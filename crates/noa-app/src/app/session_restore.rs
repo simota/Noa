@@ -143,12 +143,14 @@ impl App {
         // Collect before any early return: snapshots outlive the setting that
         // wrote them, so turning restore (or persistence) off must still drain
         // the directory rather than stranding records on disk forever.
-        self.collect_scrollback_snapshots(
-            saved
-                .as_ref()
-                .map(referenced_scrollback_keys)
-                .unwrap_or_default(),
-        );
+        let referenced = saved
+            .as_ref()
+            .map(referenced_scrollback_keys)
+            .unwrap_or_default();
+        self.collect_scrollback_snapshots(referenced.clone());
+        // Fan the reads and inflates out before the restore loop, so the winit
+        // thread pays one pane's worth of latency rather than every pane's.
+        self.preload_scrollback_records(&referenced);
 
         if !self.config.window_save_state.restores() || self.config.cli_grid_override {
             return;
@@ -162,6 +164,8 @@ impl App {
         self.restoring = true;
         self.restore_session(event_loop, &state);
         self.restoring = false;
+        // Anything left belongs to a pane that failed to spawn.
+        self.pending_records.clear();
     }
 
     fn restore_session(&mut self, event_loop: &ActiveEventLoop, state: &session::SessionState) {

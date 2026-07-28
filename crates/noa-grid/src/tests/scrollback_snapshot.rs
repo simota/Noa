@@ -220,20 +220,73 @@ fn a_skipped_row_is_left_out_of_the_capture() {
     );
 }
 
-#[test]
-fn a_skipped_row_below_the_eviction_point_is_ignored() {
-    // `skip_row` is session-absolute; a stale index from before eviction must
-    // not silently drop an unrelated live row.
-    let source = run_size(20, 4, b"alpha\r\nbeta\r\n");
+fn snapshot_text(source: &Terminal, skip: Option<usize>) -> Vec<String> {
     let bytes = source
-        .scrollback_snapshot_bytes(1 << 20, 0, Some(usize::MAX))
+        .scrollback_snapshot_bytes(1 << 20, 0, skip)
         .expect("snapshot");
-    let decoded = snapshot::decode(&bytes).expect("decodes");
-    let text: Vec<String> = decoded
+    snapshot::decode(&bytes)
+        .expect("decodes")
         .rows
         .iter()
-        .map(|row| row.cells.iter().map(|c| c.ch).collect::<String>().trim_end().to_string())
-        .collect();
+        .map(|row| {
+            row.cells
+                .iter()
+                .map(|c| c.ch)
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect()
+}
+
+#[test]
+fn a_skipped_row_above_the_retained_range_is_ignored() {
+    let source = run_size(20, 4, b"alpha\r\nbeta\r\n");
+    let text = snapshot_text(&source, Some(usize::MAX));
     assert!(text.iter().any(|line| line == "alpha"), "{text:?}");
     assert!(text.iter().any(|line| line == "beta"), "{text:?}");
+}
+
+#[test]
+fn a_skipped_row_below_the_eviction_point_is_ignored() {
+    // The real stale-index case: an index from before eviction. `usize::MAX`
+    // exercises the "too large" branch instead, which is a different path —
+    // this one has to actually evict first.
+    // Eviction is page-granular and a page is 64 KiB, so the fixture needs
+    // enough rows to fill more than one page before anything is dropped.
+    let mut source = Terminal::new(GridSize::new(80, 3));
+    source.primary.set_scrollback_limit_bytes(64 * 1024);
+    let mut stream = noa_vt::Stream::new();
+    for line in 0..3000 {
+        stream.feed(format!("line{line}\r\n").as_bytes(), &mut source);
+    }
+    let evicted = source.active_oldest_row();
+    assert!(evicted > 0, "the fixture must have evicted rows");
+
+    let text = snapshot_text(&source, Some(evicted - 1));
+
+    let unskipped = snapshot_text(&source, None);
+    assert_eq!(
+        text, unskipped,
+        "an index below the retained range must skip nothing at all"
+    );
+    assert!(
+        text.iter().any(|line| line == "line2999"),
+        "the newest line must survive"
+    );
+}
+
+#[test]
+fn a_skipped_row_landing_on_a_live_row_drops_exactly_that_row() {
+    // The dangerous direction: a *valid-looking* index that names live output.
+    // Nothing stops the caller passing one, which is why the app guards it with
+    // the terminal's coordinate generation.
+    let source = run_size(20, 5, b"keep-one\r\nvictim\r\nkeep-two\r\n");
+    let text = snapshot_text(&source, Some(1));
+    assert!(text.iter().any(|line| line == "keep-one"), "{text:?}");
+    assert!(text.iter().any(|line| line == "keep-two"), "{text:?}");
+    assert!(
+        !text.iter().any(|line| line == "victim"),
+        "skip_row is unconditional by design: {text:?}"
+    );
 }

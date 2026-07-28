@@ -23,7 +23,7 @@ use crate::osc::{
 use crate::screen::Screen;
 use crate::search::SearchMatch;
 use crate::selection::SelectionPoint;
-use crate::snapshot::ScrollbackSnapshot;
+use crate::snapshot::{ScrollbackSnapshot, ScrollbackSnapshotInput};
 use noa_core::{GridSize, Point};
 use noa_vt::{EraseDisplay, SgrAttr};
 
@@ -450,6 +450,28 @@ impl Terminal {
         saved_at: u64,
         skip_row: Option<usize>,
     ) -> Option<Vec<u8>> {
+        let input = self.scrollback_snapshot_input(max_bytes, skip_row)?;
+        crate::snapshot::encode_tail(
+            &input.rows,
+            input.cols,
+            saved_at,
+            &input.hyperlinks,
+            max_bytes,
+        )
+    }
+
+    /// The rows a snapshot would serialize, without serializing them.
+    ///
+    /// Cloning rows is a memcpy; interning styles and deflating them is not,
+    /// and this is called with the shared terminal locked on the main thread
+    /// while the io thread waits to drain the pty. Callers that can encode
+    /// elsewhere should take this and hand the result to
+    /// [`crate::snapshot::encode_tail`] off the lock.
+    pub fn scrollback_snapshot_input(
+        &self,
+        max_bytes: usize,
+        skip_row: Option<usize>,
+    ) -> Option<ScrollbackSnapshotInput> {
         if max_bytes == 0 {
             return None;
         }
@@ -483,13 +505,14 @@ impl Terminal {
         }
         collected.reverse();
 
-        crate::snapshot::encode_tail(
-            &collected,
-            screen.cols,
-            saved_at,
-            &self.hyperlinks,
-            max_bytes,
-        )
+        if collected.is_empty() {
+            return None;
+        }
+        Some(ScrollbackSnapshotInput {
+            rows: collected,
+            cols: screen.cols,
+            hyperlinks: self.hyperlinks.clone(),
+        })
     }
 
     /// Insert a decoded snapshot as the oldest history of the primary screen,
@@ -510,16 +533,17 @@ impl Terminal {
             return 0;
         }
 
-        if !hyperlinks.is_empty() {
-            let remapped: Vec<Option<HyperlinkId>> = hyperlinks
-                .into_iter()
-                .map(|link| self.intern_hyperlink(link))
-                .collect();
-            for row in &mut rows {
-                for cell in &mut row.cells {
-                    if let Some(id) = cell.hyperlink {
-                        cell.hyperlink = remapped.get(id.get()).copied().flatten();
-                    }
+        // Unconditional, including for an empty table: skipping the pass would
+        // leave any surviving id pointing into *this* terminal's registry,
+        // where it names an unrelated URI.
+        let remapped: Vec<Option<HyperlinkId>> = hyperlinks
+            .into_iter()
+            .map(|link| self.intern_hyperlink(link))
+            .collect();
+        for row in &mut rows {
+            for cell in &mut row.cells {
+                if let Some(id) = cell.hyperlink {
+                    cell.hyperlink = remapped.get(id.get()).copied().flatten();
                 }
             }
         }

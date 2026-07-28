@@ -1058,6 +1058,15 @@ pub(super) struct Surface {
     /// from capture: it is chrome the app wrote, and re-capturing it would
     /// leave one more behind in the history on every relaunch.
     pub(super) annotation_row: Option<usize>,
+    /// The key this pane was restored *from*, still on disk.
+    ///
+    /// Restoring mints a fresh key rather than adopting the saved one (two noa
+    /// instances restoring the same session would otherwise share a file), so
+    /// the old snapshot becomes redundant the moment this pane's own capture
+    /// lands. It is deleted then rather than at restore, so a crash in between
+    /// still has a record to come back to, and rather than at the next launch's
+    /// orphan sweep, so a plaintext copy does not outlive its usefulness.
+    pub(super) superseded_scrollback_key: Option<String>,
     /// The terminal's coordinate generation when `record_rows`/`annotation_row`
     /// were computed.
     ///
@@ -1233,6 +1242,7 @@ impl Surface {
             scrollback_key: None,
             record_rows: None,
             annotation_row: None,
+            superseded_scrollback_key: None,
             record_generation: 0,
             scrollback_dirty: false,
             snapshot_recycle: noa_render::FrameSnapshotRecycle::default(),

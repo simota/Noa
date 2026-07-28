@@ -49,7 +49,7 @@ pub use path::{PathMatch, detect_path_at_column};
 pub use screen::{KittyPlacement, Screen, VisibleKittyPlacement};
 pub use search::{SearchAnchor, SearchMatch, SearchState};
 pub use selection::{Selection, SelectionPoint};
-pub use snapshot::ScrollbackSnapshot;
+pub use snapshot::{ScrollbackSnapshot, ScrollbackSnapshotInput};
 pub use tabstops::Tabstops;
 pub use terminal::{PromptJump, ShellIntegrationMark, ShellIntegrationMarkKind, Terminal};
 pub use url::{UrlMatch, detect_url_at_column};

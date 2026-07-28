@@ -36,6 +36,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// user could have put something else in is not worth the tidiness.
 const EXTENSION: &str = "nsb";
 
+/// Extension of the temp file an atomic write renames from. Swept by the
+/// collector: it holds the same plaintext the snapshot does, so an interrupted
+/// write must not leave terminal output behind that nothing ever reclaims.
+const TEMP_EXTENSION: &str = "tmp";
+
 /// Length of a snapshot key, in hex characters.
 const KEY_LEN: usize = 16;
 
@@ -86,12 +91,15 @@ pub fn snapshot_path(dir: &Path, key: &str) -> Option<PathBuf> {
 
 /// Create the snapshot directory `0700` and mark it as backup-excluded.
 pub fn ensure_dir(dir: &Path) -> io::Result<()> {
-    let existed = dir.is_dir();
     fs::create_dir_all(dir)?;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
-    if !existed {
-        exclude_from_backup(dir);
-    }
+    // Unconditionally, not just on creation: the call is best-effort and its
+    // result is discarded, so a single transient failure would otherwise leave
+    // every snapshot from then on inside Time Machine — and a directory
+    // restored from a backup, or created by an older build, would never be
+    // marked at all. Re-setting an attribute that is already set is free
+    // relative to the snapshot write that follows.
+    exclude_from_backup(dir);
     Ok(())
 }
 
@@ -127,7 +135,7 @@ pub fn write(dir: &Path, key: &str, bytes: &[u8]) -> io::Result<()> {
     };
     ensure_dir(dir)?;
 
-    let temp = path.with_extension("tmp");
+    let temp = path.with_extension(TEMP_EXTENSION);
     {
         use io::Write as _;
         let mut file = fs::OpenOptions::new()
@@ -153,7 +161,8 @@ pub fn read(dir: &Path, key: &str) -> Option<Vec<u8>> {
 
 pub fn remove(dir: &Path, key: &str) {
     if let Some(path) = snapshot_path(dir, key) {
-        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension(TEMP_EXTENSION));
     }
 }
 
@@ -163,6 +172,30 @@ struct Entry {
     key: String,
     modified: u64,
     size: u64,
+}
+
+/// Delete leftover temp files from interrupted writes.
+///
+/// They are ours by construction (`<16-hex>.tmp` beside the snapshots) and hold
+/// the same plaintext, so leaving them means `scrollback-persist = never` does
+/// not actually drain the directory.
+fn sweep_temp_files(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some(TEMP_EXTENSION) {
+            continue;
+        }
+        if path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(is_valid_key)
+        {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 fn list(dir: &Path) -> Vec<Entry> {
@@ -206,6 +239,7 @@ fn list(dir: &Path) -> Vec<Entry> {
 ///
 /// `max_age_days == 0` disables expiry; `total_limit == 0` keeps nothing.
 pub fn collect(dir: &Path, referenced: &HashSet<String>, total_limit: u64, max_age_days: u64) {
+    sweep_temp_files(dir);
     let mut entries = list(dir);
     let now = now_unix();
 
@@ -242,8 +276,17 @@ pub fn collect(dir: &Path, referenced: &HashSet<String>, total_limit: u64, max_a
 // ---------------------------------------------------------------------------
 
 enum Job {
-    Write { key: String, bytes: Vec<u8> },
-    Remove { key: String },
+    /// Rows lifted from a terminal, still to be encoded. Interning and deflate
+    /// happen here rather than under the terminal lock on the main thread.
+    Write {
+        key: String,
+        input: noa_grid::ScrollbackSnapshotInput,
+        saved_at: u64,
+        max_bytes: usize,
+    },
+    Remove {
+        key: String,
+    },
 }
 
 /// Serializes snapshot writes onto one background thread.
@@ -280,9 +323,30 @@ impl ScrollbackPersister {
                     }
                     for job in pending.into_values() {
                         match job {
-                            Job::Write { key, bytes } => {
-                                if let Err(err) = write(&worker_dir, &key, &bytes) {
-                                    log::warn!("failed to save scrollback snapshot {key}: {err}");
+                            Job::Write {
+                                key,
+                                input,
+                                saved_at,
+                                max_bytes,
+                            } => {
+                                let encoded = noa_grid::snapshot::encode_tail(
+                                    &input.rows,
+                                    input.cols,
+                                    saved_at,
+                                    &input.hyperlinks,
+                                    max_bytes,
+                                );
+                                match encoded {
+                                    Some(bytes) => {
+                                        if let Err(err) = write(&worker_dir, &key, &bytes) {
+                                            log::warn!(
+                                                "failed to save scrollback snapshot {key}: {err}"
+                                            );
+                                        }
+                                    }
+                                    // Nothing worth keeping: drop whatever the
+                                    // pane wrote earlier.
+                                    None => remove(&worker_dir, &key),
                                 }
                             }
                             Job::Remove { key } => remove(&worker_dir, &key),
@@ -297,10 +361,22 @@ impl ScrollbackPersister {
         }
     }
 
-    /// Queue `bytes` for `key`. Never blocks.
-    pub fn save(&self, key: String, bytes: Vec<u8>) {
+    /// Queue `input` for `key`, to be encoded and written on the worker.
+    /// Never blocks.
+    pub fn save(
+        &self,
+        key: String,
+        input: noa_grid::ScrollbackSnapshotInput,
+        saved_at: u64,
+        max_bytes: usize,
+    ) {
         if let Some(tx) = self.tx.as_ref() {
-            let _ = tx.send(Job::Write { key, bytes });
+            let _ = tx.send(Job::Write {
+                key,
+                input,
+                saved_at,
+                max_bytes,
+            });
         }
     }
 
@@ -461,6 +537,22 @@ mod tests {
     }
 
     #[test]
+    fn the_collector_sweeps_interrupted_temp_writes() {
+        // A `.tmp` holds the same plaintext the snapshot does, so leaving it
+        // means turning the feature off does not actually drain the directory.
+        let dir = temp_dir("temp-sweep");
+        ensure_dir(&dir).unwrap();
+        let key = mint_key(21);
+        let temp = dir.join(format!("{key}.tmp"));
+        fs::write(&temp, b"interrupted plaintext").unwrap();
+
+        collect(&dir, &HashSet::new(), 0, 0);
+
+        assert!(!temp.exists(), "the temp file must be reclaimed");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_collector_leaves_foreign_files_alone() {
         let dir = temp_dir("foreign");
         ensure_dir(&dir).unwrap();
@@ -498,17 +590,46 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    fn input_of(text: &str) -> noa_grid::ScrollbackSnapshotInput {
+        use noa_core::GridSize;
+        let mut terminal = noa_grid::Terminal::new(GridSize::new(40, 4));
+        let mut stream = noa_vt::Stream::new();
+        stream.feed(format!("{text}\r\n").as_bytes(), &mut terminal);
+        terminal
+            .scrollback_snapshot_input(1 << 20, None)
+            .expect("a terminal with output has rows")
+    }
+
     #[test]
-    fn dropping_the_persister_flushes_the_newest_bytes_per_key() {
+    fn dropping_the_persister_flushes_the_newest_state_per_key() {
         let dir = temp_dir("persister");
         let key = mint_key(8);
         let persister = ScrollbackPersister::spawn(dir.clone());
         for generation in 0..20u8 {
-            persister.save(key.clone(), vec![generation; 4]);
+            persister.save(key.clone(), input_of(&format!("gen{generation}")), 0, 1 << 20);
         }
         drop(persister);
 
-        assert_eq!(read(&dir, &key), Some(vec![19u8; 4]));
+        let bytes = read(&dir, &key).expect("the file was written");
+        let decoded = noa_grid::snapshot::decode(&bytes).expect("decodes");
+        let text: String = decoded.rows[0].cells.iter().map(|cell| cell.ch).collect();
+        assert!(text.starts_with("gen19"), "newest state wins: {text:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn encoding_happens_on_the_worker_not_the_caller() {
+        // `save` takes rows, not bytes: the interning and deflate that used to
+        // run under the terminal lock now run here.
+        let dir = temp_dir("worker-encode");
+        let key = mint_key(20);
+        let mut persister = ScrollbackPersister::spawn(dir.clone());
+        persister.save(key.clone(), input_of("encoded by the worker"), 4242, 1 << 20);
+        persister.flush();
+
+        let decoded = noa_grid::snapshot::decode(&read(&dir, &key).expect("written"))
+            .expect("decodes");
+        assert_eq!(decoded.saved_at, 4242);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -517,7 +638,7 @@ mod tests {
         let dir = temp_dir("discard");
         let key = mint_key(9);
         let mut persister = ScrollbackPersister::spawn(dir.clone());
-        persister.save(key.clone(), vec![1u8; 4]);
+        persister.save(key.clone(), input_of("doomed"), 0, 1 << 20);
         persister.discard(key.clone());
         persister.flush();
 

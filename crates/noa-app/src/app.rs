@@ -405,6 +405,11 @@ pub struct App {
     /// Feeds `scrollback_persist::mint_key`, so two panes minted in the same
     /// clock tick still get distinct snapshot keys.
     scrollback_key_counter: u64,
+    /// Whether this run has already warned that scrollback is being persisted.
+    scrollback_persist_announced: bool,
+    /// Snapshots read and decoded ahead of the restore loop, keyed by snapshot
+    /// key. Drained as panes are restored; empty outside launch.
+    pending_records: std::collections::HashMap<String, noa_grid::ScrollbackSnapshot>,
     /// When the current run of un-checkpointed output began. Anchors the
     /// checkpoint ceiling so a pane that never goes quiet is still captured.
     scrollback_dirty_since: Option<Instant>,
@@ -814,6 +819,8 @@ impl App {
                 .map(crate::scrollback_persist::ScrollbackPersister::spawn),
             scrollback_key_counter: 0,
             scrollback_dirty_since: None,
+            scrollback_persist_announced: false,
+            pending_records: std::collections::HashMap::new(),
             scrollback_checkpoint_deadline: None,
             last_scrollback_checkpoint: None,
             sidebar_visible_gate,

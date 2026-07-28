@@ -46,12 +46,14 @@ const VERSION: u16 = 1;
 const FLAG_DEFLATE: u16 = 1 << 0;
 const HEADER_LEN: usize = 24;
 
-/// Ceiling on the inflated body. A snapshot is written by noa itself, but it
-/// is a file on disk that anything can rewrite, so decode refuses to allocate
-/// unboundedly for a hostile deflate stream. Comfortably above what
-/// `scrollback-persist-limit` can legitimately produce (its own ceiling is the
-/// encoded payload size, and the config default is 1 MiB).
-const MAX_DECODED_BODY: u64 = 256 << 20;
+/// Fallback ceiling on the inflated body for callers that do not know the
+/// configured budget (tests, the `dump-snapshot` example).
+///
+/// [`decode_within`] takes the real `scrollback-persist-limit` instead: a
+/// snapshot is written by noa, but it is a file on disk that anything can
+/// rewrite, and inflating 256 MiB from a few hundred compressed KiB at launch
+/// is a freeze even though it is bounded.
+const DEFAULT_MAX_DECODED_BODY: u64 = 256 << 20;
 
 /// Encoded size of one cell in the body: `ch` + style index + grapheme index.
 const CELL_ENCODED_BYTES: usize = 12;
@@ -79,6 +81,16 @@ const TAG_NONE: u32 = 3;
 /// [`Self::hyperlinks`] and must be remapped into the target terminal's
 /// registry before the rows are inserted — [`crate::Terminal::restore_scrollback_snapshot`]
 /// does that.
+/// The raw material for a snapshot: rows lifted out of a terminal, plus the
+/// registry their cells index. Produced under the terminal lock, encoded
+/// outside it.
+#[derive(Clone, Debug)]
+pub struct ScrollbackSnapshotInput {
+    pub rows: Vec<Row>,
+    pub cols: u16,
+    pub hyperlinks: Vec<Hyperlink>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ScrollbackSnapshot {
     /// Grid width the rows were captured at. Rows are rewrapped when the
@@ -303,8 +315,9 @@ fn trimmed_cells(row: &Row) -> &[Cell] {
     &row.cells[..end]
 }
 
-/// Whether `row` holds nothing a restored record would show. Trailing runs of
-/// these are dropped at both ends of the capture.
+/// Whether `row` holds nothing a restored record would show. The capture drops
+/// a trailing run of these (the live grid is blank below the cursor); a leading
+/// run inside the budget is kept, since it is history the program printed.
 pub(crate) fn is_blank_row(row: &Row) -> bool {
     trimmed_cells(row).is_empty()
 }
@@ -433,6 +446,15 @@ impl<'a> BodyReader<'a> {
 /// caller's contract is that a bad one degrades to "no record", never to a
 /// failed launch.
 pub fn decode(bytes: &[u8]) -> Option<ScrollbackSnapshot> {
+    decode_within(bytes, DEFAULT_MAX_DECODED_BODY)
+}
+
+/// [`decode`], bounded by the caller's configured budget.
+///
+/// `max_body` is a hard reject rather than a truncation: a body that does not
+/// fit was not written by a noa honoring the same limit, and half a record is
+/// worse than none.
+pub fn decode_within(bytes: &[u8], max_body: u64) -> Option<ScrollbackSnapshot> {
     let header = bytes.get(..HEADER_LEN)?;
     if &header[..6] != MAGIC {
         return None;
@@ -449,12 +471,21 @@ pub fn decode(bytes: &[u8]) -> Option<ScrollbackSnapshot> {
     let raw = &bytes[HEADER_LEN..];
     let body = if flags & FLAG_DEFLATE != 0 {
         let mut decoded = Vec::new();
+        // `take(n + 1)`: reading exactly the ceiling cannot distinguish "fits"
+        // from "truncated here", and a silently truncated body decodes to a
+        // plausible-looking short record.
         flate2::read::DeflateDecoder::new(raw)
-            .take(MAX_DECODED_BODY)
+            .take(max_body.saturating_add(1))
             .read_to_end(&mut decoded)
             .ok()?;
+        if decoded.len() as u64 > max_body {
+            return None;
+        }
         decoded
     } else {
+        if raw.len() as u64 > max_body {
+            return None;
+        }
         raw.to_vec()
     };
 
@@ -507,8 +538,12 @@ pub fn decode(bytes: &[u8]) -> Option<ScrollbackSnapshot> {
                 // 1-based so `0` can mean "no link"); remapped into the target
                 // terminal's registry by
                 // `Terminal::restore_scrollback_snapshot`.
+                // Bounded against the table decoded above: an id past its end
+                // would otherwise be handed to callers as a live registry index
+                // and adopt an unrelated URI.
                 hyperlink: link
                     .checked_sub(1)
+                    .filter(|index| (*index as usize) < hyperlinks.len())
                     .and_then(|index| HyperlinkId::new(index as usize)),
                 attrs,
                 grapheme: None,

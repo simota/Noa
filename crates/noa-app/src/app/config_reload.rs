@@ -225,6 +225,10 @@ impl App {
             // disk now (`docs/specs/scrollback-persistence.md` §4.6).
             self.purge_scrollback_snapshots();
         }
+        // Re-arm the announcement so a later re-enable warns again.
+        if !self.config.scrollback_persist.persists() {
+            self.scrollback_persist_announced = false;
+        }
 
         if padding_changed {
             self.padding =

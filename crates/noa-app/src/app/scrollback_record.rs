@@ -39,6 +39,27 @@ impl App {
             && self.scrollback_persister.is_some()
     }
 
+    /// Say once, out loud, that terminal output is now being written to disk.
+    ///
+    /// The Settings row carries the caveat, but the documented way to turn this
+    /// on is editing the config file, and that path had no acknowledgement at
+    /// all (spec §9). Someone enabling it should not have to infer from a
+    /// directory listing that their credentials are now at rest.
+    pub(super) fn announce_scrollback_persistence(&mut self) {
+        if !self.scrollback_persist_enabled() || self.scrollback_persist_announced {
+            return;
+        }
+        self.scrollback_persist_announced = true;
+        log::warn!(
+            "scrollback-persist is on: each pane's scrollback tail is written to {} \
+             (0600, excluded from backups, unencrypted). Set scrollback-persist = never to stop \
+             and delete what is stored.",
+            noa_config::scrollback_dir()
+                .map(|dir| dir.display().to_string())
+                .unwrap_or_else(|| "<no data dir>".to_string())
+        );
+    }
+
     /// Mint this pane's snapshot key if it does not have one yet, and return
     /// it. Keys are stable for the pane's life so repeated checkpoints
     /// overwrite one file.
@@ -116,7 +137,10 @@ impl App {
             else {
                 continue;
             };
-            let encoded = {
+            // Only the row clone happens under the lock; interning and deflate
+            // run on the persist worker. The io thread blocks on this same
+            // mutex, so anything expensive here stalls pty drain.
+            let input = {
                 let terminal = surface.terminal.lock();
                 // A stale index would exclude an unrelated *live* row from the
                 // record instead of the separator.
@@ -124,17 +148,22 @@ impl App {
                     == terminal.grid_coordinate_generation())
                 .then_some(surface.annotation_row)
                 .flatten();
-                terminal.scrollback_snapshot_bytes(limit, saved_at, annotation)
+                terminal.scrollback_snapshot_input(limit, annotation)
             };
             surface.scrollback_dirty = false;
+            let superseded = surface.superseded_scrollback_key.take();
             let Some(persister) = self.scrollback_persister.as_ref() else {
                 continue;
             };
-            match encoded {
-                Some(bytes) => persister.save(key, bytes),
+            match input {
+                Some(input) => persister.save(key, input, saved_at, limit),
                 // A pane with nothing to show must not restore last week's
                 // output: drop any snapshot it previously wrote.
                 None => persister.discard(key),
+            }
+            // This pane's own file now holds everything the restored one did.
+            if let Some(superseded) = superseded {
+                persister.discard(superseded);
             }
         }
         self.last_scrollback_checkpoint = Some(Instant::now());
@@ -163,6 +192,7 @@ impl App {
         {
             surface.scrollback_dirty = true;
         }
+        self.announce_scrollback_persistence();
         self.scrollback_dirty_since.get_or_insert_with(Instant::now);
         self.arm_scrollback_checkpoint();
     }
@@ -204,6 +234,46 @@ impl App {
         // exactly the crash the checkpoint exists to survive.
         self.persist_session();
         None
+    }
+
+    /// Read and decode every referenced snapshot up front, in parallel.
+    ///
+    /// Restore runs on the winit thread during launch, and doing file I/O plus
+    /// inflate plus decode inline once per pane puts all of it on the critical
+    /// path to first paint. The work is pure bytes-to-rows, so it fans out; only
+    /// the prepend has to stay on the main thread.
+    pub(super) fn preload_scrollback_records(&mut self, keys: &HashSet<String>) {
+        self.pending_records.clear();
+        if keys.is_empty() || !self.scrollback_persist_enabled() {
+            return;
+        }
+        let Some(dir) = noa_config::scrollback_dir() else {
+            return;
+        };
+        // A body larger than the pane budget was not written by a noa honoring
+        // the same limit; the slack covers the side tables the budget bounds
+        // only indirectly.
+        let ceiling = (self.config.scrollback_persist_limit as u64).saturating_mul(4);
+        let keys: Vec<&String> = keys.iter().collect();
+
+        let decoded: Vec<(String, noa_grid::ScrollbackSnapshot)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = keys
+                .iter()
+                .map(|key| {
+                    let dir = dir.clone();
+                    let key = (*key).clone();
+                    scope.spawn(move || {
+                        let bytes = store::read(&dir, &key)?;
+                        Some((key, noa_grid::snapshot::decode_within(&bytes, ceiling)?))
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .filter_map(|handle| handle.join().ok().flatten())
+                .collect()
+        });
+        self.pending_records = decoded.into_iter().collect();
     }
 
     /// Delete snapshots no saved session references, plus anything expired or
@@ -257,11 +327,7 @@ impl App {
         let snapshot = key
             .as_deref()
             .filter(|_| self.scrollback_persist_enabled())
-            .and_then(|key| {
-                let dir = noa_config::scrollback_dir()?;
-                store::read(&dir, key)
-            })
-            .and_then(|bytes| noa_grid::snapshot::decode(&bytes));
+            .and_then(|key| self.pending_records.remove(key));
 
         let (mut history, hyperlinks, saved_at) = match snapshot {
             Some(snapshot) => (snapshot.rows, snapshot.hyperlinks, Some(snapshot.saved_at)),
@@ -309,11 +375,12 @@ impl App {
         // Restoring is not output; without this the pane would be captured
         // again immediately, rewriting the file it was just restored from.
         surface.scrollback_dirty = false;
-        if let Some(key) = key
-            && store::is_valid_key(&key)
-        {
-            surface.scrollback_key = Some(key);
-        }
+        // Deliberately *not* adopting the saved key: two noa instances
+        // restoring the same session would otherwise claim the same file and
+        // overwrite each other. The pane writes to a fresh key from here; the
+        // file it was restored from is dropped once that first write lands.
+        surface.scrollback_key = None;
+        surface.superseded_scrollback_key = key.filter(|key| store::is_valid_key(key));
     }
 
     /// Command entry point: discard the focused pane's restored record.
@@ -358,6 +425,35 @@ impl App {
             persister.discard(key);
         }
         true
+    }
+
+    /// Drop the snapshots of every pane in `window_id`, called when a tab or
+    /// window is torn down.
+    ///
+    /// Without this a closed tab's record survives on disk for the rest of the
+    /// session and until the next launch — indefinitely if noa is never started
+    /// again. Closing a tab is the most direct way a user says "I am done with
+    /// that output"; the file should not outlive the pane.
+    pub(super) fn discard_window_records(&mut self, window_id: WindowId) {
+        let keys: Vec<String> = self
+            .windows
+            .get(&window_id)
+            .into_iter()
+            .flat_map(|state| state.surfaces.values())
+            .filter_map(|surface| surface.scrollback_key.clone())
+            .collect();
+        self.discard_snapshot_keys(keys);
+    }
+
+    fn discard_snapshot_keys(&mut self, keys: Vec<String>) {
+        if keys.is_empty() {
+            return;
+        }
+        if let Some(persister) = self.scrollback_persister.as_ref() {
+            for key in keys {
+                persister.discard(key);
+            }
+        }
     }
 
     /// Delete every record this session owns, now rather than at the next

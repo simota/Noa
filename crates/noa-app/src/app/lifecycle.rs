@@ -1037,6 +1037,9 @@ impl App {
     }
 
     pub(super) fn close_tab(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId) {
+        // Before the surfaces are torn down and their keys are gone: a closed
+        // tab's record must not outlive the tab.
+        self.discard_window_records(window_id);
         self.end_copy_mode_for_window(window_id);
         // The Overview overlay lives inside its host window; closing the host
         // tears the overlay down with it (before `close_tab_outcome`, so the
@@ -1336,8 +1339,17 @@ impl App {
                     return;
                 }
 
+                let closed_key = state
+                    .surfaces
+                    .get(&pane_id)
+                    .and_then(|surface| surface.scrollback_key.clone());
                 if let Some(mut surface) = state.surfaces.remove(&pane_id) {
                     surface.shutdown();
+                }
+                if let Some(key) = closed_key
+                    && let Some(persister) = self.scrollback_persister.as_ref()
+                {
+                    persister.discard(key);
                 }
                 if self.search_prompt.as_ref().is_some_and(|session| {
                     session.window_id == window_id && session.pane_id == pane_id

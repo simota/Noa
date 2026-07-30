@@ -215,6 +215,14 @@ pub struct FrameSnapshot {
     /// of rows still forces a full rebuild (a stale `row_base` would falsely
     /// cache-hit and paint shifted history rows).
     pub abs_row_base: usize,
+    /// `Screen::viewport_offset` at capture time — how far the viewport sits
+    /// scrolled back from the live bottom (`0` when following live output).
+    /// Not used by the renderer; carried purely so a later
+    /// [`Self::into_recycle`] can hand [`FrameSnapshot::realign_recycle_for_scroll`]
+    /// enough information to tell a viewport that scrolled *with* new
+    /// content (safe to realign the reuse buffer) from one a pin held
+    /// *against* it (unsafe — see that function's doc).
+    pub viewport_offset: usize,
     /// Whether this snapshot came from the alternate screen. Primary and
     /// alternate screens can share the same visible row base and both report no
     /// row damage, so the renderer must key on screen identity to avoid
@@ -268,6 +276,13 @@ pub struct FrameSnapshot {
 struct FrameSnapshotReuseKey {
     row_base: usize,
     abs_row_base: usize,
+    /// `Screen::viewport_offset` at capture time — how far the viewport is
+    /// pinned/scrolled back from the live bottom. Not used for the exact-key
+    /// fast path (it's implied by `row_base`/`abs_row_base` there); carried
+    /// so [`FrameSnapshot::realign_recycle_for_scroll`] can tell a viewport
+    /// that scrolled *with* new content (safe to realign) from one a pin
+    /// held *against* it (unsafe — see that function's doc).
+    viewport_offset: usize,
     active_is_alt: bool,
     cols: u16,
     rows_n: u16,
@@ -278,7 +293,13 @@ struct FrameSnapshotReuseKey {
 /// The key records the viewport/screen identity those rows came from. When the
 /// next snapshot has the same key, clean rows can keep their previous `Row`
 /// storage untouched instead of copying every cell again. A key mismatch
-/// degrades to ordinary allocation reuse and reclones every visible row.
+/// caused by a pure vertical scroll (new output pushing the viewport forward,
+/// or the user paging through history) is realigned instead of discarded —
+/// see [`FrameSnapshot::realign_recycle_for_scroll`] — so clean-row reuse
+/// survives the single most common redraw shape (a flood or a scrollback
+/// drag). Any other key mismatch (resize, alt-screen switch, a jump the
+/// realignment can't prove safe) degrades to ordinary allocation reuse and
+/// reclones every visible row.
 #[derive(Default)]
 pub struct FrameSnapshotRecycle {
     rows: Vec<Row>,
@@ -329,14 +350,20 @@ impl FrameSnapshot {
         let abs_row_base = screen.rows_evicted() + row_base;
         let cols = screen.cols;
         let rows_n = screen.rows;
+        let viewport_offset = screen.viewport_offset();
         let key = FrameSnapshotReuseKey {
             row_base,
             abs_row_base,
+            viewport_offset,
             active_is_alt,
             cols,
             rows_n,
         };
-        let reuse_clean_rows = recycle.key == Some(key);
+        let reuse_clean_rows = match recycle.key {
+            Some(old_key) if old_key == key => true,
+            Some(old_key) => Self::realign_recycle_for_scroll(old_key, key, &mut recycle.rows),
+            None => false,
+        };
         let snapshot = Self::from_screen_recycle(
             active_is_alt,
             colors,
@@ -348,6 +375,73 @@ impl FrameSnapshot {
         );
         debug_assert_eq!(snapshot.reuse_key(), key);
         snapshot
+    }
+
+    /// Realigns `rows_buf` (holding the previous frame's rows at `old_key`'s
+    /// slot indices) so it can serve as the clean-row reuse buffer for a new
+    /// frame at `new_key`, when the two keys differ only by new output
+    /// pushing an auto-following viewport forward — the flood shape (`cat`,
+    /// build logs) this exists for. In that shape the visible window is the
+    /// same live-grid storage window shifted forward by however many lines
+    /// scrolled, so slot `i`'s previous content becomes correct again for
+    /// slot `i - delta` instead of being worthless.
+    ///
+    /// Returns `false` (leaving `rows_buf` untouched) whenever the shift
+    /// can't be *proven* safe, degrading to a full rebuild — never to wrong
+    /// content:
+    ///
+    /// 1. **Shape change.** `cols`/`rows_n`/`active_is_alt` must match — a
+    ///    resize or alt-screen switch invalidates the whole buffer, not just
+    ///    its offset.
+    /// 2. **Anything but a following viewport.** `Screen::viewport_offset`
+    ///    must be `0` in *both* frames. `row_base = scrollback_len -
+    ///    viewport_offset`, so `viewport_offset == 0` pins `row_base ==
+    ///    scrollback_len` exactly — meaning every visible row's storage
+    ///    index is `>= scrollback_len` in both frames, i.e. the whole
+    ///    viewport is always the live grid, never scrollback, regardless of
+    ///    how much scrollback growth or eviction happened in between. That
+    ///    matters because live-grid rows are protected by their own per-row
+    ///    dirty bit (safe to trust blindly when clean), while scrollback rows
+    ///    are trusted unconditionally once addressed as such — there is no
+    ///    dirty check to fall back on. A pinned or history-scrolled viewport
+    ///    (`viewport_offset != 0` in either frame) can let a row migrate from
+    ///    grid to scrollback, or reveal a scrollback row this buffer never
+    ///    captured, either of which this function has no way to verify —
+    ///    so any non-following viewport bails out rather than risk trusting
+    ///    a stale slot forever (scrollback is otherwise never re-read).
+    /// 3. The forward delta must be smaller than the viewport height, or no
+    ///    row in the previous frame survives into the new one.
+    ///
+    /// Once past those checks, `rows_buf` is rotated left by the delta in
+    /// place. The rows rotated into the *trailing* edge (the ones with no
+    /// valid previous content) are stale, but that's safe — every row that
+    /// newly enters the viewport this way is freshly sealed/written and so
+    /// always reports dirty (see `Screen::scroll_up_region`'s doc), which
+    /// forces the caller to reclone it rather than trust the stale slot.
+    fn realign_recycle_for_scroll(
+        old_key: FrameSnapshotReuseKey,
+        new_key: FrameSnapshotReuseKey,
+        rows_buf: &mut [Row],
+    ) -> bool {
+        if old_key.cols != new_key.cols
+            || old_key.rows_n != new_key.rows_n
+            || old_key.active_is_alt != new_key.active_is_alt
+        {
+            return false;
+        }
+        if old_key.viewport_offset != 0 || new_key.viewport_offset != 0 {
+            return false; // hazard 2: not a following viewport
+        }
+        let rows_n = new_key.rows_n as usize;
+        if rows_buf.len() != rows_n || rows_n == 0 {
+            return false;
+        }
+        let delta_row_base = new_key.row_base as i64 - old_key.row_base as i64;
+        if delta_row_base <= 0 || delta_row_base as usize >= rows_n {
+            return false; // hazard 3: no forward overlap survives
+        }
+        rows_buf.rotate_left(delta_row_base as usize);
+        true
     }
 
     fn from_terminal_with_recycle_inner(
@@ -380,7 +474,8 @@ impl FrameSnapshot {
         reuse_clean_rows: bool,
     ) -> Self {
         let mut cursor = screen.cursor;
-        if screen.viewport_offset() > 0 {
+        let viewport_offset = screen.viewport_offset();
+        if viewport_offset > 0 {
             cursor.visible = false;
         }
         let row_base = screen.visible_row_base();
@@ -394,7 +489,7 @@ impl FrameSnapshot {
         screen.take_visible_rows_with_damage_into_reusing_clean(
             rows_buf,
             &mut row_dirty,
-            reuse_clean_rows && scroll_shift == 0,
+            reuse_clean_rows,
         );
         FrameSnapshot {
             rows: std::mem::take(rows_buf),
@@ -407,6 +502,7 @@ impl FrameSnapshot {
             search,
             row_base,
             abs_row_base,
+            viewport_offset,
             active_is_alt,
             cols,
             rows_n,
@@ -426,6 +522,7 @@ impl FrameSnapshot {
         FrameSnapshotReuseKey {
             row_base: self.row_base,
             abs_row_base: self.abs_row_base,
+            viewport_offset: self.viewport_offset,
             active_is_alt: self.active_is_alt,
             cols: self.cols,
             rows_n: self.rows_n,
@@ -465,6 +562,7 @@ impl FrameSnapshot {
         cursor.visible = false;
         let row_base = screen.visible_row_base();
         let abs_row_base = screen.rows_evicted() + row_base;
+        let viewport_offset = screen.viewport_offset();
         let cols = screen.cols;
         let rows_n = screen.rows;
         let selection = screen.selection;
@@ -482,6 +580,7 @@ impl FrameSnapshot {
             search,
             row_base,
             abs_row_base,
+            viewport_offset,
             active_is_alt: terminal.active_is_alt,
             cols,
             rows_n,
@@ -507,6 +606,7 @@ impl FrameSnapshot {
         cursor.visible = false;
         let row_base = screen.visible_row_base();
         let abs_row_base = screen.rows_evicted() + row_base;
+        let viewport_offset = screen.viewport_offset();
         let cols = screen.cols;
         let rows_n = screen.rows;
         let selection = screen.selection;
@@ -522,6 +622,7 @@ impl FrameSnapshot {
         snapshot.search = search;
         snapshot.row_base = row_base;
         snapshot.abs_row_base = abs_row_base;
+        snapshot.viewport_offset = viewport_offset;
         snapshot.active_is_alt = terminal.active_is_alt;
         snapshot.cols = cols;
         snapshot.rows_n = rows_n;
@@ -760,6 +861,176 @@ mod tests {
         assert_eq!(snap.rows[0].cells[0].ch, 'X');
         assert_eq!(snap.rows[1].cells[0].ch, 'B');
         assert_eq!(snap.rows[2].cells[0].ch, 'C');
+    }
+
+    /// Row content as plain text, for differential comparisons against a
+    /// fresh, non-consuming [`FrameSnapshot::peek`] read of the same
+    /// terminal moment — the correctness oracle the scroll-reuse tests below
+    /// use instead of hand-predicting expected characters.
+    fn row_texts(rows: &[Row]) -> Vec<String> {
+        rows.iter().map(|r| r.cells[0].text()).collect()
+    }
+
+    /// Feeds `n` lines of the form `"{start+i}\r\n"` through a real
+    /// `noa_vt::Stream`, so each line goes through the ordinary print path
+    /// (marks dirty, advances the cursor, triggers `scroll_up_region` at the
+    /// bottom margin) rather than the tests' direct-poke helper — this is
+    /// the actual code path a flood (`cat`, build logs) drives.
+    fn feed_lines(stream: &mut noa_vt::Stream, term: &mut Terminal, start: usize, n: usize) {
+        for i in start..start + n {
+            stream.feed(format!("{i}\r\n").as_bytes(), term);
+        }
+    }
+
+    #[test]
+    fn scroll_reuse_realigns_across_a_pure_scroll_flood() {
+        // Narrow viewport (4 rows) so a modest flood both wraps the grid's
+        // ring buffer several times over and repeatedly exercises the
+        // rotate_left realignment with partial overlap.
+        let mut term = Terminal::new(GridSize::new(4, 4));
+        let mut stream = noa_vt::Stream::new();
+        feed_lines(&mut stream, &mut term, 0, 4);
+
+        let mut recycle = FrameSnapshot::from_terminal(&mut term).into_recycle();
+        for batch in 0..40 {
+            // Vary the batch size so some steps land inside one viewport
+            // height (partial overlap) and others jump close to/over it.
+            let n = 1 + (batch % 5);
+            feed_lines(&mut stream, &mut term, 4 + batch * 5, n);
+
+            let recycled = FrameSnapshot::from_terminal_recycle(&mut term, recycle);
+            let expected = FrameSnapshot::peek(&term);
+            assert_eq!(
+                row_texts(&recycled.rows),
+                row_texts(&expected.rows),
+                "batch {batch} (n={n}): realigned reuse must match a fresh read byte-for-byte"
+            );
+            recycle = recycled.into_recycle();
+        }
+    }
+
+    #[test]
+    fn scroll_reuse_actually_reuses_surviving_row_storage() {
+        // Asserts the *point* of the optimization, not just its correctness:
+        // a row that survives a small scroll keeps its allocation
+        // (pointer-identical) and is reported clean, not re-shaped.
+        let mut term = Terminal::new(GridSize::new(2, 4));
+        put(&mut term, 0, 'A');
+        put(&mut term, 1, 'B');
+        put(&mut term, 2, 'C');
+        put(&mut term, 3, 'D');
+        let first = FrameSnapshot::from_terminal(&mut term);
+        let survivor_ptr = first.rows[3].cells.as_ptr();
+        let recycle = first.into_recycle();
+
+        // Scroll by 1 (less than the 4-row viewport): old slot 3 ('D')
+        // becomes new slot 2, unmutated.
+        term.primary.scroll_up_region(1);
+        put(&mut term, 3, 'E');
+        term.primary.grid[3].dirty = true;
+        let snap = FrameSnapshot::from_terminal_recycle(&mut term, recycle);
+
+        assert_eq!(
+            snap.rows[2].cells.as_ptr(),
+            survivor_ptr,
+            "slot 2 kept slot 3's allocation"
+        );
+        assert!(
+            !snap.row_dirty[2],
+            "the realigned slot must be reported clean, not re-shaped"
+        );
+        assert_eq!(snap.rows[0].cells[0].ch, 'B');
+        assert_eq!(snap.rows[1].cells[0].ch, 'C');
+        assert_eq!(snap.rows[2].cells[0].ch, 'D');
+        assert_eq!(snap.rows[3].cells[0].ch, 'E');
+    }
+
+    #[test]
+    fn scroll_reuse_falls_back_safely_across_history_navigation() {
+        // Realignment is intentionally scoped to a *following* viewport
+        // (`viewport_offset == 0` in both frames — see
+        // `realign_recycle_for_scroll`'s doc for why a pinned/history-scrolled
+        // viewport can't safely reuse a stale slot for a freshly-revealed
+        // scrollback row). Paging back into history and around must still
+        // degrade to a correct full rebuild rather than produce wrong output.
+        let mut term = Terminal::new(GridSize::new(4, 3));
+        let mut stream = noa_vt::Stream::new();
+        feed_lines(&mut stream, &mut term, 0, 30);
+
+        let mut recycle = FrameSnapshot::from_terminal(&mut term).into_recycle();
+        for offset in [1usize, 2, 5, 3, 0, 4, 1] {
+            term.primary.scroll_viewport_to_bottom();
+            term.primary.scroll_viewport_up(offset);
+            let recycled = FrameSnapshot::from_terminal_recycle(&mut term, recycle);
+            let expected = FrameSnapshot::peek(&term);
+            assert_eq!(
+                row_texts(&recycled.rows),
+                row_texts(&expected.rows),
+                "viewport_offset {offset}: history navigation must still read back correctly"
+            );
+            recycle = recycled.into_recycle();
+        }
+    }
+
+    #[test]
+    fn scroll_reuse_falls_back_when_delta_exceeds_the_viewport_height() {
+        let mut term = Terminal::new(GridSize::new(4, 3));
+        let mut stream = noa_vt::Stream::new();
+        feed_lines(&mut stream, &mut term, 0, 3);
+        let recycle = FrameSnapshot::from_terminal(&mut term).into_recycle();
+
+        // A single burst far larger than the 3-row viewport: no row from the
+        // old frame survives into the new one.
+        feed_lines(&mut stream, &mut term, 3, 50);
+        let recycled = FrameSnapshot::from_terminal_recycle(&mut term, recycle);
+        let expected = FrameSnapshot::peek(&term);
+        assert_eq!(row_texts(&recycled.rows), row_texts(&expected.rows));
+    }
+
+    #[test]
+    fn scroll_reuse_bails_out_for_a_pin_that_lets_content_scroll_underneath() {
+        // Regression test for the exact hazard `realign_recycle_for_scroll`'s
+        // hazard-3 check exists to catch: a pinned viewport holds `row_base`
+        // fixed while a row is mutated and then scrolled into scrollback
+        // without ever being re-captured while still dirty. If reuse trusted
+        // the stale slot here, it would render the pre-mutation content.
+        let mut term = Terminal::new(GridSize::new(2, 3));
+        put(&mut term, 0, 'A');
+        put(&mut term, 1, 'B');
+        put(&mut term, 2, 'C');
+        let recycle = FrameSnapshot::from_terminal(&mut term).into_recycle();
+
+        term.primary.set_viewport_locked(true);
+        put(&mut term, 0, 'X'); // mutate row 0 after it was last captured...
+        term.primary.grid[0].dirty = true;
+        term.primary.scroll_up_region(1); // ...then scroll it into scrollback.
+
+        let recycled = FrameSnapshot::from_terminal_recycle(&mut term, recycle);
+        let expected = FrameSnapshot::peek(&term);
+        assert_eq!(
+            row_texts(&recycled.rows),
+            row_texts(&expected.rows),
+            "a pin that lets content scroll underneath must never trust a stale slot"
+        );
+        assert_eq!(recycled.rows[0].cells[0].ch, 'X');
+    }
+
+    #[test]
+    fn scroll_reuse_falls_back_safely_for_a_scrollback_clamped_viewport() {
+        // Ask to scroll back further than history actually holds; `Screen`
+        // clamps the offset, which perturbs the clean `row_base = S - V`
+        // arithmetic the realignment relies on. Must degrade to a correct
+        // full rebuild rather than misalign.
+        let mut term = Terminal::new(GridSize::new(4, 3));
+        let mut stream = noa_vt::Stream::new();
+        feed_lines(&mut stream, &mut term, 0, 5);
+        let recycle = FrameSnapshot::from_terminal(&mut term).into_recycle();
+
+        term.primary.scroll_viewport_to_bottom();
+        term.primary.scroll_viewport_up(10_000); // far beyond available history, clamped
+        let recycled = FrameSnapshot::from_terminal_recycle(&mut term, recycle);
+        let expected = FrameSnapshot::peek(&term);
+        assert_eq!(row_texts(&recycled.rows), row_texts(&expected.rows));
     }
 
     #[test]

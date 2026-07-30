@@ -622,6 +622,7 @@ fn command_palette_card_composites_without_validation_error() {
         search: SearchState::default(),
         row_base: 0,
         abs_row_base: 0,
+        viewport_offset: 0,
         active_is_alt: false,
         cols: layout.block_cols,
         rows_n: layout.block_rows,

@@ -7,7 +7,10 @@
 #         scenario dual-reported as active @15s + settled @90s, ranked on
 #         settled), load (idle CPU% + active CPU-time-per-workload),
 #         fire (DOOM-fire IO stress: fixed 80x24 truecolor full-region
-#         repaint fps under pty flow control).
+#         repaint fps under pty flow control), latency-under-load (opt-in:
+#         DSR echo-latency distribution measured WHILE a bulk producer
+#         floods the same pty, paired with the no-load control and the
+#         sustained throughput achieved during the same window).
 #   Terminals: noa (target/release), Ghostty, Termy, kitty — whichever exist.
 #
 # One command runs the whole suite and writes a machine-readable results.json
@@ -35,10 +38,15 @@ WRAPPER="$BENCH_DIR/wrapper.sh"
 NOWNS="$TOOLS/nowns"
 PROBE="$TOOLS/dsr_probe"
 FIRE="$TOOLS/fire"
+BULK="$TOOLS/bulk_produce"
 
 # ── options ────────────────────────────────────────────────────────
 QUICK=0
 ONLY=""
+# latency-under-load is NOT in the default set: it is the most expensive axis
+# (bulk producer + probe per rep, several reps) and its whole point is to run
+# under contention, so it is opt-in via --axes latency-under-load (see
+# METHODOLOGY.md axis 8).
 AXES="throughput,scroll,latency,startup,memory,load,fire"
 EQUALIZE=0
 FORCE=0
@@ -152,6 +160,15 @@ if [ "$QUICK" = 1 ]; then
   MEM_MULTITAB_N=3; MEM_LONGEVITY_CYCLES=2; MEM_LONGEVITY_IDLE_S=1
   LOAD_IDLE_SETTLE_S=5; LOAD_IDLE_S=10
   FIRE_REPS=1; FIRE_SECS=3
+  # latency-under-load (quick): 2 independent launches, each launch runs a
+  # no-load control probe then a load probe concurrent with an 8s bulk
+  # producer — smoke only.
+  LOADLAT_REPS=2
+  LOADLAT_CTRL_ITERS=100; LOADLAT_CTRL_WARMUP=10
+  LOADLAT_ITERS=150; LOADLAT_WARMUP=15
+  LOADLAT_DISCARD_S=1
+  LOADLAT_BULK_DURATION_S=8
+  LOADLAT_TIMEOUT=30
 else
   TP_REPS=3; SCROLL_REPS=3; LAT_RUNS=10; START_REPS=5
   # latency (full): 10 process launches x 1000 kept iterations each (100
@@ -175,6 +192,20 @@ else
   # fire: median of FIRE_REPS runs, each FIRE_SECS of flat-out rendering
   # after 60 discarded warmup frames (see docs/specs/bench-doom-fire.md).
   FIRE_REPS=3; FIRE_SECS=10
+  # latency-under-load (full, see METHODOLOGY.md axis 8): 5 independent
+  # launches — the same rep philosophy as mem-longevity's 5 cycles and
+  # startup's 5 reps, chosen for the same reason: enough independent
+  # process lifetimes to see spread without the sequence taking minutes per
+  # terminal (each launch is itself ~discard + control-probe + a bounded
+  # bulk-producer window, not a single quick sample). Each launch's raw DSR
+  # samples (both control and load) are pooled across launches, same
+  # convention as the plain `latency` axis's pooled percentiles.
+  LOADLAT_REPS=5
+  LOADLAT_CTRL_ITERS=300; LOADLAT_CTRL_WARMUP=30
+  LOADLAT_ITERS=500; LOADLAT_WARMUP=50
+  LOADLAT_DISCARD_S=2
+  LOADLAT_BULK_DURATION_S=20
+  LOADLAT_TIMEOUT=90
 fi
 TP_TIMEOUT=180; SCROLL_TIMEOUT=120; LAT_TIMEOUT=60; START_TIMEOUT=30
 FIRE_TIMEOUT=60
@@ -184,7 +215,7 @@ MEM_HOLD_TIMEOUT=20
 ASCII="$BENCH_DIR/150MB_ascii.txt"
 UNICODE="$BENCH_DIR/150MB_unicode.txt"
 SCROLLF="$BENCH_DIR/scroll_stress.txt"
-if { axis_selected throughput || axis_selected load; } && { [ ! -f "$ASCII" ] || [ ! -f "$UNICODE" ]; }; then
+if { axis_selected throughput || axis_selected load || axis_selected latency-under-load; } && { [ ! -f "$ASCII" ] || [ ! -f "$UNICODE" ]; }; then
   (cd "$BENCH_DIR" && python3 generate_data.py)
 fi
 if axis_selected scroll || axis_selected memory || axis_selected load; then
@@ -196,7 +227,7 @@ fi
 # prebuilt dsr_probe would silently emit the old 4-field result format).
 tools_fresh() {
   local t
-  for t in nowns dsr_probe winwait wincount fire dispinfo; do
+  for t in nowns dsr_probe winwait wincount fire dispinfo bulk_produce; do
     [ -x "$TOOLS/$t" ] || return 1
     [ "$BENCH_DIR/tools/$t.c" -nt "$TOOLS/$t" ] && return 1
   done
@@ -205,7 +236,7 @@ tools_fresh() {
 tools_fresh || \
   (cd "$BENCH_DIR/tools" && mkdir -p bin && \
   cc -O2 -o bin/nowns nowns.c && cc -O2 -o bin/dsr_probe dsr_probe.c && \
-  cc -O2 -o bin/fire fire.c && \
+  cc -O2 -o bin/fire fire.c && cc -O2 -o bin/bulk_produce bulk_produce.c && \
   cc -O2 -framework ApplicationServices -o bin/winwait winwait.c && \
   cc -O2 -framework ApplicationServices -o bin/wincount wincount.c && \
   cc -O2 -framework ApplicationServices -o bin/dispinfo dispinfo.c)
@@ -1073,6 +1104,92 @@ run_load_active() {
   echo "$((delta_cs * 10))"
 }
 
+# run_latency_under_load <term> <rep> <ctrl_pooled_file> <load_pooled_file>
+# -> prints one line:
+#   "<ctrl_med> <ctrl_p95> <ctrl_p99> <ctrl_max> <ctrl_min> <ctrl_cnt> \
+#    <load_med> <load_p95> <load_p99> <load_max> <load_min> <load_cnt> \
+#    <bulk_bytes> <bulk_elapsed_ns> <overlap_check>"
+# or empty on timeout/failure. A single launch runs, IN THIS ORDER: a
+# no-load DSR control, then a bounded-duration bulk producer starts against
+# the same pty, then (after a short ramp) a second DSR probe runs while the
+# producer is still writing. Raw per-launch DSR samples (both control and
+# load) are appended to the given pooled files so the caller can compute
+# pooled percentiles across LOADLAT_REPS launches, same convention as the
+# plain `latency` axis. See METHODOLOGY.md axis 8 for the full design
+# rationale (why one pty, why bounded-duration, how overlap is verified).
+run_latency_under_load() {
+  local term="$1" rep="$2" ctrl_pooled="$3" load_pooled="$4"
+  local sentinel="$RUNTMP/${term}.latload.$rep.sentinel"
+  local res_noload="$RUNTMP/${term}.latload.$rep.noload.result"
+  local res_load="$RUNTMP/${term}.latload.$rep.load.result"
+  local res_bulk="$RUNTMP/${term}.latload.$rep.bulk.result"
+  local prog_bulk="$RUNTMP/${term}.latload.$rep.bulk.progress"
+  local overlap_marker="$RUNTMP/${term}.latload.$rep.overlap"
+  local samples_noload="$RUNTMP/${term}.latload.$rep.samples.noload"
+  local samples_load="$RUNTMP/${term}.latload.$rep.samples.load"
+  kill_term "$term"; sleep 0.4
+  rm -f "$sentinel" "$res_noload" "$res_load" "$res_bulk" "$prog_bulk" \
+        "$overlap_marker" "$samples_noload" "$samples_load"
+
+  local go=""
+  if [ "$FULLSCREEN" = 1 ]; then
+    go="$RUNTMP/${term}.latload.$rep.go.$RANDOM"; rm -f "$go"
+  fi
+  export NOA_MODE=latload NOA_SENTINEL="$sentinel" NOA_NOWNS="$NOWNS" \
+         NOA_PROBE="$PROBE" NOA_BULK="$BULK" NOA_BULK_FILE="$ASCII" \
+         NOA_BULK_DURATION="$LOADLAT_BULK_DURATION_S" \
+         NOA_LOAD_WARMUP_DISCARD_S="$LOADLAT_DISCARD_S" \
+         NOA_CTRL_ITERS="$LOADLAT_CTRL_ITERS" NOA_CTRL_WARMUP="$LOADLAT_CTRL_WARMUP" \
+         NOA_PROBE_ITERS="$LOADLAT_ITERS" NOA_PROBE_WARMUP="$LOADLAT_WARMUP" \
+         NOA_RESULT_NOLOAD="$res_noload" NOA_SAMPLES_NOLOAD="$samples_noload" \
+         NOA_RESULT="$res_load" NOA_SAMPLES="$samples_load" \
+         NOA_BULK_RESULT="$res_bulk" NOA_BULK_PROGRESS="$prog_bulk" \
+         NOA_OVERLAP_MARKER="$overlap_marker" NOA_GO="$go"
+
+  launch_term "$term" >/dev/null
+  if [ -n "$go" ]; then
+    fullscreen_term "$term" || emit "$term" meta - - fullscreen_window "FAILED (windowed for one latency-under-load rep)" note
+    : > "$go"
+  fi
+  if ! wait_sentinel "$sentinel" "$LOADLAT_TIMEOUT"; then
+    kill_term "$term"; sleep 0.3
+    echo ""
+    return
+  fi
+  kill_term "$term"; sleep 0.4
+
+  local ctrl="0 0 0 0 0 0" load="0 0 0 0 0 0"
+  local bulk_bytes=0 bulk_ns=0 bulk_t0=0 bulk_t1=0 overlap="unverified"
+  [ -f "$res_noload" ] && ctrl="$(cat "$res_noload")"
+  [ -f "$res_load" ] && load="$(cat "$res_load")"
+  if [ -f "$res_bulk" ]; then
+    read -r bulk_bytes bulk_ns bulk_t0 bulk_t1 < "$res_bulk"
+  fi
+  cat "$samples_noload" >> "$ctrl_pooled" 2>/dev/null
+  cat "$samples_load" >> "$load_pooled" 2>/dev/null
+
+  # Verify overlap empirically, cadence-independent: the bulk producer's own
+  # measured active interval [bulk_t0, bulk_t1] (CLOCK_MONOTONIC, written by
+  # bulk_produce itself) must CONTAIN the load probe's own recorded
+  # [probe_start, probe_end] window (same clock, same pty child process, so
+  # directly comparable) — i.e. the producer was still mid-write-loop for
+  # the ENTIRE duration the probe was running, not merely launched earlier.
+  # (An earlier version of this check counted progress-log points landing
+  # inside the probe window; that under-samples whenever the probe window —
+  # tens of ms — is shorter than the ~200ms progress-log cadence, which
+  # produced false NOT-VERIFIED results even though the two were genuinely
+  # concurrent. This containment check has no such blind spot.)
+  if [ -f "$overlap_marker" ] && [ "$bulk_t1" != 0 ]; then
+    read -r pstart pend < "$overlap_marker"
+    if [ "$bulk_t0" -le "$pstart" ] && [ "$bulk_t1" -ge "$pend" ] && [ "${bulk_bytes:-0}" -gt 0 ]; then
+      overlap="verified(bulk_active[$(( (bulk_t1 - bulk_t0) / 1000000 ))ms]_contains_probe[$(( (pend - pstart) / 1000000 ))ms])"
+    else
+      overlap="NOT-VERIFIED(bulk[${bulk_t0},${bulk_t1}]_probe[${pstart},${pend}])"
+    fi
+  fi
+  echo "$ctrl $load $bulk_bytes $bulk_ns $overlap"
+}
+
 # ── select terminals ───────────────────────────────────────────────
 # warp is opt-in only (`--only ...,warp`): its $SHELL launch is unverified
 # and it carries account/AI-agent state that doesn't belong in a default
@@ -1249,6 +1366,84 @@ for term in $SELECTED; do
   fi
 done
 fi  # axis: fire
+
+# ── LATENCY UNDER LOAD (concurrent DSR probe + bulk producer, one pty) ──
+# See METHODOLOGY.md axis 8. Opt-in (not in the default AXES set) because it
+# is the most expensive axis: LOADLAT_REPS independent launches, each one a
+# no-load control probe + a bounded-duration bulk producer + a load probe
+# run concurrently against the SAME pty. Skipped under --equalize (pinned
+# grid geometry isn't the point of this axis).
+if axis_selected latency-under-load && [ "$EQUALIZE" != 1 ]; then
+for term in $SELECTED; do
+  echo "[latency-under-load] $term ($LOADLAT_REPS launches: no-load control + ${LOADLAT_BULK_DURATION_S}s concurrent bulk producer + in-load DSR probe)"
+  ctrl_pooled="$RUNTMP/${term}.llctrl_pooled"; : > "$ctrl_pooled"
+  load_pooled="$RUNTMP/${term}.llload_pooled"; : > "$load_pooled"
+  mibps_samples=""; got=0; overlap_fail=0
+  for r in $(seq 1 $LOADLAT_REPS); do
+    out="$(run_latency_under_load "$term" "$r" "$ctrl_pooled" "$load_pooled")"
+    [ -z "$out" ] && { echo "    rep $r: UNMEASURED (timeout)"; continue; }
+    set -- $out
+    c_med="$1"; c_p95="$2"; c_p99="$3"; c_max="$4"; c_cnt="$6"
+    l_med="$7"; l_p95="$8"; l_p99="$9"; l_max="${10}"; l_cnt="${12}"
+    b_bytes="${13}"; b_ns="${14}"; overlap="${15}"
+    if [ "${c_cnt:-0}" = 0 ] || [ "${l_cnt:-0}" = 0 ]; then
+      echo "    rep $r: UNMEASURED (no DSR reply — reply appears render-thread/focus-gated)"
+      continue
+    fi
+    got=$((got + 1))
+    mibps="$(awk -v b="$b_bytes" -v ns="$b_ns" 'BEGIN{ if(ns>0) printf "%.1f", (b/1048576)/(ns/1e9); else print 0 }')"
+    emit "$term" latency_under_load load "$r" sustained_mib_per_s "$mibps" mib_s
+    emit "$term" latency_under_load load "$r" overlap_check "$overlap" note
+    emit "$term" latency_under_load control "$r" median_ns "$c_med" ns
+    emit "$term" latency_under_load control "$r" p99_ns "$c_p99" ns
+    emit "$term" latency_under_load load "$r" median_ns "$l_med" ns
+    emit "$term" latency_under_load load "$r" p95_ns "$l_p95" ns
+    emit "$term" latency_under_load load "$r" p99_ns "$l_p99" ns
+    emit "$term" latency_under_load load "$r" max_ns "$l_max" ns
+    mibps_samples="$mibps_samples$mibps\n"
+    case "$overlap" in
+      verified*) ;;
+      *) overlap_fail=$((overlap_fail + 1)) ;;
+    esac
+    c_med_us="$(awk -v n="$c_med" 'BEGIN{printf "%.1f", n/1000}')"
+    l_med_us="$(awk -v n="$l_med" 'BEGIN{printf "%.1f", n/1000}')"
+    l_p99_us="$(awk -v n="$l_p99" 'BEGIN{printf "%.1f", n/1000}')"
+    l_max_us="$(awk -v n="$l_max" 'BEGIN{printf "%.1f", n/1000}')"
+    echo "    rep $r: control median ${c_med_us}us | under load median ${l_med_us}us p99 ${l_p99_us}us max ${l_max_us}us | sustained ${mibps} MiB/s | overlap $overlap"
+  done
+  if [ "$got" -ge 1 ]; then
+    set -- $(pooled_stats "$ctrl_pooled")
+    pcmed="${1:-0}"; pcp95="${2:-0}"; pcp99="${3:-0}"; pcmax="${4:-0}"; pccnt="${5:-0}"
+    set -- $(pooled_stats "$load_pooled")
+    plmed="${1:-0}"; plp95="${2:-0}"; plp99="${3:-0}"; plmax="${4:-0}"; plcnt="${5:-0}"
+    mibps_med="$(printf "$mibps_samples" | median_f)"
+    degradation="$(awk -v l="$plmed" -v c="$pcmed" 'BEGIN{ if(c>0) printf "%.2f", l/c; else print "n/a" }')"
+    emit "$term" latency_under_load control pooled pooled_median_ns "$pcmed" ns
+    emit "$term" latency_under_load control pooled pooled_p95_ns "$pcp95" ns
+    emit "$term" latency_under_load control pooled pooled_p99_ns "$pcp99" ns
+    emit "$term" latency_under_load control pooled pooled_max_ns "$pcmax" ns
+    emit "$term" latency_under_load control pooled pooled_count "$pccnt" count
+    emit "$term" latency_under_load load pooled pooled_median_ns "$plmed" ns
+    emit "$term" latency_under_load load pooled pooled_p95_ns "$plp95" ns
+    emit "$term" latency_under_load load pooled pooled_p99_ns "$plp99" ns
+    emit "$term" latency_under_load load pooled pooled_max_ns "$plmax" ns
+    emit "$term" latency_under_load load pooled pooled_count "$plcnt" count
+    emit "$term" latency_under_load load pooled sustained_mib_per_s_median "$mibps_med" mib_s
+    emit "$term" latency_under_load load pooled degradation_factor_median_vs_control "$degradation" ratio
+    emit "$term" latency_under_load load pooled reps_ok "$got" count
+    emit "$term" latency_under_load load pooled reps_overlap_not_verified "$overlap_fail" count
+    pcmed_us="$(awk -v n="$pcmed" 'BEGIN{printf "%.1f", n/1000}')"
+    plmed_us="$(awk -v n="$plmed" 'BEGIN{printf "%.1f", n/1000}')"
+    plp95_us="$(awk -v n="$plp95" 'BEGIN{printf "%.1f", n/1000}')"
+    plp99_us="$(awk -v n="$plp99" 'BEGIN{printf "%.1f", n/1000}')"
+    plmax_us="$(awk -v n="$plmax" 'BEGIN{printf "%.1f", n/1000}')"
+    echo "    pooled ($got/$LOADLAT_REPS launches ok, $overlap_fail overlap-unverified): control ${pcmed_us}us (n=$pccnt) -> under load median ${plmed_us}us p95 ${plp95_us}us p99 ${plp99_us}us max ${plmax_us}us (n=$plcnt), ${degradation}x degradation, sustained ${mibps_med} MiB/s"
+  else
+    emit "$term" latency_under_load - - status UNMEASURED "no-dsr-reply-in-any-rep"
+    echo "    UNMEASURED (no rep produced a usable DSR reply)"
+  fi
+done
+fi  # axis: latency-under-load
 
 # Latency + startup are condition-independent; skip them under --equalize
 # (the equalized re-run targets the render-sensitive throughput+scroll axes).

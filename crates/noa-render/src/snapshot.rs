@@ -351,6 +351,12 @@ impl FrameSnapshot {
         let cols = screen.cols;
         let rows_n = screen.rows;
         let viewport_offset = screen.viewport_offset();
+        // Peeked (not taken) up front: the realignment check below needs
+        // this frame's accumulated full-height scroll count *before* the
+        // ordinary clean/dirty pass, but the counter itself is still
+        // consumed exactly once, in the usual spot inside
+        // `from_screen_recycle`.
+        let scroll_shift = screen.peek_scroll_shift();
         let key = FrameSnapshotReuseKey {
             row_base,
             abs_row_base,
@@ -361,7 +367,9 @@ impl FrameSnapshot {
         };
         let reuse_clean_rows = match recycle.key {
             Some(old_key) if old_key == key => true,
-            Some(old_key) => Self::realign_recycle_for_scroll(old_key, key, &mut recycle.rows),
+            Some(old_key) => {
+                Self::realign_recycle_for_scroll(old_key, key, scroll_shift, &mut recycle.rows)
+            }
             None => false,
         };
         let snapshot = Self::from_screen_recycle(
@@ -411,6 +419,20 @@ impl FrameSnapshot {
     ///    a stale slot forever (scrollback is otherwise never re-read).
     /// 3. The forward delta must be smaller than the viewport height, or no
     ///    row in the previous frame survives into the new one.
+    /// 4. **The delta must be a whole-viewport translation, not a scroll
+    ///    region.** `row_base` grows whenever `Screen::scroll_up_region`
+    ///    records scrollback, which only requires the region to start at
+    ///    row 0 (`records_scrollback_for_region`) — it does *not* require
+    ///    the region to span the full viewport height. A DECSTBM region
+    ///    that excludes the bottom rows (e.g. a fixed status line) grows
+    ///    `row_base` by `n` while leaving every row below the region
+    ///    physically untouched, which a blind `rotate_left(n)` would
+    ///    corrupt by handing those untouched rows a neighbor's stale
+    ///    content. `scroll_shift` is incremented only by the full-height
+    ///    fast path (the one that actually calls `RingGrid::advance_base`
+    ///    and so uniformly re-labels every row) — requiring it to equal the
+    ///    delta rejects any region-scoped scroll instead of corrupting rows
+    ///    outside the region.
     ///
     /// Once past those checks, `rows_buf` is rotated left by the delta in
     /// place. The rows rotated into the *trailing* edge (the ones with no
@@ -421,6 +443,7 @@ impl FrameSnapshot {
     fn realign_recycle_for_scroll(
         old_key: FrameSnapshotReuseKey,
         new_key: FrameSnapshotReuseKey,
+        scroll_shift: usize,
         rows_buf: &mut [Row],
     ) -> bool {
         if old_key.cols != new_key.cols
@@ -439,6 +462,9 @@ impl FrameSnapshot {
         let delta_row_base = new_key.row_base as i64 - old_key.row_base as i64;
         if delta_row_base <= 0 || delta_row_base as usize >= rows_n {
             return false; // hazard 3: no forward overlap survives
+        }
+        if scroll_shift as i64 != delta_row_base {
+            return false; // hazard 4: not a whole-viewport translation
         }
         rows_buf.rotate_left(delta_row_base as usize);
         true
@@ -1031,6 +1057,46 @@ mod tests {
         let recycled = FrameSnapshot::from_terminal_recycle(&mut term, recycle);
         let expected = FrameSnapshot::peek(&term);
         assert_eq!(row_texts(&recycled.rows), row_texts(&expected.rows));
+    }
+
+    #[test]
+    fn scroll_reuse_does_not_corrupt_fixed_rows_below_a_partial_scroll_region() {
+        // `realign_recycle_for_scroll` infers a uniform whole-viewport shift
+        // from `row_base`'s delta alone. That inference is only true for a
+        // *full-height* scroll (`scroll_up_region`'s `full_height` fast
+        // path, which also calls `grid.advance_base`). A DECSTBM scroll
+        // region that starts at the top but excludes the bottom rows (e.g.
+        // a split with a fixed status line) still records scrollback growth
+        // (`records_scrollback_for_region` only checks `top == 0`) and so
+        // still moves `row_base` by `n` — but `scroll_up_region`'s
+        // non-full-height branch never calls `advance_base` and only
+        // rotates `[top..=bottom]`, leaving every row below `bottom`
+        // physically untouched. A blind whole-buffer `rotate_left(delta)`
+        // must not be allowed to overwrite those untouched clean rows with
+        // a neighbor's stale content.
+        let mut term = Terminal::new(GridSize::new(1, 4));
+        put(&mut term, 0, 'A');
+        put(&mut term, 1, 'B');
+        put(&mut term, 2, 'Y');
+        put(&mut term, 3, 'Z');
+        let recycle = FrameSnapshot::from_terminal(&mut term).into_recycle();
+
+        // Scroll region covers only rows 0..=1; rows 2..=3 are fixed (e.g. a
+        // pinned status area) and must never move or change content.
+        term.primary.region = noa_grid::ScrollRegion { top: 0, bottom: 1 };
+        term.primary.scroll_up_region(1);
+
+        let recycled = FrameSnapshot::from_terminal_recycle(&mut term, recycle);
+        let expected = FrameSnapshot::peek(&term);
+        assert_eq!(
+            row_texts(&recycled.rows),
+            row_texts(&expected.rows),
+            "a partial (non-full-height) scroll region must never corrupt the \
+             fixed rows below it via a whole-buffer realignment"
+        );
+        // Pin the exact expectation too, so a future change to `peek` itself
+        // can't launder this assertion into a tautology.
+        assert_eq!(row_texts(&recycled.rows), vec!["B", " ", "Y", "Z"]);
     }
 
     #[test]

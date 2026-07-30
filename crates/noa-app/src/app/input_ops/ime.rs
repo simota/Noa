@@ -125,7 +125,7 @@ impl App {
         };
         update_ime_cursor_area(
             &state.window,
-            gpu.font.metrics(),
+            gpu.fonts.get(state.font_px).metrics(),
             cursor.x,
             cursor.y,
             surface.rect,

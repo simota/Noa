@@ -625,6 +625,13 @@ impl FontGrid {
     }
 
     /// Cell / face metrics at the configured size.
+    /// The pixels-per-em this grid was built at. Every glyph in its atlases
+    /// was hinted and rasterized for this size, so a caller keeping several
+    /// grids alive needs it to key them.
+    pub fn px_size(&self) -> f32 {
+        self.px_size
+    }
+
     pub fn metrics(&self) -> Metrics {
         self.metrics
     }

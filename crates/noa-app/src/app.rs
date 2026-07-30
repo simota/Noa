@@ -76,6 +76,7 @@ mod commands;
 mod config;
 mod config_reload;
 mod event_loop;
+mod font_cache;
 mod helpers;
 mod input_ops;
 mod ipc;

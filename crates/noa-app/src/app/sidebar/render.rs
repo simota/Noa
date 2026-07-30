@@ -442,12 +442,14 @@ fn sidebar_card_frame(selected: bool, attention: bool) -> SidebarCardFrame {
 pub(in crate::app) fn draw_sidebar_band(
     gpu: &mut GpuState,
     surface_format: wgpu::TextureFormat,
+    // Sidebar pixel size of the window being drawn into.
+    sidebar_font_px: f32,
     padding: GridPadding,
     view: &wgpu::TextureView,
     surface_size: PixelSize,
     model: &SidebarDrawModel,
 ) {
-    ensure_sidebar_pipelines(gpu, surface_format, padding);
+    ensure_sidebar_pipelines(gpu, surface_format, padding, sidebar_font_px);
     let band_size = PixelSize {
         w: model.inset.max(1),
         h: model.height.max(1),
@@ -461,7 +463,7 @@ pub(in crate::app) fn draw_sidebar_band(
         padding,
         active_theme(&gpu.theme, &gpu.preview_theme),
         chrome(),
-        &gpu.sidebar_font,
+        gpu.sidebar_fonts.get(sidebar_font_px),
         model,
     );
     if sidebar_cache_hit(
@@ -477,13 +479,13 @@ pub(in crate::app) fn draw_sidebar_band(
     // Each pass stamps one overlay into the shared band texture, in draw order:
     // band text, seam hairline, toolbar `+`, cards (+ status rails), inter-row
     // rules, drag float/indicator, then the `…` menu popup above them all.
-    draw_sidebar_band_runs(gpu, model, band_size);
-    draw_sidebar_divider(gpu, model, band_size, surface_format);
-    draw_sidebar_new_button(gpu, model, band_size, surface_format);
-    draw_sidebar_cards(gpu, model, band_size, surface_format);
-    draw_sidebar_rules(gpu, model, band_size, surface_format);
-    draw_sidebar_drag(gpu, model, band_size, surface_format);
-    draw_sidebar_menu(gpu, model, band_size);
+    draw_sidebar_band_runs(gpu, model, band_size, sidebar_font_px);
+    draw_sidebar_divider(gpu, model, band_size, surface_format, sidebar_font_px);
+    draw_sidebar_new_button(gpu, model, band_size, surface_format, sidebar_font_px);
+    draw_sidebar_cards(gpu, model, band_size, surface_format, sidebar_font_px);
+    draw_sidebar_rules(gpu, model, band_size, surface_format, sidebar_font_px);
+    draw_sidebar_drag(gpu, model, band_size, surface_format, sidebar_font_px);
+    draw_sidebar_menu(gpu, model, band_size, sidebar_font_px);
 
     gpu.chrome_textures.sidebar_raster_cache_key = Some(next_cache_key);
     composite_sidebar_band_cache(gpu, view, surface_size, model);
@@ -491,10 +493,20 @@ pub(in crate::app) fn draw_sidebar_band(
 
 /// Lazily (re)build the reused band renderer + the two card pipelines for this
 /// surface format. Each is rebuilt only when absent or when the format changed.
+/// `sidebar_font_px` is the sidebar pixel size of the window being drawn
+/// into. The shared renderer is rebound to that size's atlas set on every
+/// call rather than having the size folded into the rebuild condition:
+/// rebinding is idempotent, and a stale-key check is one more thing to forget
+/// when a field is added. Without it, drawing a 1x window and then a 2x one
+/// leaves the renderer on the first size's textures while `rasterize_runs`
+/// syncs the second size's grid into them — the debug assertion in
+/// `SharedGlyphAtlases::sync` in a debug build, silent cross-size corruption
+/// in a release one.
 fn ensure_sidebar_pipelines(
     gpu: &mut GpuState,
     surface_format: wgpu::TextureFormat,
     padding: GridPadding,
+    sidebar_font_px: f32,
 ) {
     if gpu
         .chrome_textures
@@ -507,19 +519,30 @@ fn ensure_sidebar_pipelines(
             &gpu.device,
             &gpu.queue,
             surface_format,
-            &gpu.sidebar_font,
+            gpu.sidebar_fonts.get(sidebar_font_px),
         );
         gpu.chrome_textures.sidebar_renderer = Renderer::with_pipelines(
             &gpu.device,
             &gpu.queue,
             &pipelines,
             &sidebar_font_atlases,
-            &mut gpu.sidebar_font,
+            gpu.sidebar_fonts.get_mut(sidebar_font_px),
             padding,
         )
         .ok();
         #[cfg(debug_assertions)]
         gpu.chrome_textures.record_rebuild();
+    }
+
+    // Follow this window's size, every call. See the note above.
+    let atlases = gpu.sidebar_font_atlases.get(
+        &gpu.device,
+        &gpu.queue,
+        surface_format,
+        gpu.sidebar_fonts.get(sidebar_font_px),
+    );
+    if let Some(renderer) = gpu.chrome_textures.sidebar_renderer.as_mut() {
+        renderer.rebind_glyph_atlases(&gpu.device, &atlases);
     }
     if gpu
         .chrome_textures
@@ -654,7 +677,12 @@ fn ensure_card_menu_scratch(
 /// Pass 1 — band text runs over a fully transparent base. The rest of the draw
 /// path stamps every sidebar overlay into this same offscreen texture; a cache
 /// hit reuses that finished texture instead.
-fn draw_sidebar_band_runs(gpu: &mut GpuState, model: &SidebarDrawModel, band_size: PixelSize) {
+fn draw_sidebar_band_runs(
+    gpu: &mut GpuState,
+    model: &SidebarDrawModel,
+    band_size: PixelSize,
+    sidebar_font_px: f32,
+) {
     let theme = active_theme(&gpu.theme, &gpu.preview_theme);
     let base_bg = theme.default_bg;
     let (Some(renderer), Some((_, _, band_view))) = (
@@ -667,7 +695,7 @@ fn draw_sidebar_band_runs(gpu: &mut GpuState, model: &SidebarDrawModel, band_siz
         renderer,
         &gpu.device,
         &gpu.queue,
-        &mut gpu.sidebar_font,
+        gpu.sidebar_fonts.get_mut(sidebar_font_px),
         theme,
         band_view,
         band_size,
@@ -712,6 +740,7 @@ fn draw_sidebar_divider(
     model: &SidebarDrawModel,
     band_size: PixelSize,
     surface_format: wgpu::TextureFormat,
+    sidebar_font_px: f32,
 ) {
     let hairline_w = (SEAM_HAIRLINE_WIDTH * model.scale).round().max(1.0) as u32;
     if SEAM_HAIRLINE_WIDTH <= 0.0 || model.inset <= hairline_w {
@@ -744,7 +773,7 @@ fn draw_sidebar_divider(
         renderer,
         &gpu.device,
         &gpu.queue,
-        &mut gpu.sidebar_font,
+        gpu.sidebar_fonts.get_mut(sidebar_font_px),
         theme,
         divider_view,
         divider_size,
@@ -789,6 +818,7 @@ fn draw_sidebar_new_button(
     model: &SidebarDrawModel,
     band_size: PixelSize,
     surface_format: wgpu::TextureFormat,
+    sidebar_font_px: f32,
 ) {
     if model.new_button.w == 0 || model.new_button.h == 0 {
         return;
@@ -831,7 +861,7 @@ fn draw_sidebar_new_button(
             renderer,
             &gpu.device,
             &gpu.queue,
-            &mut gpu.sidebar_font,
+            gpu.sidebar_fonts.get_mut(sidebar_font_px),
             theme,
             button_view,
             btn_size,
@@ -890,7 +920,7 @@ fn draw_sidebar_new_button(
         renderer,
         &gpu.device,
         &gpu.queue,
-        &mut gpu.sidebar_font,
+        gpu.sidebar_fonts.get_mut(sidebar_font_px),
         theme,
         button_view,
         btn_size,
@@ -945,6 +975,7 @@ fn draw_sidebar_cards(
     model: &SidebarDrawModel,
     band_size: PixelSize,
     surface_format: wgpu::TextureFormat,
+    sidebar_font_px: f32,
 ) {
     // The dragged card is removed from `model.cards`. Ensure its progress
     // scratch before the static-card early return so a one-card sidebar can
@@ -1032,7 +1063,7 @@ fn draw_sidebar_cards(
             renderer,
             &gpu.device,
             &gpu.queue,
-            &mut gpu.sidebar_font,
+            gpu.sidebar_fonts.get_mut(sidebar_font_px),
             theme,
             card_view,
             card_size,
@@ -1076,7 +1107,7 @@ fn draw_sidebar_cards(
                     renderer,
                     &gpu.device,
                     &gpu.queue,
-                    &mut gpu.sidebar_font,
+                    gpu.sidebar_fonts.get_mut(sidebar_font_px),
                     theme,
                     accent_view,
                     PixelSize {
@@ -1127,7 +1158,7 @@ fn draw_sidebar_cards(
                 renderer,
                 &gpu.device,
                 &gpu.queue,
-                &mut gpu.sidebar_font,
+                gpu.sidebar_fonts.get_mut(sidebar_font_px),
                 theme,
                 pipeline,
                 band_view,
@@ -1150,6 +1181,7 @@ fn draw_sidebar_rules(
     model: &SidebarDrawModel,
     band_size: PixelSize,
     surface_format: wgpu::TextureFormat,
+    sidebar_font_px: f32,
 ) {
     if model.cards.len() <= 1 {
         return;
@@ -1187,7 +1219,7 @@ fn draw_sidebar_rules(
         renderer,
         &gpu.device,
         &gpu.queue,
-        &mut gpu.sidebar_font,
+        gpu.sidebar_fonts.get_mut(sidebar_font_px),
         theme,
         rule_view,
         PixelSize {
@@ -1247,6 +1279,7 @@ fn draw_sidebar_drag(
     model: &SidebarDrawModel,
     band_size: PixelSize,
     surface_format: wgpu::TextureFormat,
+    sidebar_font_px: f32,
 ) {
     if let Some(line) = &model.drop_indicator {
         if ensure_scratch(
@@ -1273,7 +1306,7 @@ fn draw_sidebar_drag(
                 renderer,
                 &gpu.device,
                 &gpu.queue,
-                &mut gpu.sidebar_font,
+                gpu.sidebar_fonts.get_mut(sidebar_font_px),
                 theme,
                 drop_view,
                 PixelSize {
@@ -1343,7 +1376,7 @@ fn draw_sidebar_drag(
         renderer,
         &gpu.device,
         &gpu.queue,
-        &mut gpu.sidebar_font,
+        gpu.sidebar_fonts.get_mut(sidebar_font_px),
         theme,
         card_view,
         PixelSize {
@@ -1378,7 +1411,7 @@ fn draw_sidebar_drag(
             renderer,
             &gpu.device,
             &gpu.queue,
-            &mut gpu.sidebar_font,
+            gpu.sidebar_fonts.get_mut(sidebar_font_px),
             theme,
             &card.pipeline,
             band_view,
@@ -1394,7 +1427,12 @@ fn draw_sidebar_drag(
 }
 
 /// Pass 3 — the `…` menu popup, composited above the cards.
-fn draw_sidebar_menu(gpu: &mut GpuState, model: &SidebarDrawModel, band_size: PixelSize) {
+fn draw_sidebar_menu(
+    gpu: &mut GpuState,
+    model: &SidebarDrawModel,
+    band_size: PixelSize,
+    sidebar_font_px: f32,
+) {
     let Some(menu) = &model.menu else {
         return;
     };
@@ -1411,7 +1449,7 @@ fn draw_sidebar_menu(gpu: &mut GpuState, model: &SidebarDrawModel, band_size: Pi
         renderer,
         &gpu.device,
         &gpu.queue,
-        &mut gpu.sidebar_font,
+        gpu.sidebar_fonts.get_mut(sidebar_font_px),
         theme,
         menu_view,
         PixelSize {

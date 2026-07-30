@@ -209,10 +209,16 @@ struct SharedGlyphAtlasState {
     texture_generation: u64,
 }
 
-/// Cloned view handles plus the texture/view generation they came from.
+/// Cloned view handles plus the identity + generation they came from.
 pub(crate) struct SharedGlyphAtlasViews {
     pub(crate) mask: Arc<wgpu::TextureView>,
     pub(crate) color: Arc<wgpu::TextureView>,
+    /// Which atlas set these views belong to. Load-bearing: `texture_generation`
+    /// alone cannot detect a switch BETWEEN sets, because every set starts its
+    /// generation at zero, so a renderer rebound from one set to another would
+    /// compare 0 == 0 and keep bind groups pointing at the previous set's
+    /// textures. See `Renderer::rebind_glyph_atlases`.
+    pub(crate) atlas_id: u64,
     pub(crate) texture_generation: u64,
 }
 
@@ -224,7 +230,27 @@ pub(crate) struct SharedGlyphAtlasViews {
 #[derive(Clone)]
 pub struct SharedGlyphAtlases {
     format: wgpu::TextureFormat,
+    /// Process-unique id for this set of textures. Clones share it; two sets
+    /// never do.
+    id: u64,
+    /// The quantized pixel size whose glyphs belong in these textures. Only
+    /// used to catch a caller syncing a grid of a different size into them —
+    /// see [`SharedGlyphAtlases::sync`].
+    ppem: u32,
     state: Arc<Mutex<SharedGlyphAtlasState>>,
+}
+
+static NEXT_ATLAS_SET_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// A `FontGrid`'s pixel size, quantized the way both this cache and
+/// `noa-app`'s font map quantize it. The two must agree or a window could
+/// take its grid from one bucket and its atlas from another.
+fn atlas_ppem(font: &FontGrid) -> u32 {
+    (font.px_size() * 64.0).round().max(0.0) as u32
+}
+
+fn next_atlas_set_id() -> u64 {
+    NEXT_ATLAS_SET_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl SharedGlyphAtlases {
@@ -262,6 +288,8 @@ impl SharedGlyphAtlases {
         );
         SharedGlyphAtlases {
             format,
+            id: next_atlas_set_id(),
+            ppem: atlas_ppem(font),
             state: Arc::new(Mutex::new(SharedGlyphAtlasState {
                 mask,
                 color,
@@ -274,10 +302,25 @@ impl SharedGlyphAtlases {
         self.format
     }
 
+    /// Process-unique id for this set of textures; equal across clones of the
+    /// same set, never equal between two sets. Used by the renderer to notice a
+    /// switch BETWEEN sets, which a generation comparison cannot see.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
     /// Sync CPU-side atlas bytes into the shared GPU textures. The upload is
     /// guarded by the shared atlas identity/generation, so the first renderer
     /// drawing after a glyph mutation performs the write and the rest no-op.
     pub fn sync(&self, device: &wgpu::Device, queue: &wgpu::Queue, font: &FontGrid) -> u64 {
+        debug_assert_eq!(
+            atlas_ppem(font),
+            self.ppem,
+            "uploading a {} px grid into the atlas set for {} px: these textures are shared by \
+             every renderer bound to that size, and their row caches hold coordinates into them",
+            font.px_size(),
+            self.ppem as f32 / 64.0
+        );
         let mut state = self.state.lock();
         let mask_recreated = state.mask.sync(
             device,
@@ -316,6 +359,7 @@ impl SharedGlyphAtlases {
         SharedGlyphAtlasViews {
             mask: state.mask.view.clone(),
             color: state.color.view.clone(),
+            atlas_id: self.id,
             texture_generation: state.texture_generation,
         }
     }
@@ -349,8 +393,29 @@ impl SharedGlyphAtlases {
 /// Lazily built shared glyph atlas texture pairs per target format.
 #[derive(Default)]
 pub struct GlyphAtlasCache {
-    entries: Vec<SharedGlyphAtlases>,
+    entries: Vec<(AtlasCacheKey, SharedGlyphAtlases)>,
 }
+
+/// What makes two lookups the same atlas set.
+///
+/// Format alone is not enough. A `FontGrid`'s atlases hold glyphs rasterized
+/// for exactly one pixel size, so two windows at different scale factors need
+/// two texture sets: sharing one would make each `sync` overwrite the other's
+/// contents while both renderers' row caches still hold coordinates into it —
+/// corruption, not just repeated uploads.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct AtlasCacheKey {
+    format: wgpu::TextureFormat,
+    /// `px_size` quantized to 1/64 px, mirroring `noa-app`'s font cache so the
+    /// two agree on what "the same size" means.
+    ppem: u32,
+}
+
+/// Live sets are bounded like the font-grid cache that feeds them. Evicting a
+/// set a renderer still holds is safe but wasteful, not unsound: the `Arc`
+/// keeps its textures alive for that renderer, and a later lookup for the same
+/// size simply builds a second set rather than sharing the first.
+const ATLAS_CACHE_CAP: usize = 8;
 
 impl GlyphAtlasCache {
     pub fn get(
@@ -360,12 +425,19 @@ impl GlyphAtlasCache {
         format: wgpu::TextureFormat,
         font: &FontGrid,
     ) -> SharedGlyphAtlases {
-        if let Some(entry) = self.entries.iter().find(|entry| entry.format == format) {
+        let key = AtlasCacheKey {
+            format,
+            ppem: atlas_ppem(font),
+        };
+        if let Some((_, entry)) = self.entries.iter().find(|(entry_key, _)| *entry_key == key) {
             entry.sync(device, queue, font);
             return entry.clone();
         }
         let entry = SharedGlyphAtlases::new(device, queue, format, font);
-        self.entries.push(entry.clone());
+        self.entries.push((key, entry.clone()));
+        while self.entries.len() > ATLAS_CACHE_CAP {
+            self.entries.remove(0);
+        }
         entry
     }
 }

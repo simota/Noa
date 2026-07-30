@@ -244,6 +244,12 @@ impl App {
             return;
         };
         let anchor_window = anchor.window.clone();
+        // The scratch window opens next to its anchor, so it lands on the
+        // anchor's display and will rasterize at the anchor's pixel size.
+        // Measuring with `primary()` instead would size the window for a
+        // different scale — on a 1x/2x pair, roughly half the configured
+        // columns and rows would fit.
+        let anchor_font_px = anchor.font_px;
         let Ok(anchor_outer_position) = anchor_window.outer_position() else {
             return;
         };
@@ -256,7 +262,7 @@ impl App {
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
-        let metrics = gpu.font.metrics();
+        let metrics = gpu.fonts.get(anchor_font_px).metrics();
         let (width, height) = scratch_terminal_footprint_px(
             self.config.scratch_terminal_size.cols,
             self.config.scratch_terminal_size.rows,
@@ -320,15 +326,20 @@ impl App {
         };
         surface.configure(&gpu.device, &surface_config);
         let pipelines = gpu.pipelines.get(&gpu.device, surface_format);
-        let font_atlases = gpu
-            .font_atlases
-            .get(&gpu.device, &gpu.queue, surface_format, &gpu.font);
+        let font_px = font_pixel_size(self.runtime_font_size, window.scale_factor());
+        gpu.fonts.ensure(font_px);
+        let font_atlases = gpu.font_atlases.get(
+            &gpu.device,
+            &gpu.queue,
+            surface_format,
+            gpu.fonts.get(font_px),
+        );
         let Ok(mut renderer) = Renderer::with_pipelines(
             &gpu.device,
             &gpu.queue,
             &pipelines,
             &font_atlases,
-            &mut gpu.font,
+            gpu.fonts.get_mut(font_px),
             self.padding,
         ) else {
             return;
@@ -351,7 +362,7 @@ impl App {
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
-        let metrics = gpu.font.metrics();
+        let metrics = gpu.fonts.get(font_px).metrics();
         let grid = grid_size_for_pane_rect(initial_rect, metrics, self.padding);
         let auto_approve_enabled = Arc::new(AtomicBool::new(false));
         let redraw_floor = crate::io_thread::RedrawFloor::new(
@@ -378,6 +389,7 @@ impl App {
         self.windows.insert(
             window_id,
             WindowState {
+                font_px,
                 created_transparent: window_created_transparent(self.config.background_opacity),
                 window: window.clone(),
                 group,

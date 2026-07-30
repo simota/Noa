@@ -152,7 +152,7 @@ impl App {
             None => self
                 .gpu
                 .as_ref()
-                .map(|gpu| gpu.font.metrics())
+                .map(|gpu| gpu.fonts.primary().metrics())
                 .expect("font must exist before creating a tab"),
         };
         let inner_size = initial_window_logical_size(
@@ -408,30 +408,39 @@ impl App {
                 queue,
                 pipelines: noa_render::PipelineCache::default(),
                 font_atlases: noa_render::GlyphAtlasCache::default(),
-                font,
-                sidebar_font: {
-                    // Stack prefetched on the startup worker; a join failure
-                    // or load error (worth re-reporting through the fatal
-                    // path) falls back to a fresh inline load.
-                    let px_size =
-                        sidebar_font_pixel_size(self.config.sidebar_font_size, window_scale_factor);
-                    let prefetched = sidebar_handle.join().ok().and_then(Result::ok).and_then(
-                        |(stack, font_cfg)| FontGrid::with_stack(stack, px_size, font_cfg).ok(),
-                    );
-                    match prefetched {
-                        Some(font) => font,
-                        None => {
-                            FontGrid::new(px_size, font_config_from_noa_config(&self.config.font))
-                                .unwrap_or_else(|e| {
-                                    gpu_init_fatal(
-                                        &mut self.session_persister,
-                                        "could not load the sidebar font",
-                                        e,
-                                    )
-                                })
+                fonts: super::font_cache::FontGridMap::from_grid(
+                    font,
+                    font_config_from_noa_config(&self.config.font),
+                ),
+                sidebar_fonts: super::font_cache::FontGridMap::from_grid(
+                    {
+                        // Stack prefetched on the startup worker; a join failure
+                        // or load error (worth re-reporting through the fatal
+                        // path) falls back to a fresh inline load.
+                        let px_size = sidebar_font_pixel_size(
+                            self.config.sidebar_font_size,
+                            window_scale_factor,
+                        );
+                        let prefetched = sidebar_handle.join().ok().and_then(Result::ok).and_then(
+                            |(stack, font_cfg)| FontGrid::with_stack(stack, px_size, font_cfg).ok(),
+                        );
+                        match prefetched {
+                            Some(font) => font,
+                            None => FontGrid::new(
+                                px_size,
+                                font_config_from_noa_config(&self.config.font),
+                            )
+                            .unwrap_or_else(|e| {
+                                gpu_init_fatal(
+                                    &mut self.session_persister,
+                                    "could not load the sidebar font",
+                                    e,
+                                )
+                            }),
                         }
-                    }
-                },
+                    },
+                    font_config_from_noa_config(&self.config.font),
+                ),
                 sidebar_font_atlases: noa_render::GlyphAtlasCache::default(),
                 theme,
                 preview_theme: None,
@@ -439,6 +448,7 @@ impl App {
                 palette_renderer: None,
                 palette_card: None,
                 palette_padding: noa_core::GridPadding::ZERO,
+                palette_font_px: 0.0,
                 palette_scrim: None,
                 palette_shadow_source: None,
             });
@@ -468,15 +478,30 @@ impl App {
             let surface_format = surface_config.format;
 
             let pipelines = gpu.pipelines.get(&gpu.device, surface_format);
-            let font_atlases =
-                gpu.font_atlases
-                    .get(&gpu.device, &gpu.queue, surface_format, &gpu.font);
+            // Recomputed here rather than reused from the pre-paint scope
+            // above: this is the pixel size THIS window rasterizes at, and it
+            // is what keys both its font grid and its glyph atlas set.
+            let font_px = font_pixel_size(self.runtime_font_size, window.scale_factor());
+            gpu.fonts.ensure(font_px);
+            // The sidebar band is drawn per window at the window's own scale,
+            // so its grid has to exist for this window too — otherwise the
+            // draw path falls back to the primary size.
+            gpu.sidebar_fonts.ensure(sidebar_font_pixel_size(
+                self.config.sidebar_font_size,
+                window.scale_factor(),
+            ));
+            let font_atlases = gpu.font_atlases.get(
+                &gpu.device,
+                &gpu.queue,
+                surface_format,
+                gpu.fonts.get(font_px),
+            );
             let mut renderer = Renderer::with_pipelines(
                 &gpu.device,
                 &gpu.queue,
                 &pipelines,
                 &font_atlases,
-                &mut gpu.font,
+                gpu.fonts.get_mut(font_px),
                 self.padding,
             )
             .unwrap_or_else(|e| {
@@ -567,11 +592,13 @@ impl App {
         let mut surfaces = HashMap::new();
         surfaces.insert(initial_pane, initial_surface);
 
+        let font_px = font_pixel_size(self.runtime_font_size, window.scale_factor());
         self.windows.insert(
             window_id,
             WindowState {
                 created_transparent: window_created_transparent(self.config.background_opacity),
                 window: window.clone(),
+                font_px,
                 group,
                 surface,
                 surface_config,

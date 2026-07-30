@@ -5,10 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [0.2.6] - 2026-07-31
+
+### Added
+
+- Scrollback persistence: with `scrollback-persist = tail` each pane's
+  scrollback tail is captured on clean quit and on idle checkpoints, then
+  restored above the live shell on the next launch — separated by a labeled
+  boundary row and marked with a gutter, so recovered history can never be
+  read as this session's output. Restored rows are ordinary scrollback, so
+  selection, copy and search work on them unchanged. Off by default
+  (`never`, matching Ghostty, which restores window topology but never
+  terminal contents); `scrollback-persist-limit`,
+  `scrollback-persist-total-limit` and `scrollback-persist-max-age-days`
+  bound per-pane bytes, total store size and record age. The on-disk NOASB
+  format works at the materialized row level rather than serializing the
+  paged scrollback, because grapheme and hyperlink ids are process-scoped
+  and would decode to different text in the next process; restore rewraps
+  to the current grid width, so a snapshot taken in a narrow window does not
+  come back with its soft-wraps frozen (#52)
+- bench: latency-under-load axis (`latload`) measuring DSR round-trip while
+  the terminal is under a heavy write flood, with a `bulk_produce` helper,
+  a wrapper mode, `run_all.sh` integration, and its methodology written down
+  in `bench/METHODOLOGY.md` (#53)
+- bench: the repository's first font benchmarks — `bench_size_change`
+  (font-stack discovery, `FontGrid` construction and prewarm, split by
+  stage) and `bench_atlas_sync` (the GPU half: atlas texture recreation,
+  full re-upload and bind-group rebuild). Together they quantify what a font
+  size or DPI change actually costs, which nothing in the repo had measured
+  before (#55)
 
 ### Changed
 
+- A font size or DPI change costs ~58% less main-thread time (63 → 27 ms per
+  step on an M-series Mac, 3.8 → 1.6 frames of stall at 60 Hz). Nerd Font
+  family-name resolution walked every installed family through CoreText on
+  every rebuild — ~16 ms, 78% of a whole font-stack load — despite depending
+  on neither the config nor the pixel size; it is resolved once per process
+  now. Declared trade-off: a Nerd Font installed while noa is running is not
+  picked up until restart, bounded by Symbols Nerd Font Mono shipping inside
+  the binary (#55)
+- Each window now uses the font grid for its own scale factor instead of one
+  app-wide grid rebuilt at whichever window last reported a change, so on a
+  mixed-DPI setup windows no longer rasterize at a size that is not theirs.
+  Grids are kept in a live map keyed by pixel size (bounded at 6 per role,
+  LRU-evicted, never the primary), so a size already visited comes back
+  instead of being rebuilt — 14 → 15 → 14, or dragging a window between a 1x
+  and a 2x display, re-rasterizes nothing. Glyph atlases are keyed by
+  `(format, ppem)` to match (#55)
+- Frame snapshots reuse clean rows across pure vertical scroll instead of
+  rebuilding from scratch: the recycle key included the row base, so a
+  scrolling viewport (a `cat` flood, build logs) invalidated it every frame
+  even though nearly every visible row was unchanged content that had merely
+  moved. When the key mismatches only by row base and the viewport was
+  auto-following in both frames, the recycled row buffer is rotated by the
+  delta before the ordinary clean/dirty pass. Per-call
+  `FrameSnapshot::from_terminal_recycle` on a pure-scroll flood drops from a
+  ~3.3–5.3 µs median to ~0.5–0.9 µs (roughly 6–8x); pinned or
+  history-scrolled viewports, and partial (DECSTBM) scroll regions, still
+  fall back to a full rebuild (#54)
 - Glassmorphism: the `glassmorphism` key now takes a 5-step level (`off` and
   `1`–`5`, higher = more transparent) instead of a plain on/off flag. `1` is
   byte-identical to what `true` has always resolved to (0.50 window opacity /
@@ -24,6 +79,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   panel rewrites a hand-written `glassmorphism = true` as `glassmorphism = 1`.
   The panel's Glassmorphism row cycles through all six steps instead of
   flipping a toggle
+
+### Fixed
+
+- A pane restored with no scrollback record now says so, in a row naming the
+  key that would change it, instead of coming back silently empty. Restoring
+  the tabs and splits is itself a promise an empty pane breaks, and the
+  previous behavior left it ambiguous whether the output had been lost or
+  merely never kept. Ships regardless of whether persistence is enabled (#52)
 
 ## [0.2.5] - 2026-07-27
 

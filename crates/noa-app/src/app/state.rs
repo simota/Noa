@@ -22,11 +22,16 @@ pub(super) struct GpuState {
     pub(super) pipelines: noa_render::PipelineCache,
     /// Format-keyed shared atlas textures for the app-wide terminal font.
     pub(super) font_atlases: noa_render::GlyphAtlasCache,
-    pub(super) font: FontGrid,
+    /// Every live terminal grid, keyed by pixel size (see `font_cache`).
+    /// Windows look theirs up by their own scale factor, so windows on
+    /// displays with different scale factors are each crisp, and windows
+    /// sharing a scale share one grid.
+    pub(super) fonts: super::font_cache::FontGridMap,
     /// Dedicated, smaller font for the session sidebar (mockup-dense typography,
     /// [`SIDEBAR_FONT_POINT_SIZE`]), sized independently of the terminal font
     /// and rebuilt on a scale change alongside `font`.
-    pub(super) sidebar_font: FontGrid,
+    /// Every live sidebar/UI grid; same contract as `fonts`.
+    pub(super) sidebar_fonts: super::font_cache::FontGridMap,
     /// Format-keyed shared atlas textures for the dedicated sidebar/UI font.
     pub(super) sidebar_font_atlases: noa_render::GlyphAtlasCache,
     pub(super) theme: Theme,
@@ -54,6 +59,11 @@ pub(super) struct GpuState {
     /// The interior pixel padding the current `palette_renderer` was built
     /// with; the renderer is rebuilt when this drifts (font size change).
     pub(super) palette_padding: noa_core::GridPadding,
+    /// The terminal pixel size the current `palette_renderer` was built for.
+    /// Modal cards rasterize terminal cells, so the shared renderer must be
+    /// rebuilt when it is asked to draw into a window of a different scale —
+    /// otherwise the card carries another window's glyph size and atlas.
+    pub(super) palette_font_px: f32,
     /// 1x1 translucent-black texture drawn as a full-pane card behind the
     /// palette; the modal scrim dimming the pane underneath.
     pub(super) palette_scrim: Option<(wgpu::Texture, wgpu::TextureView)>,
@@ -245,6 +255,11 @@ pub(super) enum SpawnTarget {
 /// AppKit tab group; winit still reports them as distinct `WindowId`s.
 pub(super) struct WindowState {
     pub(super) window: Arc<Window>,
+    /// The pixel size this window rasterizes glyphs at
+    /// (`point_size * scale_factor`). The key into `GpuState::fonts` and,
+    /// through `noa_render::GlyphAtlasCache`, into its glyph atlas set.
+    /// Updated on a scale change and on a runtime font-size change.
+    pub(super) font_px: f32,
     /// The logical window (AppKit tab group) this tab belongs to.
     pub(super) group: WindowGroupId,
     pub(super) surface: wgpu::Surface<'static>,

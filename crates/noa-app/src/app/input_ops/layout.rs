@@ -93,7 +93,12 @@ impl App {
                 Some(Instant::now() + NATIVE_TAB_TITLE_FLUSH_DEBOUNCE);
         }
 
-        let Some(metrics) = self.gpu.as_ref().map(|gpu| gpu.font.metrics()) else {
+        let font_px = self.window_font_px(window_id);
+        let Some(metrics) = self
+            .gpu
+            .as_ref()
+            .map(|gpu| gpu.fonts.get(font_px).metrics())
+        else {
             return;
         };
         let padding = self.padding;

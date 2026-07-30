@@ -1350,24 +1350,37 @@ impl App {
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
-        let font = match FontGrid::new(
-            font_pixel_size(point_size, scale_factor),
-            font_config_from_noa_config(&self.config.font),
-        ) {
-            Ok(font) => font,
-            Err(err) => {
-                log::warn!(
-                    "failed to rebuild font for runtime size {point_size} at scale factor {scale_factor}: {err}"
-                );
-                return;
-            }
-        };
-        gpu.font = font;
+        // Reuse the grid for this size when it is already resident: a
+        // font-size scrub returns to sizes it has just left, and rebuilding
+        // one costs ~13 ms of main-thread re-rasterization that the map exists
+        // to avoid. Building unconditionally and then adopting evicted the
+        // warm grid under the same key, which defeated the cache outright.
+        let px = font_pixel_size(point_size, scale_factor);
+        if !gpu.fonts.ensure_primary(px) {
+            log::warn!(
+                "failed to rebuild font for runtime size {} at scale factor {scale_factor}",
+                point_size
+            );
+            return;
+        }
         self.runtime_font_size = point_size;
+        // A runtime size change moves every window to its own scale's pixel
+        // size, and each window's renderer to that size's atlas set.
         for state in self.windows.values_mut() {
+            let window_px = font_pixel_size(self.runtime_font_size, state.window.scale_factor());
+            gpu.fonts.ensure(window_px);
+            state.font_px = window_px;
+            let surface_format = state.surface_config.format;
+            let atlases = gpu.font_atlases.get(
+                &gpu.device,
+                &gpu.queue,
+                surface_format,
+                gpu.fonts.get(window_px),
+            );
+            state.renderer.rebind_glyph_atlases(&gpu.device, &atlases);
             state
                 .renderer
-                .sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+                .sync_atlas(&gpu.device, &gpu.queue, gpu.fonts.get_mut(window_px));
         }
         let windows = self
             .window_order

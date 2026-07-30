@@ -438,7 +438,10 @@ pub fn encode_tail(
         // per-row estimate cannot see, so a linear walk would re-encode the
         // whole tail once per row.
         start += (tail.len() / 2).max(1);
-        if rows[start..].iter().all(|row| trimmed_cells(row).is_empty()) {
+        if rows[start..]
+            .iter()
+            .all(|row| trimmed_cells(row).is_empty())
+        {
             return None;
         }
     }
@@ -662,7 +665,10 @@ fn emit_logical_line(line: &[Cell], width: usize, out: &mut Vec<Row>) {
         {
             end -= 1;
         }
-        debug_assert!(end > start, "every iteration must consume at least one cell");
+        debug_assert!(
+            end > start,
+            "every iteration must consume at least one cell"
+        );
         let mut cells = line[start..end].to_vec();
         cells.resize(width, Cell::default());
         let wrapped = end < line.len();
@@ -759,8 +765,18 @@ mod tests {
         let bytes = encode_tail(&rows, 8, 0, &[], budget).expect("encodes");
         let decoded = decode(&bytes).expect("decodes");
         assert!(decoded.rows.len() < 10, "budget must drop older rows");
-        let last: String = decoded.rows.last().unwrap().cells.iter().map(|c| c.ch).collect();
-        assert!(last.starts_with("row9"), "newest row must survive: {last:?}");
+        let last: String = decoded
+            .rows
+            .last()
+            .unwrap()
+            .cells
+            .iter()
+            .map(|c| c.ch)
+            .collect();
+        assert!(
+            last.starts_with("row9"),
+            "newest row must survive: {last:?}"
+        );
     }
 
     #[test]
@@ -999,4 +1015,3 @@ mod tests {
         assert!(decoded.hyperlinks.is_empty());
     }
 }
-

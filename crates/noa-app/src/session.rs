@@ -958,7 +958,10 @@ mod tests {
         assert!(text.contains("\"scrollback\":\"3f1c8a02b7d94e56\""));
         assert_eq!(parse(&text), Some(state.clone()));
         assert_eq!(
-            state.windows[0].tabs[0].split.first_leaf_scrollback().as_deref(),
+            state.windows[0].tabs[0]
+                .split
+                .first_leaf_scrollback()
+                .as_deref(),
             Some("3f1c8a02b7d94e56"),
             "the first leaf's key is what the restored root pane loads"
         );

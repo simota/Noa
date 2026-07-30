@@ -56,9 +56,7 @@ pub fn is_sealed(bytes: &[u8]) -> bool {
 /// for encryption specifically.
 #[cfg(target_os = "macos")]
 fn key() -> Option<[u8; KEY_LEN]> {
-    use security_framework::passwords::{
-        get_generic_password, set_generic_password_options,
-    };
+    use security_framework::passwords::{get_generic_password, set_generic_password_options};
     use security_framework::passwords_options::PasswordOptions;
 
     if let Ok(existing) = get_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)

@@ -269,7 +269,8 @@ pub(crate) fn build_overrides(
                 scrollback_persist_max_age_days = parse_u64(path, directive, &mut diagnostics);
             }
             "scrollback-persist-encrypt" => {
-                scrollback_persist_encrypt = parse_bool_directive(path, directive, &mut diagnostics);
+                scrollback_persist_encrypt =
+                    parse_bool_directive(path, directive, &mut diagnostics);
             }
             "macos-option-as-alt" => {
                 macos_option_as_alt = parse_macos_option_as_alt(path, directive, &mut diagnostics);

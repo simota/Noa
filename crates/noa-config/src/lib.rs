@@ -1239,7 +1239,9 @@ impl ConfigOverrides {
                 .image_storage_limit
                 .or(self.image_storage_limit),
             window_save_state: higher_priority.window_save_state.or(self.window_save_state),
-            scrollback_persist: higher_priority.scrollback_persist.or(self.scrollback_persist),
+            scrollback_persist: higher_priority
+                .scrollback_persist
+                .or(self.scrollback_persist),
             scrollback_persist_limit: higher_priority
                 .scrollback_persist_limit
                 .or(self.scrollback_persist_limit),

@@ -78,7 +78,10 @@ fn ruled(label: &str, cols: u16) -> String {
 pub fn separator_row(saved_at: u64, local_offset_seconds: i64, cols: u16) -> Row {
     annotation_row(
         &ruled(
-            &format!("record · saved {} · live below", stamp(saved_at, local_offset_seconds)),
+            &format!(
+                "record · saved {} · live below",
+                stamp(saved_at, local_offset_seconds)
+            ),
             cols,
         ),
         cols,

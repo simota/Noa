@@ -13,8 +13,7 @@ pub(super) const CHECKPOINT_QUIESCENCE: std::time::Duration = std::time::Duratio
 /// Ceiling on the gap between checkpoints. Quiescence alone would never fire
 /// under sustained output — exactly the long-running build whose tail the user
 /// most wants back — so a flood still gets checkpointed this often.
-pub(super) const CHECKPOINT_MAX_INTERVAL: std::time::Duration =
-    std::time::Duration::from_secs(60);
+pub(super) const CHECKPOINT_MAX_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Floor on how soon the ceiling may fire, so a burst arriving after a long
 /// idle still gets a moment to settle instead of being captured mid-stream.

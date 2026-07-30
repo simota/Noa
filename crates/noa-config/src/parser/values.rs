@@ -8,8 +8,8 @@ use crate::{
     MAX_SIDEBAR_WIDTH, MIN_BACKGROUND_IMAGE_INTERVAL_SECS, MIN_SIDEBAR_FONT_SIZE,
     MIN_SIDEBAR_WIDTH, MacosOptionAsAlt, MacosTitlebarProxyIcon, MacosTitlebarStyle,
     PaletteOverride, QuickTerminalPosition, QuickTerminalScreen, QuickTerminalSize,
-    QuickTerminalSizeDim, ResizeOverlay, ScratchTerminalSize, ScrollbackPersist, SyntheticStyleMode,
-    ThemeAppearancePair, WindowSaveState,
+    QuickTerminalSizeDim, ResizeOverlay, ScratchTerminalSize, ScrollbackPersist,
+    SyntheticStyleMode, ThemeAppearancePair, WindowSaveState,
 };
 
 use super::diagnostics::*;

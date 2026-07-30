@@ -414,7 +414,10 @@ fn no_record_rows_emits_no_gutter_quads() {
     let mut terminal = Terminal::new(GridSize::new(2, 3));
     terminal.primary.cursor.visible = false;
     let snap = FrameSnapshot::from_terminal(&mut terminal);
-    assert_eq!(snap.record_rows, None, "from_terminal defaults to no record range");
+    assert_eq!(
+        snap.record_rows, None,
+        "from_terminal defaults to no record range"
+    );
 
     let theme = Theme::new();
     let mut instances = Vec::new();

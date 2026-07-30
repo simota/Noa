@@ -63,7 +63,10 @@ pub fn now_unix() -> u64 {
 /// file. Exactly [`KEY_LEN`] lowercase hex characters can express neither a
 /// separator nor a `..`.
 pub fn is_valid_key(key: &str) -> bool {
-    key.len() == KEY_LEN && key.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    key.len() == KEY_LEN
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// Mint a fresh snapshot key. Uniqueness only has to hold against the other
@@ -663,8 +666,8 @@ mod tests {
         );
         persister.flush();
 
-        let decoded = noa_grid::snapshot::decode(&read(&dir, &key).expect("written"))
-            .expect("decodes");
+        let decoded =
+            noa_grid::snapshot::decode(&read(&dir, &key).expect("written")).expect("decodes");
         assert_eq!(decoded.saved_at, 4242);
         let _ = fs::remove_dir_all(&dir);
     }

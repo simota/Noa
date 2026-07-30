@@ -112,6 +112,12 @@ pub struct PaneFrame<'a> {
 struct PaneGpuState {
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    /// Which atlas SET the bind group's texture views came from, alongside
+    /// that set's texture generation. Both are needed: the generation catches
+    /// a texture recreated within one set, the id catches a switch between
+    /// sets (every set's generation starts at zero, so comparing generations
+    /// alone would silently keep a bind group pointing at the old set).
+    atlas_set_id: u64,
     atlas_texture_generation: u64,
     bind_group_rebuilds: u64,
 }
@@ -644,6 +650,44 @@ impl Renderer {
     /// as clean and never re-derive them, even though this cache never
     /// actually applied that content. A no-op if `pane` has no cache entry
     /// yet (its first rebuild is already full).
+    /// Point this renderer at a different set of shared glyph atlases.
+    ///
+    /// Needed because a window's glyph atlases are chosen by the pixel size it
+    /// rasterizes at, and a window's scale factor can change while it lives —
+    /// but `glyph_atlases` is otherwise fixed at construction and window
+    /// renderers are never rebuilt.
+    ///
+    /// Everything derived from the old set is dropped: pane bind groups hold
+    /// its texture views, and per-row instance caches hold concrete atlas
+    /// coordinates that mean something different in the new set's textures.
+    /// The bind-group refresh below is only correct because staleness is
+    /// tracked by `(atlas_set_id, texture_generation)` — a fresh set starts its
+    /// generation at zero, so a generation-only comparison would match the old
+    /// set's zero and skip the rebuild, leaving the pane sampling the atlas of
+    /// a different pixel size.
+    ///
+    /// A no-op when already bound to this set, so callers may call it every
+    /// frame.
+    pub fn rebind_glyph_atlases(
+        &mut self,
+        device: &wgpu::Device,
+        atlases: &crate::SharedGlyphAtlases,
+    ) {
+        debug_assert_eq!(
+            atlases.format(),
+            self.glyph_atlases.format(),
+            "glyph atlases must match the format this renderer's pipelines were built for"
+        );
+        if atlases.id() == self.glyph_atlases.id() {
+            return;
+        }
+        self.glyph_atlases = atlases.clone();
+        for cache in self.pane_render_cache.values_mut() {
+            cache.key = None;
+        }
+        self.refresh_stale_pane_bind_groups(device);
+    }
+
     pub fn invalidate_pane(&mut self, pane: PaneId) {
         if let Some(cache) = self.pane_render_cache.get_mut(&pane) {
             cache.key = None;
@@ -1111,6 +1155,7 @@ impl Renderer {
             self.pane_gpu.push(PaneGpuState {
                 uniform_buffer,
                 bind_group,
+                atlas_set_id: atlas_views.atlas_id,
                 atlas_texture_generation: atlas_views.texture_generation,
                 bind_group_rebuilds: 1,
             });
@@ -1133,7 +1178,9 @@ impl Renderer {
         atlas_views: &crate::shared::SharedGlyphAtlasViews,
     ) {
         for pane in &mut self.pane_gpu {
-            if pane.atlas_texture_generation == atlas_views.texture_generation {
+            if pane.atlas_set_id == atlas_views.atlas_id
+                && pane.atlas_texture_generation == atlas_views.texture_generation
+            {
                 continue;
             }
             pane.bind_group = self.cell.make_bind_group(
@@ -1142,6 +1189,7 @@ impl Renderer {
                 atlas_views.mask.as_ref(),
                 atlas_views.color.as_ref(),
             );
+            pane.atlas_set_id = atlas_views.atlas_id;
             pane.atlas_texture_generation = atlas_views.texture_generation;
             pane.bind_group_rebuilds = pane.bind_group_rebuilds.saturating_add(1);
         }

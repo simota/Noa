@@ -368,7 +368,7 @@ pub fn load_font_stack_with_primary(
     // before CJK (so PUA icons don't accidentally resolve to a CJK private
     // glyph when a Nerd Font candidate is installed).
     for family_name in nerd_font_fallback_family_names(&source) {
-        push_some_face(&mut fallbacks, family_fallback_face(&source, &family_name));
+        push_some_face(&mut fallbacks, family_fallback_face(&source, family_name));
     }
 
     // Permanent embedded fallback: guarantees Nerd Font PUA icon coverage
@@ -713,7 +713,30 @@ fn emoji_fallback_family_name() -> &'static str {
     "Apple Color Emoji"
 }
 
-fn nerd_font_fallback_family_names(source: &SystemSource) -> Vec<String> {
+/// Nerd Font family names usable as fallbacks on this system.
+///
+/// Resolved **once per process**. The list depends only on which fonts are
+/// installed — never on [`FontConfig`], never on the pixel size — but it was
+/// recomputed on every [`load_font_stack`], and `load_font_stack` runs on the
+/// main thread on every font-size and DPI change (`noa-app`'s
+/// `rebuild_runtime_fonts` and `on_scale_factor_changed` each build two
+/// `FontGrid`s). The `all_families()` enumeration below walks every installed
+/// family through CoreText and measures ~16 ms on an M-series Mac: 78% of a
+/// whole `load_font_stack`, paid twice per size step, for an answer that
+/// cannot have changed.
+///
+/// Deliberate trade-off: a Nerd Font installed *while noa is running* is not
+/// picked up until restart. That is the same requirement Ghostty and kitty
+/// place on newly installed fonts, and it is bounded here by
+/// [`embedded_symbols_nerd_font_face`] — Symbols Nerd Font Mono ships inside
+/// the binary, so PUA icon coverage never depended on a system install.
+static NERD_FONT_FAMILIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+fn nerd_font_fallback_family_names(source: &SystemSource) -> &'static [String] {
+    NERD_FONT_FAMILIES.get_or_init(|| discover_nerd_font_family_names(source))
+}
+
+fn discover_nerd_font_family_names(source: &SystemSource) -> Vec<String> {
     let mut names: Vec<String> = [
         "Symbols Nerd Font Mono",
         "Symbols Nerd Font",
@@ -1155,9 +1178,9 @@ fn face_index_for_postscript_name(data: &[u8], postscript_name: &str) -> Option<
 pub(crate) fn nerd_font_fallback_candidate_has_glyph(ch: char) -> bool {
     let source = SystemSource::new();
     nerd_font_fallback_family_names(&source)
-        .into_iter()
+        .iter()
         .any(|family_name| {
-            let family = [FamilyName::Title(family_name)];
+            let family = [FamilyName::Title(family_name.clone())];
             let Ok(handle) = Source::select_best_match(&source, &family, &Properties::new()) else {
                 return false;
             };
@@ -1718,6 +1741,59 @@ mod tests {
             (face.bytes, face.index),
             (expected.bytes, expected.index),
             "lazy CJK resolution must select the same face the eager priority list would"
+        );
+    }
+
+    /// The Nerd Font family list is resolved once per process
+    /// (`NERD_FONT_FAMILIES`) because `all_families()` costs ~16 ms and was
+    /// being re-run on every font-size and DPI change. Pin both halves of
+    /// that: the memo really is one allocation, and it still carries the
+    /// hardcoded candidates.
+    #[test]
+    fn nerd_font_family_names_are_memoized_once_per_process() {
+        let source = SystemSource::new();
+        let first = nerd_font_fallback_family_names(&source);
+        let second = nerd_font_fallback_family_names(&source);
+
+        assert!(
+            std::ptr::eq(first, second),
+            "memoized list must be the same allocation, not merely equal — \
+             re-running all_families() is the cost this exists to avoid"
+        );
+        assert!(
+            first.iter().any(|name| name == "Symbols Nerd Font Mono"),
+            "hardcoded candidates must survive memoization"
+        );
+    }
+
+    /// The size-change shape: `noa-app` rebuilds a `FontGrid` (and therefore a
+    /// `FontStack`) from scratch on every font-size and DPI change, so the
+    /// second and later stacks must resolve exactly the faces the first did.
+    ///
+    /// Detection power is machine-dependent, and that was verified rather than
+    /// assumed: mutating `nerd_font_fallback_family_names` to return an empty
+    /// slice after its first call does NOT fail this test on a machine with no
+    /// Nerd Font family installed, because the loop it feeds then contributes
+    /// no faces either way (the embedded Symbols Nerd Font is pushed
+    /// separately). `nerd_font_family_names_are_memoized_once_per_process` is
+    /// the machine-independent guard and does catch that mutation. This test
+    /// covers the end-to-end invariant on machines that do have one.
+    #[test]
+    fn repeated_stack_loads_resolve_the_same_faces() {
+        let cfg = FontConfig::default();
+        let first = load_font_stack(&cfg).expect("first stack");
+        let second = load_font_stack(&cfg).expect("second stack");
+
+        assert_eq!(
+            first.faces().len(),
+            second.faces().len(),
+            "a rebuild at a new pixel size must not lose fallback faces"
+        );
+        let first_ids: Vec<_> = first.faces().iter().map(|f| f.index).collect();
+        let second_ids: Vec<_> = second.faces().iter().map(|f| f.index).collect();
+        assert_eq!(
+            first_ids, second_ids,
+            "face order is FaceId identity — a rebuild must reproduce it"
         );
     }
 

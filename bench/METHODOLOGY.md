@@ -687,6 +687,119 @@ builder-quiescence gate; it is skipped under `--equalize` (the fixed region
 makes it grid/font-independent by construction). Full design rationale:
 `docs/specs/bench-doom-fire.md`.
 
+### 8. Latency under load (concurrent DSR probe + bulk producer, one pty)
+
+**Opt-in, not in the default axis set** (`--axes latency-under-load`): it is
+the most expensive axis (`LOADLAT_REPS` independent full launches, each one
+running a bulk producer for tens of seconds), and its entire point is to
+measure under contention, so it never belongs in a quick default sweep.
+
+**Why this axis exists.** Axis 1 (throughput) and axis 2 (input latency)
+never run at the same time — the DSR probe (`dsr_probe`) runs alone as the
+pty child, and the 150 MB `cat` runs alone as the pty child. Neither axis
+answers "how fast does a keystroke echo when the terminal is also draining
+a flood of output" — the actual shape of typing while a build log or `cat`
+scrolls past. This axis measures exactly that: it runs the DSR probe and a
+bulk producer **concurrently, in the same pty, in the same launch**.
+
+**One pty, not two panes.** The two are launched as sibling processes of the
+same pty child (`wrapper.sh`'s `NOA_MODE=latload`), both talking to the
+single tty the terminal opened — the producer only writes, the probe writes
+its query and reads the terminal's reply, so there is no fd contention
+between them, only contention for the terminal's own parse/render/respond
+loop. This was chosen over a two-pane design because it is the closer match
+to the real "typing while output floods" scenario: a single input/output
+path under load, not cross-pane isolation. A two-pane variant would answer a
+different, narrower question (does terminal-wide contention leak across
+independent panes?) — worth adding as a sub-variant later, not implemented
+in this pass (see "not implemented" below).
+
+**Bounded-duration bulk producer, not a bare `cat`.** A 3 GB/s terminal can
+finish 150 MB in well under a second — too short a window to hold
+contention through hundreds of DSR iterations. `bench/tools/bulk_produce.c`
+re-streams the same 150 MB ascii file in a loop under a **wall-clock
+duration bound** (`LOADLAT_BULK_DURATION_S`: 20s full / 8s quick), not a
+byte-count bound, so the window is long enough regardless of how fast the
+terminal drains. Same pty flow-control semantics as axis 1 (`write()` blocks
+on the kernel pty buffer until the terminal drains), so its own
+`<bytes>/<elapsed_ns>` gives the sustained MiB/s of the exact concurrent
+window it was writing.
+
+**Per-launch sequence** (`wrapper.sh` `NOA_MODE=latload`, driven by
+`run_all.sh: run_latency_under_load`):
+
+1. **No-load control**: `dsr_probe` runs alone first (`LOADLAT_CTRL_ITERS`
+   kept iterations, `LOADLAT_CTRL_WARMUP` discarded) — the baseline reading
+   for *this exact launch*, not a historical number from a different run.
+2. `bulk_produce` starts in the background against the same pty.
+3. **Discard window** (`LOADLAT_DISCARD_S`: 2s full / 1s quick): the
+   producer's write loop takes a fraction of a second to reach steady pty
+   backpressure; this is a deliberate margin, not the unrelated 5-40s
+   macOS GPU-driver-pool reclaim window documented for the memory axes
+   (that window is about idle GPU pool teardown, which has nothing to do
+   with a CPU/pty contention experiment running within seconds of launch —
+   verified inapplicable here by construction, not assumed).
+4. **In-load probe**: `dsr_probe` runs again (`LOADLAT_ITERS` kept
+   iterations, `LOADLAT_WARMUP` discarded) while the producer is still
+   actively writing.
+5. The wrapper joins the producer (`wait $bulk_pid`) before signaling the
+   sentinel, so the producer's own result file is always complete by the
+   time the harness reads it.
+
+**Reported pairing** (per terminal, `raw.tsv` axis `latency_under_load`):
+the no-load control's pooled median/p95/p99/max/count, the in-load probe's
+pooled median/p95/p99/max/count, the sustained MiB/s achieved during the
+in-load window (median across reps), and a **degradation factor**
+(in-load pooled median ÷ control pooled median) computed from this same
+run's own numbers — never against a historical baseline.
+
+**Reps and pooling**: `LOADLAT_REPS` independent launches (5 full / 2
+quick — the same rep philosophy as mem-longevity's 5 cycles and startup's 5
+reps: enough independent process lifetimes to see spread without the
+sequence taking minutes per terminal). Raw kept DSR samples (both control
+and load, every launch) are pooled before computing percentiles, the same
+convention axis 2 uses (`pooled_stats`) — a percentile from one launch's
+few hundred samples is noisy; pooling across `LOADLAT_REPS` independent
+launches gives the tail more support. The console also prints each rep's
+own numbers so the spread across launches is visible, not just the pooled
+figure.
+
+**Overlap is verified, not assumed — by interval containment, not sample
+counting.** `bulk_produce` records its own measured active interval
+`[t0, t1]` (`CLOCK_MONOTONIC`, written into its result file at exit);
+`wrapper.sh` separately records the in-load probe's own `[start, end]`
+wall-clock window with the same clock in the same pty child process, so the
+two are directly comparable. `run_all.sh` checks that the producer's
+interval **contains** the probe's interval (`bulk_t0 <= probe_start` and
+`bulk_t1 >= probe_end`, plus `bytes > 0`) and reports
+`verified(bulk_active[Nms]_contains_probe[Mms])` or `NOT-VERIFIED(...)` with
+the raw intervals attached. An earlier draft of this check instead counted
+how many points in `bulk_produce`'s ~200ms-cadence progress log fell inside
+the probe's window — that under-samples whenever the probe window (tens of
+ms, since the in-load probe's several hundred iterations complete quickly)
+is shorter than the logging cadence, which produced false `NOT-VERIFIED`
+results on a from-scratch run even though the two processes were genuinely
+concurrent (caught during this axis's own smoke test, not shipped
+unverified). The containment check has no such blind spot: it only needs
+each process's own start/end, not a sampling rate fine enough to land
+inside a short window. The progress log itself is kept
+(`bulk_produce`'s optional 4th argument) for auxiliary auditing of the
+producer's write cadence, but is no longer the overlap oracle.
+
+**What this is and isn't**: like axis 2, this is the pty→parser→responder
+loop, not photon/keyboard-to-glass latency — the same caveat applies here,
+amplified by contention. It measures one terminal's own behavior under its
+own bulk-output load, not cross-terminal fairness under a shared system
+load (the builder-quiescence gate still applies: the harness refuses to
+start while a `cargo`/`rustc`/`clang` build is alive system-wide, for the
+same contention-sensitivity reason as the scroll axis).
+
+**Not implemented in this pass** (documented here so it isn't silently
+assumed done): a two-pane cross-contamination variant, and reusing the
+pooled-samples files for a full session-level histogram artifact beyond the
+percentiles already reported. Both are natural follow-ups if the
+single-pty result turns out to be interesting enough to warrant them.
+
 ### Ghostty load-active timeout (baseline 2026-07-16) — root-caused & fixed
 
 The 20260716-084038 baseline reported Ghostty's two load-active rows as
@@ -822,6 +935,7 @@ bench/run_all.sh                         # full 6-axis suite
 bench/run_all.sh --quick                 # smoke (fewer reps/shorter settles)
 bench/run_all.sh --only noa,kitty        # subset of terminals
 bench/run_all.sh --axes memory,load      # subset of axes
+bench/run_all.sh --axes latency-under-load  # opt-in axis, not in the default set
 bench/run_all.sh --force                 # bypass the builder-quiescence gate
 ```
 

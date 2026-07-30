@@ -105,6 +105,7 @@ fn fresh_snapshot(term: &Terminal) -> FrameSnapshot {
         search: noa_grid::SearchState::default(),
         row_base: screen.visible_row_base(),
         abs_row_base: screen.rows_evicted() + screen.visible_row_base(),
+        viewport_offset: screen.viewport_offset(),
         active_is_alt: term.active_is_alt,
         cols,
         rows_n,

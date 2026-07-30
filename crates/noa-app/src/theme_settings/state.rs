@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use noa_config::{
     BackgroundImageFit, BackgroundImagePosition, CursorShape, GlassLevel, MacosOptionAsAlt,
-    MacosTitlebarStyle,
+    MacosTitlebarStyle, ScrollbackPersist,
 };
 
 use crate::command_palette::fuzzy_match;
@@ -462,6 +462,10 @@ impl ThemeSettings {
                             init.scratch_terminal_size.0,
                             init.scratch_terminal_size.1,
                         ),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::ScrollbackPersist(init.scrollback_persist),
                         touched: false,
                     },
                 ],
@@ -1604,6 +1608,20 @@ impl ThemeSettings {
                 }
                 RowEffect::None
             }
+            // Two-state flip, same shape as `ConfirmQuit` — no runtime apply
+            // path from `adjust` itself (see this kind's doc comment).
+            SettingsRowKind::ScrollbackPersist => {
+                let RowDraft::ScrollbackPersist(current) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let new = match current {
+                    ScrollbackPersist::Never => ScrollbackPersist::Tail,
+                    ScrollbackPersist::Tail => ScrollbackPersist::Never,
+                };
+                self.rows[idx].draft = RowDraft::ScrollbackPersist(new);
+                self.rows[idx].touched = true;
+                RowEffect::None
+            }
         }
     }
 
@@ -2270,6 +2288,12 @@ impl ThemeSettings {
                         format!("{cols}x{rows}"),
                     ));
                 }
+                RowDraft::ScrollbackPersist(mode) => {
+                    updates.push((
+                        "scrollback-persist".to_string(),
+                        scrollback_persist_config_value(*mode).to_string(),
+                    ));
+                }
             }
         }
         updates
@@ -2574,6 +2598,12 @@ fn is_reload_exempt(row: SettingsRowKind) -> bool {
             // "picked up without a restart" shape as the group above.
             | SettingsRowKind::ScratchTerminalKey
             | SettingsRowKind::ScratchTerminalSize
+            // `scrollback-persist`: read fresh only when a pane is created,
+            // so like the group above there is no running state for this
+            // row to apply to directly — `ConfigWatcher`'s normal reload
+            // picks up the written value for the next pane, same shape as
+            // `ScrollbackLimit`/`CursorStyleBlink`/`MinimumContrast`.
+            | SettingsRowKind::ScrollbackPersist
     )
 }
 
@@ -2609,6 +2639,15 @@ fn macos_option_as_alt_config_value(mode: MacosOptionAsAlt) -> &'static str {
         MacosOptionAsAlt::Left => "left",
         MacosOptionAsAlt::Right => "right",
         MacosOptionAsAlt::Both => "both",
+    }
+}
+
+/// `scrollback-persist` config value for `mode` (inverse of
+/// `parse_scrollback_persist`).
+fn scrollback_persist_config_value(mode: ScrollbackPersist) -> &'static str {
+    match mode {
+        ScrollbackPersist::Never => "never",
+        ScrollbackPersist::Tail => "tail",
     }
 }
 
@@ -2664,6 +2703,7 @@ fn hash_row_draft_value(draft: &RowDraft, hasher: &mut impl Hasher) {
             cols.hash(hasher);
             rows.hash(hasher);
         }
+        RowDraft::ScrollbackPersist(mode) => scrollback_persist_config_value(*mode).hash(hasher),
     }
 }
 

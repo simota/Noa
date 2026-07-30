@@ -800,6 +800,7 @@ mod theme_settings_session_tests {
             server_status: "Stopped".to_string(),
             scratch_terminal_key: "cmd+shift+t".to_string(),
             scratch_terminal_size: (100, 25),
+            scrollback_persist: noa_config::ScrollbackPersist::default(),
             theme_pair: None,
             carryover: None,
             favorites: std::sync::Arc::new(std::collections::HashSet::new()),
@@ -1056,6 +1057,45 @@ pub(super) struct Surface {
     pub(super) hover_link: Option<HoverLink>,
     /// The Session Overview mirror's read-only publish slot (Fix B, REQ-NF-6).
     pub(super) overview_snapshot: Arc<Mutex<Option<Arc<FrameSnapshot>>>>,
+    /// Key of this pane's persisted scrollback snapshot, when
+    /// `scrollback-persist` is on. Minted once and then stable for the pane's
+    /// life so checkpoints overwrite one file rather than littering the
+    /// directory, and so a restored pane keeps writing to the file it was
+    /// restored from. `None` while persistence is off.
+    pub(super) scrollback_key: Option<String>,
+    /// Session-absolute rows this pane restored from a snapshot — the record
+    /// region, drawn with a gutter so restored history is not mistaken for
+    /// live output. Shrinks as scrollback eviction eats into it and is cleared
+    /// once the whole region has scrolled out.
+    pub(super) record_rows: Option<std::ops::Range<usize>>,
+    /// Session-absolute row of the synthetic annotation this pane was restored
+    /// with — the record separator, or the Stage 0 "not saved" notice. Excluded
+    /// from capture: it is chrome the app wrote, and re-capturing it would
+    /// leave one more behind in the history on every relaunch.
+    pub(super) annotation_row: Option<usize>,
+    /// The key this pane was restored *from*, still on disk.
+    ///
+    /// Restoring mints a fresh key rather than adopting the saved one (two noa
+    /// instances restoring the same session would otherwise share a file), so
+    /// the old snapshot becomes redundant the moment this pane's own capture
+    /// lands. It is deleted then rather than at restore, so a crash in between
+    /// still has a record to come back to, and rather than at the next launch's
+    /// orphan sweep, so a plaintext copy does not outlive its usefulness.
+    pub(super) superseded_scrollback_key: Option<String>,
+    /// The terminal's coordinate generation when `record_rows`/`annotation_row`
+    /// were computed.
+    ///
+    /// Both are session-absolute row indices, and a column-count reflow or a
+    /// scrollback clear renumbers that space wholesale — the terminal bumps its
+    /// generation exactly when that happens, and deliberately does *not* bump it
+    /// for ordinary eviction (which preserves numbering). Comparing against it
+    /// is therefore the complete staleness test: without it the gutter paints
+    /// over live rows, capture's `skip_row` deletes a real row from the record,
+    /// and `Discard restored history` drops live history off the front.
+    pub(super) record_generation: u64,
+    /// Whether this pane produced output since its last checkpoint. Keeps the
+    /// idle checkpoint from re-encoding panes that have not changed.
+    pub(super) scrollback_dirty: bool,
     /// Previous frame's snapshot rows + viewport identity, handed back after
     /// each redraw so `FrameSnapshot::from_terminal_recycle` can reuse row/cell
     /// allocations and skip clean-row copies when the viewport is unchanged.
@@ -1214,6 +1254,12 @@ impl Surface {
             rect,
             hover_link: None,
             overview_snapshot,
+            scrollback_key: None,
+            record_rows: None,
+            annotation_row: None,
+            superseded_scrollback_key: None,
+            record_generation: 0,
+            scrollback_dirty: false,
             snapshot_recycle: noa_render::FrameSnapshotRecycle::default(),
             kitty_animation_flag,
             cursor_blink_state: CursorBlinkState::default(),

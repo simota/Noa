@@ -60,6 +60,7 @@ fn init() -> ThemeSettingsInit {
         server_status: "Stopped".to_string(),
         scratch_terminal_key: "cmd+shift+t".to_string(),
         scratch_terminal_size: (100, 25),
+        scrollback_persist: noa_config::ScrollbackPersist::default(),
         theme_pair: None,
         carryover: None,
         favorites: std::sync::Arc::new(std::collections::HashSet::new()),
@@ -1094,6 +1095,73 @@ fn confirm_quit_row_toggles_and_commits_without_restart_note() {
     assert_eq!(
         updates.iter().find(|(k, _)| k == "confirm-quit"),
         Some(&("confirm-quit".to_string(), "false".to_string()))
+    );
+}
+
+// The row toggles like `ConfirmQuit` (a plain two-state flip), but commits
+// `scrollback-persist`'s `never`/`tail` config-file strings rather than
+// `true`/`false` — asserts both directions round-trip through
+// `commit_updates` correctly.
+#[test]
+fn the_scrollback_persist_row_shows_what_the_config_actually_says() {
+    // A privacy toggle that reports Off while output is being written to disk
+    // is worse than no toggle: seed the row from the live config, never from
+    // the type default.
+    let mut init = settings_init();
+    init.scrollback_persist = noa_config::ScrollbackPersist::Tail;
+    let settings = ThemeSettings::open(init);
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::ScrollbackPersist)].draft,
+        RowDraft::ScrollbackPersist(noa_config::ScrollbackPersist::Tail),
+        "an already-recording config must not display as Off"
+    );
+    assert!(
+        settings
+            .commit_updates()
+            .iter()
+            .all(|(key, _)| key != "scrollback-persist"),
+        "an untouched row must not rewrite the key"
+    );
+}
+
+#[test]
+fn scrollback_persist_row_toggles_and_commits_never_or_tail() {
+    let mut settings = ThemeSettings::open(settings_init());
+    move_to_row(&mut settings, SettingsRowKind::ScrollbackPersist);
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::ScrollbackPersist)].draft,
+        RowDraft::ScrollbackPersist(noa_config::ScrollbackPersist::Never)
+    );
+
+    let effect = settings.adjust(1, Instant::now());
+    assert_eq!(effect, RowEffect::None);
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::ScrollbackPersist)].draft,
+        RowDraft::ScrollbackPersist(noa_config::ScrollbackPersist::Tail)
+    );
+    assert!(!settings.restart_note(SettingsRowKind::ScrollbackPersist));
+    assert_eq!(
+        settings.liveness(SettingsRowKind::ScrollbackPersist),
+        Liveness::OnSave
+    );
+
+    let updates = settings.commit_updates();
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "scrollback-persist"),
+        Some(&("scrollback-persist".to_string(), "tail".to_string()))
+    );
+
+    // Flips back to `never` on a second toggle.
+    let effect = settings.adjust(1, Instant::now());
+    assert_eq!(effect, RowEffect::None);
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::ScrollbackPersist)].draft,
+        RowDraft::ScrollbackPersist(noa_config::ScrollbackPersist::Never)
+    );
+    let updates = settings.commit_updates();
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "scrollback-persist"),
+        Some(&("scrollback-persist".to_string(), "never".to_string()))
     );
 }
 
@@ -2477,6 +2545,10 @@ fn default_for_maps_every_row_kind_to_its_documented_startup_default() {
         RowDraft::default_for(SettingsRowKind::ServerStatus),
         RowDraft::ServerStatus("Stopped".to_string())
     );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::ScrollbackPersist),
+        RowDraft::ScrollbackPersist(noa_config::ScrollbackPersist::Never)
+    );
 }
 
 // R-9: `SettingsRowKind::COUNT` is type-enforced at 20 (16 + the 4 new
@@ -2488,12 +2560,13 @@ fn default_for_maps_every_row_kind_to_its_documented_startup_default() {
 // address row (server-bind) brings it to 26 (+1), the sidebar-width row
 // brings it to 27 (+1), the sidebar-font-size row brings it to 28 (+1),
 // the send-selection-send-enter row brings it to 29 (+1), the Remote
-// App QR action brings it to 30 (+1), and the `glassmorphism` row brings
-// the array to its current length (+1 on top of the scratch-terminal rows).
+// App QR action brings it to 30 (+1), the `glassmorphism` row brings it to
+// 33 (+1 on top of the scratch-terminal rows), and the `scrollback-persist`
+// row brings the array to its current length (+1).
 #[test]
 fn settings_row_kind_count_includes_remote_app_qr_action() {
-    assert_eq!(SettingsRowKind::COUNT, 33);
-    assert_eq!(SettingsRowKind::ALL.len(), 33);
+    assert_eq!(SettingsRowKind::COUNT, 34);
+    assert_eq!(SettingsRowKind::ALL.len(), 34);
 }
 
 // settings-panel-server-status: the status row is read-only (mirrors

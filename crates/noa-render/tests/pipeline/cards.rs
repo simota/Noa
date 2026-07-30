@@ -635,6 +635,7 @@ fn command_palette_card_composites_without_validation_error() {
         preedit: None,
         image_placements: Vec::new(),
         images: Vec::new(),
+        record_rows: None,
     };
     renderer.rebuild_cells(&snap, &mut font, &Theme::new());
     renderer.sync_atlas(&device, &queue, &mut font);

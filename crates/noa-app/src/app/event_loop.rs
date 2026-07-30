@@ -111,6 +111,10 @@ impl ApplicationHandler<UserEvent> for App {
         // freshest topology/cwd/focus. The all-windows-closed path leaves the
         // last file written by `persist_session` intact (this is a no-op when
         // `windows` is empty), matching "restore the last session".
+        // Capture before `persist_session`: the topology document records each
+        // pane's snapshot key, and a key is minted here for panes that have
+        // not been checkpointed yet.
+        self.capture_scrollback_snapshots(false);
         self.persist_session();
         self.shutdown_remote_requests();
     }
@@ -254,6 +258,9 @@ impl ApplicationHandler<UserEvent> for App {
                 // Every pty-driven redraw pushes the post-burst memory trim
                 // out; it fires once, MEMORY_TRIM_QUIESCENCE after the burst.
                 self.arm_memory_trim();
+                // Output means this pane's record is stale; the next idle
+                // checkpoint re-captures it.
+                self.mark_scrollback_dirty(window_id, pane_id);
                 // Pty output on the focused surface is activity for the
                 // `cursor-stop-blinking-after` idle stop: it restarts the
                 // idle clock (resuming blink if it had settled solid)
@@ -1066,6 +1073,7 @@ impl ApplicationHandler<UserEvent> for App {
         let kitty_anim_deadline = self.tick_kitty_animations();
         let memory_trim_deadline = self.tick_memory_trim();
         let bg_refresh_wake_deadline = self.tick_bg_refresh_wake();
+        let scrollback_checkpoint_deadline = self.tick_scrollback_checkpoint();
         let deadline = [
             blink_deadline,
             resize_throttle_deadline,
@@ -1081,6 +1089,7 @@ impl ApplicationHandler<UserEvent> for App {
             kitty_anim_deadline,
             memory_trim_deadline,
             bg_refresh_wake_deadline,
+            scrollback_checkpoint_deadline,
         ]
         .into_iter()
         .flatten()

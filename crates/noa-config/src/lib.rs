@@ -27,6 +27,15 @@ pub const DEFAULT_SCROLLBACK_LIMIT: usize = 10_000_000;
 /// `image-storage-limit` default: 320 MB of decoded image data, matching
 /// Ghostty/Kitty's per-terminal graphics storage budget.
 pub const DEFAULT_IMAGE_STORAGE_LIMIT: usize = 320_000_000;
+/// `scrollback-persist-limit` default: 1 MiB of *encoded* scrollback per pane.
+/// The budget is measured before deflate, so the file on disk is smaller.
+pub const DEFAULT_SCROLLBACK_PERSIST_LIMIT: usize = 1 << 20;
+/// `scrollback-persist-total-limit` default: 64 MiB of persisted scrollback
+/// across every pane, enforced against actual on-disk file sizes.
+pub const DEFAULT_SCROLLBACK_PERSIST_TOTAL_LIMIT: usize = 64 << 20;
+/// `scrollback-persist-max-age-days` default: persisted scrollback older than
+/// a week is dropped at launch. `0` disables expiry.
+pub const DEFAULT_SCROLLBACK_PERSIST_MAX_AGE_DAYS: u64 = 7;
 /// `minimum-contrast` default: 1.0 means no automatic adjustment, matching
 /// Ghostty's contrast-ratio scale where 1 permits identical colors.
 pub const DEFAULT_MINIMUM_CONTRAST: f32 = 1.0;
@@ -336,6 +345,28 @@ impl WindowSaveState {
     /// Both `default` and `always` restore; only `never` opts out.
     pub fn restores(self) -> bool {
         !matches!(self, WindowSaveState::Never)
+    }
+}
+
+/// `scrollback-persist`: whether each pane's scrollback tail is written to
+/// disk on exit and restored on launch. noa-specific key (no Ghostty analog —
+/// Ghostty restores topology only, which is why the default is `never`:
+/// persisting terminal output changes the threat model, so it is opt-in).
+/// See `docs/specs/scrollback-persistence.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScrollbackPersist {
+    /// Never write or read persisted scrollback (Ghostty-parity behavior).
+    #[default]
+    Never,
+    /// Persist the tail of each pane's scrollback, capped by
+    /// `scrollback-persist-limit`.
+    Tail,
+}
+
+impl ScrollbackPersist {
+    /// Whether scrollback should be captured on exit and restored on launch.
+    pub fn persists(self) -> bool {
+        matches!(self, ScrollbackPersist::Tail)
     }
 }
 
@@ -709,6 +740,26 @@ pub struct StartupConfig {
     /// `window-save-state`: whether the window/tab/split session is persisted
     /// and restored across launches. Default restores.
     pub window_save_state: WindowSaveState,
+    /// `scrollback-persist`: whether each pane's scrollback tail is persisted
+    /// alongside the session topology. noa-specific key (no Ghostty analog);
+    /// defaults to `never` so noa's observable behavior matches Ghostty until
+    /// the user opts in.
+    pub scrollback_persist: ScrollbackPersist,
+    /// `scrollback-persist-limit`: per-pane cap on persisted scrollback, in
+    /// bytes of *encoded* payload (measured before deflate). noa-specific key.
+    pub scrollback_persist_limit: usize,
+    /// `scrollback-persist-total-limit`: cap on the total on-disk size of all
+    /// persisted scrollback; the oldest panes are dropped first at launch.
+    /// noa-specific key.
+    pub scrollback_persist_total_limit: usize,
+    /// `scrollback-persist-max-age-days`: persisted scrollback older than this
+    /// is discarded at launch (`0` never expires). noa-specific key.
+    pub scrollback_persist_max_age_days: u64,
+    /// `scrollback-persist-encrypt`: encrypt snapshots with a key held in the
+    /// login keychain. noa-specific key; off by default because it makes the
+    /// records unreadable once the keychain entry is gone, which is a real cost
+    /// to accept deliberately rather than by default.
+    pub scrollback_persist_encrypt: bool,
     /// `macos-option-as-alt`: which Option key(s) should be rewritten as
     /// terminal Alt by the macOS window layer. Default preserves existing
     /// platform text behavior.
@@ -886,6 +937,11 @@ impl Default for StartupConfig {
             scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
             image_storage_limit: DEFAULT_IMAGE_STORAGE_LIMIT,
             window_save_state: WindowSaveState::default(),
+            scrollback_persist: ScrollbackPersist::default(),
+            scrollback_persist_limit: DEFAULT_SCROLLBACK_PERSIST_LIMIT,
+            scrollback_persist_total_limit: DEFAULT_SCROLLBACK_PERSIST_TOTAL_LIMIT,
+            scrollback_persist_max_age_days: DEFAULT_SCROLLBACK_PERSIST_MAX_AGE_DAYS,
+            scrollback_persist_encrypt: false,
             macos_option_as_alt: MacosOptionAsAlt::default(),
             macos_titlebar_style: MacosTitlebarStyle::default(),
             macos_non_native_fullscreen: false,
@@ -961,6 +1017,11 @@ pub struct ConfigOverrides {
     pub scrollback_limit: Option<usize>,
     pub image_storage_limit: Option<usize>,
     pub window_save_state: Option<WindowSaveState>,
+    pub scrollback_persist: Option<ScrollbackPersist>,
+    pub scrollback_persist_limit: Option<usize>,
+    pub scrollback_persist_total_limit: Option<usize>,
+    pub scrollback_persist_max_age_days: Option<u64>,
+    pub scrollback_persist_encrypt: Option<bool>,
     pub macos_option_as_alt: Option<MacosOptionAsAlt>,
     pub macos_titlebar_style: Option<MacosTitlebarStyle>,
     pub macos_non_native_fullscreen: Option<bool>,
@@ -1047,6 +1108,20 @@ macro_rules! impl_redacted_config_debug {
                     .field("scrollback_limit", &self.scrollback_limit)
                     .field("image_storage_limit", &self.image_storage_limit)
                     .field("window_save_state", &self.window_save_state)
+                    .field("scrollback_persist", &self.scrollback_persist)
+                    .field("scrollback_persist_limit", &self.scrollback_persist_limit)
+                    .field(
+                        "scrollback_persist_total_limit",
+                        &self.scrollback_persist_total_limit,
+                    )
+                    .field(
+                        "scrollback_persist_max_age_days",
+                        &self.scrollback_persist_max_age_days,
+                    )
+                    .field(
+                        "scrollback_persist_encrypt",
+                        &self.scrollback_persist_encrypt,
+                    )
                     .field("macos_option_as_alt", &self.macos_option_as_alt)
                     .field("macos_titlebar_style", &self.macos_titlebar_style)
                     .field(
@@ -1164,6 +1239,21 @@ impl ConfigOverrides {
                 .image_storage_limit
                 .or(self.image_storage_limit),
             window_save_state: higher_priority.window_save_state.or(self.window_save_state),
+            scrollback_persist: higher_priority
+                .scrollback_persist
+                .or(self.scrollback_persist),
+            scrollback_persist_limit: higher_priority
+                .scrollback_persist_limit
+                .or(self.scrollback_persist_limit),
+            scrollback_persist_total_limit: higher_priority
+                .scrollback_persist_total_limit
+                .or(self.scrollback_persist_total_limit),
+            scrollback_persist_max_age_days: higher_priority
+                .scrollback_persist_max_age_days
+                .or(self.scrollback_persist_max_age_days),
+            scrollback_persist_encrypt: higher_priority
+                .scrollback_persist_encrypt
+                .or(self.scrollback_persist_encrypt),
             macos_option_as_alt: higher_priority
                 .macos_option_as_alt
                 .or(self.macos_option_as_alt),
@@ -1296,6 +1386,19 @@ impl ConfigOverrides {
             scrollback_limit: self.scrollback_limit.unwrap_or(base.scrollback_limit),
             image_storage_limit: self.image_storage_limit.unwrap_or(base.image_storage_limit),
             window_save_state: self.window_save_state.unwrap_or(base.window_save_state),
+            scrollback_persist: self.scrollback_persist.unwrap_or(base.scrollback_persist),
+            scrollback_persist_limit: self
+                .scrollback_persist_limit
+                .unwrap_or(base.scrollback_persist_limit),
+            scrollback_persist_total_limit: self
+                .scrollback_persist_total_limit
+                .unwrap_or(base.scrollback_persist_total_limit),
+            scrollback_persist_max_age_days: self
+                .scrollback_persist_max_age_days
+                .unwrap_or(base.scrollback_persist_max_age_days),
+            scrollback_persist_encrypt: self
+                .scrollback_persist_encrypt
+                .unwrap_or(base.scrollback_persist_encrypt),
             macos_option_as_alt: self.macos_option_as_alt.unwrap_or(base.macos_option_as_alt),
             macos_titlebar_style: self
                 .macos_titlebar_style
@@ -1606,6 +1709,18 @@ pub fn session_state_path_in(data_dir: &Path) -> PathBuf {
     data_dir.join("noa").join("session.json")
 }
 
+/// Directory holding per-pane persisted scrollback snapshots
+/// (`<data-dir>/noa/scrollback/`). Only created when `scrollback-persist` is
+/// not `never` — the default leaves no trace of terminal output on disk.
+/// See `docs/specs/scrollback-persistence.md`.
+pub fn scrollback_dir() -> Option<PathBuf> {
+    dirs::data_dir().map(|path| scrollback_dir_in(&path))
+}
+
+pub fn scrollback_dir_in(data_dir: &Path) -> PathBuf {
+    data_dir.join("noa").join("scrollback")
+}
+
 pub fn load_overrides_from_path(path: &Path) -> anyhow::Result<(ConfigOverrides, Vec<Diagnostic>)> {
     let source = fs::read_to_string(path)
         .with_context(|| format!("failed to read config file {}", path.display()))?;
@@ -1707,6 +1822,11 @@ mod tests {
                 scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
                 image_storage_limit: DEFAULT_IMAGE_STORAGE_LIMIT,
                 window_save_state: WindowSaveState::default(),
+                scrollback_persist: ScrollbackPersist::Never,
+                scrollback_persist_limit: DEFAULT_SCROLLBACK_PERSIST_LIMIT,
+                scrollback_persist_total_limit: DEFAULT_SCROLLBACK_PERSIST_TOTAL_LIMIT,
+                scrollback_persist_max_age_days: DEFAULT_SCROLLBACK_PERSIST_MAX_AGE_DAYS,
+                scrollback_persist_encrypt: false,
                 macos_option_as_alt: MacosOptionAsAlt::default(),
                 macos_titlebar_style: MacosTitlebarStyle::default(),
                 macos_non_native_fullscreen: false,
@@ -2028,6 +2148,74 @@ font-size = 15.5
         let resolved = file.merge(cli).apply_to(StartupConfig::default());
         assert_eq!(resolved.window_save_state, WindowSaveState::Always);
         assert!(!WindowSaveState::Never.restores());
+    }
+
+    #[test]
+    fn scrollback_persist_keys_flow_through_parse_apply_and_precedence() {
+        let (overrides, diagnostics) = parse_overrides(
+            test_path(),
+            "scrollback-persist = tail\n\
+             scrollback-persist-limit = 4096\n\
+             scrollback-persist-total-limit = 8192\n\
+             scrollback-persist-max-age-days = 30",
+        );
+        assert!(diagnostics.is_empty());
+        assert_eq!(overrides.scrollback_persist, Some(ScrollbackPersist::Tail));
+        assert_eq!(overrides.scrollback_persist_limit, Some(4096));
+        assert_eq!(overrides.scrollback_persist_total_limit, Some(8192));
+        assert_eq!(overrides.scrollback_persist_max_age_days, Some(30));
+
+        // Absent keys keep the opt-out default: noa persists nothing until asked.
+        let default = ConfigOverrides::default().apply_to(StartupConfig::default());
+        assert_eq!(default.scrollback_persist, ScrollbackPersist::Never);
+        assert!(!default.scrollback_persist.persists());
+        assert!(ScrollbackPersist::Tail.persists());
+        assert_eq!(
+            default.scrollback_persist_limit,
+            DEFAULT_SCROLLBACK_PERSIST_LIMIT
+        );
+        assert_eq!(
+            default.scrollback_persist_total_limit,
+            DEFAULT_SCROLLBACK_PERSIST_TOTAL_LIMIT
+        );
+        assert_eq!(
+            default.scrollback_persist_max_age_days,
+            DEFAULT_SCROLLBACK_PERSIST_MAX_AGE_DAYS
+        );
+
+        // CLI wins over the file.
+        let file = ConfigOverrides {
+            scrollback_persist: Some(ScrollbackPersist::Tail),
+            scrollback_persist_limit: Some(1),
+            ..Default::default()
+        };
+        let cli = ConfigOverrides {
+            scrollback_persist: Some(ScrollbackPersist::Never),
+            ..Default::default()
+        };
+        let resolved = file.merge(cli).apply_to(StartupConfig::default());
+        assert_eq!(resolved.scrollback_persist, ScrollbackPersist::Never);
+        assert_eq!(resolved.scrollback_persist_limit, 1);
+    }
+
+    #[test]
+    fn scrollback_persist_rejects_an_unknown_mode() {
+        let (overrides, diagnostics) =
+            parse_overrides(test_path(), "scrollback-persist = everything");
+        assert_eq!(overrides.scrollback_persist, None);
+        assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn scrollback_dir_sits_beside_the_session_state_file() {
+        let data_dir = Path::new("/tmp/data");
+        assert_eq!(
+            scrollback_dir_in(data_dir),
+            session_state_path_in(data_dir)
+                .parent()
+                .expect("session state lives in a directory")
+                .join("scrollback")
+        );
     }
 
     #[test]

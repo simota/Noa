@@ -181,6 +181,10 @@ impl App {
             }
         }
         crate::memory::release_reclaimable_memory();
+        // Eviction during the burst may have eaten into a restored record;
+        // re-narrow the gutter ranges here, where every terminal is already
+        // being locked and the panes are quiescent, rather than per frame.
+        self.prune_record_regions();
         None
     }
 

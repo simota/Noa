@@ -138,6 +138,15 @@ pub(super) fn rebuild_row_instances(
         cursor_visual_for(snap)
     };
     let row_highlights = RowHighlights::new(snap, y, row.cells.len());
+    // Restored-record gutter (`scrollback-persist` spec §5): this row's
+    // session-absolute index falls inside a persisted-snapshot range the
+    // caller restored, so column 0 gets an extra marker quad below — unless
+    // selection/search/cursor already own that cell's background (checked
+    // per-cell, since those apply to column 0 like any other column).
+    let record_row_hit = snap
+        .record_rows
+        .as_ref()
+        .is_some_and(|range| range.contains(&(snap.abs_row_base + usize::from(y))));
 
     for (col_idx, cell) in row.cells.iter().enumerate() {
         let x = col_idx as u16;
@@ -203,6 +212,28 @@ pub(super) fn rebuild_row_instances(
                 } else {
                     0
                 },
+            });
+        }
+
+        // Restored-record gutter: one extra opaque quad at column 0, layered
+        // on top of the cell's own background quad above (the bg pass draws
+        // in push order, so a later instance wins the pixel) but never over
+        // selection/search-match/cursor, which already won this cell's
+        // background above and must stay as the user sees them. The glyph
+        // pass runs entirely after every pane's bg pass, so this never hides
+        // the column-0 glyph.
+        if x == 0
+            && record_row_hit
+            && !(cursor_block_fill || selected || active_search || search_match)
+        {
+            let gutter = surface_output_rgb(theme.record_gutter(), target_format_is_srgb);
+            bg_instances.push(CellInstance {
+                glyph_pos: [0, 0],
+                glyph_size: [0, 0],
+                bearing: [0, 0],
+                grid_pos: [0, y],
+                color: to_u8_color(gutter),
+                flags: 0,
             });
         }
 
@@ -724,6 +755,7 @@ pub(super) fn rebuild_pane_cached(
                 search: snap.search.clone(),
                 cell_size,
                 hover_link: snap.hover_link,
+                record_rows: snap.record_rows.clone(),
                 atlas_identity,
                 atlas_eviction_generation: final_gen,
             });

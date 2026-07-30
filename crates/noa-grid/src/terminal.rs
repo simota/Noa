@@ -23,6 +23,7 @@ use crate::osc::{
 use crate::screen::Screen;
 use crate::search::SearchMatch;
 use crate::selection::SelectionPoint;
+use crate::snapshot::{ScrollbackSnapshot, ScrollbackSnapshotInput};
 use noa_core::{GridSize, Point};
 use noa_vt::{EraseDisplay, SgrAttr};
 
@@ -425,6 +426,150 @@ impl Terminal {
         inserted
     }
 
+    /// Serialize the newest rows of the **primary** screen into a
+    /// self-contained snapshot buffer (`crate::snapshot`), spending at most
+    /// `max_bytes` of encoded payload. `saved_at` is stamped into the header
+    /// for the record-view label; the grid does not read clocks.
+    ///
+    /// The primary screen is captured even while the alternate screen is
+    /// active: the alternate screen is by definition a transient full-screen
+    /// app view (vim, less), and restoring it into a fresh shell would show a
+    /// dead frame of a program that is no longer running. What a restored
+    /// pane wants is the shell history underneath.
+    ///
+    /// Returns `None` when there is nothing worth saving — an empty or fully
+    /// blank primary screen, or a zero budget.
+    /// `skip_row` omits one session-absolute row from the capture. The app
+    /// passes the record separator it inserted at restore: that row is chrome
+    /// the app synthesized, not something the program printed, so re-capturing
+    /// it would bake it into the next record and leave one more behind on every
+    /// relaunch until the history is a stack of separators.
+    pub fn scrollback_snapshot_bytes(
+        &self,
+        max_bytes: usize,
+        saved_at: u64,
+        skip_row: Option<usize>,
+    ) -> Option<Vec<u8>> {
+        let input = self.scrollback_snapshot_input(max_bytes, skip_row)?;
+        crate::snapshot::encode_tail(
+            &input.rows,
+            input.cols,
+            saved_at,
+            &input.hyperlinks,
+            max_bytes,
+        )
+    }
+
+    /// The rows a snapshot would serialize, without serializing them.
+    ///
+    /// Cloning rows is a memcpy; interning styles and deflating them is not,
+    /// and this is called with the shared terminal locked on the main thread
+    /// while the io thread waits to drain the pty. Callers that can encode
+    /// elsewhere should take this and hand the result to
+    /// [`crate::snapshot::encode_tail`] off the lock.
+    pub fn scrollback_snapshot_input(
+        &self,
+        max_bytes: usize,
+        skip_row: Option<usize>,
+    ) -> Option<ScrollbackSnapshotInput> {
+        if max_bytes == 0 {
+            return None;
+        }
+        let screen = &self.primary;
+        let skip_row = skip_row.and_then(|abs| abs.checked_sub(screen.rows_evicted()));
+        // The live grid is blank below the cursor; without this the record
+        // would restore with a screenful of empty lines after its last line.
+        let mut end = screen.total_rows();
+        while end > 0 {
+            match screen.absolute_row(end - 1) {
+                Some(row) if crate::snapshot::is_blank_row(&row) => end -= 1,
+                _ => break,
+            }
+        }
+
+        let mut collected = Vec::new();
+        let mut spent = 0usize;
+        for y in (0..end).rev() {
+            if Some(y) == skip_row {
+                continue;
+            }
+            let Some(mut row) = screen.absolute_row(y) else {
+                break;
+            };
+            crate::snapshot::mark_images(&mut row);
+            let size = crate::snapshot::encoded_row_size(&row);
+            if spent + size > max_bytes && !collected.is_empty() {
+                break;
+            }
+            spent += size;
+            collected.push(row);
+        }
+        collected.reverse();
+
+        if collected.is_empty() {
+            return None;
+        }
+        Some(ScrollbackSnapshotInput {
+            rows: collected,
+            cols: screen.cols,
+            hyperlinks: self.hyperlinks.clone(),
+        })
+    }
+
+    /// Insert a decoded snapshot as the oldest history of the primary screen,
+    /// remapping its snapshot-local hyperlink ids into this terminal's
+    /// registry. Returns the number of rows that survived retention.
+    ///
+    /// Intended for a terminal that has not started reading its pty yet, which
+    /// is why it takes ownership: the rows become history verbatim rather than
+    /// being replayed as VT input, so nothing in the snapshot can move the
+    /// cursor, change the title, or otherwise act on the live session.
+    pub fn restore_scrollback_snapshot(&mut self, snapshot: ScrollbackSnapshot) -> usize {
+        let ScrollbackSnapshot {
+            mut rows,
+            hyperlinks,
+            ..
+        } = snapshot;
+        if rows.is_empty() {
+            return 0;
+        }
+
+        // Unconditional, including for an empty table: skipping the pass would
+        // leave any surviving id pointing into *this* terminal's registry,
+        // where it names an unrelated URI.
+        let remapped: Vec<Option<HyperlinkId>> = hyperlinks
+            .into_iter()
+            .map(|link| self.intern_hyperlink(link))
+            .collect();
+        for row in &mut rows {
+            for cell in &mut row.cells {
+                if let Some(id) = cell.hyperlink {
+                    cell.hyperlink = remapped.get(id.get()).copied().flatten();
+                }
+            }
+        }
+
+        let inserted = self.primary.prepend_row_history(rows);
+        if inserted > 0 {
+            self.invalidate_grid_coordinate_space();
+            for mark in &mut self.shell_marks {
+                mark.point.y = mark.point.y.saturating_add(inserted);
+            }
+        }
+        inserted
+    }
+
+    /// Drop the oldest `count` rows of the primary screen's scrollback — the
+    /// restored record, without the live history that followed it. Returns the
+    /// number of rows dropped.
+    pub fn discard_history_prefix(&mut self, count: usize) -> usize {
+        let dropped = self.primary.discard_history_prefix(count);
+        if dropped > 0 {
+            self.invalidate_grid_coordinate_space();
+        }
+        dropped
+    }
+
     pub fn set_search_query(&mut self, query: impl Into<String>) {
         self.active_mut().set_search_query(query);
     }
@@ -737,13 +882,13 @@ impl Terminal {
         }
     }
 
-    fn set_current_hyperlink(&mut self, hyperlink: Hyperlink) {
+    /// Register `hyperlink` in the OSC 8 registry, deduping against what is
+    /// already there. `None` once the registry is full — the caller drops the
+    /// link rather than mislabeling a cell with someone else's URI.
+    fn intern_hyperlink(&mut self, hyperlink: Hyperlink) -> Option<HyperlinkId> {
         let id = match self.hyperlink_index.get(&hyperlink) {
             Some(&id) => id,
-            None if self.hyperlinks.len() >= HYPERLINK_REGISTRY_CAP => {
-                self.active_mut().cursor.hyperlink = None;
-                return;
-            }
+            None if self.hyperlinks.len() >= HYPERLINK_REGISTRY_CAP => return None,
             None => {
                 let id = self.hyperlinks.len();
                 self.hyperlinks.push(hyperlink.clone());
@@ -751,7 +896,11 @@ impl Terminal {
                 id
             }
         };
-        self.active_mut().cursor.hyperlink = HyperlinkId::new(id);
+        HyperlinkId::new(id)
+    }
+
+    fn set_current_hyperlink(&mut self, hyperlink: Hyperlink) {
+        self.active_mut().cursor.hyperlink = self.intern_hyperlink(hyperlink);
     }
 
     fn clear_current_hyperlink(&mut self) {

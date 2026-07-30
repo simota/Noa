@@ -118,6 +118,7 @@ fn fresh_snapshot(term: &Terminal) -> FrameSnapshot {
         preedit: None,
         image_placements: Vec::new(),
         images: Vec::new(),
+        record_rows: None,
     }
 }
 

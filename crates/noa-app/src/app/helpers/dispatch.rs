@@ -336,6 +336,8 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::Paste
         | AppCommand::SendSelectionToPane
         | AppCommand::ExportScrollback
+        | AppCommand::DiscardRestoredHistory
+        | AppCommand::CheckpointScrollback
         | AppCommand::PipeScrollbackToPager
         | AppCommand::Terminal(_)
         | AppCommand::FontSize(_)
@@ -436,6 +438,8 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::Paste
         | AppCommand::SendSelectionToPane
         | AppCommand::ExportScrollback
+        | AppCommand::DiscardRestoredHistory
+        | AppCommand::CheckpointScrollback
         | AppCommand::PipeScrollbackToPager
         | AppCommand::Terminal(_)
         | AppCommand::FontSize(_)

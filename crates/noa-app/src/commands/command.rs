@@ -26,6 +26,12 @@ pub enum AppCommand {
     SendSelectionToPane,
     ExportScrollback,
     PipeScrollbackToPager,
+    /// Drop the record restored from a persisted snapshot, leaving the live
+    /// session untouched (`scrollback-persist`).
+    DiscardRestoredHistory,
+    /// Write this pane's scrollback snapshot now instead of waiting for the
+    /// next idle checkpoint (`scrollback-persist`).
+    CheckpointScrollback,
     Terminal(TerminalAction),
     FontSize(FontSizeAction),
     Search(SearchAction),
@@ -213,6 +219,7 @@ impl AppCommand {
             AppCommand::SendSelectionToPane => Self::SEND_SELECTION_TO_PANE_MENU_ID,
             AppCommand::ExportScrollback => Self::EXPORT_SCROLLBACK_MENU_ID,
             AppCommand::PipeScrollbackToPager => Self::PIPE_SCROLLBACK_TO_PAGER_MENU_ID,
+            AppCommand::DiscardRestoredHistory | AppCommand::CheckpointScrollback => "",
             AppCommand::Terminal(TerminalAction::Clear) => Self::TERMINAL_CLEAR_MENU_ID,
             AppCommand::Terminal(TerminalAction::ClearScrollback) => {
                 Self::TERMINAL_CLEAR_SCROLLBACK_MENU_ID
@@ -372,6 +379,8 @@ impl AppCommand {
             Self::SendSelectionToPane => "pane.send-selection",
             Self::ExportScrollback => "terminal.export-scrollback",
             Self::PipeScrollbackToPager => "terminal.pipe-scrollback-to-pager",
+            Self::DiscardRestoredHistory => "scrollback.discard-restored",
+            Self::CheckpointScrollback => "scrollback.checkpoint",
             Self::Terminal(TerminalAction::Clear) => "terminal.clear",
             Self::Terminal(TerminalAction::ClearScrollback) => "terminal.clear-scrollback",
             Self::Terminal(TerminalAction::SelectAll) => "terminal.select-all",
@@ -454,6 +463,8 @@ impl AppCommand {
             "remote.attach" => Some(Self::AttachRemote),
             "pane.send-selection" => Some(Self::SendSelectionToPane),
             "terminal.export-scrollback" => Some(Self::ExportScrollback),
+            "scrollback.discard-restored" => Some(Self::DiscardRestoredHistory),
+            "scrollback.checkpoint" => Some(Self::CheckpointScrollback),
             "terminal.pipe-scrollback-to-pager" => Some(Self::PipeScrollbackToPager),
             "terminal.clear" => Some(Self::Terminal(TerminalAction::Clear)),
             "terminal.clear-scrollback" => Some(Self::Terminal(TerminalAction::ClearScrollback)),

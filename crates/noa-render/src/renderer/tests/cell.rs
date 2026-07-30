@@ -373,3 +373,141 @@ fn hover_link_range_underlines_only_the_matching_run_on_its_row() {
         "only columns 1..=2 on row 0 are underlined; row 1 and the rest of row 0 are not"
     );
 }
+
+/// Column-0 background quads whose color matches the theme's restored-record
+/// gutter — used by the tests below to isolate the marker from the plain
+/// (default, unpainted) background of the other cells in each row.
+fn gutter_quads(instances: &[CellInstance], theme: &Theme) -> Vec<[u16; 2]> {
+    let gutter = theme.record_gutter();
+    instances
+        .iter()
+        .filter(|i| i.glyph_size == [0, 0] && rgb_from_instance(i) == gutter)
+        .map(|i| i.grid_pos)
+        .collect()
+}
+
+#[test]
+fn record_rows_marks_rows_inside_the_range_with_a_gutter_quad_at_column_zero() {
+    let Some(mut font) = skip_font() else { return };
+    let mut terminal = Terminal::new(GridSize::new(2, 3));
+    terminal.primary.cursor.visible = false;
+    let mut snap = FrameSnapshot::from_terminal(&mut terminal);
+    snap.record_rows = Some(0..2);
+
+    let theme = Theme::new();
+    let mut instances = Vec::new();
+    rebuild_cell_instances(&mut instances, &snap, &mut font, &theme, false);
+
+    let mut marked = gutter_quads(&instances, &theme);
+    marked.sort();
+    assert_eq!(
+        marked,
+        vec![[0, 0], [0, 1]],
+        "rows 0 and 1 (inside the 0..2 record range) get a column-0 gutter quad; \
+         row 2 does not"
+    );
+}
+
+#[test]
+fn no_record_rows_emits_no_gutter_quads() {
+    let Some(mut font) = skip_font() else { return };
+    let mut terminal = Terminal::new(GridSize::new(2, 3));
+    terminal.primary.cursor.visible = false;
+    let snap = FrameSnapshot::from_terminal(&mut terminal);
+    assert_eq!(
+        snap.record_rows, None,
+        "from_terminal defaults to no record range"
+    );
+
+    let theme = Theme::new();
+    let mut instances = Vec::new();
+    rebuild_cell_instances(&mut instances, &snap, &mut font, &theme, false);
+
+    assert!(
+        gutter_quads(&instances, &theme).is_empty(),
+        "no record_rows set: no gutter quad should be emitted anywhere"
+    );
+}
+
+#[test]
+fn row_outside_the_record_range_emits_no_gutter_quad() {
+    let Some(mut font) = skip_font() else { return };
+    let mut terminal = Terminal::new(GridSize::new(2, 3));
+    terminal.primary.cursor.visible = false;
+    let mut snap = FrameSnapshot::from_terminal(&mut terminal);
+    // Only row 1 (abs index 1) is inside the range; rows 0 and 2 are outside.
+    snap.record_rows = Some(1..2);
+
+    let theme = Theme::new();
+    let mut instances = Vec::new();
+    rebuild_cell_instances(&mut instances, &snap, &mut font, &theme, false);
+
+    assert_eq!(
+        gutter_quads(&instances, &theme),
+        vec![[0, 1]],
+        "rows 0 and 2 sit outside the 1..2 record range and must not get a gutter quad"
+    );
+}
+
+#[test]
+fn selection_still_wins_the_gutter_column_inside_a_record_row() {
+    let Some(mut font) = skip_font() else { return };
+    let mut terminal = Terminal::new(GridSize::new(2, 3));
+    terminal.primary.cursor.visible = false;
+    let mut snap = FrameSnapshot::from_terminal(&mut terminal);
+    snap.record_rows = Some(0..3);
+    snap.selection = Some(Selection::new(
+        SelectionPoint::new(0, 0),
+        SelectionPoint::new(0, 0),
+    ));
+
+    let theme = Theme::new();
+    let mut instances = Vec::new();
+    rebuild_cell_instances(&mut instances, &snap, &mut font, &theme, false);
+
+    let col0_row0: Vec<_> = instances
+        .iter()
+        .filter(|i| i.glyph_size == [0, 0] && i.grid_pos == [0, 0])
+        .collect();
+    assert_eq!(
+        col0_row0.len(),
+        1,
+        "selection must still emit exactly one background quad at column 0, \
+         not an extra gutter quad on top of it"
+    );
+    assert_eq!(
+        rgb_from_instance(col0_row0[0]),
+        theme.selection_bg,
+        "the selection color must win over the record gutter at column 0"
+    );
+}
+
+#[test]
+fn cursor_still_wins_the_gutter_column_inside_a_record_row() {
+    let Some(mut font) = skip_font() else { return };
+    let mut terminal = Terminal::new(GridSize::new(2, 3));
+    // Default cursor: visible, steady block, at (0, 0) — left in place so it
+    // owns column 0 of row 0.
+    let mut snap = FrameSnapshot::from_terminal(&mut terminal);
+    snap.record_rows = Some(0..3);
+
+    let theme = Theme::new();
+    let mut instances = Vec::new();
+    rebuild_cell_instances(&mut instances, &snap, &mut font, &theme, false);
+
+    let col0_row0: Vec<_> = instances
+        .iter()
+        .filter(|i| i.glyph_size == [0, 0] && i.grid_pos == [0, 0])
+        .collect();
+    assert_eq!(
+        col0_row0.len(),
+        1,
+        "the cursor must still emit exactly one background quad at column 0, \
+         not an extra gutter quad on top of it"
+    );
+    assert_eq!(
+        col0_row0[0].flags,
+        CellInstance::FLAG_CURSOR,
+        "the cursor fill must win over the record gutter at column 0"
+    );
+}

@@ -847,6 +847,15 @@ impl Screen {
     pub fn take_scroll_shift(&mut self) -> usize {
         std::mem::take(&mut self.scroll_shift)
     }
+
+    /// Non-consuming read of the same counter [`Self::take_scroll_shift`]
+    /// drains. Lets a caller inspect this frame's accumulated full-height
+    /// scroll count *before* deciding whether to reuse a recycled row
+    /// buffer, without disturbing the value `take_scroll_shift` later
+    /// reports on the same snapshot pass.
+    pub fn peek_scroll_shift(&self) -> usize {
+        self.scroll_shift
+    }
 }
 
 fn clone_row_into(slot: &mut Row, row: &Row) {

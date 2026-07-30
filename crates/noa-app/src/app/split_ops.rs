@@ -173,7 +173,11 @@ impl App {
             return;
         };
 
-        let grid_size = grid_size_for_pane_rect(focused_rect, gpu.font.metrics(), self.padding);
+        let grid_size = grid_size_for_pane_rect(
+            focused_rect,
+            gpu.fonts.get(self.window_font_px(window_id)).metrics(),
+            self.padding,
+        );
         let inherited_cwd = self.pane_cwd(window_id, focused_pane);
         let new_surface = match self.spawn_pane_surface(
             window_id,

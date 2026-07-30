@@ -215,9 +215,12 @@ impl App {
         // accepted residual per the reviewed design, distinct from the
         // scroll-volume case this guard specifically targets).
         let any_pane_would_be_full = panes.iter().any(|pane| {
-            state
-                .renderer
-                .pane_rebuild_would_be_full(pane.pane, pane.snapshot, &gpu.font, theme)
+            state.renderer.pane_rebuild_would_be_full(
+                pane.pane,
+                pane.snapshot,
+                gpu.fonts.get(state.font_px),
+                theme,
+            )
         });
         if any_pane_would_be_full {
             // CRITICAL fix (kaizen cycle 7): every visible pane's snapshot
@@ -259,14 +262,16 @@ impl App {
             }
         } else {
             let trace_start = crate::tab_switch_trace::bg_refresh_start();
-            state.renderer.rebuild_panes(&panes, &mut gpu.font, theme);
+            state
+                .renderer
+                .rebuild_panes(&panes, gpu.fonts.get_mut(state.font_px), theme);
             crate::tab_switch_trace::on_bg_refresh(
                 trace_start,
                 state.renderer.rows_rebuilt_last_frame(),
             );
             state
                 .renderer
-                .sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+                .sync_atlas(&gpu.device, &gpu.queue, gpu.fonts.get_mut(state.font_px));
         }
         for (pane_id, _, snapshot) in snapshots {
             if let Some(surface) = state.surfaces.get_mut(&pane_id) {
@@ -525,7 +530,7 @@ impl App {
                     w: state.surface_config.width,
                     h: state.surface_config.height,
                 },
-                &gpu.font,
+                gpu.fonts.get(state.font_px),
                 &expected_panes,
             ),
         );
@@ -739,7 +744,7 @@ impl App {
         {
             update_ime_cursor_area(
                 &state.window,
-                gpu.font.metrics(),
+                gpu.fonts.get(state.font_px).metrics(),
                 snapshot.cursor.x,
                 snapshot.cursor.y,
                 *rect,
@@ -784,7 +789,7 @@ impl App {
             let trace_rebuild_start = crate::tab_switch_trace::rebuild_start();
             state.renderer.rebuild_panes(
                 &panes,
-                &mut gpu.font,
+                gpu.fonts.get_mut(state.font_px),
                 active_theme(&gpu.theme, &gpu.preview_theme),
             );
             crate::tab_switch_trace::on_pane_rebuild(
@@ -798,7 +803,7 @@ impl App {
         // when nothing changed since the last sync.
         state
             .renderer
-            .sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+            .sync_atlas(&gpu.device, &gpu.queue, gpu.fonts.get_mut(state.font_px));
 
         let frame = match state.surface.get_current_texture() {
             Ok(frame) => frame,
@@ -862,6 +867,7 @@ impl App {
             sidebar::draw_sidebar_band(
                 gpu,
                 state.surface_config.format,
+                sidebar_font_pixel_size(self.config.sidebar_font_size, state.window.scale_factor()),
                 padding,
                 &view,
                 surface_size,
@@ -979,6 +985,7 @@ impl App {
             let now = Instant::now();
             sidebar::draw_command_palette_card(
                 gpu,
+                state.font_px,
                 state.surface_config.format,
                 &view,
                 surface_size,
@@ -1008,6 +1015,7 @@ impl App {
             let now = Instant::now();
             sidebar::draw_command_palette_card(
                 gpu,
+                state.font_px,
                 state.surface_config.format,
                 &view,
                 surface_size,
@@ -1037,6 +1045,7 @@ impl App {
             let now = Instant::now();
             sidebar::draw_command_palette_card(
                 gpu,
+                state.font_px,
                 state.surface_config.format,
                 &view,
                 surface_size,
@@ -1068,6 +1077,7 @@ impl App {
             let now = Instant::now();
             sidebar::draw_theme_settings_card(
                 gpu,
+                state.font_px,
                 state.surface_config.format,
                 &view,
                 surface_size,
@@ -1099,6 +1109,7 @@ impl App {
             let now = Instant::now();
             sidebar::draw_process_monitor_card(
                 gpu,
+                state.font_px,
                 state.surface_config.format,
                 &view,
                 surface_size,
@@ -1128,6 +1139,7 @@ impl App {
             };
             sidebar::draw_confirm_dialog_card(
                 gpu,
+                state.font_px,
                 state.surface_config.format,
                 &view,
                 surface_size,
@@ -1158,6 +1170,7 @@ impl App {
             };
             sidebar::draw_confirm_dialog_card(
                 gpu,
+                state.font_px,
                 state.surface_config.format,
                 &view,
                 surface_size,
@@ -1183,6 +1196,7 @@ impl App {
             };
             sidebar::draw_toast_card(
                 gpu,
+                state.font_px,
                 state.surface_config.format,
                 &view,
                 surface_size,

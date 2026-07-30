@@ -37,7 +37,16 @@ impl App {
         let state = self.windows.get(&window_id)?;
         // The sidebar rasterizes with its own dedicated, smaller font, so cell
         // placement uses that font's metrics (not the terminal font's).
-        let metrics = gpu.sidebar_font.metrics();
+        // This window's own sidebar grid: on a mixed-DPI setup the primary
+        // belongs to whichever window's scale changed last, and using it here
+        // would lay the cards out for that window's cell size.
+        let metrics = gpu
+            .sidebar_fonts
+            .get(crate::app::helpers::sidebar_font_pixel_size(
+                self.config.sidebar_font_size,
+                state.window.scale_factor(),
+            ))
+            .metrics();
         // Folds in `sidebar_font_zoom()` so chrome details drawn at this
         // scale (drop indicator, borders, radii, glyph size) zoom coherently
         // with the cards laid out by `sidebar_metrics()` — the same factor,

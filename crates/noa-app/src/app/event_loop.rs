@@ -1156,42 +1156,60 @@ impl App {
         );
     }
 
+    /// The pixel size `window_id` rasterizes at, or the app's current runtime
+    /// size when that window is gone. Every metrics read that feeds layout or
+    /// hit-testing must go through this rather than picking an arbitrary grid,
+    /// or a window on a differently-scaled display gets another window's cell
+    /// geometry.
+    pub(super) fn window_font_px(&self, window_id: WindowId) -> f32 {
+        self.windows
+            .get(&window_id)
+            .map(|state| state.font_px)
+            .unwrap_or_else(|| font_pixel_size(self.runtime_font_size, 1.0))
+    }
+
     pub(super) fn on_scale_factor_changed(&mut self, window_id: WindowId, scale_factor: f64) {
         self.refresh_redraw_floor(window_id);
-        // #TODO(agent): the FontGrid is app-wide, so on a mixed-DPI setup
-        // every other window keeps rasterizing at this window's scale factor
-        // (correct metrics, non-crisp glyphs). The complete fix is a
-        // per-window (per-scale) FontGrid.
+        // Only THIS window's pixel size changes. Every other window keeps the
+        // grid and the atlas set it is already on — which is the point: the
+        // terminal font used to be app-wide and rebuilt at whichever window
+        // last reported a scale change, leaving every other window
+        // rasterizing at a size that was not its own.
+        let px = font_pixel_size(self.runtime_font_size, scale_factor);
+        let sidebar_px = sidebar_font_pixel_size(self.config.sidebar_font_size, scale_factor);
         let rebuilt = if let Some(gpu) = self.gpu.as_mut() {
-            match FontGrid::new(
-                font_pixel_size(self.runtime_font_size, scale_factor),
-                font_config_from_noa_config(&self.config.font),
-            ) {
-                Ok(font) => {
-                    gpu.font = font;
-                    for state in self.windows.values_mut() {
-                        state
-                            .renderer
-                            .sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
-                    }
-                    // Rebuild the dedicated sidebar font at the new scale so its
-                    // glyphs stay crisp; the sidebar `Renderer` re-syncs its
-                    // atlas from it on the next draw.
-                    match FontGrid::new(
-                        sidebar_font_pixel_size(self.config.sidebar_font_size, scale_factor),
-                        font_config_from_noa_config(&self.config.font),
-                    ) {
-                        Ok(sidebar_font) => gpu.sidebar_font = sidebar_font,
-                        Err(err) => log::warn!(
-                            "failed to rebuild sidebar font for scale factor {scale_factor}: {err}"
-                        ),
-                    }
-                    true
+            if gpu.fonts.ensure(px) {
+                // The sidebar chrome renderer is a single app-wide object, so
+                // its size follows `primary`. Promoting here restores the
+                // pre-per-window behaviour: the sidebar tracks the window whose
+                // scale last changed. Under mixed DPI that is still one size
+                // for every window — the remaining gap, which needs per-window
+                // chrome renderers rather than per-window grids.
+                if !gpu.sidebar_fonts.ensure_primary(sidebar_px) {
+                    log::warn!("failed to build sidebar font for scale factor {scale_factor}");
                 }
-                Err(err) => {
-                    log::warn!("failed to rebuild font for scale factor {scale_factor}: {err}");
-                    false
+                if let Some(state) = self.windows.get_mut(&window_id) {
+                    state.font_px = px;
+                    let surface_format = state.surface_config.format;
+                    // Glyph atlases are keyed by pixel size, so this window's
+                    // renderer has to move to the set for its new size: its
+                    // bind groups and per-row instance caches still point into
+                    // the old one.
+                    let atlases = gpu.font_atlases.get(
+                        &gpu.device,
+                        &gpu.queue,
+                        surface_format,
+                        gpu.fonts.get(px),
+                    );
+                    state.renderer.rebind_glyph_atlases(&gpu.device, &atlases);
+                    state
+                        .renderer
+                        .sync_atlas(&gpu.device, &gpu.queue, gpu.fonts.get_mut(px));
                 }
+                true
+            } else {
+                log::warn!("failed to build font for scale factor {scale_factor}");
+                false
             }
         } else {
             false
@@ -1267,7 +1285,10 @@ impl App {
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
-        let metrics = gpu.font.metrics();
+        // This window's own grid: hit-testing against another window's cell
+        // metrics would misplace every mouse coordinate on a mixed-DPI setup.
+        let font_px = self.window_font_px(window_id);
+        let metrics = gpu.fonts.get(font_px).metrics();
         let point = split_point_from_physical_position(position);
         if let Some(state) = self.windows.get_mut(&window_id) {
             state.last_mouse_point = point;
@@ -1399,7 +1420,8 @@ impl App {
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
-        let metrics = gpu.font.metrics();
+        let font_px = self.window_font_px(window_id);
+        let metrics = gpu.fonts.get(font_px).metrics();
         let Some(position) = self
             .windows
             .get(&window_id)
@@ -1659,10 +1681,11 @@ impl App {
             return;
         }
 
+        let font_px = self.window_font_px(window_id);
         let cell_h = self
             .gpu
             .as_ref()
-            .map(|gpu| gpu.font.metrics().cell_h)
+            .map(|gpu| gpu.fonts.get(font_px).metrics().cell_h)
             .unwrap_or(1.0);
         if let Some(scroll) = mouse_wheel_viewport_scroll(delta, cell_h) {
             // DECSET 1007 alternate-scroll maps wheel turns to cursor keys

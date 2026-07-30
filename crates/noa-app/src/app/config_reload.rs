@@ -354,11 +354,24 @@ impl App {
             })
             .unwrap_or(1.0);
 
-        let runtime_font = match FontGrid::new(
-            font_pixel_size(point_size, scale_factor),
-            font_config_from_noa_config(font),
-        ) {
-            Ok(font) => font,
+        let px = font_pixel_size(point_size, scale_factor);
+        let sidebar_px = sidebar_font_pixel_size(self.config.sidebar_font_size, scale_factor);
+        let cfg = font_config_from_noa_config(font);
+
+        let Some(gpu) = self.gpu.as_mut() else {
+            self.runtime_font_size = point_size;
+            return true;
+        };
+
+        // A point-size change moves EVERY window, each to its own scale's
+        // pixel size — unlike a scale change, which moves one.
+        //
+        // Both replacement grids are built before either is installed. The
+        // caller reverts `AppConfig` when this returns false, so installing
+        // into the terminal map and then failing on the sidebar would leave
+        // the app's configuration and its actual fonts disagreeing.
+        let prepared_terminal = match gpu.fonts.prepare_config(&cfg, px) {
+            Ok(grid) => grid,
             Err(err) => {
                 log::warn!(
                     "config reload: failed to rebuild font for size {point_size} at scale factor {scale_factor}: {err}"
@@ -366,11 +379,8 @@ impl App {
                 return false;
             }
         };
-        let sidebar_font = match FontGrid::new(
-            sidebar_font_pixel_size(self.config.sidebar_font_size, scale_factor),
-            font_config_from_noa_config(font),
-        ) {
-            Ok(font) => font,
+        let prepared_sidebar = match gpu.sidebar_fonts.prepare_config(&cfg, sidebar_px) {
+            Ok(grid) => grid,
             Err(err) => {
                 log::warn!(
                     "config reload: failed to rebuild sidebar font at scale factor {scale_factor}: {err}"
@@ -378,17 +388,50 @@ impl App {
                 return false;
             }
         };
+        gpu.fonts.install_config(cfg.clone(), prepared_terminal);
+        gpu.sidebar_fonts.install_config(cfg, prepared_sidebar);
+        // `set_config` short-circuits when the config is unchanged — a
+        // size-only reload — so it reports success without building anything
+        // and this is the only place a build failure at the new size shows up.
+        // Build both before promoting either, and commit no state unless both
+        // succeeded: otherwise `runtime_font_size` and every `state.font_px`
+        // would claim a size the app had silently fallen back from.
+        if !gpu.fonts.ensure(px) {
+            log::warn!(
+                "config reload: no usable font at {point_size} pt / scale factor {scale_factor}"
+            );
+            return false;
+        }
+        if !gpu.sidebar_fonts.ensure(sidebar_px) {
+            log::warn!("config reload: no usable sidebar font at scale factor {scale_factor}");
+            return false;
+        }
+        gpu.fonts.ensure_primary(px);
+        gpu.sidebar_fonts.ensure_primary(sidebar_px);
 
         self.runtime_font_size = point_size;
-        let Some(gpu) = self.gpu.as_mut() else {
-            return true;
-        };
-        gpu.font = runtime_font;
-        gpu.sidebar_font = sidebar_font;
         for state in self.windows.values_mut() {
+            let window_px = font_pixel_size(point_size, state.window.scale_factor());
+            gpu.fonts.ensure(window_px);
+            // The sidebar band draws per window at the window's own scale, and
+            // `get_mut` no longer builds on a miss, so its grid has to exist
+            // for every live window before the next frame.
+            gpu.sidebar_fonts.ensure(sidebar_font_pixel_size(
+                self.config.sidebar_font_size,
+                state.window.scale_factor(),
+            ));
+            state.font_px = window_px;
+            let surface_format = state.surface_config.format;
+            let atlases = gpu.font_atlases.get(
+                &gpu.device,
+                &gpu.queue,
+                surface_format,
+                gpu.fonts.get(window_px),
+            );
+            state.renderer.rebind_glyph_atlases(&gpu.device, &atlases);
             state
                 .renderer
-                .sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+                .sync_atlas(&gpu.device, &gpu.queue, gpu.fonts.get_mut(window_px));
         }
         true
     }
@@ -413,17 +456,21 @@ impl App {
         let Some(gpu) = self.gpu.as_mut() else {
             return true;
         };
-        match FontGrid::new(
-            sidebar_font_pixel_size(point_size, scale_factor),
-            font_config_from_noa_config(&self.config.font),
-        ) {
-            Ok(font) => {
-                gpu.sidebar_font = font;
-                true
-            }
-            Err(err) => {
+        let px = sidebar_font_pixel_size(point_size, scale_factor);
+        // Every live window, not just the focused one: on a mixed-DPI setup
+        // the others draw their band at their own scale, and `get_mut` no
+        // longer builds on a miss.
+        for state in self.windows.values() {
+            gpu.sidebar_fonts.ensure(sidebar_font_pixel_size(
+                point_size,
+                state.window.scale_factor(),
+            ));
+        }
+        match gpu.sidebar_fonts.ensure_primary(px) {
+            true => true,
+            false => {
                 log::warn!(
-                    "failed to rebuild sidebar font for size {point_size} at scale factor {scale_factor}: {err}"
+                    "failed to rebuild sidebar font for size {point_size} at scale factor {scale_factor}"
                 );
                 false
             }

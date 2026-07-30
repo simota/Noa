@@ -49,6 +49,95 @@ fn sync_atlas_uploads_rebuilt_font_grid_even_when_generation_restarts() {
     );
 }
 
+/// `noa-app`'s font map keeps grids alive per pixel size, so the renderer can
+/// see the atlas identity move **backwards**: a grid that was current, then
+/// wasn't, then is again presents an identity numerically lower than the one
+/// last seen. The sync guard compares identity by equality rather than
+/// ordering, so this works; pin it, because an ordering comparison would
+/// silently skip the re-upload.
+///
+/// Both grids here are the SAME pixel size on purpose. An atlas set belongs to
+/// one size — feeding it another size's grid is the corruption
+/// `SharedGlyphAtlases::sync`'s debug assertion now rejects, and the way a
+/// window changes size is `rebind_glyph_atlases`, not a cross-size sync.
+#[test]
+fn sync_atlas_re_uploads_when_an_earlier_font_grid_comes_back() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping earlier-FontGrid atlas sync test");
+        return;
+    };
+    let Some(mut first) = skip_font() else {
+        return;
+    };
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8Unorm,
+        &mut first,
+        GridPadding::ZERO,
+    )
+    .expect("build renderer");
+    let first_identity = first.atlas_identity();
+
+    // A second grid at the SAME pixel size becomes current.
+    let mut second = match FontGrid::new(first.px_size(), FontConfig::default()) {
+        Ok(font) => font,
+        Err(err) => {
+            eprintln!("skipping: no system monospace font available: {err}");
+            return;
+        }
+    };
+    renderer.sync_atlas(&device, &queue, &mut second);
+    assert_eq!(renderer.mask_atlas_seen_identity(), second.atlas_identity());
+
+    // ...and now the earlier grid comes back, carrying a lower identity.
+    assert!(
+        first_identity < second.atlas_identity(),
+        "identities are monotonic per construction, so the return really is backwards"
+    );
+    renderer.sync_atlas(&device, &queue, &mut first);
+
+    assert_eq!(
+        renderer.mask_atlas_seen_identity(),
+        first_identity,
+        "returning to an earlier FontGrid must re-upload its mask atlas"
+    );
+    assert_eq!(
+        renderer.color_atlas_seen_identity(),
+        first_identity,
+        "returning to an earlier FontGrid must re-upload its color atlas"
+    );
+}
+
+/// An atlas set belongs to exactly one pixel size. Syncing a grid of a
+/// different size into it uploads one size's pixels under coordinates every
+/// renderer bound to that set still holds — the corruption the per-size atlas
+/// keying exists to prevent, reachable again the moment a caller passes the
+/// wrong grid. It shipped once, in the overview thumbnail path, so the guard
+/// is asserted here rather than left to review.
+#[test]
+#[should_panic(expected = "atlas set for")]
+fn syncing_a_different_pixel_size_into_an_atlas_set_is_rejected() {
+    let Some((device, queue)) = device_queue() else {
+        // `should_panic` needs the panic, so make the skip path panic too.
+        panic!("no wgpu adapter available — atlas set for skip");
+    };
+    let Some(mut small) = skip_font() else {
+        panic!("no system monospace font — atlas set for skip");
+    };
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8Unorm,
+        &mut small,
+        GridPadding::ZERO,
+    )
+    .expect("build renderer");
+    let mut large =
+        FontGrid::new(small.px_size() * 2.0, FontConfig::default()).expect("build a second size");
+    renderer.sync_atlas(&device, &queue, &mut large);
+}
+
 #[test]
 fn atlas_eviction_epoch_forces_full_row_cache_rebuild() {
     // Regression: row-cache glyph instances store concrete atlas

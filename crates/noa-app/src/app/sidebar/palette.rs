@@ -35,31 +35,43 @@ const PALETTE_SCRIM_ALPHA: u8 = 72;
 /// surface format, or when a font-size change moves the interior padding.
 /// With the padding, grid cell (c,r) maps to texture pixel (pad + c*cell_w,
 /// pad + r*cell_h) and the scratch is the block size plus the padded rim.
+/// `font_px` is the pixel size of the window this card is being drawn into.
+/// The shared overlay renderer is keyed on it as well as on format and
+/// padding: modal cards rasterize terminal cells, so a card drawn with
+/// another window's grid would carry that window's glyph size, geometry and
+/// atlas into this one. Under mixed DPI that is visible as a card whose text
+/// does not match the pane behind it.
 fn ensure_overlay_card_gpu(
     gpu: &mut GpuState,
     surface_format: wgpu::TextureFormat,
     interior: GridPadding,
+    font_px: f32,
 ) {
     if gpu
         .palette_renderer
         .as_ref()
         .is_none_or(|renderer| renderer.target_format() != surface_format)
         || gpu.palette_padding != interior
+        || gpu.palette_font_px != font_px
     {
         let pipelines = gpu.pipelines.get(&gpu.device, surface_format);
-        let font_atlases = gpu
-            .font_atlases
-            .get(&gpu.device, &gpu.queue, surface_format, &gpu.font);
+        let font_atlases = gpu.font_atlases.get(
+            &gpu.device,
+            &gpu.queue,
+            surface_format,
+            gpu.fonts.get(font_px),
+        );
         gpu.palette_renderer = Renderer::with_pipelines(
             &gpu.device,
             &gpu.queue,
             &pipelines,
             &font_atlases,
-            &mut gpu.font,
+            gpu.fonts.get_mut(font_px),
             interior,
         )
         .ok();
         gpu.palette_padding = interior;
+        gpu.palette_font_px = font_px;
     }
     ensure_card_pipeline(gpu, surface_format);
 }
@@ -363,6 +375,8 @@ fn modal_block_origin(
 #[allow(clippy::too_many_arguments)]
 pub(in crate::app) fn draw_command_palette_card(
     gpu: &mut GpuState,
+    // Pixel size of the window being drawn into; see `ensure_overlay_card_gpu`.
+    font_px: f32,
     surface_format: wgpu::TextureFormat,
     view: &wgpu::TextureView,
     surface_size: PixelSize,
@@ -377,9 +391,9 @@ pub(in crate::app) fn draw_command_palette_card(
     let Some(layout) = command_palette_layout(palette, pane_cols, pane_rows) else {
         return;
     };
-    let metrics = gpu.font.metrics();
+    let metrics = gpu.fonts.get(font_px).metrics();
     let (interior, block_px) = modal_block_geometry(metrics, layout.block_cols, layout.block_rows);
-    ensure_overlay_card_gpu(gpu, surface_format, interior);
+    ensure_overlay_card_gpu(gpu, surface_format, interior, font_px);
     if ensure_scratch(
         &mut gpu.chrome_textures.palette_scratch,
         &gpu.device,
@@ -420,14 +434,14 @@ pub(in crate::app) fn draw_command_palette_card(
         renderer.resize(block_px);
         renderer.rebuild_cells(
             &snapshot,
-            &mut gpu.font,
+            gpu.fonts.get_mut(font_px),
             active_theme(&gpu.theme, &gpu.preview_theme),
         );
         // After `rebuild_cells` (which resets clear_color from the snapshot's
         // opaque bg) so the scratch's fill actually carries the palette's
         // translucent surface alpha under glassmorphism.
         renderer.set_clear_color(style.surface_bg());
-        renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+        renderer.sync_atlas(&gpu.device, &gpu.queue, gpu.fonts.get_mut(font_px));
         renderer.draw(&gpu.device, &gpu.queue, scratch_view);
     }
 
@@ -455,6 +469,8 @@ pub(in crate::app) fn draw_command_palette_card(
 #[allow(clippy::too_many_arguments)]
 pub(in crate::app) fn draw_confirm_dialog_card(
     gpu: &mut GpuState,
+    // Pixel size of the window being drawn into; see `ensure_overlay_card_gpu`.
+    font_px: f32,
     surface_format: wgpu::TextureFormat,
     view: &wgpu::TextureView,
     surface_size: PixelSize,
@@ -468,9 +484,9 @@ pub(in crate::app) fn draw_confirm_dialog_card(
     let Some(layout) = confirm_dialog_layout(dialog, pane_cols, pane_rows) else {
         return;
     };
-    let metrics = gpu.font.metrics();
+    let metrics = gpu.fonts.get(font_px).metrics();
     let (interior, block_px) = modal_block_geometry(metrics, layout.block_cols, layout.block_rows);
-    ensure_overlay_card_gpu(gpu, surface_format, interior);
+    ensure_overlay_card_gpu(gpu, surface_format, interior, font_px);
     if ensure_scratch(
         &mut gpu.chrome_textures.palette_scratch,
         &gpu.device,
@@ -501,14 +517,14 @@ pub(in crate::app) fn draw_confirm_dialog_card(
         renderer.resize(block_px);
         renderer.rebuild_cells(
             &snapshot,
-            &mut gpu.font,
+            gpu.fonts.get_mut(font_px),
             active_theme(&gpu.theme, &gpu.preview_theme),
         );
         // After `rebuild_cells` (which resets clear_color from the snapshot's
         // opaque bg) so the scratch's fill actually carries the palette's
         // translucent surface alpha under glassmorphism.
         renderer.set_clear_color(style.surface_bg());
-        renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+        renderer.sync_atlas(&gpu.device, &gpu.queue, gpu.fonts.get_mut(font_px));
         renderer.draw(&gpu.device, &gpu.queue, scratch_view);
     }
 
@@ -536,6 +552,8 @@ pub(in crate::app) fn draw_confirm_dialog_card(
 /// every other overlay.
 pub(in crate::app) fn draw_toast_card(
     gpu: &mut GpuState,
+    // Pixel size of the window being drawn into; see `ensure_overlay_card_gpu`.
+    font_px: f32,
     surface_format: wgpu::TextureFormat,
     view: &wgpu::TextureView,
     surface_size: PixelSize,
@@ -544,9 +562,9 @@ pub(in crate::app) fn draw_toast_card(
 ) {
     // The toast text is digits, spaces, and `×` — all one column per char.
     let cols = (text.chars().count().max(1)).min(u16::MAX as usize) as u16;
-    let metrics = gpu.font.metrics();
+    let metrics = gpu.fonts.get(font_px).metrics();
     let (interior, block_px) = modal_block_geometry(metrics, cols, 1);
-    ensure_overlay_card_gpu(gpu, surface_format, interior);
+    ensure_overlay_card_gpu(gpu, surface_format, interior, font_px);
     ensure_shadow_source(gpu);
     if ensure_scratch(
         &mut gpu.chrome_textures.palette_scratch,
@@ -587,14 +605,14 @@ pub(in crate::app) fn draw_toast_card(
         renderer.resize(block_px);
         renderer.rebuild_cells(
             &snapshot,
-            &mut gpu.font,
+            gpu.fonts.get_mut(font_px),
             active_theme(&gpu.theme, &gpu.preview_theme),
         );
         // After `rebuild_cells` (which resets clear_color from the snapshot's
         // opaque bg) so the scratch's fill actually carries the palette's
         // translucent surface alpha under glassmorphism.
         renderer.set_clear_color(style.surface_bg());
-        renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+        renderer.sync_atlas(&gpu.device, &gpu.queue, gpu.fonts.get_mut(font_px));
         renderer.draw(&gpu.device, &gpu.queue, scratch_view);
     }
 
@@ -695,6 +713,8 @@ const LIST_ROWS: u16 = 7;
 #[allow(clippy::too_many_arguments)]
 pub(in crate::app) fn draw_theme_settings_card(
     gpu: &mut GpuState,
+    // Pixel size of the window being drawn into; see `ensure_overlay_card_gpu`.
+    font_px: f32,
     surface_format: wgpu::TextureFormat,
     view: &wgpu::TextureView,
     surface_size: PixelSize,
@@ -708,9 +728,9 @@ pub(in crate::app) fn draw_theme_settings_card(
 ) {
     let cols = THEME_SETTINGS_COLS.min(pane_cols.saturating_sub(4)).max(20);
     let rows = THEME_SETTINGS_ROWS.min(pane_rows.saturating_sub(4)).max(10);
-    let metrics = gpu.font.metrics();
+    let metrics = gpu.fonts.get(font_px).metrics();
     let (interior, block_px) = modal_block_geometry(metrics, cols, rows);
-    ensure_overlay_card_gpu(gpu, surface_format, interior);
+    ensure_overlay_card_gpu(gpu, surface_format, interior, font_px);
     if ensure_scratch(
         &mut gpu.chrome_textures.palette_scratch,
         &gpu.device,
@@ -752,12 +772,12 @@ pub(in crate::app) fn draw_theme_settings_card(
         let scratch_view = &gpu.chrome_textures.palette_scratch.as_ref().unwrap().2;
         let renderer = gpu.palette_renderer.as_mut().unwrap();
         renderer.resize(block_px);
-        renderer.rebuild_cells(&snapshot, &mut gpu.font, theme);
+        renderer.rebuild_cells(&snapshot, gpu.fonts.get_mut(font_px), theme);
         // After `rebuild_cells` (which resets clear_color from the snapshot's
         // opaque bg) so the scratch's fill actually carries the palette's
         // translucent surface alpha under glassmorphism.
         renderer.set_clear_color(style.surface_bg());
-        renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+        renderer.sync_atlas(&gpu.device, &gpu.queue, gpu.fonts.get_mut(font_px));
         renderer.draw(&gpu.device, &gpu.queue, scratch_view);
     }
 
@@ -792,6 +812,8 @@ const PROCESS_MONITOR_ROWS: u16 = 20;
 #[allow(clippy::too_many_arguments)]
 pub(in crate::app) fn draw_process_monitor_card(
     gpu: &mut GpuState,
+    // Pixel size of the window being drawn into; see `ensure_overlay_card_gpu`.
+    font_px: f32,
     surface_format: wgpu::TextureFormat,
     view: &wgpu::TextureView,
     surface_size: PixelSize,
@@ -809,9 +831,9 @@ pub(in crate::app) fn draw_process_monitor_card(
     let rows = PROCESS_MONITOR_ROWS
         .min(pane_rows.saturating_sub(4))
         .max(10);
-    let metrics = gpu.font.metrics();
+    let metrics = gpu.fonts.get(font_px).metrics();
     let (interior, block_px) = modal_block_geometry(metrics, cols, rows);
-    ensure_overlay_card_gpu(gpu, surface_format, interior);
+    ensure_overlay_card_gpu(gpu, surface_format, interior, font_px);
     if ensure_scratch(
         &mut gpu.chrome_textures.palette_scratch,
         &gpu.device,
@@ -852,12 +874,12 @@ pub(in crate::app) fn draw_process_monitor_card(
         let scratch_view = &gpu.chrome_textures.palette_scratch.as_ref().unwrap().2;
         let renderer = gpu.palette_renderer.as_mut().unwrap();
         renderer.resize(block_px);
-        renderer.rebuild_cells(&snapshot, &mut gpu.font, theme);
+        renderer.rebuild_cells(&snapshot, gpu.fonts.get_mut(font_px), theme);
         // After `rebuild_cells` (which resets clear_color from the snapshot's
         // opaque bg) so the scratch's fill actually carries the palette's
         // translucent surface alpha under glassmorphism.
         renderer.set_clear_color(style.surface_bg());
-        renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+        renderer.sync_atlas(&gpu.device, &gpu.queue, gpu.fonts.get_mut(font_px));
         renderer.draw(&gpu.device, &gpu.queue, scratch_view);
     }
 

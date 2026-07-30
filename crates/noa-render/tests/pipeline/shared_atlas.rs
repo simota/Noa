@@ -227,6 +227,174 @@ fn glyph_renders_identically_after_atlas_growth() {
     );
 }
 
+/// A `FontGrid`'s atlases hold glyphs rasterized for exactly one pixel size,
+/// so two sizes must not land in the same texture set even at the same format.
+#[test]
+fn glyph_atlas_cache_is_keyed_by_pixel_size() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available - skipping GPU atlas ppem-key test");
+        return;
+    };
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let mut cache = GlyphAtlasCache::default();
+    let small =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let large =
+        FontGrid::new(28.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+
+    let a = cache.get(&device, &queue, format, &small);
+    let b = cache.get(&device, &queue, format, &large);
+    let a_again = cache.get(&device, &queue, format, &small);
+
+    assert_ne!(
+        a.id(),
+        b.id(),
+        "two pixel sizes must get separate atlas sets, or each sync overwrites the other"
+    );
+    assert_eq!(
+        a.id(),
+        a_again.id(),
+        "the same pixel size must keep sharing one set"
+    );
+}
+
+/// The corruption this keying exists to prevent, checked end to end on real
+/// pixels rather than on cache identity.
+///
+/// A renderer's per-row instance caches hold *concrete atlas coordinates*. If
+/// two font sizes shared one texture set, building the second renderer would
+/// upload the second size's atlas over the first's, and the first renderer's
+/// next draw would sample the wrong texels at coordinates it still believes.
+/// The redraw below is deliberately a bare `draw` — no rebuild, no re-sync —
+/// because a rebuild would re-upload the first atlas and hide exactly the
+/// window being tested.
+#[test]
+fn a_second_font_size_does_not_corrupt_the_first_renderers_atlas() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available - skipping cross-size atlas corruption test");
+        return;
+    };
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let mut pipeline_cache = PipelineCache::default();
+    let pipelines = pipeline_cache.get(&device, format);
+    let mut atlas_cache = GlyphAtlasCache::default();
+    let (w, h) = (256u32, 128u32);
+
+    let mut small =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let small_atlases = atlas_cache.get(&device, &queue, format, &small);
+    let mut small_renderer = Renderer::with_pipelines(
+        &device,
+        &queue,
+        &pipelines,
+        &small_atlases,
+        &mut small,
+        DEFAULT_GRID_PADDING,
+    )
+    .expect("build small renderer");
+    small_renderer.resize(PixelSize { w, h });
+
+    rebuild_text_frame(&mut small_renderer, &mut small, &device, &queue, "W");
+    let (first_target, first_view) = render_target(&device, w, h);
+    small_renderer.draw(&device, &queue, &first_view);
+    let first = read_rgba_pixels(&device, &queue, &first_target, w, h);
+    assert!(
+        non_background_pixel_count(&first) > 0,
+        "the reference glyph must render visible ink"
+    );
+
+    // A second window at a different scale factor: its own grid, its own
+    // atlas set, its own renderer — and it syncs and draws in between.
+    let mut large =
+        FontGrid::new(28.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let large_atlases = atlas_cache.get(&device, &queue, format, &large);
+    let mut large_renderer = Renderer::with_pipelines(
+        &device,
+        &queue,
+        &pipelines,
+        &large_atlases,
+        &mut large,
+        DEFAULT_GRID_PADDING,
+    )
+    .expect("build large renderer");
+    large_renderer.resize(PixelSize { w, h });
+    rebuild_text_frame(&mut large_renderer, &mut large, &device, &queue, "W");
+    let (large_target, large_view) = render_target(&device, w, h);
+    large_renderer.draw(&device, &queue, &large_view);
+    let _ = read_rgba_pixels(&device, &queue, &large_target, w, h);
+
+    // Bare redraw of the untouched first renderer.
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let (again_target, again_view) = render_target(&device, w, h);
+    small_renderer.draw(&device, &queue, &again_view);
+    let err = pollster::block_on(device.pop_error_scope());
+    let again = read_rgba_pixels(&device, &queue, &again_target, w, h);
+
+    assert!(err.is_none(), "wgpu validation error on redraw: {err:?}");
+    assert_eq!(
+        hash_pixels(&first),
+        hash_pixels(&again),
+        "a second font size must not disturb the first renderer's pixels — sharing one \
+         atlas set between sizes overwrites its textures under coordinates it still holds"
+    );
+}
+
+/// `rebind_glyph_atlases` must rebuild every pane bind group even when the
+/// outgoing and incoming sets happen to share a texture generation — which
+/// they normally do, because every set starts at zero. This is the precise
+/// shape of the bug a generation-only staleness check would have.
+#[test]
+fn rebinding_to_a_fresh_atlas_set_rebuilds_pane_bind_groups() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available - skipping atlas rebind test");
+        return;
+    };
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let mut pipeline_cache = PipelineCache::default();
+    let pipelines = pipeline_cache.get(&device, format);
+    let mut atlas_cache = GlyphAtlasCache::default();
+
+    let mut small =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let small_atlases = atlas_cache.get(&device, &queue, format, &small);
+    let mut renderer = Renderer::with_pipelines(
+        &device,
+        &queue,
+        &pipelines,
+        &small_atlases,
+        &mut small,
+        DEFAULT_GRID_PADDING,
+    )
+    .expect("build renderer");
+    renderer.resize(PixelSize { w: 256, h: 128 });
+    rebuild_text_frame(&mut renderer, &mut small, &device, &queue, "W");
+    // Pane GPU state is created lazily at draw time, not at rebuild.
+    let (_target, view) = render_target(&device, 256, 128);
+    renderer.draw(&device, &queue, &view);
+    let before = renderer.pane_bind_group_rebuild_counts();
+    assert!(!before.is_empty(), "a pane must exist to rebind");
+
+    let large =
+        FontGrid::new(28.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let large_atlases = atlas_cache.get(&device, &queue, format, &large);
+    assert_ne!(small_atlases.id(), large_atlases.id());
+
+    renderer.rebind_glyph_atlases(&device, &large_atlases);
+    let after = renderer.pane_bind_group_rebuild_counts();
+    assert!(
+        after.iter().zip(&before).all(|(now, was)| now > was),
+        "every pane bind group must be rebuilt on a rebind: {before:?} -> {after:?}"
+    );
+
+    // Idempotent: callers may rebind every frame.
+    renderer.rebind_glyph_atlases(&device, &large_atlases);
+    assert_eq!(
+        renderer.pane_bind_group_rebuild_counts(),
+        after,
+        "rebinding to the set already bound must not rebuild anything"
+    );
+}
+
 /// Count pixels whose RGB differs from the top-left (background) pixel — a
 /// cheap "did anything actually draw" oracle for a solid-background frame.
 fn non_background_pixel_count(rgba: &[u8]) -> usize {

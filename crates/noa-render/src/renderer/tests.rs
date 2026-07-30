@@ -113,6 +113,7 @@ fn baseline_snapshot(chars: [char; 3]) -> FrameSnapshot {
         search: SearchState::default(),
         row_base: 0,
         abs_row_base: 0,
+        viewport_offset: 0,
         active_is_alt: false,
         cols: 1,
         rows_n: 3,

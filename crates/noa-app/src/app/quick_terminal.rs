@@ -747,15 +747,20 @@ impl App {
             };
             surface.configure(&gpu.device, &surface_config);
             let pipelines = gpu.pipelines.get(&gpu.device, surface_format);
-            let font_atlases =
-                gpu.font_atlases
-                    .get(&gpu.device, &gpu.queue, surface_format, &gpu.font);
+            let font_px = font_pixel_size(self.runtime_font_size, window.scale_factor());
+            gpu.fonts.ensure(font_px);
+            let font_atlases = gpu.font_atlases.get(
+                &gpu.device,
+                &gpu.queue,
+                surface_format,
+                gpu.fonts.get(font_px),
+            );
             let mut renderer = Renderer::with_pipelines(
                 &gpu.device,
                 &gpu.queue,
                 &pipelines,
                 &font_atlases,
-                &mut gpu.font,
+                gpu.fonts.get_mut(font_px),
                 self.padding,
             )
             .ok()?;
@@ -776,7 +781,8 @@ impl App {
         let window_id = window.id();
         let initial_pane = PaneId::alloc();
         let initial_rect = PaneRectApp::new(0, 0, surface_config.width, surface_config.height);
-        let metrics = self.gpu.as_ref()?.font.metrics();
+        let font_px = font_pixel_size(self.runtime_font_size, window.scale_factor());
+        let metrics = self.gpu.as_ref()?.fonts.get(font_px).metrics();
         let grid = grid_size_for_pane_rect(initial_rect, metrics, self.padding);
         let auto_approve_enabled = Arc::new(AtomicBool::new(false));
         let redraw_floor = crate::io_thread::RedrawFloor::new(
@@ -803,6 +809,7 @@ impl App {
         self.windows.insert(
             window_id,
             WindowState {
+                font_px,
                 created_transparent: window_created_transparent(self.config.background_opacity),
                 window,
                 group,

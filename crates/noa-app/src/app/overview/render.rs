@@ -147,14 +147,20 @@ impl App {
                     continue;
                 };
                 state.renderer.resize(source_viewport);
+                // This tab's own grid, not the primary: `state.renderer` is
+                // bound to the atlas set for `state.font_px`, so syncing any
+                // other size into it would upload one size's pixels under
+                // another size's coordinates.
                 state.renderer.rebuild_cells(
                     &snapshot,
-                    &mut gpu.font,
+                    gpu.fonts.get_mut(state.font_px),
                     active_theme(&gpu.theme, &gpu.preview_theme),
                 );
-                state
-                    .renderer
-                    .sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+                state.renderer.sync_atlas(
+                    &gpu.device,
+                    &gpu.queue,
+                    gpu.fonts.get_mut(state.font_px),
+                );
                 rendered_any = true;
                 if let Err(err) = thumbnails.render_pane_into_tile_subrect(
                     &gpu.device,
@@ -186,7 +192,25 @@ impl App {
     /// sized in design px, sidebar parity. The construction padding is a
     /// placeholder: every band draw sets its own centering padding via
     /// `set_grid_padding` before drawing.
+    /// The sidebar pixel size of the window the overview is showing in.
+    /// The overview is a single full-window UI, so it has one size — but it
+    /// must be *that window's*, not `primary()`, which on a mixed-DPI setup
+    /// belongs to whichever window's scale changed last.
+    pub(in crate::app) fn overview_sidebar_font_px(&self) -> f32 {
+        // The overview's HOST window, not the focused one: focus can move to a
+        // window on another display while the overview stays put, and laying
+        // its labels out for that window's DPI would both misplace them and
+        // mismatch the renderer's atlas.
+        let scale = self
+            .overview_host()
+            .and_then(|id| self.windows.get(&id))
+            .map(|state| state.window.scale_factor())
+            .unwrap_or(1.0);
+        crate::app::helpers::sidebar_font_pixel_size(self.config.sidebar_font_size, scale)
+    }
+
     pub(in crate::app) fn ensure_overview_label_renderer(&mut self) {
+        let label_px = self.overview_sidebar_font_px();
         let Some(format) = self
             .overview_host_surface_config()
             .map(|config| config.format)
@@ -205,20 +229,38 @@ impl App {
             .is_none_or(|renderer| renderer.target_format() != format);
         if stale {
             let pipelines = gpu.pipelines.get(&gpu.device, format);
-            let sidebar_font_atlases =
-                gpu.sidebar_font_atlases
-                    .get(&gpu.device, &gpu.queue, format, &gpu.sidebar_font);
+            let sidebar_font_atlases = gpu.sidebar_font_atlases.get(
+                &gpu.device,
+                &gpu.queue,
+                format,
+                gpu.sidebar_fonts.get(label_px),
+            );
             overview.label_renderer = Some(
                 Renderer::with_pipelines(
                     &gpu.device,
                     &gpu.queue,
                     &pipelines,
                     &sidebar_font_atlases,
-                    &mut gpu.sidebar_font,
+                    gpu.sidebar_fonts.get_mut(label_px),
                     GridPadding::ZERO,
                 )
                 .expect("failed to build the overview label renderer"),
             );
+        }
+
+        // Follow the host window's size on every call, rather than folding it
+        // into the `stale` check above: rebinding is idempotent, and a stale
+        // key is one more thing to forget. Reopening the overview on a display
+        // of a different DPI otherwise leaves the renderer on the old size's
+        // textures while the new size's grid is synced into them.
+        let atlases = gpu.sidebar_font_atlases.get(
+            &gpu.device,
+            &gpu.queue,
+            format,
+            gpu.sidebar_fonts.get(label_px),
+        );
+        if let Some(renderer) = overview.label_renderer.as_mut() {
+            renderer.rebind_glyph_atlases(&gpu.device, &atlases);
         }
     }
 
@@ -347,15 +389,16 @@ impl App {
         band_size: PixelSize,
     ) -> Option<(GridPadding, GridSize)> {
         let metrics = self.overview_metrics()?;
+        let label_px = self.overview_sidebar_font_px();
         let gpu = self.gpu.as_ref()?;
         let padding = overview_label_padding(
             band_size.h,
-            gpu.sidebar_font.metrics().cell_h,
+            gpu.sidebar_fonts.get(label_px).metrics().cell_h,
             metrics.scale(),
         );
         let grid_size = grid_size_for_pane_rect(
             PaneRectApp::new(0, 0, band_size.w, band_size.h),
-            gpu.sidebar_font.metrics(),
+            gpu.sidebar_fonts.get(label_px).metrics(),
             padding,
         );
         Some((padding, grid_size))
@@ -378,6 +421,7 @@ impl App {
         text: &str,
         target: &wgpu::TextureView,
     ) -> Option<()> {
+        let label_px = self.overview_sidebar_font_px();
         self.ensure_overview_label_renderer();
         let gpu = self.gpu.as_mut()?;
         let overview = self.overview_window.as_mut()?;
@@ -392,13 +436,13 @@ impl App {
         label_renderer.set_grid_padding(padding);
         label_renderer.rebuild_cells(
             &snapshot,
-            &mut gpu.sidebar_font,
+            gpu.sidebar_fonts.get_mut(label_px),
             active_theme(&gpu.theme, &gpu.preview_theme),
         );
         // After `rebuild_cells` (which resets it from the snapshot bg) so the
         // target gets its own distinct backdrop, not the terminal default.
         label_renderer.set_clear_color(clear_color);
-        label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.sidebar_font);
+        label_renderer.sync_atlas(&gpu.device, &gpu.queue, gpu.sidebar_fonts.get_mut(label_px));
         label_renderer.draw(&gpu.device, &gpu.queue, target);
         Some(())
     }

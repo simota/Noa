@@ -71,7 +71,10 @@ pub(crate) struct ShellIntegration {
 pub(crate) fn resources_dir() -> Option<&'static Path> {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     let base = DIR.get_or_init(|| {
-        std::env::temp_dir().join(format!("noa-shell-integration-{}", std::process::id()))
+        let base =
+            std::env::temp_dir().join(format!("noa-shell-integration-{}", std::process::id()));
+        sweep_stale_dirs(&base);
+        base
     });
     if scripts_present(base) {
         return Some(base.as_path());
@@ -105,6 +108,45 @@ fn materialize(base: &Path) -> bool {
             .is_some_and(|parent| std::fs::create_dir_all(parent).is_ok())
             && std::fs::write(&path, contents).is_ok()
     })
+}
+
+/// Best-effort removal of the directories left behind by earlier noa
+/// processes — one accumulates per launch, and nothing but the OS temp reaper
+/// ever cleans them up. Only long-idle trees are touched, and a still-running
+/// process whose directory is swept re-materializes it on its next spawn.
+fn sweep_stale_dirs(ours: &Path) {
+    const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+
+    let (Some(parent), Some(prefix)) = (ours.parent(), ours.file_name().and_then(|n| n.to_str()))
+    else {
+        return;
+    };
+    // `noa-shell-integration-` — the pid-less stem shared by every generation.
+    let prefix = prefix.trim_end_matches(char::is_numeric);
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == ours
+            || !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(prefix))
+        {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > MAX_AGE);
+        if stale {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
 }
 
 /// Compute the integration for `shell` (a path or bare name) rooted at `dir`.
@@ -322,5 +364,25 @@ mod tests {
         assert!(!scripts_present(&base));
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn sweep_keeps_our_dir_and_recent_generations() {
+        let parent = scratch("sweep");
+        let ours = parent.join("noa-shell-integration-1");
+        let sibling = parent.join("noa-shell-integration-2");
+        let unrelated = parent.join("something-else");
+        for dir in [&ours, &sibling, &unrelated] {
+            std::fs::create_dir_all(dir).expect("create scratch dir");
+        }
+
+        sweep_stale_dirs(&ours);
+
+        // All three were just created, so none is old enough to sweep.
+        assert!(ours.is_dir());
+        assert!(sibling.is_dir());
+        assert!(unrelated.is_dir());
+
+        let _ = std::fs::remove_dir_all(&parent);
     }
 }

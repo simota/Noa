@@ -58,24 +58,95 @@ pub(crate) struct ShellIntegration {
     pub suppress_login_flag: bool,
 }
 
-/// Materialize the embedded scripts once and return the base directory, or
-/// `None` if writing failed (the shell then simply starts without
-/// integration).
+/// Materialize the embedded scripts and return the base directory, or `None`
+/// if writing failed (the shell then simply starts without integration).
+///
+/// The directory lives under `$TMPDIR`, which the OS reaps on its own
+/// schedule, so the scripts are re-verified on **every** call and rewritten
+/// when any went missing. Handing out a vanished directory is far worse than
+/// handing out nothing: zsh's `ZDOTDIR` and bash's `--rcfile` would point at
+/// files that no longer exist, and since both suppress the shell's normal
+/// startup lookup, the shell would come up with *no* configuration at all —
+/// not even the user's own — looking like a bare `sh`.
 pub(crate) fn resources_dir() -> Option<&'static Path> {
-    static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
-    DIR.get_or_init(materialize).as_deref()
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    let base = DIR.get_or_init(|| {
+        let base =
+            std::env::temp_dir().join(format!("noa-shell-integration-{}", std::process::id()));
+        sweep_stale_dirs(&base);
+        base
+    });
+    if scripts_present(base) {
+        return Some(base.as_path());
+    }
+    if materialize(base) {
+        return Some(base.as_path());
+    }
+    log::warn!(
+        "shell integration unavailable: cannot write {}; shells start without OSC 133/7 hooks",
+        base.display()
+    );
+    None
 }
 
-fn materialize() -> Option<PathBuf> {
-    let base = std::env::temp_dir().join(format!("noa-shell-integration-{}", std::process::id()));
-    for (rel, contents) in EMBEDDED_SCRIPTS {
+/// Whether every embedded script is still on disk under `base`.
+fn scripts_present(base: &Path) -> bool {
+    EMBEDDED_SCRIPTS
+        .iter()
+        .all(|(rel, _)| base.join(rel).is_file())
+}
+
+/// Write every embedded script under `base`, reporting whether all of them
+/// landed. Failure is not cached: a transient error (a full disk, a reaper
+/// deleting the tree mid-write) must not disable integration for the rest of
+/// the process's life.
+fn materialize(base: &Path) -> bool {
+    EMBEDDED_SCRIPTS.iter().all(|(rel, contents)| {
         let path = base.join(rel);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).ok()?;
+        // Every embedded path is `<shell>/…/<file>`, so it always has a parent.
+        path.parent()
+            .is_some_and(|parent| std::fs::create_dir_all(parent).is_ok())
+            && std::fs::write(&path, contents).is_ok()
+    })
+}
+
+/// Best-effort removal of the directories left behind by earlier noa
+/// processes — one accumulates per launch, and nothing but the OS temp reaper
+/// ever cleans them up. Only long-idle trees are touched, and a still-running
+/// process whose directory is swept re-materializes it on its next spawn.
+fn sweep_stale_dirs(ours: &Path) {
+    const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+
+    let (Some(parent), Some(prefix)) = (ours.parent(), ours.file_name().and_then(|n| n.to_str()))
+    else {
+        return;
+    };
+    // `noa-shell-integration-` — the pid-less stem shared by every generation.
+    let prefix = prefix.trim_end_matches(char::is_numeric);
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == ours
+            || !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(prefix))
+        {
+            continue;
         }
-        std::fs::write(&path, contents).ok()?;
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > MAX_AGE);
+        if stale {
+            let _ = std::fs::remove_dir_all(&path);
+        }
     }
-    Some(base)
 }
 
 /// Compute the integration for `shell` (a path or bare name) rooted at `dir`.
@@ -245,5 +316,73 @@ mod tests {
                 .is_file()
         );
         assert!(dir.join("bash/noa.bash").is_file());
+    }
+
+    /// A scratch base dir unique to `tag`, removed if a previous run left it.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("noa-si-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn scripts_present_tracks_what_is_actually_on_disk() {
+        let base = scratch("present");
+        assert!(!scripts_present(&base));
+        assert!(materialize(&base));
+        assert!(scripts_present(&base));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // Regression: the temp dir is reaped by the OS out from under a running
+    // noa. Handing the stale path to zsh (ZDOTDIR) or bash (--rcfile) starts
+    // a shell with no config at all — not even the user's own — so a vanished
+    // tree must be detected and rewritten rather than cached forever.
+    #[test]
+    fn a_reaped_script_tree_is_rewritten_not_reused() {
+        let base = scratch("reaped");
+        assert!(materialize(&base));
+
+        std::fs::remove_dir_all(&base).expect("simulate the OS temp reaper");
+        assert!(!scripts_present(&base));
+
+        assert!(materialize(&base));
+        assert!(scripts_present(&base));
+        assert!(base.join("zsh/.zshrc").is_file());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // A partial reap (one file gone) is just as fatal as a full one.
+    #[test]
+    fn a_single_missing_script_invalidates_the_tree() {
+        let base = scratch("partial");
+        assert!(materialize(&base));
+
+        std::fs::remove_file(base.join("bash/noa.bash")).expect("remove one script");
+        assert!(!scripts_present(&base));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn sweep_keeps_our_dir_and_recent_generations() {
+        let parent = scratch("sweep");
+        let ours = parent.join("noa-shell-integration-1");
+        let sibling = parent.join("noa-shell-integration-2");
+        let unrelated = parent.join("something-else");
+        for dir in [&ours, &sibling, &unrelated] {
+            std::fs::create_dir_all(dir).expect("create scratch dir");
+        }
+
+        sweep_stale_dirs(&ours);
+
+        // All three were just created, so none is old enough to sweep.
+        assert!(ours.is_dir());
+        assert!(sibling.is_dir());
+        assert!(unrelated.is_dir());
+
+        let _ = std::fs::remove_dir_all(&parent);
     }
 }

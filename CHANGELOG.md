@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.8] - 2026-08-24
+
+### Fixed
+
+- Modifier keys remain synchronized with the native window that originated
+  each input event. Queued events, native-tab switches, occlusion changes, and
+  focus transitions could previously make the shared modifier cache diverge
+  from winit's per-view state, intermittently turning Shift+Arrow into a plain
+  Arrow or a normal key into a Cmd shortcut. Modifier snapshots are now kept
+  per window and loaded before keyboard, pointer, and Overview dispatch, while
+  unrelated windows can no longer clear or overwrite the active input state
+  (#59)
+
 ## [0.2.7] - 2026-08-24
 
 ### Fixed

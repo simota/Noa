@@ -4,6 +4,32 @@
 use super::*;
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
+fn input_modifiers_for_window(
+    _shared: winit::keyboard::ModifiersState,
+    window: winit::keyboard::ModifiersState,
+) -> winit::keyboard::ModifiersState {
+    window
+}
+
+fn shared_modifiers_after_window_update(
+    shared: ModifiersState,
+    window: ModifiersState,
+    is_input_target: bool,
+) -> ModifiersState {
+    if is_input_target { window } else { shared }
+}
+
+fn shared_modifiers_after_focus_loss(
+    shared: ModifiersState,
+    was_input_target: bool,
+) -> ModifiersState {
+    if was_input_target {
+        ModifiersState::empty()
+    } else {
+        shared
+    }
+}
+
 impl App {
     /// Pane-dnd P1-1 remediation (`docs/specs/pane-dnd.md` L2(e)): re-resolve
     /// a pane-scoped `UserEvent`'s window at *receive* time rather than
@@ -382,18 +408,17 @@ impl ApplicationHandler<UserEvent> for App {
                 self.handle_remote_request_completed(event_loop, request_id)
             }
             UserEvent::RestoreFocus { window_id } => {
-                // Defensive twin of the `Focused(false)` reset: the deferred
-                // focus restore runs the tab-close teardown path that can eat
-                // the Cmd-up event, so clear any stale held modifiers here too
-                // rather than trusting them to survive the transition.
-                self.modifiers = winit::keyboard::ModifiersState::empty();
                 let target_exists = self.windows.contains_key(&window_id);
                 if should_apply_deferred_focus_restore(window_id, self.focused, target_exists)
-                    && let Some(window) = self
-                        .windows
-                        .get(&window_id)
-                        .map(|state| state.window.clone())
+                    && let Some(window) = self.windows.get_mut(&window_id).map(|state| {
+                        // Defensive twin of the `Focused(false)` reset: the
+                        // tab-close teardown can eat Cmd-up. Keep the app and
+                        // this winit view's cache aligned before restoring it.
+                        state.modifiers = ModifiersState::empty();
+                        state.window.clone()
+                    })
                 {
+                    self.modifiers = ModifiersState::empty();
                     window.focus_window();
                     // AppKit's native-tab teardown drops first responder off
                     // winit's content view, so `focus_window` (already-key
@@ -489,6 +514,38 @@ impl ApplicationHandler<UserEvent> for App {
         if !self.windows.contains_key(&window_id) {
             return;
         }
+        if let WindowEvent::ModifiersChanged(modifiers) = &event {
+            let modifiers = modifiers.state();
+            if let Some(state) = self.windows.get_mut(&window_id) {
+                state.modifiers = modifiers;
+            }
+            self.modifiers = shared_modifiers_after_window_update(
+                self.modifiers,
+                modifiers,
+                self.os_focused == Some(window_id),
+            );
+        }
+        // `self.modifiers` is a dispatch scratch value, not an authoritative
+        // global snapshot. Queued events from different windows can be
+        // interleaved, so every modifier-consuming input must load the
+        // originating window's event-time state before any interceptor runs.
+        // In particular, Overview handles keyboard input before the normal
+        // match below, and pointer handlers must not inherit modifiers from a
+        // queued keyboard event belonging to another window.
+        if matches!(
+            &event,
+            WindowEvent::KeyboardInput { .. }
+                | WindowEvent::CursorMoved { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::TouchpadPressure { .. }
+        ) {
+            let window_modifiers = self
+                .windows
+                .get(&window_id)
+                .map_or(ModifiersState::empty(), |state| state.modifiers);
+            self.modifiers = input_modifiers_for_window(self.modifiers, window_modifiers);
+        }
         // While the Session Overview overlay is visible, its host window's
         // redraws and input belong to the Overview; structural events
         // (resize, focus, occlusion, close) fall through to the normal
@@ -537,6 +594,10 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Focused(true) => {
                 self.focused = Some(window_id);
                 self.os_focused = Some(window_id);
+                self.modifiers = self
+                    .windows
+                    .get(&window_id)
+                    .map_or(ModifiersState::empty(), |state| state.modifiers);
                 self.end_copy_mode_if_focus_changed();
                 if self.is_quick_terminal_window(window_id) {
                     self.mark_quick_terminal_focused(window_id);
@@ -574,13 +635,18 @@ impl ApplicationHandler<UserEvent> for App {
                 // chord (a plain `f` → `cmd+f` → Search/Find). Clear on focus
                 // loss; winit re-sends `ModifiersChanged` on the next real
                 // modifier press, so nothing is lost.
-                self.modifiers = winit::keyboard::ModifiersState::empty();
+                if let Some(state) = self.windows.get_mut(&window_id) {
+                    state.modifiers = ModifiersState::empty();
+                }
                 self.end_copy_mode_for_window(window_id);
                 // Only clear if this window is the one we recorded as focused —
                 // when macOS switches between our own windows the incoming
                 // `Focused(true)` may already have repointed `os_focused`, and
                 // the outgoing window's `Focused(false)` must not undo it.
-                if self.os_focused == Some(window_id) {
+                let was_input_target = self.os_focused == Some(window_id);
+                self.modifiers =
+                    shared_modifiers_after_focus_loss(self.modifiers, was_input_target);
+                if was_input_target {
                     self.os_focused = None;
                 }
                 self.finish_active_split_drag(window_id);
@@ -716,10 +782,12 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::ModifiersChanged(mods) => {
-                self.modifiers = mods.state();
+                let _ = mods;
                 // Cmd pressed/released with the mouse stationary must still
                 // toggle the hover underline + pointer cursor.
-                self.sync_hover_link(window_id);
+                if self.os_focused == Some(window_id) {
+                    self.sync_hover_link(window_id);
+                }
             }
             WindowEvent::CursorLeft { .. } => self.on_cursor_left(window_id),
             WindowEvent::CursorMoved { position, .. } => self.on_cursor_moved(window_id, position),
@@ -1911,5 +1979,58 @@ mod resolved_session_delta_tests {
         let resolved = App::resolved_session_delta(None, id, delta);
 
         assert!(resolved.is_none());
+    }
+}
+
+#[cfg(test)]
+mod window_modifier_tests {
+    use super::*;
+
+    #[test]
+    fn input_uses_origin_window_modifiers() {
+        assert_eq!(
+            input_modifiers_for_window(
+                winit::keyboard::ModifiersState::empty(),
+                winit::keyboard::ModifiersState::SHIFT,
+            ),
+            winit::keyboard::ModifiersState::SHIFT
+        );
+        assert_eq!(
+            input_modifiers_for_window(
+                winit::keyboard::ModifiersState::SUPER,
+                winit::keyboard::ModifiersState::empty(),
+            ),
+            winit::keyboard::ModifiersState::empty()
+        );
+    }
+
+    #[test]
+    fn interleaved_window_inputs_reload_each_origin_snapshot() {
+        let after_window_a =
+            input_modifiers_for_window(ModifiersState::SHIFT, ModifiersState::SUPER);
+        let after_window_b = input_modifiers_for_window(after_window_a, ModifiersState::SHIFT);
+
+        assert_eq!(after_window_a, ModifiersState::SUPER);
+        assert_eq!(after_window_b, ModifiersState::SHIFT);
+    }
+
+    #[test]
+    fn non_target_window_events_do_not_overwrite_shared_modifiers() {
+        assert_eq!(
+            shared_modifiers_after_window_update(
+                ModifiersState::SHIFT,
+                ModifiersState::empty(),
+                false,
+            ),
+            ModifiersState::SHIFT
+        );
+        assert_eq!(
+            shared_modifiers_after_focus_loss(ModifiersState::SHIFT, false),
+            ModifiersState::SHIFT
+        );
+        assert_eq!(
+            shared_modifiers_after_focus_loss(ModifiersState::SHIFT, true),
+            ModifiersState::empty()
+        );
     }
 }

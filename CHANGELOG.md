@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.7] - 2026-08-24
+
+### Fixed
+
+- Shell integration survives the OS temp reaper. The integration scripts were
+  materialized once into `$TMPDIR/noa-shell-integration-<pid>` and the path
+  then cached in a `OnceLock` and handed out unchecked forever, so once that
+  tree was removed under a running noa every later pane still got the stale
+  path — and because `ZDOTDIR` (zsh) and `--rcfile` (bash) suppress the
+  shell's normal startup lookup, the shell came up with no configuration at
+  all, not even the user's own. The scripts are re-verified on every handout
+  and rewritten when any went missing, so an unusable directory degrades to
+  "no integration" rather than to a dangling path, and materialization failure
+  is no longer cached. Per-launch directories left behind by earlier runs are
+  swept as well (#57)
+
 ## [0.2.6] - 2026-07-31
 
 ### Added

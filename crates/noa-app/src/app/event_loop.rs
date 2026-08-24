@@ -4,7 +4,7 @@
 use super::*;
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
-fn keyboard_modifiers_for_window(
+fn input_modifiers_for_window(
     _shared: winit::keyboard::ModifiersState,
     window: winit::keyboard::ModifiersState,
 ) -> winit::keyboard::ModifiersState {
@@ -525,6 +525,27 @@ impl ApplicationHandler<UserEvent> for App {
                 self.os_focused == Some(window_id),
             );
         }
+        // `self.modifiers` is a dispatch scratch value, not an authoritative
+        // global snapshot. Queued events from different windows can be
+        // interleaved, so every modifier-consuming input must load the
+        // originating window's event-time state before any interceptor runs.
+        // In particular, Overview handles keyboard input before the normal
+        // match below, and pointer handlers must not inherit modifiers from a
+        // queued keyboard event belonging to another window.
+        if matches!(
+            &event,
+            WindowEvent::KeyboardInput { .. }
+                | WindowEvent::CursorMoved { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::TouchpadPressure { .. }
+        ) {
+            let window_modifiers = self
+                .windows
+                .get(&window_id)
+                .map_or(ModifiersState::empty(), |state| state.modifiers);
+            self.modifiers = input_modifiers_for_window(self.modifiers, window_modifiers);
+        }
         // While the Session Overview overlay is visible, its host window's
         // redraws and input belong to the Overview; structural events
         // (resize, focus, occlusion, close) fall through to the normal
@@ -782,11 +803,6 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::DroppedFile(path) => self.on_dropped_file(window_id, path),
             WindowEvent::Ime(event) => self.on_ime_event(window_id, event),
             WindowEvent::KeyboardInput { event, .. } => {
-                let window_modifiers = self
-                    .windows
-                    .get(&window_id)
-                    .map_or(ModifiersState::empty(), |state| state.modifiers);
-                self.modifiers = keyboard_modifiers_for_window(self.modifiers, window_modifiers);
                 let pressed = event.state == ElementState::Pressed;
                 if pressed {
                     // NOA_LATENCY_TRACE t0: winit key-event receipt, before
@@ -1971,21 +1987,31 @@ mod window_modifier_tests {
     use super::*;
 
     #[test]
-    fn keyboard_input_uses_origin_window_modifiers() {
+    fn input_uses_origin_window_modifiers() {
         assert_eq!(
-            keyboard_modifiers_for_window(
+            input_modifiers_for_window(
                 winit::keyboard::ModifiersState::empty(),
                 winit::keyboard::ModifiersState::SHIFT,
             ),
             winit::keyboard::ModifiersState::SHIFT
         );
         assert_eq!(
-            keyboard_modifiers_for_window(
+            input_modifiers_for_window(
                 winit::keyboard::ModifiersState::SUPER,
                 winit::keyboard::ModifiersState::empty(),
             ),
             winit::keyboard::ModifiersState::empty()
         );
+    }
+
+    #[test]
+    fn interleaved_window_inputs_reload_each_origin_snapshot() {
+        let after_window_a =
+            input_modifiers_for_window(ModifiersState::SHIFT, ModifiersState::SUPER);
+        let after_window_b = input_modifiers_for_window(after_window_a, ModifiersState::SHIFT);
+
+        assert_eq!(after_window_a, ModifiersState::SUPER);
+        assert_eq!(after_window_b, ModifiersState::SHIFT);
     }
 
     #[test]

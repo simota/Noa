@@ -824,6 +824,7 @@ impl App {
                 last_mouse_point: None,
                 last_mouse_physical_position: None,
                 active_split_drag: None,
+                modifiers: ModifiersState::empty(),
                 occluded: false,
                 title: "Noa".to_string(),
                 title_override: None,

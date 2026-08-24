@@ -278,6 +278,8 @@ pub(super) struct WindowState {
     /// no position of its own.
     pub(super) last_mouse_physical_position: Option<PhysicalPosition<f64>>,
     pub(super) active_split_drag: Option<SplitResizeDrag>,
+    /// Modifier state tracked by winit for this native window's view.
+    pub(super) modifiers: ModifiersState,
     pub(super) occluded: bool,
     /// Whether this window was *created* with `with_transparent(true)`.
     /// AppKit fixes a window's opacity at creation — a window built opaque

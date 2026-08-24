@@ -457,10 +457,7 @@ impl App {
             // No pty passthrough while the overlay owns the window
             // (REQ-OV-7): IME events die here.
             WindowEvent::Ime(_) => true,
-            WindowEvent::ModifiersChanged(mods) => {
-                self.modifiers = mods.state();
-                true
-            }
+            WindowEvent::ModifiersChanged(_) => true,
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed {
                     self.handle_overview_key(event_loop, event);

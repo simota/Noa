@@ -313,9 +313,9 @@ impl ForegroundProcessProbe {
     /// The name of the tty's foreground process — the leader of the current
     /// foreground process group (e.g. `zsh`, `cargo`, `claude`). Known generic
     /// runtime wrappers (`bun`, `node`, …) are canonicalized only when their
-    /// argv identifies a direct Codex launch. `None` when there is no foreground
-    /// group (the session ended) or on a platform without the query (only macOS
-    /// is implemented; NFR-5 graceful degradation).
+    /// argv identifies a supported coding agent. `None` when there is no
+    /// foreground group (the session ended) or on a platform without the query
+    /// (only macOS is implemented; NFR-5 graceful degradation).
     pub fn poll(&self) -> Option<String> {
         #[cfg(target_os = "macos")]
         {
@@ -443,7 +443,7 @@ fn foreground_process_name(fd: std::os::fd::RawFd) -> Option<String> {
     if name.is_empty() {
         return None;
     }
-    let args = if wrapper_can_host_codex(name) {
+    let args = if wrapper_can_host_agent(name) {
         foreground_process_args(pgid)
     } else {
         None
@@ -478,17 +478,29 @@ fn foreground_process_args(pid: libc::pid_t) -> Option<Vec<String>> {
 }
 
 fn canonical_process_name(name: &str, args: Option<&[String]>) -> String {
-    if wrapper_can_host_codex(name) && args.is_some_and(argv_mentions_codex) {
-        return "codex".to_string();
+    if wrapper_can_host_agent(name)
+        && let Some(agent) = args.and_then(wrapper_agent_from_argv)
+    {
+        return agent.to_string();
     }
     name.to_string()
 }
 
-fn wrapper_can_host_codex(name: &str) -> bool {
+fn wrapper_can_host_agent(name: &str) -> bool {
     matches!(
         executable_basename(name).as_str(),
         "bun" | "bunx" | "node" | "npx"
     )
+}
+
+fn wrapper_agent_from_argv(args: &[String]) -> Option<&'static str> {
+    if argv_mentions_codex(args) {
+        return Some("codex");
+    }
+    if argv_mentions_claude_code(args) {
+        return Some("claude");
+    }
+    None
 }
 
 fn argv_mentions_codex(args: &[String]) -> bool {
@@ -500,6 +512,17 @@ fn argv_mentions_codex(args: &[String]) -> bool {
             || lower.contains("/@openai/codex/")
             || lower.ends_with("/@openai/codex")
             || looks_like_codex_executable(&lower)
+    })
+}
+
+fn argv_mentions_claude_code(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        let lower = arg.trim().to_ascii_lowercase();
+        lower == "@anthropic-ai/claude-code"
+            || lower.starts_with("@anthropic-ai/claude-code@")
+            || lower.starts_with("@anthropic-ai/claude-code/")
+            || lower.contains("/@anthropic-ai/claude-code/")
+            || lower.ends_with("/@anthropic-ai/claude-code")
     })
 }
 
@@ -800,6 +823,20 @@ mod tests {
         assert_eq!(
             canonical_process_name("node", Some(&["node".to_string(), "codexify".to_string()])),
             "node"
+        );
+    }
+
+    #[test]
+    fn canonical_process_name_detects_claude_code_through_node_wrapper() {
+        assert_eq!(
+            canonical_process_name(
+                "node",
+                Some(&[
+                    "node".to_string(),
+                    "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js".to_string(),
+                ])
+            ),
+            "claude"
         );
     }
 

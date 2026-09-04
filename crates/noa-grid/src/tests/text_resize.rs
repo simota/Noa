@@ -290,3 +290,20 @@ fn resize_shrink_rows_keeps_cursor_on_its_content() {
     assert!(cy < 10);
     assert_eq!(cell(&t, 0, cy).ch, 'Z');
 }
+
+#[test]
+fn resize_shrink_rows_preserves_nonempty_rows_below_cursor() {
+    let mut t = run_size(
+        5,
+        5,
+        b"\x1b[1;1HA\x1b[2;1HB\x1b[3;1HC\x1b[4;1HD\x1b[5;1HE\x1b[3;1H",
+    );
+
+    t.resize(GridSize::new(5, 3));
+
+    assert_eq!(t.scrollback_len(), 2);
+    assert_eq!(row_text(&t, 0, 1), "C");
+    assert_eq!(row_text(&t, 1, 1), "D");
+    assert_eq!(row_text(&t, 2, 1), "E");
+    assert_eq!(t.primary.cursor.y, 0);
+}

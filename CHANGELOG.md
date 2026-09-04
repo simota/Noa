@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.9] - 2026-09-05
+
+### Fixed
+
+- Claude Code installed through npm is recognized as an agent. The tty's
+  foreground process for an npm install is the `node` wrapper, and the
+  wrapper's argv was only inspected for Codex, so Claude Code panes showed
+  "node", BEL never promoted to attention, and the auto-approve fire gate
+  rejected every candidate. Wrapper canonicalization now covers Claude Code as
+  well, including the common `bin/claude` symlink launch whose argv carries no
+  package name, and an explicit npm package reference takes precedence over
+  the executable-basename heuristic so a Claude Code launch mentioning a
+  `codex` path is not branded Codex (#62)
+- Raw C1 bytes in ground state decode as invalid UTF-8 instead of opening a
+  control string, so one stray byte from damaged multi-byte text can no longer
+  swallow the visible output that follows (#61)
+- Colon-form SGR subparameter groups stop at the first semicolon and no longer
+  borrow the following attribute (#61)
+- DECOM origin-relative cursor addressing is applied to CUP/CHA/VPA, margin
+  homing, CPR, and saved-cursor replay; IRM insert mode shifts existing cells;
+  ICH/DCH/IL/DL/SU/SD and TAB/CBT are confined to DECSLRM margins; images
+  outside the margins survive rectangle scrolls (#61)
+- Shrinking the row count keeps populated rows below the cursor and counts
+  erased rows as disposable (#61)
+- `noa.getText` IPC responses are capped to the WebSocket write buffer so a
+  large read cannot disconnect the control client (#61)
+
 ## [0.2.8] - 2026-08-24
 
 ### Fixed

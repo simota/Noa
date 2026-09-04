@@ -95,9 +95,8 @@ The same `# cursor:` line terminates the dump.
    (only that section is rewritten; every other byte is preserved).
 3. **Review the blessed dump line by line against xterm/Ghostty semantics**
    before committing — bless records what noa *does*, not what is *correct*.
-   If noa is known-divergent, keep the fixture and say so in `## why:` (see
-   `scroll_region_origin.txt` for the DECOM gap) so the future fix shows up
-   as a deliberate re-bless.
+   If noa is known-divergent, keep the fixture and say so in `## why:` so the
+   future fix shows up as a deliberate re-bless.
 
 ## Future: Ghostty oracle, esctest2, vttest
 

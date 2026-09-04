@@ -90,6 +90,77 @@ fn cup_is_one_based() {
 }
 
 #[test]
+fn decom_makes_cup_and_cpr_relative_to_the_scroll_region() {
+    let t = run_size(
+        10,
+        8,
+        b"\x1b[?69h\x1b[3;8s\x1b[3;6r\x1b[?6h\x1b[2;2H\x1b[6n",
+    );
+
+    assert_eq!(t.primary.cursor.y, 3);
+    assert_eq!(t.primary.cursor.x, 3);
+    assert_eq!(t.pending_writes, b"\x1b[2;2R");
+}
+
+#[test]
+fn decom_set_and_reset_home_to_the_active_origin() {
+    let t = run_size(10, 8, b"\x1b[3;6r\x1b[?6h");
+    assert_eq!(t.primary.cursor.y, 2);
+
+    let t = run_size(10, 8, b"\x1b[3;6r\x1b[?6h\x1b[?6l");
+    assert_eq!(t.primary.cursor.y, 0);
+    assert_eq!(t.primary.cursor.x, 0);
+}
+
+#[test]
+fn decsc_decrc_restore_origin_mode_for_cursor_addressing() {
+    let t = run_size(
+        10,
+        8,
+        b"\x1b[3;6r\x1b[?6h\x1b7\x1b[?6l\x1b8\x1b[2;2H",
+    );
+
+    assert!(t.modes.origin_mode());
+    assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (1, 3));
+}
+
+#[test]
+fn decsc_decrc_restore_absolute_mode_for_cursor_addressing() {
+    let t = run_size(
+        10,
+        8,
+        b"\x1b[3;6r\x1b7\x1b[?6h\x1b8\x1b[2;2H",
+    );
+
+    assert!(!t.modes.origin_mode());
+    assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (1, 1));
+}
+
+#[test]
+fn alternate_screen_1048_restores_origin_mode_with_the_cursor() {
+    let t = run_size(
+        10,
+        8,
+        b"\x1b[3;6r\x1b[?6h\x1b[?1048h\x1b[?6l\x1b[?1048l\x1b[2;2H",
+    );
+
+    assert!(t.modes.origin_mode());
+    assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (1, 3));
+}
+
+#[test]
+fn alternate_screen_1049_restores_origin_mode_with_the_primary_cursor() {
+    let t = run_size(
+        10,
+        8,
+        b"\x1b[3;6r\x1b[?6h\x1b[?1049h\x1b[?6l\x1b[?1049l\x1b[2;2H",
+    );
+
+    assert!(t.modes.origin_mode());
+    assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (1, 3));
+}
+
+#[test]
 fn decslrm_requires_left_right_margin_mode() {
     let t = run_size(10, 5, b"\x1b[3;7s");
 

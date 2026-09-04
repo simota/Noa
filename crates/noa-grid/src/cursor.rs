@@ -145,7 +145,7 @@ impl Default for Cursor {
 }
 
 /// What `DECSC` (`ESC 7` / `CSI s`) saves and `DECRC` (`ESC 8` / `CSI u`)
-/// restores: position, the deferred-wrap latch, and pen state. Deliberately
+/// restores: position, the deferred-wrap latch, pen state, and DECOM. Deliberately
 /// narrower than [`Cursor`] — per xterm/ECMA-48 (and Ghostty's `SavedCursor`),
 /// cursor visibility (DECTCEM) and shape (DECSCUSR) are *not* part of the
 /// saved-cursor state, so DECRC must not roll them back.
@@ -159,6 +159,7 @@ pub struct SavedCursor {
     pub underline_color: Option<Color>,
     pub hyperlink: Option<HyperlinkId>,
     pub attrs: CellAttrs,
+    pub origin_mode: bool,
 }
 
 impl From<Cursor> for SavedCursor {
@@ -172,6 +173,7 @@ impl From<Cursor> for SavedCursor {
             underline_color: c.underline_color,
             hyperlink: c.hyperlink,
             attrs: c.attrs,
+            origin_mode: false,
         }
     }
 }

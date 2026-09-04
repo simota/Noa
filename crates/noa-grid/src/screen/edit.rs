@@ -449,14 +449,71 @@ impl Screen {
         self.cursor.x = self.clamp_x_to_margins(col.saturating_sub(1));
     }
 
+    pub(crate) fn cursor_position_with_origin(&mut self, row: u16, col: u16, origin: bool) {
+        if !origin {
+            self.cursor_position(row, col);
+            return;
+        }
+        self.cursor.pending_wrap = false;
+        self.cursor.y = self
+            .region
+            .top
+            .saturating_add(row.saturating_sub(1))
+            .min(self.region.bottom);
+        self.cursor.x = self
+            .left_margin()
+            .saturating_add(col.saturating_sub(1))
+            .min(self.right_margin());
+    }
+
     pub fn cursor_col_abs(&mut self, col: u16) {
         self.cursor.pending_wrap = false;
         self.cursor.x = self.clamp_x_to_margins(col.saturating_sub(1));
     }
 
+    pub(crate) fn cursor_col_abs_with_origin(&mut self, col: u16, origin: bool) {
+        if !origin {
+            self.cursor_col_abs(col);
+            return;
+        }
+        self.cursor.pending_wrap = false;
+        self.cursor.x = self
+            .left_margin()
+            .saturating_add(col.saturating_sub(1))
+            .min(self.right_margin());
+    }
+
     pub fn cursor_row_abs(&mut self, row: u16) {
         self.cursor.pending_wrap = false;
         self.cursor.y = row.saturating_sub(1).min(self.rows.saturating_sub(1));
+    }
+
+    pub(crate) fn cursor_row_abs_with_origin(&mut self, row: u16, origin: bool) {
+        if !origin {
+            self.cursor_row_abs(row);
+            return;
+        }
+        self.cursor.pending_wrap = false;
+        self.cursor.y = self
+            .region
+            .top
+            .saturating_add(row.saturating_sub(1))
+            .min(self.region.bottom);
+    }
+
+    pub(crate) fn home_cursor(&mut self, origin: bool) {
+        self.cursor.pending_wrap = false;
+        self.cursor.y = if origin { self.region.top } else { 0 };
+        self.cursor.x = self.left_margin();
+    }
+
+    pub(crate) fn reported_cursor_position(&self, origin: bool) -> (u16, u16) {
+        let row_origin = if origin { self.region.top } else { 0 };
+        let col_origin = if origin { self.left_margin() } else { 0 };
+        (
+            self.cursor.y.saturating_sub(row_origin) + 1,
+            self.cursor.x.saturating_sub(col_origin) + 1,
+        )
     }
 
     pub fn tab(&mut self, n: u16) {
@@ -498,7 +555,7 @@ impl Screen {
         self.cursor.x = self.cursor.x.min(self.cols.saturating_sub(1));
     }
 
-    pub fn set_horizontal_margins(&mut self, left: u16, right: u16) {
+    pub fn set_horizontal_margins(&mut self, left: u16, right: u16, origin: bool) {
         let last = self.cols.saturating_sub(1);
         let l = left.saturating_sub(1).min(last);
         let r = if right == 0 {
@@ -508,17 +565,22 @@ impl Screen {
         };
         if l < r {
             self.horizontal_margins = Some(HorizontalMargins { left: l, right: r });
-            self.cursor_position(1, 1);
+            self.home_cursor(origin);
         }
     }
 
-    pub fn save_cursor(&mut self) {
-        self.saved_cursor = Some(self.cursor.into());
+    pub fn save_cursor(&mut self, origin_mode: bool) {
+        let mut saved: crate::cursor::SavedCursor = self.cursor.into();
+        saved.origin_mode = origin_mode;
+        self.saved_cursor = Some(saved);
     }
 
-    pub fn restore_cursor(&mut self) {
+    pub fn restore_cursor(&mut self) -> Option<bool> {
         if let Some(saved) = self.saved_cursor {
             self.cursor.restore_from(saved);
+            Some(saved.origin_mode)
+        } else {
+            None
         }
     }
 

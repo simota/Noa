@@ -250,13 +250,17 @@ impl Handler for Terminal {
         self.active_mut().cursor_backward(n);
     }
     fn cursor_position(&mut self, row: u16, col: u16) {
-        self.active_mut().cursor_position(row, col);
+        let origin = self.modes.origin_mode();
+        self.active_mut()
+            .cursor_position_with_origin(row, col, origin);
     }
     fn cursor_col_abs(&mut self, col: u16) {
-        self.active_mut().cursor_col_abs(col);
+        let origin = self.modes.origin_mode();
+        self.active_mut().cursor_col_abs_with_origin(col, origin);
     }
     fn cursor_row_abs(&mut self, row: u16) {
-        self.active_mut().cursor_row_abs(row);
+        let origin = self.modes.origin_mode();
+        self.active_mut().cursor_row_abs_with_origin(row, origin);
     }
 
     fn erase_display(&mut self, mode: EraseDisplay) {
@@ -292,7 +296,9 @@ impl Handler for Terminal {
 
     fn set_horizontal_margins(&mut self, left: u16, right: u16) {
         if self.modes.left_right_margin() {
-            self.active_mut().set_horizontal_margins(left, right);
+            let origin = self.modes.origin_mode();
+            self.active_mut()
+                .set_horizontal_margins(left, right, origin);
         }
     }
 
@@ -358,6 +364,7 @@ impl Handler for Terminal {
         self.modes.set(value, ansi, on);
         if !ansi {
             match value {
+                6 => self.active_mut().home_cursor(on),
                 25 => self.active_mut().cursor.visible = on, // DECTCEM
                 69 => {
                     if on {
@@ -382,14 +389,16 @@ impl Handler for Terminal {
                 }
                 1048 => {
                     if on {
-                        self.active_mut().save_cursor();
-                    } else {
-                        self.active_mut().restore_cursor();
+                        let origin = self.modes.origin_mode();
+                        self.active_mut().save_cursor(origin);
+                    } else if let Some(origin) = self.active_mut().restore_cursor() {
+                        self.modes.set(6, false, origin);
                     }
                 }
                 1049 => {
                     if on {
-                        self.primary.save_cursor();
+                        let origin = self.modes.origin_mode();
+                        self.primary.save_cursor(origin);
                         self.enter_alt_screen(true);
                     } else {
                         self.leave_alt_screen(true, true);
@@ -416,10 +425,13 @@ impl Handler for Terminal {
         self.active_mut().reverse_index();
     }
     fn save_cursor(&mut self) {
-        self.active_mut().save_cursor();
+        let origin = self.modes.origin_mode();
+        self.active_mut().save_cursor(origin);
     }
     fn restore_cursor(&mut self) {
-        self.active_mut().restore_cursor();
+        if let Some(origin) = self.active_mut().restore_cursor() {
+            self.modes.set(6, false, origin);
+        }
     }
     fn set_tab_stop(&mut self) {
         self.active_mut().set_tab_stop();
@@ -558,8 +570,9 @@ impl Handler for Terminal {
         match kind {
             DsrKind::Status => self.pending_writes.extend_from_slice(b"\x1b[0n"),
             DsrKind::CursorPosition => {
-                let row = self.active().cursor.y + 1;
-                let col = self.active().cursor.x + 1;
+                let (row, col) = self
+                    .active()
+                    .reported_cursor_position(self.modes.origin_mode());
                 self.pending_writes
                     .extend_from_slice(format!("\x1b[{row};{col}R").as_bytes());
             }
@@ -805,6 +818,7 @@ impl Handler for Terminal {
     }
 
     fn set_scroll_region(&mut self, top: u16, bottom: u16) {
+        let origin = self.modes.origin_mode();
         let screen = self.active_mut();
         let last = screen.rows.saturating_sub(1);
         let t = top.saturating_sub(1).min(last);
@@ -815,7 +829,7 @@ impl Handler for Terminal {
         };
         if t < b {
             screen.region = ScrollRegion { top: t, bottom: b };
-            screen.cursor_position(1, 1); // DECSTBM homes the cursor after a valid region.
+            screen.home_cursor(origin);
         }
     }
 }

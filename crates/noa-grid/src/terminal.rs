@@ -1039,8 +1039,8 @@ impl Terminal {
         }
         self.primary.scroll_viewport_to_bottom();
         self.primary.cursor.visible = self.modes.cursor_visible();
-        if restore_cursor {
-            self.primary.restore_cursor();
+        if restore_cursor && let Some(origin) = self.primary.restore_cursor() {
+            self.modes.set(6, false, origin);
         }
         if clear_alt && was_alt {
             let mut alt = Screen::alternate(self.size.cols, self.size.rows);

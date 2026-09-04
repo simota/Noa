@@ -47,6 +47,9 @@ const MAX_CONNECTIONS_PER_REMOTE_IP: usize =
 /// under this) and far below tungstenite's 64 MiB/16 MiB defaults.
 const MAX_WS_MESSAGE_SIZE: usize = 1024 * 1024;
 const MAX_WS_FRAME_SIZE: usize = 256 * 1024;
+const MAX_WS_WRITE_BUFFER_SIZE: usize = crate::attach::ATTACH_OUTPUT_CAPACITY_BYTES;
+/// Leaves room for tungstenite's frame header inside its 1 MiB write buffer.
+const MAX_WS_TEXT_PAYLOAD_SIZE: usize = MAX_WS_WRITE_BUFFER_SIZE - 1024;
 const MAX_RESIZE_COLS: u16 = 4096;
 const MAX_RESIZE_ROWS: u16 = 4096;
 const MAX_RESIZE_CELLS: u32 = 1024 * 1024;
@@ -83,7 +86,7 @@ fn connection_ws_config() -> WebSocketConfig {
         write_buffer_size: 128 * 1024,
         // Bounds both control and raw connections. Raw output also passes
         // through the exact byte-counted 1 MiB queue in `attach`.
-        max_write_buffer_size: crate::attach::ATTACH_OUTPUT_CAPACITY_BYTES,
+        max_write_buffer_size: MAX_WS_WRITE_BUFFER_SIZE,
         max_message_size: Some(MAX_WS_MESSAGE_SIZE),
         max_frame_size: Some(MAX_WS_FRAME_SIZE),
         accept_unmasked_frames: false,
@@ -1074,6 +1077,40 @@ fn success_response(id: Value, result: Value) -> String {
     serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string()
 }
 
+fn capped_get_text_response(id: Value, mut result: Value) -> String {
+    let response = success_response(id.clone(), result.clone());
+    if response.len() <= MAX_WS_TEXT_PAYLOAD_SIZE {
+        return response;
+    }
+
+    let Some(text) = result
+        .get("text")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return response;
+    };
+    result["truncated"] = Value::Bool(true);
+
+    let mut fits = 0usize;
+    let mut exceeds = text.len().saturating_add(1);
+    while fits + 1 < exceeds {
+        let candidate_bytes = fits + (exceeds - fits) / 2;
+        let (candidate, _) = truncate_tail(&text, candidate_bytes);
+        result["text"] = Value::String(candidate);
+        let candidate_response = success_response(id.clone(), result.clone());
+        if candidate_response.len() <= MAX_WS_TEXT_PAYLOAD_SIZE {
+            fits = candidate_bytes;
+        } else {
+            exceeds = candidate_bytes;
+        }
+    }
+
+    let (text, _) = truncate_tail(&text, fits);
+    result["text"] = Value::String(text);
+    success_response(id, result)
+}
+
 fn error_response(id: Value, code: ErrorCode, message: &str) -> String {
     serde_json::json!({
         "jsonrpc": "2.0",
@@ -1175,6 +1212,7 @@ fn dispatch(
         ));
     }
 
+    let is_get_text = req.method == "noa.getText";
     let outcome = (|| -> Result<Value, RpcFail> {
         match req.method.as_str() {
             "noa.listPanels" => {
@@ -1240,6 +1278,7 @@ fn dispatch(
     })();
 
     Some(match outcome {
+        Ok(result) if is_get_text => capped_get_text_response(id, result),
         Ok(result) => success_response(id, result),
         Err(fail) => error_response(id, fail.code, &fail.message),
     })

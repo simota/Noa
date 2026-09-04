@@ -307,3 +307,22 @@ fn resize_shrink_rows_preserves_nonempty_rows_below_cursor() {
     assert_eq!(row_text(&t, 2, 1), "E");
     assert_eq!(t.primary.cursor.y, 0);
 }
+
+#[test]
+fn resize_shrink_rows_treats_erased_rows_below_cursor_as_disposable() {
+    // Rows 4-5 held text and were then cleared with EL 2; they are visually
+    // blank and must be dropped before anything moves into scrollback.
+    let mut t = run_size(
+        5,
+        5,
+        b"\x1b[1;1HA\x1b[2;1HB\x1b[3;1HC\x1b[4;1HD\x1b[5;1HE\x1b[4;1H\x1b[2K\x1b[5;1H\x1b[2K\x1b[3;1H",
+    );
+
+    t.resize(GridSize::new(5, 3));
+
+    assert_eq!(t.scrollback_len(), 0);
+    assert_eq!(row_text(&t, 0, 1), "A");
+    assert_eq!(row_text(&t, 1, 1), "B");
+    assert_eq!(row_text(&t, 2, 1), "C");
+    assert_eq!(t.primary.cursor.y, 2);
+}

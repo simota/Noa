@@ -54,7 +54,7 @@ impl Screen {
                     let y = usize::from(old_rows - 1 - offset);
                     let row = &self.grid[y];
                     let abs_row = live_top + y;
-                    row.occupied() == 0
+                    row.is_blank()
                         && !row.wrapped
                         && !self.kitty_placements.iter().any(|placement| {
                             abs_row >= placement.anchor_abs_row

@@ -196,6 +196,14 @@ impl Row {
         (self.occ as usize).min(self.cells.len())
     }
 
+    /// Whether every cell is `Cell::default()`. Unlike [`Self::occupied`],
+    /// which is only an upper bound that erases never lower, this inspects
+    /// the cells, so a row cleared by default-background EL/ED counts as blank.
+    pub fn is_blank(&self) -> bool {
+        let blank = Cell::default();
+        self.cells[..self.occupied()].iter().all(|c| *c == blank)
+    }
+
     /// Record that cells below `end` may now hold non-default content.
     /// Monotonic: never lowers the watermark.
     #[inline]

@@ -817,10 +817,20 @@ impl Screen {
         self.remove_placements_intersecting_grid_rows(start, bottom);
     }
 
-    pub fn repeat_preceding_char(&mut self, n: u16, autowrap: bool, grapheme_clustering: bool) {
+    pub fn repeat_preceding_char(
+        &mut self,
+        n: u16,
+        autowrap: bool,
+        grapheme_clustering: bool,
+        insert_mode: bool,
+    ) {
         if let Some(c) = self.last_printed {
             for _ in 0..n.max(1) {
-                self.print(c, autowrap, grapheme_clustering);
+                if insert_mode {
+                    self.print_with_insert(c, autowrap, grapheme_clustering);
+                } else {
+                    self.print(c, autowrap, grapheme_clustering);
+                }
             }
         }
     }

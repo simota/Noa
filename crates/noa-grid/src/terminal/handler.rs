@@ -18,8 +18,14 @@ impl Handler for Terminal {
     fn print(&mut self, c: char) {
         let autowrap = self.modes.autowrap();
         let grapheme_clustering = self.modes.grapheme_clustering();
+        let insert_mode = self.modes.insert_mode();
         let c = self.charset.translate(c);
-        self.active_mut().print(c, autowrap, grapheme_clustering);
+        if insert_mode {
+            self.active_mut()
+                .print_with_insert(c, autowrap, grapheme_clustering);
+        } else {
+            self.active_mut().print(c, autowrap, grapheme_clustering);
+        }
     }
 
     /// Bulk fast path for ground-state text runs (Ghostty analog:
@@ -30,6 +36,15 @@ impl Handler for Terminal {
     fn print_str(&mut self, s: &str) {
         let autowrap = self.modes.autowrap();
         let grapheme_clustering = self.modes.grapheme_clustering();
+        let insert_mode = self.modes.insert_mode();
+        if insert_mode {
+            for c in s.chars() {
+                let c = self.charset.translate(c);
+                self.active_mut()
+                    .print_with_insert(c, autowrap, grapheme_clustering);
+            }
+            return;
+        }
         if !self.charset.active_is_ascii() {
             // DEC Special Graphics (or any future set) rewrites scalars —
             // stay on the per-scalar path.
@@ -83,10 +98,11 @@ impl Handler for Terminal {
         let autowrap = self.modes.autowrap();
         let lnm = self.modes.linefeed_newline();
         let grapheme_clustering = self.modes.grapheme_clustering();
+        let insert_mode = self.modes.insert_mode();
         let ascii_charset = self.charset.active_is_ascii();
         let mut rest = data;
         while !rest.is_empty() {
-            if ascii_charset && autowrap {
+            if ascii_charset && autowrap && !insert_mode {
                 let consumed = self.active_mut().apply_ascii_line_batch(
                     rest,
                     autowrap,
@@ -132,11 +148,12 @@ impl Handler for Terminal {
         let autowrap = self.modes.autowrap();
         let lnm = self.modes.linefeed_newline();
         let grapheme_clustering = self.modes.grapheme_clustering();
+        let insert_mode = self.modes.insert_mode();
         let ascii_charset = self.charset.active_is_ascii();
         let mut attrs = Vec::new();
         let mut rest = data;
         while !rest.is_empty() {
-            if ascii_charset && autowrap {
+            if ascii_charset && autowrap && !insert_mode {
                 let consumed = self.active_mut().apply_sgr_ascii_line_batch(
                     rest,
                     autowrap,
@@ -192,6 +209,15 @@ impl Handler for Terminal {
     fn print_ascii_str(&mut self, s: &str) {
         let autowrap = self.modes.autowrap();
         let grapheme_clustering = self.modes.grapheme_clustering();
+        let insert_mode = self.modes.insert_mode();
+        if insert_mode {
+            for c in s.chars() {
+                let c = self.charset.translate(c);
+                self.active_mut()
+                    .print_with_insert(c, autowrap, grapheme_clustering);
+            }
+            return;
+        }
         if !self.charset.active_is_ascii() {
             for c in s.chars() {
                 let c = self.charset.translate(c);
@@ -308,7 +334,8 @@ impl Handler for Terminal {
 
     fn request_mode(&mut self, request: ModeRequest) {
         let state = match (request.value, request.ansi) {
-            (20, true)
+            (4, true)
+            | (20, true)
             | (1, false)
             | (6, false)
             | (7, false)
@@ -520,8 +547,9 @@ impl Handler for Terminal {
     fn repeat_preceding_char(&mut self, n: u16) {
         let autowrap = self.modes.autowrap();
         let grapheme_clustering = self.modes.grapheme_clustering();
+        let insert_mode = self.modes.insert_mode();
         self.active_mut()
-            .repeat_preceding_char(n, autowrap, grapheme_clustering);
+            .repeat_preceding_char(n, autowrap, grapheme_clustering, insert_mode);
     }
 
     fn seed_set_last_printed(&mut self, ch: char) {

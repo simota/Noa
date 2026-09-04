@@ -39,6 +39,20 @@ impl Screen {
     /// candidate-1 scope, not full UAX#29) attaches to that cluster's cell
     /// instead of printing into a new one, and the cursor does not move.
     pub fn print(&mut self, c: char, autowrap: bool, grapheme_clustering: bool) {
+        self.print_inner(c, autowrap, grapheme_clustering, false);
+    }
+
+    pub(crate) fn print_with_insert(&mut self, c: char, autowrap: bool, grapheme_clustering: bool) {
+        self.print_inner(c, autowrap, grapheme_clustering, true);
+    }
+
+    fn print_inner(
+        &mut self,
+        c: char,
+        autowrap: bool,
+        grapheme_clustering: bool,
+        insert_mode: bool,
+    ) {
         if grapheme_clustering && self.extend_cluster_at_cursor(c) {
             return;
         }
@@ -90,6 +104,10 @@ impl Screen {
                 self.last_printed = Some(c);
                 return;
             }
+        }
+
+        if insert_mode {
+            self.insert_blank_chars(width as u16);
         }
 
         let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);

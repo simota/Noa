@@ -212,6 +212,13 @@ fn left_right_margin_reset_restores_full_width_motion() {
 }
 
 #[test]
+fn insert_mode_shifts_existing_text_instead_of_overwriting_it() {
+    let t = run_size(8, 1, b"abcdef\x1b[1;3H\x1b[4hXY");
+
+    assert_eq!(row_text(&t, 0, 8), "abXYcdef");
+}
+
+#[test]
 fn keypad_mode_tracks_esc_and_dec_private_mode() {
     let t = run(b"\x1b=");
     assert!(t.modes.app_keypad());

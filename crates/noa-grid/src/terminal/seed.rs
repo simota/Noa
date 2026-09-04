@@ -114,6 +114,7 @@ impl Terminal {
         } else {
             write_cursor(&mut seed, screen, screen.cursor, self.modes.autowrap());
         }
+        write_ansi_mode(&mut seed, 4, self.modes.insert_mode());
         write_ansi_mode(&mut seed, 20, self.modes.linefeed_newline());
 
         // Restoring a screen without explicit horizontal margins disables
@@ -734,7 +735,7 @@ mod tests {
         let mut source = Terminal::new(size);
         let mut source_stream = Stream::new();
         source_stream.feed(
-            b"\x1b[?66h\x1b[?1004h\x1b[?1007l\x1b[>4;2m\x1b[>1u\x1b[>5u\x1b[?1049h\x1b[>8u\x1b[>3u",
+            b"\x1b[4h\x1b[?66h\x1b[?1004h\x1b[?1007l\x1b[>4;2m\x1b[>1u\x1b[>5u\x1b[?1049h\x1b[>8u\x1b[>3u",
             &mut source,
         );
 
@@ -747,6 +748,7 @@ mod tests {
                 source.modes.get(mode, false)
             );
         }
+        assert_eq!(replica.modes.insert_mode(), source.modes.insert_mode());
         assert!(replica.modify_other_keys_2);
         assert_eq!(replica.kitty_keyboard_flags(), 3);
         replica_stream.feed(b"\x1b[<1u", &mut replica);

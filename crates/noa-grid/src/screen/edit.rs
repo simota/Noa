@@ -256,6 +256,11 @@ impl Screen {
         if n == 0 {
             return;
         }
+        if self.has_narrow_horizontal_margins() {
+            self.scroll_rectangle_up(top, bottom, n);
+            self.remove_placements_intersecting_grid_rows(top, bottom);
+            return;
+        }
         let recorded = self.records_scrollback_for_region(top, bottom);
         let full_height = top == 0 && bottom + 1 == self.rows as usize;
         if n == 1 && full_height && recorded {
@@ -386,6 +391,11 @@ impl Screen {
         if n == 0 {
             return;
         }
+        if self.has_narrow_horizontal_margins() {
+            self.scroll_rectangle_down(top, bottom, n);
+            self.remove_placements_intersecting_grid_rows(top, bottom);
+            return;
+        }
         let blank = self.blank();
         self.grid.canonicalize()[top..=bottom].rotate_right(n);
         for r in &mut self.grid.canonicalize()[top..(top + n)] {
@@ -395,6 +405,52 @@ impl Screen {
             r.dirty = true;
         }
         self.track_scroll_down(top, bottom, n);
+    }
+
+    fn has_narrow_horizontal_margins(&self) -> bool {
+        self.horizontal_margins.is_some_and(|margins| {
+            margins.left != 0 || margins.right != self.cols.saturating_sub(1)
+        })
+    }
+
+    fn scroll_rectangle_up(&mut self, top: usize, bottom: usize, n: usize) {
+        let blank = self.blank();
+        let left = self.left_margin() as usize;
+        let right = self.right_margin() as usize;
+        for dst in top..bottom + 1 - n {
+            for x in left..=right {
+                self.grid[dst].cells[x] = self.grid[dst + n].cells[x];
+            }
+        }
+        for y in bottom + 1 - n..=bottom {
+            self.grid[y].cells[left..=right].fill(blank);
+        }
+        for y in top..=bottom {
+            let row = &mut self.grid[y];
+            row.mark_occupied(right + 1);
+            Self::sanitize_wide_row(row, &blank);
+            row.dirty = true;
+        }
+    }
+
+    fn scroll_rectangle_down(&mut self, top: usize, bottom: usize, n: usize) {
+        let blank = self.blank();
+        let left = self.left_margin() as usize;
+        let right = self.right_margin() as usize;
+        for dst in (top + n..bottom + 1).rev() {
+            for x in left..=right {
+                self.grid[dst].cells[x] = self.grid[dst - n].cells[x];
+            }
+        }
+        for y in top..top + n {
+            self.grid[y].cells[left..=right].fill(blank);
+        }
+        for y in top..=bottom {
+            let row = &mut self.grid[y];
+            row.mark_occupied(right + 1);
+            Self::sanitize_wide_row(row, &blank);
+            row.dirty = true;
+        }
     }
 
     // ── horizontal / absolute motion ────────────────────────────────
@@ -519,14 +575,17 @@ impl Screen {
     pub fn tab(&mut self, n: u16) {
         self.cursor.pending_wrap = false;
         for _ in 0..n.max(1) {
-            self.cursor.x = self.tabstops.next(self.cursor.x, self.cols);
+            self.cursor.x = self
+                .tabstops
+                .next(self.cursor.x, self.cols)
+                .min(self.right_margin());
         }
     }
 
     pub fn tab_back(&mut self, n: u16) {
         self.cursor.pending_wrap = false;
         for _ in 0..n.max(1) {
-            self.cursor.x = self.tabstops.prev(self.cursor.x);
+            self.cursor.x = self.tabstops.prev(self.cursor.x).max(self.left_margin());
         }
     }
 
@@ -714,17 +773,24 @@ impl Screen {
     // ── edit ─────────────────────────────────────────────────────────
 
     pub fn insert_blank_chars(&mut self, n: u16) {
+        // #TODO(agent): Guard IL/DL outside the horizontal margins, and
+        // ICH/DCH below the left margin, when cursor addressing stops
+        // clamping to DECSLRM.
         self.cursor.pending_wrap = false;
         let blank = self.blank();
         let x = self.cursor.x as usize;
         let y = self.cursor.y as usize;
-        let len = self.cols as usize - x;
+        let right = self.right_margin() as usize;
+        if x > right {
+            return;
+        }
+        let len = right + 1 - x;
         let n = (n.max(1) as usize).min(len);
         let row = &mut self.grid[y];
         // The rotate shifts occupied content right by `n`; the fill may
         // write a styled (BCE) blank into `x..x + n`.
-        let shifted_occ = row.occupied().saturating_add(n).min(row.cells.len());
-        row.cells[x..].rotate_right(n);
+        let shifted_occ = row.occupied().saturating_add(n).min(right + 1);
+        row.cells[x..=right].rotate_right(n);
         for c in &mut row.cells[x..x + n] {
             c.set_from(&blank);
         }
@@ -741,11 +807,15 @@ impl Screen {
         let blank = self.blank();
         let x = self.cursor.x as usize;
         let y = self.cursor.y as usize;
-        let len = self.cols as usize - x;
+        let right = self.right_margin() as usize;
+        if x > right {
+            return;
+        }
+        let len = right + 1 - x;
         let n = (n.max(1) as usize).min(len);
         let row = &mut self.grid[y];
-        row.cells[x..].rotate_left(n);
-        for c in &mut row.cells[self.cols as usize - n..] {
+        row.cells[x..=right].rotate_left(n);
+        for c in &mut row.cells[right + 1 - n..=right] {
             c.set_from(&blank);
         }
         // The left shift only moves content toward lower indices (the cells
@@ -786,6 +856,11 @@ impl Screen {
         let bottom = self.region.bottom as usize;
         let len = bottom - start + 1;
         let n = (n.max(1) as usize).min(len);
+        if self.has_narrow_horizontal_margins() {
+            self.scroll_rectangle_down(start, bottom, n);
+            self.remove_placements_intersecting_grid_rows(start, bottom);
+            return;
+        }
         let blank = self.blank();
         self.grid.canonicalize()[start..=bottom].rotate_right(n);
         for r in &mut self.grid.canonicalize()[start..start + n] {
@@ -806,6 +881,11 @@ impl Screen {
         let bottom = self.region.bottom as usize;
         let len = bottom - start + 1;
         let n = (n.max(1) as usize).min(len);
+        if self.has_narrow_horizontal_margins() {
+            self.scroll_rectangle_up(start, bottom, n);
+            self.remove_placements_intersecting_grid_rows(start, bottom);
+            return;
+        }
         let blank = self.blank();
         self.grid.canonicalize()[start..=bottom].rotate_left(n);
         for r in &mut self.grid.canonicalize()[bottom + 1 - n..=bottom] {

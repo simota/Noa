@@ -219,6 +219,64 @@ fn insert_mode_shifts_existing_text_instead_of_overwriting_it() {
 }
 
 #[test]
+fn horizontal_margins_bound_ich_and_dch() {
+    let inserted = run_size(
+        10,
+        1,
+        b"0123456789\x1b[?69h\x1b[3;8s\x1b[5G\x1b[2@",
+    );
+    assert_eq!(row_text(&inserted, 0, 10), "0123  4589");
+
+    let deleted = run_size(
+        10,
+        1,
+        b"0123456789\x1b[?69h\x1b[3;8s\x1b[5G\x1b[2P",
+    );
+    assert_eq!(row_text(&deleted, 0, 10), "012367  89");
+}
+
+#[test]
+fn horizontal_margins_bound_il_and_dl() {
+    let prefix = b"\x1b[1;1HAAAAAAAA\x1b[2;1HBBBBBBBB\x1b[3;1HCCCCCCCC\x1b[4;1HDDDDDDDD\x1b[5;1HEEEEEEEE\x1b[6;1HFFFFFFFF\x1b[?69h\x1b[3;6s\x1b[2;5r\x1b[3;3H";
+
+    let inserted = run_size(8, 6, &[prefix.as_slice(), b"\x1b[L"].concat());
+    assert_eq!(row_text(&inserted, 2, 8), "CC    CC");
+    assert_eq!(row_text(&inserted, 3, 8), "DDCCCCDD");
+    assert_eq!(row_text(&inserted, 4, 8), "EEDDDDEE");
+
+    let deleted = run_size(8, 6, &[prefix.as_slice(), b"\x1b[M"].concat());
+    assert_eq!(row_text(&deleted, 2, 8), "CCDDDDCC");
+    assert_eq!(row_text(&deleted, 3, 8), "DDEEEEDD");
+    assert_eq!(row_text(&deleted, 4, 8), "EE    EE");
+}
+
+#[test]
+fn horizontal_margins_bound_su_and_sd() {
+    let prefix = b"\x1b[1;1HAAAAAAAA\x1b[2;1HBBBBBBBB\x1b[3;1HCCCCCCCC\x1b[4;1HDDDDDDDD\x1b[5;1HEEEEEEEE\x1b[6;1HFFFFFFFF\x1b[?69h\x1b[3;6s\x1b[2;5r";
+
+    let up = run_size(8, 6, &[prefix.as_slice(), b"\x1b[S"].concat());
+    assert_eq!(row_text(&up, 1, 8), "BBCCCCBB");
+    assert_eq!(row_text(&up, 2, 8), "CCDDDDCC");
+    assert_eq!(row_text(&up, 3, 8), "DDEEEEDD");
+    assert_eq!(row_text(&up, 4, 8), "EE    EE");
+
+    let down = run_size(8, 6, &[prefix.as_slice(), b"\x1b[T"].concat());
+    assert_eq!(row_text(&down, 1, 8), "BB    BB");
+    assert_eq!(row_text(&down, 2, 8), "CCBBBBCC");
+    assert_eq!(row_text(&down, 3, 8), "DDCCCCDD");
+    assert_eq!(row_text(&down, 4, 8), "EEDDDDEE");
+}
+
+#[test]
+fn horizontal_margins_bound_forward_and_backward_tabs() {
+    let t = run_size(10, 2, b"\x1b[?69h\x1b[3;6s\t");
+    assert_eq!(t.primary.cursor.x, 5);
+
+    let t = run_size(10, 2, b"\x1b[?69h\x1b[3;6s\t\x1b[Z");
+    assert_eq!(t.primary.cursor.x, 2);
+}
+
+#[test]
 fn keypad_mode_tracks_esc_and_dec_private_mode() {
     let t = run(b"\x1b=");
     assert!(t.modes.app_keypad());

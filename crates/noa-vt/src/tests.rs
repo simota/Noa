@@ -443,33 +443,14 @@ fn c0_in_the_middle_of_csi_executes() {
 }
 
 #[test]
-fn c1_csi_dispatches_like_escape_bracket() {
-    let acts = actions(&[0x9b, b'3', b'1', b'm', b'X']);
-    assert_eq!(
-        acts,
-        vec![
-            Action::CsiDispatch(Csi::new(&[31], &[], &[], 0, b'm')),
-            Action::Print('X'),
-        ]
-    );
-}
-
-#[test]
-fn c1_string_controls_dispatch_and_st_terminates() {
-    assert_eq!(
-        actions(&[0x9d, b'2', b';', b't', 0x9c]),
-        vec![Action::OscDispatch(b"2;t".to_vec())]
-    );
-    assert_eq!(
-        actions(&[0x90, b'+', b'q', b'5', b'4', b'4', b'e', 0x9c]),
-        vec![Action::DcsDispatch(crate::DcsPayload {
-            data: b"+q544e".to_vec(),
-        })]
-    );
-
-    let (data, truncated) = only_apc(&[0x9f, b'G', b'i', b'=', b'1', 0x9c]);
-    assert_eq!(data, b"Gi=1");
-    assert!(!truncated);
+fn ground_c1_bytes_are_invalid_utf8_instead_of_control_introducers() {
+    for byte in [0x90, 0x98, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f] {
+        assert_eq!(
+            actions(&[byte, b'X']),
+            vec![Action::Print('\u{FFFD}'), Action::Print('X')],
+            "raw C1 byte {byte:#04x}"
+        );
+    }
 }
 
 // ── APC bounded capture (Kitty graphics transport) ─────────────────
@@ -511,15 +492,6 @@ fn apc_sos_pm_still_discarded() {
                 .into_iter()
                 .all(|a| !matches!(a, Action::ApcDispatch { .. })),
             "lead {lead:?} should not dispatch"
-        );
-    }
-
-    for lead in [0x98, 0x9e] {
-        let mut bytes = vec![lead];
-        bytes.extend_from_slice(&[b'w', b'h', b'a', b't', 0x9b, b'3', b'1', b'm', 0x9c]);
-        assert!(
-            actions(&bytes).is_empty(),
-            "C1 SOS/PM payload must be discarded through 8-bit ST"
         );
     }
 }
@@ -936,16 +908,17 @@ fn stream_control_bytes_split_ascii_runs_across_word_boundaries() {
 
 #[test]
 fn stream_lone_c1_and_stray_lead_bytes_are_invalid_utf8_across_word_boundaries() {
-    // A single C1 byte outside the recognized 8-bit CSI/OSC/DCS/APC/SOS/PM
-    // introducers (0x90/0x98/0x9b/0x9c/0x9d/0x9e/0x9f — see `c1_control`),
-    // or a stray multi-byte lead/continuation byte, is a run byte
+    // A single C1 byte or a stray multi-byte lead/continuation byte is a run byte
     // (is_run_byte doesn't special-case C1) but on its own is never valid
     // UTF-8, so the slow from_utf8 path must still catch it and emit
     // exactly one replacement scalar — regardless of which SWAR chunk it
     // lands in.
     for len in 1..=20usize {
         for pos in 0..len {
-            for &byte in &[0x80u8, 0x81, 0x8a, 0x99, 0xa0, 0xc0, 0xff] {
+            for &byte in &[
+                0x80u8, 0x81, 0x8a, 0x90, 0x98, 0x99, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f, 0xa0, 0xc0,
+                0xff,
+            ] {
                 let mut buf = vec![b'a'; len];
                 buf[pos] = byte;
                 assert_eq!(

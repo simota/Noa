@@ -492,7 +492,7 @@ impl Parser {
     // ── primitive actions ──────────────────────────────────────────
 
     fn c1_control<F: FnMut(Action)>(&mut self, b: u8, sink: &mut F) -> bool {
-        if !(0x80..=0x9f).contains(&b) {
+        if self.state == State::Ground || !(0x80..=0x9f).contains(&b) {
             return false;
         }
         match self.state {

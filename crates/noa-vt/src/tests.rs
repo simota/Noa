@@ -82,6 +82,39 @@ fn sgr_truecolor_semicolon_and_colon() {
 }
 
 #[test]
+fn sgr_colon_truecolor_without_colorspace_stops_at_semicolon() {
+    let csi = only_csi(b"\x1b[38:2:255:0:0;1m");
+    assert_eq!(
+        parse_sgr(&csi),
+        vec![SgrAttr::Fg(Color::Rgb(Rgb::new(255, 0, 0))), SgrAttr::Bold,]
+    );
+}
+
+#[test]
+fn sgr_incomplete_colon_palette_does_not_claim_semicolon_parameter() {
+    let csi = only_csi(b"\x1b[38:5;1m");
+    assert_eq!(parse_sgr(&csi), vec![SgrAttr::Bold]);
+}
+
+#[test]
+fn sgr_incomplete_colon_truecolor_does_not_claim_semicolon_parameters() {
+    let actual = [
+        b"\x1b[38:2:255;1m".as_slice(),
+        b"\x1b[38:2;1m".as_slice(),
+        b"\x1b[38:2:255:0;1m".as_slice(),
+    ]
+    .map(|bytes| parse_sgr(&only_csi(bytes)));
+    assert_eq!(
+        actual,
+        [
+            vec![SgrAttr::Bold],
+            vec![SgrAttr::Bold],
+            vec![SgrAttr::Bold]
+        ]
+    );
+}
+
+#[test]
 fn sgr_256_palette() {
     let csi = only_csi(b"\x1b[38;5;196m");
     assert_eq!(parse_sgr(&csi), vec![SgrAttr::Fg(Color::Palette(196))]);
@@ -1461,13 +1494,8 @@ fn csi_fast_path_equals_dfa_at_every_split_position() {
 }
 
 #[test]
-fn sgr_lone_truecolor_decodes_identically_for_all_separator_patterns() {
-    // A lone 5-param truecolor pen (`38;2;r;g;b` and every colon/semicolon
-    // separator mix) decodes to the same attribute: with exactly 5 params
-    // `parse_ext_color` reads r/g/b from the same slots in both forms, and
-    // the dedicated fast path in `parse_sgr_into` must match.
-    for mask in 0u8..16 {
-        let seps: Vec<bool> = (0..4).map(|k| mask & (1 << k) != 0).collect();
+fn sgr_lone_truecolor_supports_semicolon_and_colon_forms() {
+    for seps in [[false; 4], [true; 4]] {
         for code in [38u16, 48] {
             let csi = Csi::new(&[code, 2, 10, 20, 30], &seps, &[], 0, b'm');
             let expected = if code == 38 {
@@ -1475,7 +1503,7 @@ fn sgr_lone_truecolor_decodes_identically_for_all_separator_patterns() {
             } else {
                 SgrAttr::Bg(Color::Rgb(Rgb::new(10, 20, 30)))
             };
-            assert_eq!(parse_sgr(&csi), vec![expected], "mask={mask} code={code}");
+            assert_eq!(parse_sgr(&csi), vec![expected], "seps={seps:?} code={code}");
         }
     }
 }

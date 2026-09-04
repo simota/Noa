@@ -90,6 +90,77 @@ fn cup_is_one_based() {
 }
 
 #[test]
+fn decom_makes_cup_and_cpr_relative_to_the_scroll_region() {
+    let t = run_size(
+        10,
+        8,
+        b"\x1b[?69h\x1b[3;8s\x1b[3;6r\x1b[?6h\x1b[2;2H\x1b[6n",
+    );
+
+    assert_eq!(t.primary.cursor.y, 3);
+    assert_eq!(t.primary.cursor.x, 3);
+    assert_eq!(t.pending_writes, b"\x1b[2;2R");
+}
+
+#[test]
+fn decom_set_and_reset_home_to_the_active_origin() {
+    let t = run_size(10, 8, b"\x1b[3;6r\x1b[?6h");
+    assert_eq!(t.primary.cursor.y, 2);
+
+    let t = run_size(10, 8, b"\x1b[3;6r\x1b[?6h\x1b[?6l");
+    assert_eq!(t.primary.cursor.y, 0);
+    assert_eq!(t.primary.cursor.x, 0);
+}
+
+#[test]
+fn decsc_decrc_restore_origin_mode_for_cursor_addressing() {
+    let t = run_size(
+        10,
+        8,
+        b"\x1b[3;6r\x1b[?6h\x1b7\x1b[?6l\x1b8\x1b[2;2H",
+    );
+
+    assert!(t.modes.origin_mode());
+    assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (1, 3));
+}
+
+#[test]
+fn decsc_decrc_restore_absolute_mode_for_cursor_addressing() {
+    let t = run_size(
+        10,
+        8,
+        b"\x1b[3;6r\x1b7\x1b[?6h\x1b8\x1b[2;2H",
+    );
+
+    assert!(!t.modes.origin_mode());
+    assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (1, 1));
+}
+
+#[test]
+fn alternate_screen_1048_restores_origin_mode_with_the_cursor() {
+    let t = run_size(
+        10,
+        8,
+        b"\x1b[3;6r\x1b[?6h\x1b[?1048h\x1b[?6l\x1b[?1048l\x1b[2;2H",
+    );
+
+    assert!(t.modes.origin_mode());
+    assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (1, 3));
+}
+
+#[test]
+fn alternate_screen_1049_restores_origin_mode_with_the_primary_cursor() {
+    let t = run_size(
+        10,
+        8,
+        b"\x1b[3;6r\x1b[?6h\x1b[?1049h\x1b[?6l\x1b[?1049l\x1b[2;2H",
+    );
+
+    assert!(t.modes.origin_mode());
+    assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (1, 3));
+}
+
+#[test]
 fn decslrm_requires_left_right_margin_mode() {
     let t = run_size(10, 5, b"\x1b[3;7s");
 
@@ -138,6 +209,71 @@ fn left_right_margin_reset_restores_full_width_motion() {
 
     assert_eq!(t.primary.horizontal_margins, None);
     assert_eq!(t.primary.cursor.x, 0);
+}
+
+#[test]
+fn insert_mode_shifts_existing_text_instead_of_overwriting_it() {
+    let t = run_size(8, 1, b"abcdef\x1b[1;3H\x1b[4hXY");
+
+    assert_eq!(row_text(&t, 0, 8), "abXYcdef");
+}
+
+#[test]
+fn horizontal_margins_bound_ich_and_dch() {
+    let inserted = run_size(
+        10,
+        1,
+        b"0123456789\x1b[?69h\x1b[3;8s\x1b[5G\x1b[2@",
+    );
+    assert_eq!(row_text(&inserted, 0, 10), "0123  4589");
+
+    let deleted = run_size(
+        10,
+        1,
+        b"0123456789\x1b[?69h\x1b[3;8s\x1b[5G\x1b[2P",
+    );
+    assert_eq!(row_text(&deleted, 0, 10), "012367  89");
+}
+
+#[test]
+fn horizontal_margins_bound_il_and_dl() {
+    let prefix = b"\x1b[1;1HAAAAAAAA\x1b[2;1HBBBBBBBB\x1b[3;1HCCCCCCCC\x1b[4;1HDDDDDDDD\x1b[5;1HEEEEEEEE\x1b[6;1HFFFFFFFF\x1b[?69h\x1b[3;6s\x1b[2;5r\x1b[3;3H";
+
+    let inserted = run_size(8, 6, &[prefix.as_slice(), b"\x1b[L"].concat());
+    assert_eq!(row_text(&inserted, 2, 8), "CC    CC");
+    assert_eq!(row_text(&inserted, 3, 8), "DDCCCCDD");
+    assert_eq!(row_text(&inserted, 4, 8), "EEDDDDEE");
+
+    let deleted = run_size(8, 6, &[prefix.as_slice(), b"\x1b[M"].concat());
+    assert_eq!(row_text(&deleted, 2, 8), "CCDDDDCC");
+    assert_eq!(row_text(&deleted, 3, 8), "DDEEEEDD");
+    assert_eq!(row_text(&deleted, 4, 8), "EE    EE");
+}
+
+#[test]
+fn horizontal_margins_bound_su_and_sd() {
+    let prefix = b"\x1b[1;1HAAAAAAAA\x1b[2;1HBBBBBBBB\x1b[3;1HCCCCCCCC\x1b[4;1HDDDDDDDD\x1b[5;1HEEEEEEEE\x1b[6;1HFFFFFFFF\x1b[?69h\x1b[3;6s\x1b[2;5r";
+
+    let up = run_size(8, 6, &[prefix.as_slice(), b"\x1b[S"].concat());
+    assert_eq!(row_text(&up, 1, 8), "BBCCCCBB");
+    assert_eq!(row_text(&up, 2, 8), "CCDDDDCC");
+    assert_eq!(row_text(&up, 3, 8), "DDEEEEDD");
+    assert_eq!(row_text(&up, 4, 8), "EE    EE");
+
+    let down = run_size(8, 6, &[prefix.as_slice(), b"\x1b[T"].concat());
+    assert_eq!(row_text(&down, 1, 8), "BB    BB");
+    assert_eq!(row_text(&down, 2, 8), "CCBBBBCC");
+    assert_eq!(row_text(&down, 3, 8), "DDCCCCDD");
+    assert_eq!(row_text(&down, 4, 8), "EEDDDDEE");
+}
+
+#[test]
+fn horizontal_margins_bound_forward_and_backward_tabs() {
+    let t = run_size(10, 2, b"\x1b[?69h\x1b[3;6s\t");
+    assert_eq!(t.primary.cursor.x, 5);
+
+    let t = run_size(10, 2, b"\x1b[?69h\x1b[3;6s\t\x1b[Z");
+    assert_eq!(t.primary.cursor.x, 2);
 }
 
 #[test]

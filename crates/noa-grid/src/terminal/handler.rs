@@ -18,8 +18,14 @@ impl Handler for Terminal {
     fn print(&mut self, c: char) {
         let autowrap = self.modes.autowrap();
         let grapheme_clustering = self.modes.grapheme_clustering();
+        let insert_mode = self.modes.insert_mode();
         let c = self.charset.translate(c);
-        self.active_mut().print(c, autowrap, grapheme_clustering);
+        if insert_mode {
+            self.active_mut()
+                .print_with_insert(c, autowrap, grapheme_clustering);
+        } else {
+            self.active_mut().print(c, autowrap, grapheme_clustering);
+        }
     }
 
     /// Bulk fast path for ground-state text runs (Ghostty analog:
@@ -30,6 +36,15 @@ impl Handler for Terminal {
     fn print_str(&mut self, s: &str) {
         let autowrap = self.modes.autowrap();
         let grapheme_clustering = self.modes.grapheme_clustering();
+        let insert_mode = self.modes.insert_mode();
+        if insert_mode {
+            for c in s.chars() {
+                let c = self.charset.translate(c);
+                self.active_mut()
+                    .print_with_insert(c, autowrap, grapheme_clustering);
+            }
+            return;
+        }
         if !self.charset.active_is_ascii() {
             // DEC Special Graphics (or any future set) rewrites scalars —
             // stay on the per-scalar path.
@@ -83,10 +98,11 @@ impl Handler for Terminal {
         let autowrap = self.modes.autowrap();
         let lnm = self.modes.linefeed_newline();
         let grapheme_clustering = self.modes.grapheme_clustering();
+        let insert_mode = self.modes.insert_mode();
         let ascii_charset = self.charset.active_is_ascii();
         let mut rest = data;
         while !rest.is_empty() {
-            if ascii_charset && autowrap {
+            if ascii_charset && autowrap && !insert_mode {
                 let consumed = self.active_mut().apply_ascii_line_batch(
                     rest,
                     autowrap,
@@ -132,11 +148,12 @@ impl Handler for Terminal {
         let autowrap = self.modes.autowrap();
         let lnm = self.modes.linefeed_newline();
         let grapheme_clustering = self.modes.grapheme_clustering();
+        let insert_mode = self.modes.insert_mode();
         let ascii_charset = self.charset.active_is_ascii();
         let mut attrs = Vec::new();
         let mut rest = data;
         while !rest.is_empty() {
-            if ascii_charset && autowrap {
+            if ascii_charset && autowrap && !insert_mode {
                 let consumed = self.active_mut().apply_sgr_ascii_line_batch(
                     rest,
                     autowrap,
@@ -192,6 +209,15 @@ impl Handler for Terminal {
     fn print_ascii_str(&mut self, s: &str) {
         let autowrap = self.modes.autowrap();
         let grapheme_clustering = self.modes.grapheme_clustering();
+        let insert_mode = self.modes.insert_mode();
+        if insert_mode {
+            for c in s.chars() {
+                let c = self.charset.translate(c);
+                self.active_mut()
+                    .print_with_insert(c, autowrap, grapheme_clustering);
+            }
+            return;
+        }
         if !self.charset.active_is_ascii() {
             for c in s.chars() {
                 let c = self.charset.translate(c);
@@ -250,13 +276,17 @@ impl Handler for Terminal {
         self.active_mut().cursor_backward(n);
     }
     fn cursor_position(&mut self, row: u16, col: u16) {
-        self.active_mut().cursor_position(row, col);
+        let origin = self.modes.origin_mode();
+        self.active_mut()
+            .cursor_position_with_origin(row, col, origin);
     }
     fn cursor_col_abs(&mut self, col: u16) {
-        self.active_mut().cursor_col_abs(col);
+        let origin = self.modes.origin_mode();
+        self.active_mut().cursor_col_abs_with_origin(col, origin);
     }
     fn cursor_row_abs(&mut self, row: u16) {
-        self.active_mut().cursor_row_abs(row);
+        let origin = self.modes.origin_mode();
+        self.active_mut().cursor_row_abs_with_origin(row, origin);
     }
 
     fn erase_display(&mut self, mode: EraseDisplay) {
@@ -292,7 +322,9 @@ impl Handler for Terminal {
 
     fn set_horizontal_margins(&mut self, left: u16, right: u16) {
         if self.modes.left_right_margin() {
-            self.active_mut().set_horizontal_margins(left, right);
+            let origin = self.modes.origin_mode();
+            self.active_mut()
+                .set_horizontal_margins(left, right, origin);
         }
     }
 
@@ -302,7 +334,8 @@ impl Handler for Terminal {
 
     fn request_mode(&mut self, request: ModeRequest) {
         let state = match (request.value, request.ansi) {
-            (20, true)
+            (4, true)
+            | (20, true)
             | (1, false)
             | (6, false)
             | (7, false)
@@ -358,6 +391,7 @@ impl Handler for Terminal {
         self.modes.set(value, ansi, on);
         if !ansi {
             match value {
+                6 => self.active_mut().home_cursor(on),
                 25 => self.active_mut().cursor.visible = on, // DECTCEM
                 69 => {
                     if on {
@@ -382,14 +416,16 @@ impl Handler for Terminal {
                 }
                 1048 => {
                     if on {
-                        self.active_mut().save_cursor();
-                    } else {
-                        self.active_mut().restore_cursor();
+                        let origin = self.modes.origin_mode();
+                        self.active_mut().save_cursor(origin);
+                    } else if let Some(origin) = self.active_mut().restore_cursor() {
+                        self.modes.set(6, false, origin);
                     }
                 }
                 1049 => {
                     if on {
-                        self.primary.save_cursor();
+                        let origin = self.modes.origin_mode();
+                        self.primary.save_cursor(origin);
                         self.enter_alt_screen(true);
                     } else {
                         self.leave_alt_screen(true, true);
@@ -416,10 +452,13 @@ impl Handler for Terminal {
         self.active_mut().reverse_index();
     }
     fn save_cursor(&mut self) {
-        self.active_mut().save_cursor();
+        let origin = self.modes.origin_mode();
+        self.active_mut().save_cursor(origin);
     }
     fn restore_cursor(&mut self) {
-        self.active_mut().restore_cursor();
+        if let Some(origin) = self.active_mut().restore_cursor() {
+            self.modes.set(6, false, origin);
+        }
     }
     fn set_tab_stop(&mut self) {
         self.active_mut().set_tab_stop();
@@ -508,8 +547,9 @@ impl Handler for Terminal {
     fn repeat_preceding_char(&mut self, n: u16) {
         let autowrap = self.modes.autowrap();
         let grapheme_clustering = self.modes.grapheme_clustering();
+        let insert_mode = self.modes.insert_mode();
         self.active_mut()
-            .repeat_preceding_char(n, autowrap, grapheme_clustering);
+            .repeat_preceding_char(n, autowrap, grapheme_clustering, insert_mode);
     }
 
     fn seed_set_last_printed(&mut self, ch: char) {
@@ -558,8 +598,9 @@ impl Handler for Terminal {
         match kind {
             DsrKind::Status => self.pending_writes.extend_from_slice(b"\x1b[0n"),
             DsrKind::CursorPosition => {
-                let row = self.active().cursor.y + 1;
-                let col = self.active().cursor.x + 1;
+                let (row, col) = self
+                    .active()
+                    .reported_cursor_position(self.modes.origin_mode());
                 self.pending_writes
                     .extend_from_slice(format!("\x1b[{row};{col}R").as_bytes());
             }
@@ -805,6 +846,7 @@ impl Handler for Terminal {
     }
 
     fn set_scroll_region(&mut self, top: u16, bottom: u16) {
+        let origin = self.modes.origin_mode();
         let screen = self.active_mut();
         let last = screen.rows.saturating_sub(1);
         let t = top.saturating_sub(1).min(last);
@@ -815,7 +857,7 @@ impl Handler for Terminal {
         };
         if t < b {
             screen.region = ScrollRegion { top: t, bottom: b };
-            screen.cursor_position(1, 1); // DECSTBM homes the cursor after a valid region.
+            screen.home_cursor(origin);
         }
     }
 }

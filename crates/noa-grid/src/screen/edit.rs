@@ -256,6 +256,11 @@ impl Screen {
         if n == 0 {
             return;
         }
+        if self.has_narrow_horizontal_margins() {
+            self.scroll_rectangle_up(top, bottom, n);
+            self.remove_placements_intersecting_margin_rows(top, bottom);
+            return;
+        }
         let recorded = self.records_scrollback_for_region(top, bottom);
         let full_height = top == 0 && bottom + 1 == self.rows as usize;
         if n == 1 && full_height && recorded {
@@ -386,6 +391,11 @@ impl Screen {
         if n == 0 {
             return;
         }
+        if self.has_narrow_horizontal_margins() {
+            self.scroll_rectangle_down(top, bottom, n);
+            self.remove_placements_intersecting_margin_rows(top, bottom);
+            return;
+        }
         let blank = self.blank();
         self.grid.canonicalize()[top..=bottom].rotate_right(n);
         for r in &mut self.grid.canonicalize()[top..(top + n)] {
@@ -395,6 +405,73 @@ impl Screen {
             r.dirty = true;
         }
         self.track_scroll_down(top, bottom, n);
+    }
+
+    /// Like [`Self::remove_placements_intersecting_grid_rows`], but only for
+    /// placements that also overlap the active horizontal margins. A rectangle
+    /// scroll leaves the columns outside the margins untouched, so images
+    /// living there must survive it.
+    fn remove_placements_intersecting_margin_rows(&mut self, top: usize, bottom: usize) {
+        if self.kitty_placements.is_empty() {
+            return;
+        }
+        let base = self.live_area_abs_top();
+        let r_top = base + top;
+        let r_bot = base + bottom;
+        let left = self.left_margin();
+        let right = self.right_margin();
+        self.kitty_placements.retain(|p| {
+            let p_top = p.anchor_abs_row;
+            let p_bot = p.anchor_abs_row + p.rows as usize;
+            let p_right = p.anchor_col.saturating_add(p.cols);
+            p_bot <= r_top || p_top > r_bot || p_right <= left || p.anchor_col > right
+        });
+    }
+
+    fn has_narrow_horizontal_margins(&self) -> bool {
+        self.horizontal_margins.is_some_and(|margins| {
+            margins.left != 0 || margins.right != self.cols.saturating_sub(1)
+        })
+    }
+
+    fn scroll_rectangle_up(&mut self, top: usize, bottom: usize, n: usize) {
+        let blank = self.blank();
+        let left = self.left_margin() as usize;
+        let right = self.right_margin() as usize;
+        for dst in top..bottom + 1 - n {
+            for x in left..=right {
+                self.grid[dst].cells[x] = self.grid[dst + n].cells[x];
+            }
+        }
+        for y in bottom + 1 - n..=bottom {
+            self.grid[y].cells[left..=right].fill(blank);
+        }
+        for y in top..=bottom {
+            let row = &mut self.grid[y];
+            row.mark_occupied(right + 1);
+            Self::sanitize_wide_row(row, &blank);
+            row.dirty = true;
+        }
+    }
+
+    fn scroll_rectangle_down(&mut self, top: usize, bottom: usize, n: usize) {
+        let blank = self.blank();
+        let left = self.left_margin() as usize;
+        let right = self.right_margin() as usize;
+        for dst in (top + n..bottom + 1).rev() {
+            for x in left..=right {
+                self.grid[dst].cells[x] = self.grid[dst - n].cells[x];
+            }
+        }
+        for y in top..top + n {
+            self.grid[y].cells[left..=right].fill(blank);
+        }
+        for y in top..=bottom {
+            let row = &mut self.grid[y];
+            row.mark_occupied(right + 1);
+            Self::sanitize_wide_row(row, &blank);
+            row.dirty = true;
+        }
     }
 
     // ── horizontal / absolute motion ────────────────────────────────
@@ -449,9 +526,38 @@ impl Screen {
         self.cursor.x = self.clamp_x_to_margins(col.saturating_sub(1));
     }
 
+    pub(crate) fn cursor_position_with_origin(&mut self, row: u16, col: u16, origin: bool) {
+        if !origin {
+            self.cursor_position(row, col);
+            return;
+        }
+        self.cursor.pending_wrap = false;
+        self.cursor.y = self
+            .region
+            .top
+            .saturating_add(row.saturating_sub(1))
+            .min(self.region.bottom);
+        self.cursor.x = self
+            .left_margin()
+            .saturating_add(col.saturating_sub(1))
+            .min(self.right_margin());
+    }
+
     pub fn cursor_col_abs(&mut self, col: u16) {
         self.cursor.pending_wrap = false;
         self.cursor.x = self.clamp_x_to_margins(col.saturating_sub(1));
+    }
+
+    pub(crate) fn cursor_col_abs_with_origin(&mut self, col: u16, origin: bool) {
+        if !origin {
+            self.cursor_col_abs(col);
+            return;
+        }
+        self.cursor.pending_wrap = false;
+        self.cursor.x = self
+            .left_margin()
+            .saturating_add(col.saturating_sub(1))
+            .min(self.right_margin());
     }
 
     pub fn cursor_row_abs(&mut self, row: u16) {
@@ -459,17 +565,48 @@ impl Screen {
         self.cursor.y = row.saturating_sub(1).min(self.rows.saturating_sub(1));
     }
 
+    pub(crate) fn cursor_row_abs_with_origin(&mut self, row: u16, origin: bool) {
+        if !origin {
+            self.cursor_row_abs(row);
+            return;
+        }
+        self.cursor.pending_wrap = false;
+        self.cursor.y = self
+            .region
+            .top
+            .saturating_add(row.saturating_sub(1))
+            .min(self.region.bottom);
+    }
+
+    pub(crate) fn home_cursor(&mut self, origin: bool) {
+        self.cursor.pending_wrap = false;
+        self.cursor.y = if origin { self.region.top } else { 0 };
+        self.cursor.x = self.left_margin();
+    }
+
+    pub(crate) fn reported_cursor_position(&self, origin: bool) -> (u16, u16) {
+        let row_origin = if origin { self.region.top } else { 0 };
+        let col_origin = if origin { self.left_margin() } else { 0 };
+        (
+            self.cursor.y.saturating_sub(row_origin) + 1,
+            self.cursor.x.saturating_sub(col_origin) + 1,
+        )
+    }
+
     pub fn tab(&mut self, n: u16) {
         self.cursor.pending_wrap = false;
         for _ in 0..n.max(1) {
-            self.cursor.x = self.tabstops.next(self.cursor.x, self.cols);
+            self.cursor.x = self
+                .tabstops
+                .next(self.cursor.x, self.cols)
+                .min(self.right_margin());
         }
     }
 
     pub fn tab_back(&mut self, n: u16) {
         self.cursor.pending_wrap = false;
         for _ in 0..n.max(1) {
-            self.cursor.x = self.tabstops.prev(self.cursor.x);
+            self.cursor.x = self.tabstops.prev(self.cursor.x).max(self.left_margin());
         }
     }
 
@@ -498,7 +635,7 @@ impl Screen {
         self.cursor.x = self.cursor.x.min(self.cols.saturating_sub(1));
     }
 
-    pub fn set_horizontal_margins(&mut self, left: u16, right: u16) {
+    pub fn set_horizontal_margins(&mut self, left: u16, right: u16, origin: bool) {
         let last = self.cols.saturating_sub(1);
         let l = left.saturating_sub(1).min(last);
         let r = if right == 0 {
@@ -508,17 +645,22 @@ impl Screen {
         };
         if l < r {
             self.horizontal_margins = Some(HorizontalMargins { left: l, right: r });
-            self.cursor_position(1, 1);
+            self.home_cursor(origin);
         }
     }
 
-    pub fn save_cursor(&mut self) {
-        self.saved_cursor = Some(self.cursor.into());
+    pub fn save_cursor(&mut self, origin_mode: bool) {
+        let mut saved: crate::cursor::SavedCursor = self.cursor.into();
+        saved.origin_mode = origin_mode;
+        self.saved_cursor = Some(saved);
     }
 
-    pub fn restore_cursor(&mut self) {
+    pub fn restore_cursor(&mut self) -> Option<bool> {
         if let Some(saved) = self.saved_cursor {
             self.cursor.restore_from(saved);
+            Some(saved.origin_mode)
+        } else {
+            None
         }
     }
 
@@ -652,17 +794,24 @@ impl Screen {
     // ── edit ─────────────────────────────────────────────────────────
 
     pub fn insert_blank_chars(&mut self, n: u16) {
+        // #TODO(agent): Guard IL/DL outside the horizontal margins, and
+        // ICH/DCH below the left margin, when cursor addressing stops
+        // clamping to DECSLRM.
         self.cursor.pending_wrap = false;
         let blank = self.blank();
         let x = self.cursor.x as usize;
         let y = self.cursor.y as usize;
-        let len = self.cols as usize - x;
+        let right = self.right_margin() as usize;
+        if x > right {
+            return;
+        }
+        let len = right + 1 - x;
         let n = (n.max(1) as usize).min(len);
         let row = &mut self.grid[y];
         // The rotate shifts occupied content right by `n`; the fill may
         // write a styled (BCE) blank into `x..x + n`.
-        let shifted_occ = row.occupied().saturating_add(n).min(row.cells.len());
-        row.cells[x..].rotate_right(n);
+        let shifted_occ = row.occupied().saturating_add(n).min(right + 1);
+        row.cells[x..=right].rotate_right(n);
         for c in &mut row.cells[x..x + n] {
             c.set_from(&blank);
         }
@@ -679,11 +828,15 @@ impl Screen {
         let blank = self.blank();
         let x = self.cursor.x as usize;
         let y = self.cursor.y as usize;
-        let len = self.cols as usize - x;
+        let right = self.right_margin() as usize;
+        if x > right {
+            return;
+        }
+        let len = right + 1 - x;
         let n = (n.max(1) as usize).min(len);
         let row = &mut self.grid[y];
-        row.cells[x..].rotate_left(n);
-        for c in &mut row.cells[self.cols as usize - n..] {
+        row.cells[x..=right].rotate_left(n);
+        for c in &mut row.cells[right + 1 - n..=right] {
             c.set_from(&blank);
         }
         // The left shift only moves content toward lower indices (the cells
@@ -724,6 +877,11 @@ impl Screen {
         let bottom = self.region.bottom as usize;
         let len = bottom - start + 1;
         let n = (n.max(1) as usize).min(len);
+        if self.has_narrow_horizontal_margins() {
+            self.scroll_rectangle_down(start, bottom, n);
+            self.remove_placements_intersecting_margin_rows(start, bottom);
+            return;
+        }
         let blank = self.blank();
         self.grid.canonicalize()[start..=bottom].rotate_right(n);
         for r in &mut self.grid.canonicalize()[start..start + n] {
@@ -744,6 +902,11 @@ impl Screen {
         let bottom = self.region.bottom as usize;
         let len = bottom - start + 1;
         let n = (n.max(1) as usize).min(len);
+        if self.has_narrow_horizontal_margins() {
+            self.scroll_rectangle_up(start, bottom, n);
+            self.remove_placements_intersecting_margin_rows(start, bottom);
+            return;
+        }
         let blank = self.blank();
         self.grid.canonicalize()[start..=bottom].rotate_left(n);
         for r in &mut self.grid.canonicalize()[bottom + 1 - n..=bottom] {
@@ -755,10 +918,20 @@ impl Screen {
         self.remove_placements_intersecting_grid_rows(start, bottom);
     }
 
-    pub fn repeat_preceding_char(&mut self, n: u16, autowrap: bool, grapheme_clustering: bool) {
+    pub fn repeat_preceding_char(
+        &mut self,
+        n: u16,
+        autowrap: bool,
+        grapheme_clustering: bool,
+        insert_mode: bool,
+    ) {
         if let Some(c) = self.last_printed {
             for _ in 0..n.max(1) {
-                self.print(c, autowrap, grapheme_clustering);
+                if insert_mode {
+                    self.print_with_insert(c, autowrap, grapheme_clustering);
+                } else {
+                    self.print(c, autowrap, grapheme_clustering);
+                }
             }
         }
     }

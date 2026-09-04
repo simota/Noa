@@ -53,11 +53,15 @@ pub fn parse_sgr(csi: &Csi) -> Vec<SgrAttr> {
 pub fn parse_sgr_into(csi: &Csi, out: &mut Vec<SgrAttr>) {
     out.clear();
     let p = csi.params();
-    // Fast path: a lone truecolor pen (`38;2;r;g;b` / `48;2;r;g;b`) — the
-    // per-cell shape SGR-dense floods emit. Output is identical to the
-    // general loop below (for exactly 5 params, `parse_ext_color` reads
-    // r/g/b from the same slots in both the semicolon and colon forms).
-    if let [code @ (38 | 48), 2, r, g, b] = *p {
+    // Fast path: a lone semicolon-form truecolor pen (`38;2;r;g;b` /
+    // `48;2;r;g;b`) — the per-cell shape SGR-dense floods emit. Colon forms
+    // need the general decoder because their subparameter group can end early.
+    if let [code @ (38 | 48), 2, r, g, b] = *p
+        && !csi.separator_is_colon(0)
+        && !csi.separator_is_colon(1)
+        && !csi.separator_is_colon(2)
+        && !csi.separator_is_colon(3)
+    {
         let color = Color::Rgb(Rgb::new(r as u8, g as u8, b as u8));
         out.push(if code == 38 {
             SgrAttr::Fg(color)
@@ -230,16 +234,34 @@ pub fn parse_plain_sgr_unit(unit: &[u8], out: &mut Vec<SgrAttr>) {
 /// `38`/`48`/`58` code). Returns the color and how many params to advance past.
 fn parse_ext_color(csi: &Csi, i: usize) -> (Option<Color>, usize) {
     let p = csi.params();
+    let colon_group_len = if csi.separator_is_colon(i) {
+        let mut end = i;
+        while end + 1 < p.len() && csi.separator_is_colon(end) {
+            end += 1;
+        }
+        Some(end + 1 - i)
+    } else {
+        None
+    };
     match p.get(i + 1).copied() {
         Some(5) => {
-            let n = p.get(i + 2).copied().unwrap_or(0) as u8;
-            (Some(Color::Palette(n)), 3)
+            let color = match colon_group_len {
+                Some(len) if len < 3 => None,
+                _ => Some(Color::Palette(p.get(i + 2).copied().unwrap_or(0) as u8)),
+            };
+            (color, colon_group_len.unwrap_or(3))
         }
         Some(2) => {
+            if let Some(len) = colon_group_len
+                && len < 5
+            {
+                return (None, len);
+            }
             // Colon form with an (often empty) colorspace field is `38:2:cs:r:g:b`
-            // (6 params); semicolon form is `38;2;r;g;b` (5 params).
-            let colon = csi.separator_is_colon(i + 1);
-            let rgb_start = if colon && p.len() >= i + 6 {
+            // (6 params); the shorter `38:2:r:g:b` spelling has no colorspace.
+            // Stop at the next semicolon: later SGR attributes are not part of
+            // the colon subparameter group.
+            let rgb_start = if colon_group_len.is_some_and(|len| len >= 6) {
                 i + 3
             } else {
                 i + 2
@@ -247,7 +269,10 @@ fn parse_ext_color(csi: &Csi, i: usize) -> (Option<Color>, usize) {
             let r = p.get(rgb_start).copied().unwrap_or(0) as u8;
             let g = p.get(rgb_start + 1).copied().unwrap_or(0) as u8;
             let b = p.get(rgb_start + 2).copied().unwrap_or(0) as u8;
-            (Some(Color::Rgb(Rgb::new(r, g, b))), (rgb_start + 3) - i)
+            (
+                Some(Color::Rgb(Rgb::new(r, g, b))),
+                colon_group_len.unwrap_or((rgb_start + 3) - i),
+            )
         }
         _ => (None, 1),
     }

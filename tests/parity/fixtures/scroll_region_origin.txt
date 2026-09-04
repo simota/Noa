@@ -4,7 +4,7 @@
 ## input:
 \e[2;4r\e[?6hAAA\r\nBBB\r\nCCC\r\nDDD\r\nEEE
 ## expect:
-AAA
+
 CCC
 DDD
 EEE
@@ -14,7 +14,5 @@ EEE
 DECSTBM + DECOM. DECSTBM 2;4 confines scrolling to rows 2-4 and homes the
 cursor; the LF at the region bottom scrolls only rows 2-4 (BBB is discarded at
 the top margin — a partial region never feeds scrollback) while rows outside
-the margins stay put. KNOWN GAP: noa tracks DECOM (?6) but does not yet apply
-origin-relative addressing, so AAA lands on absolute row 1 instead of the
-region top; in xterm/Ghostty row 1 would stay blank and AAA would scroll away.
-Re-bless when DECOM addressing lands — the Ghostty oracle will flag this line.
+the margins stay put. DECOM makes the initial cursor position relative to the
+region, so AAA lands at row 2 and scrolls away while absolute row 1 stays blank.

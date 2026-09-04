@@ -48,7 +48,21 @@ impl Screen {
         } else if rows < old_rows {
             let remove = old_rows - rows;
             let below = (old_rows - 1).saturating_sub(self.cursor.y);
-            let from_bottom = remove.min(below);
+            let live_top = self.live_area_abs_top();
+            let disposable_below = (0..below)
+                .take_while(|offset| {
+                    let y = usize::from(old_rows - 1 - offset);
+                    let row = &self.grid[y];
+                    let abs_row = live_top + y;
+                    row.is_blank()
+                        && !row.wrapped
+                        && !self.kitty_placements.iter().any(|placement| {
+                            abs_row >= placement.anchor_abs_row
+                                && abs_row < placement.anchor_abs_row + placement.rows as usize
+                        })
+                })
+                .count() as u16;
+            let from_bottom = remove.min(disposable_below);
             self.grid
                 .canonicalize()
                 .truncate((old_rows - from_bottom) as usize);

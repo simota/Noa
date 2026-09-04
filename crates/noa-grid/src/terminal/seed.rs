@@ -109,6 +109,12 @@ impl Terminal {
             };
             write_private_mode(&mut seed, mode, enabled);
         }
+        if self.modes.origin_mode() {
+            write_cursor_origin_relative(&mut seed, screen, screen.cursor, self.modes.autowrap());
+        } else {
+            write_cursor(&mut seed, screen, screen.cursor, self.modes.autowrap());
+        }
+        write_ansi_mode(&mut seed, 4, self.modes.insert_mode());
         write_ansi_mode(&mut seed, 20, self.modes.linefeed_newline());
 
         // Restoring a screen without explicit horizontal margins disables
@@ -167,7 +173,11 @@ fn restore_declrmm_from_inactive_screen(seed: &mut String, terminal: &Terminal) 
     // intentional `None` geometry.
     write_private_mode(seed, 47, !terminal.active_is_alt);
     write_horizontal_margins(seed, inactive);
-    write_cursor(seed, inactive, inactive.cursor, terminal.modes.autowrap());
+    if terminal.modes.origin_mode() {
+        write_cursor_origin_relative(seed, inactive, inactive.cursor, terminal.modes.autowrap());
+    } else {
+        write_cursor(seed, inactive, inactive.cursor, terminal.modes.autowrap());
+    }
     write_cursor_style_exact(seed, inactive.cursor.style);
     write_private_mode(seed, 47, terminal.active_is_alt);
     true
@@ -300,6 +310,10 @@ fn write_tabstops(seed: &mut String, screen: &Screen) {
 }
 
 fn write_saved_cursor(seed: &mut String, screen: &Screen, cursor: SavedCursor, autowrap: bool) {
+    if cursor.origin_mode {
+        write!(seed, "\x1b[1;{}r", screen.rows).expect("writing to String cannot fail");
+        write_private_mode(seed, 6, true);
+    }
     write_cursor_state(
         seed,
         screen,
@@ -313,6 +327,16 @@ fn write_saved_cursor(seed: &mut String, screen: &Screen, cursor: SavedCursor, a
         autowrap,
     );
     seed.push_str("\x1b7");
+    if cursor.origin_mode {
+        write_private_mode(seed, 6, false);
+        write!(
+            seed,
+            "\x1b[{};{}r",
+            screen.region.top.saturating_add(1),
+            screen.region.bottom.saturating_add(1)
+        )
+        .expect("writing to String cannot fail");
+    }
 }
 
 fn write_cursor(seed: &mut String, screen: &Screen, cursor: Cursor, autowrap: bool) {
@@ -327,6 +351,37 @@ fn write_cursor(seed: &mut String, screen: &Screen, cursor: Cursor, autowrap: bo
         cursor.underline_color,
         cursor.attrs,
         autowrap,
+    );
+}
+
+fn write_cursor_origin_relative(
+    seed: &mut String,
+    screen: &Screen,
+    cursor: Cursor,
+    autowrap: bool,
+) {
+    let left = screen.horizontal_margins.map_or(0, |m| m.left);
+    let right = screen
+        .horizontal_margins
+        .map_or(screen.cols.saturating_sub(1), |m| m.right);
+    let relative_x = cursor.x.saturating_sub(left);
+    let relative_y = cursor.y.saturating_sub(screen.region.top);
+    if cursor.pending_wrap && cursor.x == right {
+        let (print_x, cell) = pending_wrap_cell(screen, cursor.x, cursor.y);
+        write_private_mode(seed, 7, true);
+        write_cup(seed, print_x.saturating_sub(left), relative_y);
+        write_pen(seed, cell.fg, cell.bg, cell.underline_color, cell.attrs);
+        cell.push_text_to(seed);
+        write_private_mode(seed, 7, autowrap);
+    } else {
+        write_cup(seed, relative_x, relative_y);
+    }
+    write_pen(
+        seed,
+        cursor.fg,
+        cursor.bg,
+        cursor.underline_color,
+        cursor.attrs,
     );
 }
 
@@ -582,6 +637,24 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_seed_preserves_saved_origin_mode() {
+        let size = GridSize::new(8, 6);
+        let mut source = Terminal::new(size);
+        let mut source_stream = Stream::new();
+        source_stream.feed(b"\x1b[2;5r\x1b[?6h\x1b[2;2H\x1b7\x1b[?6l", &mut source);
+
+        let mut replica = Terminal::new(size);
+        let mut replica_stream = Stream::new();
+        replica_stream.feed(&source.synthetic_seed(), &mut replica);
+
+        source_stream.feed(b"\x1b8\x1b[2;2H", &mut source);
+        replica_stream.feed(b"\x1b8\x1b[2;2H", &mut replica);
+        assert!(source.modes.origin_mode());
+        assert!(replica.modes.origin_mode());
+        assert_screen_state(source.active(), replica.active());
+    }
+
+    #[test]
     fn synthetic_seed_preserves_primary_screen_across_alternate_screen_exit() {
         let size = GridSize::new(8, 3);
         let mut source = Terminal::new(size);
@@ -662,7 +735,7 @@ mod tests {
         let mut source = Terminal::new(size);
         let mut source_stream = Stream::new();
         source_stream.feed(
-            b"\x1b[?66h\x1b[?1004h\x1b[?1007l\x1b[>4;2m\x1b[>1u\x1b[>5u\x1b[?1049h\x1b[>8u\x1b[>3u",
+            b"\x1b[4h\x1b[?66h\x1b[?1004h\x1b[?1007l\x1b[>4;2m\x1b[>1u\x1b[>5u\x1b[?1049h\x1b[>8u\x1b[>3u",
             &mut source,
         );
 
@@ -675,6 +748,7 @@ mod tests {
                 source.modes.get(mode, false)
             );
         }
+        assert_eq!(replica.modes.insert_mode(), source.modes.insert_mode());
         assert!(replica.modify_other_keys_2);
         assert_eq!(replica.kitty_keyboard_flags(), 3);
         replica_stream.feed(b"\x1b[<1u", &mut replica);
@@ -716,6 +790,26 @@ mod tests {
 
         source_stream.feed(b"\x1b[?47l\nP", &mut source);
         replica_stream.feed(b"\x1b[?47l\nP", &mut replica);
+        assert_screen_state(source.active(), replica.active());
+    }
+
+    #[test]
+    fn synthetic_seed_restores_inactive_margins_with_origin_mode_enabled() {
+        let size = GridSize::new(10, 6);
+        let mut source = Terminal::new(size);
+        let mut source_stream = Stream::new();
+        source_stream.feed(
+            b"\x1b[?69h\x1b[?47h\x1b[3;8s\x1b[2;5r\x1b[?6h\x1b[2;3H\x1b[?47l\x1b[!p\x1b[?6h",
+            &mut source,
+        );
+
+        let mut replica = Terminal::new(size);
+        let mut replica_stream = Stream::new();
+        replica_stream.feed(&source.synthetic_seed(), &mut replica);
+        assert_screen_state(source.active(), replica.active());
+
+        source_stream.feed(b"\x1b[?47h", &mut source);
+        replica_stream.feed(b"\x1b[?47h", &mut replica);
         assert_screen_state(source.active(), replica.active());
     }
 
@@ -817,6 +911,7 @@ mod tests {
         assert_eq!(actual.bg, expected.bg);
         assert_eq!(actual.underline_color, expected.underline_color);
         assert_eq!(actual.attrs, expected.attrs);
+        assert_eq!(actual.origin_mode, expected.origin_mode);
     }
 
     #[test]

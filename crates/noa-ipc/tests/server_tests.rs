@@ -445,6 +445,47 @@ fn ac9_get_text_over_the_wire_truncates_and_flags() {
     let _ = sock.close(None);
 }
 
+#[test]
+fn get_text_json_escaping_stays_within_the_websocket_message_cap() {
+    const WS_MESSAGE_CAP: usize = 1024 * 1024;
+
+    let backend = Arc::new(MockBackend::default());
+    backend
+        .text
+        .lock()
+        .unwrap()
+        .insert(1, "\0".repeat(noa_ipc::protocol::MAX_TEXT_MAX_BYTES));
+    let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
+    let mut sock = connect_plain(handle.port());
+    hello(&mut sock, 1, 2, Some("tok"), &["read"]);
+
+    send_rpc(
+        &mut sock,
+        2,
+        "noa.getText",
+        json!({
+            "paneId": "1",
+            "source": "screen",
+            "maxBytes": noa_ipc::protocol::MAX_TEXT_MAX_BYTES,
+        }),
+    );
+    let response = loop {
+        match sock.read().unwrap() {
+            Message::Text(text) => break text,
+            Message::Ping(_) | Message::Pong(_) => continue,
+            other => panic!("unexpected message: {other:?}"),
+        }
+    };
+    assert!(response.len() <= WS_MESSAGE_CAP);
+    let response: Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["result"]["truncated"], true);
+    assert!(!response["result"]["text"].as_str().unwrap().is_empty());
+
+    send_rpc(&mut sock, 3, "noa.listPanels", json!({}));
+    assert!(recv_json(&mut sock).get("result").is_some());
+    let _ = sock.close(None);
+}
+
 // ---- AC-10: getGrid paging ----
 
 #[test]

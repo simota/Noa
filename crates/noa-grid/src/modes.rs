@@ -99,6 +99,14 @@ impl ModeState {
     pub fn left_right_margin(&self) -> bool {
         self.get(69, false)
     }
+    /// DECOM — cursor addressing is relative to the active margins.
+    pub fn origin_mode(&self) -> bool {
+        self.get(6, false)
+    }
+    /// IRM — printable characters insert cells instead of overwriting them.
+    pub fn insert_mode(&self) -> bool {
+        self.get(4, true)
+    }
     /// DECSET 2004 — bracketed paste mode.
     pub fn bracketed_paste(&self) -> bool {
         self.get(2004, false)

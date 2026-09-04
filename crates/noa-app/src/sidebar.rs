@@ -750,9 +750,12 @@ pub enum AgentKind {
 /// matched on the executable basename's leading token (so a target-triple suffix
 /// on a distribution binary — `codex-aarch64-apple-darwin` — still classifies).
 ///
-/// Note: `proc_name` can report a wrapper (e.g. `node`) rather than the agent
-/// for some installs, so an agent launched through a wrapper is classified
-/// `Generic` — we match direct basenames only, an accepted limitation.
+/// Note: `proc_name` reports a runtime wrapper (`node`, `bun`, …) for npm
+/// installs. `noa-pty` canonicalizes those to the hosted agent's name
+/// (`codex`, `claude`) from the wrapper's argv before the name reaches here —
+/// see `WRAPPED_AGENTS` in `noa-pty/src/pty.rs`, whose `name` column must stay
+/// in step with the stems matched below. A wrapper whose argv names no known
+/// agent still arrives as the wrapper name and classifies `Generic`.
 pub fn classify_agent(process: &str) -> AgentKind {
     let base = process
         .rsplit(['/', '\\'])

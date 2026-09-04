@@ -32,7 +32,7 @@
 | OSC 133 shell marks / `has_running_program` | `crates/noa-grid/src/terminal.rs:63,345,467` | Determines whether a CLI is running (though prompts internal to the CLI are invisible) |
 | Config/command infrastructure (Config bool / AppCommand / palette / keybind) | `app/config.rs`, `app/commands.rs:23`, `command_palette.rs:103` | Where the toggle gets implemented. Per-tab needs a new flag on `Surface` |
 
-**Threading constraint:** `Terminal` is `Arc<Mutex>` (parking_lot). A two-stage design — detection in io_thread (inside the existing lock) and keystroke injection via UserEvent on the main thread's `write_pane_pty_bytes` — fits the existing architecture. Synthetic keystrokes share `PTY_INPUT_OVERFLOW_BYTE_CAP` with real user input. CLIs running behind a node wrapper have a known limitation of falling into `Generic` (`sidebar.rs:731`).
+**Threading constraint:** `Terminal` is `Arc<Mutex>` (parking_lot). A two-stage design — detection in io_thread (inside the existing lock) and keystroke injection via UserEvent on the main thread's `write_pane_pty_bytes` — fits the existing architecture. Synthetic keystrokes share `PTY_INPUT_OVERFLOW_BYTE_CAP` with real user input. CLIs running behind a node/bun wrapper are canonicalized to the hosted agent's name by `noa-pty` from the wrapper's argv (`pty.rs` `WRAPPED_AGENTS`); a wrapper whose argv names no known agent still falls into `Generic`.
 
 ## Candidate options (EXPAND)
 
@@ -233,7 +233,7 @@ Prerequisite: AC-2..9 are verified as unit tests of the pure detection function 
 ## Open Questions / Deferred Decisions
 
 - **Structured OSC channel** (CLI declares approval requests via control sequences, the VS Code approach): parked. v1 uses on-screen detection. Since the detection core is isolated in the pure function `detect`, a future swap is localized
-- **CLIs behind a node wrapper** falling into `Generic` is a known limitation (`sidebar.rs:731`): out of scope for v1. Improving detection is a separate task
+- **CLIs behind a node wrapper**: originally a known limitation (fell into `Generic`); resolved after v1 by argv-based canonicalization in `noa-pty` (`WRAPPED_AGENTS`). Wrappers whose argv names no known agent still fall into `Generic`
 - **Extending the Bash approval denylist** (a substring denylist of roughly 20 lines): v2 candidate. The signature matrix keeps a structure that can be extended (NFR-5)
 - **Dedicated audit-log modal**: v2 candidate (v1 keeps it inside the sidebar card only)
 - **If Codex/agy signature capture (T-1) is delayed**: proceed with Claude Code alone first; agents not yet captured simply remain no-fire (the fail-safe design allows a safe partial release)

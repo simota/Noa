@@ -313,9 +313,9 @@ impl ForegroundProcessProbe {
     /// The name of the tty's foreground process — the leader of the current
     /// foreground process group (e.g. `zsh`, `cargo`, `claude`). Known generic
     /// runtime wrappers (`bun`, `node`, …) are canonicalized only when their
-    /// argv identifies a direct Codex launch. `None` when there is no foreground
-    /// group (the session ended) or on a platform without the query (only macOS
-    /// is implemented; NFR-5 graceful degradation).
+    /// argv identifies a supported coding agent. `None` when there is no
+    /// foreground group (the session ended) or on a platform without the query
+    /// (only macOS is implemented; NFR-5 graceful degradation).
     pub fn poll(&self) -> Option<String> {
         #[cfg(target_os = "macos")]
         {
@@ -443,7 +443,7 @@ fn foreground_process_name(fd: std::os::fd::RawFd) -> Option<String> {
     if name.is_empty() {
         return None;
     }
-    let args = if wrapper_can_host_codex(name) {
+    let args = if wrapper_can_host_agent(name) {
         foreground_process_args(pgid)
     } else {
         None
@@ -478,41 +478,116 @@ fn foreground_process_args(pid: libc::pid_t) -> Option<Vec<String>> {
 }
 
 fn canonical_process_name(name: &str, args: Option<&[String]>) -> String {
-    if wrapper_can_host_codex(name) && args.is_some_and(argv_mentions_codex) {
-        return "codex".to_string();
+    if wrapper_can_host_agent(name)
+        && let Some(agent) = args.and_then(wrapper_agent_from_argv)
+    {
+        return agent.to_string();
     }
     name.to_string()
 }
 
-fn wrapper_can_host_codex(name: &str) -> bool {
+fn wrapper_can_host_agent(name: &str) -> bool {
     matches!(
         executable_basename(name).as_str(),
         "bun" | "bunx" | "node" | "npx"
     )
 }
 
-fn argv_mentions_codex(args: &[String]) -> bool {
-    args.iter().any(|arg| {
-        let lower = arg.trim().to_ascii_lowercase();
-        lower == "@openai/codex"
-            || lower.starts_with("@openai/codex@")
-            || lower.starts_with("@openai/codex/")
-            || lower.contains("/@openai/codex/")
-            || lower.ends_with("/@openai/codex")
-            || looks_like_codex_executable(&lower)
-    })
+/// A coding agent that ships as an npm package and therefore shows up to the
+/// tty as its runtime wrapper (`node`, `bun`, …) rather than under its own
+/// name. `name` is the canonical process name handed to the app layer (it must
+/// stay in step with `classify_agent` in `noa-app`), `package` the scoped npm
+/// name, `stem` the executable basename's leading token, and `vendor_stem` an
+/// optional vendor-prefixed basename form (`openai-codex`).
+struct WrappedAgent {
+    name: &'static str,
+    package: &'static str,
+    stem: &'static str,
+    vendor_stem: Option<(&'static str, &'static str)>,
 }
 
-fn looks_like_codex_executable(value: &str) -> bool {
+const WRAPPED_AGENTS: &[WrappedAgent] = &[
+    WrappedAgent {
+        name: "codex",
+        package: "@openai/codex",
+        stem: "codex",
+        vendor_stem: Some(("openai", "codex")),
+    },
+    WrappedAgent {
+        name: "claude",
+        package: "@anthropic-ai/claude-code",
+        stem: "claude",
+        vendor_stem: None,
+    },
+];
+
+/// Resolve which agent a runtime wrapper is hosting from its argv.
+///
+/// Two passes, because the evidence differs in strength: an explicit npm
+/// package reference (`npx @openai/codex`, `…/node_modules/@anthropic-ai/
+/// claude-code/cli.js`) is unambiguous and wins outright, even when a later
+/// argument happens to look like another agent's executable (`--add-dir
+/// ~/codex`). Only when no argument names a package do we fall back to the
+/// executable-basename heuristic, which is what the common install path needs:
+/// `npm i -g` puts a `bin/claude` symlink in front of a `#!/usr/bin/env node`
+/// script, and execve hands the interpreter the *unresolved* symlink path, so
+/// argv is `["node", "/opt/homebrew/bin/claude"]` with no package name in it.
+/// The heuristic only looks at the leading positional arguments — everything
+/// before the first `-` flag — so a flag value such as `--plugin claude-code`
+/// cannot brand an unrelated script.
+fn wrapper_agent_from_argv(args: &[String]) -> Option<&'static str> {
+    let lowered: Vec<String> = args
+        .iter()
+        .map(|arg| arg.trim().to_ascii_lowercase())
+        .collect();
+    lowered
+        .iter()
+        .find_map(|arg| {
+            WRAPPED_AGENTS
+                .iter()
+                .find(|agent| arg_mentions_package(arg, agent.package))
+        })
+        .or_else(|| {
+            lowered
+                .iter()
+                .take_while(|arg| !arg.starts_with('-'))
+                .find_map(|arg| {
+                    WRAPPED_AGENTS
+                        .iter()
+                        .find(|agent| looks_like_agent_executable(arg, agent))
+                })
+        })
+        .map(|agent| agent.name)
+}
+
+/// Whether one lower-cased argv element refers to the npm package `pkg`: the
+/// bare name, a versioned spec, or a path into its installed tree.
+fn arg_mentions_package(lower: &str, pkg: &str) -> bool {
+    lower == pkg
+        || lower
+            .strip_prefix(pkg)
+            .is_some_and(|rest| rest.starts_with('@') || rest.starts_with('/'))
+        || lower.contains(&format!("/{pkg}/"))
+        || lower.ends_with(&format!("/{pkg}"))
+}
+
+/// Whether one lower-cased argv element's basename is `agent`'s executable:
+/// its leading alphanumeric token equals the stem (so `codex-aarch64-apple-
+/// darwin` and `claude` both qualify, `codexify` does not), or it carries the
+/// vendor-prefixed form (`openai-codex`).
+fn looks_like_agent_executable(value: &str, agent: &WrappedAgent) -> bool {
     let base = executable_basename(value);
     let mut tokens = base
         .split(|ch: char| !ch.is_ascii_alphanumeric())
         .filter(|token| !token.is_empty());
     let first = tokens.next().unwrap_or(&base);
-    if first == "openai" && tokens.next() == Some("codex") {
+    if let Some((vendor, stem)) = agent.vendor_stem
+        && first == vendor
+        && tokens.next() == Some(stem)
+    {
         return true;
     }
-    first == "codex"
+    first == agent.stem
 }
 
 fn executable_basename(value: &str) -> String {
@@ -800,6 +875,107 @@ mod tests {
         assert_eq!(
             canonical_process_name("node", Some(&["node".to_string(), "codexify".to_string()])),
             "node"
+        );
+    }
+
+    #[test]
+    fn canonical_process_name_detects_claude_code_through_runtime_wrappers() {
+        let node = |args: &[&str]| {
+            let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            canonical_process_name("node", Some(&owned))
+        };
+        let bun = |args: &[&str]| {
+            let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            canonical_process_name("bun", Some(&owned))
+        };
+
+        // The common install path: `npm i -g` leaves a `bin/claude` symlink in
+        // front of a `#!/usr/bin/env node` script, and execve passes the
+        // unresolved symlink path — no package name appears in argv.
+        assert_eq!(node(&["node", "/opt/homebrew/bin/claude"]), "claude");
+        assert_eq!(
+            node(&["node", "/Users/me/.bun/bin/claude", "--resume"]),
+            "claude"
+        );
+        // npx / bunx by package or by bin name.
+        assert_eq!(
+            node(&[
+                "node",
+                "/opt/homebrew/lib/node_modules/npm/bin/npx-cli.js",
+                "claude"
+            ]),
+            "claude"
+        );
+        assert_eq!(
+            node(&[
+                "node",
+                "/opt/homebrew/lib/node_modules/npm/bin/npx-cli.js",
+                "@anthropic-ai/claude-code@latest"
+            ]),
+            "claude"
+        );
+        assert_eq!(bun(&["bun", "x", "@anthropic-ai/claude-code"]), "claude");
+        // Direct script launch.
+        assert_eq!(
+            node(&[
+                "node",
+                "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+            ]),
+            "claude"
+        );
+
+        // Near misses stay unbranded.
+        assert_eq!(
+            node(&[
+                "node",
+                "/x/node_modules/@anthropic-ai/claude-code-sdk/index.js"
+            ]),
+            "node"
+        );
+        assert_eq!(bun(&["bun", "run", "claudette"]), "bun");
+        assert_eq!(
+            node(&["node", "build.js", "--plugin", "claude-code"]),
+            "node"
+        );
+        // A non-wrapper name ignores argv entirely.
+        assert_eq!(
+            canonical_process_name("zsh", Some(&["zsh".to_string(), "claude".to_string()])),
+            "zsh"
+        );
+    }
+
+    #[test]
+    fn canonical_process_name_prefers_explicit_package_over_basename_heuristic() {
+        let node = |args: &[&str]| {
+            let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            canonical_process_name("node", Some(&owned))
+        };
+        // A Claude Code launch whose arguments merely mention a codex-looking
+        // path must not be branded Codex.
+        assert_eq!(
+            node(&[
+                "node",
+                "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+                "--add-dir",
+                "/Users/me/codex-migration"
+            ]),
+            "claude"
+        );
+        // …and symmetrically for Codex.
+        assert_eq!(
+            node(&[
+                "node",
+                "/opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js",
+                "--cd",
+                "/Users/me/claude"
+            ]),
+            "codex"
+        );
+        // Without any package reference the earliest executable-looking
+        // argument decides.
+        assert_eq!(
+            node(&["node", "/opt/homebrew/bin/claude", "--resume", "codex-fix"]),
+            "claude"
         );
     }
 

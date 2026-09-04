@@ -624,3 +624,25 @@ fn placeholder_column_jump_splits_run() {
     assert_eq!(placements[0].src, Some([0, 0, 10, 20]));
     assert_eq!(placements[1].src, Some([20, 0, 10, 20]), "column 2 tile");
 }
+
+#[test]
+fn kitty_rectangle_scroll_keeps_placements_outside_the_margins() {
+    let mut t = kitty_terminal();
+    // One image left of the margins (col 1) and one inside them (col 8).
+    feed(&mut t, b"\x1b[6;1H");
+    feed(
+        &mut t,
+        &kitty_apc("a=T,f=32,s=10,v=20,i=1,C=1", &vec![0u8; 10 * 20 * 4]),
+    );
+    feed(&mut t, b"\x1b[6;8H");
+    feed(
+        &mut t,
+        &kitty_apc("a=T,f=32,s=10,v=20,i=2,C=1", &vec![0u8; 10 * 20 * 4]),
+    );
+    // DECSLRM 5..15 + DECSTBM 2..12, then LF at the region bottom scrolls only
+    // the rectangle; columns outside the margins are untouched.
+    feed(&mut t, b"\x1b[?69h\x1b[5;15s\x1b[2;12r\x1b[12;5H\n");
+    let ids: Vec<u32> = t.primary.kitty_placements.iter().map(|p| p.image_id).collect();
+    assert_eq!(ids, vec![1], "only the image inside the margins is scrolled away");
+    assert_eq!(t.kitty_visible_placements()[0].grid_y, 5);
+}

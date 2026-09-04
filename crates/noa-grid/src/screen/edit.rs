@@ -258,7 +258,7 @@ impl Screen {
         }
         if self.has_narrow_horizontal_margins() {
             self.scroll_rectangle_up(top, bottom, n);
-            self.remove_placements_intersecting_grid_rows(top, bottom);
+            self.remove_placements_intersecting_margin_rows(top, bottom);
             return;
         }
         let recorded = self.records_scrollback_for_region(top, bottom);
@@ -393,7 +393,7 @@ impl Screen {
         }
         if self.has_narrow_horizontal_margins() {
             self.scroll_rectangle_down(top, bottom, n);
-            self.remove_placements_intersecting_grid_rows(top, bottom);
+            self.remove_placements_intersecting_margin_rows(top, bottom);
             return;
         }
         let blank = self.blank();
@@ -405,6 +405,27 @@ impl Screen {
             r.dirty = true;
         }
         self.track_scroll_down(top, bottom, n);
+    }
+
+    /// Like [`Self::remove_placements_intersecting_grid_rows`], but only for
+    /// placements that also overlap the active horizontal margins. A rectangle
+    /// scroll leaves the columns outside the margins untouched, so images
+    /// living there must survive it.
+    fn remove_placements_intersecting_margin_rows(&mut self, top: usize, bottom: usize) {
+        if self.kitty_placements.is_empty() {
+            return;
+        }
+        let base = self.live_area_abs_top();
+        let r_top = base + top;
+        let r_bot = base + bottom;
+        let left = self.left_margin();
+        let right = self.right_margin();
+        self.kitty_placements.retain(|p| {
+            let p_top = p.anchor_abs_row;
+            let p_bot = p.anchor_abs_row + p.rows as usize;
+            let p_right = p.anchor_col.saturating_add(p.cols);
+            p_bot <= r_top || p_top > r_bot || p_right <= left || p.anchor_col > right
+        });
     }
 
     fn has_narrow_horizontal_margins(&self) -> bool {
@@ -858,7 +879,7 @@ impl Screen {
         let n = (n.max(1) as usize).min(len);
         if self.has_narrow_horizontal_margins() {
             self.scroll_rectangle_down(start, bottom, n);
-            self.remove_placements_intersecting_grid_rows(start, bottom);
+            self.remove_placements_intersecting_margin_rows(start, bottom);
             return;
         }
         let blank = self.blank();
@@ -883,7 +904,7 @@ impl Screen {
         let n = (n.max(1) as usize).min(len);
         if self.has_narrow_horizontal_margins() {
             self.scroll_rectangle_up(start, bottom, n);
-            self.remove_placements_intersecting_grid_rows(start, bottom);
+            self.remove_placements_intersecting_margin_rows(start, bottom);
             return;
         }
         let blank = self.blank();

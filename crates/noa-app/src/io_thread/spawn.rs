@@ -474,6 +474,14 @@ pub fn spawn(
                             break; // event loop gone
                         }
                     }
+                    if let Some(status) = output.agent_status.take() {
+                        let _ =
+                            proxy.send_event(UserEvent::SessionDelta(SessionDelta::AgentStatus {
+                                id: current_card_target(&window_id, pane_id).1,
+                                status,
+                                at: crate::localtime::wall_clock_now(),
+                            }));
+                    }
                     if let Some(cue) = progress_cue {
                         let id = current_card_target(&window_id, pane_id).1;
                         let delta = match cue {

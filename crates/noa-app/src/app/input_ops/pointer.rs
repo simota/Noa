@@ -396,9 +396,7 @@ impl App {
     /// Resolve the currently Cmd+hovered link in `window_id`'s under-the-
     /// mouse pane to its open target, re-deriving it from live grid state
     /// (rather than caching it on `Surface::hover_link`, which the renderer
-    /// only needs the geometry of). A path target's line/column suffix is
-    /// dropped here — `open` has no notion of a line number — but it was
-    /// still part of what got underlined on hover.
+    /// only needs the geometry of). Keep the line/column for editor navigation.
     pub(in crate::app) fn open_hovered_link(&self, window_id: WindowId) -> Option<LinkTarget> {
         let state = self.windows.get(&window_id)?;
         let pane_id = state.last_mouse_pane?;
@@ -441,7 +439,11 @@ impl App {
         }
         let resolved = resolve_hover_path(&path_match.path, cwd.as_deref())?;
         self.path_probe_confirmed(&resolved)
-            .then_some(LinkTarget::Path(resolved))
+            .then_some(LinkTarget::Path {
+                path: resolved,
+                line: path_match.line,
+                column: path_match.column,
+            })
     }
 }
 

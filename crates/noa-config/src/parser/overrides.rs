@@ -28,6 +28,7 @@ pub(crate) fn build_overrides(
     let mut palette = Vec::new();
     let mut clipboard_read = None;
     let mut clipboard_paste_protection = None;
+    let mut file_link_editor = None;
     let mut confirm_quit = None;
     let mut title_report = None;
     let mut window_padding_x = None;
@@ -378,6 +379,15 @@ pub(crate) fn build_overrides(
             "audible-bell-dock-bounce" => {
                 audible_bell_dock_bounce = parse_bool_directive(path, directive, &mut diagnostics);
             }
+            "file-link-editor" => {
+                if let Some(value) = directive.value.as_deref() {
+                    if let Some(editor) = crate::FileLinkEditor::parse(value) {
+                        file_link_editor = Some(editor);
+                    } else {
+                        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+                    }
+                }
+            }
             "auto-approve" => {
                 auto_approve = parse_bool_directive(path, directive, &mut diagnostics);
             }
@@ -442,6 +452,7 @@ pub(crate) fn build_overrides(
             palette,
             clipboard_read,
             clipboard_paste_protection,
+            file_link_editor,
             confirm_quit,
             title_report,
             window_padding_x,
@@ -554,6 +565,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "theme"
             | "clipboard-read"
             | "clipboard-paste-protection"
+            | "file-link-editor"
             | "confirm-quit"
             | "title-report"
             | "window-padding-x"

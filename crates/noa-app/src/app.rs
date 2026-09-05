@@ -293,6 +293,9 @@ pub struct App {
     command_palette: Option<CommandPaletteSession>,
     /// The open send-selection target picker, if any.
     send_selection_picker: Option<SendSelectionPickerSession>,
+    #[cfg(target_os = "macos")]
+    text_panel: Option<crate::text_panel::TextPanel>,
+    prompt_drafts: HashMap<PaneId, String>,
     /// The endpoint/discovery/target-picker overlay for the single
     /// `Attach Remote` command-palette flow.
     remote_ui: Option<remote_ui::RemoteUiSession>,
@@ -796,6 +799,9 @@ impl App {
             copy_mode_suppressed_repeats: HashSet::new(),
             command_palette: None,
             send_selection_picker: None,
+            #[cfg(target_os = "macos")]
+            text_panel: None,
+            prompt_drafts: HashMap::new(),
             remote_ui: None,
             theme_settings: None,
             process_monitor: None,

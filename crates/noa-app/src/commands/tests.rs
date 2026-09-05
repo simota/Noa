@@ -644,3 +644,21 @@ fn keybind_parser_rejects_missing_or_unknown_key() {
         Err(KeybindParseError::UnknownKey(_))
     ));
 }
+#[test]
+fn agent_workflow_actions_round_trip_and_next_notification_has_a_shortcut() {
+    for (action, command) in [
+        ("session.next-notification", AppCommand::NextNotification),
+        ("agent.compose-prompt", AppCommand::ComposePrompt),
+        ("terminal.read-output", AppCommand::ReadOutput),
+    ] {
+        assert_eq!(command.action_name(), action);
+        assert_eq!(AppCommand::from_action_name(action), Some(command));
+    }
+    assert_eq!(
+        KeybindEngine::default().resolve(
+            &Key::Character("j".into()),
+            ModifiersState::SUPER | ModifiersState::SHIFT
+        ),
+        Some(AppCommand::NextNotification)
+    );
+}

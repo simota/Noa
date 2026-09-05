@@ -21,6 +21,8 @@ pub fn resolve_pane_command_target(
 ) -> Option<PaneId> {
     match command {
         AppCommand::Copy
+        | AppCommand::ComposePrompt
+        | AppCommand::ReadOutput
         | AppCommand::Paste
         | AppCommand::SendSelectionToPane
         | AppCommand::ExportScrollback
@@ -53,6 +55,7 @@ pub fn resolve_pane_command_target(
         | AppCommand::OpenThemePicker
         | AppCommand::OpenSettings
         | AppCommand::ToggleProcessMonitor
+        | AppCommand::NextNotification
         | AppCommand::ToggleFullscreen
         | AppCommand::ToggleQuickTerminal
         | AppCommand::ToggleScratchTerminal

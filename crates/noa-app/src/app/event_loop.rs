@@ -259,19 +259,35 @@ impl ApplicationHandler<UserEvent> for App {
                 };
                 if crate::notification::should_notify(self.os_focused, window_id) {
                     crate::notification::post_notification(title.as_deref(), &body);
-                    // The notifying pane (typically an AI agent awaiting the
-                    // user's reply) flags its session card so the sidebar and
-                    // tab overview surface it until the window regains focus
-                    // (FR-16). The OS-focused window is exempt for the same
-                    // reason its desktop notification is suppressed — the user
-                    // is already looking at it, and focus is what clears the
-                    // flag.
-                    self.apply_session_delta(crate::session_store::SessionDelta::Attention {
-                        id: Self::session_card_id(window_id, pane_id),
-                    });
                 }
+                // Desktop alerts are window-scoped; unread state is pane-scoped.
+                self.apply_session_delta(crate::session_store::SessionDelta::Attention {
+                    id: Self::session_card_id(window_id, pane_id),
+                });
             }
+            UserEvent::TextPanelInput {
+                window_id,
+                pane_id,
+                process,
+                text,
+                paste,
+            } => {
+                self.handle_text_panel_input(window_id, pane_id, process, text, paste);
+            }
+            UserEvent::TextPanelReturn { window_id, pane_id } => {
+                self.return_from_text_panel(window_id, pane_id)
+            }
+            UserEvent::FilePreview {
+                window_id,
+                pane_id,
+                title,
+                text,
+            } => self.show_file_preview(window_id, pane_id, title, text),
             UserEvent::Redraw(window_id, pane_id) => {
+                #[cfg(target_os = "macos")]
+                if let Some(panel) = &self.text_panel {
+                    panel.note_output(pane_id);
+                }
                 // P1-1/P1-2: resolve to the pane's current window. This is
                 // also what neutralizes a `Remote`-transport pane's
                 // `WinitConnectionNotifier`, which bakes in its `window_id`
@@ -610,8 +626,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // apply: expedite the (slow) watcher so the `about_to_wait`
                 // pass right after this event stats the file immediately.
                 self.expedite_config_watch();
-                // A window gaining focus clears its cards' unread bells (FR-11).
-                self.clear_session_bell_for_window(window_id);
+                self.clear_focused_session_bell(window_id);
                 // The native tab bar appears/disappears without a `Resized`
                 // event (a full-size content view keeps `inner_size` fixed),
                 // and every tab add/switch/close focuses the surviving
@@ -1579,7 +1594,18 @@ impl App {
                         }
                         match target {
                             LinkTarget::Uri(uri) => link_open::open_uri(&uri),
-                            LinkTarget::Path(path) => link_open::open_path(&path),
+                            LinkTarget::Path { path, line, column } => {
+                                if self.modifiers.alt_key() {
+                                    self.open_file_preview(window_id, path, line);
+                                } else {
+                                    link_open::open_path(
+                                        &path,
+                                        line,
+                                        column,
+                                        self.config.file_link_editor,
+                                    );
+                                }
+                            }
                         }
                         return;
                     }

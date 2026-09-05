@@ -12,6 +12,7 @@ mod process_monitor;
 mod search;
 mod tab_title;
 mod terminal;
+mod text_panel;
 mod theme_settings;
 
 pub(in crate::app) use copy_mode::{

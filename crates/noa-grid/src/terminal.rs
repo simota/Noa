@@ -119,6 +119,7 @@ pub struct Terminal {
     /// [`Terminal::take_pending_notifications`]. Bounded at
     /// [`NOTIFICATION_QUEUE_CAP`]; the oldest is evicted on overflow.
     pending_notifications: VecDeque<Notification>,
+    pending_agent_status: Option<Option<crate::AgentStatus>>,
     /// Current `OSC 9;4` task state and its last-write-wins app-layer delta.
     progress: Option<TerminalProgress>,
     pending_progress_update: Option<ProgressUpdate>,
@@ -203,6 +204,7 @@ impl Terminal {
             pending_clipboard_writes: Vec::new(),
             pending_clipboard_reads: Vec::new(),
             pending_notifications: VecDeque::new(),
+            pending_agent_status: None,
             progress: None,
             pending_progress_update: None,
             pending_progress_cue: None,
@@ -799,6 +801,10 @@ impl Terminal {
     /// oldest first. Empty when nothing was requested since the last drain.
     pub fn take_pending_notifications(&mut self) -> Vec<Notification> {
         self.pending_notifications.drain(..).collect()
+    }
+
+    pub fn take_pending_agent_status(&mut self) -> Option<Option<crate::AgentStatus>> {
+        self.pending_agent_status.take()
     }
 
     /// Current task progress reported by the foreground terminal application.

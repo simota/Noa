@@ -343,6 +343,60 @@ pub struct Notification {
     pub body: String,
 }
 
+/// Explicit, informational agent state. It never authorizes terminal input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentState {
+    Running,
+    Permission,
+    Input,
+    Finished,
+    Error,
+}
+
+impl AgentState {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Permission => "approval needed",
+            Self::Input => "reply needed",
+            Self::Finished => "response ended",
+            Self::Error => "error",
+        }
+    }
+
+    pub const fn needs_attention(self) -> bool {
+        matches!(self, Self::Permission | Self::Input | Self::Error)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentStatus {
+    pub state: AgentState,
+    pub detail: String,
+}
+
+/// Noa extension: `OSC 777;noa-agent;<state>;<detail> ST`.
+/// The outer Option distinguishes an invalid report from an explicit clear.
+pub(crate) fn parse_agent_status_osc(data: &[u8]) -> Option<Option<AgentStatus>> {
+    let rest = std::str::from_utf8(data.strip_prefix(b"777;noa-agent;")?).ok()?;
+    let (state, detail) = rest.split_once(';').unwrap_or((rest, ""));
+    let state = match state {
+        "clear" if detail.is_empty() => return Some(None),
+        "running" => AgentState::Running,
+        "permission" => AgentState::Permission,
+        "input" => AgentState::Input,
+        "finished" => AgentState::Finished,
+        "error" => AgentState::Error,
+        _ => return None,
+    };
+    let detail = detail
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(160)
+        .collect();
+    Some(Some(AgentStatus { state, detail }))
+}
+
 /// A validated determinate progress percentage reported by `OSC 9;4`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProgressValue(u8);

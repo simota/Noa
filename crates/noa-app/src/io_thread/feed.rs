@@ -56,6 +56,7 @@ pub(super) struct TerminalOutput {
     pub(super) pending_clipboard_writes: Vec<String>,
     pub(super) pending_clipboard_reads: Vec<String>,
     pub(super) pending_notifications: Vec<noa_grid::Notification>,
+    pub(super) agent_status: Option<Option<noa_grid::AgentStatus>>,
     /// Last `OSC 9;4` change parsed in this batch, if any.
     pub(super) progress_update: Option<noa_grid::ProgressUpdate>,
     /// Last completion/error cue in this batch. A trailing Clear preserves the
@@ -322,6 +323,7 @@ pub(super) fn feed_terminal_batch<T: AsRef<[u8]>>(
         pending_clipboard_writes: term.take_pending_clipboard_writes(),
         pending_clipboard_reads: term.take_pending_clipboard_reads(),
         pending_notifications: term.take_pending_notifications(),
+        agent_status: term.take_pending_agent_status(),
         progress_update: term.take_pending_progress_update(),
         progress_cue: term.take_pending_progress_cue(),
         synchronized_output: term.modes.synchronized_output(),

@@ -26,7 +26,10 @@ fn progress_flash_for_delta(delta: &SessionDelta) -> Option<(ProgressFlashKind, 
 fn delta_changes_overview_label(delta: &SessionDelta) -> bool {
     matches!(
         delta,
-        SessionDelta::Bell { .. } | SessionDelta::Attention { .. } | SessionDelta::Progress { .. }
+        SessionDelta::Bell { .. }
+            | SessionDelta::Attention { .. }
+            | SessionDelta::Progress { .. }
+            | SessionDelta::AgentStatus { .. }
     )
 }
 
@@ -66,9 +69,8 @@ impl App {
     /// (FR-14/AC-16b): a QT pane shares the app-wide publish gate, so without
     /// this guard its output would leak a card into every window's sidebar
     /// whenever a sidebar is open elsewhere. Because the card never enters, no
-    /// reconcile is needed when the quick terminal is torn down. A bell or
-    /// attention request for the OS-focused window is dropped by the same gate
-    /// (FR-16 parity with the OSC 9/777 path — focus is what clears the flags).
+    /// reconcile is needed when the quick terminal is torn down. Only the
+    /// pane currently being read is exempt from unread notifications.
     pub(in crate::app) fn apply_session_delta(&mut self, delta: SessionDelta) {
         let window_id = WindowId::from(delta.id().window_id.0);
         // An agent session's bell is an interaction request, not a generic beep
@@ -78,7 +80,7 @@ impl App {
         if !session_delta_should_apply(
             &delta,
             self.window_sidebar_eligible(window_id),
-            self.os_focused == Some(window_id),
+            self.session_card_is_focused(delta.id()),
         ) {
             return;
         }
@@ -128,6 +130,21 @@ impl App {
             _ => None,
         };
         let pane_id = delta.id().pane_id;
+        let agent_notification = match &delta {
+            SessionDelta::AgentStatus {
+                id,
+                status: Some(status),
+                ..
+            } if status.state.needs_attention()
+                || status.state == noa_grid::AgentState::Finished =>
+            {
+                self.session_store
+                    .get(id)
+                    .filter(|card| card.agent_status.as_ref() != Some(status))
+                    .map(|_| *id)
+            }
+            _ => None,
+        };
         // panel-metrics-view FR-7: a metrics tick refreshes the open
         // process-monitor overlay's rows (checked before `apply` moves the
         // delta) — a no-op when the overlay is closed.
@@ -137,6 +154,9 @@ impl App {
         // which reads the store, not the delta stream).
         let is_process_delta = matches!(delta, SessionDelta::Process { .. });
         self.session_store.apply(delta);
+        if let Some(id) = agent_notification {
+            self.apply_session_delta(SessionDelta::Attention { id });
+        }
         if is_metrics_delta {
             self.refresh_process_monitor();
         }
@@ -295,6 +315,21 @@ impl App {
     /// window-remove reach it transitively via `close_pane`/`close_tab`.
     pub(in crate::app) fn reconcile_session_store(&mut self) {
         let live = self.live_session_card_ids();
+        let live_panes: HashSet<_> = self
+            .windows
+            .values()
+            .flat_map(|state| state.surfaces.keys().copied())
+            .collect();
+        self.prompt_drafts
+            .retain(|pane, _| live_panes.contains(pane));
+        #[cfg(target_os = "macos")]
+        if self
+            .text_panel
+            .as_ref()
+            .is_some_and(|panel| !live_panes.contains(&panel.pane_id()))
+        {
+            self.text_panel = None;
+        }
         self.session_store.reconcile_sessions(&live);
         // Prune foreground-process probes for torn-down sessions at the same
         // choke point, so a closed pane's dup'd fd is released.
@@ -313,26 +348,33 @@ impl App {
         }) {
             self.sidebar_rename = None;
         }
+        if let Some(window_id) = self.os_focused {
+            self.clear_focused_session_bell(window_id);
+        }
     }
 
-    /// Clear the unread-bell and attention flags on every card of a
-    /// just-focused window (FR-11/FR-16). Called from the `Focused(true)`
-    /// handler. The window's overview tiles re-stamp their labels so a cleared
-    /// attention marker disappears from the overview too.
-    pub(in crate::app) fn clear_session_bell_for_window(&mut self, window_id: WindowId) {
-        self.session_store
-            .clear_bell_for_window(SessionWindowId(u64::from(window_id)));
-        // The store already cleared the persistent attention flags; discard any
-        // remaining arrival emphasis for the same window as well.
-        let sw = SessionWindowId(u64::from(window_id));
-        self.attention_flash_until
-            .retain(|id, _| id.window_id != sw);
-        self.request_sidebar_redraw();
-        if let Some(pane_id) = self.windows.get(&window_id).map(|state| state.focused_pane) {
-            self.mark_overview_label_dirty(OverviewTileId::new(window_id, pane_id));
-        } else {
-            self.request_overview_redraw();
+    fn session_card_is_focused(&self, id: SessionCardId) -> bool {
+        let window_id = WindowId::from(id.window_id.0);
+        !self.overview_visible
+            && self.os_focused == Some(window_id)
+            && self
+                .windows
+                .get(&window_id)
+                .is_some_and(|state| state.focused_pane == id.pane_id)
+    }
+
+    pub(in crate::app) fn clear_focused_session_bell(&mut self, window_id: WindowId) {
+        let Some(pane_id) = self.windows.get(&window_id).map(|state| state.focused_pane) else {
+            return;
+        };
+        let id = Self::session_card_id(window_id, pane_id);
+        if !self.session_card_is_focused(id) {
+            return;
         }
+        self.session_store.clear_bell_for_card(id);
+        self.attention_flash_until.remove(&id);
+        self.request_sidebar_redraw();
+        self.mark_overview_label_dirty(OverviewTileId::new(window_id, pane_id));
     }
 
     /// Whether a window may host a sidebar (FR-14, scratch-terminal R6):
@@ -513,6 +555,16 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unread_notifications_are_suppressed_only_for_the_selected_pane() {
+        let id = SessionCardId::new(SessionWindowId(1), PaneId::new(2));
+        for delta in [SessionDelta::Bell { id }, SessionDelta::Attention { id }] {
+            assert!(session_delta_should_apply(&delta, true, false));
+            assert!(!session_delta_should_apply(&delta, true, true));
+            assert!(!session_delta_should_apply(&delta, false, false));
+        }
+    }
 
     #[test]
     fn repeated_attention_does_not_restart_one_shot_emphasis() {

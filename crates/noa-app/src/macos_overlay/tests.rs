@@ -35,6 +35,7 @@ fn settings_init() -> ThemeSettingsInit {
         glassmorphism: noa_config::GlassLevel::Off,
         confirm_quit: true,
         send_selection_send_enter: false,
+        file_link_editor: noa_config::FileLinkEditor::Default,
         font_family: "Menlo".to_string(),
         available_font_families: Vec::new(),
         scrollback_limit: noa_config::DEFAULT_SCROLLBACK_LIMIT,
@@ -154,6 +155,38 @@ fn view_model_settings_visible_reflects_the_active_search_filter() {
     assert_eq!(vm.search_query, "cursor style");
 }
 
+#[test]
+fn settings_search_exposes_editor_choice_and_agent_guide() {
+    for (query, label, value, liveness) in [
+        (
+            "file link editor",
+            "File Link Editor",
+            "Cursor",
+            Liveness::OnSave,
+        ),
+        (
+            "agent workflows",
+            "Agent Workflows",
+            "Open Guide",
+            Liveness::Live,
+        ),
+    ] {
+        let mut state = ThemeSettings::open(ThemeSettingsInit {
+            file_link_editor: noa_config::FileLinkEditor::Cursor,
+            ..settings_init()
+        });
+        state.toggle_settings_search();
+        state.push_text(query, std::time::Instant::now());
+        let model = theme_settings_view_model(&state);
+        assert_eq!(model.settings_visible.len(), 1);
+        let row = &model.rows[model.settings_visible[0]];
+        assert_eq!(row.label, label);
+        assert_eq!(row.value, value);
+        assert_eq!(row.liveness, liveness);
+        assert!(row.selected);
+    }
+}
+
 fn test_colors() -> OverlayColors {
     OverlayColors {
         surface_fg: [1.0, 1.0, 1.0, 1.0],
@@ -202,6 +235,7 @@ fn test_theme_settings_init() -> ThemeSettingsInit {
         glassmorphism: noa_config::GlassLevel::Off,
         confirm_quit: true,
         send_selection_send_enter: false,
+        file_link_editor: noa_config::FileLinkEditor::Default,
         font_family: "Menlo".to_string(),
         available_font_families: Vec::new(),
         scrollback_limit: noa_config::DEFAULT_SCROLLBACK_LIMIT,

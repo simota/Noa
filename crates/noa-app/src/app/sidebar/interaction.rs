@@ -1,6 +1,17 @@
 use super::*;
 
 impl App {
+    pub(in crate::app) fn focus_next_notification(&mut self) {
+        let Some(window_id) = self.focused else {
+            return;
+        };
+        let windows = self.session_windows_for_window(window_id);
+        if let Some(card) = self.session_store.next_notification(&windows) {
+            self.hide_tab_overview();
+            self.focus_session_card(card);
+        }
+    }
+
     /// Route a left-press at `point` (physical px) that lands in the focused
     /// window's sidebar band. Returns `true` when the click was consumed, so
     /// the caller stops before the terminal/split handling sees it (the

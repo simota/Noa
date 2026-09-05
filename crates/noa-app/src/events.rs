@@ -11,6 +11,23 @@ use winit::window::WindowId;
 pub enum UserEvent {
     /// A native app menu item or app-level shortcut was activated.
     AppCommand(AppCommand),
+    TextPanelInput {
+        window_id: WindowId,
+        pane_id: PaneId,
+        process: Option<String>,
+        text: String,
+        paste: bool,
+    },
+    TextPanelReturn {
+        window_id: WindowId,
+        pane_id: PaneId,
+    },
+    FilePreview {
+        window_id: WindowId,
+        pane_id: PaneId,
+        title: String,
+        text: String,
+    },
     /// An OSC 52 clipboard write was accepted by the terminal policy.
     ClipboardWrite {
         window_id: WindowId,

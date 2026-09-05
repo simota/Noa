@@ -5,13 +5,15 @@
 
 /// The Cmd+click open target the hover-link machinery resolved: either an
 /// OSC 8 / auto-detected URI (dispatched through the scheme allowlist below)
-/// or a resolved, existing filesystem path (dispatched through
-/// [`open_path`]'s existence re-check instead — paths have no scheme to
-/// allowlist).
+/// or a filesystem path already resolved by the asynchronous hover probe.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum LinkTarget {
     Uri(String),
-    Path(std::path::PathBuf),
+    Path {
+        path: std::path::PathBuf,
+        line: Option<u32>,
+        column: Option<u32>,
+    },
 }
 
 const ALLOWED_SCHEMES: [&str; 3] = ["http", "https", "mailto"];
@@ -49,22 +51,91 @@ pub fn open_uri(uri: &str) {
 /// (the same reason the hover probe runs on a worker); a path that vanished
 /// between hover and click just makes `open` exit non-zero, logged from the
 /// wait below on its own detached thread.
-pub fn open_path(path: &std::path::Path) {
+pub fn open_path(
+    path: &std::path::Path,
+    line: Option<u32>,
+    column: Option<u32>,
+    editor: noa_config::FileLinkEditor,
+) {
     let path = path.to_owned();
-    std::thread::spawn(
-        move || match std::process::Command::new("open").arg(&path).status() {
+    std::thread::spawn(move || {
+        if editor != noa_config::FileLinkEditor::Default && path.is_file() {
+            let result = std::process::Command::new(editor.as_str())
+                .args(editor_arguments(&path, line, column, editor))
+                .status();
+            match result {
+                Ok(status) if status.success() => return,
+                Ok(status) => log::warn!(
+                    "file-link editor {} exited with {status}; using default application",
+                    editor.as_str()
+                ),
+                Err(err) => log::warn!(
+                    "could not launch file-link editor {}: {err}; using default application",
+                    editor.as_str()
+                ),
+            }
+        }
+        match std::process::Command::new("open").arg(&path).status() {
             Ok(status) if !status.success() => {
                 log::warn!("`open` failed for path {} ({status})", path.display());
             }
             Ok(_) => {}
             Err(err) => log::warn!("failed to open path {}: {err}", path.display()),
-        },
-    );
+        }
+    });
+}
+
+fn editor_arguments(
+    path: &std::path::Path,
+    line: Option<u32>,
+    column: Option<u32>,
+    editor: noa_config::FileLinkEditor,
+) -> Vec<std::ffi::OsString> {
+    let mut args = Vec::new();
+    let mut location = path.as_os_str().to_owned();
+    if let Some(line) = line {
+        if matches!(
+            editor,
+            noa_config::FileLinkEditor::Code | noa_config::FileLinkEditor::Cursor
+        ) {
+            args.push("--goto".into());
+        }
+        location.push(format!(":{}", line.max(1)));
+        if let Some(column) = column {
+            location.push(format!(":{}", column.max(1)));
+        }
+    }
+    args.push(location);
+    args
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editor_receives_exact_location_as_one_argument() {
+        use noa_config::FileLinkEditor;
+        use std::ffi::OsString;
+        let path = std::path::Path::new("/tmp/日本語 project/$(touch nope);file.rs");
+        assert_eq!(
+            editor_arguments(path, Some(42), Some(7), FileLinkEditor::Code),
+            vec![
+                OsString::from("--goto"),
+                OsString::from("/tmp/日本語 project/$(touch nope);file.rs:42:7")
+            ]
+        );
+        assert_eq!(
+            editor_arguments(path, None, Some(7), FileLinkEditor::Cursor),
+            vec![path.as_os_str().to_owned()]
+        );
+        assert_eq!(
+            editor_arguments(path, Some(0), Some(0), FileLinkEditor::Zed),
+            vec![OsString::from(
+                "/tmp/日本語 project/$(touch nope);file.rs:1:1"
+            )]
+        );
+    }
 
     #[test]
     fn allows_http_https_and_mailto() {

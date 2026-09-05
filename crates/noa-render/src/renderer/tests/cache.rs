@@ -1410,3 +1410,81 @@ fn invalidate_pane_after_a_skipped_mixed_window_still_surfaces_the_in_place_edit
          skipped round"
     );
 }
+
+#[test]
+fn full_rebuild_keeps_per_row_buffer_capacity() {
+    // A full rebuild (here: a selection change, one of the pane-wide
+    // invalidation triggers) must refill the existing per-row slots rather
+    // than replace them with fresh zero-capacity `Vec`s — the row count is
+    // unchanged, so last frame's capacity is exactly what this frame needs.
+    let Some(mut font) = skip_font() else { return };
+    let theme = Theme::new();
+    let mut cache = PaneRenderCache::empty();
+    let mut instances = Vec::new();
+
+    let snap_a = baseline_snapshot(['A', 'B', 'C']);
+    let first = rebuild_pane_cached(
+        &mut cache,
+        &mut instances,
+        &snap_a,
+        &mut font,
+        &theme,
+        false,
+    );
+    assert_eq!(first.rows_rebuilt, 3);
+    let glyph_caps: Vec<usize> = cache.glyph.iter().map(Vec::capacity).collect();
+    let glyph_ptrs: Vec<*const CellInstance> = cache.glyph.iter().map(Vec::as_ptr).collect();
+    assert!(
+        glyph_caps.iter().all(|cap| *cap > 0),
+        "every baseline row emits a glyph, so every slot must hold capacity"
+    );
+    let reference = instances.clone();
+    instances.clear();
+
+    // Row 1, not row 0: the block cursor already owns cell (0, 0)'s
+    // background, so selecting it would leave the output unchanged.
+    let mut snap_b = baseline_snapshot(['A', 'B', 'C']);
+    snap_b.selection = Some(Selection::new(
+        SelectionPoint::new(0, 1),
+        SelectionPoint::new(0, 1),
+    ));
+    let second = rebuild_pane_cached(
+        &mut cache,
+        &mut instances,
+        &snap_b,
+        &mut font,
+        &theme,
+        false,
+    );
+    assert_eq!(
+        second.rows_rebuilt, 3,
+        "a selection change is a full rebuild"
+    );
+    assert_eq!(
+        cache.glyph.iter().map(Vec::capacity).collect::<Vec<_>>(),
+        glyph_caps,
+        "a same-size full rebuild must keep each row slot's capacity"
+    );
+    assert_eq!(
+        cache.glyph.iter().map(Vec::as_ptr).collect::<Vec<_>>(),
+        glyph_ptrs,
+        "a same-size full rebuild must reuse each row slot's allocation"
+    );
+    assert_ne!(
+        instances, reference,
+        "the selected cell's background must have changed the output"
+    );
+
+    // Rebuilding the pre-selection snapshot again yields the original output
+    // through the reused buffers.
+    instances.clear();
+    rebuild_pane_cached(
+        &mut cache,
+        &mut instances,
+        &snap_a,
+        &mut font,
+        &theme,
+        false,
+    );
+    assert_eq!(instances, reference);
+}

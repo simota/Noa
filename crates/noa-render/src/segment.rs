@@ -83,6 +83,41 @@ fn boundary_key(font: &mut FontGrid, cell: &SegmentCell) -> (BoundaryKey, StyleK
     (key, style)
 }
 
+/// Reusable output slot for [`segment_row_into`]: the `ShapeRun`s (and
+/// their inner `cells`/`cell_render` `Vec`s) from the previous row are kept
+/// allocated and refilled, so a steady stream of dirty rows segments without
+/// per-row / per-run heap churn. Only the first `live` entries of `runs` are
+/// meaningful for the row most recently segmented.
+#[derive(Default)]
+pub struct RunPool {
+    runs: Vec<ShapeRun>,
+    live: usize,
+}
+
+impl RunPool {
+    /// The runs produced by the most recent [`segment_row_into`] call.
+    pub fn runs(&self) -> &[ShapeRun] {
+        &self.runs[..self.live]
+    }
+
+    fn open_run(&mut self, start_col: u16) -> &mut ShapeRun {
+        if self.live == self.runs.len() {
+            self.runs.push(ShapeRun {
+                start_col,
+                cells: Vec::new(),
+                cell_render: Vec::new(),
+            });
+        } else {
+            let run = &mut self.runs[self.live];
+            run.start_col = start_col;
+            run.cells.clear();
+            run.cell_render.clear();
+        }
+        self.live += 1;
+        &mut self.runs[self.live - 1]
+    }
+}
+
 /// Segment one row's cells into shapeable runs (REQ-SHAPE-6): breaks at
 /// font-face, style (bold/italic), selection, active-search-match,
 /// search-match, and cursor boundaries. A row never crosses into another
@@ -92,8 +127,11 @@ fn boundary_key(font: &mut FontGrid, cell: &SegmentCell) -> (BoundaryKey, StyleK
 /// Takes `&mut FontGrid` because resolving a codepoint the curated font stack
 /// cannot map may lazily pull a system fallback face into the stack (macOS
 /// CoreText cascade — see [`noa_font::FontGrid::resolve_face_for_style`]).
-pub fn segment_row(font: &mut FontGrid, cells: &[SegmentCell]) -> Vec<ShapeRun> {
-    let mut runs: Vec<ShapeRun> = Vec::new();
+///
+/// Writes into `out` (see [`RunPool`]) instead of returning a fresh `Vec`;
+/// [`segment_row`] is the allocating convenience wrapper.
+pub fn segment_row_into(font: &mut FontGrid, cells: &[SegmentCell], out: &mut RunPool) {
+    out.live = 0;
     let mut current_key: Option<BoundaryKey> = None;
 
     for (idx, cell) in cells.iter().enumerate() {
@@ -108,21 +146,26 @@ pub fn segment_row(font: &mut FontGrid, cells: &[SegmentCell]) -> Vec<ShapeRun> 
             cursor: cell.cursor,
         };
 
-        if current_key == Some(key) {
-            let run = runs.last_mut().expect("current_key implies an open run");
-            run.cells.push(shape_cell);
-            run.cell_render.push(render_info);
+        let run = if current_key == Some(key) {
+            out.runs
+                .get_mut(out.live - 1)
+                .expect("current_key implies an open run")
         } else {
-            runs.push(ShapeRun {
-                start_col: idx as u16,
-                cells: vec![shape_cell],
-                cell_render: vec![render_info],
-            });
             current_key = Some(key);
-        }
+            out.open_run(idx as u16)
+        };
+        run.cells.push(shape_cell);
+        run.cell_render.push(render_info);
     }
+}
 
-    runs
+/// Allocating form of [`segment_row_into`] for one-off callers (overlays,
+/// tests) that do not keep a [`RunPool`] around.
+pub fn segment_row(font: &mut FontGrid, cells: &[SegmentCell]) -> Vec<ShapeRun> {
+    let mut pool = RunPool::default();
+    segment_row_into(font, cells, &mut pool);
+    pool.runs.truncate(pool.live);
+    pool.runs
 }
 
 #[cfg(test)]
@@ -237,6 +280,39 @@ mod tests {
             latin_face, cjk_face,
             "each run must resolve to its own distinct face"
         );
+    }
+
+    /// A reused `RunPool` yields exactly the runs a fresh segmentation would
+    /// (stale runs from a longer previous row never leak through `runs()`),
+    /// and keeps its `ShapeRun` slots allocated across rows.
+    #[test]
+    fn run_pool_reuse_matches_fresh_segmentation() {
+        let Some(mut font) = skip_font() else { return };
+        let mut long = vec![plain_cell('a'), plain_cell('b'), plain_cell('c')];
+        long[1].bold = true;
+        let short = vec![plain_cell('x')];
+
+        let mut pool = RunPool::default();
+        segment_row_into(&mut font, &long, &mut pool);
+        assert_eq!(pool.runs().len(), 3);
+        let slots_after_long = pool.runs.len();
+
+        segment_row_into(&mut font, &short, &mut pool);
+        let fresh = segment_row(&mut font, &short);
+        assert_eq!(pool.runs().len(), fresh.len());
+        for (pooled, fresh) in pool.runs().iter().zip(&fresh) {
+            assert_eq!(pooled.start_col, fresh.start_col);
+            assert_eq!(pooled.cells.len(), fresh.cells.len());
+            assert_eq!(pooled.cells[0].ch, fresh.cells[0].ch);
+        }
+        assert_eq!(
+            pool.runs.len(),
+            slots_after_long,
+            "a shorter row must reuse the pool's existing run slots, not shrink them"
+        );
+        segment_row_into(&mut font, &long, &mut pool);
+        assert_eq!(pool.runs().len(), 3);
+        assert_eq!(pool.runs.len(), slots_after_long);
     }
 
     /// `cell_render` stays parallel to `cells` and carries color/cursor

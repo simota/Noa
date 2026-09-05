@@ -394,25 +394,21 @@ impl RowHighlights {
             }
         }
 
+        let active = snap.search.active_match();
         for search_match in snap.search.matches_on_row(storage_y) {
-            if search_match.start.y == storage_y && search_match.end.y == storage_y {
-                mark_highlight_span(
-                    &mut cells,
-                    search_match.start.x,
-                    search_match.end.x,
-                    |cell| {
-                        cell.search_match = true;
-                    },
-                );
-            }
-        }
-
-        if let Some(active) = snap.search.active_match()
-            && active.start.y == storage_y
-            && active.end.y == storage_y
-        {
-            mark_highlight_span(&mut cells, active.start.x, active.end.x, |cell| {
-                cell.active_search = true;
+            let start_x = if storage_y == search_match.start.y {
+                search_match.start.x
+            } else {
+                0
+            };
+            let end_x = if storage_y == search_match.end.y {
+                search_match.end.x
+            } else {
+                u16::MAX
+            };
+            mark_highlight_span(&mut cells, start_x, end_x, |cell| {
+                cell.search_match = true;
+                cell.active_search |= active == Some(*search_match);
             });
         }
 

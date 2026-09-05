@@ -54,9 +54,9 @@ pub struct Terminal {
     /// Alternate screen — populated in inc≥2.
     pub alt: Option<Screen>,
     pub active_is_alt: bool,
-    /// Generation of the active screen's coordinate space. This is advanced
-    /// whenever a control sequence replaces the active [`Screen`] without
-    /// necessarily changing `active_is_alt`.
+    /// Generation of the active screen's coordinate space. Advanced whenever
+    /// a control sequence switches or replaces the active [`Screen`], including
+    /// a round trip through a retained alternate screen.
     screen_generation: u64,
     /// Opaque generation for IPC grid coordinates. Automatic scrollback
     /// eviction keeps this stable because `rows_evicted` preserves surviving
@@ -1031,12 +1031,12 @@ impl Terminal {
             let mut alt = Screen::alternate(self.size.cols, self.size.rows);
             alt.cursor.visible = self.modes.cursor_visible();
             self.alt = Some(alt);
-            self.screen_generation = self.screen_generation.wrapping_add(1);
         } else if let Some(alt) = &mut self.alt {
             alt.cursor.visible = self.modes.cursor_visible();
         }
         self.active_is_alt = true;
         if changes_active_space {
+            self.screen_generation = self.screen_generation.wrapping_add(1);
             self.invalidate_grid_coordinate_space();
         }
         self.primary.clear_selection();
@@ -1051,6 +1051,7 @@ impl Terminal {
         let was_alt = self.active_is_alt;
         self.active_is_alt = false;
         if was_alt {
+            self.screen_generation = self.screen_generation.wrapping_add(1);
             self.invalidate_grid_coordinate_space();
         }
         self.primary.scroll_viewport_to_bottom();

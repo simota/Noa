@@ -1,6 +1,28 @@
 use super::super::*;
 use super::ActiveOverlay;
 
+fn navigate_search(
+    worker: Option<&crate::search_worker::SearchWorker>,
+    target: &Arc<parking_lot::Mutex<noa_grid::Terminal>>,
+    terminal: &mut noa_grid::Terminal,
+    action: SearchAction,
+) {
+    if worker
+        .is_some_and(|worker| worker.queue_navigation(target, terminal.screen_generation(), action))
+    {
+        return;
+    }
+    match action {
+        SearchAction::FindNext => {
+            terminal.search_next();
+        }
+        SearchAction::FindPrevious => {
+            terminal.search_previous();
+        }
+        _ => unreachable!("only search navigation is handled here"),
+    }
+}
+
 impl App {
     pub(in crate::app) fn handle_search_action(&mut self, action: SearchAction) {
         let Some((window_id, pane_id)) =
@@ -8,7 +30,7 @@ impl App {
         else {
             return;
         };
-        let Some(terminal) = self
+        let Some(target) = self
             .windows
             .get(&window_id)
             .and_then(|state| state.surfaces.get(&pane_id))
@@ -17,7 +39,7 @@ impl App {
             return;
         };
 
-        let mut terminal = terminal.lock();
+        let mut terminal = target.lock();
         match action {
             SearchAction::Find => {
                 // Only one prompt is tracked app-wide; cmd+f while one is
@@ -45,11 +67,8 @@ impl App {
                 }
                 return;
             }
-            SearchAction::FindNext => {
-                terminal.search_next();
-            }
-            SearchAction::FindPrevious => {
-                terminal.search_previous();
+            SearchAction::FindNext | SearchAction::FindPrevious => {
+                navigate_search(self.search_worker.as_ref(), &target, &mut terminal, action);
             }
             SearchAction::Clear => {
                 if let Some(worker) = &self.search_worker {
@@ -184,8 +203,10 @@ impl App {
                     }
                 }
                 let proxy = self.proxy.clone();
+                let screen_generation = terminal.lock().screen_generation();
                 self.search_worker.as_ref().unwrap().submit(
                     Arc::downgrade(&terminal),
+                    screen_generation,
                     query,
                     move || {
                         let _ = proxy.send_event(UserEvent::SearchUpdated(window_id, pane_id));
@@ -226,6 +247,83 @@ impl App {
         }
         if let Some(state) = self.windows.get(&session.window_id) {
             state.window.request_redraw();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::search_worker::SearchWorker;
+    use noa_core::GridSize;
+    use noa_grid::Terminal;
+    use parking_lot::Mutex;
+    use std::time::Duration;
+
+    #[test]
+    fn navigation_during_search_matches_synchronous_navigation() {
+        for (text, old_query, actions) in [
+            ("foo foo", "", vec![SearchAction::FindNext]),
+            ("foo foo foo", "", vec![SearchAction::FindPrevious]),
+            (
+                "foo foo foo",
+                "",
+                vec![
+                    SearchAction::FindNext,
+                    SearchAction::FindNext,
+                    SearchAction::FindPrevious,
+                ],
+            ),
+            ("foo far foo", "f", vec![SearchAction::FindNext]),
+            ("foo far foo", "f", vec![SearchAction::FindPrevious]),
+            ("absent", "", vec![SearchAction::FindNext]),
+        ] {
+            let make_terminal = || {
+                let mut terminal = Terminal::new(GridSize::new(20, 3));
+                noa_vt::Stream::new().feed(text.as_bytes(), &mut terminal);
+                if !old_query.is_empty() {
+                    terminal.set_search_query(old_query);
+                    terminal.search_previous();
+                }
+                terminal
+            };
+            let mut expected = make_terminal();
+            expected.set_search_query("foo");
+            for action in &actions {
+                match action {
+                    SearchAction::FindNext => {
+                        expected.search_next();
+                    }
+                    SearchAction::FindPrevious => {
+                        expected.search_previous();
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            let terminal = Arc::new(Mutex::new(make_terminal()));
+            let worker = SearchWorker::new().unwrap();
+            let mut guard = terminal.lock();
+            let old_search = guard.active().search.clone();
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            worker.submit(
+                Arc::downgrade(&terminal),
+                guard.screen_generation(),
+                "foo".into(),
+                move || {
+                    let _ = tx.send(());
+                },
+            );
+            for action in actions {
+                navigate_search(Some(&worker), &terminal, &mut guard, action);
+            }
+            assert_eq!(guard.active().search, old_search);
+            drop(guard);
+            rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert_eq!(
+                terminal.lock().active().search,
+                expected.active().search,
+                "text={text:?}, old_query={old_query:?}"
+            );
         }
     }
 }

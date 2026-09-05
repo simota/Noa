@@ -23,7 +23,7 @@ pub(super) fn to_u16_saturating(value: u32) -> u16 {
 /// reference path `PaneRenderCache`'s per-row patching must stay
 /// output-identical to (AC-WP4-03). `Renderer::rebuild_panes` does not call
 /// this — it drives [`rebuild_row_instances`] per pane through
-/// [`rebuild_pane_cached`] instead, so unchanged rows can be skipped.
+/// [`update_pane_cache`] instead, so unchanged rows can be skipped.
 /// `cfg(test)`-only: nothing in the non-test build calls it anymore.
 #[cfg(test)]
 pub(super) fn rebuild_cell_instances(
@@ -394,7 +394,7 @@ impl RowHighlights {
             }
         }
 
-        for search_match in snap.search.matches() {
+        for search_match in snap.search.matches_on_row(storage_y) {
             if search_match.start.y == storage_y && search_match.end.y == storage_y {
                 mark_highlight_span(
                     &mut cells,
@@ -471,13 +471,15 @@ pub(super) fn flatten_row_segments(
     }
 }
 
-/// Result of [`rebuild_pane_cached`]: the pane's clear color, cell size, how
+/// Result of [`update_pane_cache`]: the pane's clear color, cell size, how
 /// many rows were regenerated, and the two z-band boundary offsets (relative to
 /// the pane's appended instance range) the image layer interleaves at.
 pub(super) struct PaneRebuild {
     pub(super) clear_color: [f32; 4],
     pub(super) cell_size: (f32, f32),
     pub(super) rows_rebuilt: u64,
+    /// The retained cell bands were written on at least one pass.
+    pub(super) cells_changed: bool,
     /// Number of background instances (offset where band 0 → band 1 splits).
     pub(super) bg_len: u32,
     /// Number of background + glyph + decoration instances, i.e. the offset
@@ -490,13 +492,27 @@ pub(super) struct PaneRebuild {
     pub(super) stable: bool,
 }
 
-/// WP4 (REQ-PERF-2/3): rebuild `cache`'s per-row segments against `snap`,
-/// regenerating only dirty rows, then append the flattened result to
-/// `instances` (the caller owns clearing `instances` once per frame across
-/// all panes).
+/// Full-copy adapter for the existing atlas/cache test oracles.
+#[cfg(test)]
 pub(super) fn rebuild_pane_cached(
     cache: &mut PaneRenderCache,
     instances: &mut Vec<CellInstance>,
+    snap: &FrameSnapshot,
+    font: &mut FontGrid,
+    theme: &Theme,
+    target_format_is_srgb: bool,
+) -> PaneRebuild {
+    let result = update_pane_cache(cache, snap, font, theme, target_format_is_srgb);
+    instances.extend_from_slice(&cache.flat);
+    instances.extend_from_slice(&cache.overlays);
+    result
+}
+
+/// Rebuild dirty rows and the pane's small UI overlay separately. Keeping
+/// the cell bands in the pane cache lets the renderer leave an unchanged
+/// pane's CPU/GPU instance range untouched.
+pub(super) fn update_pane_cache(
+    cache: &mut PaneRenderCache,
     snap: &FrameSnapshot,
     font: &mut FontGrid,
     theme: &Theme,
@@ -534,7 +550,7 @@ pub(super) fn rebuild_pane_cached(
         copy_cursor: projected_copy_cursor(snap, rows),
     };
     let mut rows_rebuilt: u64 = 0;
-    let instance_start = instances.len();
+    let mut cells_changed = false;
     let mut bg_len = 0;
     let mut glyph_len = 0;
     let mut deco_len = 0;
@@ -686,10 +702,11 @@ pub(super) fn rebuild_pane_cached(
         if full || rebuilt_rows_this_pass > 0 || cache.flat.is_empty() {
             cache.flat.clear();
             flatten_row_segments(&mut cache.flat, &cache.bg, &cache.glyph, &cache.deco);
+            cells_changed = true;
         }
 
-        instances.truncate(instance_start);
-        instances.extend_from_slice(&cache.flat);
+        cache.overlays.clear();
+        let instances = &mut cache.overlays;
         append_preedit_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
         append_search_prompt_instances(
             instances,
@@ -768,6 +785,7 @@ pub(super) fn rebuild_pane_cached(
         clear_color,
         cell_size,
         rows_rebuilt,
+        cells_changed,
         bg_len,
         text_len: bg_len + glyph_len + deco_len,
         stable,

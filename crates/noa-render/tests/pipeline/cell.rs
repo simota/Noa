@@ -126,7 +126,7 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
     );
     let snap = FrameSnapshot {
         scroll_shift: 0,
-        rows: vec![row],
+        rows: vec![row].into(),
         row_dirty: vec![true],
         cursor: Cursor::default(),
         copy_cursor: Some(SelectionPoint::new(2, 0)),
@@ -214,7 +214,7 @@ fn command_palette_overlay_draws_one_frame_without_validation_error() {
     let snap = FrameSnapshot {
         scroll_shift: 0,
         row_dirty: vec![true; rows.len()],
-        rows,
+        rows: rows.into(),
         cursor: Cursor::default(),
         copy_cursor: None,
         colors: TerminalColors::default(),
@@ -372,7 +372,7 @@ fn command_palette_surface_alpha_is_uniform_across_plain_and_selected_rows() {
     let snap = FrameSnapshot {
         scroll_shift: 0,
         row_dirty: vec![true; rows.len()],
-        rows,
+        rows: rows.into(),
         cursor,
         copy_cursor: None,
         colors: TerminalColors::default(),
@@ -512,7 +512,8 @@ fn cell_pipeline_draws_full_then_dirty_patched_frame_without_validation_error() 
             rows: vec![
                 make_row(first, row_dirty[0]),
                 make_row(second, row_dirty[1]),
-            ],
+            ]
+            .into(),
             row_dirty: row_dirty.to_vec(),
             cursor: Cursor::default(),
             copy_cursor: None,
@@ -638,7 +639,7 @@ fn cell_pipeline_draws_color_glyph_without_validation_error_and_samples_passthro
     );
     let snap = FrameSnapshot {
         scroll_shift: 0,
-        rows: vec![row],
+        rows: vec![row].into(),
         row_dirty: vec![true],
         cursor: Cursor::default(),
         copy_cursor: None,

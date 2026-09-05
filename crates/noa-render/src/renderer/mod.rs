@@ -23,6 +23,9 @@ use crate::snapshot::{
 };
 use crate::theme::{OverlayStyle, Theme, rgba};
 
+mod instance_update;
+use instance_update::InstanceChanges;
+
 const DEFAULT_PANE_ID: PaneId = PaneId::new(0);
 /// Pre-first-rebuild fallbacks only: both colors are re-derived from the
 /// active theme every [`Renderer::rebuild_panes`] (divider = the overlay
@@ -207,7 +210,7 @@ struct FrameInvalidationKey {
 /// Whether `key` (a pane's previously-cached [`FrameInvalidationKey`]) still
 /// matches `snap`'s pane-wide invalidation triggers — i.e. none of the
 /// bundled fields in the doc comment above changed since `key` was recorded.
-/// Shared between [`cell::rebuild_pane_cached`]'s actual rebuild decision and
+/// Shared between [`cell::update_pane_cache`]'s actual rebuild decision and
 /// [`Renderer::pane_rebuild_would_be_full`]'s read-only prediction of it, so
 /// the two can never drift apart.
 fn frame_invalidation_key_matches(
@@ -257,6 +260,7 @@ struct PaneRenderCache {
     glyph: Vec<Vec<CellInstance>>,
     deco: Vec<Vec<CellInstance>>,
     flat: Vec<CellInstance>,
+    overlays: Vec<CellInstance>,
     key: Option<FrameInvalidationKey>,
     /// Shell cursor state plus the optional projected copy cursor as of the
     /// last rebuild. Changes dirty exactly the affected rows instead of
@@ -276,6 +280,7 @@ impl PaneRenderCache {
             glyph: Vec::new(),
             deco: Vec::new(),
             flat: Vec::new(),
+            overlays: Vec::new(),
             key: None,
             prev_cursor: None,
             prev_row_base: None,
@@ -299,10 +304,10 @@ pub struct Renderer {
     instance_buffer: wgpu::Buffer,
     instance_capacity: usize,
     instances: Vec<CellInstance>,
-    /// CPU shadow of what `instance_buffer` currently holds, so
-    /// `upload_instances` can upload only the changed byte range instead of
-    /// the whole list every frame.
-    uploaded_instances: Vec<CellInstance>,
+    /// Changes accumulate until upload, even across multiple background
+    /// rebuilds or atlas retries without an intervening draw.
+    instance_changes: InstanceChanges,
+    overlay_instances: Vec<CellInstance>,
     cell_instance_len: usize,
     pane_instances: Vec<PaneInstances>,
     /// Per-pane kitty-graphics inputs for the most recent `rebuild_panes`,
@@ -436,7 +441,8 @@ impl Renderer {
             instance_buffer,
             instance_capacity,
             instances: Vec::new(),
-            uploaded_instances: Vec::new(),
+            instance_changes: InstanceChanges::default(),
+            overlay_instances: Vec::new(),
             cell_instance_len: 0,
             pane_instances: Vec::new(),
             pane_images: Vec::new(),
@@ -702,7 +708,7 @@ impl Renderer {
     }
 
     /// Read-only prediction of whether rebuilding `pane` against `snap` right
-    /// now would hit `cell::rebuild_pane_cached`'s FULL-rebuild path (every
+    /// now would hit `cell::update_pane_cache`'s FULL-rebuild path (every
     /// visible row) rather than its incremental one (only dirty rows, or the
     /// scroll-shift translation) — without doing any of that work or
     /// mutating any cache state. Mirrors that function's `full` decision
@@ -727,7 +733,7 @@ impl Renderer {
     ) -> bool {
         let Some(cache) = self.pane_render_cache.get(&pane) else {
             // No cache entry yet: this pane's first-ever rebuild is always
-            // full (mirrors `cell::rebuild_pane_cached`'s `cache.bg.len() !=
+            // full (mirrors `cell::update_pane_cache`'s `cache.bg.len() !=
             // rows` check against a fresh, empty cache).
             return true;
         };
@@ -808,7 +814,7 @@ impl Renderer {
         let mut first_clear_color = None;
         let mut rows_rebuilt_total: u64 = 0;
         self.frame_unstable = false;
-        // Cross-pane eviction guard: `rebuild_pane_cached` only stabilizes each
+        // Cross-pane eviction guard: `update_pane_cache` only stabilizes each
         // pane against evictions caused by its OWN rebuild. A later pane's
         // rasterization can still evict atlas rectangles that an
         // earlier-rebuilt pane's instances already reference, and nothing
@@ -816,8 +822,7 @@ impl Renderer {
         // screen until the next unrelated redraw. Detect that here and redo
         // the whole layout against the settled epoch.
         for cross_pane_pass in 0..MAX_ATLAS_EVICTION_REBUILD_PASSES {
-            self.instances.clear();
-            self.pane_instances.clear();
+            let mut instance_end = 0usize;
             self.pane_images.clear();
             self.pane_layout.clear();
             self.divider_range = 0..0;
@@ -828,8 +833,8 @@ impl Renderer {
             first_clear_color = None;
             rows_rebuilt_total = 0;
             let eviction_before = font.atlas_eviction_generation();
-            for pane in panes {
-                let start = self.instances.len() as u32;
+            for (pane_index, pane) in panes.iter().enumerate() {
+                let start = instance_end as u32;
                 let cache = self
                     .pane_render_cache
                     .entry(pane.pane)
@@ -838,12 +843,12 @@ impl Renderer {
                     clear_color,
                     cell_size,
                     rows_rebuilt,
+                    cells_changed,
                     bg_len,
                     text_len,
                     stable,
-                } = rebuild_pane_cached(
+                } = update_pane_cache(
                     cache,
-                    &mut self.instances,
                     pane.snapshot,
                     font,
                     theme,
@@ -855,13 +860,31 @@ impl Renderer {
                 }
                 first_clear_color.get_or_insert(clear_color);
                 self.cell_size = cell_size;
-                let end = self.instances.len() as u32;
-                self.pane_instances.push(PaneInstances {
+                let same_range = self.pane_instances.get(pane_index).is_some_and(|previous| {
+                    previous.pane == pane.pane
+                        && previous.range.start == start
+                        && previous.text_end == start + text_len
+                });
+                if cells_changed || !same_range {
+                    self.instance_changes
+                        .patch(&mut self.instances, instance_end, &cache.flat);
+                }
+                instance_end += cache.flat.len();
+                self.instance_changes
+                    .patch(&mut self.instances, instance_end, &cache.overlays);
+                instance_end += cache.overlays.len();
+                let end = instance_end as u32;
+                let pane_instances = PaneInstances {
                     pane: pane.pane,
                     range: start..end,
                     bg_end: start + bg_len,
                     text_end: start + text_len,
-                });
+                };
+                if let Some(previous) = self.pane_instances.get_mut(pane_index) {
+                    *previous = pane_instances;
+                } else {
+                    self.pane_instances.push(pane_instances);
+                }
                 if !pane.snapshot.image_placements.is_empty() {
                     self.pane_images.push(PaneImages {
                         pane: pane.pane,
@@ -871,9 +894,11 @@ impl Renderer {
                 }
                 self.pane_layout.push((pane.pane, pane.rect));
             }
+            self.instances.truncate(instance_end);
+            self.pane_instances.truncate(panes.len());
 
             // A single pane is already internally stabilized by
-            // `rebuild_pane_cached`'s own retry loop; only multi-pane layouts
+            // `update_pane_cache`'s own retry loop; only multi-pane layouts
             // can leave an earlier pane stale.
             if panes.len() <= 1 || font.atlas_eviction_generation() == eviction_before {
                 break;
@@ -1215,41 +1240,25 @@ impl Renderer {
             fresh_buffer = true;
         }
         if self.instances.is_empty() {
-            self.uploaded_instances.clear();
+            self.instance_changes.clear();
             return;
         }
-        // Diff against the CPU shadow of the buffer's contents and upload
-        // only the changed range. Any length change re-uploads in full (all
-        // instances past the first changed row shift anyway).
-        if fresh_buffer || self.uploaded_instances.len() != self.instances.len() {
+        if fresh_buffer {
             queue.write_buffer(
                 &self.instance_buffer,
                 0,
                 bytemuck::cast_slice(&self.instances),
             );
-            self.uploaded_instances.clone_from(&self.instances);
+            self.instance_changes.clear();
             return;
         }
-        let Some(first) = self
-            .instances
-            .iter()
-            .zip(&self.uploaded_instances)
-            .position(|(new, old)| new != old)
-        else {
-            return; // frame is byte-identical to what the GPU already holds
-        };
-        let last = self
-            .instances
-            .iter()
-            .zip(&self.uploaded_instances)
-            .rposition(|(new, old)| new != old)
-            .expect("a first diff implies a last diff");
-        queue.write_buffer(
-            &self.instance_buffer,
-            (first * std::mem::size_of::<CellInstance>()) as u64,
-            bytemuck::cast_slice(&self.instances[first..=last]),
-        );
-        self.uploaded_instances[first..=last].copy_from_slice(&self.instances[first..=last]);
+        for range in self.instance_changes.take(self.instances.len()) {
+            queue.write_buffer(
+                &self.instance_buffer,
+                (range.start * std::mem::size_of::<CellInstance>()) as u64,
+                bytemuck::cast_slice(&self.instances[range]),
+            );
+        }
     }
 
     fn upload_uniforms(&self, queue: &wgpu::Queue, layout: &[(PaneId, PaneRect)]) {
@@ -1274,33 +1283,36 @@ impl Renderer {
     }
 
     fn prepare_overlay_instances(&mut self, plan: &[DrawOp]) {
-        self.instances.truncate(self.cell_instance_len);
+        let instances = &mut self.overlay_instances;
+        instances.clear();
         self.divider_range = 0..0;
         self.focus_indicator_range = 0..0;
 
         for op in plan {
             match op {
                 DrawOp::Dividers { rects } => {
-                    let start = self.instances.len() as u32;
+                    let start = (self.cell_instance_len + instances.len()) as u32;
                     for rect in rects {
-                        self.instances
-                            .push(pixel_overlay_instance(*rect, self.divider_color));
+                        instances.push(pixel_overlay_instance(*rect, self.divider_color));
                     }
-                    let end = self.instances.len() as u32;
+                    let end = (self.cell_instance_len + instances.len()) as u32;
                     self.divider_range = start..end;
                 }
                 DrawOp::FocusIndicator { rects, .. } => {
-                    let start = self.instances.len() as u32;
+                    let start = (self.cell_instance_len + instances.len()) as u32;
                     for rect in rects {
-                        self.instances
-                            .push(pixel_overlay_instance(*rect, self.focus_indicator_color));
+                        instances.push(pixel_overlay_instance(*rect, self.focus_indicator_color));
                     }
-                    let end = self.instances.len() as u32;
+                    let end = (self.cell_instance_len + instances.len()) as u32;
                     self.focus_indicator_range = start..end;
                 }
                 DrawOp::Clear | DrawOp::PaneCells { .. } => {}
             }
         }
+        self.instance_changes
+            .patch(&mut self.instances, self.cell_instance_len, instances);
+        self.instances
+            .truncate(self.cell_instance_len + instances.len());
     }
 
     /// Draw a window-absolute overlay subrange (dividers / focus indicator).

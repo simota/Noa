@@ -1,6 +1,115 @@
 use super::*;
 
 #[test]
+fn retained_pane_instances_and_pending_uploads_match_full_rebuilds() {
+    let Some((device, queue)) = device_queue() else {
+        return;
+    };
+    let Some(mut font) = skip_font() else { return };
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8Unorm,
+        &mut font,
+        GridPadding::ZERO,
+    )
+    .unwrap();
+    renderer.resize(PixelSize { w: 256, h: 128 });
+    let theme = Theme::new();
+    let mut terminals: Vec<_> = (0..4)
+        .map(|_| {
+            let mut term = Terminal::new(GridSize::new(8, 3));
+            Stream::new().feed(b"\x1b[?25lABC\r\nDEF\r\nGHI", &mut term);
+            term
+        })
+        .collect();
+    // Independent CPU model of GPU contents: apply only the ranges the
+    // production upload path reports, never copy the entire new frame.
+    let mut uploaded = Vec::new();
+    let mut order = vec![0, 1, 2, 3];
+    for step in 0..12 {
+        match step {
+            2 => Stream::new().feed(b"\x1b[1;1HX", &mut terminals[1]),
+            3 => Stream::new().feed(b"\x1b[2J", &mut terminals[0]), // shrink, move later pane offsets
+            4 => Stream::new().feed(b"\x1b[1;1HABCDEFGH\r\nABCDEFGH", &mut terminals[0]),
+            5 => order.swap(0, 3),
+            6 => {
+                order.remove(1);
+            }
+            8 => terminals[2].set_search_query("D"),
+            9 => {
+                terminals[2].clear_search();
+                order.push(1);
+            }
+            10 => Stream::new().feed(b"\x1b[?1049hALT", &mut terminals[3]),
+            11 => Stream::new().feed(b"\x1b[?1049l", &mut terminals[3]),
+            _ => {}
+        }
+        let mut snapshots: Vec<_> = terminals
+            .iter_mut()
+            .map(FrameSnapshot::from_terminal)
+            .collect();
+        if step == 7 {
+            snapshots[2].preedit = Some(crate::snapshot::Preedit {
+                text: "日本".into(),
+                cursor_byte_range: None,
+            });
+        }
+        let panes: Vec<_> = order
+            .iter()
+            .enumerate()
+            .map(|(position, &index)| PaneFrame {
+                pane: PaneId::new(index as u64 + 1),
+                rect: PaneRect::new(position as u32 * 64, 0, 64, 128),
+                snapshot: &snapshots[index],
+            })
+            .collect();
+        renderer.rebuild_panes(&panes, &mut font, &theme);
+        assert!(!renderer.needs_follow_up_frame());
+        let mut reference = Vec::new();
+        for pane in &panes {
+            let mut instances = Vec::new();
+            rebuild_cell_instances(&mut instances, pane.snapshot, &mut font, &theme, false);
+            reference.extend(instances);
+        }
+        assert_eq!(renderer.instances, reference, "frame {step}");
+        if step == 1 {
+            assert_eq!(renderer.rows_rebuilt_last_frame(), 0);
+            assert!(
+                renderer
+                    .instance_changes
+                    .take(reference.len())
+                    .next()
+                    .is_none(),
+                "clean frame has no cell uploads"
+            );
+        }
+        if step == 2 {
+            let range = renderer.pane_instances[1].range.clone();
+            let pending: Vec<_> = renderer.instance_changes.take(reference.len()).collect();
+            assert!(!pending.is_empty());
+            assert!(
+                pending
+                    .iter()
+                    .all(|r| r.start >= range.start as usize && r.end <= range.end as usize)
+            );
+            for range in pending {
+                renderer.instance_changes.record(range);
+            }
+        }
+        // Frames 3/4 accumulate without a draw, as background refresh does.
+        if matches!(step, 3 | 4) {
+            continue;
+        }
+        uploaded.resize(reference.len(), bytemuck::Zeroable::zeroed());
+        for range in renderer.instance_changes.take(reference.len()) {
+            uploaded[range.clone()].copy_from_slice(&renderer.instances[range]);
+        }
+        assert_eq!(uploaded, reference, "pending uploads at frame {step}");
+    }
+}
+
+#[test]
 fn rebuild_panes_reports_zero_rows_rebuilt_when_nothing_changed() {
     // AC-WP4-02 (REQ-PERF-2): a frame in which no row changed since the
     // last rebuild produces a rows_rebuilt count of exactly 0.

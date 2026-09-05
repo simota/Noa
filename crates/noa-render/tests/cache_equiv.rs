@@ -97,7 +97,7 @@ fn fresh_snapshot(term: &Terminal) -> FrameSnapshot {
     FrameSnapshot {
         scroll_shift: 0,
         row_dirty: vec![true; rows.len()],
-        rows,
+        rows: rows.into(),
         cursor,
         copy_cursor: None,
         colors: term.colors.clone(),

@@ -179,13 +179,12 @@ fn kitty_snapshot(terminal: &Terminal) -> (Vec<ImagePlacementSnapshot>, Vec<Snap
 /// `Clone` exists for `noa-app`'s synchronized-output hold (DECSET 2026):
 /// while a pane's terminal is mid-update under mode 2026, `redraw` reuses a
 /// previously-held snapshot instead of reading a torn one, which requires an
-/// owned copy independent of the one already queued for this frame's render.
-/// Every field is cheap to clone relative to a fresh terminal read (`rows`'
-/// cost is the same order as a cache-miss `from_terminal_recycle`, and
-/// `images`' pixel data is `Arc`-shared, not copied).
+/// independently editable display state for the queued frame. Rows and image
+/// pixels are immutable and shared, so holding/reusing a frame never clones
+/// its cell storage.
 #[derive(Clone)]
 pub struct FrameSnapshot {
-    pub rows: Vec<Row>,
+    pub rows: Arc<Vec<Row>>,
     pub row_dirty: Vec<bool>,
     /// Rows the viewport slid down over immutable content since the previous
     /// snapshot (scrollback-recording scrolls; `Screen::take_scroll_shift`).
@@ -311,7 +310,7 @@ struct FrameSnapshotReuseKey {
 /// reclones every visible row.
 #[derive(Default)]
 pub struct FrameSnapshotRecycle {
-    rows: Vec<Row>,
+    rows: Arc<Vec<Row>>,
     key: Option<FrameSnapshotReuseKey>,
 }
 
@@ -341,8 +340,8 @@ impl FrameSnapshot {
     /// allocations (typically the previous frame's `FrameSnapshot::rows`,
     /// handed back by the caller) so a steady-state frame clones the grid
     /// without fresh heap allocation.
-    pub fn from_terminal_recycled(terminal: &mut Terminal, mut rows_buf: Vec<Row>) -> Self {
-        Self::from_terminal_with_recycle_inner(terminal, &mut rows_buf, false)
+    pub fn from_terminal_recycled(terminal: &mut Terminal, rows_buf: Vec<Row>) -> Self {
+        Self::from_terminal_with_recycle_inner(terminal, Arc::new(rows_buf), false)
     }
 
     /// Like [`Self::from_terminal_recycled`], but also reuses clean row content
@@ -351,6 +350,13 @@ impl FrameSnapshot {
         terminal: &mut Terminal,
         mut recycle: FrameSnapshotRecycle,
     ) -> Self {
+        // A synchronized-output hold or overview reader may still own these
+        // rows. Start a fresh buffer instead of cloning stale cells just to
+        // overwrite them; uniquely owned storage (including the Arc itself)
+        // is reused on ordinary frames.
+        if Arc::get_mut(&mut recycle.rows).is_none() {
+            recycle = FrameSnapshotRecycle::default();
+        }
         let colors = terminal.colors.clone();
         let (image_placements, images) = kitty_snapshot(terminal);
         let active_is_alt = terminal.active_is_alt;
@@ -376,9 +382,12 @@ impl FrameSnapshot {
         };
         let reuse_clean_rows = match recycle.key {
             Some(old_key) if old_key == key => true,
-            Some(old_key) => {
-                Self::realign_recycle_for_scroll(old_key, key, scroll_shift, &mut recycle.rows)
-            }
+            Some(old_key) => Self::realign_recycle_for_scroll(
+                old_key,
+                key,
+                scroll_shift,
+                Arc::get_mut(&mut recycle.rows).expect("recycle rows are unique"),
+            ),
             None => false,
         };
         let snapshot = Self::from_screen_recycle(
@@ -387,7 +396,7 @@ impl FrameSnapshot {
             image_placements,
             images,
             screen,
-            &mut recycle.rows,
+            recycle.rows,
             reuse_clean_rows,
         );
         debug_assert_eq!(snapshot.reuse_key(), key);
@@ -481,7 +490,7 @@ impl FrameSnapshot {
 
     fn from_terminal_with_recycle_inner(
         terminal: &mut Terminal,
-        rows_buf: &mut Vec<Row>,
+        rows_buf: Arc<Vec<Row>>,
         reuse_clean_rows: bool,
     ) -> Self {
         let colors = terminal.colors.clone();
@@ -505,7 +514,7 @@ impl FrameSnapshot {
         image_placements: Vec<ImagePlacementSnapshot>,
         images: Vec<SnapshotImage>,
         screen: &mut Screen,
-        rows_buf: &mut Vec<Row>,
+        mut rows_buf: Arc<Vec<Row>>,
         reuse_clean_rows: bool,
     ) -> Self {
         let mut cursor = screen.cursor;
@@ -522,12 +531,12 @@ impl FrameSnapshot {
         let scroll_shift = screen.take_scroll_shift();
         let mut row_dirty = Vec::new();
         screen.take_visible_rows_with_damage_into_reusing_clean(
-            rows_buf,
+            Arc::get_mut(&mut rows_buf).expect("snapshot construction owns its row buffer"),
             &mut row_dirty,
             reuse_clean_rows,
         );
         FrameSnapshot {
-            rows: std::mem::take(rows_buf),
+            rows: rows_buf,
             row_dirty,
             scroll_shift,
             cursor,
@@ -606,7 +615,7 @@ impl FrameSnapshot {
         let rows = screen.visible_rows();
         let row_dirty = vec![true; rows.len()];
         FrameSnapshot {
-            rows,
+            rows: Arc::new(rows),
             row_dirty,
             scroll_shift: 0,
             cursor,
@@ -648,7 +657,10 @@ impl FrameSnapshot {
         let rows_n = screen.rows;
         let selection = screen.selection;
         let search = screen.search.clone();
-        screen.visible_rows_into(&mut snapshot.rows);
+        if Arc::get_mut(&mut snapshot.rows).is_none() {
+            snapshot.rows = Arc::default();
+        }
+        screen.visible_rows_into(Arc::get_mut(&mut snapshot.rows).expect("peek rows are unique"));
         snapshot.row_dirty.clear();
         snapshot.row_dirty.resize(snapshot.rows.len(), true);
         snapshot.scroll_shift = 0;
@@ -790,6 +802,81 @@ mod tests {
         let snap = FrameSnapshot::from_terminal(&mut term);
 
         assert_eq!(snap.rows[0].cells[0].text(), "a\u{301}");
+    }
+
+    #[test]
+    fn held_snapshot_shares_cells_but_keeps_display_state_independent() {
+        let mut term = Terminal::new(GridSize::new(4, 2));
+        put(&mut term, 0, 'A');
+        let held = FrameSnapshot::from_terminal(&mut term);
+        let mut frame = held.clone();
+        assert!(Arc::ptr_eq(&held.rows, &frame.rows));
+        frame.cursor_blink_visible = false;
+        frame.focused = false;
+        frame.row_dirty.fill(false);
+        assert!(held.cursor_blink_visible);
+        assert!(held.focused);
+        assert!(held.row_dirty.iter().any(|&dirty| dirty));
+
+        // A fresh capture must read even clean rows when the recycle buffer
+        // was shared; consuming another snapshot can have cleared the damage.
+        put(&mut term, 0, 'B');
+        drop(FrameSnapshot::from_terminal(&mut term));
+        let fresh = FrameSnapshot::from_terminal_recycle(&mut term, frame.into_recycle());
+        assert!(!Arc::ptr_eq(&held.rows, &fresh.rows));
+        assert_eq!(held.rows[0].cells[0].ch, 'A');
+        assert_eq!(fresh.rows[0].cells[0].ch, 'B');
+    }
+
+    #[test]
+    fn unique_snapshot_recycle_reuses_the_arc_and_cell_storage() {
+        let mut term = Terminal::new(GridSize::new(4, 2));
+        let first = FrameSnapshot::from_terminal(&mut term);
+        let rows_ptr = Arc::as_ptr(&first.rows);
+        let cells_ptr = first.rows[0].cells.as_ptr();
+        let next = FrameSnapshot::from_terminal_recycle(&mut term, first.into_recycle());
+        assert_eq!(Arc::as_ptr(&next.rows), rows_ptr);
+        assert_eq!(next.rows[0].cells.as_ptr(), cells_ptr);
+    }
+
+    #[test]
+    fn peek_into_preserves_a_cloned_snapshots_rows() {
+        let mut term = Terminal::new(GridSize::new(2, 1));
+        put(&mut term, 0, 'A');
+        let mut snapshot = FrameSnapshot::peek(&term);
+        let held = snapshot.clone();
+        put(&mut term, 0, 'B');
+        FrameSnapshot::peek_into(&term, &mut snapshot);
+        assert_eq!(held.rows[0].cells[0].ch, 'A');
+        assert_eq!(snapshot.rows[0].cells[0].ch, 'B');
+    }
+
+    #[test]
+    #[ignore = "release-mode held-snapshot copy comparison"]
+    fn held_snapshot_performance_probe() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        let mut term = Terminal::new(GridSize::new(200, 50));
+        noa_vt::Stream::new().feed(
+            "日本語 e\u{301} log output\r\n".repeat(100).as_bytes(),
+            &mut term,
+        );
+        let snapshot = FrameSnapshot::from_terminal(&mut term);
+        let start = Instant::now();
+        for _ in 0..2_000 {
+            let mut copy = snapshot.clone();
+            copy.rows = Arc::new(black_box(&snapshot).rows.as_ref().clone());
+            black_box(copy);
+        }
+        let deep = start.elapsed();
+        let start = Instant::now();
+        for _ in 0..2_000 {
+            black_box(black_box(&snapshot).clone());
+        }
+        eprintln!(
+            "held snapshot 200x50, 2000 clones: deep={deep:?} shared={:?}",
+            start.elapsed()
+        );
     }
 
     #[test]

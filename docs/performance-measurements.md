@@ -249,3 +249,115 @@ because they are visible in CPU profiles even though neither affects correctness
   the next query of a burst — the dominant term in the DSR round-trip p99 tail. Classification is
   conservative (anything unknown counts as display-dirtying), so a misclassification can only cost
   a spurious repaint, never a stale frame.
+
+## Search and incremental render updates (2026-09-05)
+
+Scope: implement the four proposed optimizations against `c6dd455`, preserving
+search positions, navigation, terminal semantics, and rendered pixels. No new
+dependencies, configuration, persisted formats, or redraw timing changes.
+
+Implementation decisions:
+
+- Query results remain ordered by storage row and column. `matches_on_row`
+  uses two binary searches so row highlights and hit testing inspect only
+  the requested row's matches.
+- A query owns reusable text/UTF-8-byte-to-column scratch buffers. This
+  removes per-row scratch allocation and per-hit prefix character counting.
+  The search stays synchronous; worker scheduling/cancellation is excluded
+  from this change because it would change query/result timing.
+- Retain the composed instance stream. An unchanged pane at the same offsets
+  skips both copying and comparison; changed panes and overlays patch only
+  their differing range. Pending ranges accumulate until GPU upload, including
+  undrawn rebuilds and atlas retries. This also removes the full CPU shadow of
+  the GPU instance buffer. Existing background/glyph/decoration ordering stays
+  intact; separate GPU buffers per pane are unnecessary for this step.
+- Snapshot rows use `Arc<Vec<Row>>`. A held frame shares immutable cell storage
+  while cursor/selection/overlay metadata remains independently editable.
+  Unique row storage and its Arc allocation survive ordinary recycling.
+  A fresh capture replaces shared recycle storage instead of copying stale
+  rows that would immediately be overwritten. Literal snapshot constructors
+  now use `rows: rows.into()`; consumers should return storage with
+  `FrameSnapshot::into_recycle`.
+
+Predictions and acceptance:
+
+1. Row lookup must match a full scan at boundaries/gaps; Unicode search must
+   match the prior scalar-coordinate algorithm, including combining marks,
+   wide spacers, and non-overlapping matches. Both isolated probes should run
+   faster, without a wall-clock assertion in CI.
+2. A clean frame must schedule no cell upload. Updating one of four panes
+   without moving its offsets must only upload inside that pane. Applying
+   accumulated uploads after resize of the instance stream, reorder, close,
+   IME, search, and alternate-screen changes must reproduce a full rebuild.
+3. Cloned snapshots must share cells without sharing mutable display metadata;
+   fresh captures and overview refresh must leave held rows untouched. Unique
+   recycling must preserve the Arc and cell allocation addresses.
+4. Run workspace tests (including GPU pixel equivalence) and formatting checks.
+
+Reproducible focused probes:
+
+```sh
+cargo test -p noa-grid --release --lib search_performance_probe --offline -- --ignored --nocapture
+cargo test -p noa-render --release --lib held_snapshot_performance_probe --offline -- --ignored --nocapture
+cargo test -p noa-render --offline --lib retained_pane_instances_and_pending_uploads_match_full_rebuilds
+cargo test --workspace --offline
+cargo test --workspace --locked --offline -- --test-threads=1
+cargo fmt --all -- --check
+```
+
+The search probe runs the old scalar-coordinate algorithm and the new scratch
+algorithm on the same 200-column Unicode row 20,000 times, reusing the match
+output vector in both cases. Row lookup compares scanning 100,000 matches with
+binary-search lookup for 40 rows over 100 repetitions. The snapshot probe
+compares deep-copy versus shared-copy construction on a 200x50 frame over
+2,000 repetitions. These are isolated mechanisms, not end-to-end input latency
+or application frame-rate measurements.
+
+Measured on local arm64 macOS 26.6.2 (25G83), release profile with thin LTO.
+Three paired runs, no simultaneous build/test workload from this task during measurement;
+the table reports medians of total elapsed time for each probe above.
+
+| Probe | Prior mechanism | New mechanism | Ratio |
+| --- | ---: | ---: | ---: |
+| Search `a`, 20,000 rows | 34.165 ms | 16.909 ms | 2.02x |
+| Search `日本`, 20,000 rows | 27.486 ms | 15.137 ms | 1.82x |
+| Search space, 20,000 rows | 49.311 ms | 21.274 ms | 2.32x |
+| Search absent text, 20,000 rows | 23.936 ms | 13.229 ms | 1.81x |
+| Match-row lookup, 100,000 matches | 126.629 ms | 0.212 ms | 596.8x |
+| Snapshot clone, 200x50, 2,000 copies | 14.807 ms | 0.245 ms | 60.5x |
+
+The first run was colder: ASCII reference ranged from 29.806 to 72.478 ms,
+and deep snapshot copies from 14.788 to 24.661 ms. These small probes establish
+the direction of the local changes, not confidence bounds for application
+speedups. The match-row probe excludes highlight rasterization; the search
+probe excludes scrollback materialization and the terminal mutex.
+
+Verification:
+
+- Search: scalar-reference, coordinate-boundary, wide/combining-text, and
+  existing navigation/page-boundary tests pass. Prediction **hit**.
+- Instances: full-rebuild equivalence and simulated pending uploads across
+  four panes pass, including changes accumulated without drawing; an unchanged
+  frame has no cell patches, and a fixed-offset edit stays inside its pane.
+  The 200-frame GPU pixel-equivalence test and all 40 pipeline tests pass.
+  Prediction **hit**. Whole-application frame-time improvement is unmeasured.
+- Snapshot: shared-row isolation, overview refresh, unique-allocation reuse,
+  resize/scroll/alternate-screen tests pass. Prediction **hit**.
+- `cargo build --workspace --locked --offline` and formatting checks pass.
+- The final unrestricted serial workspace run passed: **2,499 passed,
+  0 failed, 15 ignored** across 35 test targets/doc-test suites. Ignored
+  performance probes above were run separately in release mode. All changed
+  Rust source, tests, and the example compiled; the measurement record was
+  checked against the captured test/probe output.
+- The sandboxed workspace run could not bind IPC loopback sockets. The
+  unrestricted parallel run passed IPC, then hit an intermittent assertion in
+  the unchanged PTY buffer-reuse test; both its isolated rerun and final serial
+  workspace run passed.
+
+Open follow-up (outside the four optimizations):
+
+- #TODO(agent): DEFERRED — stabilize
+  `crates/noa-pty/src/reader.rs:395` (`reader_reuses_returned_payload_buffers`).
+  The parallel workspace run once observed a different third-buffer pointer;
+  the isolated rerun passed. `noa-pty` and its dependencies were not modified
+  by this change. Keep the follow-up separate from search/render work.

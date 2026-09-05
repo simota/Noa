@@ -476,6 +476,9 @@ impl Handler for Terminal {
         let scrollback_limit = self.primary.scrollback_limit_bytes();
         self.primary = crate::screen::Screen::new(self.size.cols, self.size.rows);
         self.primary.set_scrollback_limit_bytes(scrollback_limit);
+        // The fresh screen starts from `Cursor::default()`; the user's
+        // `cursor-style` (DECSCUSR 0's target) must survive RIS.
+        self.primary.cursor.style = self.default_cursor_style;
         self.alt = None;
         self.active_is_alt = false;
         self.screen_generation = self.screen_generation.wrapping_add(1);
@@ -495,6 +498,7 @@ impl Handler for Terminal {
         self.pending_agent_status = Some(None);
         self.pending_bell = false;
         self.kitty_keyboard.reset();
+        self.modify_other_keys_2 = false;
         self.kitty_images.clear();
         self.clear_selection();
         self.clear_search();
@@ -504,6 +508,8 @@ impl Handler for Terminal {
         // DECTCEM on, DECOM off — tracked bits only; screen content untouched.
         self.modes.set(25, false, true);
         self.modes.set(6, false, false);
+        // IRM (ANSI mode 4) off — DECSTR returns to replace mode.
+        self.modes.set(4, true, false);
         self.charset = crate::charset::CharsetState::default();
         let last_row = self.size.rows.saturating_sub(1);
         let screen = self.active_mut();

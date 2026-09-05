@@ -24,6 +24,7 @@ pub fn encode_key(
         app_cursor_keys,
         false,
         0,
+        false,
         true,
         false,
     )
@@ -38,6 +39,11 @@ pub fn encode_key(
 /// `unmodified_key` is winit's `key_without_modifiers()` — the key the same
 /// physical press produces with no modifiers held — used by the Kitty encoder
 /// to report the unshifted base key code (Shift+1 must report `1`, not `!`).
+///
+/// `modify_other_keys` mirrors `Terminal::modify_other_keys_2` (xterm
+/// `CSI > 4 ; 2 m`): Character keys pressed with Ctrl/Alt/Super are reported
+/// as `CSI 27 ; mods ; codepoint ~` instead of the legacy C0/ESC forms. The
+/// Kitty protocol, when active, still takes precedence.
 ///
 /// `alt_sends_esc` says whether Alt held with this press should ESC-prefix the
 /// produced text. On macOS the Option key composes characters unless
@@ -54,6 +60,7 @@ pub fn encode_key_with_modes(
     app_cursor_keys: bool,
     app_keypad: bool,
     kitty_flags: u8,
+    modify_other_keys: bool,
     pressed: bool,
     repeat: bool,
 ) -> Option<Vec<u8>> {
@@ -87,6 +94,16 @@ pub fn encode_key_with_modes(
         return None;
     }
 
+    // xterm modifyOtherKeys level 2: a Character key with Ctrl/Alt/Super
+    // reports its codepoint after Shift/layout translation plus the modifier
+    // value, so Ctrl+I is distinguishable from Tab. Shift alone (and Option
+    // composing text on macOS) stays on the legacy path.
+    if modify_other_keys
+        && let Some(bytes) = modify_other_keys_bytes(logical_key, mods, alt_sends_esc)
+    {
+        return Some(bytes);
+    }
+
     // Ctrl+key -> the corresponding C0 control byte. Checked before the
     // general text path since terminals expect Ctrl+A..Z (and the classic
     // xterm symbol/digit mappings, e.g. Ctrl+Space=NUL, Ctrl+[=ESC) to send
@@ -99,12 +116,16 @@ pub fn encode_key_with_modes(
                 if let (Some(c), None) = (chars.next(), chars.next())
                     && let Some(byte) = ctrl_c0_byte(c)
                 {
-                    return Some(vec![byte]);
+                    // Alt still ESC-prefixes the control byte (Ctrl+Alt+A ->
+                    // ESC 0x01) when it isn't composing text.
+                    return Some(alt_esc_prefixed(vec![byte], mods, alt_sends_esc));
                 }
             }
             // winit can report Space as a named key; Ctrl+Space is NUL
             // (emacs set-mark and friends).
-            Key::Named(NamedKey::Space) => return Some(vec![0x00]),
+            Key::Named(NamedKey::Space) => {
+                return Some(alt_esc_prefixed(vec![0x00], mods, alt_sends_esc));
+            }
             _ => {}
         }
     }
@@ -165,6 +186,7 @@ pub(crate) fn encode_enter_key(kitty_flags: u8) -> Vec<u8> {
         false,
         false,
         kitty_flags,
+        false,
         true,
         false,
     )
@@ -187,6 +209,55 @@ fn ctrl_c0_byte(c: char) -> Option<u8> {
         _ => return None,
     };
     Some(byte)
+}
+
+/// ESC-prefix `bytes` for Alt, but only when Alt is acting as a modifier
+/// (`alt_sends_esc`) rather than composing text via macOS Option.
+fn alt_esc_prefixed(mut bytes: Vec<u8>, mods: ModifiersState, alt_sends_esc: bool) -> Vec<u8> {
+    if mods.alt_key() && alt_sends_esc {
+        bytes.insert(0, 0x1b);
+    }
+    bytes
+}
+
+/// xterm `modifyOtherKeys=2` encoding: `CSI 27 ; <mods> ; <codepoint> ~` for
+/// a Character (or Space) key pressed with Ctrl, Alt-as-modifier, or Super.
+/// The logical key preserves Shift and keyboard-layout translation, so
+/// Ctrl+Shift+1 on a US layout reports `33` (`!`) with the Shift bit.
+fn modify_other_keys_bytes(
+    logical_key: &Key,
+    mods: ModifiersState,
+    alt_sends_esc: bool,
+) -> Option<Vec<u8>> {
+    let alt = mods.alt_key() && alt_sends_esc;
+    if !(mods.control_key() || alt || mods.super_key()) {
+        return None;
+    }
+    let codepoint = match logical_key {
+        Key::Character(s) => {
+            let mut chars = s.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => c as u32,
+                _ => return None,
+            }
+        }
+        Key::Named(NamedKey::Space) => u32::from(' '),
+        _ => return None,
+    };
+    let mut value = 1;
+    if mods.shift_key() {
+        value += 1;
+    }
+    if alt {
+        value += 2;
+    }
+    if mods.control_key() {
+        value += 4;
+    }
+    if mods.super_key() {
+        value += 8;
+    }
+    Some(format!("\x1b[27;{value};{codepoint}~").into_bytes())
 }
 
 fn alt_prefixed(mut bytes: Vec<u8>, mods: ModifiersState) -> Vec<u8> {

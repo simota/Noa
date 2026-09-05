@@ -1312,3 +1312,26 @@ fn cursor_is_at_prompt_follows_the_nearest_row_tagging_mark() {
         "alternate screen is always false regardless of marks"
     );
 }
+
+#[test]
+fn decstr_clears_insert_mode() {
+    let mut t = Terminal::new(GridSize::new(20, 4));
+    let mut s = Stream::new();
+    s.feed(b"ABCDE\x1b[4h", &mut t);
+    assert!(t.modes.insert_mode());
+    s.feed(b"\x1b[!p", &mut t);
+    assert!(!t.modes.insert_mode(), "DECSTR returns to replace mode");
+    s.feed(b"\rZ", &mut t);
+    assert_eq!(row_text(&t, 0, 6).trim_end(), "ZBCDE");
+}
+
+#[test]
+fn ris_keeps_the_configured_default_cursor_style() {
+    let mut t = Terminal::new(GridSize::new(80, 24));
+    t.set_default_cursor_style(CursorStyle::SteadyBar);
+    let mut s = Stream::new();
+    s.feed(b"\x1b[2 q", &mut t);
+    assert_eq!(t.primary.cursor.style, CursorStyle::SteadyBlock);
+    s.feed(b"\x1bc", &mut t);
+    assert_eq!(t.primary.cursor.style, CursorStyle::SteadyBar);
+}

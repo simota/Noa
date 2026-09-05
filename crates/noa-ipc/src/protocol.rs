@@ -108,7 +108,9 @@ mod hex_color {
         let s = s
             .strip_prefix('#')
             .ok_or_else(|| D::Error::custom("expected #rrggbb"))?;
-        if s.len() != 6 {
+        // Length alone doesn't make the string ASCII; slicing a non-ASCII
+        // payload by byte offset would panic instead of failing to parse.
+        if s.len() != 6 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(D::Error::custom("expected #rrggbb"));
         }
         let byte = |i: usize| -> Result<u8, D::Error> {
@@ -582,5 +584,23 @@ mod cap_grid_rows_tests {
         // catching an off-by-one in the margin/separator accounting that a
         // huge cap might absorb unnoticed.
         assert_boundary_fits_in_cap(4096);
+    }
+}
+
+#[cfg(test)]
+mod hex_color_tests {
+    use super::*;
+
+    #[test]
+    fn hex_color_rejects_non_ascii_without_panicking() {
+        // Six bytes but not six ASCII hex digits: must be an Err, not a
+        // byte-offset slice panic inside a multibyte char.
+        for input in ["\"#あabc\"", "\"#12345\"", "\"#gggggg\"", "\"123456\""] {
+            assert!(serde_json::from_str::<SpanColor>(input).is_err(), "{input}");
+        }
+        assert_eq!(
+            serde_json::from_str::<SpanColor>("\"#0A1b2C\"").unwrap(),
+            SpanColor::Hex((0x0a, 0x1b, 0x2c))
+        );
     }
 }

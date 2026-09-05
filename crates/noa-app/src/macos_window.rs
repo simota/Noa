@@ -108,6 +108,44 @@ pub(crate) fn set_native_tab_title(window: &Window, title: &str) {
     }
 }
 
+/// Whether `window` is the selected (front) tab of its native tab group. A
+/// window with no tab group is trivially selected. `None` when the live
+/// NSWindow can't be reached, or on non-macOS platforms.
+#[allow(unused_variables)]
+pub(crate) fn native_tab_is_selected(window: &Window) -> Option<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        // SAFETY: called from session capture on winit's main (window-owning)
+        // thread; the NSWindow is live and owned by winit; every pointer is
+        // nil-checked and only compared, never dereferenced beyond messaging.
+        unsafe {
+            let handle = window.window_handle().ok()?;
+            let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+                return None;
+            };
+            let ns_view = appkit.ns_view.as_ptr().cast::<AnyObject>();
+            let ns_window: *mut AnyObject = msg_send![ns_view, window];
+            if ns_window.is_null() {
+                return None;
+            }
+            let tab_group: *mut AnyObject = msg_send![ns_window, tabGroup];
+            if tab_group.is_null() {
+                return Some(true);
+            }
+            let selected: *mut AnyObject = msg_send![tab_group, selectedWindow];
+            Some(selected == ns_window)
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 /// Toggle AppKit's native fullscreen Space for a normal terminal window.
 /// Returns `false` only when the live NSWindow cannot be reached.
 pub(crate) fn toggle_native_fullscreen(window: &Window) -> bool {

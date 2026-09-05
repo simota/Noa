@@ -1076,7 +1076,8 @@ impl ApplicationHandler<UserEvent> for App {
                 ) {
                     return;
                 }
-                let (app_cursor_keys, app_keypad, kitty_flags) = self.key_encode_modes(window_id);
+                let (app_cursor_keys, app_keypad, kitty_flags, modify_other_keys) =
+                    self.key_encode_modes(window_id);
                 let unmodified_key = event.key_without_modifiers();
                 // On macOS, Option only acts as Alt when winit stripped its
                 // composition per `macos-option-as-alt` — i.e. the delivered
@@ -1095,6 +1096,7 @@ impl ApplicationHandler<UserEvent> for App {
                     app_cursor_keys,
                     app_keypad,
                     kitty_flags,
+                    modify_other_keys,
                     pressed,
                     event.repeat,
                 );

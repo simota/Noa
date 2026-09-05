@@ -38,6 +38,7 @@ mod remote_attach;
 mod scrollback_crypt;
 mod scrollback_persist;
 mod search_prompt;
+mod search_worker;
 mod secure_input;
 mod session;
 pub mod session_overview;

@@ -121,7 +121,7 @@ const MAX_UNUSED_FRAMES: u64 = 300;
 const TOTAL_TEXTURE_BYTES_LIMIT: usize = 512 * 1024 * 1024;
 
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 struct ImageUniformsRaw {
     dest_rect: [f32; 4],
     src_uv: [f32; 4],
@@ -144,9 +144,18 @@ struct ImageTextureEntry {
 /// A per-placement draw resource: its uniform buffer and bind group, alive for
 /// the whole render pass (mirrors [`crate::blit::CardPipeline`]'s resource
 /// lifetime management).
+#[derive(Clone)]
 pub struct ImageDraw {
     _buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+}
+
+struct CachedImageDraw {
+    image_id: u32,
+    epoch: u64,
+    uniforms: ImageUniformsRaw,
+    draw: ImageDraw,
+    last_used_frame: u64,
 }
 
 /// The immutable GPU half of the image layer, shareable across `Renderer`s
@@ -165,6 +174,8 @@ pub struct ImageLayer {
     /// Count of `write_texture` uploads over the layer's lifetime, exposed for
     /// the headless test asserting an epoch bump forces a re-upload.
     uploads: u64,
+    draws: HashMap<(u64, usize), CachedImageDraw>,
+    draw_resources_created: u64,
 }
 
 impl ImagePipeline {
@@ -276,6 +287,8 @@ impl ImageLayer {
             total_bytes: 0,
             frame: 0,
             uploads: 0,
+            draws: HashMap::new(),
+            draw_resources_created: 0,
         }
     }
 
@@ -303,13 +316,18 @@ impl ImageLayer {
     ) {
         for image in images {
             let key = (pane.get(), image.id);
+            let limit = device.limits().max_texture_dimension_2d;
+            if image.width == 0 || image.height == 0 || image.width > limit || image.height > limit
+            {
+                if let Some(old) = self.cache.remove(&key) {
+                    self.total_bytes = self.total_bytes.saturating_sub(old.bytes);
+                }
+                continue;
+            }
             if let Some(entry) = self.cache.get_mut(&key)
                 && entry.epoch == image.epoch
             {
                 entry.last_used_frame = self.frame;
-                continue;
-            }
-            if image.width == 0 || image.height == 0 {
                 continue;
             }
             let bytes = image.rgba.len();
@@ -369,7 +387,7 @@ impl ImageLayer {
     /// draws for that band in the placements' (z-ascending) order.
     #[allow(clippy::too_many_arguments)]
     pub fn build_pane_draws(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         pane: PaneId,
@@ -382,8 +400,9 @@ impl ImageLayer {
     ) -> [Vec<ImageDraw>; 3] {
         let mut bands: [Vec<ImageDraw>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         let surface_size = [surface.w.max(1) as f32, surface.h.max(1) as f32];
-        for placement in placements {
-            let Some(image) = images.iter().find(|img| img.id == placement.image_id) else {
+        let images: HashMap<_, _> = images.iter().map(|image| (image.id, image)).collect();
+        for (slot, placement) in placements.iter().enumerate() {
+            let Some(image) = images.get(&placement.image_id) else {
                 continue;
             };
             let Some(entry) = self.cache.get(&(pane.get(), placement.image_id)) else {
@@ -403,6 +422,19 @@ impl ImageLayer {
                 surface_size,
                 _pad: [0.0, 0.0],
             };
+            let key = (pane.get(), slot);
+            if let Some(cached) = self.draws.get_mut(&key)
+                && cached.image_id == image.id
+                && cached.epoch == image.epoch
+            {
+                if cached.uniforms != uniforms {
+                    queue.write_buffer(&cached.draw._buffer, 0, bytemuck::bytes_of(&uniforms));
+                    cached.uniforms = uniforms;
+                }
+                cached.last_used_frame = self.frame;
+                bands[quad.band.index()].push(cached.draw.clone());
+                continue;
+            }
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("noa-image-uniform"),
                 size: std::mem::size_of::<ImageUniformsRaw>() as u64,
@@ -428,10 +460,22 @@ impl ImageLayer {
                     },
                 ],
             });
-            bands[quad.band.index()].push(ImageDraw {
+            self.draw_resources_created += 1;
+            let draw = ImageDraw {
                 _buffer: buffer,
                 bind_group,
-            });
+            };
+            bands[quad.band.index()].push(draw.clone());
+            self.draws.insert(
+                key,
+                CachedImageDraw {
+                    image_id: image.id,
+                    epoch: image.epoch,
+                    uniforms,
+                    draw,
+                    last_used_frame: self.frame,
+                },
+            );
         }
         bands
     }
@@ -454,6 +498,7 @@ impl ImageLayer {
     /// images are uploaded.
     pub fn evict(&mut self) {
         let frame = self.frame;
+        self.draws.retain(|_, draw| draw.last_used_frame == frame);
         // Long-idle entries always go, regardless of budget.
         self.cache.retain(|_, entry| {
             let keep = frame.wrapping_sub(entry.last_used_frame) <= MAX_UNUSED_FRAMES;
@@ -489,6 +534,77 @@ impl ImageLayer {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn gpu_limits_and_cached_placement_resources() {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        else {
+            eprintln!("skipping image resource test: no GPU adapter");
+            return;
+        };
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let pipeline = Arc::new(ImagePipeline::new(
+            &device,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        ));
+        let mut layer = ImageLayer::new(pipeline);
+        let pane = PaneId::new(1);
+        let mut image = snapshot_image(1, 2, 1);
+        let mut placement = ImagePlacementSnapshot {
+            image_id: 1,
+            epoch: 0,
+            grid_x: 0,
+            grid_y: 0,
+            cell_x_off: 0,
+            cell_y_off: 0,
+            cols: 1,
+            rows: 1,
+            src: None,
+            z: 0,
+        };
+        for frame in 0..3 {
+            layer.begin_frame();
+            layer.upload_pane_images(&device, &queue, pane, std::slice::from_ref(&image));
+            if frame == 2 {
+                placement.grid_x = 1;
+            }
+            let draws = layer.build_pane_draws(
+                &device,
+                &queue,
+                pane,
+                std::slice::from_ref(&placement),
+                std::slice::from_ref(&image),
+                PaneRect::new(0, 0, 100, 100),
+                GridPadding::new(0.0, 0.0, 0.0, 0.0),
+                (10.0, 20.0),
+                PixelSize { w: 100, h: 100 },
+            );
+            assert_eq!(draws[2].len(), 1);
+            layer.evict();
+        }
+        assert_eq!(
+            layer.draw_resources_created, 1,
+            "unchanged and moved placements reuse GPU resources"
+        );
+        assert_eq!(layer.upload_count(), 1);
+        image.epoch += 1;
+        layer.upload_pane_images(&device, &queue, pane, std::slice::from_ref(&image));
+        assert_eq!(layer.upload_count(), 2);
+        let oversized = snapshot_image(1, device.limits().max_texture_dimension_2d + 1, 1);
+        layer.upload_pane_images(&device, &queue, pane, &[oversized]);
+        assert!(
+            !layer.cache.contains_key(&(pane.get(), 1)),
+            "oversized replacement must not retain stale pixels"
+        );
+        assert!(pollster::block_on(device.pop_error_scope()).is_none());
+        layer.begin_frame();
+        layer.evict();
+        assert!(layer.draws.is_empty());
+    }
 
     fn snapshot_image(id: u32, width: u32, height: u32) -> SnapshotImage {
         SnapshotImage {

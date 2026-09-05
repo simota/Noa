@@ -41,23 +41,30 @@ pty bytes
 | `p` | Display an already-transferred image (put) | ✅ |
 | `d` | Delete image/placement | ✅ (see delete specifiers below) |
 | `q` | Query (validate only, no storage, respond) | ✅ |
-| `f` / `a` / `c` | Animation frame/control | ❌ `EUNSUPPORTED` |
+| `f` / `a` / `c` | Animation frame/control/composition | ✅ |
 
 ### Format (`f=`)
 
 - `f=24` (RGB, 3 bytes/px) → expanded to RGBA.
 - `f=32` (RGBA, 4 bytes/px, default).
 - `f=100` (PNG) → via the `png` crate. RGB/RGBA/grayscale/grayscale+alpha are normalized to RGBA8.
-  16-bit samples are rounded to the high byte. **Palette PNGs are not supported** (`EBADPNG`).
+  Packed grayscale, palette colors and `tRNS` transparency are expanded before normalization.
+  16-bit samples are truncated to the high byte. Decoded dimensions and buffer sizes are checked
+  against `image-storage-limit` before pixel allocation; decoder workspace is also bounded.
 
 ### Medium (`t=`)
 
 - `t=d` (direct, default): payload = base64-encoded image bytes. `o=z` (zlib) decompression is supported.
 - `t=f` (file): payload = base64-encoded **absolute path**. `canonicalize` → must be a regular file → partial read via `S=`/`O=`.
 - `t=t` (temp file): in addition to `t=f`, accepted only if the canonical path is under a temp directory
-  (`$TMPDIR` / `/tmp` / `/dev/shm` / `/var/tmp`), or the path contains `tty-graphics-protocol`;
+  (`$TMPDIR` / `/tmp` / `/dev/shm` / `/var/tmp`) **and** the path contains `tty-graphics-protocol`;
   deleted best-effort after reading. Returns `EINVAL` if the condition is not met.
-- `t=s` (POSIX shared memory): ❌ `EUNSUPPORTED`.
+  The opened descriptor must refer to a regular file; replacement symlinks and FIFOs are rejected.
+- `t=s` (POSIX shared memory): on Unix, payload is a base64-encoded shared-memory name.
+  `O` is the starting offset and `S` is the byte count. The entire range must fit the object.
+  Reads use kernel copying (Mach VM on macOS, file reads on other Unix targets), avoiding
+  userspace access to possibly truncated mappings. An opened name is unlinked after processing.
+  Non-Unix targets return `EUNSUPPORTED`.
 
 ### Chunked transfer (`m=1`)
 
@@ -121,8 +128,13 @@ Within the same render pass, drawing interleaves with the cell pass, compositing
 ## Quota
 
 - Per-image dimension cap `MAX_IMAGE_DIM = 10_000` (width and height each, matching Ghostty). Exceeding it → `EFBIG`.
+  The GPU device requests this dimension when supported by its adapter. Uploads exceeding the
+  actual device limit are skipped, including removal of an older texture for the same image ID.
 - Total decoded RGBA cap `TOTAL_BYTES_LIMIT = 320 MB` (kitty/Ghostty default). When exceeded, images without
   visible placements are evicted first in ascending seq order, then the oldest images if that's not enough.
+  The sweep also runs when transmission succeeds but placement fails.
+- Independently of pixel bytes, at most 4,096 images and 16,384 total frames are stored.
+  New entries over these limits return `EFBIG`; replacement and deletion remain available.
 - The renderer-side texture cache has a separate 512 MB / 300-frame LRU.
 - The post-inflate size of `o=z` is also guarded by the single-image cap (to prevent zip bombs). APC capture is
   capped at 1 MiB; on overflow it is not discarded but dispatched with a `truncated` flag and responded to with `EFBIG`.
@@ -131,9 +143,7 @@ Within the same render pass, drawing interleaves with the cell pass, compositing
 
 | Feature | Response |
 |---|---|
-| Animation (`a=f`/`a`/`c`, `d=f`/`F`) | `EUNSUPPORTED` |
-| Shared memory (`t=s`) | `EUNSUPPORTED` |
-| Palette PNG | `EBADPNG` |
+| Shared memory (`t=s`) on non-Unix targets | `EUNSUPPORTED` |
 
 Error code list: `EINVAL` (invalid request) / `EFBIG` (too large / truncated) / `ENODATA` (size mismatch) /
 `EBADPNG` / `ENOENT` (file not found) / `EUNSUPPORTED`.

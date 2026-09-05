@@ -29,6 +29,30 @@ fn only_csi(bytes: &[u8]) -> Csi {
 }
 
 #[test]
+fn overflowing_csi_is_ignored_without_changing_accepted_params() {
+    for separator in [';', ':'] {
+        let prefix = format!("\x1b[{}3", format!("0{separator}").repeat(31));
+        assert_eq!(only_csi(format!("{prefix}m").as_bytes()).params()[31], 3);
+        let bytes = format!("{prefix}{separator}1mX\x1b[2m");
+        let parsed = actions(bytes.as_bytes());
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0], Action::Print('X'));
+        assert!(matches!(&parsed[1], Action::CsiDispatch(c) if c.params() == [2]));
+        let mut parser = Parser::new();
+        let mut fast = Vec::new();
+        for b in b"\x1b[0" {
+            parser.advance(*b, &mut |a| fast.push(a));
+        }
+        let rest = &bytes.as_bytes()[3..];
+        let scanned = parser.scan_csi_params(rest);
+        for &b in &rest[scanned..] {
+            parser.advance(b, &mut |a| fast.push(a));
+        }
+        assert_eq!(fast, parsed);
+    }
+}
+
+#[test]
 fn prints_ascii() {
     assert_eq!(actions(b"Ab"), vec![Action::Print('A'), Action::Print('b')]);
 }

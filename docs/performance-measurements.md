@@ -361,3 +361,49 @@ Open follow-up (outside the four optimizations):
   The parallel workspace run once observed a different third-buffer pointer;
   the isolated rerun passed. `noa-pty` and its dependencies were not modified
   by this change. Keep the follow-up separate from search/render work.
+
+## Review follow-up: search and image storage (2026-09-05)
+
+Before: `55ff1a19f05e1720f3557d9923412b13943232fb`; after: the working tree
+implementing R01–R16. Machine: Apple M4, arm64 macOS 26.6.2 (25G83).
+Both measurements used isolated Cargo harnesses with the same default release
+profile (opt-level 3, no LTO), run sequentially without a concurrent build/test
+from this task. Each result comprises 31 samples; no warmup sample is discarded.
+
+The workload is retained in `crates/noa-grid/examples/bench_search_images.rs`:
+insert all images and look them up in reverse ID order, keeping total RGBA
+pixels fixed at 16 KiB; then search 20,000 generated lines in a 120×40 terminal.
+The baseline calls synchronous `set_search_query`; the new path captures a
+snapshot, scans/allocates matches outside the lock, then applies the result.
+"Lock work" times only capture and application on the new path, and the entire
+search on the baseline. It excludes mutex contention and worker scheduling.
+
+| Workload | Before median / p95 / p99 (µs) | After median / p95 / p99 (µs) |
+| --- | ---: | ---: |
+| 1 image, 16 KiB pixels | 1.083 / 2.625 / 46.833 | 1.709 / 4.333 / 120.958 |
+| 1,024 images, 16 KiB pixels | 1,036.625 / 1,825.833 / 1,894.167 | 453.583 / 536.042 / 651.208 |
+| 2,048 images, 16 KiB pixels | 2,068.917 / 2,827.167 / 2,988.708 | 556.041 / 747.250 / 957.209 |
+| 4,096 images, 16 KiB pixels | 9,770.750 / 10,156.125 / 10,229.375 | 841.833 / 997.083 / 1,150.333 |
+| Search total | 10,438.167 / 10,694.917 / 10,712.042 | 10,534.834 / 10,616.834 / 11,226.084 |
+| Search terminal-lock work | 10,438.125 / 10,694.917 / 10,712.042 | 12.374 / 16.417 / 31.667 |
+
+The scan's total time is similar; its long critical section is removed. Tiny
+single-image work has extra index overhead and a cold first sample; the benefit
+appears with many images (4,096-image median improves about 11.6×). These are
+mechanism timings, not native UI p95/p99, mutex wait time, RSS or FPS measurements.
+
+To rerun the current mechanisms under the same release settings:
+
+```sh
+CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo run -p noa-grid --example bench_search_images --release --offline
+CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo run -p noa-grid --example bench_search_images --release --offline -- --sync
+```
+
+The `--sync` option uses the current search algorithm synchronously to compare
+lock work; it does not reconstruct the old image store. The before column was
+captured using a clean archive of the named baseline with the identical workload.
+GPU resource reuse is checked independently by
+`cargo test -p noa-render gpu_limits_and_cached_placement_resources`: three
+preparations (one moved placement) create one uniform buffer/bind-group pair
+instead of three, with one unchanged texture upload. Actual GPU frame-time
+improvement and OS wake reduction for the redraw fix remain unmeasured.

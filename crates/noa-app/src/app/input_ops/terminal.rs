@@ -311,7 +311,7 @@ impl App {
                         reserved,
                         local.input_echo_seq.clone(),
                     );
-                    match local.pty_writer.write_owned(stamped) {
+                    match local.pty_writer.write_reserved(stamped) {
                         Ok(()) => crate::io_thread::QueueInputResult::Queued,
                         Err(_) => crate::io_thread::QueueInputResult::Disconnected,
                     }

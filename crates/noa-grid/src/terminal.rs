@@ -576,6 +576,16 @@ impl Terminal {
         self.active_mut().set_search_query(query);
     }
 
+    pub fn apply_search_snapshot(
+        &mut self,
+        snapshot: &crate::search::SearchSnapshot,
+        query: String,
+        matches: Arc<[SearchMatch]>,
+    ) -> bool {
+        self.active_mut()
+            .apply_search_snapshot(snapshot, query, matches)
+    }
+
     pub fn clear_search(&mut self) {
         self.active_mut().clear_search();
     }

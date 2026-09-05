@@ -566,6 +566,9 @@ impl Parser {
                 _ => break,
             }
             i += 1;
+            if self.state == State::CsiIgnore {
+                break;
+            }
         }
         i
     }
@@ -577,6 +580,8 @@ impl Parser {
         if self.params.len() < MAX_PARAMS {
             self.params.push(0);
             self.sep_colon.push(colon);
+        } else {
+            self.state = State::CsiIgnore;
         }
     }
 

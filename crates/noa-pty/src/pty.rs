@@ -208,9 +208,9 @@ impl Pty {
         let (poll_fd, writer_poll_fd, nonblocking) = (None, None, false);
 
         let (tx, event_rx) = pty_event_channel();
-        spawn_reader(reader, poll_fd, nonblocking, tx.clone())
+        let reader = spawn_reader(reader, poll_fd, nonblocking, tx.clone())
             .map_err(|e| PtyError::SpawnThread(e.to_string()))?;
-        spawn_waiter(child, tx).map_err(|e| PtyError::SpawnThread(e.to_string()))?;
+        spawn_waiter(child, tx, reader).map_err(|e| PtyError::SpawnThread(e.to_string()))?;
 
         let writer = PtyWriter::spawn(writer, writer_poll_fd)
             .map_err(|e| PtyError::SpawnThread(e.to_string()))?;
@@ -257,6 +257,7 @@ impl Pty {
 
 impl Drop for Pty {
     fn drop(&mut self) {
+        self.writer.shutdown();
         // Best-effort: terminate the child so the waiter thread unblocks.
         let _ = self.killer.kill();
     }

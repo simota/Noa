@@ -1768,17 +1768,42 @@ fn redraw_floor_claim_deadline_lets_only_one_pane_through() {
     let pane_c = floor.clone();
 
     let deadline = Instant::now();
-    assert!(pane_a.claim_deadline(deadline), "first claim wins");
-    assert!(
-        !pane_b.claim_deadline(deadline),
-        "same instant already claimed"
+    assert_eq!(
+        pane_a.claim_deadline(deadline, deadline),
+        RedrawDecision::Now
     );
-    assert!(
-        !pane_c.claim_deadline(deadline),
-        "same instant already claimed"
+    let next = deadline + Duration::from_millis(10);
+    for (pane, delay) in [(pane_b.clone(), 1), (pane_c, 2)] {
+        assert_eq!(
+            pane.claim_deadline(deadline, deadline + Duration::from_micros(delay)),
+            RedrawDecision::Suppress { deadline: next }
+        );
+    }
+    assert_eq!(pane_b.claim_deadline(next, next), RedrawDecision::Now);
+}
+
+#[test]
+fn concurrent_redraw_decisions_have_one_winner() {
+    let floor = RedrawFloor::new(Duration::from_millis(10));
+    let barrier = Arc::new(std::sync::Barrier::new(8));
+    let now = Instant::now();
+    let workers: Vec<_> = (0..8)
+        .map(|_| {
+            let floor = floor.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                floor.decide(false, now)
+            })
+        })
+        .collect();
+    assert_eq!(
+        workers
+            .into_iter()
+            .filter_map(|w| (w.join().unwrap() == RedrawDecision::Now).then_some(()))
+            .count(),
+        1
     );
-    // A genuinely later redraw can still be claimed afterward.
-    assert!(pane_b.claim_deadline(deadline + Duration::from_millis(1)));
 }
 
 // A user-input echo bypasses the redraw floor: even when the window painted

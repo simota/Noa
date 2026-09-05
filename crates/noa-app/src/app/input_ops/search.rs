@@ -51,7 +51,12 @@ impl App {
             SearchAction::FindPrevious => {
                 terminal.search_previous();
             }
-            SearchAction::Clear => terminal.clear_search(),
+            SearchAction::Clear => {
+                if let Some(worker) = &self.search_worker {
+                    worker.cancel();
+                }
+                terminal.clear_search();
+            }
         }
         drop(terminal);
 
@@ -167,11 +172,31 @@ impl App {
         else {
             return;
         };
-        {
-            let mut terminal = terminal.lock();
-            match effect {
-                SearchPromptEffect::UpdateQuery(query) => terminal.set_search_query(query),
-                SearchPromptEffect::ClearQuery => terminal.clear_search(),
+        match effect {
+            SearchPromptEffect::UpdateQuery(query) => {
+                if self.search_worker.is_none() {
+                    match crate::search_worker::SearchWorker::new() {
+                        Ok(worker) => self.search_worker = Some(worker),
+                        Err(err) => {
+                            log::warn!("could not start search worker: {err}");
+                            return;
+                        }
+                    }
+                }
+                let proxy = self.proxy.clone();
+                self.search_worker.as_ref().unwrap().submit(
+                    Arc::downgrade(&terminal),
+                    query,
+                    move || {
+                        let _ = proxy.send_event(UserEvent::SearchUpdated(window_id, pane_id));
+                    },
+                );
+            }
+            SearchPromptEffect::ClearQuery => {
+                if let Some(worker) = &self.search_worker {
+                    worker.cancel();
+                }
+                terminal.lock().clear_search();
             }
         }
         if let Some(state) = self.windows.get(&window_id) {
@@ -187,6 +212,9 @@ impl App {
         let Some(session) = self.search_prompt.take() else {
             return;
         };
+        if clear && let Some(worker) = &self.search_worker {
+            worker.cancel();
+        }
         if clear
             && let Some(terminal) = self
                 .windows

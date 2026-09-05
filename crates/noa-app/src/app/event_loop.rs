@@ -283,6 +283,13 @@ impl ApplicationHandler<UserEvent> for App {
                 title,
                 text,
             } => self.show_file_preview(window_id, pane_id, title, text),
+            UserEvent::SearchUpdated(window_id, pane_id) => {
+                if let Some(window_id) = self.resolve_pane_window(window_id, pane_id)
+                    && let Some(state) = self.windows.get(&window_id)
+                {
+                    state.window.request_redraw();
+                }
+            }
             UserEvent::Redraw(window_id, pane_id) => {
                 #[cfg(target_os = "macos")]
                 if let Some(panel) = &self.text_panel {

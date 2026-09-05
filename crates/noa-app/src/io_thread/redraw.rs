@@ -141,7 +141,7 @@ fn instant_from_nanos(nanos: u64) -> Instant {
 
 /// Sentinel meaning "no redraw recorded yet" in [`RedrawFloor::last_redraw_at`].
 /// Real timestamps are nudged to at least 1ns past the epoch (see
-/// [`RedrawFloor::claim`]) so they never collide with it.
+/// [`RedrawFloor::record`]) so they never collide with it.
 const NEVER: u64 = 0;
 
 /// A window's redraw-floor clock, shared by every pane's io thread in that
@@ -187,29 +187,12 @@ impl RedrawFloor {
         Duration::from_nanos(self.min_interval_nanos.load(Ordering::Relaxed))
     }
 
-    fn last_redraw(&self) -> Option<Instant> {
-        match self.last_redraw_at.load(Ordering::Acquire) {
-            NEVER => None,
-            nanos => Some(instant_from_nanos(nanos)),
-        }
-    }
-
-    /// Records `at` as a redraw and reports whether it is the most recent
-    /// one recorded so far. `fetch_max` makes this safe to call concurrently
-    /// from every pane's io thread in the window: only the caller whose
-    /// timestamp actually advances the clock gets `true` back, so panes that
-    /// raced to the same floor deadline converge on a single winner instead
-    /// of each sending its own wake.
-    fn claim(&self, at: Instant) -> bool {
-        let at_nanos = nanos_since_epoch(at).max(1); // never collide with NEVER (0)
-        self.last_redraw_at.fetch_max(at_nanos, Ordering::AcqRel) < at_nanos
-    }
-
     /// Unconditionally record a redraw that is happening regardless of the
     /// floor (e.g. one triggered by an unrelated per-pane throttle), so the
     /// shared clock stays accurate for other panes in this window.
     pub(super) fn record(&self, at: Instant) {
-        let _ = self.claim(at);
+        self.last_redraw_at
+            .fetch_max(nanos_since_epoch(at).max(1), Ordering::AcqRel);
     }
 
     /// Decide whether a just-fed batch should trigger a redraw against this
@@ -217,20 +200,57 @@ impl RedrawFloor {
     /// is recorded here so the next pane to ask — in this window, on any
     /// thread — sees it.
     pub(super) fn decide(&self, synchronized: bool, now: Instant) -> RedrawDecision {
-        let decision =
-            decide_redraw_floor(synchronized, self.last_redraw(), now, self.min_interval());
-        if matches!(decision, RedrawDecision::Now) {
-            self.claim(now);
+        loop {
+            let previous = self.last_redraw_at.load(Ordering::Acquire);
+            let last = (previous != NEVER).then(|| instant_from_nanos(previous));
+            let decision = decide_redraw_floor(synchronized, last, now, self.min_interval());
+            if !matches!(decision, RedrawDecision::Now) {
+                return decision;
+            }
+            if self
+                .last_redraw_at
+                .compare_exchange(
+                    previous,
+                    nanos_since_epoch(now).max(1),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                return decision;
+            }
         }
-        decision
     }
 
     /// Attempt to fire an owed redraw deadline. Every pane suppressed within
     /// the same floor window computes the identical shared deadline (it's
     /// derived from this same clock), so without this guard they'd all fire
-    /// in the same tick; `claim` lets exactly one through.
-    pub(super) fn claim_deadline(&self, now: Instant) -> bool {
-        self.claim(now)
+    /// in the same tick. A loser keeps its paint debt until the next floor:
+    /// the winning event may already have snapshotted that loser's pane.
+    pub(super) fn claim_deadline(&self, deadline: Instant, now: Instant) -> RedrawDecision {
+        if now < deadline {
+            return RedrawDecision::Suppress { deadline };
+        }
+        loop {
+            let previous = self.last_redraw_at.load(Ordering::Acquire);
+            if previous != NEVER && instant_from_nanos(previous) >= deadline {
+                return RedrawDecision::Suppress {
+                    deadline: instant_from_nanos(previous) + self.min_interval(),
+                };
+            }
+            if self
+                .last_redraw_at
+                .compare_exchange(
+                    previous,
+                    nanos_since_epoch(now).max(1),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                return RedrawDecision::Now;
+            }
+        }
     }
 
     /// [`RedrawFloor::decide`] for a batch that carries a user-input echo:

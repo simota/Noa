@@ -432,7 +432,12 @@ fn apply_decision_state(
                 state.last_match = None;
                 state.match_count = 0;
                 state.pending_fire = None;
-                state.awaiting_change = None;
+                // A partial status redraw can invalidate the live tail while
+                // leaving the accepted dialog itself unchanged.
+                state.awaiting_change = state.awaiting_change.filter(|consumed| {
+                    menu_prompt_region(rows, &lowercase_rows(rows), signature(consumed.signature))
+                        .is_some_and(|region| region_hash(rows, region) == consumed.region_hash)
+                });
             }
         }
         Decision::Suppressed(reason) => {
@@ -509,6 +514,9 @@ fn find_signature_with_lowercase(
         AutoApproveSignature::CodexCommand | AutoApproveSignature::AgyAskUserQuestion
     ) {
         let region = menu_prompt_region(rows, lowercase_rows, sig)?;
+        if !menu_has_live_tail(rows, *region.end(), sig) {
+            return None;
+        }
         return Some(MatchedPrompt {
             signature: sig.id,
             region_hash: region_hash(rows, region.clone()),
@@ -548,8 +556,8 @@ fn find_signature_with_lowercase(
 }
 
 /// These TUIs select with a painted marker and can park the terminal cursor
-/// below the menu (or hide it). Require the complete dialog at the live tail
-/// instead of treating the terminal cursor as the selected option.
+/// below the menu (or hide it). The dialog's identity excludes mutable status
+/// rows beneath its footer.
 fn menu_prompt_region(
     rows: &[RowText],
     lowercase_rows: &[RowText],
@@ -565,21 +573,6 @@ fn menu_prompt_region(
     };
     let footer = (anchor + 1..rows.len())
         .find(|&i| rows[i].split_whitespace().collect::<Vec<_>>().join(" ") == footer_text)?;
-    let mut tail = rows[footer + 1..]
-        .iter()
-        .map(|row| row.trim())
-        .filter(|row| !row.is_empty());
-    if let Some(status) = tail.next()
-        && (sig.id != AutoApproveSignature::AgyAskUserQuestion
-            || !status.starts_with('[')
-            || !status.split_once("] Cost: $").is_some_and(|(_, cost)| {
-                !cost.is_empty() && cost.bytes().all(|ch| ch.is_ascii_digit() || ch == b'.')
-            })
-            || tail.next().is_some())
-    {
-        return None;
-    }
-
     let mut selected =
         (anchor + 1..footer).filter_map(|i| selected_option(&rows[i]).map(|label| (i, label)));
     let (option, label) = selected.next()?;
@@ -602,6 +595,22 @@ fn menu_prompt_region(
     valid.then_some(anchor..=footer)
 }
 
+fn menu_has_live_tail(rows: &[RowText], footer: usize, sig: &Signature) -> bool {
+    let mut tail = rows[footer + 1..]
+        .iter()
+        .map(|row| row.trim())
+        .filter(|row| !row.is_empty());
+    let Some(status) = tail.next() else {
+        return true;
+    };
+    sig.id == AutoApproveSignature::AgyAskUserQuestion
+        && status.starts_with('[')
+        && status.split_once("] Cost: $").is_some_and(|(_, cost)| {
+            !cost.is_empty() && cost.bytes().all(|ch| ch.is_ascii_digit() || ch == b'.')
+        })
+        && tail.next().is_none()
+}
+
 fn codex_command_menu(rows: &[RowText], anchor: usize, option: usize, footer: usize) -> bool {
     let context = &rows[anchor + 1..option];
     if !context.iter().any(|row| row.trim() == "Environment: local")
@@ -618,15 +627,30 @@ fn codex_command_menu(rows: &[RowText], anchor: usize, option: usize, footer: us
         .map(|row| row.trim())
         .filter(|row| !row.is_empty())
         .collect();
-    match options.split_last() {
-        Some((&"2. No, and tell Codex what to do differently (esc)", [])) => true,
-        Some((&"3. No, and tell Codex what to do differently (esc)", remember)) => {
-            let remember = remember.join(" ");
-            remember.starts_with("2. Yes, and don't ask again for commands that start with ")
-                && remember.ends_with("(p)")
-        }
-        _ => false,
+    let Some(last_option) = options
+        .iter()
+        .rposition(|row| row.starts_with("2. ") || row.starts_with("3. "))
+    else {
+        return false;
+    };
+    let (remember, rejection) = options.split_at(last_option);
+    let expected = if remember.is_empty() {
+        "2. No, and tell Codex what to do differently (esc)"
+    } else {
+        "3. No, and tell Codex what to do differently (esc)"
+    };
+    // A physical row can end inside a word or shortcut, so match each
+    // fragment against the remaining label without inserting spaces.
+    let remaining = rejection.iter().try_fold(expected, |remaining, row| {
+        remaining.trim_start().strip_prefix(*row)
+    });
+    if remaining != Some("") {
+        return false;
     }
+    let remember = remember.join(" ");
+    remember.is_empty()
+        || (remember.starts_with("2. Yes, and don't ask again for commands that start with ")
+            && remember.ends_with("(p)"))
 }
 
 fn agy_question_menu(rows: &[RowText], anchor: usize, option: usize, footer: usize) -> bool {
@@ -857,6 +881,23 @@ mod tests {
                 Decision::Hold
             );
             assert!(!state.needs_static_rescan());
+            assert_eq!(
+                detect_and_update_any_agent(
+                    &rows(&["Working..."]),
+                    Point { x: 0, y: 0 },
+                    ctx,
+                    &mut state
+                ),
+                Decision::Hold
+            );
+            assert_eq!(
+                detect_and_update_any_agent(&prompt, cursor, ctx, &mut state),
+                Decision::Hold
+            );
+            assert!(matches!(
+                detect_and_update_any_agent(&prompt, cursor, ctx, &mut state),
+                Decision::Fire { .. }
+            ));
         }
     }
 
@@ -1142,6 +1183,130 @@ mod tests {
             assert!(
                 matches!(detect_and_update_any_agent(&screen, cursor, ctx, &mut state), Decision::Fire { signature, .. } if signature == expected)
             );
+        }
+    }
+
+    #[test]
+    fn agy_partial_cost_redraw_does_not_repeat_accepted_approval() {
+        let mut terminal = Terminal::new(noa_core::GridSize::new(140, 24));
+        let mut stream = noa_vt::Stream::new();
+        stream.feed(agy_question_prompt().join("\r\n").as_bytes(), &mut terminal);
+        let now = fixed_now();
+        let ctx = base_ctx(now);
+        let mut state = AutoApproveState::default();
+        let screen = viewport_rows_from_terminal(&terminal);
+        assert_eq!(
+            detect_and_update_any_agent(&screen, cursor(12), ctx, &mut state),
+            Decision::Hold
+        );
+        let Decision::Fire {
+            signature,
+            region_hash,
+            ..
+        } = detect_and_update_any_agent(&screen, cursor(12), ctx, &mut state)
+        else {
+            panic!("stable question should fire");
+        };
+        state.apply_feedback(signature, region_hash, true, now);
+
+        stream.feed(
+            b"\x1b[13;1H\x1b[2K[Gemini 3.8 Flash (High)] Cost: $",
+            &mut terminal,
+        );
+        let partial = viewport_rows_from_terminal(&terminal);
+        assert_no_auto_approval(&partial);
+        assert_eq!(
+            detect_and_update_any_agent(&partial, cursor(12), ctx, &mut state),
+            Decision::Hold
+        );
+        stream.feed(b"0.0100", &mut terminal);
+        let restored = viewport_rows_from_terminal(&terminal);
+        assert_eq!(
+            rescan_signature(&restored, signature, cursor(12), ctx)
+                .unwrap()
+                .region_hash,
+            region_hash
+        );
+        for _ in 0..3 {
+            assert_eq!(
+                detect_and_update_any_agent(&restored, cursor(12), ctx, &mut state),
+                Decision::Hold,
+                "redrawing only the cost must not send another Enter"
+            );
+        }
+        assert!(!state.needs_static_rescan());
+        assert_eq!(state.approvals.len(), 1);
+
+        stream.feed(
+            "\x1b[4;1H\x1b[2KQuestion 1/1: 次はどの作業を進めますか？".as_bytes(),
+            &mut terminal,
+        );
+        let changed = viewport_rows_from_terminal(&terminal);
+        assert_eq!(
+            detect_and_update_any_agent(&changed, cursor(3), ctx, &mut state),
+            Decision::Hold
+        );
+        assert!(matches!(
+            detect_and_update_any_agent(&changed, cursor(3), ctx, &mut state),
+            Decision::Fire { region_hash: new_hash, .. } if new_hash != region_hash
+        ));
+    }
+
+    #[test]
+    fn codex_wrapped_rejection_is_detected_from_vt_grid() {
+        for remember in [false, true] {
+            let mut prompt = codex_command_prompt();
+            if !remember {
+                prompt.remove(9);
+                prompt[9] = "  2. No, and tell Codex what to do differently (esc)".to_string();
+            }
+            let mut terminal = Terminal::new(noa_core::GridSize::new(48, 30));
+            let mut stream = noa_vt::Stream::new();
+            stream.feed(prompt.join("\r\n").as_bytes(), &mut terminal);
+            let screen = viewport_rows_from_terminal(&terminal);
+            let rejection_end = screen
+                .iter()
+                .position(|row| row.trim() == "esc)")
+                .expect("the rejection shortcut should wrap onto another physical row");
+            let mut state = AutoApproveState::default();
+            let ctx = base_ctx(fixed_now());
+            let position = terminal.active().cursor;
+            let cursor = Point {
+                x: position.x,
+                y: position.y,
+            };
+            assert_eq!(
+                detect_and_update_any_agent(&screen, cursor, ctx, &mut state),
+                Decision::Hold
+            );
+            let Decision::Fire {
+                signature,
+                region_hash,
+                ..
+            } = detect_and_update_any_agent(&screen, cursor, ctx, &mut state)
+            else {
+                panic!("complete wrapped menu should fire (remember={remember}): {screen:?}");
+            };
+            assert_eq!(signature, AutoApproveSignature::CodexCommand);
+            assert_eq!(signature.bytes(), b"\r");
+            assert_eq!(
+                rescan_signature(&screen, signature, cursor, ctx)
+                    .unwrap()
+                    .region_hash,
+                region_hash
+            );
+            state.apply_feedback(signature, region_hash, true, ctx.now);
+            for _ in 0..3 {
+                assert_eq!(
+                    detect_and_update_any_agent(&screen, cursor, ctx, &mut state),
+                    Decision::Hold
+                );
+            }
+            for invalid_suffix in ["", "esc", "enter)", "esc) extra output"] {
+                let mut incomplete = screen.clone();
+                incomplete[rejection_end] = invalid_suffix.to_string();
+                assert_no_auto_approval(&incomplete);
+            }
         }
     }
 

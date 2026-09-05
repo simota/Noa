@@ -1,6 +1,40 @@
 use super::super::*;
 
 impl App {
+    pub(in crate::app) fn open_agent_workflow_guide(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            let Some((window_id, pane_id)) = self.theme_settings.as_ref().and_then(|session| {
+                self.windows
+                    .get(&session.window_id)
+                    .map(|state| (session.window_id, state.focused_pane))
+            }) else {
+                return;
+            };
+            if let Some(panel) = &self.text_panel {
+                if !panel.can_close() {
+                    return;
+                }
+                if let Some((pane, text)) = panel.draft() {
+                    self.prompt_drafts.insert(pane, text);
+                }
+            }
+            // Embed the guide so packaged apps work without a repository checkout.
+            match crate::text_panel::TextPanel::open(
+                "Agent Workflows",
+                include_str!("../../../../../docs/AGENT_WORKFLOW.md"),
+                crate::text_panel::TextPanelMode::Guide,
+                window_id,
+                pane_id,
+                None,
+                self.proxy.clone(),
+            ) {
+                Ok(panel) => self.text_panel = Some(panel),
+                Err(err) => log::warn!("could not open agent workflow guide: {err}"),
+            }
+        }
+    }
+
     pub(in crate::app) fn open_file_preview(
         &self,
         window_id: WindowId,

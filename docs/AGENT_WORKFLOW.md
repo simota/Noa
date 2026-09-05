@@ -1,5 +1,18 @@
 # Coding agent workflows
 
+## Settings panel
+
+Open **Settings** with **Cmd+,**. Use **Tab** to search for **File Link Editor**,
+then **Enter** to select the row. Use **Left/Right** to choose **System Default**,
+**VS Code**, **Cursor**, **Zed**, or **Sublime Text**, and **Enter** to save.
+The editor changes on save without restarting Noa. **Escape** cancels changes;
+**Delete** or **Cmd+Backspace** resets to System Default. **Cmd+Z** on the saved
+settings toast restores the previous editor.
+
+The **Agent Workflows** row opens this built-in guide with **Left/Right**.
+Opening it keeps unsaved settings intact. Close the guide and Settings before
+running the prompt/reader commands below from the command palette.
+
 ## Notifications
 
 Unread notifications belong to individual panes. Selecting a pane acknowledges
@@ -48,6 +61,8 @@ Latest** focuses the source pane at the live tail. Reopen the snapshot to read
 updated output.
 
 ## File navigation and preview
+
+Choose **File Link Editor** in Settings, or configure it directly:
 
 ```conf
 file-link-editor = code

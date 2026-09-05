@@ -177,10 +177,12 @@ pub(crate) enum SettingsRowKind {
     /// would be worse than no row at all — this one exists so a user can see
     /// whether their terminal is recording.
     ScrollbackPersist,
+    FileLinkEditor,
+    AgentWorkflowGuide,
 }
 
 impl SettingsRowKind {
-    pub(crate) const COUNT: usize = 34;
+    pub(crate) const COUNT: usize = 36;
     pub(crate) const ALL: [SettingsRowKind; Self::COUNT] = [
         Self::FontSize,
         Self::BackgroundOpacity,
@@ -216,6 +218,8 @@ impl SettingsRowKind {
         Self::ScratchTerminalKey,
         Self::ScratchTerminalSize,
         Self::ScrollbackPersist,
+        Self::FileLinkEditor,
+        Self::AgentWorkflowGuide,
     ];
 
     /// R-8: the fixed live/commit-only classification, one row's kind at a
@@ -237,6 +241,7 @@ impl SettingsRowKind {
                 | Self::ServerTokenCopy
                 | Self::ServerRemoteAppQr
                 | Self::ServerStatus
+                | Self::AgentWorkflowGuide
         )
     }
 
@@ -281,6 +286,8 @@ impl SettingsRowKind {
             Self::ScratchTerminalKey => "Scratch Terminal Key",
             Self::ScratchTerminalSize => "Scratch Terminal Size",
             Self::ScrollbackPersist => "Persist Scrollback",
+            Self::FileLinkEditor => "File Link Editor",
+            Self::AgentWorkflowGuide => "Agent Workflows",
         }
     }
 
@@ -359,6 +366,12 @@ impl SettingsRowKind {
             }
             Self::ScrollbackPersist => {
                 "Keep each pane's scrollback tail on disk across restarts — writes terminal output to disk, so it's opt-in. Applies on save."
+            }
+            Self::FileLinkEditor => {
+                "Editor for Cmd-clicked paths; CLI must be in PATH. Applies on save."
+            }
+            Self::AgentWorkflowGuide => {
+                "Prompt drafts, output reader, unread shortcuts, and agent hook setup."
             }
         }
     }
@@ -496,6 +509,8 @@ pub(crate) enum RowDraft {
     ScratchTerminalSize(u16, u16),
     /// `scrollback-persist` for [`SettingsRowKind::ScrollbackPersist`].
     ScrollbackPersist(ScrollbackPersist),
+    FileLinkEditor(noa_config::FileLinkEditor),
+    AgentWorkflowGuide,
 }
 
 /// [`RowDraft::ServerTokenCopy`]'s three faces — deliberately holds no
@@ -609,6 +624,15 @@ impl RowDraft {
                 ScrollbackPersist::Never => "Off".to_string(),
                 ScrollbackPersist::Tail => "Record Tail".to_string(),
             },
+            RowDraft::FileLinkEditor(editor) => match editor {
+                noa_config::FileLinkEditor::Default => "System Default",
+                noa_config::FileLinkEditor::Code => "VS Code",
+                noa_config::FileLinkEditor::Cursor => "Cursor",
+                noa_config::FileLinkEditor::Zed => "Zed",
+                noa_config::FileLinkEditor::Subl => "Sublime Text",
+            }
+            .to_string(),
+            RowDraft::AgentWorkflowGuide => "Open Guide".to_string(),
         }
     }
 
@@ -707,6 +731,8 @@ impl RowDraft {
                 d.scratch_terminal_size.rows,
             ),
             SettingsRowKind::ScrollbackPersist => RowDraft::ScrollbackPersist(d.scrollback_persist),
+            SettingsRowKind::FileLinkEditor => RowDraft::FileLinkEditor(d.file_link_editor),
+            SettingsRowKind::AgentWorkflowGuide => RowDraft::AgentWorkflowGuide,
         }
     }
 }
@@ -755,6 +781,7 @@ pub(crate) struct SettingsRow {
 /// it always routes through the debouncer (`poll_font_size`), per R-9.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum RowEffect {
+    OpenAgentWorkflowGuide,
     /// Nothing to apply outside the state machine (commit-only rows, or a
     /// live row whose value didn't actually change).
     None,
@@ -820,6 +847,7 @@ pub(crate) struct RevertValues {
     pub(crate) glassmorphism: GlassLevel,
     pub(crate) confirm_quit: bool,
     pub(crate) send_selection_send_enter: bool,
+    pub(crate) file_link_editor: noa_config::FileLinkEditor,
     pub(crate) font_family: String,
 }
 
@@ -933,6 +961,7 @@ pub(crate) struct ThemeSettingsInit {
     pub(crate) glassmorphism: GlassLevel,
     pub(crate) confirm_quit: bool,
     pub(crate) send_selection_send_enter: bool,
+    pub(crate) file_link_editor: noa_config::FileLinkEditor,
     pub(crate) font_family: String,
     pub(crate) available_font_families: Vec<String>,
     /// R-9.

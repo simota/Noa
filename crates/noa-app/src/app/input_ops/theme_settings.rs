@@ -229,6 +229,7 @@ impl App {
             glassmorphism: self.config.glassmorphism,
             confirm_quit: self.config.confirm_quit,
             send_selection_send_enter: self.config.send_selection_send_enter,
+            file_link_editor: self.config.file_link_editor,
             font_family,
             available_font_families,
             scrollback_limit: self.config.scrollback_limit,
@@ -596,6 +597,7 @@ impl App {
             RowEffect::SidebarFontSize(size) => self.apply_live_sidebar_font_size(size),
             RowEffect::CopyServerToken => self.copy_server_token_to_clipboard(),
             RowEffect::ShowRemoteAppQr => self.show_remote_app_qr(),
+            RowEffect::OpenAgentWorkflowGuide => self.open_agent_workflow_guide(),
         }
     }
 
@@ -1034,6 +1036,7 @@ impl App {
             }
         }
         self.config.font_size = payload.revert.font_size;
+        self.config.file_link_editor = payload.revert.file_link_editor;
         self.config.background_opacity = payload.revert.background_opacity;
         self.config.background_blur_radius = payload.revert.background_blur_radius;
         // The `configured_*` twins too, symmetrically with the commit path's
@@ -1192,6 +1195,9 @@ impl App {
                 RowDraft::SendSelectionSendEnter(v) => {
                     self.config.send_selection_send_enter = *v;
                 }
+                RowDraft::FileLinkEditor(editor) => {
+                    self.config.file_link_editor = *editor;
+                }
                 // Commit-only rows: intentionally not mirrored (see the doc
                 // comment above).
                 RowDraft::FontFamily(_)
@@ -1235,7 +1241,9 @@ impl App {
                 // explicit rather than folded into the arm above so a
                 // future variant can't silently start skipping a real
                 // config mirror.
-                RowDraft::ServerTokenCopy(_) | RowDraft::ServerStatus(_) => {}
+                RowDraft::ServerTokenCopy(_)
+                | RowDraft::ServerStatus(_)
+                | RowDraft::AgentWorkflowGuide => {}
             }
         }
         if reload_background_image {
@@ -1757,6 +1765,7 @@ mod commit_theme_settings_tests {
             glassmorphism: noa_config::GlassLevel::Off,
             confirm_quit: true,
             send_selection_send_enter: false,
+            file_link_editor: noa_config::FileLinkEditor::Default,
             font_family: "Menlo".to_string(),
             available_font_families: Vec::new(),
             scrollback_limit: noa_config::DEFAULT_SCROLLBACK_LIMIT,
@@ -1843,6 +1852,7 @@ mod commit_theme_settings_tests {
             glassmorphism: noa_config::GlassLevel::Off,
             confirm_quit: true,
             send_selection_send_enter: false,
+            file_link_editor: noa_config::FileLinkEditor::Default,
             font_family: "Menlo".to_string(),
         };
         sync_reverted_confirm_quit_and_quick_terminal_size(&mut config, &revert);
@@ -1910,6 +1920,7 @@ mod commit_theme_settings_tests {
             glassmorphism: noa_config::GlassLevel::Off,
             confirm_quit: true,
             send_selection_send_enter: false,
+            file_link_editor: noa_config::FileLinkEditor::Default,
             font_family: "Menlo".to_string(),
             available_font_families: Vec::new(),
             scrollback_limit: noa_config::DEFAULT_SCROLLBACK_LIMIT,

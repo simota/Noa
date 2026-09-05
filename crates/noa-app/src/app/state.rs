@@ -789,6 +789,7 @@ mod theme_settings_session_tests {
             glassmorphism: noa_config::GlassLevel::Off,
             confirm_quit: true,
             send_selection_send_enter: false,
+            file_link_editor: noa_config::FileLinkEditor::Default,
             font_family: "Menlo".to_string(),
             available_font_families: Vec::new(),
             scrollback_limit: noa_config::DEFAULT_SCROLLBACK_LIMIT,

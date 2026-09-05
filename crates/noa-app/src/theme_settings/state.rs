@@ -321,6 +321,7 @@ impl ThemeSettings {
                     glassmorphism: init.glassmorphism,
                     confirm_quit: init.confirm_quit,
                     send_selection_send_enter: init.send_selection_send_enter,
+                    file_link_editor: init.file_link_editor,
                     font_family: init.font_family.clone(),
                 },
                 [
@@ -466,6 +467,14 @@ impl ThemeSettings {
                     },
                     SettingsRow {
                         draft: RowDraft::ScrollbackPersist(init.scrollback_persist),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::FileLinkEditor(init.file_link_editor),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::AgentWorkflowGuide,
                         touched: false,
                     },
                 ],
@@ -1579,6 +1588,30 @@ impl ThemeSettings {
                 RowEffect::None
             }
             SettingsRowKind::ServerRemoteAppQr => RowEffect::ShowRemoteAppQr,
+            SettingsRowKind::AgentWorkflowGuide => RowEffect::OpenAgentWorkflowGuide,
+            SettingsRowKind::FileLinkEditor => {
+                use noa_config::FileLinkEditor;
+                const EDITORS: [FileLinkEditor; 5] = [
+                    FileLinkEditor::Default,
+                    FileLinkEditor::Code,
+                    FileLinkEditor::Cursor,
+                    FileLinkEditor::Zed,
+                    FileLinkEditor::Subl,
+                ];
+                let RowDraft::FileLinkEditor(current) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let index = EDITORS
+                    .iter()
+                    .position(|editor| *editor == current)
+                    .unwrap();
+                let next = (index as i32 + delta).rem_euclid(EDITORS.len() as i32) as usize;
+                if EDITORS[next] != current {
+                    self.rows[idx].draft = RowDraft::FileLinkEditor(EDITORS[next]);
+                    self.rows[idx].touched = true;
+                }
+                RowEffect::None
+            }
             // Action row (R-2's exception, see `SettingsRowKind::ServerTokenCopy`'s
             // doc comment): never sets `touched` and never rewrites its own
             // draft here — `App` performs the actual clipboard write and
@@ -1772,6 +1805,7 @@ impl ThemeSettings {
             SettingsRowKind::ServerTokenCopy
                 | SettingsRowKind::ServerRemoteAppQr
                 | SettingsRowKind::ServerStatus
+                | SettingsRowKind::AgentWorkflowGuide
         ) {
             return RowEffect::None;
         }
@@ -2261,6 +2295,10 @@ impl ThemeSettings {
                 // `RowDraft` variant can't silently skip a real config write
                 // by landing here instead.
                 RowDraft::ServerTokenCopy(_) => {}
+                RowDraft::AgentWorkflowGuide => {}
+                RowDraft::FileLinkEditor(editor) => {
+                    updates.push(("file-link-editor".to_string(), editor.as_str().to_string()));
+                }
                 // Same "never touched" contract as `ServerTokenCopy` above.
                 RowDraft::ServerStatus(_) => {}
                 // Mirrors `FontFamily`'s empty-default skip: an invalid,
@@ -2516,6 +2554,10 @@ pub(crate) fn revert_updates(
     ));
     updates.push(("confirm-quit".to_string(), revert.confirm_quit.to_string()));
     updates.push((
+        "file-link-editor".to_string(),
+        revert.file_link_editor.as_str().to_string(),
+    ));
+    updates.push((
         "send-selection-send-enter".to_string(),
         revert.send_selection_send_enter.to_string(),
     ));
@@ -2568,6 +2610,7 @@ fn is_reload_exempt(row: SettingsRowKind) -> bool {
             | SettingsRowKind::BackgroundImageInterval
             | SettingsRowKind::Glassmorphism
             | SettingsRowKind::ConfirmQuit
+            | SettingsRowKind::FileLinkEditor
             | SettingsRowKind::SendSelectionSendEnter
             | SettingsRowKind::QuickTerminalHeight
             // R-9/Addendum D-1's FM-01 correction: these three are picked up
@@ -2704,6 +2747,8 @@ fn hash_row_draft_value(draft: &RowDraft, hasher: &mut impl Hasher) {
             rows.hash(hasher);
         }
         RowDraft::ScrollbackPersist(mode) => scrollback_persist_config_value(*mode).hash(hasher),
+        RowDraft::FileLinkEditor(editor) => editor.as_str().hash(hasher),
+        RowDraft::AgentWorkflowGuide => {}
     }
 }
 

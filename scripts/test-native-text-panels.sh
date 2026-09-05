@@ -24,4 +24,4 @@ PLIST
 open -W -n "$smoke_app" --stdout "$smoke_dir/stdout" --stderr "$smoke_dir/stderr"
 cat "$smoke_dir/stdout" "$smoke_dir/stderr"
 # open reports successful launching even when the child process failed an assertion.
-grep -Fq 'Native composer, Japanese draft, reader, find routing, and close checks passed.' "$smoke_dir/stdout"
+grep -Fq 'Native composer, Japanese draft, reader, guide, find routing, and close checks passed.' "$smoke_dir/stdout"

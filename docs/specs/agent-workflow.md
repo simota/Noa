@@ -33,18 +33,21 @@ Implemented:
 - Explicit agent states and a Claude Code lifecycle hook adapter.
 - Native prompt drafts, read-only output snapshots, Find, and fenced code copying.
   Draft paste follows the existing protection path and never sends Enter.
+- Settings exposes File Link Editor with save/cancel/reset/Undo support, plus
+  an Agent Workflows action that opens the bundled guide without saving drafts.
 
 Verification:
 
 - `cargo test --workspace`: passed with local IPC sockets permitted.
 - `cargo test -p noa-app --lib --quiet`: final app changes passed;
-  1,178 tests passed, 6 ignored.
+  1,182 tests passed, 6 ignored, including Settings search, editor save/reset/Undo,
+  and preserving pending settings when opening the guide.
 - `cargo build --workspace`: passed.
 - `cargo fmt --all -- --check` and `git diff --check`: passed.
 - `python3 -B -m unittest discover -s scripts -p test_noa_agent_hook.py`:
   4 tests passed.
 - `bash scripts/test-native-text-panels.sh`: passed on macOS. Synthetic panels
-  verify Japanese draft preservation, reader mode, native Find/selection routing,
+  verify Japanese draft preservation, reader/guide modes, native Find/selection routing,
   and clean closure without launching a shell or modifying the clipboard.
 
 Verification limits: interactive Japanese IME candidate selection, installed

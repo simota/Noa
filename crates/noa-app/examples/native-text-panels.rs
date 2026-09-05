@@ -98,7 +98,7 @@ fn main() {
         }
         fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
         fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-            if self.phase == 4 {
+            if self.phase == 6 {
                 return;
             }
             if Instant::now() < self.ready {
@@ -106,17 +106,17 @@ fn main() {
                 return;
             }
             let panel = self.panel.as_ref().unwrap();
-            if self.phase == 0 || self.phase == 2 {
+            if self.phase == 0 || self.phase == 2 || self.phase == 4 {
                 if !panel.handle_command(AppCommand::Search(commands::SearchAction::Find)) {
                     assert!(
                         Instant::now() < self.focus_deadline,
                         "native panel did not gain focus in phase {}",
                         self.phase
                     );
-                    activate_panel(if self.phase == 0 {
-                        "Compose Prompt"
-                    } else {
-                        "Output Snapshot"
+                    activate_panel(match self.phase {
+                        0 => "Compose Prompt",
+                        2 => "Output Snapshot",
+                        _ => "Agent Workflows",
                     });
                     self.ready = Instant::now() + Duration::from_millis(100);
                     event_loop.set_control_flow(ControlFlow::WaitUntil(self.ready));
@@ -143,8 +143,27 @@ fn main() {
                 assert!(panel.draft().is_none());
                 panel.note_output(split_tree::PaneId::new(1));
                 panel.close();
-                self.phase = 4;
-                event_loop.exit();
+                if self.phase == 3 {
+                    self.panel = Some(
+                        TextPanel::open(
+                            "Agent Workflows — Sample",
+                            include_str!("../../../docs/AGENT_WORKFLOW.md"),
+                            TextPanelMode::Guide,
+                            WindowId::from(1u64),
+                            split_tree::PaneId::new(1),
+                            None,
+                            self.proxy.clone(),
+                        )
+                        .unwrap(),
+                    );
+                    self.phase = 4;
+                    self.focus_deadline = Instant::now() + Duration::from_secs(10);
+                    self.ready = Instant::now() + Duration::from_millis(300);
+                    event_loop.set_control_flow(ControlFlow::WaitUntil(self.ready));
+                } else {
+                    self.phase = 6;
+                    event_loop.exit();
+                }
             }
         }
     }
@@ -160,8 +179,10 @@ fn main() {
         focus_deadline: Instant::now(),
     };
     event_loop.run_app(&mut smoke).unwrap();
-    assert_eq!(smoke.phase, 4);
-    println!("Native composer, Japanese draft, reader, find routing, and close checks passed.");
+    assert_eq!(smoke.phase, 6);
+    println!(
+        "Native composer, Japanese draft, reader, guide, find routing, and close checks passed."
+    );
 }
 
 #[cfg(not(target_os = "macos"))]

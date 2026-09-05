@@ -43,6 +43,7 @@ fn init() -> ThemeSettingsInit {
         glassmorphism: GlassLevel::Off,
         confirm_quit: true,
         send_selection_send_enter: false,
+        file_link_editor: noa_config::FileLinkEditor::Default,
         font_family: "Menlo".to_string(),
         available_font_families: vec![
             "Menlo".to_string(),
@@ -88,6 +89,114 @@ fn assert_quick_terminal_height(draft: &RowDraft, expected: f32) {
         panic!("expected quick terminal height draft, got {draft:?}");
     };
     assert!((*actual - expected).abs() < 0.001, "got {actual}");
+}
+
+#[test]
+fn file_link_editor_cycles_in_both_directions_and_applies_on_save() {
+    use noa_config::FileLinkEditor;
+    let mut settings = ThemeSettings::open(settings_init());
+    move_to_row(&mut settings, SettingsRowKind::FileLinkEditor);
+    assert!(settings.commit_updates().is_empty());
+    assert_eq!(
+        settings.liveness(SettingsRowKind::FileLinkEditor),
+        Liveness::OnSave
+    );
+    let index = row_index(SettingsRowKind::FileLinkEditor);
+    for (editor, label) in [
+        (FileLinkEditor::Code, "VS Code"),
+        (FileLinkEditor::Cursor, "Cursor"),
+        (FileLinkEditor::Zed, "Zed"),
+        (FileLinkEditor::Subl, "Sublime Text"),
+        (FileLinkEditor::Default, "System Default"),
+    ] {
+        assert_eq!(settings.adjust(1, Instant::now()), RowEffect::None);
+        assert_eq!(
+            settings.rows()[index].draft,
+            RowDraft::FileLinkEditor(editor)
+        );
+        assert_eq!(settings.rows()[index].draft.display_value(), label);
+        assert_eq!(
+            settings.restart_reason(SettingsRowKind::FileLinkEditor),
+            RestartReason::None
+        );
+    }
+    settings.adjust(-1, Instant::now());
+    assert_eq!(
+        settings.rows()[index].draft,
+        RowDraft::FileLinkEditor(FileLinkEditor::Subl)
+    );
+    assert_eq!(settings.revert().file_link_editor, FileLinkEditor::Default);
+}
+
+#[test]
+fn file_link_editor_save_undo_and_reset_preserve_unrelated_config() {
+    use noa_config::FileLinkEditor;
+    let dir = std::env::temp_dir().join(format!(
+        "noa-editor-settings-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config");
+    let original = "# keep this comment\nfile-link-editor = cursor\nfont-size = 19\n";
+    std::fs::write(&path, original).unwrap();
+    let mut settings = ThemeSettings::open(ThemeSettingsInit {
+        file_link_editor: FileLinkEditor::Cursor,
+        font_size: 19.0,
+        ..settings_init()
+    });
+    move_to_row(&mut settings, SettingsRowKind::FileLinkEditor);
+    settings.adjust(1, Instant::now());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    assert_eq!(
+        settings.commit_updates(),
+        vec![("file-link-editor".into(), "zed".into())]
+    );
+    let mut writer =
+        |path: &Path, updates: &[(String, String)]| noa_config::write_config_updates(path, updates);
+    settings.commit(&path, &mut writer).unwrap();
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("file-link-editor = zed"));
+    assert!(saved.contains("# keep this comment"));
+    assert!(saved.contains("font-size = 19"));
+    let (snapshot, pair) = settings.pre_commit_snapshot();
+    noa_config::write_config_updates(&path, &revert_updates(&snapshot, pair.as_ref())).unwrap();
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("file-link-editor = cursor")
+    );
+    settings.reset_selected_row(Instant::now());
+    assert_eq!(
+        settings.commit_updates(),
+        vec![("file-link-editor".into(), "default".into())]
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn agent_workflow_guide_opens_without_changing_pending_settings() {
+    let mut settings = ThemeSettings::open(settings_init());
+    move_to_row(&mut settings, SettingsRowKind::FileLinkEditor);
+    settings.adjust(1, Instant::now());
+    move_to_row(&mut settings, SettingsRowKind::AgentWorkflowGuide);
+    let before = settings.view_fingerprint_u64();
+    let pending = settings.commit_updates();
+    assert_eq!(
+        settings.adjust(1, Instant::now()),
+        RowEffect::OpenAgentWorkflowGuide
+    );
+    assert_eq!(
+        settings.adjust(-1, Instant::now()),
+        RowEffect::OpenAgentWorkflowGuide
+    );
+    assert_eq!(settings.reset_selected_row(Instant::now()), RowEffect::None);
+    assert_eq!(settings.view_fingerprint_u64(), before);
+    assert_eq!(settings.commit_updates(), pending);
+    assert!(!settings.rows()[row_index(SettingsRowKind::AgentWorkflowGuide)].touched);
 }
 
 fn settings_init() -> ThemeSettingsInit {
@@ -2562,11 +2671,11 @@ fn default_for_maps_every_row_kind_to_its_documented_startup_default() {
 // the send-selection-send-enter row brings it to 29 (+1), the Remote
 // App QR action brings it to 30 (+1), the `glassmorphism` row brings it to
 // 33 (+1 on top of the scratch-terminal rows), and the `scrollback-persist`
-// row brings the array to its current length (+1).
+// row brings it to 34. File Link Editor and Agent Workflows add two rows.
 #[test]
 fn settings_row_kind_count_includes_remote_app_qr_action() {
-    assert_eq!(SettingsRowKind::COUNT, 34);
-    assert_eq!(SettingsRowKind::ALL.len(), 34);
+    assert_eq!(SettingsRowKind::COUNT, 36);
+    assert_eq!(SettingsRowKind::ALL.len(), 36);
 }
 
 // settings-panel-server-status: the status row is read-only (mirrors
@@ -3201,6 +3310,7 @@ fn reset_selected_row_writes_default_for_and_marks_touched_for_every_row_kind() 
             SettingsRowKind::ServerTokenCopy
                 | SettingsRowKind::ServerRemoteAppQr
                 | SettingsRowKind::ServerStatus
+                | SettingsRowKind::AgentWorkflowGuide
         ) {
             assert_eq!(
                 settings.rows()[idx].draft,
@@ -3698,7 +3808,7 @@ fn every_mutator_that_changes_state_changes_the_fingerprint() {
             }
             // This action mutates no pure state: App presents the QR outside
             // the state machine, so its RowEffect is tested separately.
-            SettingsRowKind::ServerRemoteAppQr => {}
+            SettingsRowKind::ServerRemoteAppQr | SettingsRowKind::AgentWorkflowGuide => {}
             // Same shape as `ServerTokenCopy` above, but for the read-only
             // status row's own out-of-band refresh (see its doc comment on
             // `SettingsRowKind::ServerStatus`).
@@ -3725,7 +3835,10 @@ fn every_mutator_that_changes_state_changes_the_fingerprint() {
 
         let before_edit = settings.view_fingerprint_u64();
         exercise(&mut settings, *kind, Instant::now());
-        if *kind == SettingsRowKind::ServerRemoteAppQr {
+        if matches!(
+            kind,
+            SettingsRowKind::ServerRemoteAppQr | SettingsRowKind::AgentWorkflowGuide
+        ) {
             continue;
         }
         assert_ne!(
@@ -4053,6 +4166,7 @@ fn sample_revert(theme_name: &str) -> RevertValues {
         glassmorphism: GlassLevel::Off,
         confirm_quit: true,
         send_selection_send_enter: false,
+        file_link_editor: noa_config::FileLinkEditor::Default,
         font_family: "Menlo".to_string(),
     }
 }

@@ -7,6 +7,7 @@ pub(crate) enum TextPanelMode {
     Compose,
     Output,
     File,
+    Guide,
 }
 
 pub(crate) fn bounded_text(text: &str) -> String {
@@ -251,7 +252,10 @@ mod native {
                 } else {
                     super::code_blocks(&text)
                 };
-                if mode == super::TextPanelMode::Output {
+                if matches!(
+                    mode,
+                    super::TextPanelMode::Output | super::TextPanelMode::Guide
+                ) {
                     let prose: *mut AnyObject = msg_send![font_class, systemFontOfSize: 15.0_f64];
                     let _: () = msg_send![&*text_view, setFont: prose];
                     for block in &blocks {
@@ -296,7 +300,7 @@ mod native {
                 let _: () = msg_send![&*find, setAction: sel!(performFindPanelAction:)];
                 let _: () = msg_send![content, addSubview: &*find];
 
-                if !editable {
+                if !editable && mode != super::TextPanelMode::Guide {
                     let allocated: *mut AnyObject = msg_send![button_class, alloc];
                     let latest =
                         owned(msg_send![allocated, initWithFrame: rect(125.0, 14.0, 160.0, 30.0)])?;

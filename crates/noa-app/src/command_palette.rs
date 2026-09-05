@@ -120,6 +120,9 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::OpenThemePicker => "Open Theme\u{2026}",
         AppCommand::OpenSettings => "Open Settings\u{2026}",
         AppCommand::ToggleProcessMonitor => "Open Process Monitor",
+        AppCommand::NextNotification => "Go to Next Unread Notification",
+        AppCommand::ComposePrompt => "Compose Prompt",
+        AppCommand::ReadOutput => "Read Output Snapshot",
     }
 }
 
@@ -139,6 +142,9 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::OpenThemePicker,
         AppCommand::OpenSettings,
         AppCommand::ToggleProcessMonitor,
+        AppCommand::NextNotification,
+        AppCommand::ComposePrompt,
+        AppCommand::ReadOutput,
         AppCommand::ReloadConfig,
         AppCommand::Copy,
         AppCommand::Paste,
@@ -351,10 +357,12 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         | AppCommand::ReloadConfig
         | AppCommand::Quit => CommandCategory::Application,
         AppCommand::Copy
+        | AppCommand::ComposePrompt
         | AppCommand::Paste
         | AppCommand::SendSelectionToPane
         | AppCommand::Terminal(TerminalAction::SelectAll) => CommandCategory::Clipboard,
         AppCommand::ExportScrollback
+        | AppCommand::ReadOutput
         | AppCommand::PipeScrollbackToPager
         | AppCommand::DiscardRestoredHistory
         | AppCommand::CheckpointScrollback => CommandCategory::Scroll,
@@ -380,7 +388,8 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         | AppCommand::NextTab
         | AppCommand::PrevTab
         | AppCommand::SelectTab(_)
-        | AppCommand::ToggleTabOverview => CommandCategory::Tabs,
+        | AppCommand::ToggleTabOverview
+        | AppCommand::NextNotification => CommandCategory::Tabs,
         AppCommand::NewWindow | AppCommand::CloseWindow => CommandCategory::Window,
         AppCommand::ToggleCommandPalette
         | AppCommand::ToggleQuickTerminal

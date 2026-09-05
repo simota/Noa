@@ -47,6 +47,7 @@ mod sidebar;
 pub mod split_tree;
 pub mod startup_trace;
 mod tab_switch_trace;
+mod text_panel;
 mod theme;
 mod theme_favorites;
 mod theme_settings;

@@ -12,6 +12,12 @@ noa +list-keybinds
 
 ## Config `keybind =`
 
+Agent workflow additions: **⌘⇧J** opens the next unread notification
+(`session.next-notification`). **Compose Prompt** (`agent.compose-prompt`) and
+**Read Output Snapshot** (`terminal.read-output`) are available from the command
+palette and can be assigned custom keys. **⌘⌥-click** previews local text files;
+**⌘-click** opens them in the configured editor. See [Agent workflows](AGENT_WORKFLOW.md).
+
 `keybind = <chord>=<action>` adds to or overrides the default table.
 The same chord takes the later entry. `keybind = <chord>=unbind` clears
 that chord, and `keybind = clear` clears all bindings defined before it.
@@ -48,6 +54,7 @@ names — such as `new_tab`, `prompt_surface_title`,
 | Window | `window.new`, `window.close`, `fullscreen.toggle` |
 | Split | `split.new-left`, `split.new-right`, `split.new-up`, `split.new-down`, `split.focus-left`, `split.focus-right`, `split.focus-up`, `split.focus-down`, `split.resize-left`, `split.resize-right`, `split.resize-up`, `split.resize-down`, `split.equalize`, `split.toggle-zoom` |
 | UI | `session-overview.toggle`, `command-palette.toggle`, `quick-terminal.toggle`, `secure-keyboard-entry.toggle`, `sidebar.toggle`, `auto-approve.toggle`, `theme-settings.open` |
+| Agent workflows | `session.next-notification`, `agent.compose-prompt`, `terminal.read-output` |
 
 `tab-overview.toggle` is also accepted as a compatible name for
 `session-overview.toggle`. If the input contains `_`, the name with `-`

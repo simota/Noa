@@ -150,6 +150,7 @@ or fails to decode, a diagnostic is shown and the background image is disabled.
 | `scrollback-limit` | integer `>= 0` | `10000000` | Total byte count for scrollback. `0` disables it |
 | `clipboard-read` | `deny` / `false`, `ask`, `allow` / `true` | `ask` | Policy for OSC 52 clipboard read |
 | `clipboard-paste-protection` | `true`, `false` | `true` | Confirmation for pastes that could trigger command execution |
+| `file-link-editor` | `default`, `code`, `cursor`, `zed`, `subl` | `default` | Editor CLI for Cmd-clicked local paths with line/column navigation. Must be in Noa's inherited PATH. Directories and launch failures use the default macOS handler. See [Agent workflows](AGENT_WORKFLOW.md) |
 | `title-report` | `true`, `false` | `false` | Allow window title responses via `CSI 21 t` |
 | `visual-bell` | `true`, `false` | `false` | Flash the window on BEL |
 | `audible-bell` | `true`, `false` | `false` | Play a platform sound on BEL |

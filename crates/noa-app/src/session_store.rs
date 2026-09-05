@@ -101,7 +101,7 @@ pub struct WallClock {
 
 /// The status dot color for a card (FR-11). Semantics: `Blue` = busy (a
 /// program is running), `Green` = idle, `Yellow` = an unread bell is pending,
-/// `Red` = the program requested user interaction (OSC 9/777) and is waiting.
+/// `Red` = an unread notification or an explicitly reported request/error.
 /// Precedence is attention > bell > busy > idle (see [`status_dot`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusDot {
@@ -134,14 +134,14 @@ pub struct SessionCard {
     pub branch: Option<String>,
     pub icon: IconKind,
     pub unread_bell: bool,
-    /// The running program posted a desktop notification (OSC 9/777) while the
-    /// window was unfocused — typically an AI agent (Claude Code / Codex / agy)
-    /// waiting for the user's reply. Cleared, like `unread_bell`, when the
-    /// card's window gains focus.
+    /// Unread notification for this pane; acknowledged when this pane is selected.
+    /// A notification alone does not imply that the process is waiting for input.
     pub attention: bool,
     pub busy: bool,
     /// Task progress reported by the foreground application via `OSC 9;4`.
     pub progress: Option<noa_grid::TerminalProgress>,
+    pub agent_status: Option<noa_grid::AgentStatus>,
+    pub agent_status_at: Option<WallClock>,
     /// Per-tab agent-prompt auto approval is enabled for this card's tab.
     pub auto_approve_enabled: bool,
     /// Rolling audit of injected approvals, capped by the store.
@@ -172,6 +172,16 @@ pub struct SessionCard {
 }
 
 impl SessionCard {
+    pub fn is_running(&self) -> bool {
+        self.agent_status.as_ref().map_or(self.busy, |report| {
+            report.state == noa_grid::AgentState::Running
+        })
+    }
+    pub fn agent_needs_attention(&self) -> bool {
+        self.agent_status
+            .as_ref()
+            .is_some_and(|report| report.state.needs_attention())
+    }
     /// The name to display: the user rename if present, else the shell title.
     pub fn display_name(&self) -> &str {
         self.name_override.as_deref().unwrap_or(&self.name)
@@ -211,13 +221,15 @@ pub enum SessionDelta {
     /// Apply a user rename (FR-7): sets `name_override`, which survives later
     /// `Upsert`s.
     Rename { id: SessionCardId, name: String },
-    /// Mark an unread bell (FR-11). Cleared by the main thread when the card's
-    /// window gains focus.
+    /// Mark an unread bell (FR-11). Cleared when the pane is selected.
     Bell { id: SessionCardId },
-    /// Mark a pending interaction request (FR-16): the running program posted a
-    /// desktop notification (OSC 9/777) while its window was unfocused. Cleared
-    /// alongside bells when the card's window gains focus.
+    /// Mark an unread notification, acknowledged alongside this pane's bells.
     Attention { id: SessionCardId },
+    AgentStatus {
+        id: SessionCardId,
+        status: Option<noa_grid::AgentStatus>,
+        at: WallClock,
+    },
     /// Replace or clear the pane's `OSC 9;4` task progress.
     Progress {
         id: SessionCardId,
@@ -256,6 +268,7 @@ impl SessionDelta {
             | SessionDelta::Rename { id, .. }
             | SessionDelta::Bell { id }
             | SessionDelta::Attention { id }
+            | SessionDelta::AgentStatus { id, .. }
             | SessionDelta::Progress { id, .. }
             | SessionDelta::ProgressComplete { id }
             | SessionDelta::ProgressError { id }
@@ -294,6 +307,9 @@ impl SessionDelta {
             SessionDelta::Rename { name, .. } => SessionDelta::Rename { id, name },
             SessionDelta::Bell { .. } => SessionDelta::Bell { id },
             SessionDelta::Attention { .. } => SessionDelta::Attention { id },
+            SessionDelta::AgentStatus { status, at, .. } => {
+                SessionDelta::AgentStatus { id, status, at }
+            }
             SessionDelta::Progress { progress, .. } => SessionDelta::Progress { id, progress },
             SessionDelta::ProgressComplete { .. } => SessionDelta::ProgressComplete { id },
             SessionDelta::ProgressError { .. } => SessionDelta::ProgressError { id },
@@ -490,18 +506,12 @@ impl SessionStore {
             .collect()
     }
 
-    /// Clear the unread-bell and pending-attention flags on every card
-    /// belonging to `window_id` (FR-11/FR-16). Called by the main thread when
-    /// that window gains focus, so a bell or interaction request raised while
-    /// the window was in the background stops flagging its cards once the user
-    /// is looking at them. Not a [`SessionDelta`]: the main thread owns the
-    /// store and clears directly.
-    pub fn clear_bell_for_window(&mut self, window_id: SessionWindowId) {
-        for (id, card) in self.cards.iter_mut() {
-            if id.window_id == window_id {
-                card.unread_bell = false;
-                card.attention = false;
-            }
+    /// Acknowledge only the selected pane. Other panes in the same window
+    /// may still have unread notifications, including hidden zoomed panes.
+    pub fn clear_bell_for_card(&mut self, id: SessionCardId) {
+        if let Some(card) = self.cards.get_mut(&id) {
+            card.unread_bell = false;
+            card.attention = false;
         }
     }
 
@@ -535,6 +545,17 @@ impl SessionStore {
     /// the viewport is still noticeable.
     pub fn attention_count(&self) -> usize {
         self.cards.values().filter(|card| card.attention).count()
+    }
+
+    /// Use the same stable ordering as the sidebar and stay inside its window group.
+    pub fn next_notification(&self, windows: &HashSet<SessionWindowId>) -> Option<SessionCardId> {
+        self.ordered_ids_for_windows(windows)
+            .into_iter()
+            .find(|id| {
+                self.cards
+                    .get(id)
+                    .is_some_and(|card| card.attention || card.unread_bell)
+            })
     }
 
     /// The `(busy, attention)` counts among cards whose `window_id` is in
@@ -609,6 +630,8 @@ impl SessionStore {
                                 attention: false,
                                 busy,
                                 progress: None,
+                                agent_status: None,
+                                agent_status_at: None,
                                 auto_approve_enabled: false,
                                 auto_approve_audit: VecDeque::new(),
                                 process: None,
@@ -649,6 +672,21 @@ impl SessionStore {
             SessionDelta::Attention { id } => {
                 if let Some(card) = self.cards.get_mut(&id) {
                     card.attention = true;
+                }
+            }
+            SessionDelta::AgentStatus { id, status, at } => {
+                if let Some(card) = self.cards.get_mut(&id) {
+                    if card.agent_status != status {
+                        card.agent_status_at = status.as_ref().map(|_| at);
+                    }
+                    if status
+                        .as_ref()
+                        .is_none_or(|report| report.state == noa_grid::AgentState::Running)
+                    {
+                        card.attention = false;
+                        card.unread_bell = false;
+                    }
+                    card.agent_status = status;
                 }
             }
             SessionDelta::Progress { id, progress } => {
@@ -780,11 +818,11 @@ impl SessionStore {
 /// attention > bell > busy > idle: a pending interaction request wins over an
 /// unread bell, which wins over a running program, which wins over idle.
 pub fn status_dot(card: &SessionCard) -> StatusDot {
-    if card.attention {
+    if card.attention || card.agent_needs_attention() {
         StatusDot::Red
     } else if card.unread_bell {
         StatusDot::Yellow
-    } else if card.busy {
+    } else if card.is_running() {
         StatusDot::Blue
     } else {
         StatusDot::Green
@@ -1179,6 +1217,8 @@ mod tests {
             attention: false,
             busy: false,
             progress: None,
+            agent_status: None,
+            agent_status_at: None,
             auto_approve_enabled: false,
             auto_approve_audit: VecDeque::new(),
             process: None,
@@ -1260,7 +1300,7 @@ mod tests {
         assert!(store.get(&id).unwrap().attention);
 
         store.apply(SessionDelta::Bell { id });
-        store.clear_bell_for_window(id.window_id);
+        store.clear_bell_for_card(id);
         let card = store.get(&id).unwrap();
         assert!(!card.attention);
         assert!(!card.unread_bell);
@@ -1494,7 +1534,7 @@ mod tests {
             vec![card_id(1, 1), card_id(2, 1), card_id(1, 2)]
         );
 
-        store.clear_bell_for_window(SessionWindowId(1));
+        store.clear_bell_for_card(card_id(1, 1));
         assert_eq!(store.attention_count(), 0);
         assert_eq!(
             store.ordered_ids(),
@@ -1717,17 +1757,70 @@ mod tests {
     }
 
     #[test]
-    fn clear_bell_for_window_only_clears_that_window() {
+    fn acknowledging_a_pane_preserves_other_panes_and_windows() {
         let mut store = SessionStore::new();
-        let (a, b) = (card_id(1, 1), card_id(2, 1));
-        store.apply(upsert(a, 1, "a"));
-        store.apply(upsert(b, 1, "b"));
-        store.apply(SessionDelta::Bell { id: a });
-        store.apply(SessionDelta::Bell { id: b });
+        let (a, b, c) = (card_id(1, 1), card_id(1, 2), card_id(2, 1));
+        for id in [a, b, c] {
+            store.apply(upsert(id, 1, "agent"));
+            store.apply(SessionDelta::Bell { id });
+            store.apply(SessionDelta::Attention { id });
+        }
 
-        store.clear_bell_for_window(SessionWindowId(1));
+        store.clear_bell_for_card(a);
         assert!(!store.get(&a).unwrap().unread_bell);
-        assert!(store.get(&b).unwrap().unread_bell);
+        assert!(!store.get(&a).unwrap().attention);
+        for id in [b, c] {
+            assert!(store.get(&id).unwrap().unread_bell);
+            assert!(store.get(&id).unwrap().attention);
+        }
+        store.clear_bell_for_card(card_id(99, 99));
+        assert_eq!(store.attention_count(), 2);
+    }
+
+    #[test]
+    fn next_notification_visits_unread_panes_only_in_the_current_group() {
+        let mut store = SessionStore::new();
+        let (a, b, c) = (card_id(1, 1), card_id(1, 2), card_id(2, 1));
+        for id in [a, b, c] {
+            store.apply(upsert(id, 1, "agent"));
+        }
+        store.apply(SessionDelta::Attention { id: a });
+        store.apply(SessionDelta::Bell { id: b });
+        store.apply(SessionDelta::Attention { id: c });
+        let windows = [SessionWindowId(1)].into_iter().collect();
+        assert_eq!(store.next_notification(&windows), Some(a));
+        store.clear_bell_for_card(a);
+        assert_eq!(store.next_notification(&windows), Some(b));
+        store.clear_bell_for_card(b);
+        assert_eq!(store.next_notification(&windows), None);
+        assert!(store.get(&c).unwrap().attention);
+    }
+
+    #[test]
+    fn acknowledging_agent_notification_does_not_resolve_its_request() {
+        let mut store = SessionStore::new();
+        let id = card_id(1, 1);
+        store.apply(upsert(id, 1, "agent"));
+        let status = noa_grid::AgentStatus {
+            state: noa_grid::AgentState::Permission,
+            detail: "Edit".into(),
+        };
+        store.apply(SessionDelta::AgentStatus {
+            id,
+            status: Some(status.clone()),
+            at: wall(10, 0),
+        });
+        store.apply(SessionDelta::Attention { id });
+        store.clear_bell_for_card(id);
+        store.apply(upsert(id, 2, "agent"));
+        assert_eq!(store.get(&id).unwrap().agent_status, Some(status));
+        assert!(!store.get(&id).unwrap().attention);
+        store.apply(SessionDelta::AgentStatus {
+            id,
+            status: None,
+            at: wall(10, 1),
+        });
+        assert!(store.get(&id).unwrap().agent_status.is_none());
     }
 
     #[test]

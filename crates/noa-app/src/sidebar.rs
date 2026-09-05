@@ -680,7 +680,9 @@ pub fn card_lines(
     });
     // A busy card's age is always "now"; showing it is noise. Idle cards keep
     // the relative time (how long since this session last did anything).
-    let updated = if card.busy {
+    let updated = if card.agent_needs_attention() {
+        format_relative_time(now, card.agent_status_at.unwrap_or(card.updated_at))
+    } else if card.busy {
         String::new()
     } else {
         format_relative_time(now, card.updated_at)

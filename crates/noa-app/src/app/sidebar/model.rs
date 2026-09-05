@@ -526,7 +526,19 @@ fn emit_card_text(
         } else {
             process_badge(&lines.process, card.busy)
         };
-        let (badge, badge_fg) = if card.attention {
+        let (badge, badge_fg) = if let Some(status) = &card.agent_status {
+            let detail = if status.detail.is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", status.detail)
+            };
+            let fg = if status.state.needs_attention() {
+                chrome().dot_red
+            } else {
+                badge_fg
+            };
+            (format!("{badge} · {}{detail}", status.state.label()), fg)
+        } else if card.attention {
             (format!("{badge} · {ATTENTION_LABEL}"), chrome().dot_red)
         } else {
             (badge, badge_fg)

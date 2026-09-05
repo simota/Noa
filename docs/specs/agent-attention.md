@@ -1,5 +1,9 @@
 # Agent Attention Notification — Specification
 
+Amended 2026-09-05 by [Agent workflow improvements](agent-workflow.md): unread
+state is now acknowledged per pane. Explicit agent reports can name a waiting
+reason; generic BEL/OSC 9/777 notifications retain neutral wording.
+
 ## Metadata
 
 - slug: `agent-attention`
@@ -15,20 +19,20 @@ When several Claude Code / Codex / agy sessions run concurrently, Noa should
 make a newly raised notification easy to notice without leaving a distracting
 animation running. OSC 9/777 indicates that a notification exists; it does not
 prove that the process is blocked awaiting a response. The UI therefore uses
-the neutral label `notification` and preserves it until the relevant window
-gains focus.
+the neutral label `notification` and preserves it until the relevant pane
+is selected in the OS-focused window.
 
 - **audience**: developers running multiple concurrent terminal sessions
 - **job-to-be-done**: identify which session changed state at a glance
 - **success**: the new state gets a brief one-shot emphasis, then remains
-  identifiable through a stable shape, color, and label; focus clears it
+  identifiable through a stable shape, color, and label; selecting its pane clears it
 
 ### Existing foundation
 
 - `SessionCard { unread_bell, attention, busy, process, … }`
 - `StatusDot { Blue, Green, Yellow, Red }` with priority
   **attention > bell > busy > idle**
-- `SessionDelta::{ Bell, Attention }`; focus clears both flags
+- `SessionDelta::{ Bell, Attention }`; selecting the pane clears both flags
 - OSC 9/777 posts an OS notification and requests Dock attention
 - BEL from a known agent process is promoted to attention; generic BEL remains
   an unread bell
@@ -64,8 +68,10 @@ gains focus.
 - **FR-A5 Dock/OS notification**: an unfocused transition to attention requests
   Dock attention once. OSC 9/777 also posts to Notification Center; BEL-promoted
   attention does not, avoiding notification overload.
-- **FR-A6 Clearing**: focusing the relevant window immediately clears attention,
-  unread BEL, and any unfinished one-shot emphasis.
+- **FR-A6 Clearing**: selecting the relevant pane in the OS-focused window clears
+  its unread attention/BEL and one-shot emphasis. Sibling panes retain theirs.
+  A window focus gain acknowledges only its selected pane. Explicit waiting
+  status remains until the reporting agent changes it.
 - **FR-A7 Repeated firing**: another attention delta while attention is already
   pending does not restart the emphasis. A new occurrence after focus cleared
   the state starts a fresh emphasis.
@@ -87,8 +93,8 @@ gains focus.
   rail precedence, and the three rail geometries.
 - **AC-A2 (FR-A3/NFR-A4)**: unit tests verify known-agent BEL promotion and
   generic/unresolved fallback.
-- **AC-A3 (FR-A6)**: store/unit verification confirms window focus clears
-  attention and unread BEL; manual verification confirms the visual clears.
+- **AC-A3 (FR-A6)**: store/unit verification confirms acknowledgement clears only
+  the selected pane, retaining sibling and other-window notifications.
 - **AC-A4 (FR-A7)**: repeated attention while pending leaves the existing
   emphasis deadline unchanged.
 - **AC-A5 (FR-A2) [manual]**: a new notification briefly emphasizes the sidebar

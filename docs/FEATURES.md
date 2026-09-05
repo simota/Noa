@@ -45,6 +45,8 @@ A from-scratch DFA parser plus a `Handler` trait separating parsing from state.
 - **Theme & settings overlay** — a theme/settings editor with live preview opened from `Settings…` (⌘,), writes back to config
 - **Sidebar (session list)** — per-window session cards, process badges, inline rename, OSC 9;4 determinate/indeterminate progress
 - **Agent attention** — agent-process classification, bell-to-attention escalation, categorical status rails, one-shot arrival emphasis, Dock attention
+- **Agent workflows** — pane-scoped notifications, next-unread navigation (⌘⇧J), explicit agent state and a Claude Code hook adapter, native multiline prompt drafts, and read-only output snapshots with search/code copying; see [Agent workflows](AGENT_WORKFLOW.md)
+- **Local file navigation** — configurable editor line/column navigation on ⌘-click; UTF-8 file preview on ⌘⌥-click
 - **About panel** — version + git hash + build date, bundled-icon resolution
 - **Confirmation dialogs** — paste protection / OSC 52 / close confirmation
 - **IME preedit** — underlined display of in-progress composition text

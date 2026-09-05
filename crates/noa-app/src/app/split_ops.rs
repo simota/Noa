@@ -736,7 +736,19 @@ impl App {
         let Some(state) = self.windows.get(&window_id) else {
             return;
         };
-        if !state.contains_pane(pane_id) || state.focused_pane == pane_id {
+        if !state.contains_pane(pane_id) {
+            return;
+        }
+        let already_focused = state.focused_pane == pane_id;
+        if state.zoomed.is_some_and(|zoomed| zoomed != pane_id) {
+            // Acknowledgement must not hide a notification behind another zoomed pane.
+            if let Some(state) = self.windows.get_mut(&window_id) {
+                state.zoomed = Some(pane_id);
+            }
+            self.relayout_and_resize_window(window_id);
+        }
+        if already_focused {
+            self.clear_focused_session_bell(window_id);
             return;
         }
         self.end_copy_mode_for_window(window_id);
@@ -776,6 +788,7 @@ impl App {
             }
         }
         self.update_focused_ime_cursor_area(window_id);
+        self.clear_focused_session_bell(window_id);
         if let Some(state) = self.windows.get(&window_id) {
             state.window.request_redraw();
         }

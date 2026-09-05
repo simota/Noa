@@ -51,6 +51,7 @@ impl Default for KeybindEngine {
             ("cmd+c", AppCommand::Copy),
             ("cmd+v", AppCommand::Paste),
             ("cmd+shift+m", AppCommand::SendSelectionToPane),
+            ("cmd+shift+j", AppCommand::NextNotification),
             ("cmd+k", AppCommand::Terminal(TerminalAction::Clear)),
             ("cmd+a", AppCommand::Terminal(TerminalAction::SelectAll)),
             ("cmd+=", AppCommand::FontSize(FontSizeAction::Increase)),

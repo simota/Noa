@@ -424,6 +424,20 @@ fn clipboard_paste_protection_parses_bool() {
 }
 
 #[test]
+fn file_link_editor_validates_fixed_editors_and_merges_overrides() {
+    use crate::FileLinkEditor;
+    let (base, diagnostics) = parse_overrides(path(), "file-link-editor = code");
+    assert!(diagnostics.is_empty());
+    let (higher, diagnostics) = parse_overrides(path(), "file-link-editor = zed");
+    assert!(diagnostics.is_empty());
+    let config = base.merge(higher).apply_to(crate::StartupConfig::default());
+    assert_eq!(config.file_link_editor, FileLinkEditor::Zed);
+    let (invalid, diagnostics) = parse_overrides(path(), "file-link-editor = sh -c bad");
+    assert!(invalid.file_link_editor.is_none());
+    assert!(!diagnostics.is_empty());
+}
+
+#[test]
 fn confirm_quit_parses_bool() {
     let (overrides, diagnostics) = parse_overrides(path(), "confirm-quit = false");
 

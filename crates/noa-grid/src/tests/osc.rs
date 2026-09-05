@@ -4,6 +4,31 @@ fn title_from_osc() {
     assert_eq!(t.title, "my title");
 }
 
+#[test]
+fn explicit_agent_status_is_bounded_and_separate_from_notifications() {
+    let mut t = run(b"\x1b]777;noa-agent;permission;Edit\x1b\\");
+    let report = t.take_pending_agent_status().unwrap().unwrap();
+    assert_eq!(report.state, crate::AgentState::Permission);
+    assert_eq!(report.detail, "Edit");
+    assert!(t.take_pending_notifications().is_empty());
+    assert!(t.take_pending_writes().is_empty());
+    assert!(t.take_pending_agent_status().is_none());
+
+    let mut invalid = run(b"\x1b]777;noa-agent;approved;anything\x07");
+    assert!(invalid.take_pending_agent_status().is_none());
+    let mut clear = run(b"\x1b]777;noa-agent;clear;\x07");
+    assert_eq!(clear.take_pending_agent_status(), Some(None));
+    let source = format!("\x1b]777;noa-agent;input;{}\x1b\\", "あ".repeat(300));
+    let mut bounded = run(source.as_bytes());
+    assert_eq!(bounded.take_pending_agent_status().unwrap().unwrap().detail.chars().count(), 160);
+}
+
+#[test]
+fn resetting_the_terminal_clears_reported_agent_state() {
+    let mut t = run(b"\x1b]777;noa-agent;permission;Edit\x1b\\\x1bc");
+    assert_eq!(t.take_pending_agent_status(), Some(None));
+}
+
 // tab-title REQ-TTL-5: a title set within a prompt cycle binds to the cwd
 // reported at that cycle's end, regardless of whether the shell's title hook
 // fires before or after its cwd hook. Both orders leave the fingerprint equal

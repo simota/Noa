@@ -338,11 +338,11 @@ impl App {
     ) -> Option<noa_core::Rgb> {
         let card_id = Self::session_card_id(tile_id.window_id, tile_id.pane_id);
         let card = self.session_store.get(&card_id)?;
-        if card.attention {
+        if card.attention || card.agent_needs_attention() {
             Some(crate::chrome::palette().dot_red)
         } else if card.unread_bell {
             Some(crate::chrome::palette().dot_yellow)
-        } else if card.busy {
+        } else if card.is_running() {
             Some(crate::chrome::palette().dot_blue)
         } else {
             None

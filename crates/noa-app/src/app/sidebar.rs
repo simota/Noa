@@ -26,23 +26,21 @@ use std::collections::HashSet;
 /// `Rename` only ever target real windows, so they pass through unconditionally
 /// (and dropping a QT `Remove` would be harmless anyway).
 ///
-/// A `Bell`/`Attention` for the window that holds OS focus is also dropped
-/// (`window_os_focused`), mirroring the OSC 9/777 suppression (FR-16): the
-/// user is looking at that window, and focus is the only thing that clears the
-/// flags, so applying them would leave a marker nothing clears until the
-/// window loses and regains focus.
+/// Only the selected pane in the OS-focused window is already being read.
+/// Notifications from its sibling panes must still reach the sidebar.
 fn session_delta_should_apply(
     delta: &SessionDelta,
     window_eligible: bool,
-    window_os_focused: bool,
+    pane_os_focused: bool,
 ) -> bool {
     match delta {
         SessionDelta::Upsert { .. }
         | SessionDelta::Progress { .. }
+        | SessionDelta::AgentStatus { .. }
         | SessionDelta::ProgressComplete { .. }
         | SessionDelta::ProgressError { .. } => window_eligible,
         SessionDelta::Bell { .. } | SessionDelta::Attention { .. } => {
-            window_eligible && !window_os_focused
+            window_eligible && !pane_os_focused
         }
         SessionDelta::Remove { .. }
         | SessionDelta::Branch { .. }
@@ -198,7 +196,7 @@ fn card_progress_bar(card: &SessionCard) -> Option<ProgressBar> {
 /// The status rail along a card's left edge. Precedence mirrors
 /// [`status_dot`]: attention > bell > busy > idle.
 fn card_status_rail(card: &SessionCard) -> Option<StatusRail> {
-    if card.attention {
+    if card.attention || card.agent_needs_attention() {
         return Some(StatusRail {
             kind: StatusRailKind::Attention,
             color: chrome().dot_red,
@@ -210,7 +208,7 @@ fn card_status_rail(card: &SessionCard) -> Option<StatusRail> {
             color: chrome().dot_yellow,
         });
     }
-    if card.busy {
+    if card.is_running() {
         return Some(StatusRail {
             kind: StatusRailKind::Activity,
             color: chrome().dot_blue,

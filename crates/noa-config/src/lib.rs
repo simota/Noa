@@ -631,6 +631,8 @@ pub struct StartupConfig {
     /// Whether to confirm before pasting content that could run commands
     /// (`clipboard-paste-protection`). Ghostty default is on.
     pub clipboard_paste_protection: bool,
+    /// Editor command for Cmd-clicking local paths, including line/column.
+    pub file_link_editor: FileLinkEditor,
     /// `confirm-quit`: whether app quit (`cmd+q`, menu, command palette)
     /// prompts before exiting. Default is on.
     pub confirm_quit: bool,
@@ -910,6 +912,7 @@ impl Default for StartupConfig {
             palette: Vec::new(),
             clipboard_read: ClipboardAccess::default(),
             clipboard_paste_protection: true,
+            file_link_editor: FileLinkEditor::Default,
             confirm_quit: true,
             title_report: false,
             window_padding_x: None,
@@ -980,6 +983,40 @@ impl Default for StartupConfig {
     }
 }
 
+/// Editor for local file links. Each name selects a fixed argument format.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FileLinkEditor {
+    #[default]
+    Default,
+    Code,
+    Cursor,
+    Zed,
+    Subl,
+}
+
+impl FileLinkEditor {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "default" => Some(Self::Default),
+            "code" => Some(Self::Code),
+            "cursor" => Some(Self::Cursor),
+            "zed" => Some(Self::Zed),
+            "subl" => Some(Self::Subl),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Code => "code",
+            Self::Cursor => "cursor",
+            Self::Zed => "zed",
+            Self::Subl => "subl",
+        }
+    }
+}
+
 /// Optional values from a config file or explicit CLI flags.
 #[derive(Default, Clone, PartialEq)]
 pub struct ConfigOverrides {
@@ -992,6 +1029,7 @@ pub struct ConfigOverrides {
     pub palette: Vec<PaletteOverride>,
     pub clipboard_read: Option<ClipboardAccess>,
     pub clipboard_paste_protection: Option<bool>,
+    pub file_link_editor: Option<FileLinkEditor>,
     pub confirm_quit: Option<bool>,
     pub title_report: Option<bool>,
     pub window_padding_x: Option<f32>,
@@ -1078,6 +1116,7 @@ macro_rules! impl_redacted_config_debug {
                         &self.clipboard_paste_protection,
                     )
                     .field("confirm_quit", &self.confirm_quit)
+                    .field("file_link_editor", &self.file_link_editor)
                     .field("title_report", &self.title_report)
                     .field("window_padding_x", &self.window_padding_x)
                     .field("window_padding_y", &self.window_padding_y)
@@ -1191,6 +1230,7 @@ impl ConfigOverrides {
                 .clipboard_paste_protection
                 .or(self.clipboard_paste_protection),
             confirm_quit: higher_priority.confirm_quit.or(self.confirm_quit),
+            file_link_editor: higher_priority.file_link_editor.or(self.file_link_editor),
             title_report: higher_priority.title_report.or(self.title_report),
             window_padding_x: higher_priority.window_padding_x.or(self.window_padding_x),
             window_padding_y: higher_priority.window_padding_y.or(self.window_padding_y),
@@ -1343,6 +1383,7 @@ impl ConfigOverrides {
                 .clipboard_paste_protection
                 .unwrap_or(base.clipboard_paste_protection),
             confirm_quit: self.confirm_quit.unwrap_or(base.confirm_quit),
+            file_link_editor: self.file_link_editor.unwrap_or(base.file_link_editor),
             title_report: self.title_report.unwrap_or(base.title_report),
             window_padding_x: self.window_padding_x.or(base.window_padding_x),
             window_padding_y: self.window_padding_y.or(base.window_padding_y),
@@ -1795,6 +1836,7 @@ mod tests {
                 palette: Vec::new(),
                 clipboard_read: ClipboardAccess::Ask,
                 clipboard_paste_protection: true,
+                file_link_editor: FileLinkEditor::Default,
                 confirm_quit: true,
                 title_report: false,
                 window_padding_x: None,

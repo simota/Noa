@@ -333,6 +333,8 @@ pub(crate) fn overview_redraw_decision(
 pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
     match command {
         AppCommand::Copy
+        | AppCommand::ComposePrompt
+        | AppCommand::ReadOutput
         | AppCommand::Paste
         | AppCommand::SendSelectionToPane
         | AppCommand::ExportScrollback
@@ -356,6 +358,7 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::SetTabTitle
         | AppCommand::CloseTab => CommandScope::FocusedTab,
         AppCommand::ToggleTabOverview
+        | AppCommand::NextNotification
         | AppCommand::SelectTab(_)
         | AppCommand::NextTab
         | AppCommand::PrevTab => CommandScope::NativeTabGroup,
@@ -416,7 +419,9 @@ pub(crate) fn command_palette_snapshot(
 
 pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
     match command {
-        AppCommand::ToggleTabOverview => CommandScope::NativeTabGroup,
+        AppCommand::ToggleTabOverview | AppCommand::NextNotification => {
+            CommandScope::NativeTabGroup
+        }
         AppCommand::About
         | AppCommand::Preferences
         | AppCommand::EditConfigFile
@@ -430,6 +435,8 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         // The palette does not open while the overview is focused (v1, R-10):
         // Overview scope makes `ToggleCommandPalette` a no-op there (AC-15).
         AppCommand::ToggleCommandPalette
+        | AppCommand::ComposePrompt
+        | AppCommand::ReadOutput
         | AppCommand::AttachRemote
         | AppCommand::OpenThemePicker
         | AppCommand::OpenSettings

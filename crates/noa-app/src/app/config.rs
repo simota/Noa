@@ -33,6 +33,7 @@ pub struct AppConfig {
     pub clipboard_read: noa_config::ClipboardAccess,
     /// Whether to confirm before pasting content that could run commands.
     pub clipboard_paste_protection: bool,
+    pub file_link_editor: noa_config::FileLinkEditor,
     /// Whether to show a confirmation dialog before quitting the app.
     pub confirm_quit: bool,
     /// Whether `CSI 21 t` may report the window title back to the program
@@ -280,6 +281,7 @@ impl AppConfig {
             palette: config.palette,
             clipboard_read: config.clipboard_read,
             clipboard_paste_protection: config.clipboard_paste_protection,
+            file_link_editor: config.file_link_editor,
             confirm_quit: config.confirm_quit,
             title_report: config.title_report,
             window_padding_x: config.window_padding_x,

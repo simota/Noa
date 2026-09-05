@@ -492,6 +492,7 @@ impl Handler for Terminal {
         self.pending_clipboard_writes.clear();
         self.pending_clipboard_reads.clear();
         self.pending_notifications.clear();
+        self.pending_agent_status = Some(None);
         self.pending_bell = false;
         self.kitty_keyboard.reset();
         self.kitty_images.clear();
@@ -659,6 +660,12 @@ impl Handler for Terminal {
     }
 
     fn osc_dispatch(&mut self, data: &[u8]) {
+        if data.starts_with(b"777;noa-agent;") {
+            if let Some(status) = crate::osc::parse_agent_status_osc(data) {
+                self.pending_agent_status = Some(status);
+            }
+            return;
+        }
         if handle_color_osc(data, &mut self.colors, &mut self.pending_writes) {
             return;
         }

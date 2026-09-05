@@ -47,6 +47,14 @@ impl App {
         command: AppCommand,
         origin: CommandOrigin,
     ) {
+        #[cfg(target_os = "macos")]
+        if self
+            .text_panel
+            .as_ref()
+            .is_some_and(|panel| panel.handle_command(command))
+        {
+            return;
+        }
         if overview_should_intercept_command(command, self.overview_visible, origin) {
             return;
         }
@@ -190,6 +198,9 @@ impl App {
             AppCommand::OpenThemePicker => self.open_theme_settings(ThemeSettingsMode::Theme),
             AppCommand::OpenSettings => self.open_theme_settings(ThemeSettingsMode::Settings),
             AppCommand::ToggleProcessMonitor => self.toggle_process_monitor(),
+            AppCommand::NextNotification => self.focus_next_notification(),
+            AppCommand::ComposePrompt => self.open_text_panel(true),
+            AppCommand::ReadOutput => self.open_text_panel(false),
             AppCommand::ToggleFullscreen => self.toggle_fullscreen(),
             AppCommand::ToggleQuickTerminal => self.toggle_quick_terminal(event_loop),
             AppCommand::ToggleScratchTerminal => self.toggle_scratch_terminal(event_loop),

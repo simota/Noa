@@ -89,6 +89,9 @@ pub enum AppCommand {
     /// (v1 scope: Open Questions), so it carries no menu id either (mirrors
     /// `SelectTab`'s `menu_id() -> ""`).
     ToggleProcessMonitor,
+    NextNotification,
+    ComposePrompt,
+    ReadOutput,
 }
 
 /// Config-addressable copy-mode entry actions. `CursorOnly` implements the
@@ -268,6 +271,8 @@ impl AppCommand {
             AppCommand::OpenThemePicker => Self::OPEN_THEME_PICKER_MENU_ID,
             AppCommand::OpenSettings => Self::OPEN_SETTINGS_MENU_ID,
             AppCommand::ToggleProcessMonitor => "",
+            AppCommand::NextNotification => "",
+            AppCommand::ComposePrompt | AppCommand::ReadOutput => "",
             AppCommand::NextTab => Self::NEXT_TAB_MENU_ID,
             AppCommand::PrevTab => Self::PREV_TAB_MENU_ID,
             AppCommand::SetTabTitle => Self::SET_TAB_TITLE_MENU_ID,
@@ -449,6 +454,9 @@ impl AppCommand {
             Self::OpenThemePicker => "theme.open",
             Self::OpenSettings => "settings.open",
             Self::ToggleProcessMonitor => "process-monitor.toggle",
+            Self::NextNotification => "session.next-notification",
+            Self::ComposePrompt => "agent.compose-prompt",
+            Self::ReadOutput => "terminal.read-output",
         }
     }
 
@@ -531,6 +539,9 @@ impl AppCommand {
             "theme.open" | "theme-settings.open" => Some(Self::OpenThemePicker),
             "settings.open" => Some(Self::OpenSettings),
             "process-monitor.toggle" => Some(Self::ToggleProcessMonitor),
+            "session.next-notification" => Some(Self::NextNotification),
+            "agent.compose-prompt" => Some(Self::ComposePrompt),
+            "terminal.read-output" => Some(Self::ReadOutput),
             _ => None,
         }
     }

@@ -43,10 +43,14 @@ impl App {
             .first()
             .and_then(|id| self.windows.get(id))
             .map(|state| capture_window_frame(&state.window));
-        let focused_tab = self
-            .focused
-            .and_then(|focused| tabs.iter().position(|id| *id == focused))
-            .unwrap_or(0);
+        // App-wide focus only identifies the tab of the focused group; a
+        // background window's selected tab comes from its native tab group.
+        let focused_tab = saved_focused_tab(tabs, self.focused, |id| {
+            self.windows
+                .get(&id)
+                .and_then(|state| crate::macos_window::native_tab_is_selected(&state.window))
+                .unwrap_or(false)
+        });
         let tab_sessions = tabs
             .iter()
             .filter_map(|id| {
@@ -223,6 +227,18 @@ impl App {
                 self.apply_window_frame(*first, window.frame.as_ref());
             }
             restored_groups.push(tab_ids);
+        }
+
+        // Re-select each group's saved tab before restoring app-wide focus, so
+        // background windows come back showing the tab they were left on.
+        #[cfg(target_os = "macos")]
+        for (group, saved) in restored_groups.iter().zip(&state.windows) {
+            if saved.focused_tab == 0 || saved.focused_tab >= group.len() {
+                continue;
+            }
+            if let Some(state) = group.first().and_then(|id| self.windows.get(id)) {
+                state.window.select_tab_at_index(saved.focused_tab);
+            }
         }
 
         if let Some(focused_window) = state.focused_window
@@ -508,6 +524,20 @@ fn orientation_from_session(orientation: session::Orientation) -> SplitOrientati
     }
 }
 
+/// Index of the tab to record as a group's selected tab: the app-focused
+/// window when it belongs to this group, otherwise the natively selected tab,
+/// otherwise the first.
+fn saved_focused_tab(
+    tabs: &[WindowId],
+    focused: Option<WindowId>,
+    is_selected: impl Fn(WindowId) -> bool,
+) -> usize {
+    focused
+        .and_then(|focused| tabs.iter().position(|id| *id == focused))
+        .or_else(|| tabs.iter().position(|id| is_selected(*id)))
+        .unwrap_or(0)
+}
+
 /// Read a window's logical-pixel frame (scale-independent) for persistence.
 /// The position may be unavailable on some platforms; the size always is.
 fn capture_window_frame(window: &Window) -> session::WindowFrame {
@@ -528,6 +558,18 @@ fn capture_window_frame(window: &Window) -> session::WindowFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_focused_tab_prefers_app_focus_then_native_selection() {
+        let tabs: Vec<WindowId> = (0..3).map(|i| WindowId::from(i as u64)).collect();
+        // Focused window in this group wins.
+        assert_eq!(saved_focused_tab(&tabs, Some(tabs[2]), |_| false), 2);
+        // Focus elsewhere: the natively selected tab is recorded.
+        let other = WindowId::from(99u64);
+        assert_eq!(saved_focused_tab(&tabs, Some(other), |id| id == tabs[1]), 1);
+        // Nothing selected: first tab.
+        assert_eq!(saved_focused_tab(&tabs, None, |_| false), 0);
+    }
 
     #[test]
     fn split_rebuild_keeps_remote_identity_on_the_original_leaf() {

@@ -70,6 +70,7 @@ fn bench_encode_key_with_modes() {
                 false,
                 false,
                 kitty_flags,
+                false,
                 true,
                 false,
             ));
@@ -113,7 +114,9 @@ fn alt_printable_uses_escape_prefix() {
 }
 
 #[test]
-fn ctrl_letter_takes_priority_over_alt_prefix() {
+fn ctrl_alt_letter_sends_esc_prefixed_c0_byte() {
+    // Ctrl wins the byte (ETX, not text), and Alt-as-modifier still adds
+    // the ESC prefix (xterm metaSendsEscape / Ghostty legacy encoding).
     let key = Key::Character("c".into());
     assert_eq!(
         encode_key(
@@ -122,7 +125,7 @@ fn ctrl_letter_takes_priority_over_alt_prefix() {
             ModifiersState::CONTROL | ModifiersState::ALT,
             false
         ),
-        Some(vec![0x03])
+        Some(vec![0x1b, 0x03])
     );
 }
 
@@ -458,6 +461,7 @@ fn composed_option_text_passes_through_without_esc() {
             false,
             false,
             0,
+            false,
             true,
             false,
         ),
@@ -514,6 +518,7 @@ fn application_keypad_uses_ss3_for_numpad_digits_and_enter() {
             false,
             true,
             0,
+            false,
             true,
             false,
         ),
@@ -530,6 +535,7 @@ fn application_keypad_uses_ss3_for_numpad_digits_and_enter() {
             false,
             true,
             0,
+            false,
             true,
             false,
         ),
@@ -550,6 +556,7 @@ fn numeric_keypad_uses_text_or_standard_enter() {
             false,
             false,
             0,
+            false,
             true,
             false,
         ),
@@ -566,6 +573,7 @@ fn numeric_keypad_uses_text_or_standard_enter() {
             false,
             false,
             0,
+            false,
             true,
             false,
         ),
@@ -883,7 +891,7 @@ fn kitty_press(
     flags: u8,
 ) -> Option<Vec<u8>> {
     encode_key_with_modes(
-        logical, None, None, text, mods, true, false, false, flags, true, false,
+        logical, None, None, text, mods, true, false, false, flags, false, true, false,
     )
 }
 
@@ -1065,6 +1073,7 @@ fn kitty_shifted_symbol_reports_unshifted_base_key() {
             false,
             false,
             KITTY_REPORT_ALTERNATE_KEYS,
+            false,
             true,
             false,
         ),
@@ -1111,6 +1120,7 @@ fn kitty_event_types_report_release_and_repeat() {
             false,
             KITTY_REPORT_EVENT_TYPES,
             false,
+            false,
             // released
             false,
         ),
@@ -1128,6 +1138,7 @@ fn kitty_event_types_report_release_and_repeat() {
             false,
             false,
             KITTY_REPORT_EVENT_TYPES,
+            false,
             true,
             true, // repeat
         ),
@@ -1151,6 +1162,7 @@ fn kitty_release_of_text_key_without_report_all_is_dropped() {
             KITTY_REPORT_EVENT_TYPES,
             false,
             false,
+            false,
         ),
         None
     );
@@ -1171,6 +1183,7 @@ fn kitty_modifier_key_alone_reported_only_with_report_all() {
             false,
             false,
             KITTY_REPORT_ALL_KEYS,
+            false,
             true,
             false,
         ),
@@ -1188,6 +1201,7 @@ fn kitty_modifier_key_alone_reported_only_with_report_all() {
             false,
             false,
             KITTY_DISAMBIGUATE,
+            false,
             true,
             false,
         ),
@@ -1219,14 +1233,14 @@ fn legacy_release_sends_nothing() {
     for (logical, text, mods) in cases {
         assert!(
             encode_key_with_modes(
-                &logical, None, None, text, mods, true, false, false, 0, true, false
+                &logical, None, None, text, mods, true, false, false, 0, false, true, false
             )
             .is_some(),
             "press {logical:?} should still send"
         );
         assert_eq!(
             encode_key_with_modes(
-                &logical, None, None, text, mods, true, false, false, 0, false, false
+                &logical, None, None, text, mods, true, false, false, 0, false, false, false
             ),
             None,
             "release {logical:?} should send nothing"
@@ -1250,6 +1264,7 @@ fn kitty_event_types_repeat_legacy_keys_but_drop_their_release() {
             false,
             false,
             flags,
+            false,
             true,
             true, // repeat
         ),
@@ -1266,6 +1281,7 @@ fn kitty_event_types_repeat_legacy_keys_but_drop_their_release() {
             false,
             false,
             flags,
+            false,
             true,
             true, // repeat
         ),
@@ -1285,6 +1301,7 @@ fn kitty_event_types_repeat_legacy_keys_but_drop_their_release() {
             flags,
             false,
             false,
+            false,
         ),
         None
     );
@@ -1299,6 +1316,7 @@ fn kitty_event_types_repeat_legacy_keys_but_drop_their_release() {
             false,
             false,
             flags,
+            false,
             false,
             false,
         ),
@@ -1316,6 +1334,7 @@ fn kitty_event_types_repeat_legacy_keys_but_drop_their_release() {
             false,
             false,
             flags,
+            false,
             true,
             true,
         ),
@@ -1336,6 +1355,7 @@ fn kitty_keypad_uses_dedicated_codes_under_report_all() {
             false,
             false,
             KITTY_REPORT_ALL_KEYS,
+            false,
             true,
             false,
         ),
@@ -1357,4 +1377,116 @@ fn encode_enter_key_follows_kitty_flags() {
         encode_enter_key(KITTY_REPORT_ALL_KEYS | KITTY_REPORT_EVENT_TYPES),
         b"\x1b[13u".to_vec()
     );
+}
+
+#[test]
+fn ctrl_alt_letter_keeps_the_alt_esc_prefix() {
+    // Ctrl+Alt+A with Alt acting as a modifier: ESC then the C0 byte, not a
+    // bare Ctrl+A.
+    let bytes = encode_key_with_modes(
+        &Key::Character("a".into()),
+        Some(&Key::Character("a".into())),
+        None,
+        None,
+        ModifiersState::CONTROL | ModifiersState::ALT,
+        true,
+        false,
+        false,
+        0,
+        false,
+        true,
+        false,
+    );
+    assert_eq!(bytes, Some(vec![0x1b, 0x01]));
+    // Option composing text (alt_sends_esc = false): the C0 byte alone.
+    let bytes = encode_key_with_modes(
+        &Key::Character("a".into()),
+        Some(&Key::Character("a".into())),
+        None,
+        None,
+        ModifiersState::CONTROL | ModifiersState::ALT,
+        false,
+        false,
+        false,
+        0,
+        false,
+        true,
+        false,
+    );
+    assert_eq!(bytes, Some(vec![0x01]));
+}
+
+#[test]
+fn modify_other_keys_2_reports_modified_characters() {
+    let enc = |key: &str, mods: ModifiersState| {
+        encode_key_with_modes(
+            &Key::Character(key.into()),
+            Some(&Key::Character(key.to_ascii_lowercase().into())),
+            None,
+            Some(key),
+            mods,
+            true,
+            false,
+            false,
+            0,
+            true,
+            true,
+            false,
+        )
+    };
+    // Ctrl+I is distinguishable from Tab.
+    assert_eq!(
+        enc("i", ModifiersState::CONTROL),
+        Some(b"\x1b[27;5;105~".to_vec())
+    );
+    // Shift is folded into the modifier value; the codepoint stays unshifted.
+    assert_eq!(
+        enc("A", ModifiersState::CONTROL | ModifiersState::SHIFT),
+        Some(b"\x1b[27;6;97~".to_vec())
+    );
+    assert_eq!(
+        enc("x", ModifiersState::ALT),
+        Some(b"\x1b[27;3;120~".to_vec())
+    );
+    // Shift alone and unmodified keys stay legacy text.
+    assert_eq!(enc("A", ModifiersState::SHIFT), Some(b"A".to_vec()));
+    assert_eq!(enc("a", ModifiersState::empty()), Some(b"a".to_vec()));
+}
+
+#[test]
+fn modify_other_keys_off_keeps_legacy_ctrl_bytes() {
+    let bytes = encode_key_with_modes(
+        &Key::Character("i".into()),
+        Some(&Key::Character("i".into())),
+        None,
+        None,
+        ModifiersState::CONTROL,
+        true,
+        false,
+        false,
+        0,
+        false,
+        true,
+        false,
+    );
+    assert_eq!(bytes, Some(vec![0x09]));
+}
+
+#[test]
+fn kitty_flags_take_precedence_over_modify_other_keys() {
+    let bytes = encode_key_with_modes(
+        &Key::Character("i".into()),
+        Some(&Key::Character("i".into())),
+        None,
+        None,
+        ModifiersState::CONTROL,
+        true,
+        false,
+        false,
+        1,
+        true,
+        true,
+        false,
+    );
+    assert_eq!(bytes, Some(b"\x1b[105;5u".to_vec()));
 }

@@ -33,7 +33,11 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const ATTACH_SEED_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_WS_MESSAGE_SIZE: usize = 1024 * 1024;
-const MAX_WS_FRAME_SIZE: usize = 256 * 1024;
+// The server sends a capped `getText` response (up to ~1 MiB after JSON
+// wrapping) as a single unfragmented text frame, so the frame bound must be
+// as large as the message bound or a default-sized scrollback read would be
+// rejected on receipt.
+pub(crate) const MAX_WS_FRAME_SIZE: usize = MAX_WS_MESSAGE_SIZE;
 const ATTACH_PATH: &str = "/attach";
 
 /// A connected JSON-RPC control client. Reconnect/backoff belongs to

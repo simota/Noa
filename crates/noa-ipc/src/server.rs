@@ -1534,6 +1534,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_get_text_response_fits_the_client_frame_bound() {
+        // A default-sized text made entirely of characters JSON must escape
+        // grows past the raw byte count once wrapped; the capped response
+        // must still be accepted by the client's frame limit.
+        let text = "\"".repeat(DEFAULT_TEXT_MAX_BYTES);
+        let result = serde_json::to_value(GetTextResult {
+            pane_id: WireId(1),
+            text,
+            truncated: false,
+        })
+        .unwrap();
+        let response = capped_get_text_response(Value::from(1), result);
+        assert!(response.len() <= crate::client::MAX_WS_FRAME_SIZE);
+        assert!(response.len() <= MAX_WS_TEXT_PAYLOAD_SIZE);
+    }
+
+    #[test]
     fn raw_output_drain_yields_to_input_after_a_bounded_byte_turn() {
         let (sender, receiver) = crate::attach::output_channel();
         for _ in 0..128 {

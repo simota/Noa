@@ -21,6 +21,7 @@ pub(crate) enum PromptKind {
     Edit,
     Write,
     Read,
+    Command,
     AskUserQuestion,
     EnterConfirm,
 }
@@ -31,6 +32,7 @@ impl PromptKind {
             Self::Edit => "Edit",
             Self::Write => "Write",
             Self::Read => "Read",
+            Self::Command => "Command",
             Self::AskUserQuestion => "Question",
             Self::EnterConfirm => "Enter",
         }
@@ -44,6 +46,8 @@ pub enum AutoApproveSignature {
     ClaudeRead,
     ClaudeAskUserQuestion,
     ClaudeEnterConfirm,
+    CodexCommand,
+    AgyAskUserQuestion,
 }
 
 impl AutoApproveSignature {
@@ -121,6 +125,24 @@ const SIGNATURES: &[Signature] = &[
         requires_marker: false,
         bytes: b"\r",
     },
+    Signature {
+        id: AutoApproveSignature::CodexCommand,
+        agent: AgentKind::Codex,
+        kind: PromptKind::Command,
+        anchors: &["would you like to run the following command?"],
+        yes_label: Some("1. Yes, proceed (y)"),
+        requires_marker: true,
+        bytes: b"\r",
+    },
+    Signature {
+        id: AutoApproveSignature::AgyAskUserQuestion,
+        agent: AgentKind::Agy,
+        kind: PromptKind::AskUserQuestion,
+        anchors: &["question"],
+        yes_label: Some("1. (Recommended) "),
+        requires_marker: true,
+        bytes: b"\r",
+    },
 ];
 
 fn signature(id: AutoApproveSignature) -> &'static Signature {
@@ -196,9 +218,11 @@ impl AutoApproveState {
     pub(crate) fn needs_static_rescan(&self) -> bool {
         !self.disabled_by_runaway
             && self.pending_fire.is_none()
-            && self.awaiting_change.is_none()
-            && self.last_match.is_some()
-            && self.match_count >= 1
+            && self.last_match.is_some_and(|key| {
+                self.awaiting_change.is_none_or(|consumed| {
+                    consumed.signature != key.signature || consumed.region_hash != key.region_hash
+                })
+            })
     }
 
     pub(crate) fn apply_feedback(
@@ -389,8 +413,8 @@ fn apply_decision_state(
                     state.pending_fire = None;
                 }
                 if state.awaiting_change.is_some_and(|consumed| {
-                    consumed.signature == matched.signature
-                        && consumed.region_hash != matched.region_hash
+                    consumed.signature != matched.signature
+                        || consumed.region_hash != matched.region_hash
                 }) {
                     state.awaiting_change = None;
                 }
@@ -411,8 +435,21 @@ fn apply_decision_state(
                 state.awaiting_change = None;
             }
         }
-        Decision::Suppressed(_) => {
-            state.last_match = None;
+        Decision::Suppressed(reason) => {
+            // A fast reply can become static during the input cooldown. Keep
+            // rescanning that known prompt so it can arm when the guard expires,
+            // while still requiring two unsuppressed matches before sending.
+            state.last_match = if matches!(
+                reason,
+                SuppressReason::RecentUserInput | SuppressReason::PasteActive
+            ) {
+                find_prompt(rows, cursor, None).map(|matched| MatchKey {
+                    signature: matched.signature,
+                    region_hash: matched.region_hash,
+                })
+            } else {
+                None
+            };
             state.match_count = 0;
             state.pending_fire = None;
         }
@@ -467,6 +504,18 @@ fn find_signature_with_lowercase(
         return None;
     }
 
+    if matches!(
+        sig.id,
+        AutoApproveSignature::CodexCommand | AutoApproveSignature::AgyAskUserQuestion
+    ) {
+        let region = menu_prompt_region(rows, lowercase_rows, sig)?;
+        return Some(MatchedPrompt {
+            signature: sig.id,
+            region_hash: region_hash(rows, region.clone()),
+            region,
+        });
+    }
+
     let anchor_index = lowercase_rows
         .iter()
         .position(|row| sig.anchors.iter().any(|anchor| row.contains(anchor)))?;
@@ -498,8 +547,137 @@ fn find_signature_with_lowercase(
     })
 }
 
+/// These TUIs select with a painted marker and can park the terminal cursor
+/// below the menu (or hide it). Require the complete dialog at the live tail
+/// instead of treating the terminal cursor as the selected option.
+fn menu_prompt_region(
+    rows: &[RowText],
+    lowercase_rows: &[RowText],
+    sig: &Signature,
+) -> Option<RangeInclusive<usize>> {
+    let anchor = lowercase_rows
+        .iter()
+        .rposition(|row| sig.anchors.contains(&row.trim()))?;
+    let footer_text = match sig.id {
+        AutoApproveSignature::CodexCommand => "Press enter to confirm or esc to cancel",
+        AutoApproveSignature::AgyAskUserQuestion => "↑/↓ Navigate · enter Select · esc Skip",
+        _ => return None,
+    };
+    let footer = (anchor + 1..rows.len())
+        .find(|&i| rows[i].split_whitespace().collect::<Vec<_>>().join(" ") == footer_text)?;
+    let mut tail = rows[footer + 1..]
+        .iter()
+        .map(|row| row.trim())
+        .filter(|row| !row.is_empty());
+    if let Some(status) = tail.next()
+        && (sig.id != AutoApproveSignature::AgyAskUserQuestion
+            || !status.starts_with('[')
+            || !status.split_once("] Cost: $").is_some_and(|(_, cost)| {
+                !cost.is_empty() && cost.bytes().all(|ch| ch.is_ascii_digit() || ch == b'.')
+            })
+            || tail.next().is_some())
+    {
+        return None;
+    }
+
+    let mut selected =
+        (anchor + 1..footer).filter_map(|i| selected_option(&rows[i]).map(|label| (i, label)));
+    let (option, label) = selected.next()?;
+    if selected.next().is_some() {
+        return None;
+    }
+    let expected = sig.yes_label?;
+    let valid = match sig.id {
+        AutoApproveSignature::CodexCommand => {
+            label == expected && codex_command_menu(rows, anchor, option, footer)
+        }
+        AutoApproveSignature::AgyAskUserQuestion => {
+            label
+                .strip_prefix(expected)
+                .is_some_and(|text| !text.trim().is_empty())
+                && agy_question_menu(rows, anchor, option, footer)
+        }
+        _ => false,
+    };
+    valid.then_some(anchor..=footer)
+}
+
+fn codex_command_menu(rows: &[RowText], anchor: usize, option: usize, footer: usize) -> bool {
+    let context = &rows[anchor + 1..option];
+    if !context.iter().any(|row| row.trim() == "Environment: local")
+        || !context.iter().any(|row| {
+            row.trim()
+                .strip_prefix("$ ")
+                .is_some_and(|command| !command.trim().is_empty())
+        })
+    {
+        return false;
+    }
+    let options: Vec<_> = rows[option + 1..footer]
+        .iter()
+        .map(|row| row.trim())
+        .filter(|row| !row.is_empty())
+        .collect();
+    match options.split_last() {
+        Some((&"2. No, and tell Codex what to do differently (esc)", [])) => true,
+        Some((&"3. No, and tell Codex what to do differently (esc)", remember)) => {
+            let remember = remember.join(" ");
+            remember.starts_with("2. Yes, and don't ask again for commands that start with ")
+                && remember.ends_with("(p)")
+        }
+        _ => false,
+    }
+}
+
+fn agy_question_menu(rows: &[RowText], anchor: usize, option: usize, footer: usize) -> bool {
+    let has_question = rows[anchor + 1..option].iter().any(|row| {
+        let Some((counter, question)) = row
+            .trim()
+            .strip_prefix("Question ")
+            .and_then(|text| text.split_once(':'))
+        else {
+            return false;
+        };
+        let Some((number, total)) = counter.split_once('/') else {
+            return false;
+        };
+        matches!((number.parse::<u32>(), total.parse::<u32>()), (Ok(n), Ok(t)) if n > 0 && n <= t)
+            && !question.trim().is_empty()
+    });
+    if !has_question {
+        return false;
+    }
+    let mut next = 2;
+    let mut write_in = false;
+    for row in &rows[option + 1..footer] {
+        let row = row.trim();
+        if row.is_empty() {
+            continue;
+        }
+        if write_in {
+            return false;
+        }
+        if let Some((number, text)) = row.split_once(". ")
+            && let Ok(number) = number.parse::<u32>()
+        {
+            if number != next || text.is_empty() {
+                return false;
+            }
+            next += 1;
+            write_in = text == "Write-in...";
+        }
+    }
+    write_in
+}
+
 fn lowercase_rows(rows: &[RowText]) -> Vec<RowText> {
     rows.iter().map(|row| row.to_ascii_lowercase()).collect()
+}
+
+fn selected_option(row: &str) -> Option<&str> {
+    row.trim_start()
+        .strip_prefix(['❯', '›', '>'])
+        .map(str::trim_start)
 }
 
 fn affirmative_selected(row: &str, yes_label: &str, requires_marker: bool) -> bool {
@@ -572,6 +750,399 @@ mod tests {
 
     fn rows(input: &[&str]) -> Vec<RowText> {
         input.iter().map(|line| (*line).to_string()).collect()
+    }
+
+    // Synthetic content with the layouts supplied in the September 2026
+    // screenshots; no local terminal transcript or command output is stored.
+    fn codex_command_prompt() -> Vec<RowText> {
+        rows(&[
+            "Would you like to run the following command?",
+            "",
+            "Environment: local",
+            "",
+            "Reason: 変更をステージしてよいですか？",
+            "",
+            "$ git add sample.rs",
+            "",
+            "› 1. Yes, proceed (y)",
+            "  2. Yes, and don't ask again for commands that start with `git add` (p)",
+            "  3. No, and tell Codex what to do differently (esc)",
+            "",
+            "Press enter to confirm or esc to cancel",
+        ])
+    }
+
+    fn agy_question_prompt() -> Vec<RowText> {
+        rows(&[
+            "Question",
+            "────────────────────",
+            "",
+            "Question 1/1: どの作業を進めますか？",
+            "",
+            "> 1. (Recommended) テストを実行する",
+            "  2. 静的解析を実行する",
+            "  3. 変更内容を確認する",
+            "  4. ドキュメントを読む",
+            "  5. Write-in...",
+            "",
+            "  ↑/↓ Navigate · enter Select · esc Skip",
+            "[Gemini 3.8 Flash (High)] Cost: $0.0000",
+        ])
+    }
+
+    fn assert_no_auto_approval(prompt: &[RowText]) {
+        let mut state = AutoApproveState::default();
+        let ctx = base_ctx(fixed_now());
+        for _ in 0..3 {
+            assert_eq!(
+                detect_and_update_any_agent(prompt, cursor(0), ctx, &mut state),
+                Decision::Hold,
+                "must not approve {prompt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn detect_codex_and_agy_screenshot_layouts_confirm_only_once_with_enter() {
+        let now = fixed_now();
+        for (prompt, expected, agent, label) in [
+            (
+                codex_command_prompt(),
+                AutoApproveSignature::CodexCommand,
+                AgentKind::Codex,
+                "Command",
+            ),
+            (
+                agy_question_prompt(),
+                AutoApproveSignature::AgyAskUserQuestion,
+                AgentKind::Agy,
+                "Question",
+            ),
+        ] {
+            let mut state = AutoApproveState::default();
+            let mut ctx = base_ctx(now);
+            ctx.alt_screen = false;
+            let cursor = cursor((prompt.len() - 1) as u16);
+            assert_eq!(
+                detect_and_update_any_agent(&prompt, cursor, ctx, &mut state),
+                Decision::Hold
+            );
+            assert!(state.needs_static_rescan());
+            let Decision::Fire {
+                signature,
+                region_hash,
+                disable_after,
+            } = detect_and_update_any_agent(&prompt, cursor, ctx, &mut state)
+            else {
+                panic!("stable menu should fire");
+            };
+            assert_eq!(signature, expected);
+            assert_eq!(signature.agent(), agent);
+            assert_eq!(signature.bytes(), b"\r");
+            assert_eq!(signature.label(), label);
+            assert!(!disable_after);
+            assert_eq!(
+                rescan_signature(&prompt, signature, cursor, ctx)
+                    .unwrap()
+                    .region_hash,
+                region_hash
+            );
+            assert_eq!(
+                detect_and_update_any_agent(&prompt, cursor, ctx, &mut state),
+                Decision::Hold
+            );
+            state.apply_feedback(signature, region_hash, true, now);
+            assert_eq!(
+                detect_and_update_any_agent(&prompt, cursor, ctx, &mut state),
+                Decision::Hold
+            );
+            assert!(!state.needs_static_rescan());
+        }
+    }
+
+    #[test]
+    fn detect_menu_requires_complete_context_and_selected_safe_choice() {
+        for (prompt, mutations) in [
+            (
+                codex_command_prompt(),
+                vec![
+                    (0, "Would you like to do something else?"),
+                    (2, "Environment: remote"),
+                    (6, "$ "),
+                    (8, "  1. Yes, proceed (y)"),
+                    (8, "› 1. Yes, proceed (y), and remember this choice"),
+                    (8, "› 2. Yes, and don't ask again (p)"),
+                    (
+                        9,
+                        "› 2. Yes, and don't ask again for commands that start with `git add` (p)",
+                    ),
+                    (10, "  3. Yes, approve everything"),
+                    (12, "Press enter to confirm"),
+                ],
+            ),
+            (
+                agy_question_prompt(),
+                vec![
+                    (0, "Not a question dialog"),
+                    (3, "Question 0/1: Choose a task"),
+                    (3, "Question 2/1: Choose a task"),
+                    (3, "Question 1/1:"),
+                    (5, "  1. (Recommended) テストを実行する"),
+                    (5, "> 1. テストを実行する"),
+                    (5, "> 2. (Recommended) テストを実行する"),
+                    (6, "> 2. 静的解析を実行する"),
+                    (9, "  5. Delete everything"),
+                    (11, "space Toggle · enter Submit"),
+                    (12, "$ another command"),
+                ],
+            ),
+        ] {
+            for (index, replacement) in mutations {
+                let mut changed = prompt.clone();
+                changed[index] = replacement.to_string();
+                assert_no_auto_approval(&changed);
+            }
+            // Earlier output cannot be mistaken for an active dialog.
+            let mut stale = prompt.clone();
+            stale.push("The task is complete. Type another request.".to_string());
+            assert_no_auto_approval(&stale);
+            for prefix_len in 0..prompt.len() - 1 {
+                assert_no_auto_approval(&prompt[..prefix_len]);
+            }
+        }
+    }
+
+    #[test]
+    fn detect_menu_supports_wrapped_choices_and_no_remember_option() {
+        let mut codex = codex_command_prompt();
+        codex.remove(9);
+        codex[9] = "  2. No, and tell Codex what to do differently (esc)".to_string();
+        let mut agy = agy_question_prompt();
+        agy.insert(
+            6,
+            "     with additional details on the next row".to_string(),
+        );
+        agy[3] = "Question 2/3: 次の作業は？".to_string();
+        for prompt in [codex, agy] {
+            let mut state = AutoApproveState::default();
+            let ctx = base_ctx(fixed_now());
+            assert_eq!(
+                detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state),
+                Decision::Hold
+            );
+            assert!(matches!(
+                detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state),
+                Decision::Fire { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn menu_signatures_remain_bound_to_their_agent_and_input_guards() {
+        let now = fixed_now();
+        for (prompt, agent) in [
+            (codex_command_prompt(), AgentKind::Codex),
+            (agy_question_prompt(), AgentKind::Agy),
+        ] {
+            let mut state = AutoApproveState::default();
+            let ctx = base_ctx(now);
+            let _ = detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state);
+            assert!(matches!(
+                detect(&prompt, cursor(0), agent, ctx, &state),
+                Decision::Fire { .. }
+            ));
+            for other in [
+                AgentKind::ClaudeCode,
+                AgentKind::Codex,
+                AgentKind::Agy,
+                AgentKind::Generic,
+            ] {
+                if other != agent {
+                    assert!(!matches!(
+                        detect(&prompt, cursor(0), other, ctx, &state),
+                        Decision::Fire { .. }
+                    ));
+                }
+            }
+            let mut blocked = ctx;
+            blocked.alt_screen = false;
+            blocked.scrollback_offset = 1;
+            assert_eq!(
+                detect(&prompt, cursor(0), agent, blocked, &state),
+                Decision::Suppressed(SuppressReason::ViewportNotLive)
+            );
+            blocked = ctx;
+            blocked.guards.ime_preedit_active = true;
+            assert_eq!(
+                detect(&prompt, cursor(0), agent, blocked, &state),
+                Decision::Suppressed(SuppressReason::ImePreedit)
+            );
+        }
+    }
+
+    #[test]
+    fn menu_hash_covers_command_question_and_all_choices_but_not_cost() {
+        let now = fixed_now();
+        let ctx = base_ctx(now);
+        for (mut prompt, change_row) in [(codex_command_prompt(), 6), (agy_question_prompt(), 8)] {
+            let mut state = AutoApproveState::default();
+            let _ = detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state);
+            let Decision::Fire {
+                signature,
+                region_hash,
+                ..
+            } = detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state)
+            else {
+                panic!("stable menu should fire");
+            };
+            state.apply_feedback(signature, region_hash, true, now);
+            if signature == AutoApproveSignature::AgyAskUserQuestion {
+                prompt[12] = "[Gemini 3.8 Flash (High)] Cost: $0.0100".to_string();
+                assert_eq!(
+                    detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state),
+                    Decision::Hold
+                );
+            }
+            prompt[change_row].push_str(" --changed");
+            assert_ne!(
+                rescan_signature(&prompt, signature, cursor(0), ctx)
+                    .unwrap()
+                    .region_hash,
+                region_hash
+            );
+            assert_eq!(
+                detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state),
+                Decision::Hold
+            );
+            assert!(matches!(
+                detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state),
+                Decision::Fire { .. }
+            ));
+            let selected = prompt
+                .iter_mut()
+                .find(|row| selected_option(row).is_some())
+                .unwrap();
+            *selected = selected_option(selected).unwrap().to_string();
+            assert!(rescan_signature(&prompt, signature, cursor(0), ctx).is_none());
+        }
+    }
+
+    #[test]
+    fn static_menu_rearms_after_input_cooldown_without_new_output() {
+        let now = fixed_now();
+        for prompt in [codex_command_prompt(), agy_question_prompt()] {
+            for paste in [false, true] {
+                let mut state = AutoApproveState::default();
+                let mut ctx = base_ctx(now);
+                if paste {
+                    ctx.guards.mark_paste(now);
+                } else {
+                    ctx.guards.mark_user_input(now);
+                }
+                assert!(matches!(
+                    detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state),
+                    Decision::Suppressed(_)
+                ));
+                assert!(state.needs_static_rescan());
+                ctx.now += USER_INPUT_SUPPRESSION;
+                assert_eq!(
+                    detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state),
+                    Decision::Hold
+                );
+                assert!(matches!(
+                    detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state),
+                    Decision::Fire { .. }
+                ));
+            }
+        }
+        let mut state = AutoApproveState::default();
+        let mut ctx = base_ctx(now);
+        ctx.guards.mark_user_input(now);
+        let _ = detect_and_update_any_agent(&codex_command_prompt(), cursor(0), ctx, &mut state);
+        let _ =
+            detect_and_update_any_agent(&rows(&["unrelated output"]), cursor(0), ctx, &mut state);
+        assert!(!state.needs_static_rescan());
+    }
+
+    #[test]
+    fn static_rescan_tracks_changed_prompts_after_an_accepted_approval() {
+        let now = fixed_now();
+        let mut state = AutoApproveState::default();
+        let mut ctx = base_ctx(now);
+        let prompt = codex_command_prompt();
+        let _ = detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state);
+        let Decision::Fire {
+            signature,
+            region_hash,
+            ..
+        } = detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state)
+        else {
+            panic!("stable menu should fire");
+        };
+        state.apply_feedback(signature, region_hash, true, now);
+        ctx.guards.mark_user_input(now);
+        let _ = detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state);
+        assert!(
+            !state.needs_static_rescan(),
+            "an unchanged consumed dialog must stay idle"
+        );
+        let mut changed = prompt;
+        changed[6] = "$ git diff --cached".to_string();
+        let _ = detect_and_update_any_agent(&changed, cursor(0), ctx, &mut state);
+        assert!(
+            state.needs_static_rescan(),
+            "a new dialog must survive the cooldown"
+        );
+        ctx.now += USER_INPUT_SUPPRESSION;
+        let _ = detect_and_update_any_agent(&changed, cursor(0), ctx, &mut state);
+        let Decision::Fire {
+            signature,
+            region_hash,
+            ..
+        } = detect_and_update_any_agent(&changed, cursor(0), ctx, &mut state)
+        else {
+            panic!("new command should fire");
+        };
+        state.apply_feedback(signature, region_hash, true, ctx.now);
+        let _ = detect_and_update_any_agent(&agy_question_prompt(), cursor(0), ctx, &mut state);
+        assert!(
+            state.needs_static_rescan(),
+            "changing signature also advances the screen"
+        );
+    }
+
+    #[test]
+    fn detect_menu_from_vt_grid_with_hidden_cursor_and_split_utf8() {
+        for (prompt, expected) in [
+            (codex_command_prompt(), AutoApproveSignature::CodexCommand),
+            (
+                agy_question_prompt(),
+                AutoApproveSignature::AgyAskUserQuestion,
+            ),
+        ] {
+            let mut terminal = Terminal::new(noa_core::GridSize::new(140, 24));
+            let mut stream = noa_vt::Stream::new();
+            let frame = format!("\x1b[?25l\x1b[36m{}\x1b[0m\r\n", prompt.join("\r\n"));
+            for chunk in frame.as_bytes().chunks(7) {
+                stream.feed(chunk, &mut terminal);
+            }
+            let screen = viewport_rows_from_terminal(&terminal);
+            let cursor = terminal.active().cursor;
+            assert!(!cursor.visible);
+            let cursor = Point {
+                x: cursor.x,
+                y: cursor.y,
+            };
+            let mut state = AutoApproveState::default();
+            let ctx = base_ctx(fixed_now());
+            assert_eq!(
+                detect_and_update_any_agent(&screen, cursor, ctx, &mut state),
+                Decision::Hold
+            );
+            assert!(
+                matches!(detect_and_update_any_agent(&screen, cursor, ctx, &mut state), Decision::Fire { signature, .. } if signature == expected)
+            );
+        }
     }
 
     #[test]

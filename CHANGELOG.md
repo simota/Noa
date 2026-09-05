@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.11] - 2026-09-06
+
+### Changed
+
+- Rendering reuses per-row build buffers: a full pane rebuild keeps each
+  row's instance capacity, and segmentation, shape runs, and highlight
+  buffers live on the renderer instead of being allocated for every dirty
+  row. Auto-approve scans the viewport once per feed instead of twice (#71).
+
+### Fixed
+
+- IPC accepts a default-sized `getText` response and validates `#rrggbb`
+  colors as ASCII hex before slicing. The legacy key encoder honors
+  modifyOtherKeys=2 (`CSI 27;mods;cp~`) and keeps the Alt ESC prefix on
+  Ctrl+Alt C0 bytes. DECSTR clears IRM; RIS keeps the configured default
+  cursor style and resets modifyOtherKeys=2. Session restore saves each tab
+  group's selected tab, not only the focused one (#70).
+
 ## [0.2.10] - 2026-09-06
 
 ### Added

@@ -5,8 +5,8 @@ use super::*;
 impl Screen {
     /// Resize the grid to `cols`×`rows`, reflowing soft-wrapped logical lines,
     /// clamping the cursor, and resetting the scroll region to full-screen. On
-    /// row-shrink, rows below the cursor are dropped first; if the cursor would
-    /// fall off the bottom, rows are moved to scrollback and the cursor follows.
+    /// row-shrink, blank trailing rows below the cursor are dropped first;
+    /// otherwise top rows move to scrollback and the cursor follows.
     pub fn resize(&mut self, cols: u16, rows: u16) {
         let cols = cols.max(1);
         let rows = rows.max(1);
@@ -110,19 +110,28 @@ impl Screen {
         // Records where each old logical line landed, so placements can be
         // re-anchored onto the new row numbering after reflow re-packs history.
         let mut line_remaps: Vec<LineRemap> = Vec::new();
+        let mut content_end = 0;
         let (reflowed_len, cursor_position, saved_position) = self.stream_reflow_lines(
             cols,
             &blank,
             cursor_point,
             saved_point,
-            |_, _| {},
+            |r, row| {
+                if !row.is_blank() || row.wrapped {
+                    content_end = r + 1;
+                }
+            },
             |remap| line_remaps.push(remap),
         );
 
         let cursor_row = cursor_position.row.min(reflowed_len.saturating_sub(1));
         let max_grid_start = reflowed_len.saturating_sub(target_rows);
+        // A cursor above populated rows must not make the reflow discard
+        // those rows. Keep the last content row in the window and send any
+        // displaced top rows to scrollback, just like a row-only shrink.
         let grid_start = cursor_row
             .saturating_sub(target_rows.saturating_sub(1))
+            .max(content_end.saturating_sub(target_rows))
             .min(max_grid_start);
         let grid_end = (grid_start + target_rows).min(reflowed_len);
 

@@ -614,7 +614,7 @@ fn command_palette_card_composites_without_validation_error() {
     let snap = FrameSnapshot {
         scroll_shift: 0,
         row_dirty: vec![true; rows.len()],
-        rows,
+        rows: rows.into(),
         cursor: Cursor::default(),
         copy_cursor: None,
         colors: TerminalColors::default(),

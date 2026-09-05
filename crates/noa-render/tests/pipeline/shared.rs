@@ -48,7 +48,7 @@ pub(crate) fn snapshot_for_text(text: &str) -> FrameSnapshot {
     let cols = cells.len().min(u16::MAX as usize) as u16;
     FrameSnapshot {
         scroll_shift: 0,
-        rows: vec![Row::from_cells(cells, false, true)],
+        rows: vec![Row::from_cells(cells, false, true)].into(),
         row_dirty: vec![true],
         cursor: Cursor::default(),
         copy_cursor: None,
@@ -236,7 +236,7 @@ pub(crate) fn image_snapshot(
     FrameSnapshot {
         scroll_shift: 0,
         row_dirty: vec![true; rows.len()],
-        rows,
+        rows: rows.into(),
         cursor: Cursor::default(),
         copy_cursor: None,
         colors: TerminalColors::default(),

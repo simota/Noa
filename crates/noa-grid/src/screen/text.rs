@@ -403,16 +403,16 @@ impl Screen {
     }
 
     pub(super) fn compute_search_matches(&mut self, query: &str) -> Vec<SearchMatch> {
-        let Some(needle_chars) = needle_len(query) else {
+        let Some(mut search) = RowSearch::new(query) else {
             return Vec::new();
         };
         let scrollback_len = self.scrollback_len();
         let mut matches = Vec::new();
         self.for_each_scrollback_row(0..scrollback_len, |y, row| {
-            append_row_matches(query, needle_chars, y, row, &mut matches);
+            search.append_matches(y, row, &mut matches);
         });
         for (idx, row) in self.grid.iter().enumerate() {
-            append_row_matches(query, needle_chars, scrollback_len + idx, row, &mut matches);
+            search.append_matches(scrollback_len + idx, row, &mut matches);
         }
         matches
     }

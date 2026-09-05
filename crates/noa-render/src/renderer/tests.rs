@@ -89,7 +89,7 @@ fn one_cell_terminal_with_cursor_style(style: CursorStyle) -> Terminal {
 }
 
 fn baseline_snapshot(chars: [char; 3]) -> FrameSnapshot {
-    let rows = chars
+    let rows: Vec<_> = chars
         .into_iter()
         .map(|ch| {
             Row::from_cells(
@@ -104,7 +104,7 @@ fn baseline_snapshot(chars: [char; 3]) -> FrameSnapshot {
         .collect();
     FrameSnapshot {
         scroll_shift: 0,
-        rows,
+        rows: rows.into(),
         row_dirty: vec![false, false, false],
         cursor: Cursor::default(),
         copy_cursor: None,

@@ -56,6 +56,16 @@ impl SearchState {
         &self.matches[..]
     }
 
+    /// Matches are stored in row/column order by the screen search. Limit
+    /// rendering and hit testing to the requested row, independent of the
+    /// number of matches elsewhere in scrollback.
+    pub fn matches_on_row(&self, row: usize) -> &[SearchMatch] {
+        let start = self.matches.partition_point(|m| m.start.y < row);
+        let matches = &self.matches[start..];
+        let end = matches.partition_point(|m| m.start.y == row);
+        &matches[..end]
+    }
+
     pub fn active_match(&self) -> Option<SearchMatch> {
         self.active.and_then(|idx| self.matches.get(idx).copied())
     }
@@ -123,7 +133,9 @@ impl SearchState {
     }
 
     pub fn contains(&self, point: SelectionPoint) -> bool {
-        self.matches.iter().any(|m| m.contains(point))
+        self.matches_on_row(point.y)
+            .iter()
+            .any(|m| m.contains(point))
     }
 
     pub fn contains_active(&self, point: SelectionPoint) -> bool {
@@ -131,55 +143,217 @@ impl SearchState {
     }
 }
 
-/// Number of scalars in `query`, or `None` if the query can never match
-/// (empty). Callers hoist this out of their per-row loop.
-pub(crate) fn needle_len(query: &str) -> Option<usize> {
-    match query.chars().count() {
-        0 => None,
-        n => Some(n),
-    }
+/// Scratch space shared by every row of a query, including materialized
+/// scrollback. Mapping UTF-8 bytes to columns avoids rescanning the text
+/// prefix for every hit and preserves wide/combining-cell coordinates.
+pub(crate) struct RowSearch<'a> {
+    query: &'a str,
+    text: String,
+    byte_columns: Vec<u16>,
 }
 
-/// Append every match of `query` within a single row `row` at storage index
-/// `storage_y` to `matches`. `needle_chars` is `query.chars().count()` (from
-/// [`needle_len`]), hoisted so a full-scrollback scan computes it once. The
-/// unit both the live grid and the paged scrollback feed rows through, one at a
-/// time, so neither storage needs to hand out a shared iterator.
-pub(crate) fn append_row_matches(
-    query: &str,
-    needle_chars: usize,
-    storage_y: usize,
-    row: &Row,
-    matches: &mut Vec<SearchMatch>,
-) {
-    let mut text = String::new();
-    let mut cells = Vec::new();
-    for (x, cell) in row.cells.iter().enumerate() {
-        if cell.attrs.contains(CellAttrs::WIDE_SPACER) {
-            continue;
-        }
-        cell.push_text_to(&mut text);
-        cells.extend(std::iter::repeat_n(x as u16, cell.text_chars().count()));
+impl<'a> RowSearch<'a> {
+    pub(crate) fn new(query: &'a str) -> Option<Self> {
+        (!query.is_empty()).then(|| Self {
+            query,
+            text: String::new(),
+            byte_columns: Vec::new(),
+        })
     }
 
-    for (byte_start, _) in text.match_indices(query) {
-        let start_char = text[..byte_start].chars().count();
-        let Some(end_char) = start_char.checked_add(needle_chars - 1) else {
-            continue;
-        };
-        let (Some(&start_x), Some(&end_x)) = (cells.get(start_char), cells.get(end_char)) else {
-            continue;
-        };
-        matches.push(SearchMatch {
-            start: SelectionPoint::new(start_x, storage_y),
-            end: SelectionPoint::new(end_x, storage_y),
-        });
+    pub(crate) fn append_matches(
+        &mut self,
+        storage_y: usize,
+        row: &Row,
+        matches: &mut Vec<SearchMatch>,
+    ) {
+        self.text.clear();
+        self.byte_columns.clear();
+        for (x, cell) in row.cells.iter().enumerate() {
+            if cell.attrs.contains(CellAttrs::WIDE_SPACER) {
+                continue;
+            }
+            cell.push_text_to(&mut self.text);
+            self.byte_columns.resize(self.text.len(), x as u16);
+        }
+
+        for (byte_start, _) in self.text.match_indices(self.query) {
+            matches.push(SearchMatch {
+                start: SelectionPoint::new(self.byte_columns[byte_start], storage_y),
+                end: SelectionPoint::new(
+                    self.byte_columns[byte_start + self.query.len() - 1],
+                    storage_y,
+                ),
+            });
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Preserve the scalar-based mapping as an independent reference for the
+    // byte-column implementation, including non-overlapping match semantics.
+    fn append_scalar_matches(
+        query: &str,
+        chars: usize,
+        y: usize,
+        row: &Row,
+        matches: &mut Vec<SearchMatch>,
+    ) {
+        let mut text = String::new();
+        let mut columns = Vec::new();
+        for (x, cell) in row.cells.iter().enumerate() {
+            if !cell.attrs.contains(CellAttrs::WIDE_SPACER) {
+                cell.push_text_to(&mut text);
+                columns.extend(std::iter::repeat_n(x as u16, cell.text_chars().count()));
+            }
+        }
+        for (start, _) in text.match_indices(query) {
+            let scalar = text[..start].chars().count();
+            matches.push(SearchMatch {
+                start: SelectionPoint::new(columns[scalar], y),
+                end: SelectionPoint::new(columns[scalar + chars - 1], y),
+            });
+        }
+    }
+
+    #[test]
+    fn row_search_matches_scalar_reference_with_unicode_and_reused_buffers() {
+        let mut terminal = crate::Terminal::new(noa_core::GridSize::new(40, 4));
+        noa_vt::Stream::new().feed(
+            "aaaa 日本語 e\u{301} 👩\u{200d}💻\r\nx\r\n日本 aaaa e\u{301}".as_bytes(),
+            &mut terminal,
+        );
+        for query in [
+            "a",
+            "aa",
+            "aaa",
+            "日本",
+            "本語",
+            "e\u{301}",
+            "\u{301}",
+            "👩\u{200d}💻",
+            " ",
+            "absent",
+        ] {
+            let mut search = RowSearch::new(query).unwrap();
+            let mut actual = Vec::new();
+            let mut expected = Vec::new();
+            for (y, row) in terminal.primary.grid.iter().enumerate() {
+                search.append_matches(y, row, &mut actual);
+                append_scalar_matches(query, query.chars().count(), y, row, &mut expected);
+            }
+            assert_eq!(actual, expected, "query {query:?}");
+        }
+        assert!(RowSearch::new("").is_none());
+    }
+
+    #[test]
+    fn matches_on_row_equals_a_full_scan_at_boundaries_and_gaps() {
+        let mut state = SearchState::default();
+        assert!(state.matches_on_row(0).is_empty());
+        let matches = vec![
+            SearchMatch {
+                start: SelectionPoint::new(1, 2),
+                end: SelectionPoint::new(3, 2),
+            },
+            SearchMatch {
+                start: SelectionPoint::new(6, 2),
+                end: SelectionPoint::new(7, 2),
+            },
+            SearchMatch {
+                start: SelectionPoint::new(0, 4),
+                end: SelectionPoint::new(1, 4),
+            },
+            SearchMatch {
+                start: SelectionPoint::new(0, usize::MAX),
+                end: SelectionPoint::new(0, usize::MAX),
+            },
+        ];
+        state.set_query("x".into(), matches, top_anchor());
+        for y in [0, 1, 2, 3, 4, 5, usize::MAX] {
+            let reference: Vec<_> = state
+                .matches()
+                .iter()
+                .copied()
+                .filter(|m| m.start.y == y)
+                .collect();
+            assert_eq!(state.matches_on_row(y), reference);
+            for x in 0..9 {
+                let point = SelectionPoint::new(x, y);
+                assert_eq!(
+                    state.contains(point),
+                    state.matches().iter().any(|m| m.contains(point))
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "release-mode search performance comparison"]
+    fn search_performance_probe() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let mut terminal = crate::Terminal::new(noa_core::GridSize::new(200, 1));
+        noa_vt::Stream::new().feed("日本語 abc e\u{301} ".repeat(12).as_bytes(), &mut terminal);
+        let row = &terminal.primary.grid[0];
+        let iterations = 20_000;
+        for query in ["a", "日本", " ", "absent"] {
+            let mut matches = Vec::new();
+            let chars = query.chars().count();
+            let start = Instant::now();
+            for y in 0..iterations {
+                matches.clear();
+                append_scalar_matches(query, chars, y, black_box(row), &mut matches);
+                black_box(&matches);
+            }
+            let reference = start.elapsed();
+            let mut search = RowSearch::new(query).unwrap();
+            let start = Instant::now();
+            for y in 0..iterations {
+                matches.clear();
+                search.append_matches(y, black_box(row), &mut matches);
+                black_box(&matches);
+            }
+            eprintln!(
+                "search query={query:?} rows={iterations}: scalar={reference:?} scratch={:?}",
+                start.elapsed()
+            );
+        }
+
+        let mut state = SearchState::default();
+        state.set_query(
+            "x".into(),
+            matches_at(&(0..100_000).collect::<Vec<_>>()),
+            top_anchor(),
+        );
+        let start = Instant::now();
+        for y in 49_980..50_020 {
+            for _ in 0..100 {
+                let row = black_box(y);
+                black_box(
+                    black_box(state.matches())
+                        .iter()
+                        .filter(|m| m.start.y == row)
+                        .count(),
+                );
+            }
+        }
+        let reference = start.elapsed();
+        let start = Instant::now();
+        for y in 49_980..50_020 {
+            for _ in 0..100 {
+                black_box(black_box(&state).matches_on_row(black_box(y)));
+            }
+        }
+        eprintln!(
+            "highlight 100k matches, 40 rows x 100: scan={reference:?} indexed={:?}",
+            start.elapsed()
+        );
+    }
 
     fn matches_at(ys: &[usize]) -> Vec<SearchMatch> {
         ys.iter()

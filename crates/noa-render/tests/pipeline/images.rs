@@ -35,8 +35,8 @@ fn image_layer_draws_image_and_text_without_validation_error() {
         0,
         0,
     );
-    snap.rows[0].cells[0].ch = 'A';
-    snap.rows[0].cells[0].fg = Color::Palette(2);
+    std::sync::Arc::make_mut(&mut snap.rows)[0].cells[0].ch = 'A';
+    std::sync::Arc::make_mut(&mut snap.rows)[0].cells[0].fg = Color::Palette(2);
 
     renderer.rebuild_cells(&snap, &mut font, &Theme::new());
     renderer.sync_atlas(&device, &queue, &mut font);

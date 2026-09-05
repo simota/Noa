@@ -67,7 +67,8 @@ fn feed_bench(mode: &str, path: &str, cols: u16, rows: u16, repeats: usize) {
                 );
                 snapshot_time += t.elapsed();
                 snapshots += 1;
-                rows_buf = snap.rows;
+                rows_buf = std::sync::Arc::try_unwrap(snap.rows)
+                    .expect("benchmark snapshot uniquely owns its rows");
             }
         }
     }

@@ -410,8 +410,7 @@ mod native {
                         let _: () = msg_send![&*self.find_button, setTag: 1_isize];
                     }
                     AppCommand::CloseTab | AppCommand::CloseWindow => self.close(),
-                    AppCommand::Quit | AppCommand::About => return false,
-                    _ => {}
+                    _ => return false,
                 }
                 true
             }

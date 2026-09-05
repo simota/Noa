@@ -71,6 +71,18 @@ fn main() {
             );
             let range: NSRange = msg_send![field, selectedRange];
             assert_eq!(range, NSRange::new(0, query.encode_utf16().count()));
+            for command in [
+                AppCommand::Preferences,
+                AppCommand::NewWindow,
+                AppCommand::NextNotification,
+                AppCommand::ToggleQuickTerminal,
+                AppCommand::ToggleScratchTerminal,
+            ] {
+                assert!(
+                    !panel.handle_command(command),
+                    "modeless panels must let {command:?} reach the app"
+                );
+            }
         }
     }
     impl ApplicationHandler<UserEvent> for Smoke {

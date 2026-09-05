@@ -5,6 +5,41 @@
 - owner: simota
 - build-path decision: **apex** (`/nexus apex` — live AC: T-1 signature capture and AC-11/12/13 GUI visual checks remain manual)
 
+## 2026-09-05 extension — Codex commands and agy questions
+
+The user supplied screenshots of both dialogs and requested support. This
+extension supersedes the v1 exclusions below **for Codex command execution**
+and adds agy question selection. Other unknown dialogs and Claude Bash
+approvals remain outside the signature table.
+
+| Agent | Recognized dialog | Automatic response |
+|---|---|---|
+| Codex | `Would you like to run the following command?`, `Environment: local`, a displayed `$` command, selected `1. Yes, proceed (y)`, the known rejection/optional remember choices, and `Press enter to confirm or esc to cancel` | Enter (`\r`), accepting this execution only |
+| agy | `Question`, a valid `Question n/total:` heading, selected `1. (Recommended)` with a nonempty answer, sequential remaining choices ending in `Write-in...`, and `↑/↓ Navigate · enter Select · esc Skip` | Enter (`\r`), answering with the first recommended choice |
+
+- Enable with **Toggle Auto Approve** for the current tab, or seed new tabs
+  with `auto-approve = true` (default remains `false`). The setting applies to
+  the tab's local panes and uses the existing foreground-agent check.
+- Codex command content is **not** filtered by an allowlist or denylist. Turning
+  the mode on opts into execution of commands shown in this recognized dialog.
+  The persistent "don't ask again" choice is never selected.
+- agy support answers workflow questions, not just permission requests. If the
+  first choice is not recommended and selected, it waits for the user.
+- These menus use a painted selection marker; the terminal cursor may be hidden
+  or parked elsewhere. Require a complete dialog at the live tail instead of
+  requiring the terminal cursor to occupy the selected row. Trailing output
+  invalidates the match, except for agy's model/cost status line and blank rows.
+- Hash the whole dialog through its footer, including the command, question,
+  and every choice. Cost-only changes do not rearm an accepted question.
+- Keep two stable scans, pre-send revalidation, IME/paste/recent-input guards,
+  audit/flash feedback, and the six-approvals-per-60-seconds breaker. A known
+  prompt that becomes static during the three-second input cooldown is rescanned
+  until the cooldown expires; it then needs two unsuppressed matches.
+- Synthetic layout tests cover both screenshots, incomplete/changed selections,
+  agent separation, UTF-8/ANSI terminal-grid decoding, duplicate suppression,
+  and cooldown recovery. The screenshots establish the Enter key binding;
+  acceptance by a running CLI still requires the live AC-13 check.
+
 ## L0 — Vision
 
 - **Problem:** When running Claude Code / Codex / agy inside a noa tab, every tool execution stops at an approval prompt (y/n, numbered menu, Enter confirmation), and the agent keeps waiting until the user comes back to the terminal and types. With multiple tabs running in parallel, waiting for approvals dominates throughput.

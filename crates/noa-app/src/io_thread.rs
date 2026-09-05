@@ -62,7 +62,11 @@ use sidebar::*;
 use spawn::*;
 
 pub(crate) use auto_approve::{AutoApproveFeedback, AutoApprovePublish};
-pub(crate) use input_queue::{EchoStampedInput, PtyInputQueue, QueueInputResult, input_channel};
+#[cfg(test)]
+pub(crate) use input_queue::input_channel;
+pub(crate) use input_queue::{
+    EchoStampedInput, PtyInputQueue, QueueInputResult, input_channel_with_budget,
+};
 pub(crate) use ipc_tap::IpcOutputTap;
 pub(crate) use overview::{OverviewPublish, publish_overview_snapshot};
 pub(crate) use raw_attach::RawAttachTap;

@@ -274,6 +274,7 @@ unsafe fn write_packed_word(dst: *mut PackedCell, word: u64) {
 }
 
 /// Append-only style pool for one page, with an interning lookup.
+#[derive(Clone)]
 struct StyleTable {
     styles: Vec<Style>,
     lookup: HashMap<Style, StyleId>,
@@ -337,6 +338,7 @@ impl StyleTable {
     }
 }
 
+#[derive(Clone)]
 struct RowMeta {
     /// Start of this row's cells within [`Page::cells`].
     offset: u32,
@@ -347,6 +349,7 @@ struct RowMeta {
 
 /// A byte-bounded arena of packed cells plus its page-local style and grapheme
 /// tables. All rows in one page share `cols`.
+#[derive(Clone)]
 struct Page {
     cols: u16,
     cells: Vec<PackedCell>,
@@ -718,6 +721,7 @@ fn empty_row() -> Row {
 /// the owner's replacement-row acquisition + ~cols×24B cell writes and the
 /// worker's ~cols×24B cell reads + carcass round-trip; only the text bytes
 /// (≤ cols) are copied.
+#[derive(Clone)]
 struct SpanRow {
     /// Text byte range within the tier's span arena.
     bytes: Range<u32>,
@@ -784,6 +788,7 @@ impl SpanRow {
 
 /// One deferred (pushed but not yet packed) history row: a full Cell row
 /// from the scalar seal path, or a byte-span row from the line batch.
+#[derive(Clone)]
 enum DeferredRow {
     Cells(Row),
     Span(SpanRow),
@@ -808,7 +813,7 @@ struct SealBatch {
 /// Paged scrollback: a deque of byte-bounded [`Page`]s with a byte-quantity
 /// retention limit. `limit_bytes == 0` disables scrollback entirely.
 pub(crate) struct PagedScrollback {
-    pages: VecDeque<Page>,
+    pages: VecDeque<Arc<Page>>,
     /// Retained row count across `pages`, `sealing`, *and* `pending`.
     total_rows: usize,
     total_bytes: usize,
@@ -1322,7 +1327,7 @@ impl PagedScrollback {
         for result in results {
             for page in result.pages {
                 self.total_bytes += page.bytes;
-                self.pages.push_back(page);
+                self.pages.push_back(Arc::new(page));
             }
             lens.extend(result.lens);
             // Last batch's carcasses come back pre-blanked by the workers.
@@ -1336,7 +1341,9 @@ impl PagedScrollback {
         // from Cell rows only, in order, so the zip lines up). Span rows
         // have no allocation to recycle — their arena drops with the batch.
         let Ok(batch) = Arc::try_unwrap(batch) else {
-            unreachable!("workers released the sealing batch");
+            // A search snapshot may still own these rows. Its lifetime must
+            // never delay PTY packing merely to recycle their allocations.
+            return self.evict_to_limit();
         };
         let rows: Vec<Row> = batch
             .rows
@@ -1544,9 +1551,9 @@ impl PagedScrollback {
                 None => Page::new(cols),
             };
             self.total_bytes += page.bytes;
-            self.pages.push_back(page);
+            self.pages.push_back(Arc::new(page));
         }
-        self.pages.back_mut().unwrap()
+        Arc::make_mut(self.pages.back_mut().unwrap())
     }
 
     fn evict_to_limit(&mut self) -> usize {
@@ -1559,7 +1566,9 @@ impl PagedScrollback {
             self.total_bytes -= page.bytes;
             self.total_rows -= page.rows.len();
             evicted += page.rows.len();
-            if self.spares.len() < SPARE_PAGE_CAP {
+            if self.spares.len() < SPARE_PAGE_CAP
+                && let Ok(page) = Arc::try_unwrap(page)
+            {
                 self.spares.push(page);
             }
         }
@@ -1568,6 +1577,65 @@ impl PagedScrollback {
 }
 
 // ── Batch packing worker pool ───────────────────────────────────────
+
+/// Immutable search input: packed pages and the sealing batch are shared;
+/// only the bounded pending suffix is copied while holding the terminal lock.
+pub(crate) struct HistorySnapshot {
+    pages: Vec<Arc<Page>>,
+    sealing: Option<Arc<SealBatch>>,
+    pending: Vec<DeferredRow>,
+    span_bytes: Vec<u8>,
+}
+
+impl PagedScrollback {
+    pub(crate) fn search_snapshot(&self) -> HistorySnapshot {
+        HistorySnapshot {
+            pages: self.pages.iter().cloned().collect(),
+            sealing: self.sealing.clone(),
+            pending: self.pending.iter().cloned().collect(),
+            span_bytes: self.pending_span_bytes.clone(),
+        }
+    }
+}
+
+impl HistorySnapshot {
+    pub(crate) fn for_each_row(&self, mut visit: impl FnMut(usize, &Row) -> bool) -> bool {
+        let mut row = empty_row();
+        let mut y = 0;
+        for page in &self.pages {
+            for local in 0..page.rows.len() {
+                page.materialize_row_into(local, &mut row);
+                if !visit(y, &row) {
+                    return false;
+                }
+                y += 1;
+            }
+        }
+        let sealing = self
+            .sealing
+            .as_ref()
+            .map(|batch| (batch.rows.as_slice(), batch.span_bytes.as_slice()));
+        for (rows, arena) in sealing.into_iter().chain(std::iter::once((
+            self.pending.as_slice(),
+            self.span_bytes.as_slice(),
+        ))) {
+            for deferred in rows {
+                let current = match deferred {
+                    DeferredRow::Cells(cells) => cells,
+                    DeferredRow::Span(span) => {
+                        span.materialize_into(arena, &mut row);
+                        &row
+                    }
+                };
+                if !visit(y, current) {
+                    return false;
+                }
+                y += 1;
+            }
+        }
+        true
+    }
+}
 
 /// One chunk's output: pages in row order, each packed row's trimmed length
 /// (the rows themselves go back to the owner through the shared `Arc`), and

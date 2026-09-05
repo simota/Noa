@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Kitty temporary-file transfers require both an approved temporary directory
+  and the protocol filename marker. Shared-memory transfers validate the whole
+  requested range and copy through the kernel; `S` is a byte count independent
+  of `O`. Failed placements still enforce the image storage quota.
+- PNG decoding expands packed grayscale, palette colors and transparency, and
+  checks decoded size before allocating pixel buffers. GPU uploads respect the
+  device dimension limit; deleting and recreating an image cannot reuse stale
+  texture contents.
+- PTY exit waits for the reader's final output, with a two-second drain deadline
+  for descendants retaining the slave. User input and terminal replies share a
+  nonblocking byte budget; shutdown cancels writes waiting for PTY capacity.
+- Search finds text across soft wraps and highlights every matching row. CSI
+  requests exceeding the parameter limit are ignored without changing accepted
+  parameter values. Panes sharing a redraw deadline emit one redraw notification.
+
+### Changed
+
+- Search runs on immutable snapshots in a worker with 35 ms debounce and
+  cancellation of superseded queries, moving history scans outside the UI
+  thread and terminal lock.
+- Image storage uses ID/number/age indexes and caps image/frame metadata counts.
+  Static image placements reuse GPU uniform buffers and bind groups.
+
 ## [0.2.9] - 2026-09-05
 
 ### Fixed

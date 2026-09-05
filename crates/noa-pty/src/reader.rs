@@ -3,12 +3,83 @@
 
 use std::io::Read;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use crossbeam_channel::Sender;
 use portable_pty::Child;
 
 use crate::data::{FlowGate, ReadBufferPool};
 use crate::{PtyData, PtyEvent};
+
+/// A descendant may keep the slave open after the direct child exits.
+const EXIT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+pub(crate) struct ReaderHandle {
+    thread: Option<std::thread::JoinHandle<()>>,
+    done: crossbeam_channel::Receiver<()>,
+    stop: Arc<AtomicBool>,
+    #[cfg(unix)]
+    wake: std::os::unix::net::UnixStream,
+}
+
+impl ReaderHandle {
+    fn finish(&mut self, timeout: Duration) {
+        if matches!(
+            self.done.recv_timeout(timeout),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout)
+        ) {
+            self.stop.store(true, Ordering::Release);
+            #[cfg(unix)]
+            {
+                use std::io::Write;
+                let _ = self.wake.write_all(&[1]);
+            }
+        } else if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+
+    #[cfg(test)]
+    fn join(self) -> std::thread::Result<()> {
+        self.thread.unwrap().join()
+    }
+}
+
+#[cfg(unix)]
+fn wait_readable_or_cancel(fd: std::os::fd::RawFd, cancel: std::os::fd::RawFd) -> bool {
+    wait_ready_or_cancel(fd, libc::POLLIN, cancel)
+}
+
+#[cfg(unix)]
+pub(crate) fn wait_ready_or_cancel(
+    fd: std::os::fd::RawFd,
+    events: libc::c_short,
+    cancel: std::os::fd::RawFd,
+) -> bool {
+    let mut fds = [
+        libc::pollfd {
+            fd,
+            events,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: cancel,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    loop {
+        // SAFETY: fds contains two live descriptors, borrowed for this call.
+        let result = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+        if result >= 0 {
+            return fds[1].revents == 0;
+        }
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return false;
+        }
+    }
+}
 
 /// Size of each read buffer chunk (bytes).
 const READ_CHUNK: usize = 64 * 1024;
@@ -95,14 +166,6 @@ fn poll_readable(fd: std::os::fd::RawFd, timeout_ms: libc::c_int) -> bool {
     poll_fd_events(fd, libc::POLLIN, timeout_ms)
 }
 
-/// Block until the pty master is writable again (nonblocking writer path).
-/// Returns on POLLOUT/POLLHUP/POLLERR — the follow-up `write` surfaces the
-/// actual error, so a `false` here (EINTR-style poll failure) just retries.
-#[cfg(unix)]
-pub(crate) fn wait_writable(fd: std::os::fd::RawFd) {
-    while !poll_fd_events(fd, libc::POLLOUT, 100) {}
-}
-
 /// Spawn a thread that reads from `reader` until EOF/error, forwarding data
 /// chunks as [`PtyEvent::Data`]. On read error it emits [`PtyEvent::Error`].
 /// EOF (`read == 0`) simply ends the loop; child exit is reported by the
@@ -119,8 +182,13 @@ pub(crate) fn spawn_reader(
     #[cfg_attr(not(unix), allow(unused_variables))] poll_fd: Option<std::os::fd::OwnedFd>,
     #[cfg_attr(not(unix), allow(unused_variables))] nonblocking: bool,
     tx: Sender<PtyEvent>,
-) -> std::io::Result<std::thread::JoinHandle<()>> {
-    std::thread::Builder::new()
+) -> std::io::Result<ReaderHandle> {
+    let (done_tx, done) = crossbeam_channel::bounded(1);
+    let stop = Arc::new(AtomicBool::new(false));
+    let reader_stop = stop.clone();
+    #[cfg(unix)]
+    let (cancel, wake) = std::os::unix::net::UnixStream::pair()?;
+    let thread = std::thread::Builder::new()
         .name("noa-pty-reader".into())
         .spawn(move || {
             // Latency-elevated QoS (macOS): this thread's wake latency *is*
@@ -148,15 +216,43 @@ pub(crate) fn spawn_reader(
             // Chunk-size/congestion debug tap; checked once, not per chunk.
             let trace = std::env::var_os("NOA_PTY_READER_TRACE").is_some();
             #[cfg(unix)]
+            let cancel_fd = std::os::fd::AsRawFd::as_raw_fd(&cancel);
+            #[cfg(unix)]
             match poll_fd {
-                Some(fd) if nonblocking => {
-                    drain_nonblocking(&mut reader, fd, &tx, &pool, &gate, trace)
-                }
-                other => drain_blocking(&mut reader, other, &tx, &pool, &gate, trace),
+                Some(fd) if nonblocking => drain_nonblocking(
+                    &mut reader,
+                    fd,
+                    &tx,
+                    &pool,
+                    &gate,
+                    trace,
+                    &reader_stop,
+                    cancel_fd,
+                ),
+                other => drain_blocking(
+                    &mut reader,
+                    other,
+                    &tx,
+                    &pool,
+                    &gate,
+                    trace,
+                    &reader_stop,
+                    cancel_fd,
+                ),
             }
             #[cfg(not(unix))]
-            drain_blocking(&mut reader, &tx, &pool, &gate, trace);
-        })
+            drain_blocking(&mut reader, &tx, &pool, &gate, trace, &reader_stop);
+            // Sent only after the last Data/Error send, establishing ordering
+            // with the waiter's final Exit even though it is another producer.
+            let _ = done_tx.send(());
+        })?;
+    Ok(ReaderHandle {
+        thread: Some(thread),
+        done,
+        stop,
+        #[cfg(unix)]
+        wake,
+    })
 }
 
 /// Nonblocking drain loop (macOS/unix with `O_NONBLOCK` on the master): read
@@ -172,6 +268,8 @@ fn drain_nonblocking(
     pool: &Arc<ReadBufferPool>,
     gate: &Arc<FlowGate>,
     trace: bool,
+    stop: &AtomicBool,
+    cancel: std::os::fd::RawFd,
 ) {
     use std::os::fd::AsRawFd as _;
     let raw = fd.as_raw_fd();
@@ -181,7 +279,7 @@ fn drain_nonblocking(
     // handoff spins briefly instead of paying a full poll-park + wake —
     // two context switches per ~1KiB kernel quantum otherwise.
     let mut was_streaming = false;
-    loop {
+    while !stop.load(Ordering::Acquire) {
         let mut buf = pool.take();
         let mut n = 0usize;
         let mut eof = false;
@@ -213,7 +311,10 @@ fn drain_nonblocking(
                         }
                         was_streaming = false;
                         // Idle: park until the next byte (or hangup) arrives.
-                        poll_readable(raw, -1);
+                        if !wait_readable_or_cancel(raw, cancel) {
+                            pool.recycle(buf);
+                            return;
+                        }
                         continue;
                     }
                     let congested =
@@ -275,8 +376,17 @@ fn drain_blocking(
     pool: &Arc<ReadBufferPool>,
     gate: &Arc<FlowGate>,
     trace: bool,
+    stop: &AtomicBool,
+    #[cfg(unix)] cancel: std::os::fd::RawFd,
 ) {
-    loop {
+    while !stop.load(Ordering::Acquire) {
+        #[cfg(unix)]
+        if let Some(fd) = &poll_fd {
+            use std::os::fd::AsRawFd;
+            if !wait_readable_or_cancel(fd.as_raw_fd(), cancel) {
+                return;
+            }
+        }
         let mut buf = pool.take();
         let mut n = match reader.read(&mut buf) {
             Ok(0) => {
@@ -351,6 +461,7 @@ fn drain_blocking(
 pub(crate) fn spawn_waiter(
     mut child: Box<dyn Child + Send + Sync>,
     tx: Sender<PtyEvent>,
+    mut reader: ReaderHandle,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("noa-pty-waiter".into())
@@ -359,6 +470,7 @@ pub(crate) fn spawn_waiter(
                 Ok(status) => status.exit_code() as i32,
                 Err(_) => -1,
             };
+            reader.finish(EXIT_DRAIN_TIMEOUT);
             let _ = tx.send(PtyEvent::Exit(code));
         })
 }
@@ -366,6 +478,69 @@ pub(crate) fn spawn_waiter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug)]
+    struct ExitedChild;
+    impl portable_pty::ChildKiller for ExitedChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(Self)
+        }
+    }
+    impl Child for ExitedChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(Some(portable_pty::ExitStatus::with_exit_code(0)))
+        }
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            Ok(portable_pty::ExitStatus::with_exit_code(0))
+        }
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+    }
+
+    #[test]
+    fn child_exit_waits_for_delayed_reader_tail() {
+        let (step_tx, step_rx) = crossbeam_channel::bounded(1);
+        let (tx, rx) = crossbeam_channel::bounded(4);
+        let reader = spawn_reader(
+            Box::new(ScriptedReader { steps: step_rx }),
+            None,
+            false,
+            tx.clone(),
+        )
+        .unwrap();
+        let waiter = spawn_waiter(Box::new(ExitedChild), tx, reader).unwrap();
+        assert!(rx.recv_timeout(Duration::from_millis(20)).is_err());
+        step_tx.send(ReadStep::Data(b"tail")).unwrap();
+        assert!(
+            matches!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), PtyEvent::Data(data) if data.as_ref() == b"tail")
+        );
+        step_tx.send(ReadStep::Eof).unwrap();
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            PtyEvent::Exit(0)
+        ));
+        waiter.join().unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn drain_timeout_cancels_idle_reader_without_waiting_for_slave_close() {
+        let (stream, _held_slave) = std::os::unix::net::UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let fd = stream.try_clone().unwrap().into();
+        let (tx, _rx) = crossbeam_channel::bounded(4);
+        let mut reader = spawn_reader(Box::new(stream), Some(fd), true, tx).unwrap();
+        reader.finish(Duration::ZERO);
+        reader
+            .done
+            .recv_timeout(Duration::from_secs(1))
+            .expect("reader should be cancelled");
+        reader.join().unwrap();
+    }
     use std::io::{Error, ErrorKind, Result};
 
     enum ReadStep {

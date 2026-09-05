@@ -280,6 +280,7 @@ pub struct App {
     next_path_probe_generation: u64,
     /// The open search prompt (Cmd+F), if any — see [`SearchPromptSession`].
     search_prompt: Option<SearchPromptSession>,
+    search_worker: Option<crate::search_worker::SearchWorker>,
     /// Keyboard copy mode, bound to exactly one focused window/pane.
     copy_mode: Option<CopyModeSession>,
     /// Physical presses consumed by copy mode whose matching Kitty release
@@ -619,16 +620,23 @@ impl StartupTasks {
                 }))
                 .map_err(|e| format!("no compatible GPU adapter found ({e})"))?;
             crate::startup_trace::mark("gpu-adapter-ready");
-            let (device, queue) =
-                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            let (device, queue) = pollster::block_on(
+                adapter.request_device(&wgpu::DeviceDescriptor {
                     label: Some("noa-device"),
                     required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
+                    required_limits: wgpu::Limits {
+                        max_texture_dimension_2d: adapter
+                            .limits()
+                            .max_texture_dimension_2d
+                            .min(noa_grid::kitty::MAX_IMAGE_DIM),
+                        ..wgpu::Limits::default()
+                    },
                     experimental_features: wgpu::ExperimentalFeatures::default(),
                     memory_hints: wgpu::MemoryHints::default(),
                     trace: wgpu::Trace::Off,
-                }))
-                .map_err(|e| format!("could not open a GPU device ({e})"))?;
+                }),
+            )
+            .map_err(|e| format!("could not open a GPU device ({e})"))?;
             crate::startup_trace::mark("gpu-device-ready");
             Ok(PrewarmedGpu {
                 instance,
@@ -794,6 +802,7 @@ impl App {
             path_probe_cache: HashMap::new(),
             next_path_probe_generation: 0,
             search_prompt: None,
+            search_worker: None,
             copy_mode: None,
             copy_mode_suppressed_releases: HashSet::new(),
             copy_mode_suppressed_repeats: HashSet::new(),

@@ -10,22 +10,34 @@
 //! Ghostty analog: `terminal/kitty/graphics_storage.zig` +
 //! `graphics_image.zig`.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use noa_vt::{KittyAction, KittyCompression, KittyFormat, KittyGraphicsCommand, KittyMedium};
 
 use crate::osc::decode_base64_limited;
+
+#[cfg(test)]
+#[path = "kitty/regressions.rs"]
+mod regressions;
 
 /// Maximum width or height of a single image, in pixels (Ghostty parity).
 pub const MAX_IMAGE_DIM: u32 = 10_000;
 /// Total decoded-RGBA budget across all stored images (Kitty/Ghostty default).
 /// Configurable per terminal via [`ImageStore::set_byte_limit`].
 pub const TOTAL_BYTES_LIMIT: usize = 320_000_000;
+/// Bound metadata and allocation overhead independently of pixel bytes.
+pub const MAX_STORED_IMAGES: usize = 4096;
+const MAX_STORED_FRAMES: usize = 16384;
 /// Default per-frame gap (ms) applied when a frame declares none (`z=0`),
 /// matching kitty's animation default.
 const DEFAULT_FRAME_GAP_MS: i32 = 40;
+
+fn next_image_epoch() -> u64 {
+    static EPOCH: AtomicU64 = AtomicU64::new(0);
+    EPOCH.fetch_add(1, Ordering::Relaxed)
+}
 
 /// A Kitty graphics error, rendered into a reply as `E<code>:<message>`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -140,7 +152,7 @@ impl KittyImage {
             self.anim.current = 1;
         }
         self.rgba = Arc::clone(&self.frames[self.anim.current - 1].rgba);
-        self.epoch = self.epoch.wrapping_add(1);
+        self.epoch = next_image_epoch();
     }
 }
 
@@ -180,14 +192,16 @@ pub enum TransmitStep {
 
 /// Screen-independent image storage with a global byte quota.
 pub struct ImageStore {
-    images: Vec<KittyImage>,
+    images: HashMap<u32, KittyImage>,
+    order: BTreeSet<(u64, u32)>,
+    numbers: HashMap<u32, BTreeSet<(u64, u32)>>,
+    total_frames: usize,
     total_bytes: usize,
     /// Configurable total-byte budget (`image-storage-limit`); doubles as the
     /// per-image / intermediate-decode ceiling so an inflating `o=z` stream or
     /// oversized frame can't exceed the whole terminal's budget.
     byte_limit: usize,
     next_auto_id: u32,
-    next_epoch: u64,
     next_seq: u64,
     transfer: Option<PendingTransfer>,
     /// Mirrors [`Self::has_running_animation`], refreshed by
@@ -200,11 +214,13 @@ pub struct ImageStore {
 impl Default for ImageStore {
     fn default() -> Self {
         ImageStore {
-            images: Vec::new(),
+            images: HashMap::new(),
+            order: BTreeSet::new(),
+            numbers: HashMap::new(),
+            total_frames: 0,
             total_bytes: 0,
             byte_limit: TOTAL_BYTES_LIMIT,
             next_auto_id: 1,
-            next_epoch: 0,
             next_seq: 0,
             transfer: None,
             animation_flag: Arc::new(AtomicBool::new(false)),
@@ -226,36 +242,42 @@ impl ImageStore {
 
     /// A stored image by id.
     pub fn get(&self, id: u32) -> Option<&KittyImage> {
-        self.images.iter().find(|img| img.id == id)
+        self.images.get(&id)
     }
 
     /// The newest stored image carrying image number `number` (`I=`).
     pub fn get_by_number(&self, number: u32) -> Option<&KittyImage> {
-        self.images
-            .iter()
-            .filter(|img| img.number == number)
-            .max_by_key(|img| img.seq)
+        let (_, id) = self.numbers.get(&number)?.last()?;
+        self.get(*id)
     }
 
     /// All stored image ids carrying image number `number` (`I=`).
     pub fn ids_with_number(&self, number: u32) -> Vec<u32> {
-        self.images
-            .iter()
-            .filter(|img| img.number == number)
-            .map(|img| img.id)
+        self.numbers
+            .get(&number)
+            .into_iter()
+            .flatten()
+            .map(|(_, id)| *id)
             .collect()
     }
 
     /// All stored image ids (used by the quota sweep's "referenced" set).
     pub fn contains(&self, id: u32) -> bool {
-        self.images.iter().any(|img| img.id == id)
+        self.images.contains_key(&id)
     }
 
     /// Drop the image with `id` and its bytes. Returns whether anything changed.
     pub fn remove(&mut self, id: u32) -> bool {
-        if let Some(pos) = self.images.iter().position(|img| img.id == id) {
-            self.total_bytes -= self.images[pos].total_frame_bytes();
-            self.images.remove(pos);
+        if let Some(image) = self.images.remove(&id) {
+            self.total_bytes -= image.total_frame_bytes();
+            self.total_frames -= image.frames.len();
+            self.order.remove(&(image.seq, id));
+            if let Some(entries) = self.numbers.get_mut(&image.number) {
+                entries.remove(&(image.seq, id));
+                if entries.is_empty() {
+                    self.numbers.remove(&image.number);
+                }
+            }
             true
         } else {
             false
@@ -265,6 +287,9 @@ impl ImageStore {
     /// Drop everything, including any in-flight chunked transfer.
     pub fn clear(&mut self) {
         self.images.clear();
+        self.order.clear();
+        self.numbers.clear();
+        self.total_frames = 0;
         self.total_bytes = 0;
         self.transfer = None;
     }
@@ -321,7 +346,7 @@ impl ImageStore {
             return Err(KittyError::TooBig);
         }
         let id = self.assign_auto_id();
-        self.insert(id, 0, width, height, rgba);
+        self.insert(id, 0, width, height, rgba)?;
         Ok(id)
     }
 
@@ -411,76 +436,51 @@ impl ImageStore {
     }
 
     /// Read a POSIX shared-memory payload (`t=s`): the base64 payload is the shm
-    /// object name (kitty convention: a leading-slash name from `shm_open`). The
-    /// object is `mmap`ped read-only, the requested byte range copied out, then
-    /// `shm_unlink`ed — the terminal owns unlinking after a successful read, per
-    /// the kitty spec. Honors `O=`/`S=` offset/size like the file medium.
+    /// object name (kitty convention: a leading-slash name from `shm_open`).
+    /// The kernel copies the requested range so a concurrent truncation cannot
+    /// turn an untrusted transfer into a SIGBUS in the terminal process.
     #[cfg(unix)]
     fn read_shared_memory(&self, cmd: &KittyGraphicsCommand) -> Result<Vec<u8>, KittyError> {
         use std::ffi::CString;
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
         let name = self.decode_base64(cmd)?;
         let cname = CString::new(name).map_err(|_| KittyError::Invalid)?;
 
-        // SAFETY: `cname` is a valid NUL-terminated C string for the duration of
-        // each call; all mapped pointers are checked before use and released on
-        // every exit path.
-        unsafe {
-            let fd = libc::shm_open(cname.as_ptr(), libc::O_RDONLY, 0);
-            if fd < 0 {
+        // SAFETY: cname is NUL terminated; successful shm_open transfers fd ownership.
+        let raw_fd = unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDONLY, 0) };
+        if raw_fd < 0 {
+            return Err(KittyError::NoEnt);
+        }
+        let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+        let result = (|| {
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
                 return Err(KittyError::NoEnt);
             }
-            let mut st: libc::stat = std::mem::zeroed();
-            if libc::fstat(fd, &mut st) != 0 {
-                libc::close(fd);
-                return Err(KittyError::NoEnt);
-            }
-            // `fstat` on a POSIX shm object reports the size on Linux but returns
-            // 0 on macOS, so the byte count is taken from `S=` (the declared
-            // size) or computed from the raw format/dimensions, falling back to
-            // the stat size only when neither is available.
-            let stat_size = st.st_size.max(0) as u64;
-            let offset = cmd.file_offset as u64;
-            // The declared *data* size drives how much to read (the shm object
-            // may be page-rounded larger): `S=` wins, then the raw
-            // format/dimensions, then the stat size as a last resort.
+            let size = u64::try_from(st.st_size).map_err(|_| KittyError::NoData)?;
+            let offset = u64::from(cmd.file_offset);
             let want = if cmd.file_size != 0 {
-                (cmd.file_size as u64).saturating_sub(offset)
-            } else if let Some(e) = expected_raw_len(cmd) {
-                e as u64
+                u64::from(cmd.file_size)
+            } else if let Some(expected) = expected_raw_len(cmd) {
+                expected as u64
             } else {
-                stat_size.saturating_sub(offset)
+                size.saturating_sub(offset)
             };
-            if want as usize > self.byte_limit {
-                libc::close(fd);
-                let _ = libc::shm_unlink(cname.as_ptr());
-                return Err(KittyError::TooBig);
-            }
-            if want == 0 {
-                libc::close(fd);
-                let _ = libc::shm_unlink(cname.as_ptr());
+            let end = offset.checked_add(want).ok_or(KittyError::TooBig)?;
+            if want == 0 || end > size {
                 return Err(KittyError::NoData);
             }
-            let map_len = (offset + want) as usize;
-            let ptr = libc::mmap(
-                std::ptr::null_mut(),
-                map_len,
-                libc::PROT_READ,
-                libc::MAP_SHARED,
-                fd,
-                0,
-            );
-            libc::close(fd);
-            if ptr == libc::MAP_FAILED {
-                let _ = libc::shm_unlink(cname.as_ptr());
-                return Err(KittyError::NoEnt);
+            let len = usize::try_from(want).map_err(|_| KittyError::TooBig)?;
+            if len > self.byte_limit {
+                return Err(KittyError::TooBig);
             }
-            let src =
-                std::slice::from_raw_parts((ptr as *const u8).add(offset as usize), want as usize);
-            let out = src.to_vec();
-            libc::munmap(ptr, map_len);
-            let _ = libc::shm_unlink(cname.as_ptr());
-            Ok(out)
+            read_shared_range(fd, offset, len)
+        })();
+        // The protocol transfers ownership of the name once it has been opened.
+        unsafe {
+            libc::shm_unlink(cname.as_ptr());
         }
+        result
     }
 
     #[cfg(not(unix))]
@@ -499,12 +499,22 @@ impl ImageStore {
             return Err(KittyError::Invalid);
         }
         let canonical = std::fs::canonicalize(path).map_err(|_| KittyError::NoEnt)?;
-        let meta = std::fs::metadata(&canonical).map_err(|_| KittyError::NoEnt)?;
-        if !meta.is_file() {
-            return Err(KittyError::NoEnt);
-        }
         if cmd.medium == KittyMedium::TempFile && !is_temp_path(&canonical) {
             return Err(KittyError::Invalid);
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // The path was resolved above. Do not follow a replacement symlink
+            // or block opening a FIFO before checking the opened object's type.
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let file = options.open(&canonical).map_err(|_| KittyError::NoEnt)?;
+        let meta = file.metadata().map_err(|_| KittyError::NoEnt)?;
+        if !meta.is_file() {
+            return Err(KittyError::NoEnt);
         }
 
         let file_len = meta.len();
@@ -519,7 +529,7 @@ impl ImageStore {
             return Err(KittyError::TooBig);
         }
 
-        let bytes = read_file_range(&canonical, offset, want as usize)?;
+        let bytes = read_file_range(file, offset, want as usize)?;
         if cmd.medium == KittyMedium::TempFile {
             let _ = std::fs::remove_file(&canonical);
         }
@@ -553,7 +563,7 @@ impl ImageStore {
         if cmd.action == KittyAction::TransmitFrame {
             return self.store_frame(cmd, raw);
         }
-        let (width, height, rgba) = decode_to_rgba(cmd, raw)?;
+        let (width, height, rgba) = decode_to_rgba(cmd, raw, self.byte_limit)?;
         if width == 0 || height == 0 || width > MAX_IMAGE_DIM || height > MAX_IMAGE_DIM {
             return Err(KittyError::TooBig);
         }
@@ -567,7 +577,7 @@ impl ImageStore {
         }
 
         let id = self.assign_id(cmd);
-        self.insert(id, cmd.image_number, width, height, rgba);
+        self.insert(id, cmd.image_number, width, height, rgba)?;
         Ok(id)
     }
 
@@ -590,47 +600,47 @@ impl ImageStore {
         }
     }
 
-    fn insert(&mut self, id: u32, number: u32, width: u32, height: u32, rgba: Vec<u8>) {
+    fn insert(
+        &mut self,
+        id: u32,
+        number: u32,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    ) -> Result<(), KittyError> {
+        if !self.contains(id)
+            && (self.images.len() >= MAX_STORED_IMAGES || self.total_frames >= MAX_STORED_FRAMES)
+        {
+            return Err(KittyError::TooBig);
+        }
         let seq = self.next_seq;
         self.next_seq += 1;
         let bytes = rgba.len();
         let rgba: Arc<[u8]> = Arc::from(rgba);
 
-        if let Some(existing) = self.images.iter_mut().find(|img| img.id == id) {
-            // A re-transmit replaces the whole image, dropping any prior frames
-            // and resetting animation state.
-            self.total_bytes -= existing.total_frame_bytes();
-            existing.epoch = existing.epoch.wrapping_add(1);
-            existing.number = number;
-            existing.width = width;
-            existing.height = height;
-            existing.rgba = Arc::clone(&rgba);
-            existing.frames = vec![KittyFrame {
-                rgba,
-                gap_ms: DEFAULT_FRAME_GAP_MS,
-            }];
-            existing.anim = Anim::default();
-            existing.seq = seq;
-            self.total_bytes += bytes;
-        } else {
-            let epoch = self.next_epoch;
-            self.next_epoch += 1;
-            self.images.push(KittyImage {
+        self.remove(id);
+        self.order.insert((seq, id));
+        self.numbers.entry(number).or_default().insert((seq, id));
+        self.images.insert(
+            id,
+            KittyImage {
                 id,
                 number,
                 width,
                 height,
                 rgba: Arc::clone(&rgba),
-                epoch,
+                epoch: next_image_epoch(),
                 seq,
                 frames: vec![KittyFrame {
                     rgba,
                     gap_ms: DEFAULT_FRAME_GAP_MS,
                 }],
                 anim: Anim::default(),
-            });
-            self.total_bytes += bytes;
-        }
+            },
+        );
+        self.total_bytes += bytes;
+        self.total_frames += 1;
+        Ok(())
     }
 
     /// Evict images until the total byte budget is satisfied. Images whose id is
@@ -640,17 +650,11 @@ impl ImageStore {
         let mut evicted_any = false;
         while self.total_bytes > self.byte_limit {
             let victim = self
-                .images
+                .order
                 .iter()
-                .filter(|img| !referenced.contains(&img.id))
-                .min_by_key(|img| img.seq)
-                .map(|img| img.id)
-                .or_else(|| {
-                    self.images
-                        .iter()
-                        .min_by_key(|img| img.seq)
-                        .map(|img| img.id)
-                });
+                .find(|(_, id)| !referenced.contains(id))
+                .or_else(|| self.order.first())
+                .map(|(_, id)| *id);
             match victim {
                 Some(id) => {
                     self.remove(id);
@@ -688,7 +692,10 @@ impl ImageStore {
     /// background color) at pixel offset `x=`/`y=` with mode `X=`, then appended
     /// as a new frame or written into frame `r=`. Returns the target image id.
     fn store_frame(&mut self, cmd: &KittyGraphicsCommand, raw: Vec<u8>) -> Result<u32, KittyError> {
-        let (data_w, data_h, data) = decode_to_rgba(cmd, raw)?;
+        if cmd.rows == 0 && self.total_frames >= MAX_STORED_FRAMES {
+            return Err(KittyError::TooBig);
+        }
+        let (data_w, data_h, data) = decode_to_rgba(cmd, raw, self.byte_limit)?;
         let Some(target_id) = self.resolve_anim_target(cmd) else {
             return Err(KittyError::NoEnt);
         };
@@ -750,8 +757,7 @@ impl ImageStore {
 
         let img = self
             .images
-            .iter_mut()
-            .find(|i| i.id == target_id)
+            .get_mut(&target_id)
             .expect("target resolved above");
         if edit_frame != 0 {
             let idx = edit_frame as usize;
@@ -766,6 +772,7 @@ impl ImageStore {
                 return Err(KittyError::TooBig);
             }
             img.frames.push(new_frame);
+            self.total_frames += 1;
             self.total_bytes += new_bytes;
             // Adding a second frame auto-starts looping playback, matching
             // kitty's default of animating as soon as frames exist.
@@ -777,8 +784,7 @@ impl ImageStore {
         // Refresh so a re-uploaded texture reflects any edit to the shown frame.
         let img = self
             .images
-            .iter_mut()
-            .find(|i| i.id == target_id)
+            .get_mut(&target_id)
             .expect("target resolved above");
         img.refresh_current();
         Ok(target_id)
@@ -792,8 +798,7 @@ impl ImageStore {
         };
         let img = self
             .images
-            .iter_mut()
-            .find(|i| i.id == target_id)
+            .get_mut(&target_id)
             .expect("target resolved above");
 
         // r= with z= edits that frame's gap without changing playback.
@@ -846,8 +851,7 @@ impl ImageStore {
         }
         let img = self
             .images
-            .iter_mut()
-            .find(|i| i.id == target_id)
+            .get_mut(&target_id)
             .expect("target resolved above");
         if dst_idx > img.frames.len() || src_idx > img.frames.len() {
             return Err(KittyError::Invalid);
@@ -881,13 +885,14 @@ impl ImageStore {
     /// Delete an image's animation frames (`a=d,d=f`), keeping the root frame and
     /// resetting playback. Returns whether anything changed.
     pub fn delete_frames(&mut self, id: u32) -> bool {
-        let Some(img) = self.images.iter_mut().find(|i| i.id == id) else {
+        let Some(img) = self.images.get_mut(&id) else {
             return false;
         };
         if img.frames.len() <= 1 {
             return false;
         }
         let dropped: usize = img.frames[1..].iter().map(|f| f.rgba.len()).sum();
+        self.total_frames -= img.frames.len() - 1;
         img.frames.truncate(1);
         img.anim = Anim::default();
         img.refresh_current();
@@ -901,7 +906,7 @@ impl ImageStore {
     pub fn advance_animations(&mut self, now_ms: u64) -> AnimationTick {
         let mut changed = false;
         let mut next_wake: Option<u64> = None;
-        for img in &mut self.images {
+        for img in self.images.values_mut() {
             if !img.anim.running || img.frames.len() < 2 {
                 continue;
             }
@@ -945,9 +950,11 @@ impl ImageStore {
 
     /// Whether any stored image is currently animating (>= 2 frames, running).
     pub fn has_running_animation(&self) -> bool {
-        self.images
-            .iter()
-            .any(|img| img.anim.running && img.frames.len() >= 2)
+        self.total_frames > self.images.len()
+            && self
+                .images
+                .values()
+                .any(|img| img.anim.running && img.frames.len() >= 2)
     }
 
     /// A cheap clone of the flag mirroring [`Self::has_running_animation`].
@@ -1073,23 +1080,24 @@ fn blend_pixel(canvas: &mut [u8], d: usize, src: &[u8], overwrite: bool) {
 /// Whether `path` sits in a location we accept for `t=t` (temp-file) media and
 /// may delete after reading. Mirrors Kitty's requirement.
 fn is_temp_path(path: &std::path::Path) -> bool {
-    let temp = std::fs::canonicalize(std::env::temp_dir());
-    if let Ok(temp) = &temp
-        && path.starts_with(temp)
-    {
-        return true;
-    }
-    for prefix in ["/tmp", "/dev/shm", "/var/tmp"] {
-        if path.starts_with(prefix) {
-            return true;
-        }
-    }
     path.to_string_lossy().contains("tty-graphics-protocol")
+        && [
+            std::env::temp_dir(),
+            "/tmp".into(),
+            "/dev/shm".into(),
+            "/var/tmp".into(),
+        ]
+        .iter()
+        .filter_map(|dir| std::fs::canonicalize(dir).ok())
+        .any(|dir| path.starts_with(dir))
 }
 
-fn read_file_range(path: &std::path::Path, offset: u64, len: usize) -> Result<Vec<u8>, KittyError> {
+fn read_file_range(
+    mut file: std::fs::File,
+    offset: u64,
+    len: usize,
+) -> Result<Vec<u8>, KittyError> {
     use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path).map_err(|_| KittyError::NoEnt)?;
     if offset > 0 {
         file.seek(SeekFrom::Start(offset))
             .map_err(|_| KittyError::Invalid)?;
@@ -1097,6 +1105,69 @@ fn read_file_range(path: &std::path::Path, offset: u64, len: usize) -> Result<Ve
     let mut buf = vec![0u8; len];
     file.read_exact(&mut buf).map_err(|_| KittyError::NoData)?;
     Ok(buf)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn read_shared_range(
+    fd: std::os::fd::OwnedFd,
+    offset: u64,
+    len: usize,
+) -> Result<Vec<u8>, KittyError> {
+    // Reading through the kernel returns a short read if the object shrinks.
+    read_file_range(std::fs::File::from(fd), offset, len)
+}
+
+#[cfg(target_os = "macos")]
+fn read_shared_range(
+    fd: std::os::fd::OwnedFd,
+    offset: u64,
+    len: usize,
+) -> Result<Vec<u8>, KittyError> {
+    use std::os::fd::AsRawFd;
+    unsafe extern "C" {
+        static mach_task_self_: libc::mach_port_t;
+        fn mach_vm_read_overwrite(
+            task: libc::mach_port_t,
+            address: u64,
+            size: u64,
+            data: u64,
+            out_size: *mut u64,
+        ) -> libc::kern_return_t;
+    }
+    let map_len = usize::try_from(offset)
+        .ok()
+        .and_then(|n| n.checked_add(len))
+        .ok_or(KittyError::TooBig)?;
+    // macOS POSIX shm fds do not support read/pread. Copy through the kernel's
+    // VM API instead of dereferencing the mapping: inaccessible pages then
+    // produce an error, never a userspace SIGBUS.
+    unsafe {
+        let ptr = libc::mmap(
+            std::ptr::null_mut(),
+            map_len,
+            libc::PROT_READ,
+            libc::MAP_SHARED,
+            fd.as_raw_fd(),
+            0,
+        );
+        if ptr == libc::MAP_FAILED {
+            return Err(KittyError::NoData);
+        }
+        let mut out = vec![0; len];
+        let mut copied = 0;
+        let status = mach_vm_read_overwrite(
+            mach_task_self_,
+            ptr as u64 + offset,
+            len as u64,
+            out.as_mut_ptr() as u64,
+            &mut copied,
+        );
+        libc::munmap(ptr, map_len);
+        if status != libc::KERN_SUCCESS || copied != len as u64 {
+            return Err(KittyError::NoData);
+        }
+        Ok(out)
+    }
 }
 
 fn inflate_bounded(input: &[u8], limit: usize) -> Result<Vec<u8>, KittyError> {
@@ -1123,7 +1194,12 @@ fn inflate_bounded(input: &[u8], limit: usize) -> Result<Vec<u8>, KittyError> {
 fn decode_to_rgba(
     cmd: &KittyGraphicsCommand,
     raw: Vec<u8>,
+    byte_limit: usize,
 ) -> Result<(u32, u32, Vec<u8>), KittyError> {
+    if cmd.format != KittyFormat::Png {
+        let (w, h) = raw_dimensions(cmd)?;
+        decoded_image_bytes(w, h, byte_limit)?;
+    }
     match cmd.format {
         KittyFormat::Rgba => {
             let (w, h) = raw_dimensions(cmd)?;
@@ -1144,7 +1220,7 @@ fn decode_to_rgba(
             }
             Ok((w, h, rgba))
         }
-        KittyFormat::Png => decode_png(&raw),
+        KittyFormat::Png => decode_png(&raw, byte_limit),
     }
 }
 
@@ -1162,15 +1238,32 @@ fn raw_dimensions(cmd: &KittyGraphicsCommand) -> Result<(u32, u32), KittyError> 
     Ok((cmd.width, cmd.height))
 }
 
-fn decode_png(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), KittyError> {
-    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-    let mut reader = decoder.read_info().map_err(|_| KittyError::BadPng)?;
-    let info = reader.info();
-    let (width, height) = (info.width, info.height);
+fn decoded_image_bytes(width: u32, height: u32, limit: usize) -> Result<usize, KittyError> {
     if width == 0 || height == 0 || width > MAX_IMAGE_DIM || height > MAX_IMAGE_DIM {
         return Err(KittyError::TooBig);
     }
+    (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4))
+        .filter(|&n| n <= limit)
+        .ok_or(KittyError::TooBig)
+}
+
+fn decode_png(bytes: &[u8], byte_limit: usize) -> Result<(u32, u32, Vec<u8>), KittyError> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    // Tiny images still need the decoder's fixed zlib workspace.
+    decoder.set_limits(png::Limits {
+        bytes: byte_limit.max(64 * 1024),
+    });
+    let mut reader = decoder.read_info().map_err(|_| KittyError::BadPng)?;
+    let info = reader.info();
+    let (width, height) = (info.width, info.height);
+    decoded_image_bytes(width, height, byte_limit)?;
     let buf_size = reader.output_buffer_size().ok_or(KittyError::TooBig)?;
+    if buf_size > byte_limit {
+        return Err(KittyError::TooBig);
+    }
     let mut buf = vec![0u8; buf_size];
     let frame = reader
         .next_frame(&mut buf)
@@ -1181,9 +1274,7 @@ fn decode_png(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), KittyError> {
     Ok((width, height, rgba))
 }
 
-/// Normalize a decoded PNG frame to straight RGBA8. `png`'s transformations are
-/// left off, so we expand grayscale/RGB/palette-expanded 8-bit output here; 16-bit
-/// samples are truncated to the high byte.
+/// Normalize the expanded PNG frame to straight RGBA8.
 fn normalize_to_rgba(
     buf: &[u8],
     width: u32,
@@ -1192,8 +1283,7 @@ fn normalize_to_rgba(
     depth: png::BitDepth,
 ) -> Result<Vec<u8>, KittyError> {
     let pixels = (width as usize) * (height as usize);
-    // Only 8- and 16-bit outputs occur here; sub-byte depths are expanded by
-    // `png` to 8-bit for grayscale/indexed already when using `next_frame`.
+    // EXPAND resolves packed samples, palette colors and tRNS before this step.
     let sample_bytes = match depth {
         png::BitDepth::Sixteen => 2,
         _ => 1,
@@ -1236,8 +1326,7 @@ fn normalize_to_rgba(
             }
         }
         png::ColorType::Indexed => {
-            // `next_frame` does not expand the palette; reject rather than
-            // mis-render (Kitty clients emit RGB/RGBA PNGs in practice).
+            // EXPAND must have resolved the palette before normalization.
             return Err(KittyError::BadPng);
         }
     }
@@ -1442,7 +1531,7 @@ mod tests {
         store.transmit(&cmd);
         let e0 = store.get(4).unwrap().epoch;
         store.transmit(&cmd);
-        assert_eq!(store.get(4).unwrap().epoch, e0 + 1);
+        assert!(store.get(4).unwrap().epoch > e0);
         assert_eq!(store.len(), 1);
     }
 
@@ -1477,7 +1566,7 @@ mod tests {
             // Manually evict one unreferenced oldest.
             let victim = store
                 .images
-                .iter()
+                .values()
                 .filter(|img| !referenced.contains(&img.id))
                 .min_by_key(|img| img.seq)
                 .map(|img| img.id)

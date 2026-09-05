@@ -809,7 +809,8 @@ impl App {
         let kitty_animation_flag = terminal.kitty_animation_flag();
         let terminal = Arc::new(Mutex::new(terminal));
         let (resize_tx, resize_rx) = crossbeam_channel::unbounded();
-        let (pty_input_tx, pty_input_rx) = crate::io_thread::input_channel();
+        let (pty_input_tx, pty_input_rx) =
+            crate::io_thread::input_channel_with_budget(pty.writer().budget());
         let (auto_approve_feedback_tx, auto_approve_feedback_rx) = crossbeam_channel::unbounded();
         let auto_approve_guards = Arc::new(Mutex::new(
             crate::auto_approve::AutoApproveInputGuards::default(),

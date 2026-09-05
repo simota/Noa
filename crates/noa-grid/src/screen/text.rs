@@ -369,21 +369,74 @@ impl Screen {
     pub fn set_search_query(&mut self, query: impl Into<String>) {
         let query = query.into();
         let matches = self.compute_search_matches(&query);
+        let anchor = self.search_anchor();
+        self.install_search_matches(query, matches, anchor);
+    }
+
+    fn search_anchor(&self) -> SearchAnchor {
         // A fresh query anchors backward at the viewport bottom (activating
         // the bottom-most visible match rather than the oldest scrollback
         // row); an incremental edit anchors forward at the previous active
         // match so extending the query doesn't yank the viewport away.
-        let anchor = match self.search.active_match() {
+        match self.search.active_match() {
             Some(active) => SearchAnchor::Forward(active.start),
             None => SearchAnchor::Backward(SelectionPoint::new(
                 self.cols.saturating_sub(1),
                 self.visible_row_base() + (self.rows as usize).saturating_sub(1),
             )),
-        };
+        }
+    }
+
+    fn install_search_matches(
+        &mut self,
+        query: String,
+        matches: Vec<SearchMatch>,
+        anchor: SearchAnchor,
+    ) {
         self.search.set_query(query, matches, anchor);
         if let Some(active) = self.search.active_match() {
             self.reveal_search_match(active);
         }
+    }
+
+    pub fn search_snapshot(&self) -> crate::search::SearchSnapshot {
+        crate::search::SearchSnapshot {
+            history: self.scrollback.search_snapshot(),
+            live: self.grid.iter().cloned().collect(),
+            history_len: self.scrollback_len(),
+            rows_evicted: self.rows_evicted,
+            coordinate_generation: self.coordinate_generation,
+            cols: self.cols,
+            anchor: self.search_anchor(),
+        }
+    }
+
+    /// Do not attach stale coordinates to rows that changed during the scan.
+    pub fn apply_search_snapshot(
+        &mut self,
+        snapshot: &crate::search::SearchSnapshot,
+        query: String,
+        matches: std::sync::Arc<[SearchMatch]>,
+    ) -> bool {
+        if self.cols != snapshot.cols
+            || self.coordinate_generation != snapshot.coordinate_generation
+            || self.rows_evicted != snapshot.rows_evicted
+            || self.scrollback_len() != snapshot.history_len
+            || self.grid.len() != snapshot.live.len()
+            || self
+                .grid
+                .iter()
+                .zip(&snapshot.live)
+                .any(|(a, b)| a.wrapped != b.wrapped || a.cells != b.cells)
+        {
+            return false;
+        }
+        self.search
+            .set_shared_query(query, matches, snapshot.anchor);
+        if let Some(active) = self.search.active_match() {
+            self.reveal_search_match(active);
+        }
+        true
     }
 
     pub fn clear_search(&mut self) {

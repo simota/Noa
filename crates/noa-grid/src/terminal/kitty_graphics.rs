@@ -87,10 +87,8 @@ impl Terminal {
                     }
                 });
                 let assigned = *result.as_ref().unwrap_or(&ctrl.image_id);
-                if result.is_ok() {
-                    self.kitty_images
-                        .enforce_quota(&self.referenced_image_ids());
-                }
+                self.kitty_images
+                    .enforce_quota(&self.referenced_image_ids());
                 self.kitty_reply(
                     ctrl.image_id,
                     ctrl.image_number,

@@ -372,7 +372,7 @@ pub fn spawn(
                     // Stamped so the echo generation advances at the real
                     // PTY write, not at queue time (see `EchoStampedInput`).
                     let stamped = EchoStampedInput::new(bytes, input_echo_seq.clone());
-                    if let Err(err) = writer.write_owned(stamped) {
+                    if let Err(err) = writer.write_reserved(stamped) {
                         log::warn!("failed to queue bytes to pty: {err}");
                     }
                     did_work = true;
@@ -659,7 +659,7 @@ pub fn spawn(
                 deadline_elapsed = true;
             }
             let mut redraw_claimed = false;
-            if redraw_deadline.is_some_and(|deadline| now >= deadline) {
+            if let Some(deadline) = redraw_deadline.filter(|deadline| now >= *deadline) {
                 // A withheld redraw (floor or synchronized-output cap) came
                 // due — force the repaint so the stale frame can't persist.
                 // Every pane suppressed within the same floor window shares
@@ -668,9 +668,12 @@ pub fn spawn(
                 // of every pane firing its own wake in the same tick.
                 redraw_deadline = None;
                 deadline_elapsed = true;
-                if redraw_floor.lock().claim_deadline(now) {
-                    needs_redraw = true;
-                    redraw_claimed = true;
+                match redraw_floor.lock().claim_deadline(deadline, now) {
+                    RedrawDecision::Now => {
+                        needs_redraw = true;
+                        redraw_claimed = true;
+                    }
+                    RedrawDecision::Suppress { deadline } => redraw_deadline = Some(deadline),
                 }
             }
             if auto_approve_rescan_at.is_some_and(|deadline| now >= deadline) {

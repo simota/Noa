@@ -1,8 +1,9 @@
 //! Main-thread → io-thread pty input queueing: the bounded channel plus its
 //! ordered overflow buffer for bursts (huge pastes) the channel can't absorb.
 
+use noa_pty::{BudgetedWrite, PtyWriteBudget};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 use parking_lot::Mutex;
@@ -15,57 +16,29 @@ pub(crate) const PTY_INPUT_QUEUE_CAPACITY: usize = 1024;
 /// channel and its overflow buffer. A message-count-only limit is insufficient:
 /// raw attach accepts 1 MiB messages, so 1024 channel slots could otherwise pin
 /// roughly 1 GiB before the overflow limit was even consulted.
-pub(super) const PTY_INPUT_PENDING_BYTE_CAP: usize = 8 * 1024 * 1024;
+#[cfg(test)]
+pub(super) const PTY_INPUT_PENDING_BYTE_CAP: usize = noa_pty::WRITE_BYTE_CAP;
 /// Small frames are charged at least this much so container/allocation
 /// overhead is bounded along with payload bytes.
-pub(super) const PTY_INPUT_PENDING_MIN_CHARGE: usize = 1024;
+#[cfg(test)]
+pub(super) const PTY_INPUT_PENDING_MIN_CHARGE: usize = noa_pty::WRITE_MIN_CHARGE;
 
+#[cfg(test)]
 pub(crate) fn input_channel() -> (PtyInputQueue, Receiver<QueuedPtyInput>) {
+    input_channel_with_budget(PtyWriteBudget::default())
+}
+
+pub(crate) fn input_channel_with_budget(
+    budget: PtyWriteBudget,
+) -> (PtyInputQueue, Receiver<QueuedPtyInput>) {
     let (tx, rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_CAPACITY);
-    (PtyInputQueue::new(tx), rx)
+    (PtyInputQueue::new(tx, budget), rx)
 }
 
 /// Input plus a shared byte-budget reservation. The reservation follows the
 /// bytes through the channel, overflow queue, and PTY writer queue and is
 /// released only after the real PTY write completes (or the bytes are dropped).
-pub(crate) struct QueuedPtyInput {
-    bytes: PtyInput,
-    pending_bytes: Arc<AtomicUsize>,
-    charge: usize,
-}
-
-impl QueuedPtyInput {
-    fn reserve(input: PtyInput, pending_bytes: Arc<AtomicUsize>) -> Result<Self, PtyInput> {
-        let charge = input.len().max(PTY_INPUT_PENDING_MIN_CHARGE);
-        if pending_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current
-                    .checked_add(charge)
-                    .filter(|next| *next <= PTY_INPUT_PENDING_BYTE_CAP)
-            })
-            .is_err()
-        {
-            return Err(input);
-        }
-        Ok(Self {
-            bytes: input,
-            pending_bytes,
-            charge,
-        })
-    }
-}
-
-impl AsRef<[u8]> for QueuedPtyInput {
-    fn as_ref(&self) -> &[u8] {
-        self.bytes.as_ref()
-    }
-}
-
-impl Drop for QueuedPtyInput {
-    fn drop(&mut self) {
-        self.pending_bytes.fetch_sub(self.charge, Ordering::AcqRel);
-    }
-}
+pub(crate) type QueuedPtyInput = BudgetedWrite<PtyInput>;
 
 /// A reserved input that advances the pane's echo-repaint generation
 /// (`input_echo_seq`) only when the writer thread drops it — i.e. after the
@@ -75,13 +48,13 @@ impl Drop for QueuedPtyInput {
 /// output — consume the debt, sending the actual echo through the normal
 /// redraw floor.
 pub(crate) struct EchoStampedInput {
-    input: QueuedPtyInput,
+    input: PtyInput,
     echo_seq: Arc<AtomicU64>,
 }
 
 impl EchoStampedInput {
-    pub(crate) fn new(input: QueuedPtyInput, echo_seq: Arc<AtomicU64>) -> Self {
-        Self { input, echo_seq }
+    pub(crate) fn new(input: QueuedPtyInput, echo_seq: Arc<AtomicU64>) -> BudgetedWrite<Self> {
+        input.map(|input| Self { input, echo_seq })
     }
 }
 
@@ -120,7 +93,7 @@ pub(crate) enum QueueInputResult {
 pub(crate) struct PtyInputQueue {
     tx: Sender<QueuedPtyInput>,
     overflow: Arc<Mutex<InputOverflow>>,
-    pending_bytes: Arc<AtomicUsize>,
+    budget: PtyWriteBudget,
 }
 
 #[derive(Default)]
@@ -145,11 +118,11 @@ impl InputOverflow {
 }
 
 impl PtyInputQueue {
-    fn new(tx: Sender<QueuedPtyInput>) -> Self {
+    fn new(tx: Sender<QueuedPtyInput>, budget: PtyWriteBudget) -> Self {
         PtyInputQueue {
             tx,
             overflow: Arc::new(Mutex::new(InputOverflow::default())),
-            pending_bytes: Arc::new(AtomicUsize::new(0)),
+            budget,
         }
     }
 
@@ -163,12 +136,12 @@ impl PtyInputQueue {
     /// The returned wrapper shares this pane's budget with `queue`, so both
     /// paths are capped together.
     pub(crate) fn reserve(&self, input: PtyInput) -> Option<QueuedPtyInput> {
-        QueuedPtyInput::reserve(input, Arc::clone(&self.pending_bytes)).ok()
+        self.budget.reserve(input).ok()
     }
 
     /// Queue `input` behind every byte accepted before it, blocking never.
     pub(crate) fn queue(&self, input: PtyInput) -> QueueInputResult {
-        let Ok(input) = QueuedPtyInput::reserve(input, Arc::clone(&self.pending_bytes)) else {
+        let Ok(input) = self.budget.reserve(input) else {
             return QueueInputResult::Dropped;
         };
         let mut overflow = self.overflow.lock();

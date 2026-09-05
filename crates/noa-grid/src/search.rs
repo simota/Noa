@@ -1,10 +1,51 @@
 //! Search state over the active screen's combined scrollback + live rows.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::cell::Row;
 use crate::selection::SelectionPoint;
 use noa_core::CellAttrs;
+
+/// Searchable immutable history and live rows, safe to scan without a terminal lock.
+pub struct SearchSnapshot {
+    pub(crate) history: crate::scrollback::HistorySnapshot,
+    pub(crate) live: Vec<Row>,
+    pub(crate) history_len: usize,
+    pub(crate) rows_evicted: usize,
+    pub(crate) coordinate_generation: u64,
+    pub(crate) cols: u16,
+    pub(crate) anchor: SearchAnchor,
+}
+
+impl SearchSnapshot {
+    pub fn find_matches(
+        &self,
+        query: &str,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Option<Vec<SearchMatch>> {
+        let Some(mut search) = RowSearch::new(query) else {
+            return Some(Vec::new());
+        };
+        let mut matches = Vec::new();
+        if !self.history.for_each_row(|y, row| {
+            if cancelled() {
+                return false;
+            }
+            search.append_matches(y, row, &mut matches);
+            true
+        }) {
+            return None;
+        }
+        for (i, row) in self.live.iter().enumerate() {
+            if cancelled() {
+                return None;
+            }
+            search.append_matches(self.history_len + i, row, &mut matches);
+        }
+        Some(matches)
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SearchMatch {
@@ -33,10 +74,8 @@ pub enum SearchAnchor {
 
 impl SearchMatch {
     pub fn contains(&self, point: SelectionPoint) -> bool {
-        self.start.y == point.y
-            && self.end.y == point.y
-            && self.start.x <= point.x
-            && point.x <= self.end.x
+        (self.start.y, self.start.x) <= (point.y, point.x)
+            && (point.y, point.x) <= (self.end.y, self.end.x)
     }
 }
 
@@ -60,9 +99,9 @@ impl SearchState {
     /// rendering and hit testing to the requested row, independent of the
     /// number of matches elsewhere in scrollback.
     pub fn matches_on_row(&self, row: usize) -> &[SearchMatch] {
-        let start = self.matches.partition_point(|m| m.start.y < row);
+        let start = self.matches.partition_point(|m| m.end.y < row);
         let matches = &self.matches[start..];
-        let end = matches.partition_point(|m| m.start.y == row);
+        let end = matches.partition_point(|m| m.start.y <= row);
         &matches[..end]
     }
 
@@ -78,8 +117,17 @@ impl SearchState {
     }
 
     pub fn set_query(&mut self, query: String, matches: Vec<SearchMatch>, anchor: SearchAnchor) {
+        self.set_shared_query(query, Arc::from(matches.into_boxed_slice()), anchor);
+    }
+
+    pub(crate) fn set_shared_query(
+        &mut self,
+        query: String,
+        matches: Arc<[SearchMatch]>,
+        anchor: SearchAnchor,
+    ) {
         self.query = query;
-        self.matches = Arc::from(matches.into_boxed_slice());
+        self.matches = matches;
         self.active = self.anchored_index(anchor);
     }
 
@@ -150,14 +198,36 @@ pub(crate) struct RowSearch<'a> {
     query: &'a str,
     text: String,
     byte_columns: Vec<u16>,
+    prefix: Vec<usize>,
+    matched: usize,
+    positions: VecDeque<SelectionPoint>,
+    continuation: Option<usize>,
 }
 
 impl<'a> RowSearch<'a> {
     pub(crate) fn new(query: &'a str) -> Option<Self> {
-        (!query.is_empty()).then(|| Self {
+        if query.is_empty() {
+            return None;
+        }
+        let mut prefix = vec![0; query.len()];
+        for i in 1..query.len() {
+            let mut n = prefix[i - 1];
+            while n > 0 && query.as_bytes()[i] != query.as_bytes()[n] {
+                n = prefix[n - 1];
+            }
+            if query.as_bytes()[i] == query.as_bytes()[n] {
+                n += 1;
+            }
+            prefix[i] = n;
+        }
+        Some(Self {
             query,
             text: String::new(),
             byte_columns: Vec::new(),
+            prefix,
+            matched: 0,
+            positions: VecDeque::new(),
+            continuation: None,
         })
     }
 
@@ -169,6 +239,12 @@ impl<'a> RowSearch<'a> {
     ) {
         self.text.clear();
         self.byte_columns.clear();
+        let continuing = self.continuation == Some(storage_y);
+        if !continuing {
+            self.matched = 0;
+            self.positions.clear();
+        }
+        self.continuation = row.wrapped.then(|| storage_y.saturating_add(1));
         for (x, cell) in row.cells.iter().enumerate() {
             if cell.attrs.contains(CellAttrs::WIDE_SPACER) {
                 continue;
@@ -177,14 +253,41 @@ impl<'a> RowSearch<'a> {
             self.byte_columns.resize(self.text.len(), x as u16);
         }
 
-        for (byte_start, _) in self.text.match_indices(self.query) {
-            matches.push(SearchMatch {
-                start: SelectionPoint::new(self.byte_columns[byte_start], storage_y),
-                end: SelectionPoint::new(
-                    self.byte_columns[byte_start + self.query.len() - 1],
-                    storage_y,
-                ),
-            });
+        if !continuing && !row.wrapped {
+            for (start, _) in self.text.match_indices(self.query) {
+                matches.push(SearchMatch {
+                    start: SelectionPoint::new(self.byte_columns[start], storage_y),
+                    end: SelectionPoint::new(
+                        self.byte_columns[start + self.query.len() - 1],
+                        storage_y,
+                    ),
+                });
+            }
+            return;
+        }
+
+        // Streaming KMP keeps only one query's worth of coordinates, even for
+        // a logical line spanning the entire scrollback. Reset after a hit to
+        // preserve str::match_indices' non-overlapping semantics.
+        for (i, byte) in self.text.bytes().enumerate() {
+            let point = SelectionPoint::new(self.byte_columns[i], storage_y);
+            if self.positions.len() == self.query.len() {
+                self.positions.pop_front();
+            }
+            self.positions.push_back(point);
+            while self.matched > 0 && byte != self.query.as_bytes()[self.matched] {
+                self.matched = self.prefix[self.matched - 1];
+            }
+            if byte == self.query.as_bytes()[self.matched] {
+                self.matched += 1;
+            }
+            if self.matched == self.query.len() {
+                matches.push(SearchMatch {
+                    start: *self.positions.front().unwrap(),
+                    end: point,
+                });
+                self.matched = 0;
+            }
         }
     }
 }
@@ -192,6 +295,71 @@ impl<'a> RowSearch<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshots_survive_history_packing_eviction_and_live_edits() {
+        let mut terminal = crate::Terminal::new(noa_core::GridSize::new(80, 8));
+        let mut stream = noa_vt::Stream::new();
+        stream.feed("needle\r\n".repeat(2000).as_bytes(), &mut terminal);
+        let snapshot = terminal.active().search_snapshot();
+        let before = snapshot.find_matches("needle", || false).unwrap();
+        assert_eq!(before.len(), 2000);
+        stream.feed("more\r\n".repeat(2000).as_bytes(), &mut terminal);
+        stream.feed(b"\x1b[3Jchanged", &mut terminal);
+        assert_eq!(snapshot.find_matches("needle", || false).unwrap(), before);
+        assert!(!terminal.apply_search_snapshot(&snapshot, "needle".into(), Arc::from(before)));
+        assert!(snapshot.find_matches("needle", || true).is_none());
+    }
+
+    #[test]
+    fn search_crosses_soft_wraps_and_highlights_each_physical_row() {
+        let mut terminal = crate::Terminal::new(noa_core::GridSize::new(4, 3));
+        noa_vt::Stream::new().feed(b"abcdef", &mut terminal);
+        terminal.set_search_query("cde");
+        let state = &terminal.active().search;
+        assert_eq!(
+            state.matches(),
+            &[SearchMatch {
+                start: SelectionPoint::new(2, 0),
+                end: SelectionPoint::new(0, 1),
+            }]
+        );
+        for p in [(2, 0), (3, 0), (0, 1)] {
+            assert!(state.contains(SelectionPoint::new(p.0, p.1)));
+        }
+        for p in [(1, 0), (1, 1)] {
+            assert!(!state.contains(SelectionPoint::new(p.0, p.1)));
+        }
+        assert_eq!(state.matches_on_row(1).len(), 1);
+    }
+
+    #[test]
+    fn search_joins_scrollback_to_live_grid_but_not_hard_newlines() {
+        let mut terminal = crate::Terminal::new(noa_core::GridSize::new(4, 1));
+        noa_vt::Stream::new().feed(b"abcdef", &mut terminal);
+        terminal.set_search_query("cde");
+        assert_eq!(terminal.active().search.matches().len(), 1);
+        let mut terminal = crate::Terminal::new(noa_core::GridSize::new(4, 3));
+        noa_vt::Stream::new().feed(b"abcd\r\nef", &mut terminal);
+        terminal.set_search_query("cde");
+        assert!(terminal.active().search.matches().is_empty());
+    }
+
+    #[test]
+    fn search_preserves_wide_combining_and_nonoverlapping_matches_across_wraps() {
+        let mut terminal = crate::Terminal::new(noa_core::GridSize::new(4, 4));
+        noa_vt::Stream::new().feed("ab日e\u{301}aaa".as_bytes(), &mut terminal);
+        terminal.set_search_query("日e\u{301}");
+        assert_eq!(
+            terminal.active().search.matches(),
+            &[SearchMatch {
+                start: SelectionPoint::new(2, 0),
+                end: SelectionPoint::new(0, 1),
+            }]
+        );
+        terminal.set_search_query("aa");
+        assert_eq!(terminal.active().search.matches().len(), 1);
+    }
 
     // Preserve the scalar-based mapping as an independent reference for the
     // byte-column implementation, including non-overlapping match semantics.

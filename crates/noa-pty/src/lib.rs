@@ -15,7 +15,7 @@ mod writer;
 pub use data::PtyData;
 pub use metrics::{PaneMetrics, ProcRecord, ProcSnapshot, foreground_tree};
 pub use pty::{ForegroundProcessProbe, Pty, PtyConfig};
-pub use writer::PtyWriter;
+pub use writer::{BudgetedWrite, PtyWriteBudget, PtyWriter, WRITE_BYTE_CAP, WRITE_MIN_CHARGE};
 
 /// An event emitted by the PTY reader thread.
 #[derive(Debug)]

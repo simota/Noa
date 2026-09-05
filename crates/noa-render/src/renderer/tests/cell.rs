@@ -1,6 +1,91 @@
 use super::*;
 
 #[test]
+fn wrapped_search_matches_paint_each_visible_row() {
+    let Some(mut font) = skip_font() else {
+        return;
+    };
+    for (text, query, rows, expected) in [
+        (
+            "abcdef\r\nabcdef",
+            "cde",
+            4,
+            vec![
+                (2, 0, false),
+                (3, 0, false),
+                (0, 1, false),
+                (2, 2, true),
+                (3, 2, true),
+                (0, 3, true),
+            ],
+        ),
+        (
+            "abcdefghijkl\r\nabcdefghijkl",
+            "cdefghi",
+            6,
+            vec![
+                (2, 0, false),
+                (3, 0, false),
+                (0, 1, false),
+                (1, 1, false),
+                (2, 1, false),
+                (3, 1, false),
+                (0, 2, false),
+                (2, 3, true),
+                (3, 3, true),
+                (0, 4, true),
+                (1, 4, true),
+                (2, 4, true),
+                (3, 4, true),
+                (0, 5, true),
+            ],
+        ),
+        (
+            "abcdefghijkl",
+            "cdefghi",
+            2,
+            vec![
+                (0, 0, true),
+                (1, 0, true),
+                (2, 0, true),
+                (3, 0, true),
+                (0, 1, true),
+            ],
+        ),
+    ] {
+        let mut terminal = Terminal::new(GridSize::new(4, rows));
+        Stream::new().feed(text.as_bytes(), &mut terminal);
+        terminal.primary.cursor.visible = false;
+        terminal.set_search_query(query);
+        // Keep the viewport at the bottom, including a match that starts in history.
+        terminal.primary.scroll_viewport_to_bottom();
+        let snap = FrameSnapshot::from_terminal(&mut terminal);
+        let theme = Theme::new();
+        let mut instances = Vec::new();
+        rebuild_cell_instances(&mut instances, &snap, &mut font, &theme, false);
+        let backgrounds: Vec<_> = instances
+            .iter()
+            .filter(|instance| instance.flags == 0 && instance.glyph_size == [0, 0])
+            .map(|instance| (instance.grid_pos, rgb_from_instance(instance)))
+            .collect();
+        let expected: Vec<_> = expected
+            .into_iter()
+            .map(|(x, y, active)| {
+                (
+                    [x, y],
+                    if active {
+                        theme.active_search_bg
+                    } else {
+                        theme.search_bg
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(backgrounds, expected, "text={text:?}, query={query:?}");
+    }
+}
+
+#[test]
 fn default_bg_cell_emits_no_background_quad_so_clear_color_shows_through() {
     // The opacity path relies on default-background cells NOT painting a
     // bg quad: the (opacity-scaled) clear color is what fills them. A cell

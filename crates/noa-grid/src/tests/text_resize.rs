@@ -309,6 +309,57 @@ fn resize_shrink_rows_preserves_nonempty_rows_below_cursor() {
 }
 
 #[test]
+fn resize_reflow_preserves_nonempty_rows_below_cursor() {
+    for cols in [9, 11] {
+        let mut t = run_size(10, 4, b"AAAA\r\nBBBB\r\nCCCC\r\nDDDD\x1b[H");
+
+        t.resize(GridSize::new(cols, 3));
+
+        assert_eq!(t.scrollback_len(), 1);
+        assert_eq!(t.primary.absolute_row(0).unwrap().cells[0].ch, 'A');
+        assert_eq!(row_text(&t, 0, 4), "BBBB");
+        assert_eq!(row_text(&t, 1, 4), "CCCC");
+        assert_eq!(row_text(&t, 2, 4), "DDDD");
+        assert_eq!(t.primary.cursor.y, 0);
+    }
+}
+
+#[test]
+fn resize_reflow_preserves_wrapped_content_below_cursor() {
+    let mut t = run_size(8, 3, b"AAAA\r\nBBBBBBBB\r\nCCCCCCCC\x1b[H");
+
+    t.resize(GridSize::new(4, 3));
+
+    assert_eq!(t.scrollback_len(), 2);
+    assert_eq!(t.primary.absolute_row(0).unwrap().cells[0].ch, 'A');
+    let wrapped = t.primary.absolute_row(1).unwrap();
+    assert_eq!(wrapped.cells[0].ch, 'B');
+    assert!(wrapped.wrapped);
+    assert_eq!(row_text(&t, 0, 4), "BBBB");
+    assert_eq!(row_text(&t, 1, 4), "CCCC");
+    assert!(t.primary.grid[1].wrapped);
+    assert_eq!(row_text(&t, 2, 4), "CCCC");
+}
+
+#[test]
+fn resize_reflow_drops_erased_trailing_rows_before_scrolling() {
+    let mut t = run_size(
+        10,
+        5,
+        b"AAAA\r\nBBBB\r\nCCCC\r\nDDDD\r\nEEEE\x1b[4;1H\x1b[J\x1b[3;1H\x1b7",
+    );
+
+    t.resize(GridSize::new(11, 3));
+
+    assert_eq!(t.scrollback_len(), 0);
+    assert_eq!(row_text(&t, 0, 4), "AAAA");
+    assert_eq!(row_text(&t, 1, 4), "BBBB");
+    assert_eq!(row_text(&t, 2, 4), "CCCC");
+    assert_eq!(t.primary.cursor.y, 2);
+    assert_eq!(t.primary.saved_cursor.unwrap().y, 2);
+}
+
+#[test]
 fn resize_shrink_rows_treats_erased_rows_below_cursor_as_disposable() {
     // Rows 4-5 held text and were then cleared with EL 2; they are visually
     // blank and must be dropped before anything moves into scrollback.

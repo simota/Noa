@@ -778,6 +778,39 @@ fn paste_strips_nested_bracket_markers_from_payload() {
 }
 
 #[test]
+fn paste_strips_bracket_markers_reassembled_by_removal() {
+    for marker in ["\x1b[200~", "\x1b[201~"] {
+        for nested in ["\x1b[200~", "\x1b[201~"] {
+            for split in 1..marker.len() {
+                let text = format!(
+                    "日本{}{}{}echo harmless\n",
+                    &marker[..split],
+                    nested,
+                    &marker[split..]
+                );
+                assert_eq!(
+                    encode_paste(&text, false),
+                    Some("日本echo harmless\n".as_bytes().to_vec()),
+                    "{text:?}"
+                );
+                assert_eq!(
+                    encode_paste(&text, true),
+                    Some("\x1b[200~日本echo harmless\n\x1b[201~".as_bytes().to_vec()),
+                    "{text:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn paste_strips_deeply_nested_bracket_markers() {
+    let text = format!("{}{}", "\x1b[20".repeat(4096), "1~".repeat(4096));
+    assert!(encode_paste(&text, true).is_none());
+    assert!(encode_paste(&text, false).is_none());
+}
+
+#[test]
 fn paste_with_only_bracket_markers_emits_no_bytes() {
     assert_eq!(encode_paste("\x1b[200~\x1b[201~", true), None);
 }

@@ -76,15 +76,13 @@ pub(crate) fn paste_is_unsafe(text: &str, bracketed_paste: bool) -> bool {
 
 fn sanitize_paste_payload(bytes: &[u8]) -> Vec<u8> {
     let mut sanitized = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i..].starts_with(b"\x1b[200~") {
-            i += b"\x1b[200~".len();
-        } else if bytes[i..].starts_with(b"\x1b[201~") {
-            i += b"\x1b[201~".len();
-        } else {
-            sanitized.push(bytes[i]);
-            i += 1;
+    for &byte in bytes {
+        sanitized.push(byte);
+        // Match the output suffix: removing a nested marker can join its
+        // surrounding bytes into another marker. The remaining prefix has
+        // already been sanitized, so one suffix check per byte suffices.
+        if sanitized.ends_with(b"\x1b[200~") || sanitized.ends_with(b"\x1b[201~") {
+            sanitized.truncate(sanitized.len() - b"\x1b[201~".len());
         }
     }
     sanitized

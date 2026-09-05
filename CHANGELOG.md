@@ -7,8 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.10] - 2026-09-06
+
+### Added
+
+- Native prompt composer with per-pane drafts, a read-only output reader with
+  Find and fenced-code copying, and a bundled Agent Workflows guide (#66).
+- Optional lifecycle hooks display running, approval-needed, reply-needed,
+  response-ended, and error states. Source links retain line/column information
+  and can open a configured editor or a local UTF-8 preview (#66).
+- Opt-in auto-approve recognizes Codex command dialogs and agy's first
+  recommended answer. It handles hidden cursors, static prompts after input
+  cooldowns, and wrapped rejection labels in 48-column panes. Partial cost-line
+  redraws preserve accepted questions without sending duplicate Enter keys (#68).
+
 ### Fixed
 
+- Nested bracketed-paste markers cannot reconstruct a paste terminator and
+  expose the remaining pasted text as normal input. Resizing columns and rows
+  together preserves populated rows below the cursor, including soft wraps (#64).
+- Unread notifications remain visible until their own pane is selected.
+  Cmd+Shift+J can navigate to unread panes hidden behind a zoomed pane (#66).
 - Kitty temporary-file transfers require both an approved temporary directory
   and the protocol filename marker. Shared-memory transfers validate the whole
   requested range and copy through the kernel; `S` is a byte count independent
@@ -26,6 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Scrollback search reuses query scratch space, partial redraws retain unchanged
+  pane instances, and synchronized output shares snapshot rows to reduce
+  repeated allocation and copying (#65).
 - Search runs on immutable snapshots in a worker with 35 ms debounce and
   cancellation of superseded queries, moving history scans outside the UI
   thread and terminal lock.

@@ -298,23 +298,34 @@ pub(crate) fn detect(
     detect_inner(rows, cursor, Some(agent), ctx, state)
 }
 
-pub(crate) fn detect_any_agent(
-    rows: &[RowText],
-    cursor: Point,
-    ctx: DetectContext,
-    state: &AutoApproveState,
-) -> Decision {
-    detect_inner(rows, cursor, None, ctx, state)
-}
-
+/// Detect and advance the two-match state machine in one pass. The viewport
+/// is scanned (lowercased + signature-matched) at most once per feed: the
+/// same `MatchedPrompt` observation feeds both the decision and the state
+/// update, instead of each re-running `find_prompt` on the same rows.
 pub(crate) fn detect_and_update_any_agent(
     rows: &[RowText],
     cursor: Point,
     ctx: DetectContext,
     state: &mut AutoApproveState,
 ) -> Decision {
-    let decision = detect_any_agent(rows, cursor, ctx, state);
-    apply_decision_state(rows, cursor, ctx, state, &decision);
+    let (decision, matched) = match suppression(ctx, state.disabled_by_runaway) {
+        Some(reason) => {
+            // Only the input-cooldown suppressions keep tracking the prompt
+            // (see `apply_decision_state`), so only they pay for a scan.
+            let matched = matches!(
+                reason,
+                SuppressReason::RecentUserInput | SuppressReason::PasteActive
+            )
+            .then(|| find_prompt(rows, cursor, None))
+            .flatten();
+            (Decision::Suppressed(reason), matched)
+        }
+        None => {
+            let matched = find_prompt(rows, cursor, None);
+            (decide(matched.as_ref(), ctx, state), matched)
+        }
+    };
+    apply_decision_state(rows, matched.as_ref(), ctx, state, &decision);
     decision
 }
 
@@ -339,6 +350,7 @@ pub(crate) fn viewport_rows_from_terminal(terminal: &Terminal) -> Vec<RowText> {
         .collect()
 }
 
+#[cfg(test)]
 fn detect_inner(
     rows: &[RowText],
     cursor: Point,
@@ -349,8 +361,17 @@ fn detect_inner(
     if let Some(reason) = suppression(ctx, state.disabled_by_runaway) {
         return Decision::Suppressed(reason);
     }
+    decide(find_prompt(rows, cursor, agent).as_ref(), ctx, state)
+}
 
-    let Some(matched) = find_prompt(rows, cursor, agent) else {
+/// The unsuppressed decision for one observed viewport: `matched` is the
+/// prompt `find_prompt` found there (or `None`).
+fn decide(
+    matched: Option<&MatchedPrompt>,
+    ctx: DetectContext,
+    state: &AutoApproveState,
+) -> Decision {
+    let Some(matched) = matched else {
         return Decision::Hold;
     };
 
@@ -381,9 +402,12 @@ fn detect_inner(
     }
 }
 
+/// Advance the state machine after `decision`. `matched` is the prompt the
+/// caller observed on `rows` in the same feed (`None` when none was found,
+/// or when the suppression reason makes tracking one pointless).
 fn apply_decision_state(
     rows: &[RowText],
-    cursor: Point,
+    matched: Option<&MatchedPrompt>,
     ctx: DetectContext,
     state: &mut AutoApproveState,
     decision: &Decision,
@@ -405,7 +429,7 @@ fn apply_decision_state(
             });
         }
         Decision::Hold => {
-            if let Some(matched) = find_prompt(rows, cursor, None) {
+            if let Some(matched) = matched {
                 if state.pending_fire.is_some_and(|pending| {
                     pending.signature != matched.signature
                         || pending.region_hash != matched.region_hash
@@ -448,7 +472,7 @@ fn apply_decision_state(
                 reason,
                 SuppressReason::RecentUserInput | SuppressReason::PasteActive
             ) {
-                find_prompt(rows, cursor, None).map(|matched| MatchKey {
+                matched.map(|matched| MatchKey {
                     signature: matched.signature,
                     region_hash: matched.region_hash,
                 })
@@ -486,7 +510,16 @@ fn suppression(ctx: DetectContext, disabled_by_runaway: bool) -> Option<Suppress
     None
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Per-test-thread count of viewport scans, so a test can assert one
+    /// feed costs exactly one scan (tests run on their own threads).
+    static PROMPT_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn find_prompt(rows: &[RowText], cursor: Point, agent: Option<AgentKind>) -> Option<MatchedPrompt> {
+    #[cfg(test)]
+    PROMPT_SCANS.with(|scans| scans.set(scans.get() + 1));
     let lowercase_rows = lowercase_rows(rows);
     SIGNATURES
         .iter()
@@ -770,6 +803,58 @@ mod tests {
             "❯ 1. Yes",
             "  2. No, tell Claude what to do differently",
         ])
+    }
+
+    fn prompt_scans() -> usize {
+        PROMPT_SCANS.with(|scans| scans.get())
+    }
+
+    /// One feed scans the viewport once, whether it holds a prompt (first
+    /// match: Hold), a second identical match (Fire), or nothing at all.
+    #[test]
+    fn detect_and_update_scans_viewport_once_per_feed() {
+        let now = Instant::now();
+        let mut state = AutoApproveState::default();
+        let prompt = rows(&[
+            "Claude wants to edit crates/noa-app/src/lib.rs",
+            "❯ 1. Yes",
+            "  2. No",
+        ]);
+        let plain = rows(&["plain output", "no prompt here"]);
+
+        let before = prompt_scans();
+        assert_eq!(
+            detect_and_update_any_agent(&plain, cursor(1), base_ctx(now), &mut state),
+            Decision::Hold
+        );
+        assert_eq!(prompt_scans() - before, 1, "no-prompt feed must scan once");
+
+        let before = prompt_scans();
+        assert_eq!(
+            detect_and_update_any_agent(&prompt, cursor(1), base_ctx(now), &mut state),
+            Decision::Hold
+        );
+        assert_eq!(prompt_scans() - before, 1, "first match must scan once");
+
+        let before = prompt_scans();
+        assert!(matches!(
+            detect_and_update_any_agent(&prompt, cursor(1), base_ctx(now), &mut state),
+            Decision::Fire { .. }
+        ));
+        assert_eq!(prompt_scans() - before, 1, "firing feed must scan once");
+
+        let mut ctx = base_ctx(now);
+        ctx.guards.last_user_input_at = Some(now);
+        let before = prompt_scans();
+        assert!(matches!(
+            detect_and_update_any_agent(&prompt, cursor(1), ctx, &mut state),
+            Decision::Suppressed(SuppressReason::RecentUserInput)
+        ));
+        assert_eq!(
+            prompt_scans() - before,
+            1,
+            "input-cooldown feed must scan once"
+        );
     }
 
     fn rows(input: &[&str]) -> Vec<RowText> {

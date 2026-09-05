@@ -16,7 +16,7 @@ use crate::draw_plan::{DrawOp, PaneId, PaneRect, build_draw_plan};
 use crate::image_layer::{ImageDraw, ImageLayer};
 use crate::instance::{BlendMode, CellInstance, PaneUniformParams, populate_pane_uniform};
 use crate::pipeline::CellPipeline;
-use crate::segment::{SegmentCell, ShapeRun, segment_row};
+use crate::segment::{RunPool, SegmentCell, ShapeRun, segment_row, segment_row_into};
 use crate::snapshot::{
     CommandPaletteSnapshot, ConfirmDialogSnapshot, FrameSnapshot, HoverLink,
     ImagePlacementSnapshot, PaletteRow, SnapshotImage,
@@ -358,6 +358,8 @@ pub struct Renderer {
     /// pane's stable render-side identity so it survives split reordering
     /// across frames.
     pane_render_cache: HashMap<PaneId, PaneRenderCache>,
+    /// Reused per-row build buffers shared by every pane rebuild.
+    row_scratch: RowBuildScratch,
     /// Total rows regenerated across all panes in the most recent
     /// `rebuild_panes` call (AC-WP4-02).
     rows_rebuilt_last_frame: u64,
@@ -462,6 +464,7 @@ impl Renderer {
             target_format: format,
             target_format_is_srgb: format.is_srgb(),
             pane_render_cache: HashMap::new(),
+            row_scratch: RowBuildScratch::default(),
             rows_rebuilt_last_frame: 0,
             frame_unstable: false,
             background_opacity: 1.0,
@@ -853,6 +856,7 @@ impl Renderer {
                     font,
                     theme,
                     self.target_format_is_srgb,
+                    &mut self.row_scratch,
                 );
                 rows_rebuilt_total += rows_rebuilt;
                 if !stable {

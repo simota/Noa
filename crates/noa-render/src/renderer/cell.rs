@@ -42,6 +42,7 @@ pub(super) fn rebuild_cell_instances(
     let mut bg_rows = Vec::with_capacity(snap.rows.len());
     let mut glyph_rows = Vec::with_capacity(snap.rows.len());
     let mut deco_rows = Vec::with_capacity(snap.rows.len());
+    let mut scratch = RowBuildScratch::default();
     for (row_idx, row) in snap.rows.iter().enumerate() {
         let mut bg = Vec::new();
         let mut glyph = Vec::new();
@@ -54,6 +55,7 @@ pub(super) fn rebuild_cell_instances(
             theme,
             target_format_is_srgb,
             metrics,
+            &mut scratch,
             RowInstanceBuffers {
                 bg: &mut bg,
                 glyph: &mut glyph,
@@ -73,6 +75,18 @@ pub(super) fn rebuild_cell_instances(
     append_confirm_dialog_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
 
     (clear_color, (metrics.cell_w, metrics.cell_h))
+}
+
+/// Per-row working memory [`rebuild_row_instances`] refills for every row it
+/// builds. One instance lives on the `Renderer` and is threaded through
+/// [`update_pane_cache`], so the intermediate segmentation / highlight /
+/// run buffers are allocated once and reused instead of being rebuilt from
+/// zero capacity for each dirty row.
+#[derive(Default)]
+pub(super) struct RowBuildScratch {
+    segment_cells: Vec<SegmentCell>,
+    runs: RunPool,
+    highlights: Vec<CellHighlight>,
 }
 
 /// The three parallel output bands [`rebuild_row_instances`] fills in place,
@@ -112,6 +126,7 @@ pub(super) fn rebuild_row_instances(
     theme: &Theme,
     target_format_is_srgb: bool,
     metrics: Metrics,
+    scratch: &mut RowBuildScratch,
     out: RowInstanceBuffers<'_>,
 ) {
     // In/out Vec params (not return-by-value): the caller owns the
@@ -126,7 +141,12 @@ pub(super) fn rebuild_row_instances(
     bg_instances.clear();
     glyph_instances.clear();
     decoration_instances.clear();
-    let mut segment_cells = Vec::with_capacity(row.cells.len());
+    let RowBuildScratch {
+        segment_cells,
+        runs,
+        highlights,
+    } = scratch;
+    segment_cells.clear();
 
     // Cursor shape only depends on pane-wide snapshot state (position,
     // DECSCUSR style, focus, blink phase), so it is resolved once per row
@@ -137,7 +157,7 @@ pub(super) fn rebuild_row_instances(
     } else {
         cursor_visual_for(snap)
     };
-    let row_highlights = RowHighlights::new(snap, y, row.cells.len());
+    let row_highlights = RowHighlights::new(snap, y, row.cells.len(), highlights);
     // Restored-record gutter (`scrollback-persist` spec §5): this row's
     // session-absolute index falls inside a persisted-snapshot range the
     // caller restored, so column 0 gets an extra marker quad below — unless
@@ -357,9 +377,10 @@ pub(super) fn rebuild_row_instances(
     // becomes an extra instance anchored at its base cell, positioned
     // by its own shaped offset instead of an independent per-char pen
     // bearing (REQ-SHAPE-4).
-    for run in segment_row(font, &segment_cells) {
+    segment_row_into(font, segment_cells, runs);
+    for run in runs.runs() {
         let shaped = font.shape_run(&run.cells);
-        emit_run_glyph_instances(glyph_instances, font, &run, &shaped, y, metrics);
+        emit_run_glyph_instances(glyph_instances, font, run, &shaped, y, metrics);
     }
 }
 
@@ -370,17 +391,19 @@ pub(super) struct CellHighlight {
     search_match: bool,
 }
 
-pub(super) struct RowHighlights {
-    cells: Option<Vec<CellHighlight>>,
+pub(super) struct RowHighlights<'a> {
+    cells: Option<&'a [CellHighlight]>,
 }
 
-impl RowHighlights {
-    fn new(snap: &FrameSnapshot, y: u16, cols: usize) -> Self {
+impl<'a> RowHighlights<'a> {
+    fn new(snap: &FrameSnapshot, y: u16, cols: usize, buf: &'a mut Vec<CellHighlight>) -> Self {
         if cols == 0 || (snap.selection.is_none() && snap.search.matches().is_empty()) {
             return Self { cells: None };
         }
 
-        let mut cells = vec![CellHighlight::default(); cols];
+        buf.clear();
+        buf.resize(cols, CellHighlight::default());
+        let cells = buf.as_mut_slice();
 
         let storage_y = snap.row_base + y as usize;
         if let Some(selection) = snap.selection {
@@ -388,7 +411,7 @@ impl RowHighlights {
             if start.y <= storage_y && storage_y <= end.y {
                 let start_x = if storage_y == start.y { start.x } else { 0 };
                 let end_x = if storage_y == end.y { end.x } else { u16::MAX };
-                mark_highlight_span(&mut cells, start_x, end_x, |cell| {
+                mark_highlight_span(cells, start_x, end_x, |cell| {
                     cell.selected = true;
                 });
             }
@@ -406,7 +429,7 @@ impl RowHighlights {
             } else {
                 u16::MAX
             };
-            mark_highlight_span(&mut cells, start_x, end_x, |cell| {
+            mark_highlight_span(cells, start_x, end_x, |cell| {
                 cell.search_match = true;
                 cell.active_search |= active == Some(*search_match);
             });
@@ -417,7 +440,6 @@ impl RowHighlights {
 
     fn get(&self, idx: usize) -> CellHighlight {
         self.cells
-            .as_ref()
             .and_then(|cells| cells.get(idx))
             .copied()
             .unwrap_or_default()
@@ -498,7 +520,15 @@ pub(super) fn rebuild_pane_cached(
     theme: &Theme,
     target_format_is_srgb: bool,
 ) -> PaneRebuild {
-    let result = update_pane_cache(cache, snap, font, theme, target_format_is_srgb);
+    let mut scratch = RowBuildScratch::default();
+    let result = update_pane_cache(
+        cache,
+        snap,
+        font,
+        theme,
+        target_format_is_srgb,
+        &mut scratch,
+    );
     instances.extend_from_slice(&cache.flat);
     instances.extend_from_slice(&cache.overlays);
     result
@@ -513,6 +543,7 @@ pub(super) fn update_pane_cache(
     font: &mut FontGrid,
     theme: &Theme,
     target_format_is_srgb: bool,
+    scratch: &mut RowBuildScratch,
 ) -> PaneRebuild {
     let metrics = font.metrics();
     let clear_color = surface_output_rgba(
@@ -662,10 +693,15 @@ pub(super) fn update_pane_cache(
             }
         }
 
+        // A full rebuild invalidates every row's CONTENT, not its storage:
+        // keep each row slot's capacity (every row is rebuilt below, and
+        // `rebuild_row_instances` clears the slot first) so a selection
+        // change or theme swap does not free and re-grow every row buffer.
+        // Only a row-count change touches the outer vectors.
         if full {
-            cache.bg = vec![Vec::new(); rows];
-            cache.glyph = vec![Vec::new(); rows];
-            cache.deco = vec![Vec::new(); rows];
+            cache.bg.resize_with(rows, Vec::new);
+            cache.glyph.resize_with(rows, Vec::new);
+            cache.deco.resize_with(rows, Vec::new);
             cache.flat.clear();
         }
 
@@ -680,6 +716,7 @@ pub(super) fn update_pane_cache(
                     theme,
                     target_format_is_srgb,
                     metrics,
+                    scratch,
                     RowInstanceBuffers {
                         bg: &mut cache.bg[row_idx],
                         glyph: &mut cache.glyph[row_idx],

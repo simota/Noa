@@ -95,12 +95,11 @@ pub fn encode_key_with_modes(
     }
 
     // xterm modifyOtherKeys level 2: a Character key with Ctrl/Alt/Super
-    // reports its unshifted codepoint plus the modifier value, so Ctrl+I is
-    // distinguishable from Tab. Shift alone (and Option composing text on
-    // macOS) stays on the legacy path.
+    // reports its codepoint after Shift/layout translation plus the modifier
+    // value, so Ctrl+I is distinguishable from Tab. Shift alone (and Option
+    // composing text on macOS) stays on the legacy path.
     if modify_other_keys
-        && let Some(bytes) =
-            modify_other_keys_bytes(logical_key, unmodified_key, mods, alt_sends_esc)
+        && let Some(bytes) = modify_other_keys_bytes(logical_key, mods, alt_sends_esc)
     {
         return Some(bytes);
     }
@@ -223,11 +222,10 @@ fn alt_esc_prefixed(mut bytes: Vec<u8>, mods: ModifiersState, alt_sends_esc: boo
 
 /// xterm `modifyOtherKeys=2` encoding: `CSI 27 ; <mods> ; <codepoint> ~` for
 /// a Character (or Space) key pressed with Ctrl, Alt-as-modifier, or Super.
-/// The codepoint is the unshifted base key when the platform supplies it, so
-/// Ctrl+Shift+A reports `97` with the Shift bit rather than `65`.
+/// The logical key preserves Shift and keyboard-layout translation, so
+/// Ctrl+Shift+1 on a US layout reports `33` (`!`) with the Shift bit.
 fn modify_other_keys_bytes(
     logical_key: &Key,
-    unmodified_key: Option<&Key>,
     mods: ModifiersState,
     alt_sends_esc: bool,
 ) -> Option<Vec<u8>> {
@@ -235,7 +233,7 @@ fn modify_other_keys_bytes(
     if !(mods.control_key() || alt || mods.super_key()) {
         return None;
     }
-    let codepoint = match unmodified_key.unwrap_or(logical_key) {
+    let codepoint = match logical_key {
         Key::Character(s) => {
             let mut chars = s.chars();
             match (chars.next(), chars.next()) {

@@ -1439,10 +1439,10 @@ fn modify_other_keys_2_reports_modified_characters() {
         enc("i", ModifiersState::CONTROL),
         Some(b"\x1b[27;5;105~".to_vec())
     );
-    // Shift is folded into the modifier value; the codepoint stays unshifted.
+    // Shift is reported in both the modifier value and the resulting character.
     assert_eq!(
         enc("A", ModifiersState::CONTROL | ModifiersState::SHIFT),
-        Some(b"\x1b[27;6;97~".to_vec())
+        Some(b"\x1b[27;6;65~".to_vec())
     );
     assert_eq!(
         enc("x", ModifiersState::ALT),
@@ -1451,6 +1451,73 @@ fn modify_other_keys_2_reports_modified_characters() {
     // Shift alone and unmodified keys stay legacy text.
     assert_eq!(enc("A", ModifiersState::SHIFT), Some(b"A".to_vec()));
     assert_eq!(enc("a", ModifiersState::empty()), Some(b"a".to_vec()));
+}
+
+#[test]
+fn modify_other_keys_2_preserves_shifted_symbols_and_layout_characters() {
+    for (logical, unmodified, ctrl_expected, alt_expected) in [
+        ("!", "1", "\x1b[27;6;33~", "\x1b[27;4;33~"),
+        ("?", "/", "\x1b[27;6;63~", "\x1b[27;4;63~"),
+        ("+", ";", "\x1b[27;6;43~", "\x1b[27;4;43~"),
+        ("£", "3", "\x1b[27;6;163~", "\x1b[27;4;163~"),
+        ("Ä", "ä", "\x1b[27;6;196~", "\x1b[27;4;196~"),
+    ] {
+        for (mods, expected) in [
+            (
+                ModifiersState::CONTROL | ModifiersState::SHIFT,
+                ctrl_expected,
+            ),
+            (ModifiersState::ALT | ModifiersState::SHIFT, alt_expected),
+        ] {
+            let bytes = encode_key_with_modes(
+                &Key::Character(logical.into()),
+                Some(&Key::Character(unmodified.into())),
+                None,
+                Some(logical),
+                mods,
+                true,
+                false,
+                false,
+                0,
+                true,
+                true,
+                false,
+            );
+            assert_eq!(
+                bytes,
+                Some(expected.as_bytes().to_vec()),
+                "{logical}, {mods:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn modify_other_keys_full_reset_restores_legacy_ctrl_bytes() {
+    let mut terminal = noa_grid::Terminal::new(noa_core::GridSize::new(80, 24));
+    let mut stream = noa_vt::Stream::new();
+    let encode_ctrl_c = |terminal: &noa_grid::Terminal| {
+        encode_key_with_modes(
+            &Key::Character("c".into()),
+            Some(&Key::Character("c".into())),
+            None,
+            None,
+            ModifiersState::CONTROL,
+            true,
+            terminal.modes.app_cursor_keys(),
+            terminal.modes.app_keypad(),
+            terminal.kitty_keyboard_flags(),
+            terminal.modify_other_keys_2,
+            true,
+            false,
+        )
+    };
+
+    stream.feed(b"\x1b[>4;2m", &mut terminal);
+    assert_eq!(encode_ctrl_c(&terminal), Some(b"\x1b[27;5;99~".to_vec()));
+
+    stream.feed(b"\x1bc", &mut terminal);
+    assert_eq!(encode_ctrl_c(&terminal), Some(vec![0x03]));
 }
 
 #[test]

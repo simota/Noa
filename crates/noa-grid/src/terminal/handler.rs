@@ -498,6 +498,7 @@ impl Handler for Terminal {
         self.pending_agent_status = Some(None);
         self.pending_bell = false;
         self.kitty_keyboard.reset();
+        self.modify_other_keys_2 = false;
         self.kitty_images.clear();
         self.clear_selection();
         self.clear_search();

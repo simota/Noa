@@ -495,7 +495,18 @@ enum ConnectionRoute {
 /// wall-clock deadline during the WS handshake (R-2), or past it and running
 /// under the normal fixed read-poll/write-timeout pair (R-4).
 enum StreamMode {
-    Handshake { deadline: Instant },
+    Handshake {
+        deadline: Instant,
+    },
+    /// Handshake done, `noa.hello` not yet accepted: reads fail fast once the
+    /// absolute hello deadline has passed. Without this, `tungstenite`'s
+    /// `read()` loops internally until a *complete* message arrives, so an
+    /// unauthenticated client trickling one incomplete frame (each byte
+    /// inside the 50ms poll) never returns control to the loop's top-of-
+    /// iteration deadline check.
+    AwaitingHello {
+        deadline: Instant,
+    },
     Connected,
 }
 
@@ -544,16 +555,26 @@ impl DeadlineStream {
     }
 
     /// Switches this stream from the handshake's absolute-deadline mode to
-    /// the connection's normal steady-state timeouts. Called once,
-    /// immediately after `accept_hdr_with_config` returns successfully.
-    fn mark_connected(&mut self) -> io::Result<()> {
-        self.mode = StreamMode::Connected;
+    /// the connection's normal steady-state timeouts, while keeping reads
+    /// bounded by `hello_deadline` until [`Self::mark_hello_done`]. Called
+    /// once, immediately after `accept_hdr_with_config` returns successfully.
+    fn mark_connected(&mut self, hello_deadline: Instant) -> io::Result<()> {
+        self.mode = StreamMode::AwaitingHello {
+            deadline: hello_deadline,
+        };
         self.inner
             .set_read_timeout(Some(Duration::from_millis(50)))?;
         // R-4: a bounded write timeout for the connection's whole life, not
         // just the handshake — see `WRITE_TIMEOUT`'s doc comment.
         self.inner.set_write_timeout(Some(WRITE_TIMEOUT))?;
         Ok(())
+    }
+
+    /// Lifts the hello deadline once the session is authenticated.
+    fn mark_hello_done(&mut self) {
+        if matches!(self.mode, StreamMode::AwaitingHello { .. }) {
+            self.mode = StreamMode::Connected;
+        }
     }
 
     fn mark_attach_connected(&mut self) -> io::Result<()> {
@@ -567,8 +588,15 @@ impl DeadlineStream {
 
 impl io::Read for DeadlineStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if let StreamMode::Handshake { deadline } = self.mode {
-            self.arm_handshake(deadline)?;
+        match self.mode {
+            StreamMode::Handshake { deadline } => self.arm_handshake(deadline)?,
+            StreamMode::AwaitingHello { deadline } if Instant::now() >= deadline => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "hello deadline exceeded",
+                ));
+            }
+            StreamMode::AwaitingHello { .. } | StreamMode::Connected => {}
         }
         self.inner.read(buf)
     }
@@ -698,7 +726,8 @@ fn handle_connection(
         .unwrap_or(ConnectionRoute::Invalid);
     match selected {
         ConnectionRoute::Control { authority } => {
-            ws.get_mut().mark_connected()?;
+            let connected_at = Instant::now();
+            ws.get_mut().mark_connected(connected_at + hello_deadline)?;
             let (conn_id, queue) = broadcaster.register_connection();
             guard.conn_id = Some(conn_id);
             let mut session = Session {
@@ -708,7 +737,6 @@ fn handle_connection(
                 attach_authority: authority,
                 attach_leases: HashMap::new(),
             };
-            let connected_at = Instant::now();
             run_connection_loop(
                 &mut ws,
                 &backend,
@@ -783,6 +811,9 @@ fn run_connection_loop(
                     session,
                 ) {
                     ws.send(Message::Text(response)).map_err(ws_err_to_io)?;
+                }
+                if session.hello_done {
+                    ws.get_mut().mark_hello_done();
                 }
             }
             Ok(Message::Ping(payload)) => {
@@ -1625,12 +1656,34 @@ mod tests {
     fn deadline_stream_mark_connected_applies_the_steady_state_timeouts() {
         let (_client, server) = tcp_pair();
         let mut stream = DeadlineStream::new_handshake(server, Duration::from_secs(5));
-        stream.mark_connected().unwrap();
+        stream
+            .mark_connected(Instant::now() + Duration::from_secs(10))
+            .unwrap();
         assert_eq!(
             stream.inner.read_timeout().unwrap(),
             Some(Duration::from_millis(50))
         );
         assert_eq!(stream.inner.write_timeout().unwrap(), Some(WRITE_TIMEOUT));
+    }
+
+    #[test]
+    fn deadline_stream_read_fails_fast_past_the_hello_deadline_until_hello_is_done() {
+        let (mut client, server) = tcp_pair();
+        let mut stream = DeadlineStream::new_handshake(server, Duration::from_secs(5));
+        stream
+            .mark_connected(Instant::now() + Duration::from_millis(1))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        // Bytes are available, but the hello deadline has passed: fail fast
+        // rather than feeding tungstenite's read loop.
+        io::Write::write_all(&mut client, b"x").unwrap();
+        let mut buf = [0u8; 8];
+        let err = io::Read::read(&mut stream, &mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+
+        // Once hello completes the same stream reads normally.
+        stream.mark_hello_done();
+        assert_eq!(io::Read::read(&mut stream, &mut buf).unwrap(), 1);
     }
 
     #[test]

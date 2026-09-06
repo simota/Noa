@@ -25,7 +25,15 @@ pub fn encode_paste(text: &str, bracketed_paste: bool) -> Option<Vec<u8>> {
 /// (applescript Amendment 1.5). Sized to the terminal's OSC 52 clipboard cap
 /// (8 MiB decoded) so a scripted write can never queue more than an equivalent
 /// clipboard paste; anything longer is truncated on a UTF-8 boundary.
-pub(crate) const APPLESCRIPT_INPUT_TEXT_CAP: usize = 8 * 1024 * 1024;
+///
+/// This equals the pty writer's whole-queue budget (`WRITE_BYTE_CAP`), which
+/// is reserved for the *framed* bytes in one go — so the bracketed-paste
+/// markers must come out of the same cap ([`BRACKET_FRAME_LEN`]) or a
+/// payload cut exactly to the cap is rejected outright by the writer.
+pub(crate) const APPLESCRIPT_INPUT_TEXT_CAP: usize = noa_pty::WRITE_BYTE_CAP;
+
+/// Bytes added around a bracketed paste: `ESC[200~` + `ESC[201~`.
+const BRACKET_FRAME_LEN: usize = b"\x1b[200~".len() + b"\x1b[201~".len();
 
 /// Encode AppleScript `input text` for the pty (applescript R-7/AC-8). It
 /// travels the exact same path as a clipboard paste — bracketed when DECSET
@@ -33,7 +41,12 @@ pub(crate) const APPLESCRIPT_INPUT_TEXT_CAP: usize = 8 * 1024 * 1024;
 /// [`APPLESCRIPT_INPUT_TEXT_CAP`] on a UTF-8 boundary. Pure and unit-tested so
 /// the byte-level contract can be verified without an Apple Event.
 pub(crate) fn applescript_input_bytes(text: &str, bracketed_paste: bool) -> Option<Vec<u8>> {
-    encode_paste(cap_input_text(text), bracketed_paste)
+    let cap = if bracketed_paste {
+        APPLESCRIPT_INPUT_TEXT_CAP - BRACKET_FRAME_LEN
+    } else {
+        APPLESCRIPT_INPUT_TEXT_CAP
+    };
+    encode_paste(cap_input_text(text, cap), bracketed_paste)
 }
 
 /// Encode `noa.sendText`'s `paste: false` payload for the pty (noa-server
@@ -45,7 +58,7 @@ pub(crate) fn applescript_input_bytes(text: &str, bracketed_paste: bool) -> Opti
 /// [`APPLESCRIPT_INPUT_TEXT_CAP`] on a UTF-8 boundary, matching the paste
 /// path's bound on how much one RPC call can queue to the pty.
 pub(crate) fn raw_input_bytes(text: &str) -> Option<Vec<u8>> {
-    let capped = cap_input_text(text);
+    let capped = cap_input_text(text, APPLESCRIPT_INPUT_TEXT_CAP);
     if capped.is_empty() {
         None
     } else {
@@ -53,9 +66,9 @@ pub(crate) fn raw_input_bytes(text: &str) -> Option<Vec<u8>> {
     }
 }
 
-fn cap_input_text(text: &str) -> &str {
-    if text.len() > APPLESCRIPT_INPUT_TEXT_CAP {
-        let mut end = APPLESCRIPT_INPUT_TEXT_CAP;
+fn cap_input_text(text: &str, cap: usize) -> &str {
+    if text.len() > cap {
+        let mut end = cap;
         while end > 0 && !text.is_char_boundary(end) {
             end -= 1;
         }

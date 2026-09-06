@@ -147,11 +147,47 @@ pub fn write_config_updates(path: &Path, updates: &[(String, String)]) -> io::Re
     })?;
     fs::create_dir_all(parent)?;
 
-    let tmp = target.with_extension("tmp");
-    fs::write(&tmp, updated)?;
-    fs::rename(&tmp, &target)?;
+    // Create the temp file with a unique name so two concurrent writers never
+    // clobber each other's staging file, and 0600 so a config containing
+    // e.g. `server-token` is never briefly world-readable via the umask
+    // default. The existing file's mode (if any) is carried over before the
+    // rename so a user-tightened (0600) or user-loosened (0644) config keeps
+    // its permissions across a save.
+    let existing_mode = fs::metadata(&target).ok().map(|m| m.permissions());
+    let tmp = parent.join(format!(
+        ".{}.{}.tmp",
+        target
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "config".to_string()),
+        std::process::id()
+    ));
+    let write_result = write_private(&tmp, updated.as_bytes()).and_then(|()| {
+        if let Some(perms) = existing_mode {
+            fs::set_permissions(&tmp, perms)?;
+        }
+        fs::rename(&tmp, &target)
+    });
+    if write_result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    write_result
+}
 
-    Ok(())
+/// Creates `path` (truncating any stale leftover) with owner-only
+/// permissions on unix and writes `contents` to it.
+fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()
 }
 
 #[cfg(test)]
@@ -298,7 +334,44 @@ theme = 3024 Day\r
             "font-size = 16\n"
         );
         // No leftover temp file after a successful rename.
-        assert!(!config_path.with_extension("tmp").exists());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_config_updates_preserves_existing_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for mode in [0o600u32, 0o640, 0o644] {
+            let dir = unique_temp_dir(&format!("mode{mode:o}"));
+            fs::create_dir_all(&dir).unwrap();
+            let config_path = dir.join("config");
+            fs::write(&config_path, "font-size = 12\n").unwrap();
+            fs::set_permissions(&config_path, fs::Permissions::from_mode(mode)).unwrap();
+
+            write_config_updates(&config_path, &[("font-size".to_string(), "16".to_string())])
+                .unwrap();
+
+            let got = fs::metadata(&config_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(got, mode, "mode {mode:o} not preserved");
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_config_updates_creates_new_file_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = unique_temp_dir("newmode");
+        fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("config");
+
+        write_config_updates(&config_path, &[("font-size".to_string(), "16".to_string())]).unwrap();
+
+        let got = fs::metadata(&config_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(got, 0o600);
         fs::remove_dir_all(dir).unwrap();
     }
 

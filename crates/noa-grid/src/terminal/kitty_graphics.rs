@@ -262,7 +262,11 @@ impl Terminal {
             return;
         }
 
-        let Ok(raster) = sixel::rasterize(&cmd) else {
+        let bg = self
+            .colors
+            .default_bg()
+            .unwrap_or_else(|| self.colors.base_default_bg());
+        let Ok(raster) = sixel::rasterize(&cmd, bg) else {
             return;
         };
         let cols = raster.width.div_ceil(cell_w).clamp(1, u16::MAX as u32) as u16;
@@ -315,9 +319,12 @@ impl Terminal {
             return;
         }
         let free = kitty_delete_frees(spec);
-        let number_ids: Vec<u32> = match spec {
-            KittyDelete::ByNumber { .. } => self.kitty_images.ids_with_number(cmd.image_number),
-            _ => Vec::new(),
+        let number_id = match spec {
+            KittyDelete::ByNumber { .. } => self
+                .kitty_images
+                .get_by_number(cmd.image_number)
+                .map(|image| image.id),
+            _ => None,
         };
         let (cursor_abs, cursor_col) = {
             let s = self.active();
@@ -341,7 +348,10 @@ impl Terminal {
                 p.image_id == cmd.image_id
                     && (cmd.placement_id == 0 || p.placement_id == cmd.placement_id)
             }
-            KittyDelete::ByNumber { .. } => number_ids.contains(&p.image_id),
+            KittyDelete::ByNumber { .. } => {
+                number_id == Some(p.image_id)
+                    && (cmd.placement_id == 0 || p.placement_id == cmd.placement_id)
+            }
             KittyDelete::AtCursor { .. } => p.covers_abs(cursor_abs, cursor_col),
             KittyDelete::AtCell { .. } => p.covers_abs(target_abs, target_col),
             KittyDelete::AtCellZ { .. } => {
@@ -359,7 +369,17 @@ impl Terminal {
         });
 
         if free {
-            for id in removed {
+            // Candidates are the images whose placements were just removed
+            // *plus* the images the command named directly: an image that was
+            // transmitted but never placed has no placement to remove, yet
+            // `d=I`/`d=N` must still free its data.
+            let mut candidates = removed;
+            match spec {
+                KittyDelete::ById { .. } if cmd.image_id != 0 => candidates.push(cmd.image_id),
+                KittyDelete::ByNumber { .. } => candidates.extend(number_id),
+                _ => {}
+            }
+            for id in candidates {
                 if !self.image_referenced(id) {
                     self.kitty_images.remove(id);
                 }

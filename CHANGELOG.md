@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.12] - 2026-09-06
+
+### Fixed
+
+- Config: an atomic save creates its temp file 0600 with a unique name and
+  carries the existing mode over the rename, so a config holding
+  `server-token` no longer widens to the umask default. A key shadowed by a
+  trailing `config-file` include is appended after the include (scalar keys
+  only, so repeatable keys such as `font-family` and `keybind` do not
+  accumulate stale entries), and the watcher tracks transitive includes,
+  re-deriving the list even when a reload fails (#73, #74).
+- Sixel: geometric canvas growth for column-at-a-time streams; DEC HLS hue 0
+  is blue; P2 0/2 fills with the terminal background, 1 is transparent.
+  Kitty: `d=n/N` honors `p=`, and uppercase delete frees images that were
+  transmitted but never placed (#73).
+- IPC: the absolute hello deadline stays enforced at the stream level after
+  the WebSocket handshake. Token provisioning publishes via temp file +
+  `hard_link` so concurrent first-run servers converge on one token, and a
+  stale staging file from a reused PID no longer blocks it (#73, #74).
+- Paste: bracketed-frame bytes are excluded from the 8 MiB cap so a capped
+  AppleScript/`sendText` payload is not rejected by the pty budget (#73).
+- Grid keeps only tracked DEC modes in the mode set; session restore caps
+  the file at 16 MiB / 128 JSON levels so a corrupt file fails as "no
+  session" instead of overflowing the stack; `open` children for URIs are
+  reaped on a detached thread (#74).
+
 ## [0.2.11] - 2026-09-06
 
 ### Changed

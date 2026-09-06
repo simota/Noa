@@ -483,9 +483,25 @@ pub fn save(path: &Path, state: &SessionState) -> std::io::Result<()> {
 /// Load and parse the session at `path`, or `None` if it is absent, unreadable,
 /// malformed, or a different schema version.
 pub fn load(path: &Path) -> Option<SessionState> {
+    // Refuse to even read an implausibly large file: `load` runs on every
+    // launch before `window-save-state` is consulted (the scrollback GC needs
+    // the referenced keys either way), so a corrupt or hostile file must fail
+    // as a plain "no session" rather than exhaust memory (B05, 2026-09 audit).
+    let len = fs::metadata(path).ok()?.len();
+    if len > MAX_SESSION_FILE_BYTES {
+        log::warn!(
+            "session: ignoring {} ({len} bytes exceeds the {MAX_SESSION_FILE_BYTES}-byte limit)",
+            path.display()
+        );
+        return None;
+    }
     let source = fs::read_to_string(path).ok()?;
     parse(&source)
 }
+
+/// Upper bound on a session file `load` will read. A real session is a few
+/// KiB per pane; this leaves three orders of magnitude of headroom.
+const MAX_SESSION_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// A minimal JSON value model + recursive-descent parser, scoped to what the
 /// session schema needs. Not a general JSON library — no number exponent
@@ -559,6 +575,7 @@ mod json {
         let mut parser = Parser {
             chars: source.chars().collect(),
             pos: 0,
+            depth: 0,
         };
         parser.skip_whitespace();
         let value = parser.parse_value()?;
@@ -570,9 +587,17 @@ mod json {
         Some(value)
     }
 
+    /// Nesting cap for arrays/objects. The session schema nests a handful of
+    /// levels plus one per split; a document deeper than this is not a
+    /// session, and the recursive-descent parser must return `None` instead
+    /// of recursing until the stack overflows (an abort, not a panic, so it
+    /// would take the whole launch down).
+    const MAX_DEPTH: usize = 128;
+
     struct Parser {
         chars: Vec<char>,
         pos: usize,
+        depth: usize,
     }
 
     impl Parser {
@@ -595,13 +620,23 @@ mod json {
         fn parse_value(&mut self) -> Option<Value> {
             self.skip_whitespace();
             match self.peek()? {
-                '{' => self.parse_object(),
-                '[' => self.parse_array(),
+                '{' => self.nested(Self::parse_object),
+                '[' => self.nested(Self::parse_array),
                 '"' => self.parse_string().map(Value::String),
                 't' | 'f' => self.parse_bool(),
                 'n' => self.parse_null(),
                 _ => self.parse_number(),
             }
+        }
+
+        fn nested(&mut self, parse: fn(&mut Self) -> Option<Value>) -> Option<Value> {
+            if self.depth >= MAX_DEPTH {
+                return None;
+            }
+            self.depth += 1;
+            let value = parse(self);
+            self.depth -= 1;
+            value
         }
 
         fn parse_object(&mut self) -> Option<Value> {
@@ -738,6 +773,28 @@ use json::ObjectExt;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deeply_nested_json_is_rejected_not_overflowed() {
+        let deep = "[".repeat(100_000);
+        assert!(json::parse(&deep).is_none());
+        let deep_closed = format!("{}{}", "[".repeat(100_000), "]".repeat(100_000));
+        assert!(json::parse(&deep_closed).is_none());
+        // Realistic nesting still parses.
+        let ok = format!("{}1{}", "[".repeat(50), "]".repeat(50));
+        assert!(json::parse(&ok).is_some());
+    }
+
+    #[test]
+    fn oversized_session_file_is_ignored() {
+        let dir = std::env::temp_dir().join(format!("noa-session-oversize-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.json");
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(MAX_SESSION_FILE_BYTES + 1).unwrap();
+        assert!(load(&path).is_none());
+        fs::remove_dir_all(&dir).ok();
+    }
 
     fn sample() -> SessionState {
         SessionState {

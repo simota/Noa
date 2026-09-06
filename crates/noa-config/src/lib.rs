@@ -1762,6 +1762,17 @@ pub fn scrollback_dir_in(data_dir: &Path) -> PathBuf {
     data_dir.join("noa").join("scrollback")
 }
 
+/// Every file the config at `path` includes via `config-file`, directly or
+/// transitively (optional includes that don't exist yet included), so a
+/// live-reload watcher can track edits to split-out config files. An
+/// unreadable `path` yields an empty list.
+pub fn config_include_paths(path: &Path) -> Vec<PathBuf> {
+    match fs::read_to_string(path) {
+        Ok(source) => parser::included_file_paths(path, &source),
+        Err(_) => Vec::new(),
+    }
+}
+
 pub fn load_overrides_from_path(path: &Path) -> anyhow::Result<(ConfigOverrides, Vec<Diagnostic>)> {
     let source = fs::read_to_string(path)
         .with_context(|| format!("failed to read config file {}", path.display()))?;

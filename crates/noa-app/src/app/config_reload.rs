@@ -18,6 +18,12 @@ const CONFIG_WATCH_INTERVAL: Duration = Duration::from_secs(3);
 pub(super) struct ConfigWatcher {
     path: Option<PathBuf>,
     signature: Option<ConfigFileSignature>,
+    /// Files pulled in via `config-file` (transitively, optional-and-absent
+    /// ones included) with the last observed signature. Editing a
+    /// split-out child config must reload just like editing the main file
+    /// (B02, 2026-09 audit). The list is re-derived whenever a watched file
+    /// changes, even if the resulting configuration cannot be applied.
+    includes: Vec<(PathBuf, Option<ConfigFileSignature>)>,
     next_check: Option<Instant>,
 }
 
@@ -48,12 +54,14 @@ impl ConfigWatcher {
 
     fn with_path(path: Option<PathBuf>) -> Self {
         let signature = path.as_deref().and_then(config_file_signature);
+        let includes = path.as_deref().map(include_signatures).unwrap_or_default();
         let next_check = path
             .as_ref()
             .map(|_| Instant::now() + CONFIG_WATCH_INTERVAL);
         Self {
             path,
             signature,
+            includes,
             next_check,
         }
     }
@@ -72,8 +80,19 @@ impl ConfigWatcher {
         let next = now + CONFIG_WATCH_INTERVAL;
         self.next_check = Some(next);
         let signature = config_file_signature(path);
-        if signature != self.signature {
-            self.signature = signature;
+        let mut changed = signature != self.signature;
+        self.signature = signature;
+        for (include, seen) in &mut self.includes {
+            let current = config_file_signature(include);
+            if current != *seen {
+                *seen = current;
+                changed = true;
+            }
+        }
+        if changed {
+            // Dependencies belong to the files on disk, even when validation
+            // fails and the application keeps its previous configuration.
+            self.includes = include_signatures(path);
             ConfigWatchTick::Changed(next)
         } else {
             ConfigWatchTick::Waiting(next)
@@ -95,8 +114,19 @@ impl ConfigWatcher {
     fn mark_current(&mut self) {
         if let Some(path) = self.path.as_deref() {
             self.signature = config_file_signature(path);
+            self.includes = include_signatures(path);
         }
     }
+}
+
+fn include_signatures(path: &Path) -> Vec<(PathBuf, Option<ConfigFileSignature>)> {
+    noa_config::config_include_paths(path)
+        .into_iter()
+        .map(|include| {
+            let signature = config_file_signature(&include);
+            (include, signature)
+        })
+        .collect()
 }
 
 fn config_file_signature(path: &Path) -> Option<ConfigFileSignature> {
@@ -807,6 +837,125 @@ mod tests {
             watcher.tick(due + CONFIG_WATCH_INTERVAL * 3),
             ConfigWatchTick::Changed(_)
         ));
+    }
+
+    /// Editing only a `config-file` child (main file untouched) must still
+    /// reload; a `?`-optional include that appears later must too, and a
+    /// newly added include becomes tracked after `mark_current`.
+    #[test]
+    fn watcher_detects_edits_to_included_files() {
+        let dir = temp_config_path("includes");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config");
+        let child = dir.join("child.conf");
+        fs::write(&child, "font-size = 18\n").unwrap();
+        fs::write(
+            &path,
+            "font-size = 14\nconfig-file = child.conf\nconfig-file = ?optional.conf\n",
+        )
+        .unwrap();
+        let mut watcher = ConfigWatcher::with_path(Some(path.clone()));
+        let mut now = Instant::now() + CONFIG_WATCH_INTERVAL;
+        assert!(matches!(watcher.tick(now), ConfigWatchTick::Waiting(_)));
+
+        // Child edited, main file's mtime/len unchanged. Force a distinct
+        // signature via length so a same-second mtime cannot mask it.
+        fs::write(&child, "font-size = 20\n\n").unwrap();
+        now += CONFIG_WATCH_INTERVAL;
+        assert!(matches!(watcher.tick(now), ConfigWatchTick::Changed(_)));
+        now += CONFIG_WATCH_INTERVAL;
+        assert!(matches!(watcher.tick(now), ConfigWatchTick::Waiting(_)));
+
+        // Optional include comes into existence.
+        fs::write(dir.join("optional.conf"), "theme = X\n").unwrap();
+        now += CONFIG_WATCH_INTERVAL;
+        assert!(matches!(watcher.tick(now), ConfigWatchTick::Changed(_)));
+
+        // A new include added to the main file is tracked after reload.
+        let extra = dir.join("extra.conf");
+        fs::write(&extra, "font-size = 30\n").unwrap();
+        fs::write(
+            &path,
+            "config-file = child.conf\nconfig-file = extra.conf\n\n\n",
+        )
+        .unwrap();
+        watcher.mark_current();
+        assert!(watcher.includes.iter().any(|(p, _)| p == &extra));
+        now += CONFIG_WATCH_INTERVAL;
+        assert!(matches!(watcher.tick(now), ConfigWatchTick::Waiting(_)));
+        fs::write(&extra, "font-size = 31\n\n").unwrap();
+        now += CONFIG_WATCH_INTERVAL;
+        assert!(matches!(watcher.tick(now), ConfigWatchTick::Changed(_)));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn watcher_detects_new_include_edits_after_failed_reload() {
+        let dir = temp_config_path("failed-reload");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config");
+        let child = dir.join("child.conf");
+        let grandchild = dir.join("grandchild.conf");
+        let legacy = dir.join("config.toml");
+        fs::write(&path, "config-file = child.conf\n").unwrap();
+        fs::write(&child, "font-size = 18\n").unwrap();
+        let load = || {
+            noa_config::load_startup_config_from(
+                &path,
+                &legacy,
+                noa_config::ConfigOverrides::default(),
+            )
+        };
+        assert_eq!(load().unwrap().0.font_size, 18.0);
+        let mut watcher = ConfigWatcher::with_path(Some(path.clone()));
+        let mut now = Instant::now() + CONFIG_WATCH_INTERVAL;
+
+        fs::write(
+            &grandchild,
+            format!(
+                "client-token-file = {}\n",
+                dir.join("missing-token").display()
+            ),
+        )
+        .unwrap();
+        fs::write(&child, "font-size = 18\nconfig-file = grandchild.conf\n").unwrap();
+        assert!(matches!(watcher.tick(now), ConfigWatchTick::Changed(_)));
+        assert!(
+            load()
+                .unwrap_err()
+                .to_string()
+                .contains("client-token-file")
+        );
+
+        // A failed reload does not call mark_current. Without another edit
+        // it should stay idle, while still watching the newly added child.
+        now += CONFIG_WATCH_INTERVAL;
+        assert!(matches!(watcher.tick(now), ConfigWatchTick::Waiting(_)));
+        fs::write(&grandchild, "font-size = 22\n").unwrap();
+        now += CONFIG_WATCH_INTERVAL;
+        assert!(matches!(watcher.tick(now), ConfigWatchTick::Changed(_)));
+        assert_eq!(load().unwrap().0.font_size, 22.0);
+        watcher.mark_current();
+
+        // Removing the include must also remove it from the watch list,
+        // even when the replacement configuration still fails to load.
+        fs::write(
+            &child,
+            format!(
+                "client-token-file = {}\n",
+                dir.join("missing-token").display()
+            ),
+        )
+        .unwrap();
+        now += CONFIG_WATCH_INTERVAL;
+        assert!(matches!(watcher.tick(now), ConfigWatchTick::Changed(_)));
+        assert!(load().is_err());
+        fs::write(&grandchild, "font-size = 24\n\n").unwrap();
+        now += CONFIG_WATCH_INTERVAL;
+        assert!(matches!(watcher.tick(now), ConfigWatchTick::Waiting(_)));
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// `expedite` (focus gain / settings-panel commit) must make the very

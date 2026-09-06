@@ -1858,3 +1858,23 @@ fn unique_temp_dir(name: &str) -> PathBuf {
             .as_nanos()
     ))
 }
+
+#[test]
+fn included_file_paths_lists_transitive_and_missing_optional_includes() {
+    let dir = unique_temp_dir("config-file-paths");
+    fs::create_dir_all(&dir).unwrap();
+    let main_path = dir.join("config");
+    let child = dir.join("child");
+    let grandchild = dir.join("grandchild");
+    fs::write(&grandchild, "font-size = 9").unwrap();
+    fs::write(&child, "config-file = grandchild").unwrap();
+    fs::write(&main_path, "config-file = child\nconfig-file = ?absent").unwrap();
+
+    let paths = crate::config_include_paths(&main_path);
+
+    assert_eq!(
+        paths,
+        vec![child.clone(), grandchild.clone(), dir.join("absent")]
+    );
+    fs::remove_dir_all(&dir).unwrap();
+}

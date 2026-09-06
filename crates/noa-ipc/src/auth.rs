@@ -140,28 +140,45 @@ pub fn load_or_create_token(path: &Path, configured: Option<&str>) -> io::Result
         }
         log::warn!("noa-ipc: server-token is empty; falling back to generated token file");
     }
-    if let Ok(existing) = fs::read_to_string(path) {
-        let trimmed = existing.trim();
-        if !trimmed.is_empty() {
-            repair_token_file_permissions(path);
-            return Ok(trimmed.to_string());
-        }
-        // R-1: the file exists but is empty, so we fall through to
-        // regenerate into it below. `OpenOptions::mode(0o600)` in
-        // `write_token_file` only applies at file *creation*; an existing
-        // file (e.g. left at 0644 by a restrictive umask never being in
-        // effect) keeps its old mode across a truncate+write. Repair perms
-        // now so the freshly generated secret is never written into a
-        // world/group-readable file, even momentarily.
-        repair_token_file_permissions(path);
+    if let Some(existing) = read_existing_token(path) {
+        return Ok(existing);
     }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    // Publish the freshly generated token with a create-if-absent link
+    // rather than a truncating write: two noa processes initializing the
+    // same config dir at once (B03, 2026-09 audit) must end up agreeing on
+    // one token, whichever of them wins the `bind` later. The first to link
+    // owns the file; the loser discards its candidate and adopts the
+    // winner's. The file is never observable empty or half-written because
+    // the bytes land in a private temp file before the link.
     let token = generate_token();
-    write_token_file(path, &token)?;
+    match publish_token_file(path, &token) {
+        Ok(()) => {
+            repair_token_file_permissions(path);
+            Ok(token)
+        }
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => read_existing_token(path)
+            .ok_or_else(|| {
+                io::Error::other("token file appeared during creation but could not be read")
+            }),
+        Err(err) => Err(err),
+    }
+}
+
+/// The token in `path`, if the file exists and holds one. An existing
+/// *empty* file is removed (R-1) so `publish_token_file` can create a fresh
+/// 0600 file in its place; `OpenOptions::mode` only applies at creation.
+fn read_existing_token(path: &Path) -> Option<String> {
+    let existing = fs::read_to_string(path).ok()?;
+    let trimmed = existing.trim();
+    if trimmed.is_empty() {
+        let _ = fs::remove_file(path);
+        return None;
+    }
     repair_token_file_permissions(path);
-    Ok(token)
+    Some(trimmed.to_string())
 }
 
 /// Repairs (not rejects) an existing token file's permissions on unix if
@@ -200,20 +217,48 @@ fn generate_token() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Writes `token` to a private temp file next to `path` and links it into
+/// place with a create-if-absent semantics: fails with `AlreadyExists` (temp
+/// file removed) when another process published first.
 #[cfg(unix)]
-fn write_token_file(path: &Path, token: &str) -> io::Result<()> {
+fn publish_token_file(path: &Path, token: &str) -> io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(token.as_bytes())
+    let tmp = staging_path(path);
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        file.write_all(token.as_bytes())?;
+        file.sync_all()?;
+        fs::hard_link(&tmp, path)
+    })();
+    let _ = fs::remove_file(&tmp);
+    result
 }
 
 #[cfg(not(unix))]
-fn write_token_file(path: &Path, token: &str) -> io::Result<()> {
-    fs::write(path, token)
+fn publish_token_file(path: &Path, token: &str) -> io::Result<()> {
+    let tmp = staging_path(path);
+    let result = fs::write(&tmp, token).and_then(|()| fs::hard_link(&tmp, path));
+    let _ = fs::remove_file(&tmp);
+    result
+}
+
+/// Per-process, per-thread-unique staging name so concurrent publishers
+/// never share a temp file.
+fn staging_path(path: &Path) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "server-token".to_string());
+    path.with_file_name(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ))
 }

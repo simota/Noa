@@ -37,9 +37,21 @@ pub fn open_uri(uri: &str) {
         log::warn!("refusing to open hyperlink with disallowed scheme: {uri}");
         return;
     }
-    if let Err(err) = std::process::Command::new("open").arg(uri).spawn() {
-        log::warn!("failed to open hyperlink {uri}: {err}");
-    }
+    // Wait on a detached thread, mirroring `open_path`: a dropped `Child` is
+    // never reaped by std, so a fire-and-forget `spawn()` here left one
+    // zombie per opened link for the life of the process (B06, 2026-09
+    // audit). `open` returns as soon as the handler is launched, so the
+    // thread is short-lived; the main thread must not block on it.
+    let uri = uri.to_owned();
+    std::thread::spawn(
+        move || match std::process::Command::new("open").arg(&uri).status() {
+            Ok(status) if !status.success() => {
+                log::warn!("`open` failed for hyperlink {uri} ({status})");
+            }
+            Ok(_) => {}
+            Err(err) => log::warn!("failed to open hyperlink {uri}: {err}"),
+        },
+    );
 }
 
 /// Open `path` (already resolved to an absolute filesystem path) with the

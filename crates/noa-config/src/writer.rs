@@ -22,6 +22,10 @@ use crate::parser::parse_directives;
 ///   earlier occurrences are left untouched.
 /// - A key absent from `original` is appended as a new `key = value` line at
 ///   the end.
+/// - If a `config-file` include directive appears *after* the key's last
+///   occurrence, the key is additionally appended at the end so the
+///   included file cannot shadow the new value (includes splice in at the
+///   directive's position, so only a trailing line is guaranteed to win).
 /// - Every other line (comments, unknown keys, blank lines, other keys, and
 ///   the original line order) is preserved byte-for-byte.
 pub fn apply_updates(original: &str, updates: &[(String, String)]) -> String {
@@ -33,6 +37,17 @@ pub fn apply_updates(original: &str, updates: &[(String, String)]) -> String {
     let mut replacements: HashMap<usize, String> = HashMap::new();
     let mut appended: Vec<&(String, String)> = Vec::new();
 
+    // The reader splices an included file's directives in at the point of
+    // its `config-file` line, so an include *after* the key's last
+    // occurrence can still shadow an in-place rewrite. In that case the new
+    // value is also appended at the end of the file — after every include —
+    // so it is what the reader resolves. (B01, 2026-09 audit.)
+    let last_include_line = directives
+        .iter()
+        .filter(|directive| directive.key == "config-file")
+        .map(|directive| directive.line)
+        .max();
+
     for update @ (key, value) in updates {
         match directives
             .iter()
@@ -41,6 +56,9 @@ pub fn apply_updates(original: &str, updates: &[(String, String)]) -> String {
         {
             Some(directive) => {
                 replacements.insert(directive.line, format!("{key} = {value}"));
+                if last_include_line.is_some_and(|include| include > directive.line) {
+                    appended.push(update);
+                }
             }
             None => appended.push(update),
         }
@@ -258,6 +276,44 @@ theme = 3024 Day\r
         let output = apply_updates(original, &[("font-size".to_string(), "16".to_string())]);
 
         assert_eq!(output, "font-size = 12\nfont-size = 16\n");
+    }
+
+    #[test]
+    fn key_shadowed_by_trailing_include_is_also_appended() {
+        let original = "font-size = 14\nconfig-file = child.conf\n";
+
+        let output = apply_updates(original, &[("font-size".to_string(), "22".to_string())]);
+
+        assert_eq!(
+            output,
+            "font-size = 22\nconfig-file = child.conf\nfont-size = 22\n"
+        );
+    }
+
+    #[test]
+    fn key_after_include_is_replaced_in_place_only() {
+        let original = "config-file = child.conf\nfont-size = 14\n";
+
+        let output = apply_updates(original, &[("font-size".to_string(), "22".to_string())]);
+
+        assert_eq!(output, "config-file = child.conf\nfont-size = 22\n");
+    }
+
+    #[test]
+    fn saved_value_wins_over_trailing_include_after_reload() {
+        let dir = unique_temp_dir("include-shadow");
+        fs::create_dir_all(&dir).unwrap();
+        let main_path = dir.join("config");
+        fs::write(dir.join("child.conf"), "font-size = 18\n").unwrap();
+        fs::write(&main_path, "font-size = 14\nconfig-file = child.conf\n").unwrap();
+
+        write_config_updates(&main_path, &[("font-size".to_string(), "22".to_string())]).unwrap();
+
+        let source = fs::read_to_string(&main_path).unwrap();
+        let (overrides, diagnostics) = crate::parse_overrides(&main_path, &source);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(overrides.font_size, Some(22.0));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

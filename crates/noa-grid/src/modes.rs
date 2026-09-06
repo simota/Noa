@@ -57,7 +57,48 @@ impl ModeState {
         m
     }
 
+    /// Whether `(value, ansi)` is a mode noa implements. Anything else is
+    /// dropped by [`Self::set`] (Ghostty parity: `modes.zig` has a closed
+    /// enum and unknown numbers are no-ops) so a hostile stream cycling
+    /// through thousands of unknown `CSI ? n h` cannot grow the linear-
+    /// scanned set and slow every subsequent print (B04, 2026-09 audit).
+    /// Keep in sync with the accessors below, DECRQM in
+    /// `terminal/handler.rs`, and `seed.rs`'s `REPLAYED_PRIVATE_MODES`.
+    pub fn is_tracked(value: u16, ansi: bool) -> bool {
+        if ansi {
+            matches!(value, 4 | 20)
+        } else {
+            matches!(
+                value,
+                1 | 6
+                    | 7
+                    | 9
+                    | 25
+                    | 47
+                    | 66
+                    | 69
+                    | 1000
+                    | 1002
+                    | 1003
+                    | 1004
+                    | 1005
+                    | 1006
+                    | 1007
+                    | 1015
+                    | 1047
+                    | 1048
+                    | 1049
+                    | 2004
+                    | 2026
+                    | 2027
+            )
+        }
+    }
+
     pub fn set(&mut self, value: u16, ansi: bool, on: bool) {
+        if !Self::is_tracked(value, ansi) {
+            return;
+        }
         // Mouse-format modes displace each other: setting one clears the
         // others, and resetting a non-active one leaves the active format
         // untouched (matching xterm's single extend_coords slot).
@@ -165,5 +206,27 @@ impl ModeState {
     /// LNM — line-feed/new-line mode (LF also does CR).
     pub fn linefeed_newline(&self) -> bool {
         self.get(20, true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ModeState;
+
+    #[test]
+    fn unknown_modes_are_not_retained() {
+        let mut modes = ModeState::defaults();
+        let baseline = modes.set.len();
+        for value in 10_000..20_000u16 {
+            modes.set(value, false, true);
+            modes.set(value, true, true);
+        }
+        assert_eq!(modes.set.len(), baseline);
+        assert!(!modes.get(12_345, false));
+        // Known modes still round-trip.
+        modes.set(2004, false, true);
+        assert!(modes.bracketed_paste());
+        modes.set(2004, false, false);
+        assert!(!modes.bracketed_paste());
     }
 }

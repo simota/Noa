@@ -44,15 +44,39 @@ pub(super) fn expand_directives(
     let mut visited = HashSet::new();
     visited.insert(canonical_or_self(path));
     let mut included_count = 0usize;
+    let mut included_paths = Vec::new();
     let directives = expand(
         path,
         source,
         0,
         &mut visited,
         &mut included_count,
+        &mut included_paths,
         &mut diagnostics,
     );
     (directives, diagnostics)
+}
+
+/// Every file `path` (with contents `source`) would include, directly or
+/// transitively, in expansion order — including `?`-optional includes that
+/// do not exist yet, so a watcher can notice them being created. Diagnostics
+/// are discarded; this is the dependency list for live reload, not a parse.
+pub(crate) fn included_file_paths(path: &Path, source: &str) -> Vec<PathBuf> {
+    let mut diagnostics = Vec::new();
+    let mut visited = HashSet::new();
+    visited.insert(canonical_or_self(path));
+    let mut included_count = 0usize;
+    let mut included_paths = Vec::new();
+    let _ = expand(
+        path,
+        source,
+        0,
+        &mut visited,
+        &mut included_count,
+        &mut included_paths,
+        &mut diagnostics,
+    );
+    included_paths
 }
 
 fn expand(
@@ -61,6 +85,7 @@ fn expand(
     depth: usize,
     visited: &mut HashSet<PathBuf>,
     included_count: &mut usize,
+    included_paths: &mut Vec<PathBuf>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Vec<SourcedDirective> {
     let mut out = Vec::new();
@@ -115,6 +140,7 @@ fn expand(
             continue;
         }
         *included_count += 1;
+        included_paths.push(resolved.clone());
 
         let included_source = match fs::read_to_string(&resolved) {
             Ok(text) => text,
@@ -132,6 +158,7 @@ fn expand(
             depth + 1,
             visited,
             included_count,
+            included_paths,
             diagnostics,
         ));
         visited.remove(&canonical);

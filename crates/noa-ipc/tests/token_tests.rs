@@ -151,3 +151,46 @@ fn whitespace_only_configured_token_falls_back_to_generated_file_token() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ---- B03: concurrent first-run provisioning must converge on one token ----
+
+#[test]
+fn concurrent_provisioning_agrees_with_the_file() {
+    let dir = std::env::temp_dir().join(format!(
+        "noa-ipc-token-test-concurrent-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("server-token");
+    let _ = std::fs::remove_file(&path);
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                load_or_create_token(&path, None).unwrap()
+            })
+        })
+        .collect();
+    let tokens: Vec<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    for token in &tokens {
+        assert_eq!(
+            token,
+            on_disk.trim(),
+            "every caller must return the published token"
+        );
+    }
+    assert!(
+        std::fs::read_dir(&dir)
+            .unwrap()
+            .all(|e| e.unwrap().file_name() == "server-token"),
+        "no staging files left behind"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

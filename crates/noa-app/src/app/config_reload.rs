@@ -19,11 +19,10 @@ pub(super) struct ConfigWatcher {
     path: Option<PathBuf>,
     signature: Option<ConfigFileSignature>,
     /// Files pulled in via `config-file` (transitively, optional-and-absent
-    /// ones included) with the signature seen at the last reload. Editing a
+    /// ones included) with the last observed signature. Editing a
     /// split-out child config must reload just like editing the main file
-    /// (B02, 2026-09 audit). The list is re-derived on every reload, so an
-    /// include added or removed in a watched file is picked up on the next
-    /// reload that edit triggers.
+    /// (B02, 2026-09 audit). The list is re-derived whenever a watched file
+    /// changes, even if the resulting configuration cannot be applied.
     includes: Vec<(PathBuf, Option<ConfigFileSignature>)>,
     next_check: Option<Instant>,
 }
@@ -91,6 +90,9 @@ impl ConfigWatcher {
             }
         }
         if changed {
+            // Dependencies belong to the files on disk, even when validation
+            // fails and the application keeps its previous configuration.
+            self.includes = include_signatures(path);
             ConfigWatchTick::Changed(next)
         } else {
             ConfigWatchTick::Waiting(next)
@@ -886,6 +888,74 @@ mod tests {
         assert!(matches!(watcher.tick(now), ConfigWatchTick::Changed(_)));
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn watcher_detects_new_include_edits_after_failed_reload() {
+        let dir = temp_config_path("failed-reload");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config");
+        let child = dir.join("child.conf");
+        let grandchild = dir.join("grandchild.conf");
+        let legacy = dir.join("config.toml");
+        fs::write(&path, "config-file = child.conf\n").unwrap();
+        fs::write(&child, "font-size = 18\n").unwrap();
+        let load = || {
+            noa_config::load_startup_config_from(
+                &path,
+                &legacy,
+                noa_config::ConfigOverrides::default(),
+            )
+        };
+        assert_eq!(load().unwrap().0.font_size, 18.0);
+        let mut watcher = ConfigWatcher::with_path(Some(path.clone()));
+        let mut now = Instant::now() + CONFIG_WATCH_INTERVAL;
+
+        fs::write(
+            &grandchild,
+            format!(
+                "client-token-file = {}\n",
+                dir.join("missing-token").display()
+            ),
+        )
+        .unwrap();
+        fs::write(&child, "font-size = 18\nconfig-file = grandchild.conf\n").unwrap();
+        assert!(matches!(watcher.tick(now), ConfigWatchTick::Changed(_)));
+        assert!(
+            load()
+                .unwrap_err()
+                .to_string()
+                .contains("client-token-file")
+        );
+
+        // A failed reload does not call mark_current. Without another edit
+        // it should stay idle, while still watching the newly added child.
+        now += CONFIG_WATCH_INTERVAL;
+        assert!(matches!(watcher.tick(now), ConfigWatchTick::Waiting(_)));
+        fs::write(&grandchild, "font-size = 22\n").unwrap();
+        now += CONFIG_WATCH_INTERVAL;
+        assert!(matches!(watcher.tick(now), ConfigWatchTick::Changed(_)));
+        assert_eq!(load().unwrap().0.font_size, 22.0);
+        watcher.mark_current();
+
+        // Removing the include must also remove it from the watch list,
+        // even when the replacement configuration still fails to load.
+        fs::write(
+            &child,
+            format!(
+                "client-token-file = {}\n",
+                dir.join("missing-token").display()
+            ),
+        )
+        .unwrap();
+        now += CONFIG_WATCH_INTERVAL;
+        assert!(matches!(watcher.tick(now), ConfigWatchTick::Changed(_)));
+        assert!(load().is_err());
+        fs::write(&grandchild, "font-size = 24\n\n").unwrap();
+        now += CONFIG_WATCH_INTERVAL;
+        assert!(matches!(watcher.tick(now), ConfigWatchTick::Waiting(_)));
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// `expedite` (focus gain / settings-panel commit) must make the very

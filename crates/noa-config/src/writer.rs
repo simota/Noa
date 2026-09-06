@@ -18,11 +18,11 @@ use crate::parser::parse_directives;
 ///
 /// - A key already present is rewritten in place as `key = value`; if the
 ///   key occurs on multiple lines (duplicate directives), only the **last**
-///   occurrence is replaced (Ghostty's last-wins resolution semantics) —
-///   earlier occurrences are left untouched.
+///   occurrence is replaced; earlier occurrences are left untouched. This
+///   preserves last-wins scalar resolution and intentional repeatable entries.
 /// - A key absent from `original` is appended as a new `key = value` line at
 ///   the end.
-/// - If a `config-file` include directive appears *after* the key's last
+/// - If a `config-file` include directive appears *after* a scalar key's last
 ///   occurrence, the key is additionally appended at the end so the
 ///   included file cannot shadow the new value (includes splice in at the
 ///   directive's position, so only a trailing line is guaranteed to win).
@@ -40,8 +40,9 @@ pub fn apply_updates(original: &str, updates: &[(String, String)]) -> String {
     // The reader splices an included file's directives in at the point of
     // its `config-file` line, so an include *after* the key's last
     // occurrence can still shadow an in-place rewrite. In that case the new
-    // value is also appended at the end of the file — after every include —
-    // so it is what the reader resolves. (B01, 2026-09 audit.)
+    // scalar value is also appended after every include. Repeatable keys
+    // accumulate instead, so appending them would leave stale entries in
+    // the list on subsequent saves.
     let last_include_line = directives
         .iter()
         .filter(|directive| directive.key == "config-file")
@@ -56,7 +57,9 @@ pub fn apply_updates(original: &str, updates: &[(String, String)]) -> String {
         {
             Some(directive) => {
                 replacements.insert(directive.line, format!("{key} = {value}"));
-                if last_include_line.is_some_and(|include| include > directive.line) {
+                if !is_repeatable_key(key)
+                    && last_include_line.is_some_and(|include| include > directive.line)
+                {
                     appended.push(update);
                 }
             }
@@ -93,6 +96,24 @@ pub fn apply_updates(original: &str, updates: &[(String, String)]) -> String {
     }
 
     output
+}
+
+fn is_repeatable_key(key: &str) -> bool {
+    matches!(
+        key,
+        "font-family"
+            | "font-family-bold"
+            | "font-family-italic"
+            | "font-family-bold-italic"
+            | "font-feature"
+            | "font-variation"
+            | "font-variation-bold"
+            | "font-variation-italic"
+            | "font-variation-bold-italic"
+            | "palette"
+            | "keybind"
+            | "config-file"
+    )
 }
 
 /// Splits `text` into `(content, terminator)` pairs, where `terminator` is
@@ -288,6 +309,51 @@ theme = 3024 Day\r
             output,
             "font-size = 22\nconfig-file = child.conf\nfont-size = 22\n"
         );
+    }
+
+    #[test]
+    fn repeatable_keys_are_not_duplicated_after_include() {
+        for (key, first, second) in [
+            ("font-family", "Menlo", "Monaco"),
+            ("font-family-bold", "Menlo", "Monaco"),
+            ("font-family-italic", "Menlo", "Monaco"),
+            ("font-family-bold-italic", "Menlo", "Monaco"),
+            ("font-feature", "calt", "-liga"),
+            ("font-variation", "wght=400", "wght=500"),
+            ("font-variation-bold", "wght=600", "wght=700"),
+            ("font-variation-italic", "slnt=-5", "slnt=-10"),
+            ("font-variation-bold-italic", "wght=600", "wght=700"),
+            ("palette", "0=#000000", "1=#ffffff"),
+            ("keybind", "cmd+t=tab.new", "cmd+w=close_surface"),
+        ] {
+            let original = format!("{key} = {first}\nconfig-file = child.conf\n");
+            let first_save = apply_updates(&original, &[(key.into(), first.into())]);
+            let second_save = apply_updates(&first_save, &[(key.into(), second.into())]);
+            assert_eq!(
+                second_save,
+                format!("{key} = {second}\nconfig-file = child.conf\n"),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn consecutive_font_saves_before_include_use_the_latest_family() {
+        let dir = unique_temp_dir("font-include");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config");
+        fs::write(dir.join("child.conf"), "font-size = 18\n").unwrap();
+        fs::write(&path, "font-family = Courier\nconfig-file = child.conf\n").unwrap();
+
+        for family in ["Menlo", "Monaco"] {
+            write_config_updates(&path, &[("font-family".into(), family.into())]).unwrap();
+        }
+
+        let source = fs::read_to_string(&path).unwrap();
+        let (overrides, diagnostics) = crate::parse_overrides(&path, &source);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(overrides.font.families, ["Monaco"]);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

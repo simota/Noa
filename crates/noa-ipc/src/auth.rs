@@ -220,29 +220,31 @@ fn generate_token() -> String {
 /// Writes `token` to a private temp file next to `path` and links it into
 /// place with a create-if-absent semantics: fails with `AlreadyExists` (temp
 /// file removed) when another process published first.
-#[cfg(unix)]
 fn publish_token_file(path: &Path, token: &str) -> io::Result<()> {
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;
-    let tmp = staging_path(path);
+
+    let (tmp, mut file) = loop {
+        let tmp = staging_path(path);
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        match options.open(&tmp) {
+            Ok(file) => break (tmp, file),
+            // A previous process with a reused PID may have left this name
+            // behind. Only a collision at the final link is a competing token.
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    };
     let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp)?;
         file.write_all(token.as_bytes())?;
         file.sync_all()?;
         fs::hard_link(&tmp, path)
     })();
-    let _ = fs::remove_file(&tmp);
-    result
-}
-
-#[cfg(not(unix))]
-fn publish_token_file(path: &Path, token: &str) -> io::Result<()> {
-    let tmp = staging_path(path);
-    let result = fs::write(&tmp, token).and_then(|()| fs::hard_link(&tmp, path));
+    drop(file);
     let _ = fs::remove_file(&tmp);
     result
 }

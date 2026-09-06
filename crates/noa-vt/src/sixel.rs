@@ -9,8 +9,8 @@
 pub struct SixelGraphicsCommand {
     /// `Pa` — pixel aspect ratio. Kept for future scaling parity; v1 ignores it.
     pub aspect_ratio: u16,
-    /// `Pb` — background option. `2` requests an opaque background; other
-    /// values leave zero bits transparent in the v1 rasterizer.
+    /// `Pb` — background select. `0` (omitted) and `2` paint blank pixels
+    /// with the terminal background; `1` leaves them transparent.
     pub background: u16,
     /// `Ph` — horizontal grid size, kept for parity but ignored by xterm too.
     pub horizontal_grid_size: u16,

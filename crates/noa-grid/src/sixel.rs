@@ -20,9 +20,15 @@ pub struct SixelRaster {
 
 const COLOR_REGISTERS: usize = 256;
 
+/// Growable RGBA canvas. Storage is over-allocated geometrically (row
+/// stride `cap_width`, `cap_height` rows) so that a stream which widens the
+/// image one column at a time costs amortized O(pixels) rather than the
+/// O(height × width²) of reallocating an exact-fit buffer per column.
 struct Canvas {
     width: u32,
     height: u32,
+    cap_width: u32,
+    cap_height: u32,
     pixels: Vec<u8>,
     background: [u8; 4],
 }
@@ -32,6 +38,8 @@ impl Canvas {
         Self {
             width: 0,
             height: 0,
+            cap_width: 0,
+            cap_height: 0,
             pixels: Vec::new(),
             background,
         }
@@ -46,31 +54,47 @@ impl Canvas {
         if width > MAX_IMAGE_DIM || height > MAX_IMAGE_DIM {
             return Err(KittyError::TooBig);
         }
-        let bytes = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|px| px.checked_mul(4))
-            .ok_or(KittyError::TooBig)?;
-        if bytes > TOTAL_BYTES_LIMIT {
+        if bytes_for(width, height)? > TOTAL_BYTES_LIMIT {
             return Err(KittyError::TooBig);
         }
+        if width <= self.cap_width && height <= self.cap_height {
+            self.width = width;
+            self.height = height;
+            return Ok(());
+        }
 
-        let old_width = self.width;
-        let old_height = self.height;
+        // Grow capacity geometrically; fall back to the exact requested size
+        // when doubling would overshoot the global byte budget (the request
+        // itself is known to fit).
+        let mut cap_w = width
+            .max(self.cap_width.saturating_mul(2))
+            .min(MAX_IMAGE_DIM);
+        let mut cap_h = height
+            .max(self.cap_height.saturating_mul(2))
+            .min(MAX_IMAGE_DIM);
+        if bytes_for(cap_w, cap_h)? > TOTAL_BYTES_LIMIT {
+            cap_w = width;
+            cap_h = height;
+        }
+        let bytes = bytes_for(cap_w, cap_h)?;
+
         let old = std::mem::take(&mut self.pixels);
         let mut new_pixels = vec![0u8; bytes];
         for px in new_pixels.chunks_exact_mut(4) {
             px.copy_from_slice(&self.background);
         }
-        for y in 0..old_height as usize {
-            let old_start = y * old_width as usize * 4;
-            let old_end = old_start + old_width as usize * 4;
-            let new_start = y * width as usize * 4;
-            new_pixels[new_start..new_start + old_width as usize * 4]
-                .copy_from_slice(&old[old_start..old_end]);
+        let old_stride = self.cap_width as usize * 4;
+        let new_stride = cap_w as usize * 4;
+        let row_bytes = self.width as usize * 4;
+        for y in 0..self.height as usize {
+            new_pixels[y * new_stride..y * new_stride + row_bytes]
+                .copy_from_slice(&old[y * old_stride..y * old_stride + row_bytes]);
         }
 
         self.width = width;
         self.height = height;
+        self.cap_width = cap_w;
+        self.cap_height = cap_h;
         self.pixels = new_pixels;
         Ok(())
     }
@@ -84,7 +108,7 @@ impl Canvas {
 
     fn set_pixel(&mut self, x: u32, y: u32, color: Rgb) -> Result<(), KittyError> {
         self.ensure_size(x.saturating_add(1), y.saturating_add(1))?;
-        let i = ((y as usize * self.width as usize) + x as usize) * 4;
+        let i = ((y as usize * self.cap_width as usize) + x as usize) * 4;
         self.pixels[i..i + 4].copy_from_slice(&[color.r, color.g, color.b, 0xff]);
         Ok(())
     }
@@ -94,22 +118,44 @@ impl Canvas {
         if self.width == 0 || self.height == 0 {
             return Err(KittyError::Invalid);
         }
+        let rgba = if self.cap_width == self.width && self.cap_height == self.height {
+            self.pixels
+        } else {
+            let stride = self.cap_width as usize * 4;
+            let row_bytes = self.width as usize * 4;
+            let mut compact = Vec::with_capacity(row_bytes * self.height as usize);
+            for y in 0..self.height as usize {
+                compact.extend_from_slice(&self.pixels[y * stride..y * stride + row_bytes]);
+            }
+            compact
+        };
         Ok(SixelRaster {
             width: self.width,
             height: self.height,
-            rgba: self.pixels,
+            rgba,
         })
     }
 }
 
+fn bytes_for(width: u32, height: u32) -> Result<usize, KittyError> {
+    (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or(KittyError::TooBig)
+}
+
 /// Rasterize a parsed SIXEL command into straight RGBA8.
-pub fn rasterize(cmd: &SixelGraphicsCommand) -> Result<SixelRaster, KittyError> {
+///
+/// `terminal_bg` is the terminal's current default background: per DEC
+/// STD 070, `P2` = 0 (or omitted) and 2 paint blank pixels with the
+/// background color, while `P2` = 1 leaves them transparent (the existing
+/// screen content shows through).
+pub fn rasterize(cmd: &SixelGraphicsCommand, terminal_bg: Rgb) -> Result<SixelRaster, KittyError> {
     let mut palette = xterm_palette();
-    let background = if cmd.background == 2 {
-        let c = palette[0];
-        [c.r, c.g, c.b, 0xff]
-    } else {
+    let background = if cmd.background == 1 {
         [0, 0, 0, 0]
+    } else {
+        [terminal_bg.r, terminal_bg.g, terminal_bg.b, 0xff]
     };
     let mut canvas = Canvas::new(background);
     let mut current_color = 0usize;
@@ -158,6 +204,8 @@ pub fn rasterize(cmd: &SixelGraphicsCommand) -> Result<SixelRaster, KittyError> 
                 if params.len() >= 4 {
                     declared_width = params[2];
                     declared_height = params[3];
+                    // Pre-size so a declared image is allocated once.
+                    canvas.ensure_size(declared_width, declared_height)?;
                 }
                 i = next;
             }
@@ -257,8 +305,10 @@ fn percent(value: u32) -> u8 {
     ((value.min(100) * 255 + 50) / 100) as u8
 }
 
+/// DEC HLS: hue 0° is *blue* (120° red, 240° green), unlike the usual HSL
+/// convention where 0° is red — rotate by 240° before the standard conversion.
 fn hls_to_rgb(hue: u32, lightness: u32, saturation: u32) -> Rgb {
-    let h = (hue % 360) as f64 / 360.0;
+    let h = ((hue % 360 + 240) % 360) as f64 / 360.0;
     let l = lightness.min(100) as f64 / 100.0;
     let s = saturation.min(100) as f64 / 100.0;
     if s == 0.0 {
@@ -301,13 +351,24 @@ fn channel(p: f64, q: f64, mut t: f64) -> u8 {
 mod tests {
     use super::*;
 
+    const BG: Rgb = Rgb::new(10, 20, 30);
+    const BG_PX: [u8; 4] = [10, 20, 30, 255];
+
     fn cmd(data: &[u8]) -> SixelGraphicsCommand {
+        cmd_bg(data, 0)
+    }
+
+    fn cmd_bg(data: &[u8], background: u16) -> SixelGraphicsCommand {
         SixelGraphicsCommand {
             aspect_ratio: 0,
-            background: 0,
+            background,
             horizontal_grid_size: 0,
             data: data.to_vec(),
         }
+    }
+
+    fn rasterize(cmd: &SixelGraphicsCommand) -> Result<SixelRaster, KittyError> {
+        super::rasterize(cmd, BG)
     }
 
     #[test]
@@ -335,12 +396,66 @@ mod tests {
     }
 
     #[test]
-    fn raster_attributes_extend_transparent_canvas() {
+    fn raster_attributes_extend_canvas_with_background() {
+        // P2 omitted/0 → blank pixels take the terminal background (DEC STD 070).
         let image = rasterize(&cmd(br#""1;1;4;7#1;2;100;0;0@"#)).unwrap();
 
         assert_eq!((image.width, image.height), (4, 7));
         assert_eq!(&image.rgba[0..4], &[255, 0, 0, 255]);
-        assert_eq!(&image.rgba[(4 * 6 + 3) * 4..(4 * 6 + 4) * 4], &[0, 0, 0, 0]);
+        assert_eq!(&image.rgba[(4 * 6 + 3) * 4..(4 * 6 + 4) * 4], &BG_PX);
+    }
+
+    #[test]
+    fn background_select_one_is_transparent_and_two_is_opaque() {
+        let transparent = rasterize(&cmd_bg(b"?", 1)).unwrap();
+        assert_eq!(&transparent.rgba[0..4], &[0, 0, 0, 0]);
+
+        let opaque = rasterize(&cmd_bg(b"?", 2)).unwrap();
+        assert_eq!(&opaque.rgba[0..4], &BG_PX);
+    }
+
+    #[test]
+    fn column_at_a_time_growth_matches_exact_fit_output() {
+        // Advance far down, then widen one column per sixel: the geometric
+        // growth path (stride ≠ width) must compact to the same pixels an
+        // exact-fit canvas would produce.
+        let mut data = Vec::new();
+        for _ in 0..40 {
+            data.extend_from_slice(b"-");
+        }
+        data.extend_from_slice(b"#1;2;100;0;0");
+        for _ in 0..300 {
+            data.extend_from_slice(b"@");
+        }
+        let image = rasterize(&cmd(&data)).unwrap();
+
+        assert_eq!((image.width, image.height), (300, 246));
+        assert_eq!(image.rgba.len(), 300 * 246 * 4);
+        let top_left = &image.rgba[0..4];
+        assert_eq!(top_left, &BG_PX);
+        let last_row_first_px = 240 * 300 * 4;
+        assert_eq!(
+            &image.rgba[last_row_first_px..last_row_first_px + 4],
+            &[255, 0, 0, 255]
+        );
+        let last_row_last_px = (240 * 300 + 299) * 4;
+        assert_eq!(
+            &image.rgba[last_row_last_px..last_row_last_px + 4],
+            &[255, 0, 0, 255]
+        );
+        let row_241_first = 241 * 300 * 4;
+        assert_eq!(&image.rgba[row_241_first..row_241_first + 4], &BG_PX);
+    }
+
+    #[test]
+    fn dec_hls_hue_zero_is_blue() {
+        assert_eq!(hls_to_rgb(0, 50, 100), Rgb::new(0, 0, 255));
+        assert_eq!(hls_to_rgb(120, 50, 100), Rgb::new(255, 0, 0));
+        assert_eq!(hls_to_rgb(240, 50, 100), Rgb::new(0, 255, 0));
+        assert_eq!(hls_to_rgb(360, 50, 100), Rgb::new(0, 0, 255));
+        assert_eq!(hls_to_rgb(0, 50, 0), Rgb::new(128, 128, 128));
+        // HLS and RGB color specs must agree on the primaries.
+        assert_eq!(hls_to_rgb(120, 50, 100), Rgb::new(percent(100), 0, 0));
     }
 
     #[test]

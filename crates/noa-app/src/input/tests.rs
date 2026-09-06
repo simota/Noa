@@ -854,6 +854,23 @@ fn applescript_input_caps_oversized_payload_on_char_boundary() {
     assert_eq!(bytes.len(), cap - 1);
 }
 
+// A payload cut to the cap must still fit the pty writer's whole-queue
+// budget *with* the bracketed-paste frame, or the writer rejects it outright.
+#[test]
+fn applescript_input_bracketed_frame_fits_within_pty_budget() {
+    let cap = super::paste::APPLESCRIPT_INPUT_TEXT_CAP;
+    let text = "a".repeat(cap + 100);
+    let bytes = applescript_input_bytes(&text, true).expect("non-empty");
+    assert_eq!(bytes.len(), noa_pty::WRITE_BYTE_CAP);
+    assert!(bytes.starts_with(b"\x1b[200~") && bytes.ends_with(b"\x1b[201~"));
+    assert!(
+        noa_pty::PtyWriteBudget::default().reserve(&bytes).is_ok(),
+        "framed paste at the cap must be reservable on an empty queue"
+    );
+    let raw = applescript_input_bytes(&text, false).expect("non-empty");
+    assert_eq!(raw.len(), noa_pty::WRITE_BYTE_CAP);
+}
+
 // noa-server sendText paste:false: bytes pass through untouched, unlike the
 // paste path which strips embedded bracket markers and can wrap in ESC[200~.
 #[test]

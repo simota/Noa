@@ -63,15 +63,23 @@ impl Canvas {
             return Ok(());
         }
 
-        // Grow capacity geometrically; fall back to the exact requested size
-        // when doubling would overshoot the global byte budget (the request
-        // itself is known to fit).
-        let mut cap_w = width
-            .max(self.cap_width.saturating_mul(2))
-            .min(MAX_IMAGE_DIM);
-        let mut cap_h = height
-            .max(self.cap_height.saturating_mul(2))
-            .min(MAX_IMAGE_DIM);
+        // Grow only the axes that exceed capacity; fall back to the exact
+        // requested size when doubling would overshoot the global byte budget
+        // (the request itself is known to fit).
+        let mut cap_w = if width > self.cap_width {
+            width
+                .max(self.cap_width.saturating_mul(2))
+                .min(MAX_IMAGE_DIM)
+        } else {
+            self.cap_width
+        };
+        let mut cap_h = if height > self.cap_height {
+            height
+                .max(self.cap_height.saturating_mul(2))
+                .min(MAX_IMAGE_DIM)
+        } else {
+            self.cap_height
+        };
         if bytes_for(cap_w, cap_h)? > TOTAL_BYTES_LIMIT {
             cap_w = width;
             cap_h = height;
@@ -412,6 +420,47 @@ mod tests {
 
         let opaque = rasterize(&cmd_bg(b"?", 2)).unwrap();
         assert_eq!(&opaque.rgba[0..4], &BG_PX);
+    }
+
+    #[test]
+    fn column_growth_preserves_height_capacity() {
+        let mut canvas = Canvas::new(BG_PX);
+        let red = Rgb::new(255, 0, 0);
+        for x in 0..4096 {
+            draw_sixel(&mut canvas, x, 0, b'@' - b'?', 1, red).unwrap();
+            assert_eq!(canvas.cap_height, 6);
+        }
+        assert_eq!(canvas.pixels.len(), 4096 * 6 * 4);
+
+        let image = canvas.finish(0, 0).unwrap();
+        assert_eq!((image.width, image.height), (4096, 6));
+        for (i, pixel) in image.rgba.chunks_exact(4).enumerate() {
+            assert_eq!(pixel, if i < 4096 { &[255, 0, 0, 255] } else { &BG_PX });
+        }
+    }
+
+    #[test]
+    fn row_growth_preserves_width_capacity() {
+        let mut canvas = Canvas::new(BG_PX);
+        let red = Rgb::new(255, 0, 0);
+        for y in (0..4096).step_by(6) {
+            draw_sixel(&mut canvas, 0, y, b'@' - b'?', 1, red).unwrap();
+            assert_eq!(canvas.cap_width, 1);
+        }
+        assert!(canvas.pixels.len() < 2 * 4098 * 4);
+
+        let image = canvas.finish(0, 0).unwrap();
+        assert_eq!((image.width, image.height), (1, 4098));
+        for (y, pixel) in image.rgba.chunks_exact(4).enumerate() {
+            assert_eq!(
+                pixel,
+                if y % 6 == 0 {
+                    &[255, 0, 0, 255]
+                } else {
+                    &BG_PX
+                }
+            );
+        }
     }
 
     #[test]

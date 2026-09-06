@@ -319,9 +319,12 @@ impl Terminal {
             return;
         }
         let free = kitty_delete_frees(spec);
-        let number_ids: Vec<u32> = match spec {
-            KittyDelete::ByNumber { .. } => self.kitty_images.ids_with_number(cmd.image_number),
-            _ => Vec::new(),
+        let number_id = match spec {
+            KittyDelete::ByNumber { .. } => self
+                .kitty_images
+                .get_by_number(cmd.image_number)
+                .map(|image| image.id),
+            _ => None,
         };
         let (cursor_abs, cursor_col) = {
             let s = self.active();
@@ -346,7 +349,7 @@ impl Terminal {
                     && (cmd.placement_id == 0 || p.placement_id == cmd.placement_id)
             }
             KittyDelete::ByNumber { .. } => {
-                number_ids.contains(&p.image_id)
+                number_id == Some(p.image_id)
                     && (cmd.placement_id == 0 || p.placement_id == cmd.placement_id)
             }
             KittyDelete::AtCursor { .. } => p.covers_abs(cursor_abs, cursor_col),
@@ -373,7 +376,7 @@ impl Terminal {
             let mut candidates = removed;
             match spec {
                 KittyDelete::ById { .. } if cmd.image_id != 0 => candidates.push(cmd.image_id),
-                KittyDelete::ByNumber { .. } => candidates.extend(number_ids),
+                KittyDelete::ByNumber { .. } => candidates.extend(number_id),
                 _ => {}
             }
             for id in candidates {

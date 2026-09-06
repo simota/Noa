@@ -289,6 +289,50 @@ fn kitty_delete_by_id_uppercase_frees_unplaced_image() {
 }
 
 #[test]
+fn kitty_delete_by_number_uppercase_preserves_older_unplaced_image() {
+    for action in ["t", "T"] {
+        let mut t = kitty_terminal();
+        feed(&mut t, &kitty_apc("a=t,f=32,s=1,v=1,I=9", &[1, 2, 3, 255]));
+        let old_id = t.kitty_images.get_by_number(9).unwrap().id;
+        feed(
+            &mut t,
+            &kitty_apc(&format!("a={action},f=32,s=1,v=1,I=9"), &[4, 5, 6, 255]),
+        );
+        let new_id = t.kitty_images.get_by_number(9).unwrap().id;
+        assert_ne!(old_id, new_id);
+
+        feed(&mut t, b"\x1b_Ga=d,d=N,I=9\x1b\\");
+        assert!(t.primary.kitty_placements.is_empty());
+        assert!(t.kitty_images.get(new_id).is_none());
+        assert!(t.kitty_images.get(old_id).is_some());
+
+        t.pending_writes.clear();
+        feed(&mut t, format!("\x1b_Ga=p,i={old_id}\x1b\\").as_bytes());
+        assert_eq!(t.pending_writes, format!("\x1b_Gi={old_id};OK\x1b\\").as_bytes());
+        assert_eq!(t.primary.kitty_placements.len(), 1);
+        assert_eq!(t.primary.kitty_placements[0].image_id, old_id);
+    }
+}
+
+#[test]
+fn kitty_delete_by_number_only_removes_newest_placements() {
+    for spec in ["n", "N"] {
+        let mut t = kitty_terminal();
+        feed(&mut t, &kitty_apc("a=T,f=32,s=1,v=1,I=9,p=7", &[0; 4]));
+        let old_id = t.kitty_images.get_by_number(9).unwrap().id;
+        feed(&mut t, &kitty_apc("a=T,f=32,s=1,v=1,I=9,p=7", &[0; 4]));
+        let new_id = t.kitty_images.get_by_number(9).unwrap().id;
+        assert_eq!(t.primary.kitty_placements.len(), 2);
+
+        feed(&mut t, format!("\x1b_Ga=d,d={spec},I=9,p=7\x1b\\").as_bytes());
+        assert_eq!(t.primary.kitty_placements.len(), 1);
+        assert_eq!(t.primary.kitty_placements[0].image_id, old_id);
+        assert!(t.kitty_images.get(old_id).is_some());
+        assert_eq!(t.kitty_images.get(new_id).is_some(), spec == "n");
+    }
+}
+
+#[test]
 fn kitty_delete_by_number_honours_placement_id() {
     let mut t = kitty_terminal();
     feed(

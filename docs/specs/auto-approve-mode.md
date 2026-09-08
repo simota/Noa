@@ -5,6 +5,23 @@
 - owner: simota
 - build-path decision: **apex** (`/nexus apex` — live AC: T-1 signature capture and AC-11/12/13 GUI visual checks remain manual)
 
+## 2026-09-08 extension — agy tool permission
+
+The user supplied a screenshot of agy's `Command` permission dialog and
+requested support. The same rules as the 2026-09-05 extension apply (painted
+marker, complete dialog at the live tail, whole-dialog hash, two stable scans).
+
+| Agent | Recognized dialog | Automatic response |
+|---|---|---|
+| agy | `Command`, `Requesting permission for:` followed by the displayed tool input, `Do you want to proceed?`, selected plain `1. Yes`, any number of sequential `Yes, and always allow …` choices (wrapping over several rows), a final `No`, and `↑/↓ Navigate · tab Amend · ctrl+g edit/expand command` | Enter (`\r`), accepting this execution only |
+
+- The conversation-wide and persisted (`settings.json`) "always allow" choices
+  are never selected; only the plain `1. Yes` counts as the safe choice.
+- agy's status bar below the footer may be either the idle `[Model] Cost: $…`
+  row or the `TOOL USE | Model | branch | Context: n%` row shown during tool
+  use. Both are excluded from the dialog hash.
+- As with Codex, the command content is not filtered by an allowlist or denylist.
+
 ## 2026-09-05 extension — Codex commands and agy questions
 
 The user supplied screenshots of both dialogs and requested support. This

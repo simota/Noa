@@ -48,6 +48,7 @@ pub enum AutoApproveSignature {
     ClaudeEnterConfirm,
     CodexCommand,
     AgyAskUserQuestion,
+    AgyCommand,
 }
 
 impl AutoApproveSignature {
@@ -140,6 +141,15 @@ const SIGNATURES: &[Signature] = &[
         kind: PromptKind::AskUserQuestion,
         anchors: &["question"],
         yes_label: Some("1. (Recommended) "),
+        requires_marker: true,
+        bytes: b"\r",
+    },
+    Signature {
+        id: AutoApproveSignature::AgyCommand,
+        agent: AgentKind::Agy,
+        kind: PromptKind::Command,
+        anchors: &["command"],
+        yes_label: Some("1. Yes"),
         requires_marker: true,
         bytes: b"\r",
     },
@@ -544,7 +554,9 @@ fn find_signature_with_lowercase(
 
     if matches!(
         sig.id,
-        AutoApproveSignature::CodexCommand | AutoApproveSignature::AgyAskUserQuestion
+        AutoApproveSignature::CodexCommand
+            | AutoApproveSignature::AgyAskUserQuestion
+            | AutoApproveSignature::AgyCommand
     ) {
         let region = menu_prompt_region(rows, lowercase_rows, sig)?;
         if !menu_has_live_tail(rows, *region.end(), sig) {
@@ -602,6 +614,7 @@ fn menu_prompt_region(
     let footer_text = match sig.id {
         AutoApproveSignature::CodexCommand => "Press enter to confirm or esc to cancel",
         AutoApproveSignature::AgyAskUserQuestion => "↑/↓ Navigate · enter Select · esc Skip",
+        AutoApproveSignature::AgyCommand => "↑/↓ Navigate · tab Amend · ctrl+g edit/expand command",
         _ => return None,
     };
     let footer = (anchor + 1..rows.len())
@@ -623,6 +636,9 @@ fn menu_prompt_region(
                 .is_some_and(|text| !text.trim().is_empty())
                 && agy_question_menu(rows, anchor, option, footer)
         }
+        AutoApproveSignature::AgyCommand => {
+            label == expected && agy_command_menu(rows, anchor, option, footer)
+        }
         _ => false,
     };
     valid.then_some(anchor..=footer)
@@ -636,12 +652,24 @@ fn menu_has_live_tail(rows: &[RowText], footer: usize, sig: &Signature) -> bool 
     let Some(status) = tail.next() else {
         return true;
     };
-    sig.id == AutoApproveSignature::AgyAskUserQuestion
-        && status.starts_with('[')
+    sig.agent == AgentKind::Agy && agy_status_row(status) && tail.next().is_none()
+}
+
+/// agy's one-row status bar under a dialog: `[Model] Cost: $0.0000` while
+/// idle, or `TOOL USE | Model | branch | Context: 6.94%` while a tool runs.
+fn agy_status_row(status: &str) -> bool {
+    let cost_status = status.starts_with('[')
         && status.split_once("] Cost: $").is_some_and(|(_, cost)| {
             !cost.is_empty() && cost.bytes().all(|ch| ch.is_ascii_digit() || ch == b'.')
+        });
+    let tool_status = status.strip_prefix("TOOL USE").is_some_and(|rest| {
+        rest.rsplit_once("| Context: ").is_some_and(|(_, context)| {
+            context.strip_suffix('%').is_some_and(|percent| {
+                !percent.is_empty() && percent.bytes().all(|ch| ch.is_ascii_digit() || ch == b'.')
+            })
         })
-        && tail.next().is_none()
+    });
+    cost_status || tool_status
 }
 
 fn codex_command_menu(rows: &[RowText], anchor: usize, option: usize, footer: usize) -> bool {
@@ -725,6 +753,71 @@ fn agy_question_menu(rows: &[RowText], anchor: usize, option: usize, footer: usi
         }
     }
     write_in
+}
+
+/// agy's permission dialog: `Requesting permission for:` followed by the
+/// tool input, `Do you want to proceed?`, a plain `1. Yes`, any number of
+/// broader `Yes, and always allow …` choices (which may wrap over several
+/// rows), and a final `No`.
+fn agy_command_menu(rows: &[RowText], anchor: usize, option: usize, footer: usize) -> bool {
+    let context: Vec<_> = rows[anchor + 1..option]
+        .iter()
+        .map(|row| row.trim())
+        .collect();
+    let Some(request) = context
+        .iter()
+        .position(|row| *row == "Requesting permission for:")
+    else {
+        return false;
+    };
+    let Some(proceed) = context
+        .iter()
+        .rposition(|row| *row == "Do you want to proceed?")
+    else {
+        return false;
+    };
+    if proceed <= request + 1
+        || !context[request + 1..proceed]
+            .iter()
+            .any(|row| !row.is_empty())
+    {
+        return false;
+    }
+
+    let mut next = 2;
+    let mut saw_no = false;
+    for row in &rows[option + 1..footer] {
+        let row = row.trim();
+        if row.is_empty() {
+            continue;
+        }
+        if saw_no {
+            return false;
+        }
+        match row
+            .split_once(". ")
+            .and_then(|(number, text)| number.parse::<u32>().ok().map(|number| (number, text)))
+        {
+            Some((number, text)) => {
+                if number != next {
+                    return false;
+                }
+                next += 1;
+                if text == "No" {
+                    saw_no = true;
+                } else if !text.starts_with("Yes, and always allow ") {
+                    return false;
+                }
+            }
+            // A wrapped tail of the previous `Yes, and always allow …` choice.
+            None => {
+                if next == 2 {
+                    return false;
+                }
+            }
+        }
+    }
+    saw_no
 }
 
 fn lowercase_rows(rows: &[RowText]) -> Vec<RowText> {
@@ -899,6 +992,40 @@ mod tests {
         ])
     }
 
+    fn agy_command_prompt() -> Vec<RowText> {
+        rows(&[
+            "Command",
+            "────────────────────",
+            "",
+            "Requesting permission for:",
+            "    python3 -c '",
+            "    import time, gzip, re",
+            "",
+            "    t0 = time.time()",
+            "    ⋯ (10 lines hidden)",
+            "",
+            "Do you want to proceed?",
+            "> 1. Yes",
+            "  2. Yes, and always allow in this conversation for commands that start with",
+            "'python3 -c '",
+            "import time, gzip, re",
+            "",
+            "t0 = time.time()",
+            "msg_id = \"35285538\"",
+            "pat = r...'",
+            "  3. Yes, and always allow for commands that start with 'python3 -c '",
+            "import time, gzip, re",
+            "",
+            "t0 = time.time()",
+            "msg_id = \"35285538\"",
+            "pat = r...' (Persist to settings.json)",
+            "  4. No",
+            "",
+            "  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command",
+            " TOOL USE  | Gemini 3.8 Flash (High) |  main | Context: 6.94%",
+        ])
+    }
+
     fn assert_no_auto_approval(prompt: &[RowText]) {
         let mut state = AutoApproveState::default();
         let ctx = base_ctx(fixed_now());
@@ -926,6 +1053,12 @@ mod tests {
                 AutoApproveSignature::AgyAskUserQuestion,
                 AgentKind::Agy,
                 "Question",
+            ),
+            (
+                agy_command_prompt(),
+                AutoApproveSignature::AgyCommand,
+                AgentKind::Agy,
+                "Command",
             ),
         ] {
             let mut state = AutoApproveState::default();
@@ -1022,6 +1155,33 @@ mod tests {
                     (12, "$ another command"),
                 ],
             ),
+            (
+                agy_command_prompt(),
+                vec![
+                    (0, "Question"),
+                    (3, "Requesting something else:"),
+                    (10, "Do you want to continue?"),
+                    (11, "  1. Yes"),
+                    (11, "> 1. Yes, and always allow in this conversation"),
+                    (
+                        12,
+                        "> 2. Yes, and always allow in this conversation for commands that start with",
+                    ),
+                    (12, "  2. Yes, approve everything"),
+                    (
+                        12,
+                        "  3. Yes, and always allow in this conversation for commands that start with",
+                    ),
+                    (25, "  4. No, and tell agy what to do differently"),
+                    (25, "  5. No"),
+                    (27, "  ↑/↓ Navigate · enter Select · esc Skip"),
+                    (28, "$ another command"),
+                    (
+                        28,
+                        "TOOL USE  | Gemini 3.8 Flash (High) |  main | Context: n/a",
+                    ),
+                ],
+            ),
         ] {
             for (index, replacement) in mutations {
                 let mut changed = prompt.clone();
@@ -1069,6 +1229,7 @@ mod tests {
         for (prompt, agent) in [
             (codex_command_prompt(), AgentKind::Codex),
             (agy_question_prompt(), AgentKind::Agy),
+            (agy_command_prompt(), AgentKind::Agy),
         ] {
             let mut state = AutoApproveState::default();
             let ctx = base_ctx(now);
@@ -1110,7 +1271,11 @@ mod tests {
     fn menu_hash_covers_command_question_and_all_choices_but_not_cost() {
         let now = fixed_now();
         let ctx = base_ctx(now);
-        for (mut prompt, change_row) in [(codex_command_prompt(), 6), (agy_question_prompt(), 8)] {
+        for (mut prompt, change_row) in [
+            (codex_command_prompt(), 6),
+            (agy_question_prompt(), 8),
+            (agy_command_prompt(), 5),
+        ] {
             let mut state = AutoApproveState::default();
             let _ = detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state);
             let Decision::Fire {
@@ -1124,6 +1289,12 @@ mod tests {
             state.apply_feedback(signature, region_hash, true, now);
             if signature == AutoApproveSignature::AgyAskUserQuestion {
                 prompt[12] = "[Gemini 3.8 Flash (High)] Cost: $0.0100".to_string();
+            }
+            if signature == AutoApproveSignature::AgyCommand {
+                prompt[28] =
+                    " TOOL USE  | Gemini 3.8 Flash (High) |  main | Context: 7.10%".to_string();
+            }
+            if signature.agent() == AgentKind::Agy {
                 assert_eq!(
                     detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state),
                     Decision::Hold
@@ -1156,7 +1327,11 @@ mod tests {
     #[test]
     fn static_menu_rearms_after_input_cooldown_without_new_output() {
         let now = fixed_now();
-        for prompt in [codex_command_prompt(), agy_question_prompt()] {
+        for prompt in [
+            codex_command_prompt(),
+            agy_question_prompt(),
+            agy_command_prompt(),
+        ] {
             for paste in [false, true] {
                 let mut state = AutoApproveState::default();
                 let mut ctx = base_ctx(now);

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Auto-approve: agy's `Command` permission dialog (`Requesting permission
+  for:` … `Do you want to proceed?`) is recognized and answered with Enter on
+  the plain `1. Yes` choice only; the conversation-wide and persisted "always
+  allow" choices are never selected. agy's `TOOL USE | … | Context: n%` status
+  row is accepted below the dialog alongside the existing cost row.
+
 ## [0.2.12] - 2026-09-06
 
 ### Fixed

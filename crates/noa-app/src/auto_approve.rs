@@ -1172,8 +1172,10 @@ mod tests {
                         12,
                         "  3. Yes, and always allow in this conversation for commands that start with",
                     ),
+                    (12, "stray text before any broader choice"),
                     (25, "  4. No, and tell agy what to do differently"),
                     (25, "  5. No"),
+                    (25, ""),
                     (27, "  ↑/↓ Navigate · enter Select · esc Skip"),
                     (28, "$ another command"),
                     (
@@ -1420,8 +1422,12 @@ mod tests {
                 agy_question_prompt(),
                 AutoApproveSignature::AgyAskUserQuestion,
             ),
+            (agy_command_prompt(), AutoApproveSignature::AgyCommand),
         ] {
-            let mut terminal = Terminal::new(noa_core::GridSize::new(140, 24));
+            // Tall enough for every fixture: a dialog taller than the viewport
+            // scrolls its title off and is (correctly) never recognized.
+            let grid_rows = prompt.len() as u16 + 4;
+            let mut terminal = Terminal::new(noa_core::GridSize::new(140, grid_rows));
             let mut stream = noa_vt::Stream::new();
             let frame = format!("\x1b[?25l\x1b[36m{}\x1b[0m\r\n", prompt.join("\r\n"));
             for chunk in frame.as_bytes().chunks(7) {
@@ -1447,69 +1453,90 @@ mod tests {
     }
 
     #[test]
-    fn agy_partial_cost_redraw_does_not_repeat_accepted_approval() {
-        let mut terminal = Terminal::new(noa_core::GridSize::new(140, 24));
-        let mut stream = noa_vt::Stream::new();
-        stream.feed(agy_question_prompt().join("\r\n").as_bytes(), &mut terminal);
-        let now = fixed_now();
-        let ctx = base_ctx(now);
-        let mut state = AutoApproveState::default();
-        let screen = viewport_rows_from_terminal(&terminal);
-        assert_eq!(
-            detect_and_update_any_agent(&screen, cursor(12), ctx, &mut state),
-            Decision::Hold
-        );
-        let Decision::Fire {
-            signature,
-            region_hash,
-            ..
-        } = detect_and_update_any_agent(&screen, cursor(12), ctx, &mut state)
-        else {
-            panic!("stable question should fire");
-        };
-        state.apply_feedback(signature, region_hash, true, now);
-
-        stream.feed(
-            b"\x1b[13;1H\x1b[2K[Gemini 3.8 Flash (High)] Cost: $",
-            &mut terminal,
-        );
-        let partial = viewport_rows_from_terminal(&terminal);
-        assert_no_auto_approval(&partial);
-        assert_eq!(
-            detect_and_update_any_agent(&partial, cursor(12), ctx, &mut state),
-            Decision::Hold
-        );
-        stream.feed(b"0.0100", &mut terminal);
-        let restored = viewport_rows_from_terminal(&terminal);
-        assert_eq!(
-            rescan_signature(&restored, signature, cursor(12), ctx)
-                .unwrap()
-                .region_hash,
-            region_hash
-        );
-        for _ in 0..3 {
+    fn agy_partial_status_redraw_does_not_repeat_accepted_approval() {
+        // (fixture, status row, partial redraw, completion, dialog edit, edited row)
+        for (prompt, status_row, partial, rest, edit, edit_row) in [
+            (
+                agy_question_prompt(),
+                12u16,
+                "[Gemini 3.8 Flash (High)] Cost: $",
+                "0.0100",
+                "Question 1/1: 次はどの作業を進めますか？",
+                3u16,
+            ),
+            (
+                agy_command_prompt(),
+                28,
+                " TOOL USE  | Gemini 3.8 Flash (High) |  main | Context: ",
+                "7.10%",
+                "    python3 -c 'print(1)'",
+                4,
+            ),
+        ] {
+            let grid_rows = prompt.len() as u16 + 4;
+            let mut terminal = Terminal::new(noa_core::GridSize::new(140, grid_rows));
+            let mut stream = noa_vt::Stream::new();
+            stream.feed(prompt.join("\r\n").as_bytes(), &mut terminal);
+            let now = fixed_now();
+            let ctx = base_ctx(now);
+            let mut state = AutoApproveState::default();
+            let screen = viewport_rows_from_terminal(&terminal);
             assert_eq!(
-                detect_and_update_any_agent(&restored, cursor(12), ctx, &mut state),
-                Decision::Hold,
-                "redrawing only the cost must not send another Enter"
+                detect_and_update_any_agent(&screen, cursor(status_row), ctx, &mut state),
+                Decision::Hold
             );
-        }
-        assert!(!state.needs_static_rescan());
-        assert_eq!(state.approvals.len(), 1);
+            let Decision::Fire {
+                signature,
+                region_hash,
+                ..
+            } = detect_and_update_any_agent(&screen, cursor(status_row), ctx, &mut state)
+            else {
+                panic!("stable dialog should fire: {screen:?}");
+            };
+            state.apply_feedback(signature, region_hash, true, now);
 
-        stream.feed(
-            "\x1b[4;1H\x1b[2KQuestion 1/1: 次はどの作業を進めますか？".as_bytes(),
-            &mut terminal,
-        );
-        let changed = viewport_rows_from_terminal(&terminal);
-        assert_eq!(
-            detect_and_update_any_agent(&changed, cursor(3), ctx, &mut state),
-            Decision::Hold
-        );
-        assert!(matches!(
-            detect_and_update_any_agent(&changed, cursor(3), ctx, &mut state),
-            Decision::Fire { region_hash: new_hash, .. } if new_hash != region_hash
-        ));
+            stream.feed(
+                format!("\x1b[{};1H\x1b[2K{partial}", status_row + 1).as_bytes(),
+                &mut terminal,
+            );
+            let partial_screen = viewport_rows_from_terminal(&terminal);
+            assert_no_auto_approval(&partial_screen);
+            assert_eq!(
+                detect_and_update_any_agent(&partial_screen, cursor(status_row), ctx, &mut state),
+                Decision::Hold
+            );
+            stream.feed(rest.as_bytes(), &mut terminal);
+            let restored = viewport_rows_from_terminal(&terminal);
+            assert_eq!(
+                rescan_signature(&restored, signature, cursor(status_row), ctx)
+                    .unwrap()
+                    .region_hash,
+                region_hash
+            );
+            for _ in 0..3 {
+                assert_eq!(
+                    detect_and_update_any_agent(&restored, cursor(status_row), ctx, &mut state),
+                    Decision::Hold,
+                    "redrawing only the status row must not send another Enter"
+                );
+            }
+            assert!(!state.needs_static_rescan());
+            assert_eq!(state.approvals.len(), 1);
+
+            stream.feed(
+                format!("\x1b[{};1H\x1b[2K{edit}", edit_row + 1).as_bytes(),
+                &mut terminal,
+            );
+            let changed = viewport_rows_from_terminal(&terminal);
+            assert_eq!(
+                detect_and_update_any_agent(&changed, cursor(edit_row), ctx, &mut state),
+                Decision::Hold
+            );
+            assert!(matches!(
+                detect_and_update_any_agent(&changed, cursor(edit_row), ctx, &mut state),
+                Decision::Fire { region_hash: new_hash, .. } if new_hash != region_hash
+            ));
+        }
     }
 
     #[test]

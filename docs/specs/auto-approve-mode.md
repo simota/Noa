@@ -5,6 +5,17 @@
 - owner: simota
 - build-path decision: **apex** (`/nexus apex` — live AC: T-1 signature capture and AC-11/12/13 GUI visual checks remain manual)
 
+## 2026-09-09 extension — agy run-command wording
+
+Also recognize `Requesting permission for:` followed by a displayed command,
+`Run this command?`, selected `1. Yes, run command`, sequential broader
+`Yes, and always allow …` choices, a final `No, cancel`, and the same
+`↑/↓ Navigate · tab Amend · ctrl+g edit/expand command` footer. This layout
+does not require a `Command` title. The question and Yes/No labels must match
+this variant together; the previous wording remains supported separately.
+The automatic response is one Enter (`\r`), accepting this execution only,
+with the same stability, input, live-tail, and duplicate-suppression guards.
+
 ## 2026-09-08 extension — agy tool permission
 
 The user supplied a screenshot of agy's `Command` permission dialog and

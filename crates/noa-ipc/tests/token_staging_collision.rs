@@ -25,7 +25,8 @@ fn stale_staging_files_do_not_block_token_provisioning() {
     for stale in &stale_paths {
         assert_eq!(std::fs::read_to_string(stale).unwrap(), "stale-candidate");
     }
-    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 4);
+    // token + 3 stale staging files + the advisory `server-token.lock`.
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 5);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

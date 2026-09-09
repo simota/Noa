@@ -635,11 +635,21 @@ fn match_menu_prompt_region(
         AutoApproveSignature::AgyCommand => "↑/↓ Navigate · tab Amend · ctrl+g edit/expand command",
         _ => return None,
     };
-    let footer = (anchor + 1..rows.len()).find(|&i| {
-        let text = rows[i].split_whitespace().collect::<Vec<_>>().join(" ");
-        text == footer_text
-            || (sig.id == AutoApproveSignature::AgyCommand
-                && text.strip_suffix(" · ctrl+r Review") == Some(footer_text))
+    let (footer, footer_end) = (anchor + 1..rows.len()).find_map(|start| {
+        if sig.id == AutoApproveSignature::AgyCommand {
+            // Prefer the longer footer when Review wraps after a complete
+            // legacy footer, so its continuation stays inside the dialog hash.
+            let end = wrapped_footer_end(
+                rows,
+                start,
+                "↑/↓ Navigate · tab Amend · ctrl+g edit/expand command · ctrl+r Review",
+            )
+            .or_else(|| wrapped_footer_end(rows, start, footer_text))?;
+            Some((start, end))
+        } else {
+            let text = rows[start].split_whitespace().collect::<Vec<_>>().join(" ");
+            (text == footer_text).then_some((start, start))
+        }
     })?;
     let mut selected =
         (anchor + 1..footer).filter_map(|i| selected_option(&rows[i]).map(|label| (i, label)));
@@ -663,7 +673,23 @@ fn match_menu_prompt_region(
         }
         _ => false,
     };
-    valid.then_some(anchor..=footer)
+    valid.then_some(anchor..=footer_end)
+}
+
+fn wrapped_footer_end(rows: &[RowText], start: usize, expected: &str) -> Option<usize> {
+    let mut remaining = expected;
+    for (offset, row) in rows[start..].iter().enumerate() {
+        let text = row.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.is_empty() {
+            return None;
+        }
+        // Physical rows can split a word or shortcut as well as whitespace.
+        remaining = remaining.trim_start().strip_prefix(&text)?;
+        if remaining.is_empty() {
+            return Some(start + offset);
+        }
+    }
+    None
 }
 
 fn menu_has_live_tail(rows: &[RowText], footer: usize, sig: &Signature) -> bool {
@@ -1690,6 +1716,74 @@ mod tests {
             assert!(
                 matches!(detect_and_update_any_agent(&screen, cursor, ctx, &mut state), Decision::Fire { signature, .. } if signature == expected)
             );
+        }
+    }
+
+    #[test]
+    fn agy_wrapped_review_footer_from_vt_grid_confirms_only_once() {
+        for cols in [65, 48, 53, 54, 55, 56, 60, 64, 70, 71, 90] {
+            let mut prompt = agy_review_command_prompt();
+            let status = "TOOL USE | Model | Context: 1.00%";
+            *prompt.last_mut().unwrap() = status.to_string();
+            let mut terminal = Terminal::new(noa_core::GridSize::new(cols, 80));
+            let mut stream = noa_vt::Stream::new();
+            let frame = format!("\x1b[?25l{}", prompt.join("\r\n"));
+            for chunk in frame.as_bytes().chunks(7) {
+                stream.feed(chunk, &mut terminal);
+            }
+            let screen = viewport_rows_from_terminal(&terminal);
+            let footer_start = screen.iter().position(|row| row.contains("↑/↓")).unwrap();
+            let footer_end = screen.iter().position(|row| row == status).unwrap() - 1;
+            assert_eq!(footer_end > footer_start, cols < 71);
+            let position = terminal.active().cursor;
+            let cursor = Point {
+                x: position.x,
+                y: position.y,
+            };
+            let ctx = base_ctx(fixed_now());
+            let mut state = AutoApproveState::default();
+            assert_eq!(
+                detect_and_update_any_agent(&screen, cursor, ctx, &mut state),
+                Decision::Hold
+            );
+            let Decision::Fire {
+                signature,
+                region_hash,
+                ..
+            } = detect_and_update_any_agent(&screen, cursor, ctx, &mut state)
+            else {
+                panic!("complete review footer must fire at {cols} columns: {screen:?}");
+            };
+            assert_eq!(signature, AutoApproveSignature::AgyCommand);
+            assert_eq!(signature.bytes(), b"\r");
+            let matched = rescan_signature(&screen, signature, cursor, ctx).unwrap();
+            assert_eq!(*matched.region.end(), footer_end);
+            assert_eq!(matched.region_hash, region_hash);
+            state.apply_feedback(signature, region_hash, true, ctx.now);
+            for _ in 0..3 {
+                assert_eq!(
+                    detect_and_update_any_agent(&screen, cursor, ctx, &mut state),
+                    Decision::Hold
+                );
+            }
+            let mut invalid = screen.clone();
+            invalid[footer_end].push_str(" extra output");
+            assert_no_auto_approval(&invalid);
+            assert!(rescan_signature(&invalid, signature, cursor, ctx).is_none());
+            let mut missing = screen.clone();
+            missing[footer_end].clear();
+            assert!(
+                rescan_signature(&missing, signature, cursor, ctx)
+                    .is_none_or(|matched| matched.region_hash != region_hash)
+            );
+            let mut truncated = screen.clone();
+            truncated[footer_end].pop();
+            assert_no_auto_approval(&truncated);
+            if footer_end > footer_start {
+                let mut interrupted = screen.clone();
+                interrupted.insert(footer_start + 1, String::new());
+                assert_no_auto_approval(&interrupted);
+            }
         }
     }
 

@@ -16,8 +16,10 @@ this variant together; the previous wording remains supported separately.
 The automatic response is one Enter (`\r`), accepting this execution only,
 with the same stability, input, live-tail, and duplicate-suppression guards.
 Both agy command variants also recognize this footer with a trailing
-`· ctrl+r Review`, as shown in the updated command dialog. Other footer
-suffixes remain unrecognized.
+`· ctrl+r Review`, as shown in the updated command dialog. The footer may
+wrap over adjacent physical rows, including inside words or shortcuts; its
+final row remains part of the dialog hash and precedes the live-tail check.
+Incomplete fragments and other footer suffixes remain unrecognized.
 
 ## 2026-09-08 extension — agy tool permission
 

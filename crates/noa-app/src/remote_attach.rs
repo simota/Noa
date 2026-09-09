@@ -494,6 +494,10 @@ trait ControlTransport {
     type Reservation;
 
     fn granted_scopes(&self) -> noa_ipc::ScopeSet;
+    /// The server's per-process identity from `noa.hello` (empty when the
+    /// server predates the field). Pane ids are process-local counters on
+    /// the server, so they only mean the same pane within one instance.
+    fn server_instance_id(&self) -> String;
     fn reserve_attach(&mut self, pane_id: u64) -> Result<Self::Reservation, TransportFailure>;
     fn open_reserved_attach(
         &mut self,
@@ -544,6 +548,10 @@ impl ControlTransport for noa_ipc::Client {
 
     fn granted_scopes(&self) -> noa_ipc::ScopeSet {
         noa_ipc::Client::granted_scopes(self)
+    }
+
+    fn server_instance_id(&self) -> String {
+        noa_ipc::Client::server_instance_id(self).to_string()
     }
 
     fn reserve_attach(&mut self, pane_id: u64) -> Result<Self::Reservation, TransportFailure> {
@@ -1056,6 +1064,12 @@ fn run_connection_manager<F, C, N>(
     let mut stream = noa_vt::Stream::new();
     let mut next_generation = DISCONNECTED_GENERATION;
     let mut scheduled_retry = false;
+    // Server instance the current credentials were last attached under. An
+    // automatic reconnect that lands on a *different* instance must not
+    // re-attach: the server restarted, its pane ids restarted from 1, and
+    // `credentials.pane_id` may now name an unrelated pane (B01, 2026-09
+    // audit). Only a manual retry (fresh user intent) adopts a new instance.
+    let mut attached_instance: Option<String> = None;
     publish_state(&state, RemoteAttachState::disconnected(), &notifier);
 
     loop {
@@ -1068,6 +1082,7 @@ fn run_connection_manager<F, C, N>(
             if !wait_for_manual_retry(&state, &command_rx, &shutdown, &notifier) {
                 break;
             }
+            attached_instance = None;
             scheduled_retry = true;
         }
 
@@ -1095,21 +1110,30 @@ fn run_connection_manager<F, C, N>(
             &desired_size,
             &mut stream,
             &notifier,
+            attached_instance.as_deref(),
         );
-        let Ok(EstablishedConnection {
+        let EstablishedConnection {
             mut control,
             mut attach,
             size: established_size,
-        }) = connection
-        else {
-            if scheduled_retry {
-                retry_failed(&state, &notifier);
-            } else {
-                publish_state(&state, RemoteAttachState::disconnected(), &notifier);
+        } = match connection {
+            Ok(connection) => connection,
+            Err(EstablishFailure::ServerReplaced) => {
+                publish_state(&state, RemoteAttachState::Detached, &notifier);
+                scheduled_retry = true;
+                continue;
             }
-            scheduled_retry = true;
-            continue;
+            Err(EstablishFailure::Transport) => {
+                if scheduled_retry {
+                    retry_failed(&state, &notifier);
+                } else {
+                    publish_state(&state, RemoteAttachState::disconnected(), &notifier);
+                }
+                scheduled_retry = true;
+                continue;
+            }
         };
+        attached_instance = Some(control.server_instance_id());
 
         next_generation = next_nonzero_generation(next_generation);
         store_generation(&generation, &generation_guard, next_generation);
@@ -1437,6 +1461,23 @@ fn suffix_prefix_overlap(remote: &[u8], local: &[u8]) -> usize {
     matched
 }
 
+/// Why [`establish_connection`] gave up before attaching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EstablishFailure {
+    /// Transport-level failure; the caller's bounded auto-retry applies.
+    Transport,
+    /// The control connection succeeded but the server is a different
+    /// process from the one `expected_instance` was attached under. Nothing
+    /// was reserved or resized; the caller must stop auto-reconnecting.
+    ServerReplaced,
+}
+
+impl From<TransportFailure> for EstablishFailure {
+    fn from(_: TransportFailure) -> Self {
+        Self::Transport
+    }
+}
+
 fn establish_connection<F, N>(
     factory: &mut F,
     credentials: &RemoteConnectionCredentials,
@@ -1444,7 +1485,8 @@ fn establish_connection<F, N>(
     desired_size: &Arc<Mutex<GridSize>>,
     stream: &mut noa_vt::Stream,
     notifier: &N,
-) -> Result<EstablishedConnection<F::Control>, TransportFailure>
+    expected_instance: Option<&str>,
+) -> Result<EstablishedConnection<F::Control>, EstablishFailure>
 where
     F: ConnectionFactory,
     N: ConnectionNotifier,
@@ -1459,7 +1501,22 @@ where
         requested_scopes(),
     )?;
     if !control.granted_scopes().contains(noa_ipc::Scope::Attach) {
-        return Err(TransportFailure);
+        return Err(EstablishFailure::Transport);
+    }
+    // Refuse to touch the pane at all when the server has been replaced:
+    // dropping `control` here closes the control socket without a reserve.
+    let instance = control.server_instance_id();
+    if let Some(expected) = expected_instance
+        && !expected.is_empty()
+        && !instance.is_empty()
+        && expected != instance
+    {
+        log::warn!(
+            "remote attach: server at {} restarted (instance {expected} -> {instance}); pane {} may now be a different pane, not re-attaching automatically",
+            credentials.endpoint.authority(),
+            credentials.pane_id
+        );
+        return Err(EstablishFailure::ServerReplaced);
     }
     // Claim the single-attach lease before mutating the authoritative remote
     // PTY. A losing client must not resize the pane currently owned by the
@@ -1471,18 +1528,18 @@ where
         .is_err()
     {
         let _ = control.detach(credentials.pane_id);
-        return Err(TransportFailure);
+        return Err(EstablishFailure::Transport);
     }
     let mut attach = match control.open_reserved_attach(credentials.pane_id, &reservation) {
         Ok(attach) => attach,
         Err(error) => {
             let _ = control.detach(credentials.pane_id);
-            return Err(error);
+            return Err(error.into());
         }
     };
     if attach.set_poll_timeout(REMOTE_ATTACH_POLL_TIMEOUT).is_err() {
         close_attached_connection(credentials.pane_id, &mut control, &mut attach);
-        return Err(TransportFailure);
+        return Err(EstablishFailure::Transport);
     }
     let seed = attach.take_seed();
     feed_remote_seed(stream, terminal, &seed, initial_size, notifier);
@@ -1964,6 +2021,10 @@ mod tests {
             self.granted_scopes
         }
 
+        fn server_instance_id(&self) -> String {
+            "fake-instance".to_string()
+        }
+
         fn reserve_attach(&mut self, _pane_id: u64) -> Result<Self::Reservation, TransportFailure> {
             Ok(())
         }
@@ -2102,6 +2163,10 @@ mod tests {
             self.granted_scopes
         }
 
+        fn server_instance_id(&self) -> String {
+            "blocking-seed-instance".to_string()
+        }
+
         fn reserve_attach(&mut self, _pane_id: u64) -> Result<Self::Reservation, TransportFailure> {
             Ok(())
         }
@@ -2172,12 +2237,33 @@ mod tests {
     struct ConnectedRecordingFactory {
         events: Arc<Mutex<Vec<&'static str>>>,
         reserve_fails: bool,
+        /// Instance id reported by the n-th control connection; the last
+        /// entry repeats, an empty list reports an empty (legacy) id.
+        instance_ids: Vec<&'static str>,
+        connects: Arc<AtomicUsize>,
+        /// Every attach fails on its first poll, forcing the manager back
+        /// through the reconnect path.
+        disconnect_on_poll: bool,
+    }
+
+    impl ConnectedRecordingFactory {
+        fn new(events: Arc<Mutex<Vec<&'static str>>>, reserve_fails: bool) -> Self {
+            Self {
+                events,
+                reserve_fails,
+                instance_ids: Vec::new(),
+                connects: Arc::default(),
+                disconnect_on_poll: false,
+            }
+        }
     }
 
     struct ConnectedRecordingControl {
         events: Arc<Mutex<Vec<&'static str>>>,
         granted_scopes: noa_ipc::ScopeSet,
         reserve_fails: bool,
+        instance_id: &'static str,
+        disconnect_on_poll: bool,
     }
 
     struct ConnectedRecordingAttach {
@@ -2197,10 +2283,19 @@ mod tests {
             if requested_scopes.contains(noa_ipc::Scope::Attach) {
                 self.events.lock().push("control_connect");
             }
+            let attempt = self.connects.fetch_add(1, Ordering::AcqRel);
+            let instance_id = self
+                .instance_ids
+                .get(attempt)
+                .or(self.instance_ids.last())
+                .copied()
+                .unwrap_or("");
             Ok(ConnectedRecordingControl {
                 events: Arc::clone(&self.events),
                 granted_scopes: requested_scopes,
                 reserve_fails: self.reserve_fails,
+                instance_id,
+                disconnect_on_poll: self.disconnect_on_poll,
             })
         }
     }
@@ -2211,6 +2306,10 @@ mod tests {
 
         fn granted_scopes(&self) -> noa_ipc::ScopeSet {
             self.granted_scopes
+        }
+
+        fn server_instance_id(&self) -> String {
+            self.instance_id.to_string()
         }
 
         fn reserve_attach(&mut self, _pane_id: u64) -> Result<Self::Reservation, TransportFailure> {
@@ -2230,7 +2329,7 @@ mod tests {
             self.events.lock().push("raw_open");
             Ok(ConnectedRecordingAttach {
                 events: Arc::clone(&self.events),
-                disconnect_on_poll: false,
+                disconnect_on_poll: self.disconnect_on_poll,
             })
         }
 
@@ -3059,6 +3158,10 @@ mod tests {
             scrollback_scopes()
         }
 
+        fn server_instance_id(&self) -> String {
+            "sequential-instance".to_string()
+        }
+
         fn reserve_attach(&mut self, _pane_id: u64) -> Result<Self::Reservation, TransportFailure> {
             Ok(())
         }
@@ -3366,6 +3469,8 @@ mod tests {
             events: Arc::clone(&events),
             granted_scopes: requested_scopes(),
             reserve_fails: false,
+            instance_id: "",
+            disconnect_on_poll: false,
         };
         let mut attach = ConnectedRecordingAttach {
             events: Arc::clone(&events),
@@ -3762,6 +3867,7 @@ mod tests {
             &Arc::new(Mutex::new(GridSize::new(80, 24))),
             &mut stream,
             &FakeNotifier::default(),
+            None,
         );
         let Ok(EstablishedConnection {
             control,
@@ -4020,10 +4126,7 @@ mod tests {
             credentials(),
             terminal(),
             Arc::clone(&state),
-            ConnectedRecordingFactory {
-                events: Arc::clone(&events),
-                reserve_fails: false,
-            },
+            ConnectedRecordingFactory::new(Arc::clone(&events), false),
             SystemClock,
             FakeNotifier::default(),
         )
@@ -4049,10 +4152,7 @@ mod tests {
     #[test]
     fn attach_reservation_conflict_never_resizes_the_remote_pane() {
         let events = Arc::new(Mutex::new(Vec::new()));
-        let mut factory = ConnectedRecordingFactory {
-            events: Arc::clone(&events),
-            reserve_fails: true,
-        };
+        let mut factory = ConnectedRecordingFactory::new(Arc::clone(&events), true);
         let result = establish_connection(
             &mut factory,
             &credentials(),
@@ -4060,10 +4160,92 @@ mod tests {
             &Arc::new(Mutex::new(GridSize::new(100, 30))),
             &mut noa_vt::Stream::new(),
             &FakeNotifier::default(),
+            None,
         );
 
         assert!(result.is_err());
         assert_eq!(*events.lock(), ["control_connect", "reserve"]);
+    }
+
+    fn count_events(events: &Mutex<Vec<&'static str>>, name: &str) -> usize {
+        events.lock().iter().filter(|event| **event == name).count()
+    }
+
+    #[test]
+    fn server_restart_between_reconnects_detaches_instead_of_reattaching() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let state = Arc::new(Mutex::new(RemoteAttachState::Detached));
+        let factory = ConnectedRecordingFactory {
+            instance_ids: vec!["instance-a", "instance-b"],
+            disconnect_on_poll: true,
+            ..ConnectedRecordingFactory::new(Arc::clone(&events), false)
+        };
+        let connects = Arc::clone(&factory.connects);
+        let handle = spawn_connection_manager(
+            credentials(),
+            terminal(),
+            Arc::clone(&state),
+            factory,
+            RecordingClock {
+                waits: Arc::new(Mutex::new(Vec::new())),
+            },
+            FakeNotifier::default(),
+        )
+        .unwrap();
+
+        // First attempt attaches under instance A, the attach drops on its
+        // first poll, and the automatic reconnect lands on instance B: the
+        // manager must stop *before* reserving or resizing pane 7 there.
+        wait_until(|| {
+            connects.load(Ordering::Acquire) == 2
+                && matches!(*state.lock(), RemoteAttachState::Detached)
+        });
+        assert_eq!(
+            *events.lock(),
+            [
+                "control_connect",
+                "reserve",
+                "resize",
+                "raw_open",
+                "poll_timeout",
+                "seed",
+                "raw_close",
+                "detach",
+                "control_connect",
+            ]
+        );
+
+        // A manual retry is fresh user intent: it adopts instance B and
+        // attaches again.
+        assert!(handle.manual_retry(credentials()));
+        wait_until(|| count_events(&events, "reserve") >= 2);
+        assert!(handle.shutdown_and_join_timeout(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn same_server_instance_reconnects_automatically() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let state = Arc::new(Mutex::new(RemoteAttachState::Detached));
+        let factory = ConnectedRecordingFactory {
+            instance_ids: vec!["instance-a"],
+            disconnect_on_poll: true,
+            ..ConnectedRecordingFactory::new(Arc::clone(&events), false)
+        };
+        let handle = spawn_connection_manager(
+            credentials(),
+            terminal(),
+            Arc::clone(&state),
+            factory,
+            RecordingClock {
+                waits: Arc::new(Mutex::new(Vec::new())),
+            },
+            FakeNotifier::default(),
+        )
+        .unwrap();
+
+        wait_until(|| count_events(&events, "reserve") >= 2);
+        assert!(!matches!(*state.lock(), RemoteAttachState::Detached));
+        assert!(handle.shutdown_and_join_timeout(Duration::from_secs(2)));
     }
 
     #[test]

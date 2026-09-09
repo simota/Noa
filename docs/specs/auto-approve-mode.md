@@ -15,6 +15,9 @@ does not require a `Command` title. The question and Yes/No labels must match
 this variant together; the previous wording remains supported separately.
 The automatic response is one Enter (`\r`), accepting this execution only,
 with the same stability, input, live-tail, and duplicate-suppression guards.
+Both agy command variants also recognize this footer with a trailing
+`· ctrl+r Review`, as shown in the updated command dialog. Other footer
+suffixes remain unrecognized.
 
 ## 2026-09-08 extension — agy tool permission
 

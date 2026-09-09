@@ -635,8 +635,12 @@ fn match_menu_prompt_region(
         AutoApproveSignature::AgyCommand => "↑/↓ Navigate · tab Amend · ctrl+g edit/expand command",
         _ => return None,
     };
-    let footer = (anchor + 1..rows.len())
-        .find(|&i| rows[i].split_whitespace().collect::<Vec<_>>().join(" ") == footer_text)?;
+    let footer = (anchor + 1..rows.len()).find(|&i| {
+        let text = rows[i].split_whitespace().collect::<Vec<_>>().join(" ");
+        text == footer_text
+            || (sig.id == AutoApproveSignature::AgyCommand
+                && text.strip_suffix(" · ctrl+r Review") == Some(footer_text))
+    })?;
     let mut selected =
         (anchor + 1..footer).filter_map(|i| selected_option(&rows[i]).map(|label| (i, label)));
     let (option, label) = selected.next()?;
@@ -1090,6 +1094,13 @@ mod tests {
         ])
     }
 
+    fn agy_review_command_prompt() -> Vec<RowText> {
+        let mut prompt = agy_multiline_run_command_prompt();
+        let footer = prompt.len() - 2;
+        prompt[footer].push_str(" · ctrl+r Review");
+        prompt
+    }
+
     fn assert_no_auto_approval(prompt: &[RowText]) {
         let mut state = AutoApproveState::default();
         let ctx = base_ctx(fixed_now());
@@ -1132,6 +1143,12 @@ mod tests {
             ),
             (
                 agy_multiline_run_command_prompt(),
+                AutoApproveSignature::AgyCommand,
+                AgentKind::Agy,
+                "Command",
+            ),
+            (
+                agy_review_command_prompt(),
                 AutoApproveSignature::AgyCommand,
                 AgentKind::Agy,
                 "Command",
@@ -1268,6 +1285,10 @@ mod tests {
                     ),
                     (10, "  3. Yes, approve everything"),
                     (12, "Press enter to confirm"),
+                    (
+                        12,
+                        "Press enter to confirm or esc to cancel · ctrl+r Review",
+                    ),
                 ],
             ),
             (
@@ -1283,6 +1304,7 @@ mod tests {
                     (6, "> 2. 静的解析を実行する"),
                     (9, "  5. Delete everything"),
                     (11, "space Toggle · enter Submit"),
+                    (11, "↑/↓ Navigate · enter Select · esc Skip · ctrl+r Review"),
                     (12, "$ another command"),
                 ],
             ),
@@ -1344,6 +1366,31 @@ mod tests {
                     (12, "TOOL USE | Gemini 3.8 Flash (High) | Context: n/a"),
                 ],
             ),
+            (
+                agy_review_command_prompt(),
+                vec![
+                    (11, "  1. Yes, run command"),
+                    (11, "> 1. Yes, run command, and always allow"),
+                    (
+                        12,
+                        "> 2. Yes, and always allow in this conversation for commands that start with 'git'",
+                    ),
+                    (16, ""),
+                    (
+                        18,
+                        "↑/↓ Navigate · tab Amend · ctrl+g edit/expand command · ctrl+r",
+                    ),
+                    (
+                        18,
+                        "↑/↓ Navigate · tab Amend · ctrl+g edit/expand command · ctrl+r Approve",
+                    ),
+                    (
+                        18,
+                        "↑/↓ Navigate · tab Amend · ctrl+g edit/expand command · ctrl+r Review · enter Approve all",
+                    ),
+                    (19, "$ another command"),
+                ],
+            ),
         ] {
             for (index, replacement) in mutations {
                 let mut changed = prompt.clone();
@@ -1393,6 +1440,7 @@ mod tests {
             (agy_question_prompt(), AgentKind::Agy),
             (agy_command_prompt(), AgentKind::Agy),
             (agy_run_command_prompt(), AgentKind::Agy),
+            (agy_review_command_prompt(), AgentKind::Agy),
         ] {
             let mut state = AutoApproveState::default();
             let ctx = base_ctx(now);
@@ -1603,6 +1651,16 @@ mod tests {
             ),
             (
                 agy_multiline_run_command_prompt(),
+                AutoApproveSignature::AgyCommand,
+                140,
+            ),
+            (
+                agy_review_command_prompt(),
+                AutoApproveSignature::AgyCommand,
+                90,
+            ),
+            (
+                agy_review_command_prompt(),
                 AutoApproveSignature::AgyCommand,
                 140,
             ),

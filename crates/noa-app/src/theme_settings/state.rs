@@ -1828,16 +1828,14 @@ impl ThemeSettings {
             self.restore_glass_managed_rows();
         }
         self.clear_row_input_state();
-        // G1: `FontFamily`'s default is always the empty string (fix F2),
-        // which `commit_updates()` deliberately never writes (noa-config's
-        // writer has no key-deletion primitive, so an empty value would be
-        // an invalid `font-family = ` line rather than a meaningful
-        // "unset"). Flashing here would tell the user the reset "worked"
-        // for a save that will actually write nothing — so this one case
-        // skips the flash. Every other row's reset always writes on
-        // commit, so it keeps the flash.
-        let commits_nothing_on_save =
-            matches!(&self.rows[idx].draft, RowDraft::FontFamily(name) if name.is_empty());
+        // G1: `FontFamily`'s default is the empty string, which
+        // `commit_updates()` only writes (as a `font-family = ` list reset,
+        // B06) when the config had a family to clear. When it had none the
+        // save writes nothing, and flashing would tell the user the reset
+        // "worked" for a no-op — so that one case skips the flash. Every
+        // other row's reset always writes on commit, so it keeps the flash.
+        let commits_nothing_on_save = matches!(&self.rows[idx].draft, RowDraft::FontFamily(name)
+            if name.is_empty() && self.snapshot.font_family.is_empty());
         if !commits_nothing_on_save {
             self.reset_flash_until = Some(now + RESET_FLASH_DURATION);
         }
@@ -2209,22 +2207,19 @@ impl ThemeSettings {
                         cursor_shape_config_value(*shape).to_string(),
                     ));
                 }
-                // Fix F2: an empty name is `RowDraft::default_for`'s reset
-                // value (`StartupConfig::default().font.families` is empty
-                // — "no override configured", the same value
-                // `App::open_theme_settings` itself would have seeded from
-                // an empty `self.config.font.families`). Writing a bare
-                // `font-family = ` line would be a config value no parser
-                // reads as "no override" — it would instead try to resolve
-                // the literal empty string as a font. `write_config_updates`
-                // has no key-deletion primitive (`noa-config/src/writer.rs`
-                // only rewrites-in-place or appends), so a pre-existing
-                // `font-family = X` line in the file is left as-is rather
-                // than either deleting it or emitting an invalid value —
-                // the row still resets in memory and `touched` still marks
-                // the edit as intentional (AC-19), only the write is
-                // skipped.
-                RowDraft::FontFamily(name) if name.is_empty() => {}
+                // An empty name is `RowDraft::default_for`'s reset value
+                // ("no override configured"). The writer places an empty
+                // `font-family = ` line after the last existing entry and
+                // the parser treats it as a list reset (Ghostty parity), so
+                // the reset now persists across restarts (B06, 2026-09
+                // audit). It is only worth writing when the config actually
+                // had a family to clear — a config that never set one must
+                // not gain a stray reset line.
+                RowDraft::FontFamily(name) if name.is_empty() => {
+                    if !self.snapshot.font_family.is_empty() {
+                        updates.push(("font-family".to_string(), String::new()));
+                    }
+                }
                 RowDraft::FontFamily(name) => {
                     updates.push(("font-family".to_string(), name.clone()));
                 }

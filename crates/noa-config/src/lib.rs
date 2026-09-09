@@ -270,6 +270,18 @@ pub struct ThemeAppearancePair {
     pub dark: String,
 }
 
+/// The value of one `theme` directive: a single theme name, or a
+/// `light:X,dark:Y` appearance pair. `ConfigOverrides` carries the *last*
+/// `theme` directive as one tri-state field so a later single name really
+/// does replace an earlier pair (and vice versa) — two independent
+/// `Option`s could never express "the pair was superseded" (B04, 2026-09
+/// audit).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThemeSetting {
+    Single(String),
+    Pair(ThemeAppearancePair),
+}
+
 /// One `palette = N=#rrggbb` 256-color override. Repeatable; later entries
 /// for the same index win (see [`merge_list`] wholesale-replace semantics
 /// for cross-source precedence — within one source, [`crate::parser`]
@@ -1023,8 +1035,9 @@ pub struct ConfigOverrides {
     pub cols: Option<u16>,
     pub rows: Option<u16>,
     pub font_size: Option<f32>,
-    pub theme: Option<String>,
-    pub theme_appearance: Option<ThemeAppearancePair>,
+    /// The last `theme` directive seen (single name *or* light/dark pair);
+    /// `None` = no override. See [`ThemeSetting`].
+    pub theme: Option<ThemeSetting>,
     pub font: FontConfig,
     pub palette: Vec<PaletteOverride>,
     pub clipboard_read: Option<ClipboardAccess>,
@@ -1097,18 +1110,18 @@ pub struct ConfigOverrides {
 }
 
 macro_rules! impl_redacted_config_debug {
-    ($config:ty) => {
+    ($config:ty $(, $extra:ident)*) => {
         impl std::fmt::Debug for $config {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 let server_token = self.server_token.as_ref().map(|_| "<redacted>");
                 let client_token = self.client_token.as_ref().map(|_| "<redacted>");
-                f.debug_struct(stringify!($config))
-                    .field("cols", &self.cols)
+                let mut s = f.debug_struct(stringify!($config));
+                s.field("cols", &self.cols)
                     .field("rows", &self.rows)
                     .field("font_size", &self.font_size)
-                    .field("theme", &self.theme)
-                    .field("theme_appearance", &self.theme_appearance)
-                    .field("font", &self.font)
+                    .field("theme", &self.theme);
+                $( s.field(stringify!($extra), &self.$extra); )*
+                s.field("font", &self.font)
                     .field("palette", &self.palette)
                     .field("clipboard_read", &self.clipboard_read)
                     .field(
@@ -1210,7 +1223,7 @@ macro_rules! impl_redacted_config_debug {
     };
 }
 
-impl_redacted_config_debug!(StartupConfig);
+impl_redacted_config_debug!(StartupConfig, theme_appearance);
 impl_redacted_config_debug!(ConfigOverrides);
 
 impl ConfigOverrides {
@@ -1222,7 +1235,6 @@ impl ConfigOverrides {
             rows: higher_priority.rows.or(self.rows),
             font_size: higher_priority.font_size.or(self.font_size),
             theme: higher_priority.theme.or(self.theme),
-            theme_appearance: higher_priority.theme_appearance.or(self.theme_appearance),
             font: self.font.merge(higher_priority.font),
             palette: merge_list(self.palette, higher_priority.palette),
             clipboard_read: higher_priority.clipboard_read.or(self.clipboard_read),
@@ -1366,12 +1378,20 @@ impl ConfigOverrides {
     pub fn apply_to(self, base: StartupConfig) -> StartupConfig {
         let mut keybinds = base.keybinds;
         keybinds.extend(self.keybinds);
+        // A `theme` override is exclusive: a single name clears a base pair
+        // and a pair clears a base single name, since both resolve the same
+        // `theme` key and the app prefers `theme_appearance` when set.
+        let (theme, theme_appearance) = match self.theme {
+            None => (base.theme, base.theme_appearance),
+            Some(ThemeSetting::Single(name)) => (Some(name), None),
+            Some(ThemeSetting::Pair(pair)) => (None, Some(pair)),
+        };
         StartupConfig {
             cols: self.cols.unwrap_or(base.cols),
             rows: self.rows.unwrap_or(base.rows),
             font_size: self.font_size.unwrap_or(base.font_size),
-            theme: self.theme.or(base.theme),
-            theme_appearance: self.theme_appearance.or(base.theme_appearance),
+            theme,
+            theme_appearance,
             font: self.font.apply_to(base.font),
             palette: if self.palette.is_empty() {
                 base.palette
@@ -2027,7 +2047,7 @@ font-size = 15.5
             cols: Some(100),
             rows: Some(30),
             font_size: Some(15.5),
-            theme: Some("3024 Day".to_string()),
+            theme: Some(ThemeSetting::Single("3024 Day".to_string())),
             font: FontConfig::default(),
             keybinds: vec![KeybindConfig::Bind {
                 trigger: "cmd+t".to_string(),
@@ -2910,7 +2930,7 @@ font-size = 15.5
                     cols: None,
                     rows: None,
                     font_size: None,
-                    theme: Some("3024 Day".to_string()),
+                    theme: Some(ThemeSetting::Single("3024 Day".to_string())),
                     font: FontConfig::default(),
                     ..Default::default()
                 }
@@ -2963,15 +2983,83 @@ font-size = 15.5
     fn light_dark_syntax_parses_into_theme_appearance() {
         let (overrides, diagnostics) = parse_overrides(test_path(), "theme = light:Foo,dark:Bar");
 
-        assert_eq!(overrides.theme, None);
         assert_eq!(
-            overrides.theme_appearance,
-            Some(ThemeAppearancePair {
+            overrides.theme,
+            Some(ThemeSetting::Pair(ThemeAppearancePair {
                 light: "Foo".to_string(),
                 dark: "Bar".to_string(),
-            })
+            }))
         );
         assert!(diagnostics.is_empty());
+    }
+
+    // B04 (2026-09 audit): `theme` precedence is exclusive across sources
+    // too — a higher-priority single name drops a lower-priority pair, and
+    // applying a single name onto a base that carries a pair clears it.
+    #[test]
+    fn merge_prefers_a_higher_priority_single_theme_over_a_lower_pair() {
+        let lower = ConfigOverrides {
+            theme: Some(ThemeSetting::Pair(ThemeAppearancePair {
+                light: "LightA".to_string(),
+                dark: "DarkB".to_string(),
+            })),
+            ..Default::default()
+        };
+        let higher = ConfigOverrides {
+            theme: Some(ThemeSetting::Single("SingleC".to_string())),
+            ..Default::default()
+        };
+
+        let merged = lower.merge(higher);
+        assert_eq!(
+            merged.theme,
+            Some(ThemeSetting::Single("SingleC".to_string()))
+        );
+
+        let config = merged.apply_to(StartupConfig::default());
+        assert_eq!(config.theme.as_deref(), Some("SingleC"));
+        assert_eq!(config.theme_appearance, None);
+    }
+
+    #[test]
+    fn apply_to_single_theme_clears_a_base_pair_and_vice_versa() {
+        let base = StartupConfig {
+            theme_appearance: Some(ThemeAppearancePair {
+                light: "LightA".to_string(),
+                dark: "DarkB".to_string(),
+            }),
+            ..Default::default()
+        };
+        let config = ConfigOverrides {
+            theme: Some(ThemeSetting::Single("SingleC".to_string())),
+            ..Default::default()
+        }
+        .apply_to(base);
+        assert_eq!(config.theme.as_deref(), Some("SingleC"));
+        assert_eq!(config.theme_appearance, None);
+
+        let base = StartupConfig {
+            theme: Some("SingleC".to_string()),
+            ..Default::default()
+        };
+        let pair = ThemeAppearancePair {
+            light: "LightA".to_string(),
+            dark: "DarkB".to_string(),
+        };
+        let config = ConfigOverrides {
+            theme: Some(ThemeSetting::Pair(pair.clone())),
+            ..Default::default()
+        }
+        .apply_to(base);
+        assert_eq!(config.theme, None);
+        assert_eq!(config.theme_appearance, Some(pair));
+
+        let base = StartupConfig {
+            theme: Some("Kept".to_string()),
+            ..Default::default()
+        };
+        let config = ConfigOverrides::default().apply_to(base);
+        assert_eq!(config.theme.as_deref(), Some("Kept"));
     }
 
     #[test]
@@ -2979,7 +3067,6 @@ font-size = 15.5
         let (overrides, diagnostics) = parse_overrides(test_path(), "theme = light:Foo");
 
         assert_eq!(overrides.theme, None);
-        assert_eq!(overrides.theme_appearance, None);
         assert_eq!(diagnostics.len(), 1);
         let message = &diagnostics[0].message;
         assert!(message.contains("light:"));

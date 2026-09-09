@@ -9,7 +9,7 @@ use crate::{
     MIN_SIDEBAR_WIDTH, MacosOptionAsAlt, MacosTitlebarProxyIcon, MacosTitlebarStyle,
     PaletteOverride, QuickTerminalPosition, QuickTerminalScreen, QuickTerminalSize,
     QuickTerminalSizeDim, ResizeOverlay, ScratchTerminalSize, ScrollbackPersist,
-    SyntheticStyleMode, ThemeAppearancePair, WindowSaveState,
+    SyntheticStyleMode, ThemeAppearancePair, ThemeSetting, WindowSaveState,
 };
 
 use super::diagnostics::*;
@@ -82,14 +82,8 @@ pub(super) fn parse_font_size(
     Some(parsed)
 }
 
-/// Outcome of parsing the `theme` directive: either a single theme name, or
-/// a `light:X,dark:Y` appearance-paired pair. `None` covers both "key
-/// absent" and "malformed pair" (a diagnostic is pushed for the latter).
-pub(super) enum ThemeSetting {
-    Single(String),
-    Pair(ThemeAppearancePair),
-}
-
+/// Parses one `theme` directive into a [`ThemeSetting`]. `None` covers both
+/// "key absent" and "malformed pair" (a diagnostic is pushed for the latter).
 pub(super) fn parse_theme(
     path: &Path,
     directive: &Directive,
@@ -135,15 +129,13 @@ fn parse_theme_pair(value: &str) -> Option<ThemeAppearancePair> {
     })
 }
 
-pub(super) fn parse_family(
-    path: &Path,
-    directive: &Directive,
-    diagnostics: &mut Vec<Diagnostic>,
-    target: &mut Vec<String>,
-) {
+/// Ghostty parity: an empty value (`font-family = `) resets the list so a
+/// later directive can start over from the default. The settings panel's
+/// "reset" writes exactly this line (B06, 2026-09 audit).
+pub(super) fn parse_family(directive: &Directive, target: &mut Vec<String>) {
     match directive.value.as_deref() {
         Some(value) if !value.is_empty() => target.push(value.to_string()),
-        _ => diagnostics.push(empty_family_diagnostic(path, &directive.key)),
+        _ => target.clear(),
     }
 }
 

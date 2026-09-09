@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.14] - 2026-09-09
+
+### Fixed
+
+- Auto-approve recognizes agy's `Run this command?` dialog with the selected
+  `1. Yes, run command` choice and final `No, cancel`, including multiline
+  commands and wrapped choices. The older permission wording remains
+  supported, and approvals still apply to the current execution only (#78).
+- Auto-approve no longer stalls when displayed commands contain shell
+  redirections such as `> output.log`, `>> output.log`, or `>| output.log`
+  (#78).
+
 ## [0.2.13] - 2026-09-08
 
 ### Added

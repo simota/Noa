@@ -608,6 +608,24 @@ fn menu_prompt_region(
     lowercase_rows: &[RowText],
     sig: &Signature,
 ) -> Option<RangeInclusive<usize>> {
+    if sig.id == AutoApproveSignature::AgyCommand {
+        let run_command = Signature {
+            anchors: &["requesting permission for:"],
+            yes_label: Some("1. Yes, run command"),
+            ..*sig
+        };
+        if let Some(region) = match_menu_prompt_region(rows, lowercase_rows, &run_command) {
+            return Some(region);
+        }
+    }
+    match_menu_prompt_region(rows, lowercase_rows, sig)
+}
+
+fn match_menu_prompt_region(
+    rows: &[RowText],
+    lowercase_rows: &[RowText],
+    sig: &Signature,
+) -> Option<RangeInclusive<usize>> {
     let anchor = lowercase_rows
         .iter()
         .rposition(|row| sig.anchors.contains(&row.trim()))?;
@@ -756,24 +774,23 @@ fn agy_question_menu(rows: &[RowText], anchor: usize, option: usize, footer: usi
 }
 
 /// agy's permission dialog: `Requesting permission for:` followed by the
-/// tool input, `Do you want to proceed?`, a plain `1. Yes`, any number of
-/// broader `Yes, and always allow …` choices (which may wrap over several
-/// rows), and a final `No`.
+/// tool input and either `Do you want to proceed?` / `Yes` / `No` or
+/// `Run this command?` / `Yes, run command` / `No, cancel`. Broader
+/// `Yes, and always allow …` choices may wrap over several rows.
 fn agy_command_menu(rows: &[RowText], anchor: usize, option: usize, footer: usize) -> bool {
-    let context: Vec<_> = rows[anchor + 1..option]
-        .iter()
-        .map(|row| row.trim())
-        .collect();
+    let (question, rejection) = match selected_option(&rows[option]) {
+        Some("1. Yes") => ("Do you want to proceed?", "No"),
+        Some("1. Yes, run command") => ("Run this command?", "No, cancel"),
+        _ => return false,
+    };
+    let context: Vec<_> = rows[anchor..option].iter().map(|row| row.trim()).collect();
     let Some(request) = context
         .iter()
         .position(|row| *row == "Requesting permission for:")
     else {
         return false;
     };
-    let Some(proceed) = context
-        .iter()
-        .rposition(|row| *row == "Do you want to proceed?")
-    else {
+    let Some(proceed) = context.iter().rposition(|row| *row == question) else {
         return false;
     };
     if proceed <= request + 1
@@ -803,7 +820,7 @@ fn agy_command_menu(rows: &[RowText], anchor: usize, option: usize, footer: usiz
                     return false;
                 }
                 next += 1;
-                if text == "No" {
+                if text == rejection {
                     saw_no = true;
                 } else if !text.starts_with("Yes, and always allow ") {
                     return false;
@@ -825,9 +842,13 @@ fn lowercase_rows(rows: &[RowText]) -> Vec<RowText> {
 }
 
 fn selected_option(row: &str) -> Option<&str> {
-    row.trim_start()
+    let label = row
+        .trim_start()
         .strip_prefix(['❯', '›', '>'])
-        .map(str::trim_start)
+        .map(str::trim_start)?;
+    // Command text and wrapped choice details can begin with shell redirections.
+    let (number, _) = label.split_once(". ")?;
+    (!number.is_empty() && number.bytes().all(|ch| ch.is_ascii_digit())).then_some(label)
 }
 
 fn affirmative_selected(row: &str, yes_label: &str, requires_marker: bool) -> bool {
@@ -1026,6 +1047,49 @@ mod tests {
         ])
     }
 
+    fn agy_run_command_prompt() -> Vec<RowText> {
+        rows(&[
+            "────────────────────",
+            "",
+            "Requesting permission for:",
+            "    git -C sample-project submodule status || true",
+            "",
+            "Run this command?",
+            "> 1. Yes, run command",
+            "  2. Yes, and always allow in this conversation for commands that start with 'git -C sample-project submodule status'",
+            "  3. Yes, and always allow for commands that start with 'git -C sample-project submodule status' (Persist to settings.json)",
+            "  4. No, cancel",
+            "",
+            "  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command",
+            " TOOL USE  | Gemini 3.8 Flash (High) | Context: 2.12%",
+        ])
+    }
+
+    fn agy_multiline_run_command_prompt() -> Vec<RowText> {
+        rows(&[
+            "Command",
+            "────────────────────",
+            "",
+            "Requesting permission for:",
+            "   for repo in sample-admin-python sample-admin-node; do",
+            "     echo \"=== $repo ===\"",
+            "     git -C \"$repo\" status --short",
+            "     git -C \"$repo\" log -n 1 --oneline",
+            "   ⋯ (1 lines hidden)",
+            "",
+            "Run this command?",
+            "> 1. Yes, run command",
+            "  2. Yes, and always allow in this conversation for commands that start with 'for repo in sample-admin-python sample-admin-node; do",
+            "  echo \"=== $repo ===\"...'",
+            "  3. Yes, and always allow for commands that start with 'for repo in sample-admin-python sample-admin-node; do",
+            "  echo \"=== $repo ===\"...' (Persist to settings.json)",
+            "  4. No, cancel",
+            "",
+            "  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command",
+            " TOOL USE  | Gemini 3.8 Flash (High) | Context: 3.68%",
+        ])
+    }
+
     fn assert_no_auto_approval(prompt: &[RowText]) {
         let mut state = AutoApproveState::default();
         let ctx = base_ctx(fixed_now());
@@ -1056,6 +1120,18 @@ mod tests {
             ),
             (
                 agy_command_prompt(),
+                AutoApproveSignature::AgyCommand,
+                AgentKind::Agy,
+                "Command",
+            ),
+            (
+                agy_run_command_prompt(),
+                AutoApproveSignature::AgyCommand,
+                AgentKind::Agy,
+                "Command",
+            ),
+            (
+                agy_multiline_run_command_prompt(),
                 AutoApproveSignature::AgyCommand,
                 AgentKind::Agy,
                 "Command",
@@ -1116,6 +1192,61 @@ mod tests {
                 detect_and_update_any_agent(&prompt, cursor, ctx, &mut state),
                 Decision::Fire { .. }
             ));
+        }
+    }
+
+    #[test]
+    fn agy_command_redirections_do_not_count_as_selected_options() {
+        for prompt in [
+            agy_run_command_prompt(),
+            agy_multiline_run_command_prompt(),
+            agy_command_prompt(),
+        ] {
+            for redirection in ["> output.log", ">> output.log", ">| output.log"] {
+                let mut prompt = prompt.clone();
+                let command_row = prompt
+                    .iter()
+                    .position(|row| row == "Requesting permission for:")
+                    .unwrap()
+                    + 1;
+                prompt.insert(command_row, format!("    {redirection}"));
+                let mut terminal = Terminal::new(noa_core::GridSize::new(140, 40));
+                let mut stream = noa_vt::Stream::new();
+                stream.feed(prompt.join("\r\n").as_bytes(), &mut terminal);
+                let screen = viewport_rows_from_terminal(&terminal);
+                let cursor = Point {
+                    x: terminal.active().cursor.x,
+                    y: terminal.active().cursor.y,
+                };
+                let now = fixed_now();
+                let ctx = base_ctx(now);
+                let mut state = AutoApproveState::default();
+                assert_eq!(
+                    detect_and_update_any_agent(&screen, cursor, ctx, &mut state),
+                    Decision::Hold
+                );
+                let Decision::Fire {
+                    signature,
+                    region_hash,
+                    ..
+                } = detect_and_update_any_agent(&screen, cursor, ctx, &mut state)
+                else {
+                    panic!("command redirection must not block approval: {screen:?}");
+                };
+                assert_eq!(signature, AutoApproveSignature::AgyCommand);
+                assert_eq!(signature.bytes(), b"\r");
+                assert_eq!(
+                    rescan_signature(&screen, signature, cursor, ctx)
+                        .unwrap()
+                        .region_hash,
+                    region_hash
+                );
+                state.apply_feedback(signature, region_hash, true, now);
+                assert_eq!(
+                    detect_and_update_any_agent(&screen, cursor, ctx, &mut state),
+                    Decision::Hold
+                );
+            }
         }
     }
 
@@ -1184,6 +1315,35 @@ mod tests {
                     ),
                 ],
             ),
+            (
+                agy_run_command_prompt(),
+                vec![
+                    (2, "Requesting something else:"),
+                    (3, ""),
+                    (5, "Do you want to proceed?"),
+                    (5, "Run another command?"),
+                    (6, "  1. Yes, run command"),
+                    (6, "> 1. Yes"),
+                    (6, "> 1. Yes, run command, and always allow"),
+                    (
+                        7,
+                        "> 2. Yes, and always allow in this conversation for commands that start with 'git'",
+                    ),
+                    (7, "  2. Yes, approve everything"),
+                    (7, "stray text before any broader choice"),
+                    (
+                        8,
+                        "> 3. Yes, and always allow for commands that start with 'git' (Persist to settings.json)",
+                    ),
+                    (9, "  4. No"),
+                    (9, "  4. No, cancel and do something else"),
+                    (9, "  5. No, cancel"),
+                    (9, ""),
+                    (11, "  ↑/↓ Navigate · enter Select · esc Skip"),
+                    (12, "$ another command"),
+                    (12, "TOOL USE | Gemini 3.8 Flash (High) | Context: n/a"),
+                ],
+            ),
         ] {
             for (index, replacement) in mutations {
                 let mut changed = prompt.clone();
@@ -1232,6 +1392,7 @@ mod tests {
             (codex_command_prompt(), AgentKind::Codex),
             (agy_question_prompt(), AgentKind::Agy),
             (agy_command_prompt(), AgentKind::Agy),
+            (agy_run_command_prompt(), AgentKind::Agy),
         ] {
             let mut state = AutoApproveState::default();
             let ctx = base_ctx(now);
@@ -1277,6 +1438,7 @@ mod tests {
             (codex_command_prompt(), 6),
             (agy_question_prompt(), 8),
             (agy_command_prompt(), 5),
+            (agy_run_command_prompt(), 3),
         ] {
             let mut state = AutoApproveState::default();
             let _ = detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state);
@@ -1293,7 +1455,7 @@ mod tests {
                 prompt[12] = "[Gemini 3.8 Flash (High)] Cost: $0.0100".to_string();
             }
             if signature == AutoApproveSignature::AgyCommand {
-                prompt[28] =
+                *prompt.last_mut().unwrap() =
                     " TOOL USE  | Gemini 3.8 Flash (High) |  main | Context: 7.10%".to_string();
             }
             if signature.agent() == AgentKind::Agy {
@@ -1333,6 +1495,7 @@ mod tests {
             codex_command_prompt(),
             agy_question_prompt(),
             agy_command_prompt(),
+            agy_run_command_prompt(),
         ] {
             for paste in [false, true] {
                 let mut state = AutoApproveState::default();
@@ -1416,18 +1579,38 @@ mod tests {
 
     #[test]
     fn detect_menu_from_vt_grid_with_hidden_cursor_and_split_utf8() {
-        for (prompt, expected) in [
-            (codex_command_prompt(), AutoApproveSignature::CodexCommand),
+        for (prompt, expected, cols) in [
+            (
+                codex_command_prompt(),
+                AutoApproveSignature::CodexCommand,
+                140,
+            ),
             (
                 agy_question_prompt(),
                 AutoApproveSignature::AgyAskUserQuestion,
+                140,
             ),
-            (agy_command_prompt(), AutoApproveSignature::AgyCommand),
+            (agy_command_prompt(), AutoApproveSignature::AgyCommand, 140),
+            (
+                agy_run_command_prompt(),
+                AutoApproveSignature::AgyCommand,
+                140,
+            ),
+            (
+                agy_multiline_run_command_prompt(),
+                AutoApproveSignature::AgyCommand,
+                90,
+            ),
+            (
+                agy_multiline_run_command_prompt(),
+                AutoApproveSignature::AgyCommand,
+                140,
+            ),
         ] {
             // Tall enough for every fixture: a dialog taller than the viewport
             // scrolls its title off and is (correctly) never recognized.
             let grid_rows = prompt.len() as u16 + 4;
-            let mut terminal = Terminal::new(noa_core::GridSize::new(140, grid_rows));
+            let mut terminal = Terminal::new(noa_core::GridSize::new(cols, grid_rows));
             let mut stream = noa_vt::Stream::new();
             let frame = format!("\x1b[?25l\x1b[36m{}\x1b[0m\r\n", prompt.join("\r\n"));
             for chunk in frame.as_bytes().chunks(7) {
@@ -1471,6 +1654,14 @@ mod tests {
                 "7.10%",
                 "    python3 -c 'print(1)'",
                 4,
+            ),
+            (
+                agy_run_command_prompt(),
+                12,
+                " TOOL USE  | Gemini 3.8 Flash (High) | Context: ",
+                "2.50%",
+                "    git -C sample-project diff",
+                3,
             ),
         ] {
             let grid_rows = prompt.len() as u16 + 4;

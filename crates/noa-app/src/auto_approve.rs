@@ -842,9 +842,13 @@ fn lowercase_rows(rows: &[RowText]) -> Vec<RowText> {
 }
 
 fn selected_option(row: &str) -> Option<&str> {
-    row.trim_start()
+    let label = row
+        .trim_start()
         .strip_prefix(['❯', '›', '>'])
-        .map(str::trim_start)
+        .map(str::trim_start)?;
+    // Command text and wrapped choice details can begin with shell redirections.
+    let (number, _) = label.split_once(". ")?;
+    (!number.is_empty() && number.bytes().all(|ch| ch.is_ascii_digit())).then_some(label)
 }
 
 fn affirmative_selected(row: &str, yes_label: &str, requires_marker: bool) -> bool {
@@ -1188,6 +1192,61 @@ mod tests {
                 detect_and_update_any_agent(&prompt, cursor, ctx, &mut state),
                 Decision::Fire { .. }
             ));
+        }
+    }
+
+    #[test]
+    fn agy_command_redirections_do_not_count_as_selected_options() {
+        for prompt in [
+            agy_run_command_prompt(),
+            agy_multiline_run_command_prompt(),
+            agy_command_prompt(),
+        ] {
+            for redirection in ["> output.log", ">> output.log", ">| output.log"] {
+                let mut prompt = prompt.clone();
+                let command_row = prompt
+                    .iter()
+                    .position(|row| row == "Requesting permission for:")
+                    .unwrap()
+                    + 1;
+                prompt.insert(command_row, format!("    {redirection}"));
+                let mut terminal = Terminal::new(noa_core::GridSize::new(140, 40));
+                let mut stream = noa_vt::Stream::new();
+                stream.feed(prompt.join("\r\n").as_bytes(), &mut terminal);
+                let screen = viewport_rows_from_terminal(&terminal);
+                let cursor = Point {
+                    x: terminal.active().cursor.x,
+                    y: terminal.active().cursor.y,
+                };
+                let now = fixed_now();
+                let ctx = base_ctx(now);
+                let mut state = AutoApproveState::default();
+                assert_eq!(
+                    detect_and_update_any_agent(&screen, cursor, ctx, &mut state),
+                    Decision::Hold
+                );
+                let Decision::Fire {
+                    signature,
+                    region_hash,
+                    ..
+                } = detect_and_update_any_agent(&screen, cursor, ctx, &mut state)
+                else {
+                    panic!("command redirection must not block approval: {screen:?}");
+                };
+                assert_eq!(signature, AutoApproveSignature::AgyCommand);
+                assert_eq!(signature.bytes(), b"\r");
+                assert_eq!(
+                    rescan_signature(&screen, signature, cursor, ctx)
+                        .unwrap()
+                        .region_hash,
+                    region_hash
+                );
+                state.apply_feedback(signature, region_hash, true, now);
+                assert_eq!(
+                    detect_and_update_any_agent(&screen, cursor, ctx, &mut state),
+                    Decision::Hold
+                );
+            }
         }
     }
 

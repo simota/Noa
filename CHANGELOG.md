@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.15] - 2026-09-09
+
+### Fixed
+
+- Auto-approve recognizes agy's command approval footer with the
+  `ctrl+r Review` shortcut, including when the footer wraps across rows in
+  narrow panes. Approvals still apply to the current execution only and
+  require a complete dialog with duplicate-suppression guards (#80).
+
 ## [0.2.14] - 2026-09-09
 
 ### Fixed

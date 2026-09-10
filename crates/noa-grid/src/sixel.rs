@@ -287,9 +287,9 @@ fn draw_sixel(
     if value == 0 {
         return Ok(());
     }
-    // Charge the full 6-row band per column before painting so the budget
-    // check runs ahead of the work, not after it.
-    budget.charge(u64::from(count) * 6)?;
+    // Color passes can paint disjoint bits in the same band. Charge only
+    // pixels that will be written, before performing the work.
+    budget.charge(u64::from(count) * u64::from(value.count_ones()))?;
     for dx in 0..count {
         for bit in 0..6u32 {
             if value & (1 << bit) != 0 {
@@ -607,6 +607,47 @@ mod tests {
         assert!(MAX_SIXEL_PIXEL_WRITES >= max_pixels);
         // …and is still a finite multiple of it (no unbounded work).
         assert!(MAX_SIXEL_PIXEL_WRITES <= 4 * max_pixels);
+    }
+
+    #[test]
+    fn sparse_multicolor_bands_fit_the_actual_pixel_write_budget() {
+        let colors = [
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [255, 255, 0, 255],
+            [0, 255, 255, 255],
+            [255, 0, 255, 255],
+        ];
+        let mut data =
+            b"#1;2;100;0;0#2;2;0;100;0#3;2;0;0;100#4;2;100;100;0#5;2;0;100;100#6;2;100;0;100"
+                .to_vec();
+        let band = b"#1!4@$#2!4A$#3!4C$#4!4G$#5!4O$#6!4_";
+        data.extend_from_slice(band);
+        data.push(b'-');
+        data.extend_from_slice(band);
+        let command = cmd(&data);
+        // Two six-row bands, each row painted once by a different color.
+        let image = rasterize_with_budget(&command, BG, 4 * 12).unwrap();
+
+        assert_eq!((image.width, image.height), (4, 12));
+        for (i, pixel) in image.rgba.chunks_exact(4).enumerate() {
+            assert_eq!(pixel, colors[(i / 4) % 6]);
+        }
+        assert_eq!(
+            rasterize_with_budget(&command, BG, 4 * 12 - 1),
+            Err(KittyError::TooBig)
+        );
+    }
+
+    #[test]
+    fn sparse_overdraw_still_exhausts_the_pixel_write_budget() {
+        let single = rasterize_with_budget(&cmd(b"!4@"), BG, 4).unwrap();
+        assert_eq!(rasterize_with_budget(&cmd(b"!4@$!4@"), BG, 8), Ok(single));
+        assert_eq!(
+            rasterize_with_budget(&cmd(b"!4@$!4@"), BG, 7),
+            Err(KittyError::TooBig)
+        );
     }
 
     #[test]

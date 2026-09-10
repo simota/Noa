@@ -36,7 +36,10 @@ impl App {
         else {
             return;
         };
-        let reject = || {
+        let reject = |why: &str| {
+            if auto_approve::trace_enabled() {
+                eprintln!("[auto-approve] reject {signature:?}: {why}");
+            }
             let _ = feedback_tx.send(AutoApproveFeedback {
                 signature,
                 region_hash,
@@ -44,7 +47,7 @@ impl App {
             });
         };
         if !pane_live || !auto_enabled {
-            reject();
+            reject(if pane_live { "mode off" } else { "pane gone" });
             return;
         }
 
@@ -53,11 +56,13 @@ impl App {
             .get(&id)
             .and_then(|card| card.process.clone())
         else {
-            reject();
+            reject("no foreground process name yet");
             return;
         };
         if classify_agent(&process) != signature.agent() {
-            reject();
+            reject(&format!(
+                "foreground process {process:?} is not the prompt's agent"
+            ));
             return;
         }
 
@@ -67,7 +72,7 @@ impl App {
                 .get(&window_id)
                 .and_then(|state| state.surfaces.get(&pane_id))
             else {
-                reject();
+                reject("surface gone");
                 return;
             };
             let terminal = surface.terminal.lock();
@@ -77,7 +82,7 @@ impl App {
                 scrollback_offset: terminal.viewport_offset(),
                 guards: *surface.auto_approve_guards.lock(),
             };
-            let rows = auto_approve::viewport_rows_from_terminal(&terminal);
+            let rows = auto_approve::live_rows_from_terminal(&terminal);
             let cursor = terminal.active().cursor;
             auto_approve::rescan_signature(
                 &rows,
@@ -90,16 +95,19 @@ impl App {
             )
         };
         if live_match.is_none_or(|matched| matched.region_hash != region_hash) {
-            reject();
+            reject("prompt changed or suppressed at injection time");
             return;
         }
 
         match self.queue_pane_pty_bytes(window_id, pane_id, signature.bytes()) {
             QueueInputResult::Queued | QueueInputResult::Deferred => {}
             QueueInputResult::Dropped | QueueInputResult::Disconnected => {
-                reject();
+                reject("pty input queue refused the bytes");
                 return;
             }
+        }
+        if auto_approve::trace_enabled() {
+            eprintln!("[auto-approve] sent {signature:?} to {process:?}");
         }
         let _ = feedback_tx.send(AutoApproveFeedback {
             signature,

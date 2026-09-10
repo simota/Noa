@@ -2237,10 +2237,10 @@ mod tests {
     struct ConnectedRecordingFactory {
         events: Arc<Mutex<Vec<&'static str>>>,
         reserve_fails: bool,
-        /// Instance id reported by the n-th control connection; the last
-        /// entry repeats, an empty list reports an empty (legacy) id.
+        /// Instance id reported by the n-th attach control connection; the
+        /// last entry repeats, an empty list reports an empty (legacy) id.
         instance_ids: Vec<&'static str>,
-        connects: Arc<AtomicUsize>,
+        attach_connects: Arc<AtomicUsize>,
         /// Every attach fails on its first poll, forcing the manager back
         /// through the reconnect path.
         disconnect_on_poll: bool,
@@ -2252,7 +2252,7 @@ mod tests {
                 events,
                 reserve_fails,
                 instance_ids: Vec::new(),
-                connects: Arc::default(),
+                attach_connects: Arc::default(),
                 disconnect_on_poll: false,
             }
         }
@@ -2280,10 +2280,16 @@ mod tests {
             _token: &str,
             requested_scopes: noa_ipc::ScopeSet,
         ) -> Result<Self::Control, TransportFailure> {
-            if requested_scopes.contains(noa_ipc::Scope::Attach) {
+            let attempt = if requested_scopes.contains(noa_ipc::Scope::Attach) {
                 self.events.lock().push("control_connect");
-            }
-            let attempt = self.connects.fetch_add(1, Ordering::AcqRel);
+                self.attach_connects.fetch_add(1, Ordering::AcqRel)
+            } else {
+                // Backfill observes the current instance without consuming
+                // the next scripted reconnect, regardless of worker timing.
+                self.attach_connects
+                    .load(Ordering::Acquire)
+                    .saturating_sub(1)
+            };
             let instance_id = self
                 .instance_ids
                 .get(attempt)
@@ -4172,6 +4178,36 @@ mod tests {
     }
 
     #[test]
+    fn scrollback_connections_do_not_advance_recorded_attach_instances() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut factory = ConnectedRecordingFactory {
+            instance_ids: vec!["instance-a", "instance-b", "instance-c"],
+            ..ConnectedRecordingFactory::new(events, false)
+        };
+        let mut scrollback_factory = factory.clone();
+        let credentials = credentials();
+        for expected in ["instance-a", "instance-b"] {
+            let control = factory
+                .connect(
+                    &credentials.endpoint.control_url(),
+                    credentials.token.expose(),
+                    requested_scopes(),
+                )
+                .unwrap_or_else(|_| panic!("fake attach connection failed"));
+            assert_eq!(control.server_instance_id(), expected);
+            let scrollback = scrollback_factory
+                .connect(
+                    &credentials.endpoint.control_url(),
+                    credentials.token.expose(),
+                    scrollback_scopes(),
+                )
+                .unwrap_or_else(|_| panic!("fake scrollback connection failed"));
+            assert_eq!(scrollback.server_instance_id(), expected);
+        }
+        assert_eq!(factory.attach_connects.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
     fn server_restart_between_reconnects_detaches_instead_of_reattaching() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let state = Arc::new(Mutex::new(RemoteAttachState::Detached));
@@ -4180,7 +4216,7 @@ mod tests {
             disconnect_on_poll: true,
             ..ConnectedRecordingFactory::new(Arc::clone(&events), false)
         };
-        let connects = Arc::clone(&factory.connects);
+        let attach_connects = Arc::clone(&factory.attach_connects);
         let handle = spawn_connection_manager(
             credentials(),
             terminal(),
@@ -4197,7 +4233,7 @@ mod tests {
         // first poll, and the automatic reconnect lands on instance B: the
         // manager must stop *before* reserving or resizing pane 7 there.
         wait_until(|| {
-            connects.load(Ordering::Acquire) == 2
+            attach_connects.load(Ordering::Acquire) == 2
                 && matches!(*state.lock(), RemoteAttachState::Detached)
         });
         assert_eq!(

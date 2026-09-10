@@ -20,7 +20,16 @@ fn explicit_agent_status_is_bounded_and_separate_from_notifications() {
     assert_eq!(clear.take_pending_agent_status(), Some(None));
     let source = format!("\x1b]777;noa-agent;input;{}\x1b\\", "あ".repeat(300));
     let mut bounded = run(source.as_bytes());
-    assert_eq!(bounded.take_pending_agent_status().unwrap().unwrap().detail.chars().count(), 160);
+    assert_eq!(
+        bounded
+            .take_pending_agent_status()
+            .unwrap()
+            .unwrap()
+            .detail
+            .chars()
+            .count(),
+        160
+    );
 }
 
 #[test]
@@ -321,6 +330,28 @@ fn hostname_matches_local_accepts_case_insensitive_full_or_short_label_shapes() 
 }
 
 #[test]
+fn hostname_matches_any_local_accepts_names_the_machine_went_by_earlier() {
+    // macOS renames the host on every network change (DHCP reverse-DNS name
+    // online, `<name>.local` offline) while a shell's `$HOST` is frozen at
+    // its own startup. A shell started under either name must still be
+    // treated as local, or new-tab cwd inheritance silently breaks.
+    use crate::osc::hostname_matches_any_local;
+
+    let seen = [
+        "MacBook-Air.local",
+        "ip-192-168-0-64.ap-northeast-1.compute.internal",
+    ];
+    assert!(hostname_matches_any_local("MacBook-Air.local", seen));
+    assert!(hostname_matches_any_local("macbook-air", seen));
+    assert!(hostname_matches_any_local("ip-192-168-0-64", seen));
+    assert!(hostname_matches_any_local("localhost", seen));
+    assert!(!hostname_matches_any_local("build-box.example.com", seen));
+    // No observed name at all still honours the empty/localhost shortcuts.
+    assert!(hostname_matches_any_local("", []));
+    assert!(!hostname_matches_any_local("MacBook-Air.local", []));
+}
+
+#[test]
 fn osc133_prompt_marks_record_cursor_positions_and_exit_status() {
     let t = run(b"\x1b]133;A\x07$ \x1b]133;B\x07cmd\x1b]133;C\x07\x1b]133;D;7\x07");
 
@@ -514,10 +545,7 @@ fn osc9_4_error_and_pause_accept_optional_percentages() {
 fn osc9_4_state_four_is_paused() {
     let mut t = run(b"\x1b]9;4;4;20\x07");
     let progress = t.progress().unwrap();
-    assert!(matches!(
-        progress,
-        crate::TerminalProgress::Paused(Some(_))
-    ));
+    assert!(matches!(progress, crate::TerminalProgress::Paused(Some(_))));
     assert_eq!(progress.value().unwrap().get(), 20);
     assert_eq!(
         t.take_pending_progress_update(),

@@ -1023,6 +1023,15 @@ impl App {
         }
     }
 
+    /// Characters in the endpoint input field (0 outside that phase), for
+    /// the IME candidate-window anchor.
+    pub(in crate::app) fn remote_ui_input_chars(&self) -> usize {
+        match self.remote_ui.as_ref().map(|session| &session.phase) {
+            Some(RemoteUiPhase::EndpointInput { buffer, .. }) => buffer.chars().count(),
+            _ => 0,
+        }
+    }
+
     pub(in crate::app) fn push_remote_ui_text(&mut self, text: &str) {
         let filtered = text
             .chars()

@@ -1,8 +1,27 @@
 use super::model::{
-    NativeOverlayCache, OverlayColors, PaneRectPt, overlay_scroll_window, theme_settings_view_model,
+    CARD_PAD_H, NativeOverlayCache, OverlayColors, PALETTE_WIDTH, PaneRectPt, THEME_SETTINGS_WIDTH,
+    overlay_scroll_window, palette_query_caret, theme_settings_caret, theme_settings_view_model,
+    title_prompt_caret,
 };
 use super::sync::theme_settings_sync_decision;
 use crate::theme_settings::{Liveness, ThemeSettings, ThemeSettingsInit, ThemeSettingsMode};
+use noa_render::{CommandPaletteSnapshot, PaletteRow};
+
+fn palette_snapshot(entries: usize) -> CommandPaletteSnapshot {
+    CommandPaletteSnapshot {
+        query: String::new(),
+        rows: (0..entries)
+            .map(|index| PaletteRow::Entry {
+                title: format!("Result {index}"),
+                hint: None,
+                match_positions: Vec::new(),
+                enabled: true,
+            })
+            .collect(),
+        selected: 0,
+        total_entries: entries,
+    }
+}
 
 fn settings_init() -> ThemeSettingsInit {
     ThemeSettingsInit {
@@ -343,4 +362,118 @@ fn pane_rect_pt_scales_from_px() {
     assert_eq!(rect.y, 50.0);
     assert_eq!(rect.w, 400.0);
     assert_eq!(rect.h, 300.0);
+}
+
+// N12: the modal caret anchors land inside their card's input row, not at
+// the terminal cursor, and advance with the typed text.
+#[test]
+fn modal_caret_anchors_sit_in_the_input_row_and_follow_the_text() {
+    let pane = PaneRectPt {
+        x: 0.0,
+        y: 0.0,
+        w: 1200.0,
+        h: 800.0,
+    };
+    let card_x = (1200.0 - PALETTE_WIDTH) / 2.0;
+    let snapshot = palette_snapshot(0);
+    let empty = palette_query_caret(pane, &snapshot, 0);
+    assert_eq!(empty.x, card_x + CARD_PAD_H + 22.0);
+    assert_eq!(empty.y, 800.0 * 0.14 + 13.0);
+    let typed = palette_query_caret(pane, &snapshot, 10);
+    assert!(typed.x > empty.x && typed.y == empty.y);
+
+    let title = title_prompt_caret(pane, 0);
+    assert_eq!(title.x, 600.0);
+    assert_eq!(title.y, 800.0 * 0.30 + 40.0);
+    assert!(title_prompt_caret(pane, 4).x > title.x);
+
+    let theme_state = ThemeSettings::open(ThemeSettingsInit {
+        mode: ThemeSettingsMode::Theme,
+        ..settings_init()
+    });
+    let theme = theme_settings_caret(pane, &theme_state);
+    assert_eq!(theme.x, (1200.0 - THEME_SETTINGS_WIDTH) / 2.0 + 20.0);
+    assert_eq!(theme.y, 298.0);
+
+    // A pane narrower than the card clamps the card to the pane's width
+    // minus its margins; the caret must stay inside it.
+    let narrow = PaneRectPt {
+        x: 0.0,
+        y: 0.0,
+        w: 400.0,
+        h: 300.0,
+    };
+    let caret = palette_query_caret(narrow, &snapshot, 0);
+    assert!(caret.x >= 16.0 && caret.x < 400.0 - 16.0);
+    assert!(caret.y > 0.0 && caret.y < 300.0);
+}
+
+#[test]
+fn theme_caret_uses_filtered_rows_short_panes_and_settings_search_layout() {
+    let pane = PaneRectPt {
+        x: 0.0,
+        y: 0.0,
+        w: 1200.0,
+        h: 800.0,
+    };
+    let mut theme = ThemeSettings::open(ThemeSettingsInit {
+        mode: ThemeSettingsMode::Theme,
+        ..settings_init()
+    });
+    // Eight displayed rows give a 332pt card; a 300pt pane fits five rows
+    // in a 260pt card. Both anchors sit 64pt below the actual card top.
+    assert_eq!(theme_settings_caret(pane, &theme).y, 298.0);
+    assert_eq!(
+        theme_settings_caret(PaneRectPt { h: 300.0, ..pane }, &theme).y,
+        84.0
+    );
+    theme.push_text("no-such-theme-999999999", std::time::Instant::now());
+    assert_eq!(theme.filtered_len(), 0);
+    // Empty lists retain one row: 106 + 24 + 34 = 164pt.
+    assert_eq!(theme_settings_caret(pane, &theme).y, 382.0);
+
+    let mut settings = ThemeSettings::open(settings_init());
+    settings.toggle_settings_search();
+    settings.push_text("no-such-setting-999999999", std::time::Instant::now());
+    assert!(settings.settings_search_active());
+    assert_eq!(settings.settings_filtered_len(), 0);
+    // Settings reserve the description and search lines, yielding 158pt;
+    // their search input starts at 66pt rather than the theme's 64pt.
+    assert_eq!(theme_settings_caret(pane, &settings).y, 387.0);
+}
+
+#[test]
+fn palette_caret_uses_twelve_result_rows_in_a_short_pane() {
+    let pane = PaneRectPt {
+        h: 400.0,
+        ..test_rect()
+    };
+    // Twelve 26pt entries + 12pt list padding + 45pt query/rule = 369pt.
+    // The card starts at 400 - 369 = 31pt, and the query at 31 + 13 = 44pt.
+    assert_eq!(palette_query_caret(pane, &palette_snapshot(12), 10).y, 44.0);
+}
+
+#[test]
+fn palette_caret_tracks_visible_headers_selection_and_pane_height() {
+    let pane = PaneRectPt {
+        h: 400.0,
+        ..test_rect()
+    };
+    let mut snapshot = palette_snapshot(20);
+    snapshot.rows[0] = PaletteRow::Header {
+        label: "Commands".to_string(),
+    };
+    // One 24pt header and eleven 26pt entries make a 367pt card.
+    assert_eq!(palette_query_caret(pane, &snapshot, 0).y, 46.0);
+    snapshot.selected = 19;
+    // Scrolling the header out replaces it with a 26pt entry.
+    assert_eq!(palette_query_caret(pane, &snapshot, 0).y, 44.0);
+    assert_eq!(palette_query_caret(pane, &palette_snapshot(0), 0).y, 69.0);
+
+    let short = PaneRectPt { h: 300.0, ..pane };
+    // Eight entries fit (265pt card), placing the query at 35 + 13pt.
+    assert_eq!(palette_query_caret(short, &snapshot, 0).y, 48.0);
+    let tiny = PaneRectPt { h: 100.0, ..pane };
+    // The card height is capped at pane.h - 24 even at the three-row floor.
+    assert!((palette_query_caret(tiny, &snapshot, 0).y - 27.0).abs() < 1e-9);
 }

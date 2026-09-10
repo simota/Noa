@@ -170,15 +170,19 @@ fn decslrm_requires_left_right_margin_mode() {
 }
 
 #[test]
-fn decslrm_sets_horizontal_margins_and_homes_to_left_margin() {
+fn decslrm_sets_horizontal_margins_and_homes_the_cursor() {
+    // xterm/Ghostty: DECSLRM homes to the *screen's* top-left; only DECOM
+    // makes home margin-relative (N07).
     let t = run_size(10, 5, b"\x1b[?69h\x1b[3;7s");
 
     assert_eq!(
         t.primary.horizontal_margins,
         Some(HorizontalMargins { left: 2, right: 6 })
     );
-    assert_eq!(t.primary.cursor.x, 2);
-    assert_eq!(t.primary.cursor.y, 0);
+    assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (0, 0));
+
+    let t = run_size(10, 5, b"\x1b[?69h\x1b[?6h\x1b[3;7s");
+    assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (2, 0));
 }
 
 #[test]
@@ -195,7 +199,7 @@ fn horizontal_margins_clamp_cursor_motion_and_carriage_return() {
 
 #[test]
 fn horizontal_margins_wrap_printing_to_left_margin() {
-    let t = run_size(10, 5, b"\x1b[?69h\x1b[3;7sabcdeZ");
+    let t = run_size(10, 5, b"\x1b[?69h\x1b[3;7s\x1b[3GabcdeZ");
 
     assert_eq!(row_text(&t, 0, 8), "  abcde ");
     assert_eq!(cell(&t, 2, 1).ch, 'Z');
@@ -1334,4 +1338,206 @@ fn ris_keeps_the_configured_default_cursor_style() {
     assert_eq!(t.primary.cursor.style, CursorStyle::SteadyBlock);
     s.feed(b"\x1bc", &mut t);
     assert_eq!(t.primary.cursor.style, CursorStyle::SteadyBar);
+}
+
+// N07: with DECOM off, absolute cursor placement (CUP/CHA/HPA and the home
+// DECSLRM performs) is bounded by the screen, not the left/right margins —
+// Ghostty's `setCursorPos` only offsets/clamps to the margins in origin mode.
+#[test]
+fn absolute_cursor_placement_ignores_horizontal_margins_without_origin_mode() {
+    // DECLRMM on, margins at columns 10..20 (0-based 9..19).
+    let t = run(b"\x1b[?69h\x1b[10;20s\x1b[1;1H");
+    assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (0, 0));
+    let t = run(b"\x1b[?69h\x1b[10;20s\x1b[3;5H");
+    assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (4, 2));
+    let t = run(b"\x1b[?69h\x1b[10;20s\x1b[30G");
+    assert_eq!(t.primary.cursor.x, 29);
+    let t = run(b"\x1b[?69h\x1b[10;20s\x1b[30`");
+    assert_eq!(t.primary.cursor.x, 29);
+    // DECSLRM itself homes to the screen's top-left when origin mode is off.
+    let t = run(b"\x1b[?69h\x1b[5;5H\x1b[10;20s");
+    assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (0, 0));
+}
+
+#[test]
+fn absolute_cursor_placement_is_margin_relative_in_origin_mode() {
+    let t = run(b"\x1b[?69h\x1b[10;20s\x1b[?6h\x1b[1;1H");
+    assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (9, 0));
+    let t = run(b"\x1b[?69h\x1b[10;20s\x1b[?6h\x1b[1;30H");
+    assert_eq!(t.primary.cursor.x, 19, "clamped to the right margin");
+    let t = run(b"\x1b[?69h\x1b[10;20s\x1b[?6h\x1b[5G");
+    assert_eq!(t.primary.cursor.x, 13);
+    let t = run(b"\x1b[?69h\x1b[?6h\x1b[5;5H\x1b[10;20s");
+    assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (9, 0));
+}
+#[test]
+fn edit_commands_ignore_cursor_outside_horizontal_margins() {
+    for command in [b'@', b'P', b'L', b'M'] {
+        for col in [1, 2, 8, 10] {
+            let mut t = Terminal::new(GridSize::new(10, 3));
+            let mut stream = Stream::new();
+            stream.feed(b"ABCDEFGHIJ\r\nKLMNOPQRST\r\nUVWXYZ1234", &mut t);
+            stream.feed(b"\x1b[?69h\x1b[3;7s", &mut t);
+            stream.feed(format!("\x1b[1;{col}H").as_bytes(), &mut t);
+            let before = t.active().grid.iter().map(|row| row.cells.clone()).collect::<Vec<_>>();
+            stream.feed(&[0x1b, b'[', command], &mut t);
+            let after = t.active().grid.iter().map(|row| row.cells.clone()).collect::<Vec<_>>();
+            assert_eq!(after, before, "command {} at column {col}", command as char);
+        }
+    }
+}
+
+#[test]
+fn print_outside_horizontal_margins_uses_screen_edge() {
+    use noa_vt::Handler as _;
+    for bulk in [false, true] {
+        for text in ["ABC", "日本"] {
+            let mut t = Terminal::new(GridSize::new(10, 3));
+            let mut stream = Stream::new();
+            stream.feed(b"\x1b[?69h\x1b[3;7s\x1b[1;9H", &mut t);
+            if bulk {
+                stream.feed(text.as_bytes(), &mut t);
+            } else {
+                for c in text.chars() { t.print(c); }
+            }
+            assert_eq!(cell(&t, 8, 0).ch, text.chars().next().unwrap());
+            if text == "ABC" {
+                assert_eq!(cell(&t, 9, 0).ch, 'B');
+                assert_eq!(cell(&t, 0, 1).ch, 'C');
+            } else {
+                assert!(cell(&t, 9, 0).attrs.contains(CellAttrs::WIDE_SPACER));
+                assert_eq!(cell(&t, 0, 1).ch, '本');
+            }
+            assert!(t.active().grid[0].wrapped);
+        }
+    }
+}
+
+#[test]
+fn print_outside_horizontal_margins_without_wrap_stays_at_screen_edge() {
+    let t = run_size(10, 3, b"\x1b[?69h\x1b[3;7s\x1b[?7l\x1b[1;9HABC");
+    assert_eq!(row_text(&t, 0, 10), "        AC");
+    assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (9, 0));
+    assert!(!t.primary.grid[0].wrapped);
+}
+
+#[test]
+fn wrap_outside_horizontal_margins_preserves_scroll_rectangle() {
+    for text in ["ABC", "日本", "A日"] {
+        let t = run_size(
+            10,
+            3,
+            format!(
+                "ABCDEFGHIJ\r\nKLMNOPQRST\r\nUVWXYZ1234\x1b[?69h\x1b[3;7s\x1b[3;9H{text}"
+            )
+            .as_bytes(),
+        );
+        assert_eq!(row_text(&t, 0, 10), "ABCDEFGHIJ", "{text}");
+        assert_eq!(row_text(&t, 1, 10), "KLMNOPQRST", "{text}");
+        assert_eq!(
+            row_text(&t, 2, 7).chars().skip(2).collect::<String>(),
+            "WXYZ1",
+            "{text}"
+        );
+        assert_eq!(t.primary.cursor.y, 2);
+        assert_eq!(t.primary.scrollback_len(), 0);
+    }
+}
+
+#[test]
+fn vertical_motion_outside_horizontal_margins_does_not_scroll() {
+    for col in [1, 2, 8, 10] {
+        for (region, row, command, expected_y) in [
+            ("1;3", 3, "\n", 2),
+            ("1;3", 3, "\x1bD", 2),
+            ("1;3", 1, "\x1bM", 0),
+            ("2;3", 2, "\x1bM", 0),
+            ("1;2", 2, "\n", 2),
+        ] {
+            let t = run_size(
+                10,
+                3,
+                format!(
+                    "ABCDEFGHIJ\r\nKLMNOPQRST\r\nUVWXYZ1234\x1b[?69h\x1b[3;7s\x1b[{region}r\x1b[{row};{col}H{command}"
+                )
+                .as_bytes(),
+            );
+            assert_eq!(row_text(&t, 0, 10), "ABCDEFGHIJ", "{col}, {command:?}");
+            assert_eq!(row_text(&t, 1, 10), "KLMNOPQRST", "{col}, {command:?}");
+            assert_eq!(row_text(&t, 2, 10), "UVWXYZ1234", "{col}, {command:?}");
+            assert_eq!(
+                (t.primary.cursor.x, t.primary.cursor.y),
+                (col - 1, expected_y)
+            );
+        }
+    }
+}
+
+#[test]
+fn vertical_motion_inside_horizontal_margins_scrolls_the_rectangle() {
+    for col in [3, 7] {
+        for (row, command, expected) in [
+            (3, "\n", ["ABMNOPQHIJ", "KLWXYZ1RST", "UV     234"]),
+            (1, "\x1bM", ["AB     HIJ", "KLCDEFGRST", "UVMNOPQ234"]),
+        ] {
+            let t = run_size(
+                10,
+                3,
+                format!(
+                    "ABCDEFGHIJ\r\nKLMNOPQRST\r\nUVWXYZ1234\x1b[?69h\x1b[3;7s\x1b[{row};{col}H{command}"
+                )
+                .as_bytes(),
+            );
+            for (y, expected_row) in expected.iter().enumerate() {
+                assert_eq!(row_text(&t, y, 10), *expected_row, "{col}, {command:?}");
+            }
+            assert_eq!(
+                (t.primary.cursor.x, t.primary.cursor.y),
+                (col - 1, row - 1)
+            );
+        }
+    }
+}
+
+#[test]
+fn horizontal_motion_outside_margins_respects_direction_and_screen_edges() {
+    for (col, command, expected_x) in [
+        (1, "\x08", 0),
+        (2, "\x08", 0),
+        (1, "\x1b[D", 0),
+        (2, "\x1b[65535D", 0),
+        (1, "\x1b[Z", 0),
+        (2, "\x1b[2Z", 0),
+        (2, "\r", 0),
+        (9, "\x1b[C", 9),
+        (10, "\x1b[C", 9),
+        (9, "\x1b[65535C", 9),
+        (9, "\t", 9),
+        (10, "\x1b[2I", 9),
+        // Moving toward the margin interval still stops at its far edge.
+        (1, "\x1b[65535C", 6),
+        (10, "\x1b[65535D", 2),
+        (2, "\x1b[2C", 3),
+        (8, "\x1b[2D", 5),
+        (4, "\x1b[65535D", 2),
+        (6, "\x1b[65535C", 6),
+    ] {
+        let t = run_size(
+            10,
+            3,
+            format!("\x1b[?69h\x1b[3;7s\x1b[2;{col}H{command}").as_bytes(),
+        );
+        assert_eq!(t.primary.cursor.x, expected_x, "column {col}, {command:?}");
+        assert_eq!(t.primary.cursor.y, 1);
+        assert!(!t.primary.cursor.pending_wrap);
+    }
+}
+
+#[test]
+fn grapheme_outside_horizontal_margins_can_expand_to_screen_edge() {
+    let t = run_size(10, 3, "\x1b[?69h\x1b[3;7s\x1b[?2027h\x1b[1;9H❤\u{fe0f}".as_bytes());
+    assert!(cell(&t, 8, 0).attrs.contains(CellAttrs::WIDE));
+    assert!(cell(&t, 9, 0).attrs.contains(CellAttrs::WIDE_SPACER));
+    assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (9, 0));
+    assert!(t.primary.cursor.pending_wrap);
 }

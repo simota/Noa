@@ -52,8 +52,23 @@ fn bulk_print_matches_per_scalar_with_autowrap_off() {
 fn bulk_print_matches_per_scalar_inside_horizontal_margins() {
     // DECLRMM + DECSLRM 3..6, cursor inside the margins.
     assert_bulk_print_matches_per_scalar(10, 4, b"\x1b[?69h\x1b[3;6s\x1b[1;4H", "abcdefghijkl");
-    // Cursor placed right of the right margin: one write, then snap + latch.
+    // Cursor right of the margin wraps at the screen edge.
     assert_bulk_print_matches_per_scalar(10, 4, b"\x1b[?69h\x1b[3;6s\x1b[1;9H", "abc");
+}
+
+#[test]
+fn bulk_print_matches_per_scalar_across_horizontal_margin_boundaries() {
+    for col in [1, 2, 3, 7, 8, 9, 10] {
+        for autowrap in [true, false] {
+            let setup = format!(
+                "\x1b[?69h\x1b[3;7s\x1b[?7{}\x1b[1;{col}H",
+                if autowrap { 'h' } else { 'l' }
+            );
+            for text in ["abcdefghijkl", "日本語日本語", "❤\u{fe0f}AB"] {
+                assert_bulk_print_matches_per_scalar(10, 6, setup.as_bytes(), text);
+            }
+        }
+    }
 }
 
 #[test]

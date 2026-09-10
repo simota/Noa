@@ -515,6 +515,9 @@ impl App {
         let Some(mut surface) = source_state.surfaces.remove(&pane) else {
             return false;
         };
+        if source_state.mouse_capture_pane == Some(pane) {
+            source_state.mouse_capture_pane = None;
+        }
         source_state.split_tree = transform.source_tree;
         if source_state.zoomed == Some(pane) {
             source_state.zoomed = None;

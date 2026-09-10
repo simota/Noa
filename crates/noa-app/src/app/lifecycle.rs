@@ -608,10 +608,12 @@ impl App {
                 focused_pane: initial_pane,
                 surfaces,
                 last_mouse_pane: Some(initial_pane),
+                mouse_capture_pane: None,
                 last_mouse_point: None,
                 last_mouse_physical_position: None,
                 active_split_drag: None,
                 modifiers: ModifiersState::empty(),
+                key_modifiers: input::KeyModifierState::default(),
                 occluded: false,
                 title: "Noa".to_string(),
                 proxy_icon_cwd: None,
@@ -1372,6 +1374,9 @@ impl App {
                     .surfaces
                     .get(&pane_id)
                     .and_then(|surface| surface.scrollback_key.clone());
+                if state.mouse_capture_pane == Some(pane_id) {
+                    state.mouse_capture_pane = None;
+                }
                 if let Some(mut surface) = state.surfaces.remove(&pane_id) {
                     surface.shutdown();
                 }

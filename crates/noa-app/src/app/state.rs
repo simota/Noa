@@ -270,6 +270,10 @@ pub(super) struct WindowState {
     pub(super) focused_pane: PaneId,
     pub(super) surfaces: HashMap<PaneId, Surface>,
     pub(super) last_mouse_pane: Option<PaneId>,
+    /// The pane that received the live left-button press. Motion and the
+    /// matching release route to it even when the pointer has crossed into a
+    /// sibling split (xterm/Ghostty grab semantics); `None` outside a press.
+    pub(super) mouse_capture_pane: Option<PaneId>,
     pub(super) last_mouse_point: Option<split_tree::Point>,
     /// Raw physical pointer position from the most recent `CursorMoved`.
     /// Kept alongside `last_mouse_point`/`last_mouse_pane` for handlers that
@@ -280,6 +284,7 @@ pub(super) struct WindowState {
     pub(super) active_split_drag: Option<SplitResizeDrag>,
     /// Modifier state tracked by winit for this native window's view.
     pub(super) modifiers: ModifiersState,
+    pub(super) key_modifiers: input::KeyModifierState,
     pub(super) occluded: bool,
     /// Whether this window was *created* with `with_transparent(true)`.
     /// AppKit fixes a window's opacity at creation — a window built opaque

@@ -1,6 +1,7 @@
 use crate::macos_overlay::model::{
-    OverlayColors, PaneRectPt, ProcessMonitorViewModel, ThemeSettingsViewModel, Tone,
-    overlay_scroll_window,
+    OverlayColors, PaneRectPt, ProcessMonitorViewModel, SETTINGS_DESCRIPTION_H, SETTINGS_FOOTER_H,
+    SETTINGS_ROW_H, SETTINGS_SEARCH_H, SETTINGS_TOP, THEME_FILTER_TOP, THEME_LIST_TOP, THEME_ROW_H,
+    ThemeSettingsLayout, ThemeSettingsViewModel, Tone, overlay_scroll_window,
 };
 use crate::theme_settings::{Liveness, ThemeSettingsMode};
 use noa_render::{CommandPaletteSnapshot, ConfirmDialogSnapshot, PaletteRow};
@@ -34,17 +35,13 @@ const ID_TITLE_PROMPT: &str = "noa.native-overlay.title-prompt";
 const ID_TOAST: &str = "noa.native-overlay.toast";
 const ID_SCRATCH_BADGE: &str = "noa.native-overlay.scratch-badge";
 
-/// Palette metrics (points).
-const PALETTE_WIDTH: f64 = 560.0;
-const QUERY_ROW_H: f64 = 44.0;
-const ENTRY_ROW_H: f64 = 26.0;
-const HEADER_ROW_H: f64 = 24.0;
-const LIST_PAD_V: f64 = 6.0;
-const CARD_PAD_H: f64 = 16.0;
+/// Palette metrics (points). The widths/row heights the IME caret anchor
+/// also needs live in `model.rs` so the two can't drift.
+use crate::macos_overlay::model::{
+    CARD_PAD_H, ENTRY_ROW_H, HEADER_ROW_H, LIST_PAD_V, PaletteCardLayout, QUERY_ROW_H,
+    THEME_SETTINGS_WIDTH, TITLE_PROMPT_H, TITLE_PROMPT_WIDTH,
+};
 const CARD_RADIUS: f64 = 12.0;
-/// Max list rows (headers + entries) visible at once — matches the wgpu
-/// card's 12-row window.
-const PALETTE_CAPACITY: usize = 12;
 const SCRIM_ALPHA: f64 = 0.25;
 
 /// Balance a `+1` (alloc/init) object that a superview now retains:
@@ -628,32 +625,18 @@ pub(in crate::macos_overlay) fn rebuild_palette(
             return;
         };
 
-        // Window capacity bounded by the pane height so the list never
-        // runs past the card's bottom edge on a short pane.
-        let capacity = (((pane.h - 24.0 - QUERY_ROW_H - 1.0 - LIST_PAD_V * 2.0) / ENTRY_ROW_H)
-            as usize)
-            .clamp(3, PALETTE_CAPACITY);
-        let (offset, shown) = overlay_scroll_window(snap.rows.len(), snap.selected, capacity);
+        let PaletteCardLayout {
+            card_w,
+            card_h,
+            card_x,
+            card_top,
+            offset,
+            shown,
+        } = PaletteCardLayout::new(pane, snap);
         let visible = &snap.rows[offset..offset + shown];
         let empty = snap.rows.is_empty();
-        let list_h: f64 = if empty {
-            36.0
-        } else {
-            visible
-                .iter()
-                .map(|row| match row {
-                    PaletteRow::Header { .. } => HEADER_ROW_H,
-                    PaletteRow::Entry { .. } => ENTRY_ROW_H,
-                })
-                .sum::<f64>()
-                + LIST_PAD_V * 2.0
-        };
-        let card_w = PALETTE_WIDTH.min(pane.w - 32.0).max(280.0);
-        let card_h = (QUERY_ROW_H + 1.0 + list_h).min(pane.h - 24.0);
-        let card_x = (pane.w - card_w) / 2.0;
-        let card_y_top = (pane.h * 0.14).min(pane.h - card_h).max(8.0);
         let card_frame = NSRect::new(
-            NSPoint::new(card_x, from_top(pane.h, card_y_top, card_h)),
+            NSPoint::new(card_x, from_top(pane.h, card_top, card_h)),
             NSSize::new(card_w, card_h),
         );
         let (root, effect) = card_for(
@@ -863,7 +846,7 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
             return;
         };
 
-        let card_w = 660.0_f64.min(pane.w - 32.0).max(320.0);
+        let card_w = THEME_SETTINGS_WIDTH.min(pane.w - 32.0).max(320.0);
         // The card height is content-driven: title block + exactly one
         // section (the theme list+sample pane in Theme mode, the settings
         // rows in Settings mode — a session never shows both, DEC-2) +
@@ -878,46 +861,31 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
         // Question, resolved differently per path since one has a dynamic
         // card height and the other doesn't). Settings mode is unaffected
         // — it uses its own independent `settings_top`, not this constant.
-        let list_top = 106.0;
+        let list_top = THEME_LIST_TOP;
         let chip_row_y = 84.0;
-        let row_h = 24.0;
-        let srow_h = 23.0;
-        let settings_header_h = 20.0;
-        let footer_h = 34.0;
-        let avail = (pane.h - 24.0).max(240.0);
+        let row_h = THEME_ROW_H;
+        let srow_h = SETTINGS_ROW_H;
+        let footer_h = SETTINGS_FOOTER_H;
         let settings_total = vm.settings_visible.len();
         // Settings mode has no filter line/theme list above it, so its
         // section header sits where the "Theme"/"Sample" column headers
         // otherwise would (y=46); rows start directly below the header.
-        let settings_top = 46.0 + settings_header_h;
+        let settings_top = SETTINGS_TOP;
         // R-6/R-5 fixed lines (Addendum D-3/FM-04): always reserve the
         // description line; reserve the search line only while active.
-        let description_h = 19.0;
-        let search_h = 16.0;
-
-        let (list_rows, settings_rows, card_h) = match vm.mode {
-            ThemeSettingsMode::Theme => {
-                let needed = |list_rows: usize| list_top + list_rows as f64 * row_h + footer_h;
-                let mut list_rows = vm.themes.len().max(1);
-                while needed(list_rows) > avail && list_rows > 3 {
-                    list_rows -= 1;
-                }
-                (list_rows, 0usize, needed(list_rows).min(avail))
-            }
-            ThemeSettingsMode::Settings => {
-                let (settings_rows, height) = crate::macos_overlay::model::settings_rows_budget(
-                    settings_total,
-                    avail,
-                    settings_top,
-                    srow_h,
-                    footer_h,
-                    description_h,
-                    search_h,
-                    vm.search_active,
-                );
-                (0usize, settings_rows, height)
-            }
-        };
+        let description_h = SETTINGS_DESCRIPTION_H;
+        let search_h = SETTINGS_SEARCH_H;
+        let ThemeSettingsLayout {
+            list_rows,
+            settings_rows,
+            card_h,
+        } = ThemeSettingsLayout::new(
+            pane.h,
+            vm.mode,
+            vm.themes.len(),
+            settings_total,
+            vm.search_active,
+        );
         let card_frame = NSRect::new(
             NSPoint::new(
                 (pane.w - card_w) / 2.0,
@@ -1017,7 +985,7 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                     mono_digit_font(12.0),
                     muted,
                     NSRect::new(
-                        NSPoint::new(pad, from_top(card_h, 64.0, 16.0)),
+                        NSPoint::new(pad, from_top(card_h, THEME_FILTER_TOP, SETTINGS_SEARCH_H)),
                         NSSize::new(col_split - pad - 8.0 - count_w, 16.0),
                     ),
                 );
@@ -1843,8 +1811,8 @@ pub(in crate::macos_overlay) fn rebuild_title_prompt(
             return;
         };
 
-        let card_w = 420.0_f64.min(pane.w - 32.0).max(240.0);
-        let card_h = 104.0;
+        let card_w = TITLE_PROMPT_WIDTH.min(pane.w - 32.0).max(240.0);
+        let card_h = TITLE_PROMPT_H;
         let card_frame = NSRect::new(
             NSPoint::new(
                 (pane.w - card_w) / 2.0,

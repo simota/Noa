@@ -32,6 +32,51 @@ fn search_prompt_display_text_reports_no_matches_for_non_empty_query() {
 }
 
 #[test]
+fn search_prompt_caret_matches_rendered_cells_after_truncation() {
+    let mut no_matches = SearchState::default();
+    no_matches.set_query(
+        "needle".to_string(),
+        Vec::new(),
+        noa_grid::SearchAnchor::Backward(SelectionPoint::new(0, 0)),
+    );
+    let mut many_matches = SearchState::default();
+    many_matches.set_query(
+        "a".to_string(),
+        (0..1234)
+            .map(|row| noa_grid::SearchMatch {
+                start: SelectionPoint::new(0, row),
+                end: SelectionPoint::new(0, row),
+            })
+            .collect(),
+        noa_grid::SearchAnchor::Backward(SelectionPoint::new(0, 1233)),
+    );
+    for search in [SearchState::default(), no_matches, many_matches] {
+        for buffer in [
+            "".to_string(),
+            "short".to_string(),
+            "日e\u{301}".repeat(100),
+        ] {
+            for cols in [0, 1, 5, 11, 12, 20, 80] {
+                let text = search_prompt_display_text(&buffer, &search, cols);
+                let mut cells = search_prompt_segment_cells(&text, [255; 4]);
+                let excess = cells.len().saturating_sub(usize::from(cols));
+                cells.drain(..excess);
+                let drawn_caret = cells
+                    .iter()
+                    .rposition(|cell| cell.ch == '\u{258F}')
+                    .map_or(0, |index| usize::from(cols) - cells.len() + index);
+                assert_eq!(
+                    usize::from(search_prompt_caret_col(&buffer, &search, cols)),
+                    drawn_caret,
+                    "buffer {buffer:?}, cols {cols}, status {}",
+                    search_prompt_suffix(&buffer, &search),
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn search_prompt_overlay_emits_top_right_bg_and_glyph_instances_and_tracks_the_buffer() {
     let Some(mut font) = font_with_rasterized_m() else {
         return;

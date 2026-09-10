@@ -1372,4 +1372,5 @@ use cursor::*;
 use overlay::*;
 pub use overlay::{
     ConfirmDialogLayout, PaletteLayout, command_palette_layout, confirm_dialog_layout,
+    search_prompt_caret_col,
 };

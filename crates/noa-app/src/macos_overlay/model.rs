@@ -1,6 +1,6 @@
 use std::hash::{Hash, Hasher};
 
-use noa_render::OverlayStyle;
+use noa_render::{CommandPaletteSnapshot, OverlayStyle, PaletteRow};
 
 /// Opaque `CGColorRef` for `msg_send!` returns/arguments. The `-CGColor`
 /// property returns `^{CGColor=}`, not an object (`@`) — typing it as
@@ -68,6 +68,143 @@ impl NativeOverlayCache {
 /// REQ-TTL-3's empty-clears affordance). Shared with the non-macOS fallback
 /// card in `app.rs`.
 pub(crate) const TITLE_PROMPT_HINT: &str = "Enter to set \u{b7} Empty clears \u{b7} Esc to cancel";
+
+/// Card metrics (points) shared by the AppKit card builders (`imp/appkit.rs`)
+/// and the IME caret anchors below, so the candidate window and the drawn
+/// input row can't drift apart.
+pub(crate) const PALETTE_WIDTH: f64 = 560.0;
+pub(crate) const QUERY_ROW_H: f64 = 44.0;
+pub(crate) const CARD_PAD_H: f64 = 16.0;
+pub(crate) const ENTRY_ROW_H: f64 = 26.0;
+pub(crate) const HEADER_ROW_H: f64 = 24.0;
+pub(crate) const LIST_PAD_V: f64 = 6.0;
+/// Maximum visible list rows, including headers.
+const PALETTE_CAPACITY: usize = 12;
+pub(crate) const TITLE_PROMPT_WIDTH: f64 = 420.0;
+pub(crate) const TITLE_PROMPT_H: f64 = 104.0;
+pub(crate) const THEME_SETTINGS_WIDTH: f64 = 660.0;
+/// Mean advance of the 15pt system font the input rows use — an estimate
+/// (the labels are proportional), good enough to put the candidate window
+/// at the end of the typed text rather than at its start.
+const INPUT_FONT_ADVANCE: f64 = 8.3;
+const INPUT_ROW_H: f64 = 20.0;
+
+/// A caret rectangle in points, relative to the pane rect's origin (the
+/// cards are laid out inside the focused pane's frame).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CaretPt {
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) w: f64,
+    pub(crate) h: f64,
+}
+
+/// Card placement and visible rows shared by native drawing and IME.
+pub(crate) struct PaletteCardLayout {
+    pub(crate) card_w: f64,
+    pub(crate) card_h: f64,
+    pub(crate) card_x: f64,
+    pub(crate) card_top: f64,
+    pub(crate) offset: usize,
+    pub(crate) shown: usize,
+}
+
+impl PaletteCardLayout {
+    pub(crate) fn new(pane: PaneRectPt, snapshot: &CommandPaletteSnapshot) -> Self {
+        let capacity = (((pane.h - 24.0 - QUERY_ROW_H - 1.0 - LIST_PAD_V * 2.0) / ENTRY_ROW_H)
+            as usize)
+            .clamp(3, PALETTE_CAPACITY);
+        let (offset, shown) =
+            overlay_scroll_window(snapshot.rows.len(), snapshot.selected, capacity);
+        let visible = &snapshot.rows[offset..offset + shown];
+        let list_h = if visible.is_empty() {
+            36.0
+        } else {
+            visible
+                .iter()
+                .map(|row| match row {
+                    PaletteRow::Header { .. } => HEADER_ROW_H,
+                    PaletteRow::Entry { .. } => ENTRY_ROW_H,
+                })
+                .sum::<f64>()
+                + LIST_PAD_V * 2.0
+        };
+        let card_w = PALETTE_WIDTH.min(pane.w - 32.0).max(280.0);
+        let card_h = (QUERY_ROW_H + 1.0 + list_h).min(pane.h - 24.0);
+        Self {
+            card_w,
+            card_h,
+            card_x: (pane.w - card_w) / 2.0,
+            card_top: (pane.h * 0.14).min(pane.h - card_h).max(8.0),
+            offset,
+            shown,
+        }
+    }
+}
+
+/// The palette query row's caret after `query_chars` characters, including
+/// the remote endpoint field, which uses the same card.
+pub(crate) fn palette_query_caret(
+    pane: PaneRectPt,
+    snapshot: &CommandPaletteSnapshot,
+    query_chars: usize,
+) -> CaretPt {
+    let layout = PaletteCardLayout::new(pane, snapshot);
+    CaretPt {
+        x: layout.card_x + CARD_PAD_H + 22.0 + query_chars as f64 * INPUT_FONT_ADVANCE,
+        y: layout.card_top + 13.0,
+        w: 1.0,
+        h: INPUT_ROW_H,
+    }
+}
+
+/// The "Set Tab Title" prompt's caret: its input row is centred, so the
+/// caret sits half the text's width right of the card's centre line.
+pub(crate) fn title_prompt_caret(pane: PaneRectPt, input_chars: usize) -> CaretPt {
+    let card_w = TITLE_PROMPT_WIDTH.min(pane.w - 32.0).max(240.0);
+    let card_x = (pane.w - card_w) / 2.0;
+    let card_top = (pane.h * 0.30).min(pane.h - TITLE_PROMPT_H);
+    CaretPt {
+        x: card_x + card_w / 2.0 + input_chars as f64 * INPUT_FONT_ADVANCE / 2.0,
+        y: card_top + 40.0,
+        w: 1.0,
+        h: INPUT_ROW_H,
+    }
+}
+
+/// The search/filter field uses the same content-driven card height as the
+/// native builder, including filtered/empty lists and the Settings mode.
+pub(crate) fn theme_settings_caret(
+    pane: PaneRectPt,
+    state: &crate::theme_settings::ThemeSettings,
+) -> CaretPt {
+    use crate::theme_settings::{SettingsRowKind, ThemeSettingsMode};
+    let card_w = THEME_SETTINGS_WIDTH.min(pane.w - 32.0).max(320.0);
+    let settings_total = if state.settings_search_active() {
+        state.settings_filtered_len()
+    } else {
+        SettingsRowKind::COUNT
+    };
+    let layout = ThemeSettingsLayout::new(
+        pane.h,
+        state.mode(),
+        state.filtered_len().min(THEME_LIST_ROWS),
+        settings_total,
+        state.settings_search_active(),
+    );
+    let card_x = (pane.w - card_w) / 2.0;
+    let card_top = (pane.h - layout.card_h) / 2.0;
+    let input_top = match state.mode() {
+        ThemeSettingsMode::Theme => THEME_FILTER_TOP,
+        ThemeSettingsMode::Settings => SETTINGS_TOP,
+    };
+    CaretPt {
+        x: card_x + 20.0,
+        y: card_top + input_top,
+        w: 1.0,
+        h: SETTINGS_SEARCH_H,
+    }
+}
 
 /// A pane rectangle in AppKit points, top-left origin relative to the
 /// window's content view (i.e. physical px / scale factor).
@@ -290,6 +427,66 @@ pub(crate) struct ThemeSettingsViewModel {
 
 /// Rows the theme list shows at once in the native card.
 const THEME_LIST_ROWS: usize = 8;
+
+pub(crate) const THEME_FILTER_TOP: f64 = 64.0;
+pub(crate) const THEME_LIST_TOP: f64 = 106.0;
+pub(crate) const THEME_ROW_H: f64 = 24.0;
+pub(crate) const SETTINGS_TOP: f64 = 66.0;
+pub(crate) const SETTINGS_ROW_H: f64 = 23.0;
+pub(crate) const SETTINGS_FOOTER_H: f64 = 34.0;
+pub(crate) const SETTINGS_DESCRIPTION_H: f64 = 19.0;
+pub(crate) const SETTINGS_SEARCH_H: f64 = 16.0;
+
+pub(crate) struct ThemeSettingsLayout {
+    pub(crate) list_rows: usize,
+    pub(crate) settings_rows: usize,
+    pub(crate) card_h: f64,
+}
+
+impl ThemeSettingsLayout {
+    pub(crate) fn new(
+        pane_h: f64,
+        mode: crate::theme_settings::ThemeSettingsMode,
+        theme_rows: usize,
+        settings_total: usize,
+        search_active: bool,
+    ) -> Self {
+        use crate::theme_settings::ThemeSettingsMode;
+        let avail = (pane_h - 24.0).max(240.0);
+        match mode {
+            ThemeSettingsMode::Theme => {
+                let needed =
+                    |rows: usize| THEME_LIST_TOP + rows as f64 * THEME_ROW_H + SETTINGS_FOOTER_H;
+                let mut list_rows = theme_rows.max(1);
+                while needed(list_rows) > avail && list_rows > 3 {
+                    list_rows -= 1;
+                }
+                Self {
+                    list_rows,
+                    settings_rows: 0,
+                    card_h: needed(list_rows).min(avail),
+                }
+            }
+            ThemeSettingsMode::Settings => {
+                let (settings_rows, card_h) = settings_rows_budget(
+                    settings_total,
+                    avail,
+                    SETTINGS_TOP,
+                    SETTINGS_ROW_H,
+                    SETTINGS_FOOTER_H,
+                    SETTINGS_DESCRIPTION_H,
+                    SETTINGS_SEARCH_H,
+                    search_active,
+                );
+                Self {
+                    list_rows: 0,
+                    settings_rows,
+                    card_h,
+                }
+            }
+        }
+    }
+}
 
 pub(crate) fn theme_settings_view_model(
     state: &crate::theme_settings::ThemeSettings,

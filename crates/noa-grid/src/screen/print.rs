@@ -5,6 +5,17 @@ use super::*;
 impl Screen {
     // ── printing ───────────────────────────────────────────────────
 
+    /// Absolute addressing can place the cursor outside DECSLRM. Text there
+    /// wraps at the screen edge until the cursor enters the margin interval.
+    fn print_margins(&self, x: u16) -> (u16, u16) {
+        let (left, right) = (self.left_margin(), self.right_margin());
+        if (left..=right).contains(&x) {
+            (left, right)
+        } else {
+            (0, self.cols.saturating_sub(1))
+        }
+    }
+
     /// [`Screen::print_width`] behind a direct-indexed BMP table. The
     /// per-scalar `unicode-width` multi-level lookup shows up at ~6% of the
     /// bulk unicode ingest profile; one byte per BMP codepoint (64 KiB,
@@ -62,7 +73,8 @@ impl Screen {
             return;
         }
 
-        if width == 2 && self.right_margin() <= self.left_margin() {
+        let (left, right) = self.print_margins(self.cursor.x);
+        if width == 2 && right <= left {
             let blank = self.blank();
             let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
             let Some(row) = self.grid.get_mut(y) else {
@@ -80,17 +92,17 @@ impl Screen {
                 row.wrapped = true;
             }
             self.index();
-            self.cursor.x = self.left_margin();
+            self.cursor.x = left;
             self.cursor.pending_wrap = false;
         }
 
-        if width == 2 && self.cursor.x.saturating_add(1) > self.right_margin() {
+        if width == 2 && self.cursor.x.saturating_add(1) > right {
             if autowrap {
                 if let Some(row) = self.grid.get_mut(self.cursor.y as usize) {
                     row.wrapped = true;
                 }
                 self.index();
-                self.cursor.x = self.left_margin();
+                self.cursor.x = left;
                 self.cursor.pending_wrap = false;
             } else {
                 let blank = self.blank();
@@ -171,8 +183,8 @@ impl Screen {
         row.dirty = true;
         row.mark_occupied(x + width);
 
-        if self.cursor.x.saturating_add(width as u16) > self.right_margin() {
-            self.cursor.x = self.right_margin();
+        if self.cursor.x.saturating_add(width as u16) > right {
+            self.cursor.x = right;
             self.cursor.pending_wrap = true; // latch; stay in the last column
         } else {
             self.cursor.x += width as u16;
@@ -191,6 +203,13 @@ impl Screen {
             bytes.iter().all(|&b| (0x20..=0x7e).contains(&b)),
             "print_ascii_run only takes printable ASCII"
         );
+        if self.cursor.x < self.left_margin() || self.cursor.x > self.right_margin() {
+            // Crossing into the margins can change the wrap boundary mid-run.
+            for &b in bytes {
+                self.print(b as char, autowrap, grapheme_clustering);
+            }
+            return;
+        }
         let mut bytes = bytes;
         if grapheme_clustering {
             // Only a run prefix can extend a pre-existing cluster (an ASCII
@@ -238,16 +257,9 @@ impl Screen {
                 // scalar without moving the cursor, so the whole rest drops.
                 return;
             }
-            // Cells available on this row segment: through the right margin
-            // (inclusive) and within the row; a cursor already past the
-            // margin still writes one cell before snapping back (as the
-            // per-scalar path does).
+            // Cells available through the right margin (inclusive).
             let seg_end = (right as usize + 1).min(row.cells.len());
-            let n = if x >= seg_end {
-                1
-            } else {
-                (seg_end - x).min(bytes.len() - i)
-            };
+            let n = (seg_end - x).min(bytes.len() - i);
             // A wide pair straddling the segment can only leak a stray half
             // *outside* the segment through its two edge cells — an interior
             // hit's neighbor is also inside the segment and gets the same
@@ -321,6 +333,12 @@ impl Screen {
     ) where
         I: Iterator<Item = char>,
     {
+        if self.cursor.x < self.left_margin() || self.cursor.x > self.right_margin() {
+            for c in chars {
+                self.print(c, autowrap, grapheme_clustering);
+            }
+            return;
+        }
         let mut chars = chars.peekable();
         if grapheme_clustering {
             // As in `print_ascii_run`: only a run prefix can extend a
@@ -552,7 +570,8 @@ impl Screen {
     /// glyph may overdraw its neighbor, but the grid never desyncs.
     fn promote_cluster_to_wide(&mut self, x: usize) {
         let spacer_x = x + 1;
-        if spacer_x > self.right_margin() as usize {
+        let (_, right) = self.print_margins(x as u16);
+        if spacer_x > right as usize {
             return;
         }
         let blank = self.blank();
@@ -582,8 +601,8 @@ impl Screen {
         };
         row.dirty = true;
         if self.cursor.x as usize == spacer_x {
-            if self.cursor.x.saturating_add(1) > self.right_margin() {
-                self.cursor.x = self.right_margin();
+            if self.cursor.x.saturating_add(1) > right {
+                self.cursor.x = right;
                 self.cursor.pending_wrap = true;
             } else {
                 self.cursor.x += 1;

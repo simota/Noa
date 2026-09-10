@@ -31,6 +31,7 @@ pub use instance::{BlendMode, CellInstance, PaneUniformParams, Uniforms, populat
 pub use renderer::{
     ConfirmDialogLayout, PaletteLayout, PaneFrame, Renderer, command_palette_layout,
     confirm_dialog_layout, paint_startup_frame, renderer_construction_count,
+    search_prompt_caret_col,
 };
 pub use shared::{GlyphAtlasCache, PipelineCache, SharedGlyphAtlases, SharedPipelines};
 pub use snapshot::{

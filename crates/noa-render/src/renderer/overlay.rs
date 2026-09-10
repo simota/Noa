@@ -999,6 +999,15 @@ pub(super) fn search_prompt_suffix_cols(buffer: &str, search: &SearchState) -> u
     search_prompt_suffix(buffer, search).chars().count()
 }
 
+/// The search prompt's caret column, shared with the OS IME anchor. The
+/// prompt is right-aligned and both truncation passes drop from the front,
+/// so only the trailing ASCII status separates the caret from the right
+/// edge, even for wide or combining query text. If the pane is too narrow
+/// to show the caret, anchor at its left edge.
+pub fn search_prompt_caret_col(buffer: &str, search: &SearchState, cols: u16) -> u16 {
+    usize::from(cols).saturating_sub(search_prompt_suffix_cols(buffer, search) + 1) as u16
+}
+
 /// Turn the prompt's display text into row-local [`SegmentCell`]s, one per
 /// column — a double-width character gets a lead cell plus a blank spacer
 /// cell (mirroring `noa_grid::Screen`'s WIDE/WIDE_SPACER print path), and a

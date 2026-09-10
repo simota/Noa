@@ -459,6 +459,9 @@ impl App {
         // early-return below, so a background tab tracks its shell instead of
         // freezing at its last-foreground title (tab-close title-freeze fix).
         self.refresh_window_title(window_id);
+        // Redraws and IME events share the modal-aware anchor, including
+        // frame requests caused by preedit or a card layout change.
+        self.update_focused_ime_cursor_area(window_id);
         #[cfg(target_os = "macos")]
         let has_visible_background_image = self.background_image.has_visible_image();
         let (Some(gpu), Some(state)) = (self.gpu.as_mut(), self.windows.get_mut(&window_id)) else {
@@ -738,20 +741,6 @@ impl App {
             crate::macos_window::set_represented_url(&state.window, resolved.as_deref());
             state.proxy_icon_cwd = new_cwd;
         }
-        if let Some((_, rect, snapshot)) = snapshots
-            .iter()
-            .find(|(pane_id, _, _)| *pane_id == state.focused_pane)
-        {
-            update_ime_cursor_area(
-                &state.window,
-                gpu.fonts.get(state.font_px).metrics(),
-                snapshot.cursor.x,
-                snapshot.cursor.y,
-                *rect,
-                self.padding,
-            );
-        }
-
         let panes = snapshots
             .iter()
             .map(|(pane_id, rect, snapshot)| PaneFrame {

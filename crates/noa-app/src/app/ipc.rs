@@ -398,7 +398,12 @@ impl App {
                         self.mark_pane_paste_input(window_id, pane_id);
                     }
                     self.snap_pane_viewport_to_bottom(window_id, pane_id);
-                    self.write_pane_pty_bytes(window_id, pane_id, bytes);
+                    // The queue outcome is the reply: a full input budget or a
+                    // gone sink must surface to the automation client, which
+                    // otherwise proceeds as if the text had been accepted
+                    // (N02). `write_pane_pty_bytes` only logs those.
+                    let result = self.queue_pane_pty_bytes(window_id, pane_id, bytes);
+                    ipc_input_queue_result(result)?;
                 }
                 Ok(IpcActionReply::Ok)
             }
@@ -578,6 +583,26 @@ fn apply_attach_grid_first_resize(
     dispatch_pty_resize(new_size)
 }
 
+/// Map a pty input queue outcome onto the `noa.sendText` reply. `Queued` and
+/// `Deferred` are both acceptance (the queue owns the bytes and will write
+/// them); `Dropped` means the pane's input budget is exhausted because the
+/// foreground program isn't reading its tty, and `Disconnected` that the
+/// pane has no live sink (writer thread or remote transport gone). Neither
+/// of the last two may be reported as success. "Accepted by the queue" is
+/// still not "consumed by the child" — that guarantee doesn't exist.
+fn ipc_input_queue_result(
+    result: crate::io_thread::QueueInputResult,
+) -> Result<(), noa_ipc::IpcError> {
+    use crate::io_thread::QueueInputResult;
+    match result {
+        QueueInputResult::Queued | QueueInputResult::Deferred => Ok(()),
+        QueueInputResult::Dropped => Err(noa_ipc::IpcError::Internal(
+            "pty input queue is full: the foreground program is not reading its tty".to_string(),
+        )),
+        QueueInputResult::Disconnected => Err(noa_ipc::IpcError::PaneClosed),
+    }
+}
+
 #[cfg(test)]
 mod attach_tests {
     use super::*;
@@ -616,5 +641,27 @@ mod attach_tests {
             stale_registry_keys(registered.iter(), &live),
             vec![closed_surface]
         );
+    }
+}
+
+#[cfg(test)]
+mod send_text_reply_tests {
+    use super::*;
+    use crate::io_thread::QueueInputResult;
+
+    // N02: a rejected or sink-less queue must not turn into `Ok` for the
+    // automation client; only actual acceptance does.
+    #[test]
+    fn send_text_reports_queue_rejection_instead_of_success() {
+        assert!(ipc_input_queue_result(QueueInputResult::Queued).is_ok());
+        assert!(ipc_input_queue_result(QueueInputResult::Deferred).is_ok());
+        assert!(matches!(
+            ipc_input_queue_result(QueueInputResult::Dropped),
+            Err(noa_ipc::IpcError::Internal(message)) if message.contains("queue is full")
+        ));
+        assert!(matches!(
+            ipc_input_queue_result(QueueInputResult::Disconnected),
+            Err(noa_ipc::IpcError::PaneClosed)
+        ));
     }
 }

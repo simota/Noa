@@ -5,13 +5,36 @@ use super::*;
 
 impl Screen {
     pub(crate) fn clear_scrollback(&mut self) {
-        if self.scrollback.len() > 0 {
+        self.collapse_scrollback();
+        self.clear_selection();
+        self.clear_search();
+    }
+
+    /// Drop the scrollback and collapse the session-absolute coordinate
+    /// space by its length: Kitty placements anchored in the cleared history
+    /// go, survivors in the live area re-anchor into the shrunken space so
+    /// they keep their screen position. Shared by [`Self::clear_scrollback`]
+    /// (the app's "Clear Scrollback" action) and `ED 3`, which used to be two
+    /// diverging copies — the former left every anchor `old_len` rows too
+    /// high and pushed visible images off-screen (N06). Returns the number
+    /// of rows removed, for callers that also shift a selection.
+    fn collapse_scrollback(&mut self) -> usize {
+        let old_len = self.scrollback.len();
+        let old_live_top = self.live_area_abs_top();
+        if old_len > 0 {
             self.invalidate_coordinate_space();
         }
         self.scrollback.clear();
         self.viewport_offset = 0;
-        self.clear_selection();
-        self.clear_search();
+        self.kitty_placements.retain_mut(|p| {
+            if p.anchor_abs_row < old_live_top {
+                false
+            } else {
+                p.anchor_abs_row -= old_len;
+                true
+            }
+        });
+        old_len
     }
 
     /// Ghostty parity: the non-prompt branch of `Termio.clearScreen` — erase
@@ -203,7 +226,9 @@ impl Screen {
     /// Index (IND / LF without CR): down one row, scrolling at the region bottom.
     pub fn index(&mut self) {
         self.cursor.pending_wrap = false;
-        if self.cursor.y == self.region.bottom {
+        if self.cursor.y == self.region.bottom
+            && (self.left_margin()..=self.right_margin()).contains(&self.cursor.x)
+        {
             self.scroll_up_region(1);
         } else if self.cursor.y + 1 < self.rows {
             self.cursor.y += 1;
@@ -213,7 +238,9 @@ impl Screen {
     /// Reverse index (RI): up one row, scrolling down at the region top.
     pub fn reverse_index(&mut self) {
         self.cursor.pending_wrap = false;
-        if self.cursor.y == self.region.top {
+        if self.cursor.y == self.region.top
+            && (self.left_margin()..=self.right_margin()).contains(&self.cursor.x)
+        {
             self.scroll_down_region(1);
         } else if self.cursor.y > 0 {
             self.cursor.y -= 1;
@@ -476,14 +503,32 @@ impl Screen {
 
     // ── horizontal / absolute motion ────────────────────────────────
 
+    // A relative move stops at the margin in its direction of travel,
+    // unless the cursor is already beyond that margin. Absolute placement
+    // can put it there with DECOM off; then the screen edge is the limit.
+    fn cursor_left_bound(&self) -> u16 {
+        if self.cursor.x >= self.left_margin() {
+            self.left_margin()
+        } else {
+            0
+        }
+    }
+
+    fn cursor_right_bound(&self) -> u16 {
+        if self.cursor.x <= self.right_margin() {
+            self.right_margin()
+        } else {
+            self.cols.saturating_sub(1)
+        }
+    }
+
     pub fn carriage_return(&mut self) {
-        self.cursor.x = self.left_margin();
+        self.cursor.x = self.cursor_left_bound();
         self.cursor.pending_wrap = false;
     }
 
     pub fn backspace(&mut self) {
-        self.cursor.pending_wrap = false;
-        self.cursor.x = self.cursor.x.saturating_sub(1).max(self.left_margin());
+        self.cursor_backward(1);
     }
 
     pub fn cursor_up(&mut self, n: u16) {
@@ -511,19 +556,32 @@ impl Screen {
     pub fn cursor_forward(&mut self, n: u16) {
         self.cursor.pending_wrap = false;
         let n = n.max(1);
-        self.cursor.x = self.cursor.x.saturating_add(n).min(self.right_margin());
+        self.cursor.x = self
+            .cursor
+            .x
+            .saturating_add(n)
+            .min(self.cursor_right_bound());
     }
 
     pub fn cursor_backward(&mut self, n: u16) {
         self.cursor.pending_wrap = false;
         let n = n.max(1);
-        self.cursor.x = self.cursor.x.saturating_sub(n).max(self.left_margin());
+        self.cursor.x = self
+            .cursor
+            .x
+            .saturating_sub(n)
+            .max(self.cursor_left_bound());
     }
 
+    /// Absolute cursor placement (`CUP`/`HVP` with DECOM off). Ghostty's
+    /// `setCursorPos` bounds the target by the *screen* unless origin mode is
+    /// on — the left/right margins only constrain the origin-relative form
+    /// ([`Self::cursor_position_with_origin`]) — so a TUI that draws outside
+    /// a DECSLRM window lands where it asked, not snapped to the margin (N07).
     pub fn cursor_position(&mut self, row: u16, col: u16) {
         self.cursor.pending_wrap = false;
         self.cursor.y = row.saturating_sub(1).min(self.rows.saturating_sub(1));
-        self.cursor.x = self.clamp_x_to_margins(col.saturating_sub(1));
+        self.cursor.x = col.saturating_sub(1).min(self.cols.saturating_sub(1));
     }
 
     pub(crate) fn cursor_position_with_origin(&mut self, row: u16, col: u16, origin: bool) {
@@ -543,9 +601,10 @@ impl Screen {
             .min(self.right_margin());
     }
 
+    /// `CHA`/`HPA` with DECOM off: screen-bounded like [`Self::cursor_position`].
     pub fn cursor_col_abs(&mut self, col: u16) {
         self.cursor.pending_wrap = false;
-        self.cursor.x = self.clamp_x_to_margins(col.saturating_sub(1));
+        self.cursor.x = col.saturating_sub(1).min(self.cols.saturating_sub(1));
     }
 
     pub(crate) fn cursor_col_abs_with_origin(&mut self, col: u16, origin: bool) {
@@ -578,10 +637,12 @@ impl Screen {
             .min(self.region.bottom);
     }
 
+    /// Home is the top-left of the scrolling region under DECOM and of the
+    /// screen otherwise (DECSLRM/DECSTBM/DECOM all home through here).
     pub(crate) fn home_cursor(&mut self, origin: bool) {
         self.cursor.pending_wrap = false;
         self.cursor.y = if origin { self.region.top } else { 0 };
-        self.cursor.x = self.left_margin();
+        self.cursor.x = if origin { self.left_margin() } else { 0 };
     }
 
     pub(crate) fn reported_cursor_position(&self, origin: bool) -> (u16, u16) {
@@ -599,14 +660,17 @@ impl Screen {
             self.cursor.x = self
                 .tabstops
                 .next(self.cursor.x, self.cols)
-                .min(self.right_margin());
+                .min(self.cursor_right_bound());
         }
     }
 
     pub fn tab_back(&mut self, n: u16) {
         self.cursor.pending_wrap = false;
         for _ in 0..n.max(1) {
-            self.cursor.x = self.tabstops.prev(self.cursor.x).max(self.left_margin());
+            self.cursor.x = self
+                .tabstops
+                .prev(self.cursor.x)
+                .max(self.cursor_left_bound());
         }
     }
 
@@ -716,24 +780,7 @@ impl Screen {
                 self.remove_placements_intersecting_grid_rows(0, last);
             }
             EraseDisplay::Scrollback => {
-                // Clearing scrollback collapses the absolute coordinate space by
-                // its length: drop placements anchored in the cleared history and
-                // re-anchor the survivors (live area) into the shrunken space.
-                let old_len = self.scrollback.len();
-                let old_live_top = self.live_area_abs_top();
-                if old_len > 0 {
-                    self.invalidate_coordinate_space();
-                }
-                self.scrollback.clear();
-                self.viewport_offset = 0;
-                self.kitty_placements.retain_mut(|p| {
-                    if p.anchor_abs_row < old_live_top {
-                        false
-                    } else {
-                        p.anchor_abs_row -= old_len;
-                        true
-                    }
-                });
+                let old_len = self.collapse_scrollback();
                 // Same collapse for the selection: a live-area selection
                 // shifts with its rows, one touching cleared history is gone.
                 self.selection = self
@@ -794,15 +841,12 @@ impl Screen {
     // ── edit ─────────────────────────────────────────────────────────
 
     pub fn insert_blank_chars(&mut self, n: u16) {
-        // #TODO(agent): Guard IL/DL outside the horizontal margins, and
-        // ICH/DCH below the left margin, when cursor addressing stops
-        // clamping to DECSLRM.
         self.cursor.pending_wrap = false;
         let blank = self.blank();
         let x = self.cursor.x as usize;
         let y = self.cursor.y as usize;
         let right = self.right_margin() as usize;
-        if x > right {
+        if x < self.left_margin() as usize || x > right {
             return;
         }
         let len = right + 1 - x;
@@ -829,7 +873,7 @@ impl Screen {
         let x = self.cursor.x as usize;
         let y = self.cursor.y as usize;
         let right = self.right_margin() as usize;
-        if x > right {
+        if x < self.left_margin() as usize || x > right {
             return;
         }
         let len = right + 1 - x;
@@ -870,7 +914,11 @@ impl Screen {
 
     pub fn insert_lines(&mut self, n: u16) {
         self.cursor.pending_wrap = false;
-        if self.cursor.y < self.region.top || self.cursor.y > self.region.bottom {
+        if self.cursor.y < self.region.top
+            || self.cursor.y > self.region.bottom
+            || self.cursor.x < self.left_margin()
+            || self.cursor.x > self.right_margin()
+        {
             return;
         }
         let start = self.cursor.y as usize;
@@ -895,7 +943,11 @@ impl Screen {
 
     pub fn delete_lines(&mut self, n: u16) {
         self.cursor.pending_wrap = false;
-        if self.cursor.y < self.region.top || self.cursor.y > self.region.bottom {
+        if self.cursor.y < self.region.top
+            || self.cursor.y > self.region.bottom
+            || self.cursor.x < self.left_margin()
+            || self.cursor.x > self.right_margin()
+        {
             return;
         }
         let start = self.cursor.y as usize;

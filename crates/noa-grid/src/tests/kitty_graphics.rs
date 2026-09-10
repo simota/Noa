@@ -732,3 +732,48 @@ fn kitty_rectangle_scroll_keeps_placements_outside_the_margins() {
     );
     assert_eq!(t.kitty_visible_placements()[0].grid_y, 5);
 }
+
+// N06: the app's "Clear Scrollback" (`Terminal::clear_scrollback`, not
+// `ED 3`) must collapse placement anchors with the history it removes, or a
+// live-area image jumps `scrollback_len` rows down and off-screen.
+#[test]
+fn kitty_clear_scrollback_reanchors_live_placements_and_drops_history_ones() {
+    let mut t = kitty_terminal();
+    // One image on the first row, then push it into history with a screenful
+    // of newlines plus a few more so the scrollback is non-empty.
+    feed(
+        &mut t,
+        &kitty_apc("a=T,f=32,s=10,v=20,i=1,C=1", &vec![0u8; 10 * 20 * 4]),
+    );
+    feed(&mut t, b"\x1b[24;1H");
+    feed(&mut t, &[b'\n'; 30]);
+    assert!(
+        t.scrollback_len() >= 30,
+        "the first image is in history now"
+    );
+    // A second image on live row 2.
+    feed(&mut t, b"\x1b[3;1H");
+    feed(
+        &mut t,
+        &kitty_apc("a=T,f=32,s=10,v=20,i=2,C=1", &vec![0u8; 10 * 20 * 4]),
+    );
+    let before = t.kitty_visible_placements();
+    assert_eq!(before.len(), 1);
+    assert_eq!((before[0].image_id, before[0].grid_y), (2, 2));
+
+    t.clear_scrollback();
+
+    assert_eq!(t.scrollback_len(), 0);
+    assert_eq!(
+        t.primary.kitty_placements.len(),
+        1,
+        "the history-anchored image is gone with the history"
+    );
+    let after = t.kitty_visible_placements();
+    assert_eq!(after.len(), 1, "the live image is still visible");
+    assert_eq!(
+        (after[0].image_id, after[0].grid_y),
+        (2, 2),
+        "the live image keeps its screen row"
+    );
+}

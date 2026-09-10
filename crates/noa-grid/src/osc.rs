@@ -606,8 +606,9 @@ pub(crate) fn hostname_matches_any_local<'a>(
 /// and small enough that the per-OSC-7 scan is free.
 const OBSERVED_HOSTNAMES_CAP: usize = 8;
 
-/// Every hostname this process has seen `gethostname(2)` return, newest last,
-/// bounded by [`OBSERVED_HOSTNAMES_CAP`] (oldest evicted).
+/// Every hostname this process has seen `gethostname(2)` return, most
+/// recently observed last, bounded by [`OBSERVED_HOSTNAMES_CAP`] (least
+/// recently observed evicted).
 ///
 /// The hostname is *not* fixed for the process lifetime: macOS rewrites it on
 /// every network change (DHCP/reverse-DNS name while online, `<name>.local`
@@ -625,12 +626,14 @@ fn local_hostnames() -> Option<Vec<String>> {
     let mut observed = OBSERVED
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if !observed.contains(&current) {
-        if observed.len() == OBSERVED_HOSTNAMES_CAP {
-            observed.pop_front();
-        }
-        observed.push_back(current);
+    // LRU: a re-observed name moves to the back, so a name the machine keeps
+    // returning to is never the one evicted when the cap is hit.
+    if let Some(pos) = observed.iter().position(|seen| *seen == current) {
+        observed.remove(pos);
+    } else if observed.len() == OBSERVED_HOSTNAMES_CAP {
+        observed.pop_front();
     }
+    observed.push_back(current);
     Some(observed.iter().cloned().collect())
 }
 

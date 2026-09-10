@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.17] - 2026-09-11
+
+### Fixed
+
+- Auto-approve now handles agent prompts that appear while the viewport is
+  scrolled back. The prompt was dropped by the not-live suppression, and
+  scrolling back to the live rows produced no output to rescan on, so Codex
+  prompts stayed unapproved until the agent redrew. Detection scans the live
+  tail and keeps the prompt tracked until the viewport is live again; two
+  unsuppressed matches at the live bottom are still required before the
+  approval is sent. The Codex `Environment:` row is optional and the
+  cross-thread footer is recognized. `NOA_AUTO_APPROVE_TRACE=1` logs every
+  decision and reject reason for diagnosis (#86).
+
 ## [0.2.16] - 2026-09-10
 
 ### Fixed

@@ -3462,7 +3462,11 @@ fn font_family_change_then_reset_round_trips_through_the_config_file() {
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let config_path = dir.join("config");
-    std::fs::write(&config_path, "font-family = Menlo\nfont-family = Fallback\n").unwrap();
+    std::fs::write(
+        &config_path,
+        "font-family = Menlo\nfont-family = Fallback\n",
+    )
+    .unwrap();
     let mut writer =
         |path: &Path, updates: &[(String, String)]| noa_config::write_config_updates(path, updates);
 
@@ -4066,10 +4070,12 @@ fn ac50_committed_pair_round_trips_through_the_real_config_parser() {
     );
     assert_eq!(
         overrides.theme,
-        Some(noa_config::ThemeSetting::Pair(noa_config::ThemeAppearancePair {
-            light: target.to_string(),
-            dark: dark.to_string(),
-        }))
+        Some(noa_config::ThemeSetting::Pair(
+            noa_config::ThemeAppearancePair {
+                light: target.to_string(),
+                dark: dark.to_string(),
+            }
+        ))
     );
 
     std::fs::remove_dir_all(dir).unwrap();
@@ -4738,10 +4744,12 @@ fn ac57_pair_carryover_favorites_toggle_and_commit_integration() {
     );
     assert_eq!(
         overrides.theme,
-        Some(noa_config::ThemeSetting::Pair(noa_config::ThemeAppearancePair {
-            light: new_light_d,
-            dark: dark_b,
-        }))
+        Some(noa_config::ThemeSetting::Pair(
+            noa_config::ThemeAppearancePair {
+                light: new_light_d,
+                dark: dark_b,
+            }
+        ))
     );
 
     std::fs::remove_dir_all(dir).unwrap();

@@ -1146,7 +1146,10 @@ mod tests {
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
-        assert!(leftovers.is_empty(), "leftover staging files: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "leftover staging files: {leftovers:?}"
+        );
 
         // Loading a path with no file yields None rather than erroring.
         let _ = fs::remove_dir_all(&dir);
@@ -1155,10 +1158,8 @@ mod tests {
 
     #[test]
     fn save_ignores_stale_staging_file_from_another_writer() {
-        let dir = std::env::temp_dir().join(format!(
-            "noa-session-stale-tmp-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("noa-session-stale-tmp-{}", std::process::id()));
         let path = dir.join("session.json");
         fs::create_dir_all(&dir).unwrap();
         // A crashed writer's leftover under the old fixed name, plus a

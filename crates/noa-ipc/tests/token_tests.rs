@@ -186,12 +186,10 @@ fn concurrent_provisioning_agrees_with_the_file() {
         );
     }
     assert!(
-        std::fs::read_dir(&dir)
-            .unwrap()
-            .all(|e| {
-                let name = e.unwrap().file_name();
-                name == "server-token" || name == "server-token.lock"
-            }),
+        std::fs::read_dir(&dir).unwrap().all(|e| {
+            let name = e.unwrap().file_name();
+            name == "server-token" || name == "server-token.lock"
+        }),
         "no staging files left behind (only the token and its advisory lock)"
     );
 
@@ -204,10 +202,7 @@ fn concurrent_provisioning_agrees_with_the_file() {
 /// recoverer can no longer delete a token a faster one just published.
 #[test]
 fn concurrent_recovery_of_empty_token_file_agrees_on_one_token() {
-    let dir = std::env::temp_dir().join(format!(
-        "noa-ipc-token-empty-race-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("noa-ipc-token-empty-race-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("server-token");
     std::fs::write(&path, "").unwrap();
@@ -228,7 +223,10 @@ fn concurrent_recovery_of_empty_token_file_agrees_on_one_token() {
     let on_disk = std::fs::read_to_string(&path).unwrap();
     assert_eq!(on_disk.len(), 64);
     for token in &tokens {
-        assert_eq!(token, &on_disk, "every caller must hold the published token");
+        assert_eq!(
+            token, &on_disk,
+            "every caller must hold the published token"
+        );
     }
 
     let _ = std::fs::remove_dir_all(&dir);

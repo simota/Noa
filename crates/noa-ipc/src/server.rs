@@ -1927,8 +1927,20 @@ mod tests {
         });
         let mut first = hello_session();
         let mut second = hello_session();
-        let a = handle_hello(Value::from(1), params.clone(), "tok", ScopeSet::default_read_only(), &mut first);
-        let b = handle_hello(Value::from(2), params, "tok", ScopeSet::default_read_only(), &mut second);
+        let a = handle_hello(
+            Value::from(1),
+            params.clone(),
+            "tok",
+            ScopeSet::default_read_only(),
+            &mut first,
+        );
+        let b = handle_hello(
+            Value::from(2),
+            params,
+            "tok",
+            ScopeSet::default_read_only(),
+            &mut second,
+        );
         let a: Value = serde_json::from_str(&a).unwrap();
         let b: Value = serde_json::from_str(&b).unwrap();
         let id_a = a["result"]["serverInstanceId"].as_str().unwrap();

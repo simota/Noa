@@ -579,8 +579,8 @@ pub(crate) fn hostname_matches_local(host: &str, local_hostname: &str) -> bool {
 }
 
 fn host_is_local(host: &str) -> bool {
-    match local_hostname() {
-        Some(local) => hostname_matches_local(host, &local),
+    match local_hostnames() {
+        Some(locals) => hostname_matches_any_local(host, locals.iter().map(String::as_str)),
         // Fail open (REQ-OSC-2): a false accept only risks showing a stale
         // proxy icon, while a false reject would break the shipped sidebar
         // cwd feature on a machine where hostname resolution is unavailable.
@@ -588,12 +588,53 @@ fn host_is_local(host: &str) -> bool {
     }
 }
 
-/// Cached across the process lifetime: the local hostname cannot change
-/// without a reboot, so there's no need to re-syscall on every OSC 7
-/// sequence.
-fn local_hostname() -> Option<String> {
-    static LOCAL_HOSTNAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    LOCAL_HOSTNAME.get_or_init(query_local_hostname).clone()
+/// [`hostname_matches_local`] against every name this machine has gone by
+/// during the process lifetime (see [`local_hostnames`]). Pure, for tests.
+pub(crate) fn hostname_matches_any_local<'a>(
+    host: &str,
+    local_hostnames: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    let mut locals = local_hostnames.into_iter().peekable();
+    if locals.peek().is_none() {
+        return hostname_matches_local(host, "");
+    }
+    locals.any(|local| hostname_matches_local(host, local))
+}
+
+/// Upper bound on remembered local hostnames (see [`local_hostnames`]).
+/// Well above the handful of names a laptop cycles through in one session,
+/// and small enough that the per-OSC-7 scan is free.
+const OBSERVED_HOSTNAMES_CAP: usize = 8;
+
+/// Every hostname this process has seen `gethostname(2)` return, most
+/// recently observed last, bounded by [`OBSERVED_HOSTNAMES_CAP`] (least
+/// recently observed evicted).
+///
+/// The hostname is *not* fixed for the process lifetime: macOS rewrites it on
+/// every network change (DHCP/reverse-DNS name while online, `<name>.local`
+/// while offline), and a shell's `$HOST` is frozen at *its* startup. So a
+/// single cached value rejects every OSC 7 from shells started after a
+/// network change (or, if queried fresh each time, from shells started before
+/// one), silently breaking new-tab cwd inheritance. Re-querying on each OSC 7
+/// is a cheap sysctl, and keeping every name observed accepts both shells that
+/// predate and shells that postdate a change — fail-toward-accept, as the
+/// REQ-OSC-2 gate intends.
+fn local_hostnames() -> Option<Vec<String>> {
+    static OBSERVED: std::sync::Mutex<std::collections::VecDeque<String>> =
+        std::sync::Mutex::new(std::collections::VecDeque::new());
+    let current = query_local_hostname()?;
+    let mut observed = OBSERVED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // LRU: a re-observed name moves to the back, so a name the machine keeps
+    // returning to is never the one evicted when the cap is hit.
+    if let Some(pos) = observed.iter().position(|seen| *seen == current) {
+        observed.remove(pos);
+    } else if observed.len() == OBSERVED_HOSTNAMES_CAP {
+        observed.pop_front();
+    }
+    observed.push_back(current);
+    Some(observed.iter().cloned().collect())
 }
 
 fn query_local_hostname() -> Option<String> {

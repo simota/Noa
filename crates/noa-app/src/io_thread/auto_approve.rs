@@ -60,7 +60,7 @@ pub(super) fn detect_auto_approve_candidate(
         scrollback_offset: term.viewport_offset(),
         guards: *publish.guards.lock(),
     };
-    let rows = auto_approve::viewport_rows_from_terminal(term);
+    let rows = auto_approve::live_rows_from_terminal(term);
     let cursor = term.active().cursor;
     let decision = auto_approve::detect_and_update_any_agent(
         &rows,
@@ -71,6 +71,14 @@ pub(super) fn detect_auto_approve_candidate(
         ctx,
         state,
     );
+    if auto_approve::trace_enabled()
+        && (!matches!(decision, Decision::Hold) || state.needs_static_rescan())
+    {
+        eprintln!(
+            "[auto-approve] scan: {decision:?} alt={} offset={} guards={:?}",
+            ctx.alt_screen, ctx.scrollback_offset, ctx.guards
+        );
+    }
     match decision {
         Decision::Fire {
             signature,

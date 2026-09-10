@@ -324,7 +324,9 @@ pub(crate) fn detect_and_update_any_agent(
             // (see `apply_decision_state`), so only they pay for a scan.
             let matched = matches!(
                 reason,
-                SuppressReason::RecentUserInput | SuppressReason::PasteActive
+                SuppressReason::RecentUserInput
+                    | SuppressReason::PasteActive
+                    | SuppressReason::ViewportNotLive
             )
             .then(|| find_prompt(rows, cursor, None))
             .flatten();
@@ -351,12 +353,42 @@ pub(crate) fn rescan_signature(
     find_signature(rows, cursor, signature(signature_id))
 }
 
+/// `NOA_AUTO_APPROVE_TRACE=1`: log every tracked-prompt decision and every
+/// main-thread reject to stderr, so a silent non-approval can be diagnosed
+/// from a terminal launch without a debugger.
+pub(crate) fn trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("NOA_AUTO_APPROVE_TRACE").is_some())
+}
+
 pub(crate) fn viewport_rows_from_terminal(terminal: &Terminal) -> Vec<RowText> {
     terminal
         .active()
         .visible_rows()
         .into_iter()
         .map(|row| row_text(&row.cells))
+        .collect()
+}
+
+/// The live bottom of the active screen regardless of how far the viewport
+/// is scrolled back. A prompt that lands while the user is reading history
+/// stays tracked (and `ViewportNotLive`-suppressed) until they return to the
+/// live rows; scanning the scrolled viewport instead would drop it, and a
+/// wheel scroll back to the bottom produces no pty output to rescan on.
+pub(crate) fn live_rows_from_terminal(terminal: &Terminal) -> Vec<RowText> {
+    let screen = terminal.active();
+    if screen.viewport_offset() == 0 {
+        return viewport_rows_from_terminal(terminal);
+    }
+    let rows = usize::from(screen.rows);
+    let total = screen.total_rows();
+    (total.saturating_sub(rows)..total)
+        .map(|idx| {
+            screen
+                .absolute_row(idx)
+                .map(|row| row_text(&row.cells))
+                .unwrap_or_default()
+        })
         .collect()
 }
 
@@ -475,12 +507,17 @@ fn apply_decision_state(
             }
         }
         Decision::Suppressed(reason) => {
-            // A fast reply can become static during the input cooldown. Keep
-            // rescanning that known prompt so it can arm when the guard expires,
-            // while still requiring two unsuppressed matches before sending.
+            // A fast reply can become static during the input cooldown, and a
+            // prompt can land while the viewport is scrolled back. Keep
+            // rescanning that known prompt so it can arm when the guard expires
+            // or the user returns to the live rows (a wheel scroll produces no
+            // pty output to rescan on), while still requiring two unsuppressed
+            // matches before sending.
             state.last_match = if matches!(
                 reason,
-                SuppressReason::RecentUserInput | SuppressReason::PasteActive
+                SuppressReason::RecentUserInput
+                    | SuppressReason::PasteActive
+                    | SuppressReason::ViewportNotLive
             ) {
                 matched.map(|matched| MatchKey {
                     signature: matched.signature,
@@ -648,7 +685,12 @@ fn match_menu_prompt_region(
             Some((start, end))
         } else {
             let text = rows[start].split_whitespace().collect::<Vec<_>>().join(" ");
-            (text == footer_text).then_some((start, start))
+            let matched = text == footer_text
+                || (sig.id == AutoApproveSignature::CodexCommand
+                    && text
+                        .strip_prefix(footer_text)
+                        .is_some_and(|rest| rest == " or o to open thread"));
+            matched.then_some((start, start))
         }
     })?;
     let mut selected =
@@ -721,14 +763,15 @@ fn agy_status_row(status: &str) -> bool {
 }
 
 fn codex_command_menu(rows: &[RowText], anchor: usize, option: usize, footer: usize) -> bool {
+    // `Environment:` only appears when Codex has a selected environment
+    // (0.154 omits it for plain local runs), so the command row is the
+    // dialog's sole mandatory context.
     let context = &rows[anchor + 1..option];
-    if !context.iter().any(|row| row.trim() == "Environment: local")
-        || !context.iter().any(|row| {
-            row.trim()
-                .strip_prefix("$ ")
-                .is_some_and(|command| !command.trim().is_empty())
-        })
-    {
+    if !context.iter().any(|row| {
+        row.trim()
+            .strip_prefix("$ ")
+            .is_some_and(|command| !command.trim().is_empty())
+    }) {
         return false;
     }
     let options: Vec<_> = rows[option + 1..footer]
@@ -1025,6 +1068,41 @@ mod tests {
         ])
     }
 
+    // Codex 0.154 renders `Environment:` only for a selected environment;
+    // a local run shows `Reason:`/`Permission rule:`/`Thread:` rows instead
+    // (layouts from codex-rs approval_overlay snapshots).
+    fn codex_local_command_prompt() -> Vec<RowText> {
+        rows(&[
+            "Would you like to run the following command?",
+            "",
+            "Reason: need filesystem access",
+            "",
+            "Permission rule: network; read `/tmp/readme.txt`; write `/tmp/out.txt`",
+            "",
+            "$ cat /tmp/readme.txt",
+            "",
+            "› 1. Yes, proceed (y)",
+            "  2. No, and tell Codex what to do differently (esc)",
+            "",
+            "Press enter to confirm or esc to cancel",
+        ])
+    }
+
+    fn codex_cross_thread_command_prompt() -> Vec<RowText> {
+        rows(&[
+            "Would you like to run the following command?",
+            "",
+            "Thread: Robie [explorer]",
+            "",
+            "$ echo hi",
+            "",
+            "› 1. Yes, proceed (y)",
+            "  2. No, and tell Codex what to do differently (esc)",
+            "",
+            "Press enter to confirm or esc to cancel or o to open thread",
+        ])
+    }
+
     fn agy_question_prompt() -> Vec<RowText> {
         rows(&[
             "Question",
@@ -1300,7 +1378,6 @@ mod tests {
                 codex_command_prompt(),
                 vec![
                     (0, "Would you like to do something else?"),
-                    (2, "Environment: remote"),
                     (6, "$ "),
                     (8, "  1. Yes, proceed (y)"),
                     (8, "› 1. Yes, proceed (y), and remember this choice"),
@@ -1314,6 +1391,10 @@ mod tests {
                     (
                         12,
                         "Press enter to confirm or esc to cancel · ctrl+r Review",
+                    ),
+                    (
+                        12,
+                        "Press enter to confirm or esc to cancel or x to open thread",
                     ),
                 ],
             ),
@@ -1605,6 +1686,66 @@ mod tests {
     }
 
     #[test]
+    fn scrolled_back_prompt_rearms_when_viewport_returns_live() {
+        let now = fixed_now();
+        for prompt in [
+            codex_command_prompt(),
+            claude_edit_prompt(),
+            agy_command_prompt(),
+        ] {
+            let cursor = cursor(if prompt == claude_edit_prompt() { 1 } else { 0 });
+            let mut state = AutoApproveState::default();
+            let mut ctx = base_ctx(now);
+            ctx.alt_screen = false;
+            ctx.scrollback_offset = 3;
+            assert_eq!(
+                detect_and_update_any_agent(&prompt, cursor, ctx, &mut state),
+                Decision::Suppressed(SuppressReason::ViewportNotLive)
+            );
+            assert!(state.needs_static_rescan());
+            ctx.scrollback_offset = 0;
+            assert_eq!(
+                detect_and_update_any_agent(&prompt, cursor, ctx, &mut state),
+                Decision::Hold
+            );
+            assert!(matches!(
+                detect_and_update_any_agent(&prompt, cursor, ctx, &mut state),
+                Decision::Fire { .. }
+            ));
+        }
+        // Nothing at the live bottom: scrolled-back tracking costs no rescan.
+        let mut state = AutoApproveState::default();
+        let mut ctx = base_ctx(now);
+        ctx.alt_screen = false;
+        ctx.scrollback_offset = 3;
+        let _ =
+            detect_and_update_any_agent(&rows(&["unrelated output"]), cursor(0), ctx, &mut state);
+        assert!(!state.needs_static_rescan());
+    }
+
+    #[test]
+    fn live_rows_ignore_viewport_scrollback() {
+        let mut terminal = Terminal::new(noa_core::GridSize::new(20, 3));
+        let mut stream = noa_vt::Stream::new();
+        stream.feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive", &mut terminal);
+        terminal.scroll_viewport_up(2);
+        assert_ne!(terminal.viewport_offset(), 0);
+        assert_eq!(
+            viewport_rows_from_terminal(&terminal),
+            rows(&["one", "two", "three"])
+        );
+        assert_eq!(
+            live_rows_from_terminal(&terminal),
+            rows(&["three", "four", "five"])
+        );
+        terminal.scroll_viewport_to_bottom();
+        assert_eq!(
+            live_rows_from_terminal(&terminal),
+            viewport_rows_from_terminal(&terminal)
+        );
+    }
+
+    #[test]
     fn static_rescan_tracks_changed_prompts_after_an_accepted_approval() {
         let now = fixed_now();
         let mut state = AutoApproveState::default();
@@ -1880,6 +2021,89 @@ mod tests {
                 Decision::Fire { region_hash: new_hash, .. } if new_hash != region_hash
             ));
         }
+    }
+
+    #[test]
+    fn detect_codex_prompts_without_environment_row() {
+        let now = fixed_now();
+        for prompt in [
+            codex_local_command_prompt(),
+            codex_cross_thread_command_prompt(),
+        ] {
+            let mut state = AutoApproveState::default();
+            let mut ctx = base_ctx(now);
+            ctx.alt_screen = false;
+            let cursor = cursor((prompt.len() - 1) as u16);
+            assert_eq!(
+                detect_and_update_any_agent(&prompt, cursor, ctx, &mut state),
+                Decision::Hold
+            );
+            let Decision::Fire { signature, .. } =
+                detect_and_update_any_agent(&prompt, cursor, ctx, &mut state)
+            else {
+                panic!("codex prompt without Environment row should fire: {prompt:?}");
+            };
+            assert_eq!(signature, AutoApproveSignature::CodexCommand);
+        }
+    }
+
+    #[test]
+    fn codex_environment_prompt_with_wide_reason_from_vt_grid() {
+        // Layout from the 2026-09-11 screenshot (`Environment:` present,
+        // wide-character `Reason:`), painted the way ratatui does: absolute
+        // cursor positioning per row, styled spans, hidden cursor parked on
+        // the footer row.
+        let cols = 200u16;
+        let grid_rows = 40u16;
+        let mut terminal = Terminal::new(noa_core::GridSize::new(cols, grid_rows));
+        let mut stream = noa_vt::Stream::new();
+        let top = 26u16;
+        let lines: Vec<String> = vec![
+            "  \x1b[1mWould you like to run the following command?\x1b[0m".into(),
+            "".into(),
+            "  Environment: \x1b[1mlocal\x1b[0m".into(),
+            "".into(),
+            "  Reason: \x1b[3mSwiftのコンパイラーキャッシュへの書き込みがサンドボックスで拒否されたため、権限を拡張してチート機能を含むホスト試験を実行してよいですか？\x1b[0m".into(),
+            "".into(),
+            "  \x1b[1m$\x1b[0m \x1b[34mmake\x1b[0m host-check".into(),
+            "".into(),
+            "\x1b[1;36m› 1. Yes, proceed \x1b[2m(y)\x1b[0m".into(),
+            "  2. Yes, and don't ask again for commands that start with `make host-check` \x1b[2m(p)\x1b[0m".into(),
+            "  3. No, and tell Codex what to do differently \x1b[2m(esc)\x1b[0m".into(),
+            "".into(),
+            "  \x1b[2mPress enter to confirm or esc to cancel\x1b[0m".into(),
+        ];
+        let mut frame = String::from("\x1b[?25l");
+        for (i, line) in lines.iter().enumerate() {
+            frame.push_str(&format!("\x1b[{};1H\x1b[2K{}", top + i as u16, line));
+        }
+        frame.push_str(&format!("\x1b[{};1H", top + lines.len() as u16));
+        for chunk in frame.as_bytes().chunks(5) {
+            stream.feed(chunk, &mut terminal);
+        }
+        let screen = viewport_rows_from_terminal(&terminal);
+        let cursor = terminal.active().cursor;
+        let cursor = Point {
+            x: cursor.x,
+            y: cursor.y,
+        };
+        let mut state = AutoApproveState::default();
+        let ctx = base_ctx(fixed_now());
+        assert_eq!(
+            detect_and_update_any_agent(&screen, cursor, ctx, &mut state),
+            Decision::Hold
+        );
+        let d = detect_and_update_any_agent(&screen, cursor, ctx, &mut state);
+        assert!(
+            matches!(
+                d,
+                Decision::Fire {
+                    signature: AutoApproveSignature::CodexCommand,
+                    ..
+                }
+            ),
+            "{d:?}"
+        );
     }
 
     #[test]

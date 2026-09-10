@@ -44,7 +44,7 @@ fn kitty_modifier_value(mods: ModifiersState) -> u32 {
     value
 }
 
-/// `alt_sends_esc` is the caller's per-event verdict on whether a held Alt
+/// `alt_sends_esc` is the caller's press-paired verdict on whether a held Alt
 /// is *Alt* or a macOS Option that composed `text` (see
 /// `encode_key_with_modes`). A composing Option is not a modifier for the
 /// "does this key escape-encode" decision (Ghostty's `effectiveMods`): the
@@ -82,7 +82,7 @@ pub(super) fn encode_kitty(
     };
 
     let mods_value = kitty_modifier_value(mods);
-    let alt_is_modifier = mods.alt_key() && (alt_sends_esc || text.is_none_or(str::is_empty));
+    let alt_is_modifier = mods.alt_key() && alt_sends_esc;
     let has_non_shift = mods.control_key() || alt_is_modifier || mods.super_key();
 
     // Physical keypad keys carry dedicated code points: Ghostty's kitty

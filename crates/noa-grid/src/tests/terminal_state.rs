@@ -1370,3 +1370,62 @@ fn absolute_cursor_placement_is_margin_relative_in_origin_mode() {
     let t = run(b"\x1b[?69h\x1b[?6h\x1b[5;5H\x1b[10;20s");
     assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (9, 0));
 }
+#[test]
+fn edit_commands_ignore_cursor_outside_horizontal_margins() {
+    for command in [b'@', b'P', b'L', b'M'] {
+        for col in [1, 2, 8, 10] {
+            let mut t = Terminal::new(GridSize::new(10, 3));
+            let mut stream = Stream::new();
+            stream.feed(b"ABCDEFGHIJ\r\nKLMNOPQRST\r\nUVWXYZ1234", &mut t);
+            stream.feed(b"\x1b[?69h\x1b[3;7s", &mut t);
+            stream.feed(format!("\x1b[1;{col}H").as_bytes(), &mut t);
+            let before = t.active().grid.iter().map(|row| row.cells.clone()).collect::<Vec<_>>();
+            stream.feed(&[0x1b, b'[', command], &mut t);
+            let after = t.active().grid.iter().map(|row| row.cells.clone()).collect::<Vec<_>>();
+            assert_eq!(after, before, "command {} at column {col}", command as char);
+        }
+    }
+}
+
+#[test]
+fn print_outside_horizontal_margins_uses_screen_edge() {
+    use noa_vt::Handler as _;
+    for bulk in [false, true] {
+        for text in ["ABC", "日本"] {
+            let mut t = Terminal::new(GridSize::new(10, 3));
+            let mut stream = Stream::new();
+            stream.feed(b"\x1b[?69h\x1b[3;7s\x1b[1;9H", &mut t);
+            if bulk {
+                stream.feed(text.as_bytes(), &mut t);
+            } else {
+                for c in text.chars() { t.print(c); }
+            }
+            assert_eq!(cell(&t, 8, 0).ch, text.chars().next().unwrap());
+            if text == "ABC" {
+                assert_eq!(cell(&t, 9, 0).ch, 'B');
+                assert_eq!(cell(&t, 0, 1).ch, 'C');
+            } else {
+                assert!(cell(&t, 9, 0).attrs.contains(CellAttrs::WIDE_SPACER));
+                assert_eq!(cell(&t, 0, 1).ch, '本');
+            }
+            assert!(t.active().grid[0].wrapped);
+        }
+    }
+}
+
+#[test]
+fn print_outside_horizontal_margins_without_wrap_stays_at_screen_edge() {
+    let t = run_size(10, 3, b"\x1b[?69h\x1b[3;7s\x1b[?7l\x1b[1;9HABC");
+    assert_eq!(row_text(&t, 0, 10), "        AC");
+    assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (9, 0));
+    assert!(!t.primary.grid[0].wrapped);
+}
+
+#[test]
+fn grapheme_outside_horizontal_margins_can_expand_to_screen_edge() {
+    let t = run_size(10, 3, "\x1b[?69h\x1b[3;7s\x1b[?2027h\x1b[1;9H❤\u{fe0f}".as_bytes());
+    assert!(cell(&t, 8, 0).attrs.contains(CellAttrs::WIDE));
+    assert!(cell(&t, 9, 0).attrs.contains(CellAttrs::WIDE_SPACER));
+    assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (9, 0));
+    assert!(t.primary.cursor.pending_wrap);
+}

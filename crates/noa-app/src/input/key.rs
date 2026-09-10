@@ -3,6 +3,35 @@ use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use super::kitty::{KittyOutcome, encode_kitty};
 use super::text::encode_text;
 
+/// The Option/Alt classification belongs to a physical press, including its
+/// repeats and release: winit's release events carry no composed text.
+#[derive(Default)]
+pub(crate) struct KeyModifierState {
+    alt_by_key: std::collections::HashMap<PhysicalKey, bool>,
+}
+
+impl KeyModifierState {
+    pub(crate) fn alt_sends_esc(
+        &mut self,
+        key: PhysicalKey,
+        pressed: bool,
+        repeat: bool,
+        event_alt_sends_esc: bool,
+    ) -> bool {
+        if !pressed {
+            return self.alt_by_key.remove(&key).unwrap_or(event_alt_sends_esc);
+        }
+        if !repeat {
+            self.alt_by_key.insert(key, event_alt_sends_esc);
+        }
+        *self.alt_by_key.entry(key).or_insert(event_alt_sends_esc)
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.alt_by_key.clear();
+    }
+}
+
 /// Encode a pressed key into the bytes that should be written to the pty, if
 /// any. `app_cursor_keys` mirrors `ModeState::app_cursor_keys()` (DECCKM):
 /// when set, arrow keys send `SS3` (`ESC O <letter>`) instead of `CSI`
@@ -47,8 +76,8 @@ pub fn encode_key(
 ///
 /// `alt_sends_esc` says whether Alt held with this press should ESC-prefix the
 /// produced text. On macOS the Option key composes characters unless
-/// `macos-option-as-alt` claims it, so the caller decides per event; on other
-/// platforms it is simply `true`.
+/// `macos-option-as-alt` claims it, so the caller retains the press's verdict
+/// through repeats and release; on other platforms it is simply `true`.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_key_with_modes(
     logical_key: &Key,

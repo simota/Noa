@@ -188,6 +188,27 @@ impl App {
         ))
     }
 
+    /// Re-hit-test the physical pointer after delivering mouse-up to the
+    /// captured pane. This updates routing without synthesizing mouse motion.
+    pub(in crate::app) fn release_mouse_capture(&mut self, window_id: WindowId) {
+        let hovered = (|| {
+            let state = self.windows.get(&window_id)?;
+            let position = state.last_mouse_physical_position?;
+            let metrics = self.gpu.as_ref()?.fonts.get(state.font_px).metrics();
+            self.pane_cell_at_position(window_id, position, metrics)
+        })();
+        if let Some(state) = self.windows.get_mut(&window_id) {
+            state.mouse_capture_pane = None;
+            state.last_mouse_pane = hovered.map(|(pane_id, _)| pane_id);
+            for (pane_id, surface) in &mut state.surfaces {
+                surface.last_mouse_cell = hovered
+                    .filter(|(hovered_pane, _)| hovered_pane == pane_id)
+                    .map(|(_, cell)| cell);
+            }
+        }
+        self.sync_hover_link(window_id);
+    }
+
     /// Abandon the live left-button capture in `window_id` (focus loss): the
     /// capturing pane's pressed-button and selection-drag state are cleared
     /// as if its release had arrived, so a later motion can't keep extending
@@ -203,6 +224,7 @@ impl App {
             surface.pressed_mouse_button = None;
             let _ = surface.mouse_selection.left_released();
         }
+        self.release_mouse_capture(window_id);
     }
 
     /// The Cmd+hover link under the mouse in `window_id`'s focused-under-

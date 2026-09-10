@@ -284,6 +284,7 @@ pub(super) struct WindowState {
     pub(super) active_split_drag: Option<SplitResizeDrag>,
     /// Modifier state tracked by winit for this native window's view.
     pub(super) modifiers: ModifiersState,
+    pub(super) key_modifiers: input::KeyModifierState,
     pub(super) occluded: bool,
     /// Whether this window was *created* with `with_transparent(true)`.
     /// AppKit fixes a window's opacity at creation — a window built opaque

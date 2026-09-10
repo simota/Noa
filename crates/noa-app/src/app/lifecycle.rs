@@ -613,6 +613,7 @@ impl App {
                 last_mouse_physical_position: None,
                 active_split_drag: None,
                 modifiers: ModifiersState::empty(),
+                key_modifiers: input::KeyModifierState::default(),
                 occluded: false,
                 title: "Noa".to_string(),
                 proxy_icon_cwd: None,

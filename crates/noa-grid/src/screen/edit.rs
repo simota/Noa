@@ -808,15 +808,12 @@ impl Screen {
     // ── edit ─────────────────────────────────────────────────────────
 
     pub fn insert_blank_chars(&mut self, n: u16) {
-        // #TODO(agent): Guard IL/DL outside the horizontal margins, and
-        // ICH/DCH below the left margin, when cursor addressing stops
-        // clamping to DECSLRM.
         self.cursor.pending_wrap = false;
         let blank = self.blank();
         let x = self.cursor.x as usize;
         let y = self.cursor.y as usize;
         let right = self.right_margin() as usize;
-        if x > right {
+        if x < self.left_margin() as usize || x > right {
             return;
         }
         let len = right + 1 - x;
@@ -843,7 +840,7 @@ impl Screen {
         let x = self.cursor.x as usize;
         let y = self.cursor.y as usize;
         let right = self.right_margin() as usize;
-        if x > right {
+        if x < self.left_margin() as usize || x > right {
             return;
         }
         let len = right + 1 - x;
@@ -884,7 +881,11 @@ impl Screen {
 
     pub fn insert_lines(&mut self, n: u16) {
         self.cursor.pending_wrap = false;
-        if self.cursor.y < self.region.top || self.cursor.y > self.region.bottom {
+        if self.cursor.y < self.region.top
+            || self.cursor.y > self.region.bottom
+            || self.cursor.x < self.left_margin()
+            || self.cursor.x > self.right_margin()
+        {
             return;
         }
         let start = self.cursor.y as usize;
@@ -909,7 +910,11 @@ impl Screen {
 
     pub fn delete_lines(&mut self, n: u16) {
         self.cursor.pending_wrap = false;
-        if self.cursor.y < self.region.top || self.cursor.y > self.region.bottom {
+        if self.cursor.y < self.region.top
+            || self.cursor.y > self.region.bottom
+            || self.cursor.x < self.left_margin()
+            || self.cursor.x > self.right_margin()
+        {
             return;
         }
         let start = self.cursor.y as usize;

@@ -217,7 +217,11 @@ impl App {
                 )))
             }
             ModalImeTarget::ThemeSettings => {
-                Some(caret_px(crate::macos_overlay::theme_settings_caret(pane)))
+                let session = self.theme_settings.as_ref()?;
+                Some(caret_px(crate::macos_overlay::theme_settings_caret(
+                    pane,
+                    &session.state,
+                )))
             }
             ModalImeTarget::SidebarRename => {
                 // The renamed card's name row, from the same layout the

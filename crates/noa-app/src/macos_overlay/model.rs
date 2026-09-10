@@ -127,21 +127,37 @@ pub(crate) fn title_prompt_caret(pane: PaneRectPt, input_chars: usize) -> CaretP
     }
 }
 
-/// The theme-settings card's search/filter field, at the card's upper-left.
-/// The card's height depends on its row lists; the vertical bound it is
-/// capped at (`pane.h - 24`, at least 240) is used, which is exact whenever
-/// the catalogue fills the card (the common case) and a few rows high
-/// otherwise.
-pub(crate) fn theme_settings_caret(pane: PaneRectPt) -> CaretPt {
+/// The search/filter field uses the same content-driven card height as the
+/// native builder, including filtered/empty lists and the Settings mode.
+pub(crate) fn theme_settings_caret(
+    pane: PaneRectPt,
+    state: &crate::theme_settings::ThemeSettings,
+) -> CaretPt {
+    use crate::theme_settings::{SettingsRowKind, ThemeSettingsMode};
     let card_w = THEME_SETTINGS_WIDTH.min(pane.w - 32.0).max(320.0);
-    let card_h = (pane.h - 24.0).max(240.0);
+    let settings_total = if state.settings_search_active() {
+        state.settings_filtered_len()
+    } else {
+        SettingsRowKind::COUNT
+    };
+    let layout = ThemeSettingsLayout::new(
+        pane.h,
+        state.mode(),
+        state.filtered_len().min(THEME_LIST_ROWS),
+        settings_total,
+        state.settings_search_active(),
+    );
     let card_x = (pane.w - card_w) / 2.0;
-    let card_top = (pane.h - card_h) / 2.0;
+    let card_top = (pane.h - layout.card_h) / 2.0;
+    let input_top = match state.mode() {
+        ThemeSettingsMode::Theme => THEME_FILTER_TOP,
+        ThemeSettingsMode::Settings => SETTINGS_TOP,
+    };
     CaretPt {
         x: card_x + 20.0,
-        y: card_top + 46.0,
+        y: card_top + input_top,
         w: 1.0,
-        h: INPUT_ROW_H,
+        h: SETTINGS_SEARCH_H,
     }
 }
 
@@ -366,6 +382,66 @@ pub(crate) struct ThemeSettingsViewModel {
 
 /// Rows the theme list shows at once in the native card.
 const THEME_LIST_ROWS: usize = 8;
+
+pub(crate) const THEME_FILTER_TOP: f64 = 64.0;
+pub(crate) const THEME_LIST_TOP: f64 = 106.0;
+pub(crate) const THEME_ROW_H: f64 = 24.0;
+pub(crate) const SETTINGS_TOP: f64 = 66.0;
+pub(crate) const SETTINGS_ROW_H: f64 = 23.0;
+pub(crate) const SETTINGS_FOOTER_H: f64 = 34.0;
+pub(crate) const SETTINGS_DESCRIPTION_H: f64 = 19.0;
+pub(crate) const SETTINGS_SEARCH_H: f64 = 16.0;
+
+pub(crate) struct ThemeSettingsLayout {
+    pub(crate) list_rows: usize,
+    pub(crate) settings_rows: usize,
+    pub(crate) card_h: f64,
+}
+
+impl ThemeSettingsLayout {
+    pub(crate) fn new(
+        pane_h: f64,
+        mode: crate::theme_settings::ThemeSettingsMode,
+        theme_rows: usize,
+        settings_total: usize,
+        search_active: bool,
+    ) -> Self {
+        use crate::theme_settings::ThemeSettingsMode;
+        let avail = (pane_h - 24.0).max(240.0);
+        match mode {
+            ThemeSettingsMode::Theme => {
+                let needed =
+                    |rows: usize| THEME_LIST_TOP + rows as f64 * THEME_ROW_H + SETTINGS_FOOTER_H;
+                let mut list_rows = theme_rows.max(1);
+                while needed(list_rows) > avail && list_rows > 3 {
+                    list_rows -= 1;
+                }
+                Self {
+                    list_rows,
+                    settings_rows: 0,
+                    card_h: needed(list_rows).min(avail),
+                }
+            }
+            ThemeSettingsMode::Settings => {
+                let (settings_rows, card_h) = settings_rows_budget(
+                    settings_total,
+                    avail,
+                    SETTINGS_TOP,
+                    SETTINGS_ROW_H,
+                    SETTINGS_FOOTER_H,
+                    SETTINGS_DESCRIPTION_H,
+                    SETTINGS_SEARCH_H,
+                    search_active,
+                );
+                Self {
+                    list_rows: 0,
+                    settings_rows,
+                    card_h,
+                }
+            }
+        }
+    }
+}
 
 pub(crate) fn theme_settings_view_model(
     state: &crate::theme_settings::ThemeSettings,

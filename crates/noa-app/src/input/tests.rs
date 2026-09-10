@@ -1615,6 +1615,69 @@ fn kitty_composing_option_is_not_alt() {
         press(KITTY_REPORT_ALL_KEYS | KITTY_REPORT_ASSOCIATED_TEXT, true),
         Some(b"\x1b[97;3u".to_vec())
     );
+    // winit omits text on release; it must retain the press's composition
+    // classification so a legacy text press has no unpaired Kitty release.
+    assert_eq!(
+        encode_key_with_modes(
+            &Key::Character("å".into()),
+            Some(&Key::Character("a".into())),
+            Some(PhysicalKey::Code(KeyCode::KeyA)),
+            None,
+            ModifiersState::ALT,
+            false,
+            false,
+            false,
+            KITTY_DISAMBIGUATE | KITTY_REPORT_EVENT_TYPES,
+            false,
+            false,
+            false,
+        ),
+        None
+    );
+}
+
+#[test]
+fn option_classification_survives_repeat_and_release_per_physical_key() {
+    let mut state = KeyModifierState::default();
+    let composed = PhysicalKey::Code(KeyCode::KeyA);
+    let alt = PhysicalKey::Code(KeyCode::KeyB);
+    assert!(!state.alt_sends_esc(composed, true, false, false));
+    assert!(state.alt_sends_esc(alt, true, false, true));
+    // Missing/different repeat text must not reclassify the held key.
+    assert!(!state.alt_sends_esc(composed, true, true, true));
+    let flags = KITTY_DISAMBIGUATE | KITTY_REPORT_EVENT_TYPES;
+    let release = |state: &mut KeyModifierState, physical, flags| {
+        encode_key_with_modes(
+            &Key::Character("a".into()),
+            None,
+            Some(physical),
+            None,
+            ModifiersState::ALT,
+            state.alt_sends_esc(physical, false, false, true),
+            false,
+            false,
+            flags,
+            false,
+            false,
+            false,
+        )
+    };
+    assert_eq!(release(&mut state, composed, flags), None);
+    assert_eq!(
+        release(&mut state, alt, flags),
+        Some(b"\x1b[97;3:3u".to_vec())
+    );
+    // Report-all still pairs its encoded press with an encoded release.
+    assert!(!state.alt_sends_esc(composed, true, false, false));
+    assert_eq!(
+        release(&mut state, composed, flags | KITTY_REPORT_ALL_KEYS),
+        Some(b"\x1b[97;3:3u".to_vec())
+    );
+    assert!(!state.alt_sends_esc(composed, true, false, false));
+    state.clear();
+    assert!(state.alt_sends_esc(composed, false, false, true));
+    // Reusing the same key starts a fresh classification.
+    assert!(state.alt_sends_esc(composed, true, false, true));
 }
 
 // N11: the keypad Enter is a distinct Kitty key (57414), reachable even

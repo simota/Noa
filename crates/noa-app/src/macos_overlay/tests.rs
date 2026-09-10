@@ -369,9 +369,13 @@ fn modal_caret_anchors_sit_in_the_input_row_and_follow_the_text() {
     assert_eq!(title.y, 800.0 * 0.30 + 40.0);
     assert!(title_prompt_caret(pane, 4).x > title.x);
 
-    let theme = theme_settings_caret(pane);
+    let theme_state = ThemeSettings::open(ThemeSettingsInit {
+        mode: ThemeSettingsMode::Theme,
+        ..settings_init()
+    });
+    let theme = theme_settings_caret(pane, &theme_state);
     assert_eq!(theme.x, (1200.0 - THEME_SETTINGS_WIDTH) / 2.0 + 20.0);
-    assert_eq!(theme.y, 12.0 + 46.0);
+    assert_eq!(theme.y, 298.0);
 
     // A pane narrower than the card clamps the card to the pane's width
     // minus its margins; the caret must stay inside it.
@@ -384,4 +388,38 @@ fn modal_caret_anchors_sit_in_the_input_row_and_follow_the_text() {
     let caret = palette_query_caret(narrow, 0);
     assert!(caret.x >= 16.0 && caret.x < 400.0 - 16.0);
     assert!(caret.y > 0.0 && caret.y < 300.0);
+}
+
+#[test]
+fn theme_caret_uses_filtered_rows_short_panes_and_settings_search_layout() {
+    let pane = PaneRectPt {
+        x: 0.0,
+        y: 0.0,
+        w: 1200.0,
+        h: 800.0,
+    };
+    let mut theme = ThemeSettings::open(ThemeSettingsInit {
+        mode: ThemeSettingsMode::Theme,
+        ..settings_init()
+    });
+    // Eight displayed rows give a 332pt card; a 300pt pane fits five rows
+    // in a 260pt card. Both anchors sit 64pt below the actual card top.
+    assert_eq!(theme_settings_caret(pane, &theme).y, 298.0);
+    assert_eq!(
+        theme_settings_caret(PaneRectPt { h: 300.0, ..pane }, &theme).y,
+        84.0
+    );
+    theme.push_text("no-such-theme-999999999", std::time::Instant::now());
+    assert_eq!(theme.filtered_len(), 0);
+    // Empty lists retain one row: 106 + 24 + 34 = 164pt.
+    assert_eq!(theme_settings_caret(pane, &theme).y, 382.0);
+
+    let mut settings = ThemeSettings::open(settings_init());
+    settings.toggle_settings_search();
+    settings.push_text("no-such-setting-999999999", std::time::Instant::now());
+    assert!(settings.settings_search_active());
+    assert_eq!(settings.settings_filtered_len(), 0);
+    // Settings reserve the description and search lines, yielding 158pt;
+    // their search input starts at 66pt rather than the theme's 64pt.
+    assert_eq!(theme_settings_caret(pane, &settings).y, 387.0);
 }

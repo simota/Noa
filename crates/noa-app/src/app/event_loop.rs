@@ -687,6 +687,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // modifier press, so nothing is lost.
                 if let Some(state) = self.windows.get_mut(&window_id) {
                     state.modifiers = ModifiersState::empty();
+                    state.key_modifiers.clear();
                 }
                 self.end_copy_mode_for_window(window_id);
                 // Only clear if this window is the one we recorded as focused —
@@ -861,6 +862,22 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Ime(event) => self.on_ime_event(window_id, event),
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
+                // Pair before any modal/shortcut early return so every
+                // release also retires the physical key's classification.
+                let event_alt_sends_esc = !cfg!(target_os = "macos")
+                    || event.text.as_deref().is_none_or(str::is_empty)
+                    || event.text.as_deref() != event.text_with_all_modifiers();
+                let alt_sends_esc =
+                    self.windows
+                        .get_mut(&window_id)
+                        .map_or(event_alt_sends_esc, |state| {
+                            state.key_modifiers.alt_sends_esc(
+                                event.physical_key,
+                                pressed,
+                                event.repeat,
+                                event_alt_sends_esc,
+                            )
+                        });
                 if pressed {
                     // NOA_LATENCY_TRACE t0: winit key-event receipt, before
                     // any routing — this is the earliest app-side timestamp
@@ -1114,13 +1131,6 @@ impl ApplicationHandler<UserEvent> for App {
                 let (app_cursor_keys, app_keypad, kitty_flags, modify_other_keys) =
                     self.key_encode_modes(window_id);
                 let unmodified_key = event.key_without_modifiers();
-                // On macOS, Option only acts as Alt when winit stripped its
-                // composition per `macos-option-as-alt` — i.e. the delivered
-                // text differs from the text with every modifier applied.
-                // Otherwise the composed character must pass through with no
-                // ESC prefix.
-                let alt_sends_esc = !cfg!(target_os = "macos")
-                    || event.text.as_deref() != event.text_with_all_modifiers();
                 let bytes = input::encode_key_with_modes(
                     &event.logical_key,
                     Some(&unmodified_key),
@@ -1512,6 +1522,7 @@ impl App {
     pub(super) fn on_cursor_left(&mut self, window_id: WindowId) {
         if let Some(state) = self.windows.get_mut(&window_id) {
             state.last_mouse_point = None;
+            state.last_mouse_physical_position = None;
             // A captured gesture survives the pointer leaving the window: the
             // release still arrives here (macOS delivers mouse-up to the
             // window that saw mouse-down) and must find the pane and its last
@@ -1714,12 +1725,10 @@ impl App {
         // pressed/drag state instead of handing B a release it never saw the
         // press for.
         if button == MouseButton::Left
+            && state == ElementState::Pressed
             && let Some(tab) = self.windows.get_mut(&window_id)
         {
-            tab.mouse_capture_pane = match state {
-                ElementState::Pressed => Some(pane_id),
-                ElementState::Released => None,
-            };
+            tab.mouse_capture_pane = Some(pane_id);
         }
 
         if button == MouseButton::Left && state == ElementState::Pressed {
@@ -1759,6 +1768,9 @@ impl App {
                         }
                     }
                 }
+            }
+            if button == MouseButton::Left && state == ElementState::Released {
+                self.release_mouse_capture(window_id);
             }
             return;
         }
@@ -1800,6 +1812,9 @@ impl App {
             })
             .unwrap_or(SelectionGesture::None);
         self.apply_selection_gesture(window_id, pane_id, gesture);
+        if state == ElementState::Released {
+            self.release_mouse_capture(window_id);
+        }
     }
 
     pub(super) fn on_mouse_wheel(&mut self, window_id: WindowId, delta: MouseScrollDelta) {

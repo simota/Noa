@@ -6,6 +6,7 @@
 mod anim;
 mod app;
 mod app_actions;
+mod atomic_write;
 pub mod auto_approve;
 mod branch_poll;
 mod chrome;

@@ -1574,3 +1574,108 @@ fn kitty_flags_take_precedence_over_modify_other_keys() {
     );
     assert_eq!(bytes, Some(b"\x1b[105;5u".to_vec()));
 }
+
+// N09: a macOS Option that composed the delivered character (`alt_sends_esc`
+// false) is not Alt for the Kitty escape decision — Ghostty's
+// `effectiveMods` strips a consumed modifier — so the composed text passes
+// through as text under disambiguate, and under report-all the sequence
+// keeps the modifier bit but still carries the associated text.
+#[test]
+fn kitty_composing_option_is_not_alt() {
+    let press = |flags: u8, alt_sends_esc: bool| {
+        encode_key_with_modes(
+            &Key::Character("å".into()),
+            Some(&Key::Character("a".into())),
+            None,
+            Some("å"),
+            ModifiersState::ALT,
+            alt_sends_esc,
+            false,
+            false,
+            flags,
+            false,
+            true,
+            false,
+        )
+    };
+    assert_eq!(
+        press(KITTY_DISAMBIGUATE, false),
+        Some("å".as_bytes().to_vec())
+    );
+    // Option claimed as Alt (`macos-option-as-alt`): a real Alt+a chord.
+    assert_eq!(
+        press(KITTY_DISAMBIGUATE, true),
+        Some(b"\x1b[97;3u".to_vec())
+    );
+    assert_eq!(
+        press(KITTY_REPORT_ALL_KEYS | KITTY_REPORT_ASSOCIATED_TEXT, false),
+        Some(b"\x1b[97;3;229u".to_vec())
+    );
+    assert_eq!(
+        press(KITTY_REPORT_ALL_KEYS | KITTY_REPORT_ASSOCIATED_TEXT, true),
+        Some(b"\x1b[97;3u".to_vec())
+    );
+}
+
+// N11: the keypad Enter is a distinct Kitty key (57414), reachable even
+// though winit reports its *logical* key as plain `Enter`.
+#[test]
+fn kitty_keypad_enter_uses_its_dedicated_code() {
+    let press = |flags: u8, mods: ModifiersState| {
+        encode_key_with_modes(
+            &Key::Named(NamedKey::Enter),
+            None,
+            Some(PhysicalKey::Code(KeyCode::NumpadEnter)),
+            Some("\r"),
+            mods,
+            true,
+            false,
+            false,
+            flags,
+            false,
+            true,
+            false,
+        )
+    };
+    assert_eq!(
+        press(KITTY_REPORT_ALL_KEYS, ModifiersState::empty()),
+        Some(b"\x1b[57414u".to_vec())
+    );
+    // Non-text keypad keys escape-encode under disambiguate too (Ghostty
+    // keys its table on the physical key, so KP_Enter never takes Enter's
+    // bare-CR exemption).
+    assert_eq!(
+        press(KITTY_DISAMBIGUATE, ModifiersState::empty()),
+        Some(b"\x1b[57414u".to_vec())
+    );
+    assert_eq!(
+        press(KITTY_DISAMBIGUATE, ModifiersState::CONTROL),
+        Some(b"\x1b[57414;5u".to_vec())
+    );
+    // A bare keypad digit is still text under disambiguate; a modified one
+    // reports its keypad code, not the main-block digit's.
+    let digit = |flags: u8, mods: ModifiersState| {
+        encode_key_with_modes(
+            &Key::Character("5".into()),
+            None,
+            Some(PhysicalKey::Code(KeyCode::Numpad5)),
+            Some("5"),
+            mods,
+            true,
+            false,
+            false,
+            flags,
+            false,
+            true,
+            false,
+        )
+    };
+    assert_eq!(
+        digit(KITTY_DISAMBIGUATE, ModifiersState::empty()),
+        Some(b"5".to_vec())
+    );
+    assert_eq!(
+        digit(KITTY_DISAMBIGUATE, ModifiersState::CONTROL),
+        Some(b"\x1b[57404;5u".to_vec())
+    );
+}

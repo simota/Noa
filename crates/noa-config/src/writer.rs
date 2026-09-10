@@ -212,6 +212,7 @@ pub fn write_config_updates(path: &Path, updates: &[(String, String)]) -> io::Re
     };
 
     let updated = apply_updates(&original, updates);
+    let updated = repair_font_family_primaries(path, updated, updates);
 
     let target = resolve_symlinks(path)?;
     let parent = target.parent().ok_or_else(|| {
@@ -247,6 +248,76 @@ pub fn write_config_updates(path: &Path, updates: &[(String, String)]) -> io::Re
         let _ = fs::remove_file(&tmp);
     }
     write_result
+}
+
+/// [`apply_updates`] only sees the primary file, but the parser splices
+/// `config-file` includes in at their directive's position and accumulates
+/// every `font-family*` line into one ordered stack. A family contributed by
+/// an include that precedes the rewritten slot — or by an include standing
+/// in for a slot the primary file never had — therefore still heads the
+/// effective list after a save, and the panel's "primary font" change is
+/// silently ineffective (N04). Re-parse the would-be file with includes
+/// expanded and, when the requested family did not land in front, rewrite
+/// the key as a list reset followed by the new primary and every surviving
+/// fallback (in effective order, deduplicated), all trailing the last
+/// include so nothing can shadow them.
+fn repair_font_family_primaries(
+    path: &Path,
+    mut updated: String,
+    updates: &[(String, String)],
+) -> String {
+    for (key, value) in updates {
+        if !is_font_family_key(key) || value.is_empty() {
+            continue;
+        }
+        let (overrides, _) = crate::parse_overrides(path, &updated);
+        let families = font_families_for_key(&overrides.font, key);
+        if families.first() == Some(value) {
+            continue;
+        }
+        // The reset replaces the value line `apply_updates` just placed (the
+        // key's last occurrence) and, when an include follows it, is appended
+        // again after that include — so the primary + fallbacks appended
+        // below start from an empty list in every reload order.
+        updated = apply_updates(&updated, &[(key.clone(), String::new())]);
+        let mut lines = vec![(key.clone(), value.clone())];
+        lines.extend(
+            families
+                .iter()
+                .filter(|family| *family != value)
+                .map(|family| (key.clone(), family.clone())),
+        );
+        updated = append_directives(&updated, &lines);
+    }
+    updated
+}
+
+fn font_families_for_key<'a>(font: &'a crate::FontConfig, key: &str) -> &'a [String] {
+    match key {
+        "font-family-bold" => &font.families_bold,
+        "font-family-italic" => &font.families_italic,
+        "font-family-bold-italic" => &font.families_bold_italic,
+        _ => &font.families,
+    }
+}
+
+/// Append `lines` as `key = value` directives at the end of `text`, on the
+/// file's dominant line terminator (same rule as [`apply_updates`]).
+fn append_directives(text: &str, lines: &[(String, String)]) -> String {
+    let existing = split_lines_preserving_terminators(text);
+    let terminator = dominant_terminator(&existing);
+    let mut output = text.to_string();
+    if existing
+        .last()
+        .is_some_and(|(_, terminator)| terminator.is_empty())
+    {
+        output.push_str(terminator);
+    }
+    for (key, value) in lines {
+        output.push_str(&format!("{key} = {value}"));
+        output.push_str(terminator);
+    }
+    output
 }
 
 /// Upper bound on symlink hops before `resolve_symlinks` reports a cycle
@@ -488,6 +559,60 @@ theme = 3024 Day\r
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(overrides.font.families, ["Monaco"]);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // N04: a family that only an include provides must not stay primary
+    // after the panel saves a different one — with the include either
+    // standing in for a missing slot or preceding the primary file's own.
+    #[test]
+    fn font_saves_beat_families_contributed_by_includes() {
+        for (label, main) in [
+            ("include-only", "config-file = fonts.conf\n"),
+            (
+                "include-before-slot",
+                "config-file = fonts.conf\nfont-family = Menlo\n",
+            ),
+        ] {
+            let dir = unique_temp_dir(&format!("font-include-{label}"));
+            fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("config");
+            fs::write(
+                dir.join("fonts.conf"),
+                "font-family = Monaco\nfont-family = Courier\n",
+            )
+            .unwrap();
+            fs::write(&path, main).unwrap();
+
+            for family in ["Fira Code", "Hack"] {
+                write_config_updates(&path, &[("font-family".into(), family.into())]).unwrap();
+                let source = fs::read_to_string(&path).unwrap();
+                let (overrides, diagnostics) = crate::parse_overrides(&path, &source);
+                assert!(diagnostics.is_empty(), "{label}: {diagnostics:?}");
+                assert_eq!(
+                    overrides.font.families.first().map(String::as_str),
+                    Some(family),
+                    "{label}: the saved family heads the effective list"
+                );
+                assert!(
+                    overrides.font.families.contains(&"Monaco".to_string())
+                        && overrides.font.families.contains(&"Courier".to_string()),
+                    "{label}: the include's families survive as fallbacks: {:?}",
+                    overrides.font.families
+                );
+                assert_eq!(
+                    overrides.font.families.len(),
+                    3,
+                    "{label}: no duplicate or stale entries: {:?}",
+                    overrides.font.families
+                );
+            }
+            // Untouched by the writer: the include file itself.
+            assert_eq!(
+                fs::read_to_string(dir.join("fonts.conf")).unwrap(),
+                "font-family = Monaco\nfont-family = Courier\n"
+            );
+            fs::remove_dir_all(&dir).unwrap();
+        }
     }
 
     #[test]

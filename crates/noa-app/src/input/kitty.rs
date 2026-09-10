@@ -44,6 +44,13 @@ fn kitty_modifier_value(mods: ModifiersState) -> u32 {
     value
 }
 
+/// `alt_sends_esc` is the caller's per-event verdict on whether a held Alt
+/// is *Alt* or a macOS Option that composed `text` (see
+/// `encode_key_with_modes`). A composing Option is not a modifier for the
+/// "does this key escape-encode" decision (Ghostty's `effectiveMods`): the
+/// character it produced is plain text under every flag set. The reported
+/// modifier field still carries it (Ghostty reports `all_mods`), and it only
+/// suppresses associated text when it is claimed as Alt.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_kitty(
     logical_key: &Key,
@@ -51,6 +58,7 @@ pub(super) fn encode_kitty(
     physical_key: Option<PhysicalKey>,
     text: Option<&str>,
     mods: ModifiersState,
+    alt_sends_esc: bool,
     flags: u8,
     pressed: bool,
     repeat: bool,
@@ -74,81 +82,94 @@ pub(super) fn encode_kitty(
     };
 
     let mods_value = kitty_modifier_value(mods);
-    let has_non_shift = mods.control_key() || mods.alt_key() || mods.super_key();
+    let alt_is_modifier = mods.alt_key() && (alt_sends_esc || text.is_none_or(str::is_empty));
+    let has_non_shift = mods.control_key() || alt_is_modifier || mods.super_key();
 
+    // Physical keypad keys carry dedicated code points: Ghostty's kitty
+    // table keys on the physical key, so KP_Enter is 57414, never Enter's
+    // 13. Text-producing keypad keys (digits, operators) stay legacy text
+    // without a non-shift modifier unless report-all forces the escape
+    // form, exactly like their main-block twins; the non-text ones
+    // (KP_Enter) always escape-encode under any flag, per the disambiguate
+    // rule for keypad keys (N11).
+    let keypad = keypad_key_code(physical_key).map(|number| KittyKey {
+        number,
+        suffix: b'u',
+        shifted: None,
+    });
     // Classify the key and decide whether it escape-encodes under these flags.
-    let key = match logical_key {
-        Key::Named(NamedKey::Escape) => KittyKey {
-            number: 27,
-            suffix: b'u',
-            shifted: None,
-        },
-        Key::Named(NamedKey::Enter) => {
-            if mods_value == 1 && !report_all {
-                return legacy_or_ignore(event);
-            }
-            KittyKey {
-                number: 13,
-                suffix: b'u',
-                shifted: None,
-            }
-        }
-        Key::Named(NamedKey::Tab) => {
-            if mods_value == 1 && !report_all {
-                return legacy_or_ignore(event);
-            }
-            KittyKey {
-                number: 9,
-                suffix: b'u',
-                shifted: None,
-            }
-        }
-        Key::Named(NamedKey::Backspace) => {
-            if mods_value == 1 && !report_all {
-                return legacy_or_ignore(event);
-            }
-            KittyKey {
-                number: 127,
-                suffix: b'u',
-                shifted: None,
-            }
-        }
-        Key::Named(NamedKey::Space) => {
+    let key = match (keypad, logical_key) {
+        (Some(key), Key::Character(_)) => {
             if !report_all && !has_non_shift {
                 return legacy_or_ignore(event);
             }
-            KittyKey {
-                number: 32,
+            key
+        }
+        (Some(key), _) => key,
+        (None, logical_key) => match logical_key {
+            Key::Named(NamedKey::Escape) => KittyKey {
+                number: 27,
                 suffix: b'u',
                 shifted: None,
-            }
-        }
-        Key::Named(named) => match functional_key(*named) {
-            // Functional keys (arrows, F-keys, Home/End/...) always escape-encode.
-            Some((number, suffix)) => KittyKey {
-                number,
-                suffix,
-                shifted: None,
             },
-            // Modifier keys alone are reported only with report-all-keys.
-            None => match modifier_key_code(physical_key) {
-                Some(number) if report_all => KittyKey {
-                    number,
-                    suffix: b'u',
-                    shifted: None,
-                },
-                _ => return KittyOutcome::Ignore,
-            },
-        },
-        Key::Character(s) => {
-            // Numpad keys get their dedicated codes only under report-all.
-            if report_all && let Some(number) = keypad_key_code(physical_key) {
+            Key::Named(NamedKey::Enter) => {
+                if mods_value == 1 && !report_all {
+                    return legacy_or_ignore(event);
+                }
                 KittyKey {
-                    number,
+                    number: 13,
                     suffix: b'u',
                     shifted: None,
                 }
-            } else {
+            }
+            Key::Named(NamedKey::Tab) => {
+                if mods_value == 1 && !report_all {
+                    return legacy_or_ignore(event);
+                }
+                KittyKey {
+                    number: 9,
+                    suffix: b'u',
+                    shifted: None,
+                }
+            }
+            Key::Named(NamedKey::Backspace) => {
+                if mods_value == 1 && !report_all {
+                    return legacy_or_ignore(event);
+                }
+                KittyKey {
+                    number: 127,
+                    suffix: b'u',
+                    shifted: None,
+                }
+            }
+            Key::Named(NamedKey::Space) => {
+                if !report_all && !has_non_shift {
+                    return legacy_or_ignore(event);
+                }
+                KittyKey {
+                    number: 32,
+                    suffix: b'u',
+                    shifted: None,
+                }
+            }
+            Key::Named(named) => match functional_key(*named) {
+                // Functional keys (arrows, F-keys, Home/End/...) always escape-encode.
+                Some((number, suffix)) => KittyKey {
+                    number,
+                    suffix,
+                    shifted: None,
+                },
+                // Modifier keys alone are reported only with report-all-keys.
+                None => match modifier_key_code(physical_key) {
+                    Some(number) if report_all => KittyKey {
+                        number,
+                        suffix: b'u',
+                        shifted: None,
+                    },
+                    _ => return KittyOutcome::Ignore,
+                },
+            },
+            Key::Character(s) => {
                 let Some((base, shifted)) = character_key_codes(s, unmodified_key, mods) else {
                     return legacy_or_ignore(event);
                 };
@@ -163,12 +184,13 @@ pub(super) fn encode_kitty(
                     shifted,
                 }
             }
-        }
-        _ => return legacy_or_ignore(event),
+            _ => return legacy_or_ignore(event),
+        },
     };
 
     // Associated text: only for press/repeat, only when no modifier other than
-    // shift is active, and only for genuinely printable text.
+    // shift (or a composing Option) is active, and only for genuinely
+    // printable text.
     let assoc_text = if report_text && event != 3 && !has_non_shift {
         associated_text_codepoints(text)
     } else {

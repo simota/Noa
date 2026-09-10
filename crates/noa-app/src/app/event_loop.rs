@@ -30,6 +30,34 @@ fn shared_modifiers_after_focus_loss(
     }
 }
 
+/// The app-level OS focus after `window_id` reports `Focused(false)`. When
+/// macOS switches between two of our own windows the incoming window's
+/// `Focused(true)` can land first and already repoint `os_focused`; the
+/// outgoing window's loss must then leave it alone. Every consumer that
+/// needs "is this *app* still frontmost" (Secure Keyboard Entry above all)
+/// derives it from this result, never from the per-window boolean.
+fn os_focused_after_focus_loss(
+    os_focused: Option<WindowId>,
+    window_id: WindowId,
+) -> Option<WindowId> {
+    if os_focused == Some(window_id) {
+        None
+    } else {
+        os_focused
+    }
+}
+
+/// The pane a button event routes to: the pane holding the live left-button
+/// capture first, then the pane under the pointer, then the focused pane
+/// (for events with no pointer position at all).
+fn mouse_gesture_pane(
+    captured: Option<PaneId>,
+    hovered: Option<PaneId>,
+    focused: PaneId,
+) -> PaneId {
+    captured.or(hovered).unwrap_or(focused)
+}
+
 impl App {
     /// Pane-dnd P1-1 remediation (`docs/specs/pane-dnd.md` L2(e)): re-resolve
     /// a pane-scoped `UserEvent`'s window at *receive* time rather than
@@ -668,9 +696,11 @@ impl ApplicationHandler<UserEvent> for App {
                 let was_input_target = self.os_focused == Some(window_id);
                 self.modifiers =
                     shared_modifiers_after_focus_loss(self.modifiers, was_input_target);
-                if was_input_target {
-                    self.os_focused = None;
-                }
+                self.os_focused = os_focused_after_focus_loss(self.os_focused, window_id);
+                // A left-button gesture captured by one of this window's panes
+                // can't complete once focus is gone (the release may never
+                // arrive): drop it now so the pane isn't left "pressed".
+                self.cancel_mouse_capture(window_id);
                 self.finish_active_split_drag(window_id);
                 // Cancel an in-flight overview pane drag when its host window
                 // loses focus (Cmd-Tab / native tab switch mid-drag): the
@@ -712,10 +742,15 @@ impl ApplicationHandler<UserEvent> for App {
                 self.report_focus_event(window_id, false);
                 // Release Secure Keyboard Entry while backgrounded so it never
                 // blocks key input to the rest of the system; a matching
-                // `Focused(true)` (including switching between our own windows)
-                // restores it.
-                self.secure_input
-                    .on_focus_change(false, &mut crate::secure_input::CarbonSecureInput);
+                // `Focused(true)` restores it. The decision is made from the
+                // *app-level* focus computed above, not this window's boolean:
+                // when another of our windows already took focus (its
+                // `Focused(true)` arrived first) the app is still frontmost
+                // and the protection must stay up (N01).
+                self.secure_input.on_focus_change(
+                    self.os_focused.is_some(),
+                    &mut crate::secure_input::CarbonSecureInput,
+                );
                 if let Some(state) = self.windows.get(&window_id) {
                     state.window.request_redraw();
                 }
@@ -1406,7 +1441,22 @@ impl App {
             return;
         }
 
-        let Some((pane_id, cell)) = self.pane_cell_at_position(window_id, position, metrics) else {
+        // A left press captured a pane: this motion belongs to it (the cell is
+        // computed against *its* rect, clamped at the edges), not to whatever
+        // pane the pointer is over now. That keeps a selection or SGR drag
+        // that crosses a divider extending in the pane that saw the press,
+        // and lets that pane — not the neighbour — receive the release (N03).
+        let captured = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.mouse_capture_pane);
+        let resolved = match captured {
+            Some(pane_id) => self
+                .pane_cell_in(window_id, pane_id, position, metrics)
+                .map(|cell| (pane_id, cell)),
+            None => self.pane_cell_at_position(window_id, position, metrics),
+        };
+        let Some((pane_id, cell)) = resolved else {
             if let Some(state) = self.windows.get_mut(&window_id) {
                 state.last_mouse_pane = None;
             }
@@ -1462,9 +1512,16 @@ impl App {
     pub(super) fn on_cursor_left(&mut self, window_id: WindowId) {
         if let Some(state) = self.windows.get_mut(&window_id) {
             state.last_mouse_point = None;
-            state.last_mouse_pane = None;
-            for surface in state.surfaces.values_mut() {
-                surface.last_mouse_cell = None;
+            // A captured gesture survives the pointer leaving the window: the
+            // release still arrives here (macOS delivers mouse-up to the
+            // window that saw mouse-down) and must find the pane and its last
+            // cell intact.
+            let captured = state.mouse_capture_pane;
+            state.last_mouse_pane = captured;
+            for (pane_id, surface) in &mut state.surfaces {
+                if Some(*pane_id) != captured {
+                    surface.last_mouse_cell = None;
+                }
             }
         }
         self.update_sidebar_button_hover(window_id, None);
@@ -1640,14 +1697,30 @@ impl App {
             }
         }
 
-        let pane_id = self
-            .windows
-            .get(&window_id)
-            .and_then(|state| state.last_mouse_pane)
-            .or_else(|| self.windows.get(&window_id).map(|state| state.focused_pane));
+        let pane_id = self.windows.get(&window_id).map(|tab| {
+            mouse_gesture_pane(
+                tab.mouse_capture_pane,
+                tab.last_mouse_pane,
+                tab.focused_pane,
+            )
+        });
         let Some(pane_id) = pane_id else {
             return;
         };
+
+        // The left button captures the pane it pressed in until its release
+        // (see `on_cursor_moved`); the release always goes to the capturing
+        // pane, so a press in A and a release over B still clears A's
+        // pressed/drag state instead of handing B a release it never saw the
+        // press for.
+        if button == MouseButton::Left
+            && let Some(tab) = self.windows.get_mut(&window_id)
+        {
+            tab.mouse_capture_pane = match state {
+                ElementState::Pressed => Some(pane_id),
+                ElementState::Released => None,
+            };
+        }
 
         if button == MouseButton::Left && state == ElementState::Pressed {
             self.focus_pane(window_id, pane_id);
@@ -1842,6 +1915,10 @@ impl App {
                 }
                 Ime::Enabled | Ime::Disabled => self.modal_preedit = None,
             }
+            // The candidate window follows the modal's caret (N12): re-anchor
+            // on every composition step so it tracks the typed text rather
+            // than the terminal cursor behind the card.
+            self.update_focused_ime_cursor_area(window_id);
             self.request_window_redraw(window_id);
             return;
         }
@@ -2067,5 +2144,74 @@ mod window_modifier_tests {
             shared_modifiers_after_focus_loss(ModifiersState::SHIFT, true),
             ModifiersState::empty()
         );
+    }
+}
+
+#[cfg(test)]
+mod focus_loss_tests {
+    use super::*;
+    use crate::secure_input::{SecureInput, SecureInputBackend};
+
+    struct Recording(Vec<bool>);
+    impl SecureInputBackend for Recording {
+        fn set_enabled(&mut self, enabled: bool) {
+            self.0.push(enabled);
+        }
+    }
+
+    fn window(id: u64) -> WindowId {
+        WindowId::from(id)
+    }
+
+    // N01: `B Focused(true)` → `A Focused(false)` (macOS reorders the pair
+    // when switching between our own windows). A's loss must not read as
+    // "the app lost focus": `os_focused` still points at B.
+    #[test]
+    fn outgoing_window_loss_keeps_app_focus_when_successor_already_focused() {
+        let (a, b) = (window(1), window(2));
+        let os_focused = Some(b);
+        assert_eq!(os_focused_after_focus_loss(os_focused, a), Some(b));
+        assert_eq!(os_focused_after_focus_loss(Some(a), a), None);
+        assert_eq!(os_focused_after_focus_loss(None, a), None);
+    }
+
+    // The Secure Keyboard Entry state driven from that app-level focus:
+    // `A true → B true → A false` leaves the protection up; only `B false`
+    // (the last window) releases it.
+    #[test]
+    fn secure_input_survives_intra_app_window_switch() {
+        let (a, b) = (window(1), window(2));
+        let mut secure = SecureInput::new();
+        let mut backend = Recording(Vec::new());
+        let mut os_focused = Some(a);
+        secure.toggle(os_focused.is_some(), &mut backend);
+        assert_eq!(backend.0, [true]);
+
+        // B gains focus first …
+        os_focused = Some(b);
+        secure.on_focus_change(os_focused.is_some(), &mut backend);
+        // … then A's loss arrives: still frontmost, nothing released.
+        os_focused = os_focused_after_focus_loss(os_focused, a);
+        secure.on_focus_change(os_focused.is_some(), &mut backend);
+        assert_eq!(
+            backend.0,
+            [true],
+            "A's stale loss must not release the switch"
+        );
+
+        // B's loss is the real backgrounding.
+        os_focused = os_focused_after_focus_loss(os_focused, b);
+        secure.on_focus_change(os_focused.is_some(), &mut backend);
+        assert_eq!(backend.0, [true, false]);
+    }
+
+    // N03: a live left-button capture wins over the pane under the pointer,
+    // so the release of a press in A that ends over B still routes to A.
+    #[test]
+    fn captured_pane_outranks_hovered_pane_for_button_events() {
+        let (a, b, focused) = (PaneId::new(1), PaneId::new(2), PaneId::new(3));
+        assert_eq!(mouse_gesture_pane(Some(a), Some(b), focused), a);
+        assert_eq!(mouse_gesture_pane(None, Some(b), focused), b);
+        assert_eq!(mouse_gesture_pane(None, None, focused), focused);
     }
 }

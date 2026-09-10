@@ -468,60 +468,13 @@ fn parse_remote(value: &json::Value) -> Option<RemotePane> {
     })
 }
 
-/// Atomically write the session to `path`, creating the parent directory.
-/// Writes to a sibling temp file then renames, so a crash mid-write cannot
-/// truncate an existing good session file.
-///
-/// The temp name is unique per process and per call (`create_new`), so two
-/// noa processes saving to the same path at once cannot share one staging
-/// file and interleave their bytes into the published `session.json`
-/// (B03, 2026-09 audit #2). Which of two concurrent whole-file saves lands
-/// last is still unordered; only corruption is ruled out here.
+/// Atomically write the session to `path`, creating the parent directory
+/// (staging file + rename, unique per process and call — see
+/// [`crate::atomic_write`], B03 2026-09 audit #2). Which of two concurrent
+/// whole-file saves lands last is still unordered; only corruption is ruled
+/// out here.
 pub fn save(path: &Path, state: &SessionState) -> std::io::Result<()> {
-    use std::io::Write;
-
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let (tmp, mut file) = loop {
-        let tmp = staging_path(path);
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-        {
-            Ok(file) => break (tmp, file),
-            // A crashed process with a reused PID may have left this exact
-            // name behind; the counter makes the next candidate fresh.
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(err) => return Err(err),
-        }
-    };
-    let result = (|| {
-        file.write_all(serialize(state).as_bytes())?;
-        file.sync_all()?;
-        fs::rename(&tmp, path)
-    })();
-    drop(file);
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
-}
-
-/// `.<name>.<pid>.<seq>.tmp` beside `path`, unique per process and call.
-fn staging_path(path: &Path) -> std::path::PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "session.json".to_string());
-    path.with_file_name(format!(
-        ".{name}.{}.{}.tmp",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ))
+    crate::atomic_write::write_atomic(path, serialize(state).as_bytes())
 }
 
 /// Load and parse the session at `path`, or `None` if it is absent, unreadable,

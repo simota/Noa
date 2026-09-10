@@ -34,13 +34,15 @@ const ID_TITLE_PROMPT: &str = "noa.native-overlay.title-prompt";
 const ID_TOAST: &str = "noa.native-overlay.toast";
 const ID_SCRATCH_BADGE: &str = "noa.native-overlay.scratch-badge";
 
-/// Palette metrics (points).
-const PALETTE_WIDTH: f64 = 560.0;
-const QUERY_ROW_H: f64 = 44.0;
+/// Palette metrics (points). The widths/row heights the IME caret anchor
+/// also needs live in `model.rs` so the two can't drift.
+use crate::macos_overlay::model::{
+    CARD_PAD_H, PALETTE_WIDTH, QUERY_ROW_H, THEME_SETTINGS_WIDTH, TITLE_PROMPT_H,
+    TITLE_PROMPT_WIDTH,
+};
 const ENTRY_ROW_H: f64 = 26.0;
 const HEADER_ROW_H: f64 = 24.0;
 const LIST_PAD_V: f64 = 6.0;
-const CARD_PAD_H: f64 = 16.0;
 const CARD_RADIUS: f64 = 12.0;
 /// Max list rows (headers + entries) visible at once — matches the wgpu
 /// card's 12-row window.
@@ -863,7 +865,7 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
             return;
         };
 
-        let card_w = 660.0_f64.min(pane.w - 32.0).max(320.0);
+        let card_w = THEME_SETTINGS_WIDTH.min(pane.w - 32.0).max(320.0);
         // The card height is content-driven: title block + exactly one
         // section (the theme list+sample pane in Theme mode, the settings
         // rows in Settings mode — a session never shows both, DEC-2) +
@@ -1843,8 +1845,8 @@ pub(in crate::macos_overlay) fn rebuild_title_prompt(
             return;
         };
 
-        let card_w = 420.0_f64.min(pane.w - 32.0).max(240.0);
-        let card_h = 104.0;
+        let card_w = TITLE_PROMPT_WIDTH.min(pane.w - 32.0).max(240.0);
+        let card_h = TITLE_PROMPT_H;
         let card_frame = NSRect::new(
             NSPoint::new(
                 (pane.w - card_w) / 2.0,

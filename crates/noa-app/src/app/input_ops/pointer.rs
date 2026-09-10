@@ -159,18 +159,50 @@ impl App {
             Some(HitTarget::Pane(pane_id)) => pane_id,
             Some(HitTarget::Divider) | None => return None,
         };
-        let surface = state.surfaces.get(&pane_id)?;
+        let cell = self.pane_cell_in(window_id, pane_id, position, metrics)?;
+        Some((pane_id, cell))
+    }
+
+    /// The grid cell of `pane_id` under a window-relative `position`, with no
+    /// hit test: a position outside the pane's rect clamps to its edge cells.
+    /// This is how a captured drag keeps reporting cells of the pane that saw
+    /// the press after the pointer has crossed a divider. `None` only when
+    /// the pane no longer exists in `window_id`.
+    pub(in crate::app) fn pane_cell_in(
+        &self,
+        window_id: WindowId,
+        pane_id: PaneId,
+        position: PhysicalPosition<f64>,
+        metrics: noa_font::Metrics,
+    ) -> Option<Point> {
+        let surface = self.windows.get(&window_id)?.surfaces.get(&pane_id)?;
         let local_x = position.x - f64::from(surface.rect.x);
         let local_y = position.y - f64::from(surface.rect.y);
-        let cell = mouse::physical_position_to_grid_point(
+        Some(mouse::physical_position_to_grid_point(
             local_x,
             local_y,
             metrics.cell_w,
             metrics.cell_h,
             surface.grid_size,
             self.padding,
-        );
-        Some((pane_id, cell))
+        ))
+    }
+
+    /// Abandon the live left-button capture in `window_id` (focus loss): the
+    /// capturing pane's pressed-button and selection-drag state are cleared
+    /// as if its release had arrived, so a later motion can't keep extending
+    /// a selection or report a phantom button-held drag to a tracking TUI.
+    pub(in crate::app) fn cancel_mouse_capture(&mut self, window_id: WindowId) {
+        let Some(state) = self.windows.get_mut(&window_id) else {
+            return;
+        };
+        let Some(pane_id) = state.mouse_capture_pane.take() else {
+            return;
+        };
+        if let Some(surface) = state.surfaces.get_mut(&pane_id) {
+            surface.pressed_mouse_button = None;
+            let _ = surface.mouse_selection.left_released();
+        }
     }
 
     /// The Cmd+hover link under the mouse in `window_id`'s focused-under-

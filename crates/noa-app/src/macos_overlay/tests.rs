@@ -1,5 +1,7 @@
 use super::model::{
-    NativeOverlayCache, OverlayColors, PaneRectPt, overlay_scroll_window, theme_settings_view_model,
+    CARD_PAD_H, NativeOverlayCache, OverlayColors, PALETTE_WIDTH, PaneRectPt, THEME_SETTINGS_WIDTH,
+    overlay_scroll_window, palette_query_caret, theme_settings_caret, theme_settings_view_model,
+    title_prompt_caret,
 };
 use super::sync::theme_settings_sync_decision;
 use crate::theme_settings::{Liveness, ThemeSettings, ThemeSettingsInit, ThemeSettingsMode};
@@ -343,4 +345,43 @@ fn pane_rect_pt_scales_from_px() {
     assert_eq!(rect.y, 50.0);
     assert_eq!(rect.w, 400.0);
     assert_eq!(rect.h, 300.0);
+}
+
+// N12: the modal caret anchors land inside their card's input row, not at
+// the terminal cursor, and advance with the typed text.
+#[test]
+fn modal_caret_anchors_sit_in_the_input_row_and_follow_the_text() {
+    let pane = PaneRectPt {
+        x: 0.0,
+        y: 0.0,
+        w: 1200.0,
+        h: 800.0,
+    };
+    let card_x = (1200.0 - PALETTE_WIDTH) / 2.0;
+    let empty = palette_query_caret(pane, 0);
+    assert_eq!(empty.x, card_x + CARD_PAD_H + 22.0);
+    assert_eq!(empty.y, 800.0 * 0.14 + 13.0);
+    let typed = palette_query_caret(pane, 10);
+    assert!(typed.x > empty.x && typed.y == empty.y);
+
+    let title = title_prompt_caret(pane, 0);
+    assert_eq!(title.x, 600.0);
+    assert_eq!(title.y, 800.0 * 0.30 + 40.0);
+    assert!(title_prompt_caret(pane, 4).x > title.x);
+
+    let theme = theme_settings_caret(pane);
+    assert_eq!(theme.x, (1200.0 - THEME_SETTINGS_WIDTH) / 2.0 + 20.0);
+    assert_eq!(theme.y, 12.0 + 46.0);
+
+    // A pane narrower than the card clamps the card to the pane's width
+    // minus its margins; the caret must stay inside it.
+    let narrow = PaneRectPt {
+        x: 0.0,
+        y: 0.0,
+        w: 400.0,
+        h: 300.0,
+    };
+    let caret = palette_query_caret(narrow, 0);
+    assert!(caret.x >= 16.0 && caret.x < 400.0 - 16.0);
+    assert!(caret.y > 0.0 && caret.y < 300.0);
 }

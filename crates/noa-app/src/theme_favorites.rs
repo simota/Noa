@@ -52,15 +52,14 @@ pub(crate) fn load(path: &Path) -> HashSet<String> {
     }
 }
 
-/// Atomically write `favorites` to `path` (temp file + rename), creating
-/// the parent directory if needed — mirrors `session.rs::save`'s pattern.
+/// Atomically write `favorites` to `path`, creating the parent directory if
+/// needed. Uses the shared per-process/per-call staging file
+/// ([`crate::atomic_write`]) rather than a fixed `favorites.tmp`: with the
+/// fixed name two noa processes toggling at once shared one staging file,
+/// and the loser could overwrite the already-published file through its
+/// open descriptor and then report a failed save (N05).
 pub(crate) fn save(path: &Path, favorites: &HashSet<String>) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, serialize(favorites))?;
-    fs::rename(&tmp, path)
+    crate::atomic_write::write_atomic(path, serialize(favorites).as_bytes())
 }
 
 /// `App`'s handle on the favorites store: lazily loaded (best-effort, empty

@@ -69,6 +69,82 @@ impl NativeOverlayCache {
 /// card in `app.rs`.
 pub(crate) const TITLE_PROMPT_HINT: &str = "Enter to set \u{b7} Empty clears \u{b7} Esc to cancel";
 
+/// Card metrics (points) shared by the AppKit card builders (`imp/appkit.rs`)
+/// and the IME caret anchors below, so the candidate window and the drawn
+/// input row can't drift apart.
+pub(crate) const PALETTE_WIDTH: f64 = 560.0;
+pub(crate) const QUERY_ROW_H: f64 = 44.0;
+pub(crate) const CARD_PAD_H: f64 = 16.0;
+pub(crate) const TITLE_PROMPT_WIDTH: f64 = 420.0;
+pub(crate) const TITLE_PROMPT_H: f64 = 104.0;
+pub(crate) const THEME_SETTINGS_WIDTH: f64 = 660.0;
+/// Mean advance of the 15pt system font the input rows use — an estimate
+/// (the labels are proportional), good enough to put the candidate window
+/// at the end of the typed text rather than at its start.
+const INPUT_FONT_ADVANCE: f64 = 8.3;
+const INPUT_ROW_H: f64 = 20.0;
+
+/// A caret rectangle in points, relative to the pane rect's origin (the
+/// cards are laid out inside the focused pane's frame).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CaretPt {
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) w: f64,
+    pub(crate) h: f64,
+}
+
+/// The palette query row's caret after `query_chars` characters (also the
+/// send-selection picker and the remote-UI endpoint field, which draw the
+/// same card). Mirrors `rebuild_palette`'s frame math with the card's
+/// minimum height (query row + empty-list stub) standing in for the
+/// list-dependent height — the `min(pane.h - card_h)` term only binds on a
+/// pane shorter than the card.
+pub(crate) fn palette_query_caret(pane: PaneRectPt, query_chars: usize) -> CaretPt {
+    let card_w = PALETTE_WIDTH.min(pane.w - 32.0).max(280.0);
+    let card_h_min = QUERY_ROW_H + 1.0 + 36.0;
+    let card_x = (pane.w - card_w) / 2.0;
+    let card_top = (pane.h * 0.14).min(pane.h - card_h_min).max(8.0);
+    CaretPt {
+        x: card_x + CARD_PAD_H + 22.0 + query_chars as f64 * INPUT_FONT_ADVANCE,
+        y: card_top + 13.0,
+        w: 1.0,
+        h: INPUT_ROW_H,
+    }
+}
+
+/// The "Set Tab Title" prompt's caret: its input row is centred, so the
+/// caret sits half the text's width right of the card's centre line.
+pub(crate) fn title_prompt_caret(pane: PaneRectPt, input_chars: usize) -> CaretPt {
+    let card_w = TITLE_PROMPT_WIDTH.min(pane.w - 32.0).max(240.0);
+    let card_x = (pane.w - card_w) / 2.0;
+    let card_top = (pane.h * 0.30).min(pane.h - TITLE_PROMPT_H);
+    CaretPt {
+        x: card_x + card_w / 2.0 + input_chars as f64 * INPUT_FONT_ADVANCE / 2.0,
+        y: card_top + 40.0,
+        w: 1.0,
+        h: INPUT_ROW_H,
+    }
+}
+
+/// The theme-settings card's search/filter field, at the card's upper-left.
+/// The card's height depends on its row lists; the vertical bound it is
+/// capped at (`pane.h - 24`, at least 240) is used, which is exact whenever
+/// the catalogue fills the card (the common case) and a few rows high
+/// otherwise.
+pub(crate) fn theme_settings_caret(pane: PaneRectPt) -> CaretPt {
+    let card_w = THEME_SETTINGS_WIDTH.min(pane.w - 32.0).max(320.0);
+    let card_h = (pane.h - 24.0).max(240.0);
+    let card_x = (pane.w - card_w) / 2.0;
+    let card_top = (pane.h - card_h) / 2.0;
+    CaretPt {
+        x: card_x + 20.0,
+        y: card_top + 46.0,
+        w: 1.0,
+        h: INPUT_ROW_H,
+    }
+}
+
 /// A pane rectangle in AppKit points, top-left origin relative to the
 /// window's content view (i.e. physical px / scale factor).
 #[derive(Clone, Copy, Debug, PartialEq)]

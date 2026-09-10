@@ -75,6 +75,7 @@ pub fn encode_key_with_modes(
             physical_key,
             text,
             mods,
+            alt_sends_esc,
             kitty_flags,
             pressed,
             repeat,

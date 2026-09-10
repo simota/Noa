@@ -26,8 +26,8 @@ use crate::parser::{Directive, parse_directives};
 ///   update therefore replaces the **primary slot** — the first occurrence
 ///   after the last empty-valued (list-reset) line — so fallbacks after it
 ///   survive (B05, 2026-09 audit). An empty update is the list reset itself
-///   and keeps last-occurrence placement so it clears every earlier line
-///   (B06).
+///   and keeps last-occurrence placement, with a trailing reset appended
+///   when a later include could add more entries (B06).
 /// - A key absent from `original` is appended as a new `key = value` line at
 ///   the end.
 /// - If a `config-file` include directive appears *after* a scalar key's last
@@ -48,9 +48,9 @@ pub fn apply_updates(original: &str, updates: &[(String, String)]) -> String {
     // The reader splices an included file's directives in at the point of
     // its `config-file` line, so an include *after* the key's last
     // occurrence can still shadow an in-place rewrite. In that case the new
-    // scalar value is also appended after every include. Repeatable keys
-    // accumulate instead, so appending them would leave stale entries in
-    // the list on subsequent saves.
+    // scalar value or font-family reset is also appended after every include.
+    // Non-empty repeatable values accumulate instead, so appending them would
+    // leave stale entries in the list on subsequent saves.
     let last_include_line = directives
         .iter()
         .filter(|directive| directive.key == "config-file")
@@ -69,7 +69,7 @@ pub fn apply_updates(original: &str, updates: &[(String, String)]) -> String {
         match target {
             Some(directive) => {
                 replacements.insert(directive.line, format!("{key} = {value}"));
-                if !is_repeatable_key(key)
+                if (!is_repeatable_key(key) || (is_font_family_key(key) && value.is_empty()))
                     && last_include_line.is_some_and(|include| include > directive.line)
                 {
                     appended.push(update);
@@ -487,6 +487,36 @@ theme = 3024 Day\r
         let (overrides, diagnostics) = crate::parse_overrides(&path, &source);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(overrides.font.families, ["Monaco"]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn font_family_reset_clears_trailing_includes_after_reload() {
+        let dir = unique_temp_dir("font-reset-include");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config");
+        for key in [
+            "font-family",
+            "font-family-bold",
+            "font-family-italic",
+            "font-family-bold-italic",
+        ] {
+            fs::write(dir.join("child.conf"), format!("{key} = Monaco\n")).unwrap();
+            fs::write(dir.join("last.conf"), format!("{key} = Courier\n")).unwrap();
+            fs::write(
+                &path,
+                format!("{key} = Menlo\nconfig-file = child.conf\nconfig-file = last.conf\n"),
+            )
+            .unwrap();
+
+            let updates = [(key.to_string(), String::new())];
+            write_config_updates(&path, &updates).unwrap();
+            let source = fs::read_to_string(&path).unwrap();
+            let (overrides, diagnostics) = crate::parse_overrides(&path, &source);
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            assert_eq!(overrides.font, crate::FontConfig::default(), "{key}");
+            assert_eq!(apply_updates(&source, &updates), source, "{key}");
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 

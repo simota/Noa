@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.16] - 2026-09-10
+
+### Fixed
+
+- New tabs, splits, and the scratch terminal inherit the focused shell's
+  working directory again. The OSC 7 host check cached the hostname once per
+  process, so after macOS renamed the host on a network change every cwd
+  report was rejected as non-local; the check now matches every hostname the
+  machine has gone by during the session (#84).
+- Secure Keyboard Entry survives reordered focus events, mouse gestures stay
+  routed to the pane that received the press, Option composition is preserved
+  across key events, and IPC reports input-queue rejection and disconnected
+  panes instead of success. Cursor motion, printing, and scrolling are
+  correct around horizontal margins, and live Kitty image positions are kept
+  when clearing history (#83).
+- Panes no longer auto-attach to reused pane IDs after a server restart,
+  SIXEL overdraw is bounded, configuration resets and concurrent persistence
+  are reliable, font fallbacks and dangling symlinks are preserved, theme
+  overrides are exclusive, and token recovery is serialized (#82).
+
 ## [0.2.15] - 2026-09-09
 
 ### Fixed

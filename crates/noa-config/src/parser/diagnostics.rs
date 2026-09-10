@@ -38,15 +38,6 @@ pub(super) fn theme_pair_diagnostic(path: &Path) -> Diagnostic {
     }
 }
 
-pub(super) fn empty_family_diagnostic(path: &Path, key: &str) -> Diagnostic {
-    Diagnostic {
-        message: format!(
-            "config {}: `{key}` requires a non-empty font family name; value ignored",
-            path.display()
-        ),
-    }
-}
-
 pub(super) fn invalid_font_feature_diagnostic(path: &Path, value: &str) -> Diagnostic {
     Diagnostic {
         message: format!(

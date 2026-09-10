@@ -23,7 +23,6 @@ pub(crate) fn build_overrides(
     let mut rows = None;
     let mut font_size = None;
     let mut theme = None;
-    let mut theme_appearance = None;
     let mut font = FontConfig::default();
     let mut palette = Vec::new();
     let mut clipboard_read = None;
@@ -111,27 +110,25 @@ pub(crate) fn build_overrides(
             "font-size" => {
                 font_size = parse_font_size(path, directive, &mut diagnostics);
             }
-            "theme" => match parse_theme(path, directive, &mut diagnostics) {
-                Some(ThemeSetting::Single(name)) => theme = Some(name),
-                Some(ThemeSetting::Pair(pair)) => theme_appearance = Some(pair),
-                None => {}
-            },
+            // The last well-formed `theme` directive wins outright — a
+            // single name after a pair (or a pair after a single name)
+            // replaces it rather than leaving both set (B04).
+            "theme" => {
+                if let Some(setting) = parse_theme(path, directive, &mut diagnostics) {
+                    theme = Some(setting);
+                }
+            }
             "font-family" => {
-                parse_family(path, directive, &mut diagnostics, &mut font.families);
+                parse_family(directive, &mut font.families);
             }
             "font-family-bold" => {
-                parse_family(path, directive, &mut diagnostics, &mut font.families_bold);
+                parse_family(directive, &mut font.families_bold);
             }
             "font-family-italic" => {
-                parse_family(path, directive, &mut diagnostics, &mut font.families_italic);
+                parse_family(directive, &mut font.families_italic);
             }
             "font-family-bold-italic" => {
-                parse_family(
-                    path,
-                    directive,
-                    &mut diagnostics,
-                    &mut font.families_bold_italic,
-                );
+                parse_family(directive, &mut font.families_bold_italic);
             }
             "font-feature" => {
                 parse_font_feature(path, directive, &mut diagnostics, &mut font.features);
@@ -447,7 +444,6 @@ pub(crate) fn build_overrides(
             rows,
             font_size,
             theme,
-            theme_appearance,
             font,
             palette,
             clipboard_read,

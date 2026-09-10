@@ -186,11 +186,48 @@ fn concurrent_provisioning_agrees_with_the_file() {
         );
     }
     assert!(
-        std::fs::read_dir(&dir)
-            .unwrap()
-            .all(|e| e.unwrap().file_name() == "server-token"),
-        "no staging files left behind"
+        std::fs::read_dir(&dir).unwrap().all(|e| {
+            let name = e.unwrap().file_name();
+            name == "server-token" || name == "server-token.lock"
+        }),
+        "no staging files left behind (only the token and its advisory lock)"
     );
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// B07 (2026-09 audit #2): several processes/threads that all observe an
+/// *empty* token file must still converge on one token — the empty-file
+/// recovery (`remove_file`) is serialized with the publish, so a slow
+/// recoverer can no longer delete a token a faster one just published.
+#[test]
+fn concurrent_recovery_of_empty_token_file_agrees_on_one_token() {
+    let dir = std::env::temp_dir().join(format!("noa-ipc-token-empty-race-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("server-token");
+    std::fs::write(&path, "").unwrap();
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let path = path.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                load_or_create_token(&path, None).unwrap()
+            })
+        })
+        .collect();
+    let tokens: Vec<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(on_disk.len(), 64);
+    for token in &tokens {
+        assert_eq!(
+            token, &on_disk,
+            "every caller must hold the published token"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -46,6 +46,7 @@ pub struct Client {
     socket: Socket,
     next_id: u64,
     granted_scopes: ScopeSet,
+    server_instance_id: String,
     control_origin: (String, u16),
 }
 
@@ -83,6 +84,7 @@ impl Client {
             socket,
             next_id: 1,
             granted_scopes: ScopeSet::empty(),
+            server_instance_id: String::new(),
             control_origin,
         };
         let result: HelloResult = client.request_with_timeout(
@@ -100,11 +102,19 @@ impl Client {
             ));
         }
         client.granted_scopes = ScopeSet::from_strings(result.granted_scopes);
+        client.server_instance_id = result.server_instance_id;
         Ok(client)
     }
 
     pub fn granted_scopes(&self) -> ScopeSet {
         self.granted_scopes
+    }
+
+    /// The server's per-process identity from `noa.hello`; empty when the
+    /// server predates the field. Pane ids are only meaningful within one
+    /// server instance.
+    pub fn server_instance_id(&self) -> &str {
+        &self.server_instance_id
     }
 
     pub fn list_panels(&mut self) -> Result<Vec<Panel>, ClientError> {

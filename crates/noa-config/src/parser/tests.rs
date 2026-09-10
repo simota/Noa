@@ -8,7 +8,7 @@ use crate::{
     ConfigOverrides, CursorShape, FontConfig, FontFeature, FontVariation, GlassLevel,
     KeybindConfig, MacosOptionAsAlt, MacosTitlebarStyle, PaletteOverride, QuickTerminalPosition,
     QuickTerminalScreen, QuickTerminalSize, QuickTerminalSizeDim, ScratchTerminalSize,
-    ScrollbackPersist, SyntheticStyleMode, ThemeAppearancePair, WindowSaveState,
+    ScrollbackPersist, SyntheticStyleMode, ThemeAppearancePair, ThemeSetting, WindowSaveState,
 };
 
 use super::*;
@@ -175,7 +175,7 @@ fn keybind_rejects_malformed_values() {
 
 // AC-WP0-01: `font-family` and its per-style variants parse for real
 // (no "not yet supported" diagnostic) and land in `FontConfig`; an
-// empty value yields a precise diagnostic instead.
+// empty value resets the list (see `empty_font_family_resets_the_stack`).
 #[test]
 fn font_family_and_style_variants_are_retained_for_real() {
     let (overrides, diagnostics) = parse_overrides(
@@ -202,6 +202,26 @@ fn font_family_and_style_variants_are_retained_for_real() {
     );
 }
 
+// B06 (2026-09 audit, Ghostty parity): an empty `font-family = ` resets the
+// accumulated list; a later directive starts the list over.
+#[test]
+fn empty_font_family_resets_the_stack() {
+    let (overrides, diagnostics) =
+        parse_overrides(path(), "font-family = A\nfont-family = B\nfont-family = ");
+    assert!(diagnostics.is_empty());
+    assert!(overrides.font.families.is_empty());
+
+    let (overrides, diagnostics) =
+        parse_overrides(path(), "font-family = A\nfont-family = \nfont-family = B");
+    assert!(diagnostics.is_empty());
+    assert_eq!(overrides.font.families, vec!["B".to_string()]);
+
+    let (overrides, diagnostics) =
+        parse_overrides(path(), "font-family-bold = X\nfont-family-bold = \"\"");
+    assert!(diagnostics.is_empty());
+    assert!(overrides.font.families_bold.is_empty());
+}
+
 #[test]
 fn font_family_accumulates_a_stack_across_directives() {
     let (overrides, diagnostics) = parse_overrides(
@@ -216,20 +236,20 @@ fn font_family_accumulates_a_stack_across_directives() {
     );
 }
 
+// B06 (Ghostty parity): a bare `key =` on every family variant is a silent
+// list reset — no diagnostic, no entry.
 #[test]
-fn empty_font_family_value_produces_a_precise_diagnostic() {
+fn empty_font_family_value_is_a_silent_reset_for_every_variant() {
     for key in [
         "font-family",
         "font-family-bold",
         "font-family-italic",
         "font-family-bold-italic",
     ] {
-        let (overrides, diagnostics) = parse_overrides(path(), &format!("{key} ="));
+        let (overrides, diagnostics) = parse_overrides(path(), &format!("{key} = X\n{key} ="));
 
-        assert_eq!(overrides.font, FontConfig::default());
-        assert_eq!(diagnostics.len(), 1, "{key}: {diagnostics:?}");
-        assert!(diagnostics[0].message.contains(key));
-        assert!(diagnostics[0].message.contains("non-empty"));
+        assert_eq!(overrides.font, FontConfig::default(), "{key}");
+        assert!(diagnostics.is_empty(), "{key}: {diagnostics:?}");
     }
 }
 
@@ -1606,7 +1626,10 @@ fn theme_accepts_unquoted_and_quoted_names() {
         let (overrides, diagnostics) = parse_overrides(path(), source);
 
         assert!(diagnostics.is_empty());
-        assert_eq!(overrides.theme.as_deref(), Some("3024 Day"));
+        assert_eq!(
+            overrides.theme,
+            Some(ThemeSetting::Single("3024 Day".to_string()))
+        );
     }
 }
 
@@ -1614,13 +1637,12 @@ fn theme_accepts_unquoted_and_quoted_names() {
 fn theme_pair_syntax_parses_both_names() {
     let (overrides, diagnostics) = parse_overrides(path(), "theme = light:Foo,dark:Bar");
 
-    assert_eq!(overrides.theme, None);
     assert_eq!(
-        overrides.theme_appearance,
-        Some(ThemeAppearancePair {
+        overrides.theme,
+        Some(ThemeSetting::Pair(ThemeAppearancePair {
             light: "Foo".to_string(),
             dark: "Bar".to_string(),
-        })
+        }))
     );
     assert!(diagnostics.is_empty());
 }
@@ -1630,13 +1652,49 @@ fn theme_pair_syntax_accepts_dark_before_light() {
     let (overrides, diagnostics) = parse_overrides(path(), "theme = dark:Bar,light:Foo");
 
     assert_eq!(
-        overrides.theme_appearance,
-        Some(ThemeAppearancePair {
+        overrides.theme,
+        Some(ThemeSetting::Pair(ThemeAppearancePair {
             light: "Foo".to_string(),
             dark: "Bar".to_string(),
-        })
+        }))
     );
     assert!(diagnostics.is_empty());
+}
+
+// B04 (2026-09 audit): a later `theme` directive replaces an earlier one
+// outright, in both directions — a single name must not leave a stale pair
+// behind (the app prefers the pair when both are set).
+#[test]
+fn later_single_theme_replaces_an_earlier_pair() {
+    let (overrides, diagnostics) = parse_overrides(
+        path(),
+        "theme = light:LightA,dark:DarkB
+theme = SingleC",
+    );
+
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        overrides.theme,
+        Some(ThemeSetting::Single("SingleC".to_string()))
+    );
+}
+
+#[test]
+fn later_pair_theme_replaces_an_earlier_single() {
+    let (overrides, diagnostics) = parse_overrides(
+        path(),
+        "theme = SingleC
+theme = light:LightA,dark:DarkB",
+    );
+
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        overrides.theme,
+        Some(ThemeSetting::Pair(ThemeAppearancePair {
+            light: "LightA".to_string(),
+            dark: "DarkB".to_string(),
+        }))
+    );
 }
 
 #[test]
@@ -1644,7 +1702,6 @@ fn theme_pair_syntax_warns_on_a_missing_side() {
     let (overrides, diagnostics) = parse_overrides(path(), "theme = light:Foo,light:Bar");
 
     assert_eq!(overrides.theme, None);
-    assert_eq!(overrides.theme_appearance, None);
     assert_eq!(diagnostics.len(), 1);
     let message = &diagnostics[0].message;
     assert!(message.contains("light:"));
@@ -1742,7 +1799,10 @@ fn config_file_include_splices_directives_at_the_include_point() {
     // Last-wins, in the spliced order: 11, then the included file's 22,
     // then the trailing 33 — so 33 wins.
     assert_eq!(overrides.font_size, Some(33.0));
-    assert_eq!(overrides.theme.as_deref(), Some("Included"));
+    assert_eq!(
+        overrides.theme,
+        Some(ThemeSetting::Single("Included".to_string()))
+    );
     fs::remove_dir_all(&dir).unwrap();
 }
 

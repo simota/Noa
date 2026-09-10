@@ -11,7 +11,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use crate::parser::parse_directives;
+use crate::parser::{Directive, parse_directives};
 
 /// Applies `updates` (key, value pairs) to `original`, returning the updated
 /// config text.
@@ -20,6 +20,14 @@ use crate::parser::parse_directives;
 ///   key occurs on multiple lines (duplicate directives), only the **last**
 ///   occurrence is replaced; earlier occurrences are left untouched. This
 ///   preserves last-wins scalar resolution and intentional repeatable entries.
+/// - The `font-family*` list keys are the exception: the parser
+///   accumulates every line into an ordered family stack, and the settings
+///   panel edits the *primary* family (the head of that stack). A non-empty
+///   update therefore replaces the **primary slot** — the first occurrence
+///   after the last empty-valued (list-reset) line — so fallbacks after it
+///   survive (B05, 2026-09 audit). An empty update is the list reset itself
+///   and keeps last-occurrence placement, with a trailing reset appended
+///   when a later include could add more entries (B06).
 /// - A key absent from `original` is appended as a new `key = value` line at
 ///   the end.
 /// - If a `config-file` include directive appears *after* a scalar key's last
@@ -40,9 +48,9 @@ pub fn apply_updates(original: &str, updates: &[(String, String)]) -> String {
     // The reader splices an included file's directives in at the point of
     // its `config-file` line, so an include *after* the key's last
     // occurrence can still shadow an in-place rewrite. In that case the new
-    // scalar value is also appended after every include. Repeatable keys
-    // accumulate instead, so appending them would leave stale entries in
-    // the list on subsequent saves.
+    // scalar value or font-family reset is also appended after every include.
+    // Non-empty repeatable values accumulate instead, so appending them would
+    // leave stale entries in the list on subsequent saves.
     let last_include_line = directives
         .iter()
         .filter(|directive| directive.key == "config-file")
@@ -50,14 +58,18 @@ pub fn apply_updates(original: &str, updates: &[(String, String)]) -> String {
         .max();
 
     for update @ (key, value) in updates {
-        match directives
-            .iter()
-            .rev()
-            .find(|directive| &directive.key == key)
-        {
+        let target = if is_font_family_key(key) && !value.is_empty() {
+            primary_family_slot(&directives, key)
+        } else {
+            directives
+                .iter()
+                .rev()
+                .find(|directive| &directive.key == key)
+        };
+        match target {
             Some(directive) => {
                 replacements.insert(directive.line, format!("{key} = {value}"));
-                if !is_repeatable_key(key)
+                if (!is_repeatable_key(key) || (is_font_family_key(key) && value.is_empty()))
                     && last_include_line.is_some_and(|include| include > directive.line)
                 {
                     appended.push(update);
@@ -96,6 +108,31 @@ pub fn apply_updates(original: &str, updates: &[(String, String)]) -> String {
     }
 
     output
+}
+
+fn is_font_family_key(key: &str) -> bool {
+    matches!(
+        key,
+        "font-family" | "font-family-bold" | "font-family-italic" | "font-family-bold-italic"
+    )
+}
+
+/// The line holding the *primary* (first effective) entry of a
+/// `font-family*` stack: the first occurrence of `key` after its last
+/// empty-valued line, since an empty value resets the list in the parser.
+/// `None` when the file has no effective entry (never set, or reset last).
+fn primary_family_slot<'a>(directives: &'a [Directive], key: &str) -> Option<&'a Directive> {
+    let last_reset = directives
+        .iter()
+        .rposition(|directive| directive.key == key && is_empty_value(directive));
+    directives
+        .iter()
+        .skip(last_reset.map_or(0, |index| index + 1))
+        .find(|directive| directive.key == key && !is_empty_value(directive))
+}
+
+fn is_empty_value(directive: &Directive) -> bool {
+    directive.value.as_deref().is_none_or(str::is_empty)
 }
 
 fn is_repeatable_key(key: &str) -> bool {
@@ -163,7 +200,10 @@ fn dominant_terminator(lines: &[(&str, &str)]) -> &'static str {
 ///
 /// If `path` is a symlink (e.g. a dotfiles-managed config), the write
 /// targets the symlink's resolved destination so the symlink itself is
-/// preserved rather than being replaced by a regular file.
+/// preserved rather than being replaced by a regular file — including a
+/// *dangling* link whose target file does not exist yet, which is written
+/// (with its parent directory created) instead of being clobbered (B08,
+/// 2026-09 audit). A symlink cycle is an error rather than a replacement.
 pub fn write_config_updates(path: &Path, updates: &[(String, String)]) -> io::Result<()> {
     let original = match fs::read_to_string(path) {
         Ok(contents) => contents,
@@ -173,11 +213,7 @@ pub fn write_config_updates(path: &Path, updates: &[(String, String)]) -> io::Re
 
     let updated = apply_updates(&original, updates);
 
-    let target = if path.exists() {
-        fs::canonicalize(path)?
-    } else {
-        path.to_path_buf()
-    };
+    let target = resolve_symlinks(path)?;
     let parent = target.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -211,6 +247,43 @@ pub fn write_config_updates(path: &Path, updates: &[(String, String)]) -> io::Re
         let _ = fs::remove_file(&tmp);
     }
     write_result
+}
+
+/// Upper bound on symlink hops before `resolve_symlinks` reports a cycle
+/// (Linux's `MAXSYMLINKS` — `fs::canonicalize` would fail at the same depth).
+const MAX_SYMLINK_HOPS: usize = 40;
+
+/// Follows `path` through every symlink to the final non-link path, which
+/// may not exist. Unlike `fs::canonicalize`, this works for a dangling
+/// link (the target's parent need not exist either) and never resolves the
+/// intermediate directories, so the returned path stays usable for a
+/// sibling temp file + `rename`. Relative link targets resolve against the
+/// link's own directory, per symlink semantics.
+fn resolve_symlinks(path: &Path) -> io::Result<std::path::PathBuf> {
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_SYMLINK_HOPS {
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(current),
+            Err(err) => return Err(err),
+        };
+        if !metadata.file_type().is_symlink() {
+            return Ok(current);
+        }
+        let link_target = fs::read_link(&current)?;
+        current = if link_target.is_absolute() {
+            link_target
+        } else {
+            current
+                .parent()
+                .map(|parent| parent.join(&link_target))
+                .unwrap_or(link_target)
+        };
+    }
+    Err(io::Error::other(format!(
+        "config path {} exceeds {MAX_SYMLINK_HOPS} symlink hops (cycle?)",
+        path.display()
+    )))
 }
 
 /// Creates `path` (truncating any stale leftover) with owner-only
@@ -337,6 +410,67 @@ theme = 3024 Day\r
         }
     }
 
+    // B05 (2026-09 audit): the settings panel edits the *primary* family, so
+    // a non-empty `font-family` update replaces the head of the stack and
+    // keeps every fallback after it.
+    #[test]
+    fn font_family_update_replaces_the_primary_slot_and_keeps_fallbacks() {
+        let original = "font-family = A\nfont-family = B\n";
+
+        let output = apply_updates(original, &[("font-family".to_string(), "C".to_string())]);
+
+        assert_eq!(output, "font-family = C\nfont-family = B\n");
+    }
+
+    #[test]
+    fn font_family_primary_slot_starts_after_the_last_reset_line() {
+        let original = "font-family = A\nfont-family = \nfont-family = B\n";
+
+        let output = apply_updates(original, &[("font-family".to_string(), "C".to_string())]);
+
+        assert_eq!(output, "font-family = A\nfont-family = \nfont-family = C\n");
+    }
+
+    #[test]
+    fn font_family_update_after_a_trailing_reset_is_appended() {
+        let original = "font-family = A\nfont-family = \n";
+
+        let output = apply_updates(original, &[("font-family".to_string(), "C".to_string())]);
+
+        assert_eq!(output, "font-family = A\nfont-family = \nfont-family = C\n");
+    }
+
+    // B06: an empty `font-family` update is the list reset and must land
+    // *after* every existing entry so the parser clears them all.
+    #[test]
+    fn empty_font_family_update_replaces_the_last_occurrence_and_resets_the_stack() {
+        let original = "font-family = A\nfont-family = B\n";
+
+        let output = apply_updates(original, &[("font-family".to_string(), String::new())]);
+
+        assert_eq!(output, "font-family = A\nfont-family = \n");
+        let (overrides, diagnostics) =
+            crate::parse_overrides(Path::new("/tmp/noa-writer-test"), &output);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(overrides.font.families.is_empty());
+    }
+
+    #[test]
+    fn font_family_round_trip_change_reset_change() {
+        let original = "font-family = A\nfont-family = B\n";
+        let changed = apply_updates(original, &[("font-family".to_string(), "C".to_string())]);
+        let reset = apply_updates(&changed, &[("font-family".to_string(), String::new())]);
+        let changed_again = apply_updates(&reset, &[("font-family".to_string(), "D".to_string())]);
+
+        assert_eq!(
+            changed_again,
+            "font-family = C\nfont-family = \nfont-family = D\n"
+        );
+        let (overrides, _) =
+            crate::parse_overrides(Path::new("/tmp/noa-writer-test"), &changed_again);
+        assert_eq!(overrides.font.families, ["D"]);
+    }
+
     #[test]
     fn consecutive_font_saves_before_include_use_the_latest_family() {
         let dir = unique_temp_dir("font-include");
@@ -353,6 +487,36 @@ theme = 3024 Day\r
         let (overrides, diagnostics) = crate::parse_overrides(&path, &source);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(overrides.font.families, ["Monaco"]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn font_family_reset_clears_trailing_includes_after_reload() {
+        let dir = unique_temp_dir("font-reset-include");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config");
+        for key in [
+            "font-family",
+            "font-family-bold",
+            "font-family-italic",
+            "font-family-bold-italic",
+        ] {
+            fs::write(dir.join("child.conf"), format!("{key} = Monaco\n")).unwrap();
+            fs::write(dir.join("last.conf"), format!("{key} = Courier\n")).unwrap();
+            fs::write(
+                &path,
+                format!("{key} = Menlo\nconfig-file = child.conf\nconfig-file = last.conf\n"),
+            )
+            .unwrap();
+
+            let updates = [(key.to_string(), String::new())];
+            write_config_updates(&path, &updates).unwrap();
+            let source = fs::read_to_string(&path).unwrap();
+            let (overrides, diagnostics) = crate::parse_overrides(&path, &source);
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            assert_eq!(overrides.font, crate::FontConfig::default(), "{key}");
+            assert_eq!(apply_updates(&source, &updates), source, "{key}");
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -530,6 +694,121 @@ theme = 3024 Day\r
             fs::read_to_string(&symlink_path).unwrap(),
             "font-size = 16\n"
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    // B08 (2026-09 audit): a dotfiles-style symlink whose target does not
+    // exist yet must be written *through* (creating the target and its
+    // directory), never replaced by a regular file.
+    #[cfg(unix)]
+    #[test]
+    fn write_config_updates_writes_through_a_dangling_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = unique_temp_dir("dangling-symlink");
+        fs::create_dir_all(&dir).unwrap();
+        let real_config = dir.join("dotfiles").join("noa").join("config");
+        let symlink_path = dir.join("config");
+        symlink(&real_config, &symlink_path).unwrap();
+        assert!(!symlink_path.exists(), "precondition: link is dangling");
+
+        write_config_updates(
+            &symlink_path,
+            &[("font-size".to_string(), "16".to_string())],
+        )
+        .unwrap();
+
+        assert!(
+            symlink_path
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the symlink itself must survive"
+        );
+        assert_eq!(
+            fs::read_to_string(&real_config).unwrap(),
+            "font-size = 16\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&symlink_path).unwrap(),
+            "font-size = 16\n"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_config_updates_follows_relative_symlink_chains() {
+        use std::os::unix::fs::symlink;
+
+        let dir = unique_temp_dir("relative-symlink-chain");
+        fs::create_dir_all(dir.join("store")).unwrap();
+        // config -> store/link (relative) -> real (relative to store/)
+        symlink("real", dir.join("store").join("link")).unwrap();
+        symlink("store/link", dir.join("config")).unwrap();
+
+        write_config_updates(
+            &dir.join("config"),
+            &[("font-size".to_string(), "16".to_string())],
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dir.join("store").join("real")).unwrap(),
+            "font-size = 16\n"
+        );
+        assert!(
+            dir.join("config")
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            dir.join("store")
+                .join("link")
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_config_updates_rejects_a_symlink_cycle() {
+        use std::os::unix::fs::symlink;
+
+        let dir = unique_temp_dir("symlink-cycle");
+        fs::create_dir_all(&dir).unwrap();
+        symlink(dir.join("b"), dir.join("a")).unwrap();
+        symlink(dir.join("a"), dir.join("b")).unwrap();
+
+        let err = write_config_updates(
+            &dir.join("a"),
+            &[("font-size".to_string(), "16".to_string())],
+        )
+        .unwrap_err();
+
+        // Either the initial read (ELOOP from the OS) or `resolve_symlinks`'
+        // hop cap reports it; what matters is that the link is untouched.
+        assert!(
+            dir.join("a")
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            dir.join("b")
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let _ = err;
         fs::remove_dir_all(dir).unwrap();
     }
 }

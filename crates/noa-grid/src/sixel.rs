@@ -20,6 +20,17 @@ pub struct SixelRaster {
 
 const COLOR_REGISTERS: usize = 256;
 
+/// Upper bound on the number of pixel writes one SIXEL command may perform.
+///
+/// The image dimension and byte limits bound the *canvas*, not the *work*:
+/// `!<count><sixel>` followed by `$` (carriage return) repaints the same
+/// row band without growing the image, so a few kilobytes of data could
+/// otherwise demand hundreds of millions of pixel writes under the terminal
+/// lock. Set to twice the pixel count of the largest allowed image so a
+/// legitimately painted maximum-size image (each pixel written once) fits
+/// with room for ordinary overdraw.
+const MAX_SIXEL_PIXEL_WRITES: u64 = 2 * (TOTAL_BYTES_LIMIT / 4) as u64;
+
 /// Growable RGBA canvas. Storage is over-allocated geometrically (row
 /// stride `cap_width`, `cap_height` rows) so that a stream which widens the
 /// image one column at a time costs amortized O(pixels) rather than the
@@ -159,6 +170,16 @@ fn bytes_for(width: u32, height: u32) -> Result<usize, KittyError> {
 /// background color, while `P2` = 1 leaves them transparent (the existing
 /// screen content shows through).
 pub fn rasterize(cmd: &SixelGraphicsCommand, terminal_bg: Rgb) -> Result<SixelRaster, KittyError> {
+    rasterize_with_budget(cmd, terminal_bg, MAX_SIXEL_PIXEL_WRITES)
+}
+
+/// [`rasterize`] with an explicit pixel-write budget (`max_pixel_writes`);
+/// the public entry point always uses [`MAX_SIXEL_PIXEL_WRITES`].
+fn rasterize_with_budget(
+    cmd: &SixelGraphicsCommand,
+    terminal_bg: Rgb,
+    max_pixel_writes: u64,
+) -> Result<SixelRaster, KittyError> {
     let mut palette = xterm_palette();
     let background = if cmd.background == 1 {
         [0, 0, 0, 0]
@@ -171,13 +192,25 @@ pub fn rasterize(cmd: &SixelGraphicsCommand, terminal_bg: Rgb) -> Result<SixelRa
     let mut y = 0u32;
     let mut declared_width = 0u32;
     let mut declared_height = 0u32;
+    let mut budget = PixelWriteBudget {
+        used: 0,
+        max: max_pixel_writes,
+    };
 
     let mut i = 0usize;
     while i < cmd.data.len() {
         let b = cmd.data[i] & 0x7f;
         match b {
             b'?'..=b'~' => {
-                draw_sixel(&mut canvas, x, y, b - b'?', 1, palette[current_color])?;
+                draw_sixel(
+                    &mut canvas,
+                    x,
+                    y,
+                    b - b'?',
+                    1,
+                    palette[current_color],
+                    &mut budget,
+                )?;
                 x = x.saturating_add(1);
                 i += 1;
             }
@@ -189,7 +222,15 @@ pub fn rasterize(cmd: &SixelGraphicsCommand, terminal_bg: Rgb) -> Result<SixelRa
                 let ch = cmd.data[next] & 0x7f;
                 if (b'?'..=b'~').contains(&ch) {
                     let count = count.unwrap_or(1).max(1);
-                    draw_sixel(&mut canvas, x, y, ch - b'?', count, palette[current_color])?;
+                    draw_sixel(
+                        &mut canvas,
+                        x,
+                        y,
+                        ch - b'?',
+                        count,
+                        palette[current_color],
+                        &mut budget,
+                    )?;
                     x = x.saturating_add(count);
                 }
                 i = next + 1;
@@ -240,11 +281,15 @@ fn draw_sixel(
     value: u8,
     count: u32,
     color: Rgb,
+    budget: &mut PixelWriteBudget,
 ) -> Result<(), KittyError> {
     canvas.advance_blank(x, y, count)?;
     if value == 0 {
         return Ok(());
     }
+    // Color passes can paint disjoint bits in the same band. Charge only
+    // pixels that will be written, before performing the work.
+    budget.charge(u64::from(count) * u64::from(value.count_ones()))?;
     for dx in 0..count {
         for bit in 0..6u32 {
             if value & (1 << bit) != 0 {
@@ -253,6 +298,22 @@ fn draw_sixel(
         }
     }
     Ok(())
+}
+
+/// Running count of pixel writes for one `rasterize` call (B02).
+struct PixelWriteBudget {
+    used: u64,
+    max: u64,
+}
+
+impl PixelWriteBudget {
+    fn charge(&mut self, writes: u64) -> Result<(), KittyError> {
+        self.used = self.used.saturating_add(writes);
+        if self.used > self.max {
+            return Err(KittyError::TooBig);
+        }
+        Ok(())
+    }
 }
 
 fn parse_decimal(bytes: &[u8], mut i: usize) -> (Option<u32>, usize) {
@@ -379,6 +440,13 @@ mod tests {
         super::rasterize(cmd, BG)
     }
 
+    fn unlimited() -> PixelWriteBudget {
+        PixelWriteBudget {
+            used: 0,
+            max: u64::MAX,
+        }
+    }
+
     #[test]
     fn rasterizes_basic_sixel_columns() {
         let image = rasterize(&cmd(b"#1;2;100;0;0@A")).unwrap();
@@ -427,7 +495,7 @@ mod tests {
         let mut canvas = Canvas::new(BG_PX);
         let red = Rgb::new(255, 0, 0);
         for x in 0..4096 {
-            draw_sixel(&mut canvas, x, 0, b'@' - b'?', 1, red).unwrap();
+            draw_sixel(&mut canvas, x, 0, b'@' - b'?', 1, red, &mut unlimited()).unwrap();
             assert_eq!(canvas.cap_height, 6);
         }
         assert_eq!(canvas.pixels.len(), 4096 * 6 * 4);
@@ -444,7 +512,7 @@ mod tests {
         let mut canvas = Canvas::new(BG_PX);
         let red = Rgb::new(255, 0, 0);
         for y in (0..4096).step_by(6) {
-            draw_sixel(&mut canvas, 0, y, b'@' - b'?', 1, red).unwrap();
+            draw_sixel(&mut canvas, 0, y, b'@' - b'?', 1, red, &mut unlimited()).unwrap();
             assert_eq!(canvas.cap_width, 1);
         }
         assert!(canvas.pixels.len() < 2 * 4098 * 4);
@@ -512,6 +580,85 @@ mod tests {
         let data = format!("!{}@", MAX_IMAGE_DIM + 1);
 
         assert_eq!(rasterize(&cmd(data.as_bytes())), Err(KittyError::TooBig));
+    }
+
+    #[test]
+    fn repeated_overdraw_without_growth_is_rejected_by_work_budget() {
+        // 10,000 × 6 image, repainted 8,000 times via `$` carriage returns:
+        // ~64 KiB of data, an unchanged image size, and 480M pixel writes.
+        let mut data = format!("\"1;1;{MAX_IMAGE_DIM};6");
+        for _ in 0..8_000 {
+            data.push_str(&format!("!{MAX_IMAGE_DIM}~$"));
+        }
+        // The rejection is driven by the write count, not the data or image
+        // size, so a small budget exercises the same path fast enough for a
+        // debug build; the production constant is checked separately.
+        let budget = u64::from(MAX_IMAGE_DIM) * 6 * 10;
+
+        assert_eq!(
+            rasterize_with_budget(&cmd(data.as_bytes()), BG, budget),
+            Err(KittyError::TooBig)
+        );
+    }
+
+    #[test]
+    fn work_budget_admits_a_fully_painted_maximum_image() {
+        let max_pixels = (TOTAL_BYTES_LIMIT / 4) as u64;
+        assert!(MAX_SIXEL_PIXEL_WRITES >= max_pixels);
+        // …and is still a finite multiple of it (no unbounded work).
+        assert!(MAX_SIXEL_PIXEL_WRITES <= 4 * max_pixels);
+    }
+
+    #[test]
+    fn sparse_multicolor_bands_fit_the_actual_pixel_write_budget() {
+        let colors = [
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [255, 255, 0, 255],
+            [0, 255, 255, 255],
+            [255, 0, 255, 255],
+        ];
+        let mut data =
+            b"#1;2;100;0;0#2;2;0;100;0#3;2;0;0;100#4;2;100;100;0#5;2;0;100;100#6;2;100;0;100"
+                .to_vec();
+        let band = b"#1!4@$#2!4A$#3!4C$#4!4G$#5!4O$#6!4_";
+        data.extend_from_slice(band);
+        data.push(b'-');
+        data.extend_from_slice(band);
+        let command = cmd(&data);
+        // Two six-row bands, each row painted once by a different color.
+        let image = rasterize_with_budget(&command, BG, 4 * 12).unwrap();
+
+        assert_eq!((image.width, image.height), (4, 12));
+        for (i, pixel) in image.rgba.chunks_exact(4).enumerate() {
+            assert_eq!(pixel, colors[(i / 4) % 6]);
+        }
+        assert_eq!(
+            rasterize_with_budget(&command, BG, 4 * 12 - 1),
+            Err(KittyError::TooBig)
+        );
+    }
+
+    #[test]
+    fn sparse_overdraw_still_exhausts_the_pixel_write_budget() {
+        let single = rasterize_with_budget(&cmd(b"!4@"), BG, 4).unwrap();
+        assert_eq!(rasterize_with_budget(&cmd(b"!4@$!4@"), BG, 8), Ok(single));
+        assert_eq!(
+            rasterize_with_budget(&cmd(b"!4@$!4@"), BG, 7),
+            Err(KittyError::TooBig)
+        );
+    }
+
+    #[test]
+    fn moderate_overdraw_under_budget_still_rasterizes() {
+        // Paint a 4-wide band red, return, then overpaint it green.
+        let image = rasterize(&cmd(b"#1;2;100;0;0#2;2;0;100;0#1!4~$#2!4~")).unwrap();
+
+        assert_eq!((image.width, image.height), (4, 6));
+        for px in image.rgba.chunks_exact(4) {
+            assert_eq!(px, &[0, 255, 0, 255]);
+        }
     }
 
     #[test]

@@ -140,11 +140,18 @@ pub fn load_or_create_token(path: &Path, configured: Option<&str>) -> io::Result
         }
         log::warn!("noa-ipc: server-token is empty; falling back to generated token file");
     }
-    if let Some(existing) = read_existing_token(path) {
-        return Ok(existing);
-    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
+    }
+    // Serialize read → empty-file recovery → publish across processes.
+    // Without the lock, two processes that both observe an empty token file
+    // race their `remove_file` calls: the slower one deletes the token the
+    // faster one just published, and the two end up holding different
+    // tokens (B07, 2026-09 audit #2). The lock is advisory; if the
+    // filesystem cannot take it we proceed unlocked with a warning.
+    let _guard = TokenLock::acquire(path);
+    if let Some(existing) = read_existing_token(path) {
+        return Ok(existing);
     }
     // Publish the freshly generated token with a create-if-absent link
     // rather than a truncating write: two noa processes initializing the
@@ -165,6 +172,51 @@ pub fn load_or_create_token(path: &Path, configured: Option<&str>) -> io::Result
             }),
         Err(err) => Err(err),
     }
+}
+
+/// Exclusive advisory lock on `<path>.lock`, held for the duration of
+/// `load_or_create_token`'s generated-token branch. Released on drop.
+struct TokenLock {
+    _file: Option<fs::File>,
+}
+
+impl TokenLock {
+    fn acquire(path: &Path) -> Self {
+        let lock_path = lock_path(path);
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = match options.open(&lock_path) {
+            Ok(file) => file,
+            Err(err) => {
+                log::warn!(
+                    "noa-ipc: cannot open token lock {}: {err}; continuing unlocked",
+                    lock_path.display()
+                );
+                return Self { _file: None };
+            }
+        };
+        if let Err(err) = file.lock() {
+            log::warn!(
+                "noa-ipc: cannot lock {}: {err}; continuing unlocked",
+                lock_path.display()
+            );
+            return Self { _file: None };
+        }
+        Self { _file: Some(file) }
+    }
+}
+
+fn lock_path(path: &Path) -> std::path::PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "server-token".to_string());
+    path.with_file_name(format!("{name}.lock"))
 }
 
 /// The token in `path`, if the file exists and holds one. An existing

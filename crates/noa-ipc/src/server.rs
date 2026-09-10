@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -1315,6 +1315,19 @@ fn dispatch(
     })
 }
 
+/// Per-process server identity returned from `noa.hello` (see
+/// [`HelloResult::server_instance_id`]). Minted lazily on first use so a
+/// process that never serves a hello pays nothing.
+pub fn server_instance_id() -> &'static str {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| {
+        use rand::RngCore;
+        let mut bytes = [0u8; 16];
+        rand::thread_rng().fill_bytes(&mut bytes);
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    })
+}
+
 fn handle_hello(
     id: Value,
     params: Value,
@@ -1346,6 +1359,7 @@ fn handle_hello(
         protocol_version: PROTOCOL_VERSION,
         granted_scopes: session.granted_scopes.to_strings(),
         server_version: env!("CARGO_PKG_VERSION").to_string(),
+        server_instance_id: server_instance_id().to_string(),
     };
     success_response(id, serde_json::to_value(result).unwrap())
 }
@@ -1892,5 +1906,47 @@ mod tests {
             counts.lock().unwrap().is_empty(),
             "no idle per-IP entry should linger"
         );
+    }
+
+    fn hello_session() -> Session {
+        Session {
+            hello_done: false,
+            header_authed: false,
+            granted_scopes: ScopeSet::empty(),
+            attach_authority: String::new(),
+            attach_leases: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn hello_returns_a_non_empty_instance_id_stable_across_connections() {
+        let params = serde_json::json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "token": "tok",
+            "scopes": ["read"],
+        });
+        let mut first = hello_session();
+        let mut second = hello_session();
+        let a = handle_hello(
+            Value::from(1),
+            params.clone(),
+            "tok",
+            ScopeSet::default_read_only(),
+            &mut first,
+        );
+        let b = handle_hello(
+            Value::from(2),
+            params,
+            "tok",
+            ScopeSet::default_read_only(),
+            &mut second,
+        );
+        let a: Value = serde_json::from_str(&a).unwrap();
+        let b: Value = serde_json::from_str(&b).unwrap();
+        let id_a = a["result"]["serverInstanceId"].as_str().unwrap();
+        let id_b = b["result"]["serverInstanceId"].as_str().unwrap();
+        assert_eq!(id_a.len(), 32);
+        assert_eq!(id_a, id_b);
+        assert_eq!(id_a, server_instance_id());
     }
 }

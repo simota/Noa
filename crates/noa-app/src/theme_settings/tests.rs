@@ -2453,14 +2453,15 @@ fn reset_starts_a_brief_flash_that_expires() {
     assert!(!settings.reset_flash_active(now + Duration::from_secs(1)));
 }
 
-// G1: resetting FontFamily writes nothing on commit (its default is the
-// empty string, and `commit_updates()` deliberately skips an empty
-// FontFamily key — fix F2) — flashing anyway would be a false "it worked"
-// cue for a save that changes nothing on disk, so this one reset must not
-// start the flash.
+// G1: resetting FontFamily on a config that never set one writes nothing
+// on commit — flashing anyway would be a false "it worked" cue for a save
+// that changes nothing on disk, so this one reset must not start the flash.
 #[test]
-fn reset_font_family_does_not_start_a_flash_because_it_writes_nothing_on_commit() {
-    let mut settings = ThemeSettings::open(settings_init());
+fn reset_font_family_does_not_start_a_flash_when_no_family_was_configured() {
+    let mut settings = ThemeSettings::open(ThemeSettingsInit {
+        font_family: String::new(),
+        ..settings_init()
+    });
     move_to_row(&mut settings, SettingsRowKind::FontFamily);
     let now = Instant::now();
     assert!(!settings.reset_flash_active(now));
@@ -2481,6 +2482,24 @@ fn reset_font_family_does_not_start_a_flash_because_it_writes_nothing_on_commit(
     );
     let updates = settings.commit_updates();
     assert!(!updates.iter().any(|(key, _)| key == "font-family"));
+}
+
+// B06 companion: when a family *was* configured, the reset writes the
+// `font-family = ` list-reset line on commit, so it earns the flash.
+#[test]
+fn reset_font_family_starts_a_flash_when_it_will_write_a_reset_line() {
+    let mut settings = ThemeSettings::open(settings_init()); // font_family = "Menlo"
+    move_to_row(&mut settings, SettingsRowKind::FontFamily);
+    let now = Instant::now();
+
+    settings.reset_selected_row(now);
+
+    assert!(settings.reset_flash_active(now));
+    let updates = settings.commit_updates();
+    assert!(
+        updates.contains(&("font-family".to_string(), String::new())),
+        "{updates:?}"
+    );
 }
 
 // G1 companion: every other row's reset still writes on commit, so it
@@ -3373,7 +3392,7 @@ fn reset_background_opacity_and_blur_effect_respects_opaque_startup_gating() {
 // R-7: the written config side of a reset — `commit_updates()` must carry
 // the just-reset default value for a touched row, not merely flip the
 // `touched` bit (which the AC-19 test already covers). CursorStyle (not
-// FontFamily — see `commit_updates_skips_the_font_family_key_when_reset_to_the_empty_default`
+// FontFamily — see `commit_updates_writes_a_font_family_reset_line_when_a_family_was_configured`
 // just below) has a non-empty default, so this is the row that actually
 // proves a reset value round-trips into `commit_updates()`.
 #[test]
@@ -3391,15 +3410,12 @@ fn commit_updates_includes_the_reset_default_value_for_a_touched_row() {
     );
 }
 
-// Fix F2: `RowDraft::default_for(FontFamily)` is the empty string
-// (`StartupConfig::default().font.families` is empty — "no override"), and
-// an empty `font-family = ` line isn't a valid "unset" signal to noa-config's
-// parser. `commit_updates()` must skip the key entirely for an empty
-// FontFamily draft, even though the row is touched (contrast with
-// `reset_marks_touched_even_when_the_default_equals_the_current_value`,
-// which proves `touched` itself is unaffected).
+// B06 (2026-09 audit): `RowDraft::default_for(FontFamily)` is the empty
+// string, and `commit_updates()` now writes it as the `font-family = `
+// list reset whenever the config had a family to clear — so a reset
+// survives a restart instead of silently reverting to the old family.
 #[test]
-fn commit_updates_skips_the_font_family_key_when_reset_to_the_empty_default() {
+fn commit_updates_writes_a_font_family_reset_line_when_a_family_was_configured() {
     let mut settings = ThemeSettings::open(settings_init()); // font_family = "Menlo"
     move_to_row(&mut settings, SettingsRowKind::FontFamily);
 
@@ -3412,9 +3428,82 @@ fn commit_updates_skips_the_font_family_key_when_reset_to_the_empty_default() {
     );
     let updates = settings.commit_updates();
     assert!(
-        !updates.iter().any(|(key, _)| key == "font-family"),
-        "an empty FontFamily draft must never reach the config writer: {updates:?}"
+        updates.contains(&("font-family".to_string(), String::new())),
+        "{updates:?}"
     );
+}
+
+// B06 guard: a config that never configured a family must not gain a stray
+// reset line from a no-op reset.
+#[test]
+fn commit_updates_skips_the_font_family_reset_when_no_family_was_configured() {
+    let mut settings = ThemeSettings::open(ThemeSettingsInit {
+        font_family: String::new(),
+        ..settings_init()
+    });
+    move_to_row(&mut settings, SettingsRowKind::FontFamily);
+
+    settings.reset_selected_row(Instant::now());
+
+    let updates = settings.commit_updates();
+    assert!(
+        !updates.iter().any(|(key, _)| key == "font-family"),
+        "{updates:?}"
+    );
+}
+
+// B05/B06 end to end: change the primary family → save → reset → save →
+// reload yields no families; a primary change keeps configured fallbacks.
+#[test]
+fn font_family_change_then_reset_round_trips_through_the_config_file() {
+    let dir = std::env::temp_dir().join(format!(
+        "noa-theme-settings-font-reset-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config_path = dir.join("config");
+    std::fs::write(
+        &config_path,
+        "font-family = Menlo\nfont-family = Fallback\n",
+    )
+    .unwrap();
+    let mut writer =
+        |path: &Path, updates: &[(String, String)]| noa_config::write_config_updates(path, updates);
+
+    let mut settings = ThemeSettings::open(settings_init()); // font_family = "Menlo"
+    move_to_row(&mut settings, SettingsRowKind::FontFamily);
+    settings.adjust(1, Instant::now()); // cycle to the next available family
+    let RowDraft::FontFamily(chosen) = settings.rows()[row_index(SettingsRowKind::FontFamily)]
+        .draft
+        .clone()
+    else {
+        panic!("FontFamily row");
+    };
+    assert!(settings.commit(&config_path, &mut writer).is_some());
+    let (overrides, diagnostics) = noa_config::load_overrides_from_path(&config_path).unwrap();
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(
+        overrides.font.families,
+        vec![chosen.clone(), "Fallback".to_string()],
+        "primary change keeps the fallback"
+    );
+
+    let mut settings = ThemeSettings::open(ThemeSettingsInit {
+        font_family: chosen,
+        ..settings_init()
+    });
+    move_to_row(&mut settings, SettingsRowKind::FontFamily);
+    settings.reset_selected_row(Instant::now());
+    assert!(settings.commit(&config_path, &mut writer).is_some());
+    let (overrides, diagnostics) = noa_config::load_overrides_from_path(&config_path).unwrap();
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert!(
+        overrides.font.families.is_empty(),
+        "reset persists: {:?}",
+        overrides.font.families
+    );
+
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 // Fix F2 companion: a *non-empty* FontFamily edit (the ordinary cycle-
@@ -3980,11 +4069,13 @@ fn ac50_committed_pair_round_trips_through_the_real_config_parser() {
         "unexpected diagnostics: {diagnostics:?}"
     );
     assert_eq!(
-        overrides.theme_appearance,
-        Some(noa_config::ThemeAppearancePair {
-            light: target.to_string(),
-            dark: dark.to_string(),
-        })
+        overrides.theme,
+        Some(noa_config::ThemeSetting::Pair(
+            noa_config::ThemeAppearancePair {
+                light: target.to_string(),
+                dark: dark.to_string(),
+            }
+        ))
     );
 
     std::fs::remove_dir_all(dir).unwrap();
@@ -4652,11 +4743,13 @@ fn ac57_pair_carryover_favorites_toggle_and_commit_integration() {
         "committed config should still parse as a valid pair: {diagnostics:?}"
     );
     assert_eq!(
-        overrides.theme_appearance,
-        Some(noa_config::ThemeAppearancePair {
-            light: new_light_d,
-            dark: dark_b,
-        })
+        overrides.theme,
+        Some(noa_config::ThemeSetting::Pair(
+            noa_config::ThemeAppearancePair {
+                light: new_light_d,
+                dark: dark_b,
+            }
+        ))
     );
 
     std::fs::remove_dir_all(dir).unwrap();

@@ -250,6 +250,13 @@ pub struct HelloResult {
     pub protocol_version: u64,
     pub granted_scopes: Vec<String>,
     pub server_version: String,
+    /// Random id minted once per server process. Pane ids are process-local
+    /// counters, so a client that auto-reconnects after the server restarted
+    /// must compare this against the id it attached under and refuse to
+    /// silently re-attach to whatever pane now holds the same number (B01,
+    /// 2026-09 audit). Empty when talking to a server predating the field.
+    #[serde(default)]
+    pub server_instance_id: String,
 }
 
 // ---- noa.listPanels ----
@@ -602,5 +609,14 @@ mod hex_color_tests {
             serde_json::from_str::<SpanColor>("\"#0A1b2C\"").unwrap(),
             SpanColor::Hex((0x0a, 0x1b, 0x2c))
         );
+    }
+
+    #[test]
+    fn hello_result_without_instance_id_still_deserializes() {
+        let result: HelloResult = serde_json::from_str(
+            r#"{"protocolVersion":2,"grantedScopes":["read"],"serverVersion":"0.1.0"}"#,
+        )
+        .unwrap();
+        assert_eq!(result.server_instance_id, "");
     }
 }

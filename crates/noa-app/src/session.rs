@@ -471,13 +471,57 @@ fn parse_remote(value: &json::Value) -> Option<RemotePane> {
 /// Atomically write the session to `path`, creating the parent directory.
 /// Writes to a sibling temp file then renames, so a crash mid-write cannot
 /// truncate an existing good session file.
+///
+/// The temp name is unique per process and per call (`create_new`), so two
+/// noa processes saving to the same path at once cannot share one staging
+/// file and interleave their bytes into the published `session.json`
+/// (B03, 2026-09 audit #2). Which of two concurrent whole-file saves lands
+/// last is still unordered; only corruption is ruled out here.
 pub fn save(path: &Path, state: &SessionState) -> std::io::Result<()> {
+    use std::io::Write;
+
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, serialize(state))?;
-    fs::rename(&tmp, path)
+    let (tmp, mut file) = loop {
+        let tmp = staging_path(path);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => break (tmp, file),
+            // A crashed process with a reused PID may have left this exact
+            // name behind; the counter makes the next candidate fresh.
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    };
+    let result = (|| {
+        file.write_all(serialize(state).as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&tmp, path)
+    })();
+    drop(file);
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// `.<name>.<pid>.<seq>.tmp` beside `path`, unique per process and call.
+fn staging_path(path: &Path) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "session.json".to_string());
+    path.with_file_name(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ))
 }
 
 /// Load and parse the session at `path`, or `None` if it is absent, unreadable,
@@ -1096,9 +1140,40 @@ mod tests {
         save(&path, &state).expect("save must succeed");
         let loaded = load(&path).expect("load must return the saved session");
         assert_eq!(loaded, state);
+        // Staging files never outlive a successful save.
+        let leftovers: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "leftover staging files: {leftovers:?}"
+        );
 
         // Loading a path with no file yields None rather than erroring.
         let _ = fs::remove_dir_all(&dir);
         assert!(load(&path).is_none());
+    }
+
+    #[test]
+    fn save_ignores_stale_staging_file_from_another_writer() {
+        let dir =
+            std::env::temp_dir().join(format!("noa-session-stale-tmp-{}", std::process::id()));
+        let path = dir.join("session.json");
+        fs::create_dir_all(&dir).unwrap();
+        // A crashed writer's leftover under the old fixed name, plus a
+        // half-written file under a foreign pid's staging name.
+        fs::write(dir.join("session.json.tmp"), "{\"garbage\"").unwrap();
+        fs::write(dir.join(".session.json.1.0.tmp"), "{\"garbage\"").unwrap();
+        let state = sample();
+
+        save(&path, &state).expect("save must succeed");
+        assert_eq!(load(&path), Some(state));
+        // Foreign staging files are neither adopted nor removed.
+        assert!(dir.join("session.json.tmp").exists());
+        assert!(dir.join(".session.json.1.0.tmp").exists());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

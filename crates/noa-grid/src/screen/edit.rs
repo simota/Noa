@@ -226,7 +226,9 @@ impl Screen {
     /// Index (IND / LF without CR): down one row, scrolling at the region bottom.
     pub fn index(&mut self) {
         self.cursor.pending_wrap = false;
-        if self.cursor.y == self.region.bottom {
+        if self.cursor.y == self.region.bottom
+            && (self.left_margin()..=self.right_margin()).contains(&self.cursor.x)
+        {
             self.scroll_up_region(1);
         } else if self.cursor.y + 1 < self.rows {
             self.cursor.y += 1;
@@ -236,7 +238,9 @@ impl Screen {
     /// Reverse index (RI): up one row, scrolling down at the region top.
     pub fn reverse_index(&mut self) {
         self.cursor.pending_wrap = false;
-        if self.cursor.y == self.region.top {
+        if self.cursor.y == self.region.top
+            && (self.left_margin()..=self.right_margin()).contains(&self.cursor.x)
+        {
             self.scroll_down_region(1);
         } else if self.cursor.y > 0 {
             self.cursor.y -= 1;
@@ -499,14 +503,32 @@ impl Screen {
 
     // ── horizontal / absolute motion ────────────────────────────────
 
+    // A relative move stops at the margin in its direction of travel,
+    // unless the cursor is already beyond that margin. Absolute placement
+    // can put it there with DECOM off; then the screen edge is the limit.
+    fn cursor_left_bound(&self) -> u16 {
+        if self.cursor.x >= self.left_margin() {
+            self.left_margin()
+        } else {
+            0
+        }
+    }
+
+    fn cursor_right_bound(&self) -> u16 {
+        if self.cursor.x <= self.right_margin() {
+            self.right_margin()
+        } else {
+            self.cols.saturating_sub(1)
+        }
+    }
+
     pub fn carriage_return(&mut self) {
-        self.cursor.x = self.left_margin();
+        self.cursor.x = self.cursor_left_bound();
         self.cursor.pending_wrap = false;
     }
 
     pub fn backspace(&mut self) {
-        self.cursor.pending_wrap = false;
-        self.cursor.x = self.cursor.x.saturating_sub(1).max(self.left_margin());
+        self.cursor_backward(1);
     }
 
     pub fn cursor_up(&mut self, n: u16) {
@@ -534,13 +556,21 @@ impl Screen {
     pub fn cursor_forward(&mut self, n: u16) {
         self.cursor.pending_wrap = false;
         let n = n.max(1);
-        self.cursor.x = self.cursor.x.saturating_add(n).min(self.right_margin());
+        self.cursor.x = self
+            .cursor
+            .x
+            .saturating_add(n)
+            .min(self.cursor_right_bound());
     }
 
     pub fn cursor_backward(&mut self, n: u16) {
         self.cursor.pending_wrap = false;
         let n = n.max(1);
-        self.cursor.x = self.cursor.x.saturating_sub(n).max(self.left_margin());
+        self.cursor.x = self
+            .cursor
+            .x
+            .saturating_sub(n)
+            .max(self.cursor_left_bound());
     }
 
     /// Absolute cursor placement (`CUP`/`HVP` with DECOM off). Ghostty's
@@ -630,14 +660,17 @@ impl Screen {
             self.cursor.x = self
                 .tabstops
                 .next(self.cursor.x, self.cols)
-                .min(self.right_margin());
+                .min(self.cursor_right_bound());
         }
     }
 
     pub fn tab_back(&mut self, n: u16) {
         self.cursor.pending_wrap = false;
         for _ in 0..n.max(1) {
-            self.cursor.x = self.tabstops.prev(self.cursor.x).max(self.left_margin());
+            self.cursor.x = self
+                .tabstops
+                .prev(self.cursor.x)
+                .max(self.cursor_left_bound());
         }
     }
 

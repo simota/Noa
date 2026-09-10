@@ -1422,6 +1422,118 @@ fn print_outside_horizontal_margins_without_wrap_stays_at_screen_edge() {
 }
 
 #[test]
+fn wrap_outside_horizontal_margins_preserves_scroll_rectangle() {
+    for text in ["ABC", "日本", "A日"] {
+        let t = run_size(
+            10,
+            3,
+            format!(
+                "ABCDEFGHIJ\r\nKLMNOPQRST\r\nUVWXYZ1234\x1b[?69h\x1b[3;7s\x1b[3;9H{text}"
+            )
+            .as_bytes(),
+        );
+        assert_eq!(row_text(&t, 0, 10), "ABCDEFGHIJ", "{text}");
+        assert_eq!(row_text(&t, 1, 10), "KLMNOPQRST", "{text}");
+        assert_eq!(
+            row_text(&t, 2, 7).chars().skip(2).collect::<String>(),
+            "WXYZ1",
+            "{text}"
+        );
+        assert_eq!(t.primary.cursor.y, 2);
+        assert_eq!(t.primary.scrollback_len(), 0);
+    }
+}
+
+#[test]
+fn vertical_motion_outside_horizontal_margins_does_not_scroll() {
+    for col in [1, 2, 8, 10] {
+        for (region, row, command, expected_y) in [
+            ("1;3", 3, "\n", 2),
+            ("1;3", 3, "\x1bD", 2),
+            ("1;3", 1, "\x1bM", 0),
+            ("2;3", 2, "\x1bM", 0),
+            ("1;2", 2, "\n", 2),
+        ] {
+            let t = run_size(
+                10,
+                3,
+                format!(
+                    "ABCDEFGHIJ\r\nKLMNOPQRST\r\nUVWXYZ1234\x1b[?69h\x1b[3;7s\x1b[{region}r\x1b[{row};{col}H{command}"
+                )
+                .as_bytes(),
+            );
+            assert_eq!(row_text(&t, 0, 10), "ABCDEFGHIJ", "{col}, {command:?}");
+            assert_eq!(row_text(&t, 1, 10), "KLMNOPQRST", "{col}, {command:?}");
+            assert_eq!(row_text(&t, 2, 10), "UVWXYZ1234", "{col}, {command:?}");
+            assert_eq!(
+                (t.primary.cursor.x, t.primary.cursor.y),
+                (col - 1, expected_y)
+            );
+        }
+    }
+}
+
+#[test]
+fn vertical_motion_inside_horizontal_margins_scrolls_the_rectangle() {
+    for col in [3, 7] {
+        for (row, command, expected) in [
+            (3, "\n", ["ABMNOPQHIJ", "KLWXYZ1RST", "UV     234"]),
+            (1, "\x1bM", ["AB     HIJ", "KLCDEFGRST", "UVMNOPQ234"]),
+        ] {
+            let t = run_size(
+                10,
+                3,
+                format!(
+                    "ABCDEFGHIJ\r\nKLMNOPQRST\r\nUVWXYZ1234\x1b[?69h\x1b[3;7s\x1b[{row};{col}H{command}"
+                )
+                .as_bytes(),
+            );
+            for (y, expected_row) in expected.iter().enumerate() {
+                assert_eq!(row_text(&t, y, 10), *expected_row, "{col}, {command:?}");
+            }
+            assert_eq!(
+                (t.primary.cursor.x, t.primary.cursor.y),
+                (col - 1, row - 1)
+            );
+        }
+    }
+}
+
+#[test]
+fn horizontal_motion_outside_margins_respects_direction_and_screen_edges() {
+    for (col, command, expected_x) in [
+        (1, "\x08", 0),
+        (2, "\x08", 0),
+        (1, "\x1b[D", 0),
+        (2, "\x1b[65535D", 0),
+        (1, "\x1b[Z", 0),
+        (2, "\x1b[2Z", 0),
+        (2, "\r", 0),
+        (9, "\x1b[C", 9),
+        (10, "\x1b[C", 9),
+        (9, "\x1b[65535C", 9),
+        (9, "\t", 9),
+        (10, "\x1b[2I", 9),
+        // Moving toward the margin interval still stops at its far edge.
+        (1, "\x1b[65535C", 6),
+        (10, "\x1b[65535D", 2),
+        (2, "\x1b[2C", 3),
+        (8, "\x1b[2D", 5),
+        (4, "\x1b[65535D", 2),
+        (6, "\x1b[65535C", 6),
+    ] {
+        let t = run_size(
+            10,
+            3,
+            format!("\x1b[?69h\x1b[3;7s\x1b[2;{col}H{command}").as_bytes(),
+        );
+        assert_eq!(t.primary.cursor.x, expected_x, "column {col}, {command:?}");
+        assert_eq!(t.primary.cursor.y, 1);
+        assert!(!t.primary.cursor.pending_wrap);
+    }
+}
+
+#[test]
 fn grapheme_outside_horizontal_margins_can_expand_to_screen_edge() {
     let t = run_size(10, 3, "\x1b[?69h\x1b[3;7s\x1b[?2027h\x1b[1;9H❤\u{fe0f}".as_bytes());
     assert!(cell(&t, 8, 0).attrs.contains(CellAttrs::WIDE));

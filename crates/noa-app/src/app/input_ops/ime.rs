@@ -1,5 +1,14 @@
 use super::super::*;
 
+fn search_prompt_ime_caret_col(
+    buffer: &str,
+    preedit: &str,
+    search: &noa_grid::SearchState,
+    cols: u16,
+) -> u16 {
+    noa_render::search_prompt_caret_col(&format!("{buffer}{preedit}"), search, cols)
+}
+
 impl App {
     pub(in crate::app) fn modal_ime_target(&self, window_id: WindowId) -> Option<ModalImeTarget> {
         if self
@@ -174,38 +183,36 @@ impl App {
         match target {
             ModalImeTarget::ConfirmDialog => None,
             ModalImeTarget::SearchPrompt => {
-                // One row at the top-right of the searched pane (see
-                // `append_search_prompt_instances`): the prompt text ends at
-                // the last column, with a status suffix of at most
-                // ` no matches` / ` 999/999` after the query.
-                const SUFFIX_COLS: usize = 12;
                 let session = self.search_prompt.as_ref()?;
                 let surface = state.surfaces.get(&session.pane_id)?;
-                let cols = usize::from(surface.grid_size.cols);
-                let shown = session.prompt.buffer().chars().count() + preedit_chars + SUFFIX_COLS;
-                let col = cols.saturating_sub(shown).min(cols.saturating_sub(1));
-                Some(ime_cursor_area(
-                    metrics,
-                    col as u16,
-                    0,
-                    surface.rect,
-                    self.padding,
-                ))
+                let col = search_prompt_ime_caret_col(
+                    session.prompt.buffer(),
+                    self.modal_preedit_for(window_id, target),
+                    &surface.terminal.lock().active().search,
+                    surface.grid_size.cols,
+                );
+                Some(ime_cursor_area(metrics, col, 0, surface.rect, self.padding))
             }
             ModalImeTarget::CommandPalette => {
-                let chars = self
-                    .command_palette
-                    .as_ref()
-                    .map_or(0, |session| session.palette.query().chars().count());
+                let session = self.command_palette.as_ref()?;
+                let snapshot =
+                    command_palette_snapshot(&self.keybinds, &session.palette, |command| {
+                        self.command_is_enabled(window_id, command)
+                    });
                 Some(caret_px(crate::macos_overlay::palette_query_caret(
                     pane,
-                    chars + preedit_chars,
+                    &snapshot,
+                    snapshot.query.chars().count() + preedit_chars,
                 )))
             }
-            ModalImeTarget::RemoteUi => Some(caret_px(crate::macos_overlay::palette_query_caret(
-                pane,
-                self.remote_ui_input_chars() + preedit_chars,
-            ))),
+            ModalImeTarget::RemoteUi => {
+                let (snapshot, _) = self.remote_ui_snapshot(window_id)?;
+                Some(caret_px(crate::macos_overlay::palette_query_caret(
+                    pane,
+                    &snapshot,
+                    self.remote_ui_input_chars() + preedit_chars,
+                )))
+            }
             ModalImeTarget::TabTitlePrompt => {
                 let chars = self
                     .tab_title_prompt
@@ -242,5 +249,35 @@ impl App {
                 ))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_prompt_ime_caret_follows_the_drawn_status_suffix() {
+        let mut search = noa_grid::SearchState::default();
+        search.set_query(
+            "needle".to_string(),
+            Vec::new(),
+            noa_grid::SearchAnchor::Backward(noa_grid::SelectionPoint::new(0, 0)),
+        );
+        assert_eq!(
+            search_prompt_ime_caret_col(&"a".repeat(30), &"b".repeat(10), &search, 80),
+            68
+        );
+        assert_eq!(search_prompt_ime_caret_col("a", "", &search, 80), 68);
+        assert_eq!(
+            search_prompt_ime_caret_col(&"日".repeat(100), "本", &search, 80),
+            68
+        );
+        assert_eq!(search_prompt_ime_caret_col("a", "", &search, 5), 0);
+        assert_eq!(search_prompt_ime_caret_col("a", "", &search, 0), 0);
+        assert_eq!(
+            search_prompt_ime_caret_col("", "日本", &noa_grid::SearchState::default(), 80),
+            75
+        );
     }
 }

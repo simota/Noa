@@ -38,16 +38,10 @@ const ID_SCRATCH_BADGE: &str = "noa.native-overlay.scratch-badge";
 /// Palette metrics (points). The widths/row heights the IME caret anchor
 /// also needs live in `model.rs` so the two can't drift.
 use crate::macos_overlay::model::{
-    CARD_PAD_H, PALETTE_WIDTH, QUERY_ROW_H, THEME_SETTINGS_WIDTH, TITLE_PROMPT_H,
-    TITLE_PROMPT_WIDTH,
+    CARD_PAD_H, ENTRY_ROW_H, HEADER_ROW_H, LIST_PAD_V, PaletteCardLayout, QUERY_ROW_H,
+    THEME_SETTINGS_WIDTH, TITLE_PROMPT_H, TITLE_PROMPT_WIDTH,
 };
-const ENTRY_ROW_H: f64 = 26.0;
-const HEADER_ROW_H: f64 = 24.0;
-const LIST_PAD_V: f64 = 6.0;
 const CARD_RADIUS: f64 = 12.0;
-/// Max list rows (headers + entries) visible at once — matches the wgpu
-/// card's 12-row window.
-const PALETTE_CAPACITY: usize = 12;
 const SCRIM_ALPHA: f64 = 0.25;
 
 /// Balance a `+1` (alloc/init) object that a superview now retains:
@@ -631,32 +625,18 @@ pub(in crate::macos_overlay) fn rebuild_palette(
             return;
         };
 
-        // Window capacity bounded by the pane height so the list never
-        // runs past the card's bottom edge on a short pane.
-        let capacity = (((pane.h - 24.0 - QUERY_ROW_H - 1.0 - LIST_PAD_V * 2.0) / ENTRY_ROW_H)
-            as usize)
-            .clamp(3, PALETTE_CAPACITY);
-        let (offset, shown) = overlay_scroll_window(snap.rows.len(), snap.selected, capacity);
+        let PaletteCardLayout {
+            card_w,
+            card_h,
+            card_x,
+            card_top,
+            offset,
+            shown,
+        } = PaletteCardLayout::new(pane, snap);
         let visible = &snap.rows[offset..offset + shown];
         let empty = snap.rows.is_empty();
-        let list_h: f64 = if empty {
-            36.0
-        } else {
-            visible
-                .iter()
-                .map(|row| match row {
-                    PaletteRow::Header { .. } => HEADER_ROW_H,
-                    PaletteRow::Entry { .. } => ENTRY_ROW_H,
-                })
-                .sum::<f64>()
-                + LIST_PAD_V * 2.0
-        };
-        let card_w = PALETTE_WIDTH.min(pane.w - 32.0).max(280.0);
-        let card_h = (QUERY_ROW_H + 1.0 + list_h).min(pane.h - 24.0);
-        let card_x = (pane.w - card_w) / 2.0;
-        let card_y_top = (pane.h * 0.14).min(pane.h - card_h).max(8.0);
         let card_frame = NSRect::new(
-            NSPoint::new(card_x, from_top(pane.h, card_y_top, card_h)),
+            NSPoint::new(card_x, from_top(pane.h, card_top, card_h)),
             NSSize::new(card_w, card_h),
         );
         let (root, effect) = card_for(

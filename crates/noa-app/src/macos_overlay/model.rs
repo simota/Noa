@@ -1,6 +1,6 @@
 use std::hash::{Hash, Hasher};
 
-use noa_render::OverlayStyle;
+use noa_render::{CommandPaletteSnapshot, OverlayStyle, PaletteRow};
 
 /// Opaque `CGColorRef` for `msg_send!` returns/arguments. The `-CGColor`
 /// property returns `^{CGColor=}`, not an object (`@`) — typing it as
@@ -75,6 +75,11 @@ pub(crate) const TITLE_PROMPT_HINT: &str = "Enter to set \u{b7} Empty clears \u{
 pub(crate) const PALETTE_WIDTH: f64 = 560.0;
 pub(crate) const QUERY_ROW_H: f64 = 44.0;
 pub(crate) const CARD_PAD_H: f64 = 16.0;
+pub(crate) const ENTRY_ROW_H: f64 = 26.0;
+pub(crate) const HEADER_ROW_H: f64 = 24.0;
+pub(crate) const LIST_PAD_V: f64 = 6.0;
+/// Maximum visible list rows, including headers.
+const PALETTE_CAPACITY: usize = 12;
 pub(crate) const TITLE_PROMPT_WIDTH: f64 = 420.0;
 pub(crate) const TITLE_PROMPT_H: f64 = 104.0;
 pub(crate) const THEME_SETTINGS_WIDTH: f64 = 660.0;
@@ -94,20 +99,60 @@ pub(crate) struct CaretPt {
     pub(crate) h: f64,
 }
 
-/// The palette query row's caret after `query_chars` characters (also the
-/// send-selection picker and the remote-UI endpoint field, which draw the
-/// same card). Mirrors `rebuild_palette`'s frame math with the card's
-/// minimum height (query row + empty-list stub) standing in for the
-/// list-dependent height — the `min(pane.h - card_h)` term only binds on a
-/// pane shorter than the card.
-pub(crate) fn palette_query_caret(pane: PaneRectPt, query_chars: usize) -> CaretPt {
-    let card_w = PALETTE_WIDTH.min(pane.w - 32.0).max(280.0);
-    let card_h_min = QUERY_ROW_H + 1.0 + 36.0;
-    let card_x = (pane.w - card_w) / 2.0;
-    let card_top = (pane.h * 0.14).min(pane.h - card_h_min).max(8.0);
+/// Card placement and visible rows shared by native drawing and IME.
+pub(crate) struct PaletteCardLayout {
+    pub(crate) card_w: f64,
+    pub(crate) card_h: f64,
+    pub(crate) card_x: f64,
+    pub(crate) card_top: f64,
+    pub(crate) offset: usize,
+    pub(crate) shown: usize,
+}
+
+impl PaletteCardLayout {
+    pub(crate) fn new(pane: PaneRectPt, snapshot: &CommandPaletteSnapshot) -> Self {
+        let capacity = (((pane.h - 24.0 - QUERY_ROW_H - 1.0 - LIST_PAD_V * 2.0) / ENTRY_ROW_H)
+            as usize)
+            .clamp(3, PALETTE_CAPACITY);
+        let (offset, shown) =
+            overlay_scroll_window(snapshot.rows.len(), snapshot.selected, capacity);
+        let visible = &snapshot.rows[offset..offset + shown];
+        let list_h = if visible.is_empty() {
+            36.0
+        } else {
+            visible
+                .iter()
+                .map(|row| match row {
+                    PaletteRow::Header { .. } => HEADER_ROW_H,
+                    PaletteRow::Entry { .. } => ENTRY_ROW_H,
+                })
+                .sum::<f64>()
+                + LIST_PAD_V * 2.0
+        };
+        let card_w = PALETTE_WIDTH.min(pane.w - 32.0).max(280.0);
+        let card_h = (QUERY_ROW_H + 1.0 + list_h).min(pane.h - 24.0);
+        Self {
+            card_w,
+            card_h,
+            card_x: (pane.w - card_w) / 2.0,
+            card_top: (pane.h * 0.14).min(pane.h - card_h).max(8.0),
+            offset,
+            shown,
+        }
+    }
+}
+
+/// The palette query row's caret after `query_chars` characters, including
+/// the remote endpoint field, which uses the same card.
+pub(crate) fn palette_query_caret(
+    pane: PaneRectPt,
+    snapshot: &CommandPaletteSnapshot,
+    query_chars: usize,
+) -> CaretPt {
+    let layout = PaletteCardLayout::new(pane, snapshot);
     CaretPt {
-        x: card_x + CARD_PAD_H + 22.0 + query_chars as f64 * INPUT_FONT_ADVANCE,
-        y: card_top + 13.0,
+        x: layout.card_x + CARD_PAD_H + 22.0 + query_chars as f64 * INPUT_FONT_ADVANCE,
+        y: layout.card_top + 13.0,
         w: 1.0,
         h: INPUT_ROW_H,
     }

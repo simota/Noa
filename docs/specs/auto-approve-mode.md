@@ -5,6 +5,21 @@
 - owner: simota
 - build-path decision: **apex** (`/nexus apex` — live AC: T-1 signature capture and AC-11/12/13 GUI visual checks remain manual)
 
+## 2026-09-14 investigation — agy approval remains pending
+
+The supplied log-search dialog passes both text and VT/grid detection tests.
+The user confirmed auto-approve was enabled before the dialog appeared; the
+later observed Off menu does not establish its state at the time of the stall.
+An independent reproduction found that a dialog arriving during IME composition
+lost its rescan deadline. This is fixed and covered by a failing-before,
+passing-after regression, but the original stall's cause remains unconfirmed
+because the user cannot recall the composition state.
+
+#TODO(agent): UNVERIFIED — On recurrence, launch Noa with
+`NOA_AUTO_APPROVE_TRACE=1` and inspect only the `[auto-approve]` diagnostics to
+identify the suppression or pre-send rejection; do not infer the cause from
+the menu state observed afterward.
+
 ## 2026-09-09 extension — agy run-command wording
 
 Also recognize `Requesting permission for:` followed by a displayed command,
@@ -66,8 +81,9 @@ approvals remain outside the signature table.
   and every choice. Cost-only changes do not rearm an accepted question.
 - Keep two stable scans, pre-send revalidation, IME/paste/recent-input guards,
   audit/flash feedback, and the six-approvals-per-60-seconds breaker. A known
-  prompt that becomes static during the three-second input cooldown is rescanned
-  until the cooldown expires; it then needs two unsuppressed matches.
+  prompt that becomes static during IME composition or the three-second input
+  cooldown stays tracked until the guard clears; it then needs two unsuppressed
+  matches. Ending composition needs no further PTY output to resume detection.
 - Synthetic layout tests cover both screenshots, incomplete/changed selections,
   agent separation, UTF-8/ANSI terminal-grid decoding, duplicate suppression,
   and cooldown recovery. The screenshots establish the Enter key binding;

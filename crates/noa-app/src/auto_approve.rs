@@ -320,11 +320,12 @@ pub(crate) fn detect_and_update_any_agent(
 ) -> Decision {
     let (decision, matched) = match suppression(ctx, state.disabled_by_runaway) {
         Some(reason) => {
-            // Only the input-cooldown suppressions keep tracking the prompt
+            // Temporary input/viewport guards keep tracking the prompt
             // (see `apply_decision_state`), so only they pay for a scan.
             let matched = matches!(
                 reason,
-                SuppressReason::RecentUserInput
+                SuppressReason::ImePreedit
+                    | SuppressReason::RecentUserInput
                     | SuppressReason::PasteActive
                     | SuppressReason::ViewportNotLive
             )
@@ -507,15 +508,15 @@ fn apply_decision_state(
             }
         }
         Decision::Suppressed(reason) => {
-            // A fast reply can become static during the input cooldown, and a
-            // prompt can land while the viewport is scrolled back. Keep
-            // rescanning that known prompt so it can arm when the guard expires
-            // or the user returns to the live rows (a wheel scroll produces no
-            // pty output to rescan on), while still requiring two unsuppressed
-            // matches before sending.
+            // A prompt can become static during composition, the input
+            // cooldown, or scrollback viewing. Clearing a preedit or scrolling
+            // back to the live rows need not produce any pty output. Keep the
+            // known prompt tracked, while requiring two unsuppressed matches
+            // before sending.
             state.last_match = if matches!(
                 reason,
-                SuppressReason::RecentUserInput
+                SuppressReason::ImePreedit
+                    | SuppressReason::RecentUserInput
                     | SuppressReason::PasteActive
                     | SuppressReason::ViewportNotLive
             ) {
@@ -1198,6 +1199,27 @@ mod tests {
         ])
     }
 
+    fn agy_log_search_command_prompt() -> Vec<RowText> {
+        rows(&[
+            "────────────────────",
+            "",
+            "Requesting permission for:",
+            "   rg -z -m 10 '\"errorCode\"' sample-webapi*.log.gz",
+            "",
+            "Run this command?",
+            "> 1. Yes, run command",
+            "  2. Yes, and always allow in this conversation for commands that start with 'rg'",
+            "  3. Yes, and always allow for commands that start with 'rg' (Persist to settings.json)",
+            "  4. No, cancel",
+            "",
+            "  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command",
+            " TOOL USE  | Gemini 3.8 Flash (High) | Context: 3.39%",
+            "",
+            "",
+            "",
+        ])
+    }
+
     fn agy_review_command_prompt() -> Vec<RowText> {
         let mut prompt = agy_multiline_run_command_prompt();
         let footer = prompt.len() - 2;
@@ -1253,6 +1275,12 @@ mod tests {
             ),
             (
                 agy_review_command_prompt(),
+                AutoApproveSignature::AgyCommand,
+                AgentKind::Agy,
+                "Command",
+            ),
+            (
+                agy_log_search_command_prompt(),
                 AutoApproveSignature::AgyCommand,
                 AgentKind::Agy,
                 "Command",
@@ -1746,6 +1774,54 @@ mod tests {
     }
 
     #[test]
+    fn static_menu_rearms_after_ime_preedit_without_new_output() {
+        let prompt = agy_log_search_command_prompt();
+        let mut ctx = base_ctx(fixed_now());
+        let mut state = AutoApproveState::default();
+        ctx.guards.ime_preedit_active = true;
+        for _ in 0..3 {
+            assert_eq!(
+                detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state),
+                Decision::Suppressed(SuppressReason::ImePreedit)
+            );
+            assert!(
+                state.needs_static_rescan(),
+                "a prompt arriving during IME composition must survive until composition ends"
+            );
+        }
+
+        ctx.guards.ime_preedit_active = false;
+        assert_eq!(
+            detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state),
+            Decision::Hold
+        );
+        let Decision::Fire {
+            signature,
+            region_hash,
+            ..
+        } = detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state)
+        else {
+            panic!("the unchanged prompt must fire after two unsuppressed scans");
+        };
+        assert_eq!(signature, AutoApproveSignature::AgyCommand);
+        assert_eq!(signature.bytes(), b"\r");
+        state.apply_feedback(signature, region_hash, true, ctx.now);
+        ctx.guards.ime_preedit_active = true;
+        let _ = detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state);
+        assert!(!state.needs_static_rescan());
+        ctx.guards.ime_preedit_active = false;
+        assert_eq!(
+            detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state),
+            Decision::Hold
+        );
+
+        ctx.guards.ime_preedit_active = true;
+        let _ =
+            detect_and_update_any_agent(&rows(&["unrelated output"]), cursor(0), ctx, &mut state);
+        assert!(!state.needs_static_rescan());
+    }
+
+    #[test]
     fn static_rescan_tracks_changed_prompts_after_an_accepted_approval() {
         let now = fixed_now();
         let mut state = AutoApproveState::default();
@@ -1795,6 +1871,11 @@ mod tests {
     #[test]
     fn detect_menu_from_vt_grid_with_hidden_cursor_and_split_utf8() {
         for (prompt, expected, cols) in [
+            (
+                agy_log_search_command_prompt(),
+                AutoApproveSignature::AgyCommand,
+                94,
+            ),
             (
                 codex_command_prompt(),
                 AutoApproveSignature::CodexCommand,

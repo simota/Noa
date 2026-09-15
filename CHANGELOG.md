@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.18] - 2026-09-15
+
+### Fixed
+
+- Auto-approve resumes after IME composition ends. A recognized approval
+  dialog that arrived during composition could lose its rescan deadline and
+  stay pending once composition finished. The dialog now stays tracked while
+  approval is suppressed, two unsuppressed stable scans are still required
+  before Enter is sent, and detection resumes even when ending composition
+  produces no PTY output. The agy log-search dialog is recognized through
+  both text and VT/grid detection (#88).
+
 ## [0.2.17] - 2026-09-11
 
 ### Fixed

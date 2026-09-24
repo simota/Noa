@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.19] - 2026-09-25
+
+### Fixed
+
+- Auto-approve no longer leaves Codex command-approval prompts unanswered.
+  Codex ignores an Enter that arrives immediately after its approval modal
+  first appears, and Noa could fire milliseconds after the first paint, then
+  treat the ignored prompt as consumed. Codex prompts now wait until they have
+  been on screen for 300ms before Enter is sent (#90).
+
 ## [0.2.18] - 2026-09-15
 
 ### Fixed

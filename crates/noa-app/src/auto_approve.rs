@@ -78,7 +78,14 @@ struct Signature {
     yes_label: Option<&'static str>,
     requires_marker: bool,
     bytes: &'static [u8],
+    /// How long a prompt must stay on screen before the answer is sent. Codex
+    /// drops an Enter that lands right after its approval modal's first paint
+    /// (measured against codex 0.156.1: ignored at 0ms, accepted at 100ms),
+    /// and an ignored send is never retried because the prompt is consumed.
+    settle: Duration,
 }
+
+const CODEX_PROMPT_SETTLE: Duration = Duration::from_millis(300);
 
 const SIGNATURES: &[Signature] = &[
     Signature {
@@ -89,6 +96,7 @@ const SIGNATURES: &[Signature] = &[
         yes_label: Some("1. Yes"),
         requires_marker: true,
         bytes: b"1\r",
+        settle: Duration::ZERO,
     },
     Signature {
         id: AutoApproveSignature::ClaudeWrite,
@@ -98,6 +106,7 @@ const SIGNATURES: &[Signature] = &[
         yes_label: Some("1. Yes"),
         requires_marker: true,
         bytes: b"1\r",
+        settle: Duration::ZERO,
     },
     Signature {
         id: AutoApproveSignature::ClaudeRead,
@@ -107,6 +116,7 @@ const SIGNATURES: &[Signature] = &[
         yes_label: Some("1. Yes"),
         requires_marker: true,
         bytes: b"1\r",
+        settle: Duration::ZERO,
     },
     Signature {
         id: AutoApproveSignature::ClaudeAskUserQuestion,
@@ -116,6 +126,7 @@ const SIGNATURES: &[Signature] = &[
         yes_label: Some("1."),
         requires_marker: true,
         bytes: b"1\r",
+        settle: Duration::ZERO,
     },
     Signature {
         id: AutoApproveSignature::ClaudeEnterConfirm,
@@ -125,6 +136,7 @@ const SIGNATURES: &[Signature] = &[
         yes_label: None,
         requires_marker: false,
         bytes: b"\r",
+        settle: Duration::ZERO,
     },
     Signature {
         id: AutoApproveSignature::CodexCommand,
@@ -134,6 +146,7 @@ const SIGNATURES: &[Signature] = &[
         yes_label: Some("1. Yes, proceed (y)"),
         requires_marker: true,
         bytes: b"\r",
+        settle: CODEX_PROMPT_SETTLE,
     },
     Signature {
         id: AutoApproveSignature::AgyAskUserQuestion,
@@ -143,6 +156,7 @@ const SIGNATURES: &[Signature] = &[
         yes_label: Some("1. (Recommended) "),
         requires_marker: true,
         bytes: b"\r",
+        settle: Duration::ZERO,
     },
     Signature {
         id: AutoApproveSignature::AgyCommand,
@@ -152,6 +166,7 @@ const SIGNATURES: &[Signature] = &[
         yes_label: Some("1. Yes"),
         requires_marker: true,
         bytes: b"\r",
+        settle: Duration::ZERO,
     },
 ];
 
@@ -213,6 +228,8 @@ pub(crate) enum Decision {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct AutoApproveState {
     last_match: Option<MatchKey>,
+    /// When `last_match` was first observed, for [`Signature::settle`].
+    last_match_since: Option<Instant>,
     match_count: u8,
     pending_fire: Option<PendingPrompt>,
     awaiting_change: Option<ConsumedPrompt>,
@@ -263,6 +280,7 @@ impl AutoApproveState {
             region_hash,
         });
         self.last_match = None;
+        self.last_match_since = None;
         self.match_count = 0;
         self.disabled_by_runaway = pending.disable_after;
     }
@@ -436,6 +454,13 @@ fn decide(
     if state.last_match != Some(key) || state.match_count < 1 {
         return Decision::Hold;
     }
+    let settle = signature(matched.signature).settle;
+    if state
+        .last_match_since
+        .is_none_or(|since| ctx.now.saturating_duration_since(since) < settle)
+    {
+        return Decision::Hold;
+    }
 
     let approvals_in_window = count_recent_approvals(&state.approvals, ctx.now);
     Decision::Fire {
@@ -493,10 +518,12 @@ fn apply_decision_state(
                     state.match_count = state.match_count.saturating_add(1);
                 } else {
                     state.last_match = Some(key);
+                    state.last_match_since = Some(ctx.now);
                     state.match_count = 1;
                 }
             } else {
                 state.last_match = None;
+                state.last_match_since = None;
                 state.match_count = 0;
                 state.pending_fire = None;
                 // A partial status redraw can invalidate the live tail while
@@ -513,7 +540,7 @@ fn apply_decision_state(
             // back to the live rows need not produce any pty output. Keep the
             // known prompt tracked, while requiring two unsuppressed matches
             // before sending.
-            state.last_match = if matches!(
+            let tracked = if matches!(
                 reason,
                 SuppressReason::ImePreedit
                     | SuppressReason::RecentUserInput
@@ -527,6 +554,10 @@ fn apply_decision_state(
             } else {
                 None
             };
+            if tracked != state.last_match {
+                state.last_match_since = tracked.map(|_| ctx.now);
+            }
+            state.last_match = tracked;
             state.match_count = 0;
             state.pending_fire = None;
         }
@@ -981,6 +1012,15 @@ mod tests {
         }
     }
 
+    /// `ctx` once a prompt first seen at `ctx.now` has outlived every
+    /// signature's settle delay.
+    fn settled(ctx: DetectContext) -> DetectContext {
+        DetectContext {
+            now: ctx.now + CODEX_PROMPT_SETTLE,
+            ..ctx
+        }
+    }
+
     fn cursor(row: u16) -> Point {
         Point { x: 0, y: row }
     }
@@ -1295,6 +1335,7 @@ mod tests {
                 Decision::Hold
             );
             assert!(state.needs_static_rescan());
+            ctx.now += CODEX_PROMPT_SETTLE;
             let Decision::Fire {
                 signature,
                 region_hash,
@@ -1338,7 +1379,7 @@ mod tests {
                 Decision::Hold
             );
             assert!(matches!(
-                detect_and_update_any_agent(&prompt, cursor, ctx, &mut state),
+                detect_and_update_any_agent(&prompt, cursor, settled(ctx), &mut state),
                 Decision::Fire { .. }
             ));
         }
@@ -1561,7 +1602,7 @@ mod tests {
                 Decision::Hold
             );
             assert!(matches!(
-                detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state),
+                detect_and_update_any_agent(&prompt, cursor(0), settled(ctx), &mut state),
                 Decision::Fire { .. }
             ));
         }
@@ -1578,8 +1619,8 @@ mod tests {
             (agy_review_command_prompt(), AgentKind::Agy),
         ] {
             let mut state = AutoApproveState::default();
-            let ctx = base_ctx(now);
-            let _ = detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state);
+            let _ = detect_and_update_any_agent(&prompt, cursor(0), base_ctx(now), &mut state);
+            let ctx = settled(base_ctx(now));
             assert!(matches!(
                 detect(&prompt, cursor(0), agent, ctx, &state),
                 Decision::Fire { .. }
@@ -1616,7 +1657,7 @@ mod tests {
     #[test]
     fn menu_hash_covers_command_question_and_all_choices_but_not_cost() {
         let now = fixed_now();
-        let ctx = base_ctx(now);
+        let ctx = settled(base_ctx(now));
         for (mut prompt, change_row) in [
             (codex_command_prompt(), 6),
             (agy_question_prompt(), 8),
@@ -1624,7 +1665,7 @@ mod tests {
             (agy_run_command_prompt(), 3),
         ] {
             let mut state = AutoApproveState::default();
-            let _ = detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state);
+            let _ = detect_and_update_any_agent(&prompt, cursor(0), base_ctx(now), &mut state);
             let Decision::Fire {
                 signature,
                 region_hash,
@@ -1659,7 +1700,7 @@ mod tests {
                 Decision::Hold
             );
             assert!(matches!(
-                detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state),
+                detect_and_update_any_agent(&prompt, cursor(0), settled(ctx), &mut state),
                 Decision::Fire { .. }
             ));
             let selected = prompt
@@ -1714,6 +1755,44 @@ mod tests {
     }
 
     #[test]
+    fn codex_prompt_waits_for_settle_before_firing() {
+        // Codex 0.156.1 drops an Enter sent right after the modal's first
+        // paint; a second frame arriving within the settle window must not
+        // fire, and must keep the prompt armed for the stability rescan.
+        let prompt = codex_command_prompt();
+        let first_seen = base_ctx(fixed_now());
+        let mut state = AutoApproveState::default();
+        assert_eq!(
+            detect_and_update_any_agent(&prompt, cursor(0), first_seen, &mut state),
+            Decision::Hold
+        );
+        let mut early = first_seen;
+        early.now += CODEX_PROMPT_SETTLE - Duration::from_millis(1);
+        assert_eq!(
+            detect_and_update_any_agent(&prompt, cursor(0), early, &mut state),
+            Decision::Hold
+        );
+        assert!(state.needs_static_rescan());
+        assert!(matches!(
+            detect_and_update_any_agent(&prompt, cursor(0), settled(first_seen), &mut state),
+            Decision::Fire {
+                signature: AutoApproveSignature::CodexCommand,
+                ..
+            }
+        ));
+
+        // Other agents keep firing on the second consecutive match.
+        let prompt = claude_edit_prompt();
+        let ctx = base_ctx(fixed_now());
+        let mut state = AutoApproveState::default();
+        let _ = detect_and_update_any_agent(&prompt, cursor(1), ctx, &mut state);
+        assert!(matches!(
+            detect_and_update_any_agent(&prompt, cursor(1), ctx, &mut state),
+            Decision::Fire { .. }
+        ));
+    }
+
+    #[test]
     fn scrolled_back_prompt_rearms_when_viewport_returns_live() {
         let now = fixed_now();
         for prompt in [
@@ -1737,7 +1816,7 @@ mod tests {
                 Decision::Hold
             );
             assert!(matches!(
-                detect_and_update_any_agent(&prompt, cursor, ctx, &mut state),
+                detect_and_update_any_agent(&prompt, cursor, settled(ctx), &mut state),
                 Decision::Fire { .. }
             ));
         }
@@ -1832,7 +1911,7 @@ mod tests {
             signature,
             region_hash,
             ..
-        } = detect_and_update_any_agent(&prompt, cursor(0), ctx, &mut state)
+        } = detect_and_update_any_agent(&prompt, cursor(0), settled(ctx), &mut state)
         else {
             panic!("stable menu should fire");
         };
@@ -1936,7 +2015,7 @@ mod tests {
                 Decision::Hold
             );
             assert!(
-                matches!(detect_and_update_any_agent(&screen, cursor, ctx, &mut state), Decision::Fire { signature, .. } if signature == expected)
+                matches!(detect_and_update_any_agent(&screen, cursor, settled(ctx), &mut state), Decision::Fire { signature, .. } if signature == expected)
             );
         }
     }
@@ -2120,7 +2199,7 @@ mod tests {
                 Decision::Hold
             );
             let Decision::Fire { signature, .. } =
-                detect_and_update_any_agent(&prompt, cursor, ctx, &mut state)
+                detect_and_update_any_agent(&prompt, cursor, settled(ctx), &mut state)
             else {
                 panic!("codex prompt without Environment row should fire: {prompt:?}");
             };
@@ -2174,7 +2253,7 @@ mod tests {
             detect_and_update_any_agent(&screen, cursor, ctx, &mut state),
             Decision::Hold
         );
-        let d = detect_and_update_any_agent(&screen, cursor, ctx, &mut state);
+        let d = detect_and_update_any_agent(&screen, cursor, settled(ctx), &mut state);
         assert!(
             matches!(
                 d,
@@ -2204,14 +2283,15 @@ mod tests {
                 .position(|row| row.trim() == "esc)")
                 .expect("the rejection shortcut should wrap onto another physical row");
             let mut state = AutoApproveState::default();
-            let ctx = base_ctx(fixed_now());
+            let first_seen = base_ctx(fixed_now());
+            let ctx = settled(first_seen);
             let position = terminal.active().cursor;
             let cursor = Point {
                 x: position.x,
                 y: position.y,
             };
             assert_eq!(
-                detect_and_update_any_agent(&screen, cursor, ctx, &mut state),
+                detect_and_update_any_agent(&screen, cursor, first_seen, &mut state),
                 Decision::Hold
             );
             let Decision::Fire {

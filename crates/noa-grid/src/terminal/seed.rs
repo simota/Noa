@@ -3,7 +3,7 @@ use std::fmt::Write;
 use noa_core::{CellAttrs, Color, Rgb};
 use noa_vt::{Charset, CharsetSlot};
 
-use crate::cell::Cell;
+use crate::cell::{Cell, Row};
 use crate::cursor::{Cursor, CursorStyle, SavedCursor};
 use crate::screen::Screen;
 
@@ -267,6 +267,11 @@ fn write_wrapped_rows(seed: &mut String, screen: &Screen) {
         if !screen.grid[y].wrapped {
             continue;
         }
+        if screen.grid[y].ends_with_wide_pad() {
+            write_wide_pad_wrap(seed, screen, y);
+            continue;
+        }
+
         let (x, last) = pending_wrap_cell(screen, screen.cols - 1, y as u16);
         write_cup(seed, x, y as u16);
         write_pen(seed, last.fg, last.bg, last.underline_color, last.attrs);
@@ -282,6 +287,27 @@ fn write_wrapped_rows(seed: &mut String, screen: &Screen) {
     write_private_mode(seed, 7, false);
 }
 
+/// Recreate the filler a wide glyph left in the last column of row `y`, and
+/// the soft wrap it came with, by printing a wide scalar that cannot fit
+/// there: the replica lays down the filler (with the pen's background, which
+/// is the filler's own) exactly as the source did. Grapheme clustering is off
+/// for that print so the scalar never joins a cluster ending in a ZWJ before
+/// it. The scalar lands on the next row, which is then repainted from the
+/// source.
+fn write_wide_pad_wrap(seed: &mut String, screen: &Screen, y: usize) {
+    let last_x = screen.cols - 1;
+    let pad = &screen.grid[y].cells[usize::from(last_x)];
+    write_cup(seed, last_x, y as u16);
+    write_pen(seed, Color::Default, pad.bg, None, CellAttrs::empty());
+    write_private_mode(seed, 2027, false);
+    seed.push('\u{3000}');
+    write_private_mode(seed, 2027, true);
+
+    write_cup(seed, 0, y as u16 + 1);
+    seed.push_str("\x1b[0m\x1b[2K");
+    write_row_cells(seed, y + 1, &screen.grid[y + 1]);
+}
+
 fn write_kitty_keyboard_stack(seed: &mut String, stack: &[u8]) {
     for flags in stack {
         write!(seed, "\x1b[>{flags}u").expect("writing to String cannot fail");
@@ -290,12 +316,24 @@ fn write_kitty_keyboard_stack(seed: &mut String, stack: &[u8]) {
 
 fn write_visible_grid(seed: &mut String, screen: &Screen) {
     for (y, row) in screen.grid.iter().enumerate() {
-        for (x, cell) in row.cells.iter().enumerate() {
-            if cell.attrs.contains(CellAttrs::WIDE_SPACER) || cell == &Cell::default() {
-                continue;
-            }
-            write_cup(seed, x as u16, y as u16);
-            write_pen(seed, cell.fg, cell.bg, cell.underline_color, cell.attrs);
+        write_row_cells(seed, y, row);
+    }
+}
+
+fn write_row_cells(seed: &mut String, y: usize, row: &Row) {
+    let pad_x = row.ends_with_wide_pad().then(|| row.cells.len() - 1);
+    for (x, cell) in row.cells.iter().enumerate() {
+        if cell.attrs.contains(CellAttrs::WIDE_SPACER) || cell == &Cell::default() {
+            continue;
+        }
+        write_cup(seed, x as u16, y as u16);
+        write_pen(seed, cell.fg, cell.bg, cell.underline_color, cell.attrs);
+        if pad_x == Some(x) {
+            // Erase rather than print the filler: a printed space could join a
+            // cluster ending in a ZWJ before it. `write_wide_pad_wrap` flags it
+            // afterwards unless it sits on the last row.
+            seed.push_str("\x1b[X");
+        } else {
             cell.push_text_to(seed);
         }
     }
@@ -372,6 +410,7 @@ fn write_cursor_origin_relative(
         write_cup(seed, print_x.saturating_sub(left), relative_y);
         write_pen(seed, cell.fg, cell.bg, cell.underline_color, cell.attrs);
         cell.push_text_to(seed);
+        write_wide_pad_after_latch(seed, screen, print_x, cursor.x, cursor.y);
         write_private_mode(seed, 7, autowrap);
     } else {
         write_cup(seed, relative_x, relative_y);
@@ -407,11 +446,20 @@ fn write_cursor_state(
         write_cup(seed, print_x, y);
         write_pen(seed, cell.fg, cell.bg, cell.underline_color, cell.attrs);
         cell.push_text_to(seed);
+        write_wide_pad_after_latch(seed, screen, print_x, x, y);
         write_private_mode(seed, 7, autowrap);
     } else {
         write_cup(seed, x, y);
     }
     write_pen(seed, fg, bg, underline_color, attrs);
+}
+
+/// A latch reprint of the cell under the cursor at (`x`, `y`) turns a
+/// wide-wrap filler there into a plain space: flag it again.
+fn write_wide_pad_after_latch(seed: &mut String, screen: &Screen, print_x: u16, x: u16, y: u16) {
+    if print_x == x && screen.grid[usize::from(y)].ends_with_wide_pad() {
+        seed.push_str("\x1b[>$w");
+    }
 }
 
 fn pending_wrap_cell(screen: &Screen, x: u16, y: u16) -> (u16, &Cell) {
@@ -634,6 +682,153 @@ mod tests {
         replica_stream.feed(&seed, &mut replica);
 
         assert_screen_state(source.active(), replica.active());
+    }
+
+    #[test]
+    fn synthetic_seed_recreates_the_wide_wrap_filler() {
+        let size = GridSize::new(4, 3);
+        let mut source = Terminal::new(size);
+        Stream::new().feed("abc界Z".as_bytes(), &mut source);
+
+        let mut replica = Terminal::new(size);
+        Stream::new().feed(&source.synthetic_seed(), &mut replica);
+
+        assert_screen_state(source.active(), replica.active());
+        replica.select_all();
+        assert_eq!(
+            replica.selected_text().as_deref().map(str::trim_end),
+            Some("abc界Z")
+        );
+
+        let wider = GridSize::new(8, 3);
+        source.resize(wider);
+        replica.resize(wider);
+        assert_screen_state(source.active(), replica.active());
+    }
+
+    fn assert_seed_round_trips(size: GridSize, bytes: &[u8]) -> Terminal {
+        let mut source = Terminal::new(size);
+        Stream::new().feed(bytes, &mut source);
+        let mut replica = Terminal::new(size);
+        Stream::new().feed(&source.synthetic_seed(), &mut replica);
+        assert_screen_state(source.active(), replica.active());
+        replica
+    }
+
+    #[test]
+    fn synthetic_seed_recreates_the_filler_before_a_widened_cluster() {
+        let mut source = Terminal::new(GridSize::new(8, 3));
+        Stream::new().feed("\x1b[?2027habc\u{2764}\u{FE0F}Z".as_bytes(), &mut source);
+        source.resize(GridSize::new(4, 3));
+
+        let mut replica = Terminal::new(GridSize::new(4, 3));
+        Stream::new().feed(&source.synthetic_seed(), &mut replica);
+
+        assert_screen_state(source.active(), replica.active());
+    }
+
+    #[test]
+    fn synthetic_seed_recreates_the_filler_after_the_next_row_is_overwritten() {
+        let mut replica =
+            assert_seed_round_trips(GridSize::new(4, 3), "abc界Z\x1b[2;1HA".as_bytes());
+
+        replica.select_all();
+        assert_eq!(
+            replica.selected_text().as_deref().map(str::trim_end),
+            Some("abcA Z")
+        );
+    }
+
+    #[test]
+    fn synthetic_seed_recreates_a_filler_left_at_an_old_right_margin() {
+        assert_seed_round_trips(
+            GridSize::new(8, 3),
+            "\x1b[?69h\x1b[1;4sabc界Z\x1b[?69l".as_bytes(),
+        );
+    }
+
+    #[test]
+    fn synthetic_seed_keeps_fillers_from_an_old_margin_and_the_last_column() {
+        let mut replica = assert_seed_round_trips(
+            GridSize::new(8, 3),
+            "\x1b[?69h\x1b[1;4sabc界Z\x1b[?69l\x1b[1;8H界Q".as_bytes(),
+        );
+
+        replica.select_all();
+        let text = replica.selected_text().expect("text on screen");
+        assert!(text.starts_with("abc    界"), "{text:?}");
+    }
+
+    #[test]
+    fn synthetic_seed_does_not_join_the_filler_to_a_zwj_cluster() {
+        assert_seed_round_trips(
+            GridSize::new(8, 3),
+            "\x1b[?69h\x1b[1;4sabc\u{200D}界\x1b[?69l\x1b[1;5HWXYZ".as_bytes(),
+        );
+        assert_seed_round_trips(GridSize::new(4, 3), "abc\u{200D}界".as_bytes());
+    }
+
+    #[test]
+    fn synthetic_seed_keeps_the_filler_under_a_latched_saved_cursor() {
+        let mut replica =
+            assert_seed_round_trips(GridSize::new(4, 3), "abcd\x1b7\x1b[1;4H界Z".as_bytes());
+
+        replica.select_all();
+        assert_eq!(
+            replica.selected_text().as_deref().map(str::trim_end),
+            Some("abc界Z")
+        );
+    }
+
+    #[test]
+    fn synthetic_seed_keeps_the_filler_under_a_latched_live_cursor() {
+        let mut replica =
+            assert_seed_round_trips(GridSize::new(4, 3), "abcd\x1b7\x1b[1;4H界Z\x1b8".as_bytes());
+
+        replica.select_all();
+        assert_eq!(
+            replica.selected_text().as_deref().map(str::trim_end),
+            Some("abc界Z")
+        );
+    }
+
+    #[test]
+    fn synthetic_seed_keeps_the_filler_under_a_latched_origin_relative_cursor() {
+        let mut replica = assert_seed_round_trips(
+            GridSize::new(4, 3),
+            "\x1b[?6habcd\x1b7\x1b[1;4H界Z\x1b8".as_bytes(),
+        );
+
+        replica.select_all();
+        assert_eq!(
+            replica.selected_text().as_deref().map(str::trim_end),
+            Some("abc界Z")
+        );
+    }
+
+    #[test]
+    fn synthetic_seed_keeps_the_background_of_a_filler_on_the_last_row() {
+        // The last row's soft wrap has no row to continue into, so the seed
+        // cannot re-create it (or the filler flag); the painted cell must
+        // still match.
+        let size = GridSize::new(4, 2);
+        let mut source = Terminal::new(size);
+        Stream::new().feed(
+            b"abc\x1b[41m\xe7\x95\x8c\x1b[0m\x1b[1;1H\x1b[L",
+            &mut source,
+        );
+        let mut replica = Terminal::new(size);
+        Stream::new().feed(&source.synthetic_seed(), &mut replica);
+
+        let pad = source.active().grid[1].cells[3];
+        assert!(pad.attrs.contains(CellAttrs::WIDE_PAD));
+        let copy = replica.active().grid[1].cells[3];
+        assert_eq!((copy.ch, copy.bg), (pad.ch, pad.bg));
+    }
+
+    #[test]
+    fn synthetic_seed_keeps_the_filler_background() {
+        assert_seed_round_trips(GridSize::new(4, 3), "abc界Z\x1b[2;1H\x1b[41m界".as_bytes());
     }
 
     #[test]

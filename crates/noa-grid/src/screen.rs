@@ -367,6 +367,19 @@ impl Screen {
         }
     }
 
+    /// Seed-only (`Handler::seed_mark_wide_pad`): flag the cell under the
+    /// cursor as filler, leaving the cursor and its latch alone.
+    pub(crate) fn seed_mark_wide_pad(&mut self) {
+        let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
+        if let Some(row) = self.grid.get_mut(y)
+            && let Some(cell) = row.cells.get_mut(x)
+        {
+            cell.attrs.insert(CellAttrs::WIDE_PAD);
+            row.mark_occupied(x + 1);
+            row.dirty = true;
+        }
+    }
+
     /// Clear the filler flag from cells a shift or rectangle scroll moved: they
     /// no longer sit where their row's soft wrap left them.
     fn clear_moved_wide_pad(cells: &mut [Cell]) {

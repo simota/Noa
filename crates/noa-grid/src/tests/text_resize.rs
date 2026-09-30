@@ -491,3 +491,12 @@ fn a_wrap_at_a_narrow_right_margin_leaves_a_plain_blank() {
     assert!(!cell(&t, 3, 0).attrs.contains(CellAttrs::WIDE_PAD));
     assert!(cell(&t, 7, 0).attrs.contains(CellAttrs::WIDE_PAD));
 }
+
+#[test]
+fn seed_mark_wide_pad_keeps_the_occupancy_watermark() {
+    let mut t = run_size(4, 3, b"\x1b[1;4H\x1b[>$w");
+
+    assert!(t.primary.grid[0].occupied() >= 4);
+    Stream::new().feed(b"\x1b[2J", &mut t);
+    assert!(t.primary.grid[0].is_blank());
+}

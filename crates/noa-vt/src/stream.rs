@@ -637,6 +637,9 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H, sgr_attrs: &mut Vec<SgrAttr>) 
         // `$` intermediate keeps this clear of xterm's `CSI > Ps ; Ps t`
         // (title-mode set) namespace.
         b't' if csi.private == b'>' && csi.intermediates() == b"$" => h.seed_set_cursor_hollow(),
+        // Client-mode seed-only: see `Handler::seed_mark_wide_pad`. The
+        // private marker keeps this clear of DECRQPSR (`CSI Ps $ w`).
+        b'w' if csi.private == b'>' && csi.intermediates() == b"$" => h.seed_mark_wide_pad(),
         _ => {} // unknown / inc>=2
     }
 }

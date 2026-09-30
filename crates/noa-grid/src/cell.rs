@@ -204,6 +204,17 @@ impl Row {
         self.cells[..self.occupied()].iter().all(|c| *c == blank)
     }
 
+    /// Whether the last cell is the filler a wide glyph left when it wrapped to
+    /// the next row. The flag counts only there: a flagged cell moved anywhere
+    /// else, or into a row that no longer soft-wraps, is an ordinary blank.
+    pub fn ends_with_wide_pad(&self) -> bool {
+        self.wrapped
+            && self
+                .cells
+                .last()
+                .is_some_and(|cell| cell.attrs.contains(CellAttrs::WIDE_PAD))
+    }
+
     /// Record that cells below `end` may now hold non-default content.
     /// Monotonic: never lowers the watermark.
     #[inline]

@@ -357,6 +357,13 @@ impl Screen {
                 }
             }
 
+            // The filler a wide glyph left at the end of a soft-wrapped row is
+            // layout, not content: carrying it into the new width would leave
+            // a stray blank inside the text.
+            if len == row.cells.len() && row.ends_with_wide_pad() {
+                len -= 1;
+            }
+
             row_starts.push(cells.len());
             row_lens.push(len);
             cells.extend_from_slice(&row.cells[..len]);
@@ -431,6 +438,9 @@ impl Screen {
 
             if x > 0 && x + render_width > cols_usize {
                 if let Some(row) = rows.last_mut() {
+                    if source_width == 2 && x < cols_usize {
+                        Self::mark_wide_pad(row, x, blank);
+                    }
                     row.wrapped = true;
                 }
                 rows.push(Self::row_with_blank(cols, blank));

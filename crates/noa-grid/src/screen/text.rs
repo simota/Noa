@@ -636,8 +636,9 @@ impl Screen {
         text: &mut String,
     ) {
         let before_len = text.len();
-        for cell in &row.cells[start_x..=end_x] {
-            if cell.attrs.contains(CellAttrs::WIDE_SPACER) {
+        let pad_x = row.ends_with_wide_pad().then(|| row.cells.len() - 1);
+        for (x, cell) in row.cells[start_x..=end_x].iter().enumerate() {
+            if cell.attrs.contains(CellAttrs::WIDE_SPACER) || pad_x == Some(start_x + x) {
                 continue;
             }
             cell.push_text_to(text);

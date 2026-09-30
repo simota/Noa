@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.20] - 2026-09-30
+
+### Fixed
+
+- Resizing no longer leaves stray blanks inside CJK text. When a wide glyph
+  did not fit in the last column, the blank cell it left behind was treated as
+  a real space, so reflowing to a new width inserted blanks mid-word at the old
+  wrap points. That cell is now recognized as filler: reflow, copy, search,
+  restored scrollback, and client-mode replicas all leave it out (#92).
+
 ## [0.2.19] - 2026-09-25
 
 ### Fixed

@@ -98,8 +98,12 @@ impl Screen {
 
         if width == 2 && self.cursor.x.saturating_add(1) > right {
             if autowrap {
+                let blank = self.blank();
+                let x = self.cursor.x as usize;
                 if let Some(row) = self.grid.get_mut(self.cursor.y as usize) {
+                    Self::mark_wide_pad(row, x, &blank);
                     row.wrapped = true;
+                    row.dirty = true;
                 }
                 self.index();
                 self.cursor.x = left;
@@ -396,8 +400,11 @@ impl Screen {
             }
             if self.cursor.x.saturating_add(1) > right {
                 if autowrap {
+                    let x = self.cursor.x as usize;
                     if let Some(row) = self.grid.get_mut(self.cursor.y as usize) {
+                        Self::mark_wide_pad(row, x, &blank);
                         row.wrapped = true;
+                        row.dirty = true;
                     }
                     self.index();
                     self.cursor.x = left;

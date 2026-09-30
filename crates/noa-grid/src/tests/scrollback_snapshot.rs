@@ -290,3 +290,22 @@ fn a_skipped_row_landing_on_a_live_row_drops_exactly_that_row() {
         "skip_row is unconditional by design: {text:?}"
     );
 }
+
+#[test]
+fn restored_history_rewraps_without_the_wide_wrap_filler() {
+    // The wide glyph wrapped at 4 columns; at 8 it fits right after "abc".
+    let source = run_size(4, 3, "abc界Z\r\n".as_bytes());
+    let restored = restore_into(&source, 8, 3, 1 << 20);
+
+    let row = restored
+        .active_absolute_row(0)
+        .expect("the first restored row is addressable");
+    assert_eq!(row.cells[3].ch, '界');
+    assert_eq!(row.cells[5].ch, 'Z');
+    assert!(!row.wrapped);
+    assert!(
+        row.cells
+            .iter()
+            .all(|cell| !cell.attrs.contains(CellAttrs::WIDE_PAD))
+    );
+}

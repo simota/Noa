@@ -377,3 +377,126 @@ fn resize_shrink_rows_treats_erased_rows_below_cursor_as_disposable() {
     assert_eq!(row_text(&t, 2, 1), "C");
     assert_eq!(t.primary.cursor.y, 2);
 }
+
+#[test]
+fn wide_char_wrap_flags_the_row_end_filler() {
+    let t = run_size(4, 2, "abc界Z".as_bytes());
+
+    assert!(cell(&t, 3, 0).attrs.contains(CellAttrs::WIDE_PAD));
+    assert!(!cell(&t, 2, 0).attrs.contains(CellAttrs::WIDE_PAD));
+}
+
+#[test]
+fn wide_char_wrap_blanks_stale_content_under_the_filler() {
+    let t = run_size(4, 2, "wxyz\x1b[1;4H界Z".as_bytes());
+
+    assert_eq!(cell(&t, 3, 0).ch, ' ');
+    assert!(cell(&t, 3, 0).attrs.contains(CellAttrs::WIDE_PAD));
+}
+
+#[test]
+fn growing_reflow_drops_the_wide_wrap_filler() {
+    let mut t = run_size(4, 3, "abc界Z".as_bytes());
+
+    t.resize(GridSize::new(8, 3));
+
+    assert_eq!(row_text(&t, 0, 6), "abc界 Z");
+    assert!(!t.primary.grid[0].wrapped);
+}
+
+#[test]
+fn shrinking_reflow_flags_the_wide_wrap_filler() {
+    let mut t = run_size(8, 3, "abc界Z".as_bytes());
+
+    t.resize(GridSize::new(4, 3));
+
+    assert!(cell(&t, 3, 0).attrs.contains(CellAttrs::WIDE_PAD));
+    assert_eq!(cell(&t, 0, 1).ch, '界');
+}
+
+#[test]
+fn reflow_keeps_a_real_space_at_the_row_end() {
+    let mut t = run_size(4, 3, "abc 界".as_bytes());
+    assert!(!cell(&t, 3, 0).attrs.contains(CellAttrs::WIDE_PAD));
+
+    t.resize(GridSize::new(8, 3));
+
+    assert_eq!(row_text(&t, 0, 6), "abc 界 ");
+}
+
+#[test]
+fn selected_text_and_search_skip_the_wide_wrap_filler() {
+    let mut t = run_size(4, 3, "abc界Z".as_bytes());
+
+    t.select_all();
+    assert_eq!(
+        t.selected_text().as_deref().map(|text| text.trim_end()),
+        Some("abc界Z")
+    );
+
+    t.set_search_query("c界Z");
+    assert_eq!(t.primary.search.matches().len(), 1);
+}
+
+#[test]
+fn delete_chars_drops_the_shifted_wide_wrap_filler() {
+    let mut t = run_size(4, 3, "abc界Z\x1b[1;1H\x1b[P".as_bytes());
+
+    assert!(!cell(&t, 2, 0).attrs.contains(CellAttrs::WIDE_PAD));
+    t.select_all();
+    assert_eq!(
+        t.selected_text().as_deref().map(|text| text.trim_end()),
+        Some("bc  界Z")
+    );
+}
+
+#[test]
+fn reflow_after_an_old_right_margin_wrap_is_path_independent() {
+    let bytes = "\x1b[?69h\x1b[1;4sabc界Z\x1b[?69l".as_bytes();
+    let wide_x = |t: &Terminal| {
+        (0..12)
+            .find(|&x| cell(t, x, 0).ch == '界')
+            .expect("the wide glyph stays on the first row")
+    };
+
+    let mut direct = run_size(8, 3, bytes);
+    direct.resize(GridSize::new(12, 3));
+    let mut via_narrow = run_size(8, 3, bytes);
+    via_narrow.resize(GridSize::new(4, 3));
+    via_narrow.resize(GridSize::new(12, 3));
+
+    assert_eq!(wide_x(&direct), wide_x(&via_narrow));
+    assert!((0..12).all(|x| !cell(&direct, x, 0).attrs.contains(CellAttrs::WIDE_PAD)));
+}
+
+#[test]
+fn rectangle_scroll_drops_the_moved_wide_wrap_filler() {
+    let mut t = run_size(
+        8,
+        3,
+        "\x1b[?69h\x1b[1;4s\x1b[2;1Habc界\x1b[S\x1b[?69l\x1b[1;5HQ".as_bytes(),
+    );
+
+    t.select_all();
+    let text = t.selected_text().expect("text on screen");
+    assert!(text.starts_with("abc Q"), "{text:?}");
+    t.set_search_query("c Q");
+    assert_eq!(t.primary.search.matches().len(), 1);
+}
+
+#[test]
+fn a_wrap_at_a_narrow_right_margin_leaves_a_plain_blank() {
+    let t = run_size(8, 3, "\x1b[?69h\x1b[1;4sabc界Z\x1b[?69l\x1b[1;8H界Q".as_bytes());
+
+    assert!(!cell(&t, 3, 0).attrs.contains(CellAttrs::WIDE_PAD));
+    assert!(cell(&t, 7, 0).attrs.contains(CellAttrs::WIDE_PAD));
+}
+
+#[test]
+fn seed_mark_wide_pad_keeps_the_occupancy_watermark() {
+    let mut t = run_size(4, 3, b"\x1b[1;4H\x1b[>$w");
+
+    assert!(t.primary.grid[0].occupied() >= 4);
+    Stream::new().feed(b"\x1b[2J", &mut t);
+    assert!(t.primary.grid[0].is_blank());
+}

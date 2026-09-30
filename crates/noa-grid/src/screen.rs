@@ -353,6 +353,41 @@ impl Screen {
         row.mark_occupied(x + 1);
     }
 
+    /// Blank the cell a wide glyph could not fit into before it wrapped. In
+    /// the last column it is also flagged as filler (see
+    /// [`Row::ends_with_wide_pad`]), so a later reflow does not mistake it for
+    /// a space; at a narrower right margin it stays an ordinary blank.
+    pub(super) fn mark_wide_pad(row: &mut Row, x: usize, blank: &Cell) {
+        if x >= row.cells.len() {
+            return;
+        }
+        Self::clear_wide_at(row, x, blank);
+        if x + 1 == row.cells.len() {
+            row.cells[x].attrs.insert(CellAttrs::WIDE_PAD);
+        }
+    }
+
+    /// Seed-only (`Handler::seed_mark_wide_pad`): flag the cell under the
+    /// cursor as filler, leaving the cursor and its latch alone.
+    pub(crate) fn seed_mark_wide_pad(&mut self) {
+        let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
+        if let Some(row) = self.grid.get_mut(y)
+            && let Some(cell) = row.cells.get_mut(x)
+        {
+            cell.attrs.insert(CellAttrs::WIDE_PAD);
+            row.mark_occupied(x + 1);
+            row.dirty = true;
+        }
+    }
+
+    /// Clear the filler flag from cells a shift or rectangle scroll moved: they
+    /// no longer sit where their row's soft wrap left them.
+    fn clear_moved_wide_pad(cells: &mut [Cell]) {
+        for cell in cells {
+            cell.attrs.remove(CellAttrs::WIDE_PAD);
+        }
+    }
+
     fn sanitize_wide_row(row: &mut Row, blank: &Cell) {
         // Cells past the occupancy watermark are default (no layout flags),
         // so the invariant scan can stop there. Writes below only touch

@@ -245,8 +245,9 @@ impl<'a> RowSearch<'a> {
             self.positions.clear();
         }
         self.continuation = row.wrapped.then(|| storage_y.saturating_add(1));
+        let pad_x = row.ends_with_wide_pad().then(|| row.cells.len() - 1);
         for (x, cell) in row.cells.iter().enumerate() {
-            if cell.attrs.contains(CellAttrs::WIDE_SPACER) {
+            if cell.attrs.contains(CellAttrs::WIDE_SPACER) || pad_x == Some(x) {
                 continue;
             }
             cell.push_text_to(&mut self.text);
@@ -372,8 +373,9 @@ mod tests {
     ) {
         let mut text = String::new();
         let mut columns = Vec::new();
+        let pad_x = row.ends_with_wide_pad().then(|| row.cells.len() - 1);
         for (x, cell) in row.cells.iter().enumerate() {
-            if !cell.attrs.contains(CellAttrs::WIDE_SPACER) {
+            if !cell.attrs.contains(CellAttrs::WIDE_SPACER) && pad_x != Some(x) {
                 cell.push_text_to(&mut text);
                 columns.extend(std::iter::repeat_n(x as u16, cell.text_chars().count()));
             }

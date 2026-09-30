@@ -618,7 +618,7 @@ pub fn decode_within(bytes: &[u8], max_body: u64) -> Option<ScrollbackSnapshot> 
 ///
 /// A wide (CJK) glyph and its spacer are never separated: when a split would
 /// land between them, the lead moves to the next row and the vacated column is
-/// left blank — the same choice the live reflow makes.
+/// left as a blank `WIDE_PAD` filler — the same choice the live reflow makes.
 pub fn rewrap(rows: Vec<Row>, cols: u16) -> Vec<Row> {
     if cols == 0 {
         return Vec::new();
@@ -632,7 +632,12 @@ pub fn rewrap(rows: Vec<Row>, cols: u16) -> Vec<Row> {
     let mut logical: Vec<Cell> = Vec::new();
     for row in rows {
         let continues = row.wrapped;
-        let trimmed = trimmed_cells(&row).len();
+        let mut trimmed = trimmed_cells(&row).len();
+        // The filler a wide glyph left at the end of a soft-wrapped row is
+        // layout for the old width, not content.
+        if trimmed == row.cells.len() && row.ends_with_wide_pad() {
+            trimmed -= 1;
+        }
         logical.extend_from_slice(&row.cells[..trimmed]);
         if continues {
             continue;
@@ -669,8 +674,12 @@ fn emit_logical_line(line: &[Cell], width: usize, out: &mut Vec<Row>) {
             end > start,
             "every iteration must consume at least one cell"
         );
+        let backed_off = end < line.len() && end - start < width;
         let mut cells = line[start..end].to_vec();
         cells.resize(width, Cell::default());
+        if backed_off {
+            cells[end - start].attrs.insert(CellAttrs::WIDE_PAD);
+        }
         let wrapped = end < line.len();
         out.push(Row::from_cells(cells, wrapped, false));
         start = end;
@@ -924,8 +933,8 @@ mod tests {
         assert_eq!(wrapped[0].cells[0].ch, 'x');
         assert_eq!(
             wrapped[0].cells[1],
-            Cell::default(),
-            "the lead moved down, leaving the column blank"
+            styled(' ', Color::Default, CellAttrs::WIDE_PAD),
+            "the lead moved down, leaving the column as filler"
         );
         assert_eq!(wrapped[1].cells[0].ch, 'あ');
         assert!(wrapped[1].cells[1].attrs.contains(CellAttrs::WIDE_SPACER));

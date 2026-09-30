@@ -576,6 +576,10 @@ impl Handler for Terminal {
         };
     }
 
+    fn seed_mark_wide_pad(&mut self) {
+        self.active_mut().seed_mark_wide_pad();
+    }
+
     fn seed_set_default_cursor_style(&mut self, ps: u16, hollow: bool) {
         use crate::cursor::CursorStyle;
         // Mirrors the `DECSCUSR` numbering `write_cursor_style` emits, plus

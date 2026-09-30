@@ -444,6 +444,14 @@ pub trait Handler {
     /// recover it exactly. Emitted only by `Terminal::synthetic_seed`; real
     /// programs never send this.
     fn seed_set_cursor_hollow(&mut self) {}
+    /// Client-mode seed-only: `CSI > $ w` flags the cell under the cursor as
+    /// the filler a wide glyph left when it wrapped (`CellAttrs::WIDE_PAD`),
+    /// without moving the cursor or clearing its deferred-wrap latch. The
+    /// seed recreates a latch by reprinting the cell under the cursor, which
+    /// turns a filler there into a plain space; this puts the flag back.
+    /// Emitted only by `Terminal::synthetic_seed`; real programs never send
+    /// this.
+    fn seed_mark_wide_pad(&mut self) {}
     /// Client-mode seed-only: `CSI > Ps ; Ph $ q` restores the DECSCUSR-0
     /// default cursor style (the shape a bare `CSI 0 q` resets to), kept
     /// independent from whatever `DECSCUSR` the seed used to paint the

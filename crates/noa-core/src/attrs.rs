@@ -20,6 +20,10 @@ bitflags! {
         const CURLY_UNDERLINE  = 1 << 12;
         const DOTTED_UNDERLINE = 1 << 13;
         const DASHED_UNDERLINE = 1 << 14;
+        /// Filler in the last column of a soft-wrapped row where a wide glyph
+        /// did not fit and moved to the next row. Not content: reflow, copy
+        /// and search skip it. Anywhere else the flag is ignored.
+        const WIDE_PAD      = 1 << 15;
     }
 }
 

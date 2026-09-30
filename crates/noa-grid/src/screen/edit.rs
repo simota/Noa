@@ -476,6 +476,7 @@ impl Screen {
         for y in top..=bottom {
             let row = &mut self.grid[y];
             row.mark_occupied(right + 1);
+            Self::clear_moved_wide_pad(&mut row.cells[left..=right]);
             Self::sanitize_wide_row(row, &blank);
             row.dirty = true;
         }
@@ -496,6 +497,7 @@ impl Screen {
         for y in top..=bottom {
             let row = &mut self.grid[y];
             row.mark_occupied(right + 1);
+            Self::clear_moved_wide_pad(&mut row.cells[left..=right]);
             Self::sanitize_wide_row(row, &blank);
             row.dirty = true;
         }
@@ -883,6 +885,7 @@ impl Screen {
         for c in &mut row.cells[right + 1 - n..=right] {
             c.set_from(&blank);
         }
+        Self::clear_moved_wide_pad(&mut row.cells[x..=right]);
         // The left shift only moves content toward lower indices (the cells
         // it wraps to the end are overwritten by the fill), so the existing
         // watermark stays a valid bound — unless the fill is a styled (BCE)

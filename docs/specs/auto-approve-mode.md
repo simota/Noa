@@ -5,6 +5,42 @@
 - owner: simota
 - build-path decision: **apex** (`/nexus apex` — live AC: T-1 signature capture and AC-11/12/13 GUI visual checks remain manual)
 
+## 2026-10-01 revision — command denylist
+
+This revision supersedes the "not filtered by an allowlist or denylist"
+statements below for Codex and agy command dialogs, to restore FR-11 ("never
+approve dangerous operations").
+
+- Every recognized command dialog is checked against a fixed denylist
+  (`crates/noa-app/src/auto_approve/denylist.rs`). The check reads the rows
+  above the choices (the choices only echo the command), and a blank row ends
+  a paragraph.
+  - **Wraps:** a row boundary may fall between words or inside one, and the
+    grid cannot tell which. The words on both sides are kept as separate words
+    and are also offered glued together. The check stays linear in the length
+    of the paragraph, however its wraps mix.
+  - **Quoting:** words are split twice, once shell-quoted and once plainly. A
+    quoted path such as `"/tmp/my project"` stays one argument, and a quoted
+    program (`| 'bash'`, `sh -c '…'`) is still seen.
+  - **Position:** rules ask what appears after what, never where. A flag can
+    appear anywhere in the command (`git clean target -f`). A git subcommand is
+    found by name, so global options such as `-C <dir>` need no parsing.
+    Programs are matched by basename (`/bin/rm`).
+  - **Rules:** `rm -r`/`--recursive`, `sudo`/`doas`, forced `git push`,
+    `git reset --hard`, `git clean -f`/`--force`, `--no-verify`, a pipe into a
+    shell (`sh`, `bash`, `zsh`, `dash`, `ksh`, `fish`) or `sudo`, recursive
+    `chmod`/`chown`, `dd of=`, `mkfs*`, `diskutil erase*`,
+    `shutdown`/`reboot`/`halt`, and `DROP TABLE`/`DROP DATABASE`/`TRUNCATE
+    TABLE`.
+  - **Ambiguity resolves toward denying.** A false hit costs only a manual
+    approval. For example, `| grep sh` is denied, as is a destructive command
+    named only inside a commit message.
+- A hit withholds the automatic answer, and the dialog waits for the user as
+  it would with the mode off. `NOA_AUTO_APPROVE_TRACE=1` logs the rule that
+  matched. The check is best-effort: it sees only what the dialog paints, so a
+  command an agent elides (agy's `⋯ (n lines hidden)`) or wraps in a script can
+  still pass.
+
 ## 2026-10-01 revision — breaker re-enable
 
 The runaway breaker no longer keeps a latch in the io thread. Its off switch

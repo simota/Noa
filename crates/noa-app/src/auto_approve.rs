@@ -10,6 +10,8 @@ use noa_grid::{Cell, Terminal};
 
 use crate::sidebar::AgentKind;
 
+mod denylist;
+
 pub(crate) const USER_INPUT_SUPPRESSION: Duration = Duration::from_secs(3);
 pub(crate) const APPROVAL_WINDOW: Duration = Duration::from_secs(60);
 pub(crate) const APPROVAL_LIMIT: usize = 6;
@@ -635,6 +637,22 @@ fn find_signature_with_lowercase(
     ) {
         let region = menu_prompt_region(rows, lowercase_rows, sig)?;
         if !menu_has_live_tail(rows, *region.end(), sig) {
+            return None;
+        }
+        // The choices below only echo the command ("… start with git add").
+        let choices = region
+            .clone()
+            .find(|&idx| selected_option(&rows[idx]).is_some())
+            .expect("a matched menu has a selected choice");
+        if sig.kind == PromptKind::Command
+            && let Some(rule) = denylist::denied_rule(&lowercase_rows[*region.start()..choices])
+        {
+            if trace_enabled() {
+                eprintln!(
+                    "[auto-approve] withheld {:?}: denylist rule {rule:?}",
+                    sig.id
+                );
+            }
             return None;
         }
         return Some(MatchedPrompt {
@@ -2331,6 +2349,82 @@ mod tests {
         }
     }
 
+    const DENYLIST_GRID_COLS: usize = 48;
+
+    /// Paint a Codex command dialog showing `command` on a 48-column grid,
+    /// returning its rows and the settled decision.
+    fn decide_codex_command_on_grid(command: &str) -> (Vec<RowText>, Decision) {
+        let prompt: Vec<RowText> = codex_command_prompt()
+            .into_iter()
+            .map(|row| {
+                if row.starts_with("$ ") {
+                    command.to_string()
+                } else {
+                    row
+                }
+            })
+            .collect();
+        let mut terminal = Terminal::new(noa_core::GridSize::new(DENYLIST_GRID_COLS as u16, 30));
+        noa_vt::Stream::new().feed(prompt.join("\r\n").as_bytes(), &mut terminal);
+        let screen = viewport_rows_from_terminal(&terminal);
+        let position = terminal.active().cursor;
+        let cursor = Point {
+            x: position.x,
+            y: position.y,
+        };
+        let mut state = AutoApproveState::default();
+        let first_seen = base_ctx(fixed_now());
+        let _ = detect_and_update_any_agent(&screen, cursor, first_seen, &mut state);
+        let decision =
+            detect_and_update_any_agent(&screen, cursor, settled(first_seen), &mut state);
+        (screen, decision)
+    }
+
+    #[test]
+    fn denylist_sees_a_flag_split_by_the_grid_wrap() {
+        for (program, approved) in [("ls", true), ("rm", false)] {
+            // The first physical row ends exactly at `… && rm -`.
+            let tail = format!(" && {program} -");
+            let filler = "x".repeat(DENYLIST_GRID_COLS - "$ ".len() - tail.len());
+            let (screen, decision) =
+                decide_codex_command_on_grid(&format!("$ {filler}{tail}rf target"));
+            assert!(
+                screen.iter().any(|row| row.trim_end().ends_with(&tail))
+                    && screen.iter().any(|row| row.starts_with("rf target")),
+                "the flag should wrap mid-token: {screen:?}"
+            );
+            assert_eq!(
+                matches!(decision, Decision::Fire { .. }),
+                approved,
+                "{program}"
+            );
+        }
+    }
+
+    #[test]
+    fn denylist_sees_mixed_word_and_mid_word_grid_wraps() {
+        // `… && git` | `reset <sha> -` | `-hard`: the first wrap falls between
+        // words, the second inside `--hard`.
+        let tail = " && git";
+        let filler = "x".repeat(DENYLIST_GRID_COLS - "$ ".len() - tail.len());
+        let reset = format!("reset {} -", &"0123456789abcdef".repeat(3)[..40]);
+        assert_eq!(reset.len(), DENYLIST_GRID_COLS);
+        for (mode, approved) in [("-soft", true), ("-hard", false)] {
+            let (screen, decision) =
+                decide_codex_command_on_grid(&format!("$ {filler}{tail}{reset}{mode}"));
+            assert!(
+                screen.iter().any(|row| row.trim_end() == reset)
+                    && screen.iter().any(|row| row.trim_end() == mode),
+                "expected three physical rows: {screen:?}"
+            );
+            assert_eq!(
+                matches!(decision, Decision::Fire { .. }),
+                approved,
+                "{mode}"
+            );
+        }
+    }
+
     #[test]
     fn detect_holds_for_generic_agent_even_with_known_signature() {
         let now = fixed_now();
@@ -2635,5 +2729,27 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn destructive_codex_command_is_withheld() {
+        let now = fixed_now();
+        let prompt: Vec<RowText> = codex_command_prompt()
+            .into_iter()
+            .map(|row| row.replace("git add sample.rs", "rm -rf ~/src"))
+            .collect();
+        let cursor = cursor((prompt.len() - 1) as u16);
+        let mut state = AutoApproveState::default();
+        let mut ctx = base_ctx(now);
+        for _ in 0..3 {
+            assert_eq!(
+                detect_and_update_any_agent(&prompt, cursor, ctx, &mut state),
+                Decision::Hold
+            );
+            ctx.now += CODEX_PROMPT_SETTLE;
+        }
+        assert!(
+            rescan_signature(&prompt, AutoApproveSignature::CodexCommand, cursor, ctx).is_none()
+        );
     }
 }

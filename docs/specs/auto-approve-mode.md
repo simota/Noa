@@ -5,6 +5,13 @@
 - owner: simota
 - build-path decision: **apex** (`/nexus apex` — live AC: T-1 signature capture and AC-11/12/13 GUI visual checks remain manual)
 
+## 2026-10-01 revision — breaker re-enable
+
+The runaway breaker no longer keeps a latch in the io thread. Its off switch
+is only the tab flag, which the main thread clears when it sends the sixth
+approval. Before this change, turning the mode back on before the next pty
+output left the pane suppressed.
+
 ## 2026-09-14 investigation — agy approval remains pending
 
 The supplied log-search dialog passes both text and VT/grid detection tests.

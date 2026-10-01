@@ -205,7 +205,6 @@ pub(crate) struct DetectContext {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SuppressReason {
-    Disabled,
     #[cfg(test)]
     UnknownAgent,
     ViewportNotLive,
@@ -234,7 +233,6 @@ pub(crate) struct AutoApproveState {
     pending_fire: Option<PendingPrompt>,
     awaiting_change: Option<ConsumedPrompt>,
     approvals: VecDeque<Instant>,
-    disabled_by_runaway: bool,
 }
 
 impl AutoApproveState {
@@ -243,8 +241,7 @@ impl AutoApproveState {
     }
 
     pub(crate) fn needs_static_rescan(&self) -> bool {
-        !self.disabled_by_runaway
-            && self.pending_fire.is_none()
+        self.pending_fire.is_none()
             && self.last_match.is_some_and(|key| {
                 self.awaiting_change.is_none_or(|consumed| {
                     consumed.signature != key.signature || consumed.region_hash != key.region_hash
@@ -274,15 +271,27 @@ impl AutoApproveState {
             return;
         }
 
-        self.approvals.push_back(now);
-        self.awaiting_change = Some(ConsumedPrompt {
+        let consumed = Some(ConsumedPrompt {
             signature,
             region_hash,
         });
+        if pending.disable_after {
+            // The breaker's off switch is the tab flag, cleared in the same
+            // main-thread step that sent this feedback, so every candidate
+            // the main thread handles afterwards is rejected as mode-off.
+            // Latching here too would outlive a re-enable that arrives
+            // before the next pty output, so start over as a fresh mode-on.
+            *self = Self {
+                awaiting_change: consumed,
+                ..Self::default()
+            };
+            return;
+        }
+        self.approvals.push_back(now);
+        self.awaiting_change = consumed;
         self.last_match = None;
         self.last_match_since = None;
         self.match_count = 0;
-        self.disabled_by_runaway = pending.disable_after;
     }
 }
 
@@ -336,7 +345,7 @@ pub(crate) fn detect_and_update_any_agent(
     ctx: DetectContext,
     state: &mut AutoApproveState,
 ) -> Decision {
-    let (decision, matched) = match suppression(ctx, state.disabled_by_runaway) {
+    let (decision, matched) = match suppression(ctx) {
         Some(reason) => {
             // Temporary input/viewport guards keep tracking the prompt
             // (see `apply_decision_state`), so only they pay for a scan.
@@ -366,7 +375,7 @@ pub(crate) fn rescan_signature(
     cursor: Point,
     ctx: DetectContext,
 ) -> Option<MatchedPrompt> {
-    if suppression(ctx, false).is_some() {
+    if suppression(ctx).is_some() {
         return None;
     }
     find_signature(rows, cursor, signature(signature_id))
@@ -419,7 +428,7 @@ fn detect_inner(
     ctx: DetectContext,
     state: &AutoApproveState,
 ) -> Decision {
-    if let Some(reason) = suppression(ctx, state.disabled_by_runaway) {
+    if let Some(reason) = suppression(ctx) {
         return Decision::Suppressed(reason);
     }
     decide(find_prompt(rows, cursor, agent).as_ref(), ctx, state)
@@ -564,10 +573,7 @@ fn apply_decision_state(
     }
 }
 
-fn suppression(ctx: DetectContext, disabled_by_runaway: bool) -> Option<SuppressReason> {
-    if disabled_by_runaway {
-        return Some(SuppressReason::Disabled);
-    }
+fn suppression(ctx: DetectContext) -> Option<SuppressReason> {
     if !ctx.alt_screen && ctx.scrollback_offset != 0 {
         return Some(SuppressReason::ViewportNotLive);
     }
@@ -2584,9 +2590,50 @@ mod tests {
         };
         assert!(disable_after);
         state.apply_feedback(signature, region_hash, true, now);
-        assert!(matches!(
+        // The accepted prompt is never answered twice ...
+        assert_eq!(
             detect_and_update_any_agent(&prompt, cursor(1), base_ctx(now), &mut state),
-            Decision::Suppressed(SuppressReason::Disabled)
+            Decision::Hold
+        );
+        assert!(state.approvals.is_empty());
+    }
+
+    #[test]
+    fn re_enabling_after_the_breaker_needs_no_intervening_output() {
+        let now = fixed_now();
+        let mut state = AutoApproveState {
+            approvals: VecDeque::from(vec![now - Duration::from_secs(1); APPROVAL_LIMIT - 1]),
+            ..Default::default()
+        };
+        let edit = claude_edit_prompt();
+        let _ = detect_and_update_any_agent(&edit, cursor(1), base_ctx(now), &mut state);
+        let Decision::Fire {
+            signature,
+            region_hash,
+            disable_after: true,
+        } = detect_and_update_any_agent(&edit, cursor(1), base_ctx(now), &mut state)
+        else {
+            panic!("the limit-reaching approval should fire with disable_after");
+        };
+        state.apply_feedback(signature, region_hash, true, now);
+
+        // The user turns the mode back on before any pty output reaches the
+        // io thread's mode-off reset: the next prompt is still answered.
+        let codex = codex_command_prompt();
+        let cursor = cursor((codex.len() - 1) as u16);
+        let mut ctx = base_ctx(now);
+        assert_eq!(
+            detect_and_update_any_agent(&codex, cursor, ctx, &mut state),
+            Decision::Hold
+        );
+        ctx.now += CODEX_PROMPT_SETTLE;
+        assert!(matches!(
+            detect_and_update_any_agent(&codex, cursor, ctx, &mut state),
+            Decision::Fire {
+                signature: AutoApproveSignature::CodexCommand,
+                disable_after: false,
+                ..
+            }
         ));
     }
 }

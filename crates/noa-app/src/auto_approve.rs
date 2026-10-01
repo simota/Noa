@@ -89,6 +89,9 @@ struct Signature {
 
 const CODEX_PROMPT_SETTLE: Duration = Duration::from_millis(300);
 
+// #TODO(agent): UNVERIFIED — the Claude anchors below come from synthetic
+// fixtures only; capture a real Claude Code permission dialog and either fix
+// them or move Claude approval to its `PermissionRequest` hook.
 const SIGNATURES: &[Signature] = &[
     Signature {
         id: AutoApproveSignature::ClaudeEdit,

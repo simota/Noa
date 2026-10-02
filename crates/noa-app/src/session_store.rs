@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use noa_core::Color;
 
+use crate::sidebar::{AgentKind, classify_agent};
 use crate::split_tree::PaneId;
 
 /// One color run within a card's last-output preview (FR-2): a maximal span of
@@ -169,6 +170,13 @@ pub struct SessionCard {
     /// finer than `updated_at`, whose minute granularity would tie cards that
     /// updated within the same minute.
     activity: u64,
+}
+
+fn agent_left(previous: Option<&str>, current: Option<&str>) -> bool {
+    let is_agent = |process: Option<&str>| {
+        process.is_some_and(|process| classify_agent(process) != AgentKind::Generic)
+    };
+    is_agent(previous) && !is_agent(current)
 }
 
 impl SessionCard {
@@ -698,6 +706,17 @@ impl SessionStore {
             SessionDelta::ProgressError { .. } => {}
             SessionDelta::Process { id, process } => {
                 if let Some(card) = self.cards.get_mut(&id) {
+                    // An agent that dies without its end-of-session report
+                    // (crash, kill) would otherwise leave its last status on
+                    // the card. Only leaving recognized agents altogether
+                    // clears it: process deltas post on change only, so a
+                    // report that beat the poll may already belong to the
+                    // arriving agent (shell → agent, or one agent replacing
+                    // another between polls) and must survive that arrival.
+                    if agent_left(card.process.as_deref(), process.as_deref()) {
+                        card.agent_status = None;
+                        card.agent_status_at = None;
+                    }
                     card.process = process;
                 }
             }
@@ -1821,6 +1840,47 @@ mod tests {
             at: wall(10, 1),
         });
         assert!(store.get(&id).unwrap().agent_status.is_none());
+    }
+
+    #[test]
+    fn agent_status_clears_when_the_agent_leaves_the_foreground() {
+        let mut store = SessionStore::new();
+        let id = card_id(1, 1);
+        store.apply(upsert(id, 1, "agent"));
+        let process = |name: &str| SessionDelta::Process {
+            id,
+            process: Some(name.into()),
+        };
+        let report = |state| SessionDelta::AgentStatus {
+            id,
+            status: Some(noa_grid::AgentStatus {
+                state,
+                detail: String::new(),
+            }),
+            at: wall(10, 0),
+        };
+        store.apply(process("zsh"));
+        // The hook's first report can beat the 1s poll noticing the agent.
+        store.apply(report(noa_grid::AgentState::Running));
+        store.apply(process("claude"));
+        assert!(store.get(&id).unwrap().agent_status.is_some());
+
+        // codex exits and claude starts between polls; claude's report lands
+        // before the poll that sees it.
+        store.apply(process("codex"));
+        store.apply(report(noa_grid::AgentState::Permission));
+        store.apply(process("claude"));
+        let card = store.get(&id).unwrap();
+        assert_eq!(
+            card.agent_status.as_ref().map(|status| status.state),
+            Some(noa_grid::AgentState::Permission)
+        );
+        assert!(!card.is_running());
+
+        store.apply(process("zsh"));
+        let card = store.get(&id).unwrap();
+        assert!(card.agent_status.is_none());
+        assert!(card.agent_status_at.is_none());
     }
 
     #[test]

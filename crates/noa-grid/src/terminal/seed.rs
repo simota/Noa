@@ -134,6 +134,9 @@ impl Terminal {
         }
         write_default_cursor_style(&mut seed, self.default_cursor_style);
         write_progress(&mut seed, self.progress);
+        if let Some(shape) = &self.mouse_shape {
+            write!(seed, "\x1b]22;{shape}\x1b\\").expect("writing to String cannot fail");
+        }
 
         seed.into_bytes()
     }

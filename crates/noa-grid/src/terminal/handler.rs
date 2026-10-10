@@ -498,6 +498,7 @@ impl Handler for Terminal {
         self.pending_notifications.clear();
         self.pending_agent_status = Some(None);
         self.program_status_active = false;
+        self.set_mouse_shape(None);
         self.pending_bell = false;
         self.kitty_keyboard.reset();
         self.modify_other_keys_2 = false;
@@ -680,6 +681,19 @@ impl Handler for Terminal {
         }
         if let Some(report) = crate::osc::parse_program_status_osc(data) {
             self.program_status(report);
+            return;
+        }
+        if let Some(name) = data.strip_prefix(b"22;") {
+            // Names are short ASCII identifiers (`pointer`, `col-resize`,
+            // `left_ptr`); anything else is ignored rather than stored.
+            let valid = name.len() <= 32
+                && name
+                    .iter()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
+            if valid {
+                let name = String::from_utf8_lossy(name).into_owned();
+                self.set_mouse_shape((!name.is_empty() && name != "default").then_some(name));
+            }
             return;
         }
         if handle_color_osc(data, &mut self.colors, &mut self.pending_writes) {

@@ -478,20 +478,21 @@ impl App {
 
     /// Pointer cursor while a link is Cmd+hovered in `window_id`'s
     /// under-the-mouse pane (or the sidebar `+` button is under the pointer),
-    /// the platform default otherwise.
+    /// else that pane's `OSC 22` shape, else the platform default.
     pub(in crate::app) fn update_cursor_icon(&self, window_id: WindowId) {
         let Some(state) = self.windows.get(&window_id) else {
             return;
         };
-        let hovering = state.sidebar_button_hover
-            || state
-                .last_mouse_pane
-                .and_then(|pane_id| state.surfaces.get(&pane_id))
-                .is_some_and(|surface| surface.hover_link.is_some());
+        let pane = state
+            .last_mouse_pane
+            .and_then(|pane_id| state.surfaces.get(&pane_id));
+        let hovering =
+            state.sidebar_button_hover || pane.is_some_and(|surface| surface.hover_link.is_some());
         state.window.set_cursor(if hovering {
             CursorIcon::Pointer
         } else {
-            CursorIcon::Default
+            pane.and_then(|surface| surface.terminal.lock().mouse_shape().and_then(cursor_icon))
+                .unwrap_or(CursorIcon::Default)
         });
     }
 
@@ -614,5 +615,37 @@ mod path_resolution_tests {
     #[test]
     fn refuses_relative_path_with_no_cwd() {
         assert_eq!(resolve_hover_path_with("src/main.rs", None, None), None);
+    }
+}
+
+/// An `OSC 22` shape name as a winit cursor: the CSS `cursor` names, plus
+/// the common X11 cursor-font aliases Ghostty also accepts.
+fn cursor_icon(name: &str) -> Option<CursorIcon> {
+    let css = match name {
+        "left_ptr" | "arrow" | "top_left_arrow" => "default",
+        "xterm" | "ibeam" => "text",
+        "hand1" | "hand2" | "pointing_hand" => "pointer",
+        "watch" => "wait",
+        "left_ptr_watch" => "progress",
+        "question_arrow" | "whats_this" => "help",
+        "fleur" => "move",
+        "sb_h_double_arrow" => "ew-resize",
+        "sb_v_double_arrow" => "ns-resize",
+        name => name,
+    };
+    css.parse().ok()
+}
+
+#[cfg(test)]
+mod cursor_icon_tests {
+    use super::*;
+
+    #[test]
+    fn osc22_names_map_to_winit_cursors() {
+        assert_eq!(cursor_icon("pointer"), Some(CursorIcon::Pointer));
+        assert_eq!(cursor_icon("col-resize"), Some(CursorIcon::ColResize));
+        assert_eq!(cursor_icon("xterm"), Some(CursorIcon::Text));
+        assert_eq!(cursor_icon("hand2"), Some(CursorIcon::Pointer));
+        assert_eq!(cursor_icon("no-such-cursor"), None);
     }
 }

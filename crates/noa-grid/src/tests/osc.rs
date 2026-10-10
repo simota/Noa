@@ -1070,3 +1070,36 @@ fn program_status_subagent_entries_do_not_touch_the_card() {
     assert!(t.take_pending_agent_status().is_none());
     assert!(t.take_pending_writes().is_empty());
 }
+
+#[test]
+fn osc22_sets_and_resets_the_pointer_shape() {
+    let mut t = run(b"\x1b]22;pointer\x1b\\");
+    assert_eq!(t.mouse_shape(), Some("pointer"));
+    assert!(t.take_mouse_shape_changed());
+    assert!(!t.take_mouse_shape_changed());
+
+    Stream::new().feed(b"\x1b]22;pointer\x07", &mut t);
+    assert!(!t.take_mouse_shape_changed(), "same shape is not a change");
+
+    Stream::new().feed(b"\x1b]22;evil;name\x07\x1b]22;\xe3\x81\x82\x07", &mut t);
+    assert_eq!(
+        t.mouse_shape(),
+        Some("pointer"),
+        "invalid names are ignored"
+    );
+
+    Stream::new().feed(b"\x1b]22;default\x07", &mut t);
+    assert_eq!(t.mouse_shape(), None);
+    assert!(t.take_mouse_shape_changed());
+
+    Stream::new().feed(b"\x1b]22;text\x07\x1bc", &mut t);
+    assert_eq!(t.mouse_shape(), None, "RIS restores the default pointer");
+}
+
+#[test]
+fn synthetic_seed_restores_the_pointer_shape() {
+    let source = run(b"\x1b]22;pointer\x1b\\");
+    let mut replica = run(b"");
+    Stream::new().feed(&source.synthetic_seed(), &mut replica);
+    assert_eq!(replica.mouse_shape(), Some("pointer"));
+}

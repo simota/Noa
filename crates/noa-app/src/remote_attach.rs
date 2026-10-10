@@ -331,6 +331,9 @@ trait ConnectionNotifier: Send + Sync + 'static {
     /// Progress entered Error, independently of the final state drained from
     /// the same remote batch.
     fn progress_error(&self) {}
+
+    /// The attached pane's `OSC 22` pointer shape changed.
+    fn mouse_shape_changed(&self) {}
 }
 
 #[derive(Default)]
@@ -410,6 +413,12 @@ impl ConnectionNotifier for WinitConnectionNotifier {
 
     fn flush_overview_if_due(&self, terminal: &Arc<Mutex<Terminal>>) -> bool {
         self.overview.flush_if_due(terminal)
+    }
+
+    fn mouse_shape_changed(&self) {
+        let _ = self
+            .proxy
+            .send_event(UserEvent::MouseShapeChanged(self.window_id, self.pane_id));
     }
 
     fn bell(&self) {
@@ -1777,10 +1786,14 @@ fn feed_remote_seed<N: ConnectionNotifier>(
     let _ = terminal.take_pending_clipboard_writes();
     let progress = terminal.take_pending_progress_update();
     let _ = terminal.take_pending_progress_cue();
+    let mouse_shape_changed = terminal.take_mouse_shape_changed();
     notifier.publish_overview(&terminal);
     drop(terminal);
     if let Some(progress) = progress {
         notifier.progress(progress);
+    }
+    if mouse_shape_changed {
+        notifier.mouse_shape_changed();
     }
     notifier.redraw();
 }
@@ -1812,6 +1825,7 @@ fn feed_remote_bytes<N: ConnectionNotifier>(
     let bell = terminal.take_pending_bell();
     let progress = terminal.take_pending_progress_update();
     let progress_cue = terminal.take_pending_progress_cue();
+    let mouse_shape_changed = terminal.take_mouse_shape_changed();
     let _ = terminal.take_pending_writes();
     let _ = terminal.take_pending_clipboard_reads();
     let _ = terminal.take_pending_clipboard_writes();
@@ -1827,6 +1841,9 @@ fn feed_remote_bytes<N: ConnectionNotifier>(
     }
     if let Some(progress) = progress {
         notifier.progress(progress);
+    }
+    if mouse_shape_changed {
+        notifier.mouse_shape_changed();
     }
     notifier.redraw();
     RemoteFeedOutcome {
@@ -2494,6 +2511,7 @@ mod tests {
         progress_updates: Arc<Mutex<Vec<noa_grid::ProgressUpdate>>>,
         progress_completions: Arc<AtomicUsize>,
         progress_errors: Arc<AtomicUsize>,
+        mouse_shape_changes: Arc<AtomicUsize>,
     }
 
     impl ConnectionNotifier for FakeNotifier {
@@ -2534,6 +2552,10 @@ mod tests {
 
         fn progress_error(&self) {
             self.progress_errors.fetch_add(1, Ordering::AcqRel);
+        }
+
+        fn mouse_shape_changed(&self) {
+            self.mouse_shape_changes.fetch_add(1, Ordering::AcqRel);
         }
     }
 
@@ -3999,6 +4021,37 @@ mod tests {
         // no BEL must not report one.
         feed_remote_bytes(&mut stream, &terminal, b"no bell here", &notifier);
         assert_eq!(notifier.bells.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn remote_seed_forwards_its_restored_pointer_shape() {
+        let size = GridSize::new(20, 4);
+        let mut source = Terminal::new(size);
+        noa_vt::Stream::new().feed(b"\x1b]22;pointer\x07", &mut source);
+        let replica = Arc::new(Mutex::new(Terminal::new(size)));
+        let notifier = FakeNotifier::default();
+
+        feed_remote_seed(
+            &mut noa_vt::Stream::new(),
+            &replica,
+            &source.synthetic_seed(),
+            size,
+            &notifier,
+        );
+        assert_eq!(replica.lock().mouse_shape(), Some("pointer"));
+        assert_eq!(notifier.mouse_shape_changes.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn remote_osc22_forwards_a_pointer_shape_change_like_the_local_pty_path() {
+        let terminal = terminal();
+        let notifier = FakeNotifier::default();
+        let mut stream = noa_vt::Stream::new();
+
+        feed_remote_bytes(&mut stream, &terminal, b"\x1b]22;pointer\x1b\\", &notifier);
+        assert_eq!(notifier.mouse_shape_changes.load(Ordering::Acquire), 1);
+        feed_remote_bytes(&mut stream, &terminal, b"\x1b]22;pointer\x1b\\", &notifier);
+        assert_eq!(notifier.mouse_shape_changes.load(Ordering::Acquire), 1);
     }
 
     #[test]

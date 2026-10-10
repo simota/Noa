@@ -70,6 +70,8 @@ pub enum UserEvent {
         region_hash: u64,
         disable_after: bool,
     },
+    /// The pane's `OSC 22` pointer shape changed; re-pick the mouse cursor.
+    MouseShapeChanged(WindowId, PaneId),
     /// New terminal output is available; request a redraw.
     Redraw(WindowId, PaneId),
     SearchUpdated(WindowId, PaneId),

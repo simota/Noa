@@ -273,6 +273,11 @@ impl ApplicationHandler<UserEvent> for App {
                     noa_config::ClipboardAccess::Deny => {}
                 }
             }
+            UserEvent::MouseShapeChanged(window_id, pane_id) => {
+                if let Some(window_id) = self.resolve_pane_window(window_id, pane_id) {
+                    self.update_cursor_icon(window_id);
+                }
+            }
             UserEvent::Notify {
                 window_id,
                 pane_id,

@@ -3,12 +3,14 @@
 //! program running in the shell can set one), so only a small set of
 //! obviously-safe schemes is ever handed to `open`.
 
-/// The Cmd+click open target the hover-link machinery resolved: either an
-/// OSC 8 / auto-detected URI (dispatched through the scheme allowlist below)
-/// or a filesystem path already resolved by the asynchronous hover probe.
+/// The Cmd+click open target the hover-link machinery resolved: an OSC 8 /
+/// auto-detected URI (dispatched through the scheme allowlist below), the
+/// local path of an OSC 8 `file://` link, or a filesystem path already
+/// resolved by the asynchronous hover probe.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum LinkTarget {
     Uri(String),
+    FileUri(std::path::PathBuf),
     Path {
         path: std::path::PathBuf,
         line: Option<u32>,
@@ -70,31 +72,146 @@ pub fn open_path(
     editor: noa_config::FileLinkEditor,
 ) {
     let path = path.to_owned();
-    std::thread::spawn(move || {
-        if editor != noa_config::FileLinkEditor::Default && path.is_file() {
-            let result = std::process::Command::new(editor.as_str())
-                .args(editor_arguments(&path, line, column, editor))
-                .status();
-            match result {
-                Ok(status) if status.success() => return,
-                Ok(status) => log::warn!(
-                    "file-link editor {} exited with {status}; using default application",
-                    editor.as_str()
-                ),
-                Err(err) => log::warn!(
-                    "could not launch file-link editor {}: {err}; using default application",
-                    editor.as_str()
-                ),
-            }
-        }
-        match std::process::Command::new("open").arg(&path).status() {
-            Ok(status) if !status.success() => {
-                log::warn!("`open` failed for path {} ({status})", path.display());
-            }
-            Ok(_) => {}
-            Err(err) => log::warn!("failed to open path {}: {err}", path.display()),
-        }
+    std::thread::spawn(move || open_path_blocking(&path, line, column, editor));
+}
+
+/// Open the local path of an OSC 8 `file://` hyperlink (Ghostty opens these
+/// too). Unlike an on-screen path, the target is hidden behind arbitrary
+/// link text, so anything `open` would *run* rather than show — an
+/// executable, a `.command` script, an app bundle — is refused. The check
+/// stats the path, so it runs on the opener thread like [`open_path`]'s.
+pub fn open_file_uri(path: std::path::PathBuf, editor: noa_config::FileLinkEditor) {
+    std::thread::spawn(move || match openable_file_link(&path) {
+        Ok(resolved) => open_path_blocking(&resolved, None, None, editor),
+        Err(reason) => log::warn!("not opening file link {}: {reason}", path.display()),
     });
+}
+
+/// Extensions macOS `open` executes, installs, or follows instead of
+/// displaying (bundles are directories, so this applies to both kinds).
+const LAUNCHABLE_EXTENSIONS: [&str; 18] = [
+    "app",
+    "command",
+    "tool",
+    "terminal",
+    "workflow",
+    "action",
+    "scpt",
+    "scptd",
+    "applescript",
+    "pkg",
+    "mpkg",
+    "prefpane",
+    "saver",
+    "webloc",
+    "inetloc",
+    "fileloc",
+    "url",
+    "jar",
+];
+
+/// The resolved target of a `file://` link, or why it must not be opened.
+/// Judges (and returns, for opening) the resolved path: a symlink without an
+/// extension can point at an `.app`, and `open` follows it.
+fn openable_file_link(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let resolved = std::fs::canonicalize(path).map_err(|err| err.to_string())?;
+    let metadata = std::fs::metadata(&resolved).map_err(|err| err.to_string())?;
+    if launches_when_opened(path, &metadata) || launches_when_opened(&resolved, &metadata) {
+        return Err("it would launch rather than open".to_owned());
+    }
+    // `canonicalize` does not see through a Finder alias, but `open` does —
+    // to whatever it references, an app included. Refuse aliases outright.
+    if metadata.is_file() && is_finder_alias(&resolved) {
+        return Err("it is a Finder alias".to_owned());
+    }
+    Ok(resolved)
+}
+
+/// A Finder alias: the `kIsAlias` Finder flag, or bookmark-alias data
+/// (`book\0\0\0\0mark`) for an alias that lost its Finder info.
+fn is_finder_alias(path: &std::path::Path) -> bool {
+    use std::io::Read;
+
+    let mut magic = [0u8; 12];
+    has_finder_alias_flag(path)
+        || std::fs::File::open(path)
+            .and_then(|mut file| file.read_exact(&mut magic))
+            .is_ok_and(|()| &magic == b"book\0\0\0\0mark")
+}
+
+/// The `kIsAlias` bit of the `com.apple.FinderInfo` attribute.
+#[cfg(target_os = "macos")]
+fn has_finder_alias_flag(path: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    const K_IS_ALIAS: u16 = 0x8000;
+    let mut finder_info = [0u8; 32];
+    std::ffi::CString::new(path.as_os_str().as_bytes()).is_ok_and(|c_path| {
+        // SAFETY: both pointers are valid for the call; the buffer length is
+        // passed, and the attribute name is a NUL-terminated literal.
+        let len = unsafe {
+            libc::getxattr(
+                c_path.as_ptr(),
+                c"com.apple.FinderInfo".as_ptr(),
+                finder_info.as_mut_ptr().cast(),
+                finder_info.len(),
+                0,
+                0,
+            )
+        };
+        len >= 10 && u16::from_be_bytes([finder_info[8], finder_info[9]]) & K_IS_ALIAS != 0
+    })
+}
+
+/// Finder info exists only on macOS; elsewhere an alias file can only be
+/// recognized by its bookmark data.
+#[cfg(not(target_os = "macos"))]
+fn has_finder_alias_flag(_path: &std::path::Path) -> bool {
+    false
+}
+
+fn launches_when_opened(path: &std::path::Path, metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let launchable_extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            LAUNCHABLE_EXTENSIONS
+                .iter()
+                .any(|launchable| ext.eq_ignore_ascii_case(launchable))
+        });
+    launchable_extension || (metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+fn open_path_blocking(
+    path: &std::path::Path,
+    line: Option<u32>,
+    column: Option<u32>,
+    editor: noa_config::FileLinkEditor,
+) {
+    if editor != noa_config::FileLinkEditor::Default && path.is_file() {
+        let result = std::process::Command::new(editor.as_str())
+            .args(editor_arguments(path, line, column, editor))
+            .status();
+        match result {
+            Ok(status) if status.success() => return,
+            Ok(status) => log::warn!(
+                "file-link editor {} exited with {status}; using default application",
+                editor.as_str()
+            ),
+            Err(err) => log::warn!(
+                "could not launch file-link editor {}: {err}; using default application",
+                editor.as_str()
+            ),
+        }
+    }
+    match std::process::Command::new("open").arg(path).status() {
+        Ok(status) if !status.success() => {
+            log::warn!("`open` failed for path {} ({status})", path.display());
+        }
+        Ok(_) => {}
+        Err(err) => log::warn!("failed to open path {}: {err}", path.display()),
+    }
 }
 
 fn editor_arguments(
@@ -147,6 +264,72 @@ mod tests {
                 "/tmp/日本語 project/$(touch nope);file.rs:1:1"
             )]
         );
+    }
+
+    #[test]
+    fn file_links_refuse_what_open_would_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("noa-link-open-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("Evil.app")).unwrap();
+        let check = |name: &str, mode: u32| {
+            let path = dir.join(name);
+            if !path.exists() {
+                std::fs::write(&path, b"x").unwrap();
+            }
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            launches_when_opened(&path, &std::fs::metadata(&path).unwrap())
+        };
+        assert!(!check("notes.md", 0o644));
+        assert!(check("run.command", 0o644));
+        assert!(check("Run.COMMAND", 0o644));
+        assert!(check("payload", 0o755));
+        let bundle = dir.join("Evil.app");
+        assert!(launches_when_opened(
+            &bundle,
+            &std::fs::metadata(&bundle).unwrap()
+        ));
+        assert!(!launches_when_opened(
+            &dir,
+            &std::fs::metadata(&dir).unwrap()
+        ));
+
+        // A Finder alias opens whatever it references, so it is refused.
+        let alias = dir.join("alias");
+        std::fs::write(&alias, b"book\0\0\0\0mark\0\0\0\0").unwrap();
+        assert!(openable_file_link(&alias).is_err());
+        #[cfg(target_os = "macos")]
+        {
+            let flagged = dir.join("flagged");
+            std::fs::write(&flagged, b"x").unwrap();
+            let mut finder_info = [0u8; 32];
+            finder_info[8] = 0x80;
+            let c_path = std::ffi::CString::new(flagged.as_os_str().as_encoded_bytes()).unwrap();
+            // SAFETY: valid NUL-terminated path/name and an in-bounds buffer.
+            let set = unsafe {
+                libc::setxattr(
+                    c_path.as_ptr(),
+                    c"com.apple.FinderInfo".as_ptr(),
+                    finder_info.as_ptr().cast(),
+                    finder_info.len(),
+                    0,
+                    0,
+                )
+            };
+            assert_eq!(set, 0);
+            assert!(openable_file_link(&flagged).is_err());
+        }
+
+        // A bare-named symlink to a bundle is judged by its target.
+        let link = dir.join("innocent");
+        std::os::unix::fs::symlink(dir.join("Evil.app"), &link).unwrap();
+        assert!(openable_file_link(&link).is_err());
+        let doc_link = dir.join("doc");
+        std::os::unix::fs::symlink(dir.join("notes.md"), &doc_link).unwrap();
+        assert_eq!(
+            openable_file_link(&doc_link).unwrap(),
+            std::fs::canonicalize(dir.join("notes.md")).unwrap()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

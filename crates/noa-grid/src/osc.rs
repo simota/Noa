@@ -780,11 +780,23 @@ fn hyperlink_id(params: &[u8]) -> Option<Option<String>> {
     Some(None)
 }
 
+/// The absolute path of an OSC 8 `file://` hyperlink, when its host is this
+/// machine under the same loose match OSC 7 uses; `None` for any other URI.
+pub fn local_file_uri_path(uri: &str) -> Option<String> {
+    let (host, path) = parse_file_uri_path(uri)?;
+    host_is_local(host).then_some(path)
+}
+
 fn parse_file_uri_path(uri: &str) -> Option<(&str, String)> {
     let rest = uri.strip_prefix("file://")?;
     let path_start = rest.find('/')?;
     let host = &rest[..path_start];
-    let path = &rest[path_start..];
+    // Only the path component: `?query` / `#fragment` (e.g. `#L10`) are not
+    // part of the file name; a literal `?` / `#` in one arrives as `%3F` / `%23`.
+    let path = rest[path_start..]
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default();
     let decoded = percent_decode_utf8(path)?;
     validate_path(decoded).map(|path| (host, path))
 }

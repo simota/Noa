@@ -510,10 +510,15 @@ impl App {
         let terminal = surface.terminal.lock();
         let row = terminal.active().visible_row(cell.y)?;
         if let Some(link_id) = row.cells.get(cell.x as usize).and_then(|c| c.hyperlink) {
-            return terminal
-                .hyperlinks
-                .get(link_id.get())
-                .map(|link| LinkTarget::Uri(link.uri.clone()));
+            let uri = &terminal.hyperlinks.get(link_id.get())?.uri;
+            // Same remote gate as below: a remote pane's `file://` names
+            // another host's file even when its host part looks local.
+            return Some(
+                match noa_grid::local_file_uri_path(uri).filter(|_| !surface.is_remote()) {
+                    Some(path) => LinkTarget::FileUri(path.into()),
+                    None => LinkTarget::Uri(uri.clone()),
+                },
+            );
         }
         if let Some(url) = noa_grid::detect_url_at_column(&row, cell.x) {
             return Some(LinkTarget::Uri(url.uri));

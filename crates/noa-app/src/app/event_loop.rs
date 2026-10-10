@@ -1681,6 +1681,13 @@ impl App {
                         }
                         match target {
                             LinkTarget::Uri(uri) => link_open::open_uri(&uri),
+                            LinkTarget::FileUri(path) => {
+                                if self.modifiers.alt_key() {
+                                    self.open_file_preview(window_id, path, None);
+                                } else {
+                                    link_open::open_file_uri(path, self.config.file_link_editor);
+                                }
+                            }
                             LinkTarget::Path { path, line, column } => {
                                 if self.modifiers.alt_key() {
                                     self.open_file_preview(window_id, path, line);

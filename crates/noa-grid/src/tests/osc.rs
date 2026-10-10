@@ -1097,6 +1097,32 @@ fn osc22_sets_and_resets_the_pointer_shape() {
 }
 
 #[test]
+fn local_file_uri_path_accepts_only_this_host() {
+    assert_eq!(
+        crate::local_file_uri_path("file:///tmp/a%20b.txt").as_deref(),
+        Some("/tmp/a b.txt")
+    );
+    assert_eq!(
+        crate::local_file_uri_path("file://localhost/etc/hosts").as_deref(),
+        Some("/etc/hosts")
+    );
+    assert_eq!(
+        crate::local_file_uri_path("file://evil-remote-host/etc/hosts"),
+        None
+    );
+    assert_eq!(crate::local_file_uri_path("https://example.com/"), None);
+    assert_eq!(crate::local_file_uri_path("file://relative"), None);
+    assert_eq!(
+        crate::local_file_uri_path("file:///tmp/notes.txt#L10").as_deref(),
+        Some("/tmp/notes.txt")
+    );
+    assert_eq!(
+        crate::local_file_uri_path("file:///tmp/a%23b?x=1").as_deref(),
+        Some("/tmp/a#b")
+    );
+}
+
+#[test]
 fn synthetic_seed_restores_the_pointer_shape() {
     let source = run(b"\x1b]22;pointer\x1b\\");
     let mut replica = run(b"");

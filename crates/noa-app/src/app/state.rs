@@ -1055,6 +1055,10 @@ pub(super) struct Surface {
     /// selection. `None` outside a single-click drag.
     pub(super) selection_anchor: Option<(noa_grid::SelectionPoint, usize)>,
     pub(super) last_mouse_cell: Option<Point>,
+    /// The DEC 1016 (SGR-pixels) position matching `last_mouse_cell`: kept
+    /// and cleared with it, so a captured drag released outside the window
+    /// still reports where the pointer last was.
+    pub(super) last_mouse_pixel: Option<Point>,
     pub(super) pressed_mouse_button: Option<MouseButton>,
     pub(super) ime_state: input::ImeState,
     pub(super) auto_approve_guards: Arc<Mutex<crate::auto_approve::AutoApproveInputGuards>>,
@@ -1256,6 +1260,7 @@ impl Surface {
             mouse_selection: MouseSelectionState::default(),
             selection_anchor: None,
             last_mouse_cell: None,
+            last_mouse_pixel: None,
             pressed_mouse_button: None,
             ime_state: input::ImeState::default(),
             auto_approve_guards,

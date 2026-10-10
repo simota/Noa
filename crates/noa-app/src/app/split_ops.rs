@@ -605,6 +605,7 @@ impl App {
         // resolves `last_mouse_pane.or(focused_pane)`, so `None` here simply
         // defers to the (correctly) focused moved pane with no stale cell.
         surface.last_mouse_cell = None;
+        surface.last_mouse_pixel = None;
         dest_state.surfaces.insert(pane, surface);
         // P1 (review round 13): force `dest`'s renderer to fully rebuild this
         // pane's rows on its next frame. `PaneId` is process-global and never

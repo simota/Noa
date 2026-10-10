@@ -160,6 +160,48 @@ pub fn physical_position_to_grid_point(
     Point { x: col, y: row }
 }
 
+/// The DEC 1016 (SGR-pixels) report position: the pane-local physical
+/// position minus padding, clamped to the grid's pixel extent the same way
+/// [`physical_position_to_grid_point`] clamps to its edge cells.
+pub fn physical_position_to_grid_pixel(
+    x: f64,
+    y: f64,
+    cell_w: f32,
+    cell_h: f32,
+    grid_size: GridSize,
+    padding: GridPadding,
+) -> Point {
+    let clamp = |coord: f64, cell: f32, cells: u16| {
+        let max = (f64::from(cell) * f64::from(cells) - 1.0).max(0.0);
+        coord.round().clamp(0.0, max) as u16
+    };
+    Point {
+        x: clamp(x - f64::from(padding.left), cell_w, grid_size.cols),
+        y: clamp(y - f64::from(padding.top), cell_h, grid_size.rows),
+    }
+}
+
+/// The coordinates a report in `format` carries: `cell` for the cell-based
+/// formats; for DEC 1016 the pane's last pixel position, or — never handing
+/// a cell to the pixel encoder — the cell's top-left pixel.
+pub fn report_point(
+    format: MouseFormat,
+    cell: Point,
+    last_pixel: Option<Point>,
+    cell_size: Option<(f32, f32)>,
+) -> Point {
+    if format != MouseFormat::SgrPixels {
+        return cell;
+    }
+    last_pixel.unwrap_or_else(|| {
+        let (cell_w, cell_h) = cell_size.unwrap_or((0.0, 0.0));
+        Point {
+            x: (f32::from(cell.x) * cell_w) as u16,
+            y: (f32::from(cell.y) * cell_h) as u16,
+        }
+    })
+}
+
 /// Inverse of [`physical_position_to_grid_point`]: the top-left physical
 /// pixel offset of grid cell `point`, relative to the pane's own local
 /// origin (the caller adds the pane rect's offset for a window-relative
@@ -215,7 +257,7 @@ pub fn encode_mouse_input(
         // SGR is the only format that can name the released button; the
         // legacy encodings all report a release as button value 3.
         ElementState::Released => {
-            let code = if format == MouseFormat::Sgr {
+            let code = if matches!(format, MouseFormat::Sgr | MouseFormat::SgrPixels) {
                 button_code
             } else {
                 3
@@ -300,6 +342,9 @@ pub fn alternate_scroll_bytes(up: bool, rows: usize, app_cursor_keys: bool) -> V
 /// Serialize one mouse report in the active format. `code` is the final
 /// button value (button + modifier + motion bits) *without* the +32 bias;
 /// `release` only matters for SGR, whose final byte distinguishes it.
+/// `cell` is a 0-based grid cell, except under [`MouseFormat::SgrPixels`]
+/// where it is the pixel offset from the grid's top-left
+/// (see [`physical_position_to_grid_pixel`]).
 fn encode_mouse_report(
     format: MouseFormat,
     code: u16,
@@ -310,7 +355,13 @@ fn encode_mouse_report(
     match format {
         MouseFormat::Sgr => {
             let final_byte = if release { b'm' } else { b'M' };
-            Some(sgr_mouse_sequence(code, cell, final_byte))
+            Some(sgr_mouse_sequence(code, cx, cy, final_byte))
+        }
+        // Pixels are reported as-is, without the cell formats' 1-based
+        // bias (Ghostty `mouseReport` `.sgr_pixels`).
+        MouseFormat::SgrPixels => {
+            let final_byte = if release { b'm' } else { b'M' };
+            Some(sgr_mouse_sequence(code, cell.x, cell.y, final_byte))
         }
         MouseFormat::Legacy => {
             // Each field is one raw byte: 223 + 32 = 255 is the last
@@ -372,14 +423,8 @@ fn modifier_bits(mods: ModifiersState) -> u16 {
     bits
 }
 
-fn sgr_mouse_sequence(code: u16, cell: Point, final_byte: u8) -> Vec<u8> {
-    format!(
-        "\x1b[<{code};{};{}{}",
-        cell.x + 1,
-        cell.y + 1,
-        final_byte as char
-    )
-    .into_bytes()
+fn sgr_mouse_sequence(code: u16, x: u16, y: u16, final_byte: u8) -> Vec<u8> {
+    format!("\x1b[<{code};{x};{y}{}", final_byte as char).into_bytes()
 }
 
 fn coord_to_cell(coord: f64, cell: f32, max_cells: u16) -> u16 {
@@ -508,6 +553,77 @@ mod tests {
         assert_eq!(
             state.left_pressed(start + Duration::from_millis(200)),
             SelectionGesture::SelectLine(point(2, 0))
+        );
+    }
+
+    #[test]
+    fn sgr_pixels_reports_raw_pixel_offsets() {
+        let px = physical_position_to_grid_pixel(
+            110.6,
+            47.2,
+            10.0,
+            20.0,
+            GridSize::new(80, 24),
+            GridPadding::new(5.0, 0.0, 0.0, 8.0),
+        );
+        assert_eq!(px, point(103, 42));
+        assert_eq!(
+            encode_mouse_input(
+                MouseFormat::SgrPixels,
+                MouseTracking::Press,
+                MouseButton::Left,
+                ElementState::Released,
+                px,
+                ModifiersState::empty()
+            ),
+            Some(b"\x1b[<0;103;42m".to_vec())
+        );
+        assert_eq!(
+            encode_mouse_motion(
+                MouseFormat::SgrPixels,
+                MouseTracking::AnyMotion,
+                None,
+                point(0, 0),
+                ModifiersState::empty()
+            ),
+            Some(b"\x1b[<35;0;0M".to_vec())
+        );
+    }
+
+    #[test]
+    fn report_point_never_mixes_cell_and_pixel_units() {
+        let cell = point(3, 2);
+        assert_eq!(
+            report_point(MouseFormat::Sgr, cell, Some(point(99, 99)), None),
+            cell
+        );
+        // A drag released outside the window keeps its last pixel position.
+        assert_eq!(
+            report_point(
+                MouseFormat::SgrPixels,
+                cell,
+                Some(point(37, 45)),
+                Some((10.0, 20.0))
+            ),
+            point(37, 45)
+        );
+        assert_eq!(
+            report_point(MouseFormat::SgrPixels, cell, None, Some((10.0, 20.0))),
+            point(30, 40)
+        );
+    }
+
+    #[test]
+    fn sgr_pixels_position_clamps_to_the_grid() {
+        let grid = GridSize::new(80, 24);
+        let pad = GridPadding::new(5.0, 0.0, 0.0, 8.0);
+        assert_eq!(
+            physical_position_to_grid_pixel(-3.0, 0.0, 10.0, 20.0, grid, pad),
+            point(0, 0)
+        );
+        assert_eq!(
+            physical_position_to_grid_pixel(5000.0, 5000.0, 10.0, 20.0, grid, pad),
+            point(799, 479)
         );
     }
 

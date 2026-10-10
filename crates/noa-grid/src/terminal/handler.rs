@@ -352,6 +352,7 @@ impl Handler for Terminal {
             | (1006, false)
             | (1007, false)
             | (1015, false)
+            | (1016, false)
             | (1047, false)
             | (1048, false)
             | (1049, false)

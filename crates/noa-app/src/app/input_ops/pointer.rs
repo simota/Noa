@@ -188,6 +188,52 @@ impl App {
         ))
     }
 
+    /// The DEC 1016 position of a window-relative `position` in `pane_id`:
+    /// pixels from its grid's top-left, clamped to the grid like
+    /// [`Self::pane_cell_in`] clamps to its edge cells.
+    pub(in crate::app) fn pane_pixel_in(
+        &self,
+        window_id: WindowId,
+        pane_id: PaneId,
+        position: PhysicalPosition<f64>,
+        metrics: noa_font::Metrics,
+    ) -> Option<Point> {
+        let surface = self.windows.get(&window_id)?.surfaces.get(&pane_id)?;
+        Some(mouse::physical_position_to_grid_pixel(
+            position.x - f64::from(surface.rect.x),
+            position.y - f64::from(surface.rect.y),
+            metrics.cell_w,
+            metrics.cell_h,
+            surface.grid_size,
+            self.padding,
+        ))
+    }
+
+    /// The position a mouse report for `pane_id` carries: `cell` for the
+    /// cell-based formats, or under DEC 1016 the pane's last pixel position
+    /// (recorded with `cell`, and kept with it while a drag is captured).
+    pub(in crate::app) fn mouse_report_point(
+        &self,
+        window_id: WindowId,
+        pane_id: PaneId,
+        format: MouseFormat,
+        cell: Point,
+    ) -> Point {
+        if format != MouseFormat::SgrPixels {
+            return cell;
+        }
+        let last_pixel = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&pane_id))
+            .and_then(|surface| surface.last_mouse_pixel);
+        let cell_size = self.gpu.as_ref().map(|gpu| {
+            let metrics = gpu.fonts.get(self.window_font_px(window_id)).metrics();
+            (metrics.cell_w, metrics.cell_h)
+        });
+        mouse::report_point(format, cell, last_pixel, cell_size)
+    }
+
     /// Re-hit-test the physical pointer after delivering mouse-up to the
     /// captured pane. This updates routing without synthesizing mouse motion.
     pub(in crate::app) fn release_mouse_capture(&mut self, window_id: WindowId) {
@@ -195,15 +241,17 @@ impl App {
             let state = self.windows.get(&window_id)?;
             let position = state.last_mouse_physical_position?;
             let metrics = self.gpu.as_ref()?.fonts.get(state.font_px).metrics();
-            self.pane_cell_at_position(window_id, position, metrics)
+            let (pane_id, cell) = self.pane_cell_at_position(window_id, position, metrics)?;
+            let pixel = self.pane_pixel_in(window_id, pane_id, position, metrics);
+            Some((pane_id, cell, pixel))
         })();
         if let Some(state) = self.windows.get_mut(&window_id) {
             state.mouse_capture_pane = None;
-            state.last_mouse_pane = hovered.map(|(pane_id, _)| pane_id);
+            state.last_mouse_pane = hovered.map(|(pane_id, ..)| pane_id);
             for (pane_id, surface) in &mut state.surfaces {
-                surface.last_mouse_cell = hovered
-                    .filter(|(hovered_pane, _)| hovered_pane == pane_id)
-                    .map(|(_, cell)| cell);
+                let here = hovered.filter(|(hovered_pane, ..)| hovered_pane == pane_id);
+                surface.last_mouse_cell = here.map(|(_, cell, _)| cell);
+                surface.last_mouse_pixel = here.and_then(|(.., pixel)| pixel);
             }
         }
         self.sync_hover_link(window_id);

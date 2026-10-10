@@ -1474,10 +1474,12 @@ impl App {
             return;
         };
 
+        let pixel = self.pane_pixel_in(window_id, pane_id, position, metrics);
         let mut prev_cell = None;
         if let Some(state) = self.windows.get_mut(&window_id) {
             state.last_mouse_pane = Some(pane_id);
             if let Some(surface) = state.surfaces.get_mut(&pane_id) {
+                surface.last_mouse_pixel = pixel;
                 prev_cell = surface.last_mouse_cell.replace(cell);
             }
         }
@@ -1488,7 +1490,8 @@ impl App {
             // Motion is reported per cell, not per pixel (xterm/Ghostty):
             // sub-cell jitter must not flood the application with duplicate
             // reports — bursts of identical SGR motion sequences can break
-            // TUI input parsers mid-paste.
+            // TUI input parsers mid-paste. DEC 1016 keeps this gate too and
+            // only refines the coordinates of the reports that do go out.
             if prev_cell == Some(cell) {
                 return;
             }
@@ -1497,11 +1500,12 @@ impl App {
                 .get(&window_id)
                 .and_then(|state| state.surfaces.get(&pane_id))
                 .and_then(|surface| surface.pressed_mouse_button);
+            let point = self.mouse_report_point(window_id, pane_id, format, cell);
             if let Some(bytes) = mouse::encode_mouse_motion(
                 format,
                 tracking,
                 pressed_mouse_button,
-                cell,
+                point,
                 self.modifiers,
             ) {
                 self.mark_pane_user_input(window_id, pane_id);
@@ -1532,6 +1536,7 @@ impl App {
             for (pane_id, surface) in &mut state.surfaces {
                 if Some(*pane_id) != captured {
                     surface.last_mouse_cell = None;
+                    surface.last_mouse_pixel = None;
                 }
             }
         }
@@ -1743,8 +1748,15 @@ impl App {
                 .and_then(|state| state.surfaces.get(&pane_id))
                 .and_then(|surface| surface.last_mouse_cell);
             if let Some(cell) = last_mouse_cell
-                && let Some(bytes) =
-                    mouse::encode_mouse_input(format, tracking, button, state, cell, self.modifiers)
+                && let point = self.mouse_report_point(window_id, pane_id, format, cell)
+                && let Some(bytes) = mouse::encode_mouse_input(
+                    format,
+                    tracking,
+                    button,
+                    state,
+                    point,
+                    self.modifiers,
+                )
             {
                 self.mark_pane_user_input(window_id, pane_id);
                 self.write_pane_pty_bytes(window_id, pane_id, bytes);
@@ -1852,7 +1864,8 @@ impl App {
             .windows
             .get(&window_id)
             .and_then(|state| state.surfaces.get(&pane_id))
-            .and_then(|surface| surface.last_mouse_cell);
+            .and_then(|surface| surface.last_mouse_cell)
+            .map(|cell| self.mouse_report_point(window_id, pane_id, format, cell));
         let delta_y = match delta {
             MouseScrollDelta::LineDelta(_, y) => y,
             MouseScrollDelta::PixelDelta(position) => position.y as f32,

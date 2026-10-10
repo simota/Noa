@@ -11,7 +11,7 @@ pub enum MouseTracking {
     AnyMotion,
 }
 
-/// Coordinate encoding for mouse reports, selected by DECSET 1005/1015/1006.
+/// Coordinate encoding for mouse reports, selected by DECSET 1005/1015/1006/1016.
 ///
 /// Orthogonal to [`MouseTracking`]: the tracking mode decides *which* events
 /// are reported, the format decides *how* they are written to the pty.
@@ -26,12 +26,15 @@ pub enum MouseFormat {
     Urxvt,
     /// DECSET 1006 — SGR encoding `CSI < Cb ; Cx ; Cy M/m`.
     Sgr,
+    /// DECSET 1016 — SGR encoding with `Cx ; Cy` in pixels from the grid's
+    /// top-left instead of 1-based cells.
+    SgrPixels,
 }
 
 /// The DEC private mode numbers that select a [`MouseFormat`]. They are
 /// mutually exclusive: the last one set wins (xterm keeps a single
 /// "extended coordinates" slot, not one flag per mode).
-const MOUSE_FORMAT_MODES: [u16; 3] = [1005, 1015, 1006];
+const MOUSE_FORMAT_MODES: [u16; 4] = [1005, 1015, 1006, 1016];
 
 #[derive(Clone, Debug, Default)]
 pub struct ModeState {
@@ -85,6 +88,7 @@ impl ModeState {
                     | 1006
                     | 1007
                     | 1015
+                    | 1016
                     | 1047
                     | 1048
                     | 1049
@@ -152,12 +156,14 @@ impl ModeState {
     pub fn bracketed_paste(&self) -> bool {
         self.get(2004, false)
     }
-    /// DECSET 1005/1015/1006 — the active mouse report encoding. At most one
+    /// DECSET 1005/1015/1006/1016 — the active mouse report encoding. At most one
     /// of the format modes is set at a time (see [`ModeState::set`]), so the
     /// probe order here is irrelevant.
     pub fn mouse_format(&self) -> MouseFormat {
         if self.get(1006, false) {
             MouseFormat::Sgr
+        } else if self.get(1016, false) {
+            MouseFormat::SgrPixels
         } else if self.get(1015, false) {
             MouseFormat::Urxvt
         } else if self.get(1005, false) {

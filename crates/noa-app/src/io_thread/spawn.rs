@@ -581,6 +581,12 @@ pub fn spawn(
                             target,
                         });
                     }
+                    if output.mouse_shape_changed {
+                        let _ = proxy.send_event(UserEvent::MouseShapeChanged(
+                            current_card_target(&window_id, pane_id).0,
+                            pane_id,
+                        ));
+                    }
                     for notification in output.pending_notifications {
                         let _ = proxy.send_event(UserEvent::Notify {
                             window_id: current_card_target(&window_id, pane_id).0,

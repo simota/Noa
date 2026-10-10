@@ -397,6 +397,73 @@ pub(crate) fn parse_agent_status_osc(data: &[u8]) -> Option<Option<AgentStatus>>
     Some(Some(AgentStatus { state, detail }))
 }
 
+/// One `OSC 7501` (Program Status Protocol) report, as emitted by Claude Code
+/// and Codex: `OSC 7501;state=<s>:app=<a>[:id=..][:kind=..][:progress=N]
+/// [:title=<b64>][:msg=<b64>] ST`, plus the `OSC 7501;? ST` support probe.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ProgramStatusOsc {
+    Query,
+    Working(String),
+    Blocked {
+        state: AgentState,
+        detail: String,
+    },
+    Idle,
+    Clear,
+    /// Malformed, an unknown state, or a per-subagent (`id=`) entry: the
+    /// session card tracks only the program's own status.
+    Ignored,
+}
+
+pub(crate) fn parse_program_status_osc(data: &[u8]) -> Option<ProgramStatusOsc> {
+    let rest = data.strip_prefix(b"7501;")?;
+    if rest.starts_with(b"?") {
+        return Some(ProgramStatusOsc::Query);
+    }
+    let Ok(rest) = std::str::from_utf8(rest) else {
+        return Some(ProgramStatusOsc::Ignored);
+    };
+    let (mut state, mut kind, mut title, mut msg) = (None, None, None, None);
+    for field in rest.split(':') {
+        let (key, value) = field.split_once('=').unwrap_or((field, ""));
+        match key {
+            "state" => state = Some(value),
+            "kind" => kind = Some(value),
+            "title" => title = Some(value),
+            "msg" => msg = Some(value),
+            "id" => return Some(ProgramStatusOsc::Ignored),
+            _ => {}
+        }
+    }
+    let detail = || {
+        title
+            .or(msg)
+            .and_then(|b64| decode_base64_limited(b64.as_bytes(), 2048))
+            .map(|raw| {
+                String::from_utf8_lossy(&raw)
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(160)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    Some(match state {
+        Some("working") => ProgramStatusOsc::Working(detail()),
+        Some("blocked") => ProgramStatusOsc::Blocked {
+            state: match kind {
+                Some("permission") => AgentState::Permission,
+                Some("auth") => AgentState::Error,
+                _ => AgentState::Input,
+            },
+            detail: detail(),
+        },
+        Some("idle") => ProgramStatusOsc::Idle,
+        Some("clear") => ProgramStatusOsc::Clear,
+        _ => ProgramStatusOsc::Ignored,
+    })
+}
+
 /// A validated determinate progress percentage reported by `OSC 9;4`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProgressValue(u8);
@@ -713,11 +780,23 @@ fn hyperlink_id(params: &[u8]) -> Option<Option<String>> {
     Some(None)
 }
 
+/// The absolute path of an OSC 8 `file://` hyperlink, when its host is this
+/// machine under the same loose match OSC 7 uses; `None` for any other URI.
+pub fn local_file_uri_path(uri: &str) -> Option<String> {
+    let (host, path) = parse_file_uri_path(uri)?;
+    host_is_local(host).then_some(path)
+}
+
 fn parse_file_uri_path(uri: &str) -> Option<(&str, String)> {
     let rest = uri.strip_prefix("file://")?;
     let path_start = rest.find('/')?;
     let host = &rest[..path_start];
-    let path = &rest[path_start..];
+    // Only the path component: `?query` / `#fragment` (e.g. `#L10`) are not
+    // part of the file name; a literal `?` / `#` in one arrives as `%3F` / `%23`.
+    let path = rest[path_start..]
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default();
     let decoded = percent_decode_utf8(path)?;
     validate_path(decoded).map(|path| (host, path))
 }

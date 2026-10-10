@@ -1,8 +1,43 @@
 use noa_core::{CellAttrs, Color};
 
 use super::Terminal;
+use crate::osc::ProgramStatusOsc;
+use crate::{AgentState, AgentStatus};
 
 impl Terminal {
+    /// `OSC 7501` lands on the same card state as Noa's own
+    /// `OSC 777;noa-agent`; whichever reported last wins.
+    pub(super) fn program_status(&mut self, report: ProgramStatusOsc) {
+        let (status, active) = match report {
+            ProgramStatusOsc::Query => {
+                // Claude Code only emits status after any `OSC 7501;?…` reply.
+                self.pending_writes.extend_from_slice(b"\x1b]7501;?\x1b\\");
+                return;
+            }
+            ProgramStatusOsc::Ignored => return,
+            ProgramStatusOsc::Working(detail) => (
+                Some(AgentStatus {
+                    state: AgentState::Running,
+                    detail,
+                }),
+                true,
+            ),
+            ProgramStatusOsc::Blocked { state, detail } => {
+                (Some(AgentStatus { state, detail }), true)
+            }
+            ProgramStatusOsc::Idle if self.program_status_active => (
+                Some(AgentStatus {
+                    state: AgentState::Finished,
+                    detail: String::new(),
+                }),
+                false,
+            ),
+            ProgramStatusOsc::Idle | ProgramStatusOsc::Clear => (None, false),
+        };
+        self.program_status_active = active;
+        self.pending_agent_status = Some(status);
+    }
+
     pub(super) fn push_dcs_response(&mut self, body: &[u8]) {
         self.pending_writes.extend_from_slice(b"\x1bP");
         self.pending_writes.extend_from_slice(body);

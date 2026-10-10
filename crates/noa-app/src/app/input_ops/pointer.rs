@@ -188,6 +188,48 @@ impl App {
         ))
     }
 
+    /// The DEC 1016 position of a window-relative `position` in `pane_id`:
+    /// pixels from its grid's top-left. Unlike [`Self::pane_cell_in`] it is
+    /// not clamped, so a captured drag beyond the pane reports as it is.
+    pub(in crate::app) fn pane_pixel_in(
+        &self,
+        window_id: WindowId,
+        pane_id: PaneId,
+        position: PhysicalPosition<f64>,
+    ) -> Option<mouse::MousePos> {
+        let surface = self.windows.get(&window_id)?.surfaces.get(&pane_id)?;
+        Some(mouse::physical_position_to_grid_pixel(
+            position.x - f64::from(surface.rect.x),
+            position.y - f64::from(surface.rect.y),
+            self.padding,
+        ))
+    }
+
+    /// The position a mouse report for `pane_id` carries: `cell` for the
+    /// cell-based formats, or under DEC 1016 the pane's last pixel position
+    /// (recorded with `cell`, and kept with it while a drag is captured).
+    pub(in crate::app) fn mouse_report_point(
+        &self,
+        window_id: WindowId,
+        pane_id: PaneId,
+        format: MouseFormat,
+        cell: Point,
+    ) -> mouse::MousePos {
+        if format != MouseFormat::SgrPixels {
+            return cell.into();
+        }
+        let last_pixel = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&pane_id))
+            .and_then(|surface| surface.last_mouse_pixel);
+        let cell_size = self.gpu.as_ref().map(|gpu| {
+            let metrics = gpu.fonts.get(self.window_font_px(window_id)).metrics();
+            (metrics.cell_w, metrics.cell_h)
+        });
+        mouse::report_point(format, cell, last_pixel, cell_size)
+    }
+
     /// Re-hit-test the physical pointer after delivering mouse-up to the
     /// captured pane. This updates routing without synthesizing mouse motion.
     pub(in crate::app) fn release_mouse_capture(&mut self, window_id: WindowId) {
@@ -195,15 +237,17 @@ impl App {
             let state = self.windows.get(&window_id)?;
             let position = state.last_mouse_physical_position?;
             let metrics = self.gpu.as_ref()?.fonts.get(state.font_px).metrics();
-            self.pane_cell_at_position(window_id, position, metrics)
+            let (pane_id, cell) = self.pane_cell_at_position(window_id, position, metrics)?;
+            let pixel = self.pane_pixel_in(window_id, pane_id, position);
+            Some((pane_id, cell, pixel))
         })();
         if let Some(state) = self.windows.get_mut(&window_id) {
             state.mouse_capture_pane = None;
-            state.last_mouse_pane = hovered.map(|(pane_id, _)| pane_id);
+            state.last_mouse_pane = hovered.map(|(pane_id, ..)| pane_id);
             for (pane_id, surface) in &mut state.surfaces {
-                surface.last_mouse_cell = hovered
-                    .filter(|(hovered_pane, _)| hovered_pane == pane_id)
-                    .map(|(_, cell)| cell);
+                let here = hovered.filter(|(hovered_pane, ..)| hovered_pane == pane_id);
+                surface.last_mouse_cell = here.map(|(_, cell, _)| cell);
+                surface.last_mouse_pixel = here.and_then(|(.., pixel)| pixel);
             }
         }
         self.sync_hover_link(window_id);
@@ -430,20 +474,21 @@ impl App {
 
     /// Pointer cursor while a link is Cmd+hovered in `window_id`'s
     /// under-the-mouse pane (or the sidebar `+` button is under the pointer),
-    /// the platform default otherwise.
+    /// else that pane's `OSC 22` shape, else the platform default.
     pub(in crate::app) fn update_cursor_icon(&self, window_id: WindowId) {
         let Some(state) = self.windows.get(&window_id) else {
             return;
         };
-        let hovering = state.sidebar_button_hover
-            || state
-                .last_mouse_pane
-                .and_then(|pane_id| state.surfaces.get(&pane_id))
-                .is_some_and(|surface| surface.hover_link.is_some());
+        let pane = state
+            .last_mouse_pane
+            .and_then(|pane_id| state.surfaces.get(&pane_id));
+        let hovering =
+            state.sidebar_button_hover || pane.is_some_and(|surface| surface.hover_link.is_some());
         state.window.set_cursor(if hovering {
             CursorIcon::Pointer
         } else {
-            CursorIcon::Default
+            pane.and_then(|surface| surface.terminal.lock().mouse_shape().and_then(cursor_icon))
+                .unwrap_or(CursorIcon::Default)
         });
     }
 
@@ -461,10 +506,15 @@ impl App {
         let terminal = surface.terminal.lock();
         let row = terminal.active().visible_row(cell.y)?;
         if let Some(link_id) = row.cells.get(cell.x as usize).and_then(|c| c.hyperlink) {
-            return terminal
-                .hyperlinks
-                .get(link_id.get())
-                .map(|link| LinkTarget::Uri(link.uri.clone()));
+            let uri = &terminal.hyperlinks.get(link_id.get())?.uri;
+            // Same remote gate as below: a remote pane's `file://` names
+            // another host's file even when its host part looks local.
+            return Some(
+                match noa_grid::local_file_uri_path(uri).filter(|_| !surface.is_remote()) {
+                    Some(path) => LinkTarget::FileUri(path.into()),
+                    None => LinkTarget::Uri(uri.clone()),
+                },
+            );
         }
         if let Some(url) = noa_grid::detect_url_at_column(&row, cell.x) {
             return Some(LinkTarget::Uri(url.uri));
@@ -566,5 +616,37 @@ mod path_resolution_tests {
     #[test]
     fn refuses_relative_path_with_no_cwd() {
         assert_eq!(resolve_hover_path_with("src/main.rs", None, None), None);
+    }
+}
+
+/// An `OSC 22` shape name as a winit cursor: the CSS `cursor` names, plus
+/// the common X11 cursor-font aliases Ghostty also accepts.
+fn cursor_icon(name: &str) -> Option<CursorIcon> {
+    let css = match name {
+        "left_ptr" | "arrow" | "top_left_arrow" => "default",
+        "xterm" | "ibeam" => "text",
+        "hand1" | "hand2" | "pointing_hand" => "pointer",
+        "watch" => "wait",
+        "left_ptr_watch" => "progress",
+        "question_arrow" | "whats_this" => "help",
+        "fleur" => "move",
+        "sb_h_double_arrow" => "ew-resize",
+        "sb_v_double_arrow" => "ns-resize",
+        name => name,
+    };
+    css.parse().ok()
+}
+
+#[cfg(test)]
+mod cursor_icon_tests {
+    use super::*;
+
+    #[test]
+    fn osc22_names_map_to_winit_cursors() {
+        assert_eq!(cursor_icon("pointer"), Some(CursorIcon::Pointer));
+        assert_eq!(cursor_icon("col-resize"), Some(CursorIcon::ColResize));
+        assert_eq!(cursor_icon("xterm"), Some(CursorIcon::Text));
+        assert_eq!(cursor_icon("hand2"), Some(CursorIcon::Pointer));
+        assert_eq!(cursor_icon("no-such-cursor"), None);
     }
 }

@@ -120,6 +120,13 @@ pub struct Terminal {
     /// [`NOTIFICATION_QUEUE_CAP`]; the oldest is evicted on overflow.
     pending_notifications: VecDeque<Notification>,
     pending_agent_status: Option<Option<crate::AgentStatus>>,
+    /// Whether the last `OSC 7501` report was working/blocked, so a following
+    /// `idle` reads as "response ended" rather than a fresh program's idle.
+    program_status_active: bool,
+    /// `OSC 22` pointer shape name (a CSS `cursor` / X11 cursor name, as
+    /// Ghostty accepts); `None` is the terminal's default pointer.
+    mouse_shape: Option<String>,
+    mouse_shape_changed: bool,
     /// Current `OSC 9;4` task state and its last-write-wins app-layer delta.
     progress: Option<TerminalProgress>,
     pending_progress_update: Option<ProgressUpdate>,
@@ -205,6 +212,9 @@ impl Terminal {
             pending_clipboard_reads: Vec::new(),
             pending_notifications: VecDeque::new(),
             pending_agent_status: None,
+            program_status_active: false,
+            mouse_shape: None,
+            mouse_shape_changed: false,
             progress: None,
             pending_progress_update: None,
             pending_progress_cue: None,
@@ -815,6 +825,23 @@ impl Terminal {
 
     pub fn take_pending_agent_status(&mut self) -> Option<Option<crate::AgentStatus>> {
         self.pending_agent_status.take()
+    }
+
+    /// The `OSC 22` pointer shape the application asked for, if any.
+    pub fn mouse_shape(&self) -> Option<&str> {
+        self.mouse_shape.as_deref()
+    }
+
+    /// Whether [`Self::mouse_shape`] changed since the previous call.
+    pub fn take_mouse_shape_changed(&mut self) -> bool {
+        std::mem::take(&mut self.mouse_shape_changed)
+    }
+
+    pub(crate) fn set_mouse_shape(&mut self, shape: Option<String>) {
+        if self.mouse_shape != shape {
+            self.mouse_shape = shape;
+            self.mouse_shape_changed = true;
+        }
     }
 
     /// Current task progress reported by the foreground terminal application.

@@ -695,9 +695,11 @@ fn match_menu_prompt_region(
     lowercase_rows: &[RowText],
     sig: &Signature,
 ) -> Option<RangeInclusive<usize>> {
-    let anchor = lowercase_rows
-        .iter()
-        .rposition(|row| sig.anchors.contains(&row.trim()))?;
+    let anchor = lowercase_rows.iter().rposition(|row| {
+        let row = row.trim();
+        sig.anchors.contains(&row)
+            || (sig.id == AutoApproveSignature::CodexCommand && codex_stdin_title(row))
+    })?;
     let footer_text = match sig.id {
         AutoApproveSignature::CodexCommand => "Press enter to confirm or esc to cancel",
         AutoApproveSignature::AgyAskUserQuestion => "↑/↓ Navigate · enter Select · esc Skip",
@@ -794,15 +796,31 @@ fn agy_status_row(status: &str) -> bool {
     cost_status || tool_status
 }
 
+/// Codex 0.158+ asks before writing to a process it already started
+/// (`write_stdin_approval`); the menu is the command dialog's, with an
+/// `Input: "<debug-quoted>"` row in place of the `$ command` row.
+fn codex_stdin_title(lowercase_row: &str) -> bool {
+    lowercase_row == "would you like to send input to the existing terminal?"
+        || lowercase_row
+            .strip_prefix("would you like to send input to terminal ")
+            .and_then(|rest| rest.strip_suffix('?'))
+            .is_some_and(|id| !id.is_empty() && !id.contains(char::is_whitespace))
+}
+
 fn codex_command_menu(rows: &[RowText], anchor: usize, option: usize, footer: usize) -> bool {
     // `Environment:` only appears when Codex has a selected environment
-    // (0.154 omits it for plain local runs), so the command row is the
-    // dialog's sole mandatory context.
+    // (0.154 omits it for plain local runs), so the command (or stdin input)
+    // row is the dialog's sole mandatory context.
+    let (prefix, min_len) = if codex_stdin_title(&rows[anchor].trim().to_lowercase()) {
+        ("Input: ", 2) // at least the `""` of an empty debug-quoted string
+    } else {
+        ("$ ", 1)
+    };
     let context = &rows[anchor + 1..option];
     if !context.iter().any(|row| {
         row.trim()
-            .strip_prefix("$ ")
-            .is_some_and(|command| !command.trim().is_empty())
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.trim().len() >= min_len)
     }) {
         return false;
     }
@@ -2180,6 +2198,71 @@ mod tests {
                 detect_and_update_any_agent(&changed, cursor(edit_row), ctx, &mut state),
                 Decision::Fire { region_hash: new_hash, .. } if new_hash != region_hash
             ));
+        }
+    }
+
+    // Layout from codex-rs `write_stdin_approval_modal` snapshot (0.158+).
+    fn codex_stdin_prompt(title: &str, input: &str) -> Vec<RowText> {
+        rows(&[
+            title,
+            "",
+            input,
+            "",
+            "",
+            "› 1. Yes, proceed (y)",
+            "  2. No, and tell Codex what to do differently (esc)",
+            "",
+            "Press enter to confirm or esc to cancel",
+        ])
+    }
+
+    #[test]
+    fn detect_codex_stdin_approval_prompts() {
+        let now = fixed_now();
+        for title in [
+            "Would you like to send input to terminal 42?",
+            "Would you like to send input to the existing terminal?",
+        ] {
+            let prompt = codex_stdin_prompt(title, "Input: \"confirm\\n\"");
+            let mut state = AutoApproveState::default();
+            let ctx = base_ctx(now);
+            let cursor = cursor((prompt.len() - 1) as u16);
+            assert_eq!(
+                detect_and_update_any_agent(&prompt, cursor, ctx, &mut state),
+                Decision::Hold
+            );
+            let Decision::Fire { signature, .. } =
+                detect_and_update_any_agent(&prompt, cursor, settled(ctx), &mut state)
+            else {
+                panic!("codex stdin prompt should fire: {prompt:?}");
+            };
+            assert_eq!(signature, AutoApproveSignature::CodexCommand);
+        }
+    }
+
+    #[test]
+    fn codex_stdin_prompt_requires_its_input_row() {
+        let now = fixed_now();
+        for prompt in [
+            codex_stdin_prompt("Would you like to send input to terminal 42?", ""),
+            // A `$ command` row does not stand in for the stdin dialog's input.
+            codex_stdin_prompt("Would you like to send input to terminal 42?", "$ rm -rf x"),
+            codex_stdin_prompt(
+                "Would you like to send input to terminal 4 2?",
+                "Input: \"y\"",
+            ),
+        ] {
+            let mut state = AutoApproveState::default();
+            let cursor = cursor((prompt.len() - 1) as u16);
+            for ctx in [base_ctx(now), settled(base_ctx(now))] {
+                assert!(
+                    !matches!(
+                        detect_and_update_any_agent(&prompt, cursor, ctx, &mut state),
+                        Decision::Fire { .. }
+                    ),
+                    "must not fire: {prompt:?}"
+                );
+            }
         }
     }
 

@@ -1020,3 +1020,112 @@ fn osc_color_rejects_malformed_without_mutation_or_reply() {
     assert_eq!(t.colors.cursor(), None);
     assert!(t.pending_writes.is_empty());
 }
+
+#[test]
+fn program_status_probe_is_answered() {
+    let mut t = run(b"\x1b]7501;?\x1b\\");
+    assert_eq!(t.take_pending_writes(), b"\x1b]7501;?\x1b\\");
+    assert!(t.take_pending_agent_status().is_none());
+}
+
+#[test]
+fn program_status_reports_map_onto_agent_state() {
+    // title=base64("Edit main.rs")
+    let mut t = run(b"\x1b]7501;state=working:app=claude-code:title=RWRpdCBtYWluLnJz\x1b\\");
+    let report = t.take_pending_agent_status().unwrap().unwrap();
+    assert_eq!(report.state, crate::AgentState::Running);
+    assert_eq!(report.detail, "Edit main.rs");
+
+    let mut t = run(b"\x1b]7501;state=blocked:app=claude-code:kind=permission\x1b\\");
+    assert_eq!(
+        t.take_pending_agent_status().unwrap().unwrap().state,
+        crate::AgentState::Permission
+    );
+    let mut t = run(b"\x1b]7501;state=blocked:app=codex\x1b\\");
+    assert_eq!(
+        t.take_pending_agent_status().unwrap().unwrap().state,
+        crate::AgentState::Input
+    );
+
+    let mut t = run(b"\x1b]7501;state=clear\x1b\\");
+    assert_eq!(t.take_pending_agent_status(), Some(None));
+    assert!(t.take_pending_notifications().is_empty());
+}
+
+#[test]
+fn program_status_idle_is_finished_only_after_activity() {
+    let mut fresh = run(b"\x1b]7501;state=idle:app=codex\x1b\\");
+    assert_eq!(fresh.take_pending_agent_status(), Some(None));
+
+    let mut t = run(b"\x1b]7501;state=working:app=codex\x1b\\\x1b]7501;state=idle:app=codex\x1b\\");
+    assert_eq!(
+        t.take_pending_agent_status().unwrap().unwrap().state,
+        crate::AgentState::Finished
+    );
+}
+
+#[test]
+fn program_status_subagent_entries_do_not_touch_the_card() {
+    let mut t = run(b"\x1b]7501;state=working:app=claude-code:id=agent-1\x1b\\\x1b]7501;state=clear:id=agent-1\x1b\\");
+    assert!(t.take_pending_agent_status().is_none());
+    assert!(t.take_pending_writes().is_empty());
+}
+
+#[test]
+fn osc22_sets_and_resets_the_pointer_shape() {
+    let mut t = run(b"\x1b]22;pointer\x1b\\");
+    assert_eq!(t.mouse_shape(), Some("pointer"));
+    assert!(t.take_mouse_shape_changed());
+    assert!(!t.take_mouse_shape_changed());
+
+    Stream::new().feed(b"\x1b]22;pointer\x07", &mut t);
+    assert!(!t.take_mouse_shape_changed(), "same shape is not a change");
+
+    Stream::new().feed(b"\x1b]22;evil;name\x07\x1b]22;\xe3\x81\x82\x07", &mut t);
+    assert_eq!(
+        t.mouse_shape(),
+        Some("pointer"),
+        "invalid names are ignored"
+    );
+
+    Stream::new().feed(b"\x1b]22;default\x07", &mut t);
+    assert_eq!(t.mouse_shape(), None);
+    assert!(t.take_mouse_shape_changed());
+
+    Stream::new().feed(b"\x1b]22;text\x07\x1bc", &mut t);
+    assert_eq!(t.mouse_shape(), None, "RIS restores the default pointer");
+}
+
+#[test]
+fn local_file_uri_path_accepts_only_this_host() {
+    assert_eq!(
+        crate::local_file_uri_path("file:///tmp/a%20b.txt").as_deref(),
+        Some("/tmp/a b.txt")
+    );
+    assert_eq!(
+        crate::local_file_uri_path("file://localhost/etc/hosts").as_deref(),
+        Some("/etc/hosts")
+    );
+    assert_eq!(
+        crate::local_file_uri_path("file://evil-remote-host/etc/hosts"),
+        None
+    );
+    assert_eq!(crate::local_file_uri_path("https://example.com/"), None);
+    assert_eq!(crate::local_file_uri_path("file://relative"), None);
+    assert_eq!(
+        crate::local_file_uri_path("file:///tmp/notes.txt#L10").as_deref(),
+        Some("/tmp/notes.txt")
+    );
+    assert_eq!(
+        crate::local_file_uri_path("file:///tmp/a%23b?x=1").as_deref(),
+        Some("/tmp/a#b")
+    );
+}
+
+#[test]
+fn synthetic_seed_restores_the_pointer_shape() {
+    let source = run(b"\x1b]22;pointer\x1b\\");
+    let mut replica = run(b"");
+    Stream::new().feed(&source.synthetic_seed(), &mut replica);
+    assert_eq!(replica.mouse_shape(), Some("pointer"));
+}

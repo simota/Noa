@@ -797,6 +797,12 @@ fn mouse_format_modes_are_exclusive_and_last_set_wins() {
     assert_eq!(t.modes.mouse_format(), MouseFormat::Sgr);
     let t = run(b"\x1b[?1005h\x1b[?1006h\x1b[?1006l");
     assert_eq!(t.modes.mouse_format(), MouseFormat::Legacy);
+    // DEC 1016 (SGR-pixels) shares the same slot.
+    let mut t = run(b"\x1b[?1006h\x1b[?1016h");
+    assert_eq!(t.modes.mouse_format(), MouseFormat::SgrPixels);
+    t.take_pending_writes();
+    Stream::new().feed(b"\x1b[?1016$p\x1b[?1006$p", &mut t);
+    assert_eq!(t.take_pending_writes(), b"\x1b[?1016;1$y\x1b[?1006;2$y");
 }
 
 #[test]

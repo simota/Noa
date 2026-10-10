@@ -43,7 +43,7 @@ pub use kitty_placeholder::{PLACEHOLDER, PlaceholderRun, scan_row};
 pub use modes::ModeState;
 pub use osc::{
     AgentState, AgentStatus, Notification, Osc52Policy, ProgressCue, ProgressUpdate, ProgressValue,
-    TerminalColors, TerminalProgress,
+    TerminalColors, TerminalProgress, local_file_uri_path,
 };
 pub use path::{PathMatch, detect_path_at_column};
 pub use screen::{KittyPlacement, Screen, VisibleKittyPlacement};

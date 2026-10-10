@@ -174,7 +174,7 @@ impl App {
         &self,
         window_id: WindowId,
         pane_id: PaneId,
-    ) -> (MouseTracking, MouseFormat) {
+    ) -> (MouseTracking, MouseFormat, bool) {
         self.windows
             .get(&window_id)
             .and_then(|state| state.surfaces.get(&pane_id))
@@ -183,9 +183,12 @@ impl App {
                 (
                     terminal.modes.mouse_tracking(),
                     terminal.modes.mouse_format(),
+                    self.config
+                        .mouse_shift_capture
+                        .captures(terminal.mouse_shift_capture),
                 )
             })
-            .unwrap_or((MouseTracking::Off, MouseFormat::Legacy))
+            .unwrap_or((MouseTracking::Off, MouseFormat::Legacy, false))
     }
 
     /// Wheel-routing state read under one terminal lock: mouse tracking mode,
@@ -195,7 +198,7 @@ impl App {
         &self,
         window_id: WindowId,
         pane_id: PaneId,
-    ) -> (MouseTracking, MouseFormat, bool, bool, bool) {
+    ) -> (MouseTracking, MouseFormat, bool, bool, bool, bool) {
         self.windows
             .get(&window_id)
             .and_then(|state| state.surfaces.get(&pane_id))
@@ -207,9 +210,19 @@ impl App {
                     terminal.active_is_alt,
                     terminal.modes.alternate_scroll(),
                     terminal.modes.app_cursor_keys(),
+                    self.config
+                        .mouse_shift_capture
+                        .captures(terminal.mouse_shift_capture),
                 )
             })
-            .unwrap_or((MouseTracking::Off, MouseFormat::Legacy, false, false, false))
+            .unwrap_or((
+                MouseTracking::Off,
+                MouseFormat::Legacy,
+                false,
+                false,
+                false,
+                false,
+            ))
     }
 
     /// Snap `window_id`'s focused pane viewport back to the live bottom, if it

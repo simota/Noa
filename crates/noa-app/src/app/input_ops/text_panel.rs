@@ -212,11 +212,14 @@ impl App {
                     return;
                 };
                 let mut terminal = surface.terminal.lock();
+                let fullscreen = terminal.active_is_alt;
                 terminal.selected_text().unwrap_or_else(|| {
                     terminal
-                        .scrollback_text_tail(crate::text_panel::TEXT_LIMIT - 128)
+                        .scrollback_text_tail(crate::text_panel::TEXT_LIMIT - 256)
                         .map(|(text, truncated)| {
-                            if truncated {
+                            if fullscreen {
+                                format!("[Current screen only. Use the application's search or copy commands for earlier messages.]\n\n{text}")
+                            } else if truncated {
                                 format!("[Earlier output omitted]\n\n{text}")
                             } else {
                                 text

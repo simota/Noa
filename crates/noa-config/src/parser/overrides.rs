@@ -27,6 +27,7 @@ pub(crate) fn build_overrides(
     let mut palette = Vec::new();
     let mut clipboard_read = None;
     let mut clipboard_paste_protection = None;
+    let mut mouse_shift_capture = None;
     let mut file_link_editor = None;
     let mut confirm_quit = None;
     let mut title_report = None;
@@ -170,6 +171,20 @@ pub(crate) fn build_overrides(
             }
             "clipboard-read" => {
                 clipboard_read = parse_clipboard_read(path, directive, &mut diagnostics);
+            }
+            "mouse-shift-capture" => {
+                use crate::MouseShiftCapture;
+                let value = directive.value.as_deref().unwrap_or("");
+                mouse_shift_capture = match value {
+                    "false" => Some(MouseShiftCapture::False),
+                    "true" => Some(MouseShiftCapture::True),
+                    "always" => Some(MouseShiftCapture::Always),
+                    "never" => Some(MouseShiftCapture::Never),
+                    _ => {
+                        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+                        None
+                    }
+                };
             }
             "clipboard-paste-protection" => {
                 clipboard_paste_protection =
@@ -448,6 +463,7 @@ pub(crate) fn build_overrides(
             palette,
             clipboard_read,
             clipboard_paste_protection,
+            mouse_shift_capture,
             file_link_editor,
             confirm_quit,
             title_report,

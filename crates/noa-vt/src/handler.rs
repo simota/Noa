@@ -401,6 +401,8 @@ pub trait Handler {
     fn clear_tab_stop(&mut self) {}
     /// `TBC 3` — clear all horizontal tab stops.
     fn clear_all_tab_stops(&mut self) {}
+    /// XTSHIFTESCAPE (`CSI > Ps s`): request Shift-modified mouse reports.
+    fn set_mouse_shift_capture(&mut self, _capture: bool) {}
     /// `RIS` (`ESC c`) — full reset.
     fn full_reset(&mut self);
     /// `DECALN` (`ESC # 8`) — screen alignment test: fill the active screen

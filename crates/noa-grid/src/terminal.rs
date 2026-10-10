@@ -127,6 +127,8 @@ pub struct Terminal {
     /// Ghostty accepts); `None` is the terminal's default pointer.
     mouse_shape: Option<String>,
     mouse_shape_changed: bool,
+    /// XTSHIFTESCAPE override; `None` uses the application's configured default.
+    pub mouse_shift_capture: Option<bool>,
     /// Current `OSC 9;4` task state and its last-write-wins app-layer delta.
     progress: Option<TerminalProgress>,
     pending_progress_update: Option<ProgressUpdate>,
@@ -215,6 +217,7 @@ impl Terminal {
             program_status_active: false,
             mouse_shape: None,
             mouse_shape_changed: false,
+            mouse_shift_capture: None,
             progress: None,
             pending_progress_update: None,
             pending_progress_cue: None,

@@ -31,6 +31,7 @@ pub struct AppConfig {
     pub palette: Vec<noa_config::PaletteOverride>,
     /// OSC 52 clipboard read (query) policy.
     pub clipboard_read: noa_config::ClipboardAccess,
+    pub mouse_shift_capture: noa_config::MouseShiftCapture,
     /// Whether to confirm before pasting content that could run commands.
     pub clipboard_paste_protection: bool,
     pub file_link_editor: noa_config::FileLinkEditor,
@@ -280,6 +281,7 @@ impl AppConfig {
             font: config.font,
             palette: config.palette,
             clipboard_read: config.clipboard_read,
+            mouse_shift_capture: config.mouse_shift_capture,
             clipboard_paste_protection: config.clipboard_paste_protection,
             file_link_editor: config.file_link_editor,
             confirm_quit: config.confirm_quit,

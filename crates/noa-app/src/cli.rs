@@ -288,6 +288,11 @@ fn show_config_output(config: &StartupConfig) -> String {
     push_line(&mut out, "confirm-quit", &config.confirm_quit.to_string());
     push_line(
         &mut out,
+        "mouse-shift-capture",
+        config.mouse_shift_capture.as_str(),
+    );
+    push_line(
+        &mut out,
         "file-link-editor",
         config.file_link_editor.as_str(),
     );

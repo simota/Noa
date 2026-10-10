@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.21] - 2026-10-10
+
+### Added
+
+- Program status from agent CLIs (OSC 7501). Claude Code 2.1.295 and later
+  report whether they are working, waiting for you, or done. Codex will report
+  this too from its next release. The state appears on the session card,
+  alongside Noa's own agent status.
+- Auto-approve: Codex's stdin approval prompt ("Would you like to send input
+  to terminal N?") is recognized and answered like its command prompt.
+- Pixel-precise mouse reporting (DEC 1016). Programs that ask for it receive
+  every pixel move, and drags beyond the pane are reported as they are.
+- Pointer shapes requested by programs (OSC 22), such as a hand over links,
+  including in client-mode and remote panes.
+- OSC 8 `file://` links open on Cmd+click when they point at this machine.
+  Links to executables, apps, scripts and Finder aliases are refused, because
+  the target is hidden behind the link text (#95).
+
+### Changed
+
+- OSC 7 working-directory reports ignore a `?query` or `#fragment` after the
+  path (#95).
+
 ## [0.2.20] - 2026-09-30
 
 ### Fixed

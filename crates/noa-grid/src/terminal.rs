@@ -120,6 +120,9 @@ pub struct Terminal {
     /// [`NOTIFICATION_QUEUE_CAP`]; the oldest is evicted on overflow.
     pending_notifications: VecDeque<Notification>,
     pending_agent_status: Option<Option<crate::AgentStatus>>,
+    /// Whether the last `OSC 7501` report was working/blocked, so a following
+    /// `idle` reads as "response ended" rather than a fresh program's idle.
+    program_status_active: bool,
     /// Current `OSC 9;4` task state and its last-write-wins app-layer delta.
     progress: Option<TerminalProgress>,
     pending_progress_update: Option<ProgressUpdate>,
@@ -205,6 +208,7 @@ impl Terminal {
             pending_clipboard_reads: Vec::new(),
             pending_notifications: VecDeque::new(),
             pending_agent_status: None,
+            program_status_active: false,
             progress: None,
             pending_progress_update: None,
             pending_progress_cue: None,

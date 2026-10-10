@@ -496,6 +496,7 @@ impl Handler for Terminal {
         self.pending_clipboard_reads.clear();
         self.pending_notifications.clear();
         self.pending_agent_status = Some(None);
+        self.program_status_active = false;
         self.pending_bell = false;
         self.kitty_keyboard.reset();
         self.modify_other_keys_2 = false;
@@ -674,6 +675,10 @@ impl Handler for Terminal {
             if let Some(status) = crate::osc::parse_agent_status_osc(data) {
                 self.pending_agent_status = Some(status);
             }
+            return;
+        }
+        if let Some(report) = crate::osc::parse_program_status_osc(data) {
+            self.program_status(report);
             return;
         }
         if handle_color_osc(data, &mut self.colors, &mut self.pending_writes) {

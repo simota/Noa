@@ -1020,3 +1020,53 @@ fn osc_color_rejects_malformed_without_mutation_or_reply() {
     assert_eq!(t.colors.cursor(), None);
     assert!(t.pending_writes.is_empty());
 }
+
+#[test]
+fn program_status_probe_is_answered() {
+    let mut t = run(b"\x1b]7501;?\x1b\\");
+    assert_eq!(t.take_pending_writes(), b"\x1b]7501;?\x1b\\");
+    assert!(t.take_pending_agent_status().is_none());
+}
+
+#[test]
+fn program_status_reports_map_onto_agent_state() {
+    // title=base64("Edit main.rs")
+    let mut t = run(b"\x1b]7501;state=working:app=claude-code:title=RWRpdCBtYWluLnJz\x1b\\");
+    let report = t.take_pending_agent_status().unwrap().unwrap();
+    assert_eq!(report.state, crate::AgentState::Running);
+    assert_eq!(report.detail, "Edit main.rs");
+
+    let mut t = run(b"\x1b]7501;state=blocked:app=claude-code:kind=permission\x1b\\");
+    assert_eq!(
+        t.take_pending_agent_status().unwrap().unwrap().state,
+        crate::AgentState::Permission
+    );
+    let mut t = run(b"\x1b]7501;state=blocked:app=codex\x1b\\");
+    assert_eq!(
+        t.take_pending_agent_status().unwrap().unwrap().state,
+        crate::AgentState::Input
+    );
+
+    let mut t = run(b"\x1b]7501;state=clear\x1b\\");
+    assert_eq!(t.take_pending_agent_status(), Some(None));
+    assert!(t.take_pending_notifications().is_empty());
+}
+
+#[test]
+fn program_status_idle_is_finished_only_after_activity() {
+    let mut fresh = run(b"\x1b]7501;state=idle:app=codex\x1b\\");
+    assert_eq!(fresh.take_pending_agent_status(), Some(None));
+
+    let mut t = run(b"\x1b]7501;state=working:app=codex\x1b\\\x1b]7501;state=idle:app=codex\x1b\\");
+    assert_eq!(
+        t.take_pending_agent_status().unwrap().unwrap().state,
+        crate::AgentState::Finished
+    );
+}
+
+#[test]
+fn program_status_subagent_entries_do_not_touch_the_card() {
+    let mut t = run(b"\x1b]7501;state=working:app=claude-code:id=agent-1\x1b\\\x1b]7501;state=clear:id=agent-1\x1b\\");
+    assert!(t.take_pending_agent_status().is_none());
+    assert!(t.take_pending_writes().is_empty());
+}

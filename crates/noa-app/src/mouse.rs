@@ -160,44 +160,51 @@ pub fn physical_position_to_grid_point(
     Point { x: col, y: row }
 }
 
-/// The DEC 1016 (SGR-pixels) report position: the pane-local physical
-/// position minus padding, clamped to the grid's pixel extent the same way
-/// [`physical_position_to_grid_point`] clamps to its edge cells.
-pub fn physical_position_to_grid_pixel(
-    x: f64,
-    y: f64,
-    cell_w: f32,
-    cell_h: f32,
-    grid_size: GridSize,
-    padding: GridPadding,
-) -> Point {
-    let clamp = |coord: f64, cell: f32, cells: u16| {
-        let max = (f64::from(cell) * f64::from(cells) - 1.0).max(0.0);
-        coord.round().clamp(0.0, max) as u16
-    };
-    Point {
-        x: clamp(x - f64::from(padding.left), cell_w, grid_size.cols),
-        y: clamp(y - f64::from(padding.top), cell_h, grid_size.rows),
+/// A mouse report position: a 0-based grid cell for the cell formats, or
+/// under [`MouseFormat::SgrPixels`] a pixel offset from the grid's top-left.
+/// Signed because DEC 1016 reports a drag beyond the grid as it is — negative
+/// or past the last pixel — where the cell formats clamp to the edge cells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MousePos {
+    pub x: i32,
+    pub y: i32,
+}
+
+impl From<Point> for MousePos {
+    fn from(cell: Point) -> Self {
+        Self {
+            x: i32::from(cell.x),
+            y: i32::from(cell.y),
+        }
     }
 }
 
-/// The coordinates a report in `format` carries: `cell` for the cell-based
+/// The DEC 1016 (SGR-pixels) report position: the pane-local physical
+/// position minus padding, rounded and unclamped (Ghostty `posToPixels`).
+pub fn physical_position_to_grid_pixel(x: f64, y: f64, padding: GridPadding) -> MousePos {
+    MousePos {
+        x: (x - f64::from(padding.left)).round() as i32,
+        y: (y - f64::from(padding.top)).round() as i32,
+    }
+}
+
+/// The position a report in `format` carries: `cell` for the cell-based
 /// formats; for DEC 1016 the pane's last pixel position, or — never handing
 /// a cell to the pixel encoder — the cell's top-left pixel.
 pub fn report_point(
     format: MouseFormat,
     cell: Point,
-    last_pixel: Option<Point>,
+    last_pixel: Option<MousePos>,
     cell_size: Option<(f32, f32)>,
-) -> Point {
+) -> MousePos {
     if format != MouseFormat::SgrPixels {
-        return cell;
+        return cell.into();
     }
     last_pixel.unwrap_or_else(|| {
         let (cell_w, cell_h) = cell_size.unwrap_or((0.0, 0.0));
-        Point {
-            x: (f32::from(cell.x) * cell_w) as u16,
-            y: (f32::from(cell.y) * cell_h) as u16,
+        MousePos {
+            x: (f32::from(cell.x) * cell_w) as i32,
+            y: (f32::from(cell.y) * cell_h) as i32,
         }
     })
 }
@@ -239,20 +246,20 @@ pub fn encode_mouse_input(
     tracking: MouseTracking,
     button: MouseButton,
     state: ElementState,
-    cell: Point,
+    pos: impl Into<MousePos>,
     mods: ModifiersState,
 ) -> Option<Vec<u8>> {
     let button_code = button_code(button)?;
     // X10 compatibility mode (DECSET 9): presses only, no modifier bits.
     if tracking == MouseTracking::X10 {
         return match state {
-            ElementState::Pressed => encode_mouse_report(format, button_code, false, cell),
+            ElementState::Pressed => encode_mouse_report(format, button_code, false, pos.into()),
             ElementState::Released => None,
         };
     }
     match state {
         ElementState::Pressed => {
-            encode_mouse_report(format, button_code + modifier_bits(mods), false, cell)
+            encode_mouse_report(format, button_code + modifier_bits(mods), false, pos.into())
         }
         // SGR is the only format that can name the released button; the
         // legacy encodings all report a release as button value 3.
@@ -262,7 +269,7 @@ pub fn encode_mouse_input(
             } else {
                 3
             };
-            encode_mouse_report(format, code + modifier_bits(mods), true, cell)
+            encode_mouse_report(format, code + modifier_bits(mods), true, pos.into())
         }
     }
 }
@@ -271,7 +278,7 @@ pub fn encode_mouse_motion(
     format: MouseFormat,
     tracking: MouseTracking,
     pressed_button: Option<MouseButton>,
-    cell: Point,
+    pos: impl Into<MousePos>,
     mods: ModifiersState,
 ) -> Option<Vec<u8>> {
     let button_code = match tracking {
@@ -282,14 +289,19 @@ pub fn encode_mouse_motion(
         MouseTracking::AnyMotion => pressed_button.and_then(button_code).unwrap_or(3),
     };
 
-    encode_mouse_report(format, button_code + 32 + modifier_bits(mods), false, cell)
+    encode_mouse_report(
+        format,
+        button_code + 32 + modifier_bits(mods),
+        false,
+        pos.into(),
+    )
 }
 
 pub fn encode_mouse_wheel(
     format: MouseFormat,
     tracking: MouseTracking,
     delta_y: f32,
-    cell: Point,
+    pos: impl Into<MousePos>,
     mods: ModifiersState,
 ) -> Option<Vec<u8>> {
     // X10 compatibility mode predates wheel buttons: never reported.
@@ -303,7 +315,7 @@ pub fn encode_mouse_wheel(
     } else {
         return None;
     };
-    encode_mouse_report(format, button_code + modifier_bits(mods), false, cell)
+    encode_mouse_report(format, button_code + modifier_bits(mods), false, pos.into())
 }
 
 /// Route a wheel event: `Some(bytes)` to report to the pty, `None` to scroll
@@ -316,13 +328,13 @@ pub fn route_mouse_wheel(
     format: MouseFormat,
     shift: bool,
     delta_y: f32,
-    cell: Option<Point>,
+    pos: Option<MousePos>,
     mods: ModifiersState,
 ) -> Option<Vec<u8>> {
     if tracking == MouseTracking::Off || shift {
         return None;
     }
-    encode_mouse_wheel(format, tracking, delta_y, cell?, mods)
+    encode_mouse_wheel(format, tracking, delta_y, pos?, mods)
 }
 
 /// DECSET 1007 alternate scroll: on the alternate screen with mouse tracking
@@ -342,16 +354,15 @@ pub fn alternate_scroll_bytes(up: bool, rows: usize, app_cursor_keys: bool) -> V
 /// Serialize one mouse report in the active format. `code` is the final
 /// button value (button + modifier + motion bits) *without* the +32 bias;
 /// `release` only matters for SGR, whose final byte distinguishes it.
-/// `cell` is a 0-based grid cell, except under [`MouseFormat::SgrPixels`]
-/// where it is the pixel offset from the grid's top-left
-/// (see [`physical_position_to_grid_pixel`]).
+/// `pos` is a [`MousePos`]: a cell for the cell formats (never negative),
+/// a signed pixel offset for [`MouseFormat::SgrPixels`].
 fn encode_mouse_report(
     format: MouseFormat,
     code: u16,
     release: bool,
-    cell: Point,
+    pos: MousePos,
 ) -> Option<Vec<u8>> {
-    let (cx, cy) = (cell.x + 1, cell.y + 1);
+    let (cx, cy) = (pos.x + 1, pos.y + 1);
     match format {
         MouseFormat::Sgr => {
             let final_byte = if release { b'm' } else { b'M' };
@@ -361,7 +372,7 @@ fn encode_mouse_report(
         // bias (Ghostty `mouseReport` `.sgr_pixels`).
         MouseFormat::SgrPixels => {
             let final_byte = if release { b'm' } else { b'M' };
-            Some(sgr_mouse_sequence(code, cell.x, cell.y, final_byte))
+            Some(sgr_mouse_sequence(code, pos.x, pos.y, final_byte))
         }
         MouseFormat::Legacy => {
             // Each field is one raw byte: 223 + 32 = 255 is the last
@@ -385,8 +396,8 @@ fn encode_mouse_report(
                 return None;
             }
             let mut bytes = vec![0x1b, b'[', b'M'];
-            for value in [code + 32, cx + 32, cy + 32] {
-                push_utf8(&mut bytes, value);
+            for value in [i32::from(code) + 32, cx + 32, cy + 32] {
+                push_utf8(&mut bytes, value as u16);
             }
             Some(bytes)
         }
@@ -423,7 +434,7 @@ fn modifier_bits(mods: ModifiersState) -> u16 {
     bits
 }
 
-fn sgr_mouse_sequence(code: u16, x: u16, y: u16, final_byte: u8) -> Vec<u8> {
+fn sgr_mouse_sequence(code: u16, x: i32, y: i32, final_byte: u8) -> Vec<u8> {
     format!("\x1b[<{code};{x};{y}{}", final_byte as char).into_bytes()
 }
 
@@ -558,15 +569,8 @@ mod tests {
 
     #[test]
     fn sgr_pixels_reports_raw_pixel_offsets() {
-        let px = physical_position_to_grid_pixel(
-            110.6,
-            47.2,
-            10.0,
-            20.0,
-            GridSize::new(80, 24),
-            GridPadding::new(5.0, 0.0, 0.0, 8.0),
-        );
-        assert_eq!(px, point(103, 42));
+        let px = physical_position_to_grid_pixel(110.6, 47.2, GridPadding::new(5.0, 0.0, 0.0, 8.0));
+        assert_eq!(px, MousePos { x: 103, y: 42 });
         assert_eq!(
             encode_mouse_input(
                 MouseFormat::SgrPixels,
@@ -594,36 +598,48 @@ mod tests {
     fn report_point_never_mixes_cell_and_pixel_units() {
         let cell = point(3, 2);
         assert_eq!(
-            report_point(MouseFormat::Sgr, cell, Some(point(99, 99)), None),
-            cell
+            report_point(
+                MouseFormat::Sgr,
+                cell,
+                Some(MousePos { x: 99, y: 99 }),
+                None
+            ),
+            MousePos::from(cell)
         );
         // A drag released outside the window keeps its last pixel position.
         assert_eq!(
             report_point(
                 MouseFormat::SgrPixels,
                 cell,
-                Some(point(37, 45)),
+                Some(MousePos { x: -37, y: 450 }),
                 Some((10.0, 20.0))
             ),
-            point(37, 45)
+            MousePos { x: -37, y: 450 }
         );
         assert_eq!(
             report_point(MouseFormat::SgrPixels, cell, None, Some((10.0, 20.0))),
-            point(30, 40)
+            MousePos { x: 30, y: 40 }
         );
     }
 
     #[test]
-    fn sgr_pixels_position_clamps_to_the_grid() {
-        let grid = GridSize::new(80, 24);
+    fn sgr_pixels_reports_drags_beyond_the_grid_unclamped() {
         let pad = GridPadding::new(5.0, 0.0, 0.0, 8.0);
+        let outside = physical_position_to_grid_pixel(-3.0, 0.0, pad);
+        assert_eq!(outside, MousePos { x: -11, y: -5 });
         assert_eq!(
-            physical_position_to_grid_pixel(-3.0, 0.0, 10.0, 20.0, grid, pad),
-            point(0, 0)
+            physical_position_to_grid_pixel(5000.0, 5000.0, pad),
+            MousePos { x: 4992, y: 4995 }
         );
         assert_eq!(
-            physical_position_to_grid_pixel(5000.0, 5000.0, 10.0, 20.0, grid, pad),
-            point(799, 479)
+            encode_mouse_motion(
+                MouseFormat::SgrPixels,
+                MouseTracking::ButtonMotion,
+                Some(MouseButton::Left),
+                outside,
+                ModifiersState::empty()
+            ),
+            Some(b"\x1b[<32;-11;-5M".to_vec())
         );
     }
 
@@ -994,7 +1010,7 @@ mod tests {
                 MouseFormat::Sgr,
                 false,
                 1.0,
-                Some(point(0, 0)),
+                Some(point(0, 0).into()),
                 ModifiersState::empty()
             ),
             None
@@ -1006,7 +1022,7 @@ mod tests {
                 MouseFormat::Sgr,
                 false,
                 1.0,
-                Some(point(0, 0)),
+                Some(point(0, 0).into()),
                 ModifiersState::empty()
             ),
             Some(b"\x1b[<64;1;1M".to_vec())
@@ -1018,7 +1034,7 @@ mod tests {
                 MouseFormat::Sgr,
                 true,
                 1.0,
-                Some(point(0, 0)),
+                Some(point(0, 0).into()),
                 ModifiersState::empty()
             ),
             None
@@ -1030,7 +1046,7 @@ mod tests {
                 MouseFormat::Sgr,
                 false,
                 1.0,
-                Some(point(0, 0)),
+                Some(point(0, 0).into()),
                 ModifiersState::empty()
             ),
             None

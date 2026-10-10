@@ -1479,12 +1479,12 @@ impl App {
             return;
         };
 
-        let pixel = self.pane_pixel_in(window_id, pane_id, position, metrics);
-        let mut prev_cell = None;
+        let pixel = self.pane_pixel_in(window_id, pane_id, position);
+        let (mut prev_cell, mut prev_pixel) = (None, None);
         if let Some(state) = self.windows.get_mut(&window_id) {
             state.last_mouse_pane = Some(pane_id);
             if let Some(surface) = state.surfaces.get_mut(&pane_id) {
-                surface.last_mouse_pixel = pixel;
+                prev_pixel = std::mem::replace(&mut surface.last_mouse_pixel, pixel);
                 prev_cell = surface.last_mouse_cell.replace(cell);
             }
         }
@@ -1495,9 +1495,15 @@ impl App {
             // Motion is reported per cell, not per pixel (xterm/Ghostty):
             // sub-cell jitter must not flood the application with duplicate
             // reports — bursts of identical SGR motion sequences can break
-            // TUI input parsers mid-paste. DEC 1016 keeps this gate too and
-            // only refines the coordinates of the reports that do go out.
-            if prev_cell == Some(cell) {
+            // TUI input parsers mid-paste. DEC 1016 asked for pixels, so it
+            // reports every pixel move (Ghostty `mouse_encode`), still never
+            // the same position twice.
+            let unchanged = if format == MouseFormat::SgrPixels {
+                prev_pixel == pixel
+            } else {
+                prev_cell == Some(cell)
+            };
+            if unchanged {
                 return;
             }
             let pressed_mouse_button = self

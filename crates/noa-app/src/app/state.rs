@@ -1058,7 +1058,7 @@ pub(super) struct Surface {
     /// The DEC 1016 (SGR-pixels) position matching `last_mouse_cell`: kept
     /// and cleared with it, so a captured drag released outside the window
     /// still reports where the pointer last was.
-    pub(super) last_mouse_pixel: Option<Point>,
+    pub(super) last_mouse_pixel: Option<crate::mouse::MousePos>,
     pub(super) pressed_mouse_button: Option<MouseButton>,
     pub(super) ime_state: input::ImeState,
     pub(super) auto_approve_guards: Arc<Mutex<crate::auto_approve::AutoApproveInputGuards>>,

@@ -189,22 +189,18 @@ impl App {
     }
 
     /// The DEC 1016 position of a window-relative `position` in `pane_id`:
-    /// pixels from its grid's top-left, clamped to the grid like
-    /// [`Self::pane_cell_in`] clamps to its edge cells.
+    /// pixels from its grid's top-left. Unlike [`Self::pane_cell_in`] it is
+    /// not clamped, so a captured drag beyond the pane reports as it is.
     pub(in crate::app) fn pane_pixel_in(
         &self,
         window_id: WindowId,
         pane_id: PaneId,
         position: PhysicalPosition<f64>,
-        metrics: noa_font::Metrics,
-    ) -> Option<Point> {
+    ) -> Option<mouse::MousePos> {
         let surface = self.windows.get(&window_id)?.surfaces.get(&pane_id)?;
         Some(mouse::physical_position_to_grid_pixel(
             position.x - f64::from(surface.rect.x),
             position.y - f64::from(surface.rect.y),
-            metrics.cell_w,
-            metrics.cell_h,
-            surface.grid_size,
             self.padding,
         ))
     }
@@ -218,9 +214,9 @@ impl App {
         pane_id: PaneId,
         format: MouseFormat,
         cell: Point,
-    ) -> Point {
+    ) -> mouse::MousePos {
         if format != MouseFormat::SgrPixels {
-            return cell;
+            return cell.into();
         }
         let last_pixel = self
             .windows
@@ -242,7 +238,7 @@ impl App {
             let position = state.last_mouse_physical_position?;
             let metrics = self.gpu.as_ref()?.fonts.get(state.font_px).metrics();
             let (pane_id, cell) = self.pane_cell_at_position(window_id, position, metrics)?;
-            let pixel = self.pane_pixel_in(window_id, pane_id, position, metrics);
+            let pixel = self.pane_pixel_in(window_id, pane_id, position);
             Some((pane_id, cell, pixel))
         })();
         if let Some(state) = self.windows.get_mut(&window_id) {

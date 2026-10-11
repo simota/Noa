@@ -132,6 +132,9 @@ impl Terminal {
         if self.modify_other_keys_2 {
             seed.push_str("\x1b[>4;2m");
         }
+        if let Some(capture) = self.mouse_shift_capture {
+            seed.push_str(if capture { "\x1b[>1s" } else { "\x1b[>0s" });
+        }
         write_default_cursor_style(&mut seed, self.default_cursor_style);
         write_progress(&mut seed, self.progress);
         if let Some(shape) = &self.mouse_shape {
@@ -629,6 +632,27 @@ fn write_charset(seed: &mut String, state: (Charset, Charset, CharsetSlot)) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shift_capture_request_survives_client_seed_and_resets() {
+        let mut source = super::Terminal::new(noa_core::GridSize::new(80, 24));
+        let mut stream = noa_vt::Stream::new();
+        assert_eq!(source.mouse_shift_capture, None);
+        for (sequence, expected) in [
+            (b"\x1b[>1s".as_slice(), Some(true)),
+            (b"\x1b[>2s", Some(true)),
+            (b"\x1b[>0s", Some(false)),
+            (b"\x1b[>1;0s", Some(false)),
+            (b"\x1b[>1s", Some(true)),
+            (b"\x1b[>s", Some(false)),
+            (b"\x1bc", None),
+        ] {
+            stream.feed(sequence, &mut source);
+            assert_eq!(source.mouse_shift_capture, expected);
+            let mut replica = super::Terminal::new(noa_core::GridSize::new(80, 24));
+            noa_vt::Stream::new().feed(&source.synthetic_seed(), &mut replica);
+            assert_eq!(replica.mouse_shift_capture, expected);
+        }
+    }
     use noa_core::{GridSize, Rgb};
     use noa_vt::Stream;
 

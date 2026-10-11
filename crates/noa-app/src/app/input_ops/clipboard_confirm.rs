@@ -5,16 +5,25 @@ impl App {
         let Some((window_id, pane_id)) = self.resolve_pane_command_target(AppCommand::Copy) else {
             return;
         };
-        let selected_text = self
+        let Some((selected_text, copy_bytes)) = self
             .windows
             .get(&window_id)
             .and_then(|state| state.surfaces.get(&pane_id))
-            .and_then(|surface| surface.terminal.lock().selected_text());
-        let Some(selected_text) = selected_text else {
+            .map(|surface| {
+                let terminal = surface.terminal.lock();
+                (terminal.selected_text(), application_copy_bytes(&terminal))
+            })
+        else {
             return;
         };
-
-        self.write_text_to_clipboard(&selected_text);
+        if let Some(selected_text) = selected_text {
+            self.write_text_to_clipboard(&selected_text);
+        } else if let Some(bytes) = copy_bytes {
+            // Native menu accelerators reach this path without a winit key
+            // press. Send a complete gesture, including a negotiated release.
+            self.mark_pane_user_input(window_id, pane_id);
+            self.write_pane_pty_bytes(window_id, pane_id, bytes);
+        }
     }
 
     pub(in crate::app) fn write_text_to_clipboard(&mut self, text: &str) {
@@ -264,5 +273,67 @@ impl App {
             ConfirmAction::CloseWindow { group } => self.close_group(event_loop, group),
             ConfirmAction::Quit => event_loop.exit(),
         }
+    }
+}
+
+fn application_copy_bytes(terminal: &noa_grid::Terminal) -> Option<Vec<u8>> {
+    let flags = terminal.kitty_keyboard_flags();
+    if !terminal.active_is_alt || flags == 0 || terminal.selected_text().is_some() {
+        return None;
+    }
+    let key = winit::keyboard::Key::Character("c".into());
+    let encode = |pressed| {
+        input::encode_key_with_modes(
+            &key,
+            Some(&key),
+            None,
+            None,
+            winit::keyboard::ModifiersState::SUPER,
+            false,
+            false,
+            false,
+            flags,
+            false,
+            pressed,
+            false,
+        )
+    };
+    let mut bytes = encode(true)?;
+    if let Some(release) = encode(false) {
+        bytes.extend(release);
+    }
+    Some(bytes)
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+
+    #[test]
+    fn copy_is_forwarded_only_to_negotiated_fullscreen_apps() {
+        let mut t = noa_grid::Terminal::new(noa_core::GridSize::new(80, 24));
+        let mut stream = noa_vt::Stream::new();
+        assert_eq!(application_copy_bytes(&t), None);
+        stream.feed(b"\x1b[>1u", &mut t);
+        assert_eq!(application_copy_bytes(&t), None);
+        stream.feed(b"\x1b[?1049h", &mut t);
+        assert_eq!(application_copy_bytes(&t), None);
+        stream.feed(b"\x1b[>1u", &mut t);
+        assert_eq!(application_copy_bytes(&t), Some(b"\x1b[99;9u".to_vec()));
+        stream.feed(b"selected", &mut t);
+        t.set_viewport_selection(
+            noa_core::Point { x: 0, y: 0 },
+            noa_core::Point { x: 2, y: 0 },
+        );
+        assert!(t.selected_text().is_some());
+        assert_eq!(application_copy_bytes(&t), None);
+        t.clear_selection();
+        stream.feed(b"\x1b[>3u", &mut t);
+        assert_eq!(
+            application_copy_bytes(&t),
+            Some(b"\x1b[99;9u\x1b[99;9:3u".to_vec())
+        );
+        stream.feed(b"\x1b[?1049l", &mut t);
+        assert_eq!(application_copy_bytes(&t), None);
     }
 }

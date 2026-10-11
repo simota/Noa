@@ -471,6 +471,10 @@ impl Handler for Terminal {
         self.active_mut().clear_all_tab_stops();
     }
 
+    fn set_mouse_shift_capture(&mut self, capture: bool) {
+        self.mouse_shift_capture = Some(capture);
+    }
+
     fn full_reset(&mut self) {
         self.set_progress(None);
         self.invalidate_grid_coordinate_space();
@@ -499,6 +503,7 @@ impl Handler for Terminal {
         self.pending_agent_status = Some(None);
         self.program_status_active = false;
         self.set_mouse_shape(None);
+        self.mouse_shift_capture = None;
         self.pending_bell = false;
         self.kitty_keyboard.reset();
         self.modify_other_keys_2 = false;

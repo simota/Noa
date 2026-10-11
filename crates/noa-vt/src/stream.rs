@@ -609,6 +609,15 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H, sgr_attrs: &mut Vec<SgrAttr>) 
         b'r' if csi.private == 0 => h.set_scroll_region(csi.param(0, 1), csi.param(1, 0)),
         b's' if csi.private == 0 && csi.params().is_empty() => h.save_cursor(),
         b's' if csi.private == 0 => h.set_horizontal_margins(csi.param(0, 1), csi.param(1, 0)),
+        b's' if csi.private == b'>' && csi.intermediates().is_empty() => {
+            if csi.params().len() <= 1 {
+                match csi.param(0, 0) {
+                    0 => h.set_mouse_shift_capture(false),
+                    1 => h.set_mouse_shift_capture(true),
+                    _ => {}
+                }
+            }
+        }
         // Client-mode seed-only: see `Handler::seed_set_last_printed`. The
         // `$` intermediate keeps this clear of xterm's `CSI > Ps s`
         // (XTSHIFTESCAPE) namespace.

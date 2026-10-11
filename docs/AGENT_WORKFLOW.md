@@ -1,5 +1,29 @@
 # Coding agent workflows
 
+## Fullscreen agents
+
+Codex's fullscreen UI keeps its own conversation history. Output Snapshot and
+Noa's search can access only the current alternate screen. Use Codex's search
+or `/copy` for earlier messages, or choose Scrollback with `/tui`.
+
+Cmd+C copies Noa's selection first. With no terminal selection, Noa forwards
+Cmd+C to fullscreen applications that negotiate the Kitty keyboard protocol;
+the application decides what to copy.
+
+To let Codex extend its selection with Shift+click, set
+`mouse-shift-capture = true` in Noa's config. The default reserves Shift for
+Noa's selection unless the application requests it with XTSHIFTESCAPE.
+`never` always reserves Shift for Noa; `always` always passes it to applications
+with mouse reporting enabled.
+
+Antigravity CLI's automatic image detection over SSH currently checks terminal
+brands. On a remote host, run `CLI_GRAPHICS=kitty agy` to explicitly select Kitty
+graphics supported by Noa. Multiplexers must also support image passthrough.
+
+The macOS app bundle includes a microphone usage description and audio-input
+entitlement for voice-capable terminal applications. macOS still controls the
+microphone permission; packaging does not grant recording permission itself.
+
 ## Settings panel
 
 Open **Settings** with **Cmd+,**. Use **Tab** to search for **File Link Editor**,

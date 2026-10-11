@@ -1490,8 +1490,8 @@ impl App {
         }
         self.sync_hover_link(window_id);
 
-        let (tracking, format) = self.mouse_report_modes(window_id, pane_id);
-        if tracking != MouseTracking::Off && !self.modifiers.shift_key() {
+        let (tracking, format, capture_shift) = self.mouse_report_modes(window_id, pane_id);
+        if tracking != MouseTracking::Off && (!self.modifiers.shift_key() || capture_shift) {
             // Motion is reported per cell, not per pixel (xterm/Ghostty):
             // sub-cell jitter must not flood the application with duplicate
             // reports — bursts of identical SGR motion sequences can break
@@ -1758,8 +1758,8 @@ impl App {
             self.focus_pane(window_id, pane_id);
         }
 
-        let (tracking, format) = self.mouse_report_modes(window_id, pane_id);
-        if tracking != MouseTracking::Off && !self.modifiers.shift_key() {
+        let (tracking, format, capture_shift) = self.mouse_report_modes(window_id, pane_id);
+        if tracking != MouseTracking::Off && (!self.modifiers.shift_key() || capture_shift) {
             let last_mouse_cell = self
                 .windows
                 .get(&window_id)
@@ -1876,8 +1876,14 @@ impl App {
             return;
         };
 
-        let (tracking, format, active_is_alt, alternate_scroll_mode, app_cursor_keys) =
-            self.mouse_wheel_modes(window_id, pane_id);
+        let (
+            tracking,
+            format,
+            active_is_alt,
+            alternate_scroll_mode,
+            app_cursor_keys,
+            capture_shift,
+        ) = self.mouse_wheel_modes(window_id, pane_id);
         let cell = self
             .windows
             .get(&window_id)
@@ -1893,7 +1899,7 @@ impl App {
         if let Some(bytes) = mouse::route_mouse_wheel(
             tracking,
             format,
-            self.modifiers.shift_key(),
+            self.modifiers.shift_key() && !capture_shift,
             delta_y,
             cell,
             self.modifiers,

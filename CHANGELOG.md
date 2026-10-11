@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Support application requests for Shift-modified mouse input (XTSHIFTESCAPE)
+  and the `mouse-shift-capture` setting, including remote client replay.
+- Forward Cmd+C to fullscreen applications using the Kitty keyboard protocol
+  when Noa has no selection to copy.
+- Identify fullscreen Output Snapshots as current-screen captures and document
+  agent history, selection, and Antigravity SSH image workarounds.
+- Include macOS microphone usage metadata and the audio-input entitlement in
+  signed app bundles for terminal applications with voice input.
+
 ## [0.2.21] - 2026-10-10
 
 ### Added

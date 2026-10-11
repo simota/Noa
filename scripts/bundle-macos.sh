@@ -121,6 +121,8 @@ cat > "$CONTENTS/Info.plist" <<PLIST
     <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Allow terminal applications to use the microphone for voice input.</string>
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
     <key>NSAppleScriptEnabled</key>
@@ -138,13 +140,15 @@ if [ -n "${NOA_SIGN_IDENTITY:-}" ]; then
   # Sign the inner binary before the enclosing bundle so the outer signature
   # seals an already-signed executable.
   codesign --force --options runtime --timestamp \
+    --entitlements "$ROOT/assets/macos.entitlements.plist" \
     --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/MacOS/Noa"
   codesign --force --options runtime --timestamp \
+    --entitlements "$ROOT/assets/macos.entitlements.plist" \
     --sign "$NOA_SIGN_IDENTITY" "$APP"
   echo "Signed $APP with Developer ID identity: $NOA_SIGN_IDENTITY"
 else
   # Ad-hoc code signature so double-clicking / `open` doesn't trip Gatekeeper.
-  codesign --force --deep --sign - "$APP" >/dev/null 2>&1 \
+  codesign --force --deep --entitlements "$ROOT/assets/macos.entitlements.plist" --sign - "$APP" >/dev/null 2>&1 \
     || echo "warning: ad-hoc codesign failed (app still runnable via terminal)" >&2
 fi
 

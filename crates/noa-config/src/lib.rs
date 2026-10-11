@@ -235,6 +235,36 @@ pub enum ClipboardAccess {
     Allow,
 }
 
+/// Whether applications may receive Shift-modified mouse input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MouseShiftCapture {
+    #[default]
+    False,
+    True,
+    Always,
+    Never,
+}
+
+impl MouseShiftCapture {
+    pub fn captures(self, requested: Option<bool>) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Never => false,
+            Self::False => requested.unwrap_or(false),
+            Self::True => requested.unwrap_or(true),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::False => "false",
+            Self::True => "true",
+            Self::Always => "always",
+            Self::Never => "never",
+        }
+    }
+}
+
 /// A single OpenType feature toggle, e.g. `calt` (enabled) or `-liga`
 /// (`enabled: false`, explicitly disabled). Consumed for real in WP2; WP0
 /// only parses and stores it.
@@ -643,6 +673,7 @@ pub struct StartupConfig {
     /// Whether to confirm before pasting content that could run commands
     /// (`clipboard-paste-protection`). Ghostty default is on.
     pub clipboard_paste_protection: bool,
+    pub mouse_shift_capture: MouseShiftCapture,
     /// Editor command for Cmd-clicking local paths, including line/column.
     pub file_link_editor: FileLinkEditor,
     /// `confirm-quit`: whether app quit (`cmd+q`, menu, command palette)
@@ -924,6 +955,7 @@ impl Default for StartupConfig {
             palette: Vec::new(),
             clipboard_read: ClipboardAccess::default(),
             clipboard_paste_protection: true,
+            mouse_shift_capture: MouseShiftCapture::default(),
             file_link_editor: FileLinkEditor::Default,
             confirm_quit: true,
             title_report: false,
@@ -1042,6 +1074,7 @@ pub struct ConfigOverrides {
     pub palette: Vec<PaletteOverride>,
     pub clipboard_read: Option<ClipboardAccess>,
     pub clipboard_paste_protection: Option<bool>,
+    pub mouse_shift_capture: Option<MouseShiftCapture>,
     pub file_link_editor: Option<FileLinkEditor>,
     pub confirm_quit: Option<bool>,
     pub title_report: Option<bool>,
@@ -1124,6 +1157,7 @@ macro_rules! impl_redacted_config_debug {
                 s.field("font", &self.font)
                     .field("palette", &self.palette)
                     .field("clipboard_read", &self.clipboard_read)
+                    .field("mouse_shift_capture", &self.mouse_shift_capture)
                     .field(
                         "clipboard_paste_protection",
                         &self.clipboard_paste_protection,
@@ -1238,6 +1272,9 @@ impl ConfigOverrides {
             font: self.font.merge(higher_priority.font),
             palette: merge_list(self.palette, higher_priority.palette),
             clipboard_read: higher_priority.clipboard_read.or(self.clipboard_read),
+            mouse_shift_capture: higher_priority
+                .mouse_shift_capture
+                .or(self.mouse_shift_capture),
             clipboard_paste_protection: higher_priority
                 .clipboard_paste_protection
                 .or(self.clipboard_paste_protection),
@@ -1399,6 +1436,7 @@ impl ConfigOverrides {
                 self.palette
             },
             clipboard_read: self.clipboard_read.unwrap_or(base.clipboard_read),
+            mouse_shift_capture: self.mouse_shift_capture.unwrap_or(base.mouse_shift_capture),
             clipboard_paste_protection: self
                 .clipboard_paste_protection
                 .unwrap_or(base.clipboard_paste_protection),
@@ -1845,6 +1883,35 @@ pub fn validate_grid_dimension(value: u16, context: &str, key: &'static str) -> 
 mod tests {
     use super::*;
 
+    #[test]
+    fn mouse_shift_capture_config_and_application_override() {
+        for (value, expected) in [
+            ("false", [false, false, true]),
+            ("true", [true, false, true]),
+            ("always", [true, true, true]),
+            ("never", [false, false, false]),
+        ] {
+            let (overrides, diagnostics) = crate::parser::parse_overrides(
+                test_path(),
+                &format!("mouse-shift-capture = {value}\n"),
+            );
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let policy = overrides
+                .apply_to(StartupConfig::default())
+                .mouse_shift_capture;
+            for (requested, expected) in [None, Some(false), Some(true)].into_iter().zip(expected) {
+                assert_eq!(
+                    policy.captures(requested),
+                    expected,
+                    "{value}: {requested:?}"
+                );
+            }
+        }
+        let (_, diagnostics) =
+            crate::parser::parse_overrides(test_path(), "mouse-shift-capture = invalid\n");
+        assert!(!diagnostics.is_empty());
+    }
+
     fn test_path() -> &'static Path {
         Path::new("/tmp/noa-test-config")
     }
@@ -1867,6 +1934,7 @@ mod tests {
                 palette: Vec::new(),
                 clipboard_read: ClipboardAccess::Ask,
                 clipboard_paste_protection: true,
+                mouse_shift_capture: MouseShiftCapture::default(),
                 file_link_editor: FileLinkEditor::Default,
                 confirm_quit: true,
                 title_report: false,

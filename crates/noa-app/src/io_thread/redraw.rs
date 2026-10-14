@@ -40,7 +40,7 @@ pub(crate) const SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION: Duration = Duration::from_
 /// actual refresh rate isn't known (one 120Hz frame); [`RedrawFloor`] derives
 /// a tighter, monitor-accurate value at runtime via
 /// [`redraw_floor_from_refresh_millihertz`].
-pub(super) const REDRAW_MIN_INTERVAL: Duration = Duration::from_millis(8);
+pub(crate) const REDRAW_MIN_INTERVAL: Duration = Duration::from_millis(8);
 
 /// Sane clamp range for a monitor-derived redraw floor — guards against a
 /// platform reporting an implausible refresh rate (e.g. 0 or absurdly high)
@@ -64,7 +64,7 @@ pub(crate) fn redraw_floor_from_refresh_millihertz(millihertz: Option<u32>) -> D
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum RedrawDecision {
+pub(crate) enum RedrawDecision {
     /// Ask the main thread to repaint now — the redraw floor (or, under
     /// synchronized output, the suppression cap) has elapsed since the last
     /// paint.
@@ -101,7 +101,7 @@ pub(super) fn decide_redraw(
 /// since the last paint, so a stalled or batch-straddled frame can't freeze
 /// the screen. Either way a suppressed batch owes a redraw at `deadline`, so
 /// a burst's final frame always paints.
-pub(super) fn decide_redraw_floor(
+pub(crate) fn decide_redraw_floor(
     synchronized: bool,
     last_redraw: Option<Instant>,
     now: Instant,

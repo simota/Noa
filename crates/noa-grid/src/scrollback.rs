@@ -90,6 +90,11 @@ use std::sync::{Arc, Condvar, Mutex};
 const PAGE_TARGET_BYTES: usize = 64 * 1024;
 const PACKED_CELL_SIZE: usize = std::mem::size_of::<PackedCell>();
 const PAGE_CELL_CAPACITY: usize = PAGE_TARGET_BYTES / PACKED_CELL_SIZE;
+/// Billed per stored row on top of its cells, so rows that trim to zero
+/// cells (blank lines) still count against `scrollback-limit` and still fill
+/// a page — otherwise a blank-line flood grows `Page::rows` without bound.
+const ROW_META_SIZE: usize = std::mem::size_of::<RowMeta>();
+const PAGE_ROW_CAPACITY: usize = PAGE_TARGET_BYTES / ROW_META_SIZE;
 
 /// Flat per-page byte overhead (deque node, `Vec` headers, `HashMap` control
 /// block). Approximate — byte accounting is deterministic but not a heap
@@ -382,6 +387,10 @@ impl Page {
         }
     }
 
+    fn is_full(&self) -> bool {
+        self.cells.len() >= PAGE_CELL_CAPACITY || self.rows.len() >= PAGE_ROW_CAPACITY
+    }
+
     fn unpack_cell(&self, packed: PackedCell, cell_index: usize) -> Cell {
         let style = self.styles.get(packed.style);
         let mut attrs = style.attrs();
@@ -466,7 +475,7 @@ impl Page {
 
         let base = self.cells.len();
         let offset = base as u32;
-        let mut delta = len * PACKED_CELL_SIZE;
+        let mut delta = len * PACKED_CELL_SIZE + ROW_META_SIZE;
 
         // The whole row fits without reallocating — the caller guarantees
         // `len <= cols` headroom past the seal threshold — so fill the
@@ -610,7 +619,7 @@ impl Page {
 
         let base = self.cells.len();
         let offset = base as u32;
-        let mut delta = len * PACKED_CELL_SIZE;
+        let mut delta = len * PACKED_CELL_SIZE + ROW_META_SIZE;
         self.cells.reserve(len);
         let dst = self.cells.as_mut_ptr();
 
@@ -1537,7 +1546,7 @@ impl PagedScrollback {
     fn ensure_page(&mut self, cols: u16) -> &mut Page {
         let need_new = match self.pages.back() {
             None => true,
-            Some(page) => page.cols != cols || page.cells.len() >= PAGE_CELL_CAPACITY,
+            Some(page) => page.cols != cols || page.is_full(),
         };
         if need_new {
             // Reuse a spare evicted page when its arena is big enough for
@@ -1665,7 +1674,7 @@ fn pack_chunk(
         let cols = row.cols() as u16;
         let need_new = match pages.last() {
             None => true,
-            Some(page) => page.cols != cols || page.cells.len() >= PAGE_CELL_CAPACITY,
+            Some(page) => page.cols != cols || page.is_full(),
         };
         if need_new {
             if let Some(page) = pages.last_mut() {
@@ -2323,6 +2332,26 @@ mod tests {
         );
         // Retention stays within the limit plus at most one over-target page.
         assert!(sb.bytes() <= limit + PAGE_TARGET_BYTES + PAGE_HEADER_COST);
+    }
+
+    #[test]
+    fn blank_row_flood_stays_within_limit() {
+        // Blank rows trim to zero cells; they must still be billed and seal
+        // pages, or `yes ''` grows history past `scrollback-limit` forever.
+        let limit = 1_000_000;
+        let blank = Cell::default();
+        let mut span_sb = PagedScrollback::new(limit);
+        let mut row_sb = PagedScrollback::new(limit);
+        let empty = text_row("", 80);
+        for _ in 0..1_000_000 {
+            span_sb.push_span_immediate(b"", 0, 80, &blank, &blank, false);
+            row_sb.push_row(&empty);
+        }
+        for sb in [&span_sb, &row_sb] {
+            assert!(sb.bytes() <= limit + PAGE_TARGET_BYTES + PAGE_HEADER_COST);
+            assert!(sb.len() <= limit / ROW_META_SIZE + PAGE_ROW_CAPACITY);
+            assert!(sb.pages.len() > 1);
+        }
     }
 
     #[test]

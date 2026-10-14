@@ -1235,13 +1235,14 @@ fn run_scrollback_worker<F, N>(
     N: ConnectionNotifier,
 {
     let mut read_denied_generation = DISCONNECTED_GENERATION;
-    // Generation whose last fetch was this worker's own overtaken refetch.
-    // An overtaken snapshot is refetched once; if the refetch is overtaken
-    // too, retrying cannot converge (local history already covers what a
-    // fresh tail can offer), and an unconditional refetch here spun a
-    // connect + server tail walk + two full local scrollback builds in a
-    // tight loop.
-    let mut refetched_generation = DISCONNECTED_GENERATION;
+    // Consecutive overtaken fetches for `overtaken_generation`. The first
+    // refetch is immediate; later ones back off exponentially, because
+    // repeated overtaking can be either a race that a later fetch wins
+    // (raw output keeps landing during each fetch) or a snapshot that can
+    // never merge — and an unconditional immediate refetch spun a connect +
+    // server tail walk + two full local scrollback builds in a tight loop.
+    let mut overtaken_generation = DISCONNECTED_GENERATION;
+    let mut overtaken_streak: u32 = 0;
     loop {
         if shutdown.load(Ordering::Acquire) {
             break;
@@ -1306,18 +1307,22 @@ fn run_scrollback_worker<F, N>(
         // above: that failure mode is a permission rejection, not a stale
         // snapshot, and must stay un-retried for this generation.
         let overtaken = !merged && scrollback_snapshot_overtaken(&terminal, &snapshot);
-        let refetch = overtaken && refetched_generation != requested;
-        refetched_generation = if refetch {
-            requested
-        } else {
-            DISCONNECTED_GENERATION
-        };
+        if overtaken_generation != requested || !overtaken {
+            overtaken_generation = requested;
+            overtaken_streak = 0;
+        }
+        let refetch_delay = overtaken
+            .then(|| overtaken_refetch_delay(overtaken_streak))
+            .flatten();
+        if overtaken {
+            overtaken_streak = overtaken_streak.saturating_add(1);
+        }
         *cache.lock() = Some(CachedRemoteScrollback {
             generation: requested,
             snapshot,
             merged,
         });
-        if refetch {
+        if overtaken {
             // No wake signal needed: `requested_generation` is only ever
             // *read* blockingly (`wake_rx.recv()`) when it reads
             // `DISCONNECTED_GENERATION` at the top of this same loop, which
@@ -1326,7 +1331,28 @@ fn run_scrollback_worker<F, N>(
             requested_generation.store(requested, Ordering::Release);
         }
         notifier.redraw();
+        drop(_guard);
+        if let Some(delay) = refetch_delay
+            && matches!(
+                wake_rx.recv_timeout(delay),
+                Err(RecvTimeoutError::Disconnected)
+            )
+        {
+            break;
+        }
     }
+}
+
+/// Wait before the `streak`-th consecutive overtaken refetch (0-based) of
+/// one generation: none for the first, then [`SCROLLBACK_RETRY_DELAY`]
+/// doubling up to [`MAX_RECONNECT_DELAY`].
+fn overtaken_refetch_delay(streak: u32) -> Option<Duration> {
+    let exponent = streak.checked_sub(1)?;
+    Some(
+        SCROLLBACK_RETRY_DELAY
+            .saturating_mul(1u32.checked_shl(exponent).unwrap_or(u32::MAX))
+            .min(MAX_RECONNECT_DELAY),
+    )
 }
 
 fn store_generation(generation: &AtomicU64, guard: &Mutex<()>, value: u64) {
@@ -1674,22 +1700,12 @@ where
                 }
                 retry_pending_scrollback_merge(terminal, generation, scrollback);
                 let now = Instant::now();
-                match crate::io_thread::decide_redraw_floor(
-                    outcome.synchronized_output,
-                    last_redraw,
-                    now,
-                    crate::io_thread::REDRAW_MIN_INTERVAL,
-                ) {
-                    crate::io_thread::RedrawDecision::Now => {
-                        last_redraw = Some(now);
-                        notifier.redraw();
-                        redraw_deadline = outcome
-                            .synchronized_output
-                            .then(|| now + crate::io_thread::SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION);
-                    }
-                    crate::io_thread::RedrawDecision::Suppress { deadline } => {
-                        redraw_deadline = Some(deadline);
-                    }
+                let (paint_now, deadline) =
+                    remote_redraw_decision(outcome.synchronized_output, last_redraw, now);
+                redraw_deadline = deadline;
+                if paint_now {
+                    last_redraw = Some(now);
+                    notifier.redraw();
                 }
             }
             Ok(None) => {
@@ -1709,6 +1725,34 @@ where
                 }
             }
             Err(_) => return ConnectedOutcome::Disconnected,
+        }
+    }
+}
+
+/// Redraw decision for one fed remote batch: whether to paint now, and the
+/// trailing redraw deadline to arm (replacing any earlier one). Outside
+/// synchronized output this is the local pty path's redraw floor. Under it,
+/// the render side holds its snapshot for
+/// [`crate::io_thread::SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION`] from when it
+/// painted — which is after `last_redraw` — so the trailing redraw is
+/// anchored to this batch; anchoring it to `last_redraw` could land inside
+/// that hold window, get swallowed, and leave the batch unpainted.
+fn remote_redraw_decision(
+    synchronized: bool,
+    last_redraw: Option<Instant>,
+    now: Instant,
+) -> (bool, Option<Instant>) {
+    let sync_deadline =
+        synchronized.then(|| now + crate::io_thread::SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION);
+    match crate::io_thread::decide_redraw_floor(
+        synchronized,
+        last_redraw,
+        now,
+        crate::io_thread::REDRAW_MIN_INTERVAL,
+    ) {
+        crate::io_thread::RedrawDecision::Now => (true, sync_deadline),
+        crate::io_thread::RedrawDecision::Suppress { deadline } => {
+            (false, Some(sync_deadline.unwrap_or(deadline)))
         }
     }
 }
@@ -3346,51 +3390,50 @@ mod tests {
         );
     }
 
-    #[test]
-    fn repeatedly_overtaken_scrollback_snapshot_stops_after_one_refetch() {
-        // Once local history already covers the fresh tail (e.g. after an
-        // alternate-screen exit on a pane whose backfill already merged),
-        // every refetched snapshot is overtaken too. The worker must give up
-        // after one refetch instead of reconnecting in a tight loop.
+    /// Runs the scrollback worker over `snapshots` against a one-line
+    /// replica already holding "seedfuture" (so a "seed" snapshot is
+    /// overtaken). Returns the connect counter, cache and a stop closure.
+    fn spawn_overtaken_worker(
+        snapshots: Vec<&str>,
+    ) -> (
+        Arc<AtomicUsize>,
+        Arc<Mutex<Option<CachedRemoteScrollback>>>,
+        impl FnOnce(),
+    ) {
         let mut one_line_terminal = Terminal::new(GridSize::new(80, 1));
         one_line_terminal.set_reply_writes_enabled(false);
         let terminal = Arc::new(Mutex::new(one_line_terminal));
-        let mut stream = noa_vt::Stream::new();
         feed_remote_bytes(
-            &mut stream,
+            &mut noa_vt::Stream::new(),
             &terminal,
             b"seedfuture",
             &FakeNotifier::default(),
         );
-
         let connects = Arc::new(AtomicUsize::new(0));
         let factory = SequentialScrollbackFactory {
             snapshots: Arc::new(Mutex::new(
-                (0..16)
-                    .map(|_| RemoteScrollbackSnapshot {
-                        text: "seed".to_string(),
+                snapshots
+                    .into_iter()
+                    .map(|text| RemoteScrollbackSnapshot {
+                        text: text.to_string(),
                         truncated: false,
                     })
                     .collect(),
             )),
             connects: Arc::clone(&connects),
         };
-        let generation = Arc::new(AtomicU64::new(3));
-        let requested_generation = Arc::new(AtomicU64::new(3));
         let shutdown = Arc::new(AtomicBool::new(false));
         let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
         let cache = Arc::new(Mutex::new(None));
-
         let worker_cache = Arc::clone(&cache);
         let worker_shutdown = Arc::clone(&shutdown);
-        let worker_requested = Arc::clone(&requested_generation);
         let join = std::thread::spawn(move || {
             run_scrollback_worker(
                 Arc::new(Mutex::new(credentials())),
                 factory,
-                generation,
+                Arc::new(AtomicU64::new(3)),
                 Arc::new(Mutex::new(())),
-                worker_requested,
+                Arc::new(AtomicU64::new(3)),
                 worker_shutdown,
                 wake_rx,
                 worker_cache,
@@ -3398,18 +3441,70 @@ mod tests {
                 FakeNotifier::default(),
             );
         });
+        let stop = move || {
+            shutdown.store(true, Ordering::Release);
+            let _ = wake_tx.try_send(());
+            join.join().unwrap();
+        };
+        (connects, cache, stop)
+    }
 
-        wait_until(|| {
-            connects.load(Ordering::Acquire) >= 2
-                && requested_generation.load(Ordering::Acquire) == DISCONNECTED_GENERATION
-        });
-        std::thread::sleep(Duration::from_millis(50));
-        shutdown.store(true, Ordering::Release);
-        let _ = wake_tx.try_send(());
-        join.join().unwrap();
-
+    #[test]
+    fn repeatedly_overtaken_scrollback_refetch_backs_off_instead_of_spinning() {
+        // A snapshot that never merges must not reconnect in a tight loop:
+        // the first refetch is immediate, the next waits SCROLLBACK_RETRY_DELAY.
+        let (connects, _cache, stop) = spawn_overtaken_worker(vec!["seed"; 16]);
+        wait_until(|| connects.load(Ordering::Acquire) >= 2);
+        std::thread::sleep(SCROLLBACK_RETRY_DELAY / 4);
         assert_eq!(connects.load(Ordering::Acquire), 2);
-        assert!(cache.lock().as_ref().is_some_and(|cached| !cached.merged));
+        stop();
+    }
+
+    #[test]
+    fn scrollback_still_merges_after_two_overtaken_fetches() {
+        // Raw output can overtake both the first fetch and its refetch while
+        // a later fetch still merges; backing off must keep retrying rather
+        // than give up and leave older history missing for the connection.
+        let (connects, cache, stop) =
+            spawn_overtaken_worker(vec!["seed", "seed", "older output\nseedfuture"]);
+        let deadline = Instant::now() + SCROLLBACK_RETRY_DELAY * 3;
+        while !cache.lock().as_ref().is_some_and(|cached| cached.merged) {
+            assert!(Instant::now() < deadline, "the third fetch never merged");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(connects.load(Ordering::Acquire), 3);
+        stop();
+    }
+
+    #[test]
+    fn overtaken_refetch_delay_is_immediate_then_exponential_and_capped() {
+        assert_eq!(overtaken_refetch_delay(0), None);
+        assert_eq!(overtaken_refetch_delay(1), Some(SCROLLBACK_RETRY_DELAY));
+        assert_eq!(overtaken_refetch_delay(2), Some(SCROLLBACK_RETRY_DELAY * 2));
+        assert_eq!(overtaken_refetch_delay(40), Some(MAX_RECONNECT_DELAY));
+    }
+
+    #[test]
+    fn synchronized_trailing_redraw_is_anchored_to_the_latest_batch() {
+        // Requested at 0 ms, a further synchronized batch at 50 ms: the
+        // render side may have started holding its snapshot after 0 ms, so a
+        // trailing redraw at 0 + 100 ms could land inside the hold window
+        // and be swallowed. It must be 50 + 100 ms.
+        let t0 = Instant::now();
+        let batch = t0 + Duration::from_millis(50);
+        let (paint_now, deadline) = remote_redraw_decision(true, Some(t0), batch);
+        assert!(!paint_now);
+        assert_eq!(
+            deadline,
+            Some(batch + crate::io_thread::SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION)
+        );
+
+        // Outside synchronized output the plain redraw floor applies.
+        let (paint_now, deadline) =
+            remote_redraw_decision(false, Some(t0), t0 + Duration::from_millis(1));
+        assert!(!paint_now);
+        assert_eq!(deadline, Some(t0 + crate::io_thread::REDRAW_MIN_INTERVAL));
+        assert_eq!(remote_redraw_decision(false, None, t0), (true, None));
     }
 
     #[test]

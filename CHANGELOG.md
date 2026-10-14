@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.22] - 2026-10-14
+
 ### Fixed
 
 - Support application requests for Shift-modified mouse input (XTSHIFTESCAPE)
@@ -17,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agent history, selection, and Antigravity SSH image workarounds.
 - Include macOS microphone usage metadata and the audio-input entitlement in
   signed app bundles for terminal applications with voice input.
+- Blank lines now count against `scrollback-limit`, so a flood of empty output
+  can no longer grow history without bound (#98).
+- Busy background tabs no longer re-title every hidden window on each redraw,
+  which made the main thread slow down with many busy tabs (#98).
+- Remote panes coalesce redraws like local panes, keep the final synchronized
+  output batch painted, and retry missing scrollback with backoff instead of
+  reconnecting in a tight loop (#98).
 
 ## [0.2.21] - 2026-10-10
 

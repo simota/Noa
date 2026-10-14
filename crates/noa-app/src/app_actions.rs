@@ -178,8 +178,18 @@ pub(crate) fn open_config_file() {
 }
 
 /// Create the config file (and its parent directory) seeded with the template
-/// when it is absent. A no-op when the file already exists.
+/// when it is absent. A no-op when the file already exists. A dotfiles
+/// symlink whose target does not exist yet is seeded at that target, keeping
+/// the link, the same way the settings writer treats it.
 fn ensure_config_file(path: &Path) {
+    let path = match noa_config::resolve_config_symlinks(path) {
+        Ok(target) => target,
+        Err(err) => {
+            log::warn!("failed to resolve config path {}: {err}", path.display());
+            return;
+        }
+    };
+    let path = path.as_path();
     if path.exists() {
         return;
     }
@@ -192,7 +202,20 @@ fn ensure_config_file(path: &Path) {
         );
         return;
     }
-    if let Err(err) = std::fs::write(path, CONFIG_TEMPLATE) {
+    // Owner-only: the user is about to edit this file, and it is where a
+    // `server-token` or `client-token` would be written.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = options.open(path).and_then(|mut file| {
+        use std::io::Write;
+        file.write_all(CONFIG_TEMPLATE.as_bytes())
+    });
+    if let Err(err) = result {
         log::warn!("failed to seed config file {}: {err}", path.display());
     }
 }
@@ -358,6 +381,31 @@ mod tests {
         ensure_config_file(&path);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "font-size = 20\n");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_config_file_seeds_a_dangling_symlink_target_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("noa-cfg-link-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let link = dir.join("noa/config");
+        let target = dir.join("dotfiles/noa/config");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        ensure_config_file(&link);
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), CONFIG_TEMPLATE);
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

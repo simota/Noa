@@ -742,18 +742,16 @@ impl App {
     /// The working directory reported by a pane's shell over OSC 7, if it
     /// points at a directory that still exists locally. A new tab or split
     /// inherits it so it opens where the focused shell is (Ghostty parity).
-    /// Stale or remote paths (which usually don't resolve locally) fall back
-    /// to `None`, i.e. the process's own cwd.
+    /// Stale paths fall back to `None`, i.e. the process's own cwd. A remote
+    /// pane's cwd is never used, even when it happens to resolve locally:
+    /// it is whatever the remote server sent, and a local shell must not
+    /// start in a directory a remote peer chose.
     pub(super) fn pane_cwd(&self, window_id: WindowId, pane_id: PaneId) -> Option<String> {
-        let cwd = self
-            .windows
-            .get(&window_id)?
-            .surfaces
-            .get(&pane_id)?
-            .terminal
-            .lock()
-            .cwd
-            .clone()?;
+        let surface = self.windows.get(&window_id)?.surfaces.get(&pane_id)?;
+        if surface.is_remote() {
+            return None;
+        }
+        let cwd = surface.terminal.lock().cwd.clone()?;
         std::path::Path::new(&cwd).is_dir().then_some(cwd)
     }
 
@@ -929,6 +927,7 @@ impl App {
         let mut terminal = self.new_terminal(grid_size);
         terminal.osc52_policy.allow_read = false;
         terminal.set_reply_writes_enabled(false);
+        terminal.kitty_images.set_local_media_enabled(false);
         let mut stream = noa_vt::Stream::new();
         stream.feed(
             b"\x1b[2J\x1b[HRemote pane detached.\r\nUse Attach Remote to reconnect.",

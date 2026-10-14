@@ -342,7 +342,7 @@ const MAX_SYMLINK_HOPS: usize = 40;
 /// intermediate directories, so the returned path stays usable for a
 /// sibling temp file + `rename`. Relative link targets resolve against the
 /// link's own directory, per symlink semantics.
-fn resolve_symlinks(path: &Path) -> io::Result<std::path::PathBuf> {
+pub fn resolve_symlinks(path: &Path) -> io::Result<std::path::PathBuf> {
     let mut current = path.to_path_buf();
     for _ in 0..MAX_SYMLINK_HOPS {
         let metadata = match fs::symlink_metadata(&current) {

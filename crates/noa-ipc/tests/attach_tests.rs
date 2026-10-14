@@ -34,6 +34,9 @@ struct TestBackend {
     resizes: Mutex<Vec<(PaneRef, u16, u16)>>,
     resize_event: Sender<()>,
     resize_rx: Receiver<()>,
+    /// When set, `open_attach` reports that it started and then blocks until
+    /// released, to hold the server between authentication and registration.
+    open_gate: Mutex<Option<(Sender<()>, Receiver<()>)>>,
 }
 
 impl TestBackend {
@@ -54,6 +57,7 @@ impl TestBackend {
             resizes: Mutex::new(Vec::new()),
             resize_event,
             resize_rx,
+            open_gate: Mutex::new(None),
         }
     }
 
@@ -154,6 +158,11 @@ impl IpcBackend for TestBackend {
         generation: u64,
         output: AttachOutputSender,
     ) -> Result<Vec<u8>, IpcError> {
+        let gate = self.open_gate.lock().unwrap().take();
+        if let Some((started, release)) = gate {
+            started.send(()).unwrap();
+            release.recv().unwrap();
+        }
         self.validate_attach(pane)?;
         self.outputs
             .lock()
@@ -570,6 +579,64 @@ fn delayed_detach_only_releases_the_calling_control_sessions_generation() {
     assert_eq!(
         backend.inputs.lock().unwrap().last().unwrap().2,
         b"still-owned"
+    );
+}
+
+#[test]
+fn ending_the_control_connection_revokes_its_unredeemed_attach_token() {
+    let (_backend, handle) = start(ScopeSet::from_strings(["attach"]));
+    let mut control = connect_control(handle.port(), &["attach"]);
+    let (url, token) = reserve(&mut control, 2);
+    control.close(None).unwrap();
+    drop(control);
+    wait_for_connection_count(&handle, 0);
+
+    let (mut raw, _) = tungstenite::connect(&url).unwrap();
+    raw.send(Message::Binary(token.into_bytes())).unwrap();
+    let frame = match raw.read().unwrap() {
+        Message::Close(Some(frame)) => frame,
+        other => panic!("expected the revoked token to be refused, got {other:?}"),
+    };
+    assert_eq!(frame.code, CloseCode::Policy);
+
+    // The pane is free again for a new control session.
+    let mut fresh = connect_control(handle.port(), &["attach"]);
+    let (fresh_url, fresh_token) = reserve(&mut fresh, 2);
+    let _raw = connect_attach(&fresh_url, fresh_token);
+}
+
+#[test]
+fn control_exit_during_raw_registration_never_leaves_a_stale_tap() {
+    let (backend, handle) = start(ScopeSet::from_strings(["attach"]));
+    let mut control = connect_control(handle.port(), &["attach"]);
+    let (url, token) = reserve(&mut control, 2);
+
+    let (started_tx, started_rx) = bounded(1);
+    let (release_tx, release_rx) = bounded(1);
+    *backend.open_gate.lock().unwrap() = Some((started_tx, release_rx));
+    let raw = std::thread::spawn(move || {
+        let (mut raw, _) = tungstenite::connect(&url).unwrap();
+        raw.send(Message::Binary(token.into_bytes())).unwrap();
+        // The seed or a close, depending on who won; either way drain it.
+        let _ = raw.read();
+        raw
+    });
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    // The raw side has authenticated but not yet registered its tap.
+    control.close(None).unwrap();
+    drop(control);
+    std::thread::sleep(Duration::from_millis(200));
+    release_tx.send(()).unwrap();
+    let _raw = raw.join().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !backend.outputs.lock().unwrap().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        backend.outputs.lock().unwrap().is_empty(),
+        "a tap registered for a released lease was never detached"
     );
 }
 

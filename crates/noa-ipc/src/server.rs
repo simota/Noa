@@ -22,6 +22,11 @@ use tungstenite::protocol::{CloseFrame, WebSocketConfig};
 /// unbounded number of connection threads.
 const MAX_CONNECTIONS: usize = 32;
 
+/// Most pane ids one `noa.subscribe` may filter on. Each id is kept per
+/// subscription and scanned on every broadcast while the connection map is
+/// locked; far more than any window holds, far less than a 1 MiB message.
+const MAX_SUBSCRIBE_PANE_IDS: usize = 1024;
+
 /// Per-remote-source-IP cap on concurrent connections, a subset of the global
 /// [`MAX_CONNECTIONS`] budget (LAN-exposure hardening). On a non-loopback
 /// (`server-bind = 0.0.0.0`) server, a single remote host — authenticated or
@@ -480,15 +485,22 @@ fn release_ip_slot(counts: &Mutex<HashMap<IpAddr, usize>>, ip: IpAddr) {
 struct Session {
     hello_done: bool,
     header_authed: bool,
+    /// Set by a `noa.hello` that presented a wrong token. The connection is
+    /// closed after that reply, so each guess costs a new connection.
+    auth_failed: bool,
     granted_scopes: ScopeSet,
     attach_authority: String,
     attach_leases: HashMap<PaneRef, LeaseIdentity>,
 }
 
 enum ConnectionRoute {
-    Control { authority: String },
+    Control {
+        authority: String,
+    },
     Attach,
     Invalid,
+    /// A browser page on another origin; see [`origin_allowed`].
+    ForbiddenOrigin,
 }
 
 /// Where a [`DeadlineStream`] is in its lifecycle: bounded by an absolute
@@ -650,6 +662,50 @@ impl Drop for ConnectionGuard {
     }
 }
 
+fn header_str<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
+    req.headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+}
+
+/// Whether a WebSocket upgrade may proceed given its `Origin` and `Host`.
+///
+/// Native clients send no `Origin`. Browsers always do, and any page the
+/// user visits can open `ws://127.0.0.1:<port>`, so a present `Origin` must
+/// name a loopback host — or, for a dashboard reaching a LAN bind by
+/// address, the same IP literal as `Host`. A host *name* matching `Host` is
+/// not enough: DNS rebinding makes an attacker's name resolve to us.
+fn origin_allowed(origin: Option<&str>, host: Option<&str>) -> bool {
+    let Some(origin) = origin else {
+        return true;
+    };
+    let Some(origin_host) = origin
+        .split_once("://")
+        .map(|(_, rest)| authority_host(rest.split('/').next().unwrap_or(rest)))
+    else {
+        return false;
+    };
+    if origin_host.eq_ignore_ascii_case("localhost")
+        || origin_host
+            .parse::<IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+    {
+        return true;
+    }
+    origin_host.parse::<IpAddr>().is_ok()
+        && host.is_some_and(|host| authority_host(host) == origin_host)
+}
+
+/// The host of `host[:port]` / `[v6]:port`, brackets removed.
+fn authority_host(authority: &str) -> &str {
+    if let Some(rest) = authority.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    authority
+        .rsplit_once(':')
+        .map_or(authority, |(host, _)| host)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_connection(
     stream: TcpStream,
@@ -684,7 +740,9 @@ fn handle_connection(
     let token_cb = token.clone();
     let callback = move |req: &Request, response: Response| {
         let path = req.uri().path();
-        let selected = if path == "/" {
+        let selected = if !origin_allowed(header_str(req, "Origin"), header_str(req, "Host")) {
+            ConnectionRoute::ForbiddenOrigin
+        } else if path == "/" {
             if let Some(value) = req.headers().get("Authorization")
                 && let Ok(text) = value.to_str()
                 && let Some(presented) = text.strip_prefix("Bearer ")
@@ -733,11 +791,12 @@ fn handle_connection(
             let mut session = Session {
                 hello_done: false,
                 header_authed: header_authed.load(Ordering::SeqCst),
+                auth_failed: false,
                 granted_scopes: ScopeSet::empty(),
                 attach_authority: authority,
                 attach_leases: HashMap::new(),
             };
-            run_connection_loop(
+            let result = run_connection_loop(
                 &mut ws,
                 &backend,
                 &token,
@@ -750,13 +809,25 @@ fn handle_connection(
                 &shutdown,
                 connected_at,
                 hello_deadline,
-            )
+            );
+            // Attach reservations and leases belong to the control session
+            // that requested them. Once it ends — the client left, or a
+            // config reload rotated the token or narrowed the scopes — an
+            // unredeemed token must not still open a raw channel, and an
+            // active one must not outlive the grant it was issued under.
+            for identity in session.attach_leases.into_values() {
+                if attach_registry.release_generation(identity) {
+                    let _ = backend.detach_attach(identity.pane, identity.generation);
+                }
+            }
+            result
         }
         ConnectionRoute::Attach => {
             ws.get_mut().mark_attach_connected()?;
             run_attach_connection(&mut ws, &backend, &attach_registry, &shutdown)
         }
         ConnectionRoute::Invalid => close_policy(&mut ws, "invalid websocket path"),
+        ConnectionRoute::ForbiddenOrigin => close_policy(&mut ws, "cross-origin request refused"),
     }
     // `guard` drops here on every path above (including the `?`s earlier in
     // this function and any error `run_connection_loop` returns),
@@ -811,6 +882,9 @@ fn run_connection_loop(
                     session,
                 ) {
                     ws.send(Message::Text(response)).map_err(ws_err_to_io)?;
+                }
+                if session.auth_failed {
+                    return Ok(());
                 }
                 if session.hello_done {
                     ws.get_mut().mark_hello_done();
@@ -873,9 +947,15 @@ fn run_attach_connection(
     // The backend performs raw-tap registration and seed snapshot atomically.
     // Only after it returns do we touch the socket, so a Terminal lock held by
     // the application can never include a WebSocket write.
-    let seed = match backend.open_attach(identity.pane, identity.generation, output) {
-        Ok(seed) => seed,
-        Err(_) => return close_attach_failure(ws),
+    // Registration runs under the registry lock, like `noa.resizePane`: the
+    // control session can end between authentication and this call, and its
+    // release must either see the tap registered (and detach it) or win the
+    // lock first so a stale generation is never registered at all.
+    let opened = registry.with_current_lease(identity, || {
+        backend.open_attach(identity.pane, identity.generation, output)
+    });
+    let Some(Ok(seed)) = opened else {
+        return close_attach_failure(ws);
     };
     send_attach_seed(ws, &seed)?;
 
@@ -1347,7 +1427,10 @@ fn handle_hello(
     if !session.header_authed {
         match &hello.token {
             Some(presented) if constant_time_eq(presented.as_bytes(), token.as_bytes()) => {}
-            _ => return error_response(id, ErrorCode::Auth, "invalid token"),
+            _ => {
+                session.auth_failed = true;
+                return error_response(id, ErrorCode::Auth, "invalid token");
+            }
         }
     }
 
@@ -1541,6 +1624,12 @@ fn handle_subscribe(
 ) -> Result<Value, RpcFail> {
     let p: SubscribeParams =
         serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
+    if p.pane_ids
+        .as_ref()
+        .is_some_and(|ids| ids.len() > MAX_SUBSCRIBE_PANE_IDS)
+    {
+        return Err(RpcFail::invalid_params());
+    }
     let mask = EventMask::from_events(&p.events);
     let pane_ids = p
         .pane_ids
@@ -1912,6 +2001,7 @@ mod tests {
         Session {
             hello_done: false,
             header_authed: false,
+            auth_failed: false,
             granted_scopes: ScopeSet::empty(),
             attach_authority: String::new(),
             attach_leases: HashMap::new(),

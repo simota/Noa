@@ -36,6 +36,12 @@ windowGroup (logical window) ─▶ window (native tab) ─▶ pane
 3. After hello succeeds, methods can be called within the range of `grantedScopes`.
 
 Any other method before hello returns `-32001`. A major mismatch returns `-32006`.
+A `noa.hello` with a wrong or missing token returns `-32001` and the server then closes the
+connection; retry on a new connection.
+
+An upgrade request carrying an `Origin` header (every browser sends one) is closed with policy code
+1008 right after the upgrade unless the origin's host is `localhost`, a loopback IP, or the same IP literal as the request's
+`Host`. Native clients send no `Origin` and are unaffected.
 
 ## 4. Scopes
 
@@ -139,6 +145,8 @@ params: `{"paneId":"1"}` / result: `{"ok":true}`
 
 Releases the pane's attach lease and closes its raw subscription. It does not close the pane or terminate the remote process.
 
+Closing the control connection does the same for every lease it holds: an unredeemed attach token stops working and an active raw channel is closed. Keep the control connection open for as long as the raw channel is in use.
+
 ### noa.resizePane — requires attach
 
 params: `{"paneId":"1","cols":120,"rows":40}` / result: `{"ok":true}`
@@ -158,7 +166,7 @@ Resizes the server-side terminal grid first and then updates the PTY winsize. A 
 
 result: `{"subscriptionId":"1"}`
 
-Max 16 per connection (slots freed by `unsubscribe` are immediately available again). A `subscribe` call beyond the limit returns `-32005` ("subscription limit exceeded") without closing the connection.
+`paneIds`, when present, may list at most 1024 ids; more returns `-32602`. Max 16 per connection (slots freed by `unsubscribe` are immediately available again). A `subscribe` call beyond the limit returns `-32005` ("subscription limit exceeded") without closing the connection.
 
 ### noa.unsubscribe — requires read
 

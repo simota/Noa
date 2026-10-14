@@ -103,7 +103,10 @@ Two authentication methods (either one):
 2. `params.token` in `noa.hello` right after connecting
 
 Either way, **`noa.hello` must come first** (other methods return `-32001`). `protocolVersion` is
-currently `2` (a major version mismatch returns `-32006`).
+currently `2` (a major version mismatch returns `-32006`). A hello with a wrong token gets `-32001`
+and the connection is closed. Browser pages can connect only from a `localhost` / loopback origin
+(or the same IP literal as the bind address); other `Origin`s are closed with code 1008. An explicit
+`server-token` shorter than 32 characters is still accepted but logs a warning.
 
 ```sh
 # Example interaction with websocat (brew install websocat)

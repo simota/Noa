@@ -797,7 +797,7 @@ impl Handler for Terminal {
         if let Some(i) = sep {
             let code = &data[..i];
             if code == b"0" || code == b"2" {
-                self.title = String::from_utf8_lossy(&data[i + 1..]).into_owned();
+                self.title = truncated_title(&data[i + 1..]);
                 // Provisionally bind to the current cwd; the next OSC 7 in this
                 // prompt cycle re-binds it if the cwd hook fires after the title
                 // hook (see the OSC 7 branch and `title_set_since_cwd_report`).
@@ -902,4 +902,14 @@ impl Handler for Terminal {
             screen.home_cursor(origin);
         }
     }
+}
+
+fn truncated_title(raw: &[u8]) -> String {
+    use super::MAX_TITLE_BYTES;
+    let mut title = String::from_utf8_lossy(&raw[..raw.len().min(MAX_TITLE_BYTES)]).into_owned();
+    // A cut through a multi-byte sequence decodes to a trailing U+FFFD.
+    if raw.len() > MAX_TITLE_BYTES && title.ends_with('\u{FFFD}') {
+        title.pop();
+    }
+    title
 }

@@ -1129,3 +1129,34 @@ fn synthetic_seed_restores_the_pointer_shape() {
     Stream::new().feed(&source.synthetic_seed(), &mut replica);
     assert_eq!(replica.mouse_shape(), Some("pointer"));
 }
+
+#[test]
+fn oversized_title_is_truncated_on_a_char_boundary() {
+    let mut input = b"\x1b]2;".to_vec();
+    input.extend("あ".repeat(4096).as_bytes());
+    input.push(0x07);
+    let t = run(&input);
+    assert!(t.title.len() <= crate::terminal::MAX_TITLE_BYTES);
+    assert!(t.title.chars().all(|c| c == 'あ'));
+    assert!(!t.title.is_empty());
+}
+
+#[test]
+fn oversized_hyperlink_uri_ends_the_open_link() {
+    let mut input = b"\x1b]8;;https://example.test/first\x1b\\A\x1b]8;;https://example.test/".to_vec();
+    input.extend(std::iter::repeat_n(b'a', crate::osc::MAX_HYPERLINK_URI_BYTES));
+    input.extend(b"\x1b\\B");
+    let t = run(&input);
+    assert!(cell(&t, 0, 0).hyperlink.is_some());
+    assert_eq!(cell(&t, 1, 0).hyperlink, None);
+}
+
+#[test]
+fn oversized_hyperlink_uri_prints_as_plain_text() {
+    let mut input = b"\x1b]8;;https://example.test/".to_vec();
+    input.extend(std::iter::repeat_n(b'a', crate::osc::MAX_HYPERLINK_URI_BYTES));
+    input.extend(b"\x1b\\A\x1b]8;;\x1b\\");
+    let t = run(&input);
+    assert_eq!(cell(&t, 0, 0).hyperlink, None);
+    assert!(t.hyperlinks.is_empty());
+}

@@ -393,7 +393,17 @@ fn decrqss_reports_sgr_cursor_and_margins() {
           \x1bP1$r6 q\x1b\\\
           \x1bP1$r2;4r\x1b\\\
           \x1bP1$r3;7s\x1b\\\
-          \x1bP0$rBAD\x1b\\"
+          \x1bP0$r\x1b\\"
+    );
+}
+
+#[test]
+fn decrqss_and_xtgettcap_never_echo_invalid_requests_into_pty_input() {
+    let t = run(b"\x1bP$qecho pwned\x1b\\\x1bP+qnot hex;7878\x1b\\");
+
+    assert_eq!(
+        t.pending_writes,
+        concat!("\x1bP0$r\x1b\\", "\x1bP0+r\x1b\\", "\x1bP0+r7878\x1b\\").as_bytes()
     );
 }
 

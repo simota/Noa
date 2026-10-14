@@ -32,6 +32,11 @@ use noa_vt::{EraseDisplay, SgrAttr};
 /// parser's `MAX_OSC_BYTES`/`MAX_PARAMS`. The oldest entry is evicted first.
 const TITLE_STACK_CAP: usize = 64;
 
+/// Longest window title kept, in bytes. Titles are cloned onto the title
+/// stack, so an unbounded title lets output pin `TITLE_STACK_CAP` × the
+/// 12 MiB OSC limit; no tab or window bar can show more anyway.
+pub(crate) const MAX_TITLE_BYTES: usize = 4096;
+
 /// Cap on queued desktop notifications (OSC 9 / OSC 777) awaiting drain by the
 /// app layer. A misbehaving program can emit these faster than the main thread
 /// consumes them; the oldest entry is evicted first, same as the title stack.

@@ -18,10 +18,12 @@ if [[ -o interactive ]]; then
   # (prompt start) + B (prompt end / input start), emitted just before each
   # prompt. This runs on every prompt, so it must stay cheap: one builtin
   # printf, no subshells. The kitty-shell-cwd:// scheme carries the path raw
-  # (no percent-encoding), same as Ghostty/kitty.
+  # (no percent-encoding), same as Ghostty/kitty — so control characters are
+  # stripped: a BEL or ESC in a directory name would otherwise end the OSC
+  # early and turn the rest of the name into escape sequences.
   _noa_precmd() {
     builtin printf '\e]133;D;%s\a\e]7;kitty-shell-cwd://%s%s\a\e]133;A\a\e]133;B\a' \
-      "$?" "$HOST" "$PWD"
+      "$?" "$HOST" "${PWD//[[:cntrl:]]/}"
   }
 
   # OSC 133 C: a command is about to run.

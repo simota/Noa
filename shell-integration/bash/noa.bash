@@ -25,10 +25,11 @@ case "$-" in
     # kitty-shell-cwd:// scheme — no encoding needed) + A (prompt start) +
     # B (input start), emitted before each prompt in one builtin printf.
     # Runs first in PROMPT_COMMAND so `$?` is still the finished command's
-    # status when it's expanded.
+    # status when it's expanded. Control characters are stripped from the
+    # path: a BEL or ESC in a directory name would end the OSC early.
     _noa_prompt() {
       builtin printf '\e]133;D;%s\a\e]7;kitty-shell-cwd://%s%s\a\e]133;A\a\e]133;B\a' \
-        "$?" "$HOSTNAME" "$PWD"
+        "$?" "$HOSTNAME" "${PWD//[[:cntrl:]]/}"
     }
     PROMPT_COMMAND="_noa_prompt${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
 

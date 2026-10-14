@@ -205,6 +205,18 @@ fn dominant_terminator(lines: &[(&str, &str)]) -> &'static str {
 /// (with its parent directory created) instead of being clobbered (B08,
 /// 2026-09 audit). A symlink cycle is an error rather than a replacement.
 pub fn write_config_updates(path: &Path, updates: &[(String, String)]) -> io::Result<()> {
+    // Every update must stay one directive. A value carrying a newline (a
+    // font family name from the OS list, say) would otherwise add lines of
+    // its own — `server-enable`, `server-scopes` — to the user's config.
+    if let Some((key, _)) = updates
+        .iter()
+        .find(|(key, value)| key.chars().chain(value.chars()).any(char::is_control))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("refusing to write `{key}`: control character in key or value"),
+        ));
+    }
     let original = match fs::read_to_string(path) {
         Ok(contents) => contents,
         Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
@@ -380,6 +392,25 @@ mod tests {
 
     fn unique_temp_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("noa-config-writer-{name}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn a_value_with_a_newline_is_refused_and_the_file_is_untouched() {
+        let dir = unique_temp_dir("control-chars");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config");
+        fs::write(&path, "font-size = 14\n").unwrap();
+        let err = write_config_updates(
+            &path,
+            &[(
+                "font-family".to_string(),
+                "Evil Sans\nserver-enable = true".to_string(),
+            )],
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "font-size = 14\n");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

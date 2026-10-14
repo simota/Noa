@@ -83,9 +83,16 @@ pub fn import_ghostty_config_at(
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
+    // Owner-only, like the settings writer: the imported config may hold a
+    // `server-token` or `client-token`.
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
         .open(target)
         .with_context(|| format!("failed to create {}", target.display()))?;
     file.write_all(output.as_bytes())
@@ -207,6 +214,23 @@ mod tests {
         assert!(error.to_string().contains("config.ghostty"));
         assert!(!target.exists());
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn imported_config_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = unique_temp_path("owner-only");
+        let source = dir.join("ghostty/config");
+        let target = dir.join("noa/config");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, "font-size = 12").unwrap();
+
+        import_ghostty_config_at(&[source], &target).unwrap();
+
+        let mode = fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

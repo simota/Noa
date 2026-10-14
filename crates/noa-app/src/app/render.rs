@@ -33,13 +33,18 @@ impl App {
         // (and so be retained-out) before it ever won the throttled pane-cache
         // refresh, which would otherwise strand its label at a stale title.
         // The title update is cheap and independent of the rebuild throttle
-        // (keep-occluded-tab-titles-fresh).
-        for window_id in self
+        // (keep-occluded-tab-titles-fresh). Still-occluded windows already
+        // refreshed their own title on the Redraw that dirtied them, so only
+        // the ones about to be retained out are re-asserted here: looping
+        // over every dirty window per pty Redraw made K busy background tabs
+        // cost O(K²) Terminal locks per second on the main thread.
+        let leaving: Vec<WindowId> = self
             .dirty_occluded_windows
             .iter()
             .copied()
-            .collect::<Vec<_>>()
-        {
+            .filter(|id| self.windows.get(id).is_some_and(|state| !state.occluded))
+            .collect();
+        for window_id in leaving {
             self.refresh_window_title(window_id);
         }
         self.dirty_occluded_windows

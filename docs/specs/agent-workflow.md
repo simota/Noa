@@ -2,6 +2,13 @@
 
 Status: implemented (2026-09-05).
 
+Amended 2026-10-01: a pane's explicit agent status is cleared when its
+foreground process changes from a recognized agent to a non-agent, so an agent
+that exits without an end-of-session report leaves no stale status. A direct
+switch from one agent to another keeps the status, because process changes are
+posted only when they happen, and the arriving agent's first report can land
+before that post.
+
 Scope: pane-scoped unread notifications and next-unread navigation; local
 file links with editor line/column navigation; explicit agent status reports;
 multiline prompt drafts and a readable output view. Project grouping and a

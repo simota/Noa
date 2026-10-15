@@ -124,7 +124,7 @@ impl App {
         // label. Remember that before `apply` moves the delta; the shared
         // label-dirty path below invalidates the filter after the new state is
         // visible and redraws every tile when the live result set can reflow.
-        let flags_overview_tile = delta_changes_overview_label(&delta);
+        let mut flags_overview_tile = delta_changes_overview_label(&delta);
         let upsert_window = match &delta {
             SessionDelta::Upsert { id, .. } => Some(id.window_id),
             _ => None,
@@ -153,7 +153,23 @@ impl App {
         // below (a process change is otherwise invisible to the render path,
         // which reads the store, not the delta stream).
         let is_process_delta = matches!(delta, SessionDelta::Process { .. });
+        // A process change can clear a departed agent's status, which the
+        // Overview label shows like an `AgentStatus` delta would.
+        let card_id = delta.id();
+        let had_status = is_process_delta
+            && self
+                .session_store
+                .get(&card_id)
+                .is_some_and(|card| card.agent_status.is_some());
         self.session_store.apply(delta);
+        if had_status
+            && self
+                .session_store
+                .get(&card_id)
+                .is_some_and(|card| card.agent_status.is_none())
+        {
+            flags_overview_tile = true;
+        }
         if let Some(id) = agent_notification {
             self.apply_session_delta(SessionDelta::Attention { id });
         }

@@ -990,6 +990,10 @@ pub(super) struct ConfirmDialogSession {
     pub(super) message: String,
     pub(super) hint: String,
     pub(super) action: ConfirmAction,
+    /// Keys arriving before this instant are swallowed. Set for dialogs that
+    /// terminal output can raise (OSC 52 reads), so an Enter the user was
+    /// already typing for the shell cannot answer a prompt they never saw.
+    pub(super) armed_at: Option<Instant>,
 }
 
 /// The deferred side effect a [`ConfirmDialogSession`] runs on confirmation.

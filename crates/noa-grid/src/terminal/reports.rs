@@ -44,14 +44,16 @@ impl Terminal {
         self.pending_writes.extend_from_slice(b"\x1b\\");
     }
 
-    fn push_decrqss_response(&mut self, valid: bool, request: &[u8], setting: &[u8]) {
+    /// An invalid request is answered with a bare `0$r` (as xterm does): the
+    /// reply lands on the pty's input, so echoing the request would let any
+    /// output type attacker-chosen text onto the user's command line.
+    fn push_decrqss_response(&mut self, valid: bool, setting: &[u8]) {
         self.pending_writes.extend_from_slice(b"\x1bP");
         if valid {
             self.pending_writes.extend_from_slice(b"1$r");
             self.pending_writes.extend_from_slice(setting);
         } else {
             self.pending_writes.extend_from_slice(b"0$r");
-            self.pending_writes.extend_from_slice(request);
         }
         self.pending_writes.extend_from_slice(b"\x1b\\");
     }
@@ -60,16 +62,16 @@ impl Terminal {
         match request {
             b"m" => {
                 let setting = self.current_sgr_report();
-                self.push_decrqss_response(true, request, setting.as_bytes());
+                self.push_decrqss_response(true, setting.as_bytes());
             }
             b" q" => {
                 let setting = format!("{} q", self.cursor_style_number());
-                self.push_decrqss_response(true, request, setting.as_bytes());
+                self.push_decrqss_response(true, setting.as_bytes());
             }
             b"r" => {
                 let region = self.active().region;
                 let setting = format!("{};{}r", region.top + 1, region.bottom + 1);
-                self.push_decrqss_response(true, request, setting.as_bytes());
+                self.push_decrqss_response(true, setting.as_bytes());
             }
             b"s" => {
                 let (left, right) = self
@@ -78,9 +80,9 @@ impl Terminal {
                     .map(|m| (m.left + 1, m.right + 1))
                     .unwrap_or((1, self.size.cols));
                 let setting = format!("{left};{right}s");
-                self.push_decrqss_response(true, request, setting.as_bytes());
+                self.push_decrqss_response(true, setting.as_bytes());
             }
-            _ => self.push_decrqss_response(false, request, &[]),
+            _ => self.push_decrqss_response(false, &[]),
         }
     }
 
@@ -150,8 +152,10 @@ impl Terminal {
             .split(|&b| b == b';')
             .filter(|name| !name.is_empty())
         {
+            // Only a well-formed hex name is echoed back: the reply is pty
+            // input, and a name that is not hex is arbitrary output text.
             let Some(name) = decode_xtgettcap_name(encoded_name) else {
-                self.push_xtgettcap_response(false, encoded_name, &[]);
+                self.push_xtgettcap_response(false, &[], &[]);
                 continue;
             };
             let value = match name.as_slice() {

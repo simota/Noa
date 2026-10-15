@@ -40,6 +40,16 @@ const KEYCHAIN_SERVICE: &str = "noa";
 #[cfg(target_os = "macos")]
 const KEYCHAIN_ACCOUNT: &str = "scrollback-persist-key";
 
+/// `errSecItemNotFound`: the only lookup failure that means "no key yet".
+#[cfg(any(target_os = "macos", test))]
+const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+
+/// Whether a keychain lookup that failed with `code` may mint a fresh key.
+#[cfg(any(target_os = "macos", test))]
+fn mints_on_lookup_error(code: i32) -> bool {
+    code == ERR_SEC_ITEM_NOT_FOUND
+}
+
 /// Whether `bytes` is a sealed container (rather than a bare snapshot).
 ///
 /// Read paths use this instead of the config value: a file written before
@@ -59,10 +69,21 @@ fn key() -> Option<[u8; KEY_LEN]> {
     use security_framework::passwords::{get_generic_password, set_generic_password_options};
     use security_framework::passwords_options::PasswordOptions;
 
-    if let Ok(existing) = get_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
-        && let Ok(key) = <[u8; KEY_LEN]>::try_from(existing.as_slice())
-    {
-        return Some(key);
+    match get_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) {
+        Ok(existing) => {
+            if let Ok(key) = <[u8; KEY_LEN]>::try_from(existing.as_slice()) {
+                return Some(key);
+            }
+            // A wrong-length item can never have sealed anything; replace it.
+        }
+        Err(err) if !mints_on_lookup_error(err.code()) => {
+            // Locked keychain, a denied access prompt, a transient failure:
+            // the stored key may still exist. Minting here would overwrite it
+            // and orphan every record sealed under it, so skip this write.
+            log::warn!("could not read the scrollback encryption key: {err}");
+            return None;
+        }
+        Err(_) => {}
     }
 
     let mut fresh = [0u8; KEY_LEN];
@@ -186,6 +207,15 @@ fn random_bytes(_buf: &mut [u8]) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_missing_item_mints_a_new_key() {
+        assert!(mints_on_lookup_error(ERR_SEC_ITEM_NOT_FOUND));
+        // errSecInteractionNotAllowed (locked), errSecAuthFailed, errSecUserCanceled.
+        for code in [-25308, -25293, -128] {
+            assert!(!mints_on_lookup_error(code));
+        }
+    }
 
     #[test]
     fn a_bare_snapshot_is_not_mistaken_for_a_sealed_one() {

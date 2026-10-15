@@ -665,24 +665,34 @@ fn find_signature_with_lowercase(
         });
     }
 
-    let anchor_index = lowercase_rows
-        .iter()
-        .position(|row| sig.anchors.iter().any(|anchor| row.contains(anchor)))?;
-
-    let option_index = match sig.yes_label {
+    let (anchor_index, option_index) = match sig.yes_label {
         Some(label) => {
-            let (index, _) = rows
+            let option_index = cursor.y as usize;
+            if !affirmative_selected(&rows[option_index], label, sig.requires_marker) {
+                return None;
+            }
+            let anchor_index = claude_dialog_anchor(&lowercase_rows[..option_index], sig)?;
+            // The option must open the first menu below the title: another
+            // menu in between (a stale, already-answered dialog left on
+            // screen) means the cursor sits in a different, unknown dialog.
+            if rows[anchor_index + 1..option_index]
                 .iter()
-                .enumerate()
-                .skip(anchor_index)
-                .find(|(_, row)| affirmative_selected(row, label, sig.requires_marker))?;
-            index
+                .any(|row| starts_menu(row))
+            {
+                return None;
+            }
+            (anchor_index, option_index)
         }
-        None => anchor_index,
+        None => {
+            let anchor_index = lowercase_rows
+                .iter()
+                .position(|row| sig.anchors.iter().any(|anchor| row.contains(anchor)))?;
+            if cursor.y as usize != anchor_index {
+                return None;
+            }
+            (anchor_index, anchor_index)
+        }
     };
-    if cursor.y as usize != option_index {
-        return None;
-    }
 
     let end = rows
         .len()
@@ -694,6 +704,52 @@ fn find_signature_with_lowercase(
         region_hash: region_hash(rows, region.clone()),
         region,
     })
+}
+
+/// Rows that open a Claude Code approval dialog. Bash approvals are listed so
+/// that their presence makes a screen ambiguous, never so they match.
+const CLAUDE_DIALOG_TITLES: &[&str] = &[
+    "claude wants to",
+    "claude has a question",
+    "claude asks",
+    "bash command",
+];
+
+/// The title row of the dialog whose selected option sits just below
+/// `above_option`, if that title is one of `sig`'s anchors. The title must
+/// begin its row, and it must be the only dialog title on screen above the
+/// option: anchor text quoted inside another dialog (a Bash command, tool
+/// output) adds a second title, and the screen is then left to the user.
+fn claude_dialog_anchor(above_option: &[RowText], sig: &Signature) -> Option<usize> {
+    let mut titles = above_option.iter().enumerate().filter(|(_, row)| {
+        let row = trim_dialog_border(row);
+        CLAUDE_DIALOG_TITLES
+            .iter()
+            .any(|title| row.starts_with(title))
+    });
+    let (index, title) = titles.next()?;
+    if titles.next().is_some() {
+        return None;
+    }
+    let title = trim_dialog_border(title);
+    sig.anchors
+        .iter()
+        .any(|anchor| title.starts_with(anchor))
+        .then_some(index)
+}
+
+/// A row that opens a numbered menu: its first choice, selected or not.
+fn starts_menu(row: &str) -> bool {
+    let row = trim_dialog_border(row);
+    let row = row
+        .strip_prefix('❯')
+        .or_else(|| row.strip_prefix('>'))
+        .unwrap_or(row);
+    row.trim_start().starts_with("1.")
+}
+
+fn trim_dialog_border(row: &str) -> &str {
+    row.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '│' | '╭' | '╰' | '─' | '|'))
 }
 
 /// These TUIs select with a painted marker and can park the terminal cursor
@@ -2525,6 +2581,72 @@ mod tests {
             ),
             Decision::Suppressed(SuppressReason::UnknownAgent)
         );
+    }
+
+    #[test]
+    fn claude_anchor_quoted_inside_a_bash_approval_does_not_match() {
+        for fixture in [
+            rows(&[
+                "Bash command",
+                "  echo done # Claude wants to edit crates/noa-app/src/lib.rs",
+                "Claude wants to edit crates/noa-app/src/lib.rs",
+                "Do you want to proceed?",
+                "❯ 1. Yes",
+                "  2. No",
+            ]),
+            rows(&[
+                "Claude wants to edit crates/noa-app/src/lib.rs",
+                "Claude wants to use Bash",
+                "❯ 1. Yes",
+                "  2. No",
+            ]),
+        ] {
+            let option_row = fixture.iter().position(|row| row.starts_with('❯')).unwrap();
+            assert_eq!(
+                find_signature(
+                    &fixture,
+                    cursor(option_row as u16),
+                    signature(AutoApproveSignature::ClaudeEdit)
+                ),
+                None
+            );
+        }
+        assert!(
+            find_signature(
+                &claude_edit_prompt(),
+                cursor(1),
+                signature(AutoApproveSignature::ClaudeEdit)
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn stale_claude_title_does_not_claim_an_unknown_menu_below_it() {
+        let now = fixed_now();
+        let mut state = AutoApproveState::default();
+        let screen = rows(&[
+            "Claude wants to edit crates/noa-app/src/lib.rs",
+            "❯ 1. Yes",
+            "  2. No",
+            "Allow tool execution?",
+            "❯ 1. Yes",
+            "  2. No",
+        ]);
+        assert_eq!(
+            find_signature(
+                &screen,
+                cursor(4),
+                signature(AutoApproveSignature::ClaudeEdit)
+            ),
+            None
+        );
+        for _ in 0..2 {
+            assert!(!matches!(
+                detect_and_update_any_agent(&screen, cursor(4), base_ctx(now), &mut state),
+                Decision::Fire { .. }
+            ));
+        }
     }
 
     #[test]

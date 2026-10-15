@@ -84,7 +84,7 @@ fn bench_encode_key_with_modes() {
 }
 
 #[test]
-fn paste_protection_flags_unbracketed_multiline_only() {
+fn paste_protection_flags_unbracketed_control_characters() {
     // Newline outside bracketed paste can submit a command → unsafe.
     assert!(paste_is_unsafe("git push\n", false));
     assert!(paste_is_unsafe("a\rb", false));
@@ -93,6 +93,14 @@ fn paste_protection_flags_unbracketed_multiline_only() {
     // Single-line paste has nothing to auto-submit.
     assert!(!paste_is_unsafe("just some words", false));
     assert!(!paste_is_unsafe("", false));
+    assert!(!paste_is_unsafe("a\tb", false));
+    for control in ["ls\x0f", "x\x18\x05", "\x1b[201~", "rm\x7f", "a\u{9b}b"] {
+        assert!(
+            paste_is_unsafe(control, false),
+            "{control:?} must be confirmed"
+        );
+        assert!(!paste_is_unsafe(control, true));
+    }
 }
 
 #[test]

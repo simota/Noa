@@ -17,7 +17,9 @@ pub use import::{
     import_ghostty_config_at,
 };
 pub use parser::{Diagnostic, Directive, parse_directives, parse_overrides};
-pub use writer::{apply_updates, write_config_updates};
+pub use writer::{
+    apply_updates, resolve_symlinks as resolve_config_symlinks, write_config_updates,
+};
 
 pub const DEFAULT_COLS: u16 = 80;
 pub const DEFAULT_ROWS: u16 = 24;

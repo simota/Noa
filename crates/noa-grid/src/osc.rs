@@ -313,6 +313,13 @@ pub(crate) fn handle_clipboard_osc(
     true
 }
 
+/// Longest OSC 8 URI kept. The registry caps the number of links, but each
+/// entry is stored for the life of the terminal, so without a per-URI bound
+/// output could pin `HYPERLINK_REGISTRY_CAP` × the 12 MiB OSC limit. A longer
+/// URI ends any open link, so the text it labels prints as plain text rather
+/// than keeping the previous link's target.
+pub(crate) const MAX_HYPERLINK_URI_BYTES: usize = 8192;
+
 pub(crate) fn parse_hyperlink_osc(data: &[u8]) -> Option<HyperlinkOsc> {
     let rest = data.strip_prefix(b"8;")?;
     let Some(separator) = rest.iter().position(|&b| b == b';') else {
@@ -325,6 +332,9 @@ pub(crate) fn parse_hyperlink_osc(data: &[u8]) -> Option<HyperlinkOsc> {
         return Some(HyperlinkOsc::End);
     }
 
+    if uri.len() > MAX_HYPERLINK_URI_BYTES {
+        return Some(HyperlinkOsc::End);
+    }
     let Some(uri) = utf8_no_controls(uri) else {
         return Some(HyperlinkOsc::Malformed);
     };

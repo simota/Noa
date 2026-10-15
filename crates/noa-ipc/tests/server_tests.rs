@@ -11,6 +11,7 @@ use noa_ipc::protocol::{Panel, Row, SplitDirection, TextSource, WireId};
 use noa_ipc::{Broadcaster, ScopeSet, Server, ServerConfig};
 use serde_json::{Value, json};
 use tungstenite::client::IntoClientRequest;
+use tungstenite::protocol::frame::coding::CloseCode;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
 
@@ -269,11 +270,110 @@ fn ac4_missing_token_rejected() {
     let resp = hello(&mut sock, 1, 2, None, &["read"]);
     assert_eq!(resp["error"]["code"], -32001);
 
-    send_rpc(&mut sock, 2, "noa.listPanels", json!({}));
-    let resp = recv_json(&mut sock);
-    assert_eq!(resp["error"]["code"], -32001);
+    // A failed hello ends the connection: no method runs on it, and every
+    // further token guess needs a fresh connection.
+    assert_connection_closed(&mut sock);
+    assert!(backend.sent_text.lock().unwrap().is_empty());
+}
 
-    let _ = sock.close(None);
+/// The server must close promptly — well inside the 10 s hello deadline,
+/// which would otherwise close an unauthenticated connection anyway.
+fn assert_connection_closed(sock: &mut Sock) {
+    if let MaybeTlsStream::Plain(stream) = sock.get_mut() {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+    }
+    match sock.read() {
+        Ok(Message::Close(_))
+        | Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {}
+        Err(tungstenite::Error::Io(err))
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::UnexpectedEof
+            ) => {}
+        Err(tungstenite::Error::Protocol(_)) => {}
+        other => panic!("expected the connection to close, got {other:?}"),
+    }
+}
+
+#[test]
+fn wrong_token_closes_the_connection_after_the_auth_error() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend, "secret-token", ScopeSet::default_read_only());
+    let mut sock = connect_plain(handle.port());
+
+    let resp = hello(&mut sock, 1, 2, Some("wrong"), &["read"]);
+    assert_eq!(resp["error"]["code"], -32001);
+    assert_connection_closed(&mut sock);
+}
+
+fn connect_with_origin(port: u16, origin: &str) -> Sock {
+    let mut request = format!("ws://127.0.0.1:{port}/")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Origin", origin.parse().unwrap());
+    let (socket, _resp) = tungstenite::connect(request).expect("upgrade should complete");
+    socket
+}
+
+#[test]
+fn browser_origins_other_than_loopback_are_refused() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
+
+    for origin in [
+        "https://example.test",
+        "http://rebind.example.test:61771",
+        "null",
+    ] {
+        let mut sock = connect_with_origin(handle.port(), origin);
+        match sock.read() {
+            Ok(Message::Close(Some(frame))) => assert_eq!(frame.code, CloseCode::Policy),
+            other => panic!("origin {origin} should be refused, got {other:?}"),
+        }
+    }
+    for origin in [
+        "http://localhost:3000",
+        "http://127.0.0.1:8080",
+        "http://[::1]",
+    ] {
+        let mut sock = connect_with_origin(handle.port(), origin);
+        assert!(
+            hello(&mut sock, 1, 2, Some("tok"), &["read"])
+                .get("result")
+                .is_some(),
+            "origin {origin} should be allowed"
+        );
+    }
+}
+
+#[test]
+fn subscribe_with_too_many_pane_ids_is_invalid_params() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
+    let mut sock = connect_plain(handle.port());
+    hello(&mut sock, 1, 2, Some("tok"), &["read"]);
+
+    let pane_ids: Vec<String> = (0..1025).map(|id| id.to_string()).collect();
+    send_rpc(
+        &mut sock,
+        2,
+        "noa.subscribe",
+        json!({ "events": ["output"], "paneIds": pane_ids }),
+    );
+    assert_eq!(recv_json(&mut sock)["error"]["code"], -32602);
+
+    let pane_ids: Vec<String> = (0..1024).map(|id| id.to_string()).collect();
+    send_rpc(
+        &mut sock,
+        3,
+        "noa.subscribe",
+        json!({ "events": ["output"], "paneIds": pane_ids }),
+    );
+    assert!(recv_json(&mut sock)["result"]["subscriptionId"].is_string());
 }
 
 #[test]

@@ -56,15 +56,13 @@ pub fn open_uri(uri: &str) {
     );
 }
 
-/// Open `path` (already resolved to an absolute filesystem path) with the
-/// macOS `open` command. Unlike [`open_uri`], there is no scheme to
-/// allowlist: the path came from `detect_path_at_column`'s pure
-/// text-matching plus the hover-time existence probe, not from untrusted
-/// OSC 8 metadata. There is deliberately no click-time `exists()` re-check —
-/// a metadata query on a wedged network volume would block the main thread
-/// (the same reason the hover probe runs on a worker); a path that vanished
-/// between hover and click just makes `open` exit non-zero, logged from the
-/// wait below on its own detached thread.
+/// Open `path` (already resolved to an absolute filesystem path) in the
+/// configured editor or with the macOS `open` command. The path is on-screen
+/// text, which terminal output (or a file the user is viewing) controls just
+/// like OSC 8 metadata, so the `open` fallback refuses anything it would run
+/// rather than show — the same rule as [`open_file_uri`]. The check stats
+/// the path on the opener thread, never the main thread, since a metadata
+/// query on a wedged network volume can block.
 pub fn open_path(
     path: &std::path::Path,
     line: Option<u32>,
@@ -205,7 +203,14 @@ fn open_path_blocking(
             ),
         }
     }
-    match std::process::Command::new("open").arg(path).status() {
+    let path = match openable_file_link(path) {
+        Ok(resolved) => resolved,
+        Err(reason) => {
+            log::warn!("not opening path {}: {reason}", path.display());
+            return;
+        }
+    };
+    match std::process::Command::new("open").arg(&path).status() {
         Ok(status) if !status.success() => {
             log::warn!("`open` failed for path {} ({status})", path.display());
         }

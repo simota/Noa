@@ -14,8 +14,11 @@ end
 function _noa_prompt --on-event fish_prompt
     # OSC 133 D (last command's exit status) + OSC 7 (cwd, raw path via the
     # kitty-shell-cwd:// scheme) + A (prompt start) + B (input start), emitted
-    # before each prompt. One builtin printf and the $hostname variable — no
-    # command substitution, since this runs on every prompt.
+    # before each prompt. Only builtins and the $hostname variable, since this
+    # runs on every prompt. Control characters are stripped from the path: a
+    # BEL or ESC in a directory name would end the OSC early. $status is
+    # captured first because the substitution below resets it.
+    set -l noa_status $status
     printf '\e]133;D;%s\a\e]7;kitty-shell-cwd://%s%s\a\e]133;A\a\e]133;B\a' \
-        $status $hostname $PWD
+        $noa_status $hostname (string replace -ra '[[:cntrl:]]' '' -- $PWD)
 end

@@ -179,21 +179,30 @@ impl App {
     }
 
     /// Raise a confirmation dialog before revealing the clipboard to a program
-    /// over OSC 52 (`clipboard-read = ask`).
+    /// over OSC 52 (`clipboard-read = ask`). The request comes from terminal
+    /// output, so it never displaces a dialog the user is already answering
+    /// (it is dropped, i.e. denied) and it ignores keys for
+    /// [`CLIPBOARD_READ_ARM_DELAY`] so an Enter typed for the shell can't
+    /// confirm it.
     pub(in crate::app) fn prompt_clipboard_read(
         &mut self,
         window_id: WindowId,
         pane_id: PaneId,
         target: String,
     ) {
-        self.open_confirm_dialog(
+        if self.confirm_dialog.is_some() {
+            log::info!("denying OSC 52 clipboard read: another confirmation is open");
+            return;
+        }
+        self.open_confirm_dialog_armed(
             window_id,
-            "Send clipboard contents to the terminal?".to_string(),
+            "A program in this pane wants to read the clipboard. Send it?".to_string(),
             ConfirmAction::ClipboardRead {
                 window_id,
                 pane_id,
                 target,
             },
+            Some(Instant::now() + CLIPBOARD_READ_ARM_DELAY),
         );
     }
 
@@ -205,12 +214,23 @@ impl App {
         message: String,
         action: ConfirmAction,
     ) {
+        self.open_confirm_dialog_armed(window_id, message, action, None);
+    }
+
+    fn open_confirm_dialog_armed(
+        &mut self,
+        window_id: WindowId,
+        message: String,
+        action: ConfirmAction,
+        armed_at: Option<Instant>,
+    ) {
         self.end_copy_mode_for_window(window_id);
         self.confirm_dialog = Some(ConfirmDialogSession {
             window_id,
             message,
             hint: "Enter: confirm    Esc: cancel".to_string(),
             action,
+            armed_at,
         });
         self.request_window_redraw(window_id);
     }
@@ -231,6 +251,12 @@ impl App {
             Key::Character(s) if s.eq_ignore_ascii_case("n") => false,
             _ => return, // swallow anything else while modal
         };
+        if confirm
+            && let Some(session) = &self.confirm_dialog
+            && !confirm_dialog_armed(session.armed_at, Instant::now())
+        {
+            return;
+        }
         let Some(session) = self.confirm_dialog.take() else {
             return;
         };
@@ -303,6 +329,36 @@ fn application_copy_bytes(terminal: &noa_grid::Terminal) -> Option<Vec<u8>> {
         bytes.extend(release);
     }
     Some(bytes)
+}
+
+/// How long an output-raised clipboard-read prompt ignores confirm keys.
+const CLIPBOARD_READ_ARM_DELAY: Duration = Duration::from_millis(600);
+
+/// Whether a confirm key may answer a dialog armed at `armed_at`. Cancel keys
+/// are always honoured; only confirmation waits for the dialog to arm.
+fn confirm_dialog_armed(armed_at: Option<Instant>, now: Instant) -> bool {
+    armed_at.is_none_or(|armed_at| now >= armed_at)
+}
+
+#[cfg(test)]
+mod confirm_tests {
+    use super::*;
+
+    #[test]
+    fn output_raised_dialog_ignores_confirm_keys_until_armed() {
+        let opened = Instant::now();
+        let armed_at = Some(opened + CLIPBOARD_READ_ARM_DELAY);
+        assert!(!confirm_dialog_armed(armed_at, opened));
+        assert!(!confirm_dialog_armed(
+            armed_at,
+            opened + CLIPBOARD_READ_ARM_DELAY - Duration::from_millis(1)
+        ));
+        assert!(confirm_dialog_armed(
+            armed_at,
+            opened + CLIPBOARD_READ_ARM_DELAY
+        ));
+        assert!(confirm_dialog_armed(None, opened));
+    }
 }
 
 #[cfg(test)]

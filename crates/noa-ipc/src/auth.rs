@@ -122,6 +122,11 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+/// Below this length an explicit `server-token` is warned about. It is still
+/// honoured — refusing it would lock out existing setups — but the generated
+/// token (64 hex characters) is the strength the server is designed around.
+const RECOMMENDED_TOKEN_LEN: usize = 32;
+
 /// Loads the server's bearer token, or provisions one on first run (FR-3).
 ///
 /// - `configured` (config `server-token`) short-circuits: no file I/O — but
@@ -136,6 +141,12 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 pub fn load_or_create_token(path: &Path, configured: Option<&str>) -> io::Result<String> {
     if let Some(token) = configured {
         if !token.trim().is_empty() {
+            if token.len() < RECOMMENDED_TOKEN_LEN {
+                log::warn!(
+                    "noa-ipc: server-token is shorter than {RECOMMENDED_TOKEN_LEN} characters; \
+                     a short token can be guessed (remove it to use a generated 64-character one)"
+                );
+            }
             return Ok(token.to_string());
         }
         log::warn!("noa-ipc: server-token is empty; falling back to generated token file");

@@ -209,6 +209,10 @@ pub struct ImageStore {
     /// so `noa-app` can poll for "any pane animating" without locking the
     /// terminal at all in the common no-animation case.
     animation_flag: Arc<AtomicBool>,
+    /// Whether `t=f` / `t=t` / `t=s` may touch this machine's files and
+    /// shared memory. Off for a client-mode replica: its bytes come from a
+    /// remote server, which must not read, delete or unlink anything local.
+    local_media_enabled: bool,
 }
 
 impl Default for ImageStore {
@@ -224,6 +228,7 @@ impl Default for ImageStore {
             next_seq: 0,
             transfer: None,
             animation_flag: Arc::new(AtomicBool::new(false)),
+            local_media_enabled: true,
         }
     }
 }
@@ -238,6 +243,12 @@ impl ImageStore {
     pub fn set_byte_limit(&mut self, bytes: usize) {
         self.byte_limit = bytes;
         self.enforce_quota(&HashSet::new());
+    }
+
+    /// Allow or refuse the file / temp-file / shared-memory media. Refused
+    /// transfers fail with `EUNSUPPORTED` without touching the path or name.
+    pub fn set_local_media_enabled(&mut self, enabled: bool) {
+        self.local_media_enabled = enabled;
     }
 
     /// A stored image by id.
@@ -423,6 +434,11 @@ impl ImageStore {
             KittyMedium::Direct => {
                 let decoded = self.decode_base64(cmd)?;
                 self.decompress(cmd, decoded)
+            }
+            KittyMedium::File | KittyMedium::TempFile | KittyMedium::SharedMem
+                if !self.local_media_enabled =>
+            {
+                Err(KittyError::Unsupported)
             }
             KittyMedium::File | KittyMedium::TempFile => {
                 let raw = self.read_file_medium(cmd)?;
@@ -1609,6 +1625,28 @@ mod tests {
         assert_eq!(done.result, Ok(1));
         assert_eq!(&*store.get(1).unwrap().rgba, px.as_slice());
         assert!(path.exists(), "t=f must NOT delete the file");
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn local_media_disabled_leaves_files_untouched() {
+        let px = vec![1u8, 1, 1, 1];
+        let path = std::env::temp_dir().join(format!(
+            "noa-kitty-tty-graphics-protocol-remote-{}.bin",
+            std::process::id()
+        ));
+        std::fs::write(&path, &px).unwrap();
+        let mut store = ImageStore::new();
+        store.set_local_media_enabled(false);
+        for control in ["a=t,t=f,f=32,s=1,v=1,i=1", "a=t,t=t,f=32,s=1,v=1,i=2"] {
+            let cmd = direct(control, path.to_str().unwrap().as_bytes());
+            let TransmitStep::Done(done) = store.transmit(&cmd) else {
+                panic!()
+            };
+            assert_eq!(done.result, Err(KittyError::Unsupported));
+        }
+        assert!(store.get(1).is_none() && store.get(2).is_none());
+        assert!(path.exists(), "a refused t=t must not delete the file");
         std::fs::remove_file(&path).unwrap();
     }
 

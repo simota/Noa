@@ -587,11 +587,26 @@ impl BranchProbe {
     }
 }
 
+/// `-c` overrides placed before `-C`, so they outrank the repository config.
+const GIT_HARDENING_ARGS: [&str; 4] = [
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+];
+
 /// Run `git -C <cwd> branch --show-current`, killing it after `timeout`. A
 /// spawn error, non-zero exit, or timeout all degrade to "not a git repo"
 /// (NFR-5) so the card simply shows no branch.
+///
+/// `cwd` comes from OSC 7, which any terminal output can set, so the
+/// directory may hold a hostile `.git/config`. The repository's own config
+/// is not trusted to start programs: fsmonitor and hooks are pinned off and
+/// optional lock-taking is disabled.
 fn run_git_branch(cwd: &str, timeout: Duration) -> BranchProbe {
     let mut child = match Command::new("git")
+        .args(GIT_HARDENING_ARGS)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
         .arg(cwd)
         .arg("branch")
@@ -847,6 +862,41 @@ mod tests {
         if !probe.is_git {
             assert!(probe.branch.is_none());
         }
+    }
+
+    // The hardening overrides must not break detection, and a repository
+    // config naming an fsmonitor program must not get it run.
+    #[test]
+    fn run_git_branch_reads_a_repo_without_running_its_fsmonitor() {
+        let dir = std::env::temp_dir().join(format!("noa-branch-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        if !git(&["init", "-q", "-b", "probe-branch"]) {
+            return; // git unavailable in this environment
+        }
+        let marker = dir.join("fsmonitor-ran");
+        let hook = dir.join("fsmonitor.sh");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(git(&["config", "core.fsmonitor", hook.to_str().unwrap()]));
+
+        let probe = run_git_branch(dir.to_str().unwrap(), Duration::from_secs(5));
+
+        assert!(probe.is_git);
+        assert_eq!(probe.branch.as_deref(), Some("probe-branch"));
+        assert!(!marker.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // AC-8 (FR-7/NFR-1): inactive ⇒ no deadline at all, regardless of any

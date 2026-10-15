@@ -79,12 +79,15 @@ fn cap_input_text(text: &str, cap: usize) -> &str {
 }
 
 /// Whether a paste should be confirmed before being sent
-/// (`clipboard-paste-protection`). A newline can submit a command line on its
-/// own, so unbracketed multi-line pastes are the risk. In bracketed-paste
-/// mode the receiving program frames the paste itself, so it is treated as
-/// safe (Ghostty's `clipboard-paste-bracketed-safe`, on by default).
+/// (`clipboard-paste-protection`). Unbracketed, every control character
+/// reaches the line editor as a keystroke: a newline submits the line, and
+/// others are bound to editing or submitting commands (e.g. `^O`
+/// operate-and-get-next, `^X^E`). Tab is allowed since it is ordinary in
+/// pasted text. In bracketed-paste mode the receiving program frames the
+/// paste itself, so it is treated as safe (Ghostty's
+/// `clipboard-paste-bracketed-safe`, on by default).
 pub(crate) fn paste_is_unsafe(text: &str, bracketed_paste: bool) -> bool {
-    !bracketed_paste && text.contains(['\n', '\r'])
+    !bracketed_paste && text.chars().any(|c| c != '\t' && c.is_control())
 }
 
 fn sanitize_paste_payload(bytes: &[u8]) -> Vec<u8> {

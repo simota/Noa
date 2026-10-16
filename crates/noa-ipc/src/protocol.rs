@@ -9,9 +9,9 @@ use serde::de::{self, Visitor};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Current protocol major version. Version 2 separates stable grid-coordinate
-/// semantics from version 1's retained-array indices.
-pub const PROTOCOL_VERSION: u64 = 2;
+/// Current protocol major version. Version 3 requires cell-exact seed replay
+/// (`CSI > Ph;Pl;Pw $ v` and `CSI > Ph;Pl $ x`) on attach clients.
+pub const PROTOCOL_VERSION: u64 = 3;
 
 /// Default `getText` response cap, in UTF-8 bytes (FR-8).
 pub const DEFAULT_TEXT_MAX_BYTES: usize = 256 * 1024;

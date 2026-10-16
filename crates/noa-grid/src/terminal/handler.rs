@@ -571,6 +571,15 @@ impl Handler for Terminal {
         self.active_mut().set_last_printed(ch);
     }
 
+    fn seed_print_cell(&mut self, ch: char, width: u8) {
+        let autowrap = self.modes.autowrap();
+        self.active_mut().seed_print_cell(ch, width, autowrap);
+    }
+
+    fn seed_append_combining(&mut self, ch: char) {
+        self.active_mut().seed_append_combining(ch);
+    }
+
     fn seed_set_cursor_hollow(&mut self) {
         let cursor = &mut self.active_mut().cursor;
         cursor.style = match cursor.style {

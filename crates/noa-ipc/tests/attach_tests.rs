@@ -10,7 +10,8 @@ use noa_ipc::client::{Client, ClientError};
 use noa_ipc::error::IpcError;
 use noa_ipc::protocol::{Panel, SplitDirection, TextSource, WireId};
 use noa_ipc::{
-    ATTACH_HANDSHAKE_CLOSE_REASON, AttachOutputSender, Broadcaster, ScopeSet, Server, ServerConfig,
+    ATTACH_HANDSHAKE_CLOSE_REASON, AttachOutputSender, Broadcaster, PROTOCOL_VERSION, ScopeSet,
+    Server, ServerConfig,
 };
 use serde_json::{Value, json};
 use tungstenite::protocol::frame::coding::CloseCode;
@@ -236,7 +237,7 @@ fn connect_control(port: u16, scopes: &[&str]) -> Socket {
         1,
         "noa.hello",
         json!({
-            "protocolVersion": 2,
+            "protocolVersion": PROTOCOL_VERSION,
             "token": "control-token",
             "scopes": scopes,
         }),
@@ -383,7 +384,7 @@ fn attach_scope_is_explicit_and_conflicts_until_detach() {
         1,
         "noa.hello",
         json!({
-            "protocolVersion": 2,
+            "protocolVersion": PROTOCOL_VERSION,
             "token": "control-token",
             "scopes": ["attach"],
         }),

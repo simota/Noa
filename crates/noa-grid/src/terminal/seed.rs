@@ -282,14 +282,14 @@ fn write_wrapped_rows(seed: &mut String, screen: &Screen) {
         let (x, last) = pending_wrap_cell(screen, screen.cols - 1, y as u16);
         write_cup(seed, x, y as u16);
         write_pen(seed, last.fg, last.bg, last.underline_color, last.attrs);
-        last.push_text_to(seed);
+        write_cell(seed, last);
 
         // SGR does not clear the deferred-wrap latch. Printing the next row's
         // existing first cell therefore recreates the logical soft-wrap
         // boundary without changing the visible contents.
         let first = &screen.grid[y + 1].cells[0];
         write_pen(seed, first.fg, first.bg, first.underline_color, first.attrs);
-        first.push_text_to(seed);
+        write_cell(seed, first);
     }
     write_private_mode(seed, 7, false);
 }
@@ -341,8 +341,27 @@ fn write_row_cells(seed: &mut String, y: usize, row: &Row) {
             // afterwards unless it sits on the last row.
             seed.push_str("\x1b[X");
         } else {
-            cell.push_text_to(seed);
+            write_cell(seed, cell);
         }
+    }
+}
+
+/// Repaint explicit cells rather than re-running grapheme segmentation. A
+/// screen can contain cells produced under different mode-2027 settings, and
+/// its stored width need not equal the width inferred from its current text.
+fn write_cell(seed: &mut String, cell: &Cell) {
+    let cp = cell.ch as u32;
+    let width = if cell.attrs.contains(CellAttrs::WIDE) {
+        2
+    } else {
+        1
+    };
+    write!(seed, "\x1b[>{};{};{width}$v", cp >> 16, cp & 0xffff)
+        .expect("writing to String cannot fail");
+    for ch in cell.combining().chars() {
+        let cp = ch as u32;
+        write!(seed, "\x1b[>{};{}$x", cp >> 16, cp & 0xffff)
+            .expect("writing to String cannot fail");
     }
 }
 
@@ -416,7 +435,7 @@ fn write_cursor_origin_relative(
         write_private_mode(seed, 7, true);
         write_cup(seed, print_x.saturating_sub(left), relative_y);
         write_pen(seed, cell.fg, cell.bg, cell.underline_color, cell.attrs);
-        cell.push_text_to(seed);
+        write_cell(seed, cell);
         write_wide_pad_after_latch(seed, screen, print_x, cursor.x, cursor.y);
         write_private_mode(seed, 7, autowrap);
     } else {
@@ -452,7 +471,7 @@ fn write_cursor_state(
         write_private_mode(seed, 7, true);
         write_cup(seed, print_x, y);
         write_pen(seed, cell.fg, cell.bg, cell.underline_color, cell.attrs);
-        cell.push_text_to(seed);
+        write_cell(seed, cell);
         write_wide_pad_after_latch(seed, screen, print_x, x, y);
         write_private_mode(seed, 7, autowrap);
     } else {
@@ -741,6 +760,62 @@ mod tests {
         Stream::new().feed(&source.synthetic_seed(), &mut replica);
         assert_screen_state(source.active(), replica.active());
         replica
+    }
+
+    #[test]
+    fn synthetic_seed_keeps_independent_cell_boundaries() {
+        for text in ["ᄀᄀX", "👍🏽X", "🇯🇵X", "❤️X", "กำX", "👩‍💻X"] {
+            for mode in ["\x1b[?2027l", "\x1b[?2027h"] {
+                assert_seed_round_trips(GridSize::new(12, 3), format!("{mode}{text}").as_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn seed_cell_commands_ignore_invalid_scalars_controls_and_widths() {
+        let mut terminal = Terminal::new(GridSize::new(4, 1));
+        Stream::new().feed(
+            b"A\x1b[>0;66;0$v\x1b[>0;66;3$v\x1b[>0;55296;1$v\x1b[>17;0;1$v\x1b[>0;10;1$v\x1b[>0;10$x",
+            &mut terminal,
+        );
+        assert_eq!(terminal.active().cursor.x, 1);
+        assert_eq!(terminal.active().grid[0].cells[0].text(), "A");
+        assert_eq!(terminal.active().grid[0].cells[1], Cell::default());
+    }
+
+    #[test]
+    fn synthetic_seed_preserves_mixed_cluster_widths_wraps_and_hidden_screen() {
+        for bytes in [
+            "\x1b[?2027labc❤️\x1b7\x1b[?2027h\x1b[2;1H❤️X",
+            "\x1b[?2027h\x1b[1;4H🇯🇵X\x1b7",
+            "\x1b[?2027h😀︎X\x1b[1;4H😀︎\x1b7\x1b[2;4H😀︎",
+            "\x1b[?2027l👍🏽X\x1b[?1049h\x1b[?2027h👩‍💻X",
+            "\x1b[?2027hᄀᄀ\x1b[?2027lᄀX",
+        ] {
+            let mut source = Terminal::new(GridSize::new(4, 4));
+            let mut source_stream = Stream::new();
+            source_stream.feed(bytes.as_bytes(), &mut source);
+            let seed = source.synthetic_seed();
+            for chunk in [1, 17, seed.len()] {
+                let mut replica = Terminal::new(source.size);
+                let mut stream = Stream::new();
+                for bytes in seed.chunks(chunk) {
+                    stream.feed(bytes, &mut replica);
+                }
+                assert_screen_state(source.active(), replica.active());
+                assert_screen_state(&source.primary, &replica.primary);
+                assert_eq!(
+                    source.modes.grapheme_clustering(),
+                    replica.modes.grapheme_clustering()
+                );
+                // Live output must see the same pending wrap and clustering state.
+                let mut continued = Terminal::new(source.size);
+                Stream::new().feed(bytes.as_bytes(), &mut continued);
+                Stream::new().feed("Z👍🏽".as_bytes(), &mut continued);
+                stream.feed("Z👍🏽".as_bytes(), &mut replica);
+                assert_screen_state(continued.active(), replica.active());
+            }
+        }
     }
 
     #[test]

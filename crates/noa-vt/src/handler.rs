@@ -439,6 +439,13 @@ pub trait Handler {
     /// `noa_grid::terminal::Terminal::synthetic_seed`; real programs never
     /// send this.
     fn seed_set_last_printed(&mut self, _ch: char) {}
+    /// Seed-only `CSI > Ph ; Pl ; Pw $ v`: print a new cell with scalar
+    /// `(Ph << 16) | Pl` and its stored width (1 or 2), without joining it
+    /// to its predecessor. Live mode 2027 cannot describe mixed-mode cells.
+    fn seed_print_cell(&mut self, _ch: char, _width: u8) {}
+    /// Seed-only `CSI > Ph ; Pl $ x`: append a scalar to the preceding
+    /// cell's text without changing its width, cursor, or wrap latch.
+    fn seed_append_combining(&mut self, _ch: char) {}
     /// Client-mode seed-only: `CSI > $ t` promotes the cursor style
     /// set by the immediately preceding `DECSCUSR` from a plain block to
     /// its hollow variant. Standard `DECSCUSR` cannot express

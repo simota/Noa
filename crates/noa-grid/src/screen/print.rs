@@ -50,11 +50,25 @@ impl Screen {
     /// candidate-1 scope, not full UAX#29) attaches to that cluster's cell
     /// instead of printing into a new one, and the cursor does not move.
     pub fn print(&mut self, c: char, autowrap: bool, grapheme_clustering: bool) {
-        self.print_inner(c, autowrap, grapheme_clustering, false);
+        self.print_inner(c, autowrap, grapheme_clustering, false, None);
     }
 
     pub(crate) fn print_with_insert(&mut self, c: char, autowrap: bool, grapheme_clustering: bool) {
-        self.print_inner(c, autowrap, grapheme_clustering, true);
+        self.print_inner(c, autowrap, grapheme_clustering, true, None);
+    }
+
+    /// Seed repaint preserves the stored footprint, including a narrow emoji
+    /// or a VS15 cluster whose base scalar normally occupies two columns.
+    pub(crate) fn seed_print_cell(&mut self, c: char, width: u8, autowrap: bool) {
+        if matches!(width, 1 | 2) && !c.is_control() {
+            self.print_inner(c, autowrap, false, false, Some(usize::from(width)));
+        }
+    }
+
+    pub(crate) fn seed_append_combining(&mut self, c: char) {
+        if !c.is_control() {
+            self.attach_combining_mark(c);
+        }
     }
 
     fn print_inner(
@@ -63,11 +77,12 @@ impl Screen {
         autowrap: bool,
         grapheme_clustering: bool,
         insert_mode: bool,
+        stored_width: Option<usize>,
     ) {
         if grapheme_clustering && self.extend_cluster_at_cursor(c) {
             return;
         }
-        let width = Self::print_width_fast(c);
+        let width = stored_width.unwrap_or_else(|| Self::print_width_fast(c));
         if width == 0 {
             self.attach_combining_mark(c);
             return;

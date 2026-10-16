@@ -649,6 +649,16 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H, sgr_attrs: &mut Vec<SgrAttr>) 
         // Client-mode seed-only: see `Handler::seed_mark_wide_pad`. The
         // private marker keeps this clear of DECRQPSR (`CSI Ps $ w`).
         b'w' if csi.private == b'>' && csi.intermediates() == b"$" => h.seed_mark_wide_pad(),
+        b'v' | b'x' if csi.private == b'>' && csi.intermediates() == b"$" => {
+            let codepoint = (u32::from(csi.param(0, 0)) << 16) | u32::from(csi.param(1, 0));
+            if let Some(ch) = char::from_u32(codepoint).filter(|c| !c.is_control()) {
+                if csi.final_byte == b'x' {
+                    h.seed_append_combining(ch);
+                } else if let width @ (1 | 2) = csi.param(2, 0) {
+                    h.seed_print_cell(ch, width as u8);
+                }
+            }
+        }
         _ => {} // unknown / inc>=2
     }
 }

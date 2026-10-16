@@ -8,7 +8,7 @@ use std::time::Duration;
 use noa_ipc::backend::{GridResult, IpcBackend, PaneRef, TextResult, WindowRef};
 use noa_ipc::error::IpcError;
 use noa_ipc::protocol::{Panel, Row, SplitDirection, TextSource, WireId};
-use noa_ipc::{Broadcaster, ScopeSet, Server, ServerConfig};
+use noa_ipc::{Broadcaster, PROTOCOL_VERSION, ScopeSet, Server, ServerConfig};
 use serde_json::{Value, json};
 use tungstenite::client::IntoClientRequest;
 use tungstenite::protocol::frame::coding::CloseCode;
@@ -267,7 +267,7 @@ fn ac4_missing_token_rejected() {
     );
     let mut sock = connect_plain(handle.port());
 
-    let resp = hello(&mut sock, 1, 2, None, &["read"]);
+    let resp = hello(&mut sock, 1, PROTOCOL_VERSION, None, &["read"]);
     assert_eq!(resp["error"]["code"], -32001);
 
     // A failed hello ends the connection: no method runs on it, and every
@@ -303,7 +303,7 @@ fn wrong_token_closes_the_connection_after_the_auth_error() {
     let handle = start_test_server(backend, "secret-token", ScopeSet::default_read_only());
     let mut sock = connect_plain(handle.port());
 
-    let resp = hello(&mut sock, 1, 2, Some("wrong"), &["read"]);
+    let resp = hello(&mut sock, 1, PROTOCOL_VERSION, Some("wrong"), &["read"]);
     assert_eq!(resp["error"]["code"], -32001);
     assert_connection_closed(&mut sock);
 }
@@ -342,7 +342,7 @@ fn browser_origins_other_than_loopback_are_refused() {
     ] {
         let mut sock = connect_with_origin(handle.port(), origin);
         assert!(
-            hello(&mut sock, 1, 2, Some("tok"), &["read"])
+            hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"])
                 .get("result")
                 .is_some(),
             "origin {origin} should be allowed"
@@ -355,7 +355,7 @@ fn subscribe_with_too_many_pane_ids_is_invalid_params() {
     let backend = Arc::new(MockBackend::default());
     let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
     let mut sock = connect_plain(handle.port());
-    hello(&mut sock, 1, 2, Some("tok"), &["read"]);
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
 
     let pane_ids: Vec<String> = (0..1025).map(|id| id.to_string()).collect();
     send_rpc(
@@ -382,7 +382,7 @@ fn ac4_wrong_token_rejected() {
     let handle = start_test_server(backend, "secret-token", ScopeSet::default_read_only());
     let mut sock = connect_plain(handle.port());
 
-    let resp = hello(&mut sock, 1, 2, Some("wrong"), &["read"]);
+    let resp = hello(&mut sock, 1, PROTOCOL_VERSION, Some("wrong"), &["read"]);
     assert_eq!(resp["error"]["code"], -32001);
     let _ = sock.close(None);
 }
@@ -398,7 +398,7 @@ fn ac5_read_only_client_cannot_send_text_or_focus() {
         ScopeSet::from_strings(["read", "control", "input"]),
     );
     let mut sock = connect_plain(handle.port());
-    let resp = hello(&mut sock, 1, 2, Some("tok"), &["read"]);
+    let resp = hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
     assert_eq!(resp["result"]["grantedScopes"], json!(["read"]));
 
     send_rpc(
@@ -428,7 +428,13 @@ fn ac6_control_without_input_cannot_send_text() {
         ScopeSet::from_strings(["read", "control", "input"]),
     );
     let mut sock = connect_plain(handle.port());
-    hello(&mut sock, 1, 2, Some("tok"), &["read", "control"]);
+    hello(
+        &mut sock,
+        1,
+        PROTOCOL_VERSION,
+        Some("tok"),
+        &["read", "control"],
+    );
 
     send_rpc(
         &mut sock,
@@ -446,7 +452,13 @@ fn ac20_default_scopes_grant_read_only_even_if_more_requested() {
     let backend = Arc::new(MockBackend::default());
     let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
     let mut sock = connect_plain(handle.port());
-    let resp = hello(&mut sock, 1, 2, Some("tok"), &["read", "control", "input"]);
+    let resp = hello(
+        &mut sock,
+        1,
+        PROTOCOL_VERSION,
+        Some("tok"),
+        &["read", "control", "input"],
+    );
     assert_eq!(resp["result"]["grantedScopes"], json!(["read"]));
     let _ = sock.close(None);
 }
@@ -456,7 +468,13 @@ fn ac20_read_input_config_grants_input_not_control() {
     let backend = Arc::new(MockBackend::default());
     let handle = start_test_server(backend, "tok", ScopeSet::from_strings(["read", "input"]));
     let mut sock = connect_plain(handle.port());
-    let resp = hello(&mut sock, 1, 2, Some("tok"), &["read", "control", "input"]);
+    let resp = hello(
+        &mut sock,
+        1,
+        PROTOCOL_VERSION,
+        Some("tok"),
+        &["read", "control", "input"],
+    );
     let granted = resp["result"]["grantedScopes"].as_array().unwrap();
     let granted: Vec<&str> = granted.iter().map(|v| v.as_str().unwrap()).collect();
     assert!(granted.contains(&"input"));
@@ -467,13 +485,15 @@ fn ac20_read_input_config_grants_input_not_control() {
 // ---- AC-7 / AC-21: hello version mismatch, unknown fields, unknown method ----
 
 #[test]
-fn ac7_protocol_v1_is_rejected_after_grid_coordinate_break() {
+fn ac7_legacy_protocols_are_rejected_before_seed_replay() {
     let backend = Arc::new(MockBackend::default());
     let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
-    let mut sock = connect_plain(handle.port());
-    let resp = hello(&mut sock, 1, 1, Some("tok"), &["read"]);
-    assert_eq!(resp["error"]["code"], -32006);
-    let _ = sock.close(None);
+    for version in [1, 2] {
+        let mut sock = connect_plain(handle.port());
+        let resp = hello(&mut sock, 1, version, Some("tok"), &["read"]);
+        assert_eq!(resp["error"]["code"], -32006);
+        let _ = sock.close(None);
+    }
 }
 
 #[test]
@@ -485,7 +505,7 @@ fn ac7_unknown_fields_ignored() {
         &mut sock,
         1,
         "noa.hello",
-        json!({ "protocolVersion": 2, "token": "tok", "scopes": ["read"], "somethingUnknown": 42 }),
+        json!({ "protocolVersion": PROTOCOL_VERSION, "token": "tok", "scopes": ["read"], "somethingUnknown": 42 }),
     );
     let resp = recv_json(&mut sock);
     assert_eq!(resp["result"]["grantedScopes"], json!(["read"]));
@@ -497,7 +517,7 @@ fn ac21_unknown_method_then_connection_still_works() {
     let backend = Arc::new(MockBackend::default());
     let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
     let mut sock = connect_plain(handle.port());
-    hello(&mut sock, 1, 2, Some("tok"), &["read"]);
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
 
     send_rpc(&mut sock, 2, "noa.nonexistent", json!({}));
     let resp = recv_json(&mut sock);
@@ -531,7 +551,7 @@ fn ac9_get_text_over_the_wire_truncates_and_flags() {
     backend.text.lock().unwrap().insert(1, "x".repeat(1000));
     let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
     let mut sock = connect_plain(handle.port());
-    hello(&mut sock, 1, 2, Some("tok"), &["read"]);
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
 
     send_rpc(
         &mut sock,
@@ -557,7 +577,7 @@ fn get_text_json_escaping_stays_within_the_websocket_message_cap() {
         .insert(1, "\0".repeat(noa_ipc::protocol::MAX_TEXT_MAX_BYTES));
     let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
     let mut sock = connect_plain(handle.port());
-    hello(&mut sock, 1, 2, Some("tok"), &["read"]);
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
 
     send_rpc(
         &mut sock,
@@ -600,7 +620,7 @@ fn ac10_get_grid_returns_range_only_rows() {
     backend.grid_rows.lock().unwrap().insert(1, rows);
     let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
     let mut sock = connect_plain(handle.port());
-    hello(&mut sock, 1, 2, Some("tok"), &["read"]);
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
 
     send_rpc(
         &mut sock,
@@ -637,7 +657,7 @@ fn ac10_get_grid_has_more_when_capped() {
     backend.grid_rows.lock().unwrap().insert(1, rows);
     let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
     let mut sock = connect_plain(handle.port());
-    hello(&mut sock, 1, 2, Some("tok"), &["read"]);
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
 
     send_rpc(
         &mut sock,
@@ -659,7 +679,7 @@ fn ac15_unknown_pane_returns_32002() {
     let backend = Arc::new(MockBackend::default());
     let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
     let mut sock = connect_plain(handle.port());
-    hello(&mut sock, 1, 2, Some("tok"), &["read"]);
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
 
     send_rpc(
         &mut sock,
@@ -678,7 +698,13 @@ fn ac15_pane_closed_returns_32004() {
     backend.closed_panes.lock().unwrap().insert(5);
     let handle = start_test_server(backend, "tok", ScopeSet::from_strings(["read", "control"]));
     let mut sock = connect_plain(handle.port());
-    hello(&mut sock, 1, 2, Some("tok"), &["read", "control"]);
+    hello(
+        &mut sock,
+        1,
+        PROTOCOL_VERSION,
+        Some("tok"),
+        &["read", "control"],
+    );
 
     send_rpc(&mut sock, 2, "noa.focusPane", json!({ "paneId": "5" }));
     let resp = recv_json(&mut sock);
@@ -704,7 +730,7 @@ fn ac15_oversize_single_row_returns_32005() {
     );
     let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
     let mut sock = connect_plain(handle.port());
-    hello(&mut sock, 1, 2, Some("tok"), &["read"]);
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
 
     send_rpc(
         &mut sock,
@@ -725,7 +751,7 @@ fn r3_backend_internal_error_maps_to_32603() {
     backend.internal_error_panes.lock().unwrap().insert(1);
     let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
     let mut sock = connect_plain(handle.port());
-    hello(&mut sock, 1, 2, Some("tok"), &["read"]);
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
 
     send_rpc(
         &mut sock,
@@ -747,13 +773,13 @@ fn r5_missing_jsonrpc_field_rejected() {
     let mut sock = connect_plain(handle.port());
 
     // Pre-auth: `noa.hello` itself must be rejected without a valid `jsonrpc`.
-    let req = json!({ "id": 1, "method": "noa.hello", "params": { "protocolVersion": 2, "token": "tok", "scopes": ["read"] } });
+    let req = json!({ "id": 1, "method": "noa.hello", "params": { "protocolVersion": PROTOCOL_VERSION, "token": "tok", "scopes": ["read"] } });
     sock.send(Message::Text(req.to_string())).unwrap();
     let resp = recv_json(&mut sock);
     assert_eq!(resp["error"]["code"], -32600);
 
     // Connection stays open: a compliant hello now succeeds.
-    let resp = hello(&mut sock, 2, 2, Some("tok"), &["read"]);
+    let resp = hello(&mut sock, 2, PROTOCOL_VERSION, Some("tok"), &["read"]);
     assert_eq!(resp["result"]["grantedScopes"], json!(["read"]));
 
     // Post-auth: a subsequent method without `jsonrpc` is also rejected.
@@ -774,7 +800,7 @@ fn r5_wrong_jsonrpc_version_rejected() {
     let backend = Arc::new(MockBackend::default());
     let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
     let mut sock = connect_plain(handle.port());
-    hello(&mut sock, 1, 2, Some("tok"), &["read"]);
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
 
     let req = json!({ "jsonrpc": "1.0", "id": 2, "method": "noa.listPanels", "params": {} });
     sock.send(Message::Text(req.to_string())).unwrap();
@@ -853,7 +879,7 @@ fn bind_addr_explicit_loopback_still_works() {
     );
 
     let mut sock = connect_plain(handle.port());
-    let resp = hello(&mut sock, 1, 2, Some("tok"), &["read"]);
+    let resp = hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
     assert!(resp.get("result").is_some());
     let _ = sock.close(None);
 }
@@ -882,7 +908,7 @@ fn bind_addr_inaddr_any_is_reachable_via_loopback() {
     );
 
     let mut sock = connect_plain(handle.port());
-    let resp = hello(&mut sock, 1, 2, Some("tok"), &["read"]);
+    let resp = hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
     assert!(resp.get("result").is_some());
     let _ = sock.close(None);
 }
@@ -952,7 +978,7 @@ fn r2_slot_freed_by_a_reaped_connection_is_available_to_a_new_client() {
     // round-trip, proving the server isn't wedged (and, if this were run at
     // MAX_CONNECTIONS, that the reaped slot was released).
     let mut fresh = connect_plain(handle.port());
-    let resp = hello(&mut fresh, 1, 2, Some("tok"), &["read"]);
+    let resp = hello(&mut fresh, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
     assert_eq!(resp["result"]["grantedScopes"], json!(["read"]));
     let _ = fresh.close(None);
 }
@@ -1056,7 +1082,7 @@ fn r4_malformed_json_is_parse_error() {
     assert_eq!(resp["error"]["code"], -32700);
 
     // Connection stays open.
-    let resp = hello(&mut sock, 1, 2, Some("tok"), &["read"]);
+    let resp = hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
     assert_eq!(resp["result"]["grantedScopes"], json!(["read"]));
     let _ = sock.close(None);
 }
@@ -1077,7 +1103,7 @@ fn r4_well_formed_json_that_is_not_a_valid_request_is_invalid_request() {
     }
 
     // Connection stays open after every rejection.
-    let resp = hello(&mut sock, 1, 2, Some("tok"), &["read"]);
+    let resp = hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
     assert_eq!(resp["result"]["grantedScopes"], json!(["read"]));
     let _ = sock.close(None);
 }
@@ -1096,7 +1122,7 @@ fn bearer_header_preauth_still_requires_hello_before_other_methods() {
     assert_eq!(resp["error"]["code"], -32001);
 
     // hello with no token in params succeeds because the header already authed.
-    let resp = hello(&mut sock, 2, 2, None, &["read"]);
+    let resp = hello(&mut sock, 2, PROTOCOL_VERSION, None, &["read"]);
     assert_eq!(resp["result"]["grantedScopes"], json!(["read"]));
     let _ = sock.close(None);
 }
@@ -1109,7 +1135,7 @@ fn subscribe_delivers_state_changed_and_unsubscribe_stops_it() {
     let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
     let broadcaster = handle.broadcaster();
     let mut sock = connect_plain(handle.port());
-    hello(&mut sock, 1, 2, Some("tok"), &["read"]);
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
 
     send_rpc(
         &mut sock,
@@ -1168,7 +1194,7 @@ fn subscribe_beyond_the_per_connection_cap_returns_32005_and_unsubscribing_frees
     let backend = Arc::new(MockBackend::default());
     let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
     let mut sock = connect_plain(handle.port());
-    hello(&mut sock, 1, 2, Some("tok"), &["read"]);
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
 
     let mut sub_ids = Vec::new();
     for i in 0..16 {
@@ -1244,7 +1270,7 @@ fn broadcaster_survives_a_server_restart_and_leaves_no_stale_connections() {
         broadcaster.clone(),
     );
     let mut sock_a = connect_plain(handle_a.port());
-    hello(&mut sock_a, 1, 2, Some("tok"), &["read"]);
+    hello(&mut sock_a, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
     send_rpc(
         &mut sock_a,
         2,
@@ -1269,7 +1295,7 @@ fn broadcaster_survives_a_server_restart_and_leaves_no_stale_connections() {
         broadcaster.clone(),
     );
     let mut sock_b = connect_plain(handle_b.port());
-    hello(&mut sock_b, 1, 2, Some("tok"), &["read"]);
+    hello(&mut sock_b, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
     send_rpc(
         &mut sock_b,
         2,
@@ -1312,7 +1338,7 @@ fn f3_oversized_message_closes_the_connection() {
     let backend = Arc::new(MockBackend::default());
     let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
     let mut sock = connect_plain(handle.port());
-    hello(&mut sock, 1, 2, Some("tok"), &["read"]);
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
 
     // Over the server's 1 MiB max_message_size (F-3): the connection must be
     // torn down rather than the server accepting an unbounded payload.
@@ -1345,7 +1371,13 @@ fn send_text_paste_param_reaches_backend() {
         ScopeSet::from_strings(["read", "control", "input"]),
     );
     let mut sock = connect_plain(handle.port());
-    hello(&mut sock, 1, 2, Some("tok"), &["read", "control", "input"]);
+    hello(
+        &mut sock,
+        1,
+        PROTOCOL_VERSION,
+        Some("tok"),
+        &["read", "control", "input"],
+    );
 
     send_rpc(
         &mut sock,
@@ -1396,7 +1428,7 @@ fn fix5_r1_get_text_max_bytes_is_clamped_before_backend_call() {
     backend.text.lock().unwrap().insert(1, "x".repeat(10));
     let handle = start_test_server(backend.clone(), "tok", ScopeSet::default_read_only());
     let mut sock = connect_plain(handle.port());
-    hello(&mut sock, 1, 2, Some("tok"), &["read"]);
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
 
     send_rpc(
         &mut sock,
@@ -1425,7 +1457,7 @@ fn fix5_r1_get_text_max_bytes_under_cap_passes_through_unclamped() {
     backend.text.lock().unwrap().insert(1, "x".repeat(10));
     let handle = start_test_server(backend.clone(), "tok", ScopeSet::default_read_only());
     let mut sock = connect_plain(handle.port());
-    hello(&mut sock, 1, 2, Some("tok"), &["read"]);
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
 
     send_rpc(
         &mut sock,
@@ -1455,13 +1487,13 @@ fn fix5_r3_missing_id_rejected_pre_and_post_auth() {
     let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
     let mut sock = connect_plain(handle.port());
 
-    let req = json!({ "jsonrpc": "2.0", "method": "noa.hello", "params": { "protocolVersion": 2, "token": "tok", "scopes": ["read"] } });
+    let req = json!({ "jsonrpc": "2.0", "method": "noa.hello", "params": { "protocolVersion": PROTOCOL_VERSION, "token": "tok", "scopes": ["read"] } });
     sock.send(Message::Text(req.to_string())).unwrap();
     let resp = recv_json(&mut sock);
     assert_eq!(resp["error"]["code"], -32600);
     assert_eq!(resp["id"], Value::Null);
 
-    hello(&mut sock, 1, 2, Some("tok"), &["read"]);
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
 
     let req = json!({ "jsonrpc": "2.0", "method": "noa.listPanels", "params": {} });
     sock.send(Message::Text(req.to_string())).unwrap();
@@ -1482,7 +1514,13 @@ fn fix5_r3_invalid_id_types_rejected_without_backend_side_effect() {
     let backend = Arc::new(MockBackend::default());
     let handle = start_test_server(backend.clone(), "tok", ScopeSet::parse_list("read,input"));
     let mut sock = connect_plain(handle.port());
-    hello(&mut sock, 1, 2, Some("tok"), &["read", "input"]);
+    hello(
+        &mut sock,
+        1,
+        PROTOCOL_VERSION,
+        Some("tok"),
+        &["read", "input"],
+    );
 
     for bad_id in [Value::Null, json!({}), json!([]), json!(true)] {
         let req = json!({

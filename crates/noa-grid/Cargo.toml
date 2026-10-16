@@ -10,6 +10,7 @@ bitflags.workspace = true
 noa-vt.workspace = true
 thiserror.workspace = true
 unicode-width.workspace = true
+unicode-segmentation.workspace = true
 png.workspace = true
 flate2.workspace = true
 # OSC 7 anti-spoofing hostname check (REQ-OSC-2): `gethostname(2)`. Already a

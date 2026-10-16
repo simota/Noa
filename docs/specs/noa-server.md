@@ -94,7 +94,7 @@
 
 - WebSocket over TCP, `ws://127.0.0.1:61771/` (configurable via `server-port`). No TLS (loopback assumed; iOS terminates via tunnel).
 - Auth: an `Authorization: Bearer <token>` header on the WS upgrade, or for clients that can't set headers, an `noa.hello` request (`params.token`) sent immediately after connecting. Either is compared against the FR-3 token in constant time.
-- Handshake: the client sends `noa.hello { protocolVersion, token, scopes }`, and the server responds with `{ protocolVersion, grantedScopes, serverVersion, serverInstanceId }`. Current `protocolVersion` is `2`. `serverInstanceId` is a random id minted once per server process (additive field; absent on older servers): pane ids are process-local, so a client auto-reconnecting after a server restart must compare it against the id it attached under and stop rather than re-attach to whichever pane now carries the same number. `grantedScopes` = requested scopes ∩ `server-scopes` (config, default `read` only).
+- Handshake: the client sends `noa.hello { protocolVersion, token, scopes }`, and the server responds with `{ protocolVersion, grantedScopes, serverVersion, serverInstanceId }`. Current `protocolVersion` is `3`. `serverInstanceId` is a random id minted once per server process (additive field; absent on older servers): pane ids are process-local, so a client auto-reconnecting after a server restart must compare it against the id it attached under and stop rather than re-attach to whichever pane now carries the same number. `grantedScopes` = requested scopes ∩ `server-scopes` (config, default `read` only).
 - Any method called before auth and version are established is rejected with `-32001` (auth) / `-32006` (version).
 
 ### JSON-RPC 2.0 method table

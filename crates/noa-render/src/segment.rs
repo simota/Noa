@@ -28,6 +28,9 @@ use noa_font::{FaceId, FontGrid, ShapeCell, StyleKey};
 pub struct SegmentCell {
     pub ch: char,
     pub combining: Vec<char>,
+    /// Actual grid footprint, including a wide cell's spacer. Presentation
+    /// selectors can make this differ from the base scalar's Unicode width.
+    pub span: u8,
     pub bold: bool,
     pub italic: bool,
     pub selected: bool,
@@ -44,6 +47,7 @@ pub struct SegmentCell {
 pub struct CellRenderInfo {
     pub color: [u8; 4],
     pub cursor: bool,
+    pub span: u8,
 }
 
 /// One row-local shapeable run: a maximal span of cells sharing the same
@@ -73,7 +77,7 @@ fn boundary_key(font: &mut FontGrid, cell: &SegmentCell) -> (BoundaryKey, StyleK
         italic: cell.italic,
     };
     let key = BoundaryKey {
-        face: font.resolve_face_for_style(cell.ch, style),
+        face: font.resolve_face_for_cluster(cell.ch, &cell.combining, style),
         style,
         selected: cell.selected,
         active_search: cell.active_search,
@@ -144,6 +148,7 @@ pub fn segment_row_into(font: &mut FontGrid, cells: &[SegmentCell], out: &mut Ru
         let render_info = CellRenderInfo {
             color: cell.color,
             cursor: cell.cursor,
+            span: cell.span,
         };
 
         let run = if current_key == Some(key) {
@@ -177,6 +182,7 @@ mod tests {
         SegmentCell {
             ch,
             combining: Vec::new(),
+            span: 1,
             bold: false,
             italic: false,
             selected: false,

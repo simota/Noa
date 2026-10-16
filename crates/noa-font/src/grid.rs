@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use etagere::AllocId;
 use swash::FontRef;
 use swash::scale::ScaleContext;
+use unicode_properties::emoji::{EmojiStatus, UnicodeEmoji};
 use unicode_width::UnicodeWidthChar;
 
 use crate::atlas::Atlas;
@@ -18,6 +19,10 @@ use crate::face::{
 use crate::raster::{GlyphSynthesis, RasterizedGlyph, rasterize_with_variations};
 use crate::shape::{self, FaceId, ShapeCell, ShapeRunEntry, ShapedGlyph, StyleKey};
 use crate::{FontConfig, FontError, GlyphInfo, GlyphKey};
+
+#[cfg(test)]
+#[path = "test_font.rs"]
+mod test_font;
 
 /// Initial atlas dimensions. These are floors, not caps: the atlas grows on
 /// demand (doubling — see `atlas.rs`) when glyph pressure exceeds them, up to
@@ -94,7 +99,7 @@ struct Cached {
 /// Cache key for the shaped-glyph raster path ([`FontGrid::raster_shaped`]):
 /// a rasterized glyph identified by face + glyph id + style (style matters
 /// because it selects both the variation coords and the synthetic-style
-/// transform) + `span` (the cell width the glyph is fit to — see
+/// transform) + cluster scale + `span` (the cell width the glyph is fit to — see
 /// [`FontGrid::raster_shaped`]'s doc comment; two source cells of different
 /// width must never collide on the same cached, possibly fit-scaled, glyph).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -103,6 +108,7 @@ struct ShapedGlyphKey {
     glyph_id: u16,
     style: StyleKey,
     span: u8,
+    scale_bits: u32,
 }
 
 /// Owns the font bytes, a swash scale context, cell metrics, the two glyph
@@ -176,6 +182,8 @@ pub struct FontGrid {
     /// the stack. Only successful resolutions are cached, mirroring
     /// `cascade_misses`'s reciprocal permanent cache for failures.
     resolved_glyph_cache: HashMap<(char, StyleKey), (usize, u16)>,
+    /// Presentation resolution is also on the per-cell segmentation path.
+    resolved_presentation_cache: HashMap<(ShapeCell, bool), FaceId>,
 }
 
 impl FontGrid {
@@ -230,6 +238,7 @@ impl FontGrid {
             atlas_eviction_generation: 0,
             cascade_misses: HashSet::new(),
             resolved_glyph_cache: HashMap::new(),
+            resolved_presentation_cache: HashMap::new(),
         })
     }
 
@@ -269,6 +278,7 @@ impl FontGrid {
             atlas_eviction_generation: 0,
             cascade_misses: HashSet::new(),
             resolved_glyph_cache: HashMap::new(),
+            resolved_presentation_cache: HashMap::new(),
         })
     }
 
@@ -325,6 +335,14 @@ impl FontGrid {
             fit_width,
         );
 
+        let glyph = self.fit_color_to_cell(
+            font_index,
+            glyph_id,
+            StyleKey::default(),
+            span_for_char(ch),
+            glyph,
+        );
+
         self.store_and_cache(&glyph, SlotOwner::Char(key))
     }
 
@@ -345,17 +363,139 @@ impl FontGrid {
     /// bold/italic faces are tried first when available; otherwise the regular
     /// face stays first and synthetic style remains eligible during raster.
     pub fn resolve_face_for_style(&mut self, ch: char, style: StyleKey) -> FaceId {
-        // Builtin (procedurally-drawn) codepoints resolve to a sentinel face so
-        // segmentation isolates them into their own runs — see
-        // [`FaceId::BUILTIN`] and [`FontGrid::raster_shaped`]'s builtin branch.
+        self.resolve_face_for_cluster(ch, &[], style)
+    }
+
+    /// Resolve presentation for the whole cell, so VS16/keycaps do not get
+    /// trapped in a primary font that only covers the monochrome base.
+    pub fn resolve_face_for_cluster(
+        &mut self,
+        ch: char,
+        combining: &[char],
+        style: StyleKey,
+    ) -> FaceId {
         if is_builtin_glyph(ch) {
             return FaceId::BUILTIN;
         }
-        FaceId(self.resolve_glyph_for_style(ch, style).0 as u16)
+        let selector = combining
+            .iter()
+            .find(|&&c| matches!(c, '\u{fe0e}' | '\u{fe0f}'));
+        let wants_color = match selector {
+            Some('\u{fe0e}') => false,
+            Some('\u{fe0f}') => true,
+            _ => {
+                matches!(
+                    ch.emoji_status(),
+                    EmojiStatus::EmojiPresentation
+                        | EmojiStatus::EmojiPresentationAndModifierBase
+                        | EmojiStatus::EmojiPresentationAndEmojiComponent
+                        | EmojiStatus::EmojiPresentationAndModifierAndEmojiComponent
+                ) || (matches!(ch, '#' | '*' | '0'..='9') && combining.contains(&'\u{20e3}'))
+            }
+        };
+        let presentation = (wants_color || selector == Some(&'\u{fe0e}')).then(|| {
+            (
+                ShapeCell {
+                    ch,
+                    combining: combining.to_vec(),
+                    style,
+                },
+                wants_color,
+            )
+        });
+        if let Some(key) = presentation.as_ref() {
+            if let Some(&face) = self.resolved_presentation_cache.get(key) {
+                return face;
+            }
+            let font_style = FontStyle::from_bold_italic(style.bold, style.italic);
+            let candidates = self.font_stack.face_indices_for_style(font_style).to_vec();
+            for index in candidates {
+                if self.face_matches_presentation(index, &key.0, wants_color) {
+                    let face = FaceId(index as u16);
+                    self.cache_presentation(key.clone(), face);
+                    return face;
+                }
+            }
+        }
+        let (index, glyph) = self.resolve_glyph_for_style(ch, style);
+        let face = FaceId(index as u16);
+        if glyph != 0
+            && let Some(key) = presentation
+        {
+            self.cache_presentation(key, face);
+        }
+        face
+    }
+
+    fn cache_presentation(&mut self, key: (ShapeCell, bool), face: FaceId) {
+        // Cluster text has more combinations than base codepoints; keep the
+        // memoized presentation choices within the same budget as shape runs.
+        if self.resolved_presentation_cache.len() >= SHAPE_CACHE_CAP {
+            self.resolved_presentation_cache.clear();
+        }
+        self.resolved_presentation_cache.insert(key, face);
+    }
+
+    fn face_matches_presentation(&mut self, index: usize, cell: &ShapeCell, color: bool) -> bool {
+        let data = &self.font_stack.faces()[index];
+        let font = data.font_ref().expect("validated font");
+        if font.charmap().map(cell.ch) == 0 {
+            return false;
+        }
+        // Missing color tables can rule color out, but their presence says
+        // nothing about this glyph. Mixed faces need the actual shaped output.
+        if font.color_strikes().next().is_none() && font.color_palettes().next().is_none() {
+            return !color;
+        }
+        let coords = shape::variation_coords_for(&self.font_cfg, cell.style);
+        let glyphs = shape::shape_with_rustybuzz(
+            data,
+            FaceId(index as u16),
+            self.px_size,
+            std::slice::from_ref(cell),
+            &coords,
+            &self.font_cfg,
+        );
+        let style = FontStyle::from_bold_italic(cell.style.bold, cell.style.italic);
+        let synthesis = synthesis_for(
+            &self.font_cfg,
+            cell.style,
+            self.font_stack.is_native_style_face(index, style),
+        );
+        let mut visible = false;
+        for glyph in glyphs {
+            if glyph.glyph_id == 0 {
+                return false;
+            }
+            let raster = rasterize_with_variations(
+                &mut self.ctx,
+                font,
+                glyph.glyph_id,
+                self.px_size,
+                &coords,
+                synthesis,
+                None,
+            );
+            if raster.width == 0 || raster.height == 0 {
+                continue;
+            }
+            if raster.color != color {
+                return false;
+            }
+            visible = true;
+        }
+        visible
     }
 
     fn resolve_glyph(&mut self, ch: char) -> (usize, u16) {
-        self.resolve_glyph_for_style(ch, StyleKey::default())
+        if is_builtin_glyph(ch) {
+            return self.resolve_glyph_for_style(ch, StyleKey::default());
+        }
+        let index = self.resolve_face(ch).0 as usize;
+        let font = self.font_stack.faces()[index]
+            .font_ref()
+            .expect("validated font");
+        (index, font.charmap().map(ch))
     }
 
     fn resolve_glyph_for_style(&mut self, ch: char, style: StyleKey) -> (usize, u16) {
@@ -473,7 +613,7 @@ impl FontGrid {
         // (all builtin codepoints fit in `u16`) for `raster_shaped` to draw.
         // Segmentation guarantees the whole run is builtin (all cells share
         // `FaceId::BUILTIN`).
-        if self.resolve_face_for_style(first.ch, style) == FaceId::BUILTIN {
+        if self.resolve_face_for_cluster(first.ch, &first.combining, style) == FaceId::BUILTIN {
             let x_advance = self.metrics.cell_w.round() as i32;
             let glyphs: Vec<ShapedGlyph> = cells
                 .iter()
@@ -490,7 +630,7 @@ impl FontGrid {
             return self.insert_shape_run(hash, cells, style, cfg_digest, glyphs, now);
         }
 
-        let face_id = self.resolve_face_for_style(first.ch, style);
+        let face_id = self.resolve_face_for_cluster(first.ch, &first.combining, style);
         let variation_coords = self.variation_coords(style);
         let font_data = &self.font_stack.faces()[face_id.0 as usize];
         let glyphs = shape::shape_with_rustybuzz(
@@ -574,11 +714,30 @@ impl FontGrid {
         style: StyleKey,
         span: u8,
     ) -> GlyphInfo {
+        self.raster_shaped_scaled(face_id, glyph_id, style, span, 1.0)
+    }
+
+    /// Rasterize at a shared cluster scale so multiple advancing glyphs fit
+    /// their combined cell footprint without losing their relative positions.
+    pub fn raster_shaped_scaled(
+        &mut self,
+        face_id: FaceId,
+        glyph_id: u16,
+        style: StyleKey,
+        span: u8,
+        scale: f32,
+    ) -> GlyphInfo {
+        let scale = if scale.is_finite() {
+            scale.clamp(0.01, 1.0)
+        } else {
+            1.0
+        };
         let key = ShapedGlyphKey {
             face_id,
             glyph_id,
             style,
             span,
+            scale_bits: scale.to_bits(),
         };
         if let Some(cached) = self.raster_shaped_cache.get(&key).copied() {
             self.touch(cached.slot);
@@ -615,13 +774,76 @@ impl FontGrid {
             &mut self.ctx,
             font,
             glyph_id,
-            self.px_size,
+            self.px_size * scale,
             &variation_coords,
             synthesis,
             fit_width,
         );
 
+        let glyph = self.fit_color_to_cell_at_size(
+            face_id.0 as usize,
+            glyph_id,
+            style,
+            span,
+            glyph,
+            self.px_size * scale,
+        );
+
         self.store_and_cache(&glyph, SlotOwner::Shaped(key))
+    }
+
+    fn fit_color_to_cell(
+        &mut self,
+        face_index: usize,
+        glyph_id: u16,
+        style: StyleKey,
+        span: u8,
+        glyph: RasterizedGlyph,
+    ) -> RasterizedGlyph {
+        self.fit_color_to_cell_at_size(face_index, glyph_id, style, span, glyph, self.px_size)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fit_color_to_cell_at_size(
+        &mut self,
+        face_index: usize,
+        glyph_id: u16,
+        style: StyleKey,
+        span: u8,
+        mut glyph: RasterizedGlyph,
+        px_size: f32,
+    ) -> RasterizedGlyph {
+        if !glyph.color || glyph.width == 0 || glyph.height == 0 {
+            return glyph;
+        }
+        let width = (self.metrics.cell_w * f32::from(span)).floor().max(1.0);
+        let height = self.metrics.cell_h.floor().max(1.0);
+        let scale = (width / glyph.width as f32)
+            .min(height / glyph.height as f32)
+            .min(1.0);
+        if scale < 1.0 {
+            // Swash resamples bitmap strikes at the requested ppem. Fit the
+            // ink bounds, including for a one-cell compatibility footprint.
+            let font = self.font_stack.faces()[face_index]
+                .font_ref()
+                .expect("validated font");
+            let coords = self.variation_coords(style);
+            glyph = rasterize_with_variations(
+                &mut self.ctx,
+                font,
+                glyph_id,
+                px_size * scale,
+                &coords,
+                GlyphSynthesis::default(),
+                None,
+            );
+        }
+        glyph.bearing_x = ((width - glyph.width as f32) / 2.0).floor() as i32;
+        let baseline = self.metrics.ascent.round();
+        let top =
+            (baseline - glyph.bearing_y as f32).clamp(0.0, (height - glyph.height as f32).max(0.0));
+        glyph.bearing_y = (baseline - top) as i32;
+        glyph
     }
 
     /// Cell / face metrics at the configured size.
@@ -953,6 +1175,172 @@ mod tests {
     use super::*;
     use crate::face::nerd_font_fallback_candidate_has_glyph;
     use crate::{FontFeature, FontVariation, SyntheticStyle};
+
+    #[test]
+    fn mixed_color_faces_resolve_the_requested_glyph_presentation() {
+        let stack = crate::face::FontStack::new(
+            test_font::mixed_color_face(&['☀']),
+            None,
+            None,
+            None,
+            vec![
+                test_font::mixed_color_face(&['❤', '☀']),
+                test_font::mixed_color_face(&[]),
+            ],
+        );
+        let mut grid = FontGrid::with_stack(stack, 28.0, FontConfig::default()).unwrap();
+        let style = StyleKey::default();
+        // Both first faces have color strikes, but the primary heart is an outline.
+        for (ch, selector, expected, color) in [
+            ('❤', '\u{fe0f}', 1, true),
+            ('❤', '\u{fe0e}', 0, false),
+            ('☀', '\u{fe0f}', 0, true),
+            ('☀', '\u{fe0e}', 2, false),
+            ('❤', '\u{fe0f}', 1, true),
+        ] {
+            let face = grid.resolve_face_for_cluster(ch, &[selector], style);
+            assert_eq!(face, FaceId(expected), "{ch}{selector}");
+            let glyphs = grid.shape_run(&[ShapeCell {
+                ch,
+                combining: vec![selector],
+                style,
+            }]);
+            let visible: Vec<_> = glyphs
+                .iter()
+                .map(|g| grid.raster_shaped(g.face_id, g.glyph_id, style, 2))
+                .filter(|g| g.atlas_size != [0, 0])
+                .collect();
+            assert!(!visible.is_empty());
+            assert!(visible.iter().all(|g| g.color == color), "{ch}{selector}");
+        }
+    }
+
+    #[test]
+    fn presentation_cache_distinguishes_clusters_with_the_same_base() {
+        let stack = crate::face::FontStack::new(
+            test_font::mixed_color_face(&['❤']),
+            None,
+            None,
+            None,
+            vec![test_font::mixed_color_face(&['❤', '☀'])],
+        );
+        let mut grid = FontGrid::with_stack(stack, 28.0, FontConfig::default()).unwrap();
+        for (marks, expected) in [(vec![], 0), (vec!['🏽'], 1), (vec![], 0), (vec!['🏽'], 1)] {
+            assert_eq!(
+                grid.resolve_face_for_cluster('👍', &marks, StyleKey::default()),
+                FaceId(expected)
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn text_default_wide_symbols_keep_configured_primary_face() {
+        let cfg = FontConfig {
+            families: vec!["Hiragino Sans".into()],
+            ..FontConfig::default()
+        };
+        let mut grid = FontGrid::new(28.0, cfg).unwrap();
+        let style = StyleKey::default();
+        for ch in ['㊗', '㊙', '〰'] {
+            assert!(grid.primary_has_glyph(ch), "primary must cover {ch}");
+            for marks in [vec![], vec!['\u{fe0f}'], vec![], vec!['\u{fe0e}']] {
+                let face = grid.resolve_face_for_cluster(ch, &marks, style);
+                if marks == ['\u{fe0f}'] {
+                    assert_ne!(face, FaceId(0), "{ch}+VS16 should use the color fallback");
+                } else {
+                    assert_eq!(
+                        face,
+                        FaceId(0),
+                        "{ch} with {marks:?} must keep the configured text face"
+                    );
+                }
+            }
+        }
+        for ch in ['✅', '⚡', '😀'] {
+            let face = grid.resolve_face_for_cluster(ch, &[], style);
+            let glyphs = grid.shape_run(&[ShapeCell {
+                ch,
+                combining: vec![],
+                style,
+            }]);
+            assert!(!glyphs.is_empty());
+            assert!(
+                grid.raster_shaped(face, glyphs[0].glyph_id, style, 2).color,
+                "{ch} should keep default emoji presentation"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn emoji_presentation_sequences_shape_as_color_glyphs() {
+        let mut grid = FontGrid::new(28.0, FontConfig::default()).unwrap();
+        for text in ["❤️", "⚠️", "☀️", "🛠️", "1️⃣", "👩‍💻", "👍🏽", "🇯🇵"]
+        {
+            let mut chars = text.chars();
+            let cells = [ShapeCell {
+                ch: chars.next().unwrap(),
+                combining: chars.collect(),
+                style: StyleKey::default(),
+            }];
+            let glyphs = grid.shape_run(&cells);
+            let visible: Vec<_> = glyphs
+                .iter()
+                .map(|g| grid.raster_shaped(g.face_id, g.glyph_id, cells[0].style, 2))
+                .filter(|r| r.atlas_size != [0, 0])
+                .collect();
+            assert_eq!(
+                visible.len(),
+                1,
+                "{text}: expected one composed glyph: {glyphs:?}"
+            );
+            assert!(
+                visible[0].color,
+                "{text}: emoji presentation must select a color face"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn color_emoji_fits_allocated_cells() {
+        for px in [12.0, 20.0, 28.0, 40.0] {
+            let mut grid = FontGrid::new(px, FontConfig::default()).unwrap();
+            for ch in ['😀', '🚀', '✅', '⚠', '🛠', '❤'] {
+                let glyphs = grid.shape_run(&[ShapeCell {
+                    ch,
+                    combining: vec!['\u{fe0f}'],
+                    style: StyleKey::default(),
+                }]);
+                for span in [1, 2] {
+                    for glyph in glyphs.iter() {
+                        let r = grid.raster_shaped(
+                            glyph.face_id,
+                            glyph.glyph_id,
+                            StyleKey::default(),
+                            span,
+                        );
+                        if !r.color {
+                            continue;
+                        }
+                        let m = grid.metrics();
+                        assert!(
+                            r.bearing[0] >= 0
+                                && f32::from(r.bearing[0]) + f32::from(r.atlas_size[0])
+                                    <= m.cell_w * f32::from(span),
+                            "{ch} at {px}px/span {span}: {r:?}, metrics {m:?}"
+                        );
+                        let top = m.ascent.round() - f32::from(r.bearing[1]);
+                        assert!(
+                            top >= 0.0 && top + f32::from(r.atlas_size[1]) <= m.cell_h,
+                            "{ch} at {px}px: {r:?}, metrics {m:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     const NERD_FONT_HOME_PUA: char = '\u{F015}';
 

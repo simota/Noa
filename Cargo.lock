@@ -1692,6 +1692,7 @@ dependencies = [
  "rustybuzz",
  "swash",
  "thiserror 2.0.18",
+ "unicode-properties",
  "unicode-width",
 ]
 
@@ -1706,6 +1707,7 @@ dependencies = [
  "noa-vt",
  "png",
  "thiserror 2.0.18",
+ "unicode-segmentation",
  "unicode-width",
 ]
 

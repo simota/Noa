@@ -166,6 +166,80 @@ fn ac_2027_005_decrqm_reports_grapheme_clustering_state() {
 // ── WP3: cluster attachment under mode 2027 (AC-2027-001..004) ─────────
 
 #[test]
+fn agent_output_composes_emoji_by_default_across_feed_boundaries() {
+    for emoji in ["❤️", "⚠️", "1️⃣", "1\u{20e3}", "👍🏽", "👩‍💻", "👨‍👩‍👧‍👦", "🇯🇵", "🏳️‍🌈", "🏴\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}"] {
+        let input = format!("{emoji}X");
+        for chunk_size in [1, 2, input.len()] {
+            let mut t = Terminal::new(GridSize::new(12, 2));
+            let mut stream = Stream::new();
+            for chunk in input.as_bytes().chunks(chunk_size) {
+                stream.feed(chunk, &mut t);
+            }
+            assert_eq!(cell(&t, 0, 0).text(), emoji, "{emoji}, chunk {chunk_size}");
+            assert!(cell(&t, 0, 0).attrs.contains(CellAttrs::WIDE), "{emoji}");
+            assert!(cell(&t, 1, 0).attrs.contains(CellAttrs::WIDE_SPACER), "{emoji}");
+            assert_eq!(cell(&t, 2, 0).ch, 'X', "{emoji}, chunk {chunk_size}");
+            assert_eq!(t.primary.cursor.x, 3, "{emoji}");
+        }
+    }
+}
+
+#[test]
+fn ordinary_text_does_not_widen_with_an_invalid_emoji_selector() {
+    let t = run_size(12, 1, "\x1b[?2027hA\u{fe0f}X".as_bytes());
+    assert_eq!(cell(&t, 1, 0).ch, 'X');
+    assert!(!cell(&t, 0, 0).attrs.contains(CellAttrs::WIDE));
+}
+
+#[test]
+fn text_presentation_releases_a_default_emoji_spacer() {
+    for prefix in ["", "AB"] {
+        let input = format!("{prefix}⚡\u{fe0e}X");
+        let t = run_size(4, 2, input.as_bytes());
+        let x = prefix.len();
+        assert_eq!(cell(&t, x, 0).text(), "⚡\u{fe0e}");
+        assert!(!cell(&t, x, 0).attrs.contains(CellAttrs::WIDE));
+        assert!(!cell(&t, x + 1, 0).attrs.contains(CellAttrs::WIDE_SPACER));
+        assert_eq!(cell(&t, x + 1, 0).ch, 'X');
+    }
+}
+
+#[test]
+fn emoji_joiners_do_not_swallow_following_text_or_flags() {
+    let t = run_size(12, 2, "👩\u{200d}X🇯🇵🇺🇸Y".as_bytes());
+    assert_eq!(cell(&t, 0, 0).text(), "👩\u{200d}");
+    assert_eq!(cell(&t, 2, 0).ch, 'X');
+    assert_eq!(cell(&t, 3, 0).text(), "🇯🇵");
+    assert_eq!(cell(&t, 5, 0).text(), "🇺🇸");
+    assert_eq!(cell(&t, 7, 0).ch, 'Y');
+}
+
+#[test]
+fn emoji_cluster_finishes_before_deferred_wrap() {
+    let t = run_size(4, 2, "AB👩‍💻X".as_bytes());
+    assert_eq!(cell(&t, 2, 0).text(), "👩‍💻");
+    assert!(cell(&t, 3, 0).attrs.contains(CellAttrs::WIDE_SPACER));
+    assert_eq!(cell(&t, 0, 1).ch, 'X');
+    assert!(t.primary.grid[0].wrapped);
+}
+
+#[test]
+fn grapheme_mode_defaults_on_and_can_be_negotiated_or_reset() {
+    let t = run(b"\x1b[?2027$p\x1b[?2027l\x1b[?2027$p\x1bc\x1b[?2027$p");
+    assert_eq!(t.pending_writes, b"\x1b[?2027;1$y\x1b[?2027;2$y\x1b[?2027;1$y");
+}
+
+#[test]
+fn promoted_emoji_spacer_survives_scrollback_packing() {
+    let mut t = run_size(12, 2, "\r\n\r\n\r\n❤️\r\nnext\r\n".as_bytes());
+    t.primary.trim_memory();
+    let row = t.primary.absolute_row(t.scrollback_len() - 1).unwrap();
+    assert_eq!(row.cells[0].text(), "❤️");
+    assert!(row.cells[0].attrs.contains(CellAttrs::WIDE));
+    assert!(row.cells[1].attrs.contains(CellAttrs::WIDE_SPACER));
+}
+
+#[test]
 fn ac_2027_001_zwj_family_emoji_clusters_into_one_cell() {
     // 👨‍👩‍👧‍👦 = man ZWJ woman ZWJ girl ZWJ boy, each base emoji width-2.
     let t = run_size(
@@ -292,7 +366,7 @@ fn ac_2027_004_mode_off_falls_back_to_plain_combining_only() {
     let t = run_size(
         10,
         1,
-        "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}".as_bytes(),
+        "\x1b[?2027l\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}".as_bytes(),
     );
 
     assert_eq!(cell(&t, 0, 0).text(), "\u{1F468}\u{200D}");

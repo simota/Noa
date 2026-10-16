@@ -662,6 +662,7 @@ fn palette_segment_cells(
     let blank = |color: [u8; 4], bold: bool| SegmentCell {
         ch: ' ',
         combining: Vec::new(),
+        span: 1,
         bold,
         italic: false,
         selected: false,
@@ -686,6 +687,7 @@ fn palette_segment_cells(
             2 => {
                 cells.push(SegmentCell {
                     ch,
+                    span: 2,
                     ..blank(color, bold)
                 });
                 cells.push(blank(color, bold));
@@ -871,6 +873,7 @@ pub(super) fn overlay_segment_cells(text: &str, fg_by_col: &[[u8; 4]]) -> Vec<Se
     let blank = |color: [u8; 4]| SegmentCell {
         ch: ' ',
         combining: Vec::new(),
+        span: 1,
         bold: false,
         italic: false,
         selected: false,
@@ -892,7 +895,11 @@ pub(super) fn overlay_segment_cells(text: &str, fg_by_col: &[[u8; 4]]) -> Vec<Se
                 }
             }
             2 => {
-                cells.push(SegmentCell { ch, ..blank(color) });
+                cells.push(SegmentCell {
+                    ch,
+                    span: 2,
+                    ..blank(color)
+                });
                 cells.push(blank(color));
                 col += 2;
             }
@@ -1017,6 +1024,7 @@ pub(super) fn search_prompt_segment_cells(text: &str, color: [u8; 4]) -> Vec<Seg
     let blank = |color: [u8; 4]| SegmentCell {
         ch: ' ',
         combining: Vec::new(),
+        span: 1,
         bold: false,
         italic: false,
         selected: false,
@@ -1036,7 +1044,11 @@ pub(super) fn search_prompt_segment_cells(text: &str, color: [u8; 4]) -> Vec<Seg
                 }
             }
             2 => {
-                cells.push(SegmentCell { ch, ..blank(color) });
+                cells.push(SegmentCell {
+                    ch,
+                    span: 2,
+                    ..blank(color)
+                });
                 cells.push(blank(color));
             }
             _ => cells.push(SegmentCell { ch, ..blank(color) }),

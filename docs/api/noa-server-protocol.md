@@ -1,4 +1,4 @@
-# noa-server Client API Specification (protocolVersion 2)
+# noa-server Client API Specification (protocolVersion 3)
 
 A protocol reference for connecting to noa from external clients (CLI, dashboard, iOS app, etc.).
 For operational procedures (enabling, tokens, troubleshooting) see `docs/runbooks/noa-server.md`; for design background see `docs/specs/noa-server.md`.
@@ -60,11 +60,11 @@ An upgrade request carrying an `Origin` header (every browser sends one) is clos
 
 | params | type | required | description |
 |--------|----|------|------|
-| `protocolVersion` | number | ✓ | the client's major version. Currently `2` |
+| `protocolVersion` | number | ✓ | the client's major version. Currently `3` |
 | `token` | string | optional if header-authenticated | Bearer token |
 | `scopes` | string[] | — (omitted = `[]`) | requested scopes |
 
-result: `{"protocolVersion":2,"grantedScopes":["read"],"serverVersion":"0.1.2"}`
+result: `{"protocolVersion":3,"grantedScopes":["read"],"serverVersion":"0.1.2"}`
 
 ### noa.listPanels — requires read
 
@@ -178,6 +178,13 @@ params: `{"subscriptionId":"1"}` / result: `{"ok":true}`
 
 ## 6. Raw attach channel
 
+Protocol version 3 requires cell-exact seed replay. `CSI > Ph ; Pl ; Pw $ v`
+prints a new cell with scalar `(Ph << 16) | Pl` and stored width `Pw` (1 or 2),
+without joining the preceding cell. `CSI > Ph ; Pl $ x` appends a scalar to
+that cell without changing its width or cursor. These seed-only commands
+preserve cells created under different mode-2027 settings. Both client and
+server must use version 3; older versions are rejected during `noa.hello`.
+
 After the first-frame token handshake, every data message on `/attach` is binary and carries at most 64 KiB of application payload:
 
 - Server → client: a synthetic repaint VT seed split across as many messages as needed, one empty binary seed terminator, then lossless PTY output in order. The terminator is a boundary marker and contributes no VT bytes.
@@ -263,8 +270,8 @@ When the subscription queue overflows, the oldest notifications are dropped and 
 ## 10. Full session example
 
 ```json
-→ {"jsonrpc":"2.0","id":1,"method":"noa.hello","params":{"protocolVersion":2,"token":"<hex64>","scopes":["read","input"]}}
-← {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":2,"grantedScopes":["read","input"],"serverVersion":"0.1.2"}}
+→ {"jsonrpc":"2.0","id":1,"method":"noa.hello","params":{"protocolVersion":3,"token":"<hex64>","scopes":["read","input"]}}
+← {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":3,"grantedScopes":["read","input"],"serverVersion":"0.1.2"}}
 → {"jsonrpc":"2.0","id":2,"method":"noa.listPanels","params":{}}
 ← {"jsonrpc":"2.0","id":2,"result":{"panels":[{"windowGroupId":"1","windowId":"105553...","paneId":"1","name":"zsh","cwd":"/Users/me","busy":false,"attention":false,"preview":[]}]}}
 → {"jsonrpc":"2.0","id":3,"method":"noa.subscribe","params":{"events":["output"],"paneIds":["1"]}}

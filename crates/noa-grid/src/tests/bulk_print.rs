@@ -252,3 +252,69 @@ fn bulk_wide_run_matches_per_scalar_extending_a_cluster_under_mode_2027() {
     // per-scalar and attach, not print into fresh cells.
     assert_bulk_print_matches_per_scalar(80, 24, "\x1b[?2027h👍".as_bytes(), "\u{1F3FD}日本");
 }
+
+#[test]
+fn wide_graphemes_match_across_stream_feed_partitions() {
+    for setup in ["", "\x1b[?2027l", "\x1b[?7l", "\x1b[?69h\x1b[2;5s\x1b[1;2H"] {
+        for text in [
+            "ᄀᄀX",
+            "ᄀᄀᄀᄀX",
+            "ᄀ가X",
+            "\u{a960}\u{a960}X",
+            "日本ᄀᄀX",
+            "日本ᄀᄀᄀ日本X",
+        ] {
+            let mut expected = Terminal::new(GridSize::new(6, 3));
+            let mut stream = Stream::new();
+            stream.feed(setup.as_bytes(), &mut expected);
+            for byte in text.bytes() {
+                stream.feed(&[byte], &mut expected);
+            }
+            for split in 0..=text.len() {
+                let mut actual = Terminal::new(GridSize::new(6, 3));
+                let mut stream = Stream::new();
+                stream.feed(setup.as_bytes(), &mut actual);
+                stream.feed(&text.as_bytes()[..split], &mut actual);
+                stream.feed(&text.as_bytes()[split..], &mut actual);
+                let (a, e) = (actual.active(), expected.active());
+                assert_eq!(
+                    (a.cursor.x, a.cursor.y, a.cursor.pending_wrap),
+                    (e.cursor.x, e.cursor.y, e.cursor.pending_wrap),
+                    "{text:?}, split {split}, setup {setup:?}"
+                );
+                for (ar, er) in a.grid.iter().zip(e.grid.iter()) {
+                    assert_eq!(
+                        ar.cells, er.cells,
+                        "{text:?}, split {split}, setup {setup:?}"
+                    );
+                    assert_eq!(ar.wrapped, er.wrapped);
+                }
+            }
+        }
+    }
+    let t = run_size(12, 1, "ᄀᄀX".as_bytes());
+    assert_eq!(cell(&t, 0, 0).text(), "ᄀᄀ");
+    assert_eq!(cell(&t, 2, 0).ch, 'X');
+    assert_eq!(t.primary.cursor.x, 3);
+    let mut direct = Terminal::new(GridSize::new(12, 1));
+    direct.primary.print_wide_run("ᄀᄀ", true, true);
+    direct.primary.print('X', true, true);
+    assert_eq!(direct.primary.cursor.x, 3);
+    assert_eq!(direct.primary.grid[0].cells, t.primary.grid[0].cells);
+}
+
+#[test]
+fn bulk_wide_candidates_have_boundaries_between_repeated_scalars() {
+    use unicode_segmentation::UnicodeSegmentation as _;
+    for ch in (0..=0x10ffff).filter_map(char::from_u32) {
+        if crate::screen::Screen::is_plain_wide(ch) {
+            let text = format!("{ch}{ch}");
+            assert_eq!(
+                text.graphemes(true).count(),
+                2,
+                "U+{:04X} must take the cluster path",
+                ch as u32
+            );
+        }
+    }
+}

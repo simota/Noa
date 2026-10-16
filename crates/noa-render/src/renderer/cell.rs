@@ -359,6 +359,11 @@ pub(super) fn rebuild_row_instances(
         segment_cells.push(SegmentCell {
             ch: shape_ch,
             combining: shape_combining,
+            span: if cell.attrs.contains(CellAttrs::WIDE) {
+                2
+            } else {
+                1
+            },
             bold: cell.attrs.contains(CellAttrs::BOLD),
             italic: cell.attrs.contains(CellAttrs::ITALIC),
             selected,
@@ -832,8 +837,8 @@ pub(super) fn update_pane_cache(
 /// a ligature that is the cluster-start cell (the cells it covers get no
 /// instance at all, since no `ShapedGlyph` in `shaped` carries their
 /// cluster index — no double-draw); for a combining mark it is the mark's
-/// base cell, positioned by the shaped `x_offset`/`y_offset` rather than an
-/// independent per-char pen bearing.
+/// base cell. Shaped offsets are relative to the advancing pen within that
+/// cluster; a cluster with several advancing glyphs shares one fit scale.
 pub(super) fn emit_run_glyph_instances(
     glyph_instances: &mut Vec<CellInstance>,
     font: &mut FontGrid,
@@ -842,8 +847,15 @@ pub(super) fn emit_run_glyph_instances(
     row: u16,
     metrics: Metrics,
 ) {
-    for (i, glyph) in shaped.iter().enumerate() {
-        let cluster = glyph.cluster as usize;
+    let mut remaining = shaped;
+    while let Some(first) = remaining.first() {
+        let cluster = first.cluster as usize;
+        let end = remaining
+            .iter()
+            .position(|g| g.cluster != first.cluster)
+            .unwrap_or(remaining.len());
+        let (glyphs, rest) = remaining.split_at(end);
+        remaining = rest;
         let (Some(cell), Some(render_info)) =
             (run.cells.get(cluster), run.cell_render.get(cluster))
         else {
@@ -854,14 +866,13 @@ pub(super) fn emit_run_glyph_instances(
         // whose native advance overshoots it gets fit to the span instead
         // of bleeding into the neighbor cell (see
         // `noa_font::raster::rasterize_with_variations`'s doc comment).
-        // Two sources, take the max: the anchor cell's `unicode-width`
-        // (matches `noa-grid::Screen::print_width`; covers wide chars,
-        // whose spacer cell shapes as `' '` and thus yields a next-cluster
-        // distance of only 1) and the distance to the next distinct cluster
+        // Take the max of the actual cell footprint (including a wide
+        // spacer, even when it belongs to a different run) and the distance
+        // to the next distinct cluster
         // (covers multi-cell ligature glyphs when `liga`/`calt` are
         // re-enabled via config — their cluster-start cell is width 1).
-        let char_span = cell.ch.width().unwrap_or(1).min(2);
-        let cluster_span = shaped[i + 1..]
+        let char_span = usize::from(render_info.span);
+        let cluster_span = rest
             .iter()
             .map(|g| g.cluster as usize)
             .find(|&c| c > cluster)
@@ -869,34 +880,47 @@ pub(super) fn emit_run_glyph_instances(
             .saturating_sub(cluster)
             .max(1);
         let span = char_span.max(cluster_span).min(u8::MAX as usize) as u8;
-        let raster = font.raster_shaped(glyph.face_id, glyph.glyph_id, cell.style, span);
-        if raster.atlas_size[0] == 0 || raster.atlas_size[1] == 0 {
-            continue;
-        }
+        let advance: i64 = glyphs.iter().map(|g| i64::from(g.x_advance)).sum();
+        let scale = if glyphs.iter().filter(|g| g.x_advance > 0).count() > 1 {
+            (f32::from(span) * metrics.cell_w / (advance.max(1) as f32)).clamp(0.01, 1.0)
+        } else {
+            1.0
+        };
+        let mut pen = 0i64;
+        for glyph in glyphs {
+            let x = ((pen + i64::from(glyph.x_offset)) as f32 * scale).round() as i32;
+            pen += i64::from(glyph.x_advance);
+            let raster =
+                font.raster_shaped_scaled(glyph.face_id, glyph.glyph_id, cell.style, span, scale);
+            if raster.atlas_size[0] == 0 || raster.atlas_size[1] == 0 {
+                continue;
+            }
 
-        let mut flags = CellInstance::FLAG_GLYPH;
-        if render_info.cursor {
-            flags |= CellInstance::FLAG_CURSOR;
-        }
-        if raster.color {
-            flags |= CellInstance::FLAG_COLOR_GLYPH;
-        }
+            let mut flags = CellInstance::FLAG_GLYPH;
+            if render_info.cursor {
+                flags |= CellInstance::FLAG_CURSOR;
+            }
+            if raster.color {
+                flags |= CellInstance::FLAG_COLOR_GLYPH;
+            }
 
-        let base_bearing = glyph_cell_bearing(metrics, raster.bearing);
-        let bearing = [
-            base_bearing[0].saturating_add(clamp_to_i16(glyph.x_offset)),
-            base_bearing[1].saturating_sub(clamp_to_i16(glyph.y_offset)),
-        ];
-        let anchor_col = run.start_col.saturating_add(glyph.cluster as u16);
+            let base_bearing = glyph_cell_bearing(metrics, raster.bearing);
+            let bearing = [
+                base_bearing[0].saturating_add(clamp_to_i16(x)),
+                base_bearing[1]
+                    .saturating_sub(clamp_to_i16((glyph.y_offset as f32 * scale).round() as i32)),
+            ];
+            let anchor_col = run.start_col.saturating_add(glyph.cluster as u16);
 
-        glyph_instances.push(CellInstance {
-            glyph_pos: raster.atlas_pos,
-            glyph_size: raster.atlas_size,
-            bearing,
-            grid_pos: [anchor_col, row],
-            color: render_info.color,
-            flags,
-        });
+            glyph_instances.push(CellInstance {
+                glyph_pos: raster.atlas_pos,
+                glyph_size: raster.atlas_size,
+                bearing,
+                grid_pos: [anchor_col, row],
+                color: render_info.color,
+                flags,
+            });
+        }
     }
 }
 

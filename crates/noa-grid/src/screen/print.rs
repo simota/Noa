@@ -1,6 +1,7 @@
 //! `Screen` character printing and grapheme-cluster / combining-mark handling.
 
 use super::*;
+use unicode_segmentation::UnicodeSegmentation;
 
 impl Screen {
     // ── printing ───────────────────────────────────────────────────
@@ -46,9 +47,8 @@ impl Screen {
     ///
     /// `grapheme_clustering` gates mode 2027 (DECSET `?2027`): when on, a
     /// scalar that [`Self::extends_cluster`] judges to continue the previous
-    /// cluster (ZWJ / Fitzpatrick modifier / regional-indicator pairing —
-    /// candidate-1 scope, not full UAX#29) attaches to that cluster's cell
-    /// instead of printing into a new one, and the cursor does not move.
+    /// cluster attaches to that cluster's cell instead of printing into a new
+    /// one. A narrow cluster that becomes an emoji may gain a spacer cell.
     pub fn print(&mut self, c: char, autowrap: bool, grapheme_clustering: bool) {
         self.print_inner(c, autowrap, grapheme_clustering, false, None);
     }
@@ -231,10 +231,8 @@ impl Screen {
         }
         let mut bytes = bytes;
         if grapheme_clustering {
-            // Only a run prefix can extend a pre-existing cluster (an ASCII
-            // scalar extends only across a trailing ZWJ, and once one
-            // attaches, the cluster's last scalar is ASCII — so this loop
-            // exits after at most one iteration in practice).
+            // Only a run prefix can extend a pre-existing cluster; later
+            // printable ASCII scalars always begin their own cluster.
             while let Some((&first, rest)) = bytes.split_first() {
                 if !self.extend_cluster_at_cursor(first as char) {
                     break;
@@ -321,12 +319,13 @@ impl Screen {
         }
     }
 
-    /// Whether `c` qualifies for [`Self::print_wide_run`]: rendered two cells
-    /// wide with no cluster side channel. Fitzpatrick modifiers are wide but
-    /// may *extend* the preceding cluster under mode 2027, so they stay on
-    /// the per-scalar path.
+    /// Whether `c` qualifies for [`Self::print_wide_run`]: a width-2 scalar
+    /// that cannot extend another scalar inside the run. Hangul L (GB6) and
+    /// skin-tone modifiers can join their predecessors, so both must take
+    /// the per-scalar cluster path, including in the middle of a text run.
     pub(crate) fn is_plain_wide(c: char) -> bool {
-        Self::print_width_fast(c) == 2 && !matches!(c, '\u{1F3FB}'..='\u{1F3FF}')
+        Self::print_width_fast(c) == 2
+            && !matches!(c, '\u{1100}'..='\u{115f}' | '\u{a960}'..='\u{a97c}' | '\u{1F3FB}'..='\u{1F3FF}')
     }
 
     /// Bulk print a run of plain width-2 scalars (see [`Self::is_plain_wide`]),
@@ -335,7 +334,13 @@ impl Screen {
     /// template and per-iteration wrap/latch handling as the per-scalar
     /// width-2 path.
     pub fn print_wide_run(&mut self, text: &str, autowrap: bool, grapheme_clustering: bool) {
-        debug_assert!(text.chars().all(Self::is_plain_wide));
+        debug_assert!(text.chars().all(|c| Self::print_width_fast(c) == 2));
+        if !text.chars().all(Self::is_plain_wide) {
+            for c in text.chars() {
+                self.print(c, autowrap, grapheme_clustering);
+            }
+            return;
+        }
         self.print_wide_scalars(text.chars(), autowrap, grapheme_clustering);
     }
 
@@ -360,9 +365,9 @@ impl Screen {
         }
         let mut chars = chars.peekable();
         if grapheme_clustering {
-            // As in `print_ascii_run`: only a run prefix can extend a
-            // pre-existing cluster (a plain wide scalar extends only across
-            // a trailing ZWJ, which the run itself never contains).
+            // Only a prefix can extend a pre-existing cluster (for example
+            // Hangul LV after L, or an emoji after ZWJ). `is_plain_wide`
+            // excludes scalars that could extend within the run itself.
             while let Some(&c) = chars.peek() {
                 if !self.extend_cluster_at_cursor(c) {
                     break;
@@ -559,30 +564,30 @@ impl Screen {
         }
         row.cells[x].push_combining(c);
         row.dirty = true;
-        if !row.cells[x].attrs.contains(CellAttrs::WIDE) && Self::cluster_wants_wide(&row.cells[x])
-        {
+        let was_wide = row.cells[x].attrs.contains(CellAttrs::WIDE);
+        let wants_wide = Self::cluster_wants_wide(&row.cells[x]);
+        if !was_wide && wants_wide {
             self.promote_cluster_to_wide(x);
+        } else if was_wide && !wants_wide && c == '\u{fe0e}' {
+            let blank = self.blank();
+            let row = &mut self.grid[y];
+            row.cells[x].attrs.remove(CellAttrs::WIDE);
+            row.cells[x + 1] = blank;
+            if self.cursor.pending_wrap {
+                self.cursor.pending_wrap = false;
+            } else if self.cursor.x as usize == x + 2 {
+                self.cursor.x -= 1;
+            }
         }
         true
     }
 
     /// Whether an attached scalar changed a narrow cluster's rendered width
-    /// to two cells: an emoji-presentation selector (VS16) on the cluster, or
-    /// a completed regional-indicator pair (a flag). A text-presentation
-    /// selector (VS15) pins the cluster narrow; the *last* selector wins.
+    /// to two cells. Use sequence width so an invalid VS16 after plain text
+    /// cannot widen it. Keycaps without VS16 also have an emoji footprint.
     pub(super) fn cluster_wants_wide(cell: &Cell) -> bool {
-        for scalar in cell.combining().chars().rev() {
-            match scalar {
-                '\u{FE0F}' => return true,
-                '\u{FE0E}' => return false,
-                _ => {}
-            }
-        }
-        let regional_indicators = cell
-            .text_chars()
-            .filter(|scalar| matches!(scalar, '\u{1F1E6}'..='\u{1F1FF}'))
-            .count();
-        regional_indicators == 2
+        (matches!(cell.ch, '#' | '*' | '0'..='9') && cell.combining().ends_with('\u{20e3}'))
+            || unicode_width::UnicodeWidthStr::width(cell.text().as_str()) >= 2
     }
 
     /// A cluster at `x` on the cursor row grew from one rendered cell to two
@@ -632,33 +637,14 @@ impl Screen {
         }
     }
 
-    /// The mode 2027 cluster-extension judgment (candidate-1 scope: ZWJ,
-    /// Fitzpatrick skin-tone modifiers, and regional-indicator pairing —
-    /// complex-script clustering per full UAX#29 is out of scope, see
-    /// phase4-spec.md REQ-2027). A future upgrade to full UAX#29 replaces
-    /// only this function.
+    /// UAX #29 boundaries prevent a trailing ZWJ from swallowing unrelated
+    /// text and keep regional-indicator pairs separate from the next flag.
     pub(super) fn extends_cluster(target: &Cell, next: char) -> bool {
-        const ZWJ: char = '\u{200D}';
-        let last_scalar = target.combining().chars().next_back().unwrap_or(target.ch);
-        if next == ZWJ || last_scalar == ZWJ {
-            return true;
+        if target.ch.is_ascii() && next.is_ascii() {
+            return false;
         }
-        if matches!(next, '\u{1F3FB}'..='\u{1F3FF}') {
-            return true;
-        }
-        // Variation selectors bind to the preceding scalar; VS16 may widen
-        // the cluster (see `cluster_wants_wide`), so under mode 2027 it must
-        // route through the cluster path rather than plain combining attach.
-        if matches!(next, '\u{FE0E}' | '\u{FE0F}') {
-            return true;
-        }
-        if matches!(next, '\u{1F1E6}'..='\u{1F1FF}') {
-            let regional_indicator_count = target
-                .text_chars()
-                .filter(|scalar| matches!(scalar, '\u{1F1E6}'..='\u{1F1FF}'))
-                .count();
-            return regional_indicator_count % 2 == 1;
-        }
-        false
+        let mut text = target.text();
+        text.push(next);
+        text.graphemes(true).nth(1).is_none()
     }
 }

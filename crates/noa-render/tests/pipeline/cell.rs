@@ -8,6 +8,123 @@ use noa_render::{
 };
 
 #[test]
+#[cfg(target_os = "macos")]
+fn agent_emoji_output_renders_color_with_correct_cell_footprints() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping agent emoji draw test");
+        return;
+    };
+    let examples = [
+        ("✅", "Checks passed"),
+        ("⚠️", "Review this change"),
+        ("❤️", "Thanks for the help"),
+        ("🛠️", "Working on the fix"),
+        ("🚀", "Ready to launch"),
+        ("👍🏽", "Looks good"),
+        ("👩‍💻", "Agent is coding"),
+        ("👨‍👩‍👧‍👦", "Team workspace"),
+        ("🇯🇵", "Japanese support"),
+        ("1️⃣", "First step"),
+        ("🏳️‍🌈", "Everyone is welcome"),
+    ];
+    for px in [16.0, 28.0] {
+        let mut terminal = noa_grid::Terminal::new(noa_core::GridSize::new(42, 14));
+        let mut stream = noa_vt::Stream::new();
+        stream.feed(b"\x1b[?25l\x1b[37;40m", &mut terminal);
+        for (emoji, label) in examples {
+            // Byte-at-a-time feed exercises selectors and ZWJ sequences that
+            // arrive in separate PTY reads, followed immediately by text.
+            for byte in format!("{emoji}X  {label}\r\n").bytes() {
+                stream.feed(&[byte], &mut terminal);
+            }
+        }
+        stream.feed(
+            "\x1b[?2027l⚠️X  Scalar width compatibility\r\n".as_bytes(),
+            &mut terminal,
+        );
+        stream.feed(
+            "\x1b[?2027h☀︎X  Text presentation\r\nกำX  Thai cluster".as_bytes(),
+            &mut terminal,
+        );
+        let snap = FrameSnapshot::from_terminal(&mut terminal);
+        let mut font = FontGrid::new(px, noa_font::FontConfig::default()).unwrap();
+        let metrics = font.metrics();
+        let width = (42.0 * metrics.cell_w) as u32;
+        let height = (14.0 * metrics.cell_h) as u32;
+        let mut renderer = Renderer::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+            &mut font,
+            GridPadding::ZERO,
+        )
+        .unwrap();
+        renderer.resize(PixelSize {
+            w: width,
+            h: height,
+        });
+        renderer.rebuild_cells(&snap, &mut font, &Theme::new());
+        renderer.sync_atlas(&device, &queue, &mut font);
+        let (target, view) = render_target(&device, width, height);
+        renderer.draw(&device, &queue, &view);
+        let pixels = read_rgba_pixels(&device, &queue, &target, width, height);
+        if let Ok(path) = std::env::var("NOA_EMOJI_PREVIEW") {
+            let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
+            for p in pixels.chunks_exact(4) {
+                ppm.extend_from_slice(&p[..3]);
+            }
+            std::fs::write(format!("{path}-{px}.ppm"), ppm).unwrap();
+        }
+        for (row, (emoji, _)) in examples.iter().enumerate() {
+            assert_eq!(snap.rows[row].cells[0].text(), *emoji);
+            assert_eq!(snap.rows[row].cells[2].ch, 'X');
+            let chromatic_pixels = |start: u32, end: u32| {
+                let mut count = 0;
+                for y in
+                    (row as f32 * metrics.cell_h) as u32..((row + 1) as f32 * metrics.cell_h) as u32
+                {
+                    for x in start..end {
+                        let p = &pixels[((y * width + x) * 4) as usize..][..3];
+                        if p.iter().max().unwrap() - p.iter().min().unwrap() > 60 {
+                            count += 1;
+                        }
+                    }
+                }
+                count
+            };
+            // Apple's crossed-tools artwork is silver; color-face selection
+            // for it is checked by the font regression, not saturation.
+            if *emoji != "🛠️" {
+                let ink = chromatic_pixels(0, (2.0 * metrics.cell_w) as u32);
+                assert!(
+                    ink > 4,
+                    "{emoji} at {px}px must have visible color ink: {ink}"
+                );
+            }
+            let has_ink = ((row as f32 * metrics.cell_h) as u32
+                ..((row + 1) as f32 * metrics.cell_h) as u32)
+                .any(|y| {
+                    (0..(2.0 * metrics.cell_w) as u32).any(|x| {
+                        pixels[((y * width + x) * 4) as usize..][..3]
+                            .iter()
+                            .any(|&v| v > 100)
+                    })
+                });
+            assert!(has_ink, "{emoji} must not disappear");
+            assert_eq!(
+                chromatic_pixels((2.0 * metrics.cell_w) as u32, (4.0 * metrics.cell_w) as u32),
+                0,
+                "{emoji} must not overlap following text"
+            );
+        }
+        assert_eq!(snap.rows[11].cells[1].ch, 'X');
+        assert_eq!(snap.rows[12].cells[1].ch, 'X');
+        assert_eq!(snap.rows[13].cells[0].text(), "กำ");
+        assert_eq!(snap.rows[13].cells[2].ch, 'X');
+    }
+}
+
+#[test]
 fn cell_pipeline_builds_without_validation_error() {
     let Some((device, queue)) = device_queue() else {
         eprintln!("no wgpu adapter available — skipping GPU pipeline-build test");

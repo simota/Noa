@@ -1,5 +1,137 @@
 use super::*;
 
+#[test]
+fn advancing_cluster_shares_one_scale_and_keeps_the_raster_cache_separate() {
+    let Some(mut font) = skip_font() else { return };
+    let style = StyleKey::default();
+    let cell = ShapeCell {
+        ch: 'M',
+        combining: vec![],
+        style,
+    };
+    let real = font.shape_run(std::slice::from_ref(&cell))[0];
+    let width = font.metrics().cell_w;
+    let natural = font.raster_shaped(real.face_id, real.glyph_id, style, 1);
+    let run = ShapeRun {
+        start_col: 0,
+        cells: vec![cell],
+        cell_render: vec![CellRenderInfo {
+            color: [255; 4],
+            cursor: false,
+            span: 1,
+        }],
+    };
+    let glyph = ShapedGlyph {
+        x_advance: width.ceil() as i32,
+        x_offset: 0,
+        y_offset: 0,
+        cluster: 0,
+        ..real
+    };
+    let mut instances = Vec::new();
+    let metrics = font.metrics();
+    emit_run_glyph_instances(&mut instances, &mut font, &run, &[glyph, glyph], 0, metrics);
+    assert_eq!(instances.len(), 2);
+    assert_eq!(
+        instances[1].bearing[0] - instances[0].bearing[0],
+        (width / 2.0).round() as i16
+    );
+    for instance in &instances {
+        assert!(instance.glyph_size[0] < natural.atlas_size[0]);
+        assert!(f32::from(instance.bearing[0]) + f32::from(instance.glyph_size[0]) <= width.ceil());
+    }
+    assert_eq!(
+        font.raster_shaped(real.face_id, real.glyph_id, style, 1),
+        natural
+    );
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn thai_cluster_uses_the_advancing_pen_and_fits_its_cell() {
+    let mut font = FontGrid::new(28.0, FontConfig::default()).unwrap();
+    let mut terminal = Terminal::new(GridSize::new(12, 1));
+    Stream::new().feed("กำX\x1b[?25l".as_bytes(), &mut terminal);
+    let snap = FrameSnapshot::from_terminal(&mut terminal);
+    let mut instances = Vec::new();
+    rebuild_cell_instances(&mut instances, &snap, &mut font, &Theme::new(), false);
+    let glyphs: Vec<_> = instances
+        .iter()
+        .filter(|i| i.flags & CellInstance::FLAG_GLYPH != 0)
+        .collect();
+    let at_start: Vec<_> = glyphs.iter().filter(|i| i.grid_pos == [0, 0]).collect();
+    let style = StyleKey::default();
+    let shaped = font.shape_run(&[ShapeCell {
+        ch: 'ก',
+        combining: vec!['ำ'],
+        style,
+    }]);
+    assert!(shaped.iter().filter(|g| g.x_advance > 0).count() >= 2);
+    let span = if snap.rows[0].cells[0].attrs.contains(CellAttrs::WIDE) {
+        2
+    } else {
+        1
+    };
+    let width = font.metrics().cell_w * f32::from(span);
+    let total: i32 = shaped.iter().map(|g| g.x_advance).sum();
+    let scale = (width / total as f32).min(1.0);
+    let mut pen = 0;
+    let mut visible = 0;
+    for glyph in shaped.iter() {
+        let origin = ((pen + glyph.x_offset) as f32 * scale).round() as i16;
+        pen += glyph.x_advance;
+        let raster = font.raster_shaped_scaled(glyph.face_id, glyph.glyph_id, style, span, scale);
+        if raster.atlas_size.contains(&0) {
+            continue;
+        }
+        let instance = at_start[visible];
+        assert_eq!(instance.bearing[0], raster.bearing[0] + origin);
+        assert_eq!(instance.glyph_size, raster.atlas_size);
+        assert!(f32::from(instance.bearing[0]) + f32::from(instance.glyph_size[0]) <= width.ceil());
+        visible += 1;
+    }
+    assert_eq!(at_start.len(), visible);
+    assert!(
+        glyphs.iter().any(|g| g.grid_pos == [u16::from(span), 0]),
+        "X keeps the next cell"
+    );
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn emoji_presentation_uses_grid_span_even_across_cursor_run_boundaries() {
+    let mut font = FontGrid::new(28.0, FontConfig::default()).unwrap();
+    for (mode, next_col) in [("\x1b[?2027h", 2), ("\x1b[?2027l", 1)] {
+        let mut terminal = Terminal::new(GridSize::new(8, 1));
+        Stream::new().feed(format!("{mode}❤️X\x1b[1;2H").as_bytes(), &mut terminal);
+        let snap = FrameSnapshot::from_terminal(&mut terminal);
+        let mut instances = Vec::new();
+        rebuild_cell_instances(&mut instances, &snap, &mut font, &Theme::new(), false);
+        let emoji: Vec<_> = instances
+            .iter()
+            .filter(|i| i.flags & CellInstance::FLAG_COLOR_GLYPH != 0)
+            .collect();
+        assert_eq!(emoji.len(), 1);
+        let glyph = emoji[0];
+        assert_eq!(glyph.grid_pos, [0, 0]);
+        assert!(
+            f32::from(glyph.bearing[0]) + f32::from(glyph.glyph_size[0])
+                <= f32::from(next_col) * font.metrics().cell_w
+        );
+        if next_col == 2 {
+            assert!(
+                f32::from(glyph.glyph_size[0]) > font.metrics().cell_w,
+                "a two-cell heart must not be shrunk to one cell"
+            );
+        }
+        assert!(
+            instances
+                .iter()
+                .any(|i| i.flags & CellInstance::FLAG_GLYPH != 0 && i.grid_pos == [next_col, 0])
+        );
+    }
+}
+
 /// AC-WP2-01 [noa-render half of the FM-04 mitigation]: a single
 /// shaped glyph covering 2 source cells (simulating a ligature — real
 /// ligature-font availability isn't guaranteed in every environment, so
@@ -42,10 +174,12 @@ fn ligature_shaped_glyph_emits_one_instance_and_covered_cell_emits_none() {
             CellRenderInfo {
                 color: [10, 20, 30, 255],
                 cursor: false,
+                span: 1,
             },
             CellRenderInfo {
                 color: [40, 50, 60, 255],
                 cursor: false,
+                span: 1,
             },
         ],
     };
@@ -110,6 +244,7 @@ fn combining_mark_glyph_is_positioned_by_shaped_offset_not_pen_bearing() {
         cell_render: vec![CellRenderInfo {
             color: [1, 2, 3, 255],
             cursor: false,
+            span: 1,
         }],
     };
     // Two glyphs sharing cluster 0: the base, and a stand-in "mark"
@@ -151,8 +286,8 @@ fn combining_mark_glyph_is_positioned_by_shaped_offset_not_pen_bearing() {
     let mark_bearing = glyph_instances[1].bearing;
     assert_eq!(
         mark_bearing[0],
-        base_bearing[0] + 3,
-        "the mark's x position must come from its own shaped x_offset"
+        base_bearing[0] + base.x_advance as i16 + 3,
+        "shaped offsets are relative to the pen after the preceding glyph's advance"
     );
     assert_eq!(
         mark_bearing[1],

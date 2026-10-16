@@ -51,12 +51,14 @@ pub struct ModeState {
 
 impl ModeState {
     /// The power-on defaults: autowrap (DECAWM 7), cursor-visible (DECTCEM 25)
-    /// and alternate scroll (1007) on — 1007 defaults on to match Ghostty.
+    /// alternate scroll (1007), and grapheme clustering (2027) on. Applications
+    /// can query/reset 2027 when they require scalar-based cursor accounting.
     pub fn defaults() -> Self {
         let mut m = ModeState::default();
         m.set(7, false, true); // DECAWM
         m.set(25, false, true); // DECTCEM
         m.set(1007, false, true); // alternate scroll
+        m.set(2027, false, true); // compose emoji in ordinary shell/agent output
         m
     }
 
@@ -185,8 +187,7 @@ impl ModeState {
     pub fn synchronized_output(&self) -> bool {
         self.get(2026, false)
     }
-    /// DECSET 2027 — grapheme clustering (candidate-1 scope: ZWJ / Fitzpatrick
-    /// modifier / regional-indicator pairing; full UAX#29 is out of scope).
+    /// DECSET 2027 — compose grapheme clusters, including emoji sequences.
     pub fn grapheme_clustering(&self) -> bool {
         self.get(2027, false)
     }

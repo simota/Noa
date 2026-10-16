@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-16
+
+### Changed
+
+- **Breaking:** raw attach seeds require protocol version 3, which carries
+  stored cell boundaries and widths. Update Noa clients and servers together;
+  older peers are rejected during hello (#101).
+- Grapheme clustering (mode 2027) is enabled by default; applications can
+  still query and reset it for scalar-width behavior (#101).
+
+### Fixed
+
+- Emoji sequences split across output chunks stay composed, colour emoji no
+  longer fall back to monochrome glyphs, and wide glyphs no longer overlap the
+  characters that follow them (#101).
+- Auto-approve leaves Codex and agy dialogs that would run a destructive
+  command for the user, and resumes when re-enabled right after the runaway
+  breaker trips (#94).
+- Agents that exit without an end-of-session report no longer stay shown as
+  running or waiting in the sidebar and Overview (#94).
+- Invalid DECRQSS and XTGETTCAP requests are no longer echoed back into the
+  pty input, and window titles and OSC 8 URIs are size-capped (#100).
+- The server refuses non-loopback browser origins, closes the connection after
+  a wrong token, and releases attach leases when their control session ends
+  (#100).
+- OSC 52 clipboard-read confirmation ignores keys for 600 ms; Cmd+click refuses
+  executable targets; unbracketed pastes with control characters ask first;
+  remote panes no longer lend their cwd or accept kitty file/shared-memory
+  media (#100).
+- Config writes reject control characters, imported and seeded configs are
+  created 0600, an unreadable keychain no longer overwrites the scrollback
+  key, and shell integration strips control characters from the OSC 7 path
+  (#100).
+
 ## [0.2.22] - 2026-10-14
 
 ### Fixed

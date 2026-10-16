@@ -20,6 +20,10 @@ use crate::raster::{GlyphSynthesis, RasterizedGlyph, rasterize_with_variations};
 use crate::shape::{self, FaceId, ShapeCell, ShapeRunEntry, ShapedGlyph, StyleKey};
 use crate::{FontConfig, FontError, GlyphInfo, GlyphKey};
 
+#[cfg(test)]
+#[path = "test_font.rs"]
+mod test_font;
+
 /// Initial atlas dimensions. These are floors, not caps: the atlas grows on
 /// demand (doubling — see `atlas.rs`) when glyph pressure exceeds them, up to
 /// `MAX_ATLAS_DIM`. They start below a fixed 1024² because the GPU-side atlas
@@ -179,7 +183,7 @@ pub struct FontGrid {
     /// `cascade_misses`'s reciprocal permanent cache for failures.
     resolved_glyph_cache: HashMap<(char, StyleKey), (usize, u16)>,
     /// Presentation resolution is also on the per-cell segmentation path.
-    resolved_presentation_cache: HashMap<(char, StyleKey, bool), FaceId>,
+    resolved_presentation_cache: HashMap<(ShapeCell, bool), FaceId>,
 }
 
 impl FontGrid {
@@ -389,32 +393,98 @@ impl FontGrid {
                 ) || (matches!(ch, '#' | '*' | '0'..='9') && combining.contains(&'\u{20e3}'))
             }
         };
-        if wants_color || selector == Some(&'\u{fe0e}') {
-            let key = (ch, style, wants_color);
-            if let Some(&face) = self.resolved_presentation_cache.get(&key) {
+        let presentation = (wants_color || selector == Some(&'\u{fe0e}')).then(|| {
+            (
+                ShapeCell {
+                    ch,
+                    combining: combining.to_vec(),
+                    style,
+                },
+                wants_color,
+            )
+        });
+        if let Some(key) = presentation.as_ref() {
+            if let Some(&face) = self.resolved_presentation_cache.get(key) {
                 return face;
             }
             let font_style = FontStyle::from_bold_italic(style.bold, style.italic);
-            for &index in self.font_stack.face_indices_for_style(font_style) {
-                let font = self.font_stack.faces()[index]
-                    .font_ref()
-                    .expect("validated font");
-                let has_color =
-                    font.color_strikes().next().is_some() || font.color_palettes().next().is_some();
-                if has_color == wants_color && font.charmap().map(ch) != 0 {
+            let candidates = self.font_stack.face_indices_for_style(font_style).to_vec();
+            for index in candidates {
+                if self.face_matches_presentation(index, &key.0, wants_color) {
                     let face = FaceId(index as u16);
-                    self.resolved_presentation_cache.insert(key, face);
+                    self.cache_presentation(key.clone(), face);
                     return face;
                 }
             }
         }
         let (index, glyph) = self.resolve_glyph_for_style(ch, style);
         let face = FaceId(index as u16);
-        if glyph != 0 && (wants_color || selector == Some(&'\u{fe0e}')) {
-            self.resolved_presentation_cache
-                .insert((ch, style, wants_color), face);
+        if glyph != 0
+            && let Some(key) = presentation
+        {
+            self.cache_presentation(key, face);
         }
         face
+    }
+
+    fn cache_presentation(&mut self, key: (ShapeCell, bool), face: FaceId) {
+        // Cluster text has more combinations than base codepoints; keep the
+        // memoized presentation choices within the same budget as shape runs.
+        if self.resolved_presentation_cache.len() >= SHAPE_CACHE_CAP {
+            self.resolved_presentation_cache.clear();
+        }
+        self.resolved_presentation_cache.insert(key, face);
+    }
+
+    fn face_matches_presentation(&mut self, index: usize, cell: &ShapeCell, color: bool) -> bool {
+        let data = &self.font_stack.faces()[index];
+        let font = data.font_ref().expect("validated font");
+        if font.charmap().map(cell.ch) == 0 {
+            return false;
+        }
+        // Missing color tables can rule color out, but their presence says
+        // nothing about this glyph. Mixed faces need the actual shaped output.
+        if font.color_strikes().next().is_none() && font.color_palettes().next().is_none() {
+            return !color;
+        }
+        let coords = shape::variation_coords_for(&self.font_cfg, cell.style);
+        let glyphs = shape::shape_with_rustybuzz(
+            data,
+            FaceId(index as u16),
+            self.px_size,
+            std::slice::from_ref(cell),
+            &coords,
+            &self.font_cfg,
+        );
+        let style = FontStyle::from_bold_italic(cell.style.bold, cell.style.italic);
+        let synthesis = synthesis_for(
+            &self.font_cfg,
+            cell.style,
+            self.font_stack.is_native_style_face(index, style),
+        );
+        let mut visible = false;
+        for glyph in glyphs {
+            if glyph.glyph_id == 0 {
+                return false;
+            }
+            let raster = rasterize_with_variations(
+                &mut self.ctx,
+                font,
+                glyph.glyph_id,
+                self.px_size,
+                &coords,
+                synthesis,
+                None,
+            );
+            if raster.width == 0 || raster.height == 0 {
+                continue;
+            }
+            if raster.color != color {
+                return false;
+            }
+            visible = true;
+        }
+        visible
     }
 
     fn resolve_glyph(&mut self, ch: char) -> (usize, u16) {
@@ -1105,6 +1175,63 @@ mod tests {
     use super::*;
     use crate::face::nerd_font_fallback_candidate_has_glyph;
     use crate::{FontFeature, FontVariation, SyntheticStyle};
+
+    #[test]
+    fn mixed_color_faces_resolve_the_requested_glyph_presentation() {
+        let stack = crate::face::FontStack::new(
+            test_font::mixed_color_face(&['☀']),
+            None,
+            None,
+            None,
+            vec![
+                test_font::mixed_color_face(&['❤', '☀']),
+                test_font::mixed_color_face(&[]),
+            ],
+        );
+        let mut grid = FontGrid::with_stack(stack, 28.0, FontConfig::default()).unwrap();
+        let style = StyleKey::default();
+        // Both first faces have color strikes, but the primary heart is an outline.
+        for (ch, selector, expected, color) in [
+            ('❤', '\u{fe0f}', 1, true),
+            ('❤', '\u{fe0e}', 0, false),
+            ('☀', '\u{fe0f}', 0, true),
+            ('☀', '\u{fe0e}', 2, false),
+            ('❤', '\u{fe0f}', 1, true),
+        ] {
+            let face = grid.resolve_face_for_cluster(ch, &[selector], style);
+            assert_eq!(face, FaceId(expected), "{ch}{selector}");
+            let glyphs = grid.shape_run(&[ShapeCell {
+                ch,
+                combining: vec![selector],
+                style,
+            }]);
+            let visible: Vec<_> = glyphs
+                .iter()
+                .map(|g| grid.raster_shaped(g.face_id, g.glyph_id, style, 2))
+                .filter(|g| g.atlas_size != [0, 0])
+                .collect();
+            assert!(!visible.is_empty());
+            assert!(visible.iter().all(|g| g.color == color), "{ch}{selector}");
+        }
+    }
+
+    #[test]
+    fn presentation_cache_distinguishes_clusters_with_the_same_base() {
+        let stack = crate::face::FontStack::new(
+            test_font::mixed_color_face(&['❤']),
+            None,
+            None,
+            None,
+            vec![test_font::mixed_color_face(&['❤', '☀'])],
+        );
+        let mut grid = FontGrid::with_stack(stack, 28.0, FontConfig::default()).unwrap();
+        for (marks, expected) in [(vec![], 0), (vec!['🏽'], 1), (vec![], 0), (vec!['🏽'], 1)] {
+            assert_eq!(
+                grid.resolve_face_for_cluster('👍', &marks, StyleKey::default()),
+                FaceId(expected)
+            );
+        }
+    }
 
     #[test]
     #[cfg(target_os = "macos")]

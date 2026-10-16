@@ -1,7 +1,7 @@
 //! Plain-text filesystem path detection within a single row, for the
 //! Cmd+hover auto-link feature (`noa-app` mouse hover path). Mirrors
-//! [`crate::url`]'s approach (same row-text + cell-x map, same run-boundary
-//! and trailing-punctuation trimming) but for `/abs/path`, `~/path`,
+//! [`crate::url`]'s row-text + cell-x mapping, with path-specific boundaries
+//! and trailing-punctuation trimming for `/abs/path`, `~/path`,
 //! `./rel/path`, `../rel/path`, and bare relative paths with an interior
 //! slash (`src/main.rs`), optionally suffixed with `:LINE` or `:LINE:COL`
 //! (rustc/grep style).
@@ -37,9 +37,9 @@ fn is_run_boundary(c: char) -> bool {
     c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>')
 }
 
-/// Trim `run`'s trailing punctuation, never shrinking to empty. Shares the
-/// balanced-paren rule with [`crate::url::trim_trailing_punctuation`] but
-/// path tokens have no scheme-length floor, so the minimum is 1.
+/// Trim `run`'s trailing punctuation, never shrinking to empty. Balanced
+/// trailing parentheses belong to the path; unmatched closing ones are
+/// decoration.
 fn trim_trailing_punctuation(run: &[char]) -> usize {
     let mut len = run.len();
     while len > 1 {

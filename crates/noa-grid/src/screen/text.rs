@@ -542,11 +542,11 @@ impl Screen {
     }
 
     /// Tail-bounded variant of [`Self::scrollback_text`] (noa-server spec
-    /// NFR-4 / FR-8): walks rows from the newest backward, accumulating only
-    /// an approximate byte length until roughly `max_bytes` (plus a small
-    /// margin for the trailing char-boundary trim below) are covered, then
-    /// builds the joined text forward from that point on — the full
-    /// scrollback is never materialized. Returns `(text, truncated)`.
+    /// NFR-4 / FR-8): walks rows from the newest backward, rendering each
+    /// row's text exactly once, until roughly `max_bytes` (plus a small margin
+    /// for the trailing char-boundary trim below) are covered, then joins
+    /// those rows forward — the full scrollback is never materialized.
+    /// Returns `(text, truncated)`.
     pub fn scrollback_text_tail(&mut self, max_bytes: usize) -> Option<(String, bool)> {
         if self.cols == 0 || !self.has_selectable_text() {
             return None;
@@ -561,30 +561,64 @@ impl Screen {
         const TRIM_MARGIN: usize = 4;
         let budget = max_bytes.saturating_add(TRIM_MARGIN);
 
+        // Every rendered row's text lives in one buffer (rendered newest
+        // chunk first, so not in display order); `tail` holds each kept row's
+        // span in it, newest first, with whether it soft-wraps into the next.
+        // Rows with no cells contribute nothing (as in `push_full_row_text`).
+        let mut buf = String::new();
+        let mut tail: Vec<(usize, usize, bool)> = Vec::new();
         let mut start = total;
         let mut acc = 0usize;
-        while start > 0 && acc < budget {
+        let render = |row: &Row, buf: &mut String| -> Option<(usize, usize, bool)> {
+            let row_end = row.cells.len().checked_sub(1)?;
+            let begin = buf.len();
+            Self::push_selected_row_text(row, 0, row_end, buf);
+            Some((begin, buf.len(), row.wrapped))
+        };
+        // The live grid first (borrowed rows) …
+        while start > scrollback_len && acc < budget {
             start -= 1;
             let Some(row) = self.storage_row(start) else {
                 break;
             };
-            acc += Self::approx_row_len(&row);
+            if let Some(span) = render(&row, &mut buf) {
+                acc += span.1 - span.0 + usize::from(!span.2);
+                tail.push(span);
+            }
+        }
+        // … then history in chunks through the paged-storage visitor, which
+        // decodes each page once instead of cloning row by row.
+        const SCAN_CHUNK: usize = 256;
+        let mut chunk: Vec<Option<(usize, usize, bool)>> = Vec::with_capacity(SCAN_CHUNK);
+        while start > 0 && start <= scrollback_len && acc < budget {
+            let chunk_start = start.saturating_sub(SCAN_CHUNK);
+            chunk.clear();
+            self.for_each_scrollback_row(chunk_start..start, |_, row| {
+                chunk.push(render(row, &mut buf));
+            });
+            if chunk.is_empty() {
+                break;
+            }
+            while let Some(span) = chunk.pop() {
+                if acc >= budget {
+                    break;
+                }
+                start -= 1;
+                if let Some(span) = span {
+                    acc += span.1 - span.0 + usize::from(!span.2);
+                    tail.push(span);
+                }
+            }
         }
 
-        let mut text = String::new();
+        let mut text = String::with_capacity(acc);
         let mut previous_wrapped = false;
-        let mut first_row = true;
-        if start < scrollback_len {
-            self.for_each_scrollback_row(start..scrollback_len, |_, row| {
-                Self::push_full_row_text(row, &mut text, &mut previous_wrapped, &mut first_row);
-            });
-            for row in &self.grid {
-                Self::push_full_row_text(row, &mut text, &mut previous_wrapped, &mut first_row);
+        for (index, &(begin, end, wrapped)) in tail.iter().rev().enumerate() {
+            if index > 0 && !previous_wrapped {
+                text.push('\n');
             }
-        } else {
-            for row in &self.grid.canonicalize()[start - scrollback_len..] {
-                Self::push_full_row_text(row, &mut text, &mut previous_wrapped, &mut first_row);
-            }
+            text.push_str(&buf[begin..end]);
+            previous_wrapped = wrapped;
         }
 
         if text.is_empty() {
@@ -599,17 +633,8 @@ impl Screen {
         while idx < text.len() && !text.is_char_boundary(idx) {
             idx += 1;
         }
-        Some((text[idx..].to_string(), true))
-    }
-
-    /// Approximate serialized byte length of one row's text plus its line
-    /// separator, for [`Self::scrollback_text_tail`]'s backward budget scan.
-    fn approx_row_len(row: &Row) -> usize {
-        let mut buf = String::new();
-        for cell in &row.cells {
-            cell.push_text_to(&mut buf);
-        }
-        buf.len() + 1
+        text.drain(..idx);
+        Some((text, true))
     }
 
     fn push_full_row_text(

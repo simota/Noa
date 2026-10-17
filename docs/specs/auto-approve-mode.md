@@ -5,6 +5,28 @@
 - owner: simota
 - build-path decision: **apex** (`/nexus apex` — live AC: T-1 signature capture and AC-11/12/13 GUI visual checks remain manual)
 
+## 2026-10-17 extension — agy subagent approval notice
+
+The user supplied a screenshot of agy's notice that a subagent waits on a tool
+approval and requested support.
+
+| Agent | Recognized notice | Automatic response |
+|---|---|---|
+| agy | Rows behind one left bar (`│`, `┃`, `▌` or `▎`): `<agent> needs approval for <Tool>`, a `─` rule, a `● <Tool>(…)` call naming the same tool, and `ctrl+k approve · alt+j manage`. Below it: a rule, an empty `>` input prompt, a rule, the subagent list, and agy's status bar last | ctrl+k (`0x0b`, `subagent.approve_fast`), approving this one step |
+
+- The hint must name ctrl+k. A rebound approve key is left to the user.
+- A draft in the input prompt leaves the notice to the user, since ctrl+k is
+  also a line edit there.
+- A second notice title on screen leaves it unclear which step ctrl+k answers,
+  so that screen is left to the user as well.
+- The dialog hash covers the title through the hint. The subagent list's timers
+  below it do not rearm an accepted notice.
+- The command denylist applies to the rows between the title and the hint.
+- The status bar may now carry any upper-case mode label (`IDLE`, `TOOL USE`)
+  before `| Model | … | Context: n%`. This applies to every agy dialog.
+- Synthetic layout tests only. The bar glyph and acceptance of ctrl+k by a
+  running agy still need the live AC-13 check.
+
 ## 2026-10-01 revision — command denylist
 
 This revision supersedes the "not filtered by an allowlist or denylist"

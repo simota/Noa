@@ -51,6 +51,7 @@ pub enum AutoApproveSignature {
     CodexCommand,
     AgyAskUserQuestion,
     AgyCommand,
+    AgySubagentApproval,
 }
 
 impl AutoApproveSignature {
@@ -171,6 +172,19 @@ const SIGNATURES: &[Signature] = &[
         yes_label: Some("1. Yes"),
         requires_marker: true,
         bytes: b"\r",
+        settle: Duration::ZERO,
+    },
+    // Recognized by `agy_subagent_notice`, not by anchor or choice; the
+    // answer is the hint's ctrl+k (`subagent.approve_fast`), approving the
+    // one pending step.
+    Signature {
+        id: AutoApproveSignature::AgySubagentApproval,
+        agent: AgentKind::Agy,
+        kind: PromptKind::Command,
+        anchors: &[" needs approval for "],
+        yes_label: None,
+        requires_marker: false,
+        bytes: b"\x0b",
         settle: Duration::ZERO,
     },
 ];
@@ -632,6 +646,30 @@ fn find_signature_with_lowercase(
         return None;
     }
 
+    if sig.id == AutoApproveSignature::AgySubagentApproval {
+        let region = agy_subagent_notice(rows)?;
+        if !agy_subagent_live_tail(rows, *region.end()) {
+            return None;
+        }
+        // The rows between the title and the hint show the tool call.
+        let call: Vec<_> = rows[*region.start() + 1..*region.end()]
+            .iter()
+            .map(|row| {
+                notice_bar(row)
+                    .map_or("", |(_, text)| text)
+                    .to_ascii_lowercase()
+            })
+            .collect();
+        if denied(sig, &call) {
+            return None;
+        }
+        return Some(MatchedPrompt {
+            signature: sig.id,
+            region_hash: region_hash(rows, region.clone()),
+            region,
+        });
+    }
+
     if matches!(
         sig.id,
         AutoApproveSignature::CodexCommand
@@ -647,15 +685,8 @@ fn find_signature_with_lowercase(
             .clone()
             .find(|&idx| selected_option(&rows[idx]).is_some())
             .expect("a matched menu has a selected choice");
-        if sig.kind == PromptKind::Command
-            && let Some(rule) = denylist::denied_rule(&lowercase_rows[*region.start()..choices])
+        if sig.kind == PromptKind::Command && denied(sig, &lowercase_rows[*region.start()..choices])
         {
-            if trace_enabled() {
-                eprintln!(
-                    "[auto-approve] withheld {:?}: denylist rule {rule:?}",
-                    sig.id
-                );
-            }
             return None;
         }
         return Some(MatchedPrompt {
@@ -704,6 +735,20 @@ fn find_signature_with_lowercase(
         region_hash: region_hash(rows, region.clone()),
         region,
     })
+}
+
+/// Whether the lowercased command display trips the denylist.
+fn denied(sig: &Signature, command_rows: &[RowText]) -> bool {
+    let Some(rule) = denylist::denied_rule(command_rows) else {
+        return false;
+    };
+    if trace_enabled() {
+        eprintln!(
+            "[auto-approve] withheld {:?}: denylist rule {rule:?}",
+            sig.id
+        );
+    }
+    true
 }
 
 /// Rows that open a Claude Code approval dialog. Bash approvals are listed so
@@ -760,6 +805,9 @@ fn menu_prompt_region(
     lowercase_rows: &[RowText],
     sig: &Signature,
 ) -> Option<RangeInclusive<usize>> {
+    if sig.id == AutoApproveSignature::AgySubagentApproval {
+        return agy_subagent_notice(rows);
+    }
     if sig.id == AutoApproveSignature::AgyCommand {
         let run_command = Signature {
             anchors: &["requesting permission for:"],
@@ -862,21 +910,118 @@ fn menu_has_live_tail(rows: &[RowText], footer: usize, sig: &Signature) -> bool 
     sig.agent == AgentKind::Agy && agy_status_row(status) && tail.next().is_none()
 }
 
-/// agy's one-row status bar under a dialog: `[Model] Cost: $0.0000` while
-/// idle, or `TOOL USE | Model | branch | Context: 6.94%` while a tool runs.
+/// agy's one-row status bar under a dialog: `[Model] Cost: $0.0000`, or a
+/// mode label such as `TOOL USE` or `IDLE` before `| Model | branch |
+/// Context: 6.94%`.
 fn agy_status_row(status: &str) -> bool {
     let cost_status = status.starts_with('[')
         && status.split_once("] Cost: $").is_some_and(|(_, cost)| {
             !cost.is_empty() && cost.bytes().all(|ch| ch.is_ascii_digit() || ch == b'.')
         });
-    let tool_status = status.strip_prefix("TOOL USE").is_some_and(|rest| {
-        rest.rsplit_once("| Context: ").is_some_and(|(_, context)| {
-            context.strip_suffix('%').is_some_and(|percent| {
-                !percent.is_empty() && percent.bytes().all(|ch| ch.is_ascii_digit() || ch == b'.')
+    let mode_status = status.split_once('|').is_some_and(|(mode, rest)| {
+        let mode = mode.trim();
+        !mode.is_empty()
+            && mode.bytes().all(|ch| ch.is_ascii_uppercase() || ch == b' ')
+            && rest.rsplit_once("| Context: ").is_some_and(|(_, context)| {
+                context.strip_suffix('%').is_some_and(|percent| {
+                    !percent.is_empty()
+                        && percent.bytes().all(|ch| ch.is_ascii_digit() || ch == b'.')
+                })
             })
-        })
     });
-    cost_status || tool_status
+    cost_status || mode_status
+}
+
+/// The approve key the hint must name: [`AutoApproveSignature::bytes`] sends
+/// ctrl+k, so a rebound `subagent.approve_fast` is left to the user.
+const AGY_SUBAGENT_HINT: &str = "ctrl+k approve · alt+j manage";
+
+/// Glyphs agy may paint as the notice's left bar.
+const NOTICE_BARS: [char; 4] = ['│', '┃', '▌', '▎'];
+
+/// agy's notice that a subagent waits on a tool approval, painted above the
+/// input box: `<agent> needs approval for <Tool>`, a rule, the
+/// `● <Tool>(…)` call, and the approve hint, every row behind one left bar.
+/// Returns the title..=hint rows. A second notice title on screen leaves it
+/// unclear which step ctrl+k answers, so that screen is left to the user.
+fn agy_subagent_notice(rows: &[RowText]) -> Option<RangeInclusive<usize>> {
+    let mut titles = rows.iter().enumerate().filter_map(|(idx, row)| {
+        let (bar, text) = notice_bar(row)?;
+        subagent_approval_tool(text).map(|tool| (idx, bar, tool))
+    });
+    let (title, bar, tool) = titles.next()?;
+    if titles.next().is_some() {
+        return None;
+    }
+    let mut body = Vec::new();
+    let mut hint = None;
+    for (idx, row) in rows.iter().enumerate().skip(title + 1) {
+        let (row_bar, text) = notice_bar(row)?;
+        if row_bar != bar {
+            return None;
+        }
+        if text.split_whitespace().collect::<Vec<_>>().join(" ") == AGY_SUBAGENT_HINT {
+            hint = Some(idx);
+            break;
+        }
+        body.push(text);
+    }
+    let hint = hint?;
+    let (rule, call) = body.split_first()?;
+    let call_matches = call
+        .iter()
+        .find(|row| !row.trim().is_empty())
+        .and_then(|row| row.trim().strip_prefix("● "))
+        .and_then(|row| row.strip_prefix(tool))
+        .is_some_and(|args| args.starts_with('('));
+    (rule_row(rule) && call_matches).then_some(title..=hint)
+}
+
+/// The tool a `<agent> needs approval for <Tool>` title names.
+fn subagent_approval_tool(title: &str) -> Option<&str> {
+    let (agent, tool) = title.trim_end().rsplit_once(" needs approval for ")?;
+    (!agent.trim().is_empty()
+        && !tool.is_empty()
+        && tool
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')))
+    .then_some(tool)
+}
+
+/// A row's left bar and the text after it.
+fn notice_bar(row: &str) -> Option<(char, &str)> {
+    let row = row.trim_start();
+    let bar = row.chars().next().filter(|ch| NOTICE_BARS.contains(ch))?;
+    Some((bar, row[bar.len_utf8()..].trim_start()))
+}
+
+fn rule_row(row: &str) -> bool {
+    let row = row.trim();
+    !row.is_empty() && row.chars().all(|ch| ch == '─')
+}
+
+/// Below the notice agy keeps its live frame: a rule, the input prompt, a
+/// rule, the subagent list, and the status bar last. ctrl+k is also a line
+/// edit, so a draft in the input leaves the notice to the user: a multi-line
+/// draft can paint its own rule under an empty first line, so every row
+/// between that rule and the status bar must be a subagent list row.
+fn agy_subagent_live_tail(rows: &[RowText], hint: usize) -> bool {
+    let mut tail = rows[hint + 1..]
+        .iter()
+        .map(|row| row.trim())
+        .filter(|row| !row.is_empty());
+    tail.next().is_some_and(rule_row)
+        && tail.next() == Some(">")
+        && tail.next().is_some_and(rule_row)
+        && tail.next_back().is_some_and(agy_status_row)
+        && tail.all(subagent_list_row)
+}
+
+/// `● Agent(<name>: <task>) …`, behind whatever state glyph agy paints.
+fn subagent_list_row(row: &str) -> bool {
+    let mut chars = row.chars();
+    chars.next().is_some_and(|glyph| !glyph.is_alphanumeric())
+        && chars.as_str().starts_with(" Agent(")
 }
 
 /// Codex 0.158+ asks before writing to a process it already started
@@ -2959,5 +3104,146 @@ mod tests {
         assert!(
             rescan_signature(&prompt, AutoApproveSignature::CodexCommand, cursor, ctx).is_none()
         );
+    }
+
+    // Layout of the October 2026 screenshot of agy's subagent approval notice;
+    // the command and agent descriptions are synthetic.
+    fn agy_subagent_notice_prompt() -> Vec<RowText> {
+        rows(&[
+            "サブエージェントを並列実行中です。",
+            "",
+            "│ self needs approval for Bash",
+            "│ ────────────────────────────────",
+            "│",
+            "│ ● Bash(python3 -c '",
+            "│ import sys",
+            "│ print(sys.version)",
+            "│ ')",
+            "│",
+            "│ ctrl+k approve · alt+j manage",
+            "────────────────────────────────────",
+            ">",
+            "────────────────────────────────────",
+            "",
+            "  ● Agent(self: Sample Generator 2)  Read tests/sample.py · 10m17s",
+            "  ● Agent(self: Sample Generator 1)  Blocked · Run sample check · 10m17s",
+            "",
+            " IDLE  | Gemini 4 Argon (High) |  main | Context: 19.20%",
+        ])
+    }
+
+    fn fire(prompt: &[RowText], state: &mut AutoApproveState) -> Decision {
+        let ctx = base_ctx(fixed_now());
+        let cursor = cursor(12);
+        assert_eq!(
+            detect_and_update_any_agent(prompt, cursor, ctx, state),
+            Decision::Hold
+        );
+        detect_and_update_any_agent(prompt, cursor, settled(ctx), state)
+    }
+
+    #[test]
+    fn agy_subagent_notice_approves_once_with_ctrl_k() {
+        let prompt = agy_subagent_notice_prompt();
+        let mut state = AutoApproveState::default();
+        let Decision::Fire {
+            signature,
+            region_hash,
+            ..
+        } = fire(&prompt, &mut state)
+        else {
+            panic!("stable notice should fire");
+        };
+        assert_eq!(signature, AutoApproveSignature::AgySubagentApproval);
+        assert_eq!(signature.agent(), AgentKind::Agy);
+        assert_eq!(signature.bytes(), b"\x0b");
+        assert_eq!(signature.label(), "Command");
+        let ctx = settled(base_ctx(fixed_now()));
+        assert_eq!(
+            rescan_signature(&prompt, signature, cursor(12), ctx)
+                .unwrap()
+                .region_hash,
+            region_hash
+        );
+
+        // The subagent list's timers tick under the notice without rearming it.
+        state.apply_feedback(signature, region_hash, true, ctx.now);
+        let mut ticked = prompt.clone();
+        ticked[15] = ticked[15].replace("10m17s", "10m18s");
+        for _ in 0..3 {
+            assert_eq!(
+                detect_and_update_any_agent(&ticked, cursor(12), ctx, &mut state),
+                Decision::Hold
+            );
+        }
+    }
+
+    #[test]
+    fn agy_subagent_notice_needs_its_whole_layout() {
+        let base = agy_subagent_notice_prompt();
+        let edit = |row: usize, text: &str| {
+            let mut prompt = base.clone();
+            prompt[row] = text.to_string();
+            prompt
+        };
+        let mut prompts = vec![
+            edit(5, "│ ● Bash(rm -rf target)"),
+            edit(5, "│ ● Read(python3 -c '"),
+            edit(7, "  print(sys.version)"),
+            edit(7, "┃ print(sys.version)"),
+            edit(3, "│"),
+            edit(10, "│ alt+k approve · alt+j manage"),
+            edit(12, "> draft reply"),
+            edit(18, "plain output"),
+            edit(2, "│ self needs approval for Bash (+1 more)"),
+        ];
+        let mut second = base.clone();
+        second.insert(1, "│ other needs approval for Bash".to_string());
+        prompts.push(second);
+        let mut trailing = base.clone();
+        trailing.push("$ stray output".to_string());
+        prompts.push(trailing);
+        // A draft whose empty first line and rule mimic the input box's end.
+        let mut draft = base.clone();
+        draft.splice(
+            13..13,
+            ["────────────────────────────────────", "draft body"].map(String::from),
+        );
+        prompts.push(draft);
+        for prompt in prompts {
+            let mut state = AutoApproveState::default();
+            assert_eq!(fire(&prompt, &mut state), Decision::Hold, "{prompt:?}");
+        }
+    }
+
+    #[test]
+    fn agy_subagent_notice_from_vt_grid() {
+        let prompt = agy_subagent_notice_prompt();
+        let mut terminal = Terminal::new(noa_core::GridSize::new(100, prompt.len() as u16));
+        let mut stream = noa_vt::Stream::new();
+        let frame = format!(
+            "\x1b[33m{}\x1b[0m\r\n{}\x1b[13;2H",
+            prompt[..11].join("\r\n"),
+            prompt[11..].join("\r\n")
+        );
+        for chunk in frame.as_bytes().chunks(7) {
+            stream.feed(chunk, &mut terminal);
+        }
+        let screen = viewport_rows_from_terminal(&terminal);
+        let cursor = terminal.active().cursor;
+        let cursor = Point {
+            x: cursor.x,
+            y: cursor.y,
+        };
+        let mut state = AutoApproveState::default();
+        let ctx = base_ctx(fixed_now());
+        assert_eq!(
+            detect_and_update_any_agent(&screen, cursor, ctx, &mut state),
+            Decision::Hold
+        );
+        assert!(matches!(
+            detect_and_update_any_agent(&screen, cursor, settled(ctx), &mut state),
+            Decision::Fire { signature, .. } if signature == AutoApproveSignature::AgySubagentApproval
+        ));
     }
 }

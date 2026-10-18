@@ -498,7 +498,13 @@ impl IpcBackend for AppIpcBackend {
 fn screen_text(rows: &[GridRow]) -> String {
     rows.iter().fold(String::new(), |mut out, row| {
         let before_len = out.len();
-        for cell in &row.cells {
+        // A wide glyph's spacer and the pad before a wide glyph wrapped to
+        // the next row are layout, not text (as in selection extraction).
+        let pad_x = row.ends_with_wide_pad().then(|| row.cells.len() - 1);
+        for (x, cell) in row.cells.iter().enumerate() {
+            if cell.attrs.contains(CellAttrs::WIDE_SPACER) || pad_x == Some(x) {
+                continue;
+            }
             cell.push_text_to(&mut out);
         }
         if !row.wrapped {
@@ -917,6 +923,48 @@ mod tests {
             text, "a  \n",
             "wrapped row's trailing spaces survive; only the blank row's own space is trimmed"
         );
+    }
+
+    #[test]
+    fn screen_text_skips_wide_spacers_and_wrap_pads() {
+        let wide = |ch| Cell {
+            ch,
+            attrs: CellAttrs::WIDE,
+            ..Cell::default()
+        };
+        let spacer = || Cell {
+            ch: ' ',
+            attrs: CellAttrs::WIDE_SPACER,
+            ..Cell::default()
+        };
+        let pad = Cell {
+            ch: ' ',
+            attrs: CellAttrs::WIDE_PAD,
+            ..Cell::default()
+        };
+        let first = GridRow::from_cells(
+            vec![
+                wide('あ'),
+                spacer(),
+                wide('い'),
+                spacer(),
+                cell('-', Color::Default),
+                pad,
+            ],
+            true,
+            false,
+        );
+        let second = GridRow::from_cells(
+            vec![
+                wide('う'),
+                spacer(),
+                cell('A', Color::Default),
+                cell(' ', Color::Default),
+            ],
+            false,
+            false,
+        );
+        assert_eq!(screen_text(&[first, second]), "あい-うA\n");
     }
 
     #[test]

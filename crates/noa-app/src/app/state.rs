@@ -262,6 +262,14 @@ pub(super) struct WindowState {
     pub(super) font_px: f32,
     /// The logical window (AppKit tab group) this tab belongs to.
     pub(super) group: WindowGroupId,
+    /// This tab's stable AppleScript id (agent-automation L2.1), allocated
+    /// from `macos_applescript::alloc_tab_id` — or pre-allocated by the AE
+    /// handler for a scripted `new tab`/`new window`.
+    pub(super) tab_id: u64,
+    /// This tab's panes in the accessibility tree (agent-automation
+    /// REQ-014), kept in line with the split layout by
+    /// `App::sync_accessibility`.
+    pub(super) ax: crate::macos_accessibility::WindowAx,
     pub(super) surface: wgpu::Surface<'static>,
     pub(super) surface_config: wgpu::SurfaceConfiguration,
     pub(super) renderer: Renderer,
@@ -1147,6 +1155,33 @@ pub(super) struct Surface {
     /// (kaizen cycle 3, finding P1-1). Consumed (`take`n) by the very next
     /// redraw of this pane, fast path or not.
     pub(super) pending_reveal_snapshot: Option<FrameSnapshot>,
+    /// The pty child's pid and slave tty path, captured at spawn for the
+    /// AppleScript `pid`/`tty` properties (agent-automation REQ-001). `None`
+    /// for remote panes or when the platform reports nothing.
+    pub(super) child_pid: Option<u32>,
+    pub(super) tty_name: Option<String>,
+    /// AppleScript `wait after command` (agent-automation REQ-005): keep the
+    /// pane open after its process exits, until the next key press.
+    pub(super) wait_after_command: bool,
+    /// The process exited while `wait_after_command` held the pane open; the
+    /// next key press closes it.
+    pub(super) exited: bool,
+    /// Where the last scripted `send mouse position` put this pane's pointer,
+    /// in points relative to the pane's top-left — so it survives the pane
+    /// moving or resizing — restored before a scripted button or wheel event
+    /// when the window's pointer has since moved elsewhere.
+    pub(super) script_pointer: Option<(f64, f64)>,
+    /// `script_pointer` is newer than any real pointer motion over this
+    /// pane, so a scripted button or wheel event lands there rather than at
+    /// the real pointer; real motion over the pane clears it.
+    pub(super) script_pointer_live: bool,
+    /// The cell and DEC 1016 pixel of the last pointer motion delivered to
+    /// this pane by either the real pointer or a script — the position the
+    /// terminal last saw, which motion reports are deduplicated against.
+    /// Equal to `last_mouse_cell`/`last_mouse_pixel` until a scripted event
+    /// moves it; those then go back to the real pointer's.
+    pub(super) reported_cell: Option<Point>,
+    pub(super) reported_pixel: Option<crate::mouse::MousePos>,
 }
 
 /// Transport-specific ownership for a pane. Keeping this explicit prevents a
@@ -1282,6 +1317,14 @@ impl Surface {
             cursor_blink_state: CursorBlinkState::default(),
             held_snapshot: None,
             pending_reveal_snapshot: None,
+            child_pid: None,
+            tty_name: None,
+            wait_after_command: false,
+            exited: false,
+            script_pointer: None,
+            script_pointer_live: false,
+            reported_cell: None,
+            reported_pixel: None,
         }
     }
 
@@ -1475,6 +1518,9 @@ mod chrome_textures_tests {
     // itself a rebuild, so it must never clear the rebuild counter — the
     // eventual GUI-integrated AC-18 check relies on the counter being
     // cumulative across the reset that a theme confirm triggers.
+    // The counter only exists in debug builds (`record_rebuild` is
+    // `cfg(debug_assertions)`), so the test is too.
+    #[cfg(debug_assertions)]
     #[test]
     fn reset_does_not_clear_rebuild_count() {
         let mut textures = ChromeTextures::default();

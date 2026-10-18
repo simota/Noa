@@ -9,7 +9,15 @@ pub(crate) fn shutdown_pane_io_threads<'a>(surfaces: impl IntoIterator<Item = &'
 }
 
 pub(crate) fn surface_has_running_program(surface: &Surface) -> bool {
-    !surface.is_remote() && surface.terminal.lock().has_running_program()
+    !surface.is_remote() && program_still_running(surface.exited, &surface.terminal.lock())
+}
+
+/// Whether a local pane's program still runs. A pane held open after its
+/// process exited (`wait after command`) runs nothing, whatever shell
+/// integration last marked — an `exit` typed at the prompt leaves its
+/// OSC 133;C command-start as the final mark.
+pub(crate) fn program_still_running(exited: bool, terminal: &Terminal) -> bool {
+    !exited && terminal.has_running_program()
 }
 
 pub(crate) fn running_program_count<'a>(surfaces: impl IntoIterator<Item = &'a Surface>) -> usize {

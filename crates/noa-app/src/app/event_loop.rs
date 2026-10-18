@@ -1,6 +1,9 @@
 //! winit event-loop glue — the [`ApplicationHandler`] impl plus the
 //! `on_*` window/mouse/IME handlers it dispatches to.
 
+use super::applescript::{
+    closes_held_pane_exempt, ime_event_types_text, swallow_held_pane_close_key,
+};
 use super::*;
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
@@ -59,6 +62,14 @@ fn mouse_gesture_pane(
 }
 
 impl App {
+    /// The pane a scripted mouse event being delivered in `state` names
+    /// (agent-automation REQ-011). It outranks a live left-button capture
+    /// and the pane under the pointer for motion, buttons and the wheel.
+    fn script_target(&self, state: &WindowState) -> Option<PaneId> {
+        self.script_mouse_pane
+            .filter(|pane| state.contains_pane(*pane))
+    }
+
     /// Pane-dnd P1-1 remediation (`docs/specs/pane-dnd.md` L2(e)): re-resolve
     /// a pane-scoped `UserEvent`'s window at *receive* time rather than
     /// trusting the `window_id` baked into the message. The io thread's
@@ -394,71 +405,7 @@ impl ApplicationHandler<UserEvent> for App {
                     self.request_overview_redraw();
                 }
             }
-            UserEvent::WriteText {
-                window_id,
-                pane_id,
-                text,
-            } => {
-                // P1-1: re-resolve the pane's *current* window at receive time.
-                // The ids were frozen when the AE was resolved; if the pane was
-                // moved to another tab between then and now it's still live, so
-                // resolve rather than dropping the write. A target that closed
-                // entirely resolves to `None` and drops as before.
-                let Some(window_id) = self.resolve_pane_window(window_id, pane_id) else {
-                    return;
-                };
-                let bracketed = self.bracketed_paste(window_id, pane_id);
-                if let Some(bytes) = input::applescript_input_bytes(&text, bracketed) {
-                    self.mark_pane_paste_input(window_id, pane_id);
-                    self.snap_pane_viewport_to_bottom(window_id, pane_id);
-                    self.write_pane_pty_bytes(window_id, pane_id, bytes);
-                }
-            }
-            UserEvent::RaiseWindow {
-                window_id,
-                pane_id,
-                activate_app,
-            } => {
-                // P1-1: raise the pane's *current* window, so a `select tab`/
-                // `focus` racing a cross-tab move focuses where the pane now
-                // lives instead of no-oping against the old (still-live) window.
-                let Some(window_id) = self.resolve_pane_window(window_id, pane_id) else {
-                    return;
-                };
-                self.focused = Some(window_id);
-                // Move split focus (a no-op when `pane_id` is already
-                // focused) …
-                self.focus_pane(window_id, pane_id);
-                // … then raise the native tab/window regardless, so a
-                // `select tab`/`focus`/`activate window` always re-orders
-                // the UI even on the no-op focus path.
-                if let Some(window) = self
-                    .windows
-                    .get(&window_id)
-                    .map(|state| state.window.clone())
-                {
-                    window.focus_window();
-                }
-                #[cfg(target_os = "macos")]
-                if activate_app {
-                    crate::macos_window::activate_app();
-                }
-                #[cfg(not(target_os = "macos"))]
-                let _ = activate_app;
-            }
-            UserEvent::ClosePane { window_id, pane_id } => {
-                // P1-1: close the pane wherever it now lives, so a close racing
-                // a cross-tab move doesn't silently no-op against the old window.
-                let Some(window_id) = self.resolve_pane_window(window_id, pane_id) else {
-                    return;
-                };
-                self.request_close_pane(event_loop, window_id, pane_id);
-            }
-            UserEvent::SpawnTab {
-                window_target,
-                cwd,
-                command,
-            } => self.spawn_applescript_tab(event_loop, window_target, cwd, command),
+            UserEvent::AppleScript => self.drain_applescript_actions(event_loop),
             UserEvent::IpcAction { request_id } => self.handle_ipc_action(event_loop, request_id),
             UserEvent::RemoteRequestCompleted { request_id } => {
                 self.handle_remote_request_completed(event_loop, request_id)
@@ -543,6 +490,11 @@ impl ApplicationHandler<UserEvent> for App {
                 let Some(window_id) = self.resolve_pane_window(window_id, pane_id) else {
                     return;
                 };
+                // `wait after command` keeps a scripted pane open after its
+                // process exits (agent-automation REQ-005).
+                if self.hold_pane_after_exit(window_id, pane_id) {
+                    return;
+                }
                 // The quick terminal isn't a saved/tabbed window, so its shell
                 // exiting tears the whole drop-down down rather than routing
                 // through the tab-close path (which walks `window_order`).
@@ -864,7 +816,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::HoveredFile(path) => self.on_hovered_file(window_id, path),
             WindowEvent::HoveredFileCancelled => self.on_hovered_file_cancelled(window_id),
             WindowEvent::DroppedFile(path) => self.on_dropped_file(window_id, path),
-            WindowEvent::Ime(event) => self.on_ime_event(window_id, event),
+            WindowEvent::Ime(event) => self.on_ime_event(event_loop, window_id, event),
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
                 // Pair before any modal/shortcut early return so every
@@ -888,6 +840,17 @@ impl ApplicationHandler<UserEvent> for App {
                     // any routing — this is the earliest app-side timestamp
                     // a keystroke has.
                     crate::latency_trace::on_key_pressed();
+                }
+                // The rest of a key that closed a held pane: its repeats and
+                // release would otherwise land in the newly focused pane. A
+                // fresh press means the release was lost (focus moved away).
+                if swallow_held_pane_close_key(
+                    &mut self.held_pane_close_keys,
+                    event.physical_key,
+                    pressed,
+                    event.repeat,
+                ) {
+                    return;
                 }
                 if pressed
                     && self.copy_mode_key_repeat_is_suppressed(event.physical_key, event.repeat)
@@ -1071,6 +1034,18 @@ impl ApplicationHandler<UserEvent> for App {
                 {
                     return;
                 }
+                // A pane held open after its process exited closes on the
+                // next key press (agent-automation REQ-005) — not on a bare
+                // modifier or a Cmd shortcut, so copying its output or
+                // switching apps still works.
+                if pressed
+                    && !closes_held_pane_exempt(&event.logical_key, self.modifiers)
+                    && let Some(pane_id) = self.exited_focused_pane(window_id)
+                {
+                    self.held_pane_close_keys.insert(event.physical_key);
+                    self.close_pane_after_pty_exit(event_loop, window_id, pane_id);
+                    return;
+                }
                 let resolved_command = self.keybinds.resolve(&event.logical_key, self.modifiers);
                 let mut copy_mode_directional_passthrough =
                     resolved_command.is_some_and(|command| {
@@ -1187,6 +1162,9 @@ impl ApplicationHandler<UserEvent> for App {
         // Keep the AppleScript snapshot fresh for synchronous property reads
         // (a no-op when the bridge was never installed).
         self.sync_applescript_snapshot();
+        // Keep each tab's accessibility elements on its pane layout (a
+        // lock-free no-op unless a split, close, focus or resize moved it).
+        self.sync_accessibility();
         // Keep the noa-ipc read snapshot fresh (a no-op when the server was
         // never started).
         self.sync_ipc_snapshot();
@@ -1449,11 +1427,16 @@ impl App {
             self.sync_hover_link(window_id);
             return;
         };
-        if self.drag_active_sidebar(window_id, point) {
-            return;
-        }
-        if self.drag_active_split(window_id, point) {
-            return;
+        // A user's sidebar-card or divider drag in progress belongs to the
+        // real pointer; a scripted motion neither moves it nor is swallowed
+        // by it (agent-automation REQ-011).
+        if self.script_mouse_pane.is_none() {
+            if self.drag_active_sidebar(window_id, point) {
+                return;
+            }
+            if self.drag_active_split(window_id, point) {
+                return;
+            }
         }
 
         // A left press captured a pane: this motion belongs to it (the cell is
@@ -1461,10 +1444,13 @@ impl App {
         // pane the pointer is over now. That keeps a selection or SGR drag
         // that crosses a divider extending in the pane that saw the press,
         // and lets that pane — not the neighbour — receive the release (N03).
+        // A scripted mouse event names its pane outright (agent-automation
+        // REQ-011): it resolves like a captured drag, ahead of any real
+        // capture, never by hit-testing.
         let captured = self
             .windows
             .get(&window_id)
-            .and_then(|state| state.mouse_capture_pane);
+            .and_then(|state| self.script_target(state).or(state.mouse_capture_pane));
         let resolved = match captured {
             Some(pane_id) => self
                 .pane_cell_in(window_id, pane_id, position, metrics)
@@ -1484,8 +1470,17 @@ impl App {
         if let Some(state) = self.windows.get_mut(&window_id) {
             state.last_mouse_pane = Some(pane_id);
             if let Some(surface) = state.surfaces.get_mut(&pane_id) {
-                prev_pixel = std::mem::replace(&mut surface.last_mouse_pixel, pixel);
-                prev_cell = surface.last_mouse_cell.replace(cell);
+                // Deduplicated against what the terminal last saw, which a
+                // scripted motion may have moved away from the real pointer.
+                surface.last_mouse_cell = Some(cell);
+                surface.last_mouse_pixel = pixel;
+                prev_pixel = std::mem::replace(&mut surface.reported_pixel, pixel);
+                prev_cell = surface.reported_cell.replace(cell);
+                // Real motion over the pane makes the real pointer the one a
+                // later scripted button or wheel event lands at again.
+                if self.script_mouse_pane.is_none() {
+                    surface.script_pointer_live = false;
+                }
             }
         }
         self.sync_hover_link(window_id);
@@ -1548,6 +1543,8 @@ impl App {
                 if Some(*pane_id) != captured {
                     surface.last_mouse_cell = None;
                     surface.last_mouse_pixel = None;
+                    surface.reported_cell = None;
+                    surface.reported_pixel = None;
                 }
             }
         }
@@ -1658,11 +1655,19 @@ impl App {
         if state == ElementState::Pressed {
             self.end_copy_mode_for_window(window_id);
         }
+        // A scripted event goes to the pane it names: it neither takes nor
+        // ends the real pointer's capture, and never starts, moves or ends a
+        // sidebar or divider drag — a user's drag in progress keeps going.
+        let scripted = self
+            .windows
+            .get(&window_id)
+            .and_then(|tab| self.script_target(tab));
         // A left press inside the sidebar band is consumed there (card switch,
         // toolbar `+`/`…`, per-card menu) and never reaches the terminal/split
         // handling (FR-3/FR-6/FR-7).
         if button == MouseButton::Left
             && state == ElementState::Pressed
+            && scripted.is_none()
             && let Some(point) = self
                 .windows
                 .get(&window_id)
@@ -1711,10 +1716,10 @@ impl App {
                     }
                 }
                 ElementState::Released => {
-                    if self.finish_active_sidebar_drag(window_id) {
+                    if scripted.is_none() && self.finish_active_sidebar_drag(window_id) {
                         return;
                     }
-                    if self.finish_active_split_drag(window_id) {
+                    if scripted.is_none() && self.finish_active_split_drag(window_id) {
                         return;
                     }
                     // The matching half of the Cmd+click-to-open consume
@@ -1733,7 +1738,7 @@ impl App {
 
         let pane_id = self.windows.get(&window_id).map(|tab| {
             mouse_gesture_pane(
-                tab.mouse_capture_pane,
+                scripted.or(tab.mouse_capture_pane),
                 tab.last_mouse_pane,
                 tab.focused_pane,
             )
@@ -1749,6 +1754,7 @@ impl App {
         // press for.
         if button == MouseButton::Left
             && state == ElementState::Pressed
+            && scripted.is_none()
             && let Some(tab) = self.windows.get_mut(&window_id)
         {
             tab.mouse_capture_pane = Some(pane_id);
@@ -1799,7 +1805,8 @@ impl App {
                     }
                 }
             }
-            if button == MouseButton::Left && state == ElementState::Released {
+            if button == MouseButton::Left && state == ElementState::Released && scripted.is_none()
+            {
                 self.release_mouse_capture(window_id);
             }
             return;
@@ -1842,7 +1849,7 @@ impl App {
             })
             .unwrap_or(SelectionGesture::None);
         self.apply_selection_gesture(window_id, pane_id, gesture);
-        if state == ElementState::Released {
+        if state == ElementState::Released && scripted.is_none() {
             self.release_mouse_capture(window_id);
         }
     }
@@ -1870,7 +1877,7 @@ impl App {
         let pane_id = self
             .windows
             .get(&window_id)
-            .and_then(|state| state.last_mouse_pane)
+            .and_then(|state| self.script_target(state).or(state.last_mouse_pane))
             .or_else(|| self.windows.get(&window_id).map(|state| state.focused_pane));
         let Some(pane_id) = pane_id else {
             return;
@@ -1936,7 +1943,12 @@ impl App {
         }
     }
 
-    pub(super) fn on_ime_event(&mut self, window_id: WindowId, event: Ime) {
+    pub(super) fn on_ime_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: Ime,
+    ) {
         // Composition traffic is typing: `Preedit` updates and `Commit`s
         // reset the blink phase (and the `cursor-stop-blinking-after` idle
         // clock) exactly like the raw keypresses in `KeyboardInput` — which
@@ -1978,6 +1990,21 @@ impl App {
         // (e.g. the modal closed mid-composition) must not ghost into the
         // next modal's input row.
         self.modal_preedit = None;
+
+        // A pane held open after its process exited closes on any typing,
+        // IME included (agent-automation REQ-005): composing reports
+        // `Preedit`/`Commit`, not `KeyboardInput`. The composition is
+        // dropped with the pane rather than leaking into the next one.
+        if ime_event_types_text(&event)
+            && let Some(pane_id) = self.exited_focused_pane(window_id)
+        {
+            self.close_pane_after_pty_exit(event_loop, window_id, pane_id);
+            if let Some(window) = self.windows.get(&window_id).map(|s| s.window.clone()) {
+                window.set_ime_allowed(false);
+                window.set_ime_allowed(true);
+            }
+            return;
+        }
 
         let pane_id = self.windows.get(&window_id).map(|state| state.focused_pane);
         let bytes = self

@@ -495,7 +495,7 @@ impl IpcBackend for AppIpcBackend {
 /// the next row and must survive the join (mirrors `noa-grid`'s
 /// `push_selected_row_text`). The trim tracks each row's own start offset
 /// so it can never eat into a preceding wrapped row's real trailing spaces.
-fn screen_text(rows: &[GridRow]) -> String {
+pub(crate) fn screen_text(rows: &[GridRow]) -> String {
     rows.iter().fold(String::new(), |mut out, row| {
         let before_len = out.len();
         // A wide glyph's spacer and the pad before a wide glyph wrapped to

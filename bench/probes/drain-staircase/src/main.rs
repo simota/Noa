@@ -451,6 +451,7 @@ fn run_real(stage: Stage, tmpfile: &str, total: usize, grid: GridSize, contend: 
         term: "xterm-256color".to_string(),
         login: false,
         shell_integration: false,
+        env: Vec::new(),
     };
     let pty = Pty::spawn(cfg).expect("spawn pty");
 
@@ -569,6 +570,7 @@ fn run_tbench_faithful(
         term: "xterm-256color".to_string(),
         login: false,
         shell_integration: false,
+        env: Vec::new(),
     };
     let pty = Pty::spawn(cfg).expect("spawn pty");
 
@@ -683,6 +685,7 @@ fn run_mem_suite(fixtures: &[String], grid: GridSize, suites: usize, runs: usize
         term: "xterm-256color".to_string(),
         login: false,
         shell_integration: false,
+        env: Vec::new(),
     };
     let pty = Pty::spawn(cfg).expect("spawn pty");
     let mut stream = Stream::new();
@@ -790,6 +793,7 @@ with open(resfile, "w") as f:
         term: "xterm-256color".to_string(),
         login: false,
         shell_integration: false,
+        env: Vec::new(),
     };
     let pty = Pty::spawn(cfg).expect("spawn pty");
     let writer = pty.writer();

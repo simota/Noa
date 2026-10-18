@@ -1797,6 +1797,14 @@ fn overview_intercepts_only_non_terminal_window_commands() {
 }
 
 #[test]
+fn exited_held_pane_runs_no_program_despite_a_command_start_mark() {
+    let mut terminal = Terminal::new(GridSize::new(5, 3));
+    noa_vt::Stream::new().feed(b"\x1b]133;C\x07", &mut terminal);
+    assert!(program_still_running(false, &terminal));
+    assert!(!program_still_running(true, &terminal));
+}
+
+#[test]
 fn overview_snapshot_seed_skips_locked_terminal_without_waiting() {
     let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(5, 3))));
     let slot = Arc::new(Mutex::new(None));

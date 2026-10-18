@@ -6,6 +6,7 @@
 mod anim;
 mod app;
 mod app_actions;
+mod applescript_keys;
 mod atomic_write;
 pub mod auto_approve;
 mod branch_poll;
@@ -23,6 +24,7 @@ mod ipc_bridge;
 mod latency_trace;
 mod link_open;
 mod localtime;
+mod macos_accessibility;
 mod macos_applescript;
 mod macos_blur;
 mod macos_hotkey;

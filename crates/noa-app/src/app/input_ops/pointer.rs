@@ -83,6 +83,10 @@ impl App {
         &mut self,
         window_id: WindowId,
     ) -> bool {
+        // A scripted press targets its terminal, never a divider.
+        if self.script_mouse_pane.is_some() {
+            return false;
+        }
         let Some(target) = self.split_drag_target_at_last_mouse_point(window_id) else {
             return false;
         };
@@ -248,6 +252,8 @@ impl App {
                 let here = hovered.filter(|(hovered_pane, ..)| hovered_pane == pane_id);
                 surface.last_mouse_cell = here.map(|(_, cell, _)| cell);
                 surface.last_mouse_pixel = here.and_then(|(.., pixel)| pixel);
+                surface.reported_cell = surface.last_mouse_cell;
+                surface.reported_pixel = surface.last_mouse_pixel;
             }
         }
         self.sync_hover_link(window_id);

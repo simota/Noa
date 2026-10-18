@@ -46,4 +46,8 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSPasteboardItem",
     "NSBitmapImageRep",
     "NSImageRep",
+    "NSAccessibilityElement",
+    "NSAccessibilityProtocols",
+    "NSResponder",
+    "NSView",
 ] }

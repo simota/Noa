@@ -813,6 +813,8 @@ impl App {
                 created_transparent: window_created_transparent(self.config.background_opacity),
                 window,
                 group,
+                tab_id: crate::macos_applescript::alloc_tab_id(),
+                ax: Default::default(),
                 surface,
                 surface_config,
                 renderer,

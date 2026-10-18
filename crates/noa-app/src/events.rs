@@ -90,48 +90,12 @@ pub enum UserEvent {
     },
     /// The pty's child process exited (or errored) — the app should close.
     PtyExit(WindowId, PaneId),
-    /// AppleScript `input text`: write text to a resolved pane's pty on the
-    /// main thread (applescript R-7). The `window_id`/`pane_id` are captured at
-    /// AE-resolve time but re-resolved to the pane's current window at process
-    /// time (P1-1), so a cross-tab move between queue and receipt still writes;
-    /// the write is dropped only if the pane closed entirely. Bracketed-paste
-    /// wrapping is decided at process time from the pane's live mode. Never
-    /// touches winit objects from the AE handler (R-11).
-    WriteText {
-        window_id: WindowId,
-        pane_id: PaneId,
-        text: String,
-    },
-    /// AppleScript `focus` / `select tab` / `activate window` (applescript
-    /// R-5/AC-6/AC-15): raise the target's native tab/window to the front and
-    /// move split focus to `pane_id`. Unlike a plain split-focus this always
-    /// re-orders the window (even when `pane_id` is already focused), and when
-    /// `activate_app` is set it also brings the whole app forward
-    /// (`activateIgnoringOtherApps`) for the application-level `activate`. Ids
-    /// captured at AE-resolve time but re-resolved to the pane's current window
-    /// at process time (P1-1), so it raises where the pane now lives.
-    RaiseWindow {
-        window_id: WindowId,
-        pane_id: PaneId,
-        activate_app: bool,
-    },
-    /// AppleScript `close` on a terminal (applescript R-6/AC-16): close one
-    /// split pane through the existing confirm/close path. Ids captured at
-    /// AE-resolve time but re-resolved to the pane's current window at process
-    /// time (P1-1), so it closes the pane wherever it now lives.
-    ClosePane {
-        window_id: WindowId,
-        pane_id: PaneId,
-    },
-    /// AppleScript `new window` / `new tab` (applescript R-3): spawn a tab,
-    /// optionally in a saved cwd and/or running an initial command. Routed as a
-    /// dedicated event rather than an `AppCommand` so the payload does not have
-    /// to be threaded through the parameterless [`AppCommand`] variants.
-    SpawnTab {
-        window_target: AppleScriptSpawnTarget,
-        cwd: Option<String>,
-        command: Option<String>,
-    },
+    /// The AppleScript bridge queued one or more `ScriptAction`s in
+    /// `ScriptShared::actions` (applescript R-11, agent-automation L2.1).
+    /// Carries no payload — like `IpcAction`, the work lives in a shared
+    /// queue — so the AE handler can hand over non-`Eq` data; the main thread
+    /// drains the whole queue on receipt, in order.
+    AppleScript,
     /// A `noa-ipc` mutating RPC (`focusPane`/`newTab`/`split`/`closePane`/
     /// `sendText`) is waiting on the main thread (noa-server spec DEC-C). The
     /// payload lives in `App::ipc_pending`, keyed by `request_id`, because
@@ -155,15 +119,4 @@ pub enum UserEvent {
     RestoreFocus {
         window_id: WindowId,
     },
-}
-
-/// Whether an AppleScript-driven spawn joins the focused window's tab group or
-/// starts a fresh native window — the scripting-visible analog of the internal
-/// `SpawnTarget` (kept out of `events` to avoid leaking an `app`-private type).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AppleScriptSpawnTarget {
-    /// Join the focused window's tab group (`new tab`).
-    CurrentWindow,
-    /// Start a fresh native window / tab group (`new window`).
-    NewWindow,
 }

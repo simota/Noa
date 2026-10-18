@@ -37,6 +37,10 @@ pub struct PtyConfig {
     /// Automatically inject noa's OSC 133 / OSC 7 shell integration for
     /// supported shells (zsh/bash/fish).
     pub shell_integration: bool,
+    /// Extra environment for the child, applied after Noa's own `TERM`/
+    /// `COLORTERM`/`TERM_PROGRAM` so an explicit request wins (AppleScript
+    /// `environment variables`, agent-automation REQ-003).
+    pub env: Vec<(String, String)>,
 }
 
 impl Default for PtyConfig {
@@ -49,6 +53,7 @@ impl Default for PtyConfig {
             term: "xterm-256color".to_string(),
             login: true,
             shell_integration: true,
+            env: Vec::new(),
         }
     }
 }
@@ -63,6 +68,7 @@ pub struct Pty {
     writer: PtyWriter,
     event_rx: Receiver<PtyEvent>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    child_pid: Option<u32>,
 }
 
 impl Pty {
@@ -145,6 +151,9 @@ impl Pty {
         // programs can identify the terminal without seeing the parent.
         cmd.env("TERM_PROGRAM", "Noa");
         cmd.env_remove("TERM_PROGRAM_VERSION");
+        for (key, value) in &config.env {
+            cmd.env(key, value);
+        }
         if let Some(cwd) = &config.cwd {
             cmd.cwd(cwd);
         }
@@ -162,6 +171,7 @@ impl Pty {
         // A killer handle so Drop can terminate the child even though the
         // child itself is owned by the waiter thread.
         let killer = child.clone_killer();
+        let child_pid = child.process_id();
 
         let reader = master
             .try_clone_reader()
@@ -220,6 +230,7 @@ impl Pty {
             writer,
             event_rx,
             killer,
+            child_pid,
         })
     }
 
@@ -240,6 +251,19 @@ impl Pty {
     /// exposes no fd or the `dup` fails.
     pub fn foreground_probe(&self) -> Option<ForegroundProcessProbe> {
         ForegroundProcessProbe::from_master(self.master.as_ref())
+    }
+
+    /// The direct child's pid (the shell, or the `-e` command), when the
+    /// platform reports one.
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child_pid
+    }
+
+    /// The slave device path (`/dev/ttysNNN`), when the platform reports one.
+    pub fn tty_name(&self) -> Option<String> {
+        self.master
+            .tty_name()
+            .map(|path| path.to_string_lossy().into_owned())
     }
 
     /// Resize the PTY, informing the kernel and signalling the child.
@@ -677,6 +701,7 @@ mod tests {
             term: "xterm-256color".to_string(),
             login: false,
             shell_integration: false,
+            env: Vec::new(),
         };
         let pty = Pty::spawn(cfg).expect("spawn pty");
 
@@ -726,6 +751,7 @@ mod tests {
             term: "xterm-256color".to_string(),
             login: true,
             shell_integration: true,
+            env: Vec::new(),
         };
         let pty = Pty::spawn(cfg).expect("spawn pty");
 
@@ -765,6 +791,7 @@ mod tests {
             term: "xterm-256color".to_string(),
             login: false,
             shell_integration: false,
+            env: Vec::new(),
         };
         let pty = Pty::spawn(cfg).expect("spawn pty");
 
@@ -792,6 +819,50 @@ mod tests {
     }
 
     #[test]
+    fn configured_env_reaches_the_child_and_identity_is_reported() {
+        // AppleScript `environment variables` (agent-automation REQ-003) and
+        // the `pid`/`tty` properties (REQ-001).
+        let pty = Pty::spawn(PtyConfig {
+            size: GridSize::new(80, 24),
+            shell: None,
+            command: Some(vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "printf 'ENV-%s-%s\\n' \"$FOO\" \"$TERM_PROGRAM\"".to_string(),
+            ]),
+            cwd: None,
+            term: "xterm-256color".to_string(),
+            login: false,
+            shell_integration: false,
+            env: vec![
+                ("FOO".to_string(), "bar".to_string()),
+                // An explicit request wins over Noa's own identity.
+                ("TERM_PROGRAM".to_string(), "custom".to_string()),
+            ],
+        })
+        .expect("spawn");
+        assert!(pty.child_pid().is_some_and(|pid| pid > 0));
+        assert!(
+            // macOS names pty slaves /dev/ttysNNN, Linux /dev/pts/N.
+            pty.tty_name()
+                .is_some_and(|tty| tty.starts_with("/dev/tty") || tty.starts_with("/dev/pts/")),
+            "tty = {:?}",
+            pty.tty_name()
+        );
+
+        let mut collected = Vec::new();
+        loop {
+            match pty.event_rx().recv_timeout(Duration::from_secs(5)) {
+                Ok(PtyEvent::Data(chunk)) => collected.extend_from_slice(&chunk),
+                Ok(PtyEvent::Exit(_)) | Err(_) => break,
+                Ok(PtyEvent::Error(e)) => panic!("pty error: {e}"),
+            }
+        }
+        let text = String::from_utf8_lossy(&collected);
+        assert!(text.contains("ENV-bar-custom"), "child output: {text:?}");
+    }
+
+    #[test]
     fn foreground_probe_reports_the_shell_process() {
         // The probe reads the tty's foreground process group leader, which for a
         // freshly spawned interactive shell is the shell itself. macOS-only; on
@@ -804,6 +875,7 @@ mod tests {
             term: "xterm-256color".to_string(),
             login: false,
             shell_integration: false,
+            env: Vec::new(),
         })
         .expect("spawn");
         let probe = pty.foreground_probe().expect("a unix master exposes an fd");

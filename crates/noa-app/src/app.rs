@@ -95,6 +95,7 @@ mod split_ops;
 mod state;
 mod timers;
 
+use applescript::ScriptSpawn;
 pub use config::AppConfig;
 use config_reload::ConfigWatcher;
 use quick_terminal::QuickTerminalState;
@@ -207,10 +208,6 @@ pub struct App {
     os_focused: Option<WindowId>,
     #[cfg(target_os = "macos")]
     macos_menu: Option<crate::macos_menu::MacosMenu>,
-    /// Monotonic source of [`WindowGroupId`]s; bumped by
-    /// [`App::allocate_group_id`] each time a `New Window` starts a fresh tab
-    /// group so no two logical windows ever collide.
-    next_group_id: u64,
     modifiers: ModifiersState,
     clipboard: SystemClipboard,
     keybinds: KeybindEngine,
@@ -289,6 +286,10 @@ pub struct App {
     /// Enter/Escape presses consumed by copy mode. Their auto-repeats stay
     /// suppressed until release, even when the initial press ended the mode.
     copy_mode_suppressed_repeats: HashSet<PhysicalKey>,
+    /// Keys whose press closed a held, exited pane (agent-automation
+    /// REQ-005). Their auto-repeats and release are swallowed until the
+    /// release, so they don't reach the pane that takes focus after it.
+    held_pane_close_keys: HashSet<PhysicalKey>,
     /// The open command palette (`cmd+shift+p`), if any — see
     /// [`CommandPaletteSession`].
     command_palette: Option<CommandPaletteSession>,
@@ -428,11 +429,20 @@ pub struct App {
     /// alive for the app's lifetime (dropping it removes the handlers). `None`
     /// until installed, when `macos-applescript` is false, or off macOS.
     applescript: Option<crate::macos_applescript::Registration>,
-    /// The read-only window/tab/terminal projection the Apple Event handler
-    /// answers property queries from (applescript Amendment 1.1). The main
-    /// thread rebuilds it in `about_to_wait` while the bridge is installed; the
-    /// handler only ever locks and reads it, so scripting never blocks the loop.
-    applescript_snapshot: Arc<Mutex<crate::macos_applescript::AppStateSnapshot>>,
+    /// State shared with the Apple Event handler (applescript Amendment 1.1,
+    /// agent-automation L2.1): the read-only window/tab/terminal snapshot the
+    /// main thread rebuilds in `about_to_wait`, the registry of objects a
+    /// creation verb has promised, and the queue of scripted mutations.
+    applescript_shared: Arc<crate::macos_applescript::ScriptShared>,
+    /// Overrides for the spawn a scripted action is running right now
+    /// (pre-allocated ids, `surface configuration`), read by the spawn paths
+    /// and cleared when the action finishes. `None` outside one.
+    script_spawn: Option<ScriptSpawn>,
+    /// The pane a scripted mouse event is being delivered to, set only while
+    /// one runs: pointer motion resolves against this pane's rect (as for a
+    /// captured drag) and no split-divider drag starts, so the event reaches
+    /// the terminal it named whatever the window layout around it.
+    script_mouse_pane: Option<PaneId>,
     /// Guards the one-time Apple Event handler registration to the first
     /// `resumed`, mirroring `hotkey_install_attempted`.
     applescript_install_attempted: bool,
@@ -698,6 +708,7 @@ fn prespawn_matches(
 ) -> bool {
     config.command.as_deref() == prespawn_command
         && config.cwd.is_none()
+        && config.env.is_empty()
         && config.shell.is_none()
         && config.size == prespawn_size
         && config.login
@@ -779,7 +790,6 @@ impl App {
             os_focused: None,
             #[cfg(target_os = "macos")]
             macos_menu: None,
-            next_group_id: 0,
             modifiers: ModifiersState::empty(),
             clipboard: SystemClipboard::new(),
             keybinds,
@@ -806,6 +816,7 @@ impl App {
             copy_mode: None,
             copy_mode_suppressed_releases: HashSet::new(),
             copy_mode_suppressed_repeats: HashSet::new(),
+            held_pane_close_keys: HashSet::new(),
             command_palette: None,
             send_selection_picker: None,
             #[cfg(target_os = "macos")]
@@ -843,9 +854,9 @@ impl App {
             sidebar_preview_lines_gate,
             sidebar_visible_groups: HashSet::new(),
             applescript: None,
-            applescript_snapshot: Arc::new(Mutex::new(
-                crate::macos_applescript::AppStateSnapshot::default(),
-            )),
+            applescript_shared: Arc::default(),
+            script_spawn: None,
+            script_mouse_pane: None,
             applescript_install_attempted: false,
             applescript_snapshot_sig: 0,
             applescript_snapshot_at: None,

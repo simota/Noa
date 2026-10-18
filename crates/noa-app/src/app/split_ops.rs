@@ -152,6 +152,7 @@ impl App {
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
+        let script_pane = self.script_spawn.as_ref().and_then(|spawn| spawn.pane_id);
         let Some((focused_pane, new_pane, focused_rect, auto_approve_enabled, redraw_floor)) =
             self.windows.get_mut(&window_id).and_then(|state| {
                 let focused_rect = state.focused_surface()?.rect;
@@ -160,7 +161,7 @@ impl App {
                 {
                     return None;
                 }
-                let new_pane = PaneId::alloc();
+                let new_pane = script_pane.unwrap_or_else(PaneId::alloc);
                 Some((
                     state.focused_pane,
                     new_pane,
@@ -606,6 +607,8 @@ impl App {
         // defers to the (correctly) focused moved pane with no stale cell.
         surface.last_mouse_cell = None;
         surface.last_mouse_pixel = None;
+        surface.reported_cell = None;
+        surface.reported_pixel = None;
         dest_state.surfaces.insert(pane, surface);
         // P1 (review round 13): force `dest`'s renderer to fully rebuild this
         // pane's rows on its next frame. `PaneId` is process-global and never

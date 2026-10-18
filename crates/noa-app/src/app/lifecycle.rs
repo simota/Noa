@@ -30,6 +30,22 @@ impl App {
         self.spawn_tab_with_initial_pane(event_loop, target, InitialPane::Local { inherited_cwd })
     }
 
+    /// Spawn a local tab for a scripted `new window`/`new tab` into `group`
+    /// (agent-automation REQ-003/006), the ids and pty overrides coming from
+    /// `App::script_spawn`.
+    pub(super) fn spawn_script_tab(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        group: GroupChoice<WindowGroupId>,
+        cwd: Option<String>,
+    ) -> anyhow::Result<WindowId> {
+        self.spawn_tab_with_initial_pane_in_group(
+            event_loop,
+            group,
+            InitialPane::Local { inherited_cwd: cwd },
+        )
+    }
+
     pub(super) fn spawn_detached_remote_tab(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -553,7 +569,7 @@ impl App {
         }
 
         let window_id = window.id();
-        let initial_pane = PaneId::alloc();
+        let initial_pane = self.next_pane_id();
         let initial_rect = content_inset_bounds(
             PaneRectApp::new(0, 0, surface_config.width, surface_config.height),
             crate::macos_window::top_chrome_inset_px(&window).unwrap_or_else(|| {
@@ -600,6 +616,12 @@ impl App {
                 window: window.clone(),
                 font_px,
                 group,
+                tab_id: self
+                    .script_spawn
+                    .as_ref()
+                    .and_then(|spawn| spawn.tab_id)
+                    .unwrap_or_else(crate::macos_applescript::alloc_tab_id),
+                ax: Default::default(),
                 surface,
                 surface_config,
                 renderer,
@@ -657,41 +679,14 @@ impl App {
         // the io-thread gate on so its panes start publishing card state.
         self.refresh_sidebar_visible_gate();
         self.focused = Some(window_id);
-        window.focus_window();
+        if self.script_spawn.is_some() {
+            crate::macos_window::make_key_without_activating(&window);
+        } else {
+            window.focus_window();
+        }
         self.request_overview_redraw();
         self.persist_session();
         Ok(window_id)
-    }
-
-    /// Spawn a tab for AppleScript `new window` / `new tab` (applescript R-3).
-    /// `cwd` forces the initial pane's directory when set (otherwise the tab
-    /// inherits the focused shell's cwd like an interactive New Tab); `command`
-    /// is written to the new pane's pty followed by a newline so it runs in the
-    /// freshly spawned surface.
-    pub(super) fn spawn_applescript_tab(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        window_target: crate::events::AppleScriptSpawnTarget,
-        cwd: Option<String>,
-        command: Option<String>,
-    ) {
-        let target = match window_target {
-            crate::events::AppleScriptSpawnTarget::CurrentWindow => SpawnTarget::CurrentWindow,
-            crate::events::AppleScriptSpawnTarget::NewWindow => SpawnTarget::NewWindow,
-        };
-        // `Some(..)` forces the cwd; `None` keeps the inherit-from-focused-shell
-        // behavior of an ordinary New Tab/New Window.
-        let cwd_override = cwd.map(Some);
-        match self.spawn_tab_with_cwd(event_loop, target, cwd_override) {
-            Ok(window_id) => {
-                if let Some(command) = command.filter(|command| !command.is_empty()) {
-                    let mut bytes = command.into_bytes();
-                    bytes.push(b'\n');
-                    self.write_pty_bytes(window_id, bytes);
-                }
-            }
-            Err(err) => log::warn!("failed to spawn AppleScript tab: {err:#}"),
-        }
     }
 
     fn tab_window_attributes(
@@ -726,9 +721,15 @@ impl App {
     /// Mint the next unique [`WindowGroupId`]. Each `New Window` calls this so
     /// its tab group can never collide with an existing window's.
     pub(super) fn allocate_group_id(&mut self) -> WindowGroupId {
-        let id = WindowGroupId(self.next_group_id);
-        self.next_group_id += 1;
-        id
+        // A scripted `new window` pre-allocated its group id in the AE
+        // handler (agent-automation REQ-008); everything else draws a fresh
+        // one from the same process-wide counter.
+        WindowGroupId(
+            self.script_spawn
+                .as_mut()
+                .and_then(|spawn| spawn.group_id.take())
+                .unwrap_or_else(crate::macos_applescript::alloc_group_id),
+        )
     }
 
     /// The macOS `tabbingIdentifier` for a logical window. Per-process
@@ -774,13 +775,20 @@ impl App {
         auto_approve_enabled: Arc<AtomicBool>,
         redraw_floor: crate::io_thread::RedrawFloor,
     ) -> anyhow::Result<Surface> {
+        let script = self.script_spawn.as_ref();
         let pty_config = PtyConfig {
             size: grid_size,
-            cwd,
-            // One-shot: only the first spawned surface runs the CLI `-e`
-            // command (see `App::initial_command`); later tabs/splits find
-            // the slot empty and get the normal shell.
-            command: self.initial_command.lock().take(),
+            cwd: script.and_then(|spawn| spawn.cwd.clone()).or(cwd),
+            // A scripted spawn's `command` runs instead of the shell
+            // (agent-automation Amendment 1). Otherwise one-shot: only the
+            // first spawned surface runs the CLI `-e` command (see
+            // `App::initial_command`); later tabs/splits find the slot empty
+            // and get the normal shell.
+            command: match script.and_then(|spawn| spawn.argv.clone()) {
+                Some(argv) => Some(argv),
+                None => self.initial_command.lock().take(),
+            },
+            env: script.map(|spawn| spawn.env.clone()).unwrap_or_default(),
             ..Default::default()
         };
         // The first spawn normally consumes the child already booted in
@@ -791,6 +799,7 @@ impl App {
             None => Pty::spawn(pty_config)?,
         };
         crate::startup_trace::mark("pty-spawned");
+        let (child_pid, tty_name) = (pty.child_pid(), pty.tty_name());
         // Hand the foreground-process probe to the session-metadata worker
         // (running-process display) before the pty moves into the io thread.
         // Quick-terminal panes never get a sidebar card, so they need no probe.
@@ -875,7 +884,7 @@ impl App {
             raw_attach_tap,
         );
 
-        Ok(Surface::new(
+        let mut surface = Surface::new(
             terminal,
             SurfaceTransport::Local(LocalSurfaceTransport {
                 pty_input_tx,
@@ -893,7 +902,11 @@ impl App {
             auto_approve_guards,
             overview_snapshot,
             kitty_animation_flag,
-        ))
+        );
+        surface.child_pid = child_pid;
+        surface.tty_name = tty_name;
+        surface.wait_after_command = script.is_some_and(|spawn| spawn.wait_after_command);
+        Ok(surface)
     }
 
     fn new_terminal(&self, grid_size: GridSize) -> Terminal {
@@ -1023,14 +1036,14 @@ impl App {
         });
     }
 
-    fn pane_has_running_program(&self, window_id: WindowId, pane_id: PaneId) -> bool {
+    pub(super) fn pane_has_running_program(&self, window_id: WindowId, pane_id: PaneId) -> bool {
         self.windows
             .get(&window_id)
             .and_then(|state| state.surfaces.get(&pane_id))
             .is_some_and(surface_has_running_program)
     }
 
-    fn tab_running_program_count(&self, window_id: WindowId) -> usize {
+    pub(super) fn tab_running_program_count(&self, window_id: WindowId) -> usize {
         self.windows
             .get(&window_id)
             .map(|state| running_program_count(state.surfaces.values()))

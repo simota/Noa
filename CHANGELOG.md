@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- AppleScript now covers Ghostty 1.3's dictionary: `front window`,
+  `selected tab`, `focused terminal`, `pid`, `tty`, `terminals` elements,
+  `count`/`exists`, `close tab`/`close window`, `new surface configuration`
+  and `with configuration` (font size, working directory, command, initial
+  input, wait after command, environment variables), `new tab in <window>`,
+  `split <terminal> direction <dir>`, `perform action … on <terminal>`, and
+  `send key` / `send mouse button|position|scroll`. `new window`, `new tab` and
+  `split` return the object they create, usable in the very next statement.
+- Noa Extensions: a terminal's `contents`, `selection` and `scrollback` can be
+  read from AppleScript.
+- Terminal panes appear in the accessibility tree as text areas (value,
+  selected text, insertion line, frame, focus), so assistants that read the
+  AX tree can find and read every pane.
+
+### Changed
+
+- **Breaking (AppleScript):** `command` on `new window`/`new tab` now runs
+  instead of the shell, as in Ghostty; the terminal closes when it exits
+  unless `wait after command` is set. Previously it was typed into a shell.
+- **Breaking (AppleScript):** `count windows` counts logical windows (tab
+  groups) rather than native tabs, and tab ids are small per-process integers
+  instead of window-handle values.
+- **Breaking (AppleScript):** with Ghostty's `close tab` command in the
+  dictionary, `close tab 2 of window 1` no longer compiles; write
+  `close (tab 2 of window 1)` or `close tab (tab 2 of window 1)`.
+- Reading a terminal's scrollback tail (AppleScript `scrollback`,
+  `noa.getText` scrollback) renders each row once instead of twice.
+
 ## [0.3.0] - 2026-10-16
 
 ### Changed

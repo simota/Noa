@@ -1,10 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
 <!--
-  Noa AppleScript terminology (applescript spec, Ghostty 1.3-compatible).
-  Every four-char `code` here is mirrored in crates/noa-app/src/macos_applescript.rs
-  (module `codes`) and cross-checked by a unit test, so the dictionary and the
-  Apple Event dispatch can never silently drift.
+  Noa AppleScript terminology (applescript + agent-automation specs,
+  Ghostty 1.3-compatible). Every four-char `code` here is mirrored in
+  crates/noa-app/src/macos_applescript.rs (module `codes`) and cross-checked by
+  a unit test, so the dictionary and the Apple Event dispatch can never
+  silently drift. Terms Noa adopted from Ghostty after the first release keep
+  Ghostty's codes verbatim (agent-automation spec Appendix B).
 -->
 <dictionary title="Noa Terminology">
     <suite name="Standard Suite" code="core" description="Common terminology.">
@@ -15,6 +17,18 @@
         <command name="close" code="coreclos" description="Close a terminal, tab, or window.">
             <direct-parameter type="specifier" description="The object to close."/>
         </command>
+        <command name="count" code="corecnte" description="Return the number of elements of a particular class within an object.">
+            <direct-parameter type="specifier" requires-access="r" description="The objects to be counted."/>
+            <parameter name="each" code="kocl" type="type" optional="yes" hidden="yes" description="The class of objects to be counted.">
+                <cocoa key="ObjectClass"/>
+            </parameter>
+            <result type="integer" description="The count."/>
+        </command>
+        <command name="exists" code="coredoex" description="Verify that an object exists.">
+            <direct-parameter type="any" requires-access="r" description="The object(s) to check."/>
+            <result type="boolean" description="Did the object(s) exist?"/>
+        </command>
+        <command name="quit" code="aevtquit" description="Quit the application."/>
         <command name="activate" code="miscactv" description="Bring the app to the front."/>
     </suite>
 
@@ -26,55 +40,122 @@
             <enumerator name="up" code="up  "/>
         </enumeration>
 
+        <enumeration name="input action" code="GIAc">
+            <enumerator name="press" code="GIpr"/>
+            <enumerator name="release" code="GIrl"/>
+        </enumeration>
+
+        <enumeration name="mouse button" code="GMBt">
+            <enumerator name="left button" code="GMlf"/>
+            <enumerator name="right button" code="GMrt"/>
+            <enumerator name="middle button" code="GMmd"/>
+        </enumeration>
+
+        <enumeration name="scroll momentum" code="GSMo">
+            <enumerator name="none" code="SMno"/>
+            <enumerator name="began" code="SMbg"/>
+            <enumerator name="changed" code="SMch"/>
+            <enumerator name="ended" code="SMen"/>
+            <enumerator name="cancelled" code="SMcn"/>
+            <enumerator name="may begin" code="SMmb"/>
+            <enumerator name="stationary" code="SMst"/>
+        </enumeration>
+
+        <record-type name="surface configuration" code="GScf" description="Settings for a new terminal.">
+            <property name="font size" code="GScF" type="real" description="Font size in points (new windows and tabs only; a split keeps its tab's size)."/>
+            <property name="initial working directory" code="GScD" type="text" description="Initial working directory for the terminal process."/>
+            <property name="command" code="GScC" type="text" description="A command to run instead of the shell."/>
+            <property name="initial input" code="GScI" type="text" description="Text written to the terminal right after it starts."/>
+            <property name="wait after command" code="GScW" type="boolean" description="Keep the terminal open after its process exits."/>
+            <property name="environment variables" code="GScE" description="Environment variables in KEY=VALUE format.">
+                <type type="text" list="yes"/>
+            </property>
+        </record-type>
+
         <class name="application" code="capp" description="The Noa application." inherits="application">
             <cocoa class="NSApplication"/>
             <property name="name" code="pnam" type="text" access="r" description="The application's name."/>
             <property name="version" code="vers" type="text" access="r" description="The application's version."/>
             <property name="frontmost" code="pisf" type="boolean" access="r" description="Is the app frontmost?"/>
-            <element type="window"/>
+            <property name="front window" code="GFWn" type="window" access="r" description="The window holding the key (or last key) tab."/>
+            <element type="window" access="r"/>
+            <element type="terminal" access="r"/>
         </class>
 
-        <class name="window" code="cwin" description="A Noa logical window (tab group).">
+        <class name="window" code="cwin" plural="windows" description="A Noa logical window (tab group).">
             <property name="id" code="ID  " type="integer" access="r" description="A stable window id."/>
             <property name="name" code="pnam" type="text" access="r" description="The window's name."/>
             <property name="index" code="pidx" type="integer" access="r" description="The window's position."/>
-            <element type="tab"/>
+            <property name="selected tab" code="GWsT" type="tab" access="r" description="The window's selected tab."/>
+            <element type="tab" access="r"/>
+            <element type="terminal" access="r"/>
         </class>
 
-        <class name="tab" code="cTab" description="A native tab within a window.">
+        <class name="tab" code="cTab" plural="tabs" description="A native tab within a window.">
             <property name="id" code="ID  " type="integer" access="r" description="A stable tab id."/>
             <property name="name" code="pnam" type="text" access="r" description="The tab's name."/>
             <property name="index" code="pidx" type="integer" access="r" description="The tab's position."/>
-            <property name="selected" code="selc" type="boolean" access="r" description="Is the tab selected?"/>
-            <element type="terminal"/>
+            <property name="selected" code="selc" type="boolean" access="r" description="Is this the selected tab of its window?"/>
+            <property name="focused terminal" code="GTfT" type="terminal" access="r" description="The tab's focused terminal."/>
+            <element type="terminal" access="r"/>
         </class>
 
-        <class name="terminal" code="cTrm" description="A terminal split pane within a tab.">
+        <class name="terminal" code="cTrm" plural="terminals" description="A terminal split pane within a tab.">
             <property name="id" code="ID  " type="integer" access="r" description="A stable terminal id."/>
             <property name="name" code="pnam" type="text" access="r" description="The terminal's name."/>
             <property name="working directory" code="pwd " type="text" access="r" description="The shell's working directory."/>
+            <property name="pid" code="Gpid" type="integer" access="r" description="The process id of the terminal's direct child (usually the shell)."/>
+            <property name="tty" code="Gtty" type="text" access="r" description="The terminal's tty device path."/>
         </class>
 
         <command name="new window" code="noaXnwin" description="Open a new window.">
+            <parameter name="with configuration" code="GNwS" type="surface configuration" optional="yes" description="Settings for the new terminal.">
+                <cocoa key="configuration"/>
+            </parameter>
             <parameter name="initial working directory" code="iwd " type="text" optional="yes" description="Directory for the new terminal.">
                 <cocoa key="initialWorkingDirectory"/>
             </parameter>
-            <parameter name="command" code="cmd " type="text" optional="yes" description="A command to run in the new terminal.">
+            <parameter name="command" code="cmd " type="text" optional="yes" description="A command to run instead of the shell.">
                 <cocoa key="command"/>
             </parameter>
+            <result type="window" description="The new window."/>
         </command>
 
-        <command name="new tab" code="noaXntab" description="Open a new tab in the frontmost window.">
+        <command name="new tab" code="noaXntab" description="Open a new tab.">
+            <parameter name="in" code="GNtW" type="window" optional="yes" description="The window to open the tab in (defaults to the front window).">
+                <cocoa key="window"/>
+            </parameter>
+            <parameter name="with configuration" code="GNtS" type="surface configuration" optional="yes" description="Settings for the new terminal.">
+                <cocoa key="configuration"/>
+            </parameter>
             <parameter name="initial working directory" code="iwd " type="text" optional="yes" description="Directory for the new terminal.">
                 <cocoa key="initialWorkingDirectory"/>
             </parameter>
-            <parameter name="command" code="cmd " type="text" optional="yes" description="A command to run in the new terminal.">
+            <parameter name="command" code="cmd " type="text" optional="yes" description="A command to run instead of the shell.">
                 <cocoa key="command"/>
             </parameter>
+            <result type="tab" description="The new tab."/>
         </command>
 
-        <command name="split" code="noaXsplt" description="Split the focused terminal.">
-            <direct-parameter type="split direction" description="The direction to split."/>
+        <command name="new surface configuration" code="GhstNSCf" description="Create a surface configuration record.">
+            <parameter name="from" code="GScS" type="surface configuration" optional="yes" description="A configuration to copy.">
+                <cocoa key="source"/>
+            </parameter>
+            <result type="surface configuration" description="The configuration."/>
+        </command>
+
+        <command name="split" code="noaXsplt" description="Split a terminal.">
+            <direct-parameter description="The terminal to split, or a direction to split the focused terminal.">
+                <type type="specifier"/>
+                <type type="split direction"/>
+            </direct-parameter>
+            <parameter name="direction" code="GSpd" type="split direction" optional="yes" description="The direction to split (required when a terminal is given).">
+                <cocoa key="direction"/>
+            </parameter>
+            <parameter name="with configuration" code="GSpS" type="surface configuration" optional="yes" description="Settings for the new terminal.">
+                <cocoa key="configuration"/>
+            </parameter>
+            <result type="terminal" description="The new terminal."/>
         </command>
 
         <command name="focus" code="noaXfocs" description="Focus a terminal.">
@@ -89,15 +170,94 @@
             <direct-parameter type="specifier" description="The tab to select."/>
         </command>
 
-        <command name="input text" code="noaXinpt" description="Send text to a terminal.">
+        <command name="close tab" code="GhstClTb" description="Close a tab.">
+            <direct-parameter type="specifier" description="The tab to close."/>
+        </command>
+
+        <command name="close window" code="GhstClWn" description="Close a window.">
+            <direct-parameter type="specifier" description="The window to close."/>
+        </command>
+
+        <command name="input text" code="noaXinpt" description="Send text to a terminal, as a paste.">
             <direct-parameter type="text" description="The text to send."/>
             <parameter name="to" code="ttrg" type="specifier" optional="yes" description="The target terminal (defaults to the focused one).">
                 <cocoa key="target"/>
             </parameter>
         </command>
 
+        <command name="send key" code="GhstSKey" description="Send a keyboard event to a terminal. Keys are translated once through the current keyboard layout. Dead keys do not compose with subsequent keys.">
+            <direct-parameter type="text" description="The key name (e.g. &quot;enter&quot;, &quot;a&quot;, &quot;space&quot;)."/>
+            <parameter name="action" code="GKeA" type="input action" optional="yes" description="Press or release (default: press).">
+                <cocoa key="action"/>
+            </parameter>
+            <parameter name="modifiers" code="GKeM" type="text" optional="yes" description="Comma-separated modifier keys: shift, control, option, command.">
+                <cocoa key="modifiers"/>
+            </parameter>
+            <parameter name="to" code="GKeT" type="terminal" optional="yes" description="The terminal to send the key event to (defaults to the focused one).">
+                <cocoa key="terminal"/>
+            </parameter>
+        </command>
+
+        <command name="send mouse button" code="GhstSMBt" description="Send a mouse button event to a terminal.">
+            <direct-parameter type="mouse button" description="The mouse button."/>
+            <parameter name="action" code="GMbA" type="input action" optional="yes" description="Press or release (default: press).">
+                <cocoa key="action"/>
+            </parameter>
+            <parameter name="modifiers" code="GMbM" type="text" optional="yes" description="Comma-separated modifier keys: shift, control, option, command.">
+                <cocoa key="modifiers"/>
+            </parameter>
+            <parameter name="to" code="GMbT" type="terminal" optional="yes" description="The terminal to send the event to (defaults to the focused one).">
+                <cocoa key="terminal"/>
+            </parameter>
+        </command>
+
+        <command name="send mouse position" code="GhstSMPs" description="Move the terminal's mouse position (the system pointer does not move).">
+            <parameter name="x" code="GMpX" type="real" description="Horizontal position in points from the terminal's left edge.">
+                <cocoa key="x"/>
+            </parameter>
+            <parameter name="y" code="GMpY" type="real" description="Vertical position in points from the terminal's top edge.">
+                <cocoa key="y"/>
+            </parameter>
+            <parameter name="modifiers" code="GMpM" type="text" optional="yes" description="Comma-separated modifier keys: shift, control, option, command.">
+                <cocoa key="modifiers"/>
+            </parameter>
+            <parameter name="to" code="GMpT" type="terminal" optional="yes" description="The terminal to send the event to (defaults to the focused one).">
+                <cocoa key="terminal"/>
+            </parameter>
+        </command>
+
+        <command name="send mouse scroll" code="GhstSMSc" description="Send a mouse scroll event to a terminal.">
+            <parameter name="x" code="GMsX" type="real" description="Horizontal scroll delta.">
+                <cocoa key="x"/>
+            </parameter>
+            <parameter name="y" code="GMsY" type="real" description="Vertical scroll delta; positive scrolls up. Wheel notches unless precision is true, then points.">
+                <cocoa key="y"/>
+            </parameter>
+            <parameter name="precision" code="GMsP" type="boolean" optional="yes" description="High-precision scroll (e.g. trackpad). Default: false.">
+                <cocoa key="precision"/>
+            </parameter>
+            <parameter name="momentum" code="GMsM" type="scroll momentum" optional="yes" description="Momentum phase for inertial scrolling. Accepted for compatibility; Noa's scrolling does not use it. Default: none.">
+                <cocoa key="momentum"/>
+            </parameter>
+            <parameter name="to" code="GMsT" type="terminal" optional="yes" description="The terminal to send the event to (defaults to the focused one).">
+                <cocoa key="terminal"/>
+            </parameter>
+        </command>
+
         <command name="perform action" code="noaXpact" description="Perform a named Noa action.">
             <direct-parameter type="text" description="The action name."/>
+            <parameter name="on" code="GonT" type="terminal" optional="yes" description="The terminal to perform it on (defaults to the focused one).">
+                <cocoa key="terminal"/>
+            </parameter>
+            <result type="boolean" description="True when the action was performed."/>
         </command>
+    </suite>
+
+    <suite name="Noa Extensions" code="noaE" description="Noa-specific terms beyond Ghostty's dictionary.">
+        <class-extension extends="terminal" description="Reading a terminal's text.">
+            <property name="contents" code="NEct" type="text" access="r" description="The text currently visible in the terminal."/>
+            <property name="selection" code="NEsl" type="text" access="r" description="The selected text (empty when nothing is selected)."/>
+            <property name="scrollback" code="NEsb" type="text" access="r" description="The last 256 KiB of the terminal's history, screen included."/>
+        </class-extension>
     </suite>
 </dictionary>

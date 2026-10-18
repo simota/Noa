@@ -108,6 +108,43 @@ pub(crate) fn set_native_tab_title(window: &Window, title: &str) {
     }
 }
 
+/// Make `window` key and order it front *within* the app, without activating
+/// the app (agent-automation ASSUME-6: a scripted `new window`/`new tab` must
+/// not steal focus from the scripting app). winit's `focus_window` always
+/// activates. Falls back to `focus_window` off macOS or when the NSWindow
+/// can't be reached.
+pub(crate) fn make_key_without_activating(window: &Window) {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        // SAFETY: main (window-owning) thread; the NSWindow is live and owned
+        // by winit; every pointer is nil-checked before messaging.
+        let done = unsafe {
+            (|| {
+                let handle = window.window_handle().ok()?;
+                let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+                    return None;
+                };
+                let ns_view = appkit.ns_view.as_ptr().cast::<AnyObject>();
+                let ns_window: *mut AnyObject = msg_send![ns_view, window];
+                if ns_window.is_null() {
+                    return None;
+                }
+                let _: () =
+                    msg_send![ns_window, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
+                Some(())
+            })()
+        };
+        if done.is_some() {
+            return;
+        }
+    }
+    window.focus_window();
+}
+
 /// Whether `window` is the selected (front) tab of its native tab group. A
 /// window with no tab group is trivially selected. `None` when the live
 /// NSWindow can't be reached, or on non-macOS platforms.

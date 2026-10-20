@@ -213,8 +213,9 @@ Notes:
 
 `bin/ember` (`cargo run -p ember`) is a local noa-server client that lives in
 the macOS menu bar. It pairs with the server described in this runbook: it
-reads `server-enable`, `server-port` and `server-token` (or the token file)
-from the same config, connects to `ws://127.0.0.1:<port>/`, and requests
+reads `server-enable`, `server-bind`, `server-port` and `server-token` (or
+the token file) from the same config, connects to `server-bind` (a wildcard
+bind via the matching loopback, `127.0.0.1` or `::1`), and requests
 `read` + `control`. The reason for `control` is stated in one line, both at
 pairing (log) and in the menu when it is missing: *Ember asks for control only
 to jump to the pane you pick.*
@@ -226,6 +227,9 @@ to jump to the pane you pick.*
 - Picking a row activates noa (`com.simota.noa`) and calls `noa.focusPane`.
   With `server-scopes = read` the rows are listed but disabled.
 - Output text (`preview`) is never shown in the list.
+- Pane ids are tied to `serverInstanceId`: after noa restarts, `done.` state
+  is dropped and a click on a row from a menu built before the restart is
+  ignored rather than focusing whichever new pane reuses that id.
 - `Pause Ember` drops the connection until resumed; the badge beside the
   ghost counts `waiting.` panes.
 

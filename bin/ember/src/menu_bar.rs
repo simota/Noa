@@ -2,7 +2,7 @@
 //! rebuilt from the latest [`Snapshot`] only as it opens. While it is open
 //! nothing touches it, so the row you are reaching for never moves.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use crossbeam_channel::Sender;
 use objc2::rc::{Allocated, Retained};
@@ -37,6 +37,8 @@ struct Ivars {
     menu_open: Cell<bool>,
     paused: Cell<bool>,
     badge: Cell<usize>,
+    /// Server instance of the rows currently in the menu.
+    menu_instance: RefCell<String>,
 }
 
 define_class!(
@@ -76,7 +78,8 @@ define_class!(
         fn jump(&self, sender: &AnyObject) {
             let tag: isize = unsafe { msg_send![sender, tag] };
             activate_noa();
-            let _ = self.ivars().commands.send(Command::Focus(tag as u64));
+            let instance = self.ivars().menu_instance.borrow().clone();
+            let _ = self.ivars().commands.send(Command::Focus { pane: tag as u64, instance });
         }
 
         #[unsafe(method(openNoa:))]
@@ -139,6 +142,7 @@ impl Delegate {
             menu_open: Cell::new(false),
             paused: Cell::new(false),
             badge: Cell::new(0),
+            menu_instance: RefCell::new(String::new()),
         });
         unsafe { msg_send![super(allocated), init] }
     }
@@ -169,6 +173,9 @@ impl Delegate {
     }
 
     fn rebuild(&self, menu: &AnyObject, snapshot: &Snapshot) {
+        self.ivars()
+            .menu_instance
+            .replace(snapshot.instance.clone());
         unsafe {
             let _: () = msg_send![menu, removeAllItems];
         }
@@ -449,7 +456,11 @@ mod tests {
     /// each selector's argument/return encoding at runtime).
     fn build(link: Link, rows: Vec<PaneRow>) -> Vec<(String, bool, isize)> {
         let (commands, _rx) = crossbeam_channel::unbounded();
-        let shared: Shared = std::sync::Arc::new(parking_lot::Mutex::new(Snapshot { link, rows }));
+        let shared: Shared = std::sync::Arc::new(parking_lot::Mutex::new(Snapshot {
+            link,
+            rows,
+            instance: String::new(),
+        }));
         unsafe {
             let menu: Retained<AnyObject> =
                 msg_send![alloc("NSMenu"), initWithTitle: &*ns("Ember")];

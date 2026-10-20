@@ -33,6 +33,7 @@ struct TestBackend {
     detach_event: Sender<()>,
     detach_rx: Receiver<()>,
     resizes: Mutex<Vec<(PaneRef, u16, u16)>>,
+    focused: Mutex<Vec<PaneRef>>,
     resize_event: Sender<()>,
     resize_rx: Receiver<()>,
     /// When set, `open_attach` reports that it started and then blocks until
@@ -56,6 +57,7 @@ impl TestBackend {
             detach_event,
             detach_rx,
             resizes: Mutex::new(Vec::new()),
+            focused: Mutex::new(Vec::new()),
             resize_event,
             resize_rx,
             open_gate: Mutex::new(None),
@@ -120,8 +122,9 @@ impl IpcBackend for TestBackend {
         Err(IpcError::Unsupported("send_text"))
     }
 
-    fn focus_pane(&self, _pane: PaneRef) -> Result<(), IpcError> {
-        Err(IpcError::Unsupported("focus_pane"))
+    fn focus_pane(&self, pane: PaneRef) -> Result<(), IpcError> {
+        self.focused.lock().unwrap().push(pane);
+        Ok(())
     }
 
     fn new_tab(&self, window: Option<WindowRef>) -> Result<PaneRef, IpcError> {
@@ -718,6 +721,32 @@ fn first_binary_token_is_secret_safe_one_time_and_mismatch_closes_1008() {
     };
     assert_eq!(frame.code, CloseCode::Policy);
     assert_eq!(frame.reason, ATTACH_HANDSHAKE_CLOSE_REASON);
+}
+
+#[test]
+fn typed_client_focus_pane_requires_control_scope() {
+    let (backend, handle) = start(ScopeSet::from_strings(["read", "control"]));
+    let control_url = format!("ws://127.0.0.1:{}/", handle.port());
+    let mut control = Client::connect(
+        &control_url,
+        "control-token",
+        ScopeSet::from_strings(["read", "control"]),
+    )
+    .unwrap();
+    control.focus_pane(1).unwrap();
+    assert_eq!(*backend.focused.lock().unwrap(), vec![1]);
+
+    let mut read_only = Client::connect(
+        &control_url,
+        "control-token",
+        ScopeSet::from_strings(["read"]),
+    )
+    .unwrap();
+    assert!(matches!(
+        read_only.focus_pane(1),
+        Err(noa_ipc::ClientError::Rpc { code: -32003, .. })
+    ));
+    assert_eq!(backend.focused.lock().unwrap().len(), 1);
 }
 
 #[test]

@@ -138,6 +138,12 @@ impl Client {
         )
     }
 
+    pub fn focus_pane(&mut self, pane: u64) -> Result<(), ClientError> {
+        let _: OkResult =
+            self.request("noa.focusPane", serde_json::json!({ "paneId": WireId(pane) }))?;
+        Ok(())
+    }
+
     pub fn new_tab(&mut self, window: Option<u64>) -> Result<u64, ClientError> {
         let result: PaneIdResult = self.request(
             "noa.newTab",

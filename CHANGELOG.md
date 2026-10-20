@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Ember, a menu bar companion (`cargo run -p ember`): click the ghost to see
+  every pane ordered by what needs you first — `waiting.` (attention), then
+  `running…`, `idle`, `done.` — with name · process over branch · cwd; pick a
+  row to jump there via `noa.focusPane`. The order is frozen while the menu is
+  open. Needs `server-enable = true`; jumping needs `control` in
+  `server-scopes` (the list still works with `read` alone).
 - AppleScript now covers Ghostty 1.3's dictionary: `front window`,
   `selected tab`, `focused terminal`, `pid`, `tty`, `terminals` elements,
   `count`/`exists`, `close tab`/`close window`, `new surface configuration`

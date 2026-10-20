@@ -209,6 +209,26 @@ Notes:
   closes it — and any running process — without confirmation, so validate the target id on the
   automation side before calling it.
 
+### Ember (menu bar pane list)
+
+`bin/ember` (`cargo run -p ember`) is a local noa-server client that lives in
+the macOS menu bar. It pairs with the server described in this runbook: it
+reads `server-enable`, `server-port` and `server-token` (or the token file)
+from the same config, connects to `ws://127.0.0.1:<port>/`, and requests
+`read` + `control`. The reason for `control` is stated in one line, both at
+pairing (log) and in the menu when it is missing: *Ember asks for control only
+to jump to the pane you pick.*
+
+- The list polls `noa.listPanels` every 1.5 s and is ordered `waiting.`
+  (attention) → `running…` (busy) → `idle` → `done.` (was busy, now quiet;
+  cleared when it runs again or you jump to it). Ties keep the sidebar order.
+- The menu is rebuilt only as it opens; rows never move while it is open.
+- Picking a row activates noa (`com.simota.noa`) and calls `noa.focusPane`.
+  With `server-scopes = read` the rows are listed but disabled.
+- Output text (`preview`) is never shown in the list.
+- `Pause Ember` drops the connection until resumed; the badge beside the
+  ghost counts `waiting.` panes.
+
 ## 7. Troubleshooting
 
 | Symptom | Check |

@@ -1,0 +1,23 @@
+[package]
+name = "ember"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "Ember"
+path = "src/main.rs"
+
+[dependencies]
+noa-ipc.workspace = true
+noa-config.workspace = true
+crossbeam-channel.workspace = true
+parking_lot.workspace = true
+png.workspace = true
+log.workspace = true
+env_logger.workspace = true
+dirs.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSData", "NSGeometry", "NSRange"] }

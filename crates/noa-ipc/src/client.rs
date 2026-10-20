@@ -139,8 +139,10 @@ impl Client {
     }
 
     pub fn focus_pane(&mut self, pane: u64) -> Result<(), ClientError> {
-        let _: OkResult =
-            self.request("noa.focusPane", serde_json::json!({ "paneId": WireId(pane) }))?;
+        let _: OkResult = self.request(
+            "noa.focusPane",
+            serde_json::json!({ "paneId": WireId(pane) }),
+        )?;
         Ok(())
     }
 

@@ -736,8 +736,12 @@ fn typed_client_focus_pane_requires_control_scope() {
     control.focus_pane(1).unwrap();
     assert_eq!(*backend.focused.lock().unwrap(), vec![1]);
 
-    let mut read_only =
-        Client::connect(&control_url, "control-token", ScopeSet::from_strings(["read"])).unwrap();
+    let mut read_only = Client::connect(
+        &control_url,
+        "control-token",
+        ScopeSet::from_strings(["read"]),
+    )
+    .unwrap();
     assert!(matches!(
         read_only.focus_pane(1),
         Err(noa_ipc::ClientError::Rpc { code: -32003, .. })

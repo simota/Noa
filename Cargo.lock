@@ -773,7 +773,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "drain-staircase"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "crossbeam-channel",
  "libc",
@@ -798,7 +798,7 @@ dependencies = [
 
 [[package]]
 name = "ember"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "crossbeam-channel",
  "dirs",
@@ -1630,7 +1630,7 @@ dependencies = [
 
 [[package]]
 name = "noa"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1641,7 +1641,7 @@ dependencies = [
 
 [[package]]
 name = "noa-app"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1680,7 +1680,7 @@ dependencies = [
 
 [[package]]
 name = "noa-config"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1689,14 +1689,14 @@ dependencies = [
 
 [[package]]
 name = "noa-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bitflags 2.13.0",
 ]
 
 [[package]]
 name = "noa-font"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "core-foundation 0.9.4",
  "core-text",
@@ -1714,7 +1714,7 @@ dependencies = [
 
 [[package]]
 name = "noa-grid"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bitflags 2.13.0",
  "flate2",
@@ -1729,7 +1729,7 @@ dependencies = [
 
 [[package]]
 name = "noa-ipc"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "crossbeam-channel",
  "libc",
@@ -1744,7 +1744,7 @@ dependencies = [
 
 [[package]]
 name = "noa-parity"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "noa-core",
  "noa-grid",
@@ -1753,7 +1753,7 @@ dependencies = [
 
 [[package]]
 name = "noa-pty"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "crossbeam-channel",
  "libc",
@@ -1766,7 +1766,7 @@ dependencies = [
 
 [[package]]
 name = "noa-render"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1783,14 +1783,14 @@ dependencies = [
 
 [[package]]
 name = "noa-theme"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "noa-core",
 ]
 
 [[package]]
 name = "noa-vt"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "noa-core",
  "simdutf8",

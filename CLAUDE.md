@@ -22,6 +22,7 @@ cargo test -p noa-grid deferred  # one test by name substring
 cargo run -p noa-pty --example probe   # diagnose pty/shell spawn issues
 
 scripts/bundle-macos.sh          # → target/release/Noa.app (ad-hoc signed)
+scripts/package-linux.sh         # → target/release/Noa-<ver>-linux-<arch>.tar.gz (dist/linux/ assets)
 scripts/gen-icon.sh              # regenerate assets/noa.icns
 ```
 

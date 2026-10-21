@@ -2,7 +2,7 @@
 
 # Noa
 
-Noa is a GPU-accelerated terminal emulator for macOS, implemented independently
+Noa is a GPU-accelerated terminal emulator for macOS and Linux, implemented independently
 in Rust with `winit` and `wgpu`. It is built to be **the fastest terminal at
 swallowing output floods** — `cat huge.log`, build logs, CI streams — and aims
 for observable compatibility with [Ghostty](https://ghostty.org) while keeping
@@ -54,6 +54,53 @@ experience after download when the signing secrets are configured; without them
 the workflow falls back to ad-hoc signing. See
 [docs/release-signing.md](docs/release-signing.md) for the required secrets and
 local testing steps.
+
+## Linux
+
+Noa also builds and runs on Linux (X11 and Wayland). Ghostty's
+Linux (GTK) keybindings are the defaults — `ctrl+shift+c`/`ctrl+shift+v` copy and
+paste, `ctrl+shift+t` opens a tab, `ctrl+shift+p` opens the command palette.
+
+Build dependencies (Debian/Ubuntu names):
+
+```bash
+sudo apt install build-essential pkg-config libfontconfig1-dev libfreetype-dev \
+  libxkbcommon-dev libwayland-dev
+```
+
+At runtime Noa needs a Vulkan driver (Mesa or a vendor driver) or OpenGL ES as
+a fallback, and loads X11/Wayland and `libxkbcommon` dynamically. Fonts come
+from fontconfig: the default is the first installed of JetBrains Mono, DejaVu
+Sans Mono, Noto Sans Mono, Ubuntu Mono, and Liberation Mono (then the generic
+`monospace` alias), with fontconfig fallback for CJK, emoji, and symbols.
+
+To build a tarball with the desktop entry, AppStream metadata, and icons, and
+install it into `~/.local` (or any prefix):
+
+```bash
+scripts/package-linux.sh
+tar -xzf target/release/Noa-*-linux-*.tar.gz -C /tmp
+/tmp/Noa-*-linux-*/install.sh                  # or: --prefix /usr/local
+/tmp/Noa-*-linux-*/install.sh --uninstall      # remove again
+```
+
+Tagged releases also publish `Noa-<version>-linux-x86_64.tar.gz` with the same
+layout. The window's Wayland app id / X11 `WM_CLASS` is `com.simota.noa`.
+
+Desktop integration uses standard tools: clipboard and the PRIMARY selection
+(`copy-on-select`, middle-click paste), `xdg-open` for links and files,
+`notify-send` for desktop notifications, and `canberra-gtk-play` (when
+installed) for the audible bell. Linux limitations compared to macOS:
+
+- `quick-terminal-hotkey` is not registered system-wide (Wayland offers no
+  global-shortcut API to applications); a `toggle_quick_terminal` keybinding works
+  while a Noa window is focused.
+- macOS-only integrations are absent: the menu bar and Ember, AppleScript,
+  Dock badges, background blur, and the native AppKit overlay cards (the
+  command palette and dialogs are drawn by the GPU renderer instead).
+- File previews open in your editor instead of a native text panel.
+- Encrypted scrollback persistence needs the macOS Keychain, so restored
+  sessions come back without their scrollback.
 
 ## Releasing
 
@@ -165,7 +212,8 @@ Noa is an independent reimplementation and does not include or link Ghostty
 source code. Compatibility work focuses on observable terminal behavior rather
 than source-level equivalence.
 
-- The application and packaging workflow are macOS-first.
+- The application is macOS-first; Linux is supported with the limitations
+  listed under [Linux](#linux).
 - Current parity protection is fixture-based; the automated Ghostty oracle is
   not implemented yet.
 - Some advanced terminal behavior may still differ from Ghostty.

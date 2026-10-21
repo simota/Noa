@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Noa
+GenericName=Terminal
+Comment=GPU-accelerated terminal emulator written in Rust
+Exec=Noa
+Icon=com.simota.noa
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;prompt;command;commandline;cmd;
+StartupNotify=true
+StartupWMClass=com.simota.noa
+X-TerminalArgExec=-e

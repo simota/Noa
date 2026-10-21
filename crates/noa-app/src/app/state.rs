@@ -375,6 +375,7 @@ pub(super) struct WindowState {
     /// Last-synced native (AppKit) overlay model hashes — palette, theme
     /// settings, confirm dialog, toast. Plain data on every platform; only
     /// the macOS redraw path feeds it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(super) native_overlays: crate::macos_overlay::NativeOverlayCache,
     /// The `(theme bg, opacity bits)` last applied via
     /// `set_window_background_color`, so `redraw` only touches the NSWindow
@@ -382,6 +383,7 @@ pub(super) struct WindowState {
     /// free: each `setBackgroundColor:` dirties the window's backdrop layer,
     /// dragging a full AppKit layout + CA commit into every cursor-blink
     /// frame (measured as the largest single main-thread idle cost).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(super) applied_window_bg: Option<(noa_core::Rgb, u32)>,
     /// Last time this window's pane cache was refreshed while occluded (tab
     /// switch stall fix). `None` means no background refresh has run yet

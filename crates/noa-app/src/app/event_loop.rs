@@ -217,7 +217,7 @@ impl ApplicationHandler<UserEvent> for App {
                             && crate::notification::should_notify(self.os_focused, window_id)
                             && !self.agent_bell_will_bounce_dock(*id)
                         {
-                            crate::notification::bounce_dock();
+                            self.request_window_attention(window_id);
                         }
                     }
                     // `visual-bell`: BEL flashes its window briefly (the
@@ -303,6 +303,10 @@ impl ApplicationHandler<UserEvent> for App {
                 };
                 if crate::notification::should_notify(self.os_focused, window_id) {
                     crate::notification::post_notification(title.as_deref(), &body);
+                    // macOS's post already bounced the Dock; elsewhere mark
+                    // the window urgent so the taskbar/dock highlights it.
+                    #[cfg(not(target_os = "macos"))]
+                    self.request_window_attention(window_id);
                 }
                 // Desktop alerts are window-scoped; unread state is pane-scoped.
                 self.apply_session_delta(crate::session_store::SessionDelta::Attention {
@@ -1230,6 +1234,23 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 impl App {
+    /// Ask the desktop to draw the user's eye to `window_id` once: a single
+    /// Dock bounce on macOS, the window's urgency hint (taskbar/dock
+    /// highlight, cleared on focus) on X11/Wayland.
+    pub(super) fn request_window_attention(&self, window_id: WindowId) {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = window_id;
+            crate::notification::bounce_dock();
+        }
+        #[cfg(not(target_os = "macos"))]
+        if let Some(state) = self.windows.get(&window_id) {
+            state
+                .window
+                .request_user_attention(Some(winit::window::UserAttentionType::Informational));
+        }
+    }
+
     fn agent_bell_will_bounce_dock(&self, id: SessionCardId) -> bool {
         let window_id = WindowId::from(id.window_id.0);
         self.os_focused != Some(window_id)
@@ -1833,6 +1854,13 @@ impl App {
             return;
         }
 
+        if button == MouseButton::Middle {
+            if state == ElementState::Pressed {
+                self.focus_pane(window_id, pane_id);
+                self.paste_primary_selection_to_pane(window_id, pane_id);
+            }
+            return;
+        }
         if button != MouseButton::Left {
             return;
         }
@@ -1857,8 +1885,11 @@ impl App {
             })
             .unwrap_or(SelectionGesture::None);
         self.apply_selection_gesture(window_id, pane_id, gesture);
-        if state == ElementState::Released && scripted.is_none() {
-            self.release_mouse_capture(window_id);
+        if state == ElementState::Released {
+            self.copy_selection_on_select(window_id, pane_id);
+            if scripted.is_none() {
+                self.release_mouse_capture(window_id);
+            }
         }
     }
 

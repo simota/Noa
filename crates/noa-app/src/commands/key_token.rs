@@ -55,7 +55,7 @@ impl std::fmt::Display for KeyTrigger {
     /// through [`KeyTrigger::parse`].
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.mods.super_key {
-            f.write_str("cmd+")?;
+            f.write_str(SUPER_TOKEN)?;
         }
         if self.mods.control {
             f.write_str("ctrl+")?;
@@ -69,6 +69,14 @@ impl std::fmt::Display for KeyTrigger {
         write!(f, "{}", self.key)
     }
 }
+
+/// How the Super/Command modifier is spelled when a chord is rendered (the
+/// palette's keybind hints, `+list-keybinds`): `cmd` on macOS, `super` on
+/// Linux, where there is no Command key. Both spellings parse everywhere.
+#[cfg(target_os = "macos")]
+const SUPER_TOKEN: &str = "cmd+";
+#[cfg(not(target_os = "macos"))]
+const SUPER_TOKEN: &str = "super+";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct TriggerMods {
@@ -134,7 +142,17 @@ impl KeyToken {
             "tab" => NamedKeyToken::Tab,
             "space" => NamedKeyToken::Space,
             "escape" | "esc" => NamedKeyToken::Escape,
-            _ => return Err(KeybindParseError::UnknownKey(token.to_string())),
+            "insert" => NamedKeyToken::Insert,
+            "delete" => NamedKeyToken::Delete,
+            "backspace" => NamedKeyToken::Backspace,
+            _ => match token
+                .strip_prefix('f')
+                .and_then(|n| n.parse::<u8>().ok())
+                .filter(|n| (1..=12).contains(n))
+            {
+                Some(n) => NamedKeyToken::F(n),
+                None => return Err(KeybindParseError::UnknownKey(token.to_string())),
+            },
         }))
     }
 
@@ -213,12 +231,20 @@ enum NamedKeyToken {
     Tab,
     Space,
     Escape,
+    Insert,
+    Delete,
+    Backspace,
+    /// F1–F12.
+    F(u8),
 }
 
 impl NamedKeyToken {
     /// The canonical chord token for this key, matching a name
     /// [`KeyToken::parse`] accepts (so [`KeyTrigger`]'s `Display` round-trips).
     fn as_str(self) -> &'static str {
+        const FUNCTION_KEYS: [&str; 12] = [
+            "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+        ];
         match self {
             Self::ArrowUp => "arrowup",
             Self::ArrowDown => "arrowdown",
@@ -232,10 +258,31 @@ impl NamedKeyToken {
             Self::Tab => "tab",
             Self::Space => "space",
             Self::Escape => "escape",
+            Self::Insert => "insert",
+            Self::Delete => "delete",
+            Self::Backspace => "backspace",
+            Self::F(n) => FUNCTION_KEYS[usize::from(n.clamp(1, 12)) - 1],
         }
     }
 
     fn matches(self, key: NamedKey) -> bool {
+        if let Self::F(n) = self {
+            const FUNCTION_KEYS: [NamedKey; 12] = [
+                NamedKey::F1,
+                NamedKey::F2,
+                NamedKey::F3,
+                NamedKey::F4,
+                NamedKey::F5,
+                NamedKey::F6,
+                NamedKey::F7,
+                NamedKey::F8,
+                NamedKey::F9,
+                NamedKey::F10,
+                NamedKey::F11,
+                NamedKey::F12,
+            ];
+            return FUNCTION_KEYS.get(usize::from(n).wrapping_sub(1)) == Some(&key);
+        }
         matches!(
             (self, key),
             (Self::ArrowUp, NamedKey::ArrowUp)
@@ -250,6 +297,9 @@ impl NamedKeyToken {
                 | (Self::Tab, NamedKey::Tab)
                 | (Self::Space, NamedKey::Space)
                 | (Self::Escape, NamedKey::Escape)
+                | (Self::Insert, NamedKey::Insert)
+                | (Self::Delete, NamedKey::Delete)
+                | (Self::Backspace, NamedKey::Backspace)
         )
     }
 }

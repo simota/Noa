@@ -373,8 +373,8 @@ fn terminal_with_scrollback(grid_size: GridSize) -> Terminal {
 
 #[test]
 fn font_pixel_size_scales_logical_points() {
-    assert_eq!(font_pixel_size(14.0, 1.0), 14.0);
-    assert_eq!(font_pixel_size(14.0, 2.0), 28.0);
+    assert_eq!(font_pixel_size(14.0, 1.0), 14.0 * PIXELS_PER_POINT);
+    assert_eq!(font_pixel_size(14.0, 2.0), 28.0 * PIXELS_PER_POINT);
 }
 
 #[test]
@@ -1937,6 +1937,8 @@ fn fullscreen_toggle_is_app_scoped() {
     );
 }
 
+// Asserts the macOS (Command-based) default chords.
+#[cfg(target_os = "macos")]
 #[test]
 fn command_palette_snapshot_reflects_query_selection_and_keybinds() {
     // AC-18: the render payload mirrors the session (query / grouped rows /
@@ -1981,6 +1983,8 @@ fn command_palette_snapshot_reflects_query_selection_and_keybinds() {
     );
 }
 
+// Asserts the macOS (Command-based) default chords.
+#[cfg(target_os = "macos")]
 #[test]
 fn command_palette_snapshot_marks_unavailable_commands_disabled() {
     use noa_render::PaletteRow;

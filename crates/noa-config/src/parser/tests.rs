@@ -436,6 +436,23 @@ fn clipboard_read_invalid_value_warns() {
 }
 
 #[test]
+fn copy_on_select_parses_ghostty_values() {
+    for (value, expected) in [
+        ("true", crate::CopyOnSelect::True),
+        ("false", crate::CopyOnSelect::False),
+        ("clipboard", crate::CopyOnSelect::Clipboard),
+    ] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("copy-on-select = {value}"));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(overrides.copy_on_select, Some(expected));
+    }
+    let (overrides, diagnostics) = parse_overrides(path(), "copy-on-select = primary");
+    assert_eq!(overrides.copy_on_select, None);
+    assert_eq!(diagnostics.len(), 1);
+}
+
+#[test]
 fn clipboard_paste_protection_parses_bool() {
     let (overrides, diagnostics) = parse_overrides(path(), "clipboard-paste-protection = false");
 

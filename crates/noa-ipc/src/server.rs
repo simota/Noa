@@ -249,6 +249,13 @@ impl ServerHandle {
 #[cfg(unix)]
 fn force_close_listener(listener: &TcpListener) {
     use std::os::fd::AsRawFd;
+    // Linux is the mirror image of macOS: the blocked `accept(2)` holds its
+    // own file reference, so the dup2 below never wakes it, but `shutdown(2)`
+    // on a listening socket does (accept returns `EINVAL`).
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::shutdown(listener.as_raw_fd(), libc::SHUT_RDWR);
+    }
     match std::fs::File::open("/dev/null") {
         Ok(devnull) => {
             let rv = unsafe { libc::dup2(devnull.as_raw_fd(), listener.as_raw_fd()) };

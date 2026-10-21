@@ -6,6 +6,12 @@
 mod anim;
 mod app;
 mod app_actions;
+// macOS-native integration: off macOS these compile to no-op shims whose
+// helpers/view models are intentionally unused.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, unused_imports, unused_variables)
+)]
 mod applescript_keys;
 mod atomic_write;
 pub mod auto_approve;
@@ -26,13 +32,43 @@ mod ipc_bridge;
 mod latency_trace;
 mod link_open;
 mod localtime;
+// macOS-native integration: off macOS these compile to no-op shims whose
+// helpers/view models are intentionally unused.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, unused_imports, unused_variables)
+)]
 mod macos_accessibility;
+// macOS-native integration: off macOS these compile to no-op shims whose
+// helpers/view models are intentionally unused.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, unused_imports, unused_variables)
+)]
 mod macos_applescript;
 mod macos_blur;
+// macOS-native integration: off macOS these compile to no-op shims whose
+// helpers/view models are intentionally unused.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, unused_imports, unused_variables)
+)]
 mod macos_hotkey;
 #[cfg(target_os = "macos")]
 mod macos_menu;
+// macOS-native integration: off macOS these compile to no-op shims whose
+// helpers/view models are intentionally unused.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, unused_imports, unused_variables)
+)]
 mod macos_overlay;
+// macOS-native integration: off macOS these compile to no-op shims whose
+// helpers/view models are intentionally unused.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, unused_imports, unused_variables)
+)]
 mod macos_window;
 mod memory;
 mod mouse;
@@ -53,6 +89,12 @@ mod sidebar;
 pub mod split_tree;
 pub mod startup_trace;
 mod tab_switch_trace;
+// macOS-native integration: off macOS these compile to no-op shims whose
+// helpers/view models are intentionally unused.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, unused_imports, unused_variables)
+)]
 mod text_panel;
 mod theme;
 mod theme_favorites;

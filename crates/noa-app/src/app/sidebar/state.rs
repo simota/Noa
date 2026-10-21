@@ -222,7 +222,7 @@ impl App {
             .get(&id)
             .is_some_and(|card| card.attention);
         if !already && self.os_focused != Some(window_id) {
-            crate::notification::bounce_dock();
+            self.request_window_attention(window_id);
         }
         SessionDelta::Attention { id }
     }

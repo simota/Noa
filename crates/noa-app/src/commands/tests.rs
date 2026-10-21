@@ -68,6 +68,8 @@ fn stable_menu_ids_map_to_commands() {
     assert_eq!(AppCommand::from_menu_id("noa.app.unknown"), None);
 }
 
+// Asserts the macOS (Command-based) default chords.
+#[cfg(target_os = "macos")]
 #[test]
 fn cmd_characters_map_only_supported_shortcuts() {
     assert_eq!(AppCommand::from_cmd_character("q"), Some(AppCommand::Quit));
@@ -150,6 +152,8 @@ fn cmd_characters_map_only_supported_shortcuts() {
     assert_eq!(AppCommand::from_cmd_character(","), None);
 }
 
+// Asserts the macOS (Command-based) default chords.
+#[cfg(target_os = "macos")]
 #[test]
 fn find_action_is_addressable_and_bound_to_cmd_f() {
     let command = AppCommand::Search(SearchAction::Find);
@@ -256,6 +260,8 @@ fn copy_mode_actions_are_configurable_and_directional_defaults_are_rebindable() 
     );
 }
 
+// Asserts the macOS (Command-based) default chords.
+#[cfg(target_os = "macos")]
 #[test]
 fn split_shortcuts_map_to_pane_commands() {
     let directions = [
@@ -317,6 +323,8 @@ fn split_shortcuts_map_to_pane_commands() {
     );
 }
 
+// Asserts the macOS (Command-based) default chords.
+#[cfg(target_os = "macos")]
 #[test]
 fn new_window_binds_to_cmd_n_and_round_trips() {
     let command = AppCommand::NewWindow;
@@ -337,6 +345,8 @@ fn new_window_binds_to_cmd_n_and_round_trips() {
     );
 }
 
+// Asserts the macOS (Command-based) default chords.
+#[cfg(target_os = "macos")]
 #[test]
 fn close_window_binds_to_cmd_shift_w_distinct_from_close_tab() {
     // cmd+w closes the tab; cmd+shift+w closes the whole window.
@@ -353,6 +363,8 @@ fn close_window_binds_to_cmd_shift_w_distinct_from_close_tab() {
     );
 }
 
+// Asserts the macOS (Command-based) default chords.
+#[cfg(target_os = "macos")]
 #[test]
 fn tab_cycle_shortcuts_use_cmd_shift_brackets() {
     assert_eq!(
@@ -385,6 +397,8 @@ fn tab_cycle_shortcuts_use_cmd_shift_brackets() {
     );
 }
 
+// Asserts the macOS (Command-based) default chords.
+#[cfg(target_os = "macos")]
 #[test]
 fn command_palette_toggle_round_trips_and_binds_to_cmd_shift_p() {
     let command = AppCommand::ToggleCommandPalette;
@@ -405,6 +419,8 @@ fn command_palette_toggle_round_trips_and_binds_to_cmd_shift_p() {
     );
 }
 
+// Asserts the macOS (Command-based) default chords.
+#[cfg(target_os = "macos")]
 #[test]
 fn command_palette_binding_does_not_shadow_existing_cmd_shift_shortcuts() {
     // AC-2: adding cmd+shift+p leaves the other cmd+shift+* bindings intact.
@@ -434,6 +450,8 @@ fn command_palette_binding_does_not_shadow_existing_cmd_shift_shortcuts() {
     );
 }
 
+// Asserts the macOS (Command-based) default chords.
+#[cfg(target_os = "macos")]
 #[test]
 fn chord_for_reverse_maps_bound_commands_and_reports_none_for_unbound() {
     // AC-5 (engine layer): chord text round-trips modifier order.
@@ -644,6 +662,8 @@ fn keybind_parser_rejects_missing_or_unknown_key() {
         Err(KeybindParseError::UnknownKey(_))
     ));
 }
+// Asserts the macOS (Command-based) default chords.
+#[cfg(target_os = "macos")]
 #[test]
 fn agent_workflow_actions_round_trip_and_next_notification_has_a_shortcut() {
     for (action, command) in [
@@ -660,5 +680,129 @@ fn agent_workflow_actions_round_trip_and_next_notification_has_a_shortcut() {
             ModifiersState::SUPER | ModifiersState::SHIFT
         ),
         Some(AppCommand::NextNotification)
+    );
+}
+
+/// Ghostty's GTK default chords: Ctrl+Shift app commands, Alt+digit tabs,
+/// Ctrl+Alt+arrow split focus — and plain Ctrl chords left to the shell.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn linux_defaults_follow_ghostty_gtk_chords() {
+    let engine = KeybindEngine::default();
+    let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+    let ch = |c: &str| Key::Character(c.into());
+
+    assert_eq!(engine.resolve(&ch("C"), ctrl_shift), Some(AppCommand::Copy));
+    assert_eq!(
+        engine.resolve(&ch("V"), ctrl_shift),
+        Some(AppCommand::Paste)
+    );
+    assert_eq!(
+        engine.resolve(&ch("T"), ctrl_shift),
+        Some(AppCommand::NewTab)
+    );
+    assert_eq!(
+        engine.resolve(&ch("N"), ctrl_shift),
+        Some(AppCommand::NewWindow)
+    );
+    assert_eq!(
+        engine.resolve(&ch("W"), ctrl_shift),
+        Some(AppCommand::CloseTab)
+    );
+    assert_eq!(
+        engine.resolve(&ch("P"), ctrl_shift),
+        Some(AppCommand::ToggleCommandPalette)
+    );
+    assert_eq!(
+        engine.resolve(&ch("3"), ModifiersState::ALT),
+        Some(AppCommand::SelectTab(3))
+    );
+    assert_eq!(
+        engine.resolve(&Key::Named(NamedKey::PageDown), ModifiersState::CONTROL),
+        Some(AppCommand::NextTab)
+    );
+    assert_eq!(
+        engine.resolve(
+            &Key::Named(NamedKey::ArrowLeft),
+            ModifiersState::CONTROL | ModifiersState::ALT
+        ),
+        Some(AppCommand::FocusDirection(Direction::Left))
+    );
+    assert_eq!(
+        engine.resolve(&Key::Named(NamedKey::F4), ModifiersState::ALT),
+        Some(AppCommand::CloseWindow)
+    );
+    assert_eq!(
+        engine.resolve(&ch("="), ModifiersState::CONTROL),
+        Some(AppCommand::FontSize(FontSizeAction::Increase))
+    );
+    // The shifted keysym X11/Wayland report for ctrl+shift+, still reloads.
+    assert_eq!(
+        engine.resolve(&ch("<"), ctrl_shift),
+        Some(AppCommand::ReloadConfig)
+    );
+
+    // Plain Ctrl+letter is the shell's (^C, ^V, ^T, ^W …).
+    for letter in ["c", "v", "t", "w", "n", "p", "f"] {
+        assert_eq!(engine.resolve(&ch(letter), ModifiersState::CONTROL), None);
+    }
+    // Super is left to the desktop for everything but split resizing.
+    for (chord, _) in engine.list() {
+        assert!(
+            !chord.starts_with("super+") || chord.starts_with("super+ctrl+shift+"),
+            "{chord} would collide with desktop Super shortcuts"
+        );
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn linux_scratch_terminal_default_does_not_shadow_new_tab() {
+    let mut engine = KeybindEngine::default();
+    let diagnostics =
+        engine.apply_scratch_terminal_key(Some(noa_config::DEFAULT_SCRATCH_TERMINAL_KEY));
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+    assert_eq!(
+        engine.resolve(&Key::Character("T".into()), ctrl_shift),
+        Some(AppCommand::NewTab)
+    );
+    assert_eq!(
+        engine.resolve(&Key::Character("X".into()), ctrl_shift),
+        Some(AppCommand::ToggleScratchTerminal)
+    );
+}
+
+#[test]
+fn function_and_editing_keys_parse_and_round_trip() {
+    for chord in ["alt+f4", "f11", "shift+insert", "ctrl+delete", "backspace"] {
+        let binding = KeyBinding::parse(chord, AppCommand::ToggleFullscreen)
+            .unwrap_or_else(|err| panic!("{chord}: {err:?}"));
+        let (engine, diagnostics) = KeybindEngine::from_config_test(&[
+            noa_config::KeybindConfig::Clear,
+            noa_config::KeybindConfig::Bind {
+                trigger: chord.to_string(),
+                action: "toggle_fullscreen".to_string(),
+            },
+        ]);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(engine.bindings, vec![binding]);
+    }
+    assert!(KeyBinding::parse("f13", AppCommand::ToggleFullscreen).is_err());
+    assert!(KeyBinding::parse("f0", AppCommand::ToggleFullscreen).is_err());
+    let engine = KeybindEngine {
+        bindings: vec![KeyBinding::parse("f11", AppCommand::ToggleFullscreen).unwrap()],
+    };
+    assert_eq!(
+        engine.resolve(&Key::Named(NamedKey::F11), ModifiersState::empty()),
+        Some(AppCommand::ToggleFullscreen)
+    );
+    assert_eq!(
+        engine.resolve(&Key::Named(NamedKey::F12), ModifiersState::empty()),
+        None
+    );
+    assert_eq!(
+        engine.chord_for(AppCommand::ToggleFullscreen).as_deref(),
+        Some("f11")
     );
 }

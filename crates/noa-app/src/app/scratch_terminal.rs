@@ -126,6 +126,7 @@ pub(super) fn scratch_terminal_window_title(cwd: Option<&str>) -> String {
 /// badge (kaizen cycle 2) before tail-truncating — the badge is a
 /// fixed-width pill (unlike the OS window title above, which has no such
 /// constraint), so a deeply nested project path must be kept in check.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // native badge only
 const SCRATCH_TERMINAL_BADGE_CWD_MAX_CHARS: usize = 28;
 
 /// The scratch popup's persistent in-window identity badge text (kaizen
@@ -134,6 +135,7 @@ const SCRATCH_TERMINAL_BADGE_CWD_MAX_CHARS: usize = 28;
 /// path segment, prefixed with `…`) so the badge pill stays a reasonable
 /// width even for a deeply nested project. `cwd`/`home_dir` are both plain
 /// inputs (no filesystem access here) so this is fully unit-testable.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // native badge only
 pub(super) fn scratch_terminal_badge_label(cwd: Option<&str>, home_dir: Option<&str>) -> String {
     match cwd.filter(|c| !c.is_empty()) {
         Some(cwd) => {
@@ -148,6 +150,7 @@ pub(super) fn scratch_terminal_badge_label(cwd: Option<&str>, home_dir: Option<&
 /// Replace a leading `$HOME` path component with `~` (e.g. `/Users/simota` →
 /// `~`, `/Users/simota/repos/Noa` → `~/repos/Noa`) — a no-op when `home_dir`
 /// is `None`/empty or `path` isn't actually under it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // native badge only
 fn collapse_home_tilde(path: &str, home_dir: Option<&str>) -> String {
     let Some(home) = home_dir.filter(|h| !h.is_empty()) else {
         return path.to_string();
@@ -168,6 +171,7 @@ fn collapse_home_tilde(path: &str, home_dir: Option<&str>) -> String {
 /// `~/very/deeply/nested/project/dir` becomes `…ply/nested/project/dir`
 /// rather than losing the part that actually identifies the directory.
 /// A no-op when `path` already fits.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // native badge only
 fn truncate_path_tail(path: &str, max_chars: usize) -> String {
     let char_count = path.chars().count();
     if char_count <= max_chars || max_chars == 0 {
@@ -185,6 +189,7 @@ fn truncate_path_tail(path: &str, max_chars: usize) -> String {
 /// The viewer's home directory, resolved once and cached — mirrors
 /// `sidebar/model.rs`'s own `home_dir()` (kept separate rather than shared
 /// across modules for one three-line `OnceLock`).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // native badge only
 pub(super) fn scratch_terminal_home_dir() -> Option<&'static str> {
     static HOME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     HOME.get_or_init(|| std::env::var("HOME").ok()).as_deref()
@@ -277,7 +282,7 @@ impl App {
             (width, height),
         );
 
-        let attrs = WindowAttributes::default()
+        let attrs = with_desktop_app_id(WindowAttributes::default())
             .with_title(scratch_terminal_window_title(cwd.as_deref()))
             .with_decorations(false)
             .with_inner_size(PhysicalSize::new(width, height))

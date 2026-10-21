@@ -21,7 +21,9 @@ fn pty_event_channel() -> (Sender<PtyEvent>, Receiver<PtyEvent>) {
 pub struct PtyConfig {
     /// Initial terminal size in cells.
     pub size: GridSize,
-    /// Shell program to run. `None` uses `$SHELL`, falling back to `/bin/zsh`.
+    /// Shell program to run. `None` uses `$SHELL`, then the passwd entry's
+    /// login shell, then the platform default (`/bin/zsh` on macOS,
+    /// `/bin/sh` elsewhere).
     pub shell: Option<String>,
     /// Explicit command argv to run *instead of* the shell (the CLI `-e`
     /// flag). When set, `shell`, `login`, and `shell_integration` are all
@@ -103,8 +105,9 @@ impl Pty {
             let shell = config
                 .shell
                 .clone()
-                .or_else(|| std::env::var("SHELL").ok())
-                .unwrap_or_else(|| "/bin/zsh".to_string());
+                .or_else(|| std::env::var("SHELL").ok().filter(|s| !s.is_empty()))
+                .or_else(passwd_login_shell)
+                .unwrap_or_else(|| DEFAULT_SHELL.to_string());
 
             let mut cmd = CommandBuilder::new(&shell);
 
@@ -340,14 +343,14 @@ impl ForegroundProcessProbe {
     /// runtime wrappers (`bun`, `node`, …) are canonicalized only when their
     /// argv identifies a supported coding agent. `None` when there is no
     /// foreground group (the session ended) or on a platform without the query
-    /// (only macOS is implemented; NFR-5 graceful degradation).
+    /// (macOS and Linux are implemented; NFR-5 graceful degradation).
     pub fn poll(&self) -> Option<String> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             use std::os::fd::AsRawFd;
             foreground_process_name(self.fd.as_raw_fd())
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             None
         }
@@ -360,10 +363,10 @@ impl ForegroundProcessProbe {
     /// snapshot the caller captures once per tick and shares across every
     /// pane's probe (NFR-2) — this call makes no syscalls of its own beyond
     /// `tcgetpgrp` and one `proc_pid_rusage` per tree member. `None` when
-    /// there is no foreground group (session ended) or off macOS (FR-8,
-    /// AC-15).
+    /// there is no foreground group (session ended) or on a platform without
+    /// a process table query (FR-8, AC-15). Linux reads `/proc`.
     pub fn poll_metrics(&mut self, snap: &crate::ProcSnapshot) -> Option<crate::PaneMetrics> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             use std::os::fd::AsRawFd;
             let pgid = unsafe { libc::tcgetpgrp(self.fd.as_raw_fd()) };
@@ -418,15 +421,16 @@ impl ForegroundProcessProbe {
                 started_at,
             })
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
+            let _ = snap;
             None
         }
     }
 
     /// Drop the CPU-diff state back to first-sample semantics (no foreground
     /// group, an empty tree, or a foreground job switch).
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
     fn reset_cpu_diff(&mut self) {
         self.prev_pgid = None;
         self.prev_cpu_ns = None;
@@ -439,6 +443,34 @@ impl std::fmt::Debug for ForegroundProcessProbe {
         f.debug_struct("ForegroundProcessProbe")
             .finish_non_exhaustive()
     }
+}
+
+/// Last-resort shell when neither `$SHELL` nor the passwd entry names one.
+#[cfg(target_os = "macos")]
+const DEFAULT_SHELL: &str = "/bin/zsh";
+#[cfg(not(target_os = "macos"))]
+const DEFAULT_SHELL: &str = "/bin/sh";
+
+/// The current user's login shell from the passwd database (`pw_shell`) — a
+/// desktop-launched session (a `.desktop` file, a GNOME launcher) does not
+/// always export `$SHELL`.
+#[cfg(unix)]
+fn passwd_login_shell() -> Option<String> {
+    // SAFETY: `getpwuid` returns NULL or a pointer to static storage that
+    // stays valid until the next passwd call; the shell is copied out at once.
+    unsafe {
+        let entry = libc::getpwuid(libc::getuid());
+        if entry.is_null() || (*entry).pw_shell.is_null() {
+            return None;
+        }
+        let shell = std::ffi::CStr::from_ptr((*entry).pw_shell).to_str().ok()?;
+        (!shell.is_empty()).then(|| shell.to_string())
+    }
+}
+
+#[cfg(not(unix))]
+fn passwd_login_shell() -> Option<String> {
+    None
 }
 
 /// The foreground process name for `fd`'s tty (macOS): `tcgetpgrp` gives the
@@ -474,6 +506,40 @@ fn foreground_process_name(fd: std::os::fd::RawFd) -> Option<String> {
         None
     };
     Some(canonical_process_name(name, args.as_deref()))
+}
+
+/// The foreground process name for `fd`'s tty (Linux): `tcgetpgrp` gives the
+/// foreground process-group id, then `/proc/<pgid>/comm` names it.
+#[cfg(target_os = "linux")]
+fn foreground_process_name(fd: std::os::fd::RawFd) -> Option<String> {
+    // SAFETY: `fd` is a valid tty fd; `tcgetpgrp` returns -1 on error.
+    let pgid = unsafe { libc::tcgetpgrp(fd) };
+    if pgid <= 0 {
+        return None;
+    }
+    let comm = std::fs::read_to_string(format!("/proc/{pgid}/comm")).ok()?;
+    let name = comm.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let args = if wrapper_can_host_agent(name) {
+        foreground_process_args(pgid)
+    } else {
+        None
+    };
+    Some(canonical_process_name(name, args.as_deref()))
+}
+
+/// `/proc/<pid>/cmdline`: the argv, NUL-separated (and NUL-terminated).
+#[cfg(target_os = "linux")]
+fn foreground_process_args(pid: libc::pid_t) -> Option<Vec<String>> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let args: Vec<String> = raw
+        .split(|&b| b == 0)
+        .filter(|arg| !arg.is_empty())
+        .map(|arg| String::from_utf8_lossy(arg).into_owned())
+        .collect();
+    (!args.is_empty()).then_some(args)
 }
 
 #[cfg(target_os = "macos")]

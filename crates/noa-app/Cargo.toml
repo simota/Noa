@@ -51,3 +51,9 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSResponder",
     "NSView",
 ] }
+
+# Linux/BSD clipboard (CLIPBOARD + PRIMARY selections) over X11, and over
+# Wayland compositors that speak wlr-data-control; GNOME falls back to the
+# XWayland bridge. macOS talks to NSPasteboard directly (see clipboard.rs).
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }

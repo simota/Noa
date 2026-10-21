@@ -291,6 +291,17 @@ impl App {
             crate::chrome::select_palette(theme.is_light(), self.config.glassmorphism);
 
             let caps = surface.get_capabilities(&adapter);
+            // The adapter is picked before any window exists (prewarm), so on
+            // multi-GPU / mixed Vulkan+GL Linux systems it may be unable to
+            // present to this surface; `preferred_surface_format` would then
+            // index an empty format list.
+            if caps.formats.is_empty() {
+                gpu_init_fatal(
+                    &mut self.session_persister,
+                    "the GPU adapter cannot present to this window",
+                    adapter.get_info().name,
+                );
+            }
             let alpha_blending = alpha_blending_mode(&self.config.font);
 
             // If the window landed on a scale factor the monitor probe didn't
@@ -694,7 +705,7 @@ impl App {
         inner_size: LogicalSize<f64>,
         group: WindowGroupId,
     ) -> WindowAttributes {
-        let attrs = WindowAttributes::default()
+        let attrs = with_desktop_app_id(WindowAttributes::default())
             .with_title("Noa")
             .with_inner_size(inner_size)
             // A transparent window is required for `background-opacity` to

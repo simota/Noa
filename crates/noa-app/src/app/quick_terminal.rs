@@ -699,7 +699,7 @@ impl App {
         event_loop: &ActiveEventLoop,
         geometry: QuickTerminalGeometry,
     ) -> Option<WindowId> {
-        let attrs = WindowAttributes::default()
+        let attrs = with_desktop_app_id(WindowAttributes::default())
             .with_title("Quick Terminal")
             .with_decorations(false)
             .with_inner_size(PhysicalSize::new(geometry.width, geometry.height))

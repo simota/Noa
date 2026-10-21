@@ -261,6 +261,7 @@ pub(crate) fn spawn_reader(
 /// the child's refill gap so chunks stay near [`READ_CHUNK`]; interactive
 /// slivers are emitted on the first `EAGAIN`, preserving input latency.
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn drain_nonblocking(
     reader: &mut Box<dyn Read + Send>,
     fd: std::os::fd::OwnedFd,
@@ -369,6 +370,7 @@ fn drain_nonblocking(
 
 /// Legacy blocking-fd loop: one blocking read per chunk, with a
 /// poll-gated top-up while the consumer is measurably behind.
+#[allow(clippy::too_many_arguments)]
 fn drain_blocking(
     reader: &mut Box<dyn Read + Send>,
     #[cfg(unix)] poll_fd: Option<std::os::fd::OwnedFd>,

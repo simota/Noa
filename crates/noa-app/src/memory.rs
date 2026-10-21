@@ -29,6 +29,14 @@ pub(crate) fn release_reclaimable_memory() {
     unsafe {
         malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
     }
+    // glibc's equivalent: `malloc_trim(0)` releases free memory at the top of
+    // every arena and madvises free pages inside them (glibc >= 2.8).
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: `malloc_trim` only returns free blocks to the kernel; live
+    // allocations are untouched.
+    unsafe {
+        libc::malloc_trim(0);
+    }
 }
 
 #[cfg(target_os = "macos")]

@@ -424,6 +424,9 @@ pub(crate) fn keybind_symbols(chord: &str) -> String {
             other => key = keybind_key_symbol(other),
         }
     }
+    if !cfg!(target_os = "macos") {
+        return linux_keybind_label(ctrl, alt, shift, cmd, &key);
+    }
     let mut out = String::new();
     if ctrl {
         out.push('\u{2303}'); // ⌃
@@ -439,6 +442,23 @@ pub(crate) fn keybind_symbols(chord: &str) -> String {
     }
     out.push_str(&key);
     out
+}
+
+/// The GNOME/KDE convention for a shortcut label (`Ctrl+Shift+P`): the
+/// macOS ⌃⌥⇧⌘ glyphs mean nothing on a PC keyboard.
+fn linux_keybind_label(ctrl: bool, alt: bool, shift: bool, super_key: bool, key: &str) -> String {
+    let key = if key == "\u{23ce}" { "Enter" } else { key };
+    [
+        (ctrl, "Ctrl"),
+        (alt, "Alt"),
+        (shift, "Shift"),
+        (super_key, "Super"),
+    ]
+    .into_iter()
+    .filter_map(|(held, label)| held.then_some(label))
+    .chain(std::iter::once(key))
+    .collect::<Vec<_>>()
+    .join("+")
 }
 
 /// The display glyph/label for a chord's key token (E). A single character is
@@ -978,6 +998,20 @@ mod tests {
         ));
     }
 
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn keybind_symbols_render_pc_labels_off_macos() {
+        assert_eq!(keybind_symbols("ctrl+shift+p"), "Ctrl+Shift+P");
+        assert_eq!(
+            keybind_symbols("shift+super+ctrl+alt+k"),
+            "Ctrl+Alt+Shift+Super+K"
+        );
+        assert_eq!(keybind_symbols("ctrl+plus"), "Ctrl++");
+        assert_eq!(keybind_symbols("ctrl+shift+enter"), "Ctrl+Shift+Enter");
+        assert_eq!(keybind_symbols("ctrl+pageup"), "Ctrl+PgUp");
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
     fn keybind_symbols_render_macos_glyphs_in_canonical_order() {
         // E: modifiers reorder to ⌃⌥⇧⌘ and keys map to their symbols.
@@ -1002,6 +1036,8 @@ mod tests {
         assert_eq!(palette.selected_command(), None);
     }
 
+    // Asserts the macOS (Command-based) default chords.
+    #[cfg(target_os = "macos")]
     #[test]
     fn keybind_hints_reverse_lookup_from_the_engine() {
         // AC-5.

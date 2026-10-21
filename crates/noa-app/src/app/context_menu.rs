@@ -174,6 +174,10 @@ impl App {
                 .send_selection_picker
                 .as_ref()
                 .is_some_and(|session| session.window_id == window_id)
+            || self
+                .process_monitor
+                .as_ref()
+                .is_some_and(|session| session.window_id == window_id)
         {
             return;
         }

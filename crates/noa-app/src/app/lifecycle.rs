@@ -1132,6 +1132,16 @@ impl App {
     pub(super) fn request_close_tab(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId) {
         let count = self.tab_running_program_count(window_id);
         if count > 0 {
+            // Only the front tab of a shared OS window (off macOS) draws the
+            // dialog and receives its keys, so a background tab closed from
+            // the tab bar must come forward first.
+            if self
+                .windows
+                .get(&window_id)
+                .is_some_and(|state| state.background_tab)
+            {
+                self.focus_tab(window_id);
+            }
             self.open_confirm_dialog(
                 window_id,
                 close_confirm_message(CloseConfirmTarget::Session, count),

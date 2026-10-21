@@ -248,10 +248,7 @@ impl App {
             )
             && let Some(window_id) = group.get(saved.focused_tab).or_else(|| group.first())
         {
-            self.focused = Some(*window_id);
-            if let Some(target) = self.windows.get(window_id) {
-                target.window.clone().focus_window();
-            }
+            self.focus_tab(*window_id);
         }
     }
 

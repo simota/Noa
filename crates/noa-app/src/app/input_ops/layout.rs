@@ -16,7 +16,7 @@ impl App {
                 self.config.macos_titlebar_style,
                 state.window.scale_factor(),
             )
-        })
+        }) + self.tab_bar_height_px(window_id)
     }
 
     /// Physical left/right/bottom margin around the pane area — non-zero only

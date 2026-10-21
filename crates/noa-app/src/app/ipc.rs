@@ -305,11 +305,8 @@ impl App {
         match action {
             IpcActionKind::FocusPane { pane } => {
                 let (window_id, pane_id) = self.resolve_ipc_pane(pane)?;
-                self.focused = Some(window_id);
                 self.focus_pane(window_id, pane_id);
-                if let Some(window) = self.windows.get(&window_id).map(|s| s.window.clone()) {
-                    window.focus_window();
-                }
+                self.focus_tab(window_id);
                 Ok(IpcActionReply::Ok)
             }
             IpcActionKind::NewTab { window } => {

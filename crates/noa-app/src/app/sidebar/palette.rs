@@ -676,6 +676,123 @@ pub(in crate::app) fn draw_toast_card(
     );
 }
 
+/// `(horizontal padding, height)` in pixels of the in-window tab bar: one
+/// row of terminal cells padded like a modal card row.
+pub(in crate::app) fn tab_bar_geometry(metrics: noa_font::Metrics) -> (u32, u32) {
+    let (interior, block_px) = modal_block_geometry(metrics, 1, 1);
+    (interior.left as u32, block_px.h)
+}
+
+/// Paint the non-macOS in-window tab bar across the top of the surface,
+/// starting at `x` (right of the sidebar band). `titles` are the OS window's
+/// tabs in order; `active` is the one being drawn.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::app) fn draw_tab_bar(
+    gpu: &mut GpuState,
+    font_px: f32,
+    surface_format: wgpu::TextureFormat,
+    view: &wgpu::TextureView,
+    surface_size: PixelSize,
+    x: u32,
+    titles: &[String],
+    active: usize,
+) {
+    let metrics = gpu.fonts.get(font_px).metrics();
+    let (interior, _) = modal_block_geometry(metrics, 1, 1);
+    let (pad_x, height) = tab_bar_geometry(metrics);
+    let block_px = PixelSize {
+        w: surface_size.w.saturating_sub(x).max(1),
+        h: height,
+    };
+    let cols = super::super::linux_tabs::tab_bar_cols(block_px.w, pad_x, metrics.cell_w);
+    ensure_overlay_card_gpu(gpu, surface_format, interior, font_px);
+    if ensure_scratch(
+        &mut gpu.chrome_textures.tab_bar_scratch,
+        &gpu.device,
+        block_px,
+        surface_format,
+        "noa-tab-bar",
+    ) {
+        #[cfg(debug_assertions)]
+        gpu.chrome_textures.record_rebuild();
+    }
+    if gpu.palette_renderer.is_none()
+        || gpu.palette_card.is_none()
+        || gpu.chrome_textures.tab_bar_scratch.is_none()
+    {
+        return;
+    }
+
+    let theme = active_theme(&gpu.theme, &gpu.preview_theme);
+    let style = OverlayStyle::from_theme(theme);
+    {
+        let active_fg = rgb_from_rgba(style.surface_fg());
+        let active_bg = theme.default_bg;
+        let mut text = String::from("\x1b[?7l");
+        for (index, label) in super::super::linux_tabs::tab_bar_labels(titles, cols)
+            .iter()
+            .enumerate()
+        {
+            if index == active {
+                let _ = write!(
+                    text,
+                    "\x1b[1;38;2;{};{};{};48;2;{};{};{}m{label}\x1b[0m",
+                    active_fg.r, active_fg.g, active_fg.b, active_bg.r, active_bg.g, active_bg.b,
+                );
+            } else {
+                text.push_str(label);
+            }
+        }
+        let fg = rgb_from_rgba(style.muted_fg());
+        let bg = rgb_from_rgba(style.surface_bg());
+        let mut term = Terminal::new(GridSize::new(cols, 1));
+        term.set_base_colors(fg, bg, fg, theme.palette);
+        Stream::new().feed(text.as_bytes(), &mut term);
+        let mut snapshot = FrameSnapshot::from_terminal(&mut term);
+        snapshot.cursor.visible = false;
+        let scratch_view = &gpu.chrome_textures.tab_bar_scratch.as_ref().unwrap().2;
+        let renderer = gpu.palette_renderer.as_mut().unwrap();
+        renderer.resize(block_px);
+        renderer.rebuild_cells(
+            &snapshot,
+            gpu.fonts.get_mut(font_px),
+            active_theme(&gpu.theme, &gpu.preview_theme),
+        );
+        renderer.set_clear_color(style.surface_bg());
+        renderer.sync_atlas(&gpu.device, &gpu.queue, gpu.fonts.get_mut(font_px));
+        renderer.draw(&gpu.device, &gpu.queue, scratch_view);
+    }
+
+    let flat = CardStyle {
+        background: [0.0; 4],
+        border_color: [0.0; 4],
+        focus_color: [0.0; 4],
+        corner_radius: 0.0,
+        border_width: 0.0,
+        focus_width: 0.0,
+        focus_glow_width: 0.0,
+    };
+    gpu.palette_card
+        .as_ref()
+        .unwrap()
+        .pipeline
+        .overlay_texture_cards(
+            &gpu.device,
+            &gpu.queue,
+            view,
+            surface_size,
+            &flat,
+            &[CardTexturePlacement {
+                texture_view: &gpu.chrome_textures.tab_bar_scratch.as_ref().unwrap().2,
+                x,
+                y: 0,
+                w: block_px.w,
+                h: block_px.h,
+                selected: false,
+            }],
+        );
+}
+
 /// Fixed logical size (cols x rows) of the theme-settings overlay's content
 /// grid, clamped down for a small pane. Unlike the command palette (whose
 /// [`command_palette_layout`] sizes to the query/entry count), this overlay's

@@ -171,14 +171,9 @@ impl App {
             return;
         };
         let target_window_id = WindowId::from(card_id.window_id.0);
-        if let Some(window) = self
-            .windows
-            .get(&target_window_id)
-            .map(|s| s.window.clone())
-        {
+        if self.windows.contains_key(&target_window_id) {
             self.focus_pane(target_window_id, card_id.pane_id);
-            self.focused = Some(target_window_id);
-            window.focus_window();
+            self.focus_tab(target_window_id);
         }
         self.close_process_monitor();
     }

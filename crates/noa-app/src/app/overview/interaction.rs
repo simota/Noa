@@ -65,13 +65,9 @@ impl App {
         window_id: WindowId,
         pane: Option<PaneId>,
     ) {
-        let Some(window) = self
-            .windows
-            .get(&window_id)
-            .map(|state| state.window.clone())
-        else {
+        if !self.windows.contains_key(&window_id) {
             return;
-        };
+        }
         let pane = pane
             .filter(|pane| {
                 self.windows
@@ -83,8 +79,7 @@ impl App {
         if let Some(pane) = pane {
             self.focus_pane(window_id, pane);
         }
-        self.focused = Some(window_id);
-        window.focus_window();
+        self.focus_tab(window_id);
     }
 
     /// Drives the Overview-focused keymap directly from the keypress
@@ -430,10 +425,7 @@ impl App {
                                     .get(&target_tab)
                                     .map(|state| state.focused_pane);
                                 self.hide_tab_overview();
-                                if let Some(window_state) = self.windows.get(&target_tab) {
-                                    window_state.window.focus_window();
-                                }
-                                self.focused = Some(target_tab);
+                                self.focus_tab(target_tab);
                                 if let Some(pane) = focused_pane {
                                     self.request_close_pane(event_loop, target_tab, pane);
                                 }

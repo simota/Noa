@@ -605,12 +605,16 @@ impl App {
             let alpha_mode = preferred_surface_alpha_mode(&caps, transparent);
             if state.surface_config.alpha_mode != alpha_mode {
                 state.surface_config.alpha_mode = alpha_mode;
-                configure_wgpu_surface(
-                    &state.surface,
-                    &gpu.device,
-                    &state.surface_config,
-                    state.occluded,
-                );
+                // A background in-window tab shares its host's surface; the
+                // shown tab reconfigures it.
+                if !state.background_tab {
+                    configure_wgpu_surface(
+                        &state.surface,
+                        &gpu.device,
+                        &state.surface_config,
+                        state.occluded,
+                    );
+                }
             }
             state.renderer.set_background_opacity(opacity);
         }

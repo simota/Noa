@@ -529,6 +529,37 @@ impl ApplicationHandler<UserEvent> for App {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        // Off macOS an OS window may host several tabs (`linux_tabs`): its
+        // events belong to the tab in front, and geometry changes reach the
+        // tabs behind it too.
+        #[cfg(not(target_os = "macos"))]
+        let window_id = {
+            let front = self.tab_hosts.get(&window_id).copied().unwrap_or(window_id);
+            let background = || {
+                self.tab_siblings(front)
+                    .into_iter()
+                    .filter(move |id| *id != front)
+            };
+            match &event {
+                WindowEvent::Resized(size) => {
+                    for tab in background().collect::<Vec<_>>() {
+                        self.on_resize(tab, *size);
+                    }
+                }
+                WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                    for tab in background().collect::<Vec<_>>() {
+                        self.on_scale_factor_changed(tab, *scale_factor);
+                    }
+                }
+                WindowEvent::Moved(_) => {
+                    for tab in background().collect::<Vec<_>>() {
+                        self.refresh_redraw_floor(tab);
+                    }
+                }
+                _ => {}
+            }
+            front
+        };
         if !self.windows.contains_key(&window_id) {
             return;
         }
@@ -594,6 +625,11 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CloseRequested if self.is_scratch_terminal_window(window_id) => {
                 self.destroy_scratch_terminal();
             }
+            // The window's close button closes every tab it hosts off macOS;
+            // on macOS each native tab is its own window.
+            #[cfg(not(target_os = "macos"))]
+            WindowEvent::CloseRequested => self.request_close_window_of(event_loop, window_id),
+            #[cfg(target_os = "macos")]
             WindowEvent::CloseRequested => self.request_close_tab(event_loop, window_id),
             WindowEvent::RedrawRequested => self.redraw(window_id),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
@@ -1406,12 +1442,16 @@ impl App {
         }
         state.surface_config.width = size.width;
         state.surface_config.height = size.height;
-        configure_wgpu_surface(
-            &state.surface,
-            &gpu.device,
-            &state.surface_config,
-            state.occluded,
-        );
+        // A background in-window tab shares its host's surface; only the
+        // shown tab configures it.
+        if !state.background_tab {
+            configure_wgpu_surface(
+                &state.surface,
+                &gpu.device,
+                &state.surface_config,
+                state.occluded,
+            );
+        }
         state.renderer.resize(PixelSize {
             w: size.width,
             h: size.height,
@@ -1691,6 +1731,23 @@ impl App {
             .windows
             .get(&window_id)
             .and_then(|tab| self.script_target(tab));
+        // Off macOS a left press on the in-window tab bar selects or closes
+        // a tab and goes no further.
+        if button == MouseButton::Left
+            && state == ElementState::Pressed
+            && scripted.is_none()
+            && let Some(point) = self
+                .windows
+                .get(&window_id)
+                .and_then(|s| s.last_mouse_point)
+            && let Some(hit) = self.tab_bar_hit(window_id, point)
+        {
+            match hit {
+                linux_tabs::TabBarHit::Select(tab) => self.focus_tab(tab),
+                linux_tabs::TabBarHit::Close(tab) => self.request_close_tab(event_loop, tab),
+            }
+            return;
+        }
         // A left press inside the sidebar band is consumed there (card switch,
         // toolbar `+`/`…`, per-card menu) and never reaches the terminal/split
         // handling (FR-3/FR-6/FR-7).

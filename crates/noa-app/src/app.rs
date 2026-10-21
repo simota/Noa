@@ -83,6 +83,7 @@ mod helpers;
 mod input_ops;
 mod ipc;
 mod lifecycle;
+mod linux_tabs;
 mod overview;
 mod pane_drag;
 mod pane_drag_render;
@@ -190,6 +191,12 @@ pub struct App {
     gpu: Option<GpuState>,
     windows: HashMap<WindowId, WindowState>,
     window_order: Vec<WindowId>,
+    /// Off macOS, a logical window's tabs share one OS window: maps that OS
+    /// window's id to the tab currently shown in it (see `linux_tabs`). Empty
+    /// on macOS, where every tab is its own native window.
+    tab_hosts: HashMap<WindowId, WindowId>,
+    /// Counter behind the synthetic `WindowId`s minted for in-window tabs.
+    next_tab_id: u64,
     overview_window: Option<OverviewWindowState>,
     /// Per-TAB overview tile render state (Overview U1): the grid lays out one
     /// tile per tab (window), so dirty/last-render is tracked by `WindowId`.
@@ -789,6 +796,8 @@ impl App {
             gpu: None,
             windows: HashMap::new(),
             window_order: Vec::new(),
+            tab_hosts: HashMap::new(),
+            next_tab_id: 0,
             overview_window: None,
             overview_tiles: HashMap::new(),
             focused: None,

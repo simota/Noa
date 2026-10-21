@@ -818,6 +818,7 @@ pub(in crate::app) fn draw_context_menu(
     use super::super::context_menu::{ContextMenuEntry, ContextMenuSession};
 
     let cols = ContextMenuSession::cols(&menu.entries);
+    let (label_w, hint_w) = ContextMenuSession::column_widths(&menu.entries);
     let rows = menu.entries.len().min(u16::MAX as usize) as u16;
     let metrics = gpu.fonts.get(font_px).metrics();
     let (interior, block_px) = modal_block_geometry(metrics, cols, rows);
@@ -859,11 +860,16 @@ pub(in crate::app) fn draw_context_menu(
                     text.push_str(&sgr(style.border()));
                     text.push_str(&"\u{2500}".repeat(cols as usize));
                 }
-                ContextMenuEntry::Item { label, enabled, .. } => {
-                    let row = format!(" {label:<width$}", width = cols as usize - 1);
+                ContextMenuEntry::Item {
+                    label,
+                    hint,
+                    enabled,
+                    ..
+                } => {
+                    let hovered = *enabled && menu.hovered == Some(index);
                     if !enabled {
                         text.push_str(&sgr(style.muted_fg()));
-                    } else if menu.hovered == Some(index) {
+                    } else if hovered {
                         text.push_str(&sgr(style.accent_fg()));
                         let _ = write!(
                             text,
@@ -871,7 +877,17 @@ pub(in crate::app) fn draw_context_menu(
                             accent_bg.r, accent_bg.g, accent_bg.b
                         );
                     }
-                    text.push_str(&row);
+                    let _ = write!(text, " {label:<label_w$}");
+                    if hint_w > 0 {
+                        // Hints read as secondary: muted unless the row is
+                        // highlighted.
+                        if *enabled && !hovered {
+                            text.push_str(&sgr(style.muted_fg()));
+                        }
+                        let hint = hint.as_deref().unwrap_or("");
+                        let _ = write!(text, "  {hint:>hint_w$}");
+                    }
+                    text.push(' ');
                 }
             }
             text.push_str("\x1b[0m");

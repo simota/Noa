@@ -19,6 +19,9 @@ pub(super) enum ContextMenuEntry {
     Item {
         command: AppCommand,
         label: &'static str,
+        /// The command's effective chord, right-aligned like a GTK menu
+        /// accelerator; `None` when unbound.
+        hint: Option<String>,
         enabled: bool,
     },
     Separator,
@@ -39,17 +42,23 @@ pub(super) struct ContextMenuSession {
 }
 
 impl ContextMenuSession {
-    /// Text columns of the menu: the longest label plus one space each side.
+    /// Widths of the label and hint columns: the longest of each.
+    pub(super) fn column_widths(entries: &[ContextMenuEntry]) -> (usize, usize) {
+        entries.iter().fold((0, 0), |(label_w, hint_w), entry| match entry {
+            ContextMenuEntry::Item { label, hint, .. } => (
+                label_w.max(label.chars().count()),
+                hint_w.max(hint.as_ref().map_or(0, |hint| hint.chars().count())),
+            ),
+            ContextMenuEntry::Separator => (label_w, hint_w),
+        })
+    }
+
+    /// Text columns of the menu: the label column, then a two-space gap and
+    /// the hint column when any item has one, plus one space each side.
     pub(super) fn cols(entries: &[ContextMenuEntry]) -> u16 {
-        let widest = entries
-            .iter()
-            .filter_map(|entry| match entry {
-                ContextMenuEntry::Item { label, .. } => Some(label.chars().count()),
-                ContextMenuEntry::Separator => None,
-            })
-            .max()
-            .unwrap_or(0);
-        (widest + 2).min(u16::MAX as usize) as u16
+        let (label_w, hint_w) = Self::column_widths(entries);
+        let hints = if hint_w > 0 { hint_w + 2 } else { 0 };
+        (label_w + hints + 2).min(u16::MAX as usize) as u16
     }
 
     fn contains(&self, point: MousePoint) -> bool {
@@ -118,6 +127,7 @@ impl App {
         let item = |command, label| ContextMenuEntry::Item {
             command,
             label,
+            hint: self.keybinds.chord_for(command),
             enabled: self.command_is_enabled(window_id, command),
         };
         let auto_approve = self
@@ -129,6 +139,17 @@ impl App {
             .get(&window_id)
             .map(|state| state.focused_pane)
             .is_some_and(|pane| self.can_open_send_selection_picker_for_pane(window_id, pane));
+        // `CloseTab` is Ghostty's `close_surface`: it closes only the focused
+        // pane while the tab is split, so name it for what it will close.
+        let close_label = if self
+            .windows
+            .get(&window_id)
+            .is_some_and(|state| state.pane_count() > 1)
+        {
+            "Close Pane"
+        } else {
+            "Close Tab"
+        };
         vec![
             item(AppCommand::Copy, "Copy"),
             item(AppCommand::Paste, "Paste"),
@@ -153,12 +174,13 @@ impl App {
             ContextMenuEntry::Item {
                 command: AppCommand::SendSelectionToPane,
                 label: "Send Selection to Pane",
+                hint: self.keybinds.chord_for(AppCommand::SendSelectionToPane),
                 enabled: send_selection,
             },
             item(AppCommand::SetTabTitle, "Set Tab Title\u{2026}"),
             ContextMenuEntry::Separator,
             item(AppCommand::NewTab, "New Tab"),
-            item(AppCommand::CloseTab, "Close Tab"),
+            item(AppCommand::CloseTab, close_label),
         ]
     }
 
@@ -370,6 +392,7 @@ mod tests {
         ContextMenuEntry::Item {
             command: AppCommand::Copy,
             label,
+            hint: None,
             enabled,
         }
     }
@@ -436,5 +459,18 @@ mod tests {
             ContextMenuSession::cols(&[item("Copy", true), item("Equalize", true)]),
             10
         );
+    }
+
+    #[test]
+    fn cols_add_a_gap_and_the_widest_hint() {
+        let hinted = ContextMenuEntry::Item {
+            command: AppCommand::Paste,
+            label: "Paste",
+            hint: Some("ctrl+shift+v".into()),
+            enabled: true,
+        };
+        let menu = [item("Equalize", true), hinted];
+        assert_eq!(ContextMenuSession::column_widths(&menu), (8, 12));
+        assert_eq!(ContextMenuSession::cols(&menu), 8 + 2 + 12 + 2);
     }
 }

@@ -126,7 +126,7 @@ Every binding can be changed with `keybind = …` (see
 | Chord | Action |
 |---|---|
 | `ctrl+shift+t` / `ctrl+shift+n` | New tab / new window |
-| `ctrl+shift+w` / `alt+f4` | Close tab / close window |
+| `ctrl+shift+w` / `alt+f4` | Close pane (the tab when unsplit) / close window |
 | `ctrl+shift+q` | Quit |
 | `alt+1` … `alt+9` | Select tab 1–9 |
 | `ctrl+tab` / `ctrl+shift+tab`, `ctrl+pagedown` / `ctrl+pageup` | Next / previous tab |
@@ -144,6 +144,7 @@ Every binding can be changed with `keybind = …` (see
 | `ctrl+=` / `ctrl+-` / `ctrl+0` | Font size up / down / reset |
 | `ctrl+shift+p` | Command palette |
 | `ctrl+shift+s` | Sidebar |
+| `ctrl+shift+l` | Session overview (`ctrl+shift+o` is Split Right here) |
 | `ctrl+shift+m` | Send selection to pane |
 | `ctrl+shift+j` | Next notification |
 | `ctrl+shift+x` | Scratch terminal (`ctrl+shift+t` is New Tab here) |

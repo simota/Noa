@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "bin/noa", "tests/parity", "bench/probes/drain-staircase"]
+exclude = ["vendor"]
 
 # Cross-crate inlining for the release binary: the hot pty→parser→grid feed
 # path spans noa-vt/noa-grid crate boundaries, and thin LTO recovers the
@@ -78,3 +79,15 @@ tungstenite = "0.24"
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
 rand        = "0.8"
+
+# ── patched upstream crates ────────────────────────────────────────
+# winit 0.30's Wayland client-side decorations (sctk-adwaita 0.10) draw the
+# window title with the single titlebar font and no glyph fallback, so a
+# CJK/emoji title renders as tofu. The vendored copy adds per-character
+# Fontconfig fallback to the ab_glyph title renderer (see
+# vendor/sctk-adwaita/src/title/ab_glyph_renderer.rs). The upstream crossfont
+# renderer can't be used instead: sctk-adwaita 0.10 pins crossfont 0.8 →
+# yeslogic-fontconfig-sys 5, which conflicts with font-kit's 6.
+#TODO(agent): drop this patch once winit ships an sctk-adwaita with fallback.
+[patch.crates-io]
+sctk-adwaita = { path = "vendor/sctk-adwaita" }

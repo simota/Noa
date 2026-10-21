@@ -57,7 +57,8 @@ local testing steps.
 
 ## Linux
 
-Noa also builds and runs on Linux (X11 and Wayland). Ghostty's
+Noa also builds and runs on Linux (X11 and Wayland); see
+[docs/LINUX.md](docs/LINUX.md) for the full guide. Ghostty's
 Linux (GTK) keybindings are the defaults — `ctrl+shift+c`/`ctrl+shift+v` copy and
 paste, `ctrl+shift+t` opens a tab, `ctrl+shift+p` opens the command palette.
 

@@ -163,6 +163,8 @@ pub(super) struct ChromeTextures {
     pub(super) palette_scratch: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
     /// The non-macOS in-window tab bar strip, cached like `palette_scratch`.
     pub(super) tab_bar_scratch: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
+    /// The non-macOS right-click menu card, cached like `palette_scratch`.
+    pub(super) context_menu_scratch: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
     /// 1x1 theme-tinted texture for the scrollback thumb drawn along a
     /// scrolled pane's right edge (its alpha carries the thumb opacity).
     pub(super) scrollbar_tex: Option<(wgpu::Texture, wgpu::TextureView)>,
@@ -205,6 +207,7 @@ impl ChromeTextures {
         self.sidebar_rule_tex = None;
         self.palette_scratch = None;
         self.tab_bar_scratch = None;
+        self.context_menu_scratch = None;
         self.scrollbar_tex = None;
         self.bell_flash_tex = None;
         // `rebuild_count` is deliberately left untouched — it counts total
@@ -1520,6 +1523,7 @@ mod chrome_textures_tests {
         assert!(textures.sidebar_rule_tex.is_none());
         assert!(textures.palette_scratch.is_none());
         assert!(textures.tab_bar_scratch.is_none());
+        assert!(textures.context_menu_scratch.is_none());
         assert!(textures.scrollbar_tex.is_none());
         assert!(textures.bell_flash_tex.is_none());
     }

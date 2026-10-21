@@ -75,6 +75,7 @@ mod auto_approve;
 mod commands;
 mod config;
 mod config_reload;
+mod context_menu;
 #[cfg(target_os = "macos")]
 mod ember;
 mod event_loop;
@@ -307,6 +308,8 @@ pub struct App {
     command_palette: Option<CommandPaletteSession>,
     /// The open send-selection target picker, if any.
     send_selection_picker: Option<SendSelectionPickerSession>,
+    /// The open right-click menu off macOS (`context_menu`), if any.
+    context_menu: Option<context_menu::ContextMenuSession>,
     #[cfg(target_os = "macos")]
     text_panel: Option<crate::text_panel::TextPanel>,
     prompt_drafts: HashMap<PaneId, String>,
@@ -835,6 +838,7 @@ impl App {
             held_pane_close_keys: HashSet::new(),
             command_palette: None,
             send_selection_picker: None,
+            context_menu: None,
             #[cfg(target_os = "macos")]
             text_panel: None,
             prompt_drafts: HashMap::new(),

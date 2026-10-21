@@ -1206,6 +1206,26 @@ impl App {
                 *active,
             );
         }
+        #[cfg(not(target_os = "macos"))]
+        if let Some(menu) = self
+            .context_menu
+            .as_ref()
+            .filter(|menu| menu.window_id == window_id)
+        {
+            let surface_size = PixelSize {
+                w: state.surface_config.width,
+                h: state.surface_config.height,
+            };
+            sidebar::draw_context_menu(
+                gpu,
+                state.font_px,
+                state.surface_config.format,
+                &view,
+                surface_size,
+                menu,
+                state.window.scale_factor() as f32,
+            );
+        }
         // Transient overlays last, above every modal: the `cols × rows`
         // resize toast and the visual-bell flash (both expire via
         // `tick_transient_overlays`).

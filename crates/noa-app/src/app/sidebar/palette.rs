@@ -793,6 +793,163 @@ pub(in crate::app) fn draw_tab_bar(
         );
 }
 
+/// `(interior padding, card size)` of the non-macOS right-click menu: a
+/// modal-style cell block of `cols x rows`.
+pub(in crate::app) fn context_menu_geometry(
+    metrics: noa_font::Metrics,
+    cols: u16,
+    rows: u16,
+) -> (GridPadding, PixelSize) {
+    modal_block_geometry(metrics, cols, rows)
+}
+
+/// Paint the open non-macOS right-click menu as a floating card at its
+/// stored origin: one row per entry, the hovered item in the accent colors,
+/// disabled items muted, separators as rules.
+pub(in crate::app) fn draw_context_menu(
+    gpu: &mut GpuState,
+    font_px: f32,
+    surface_format: wgpu::TextureFormat,
+    view: &wgpu::TextureView,
+    surface_size: PixelSize,
+    menu: &super::super::context_menu::ContextMenuSession,
+    scale: f32,
+) {
+    use super::super::context_menu::{ContextMenuEntry, ContextMenuSession};
+
+    let cols = ContextMenuSession::cols(&menu.entries);
+    let rows = menu.entries.len().min(u16::MAX as usize) as u16;
+    let metrics = gpu.fonts.get(font_px).metrics();
+    let (interior, block_px) = modal_block_geometry(metrics, cols, rows);
+    ensure_overlay_card_gpu(gpu, surface_format, interior, font_px);
+    ensure_shadow_source(gpu);
+    if ensure_scratch(
+        &mut gpu.chrome_textures.context_menu_scratch,
+        &gpu.device,
+        block_px,
+        surface_format,
+        "noa-context-menu",
+    ) {
+        #[cfg(debug_assertions)]
+        gpu.chrome_textures.record_rebuild();
+    }
+    if gpu.palette_renderer.is_none()
+        || gpu.palette_card.is_none()
+        || gpu.chrome_textures.context_menu_scratch.is_none()
+        || gpu.palette_shadow_source.is_none()
+    {
+        return;
+    }
+
+    let theme = active_theme(&gpu.theme, &gpu.preview_theme);
+    let style = OverlayStyle::from_theme(theme);
+    {
+        let sgr = |fg: [f32; 4]| {
+            let c = rgb_from_rgba(fg);
+            format!("\x1b[38;2;{};{};{}m", c.r, c.g, c.b)
+        };
+        let accent_bg = rgb_from_rgba(style.accent_bg());
+        let mut text = String::from("\x1b[?7l");
+        for (index, entry) in menu.entries.iter().enumerate() {
+            if index > 0 {
+                text.push_str("\r\n");
+            }
+            match entry {
+                ContextMenuEntry::Separator => {
+                    text.push_str(&sgr(style.border()));
+                    text.push_str(&"\u{2500}".repeat(cols as usize));
+                }
+                ContextMenuEntry::Item { label, enabled, .. } => {
+                    let row = format!(" {label:<width$}", width = cols as usize - 1);
+                    if !enabled {
+                        text.push_str(&sgr(style.muted_fg()));
+                    } else if menu.hovered == Some(index) {
+                        text.push_str(&sgr(style.accent_fg()));
+                        let _ = write!(
+                            text,
+                            "\x1b[48;2;{};{};{}m",
+                            accent_bg.r, accent_bg.g, accent_bg.b
+                        );
+                    }
+                    text.push_str(&row);
+                }
+            }
+            text.push_str("\x1b[0m");
+        }
+        let fg = rgb_from_rgba(style.surface_fg());
+        let bg = rgb_from_rgba(style.surface_bg());
+        let mut term = Terminal::new(GridSize::new(cols, rows.max(1)));
+        term.set_base_colors(fg, bg, fg, theme.palette);
+        Stream::new().feed(text.as_bytes(), &mut term);
+        let mut snapshot = FrameSnapshot::from_terminal(&mut term);
+        snapshot.cursor.visible = false;
+        let scratch_view = &gpu.chrome_textures.context_menu_scratch.as_ref().unwrap().2;
+        let renderer = gpu.palette_renderer.as_mut().unwrap();
+        renderer.resize(block_px);
+        renderer.rebuild_cells(
+            &snapshot,
+            gpu.fonts.get_mut(font_px),
+            active_theme(&gpu.theme, &gpu.preview_theme),
+        );
+        renderer.set_clear_color(style.surface_bg());
+        renderer.sync_atlas(&gpu.device, &gpu.queue, gpu.fonts.get_mut(font_px));
+        renderer.draw(&gpu.device, &gpu.queue, scratch_view);
+    }
+
+    let border = style.border();
+    let shadow_style = CardStyle {
+        background: [0.0; 4],
+        border_color: [0.0; 4],
+        focus_color: [0.0, 0.0, 0.0, PALETTE_CARD_SHADOW_ALPHA],
+        corner_radius: crate::chrome::RADIUS_MD * scale,
+        border_width: 0.0,
+        focus_width: 0.0,
+        focus_glow_width: crate::chrome::GLOW_SELECTED * scale,
+    };
+    let border_style = CardStyle {
+        background: [0.0; 4],
+        border_color: border,
+        focus_color: border,
+        corner_radius: crate::chrome::RADIUS_MD * scale,
+        border_width: 1.0 * scale,
+        focus_width: 1.0 * scale,
+        focus_glow_width: 0.0,
+    };
+    let card = &gpu.palette_card.as_ref().unwrap().pipeline;
+    // One fill only, as in `draw_toast_card`: the shadow pass samples the
+    // transparent source so a frosted card is not composited twice.
+    card.overlay_texture_cards(
+        &gpu.device,
+        &gpu.queue,
+        view,
+        surface_size,
+        &shadow_style,
+        &[CardTexturePlacement {
+            texture_view: &gpu.palette_shadow_source.as_ref().unwrap().1,
+            x: menu.x,
+            y: menu.y,
+            w: block_px.w,
+            h: block_px.h,
+            selected: true,
+        }],
+    );
+    card.overlay_texture_cards(
+        &gpu.device,
+        &gpu.queue,
+        view,
+        surface_size,
+        &border_style,
+        &[CardTexturePlacement {
+            texture_view: &gpu.chrome_textures.context_menu_scratch.as_ref().unwrap().2,
+            x: menu.x,
+            y: menu.y,
+            w: block_px.w,
+            h: block_px.h,
+            selected: false,
+        }],
+    );
+}
+
 /// Fixed logical size (cols x rows) of the theme-settings overlay's content
 /// grid, clamped down for a small pane. Unlike the command palette (whose
 /// [`command_palette_layout`] sizes to the query/entry count), this overlay's

@@ -642,6 +642,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Moved(_) => self.refresh_redraw_floor(window_id),
             WindowEvent::Resized(size) => {
                 self.end_copy_mode_for_window(window_id);
+                self.close_context_menu(window_id);
                 self.on_resize(window_id, size);
             }
             WindowEvent::ThemeChanged(theme) => self.on_system_appearance_changed(theme),
@@ -693,6 +694,7 @@ impl ApplicationHandler<UserEvent> for App {
                     state.key_modifiers.clear();
                 }
                 self.end_copy_mode_for_window(window_id);
+                self.close_context_menu(window_id);
                 // Only clear if this window is the one we recorded as focused —
                 // when macOS switches between our own windows the incoming
                 // `Focused(true)` may already have repointed `os_focused`, and
@@ -935,6 +937,14 @@ impl ApplicationHandler<UserEvent> for App {
                     window_id,
                     pane_preedit_active,
                 ) {
+                    return;
+                }
+                // An open right-click menu is the topmost layer: it takes
+                // the keyboard until it is dismissed.
+                if self.context_menu_open_in(window_id) {
+                    if pressed {
+                        self.handle_context_menu_key(event_loop, window_id, &event);
+                    }
                     return;
                 }
                 // A confirmation dialog is fully modal — it sits ahead of
@@ -1489,6 +1499,9 @@ impl App {
         // pointer before any early return below; a no-op when the sidebar is
         // hidden (inset 0).
         self.update_sidebar_button_hover(window_id, point);
+        if point.is_some_and(|point| self.context_menu_cursor_moved(window_id, point)) {
+            return;
+        }
         let Some(point) = point else {
             if let Some(state) = self.windows.get_mut(&window_id) {
                 state.last_mouse_pane = None;
@@ -1731,6 +1744,13 @@ impl App {
             .windows
             .get(&window_id)
             .and_then(|tab| self.script_target(tab));
+        // An open right-click menu owns the next press (see `context_menu`).
+        if state == ElementState::Pressed
+            && scripted.is_none()
+            && self.context_menu_mouse_press(event_loop, window_id, button)
+        {
+            return;
+        }
         // Off macOS a left press on the in-window tab bar selects or closes
         // a tab and goes no further.
         if button == MouseButton::Left
@@ -1907,6 +1927,8 @@ impl App {
                     self.install_macos_menu_if_needed();
                     self.show_macos_split_context_menu(window_id);
                 }
+                #[cfg(not(target_os = "macos"))]
+                self.open_context_menu(window_id);
             }
             return;
         }

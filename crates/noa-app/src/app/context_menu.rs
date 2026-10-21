@@ -44,13 +44,15 @@ pub(super) struct ContextMenuSession {
 impl ContextMenuSession {
     /// Widths of the label and hint columns: the longest of each.
     pub(super) fn column_widths(entries: &[ContextMenuEntry]) -> (usize, usize) {
-        entries.iter().fold((0, 0), |(label_w, hint_w), entry| match entry {
-            ContextMenuEntry::Item { label, hint, .. } => (
-                label_w.max(label.chars().count()),
-                hint_w.max(hint.as_ref().map_or(0, |hint| hint.chars().count())),
-            ),
-            ContextMenuEntry::Separator => (label_w, hint_w),
-        })
+        entries
+            .iter()
+            .fold((0, 0), |(label_w, hint_w), entry| match entry {
+                ContextMenuEntry::Item { label, hint, .. } => (
+                    label_w.max(label.chars().count()),
+                    hint_w.max(hint.as_ref().map_or(0, |hint| hint.chars().count())),
+                ),
+                ContextMenuEntry::Separator => (label_w, hint_w),
+            })
     }
 
     /// Text columns of the menu: the label column, then a two-space gap and

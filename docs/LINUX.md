@@ -80,10 +80,9 @@ The packaging assets live in `dist/linux/`.
 - **Clipboard**: `ctrl+shift+c` / `ctrl+shift+v` use the CLIPBOARD selection.
   The PRIMARY selection is supported: `copy-on-select` fills it, and
   middle-click pastes it.
-- **Links and files**: hold Super and click a URL or an OSC 8 hyperlink to
-  open it with `xdg-open`, the same modifier as Cmd on macOS. Some desktops
-  claim Super+click for themselves; GNOME, for example, uses Super+drag to move
-  windows.
+- **Links and files**: Ctrl-click a URL, an OSC 8 hyperlink, or a file path to
+  open it (with `xdg-open`, or the configured editor for files), as in
+  Ghostty's GTK build.
 - **Notifications and bell**: desktop notifications go through `notify-send`.
   The bell plays the sound theme's `bell` event through `canberra-gtk-play` and
   also marks the window as urgent.
@@ -119,7 +118,7 @@ inside the window:
 Linux follows Ghostty's GTK defaults:
 
 - App commands use **Ctrl+Shift**, so plain Ctrl chords stay with the shell.
-- Super is mostly left to the desktop; only split resizing and link clicks use it.
+- Super is mostly left to the desktop; only split resizing uses it.
 
 Every binding can be changed with `keybind = …` (see
 [KEYBINDINGS.md](KEYBINDINGS.md)).

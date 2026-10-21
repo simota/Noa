@@ -278,17 +278,17 @@ impl App {
     }
 
     /// The Cmd+hover link under the mouse in `window_id`'s focused-under-
-    /// pointer pane, if `Cmd` is held and the cell under `last_mouse_cell`
-    /// carries an OSC 8 hyperlink or sits inside an auto-detected
-    /// `https?://` URL run. Reuses `last_mouse_pane`/`last_mouse_cell`
-    /// (already kept up to date by every `CursorMoved`) instead of
-    /// recomputing a pixel hit-test, so it can also be called from
-    /// `ModifiersChanged` with the mouse stationary.
+    /// pointer pane, if the link modifier ([`link_modifier_held`]) is held
+    /// and the cell under `last_mouse_cell` carries an OSC 8 hyperlink or
+    /// sits inside an auto-detected `https?://` URL run. Reuses
+    /// `last_mouse_pane`/`last_mouse_cell` (already kept up to date by every
+    /// `CursorMoved`) instead of recomputing a pixel hit-test, so it can also
+    /// be called from `ModifiersChanged` with the mouse stationary.
     pub(in crate::app) fn hover_link_target(
         &mut self,
         window_id: WindowId,
     ) -> Option<(PaneId, HoverLink)> {
-        if !self.modifiers.super_key() {
+        if !link_modifier_held(self.modifiers) {
             return None;
         }
         let state = self.windows.get(&window_id)?;
@@ -557,6 +557,17 @@ impl App {
     }
 }
 
+/// Whether the modifier that arms link hover/click is held: Cmd on macOS,
+/// Ctrl elsewhere (Ghostty's GTK default — Super+click is the desktop's,
+/// e.g. GNOME's window move).
+fn link_modifier_held(mods: ModifiersState) -> bool {
+    if cfg!(target_os = "macos") {
+        mods.super_key()
+    } else {
+        mods.control_key()
+    }
+}
+
 /// Resolve a detected path token to an absolute filesystem path: `~/...`
 /// expands against `$HOME`, `/...` is used as-is, and anything else is
 /// joined onto `cwd` (the owning pane's `Terminal::cwd`, from OSC 7).
@@ -641,6 +652,24 @@ fn cursor_icon(name: &str) -> Option<CursorIcon> {
         name => name,
     };
     css.parse().ok()
+}
+
+#[cfg(test)]
+mod link_modifier_tests {
+    use super::*;
+
+    #[test]
+    fn link_modifier_is_cmd_on_macos_and_ctrl_elsewhere() {
+        let (armed, other) = if cfg!(target_os = "macos") {
+            (ModifiersState::SUPER, ModifiersState::CONTROL)
+        } else {
+            (ModifiersState::CONTROL, ModifiersState::SUPER)
+        };
+        assert!(link_modifier_held(armed));
+        assert!(link_modifier_held(armed | ModifiersState::ALT));
+        assert!(!link_modifier_held(other));
+        assert!(!link_modifier_held(ModifiersState::empty()));
+    }
 }
 
 #[cfg(test)]

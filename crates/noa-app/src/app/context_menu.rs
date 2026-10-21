@@ -6,7 +6,8 @@
 //! Ghostty's GTK build shows a `PopoverMenu` on right-click in the same
 //! spirit. While open it owns the pointer and the keyboard: hovering
 //! highlights a row, a left click or Enter runs it, and any other press,
-//! Escape, focus loss or a resize dismisses it.
+//! Escape, a wheel turn, focus loss or a resize dismisses it. It never opens
+//! over a modal (dialog, palette, prompt) that already owns the keyboard.
 
 #![cfg_attr(target_os = "macos", allow(dead_code))]
 
@@ -168,6 +169,14 @@ impl App {
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
+        if self.modal_ime_target(window_id).is_some()
+            || self
+                .send_selection_picker
+                .as_ref()
+                .is_some_and(|session| session.window_id == window_id)
+        {
+            return;
+        }
         let Some(state) = self.windows.get(&window_id) else {
             return;
         };
@@ -215,9 +224,10 @@ impl App {
             .is_some_and(|menu| menu.window_id == window_id)
     }
 
-    /// Track the pointer over the open menu. Returns `true` while the pointer
-    /// is inside the card, so the motion goes no further (no link hover, no
-    /// selection drag underneath).
+    /// Track the pointer over the open menu: the row under it is highlighted,
+    /// and leaving the card clears the highlight so Enter can't run a row the
+    /// pointer has left. Returns `true` while the pointer is inside the card,
+    /// so the motion goes no further (no link hover underneath).
     pub(super) fn context_menu_cursor_moved(
         &mut self,
         window_id: WindowId,
@@ -232,7 +242,7 @@ impl App {
         };
         let hovered = menu.item_at(point);
         let inside = menu.contains(point);
-        if inside && menu.hovered != hovered {
+        if menu.hovered != hovered {
             menu.hovered = hovered;
             self.request_window_redraw(window_id);
         }
@@ -249,12 +259,18 @@ impl App {
         window_id: WindowId,
         button: MouseButton,
     ) -> bool {
+        // A release that landed in another window must not leave a stale
+        // swallow armed for the next unrelated click.
+        self.context_menu_swallowed_release = None;
         let Some(menu) = self.context_menu.take() else {
             return false;
         };
         self.request_window_redraw(menu.window_id);
         if menu.window_id != window_id {
             return false;
+        }
+        if button != MouseButton::Right {
+            self.context_menu_swallowed_release = Some(button);
         }
         let point = self
             .windows
@@ -271,6 +287,15 @@ impl App {
             self.handle_app_command(event_loop, command, CommandOrigin::TerminalWindow);
         }
         button != MouseButton::Right
+    }
+
+    /// Whether this release pairs with a press the menu consumed.
+    pub(super) fn context_menu_swallows_release(&mut self, button: MouseButton) -> bool {
+        if self.context_menu_swallowed_release == Some(button) {
+            self.context_menu_swallowed_release = None;
+            return true;
+        }
+        false
     }
 
     pub(super) fn handle_context_menu_key(

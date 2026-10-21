@@ -310,6 +310,9 @@ pub struct App {
     send_selection_picker: Option<SendSelectionPickerSession>,
     /// The open right-click menu off macOS (`context_menu`), if any.
     context_menu: Option<context_menu::ContextMenuSession>,
+    /// The button whose press the menu consumed; its release is swallowed so
+    /// the pane never sees a mouse-up it got no press for.
+    context_menu_swallowed_release: Option<MouseButton>,
     #[cfg(target_os = "macos")]
     text_panel: Option<crate::text_panel::TextPanel>,
     prompt_drafts: HashMap<PaneId, String>,
@@ -839,6 +842,7 @@ impl App {
             command_palette: None,
             send_selection_picker: None,
             context_menu: None,
+            context_menu_swallowed_release: None,
             #[cfg(target_os = "macos")]
             text_panel: None,
             prompt_drafts: HashMap::new(),

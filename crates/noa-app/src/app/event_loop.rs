@@ -1744,12 +1744,20 @@ impl App {
             .windows
             .get(&window_id)
             .and_then(|tab| self.script_target(tab));
-        // An open right-click menu owns the next press (see `context_menu`).
-        if state == ElementState::Pressed
-            && scripted.is_none()
-            && self.context_menu_mouse_press(event_loop, window_id, button)
-        {
-            return;
+        // An open right-click menu owns the next press (see `context_menu`),
+        // and then that press's release.
+        if scripted.is_none() {
+            match state {
+                ElementState::Pressed
+                    if self.context_menu_mouse_press(event_loop, window_id, button) =>
+                {
+                    return;
+                }
+                ElementState::Released if self.context_menu_swallows_release(button) => {
+                    return;
+                }
+                _ => {}
+            }
         }
         // Off macOS a left press on the in-window tab bar selects or closes
         // a tab and goes no further.
@@ -1974,6 +1982,9 @@ impl App {
 
     pub(super) fn on_mouse_wheel(&mut self, window_id: WindowId, delta: MouseScrollDelta) {
         self.end_copy_mode_for_window(window_id);
+        // Scrolling under an open menu would move the content its commands
+        // act on; dismiss it like a GTK popover.
+        self.close_context_menu(window_id);
         // A wheel turn over the sidebar band scrolls its card list (FR-15),
         // consuming the event so the terminal viewport doesn't also scroll.
         let sidebar_lines = match delta {

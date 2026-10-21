@@ -12,7 +12,12 @@ pub(crate) fn gpu_init_fatal(
 ) -> ! {
     log::error!("GPU initialization failed: {what}: {detail}");
     eprintln!("noa: {what} ({detail})");
-    eprintln!("noa: a working GPU (Metal) and a usable monospace font are required.");
+    let api = if cfg!(target_os = "macos") {
+        "Metal"
+    } else {
+        "Vulkan or OpenGL"
+    };
+    eprintln!("noa: a working GPU ({api}) and a usable monospace font are required.");
     persister.flush();
     std::process::exit(1);
 }
@@ -161,8 +166,17 @@ pub(crate) fn pane_owns_keyboard_focus<Window: PartialEq, Pane: PartialEq>(
     pane_id == focused_pane && os_focused.as_ref() == Some(&window_id)
 }
 
+/// Logical pixels per typographic point at scale factor 1.0 — Ghostty's
+/// `font.face.default_dpi / 72`: macOS lays out at 72 dpi (1pt = 1px), every
+/// other platform at the 96 dpi desktop convention (1pt = 4/3 px), so a given
+/// `font-size` renders at the same physical size Ghostty uses there.
+#[cfg(target_os = "macos")]
+pub(crate) const PIXELS_PER_POINT: f32 = 1.0;
+#[cfg(not(target_os = "macos"))]
+pub(crate) const PIXELS_PER_POINT: f32 = 96.0 / 72.0;
+
 pub(crate) fn font_pixel_size(point_size: f32, scale_factor: f64) -> f32 {
-    (point_size * scale_factor.max(f64::EPSILON) as f32).max(1.0)
+    (point_size * PIXELS_PER_POINT * scale_factor.max(f64::EPSILON) as f32).max(1.0)
 }
 
 /// The session sidebar renders its synthetic cells at a dedicated point size

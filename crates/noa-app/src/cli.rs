@@ -286,6 +286,7 @@ fn show_config_output(config: &StartupConfig) -> String {
         &config.clipboard_paste_protection.to_string(),
     );
     push_line(&mut out, "confirm-quit", &config.confirm_quit.to_string());
+    push_line(&mut out, "copy-on-select", config.copy_on_select.as_str());
     push_line(
         &mut out,
         "mouse-shift-capture",
@@ -713,12 +714,28 @@ mod tests {
         let keybinds = KeybindEngine::default();
         let output = list_keybinds_output(&keybinds);
 
+        // Ghostty's per-platform defaults: Command-based on macOS, the GTK
+        // Ctrl+Shift family elsewhere.
+        let expected: &[&str] = if cfg!(target_os = "macos") {
+            &[
+                "cmd+t = tab.new\n",
+                "cmd+ctrl+arrowleft = split.focus-left\n",
+                "cmd+ctrl+shift+arrowright = split.resize-right\n",
+                "cmd+shift+p = command-palette.toggle\n",
+            ]
+        } else {
+            &[
+                "ctrl+shift+t = tab.new\n",
+                "ctrl+alt+arrowleft = split.focus-left\n",
+                "super+ctrl+shift+arrowright = split.resize-right\n",
+                "ctrl+shift+p = command-palette.toggle\n",
+            ]
+        };
         assert!(!output.is_empty());
-        assert!(output.contains("cmd+t = tab.new\n"));
-        assert!(output.contains("cmd+ctrl+arrowleft = split.focus-left\n"));
-        assert!(output.contains("cmd+ctrl+shift+arrowright = split.resize-right\n"));
+        for line in expected {
+            assert!(output.contains(line), "missing default {line:?}");
+        }
         assert!(!output.contains("cmd+grave = quick-terminal.toggle\n"));
-        assert!(output.contains("cmd+shift+p = command-palette.toggle\n"));
         // Every line is `chord = action` where the action name round-trips
         // through the command registry.
         for line in output.lines() {
@@ -731,6 +748,8 @@ mod tests {
         assert_eq!(output.lines().count(), keybinds.list().len());
     }
 
+    // Asserts the macOS (Command-based) default chords.
+    #[cfg(target_os = "macos")]
     #[test]
     fn list_keybinds_output_uses_the_supplied_effective_engine() {
         let (keybinds, diagnostics) = KeybindEngine::from_config_test(&[
@@ -780,7 +799,10 @@ mod tests {
         assert!(output.contains("macos-titlebar-style = native\n"));
         assert!(output.contains("macos-non-native-fullscreen = false\n"));
         assert!(output.contains("macos-titlebar-proxy-icon = visible\n"));
-        assert!(output.contains("quick-terminal-hotkey = cmd+grave\n"));
+        assert!(output.contains(&format!(
+            "quick-terminal-hotkey = {}\n",
+            noa_config::DEFAULT_QUICK_TERMINAL_HOTKEY
+        )));
         assert!(output.contains("quick-terminal-size = 40%\n"));
         assert!(output.contains("quick-terminal-screen = mouse\n"));
         assert!(output.contains("quick-terminal-position = top\n"));

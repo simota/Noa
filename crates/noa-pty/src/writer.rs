@@ -325,13 +325,13 @@ fn write_all_pollout(
             #[cfg(unix)]
             Err(e) if e.kind() == io::ErrorKind::WouldBlock && poll_fd.is_some() => {
                 use std::os::fd::AsRawFd as _;
-                if let Some(fd) = poll_fd {
-                    if !crate::reader::wait_ready_or_cancel(fd.as_raw_fd(), libc::POLLOUT, cancel) {
-                        return Err(io::Error::new(
-                            io::ErrorKind::BrokenPipe,
-                            "pty writer stopped",
-                        ));
-                    }
+                if let Some(fd) = poll_fd
+                    && !crate::reader::wait_ready_or_cancel(fd.as_raw_fd(), libc::POLLOUT, cancel)
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "pty writer stopped",
+                    ));
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}

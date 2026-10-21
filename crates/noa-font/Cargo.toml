@@ -22,3 +22,9 @@ unicode-properties.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 core-text = "20"
 core-foundation = "0.9"
+
+# Linux/BSD per-codepoint fallback (FcFontSort over a charset pattern) — the
+# fontconfig analogue of the CoreText cascade above. Already linked through
+# font-kit's fontconfig source, so this adds no new system dependency.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+yeslogic-fontconfig-sys = "6"

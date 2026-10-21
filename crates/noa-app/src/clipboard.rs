@@ -19,6 +19,17 @@ impl SystemClipboard {
         platform::get_text()
     }
 
+    /// Writes the X11/Wayland PRIMARY selection (`copy-on-select`). macOS
+    /// has no primary selection, so this is a no-op there.
+    pub(crate) fn set_primary_text(&mut self, text: &str) -> anyhow::Result<()> {
+        platform::set_primary_text(text)
+    }
+
+    /// Reads the PRIMARY selection, for middle-click paste. Empty on macOS.
+    pub(crate) fn get_primary_text(&mut self) -> anyhow::Result<String> {
+        platform::get_primary_text()
+    }
+
     /// Reads the clipboard the way Ghostty's paste command does: file URLs
     /// and images take priority over plain text, so pasting a Finder
     /// selection or a copied screenshot inserts a shell-escaped path instead
@@ -204,6 +215,14 @@ mod platform {
         Ok(())
     }
 
+    pub(super) fn get_primary_text() -> anyhow::Result<String> {
+        Ok(String::new())
+    }
+
+    pub(super) fn set_primary_text(_text: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     pub(super) fn get_paste_contents() -> anyhow::Result<PasteContents> {
         let pasteboard = NSPasteboard::generalPasteboard();
 
@@ -262,18 +281,105 @@ mod platform {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// X11 / Wayland through `arboard`. One process-wide handle is kept alive:
+/// on X11 the clipboard owner must keep serving the selection after a copy,
+/// and arboard does that from a thread tied to the handle's lifetime.
+#[cfg(all(unix, not(target_os = "macos")))]
+mod platform {
+    use std::path::PathBuf;
+    use std::sync::{Mutex, MutexGuard};
+
+    use anyhow::Context;
+    use arboard::{Clipboard, GetExtLinux, LinuxClipboardKind, SetExtLinux};
+
+    use super::PasteContents;
+
+    static CLIPBOARD: Mutex<Option<Clipboard>> = Mutex::new(None);
+
+    fn with_clipboard<T>(
+        f: impl FnOnce(&mut Clipboard) -> Result<T, arboard::Error>,
+    ) -> anyhow::Result<T> {
+        let mut guard: MutexGuard<'_, Option<Clipboard>> = CLIPBOARD
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if guard.is_none() {
+            *guard = Some(Clipboard::new().context("failed to open the system clipboard")?);
+        }
+        let clipboard = guard.as_mut().expect("clipboard initialized above");
+        f(clipboard).context("clipboard access failed")
+    }
+
+    /// An empty selection is not an error for a read: it pastes nothing.
+    fn text_or_empty(result: Result<String, arboard::Error>) -> Result<String, arboard::Error> {
+        match result {
+            Err(arboard::Error::ContentNotAvailable) => Ok(String::new()),
+            other => other,
+        }
+    }
+
+    pub(super) fn get_text() -> anyhow::Result<String> {
+        with_clipboard(|clipboard| text_or_empty(clipboard.get_text()))
+    }
+
+    pub(super) fn set_text(text: &str) -> anyhow::Result<()> {
+        with_clipboard(|clipboard| clipboard.set_text(text))
+    }
+
+    pub(super) fn get_primary_text() -> anyhow::Result<String> {
+        with_clipboard(|clipboard| {
+            text_or_empty(
+                clipboard
+                    .get()
+                    .clipboard(LinuxClipboardKind::Primary)
+                    .text(),
+            )
+        })
+    }
+
+    pub(super) fn set_primary_text(text: &str) -> anyhow::Result<()> {
+        with_clipboard(|clipboard| {
+            clipboard
+                .set()
+                .clipboard(LinuxClipboardKind::Primary)
+                .text(text)
+        })
+    }
+
+    pub(super) fn get_paste_contents() -> anyhow::Result<PasteContents> {
+        with_clipboard(|clipboard| {
+            // A file-manager copy publishes `text/uri-list`; prefer it so the
+            // paste inserts shell-escaped paths, as on macOS.
+            let file_urls: Vec<PathBuf> = clipboard.get().file_list().unwrap_or_default();
+            let text = text_or_empty(clipboard.get_text())?;
+            Ok(super::paste_contents_from_parts(
+                file_urls,
+                None,
+                Some(text),
+            ))
+        })
+    }
+}
+
+#[cfg(not(unix))]
 mod platform {
     pub(super) fn get_text() -> anyhow::Result<String> {
-        anyhow::bail!("clipboard is only implemented on macOS")
+        anyhow::bail!("clipboard is not implemented on this platform")
     }
 
     pub(super) fn set_text(_text: &str) -> anyhow::Result<()> {
-        anyhow::bail!("clipboard is only implemented on macOS")
+        anyhow::bail!("clipboard is not implemented on this platform")
+    }
+
+    pub(super) fn get_primary_text() -> anyhow::Result<String> {
+        anyhow::bail!("clipboard is not implemented on this platform")
+    }
+
+    pub(super) fn set_primary_text(_text: &str) -> anyhow::Result<()> {
+        anyhow::bail!("clipboard is not implemented on this platform")
     }
 
     pub(super) fn get_paste_contents() -> anyhow::Result<super::PasteContents> {
-        anyhow::bail!("clipboard is only implemented on macOS")
+        anyhow::bail!("clipboard is not implemented on this platform")
     }
 }
 

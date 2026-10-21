@@ -29,143 +29,7 @@ pub(crate) struct KeybindEngine {
 
 impl Default for KeybindEngine {
     fn default() -> Self {
-        let specs = [
-            ("cmd+q", AppCommand::Quit),
-            ("cmd+t", AppCommand::NewTab),
-            ("cmd+n", AppCommand::NewWindow),
-            ("cmd+d", AppCommand::NewSplitRight),
-            ("cmd+shift+d", AppCommand::NewSplitDown),
-            ("cmd+w", AppCommand::CloseTab),
-            ("cmd+shift+w", AppCommand::CloseWindow),
-            ("cmd+1", AppCommand::SelectTab(1)),
-            ("cmd+2", AppCommand::SelectTab(2)),
-            ("cmd+3", AppCommand::SelectTab(3)),
-            ("cmd+4", AppCommand::SelectTab(4)),
-            ("cmd+5", AppCommand::SelectTab(5)),
-            ("cmd+6", AppCommand::SelectTab(6)),
-            ("cmd+7", AppCommand::SelectTab(7)),
-            ("cmd+8", AppCommand::SelectTab(8)),
-            ("cmd+9", AppCommand::SelectTab(9)),
-            ("cmd+shift+]", AppCommand::NextTab),
-            ("cmd+shift+[", AppCommand::PrevTab),
-            ("cmd+c", AppCommand::Copy),
-            ("cmd+v", AppCommand::Paste),
-            ("cmd+shift+m", AppCommand::SendSelectionToPane),
-            ("cmd+shift+j", AppCommand::NextNotification),
-            ("cmd+k", AppCommand::Terminal(TerminalAction::Clear)),
-            ("cmd+a", AppCommand::Terminal(TerminalAction::SelectAll)),
-            ("cmd+=", AppCommand::FontSize(FontSizeAction::Increase)),
-            (
-                "cmd+shift+plus",
-                AppCommand::FontSize(FontSizeAction::Increase),
-            ),
-            ("cmd+-", AppCommand::FontSize(FontSizeAction::Decrease)),
-            ("cmd+0", AppCommand::FontSize(FontSizeAction::Reset)),
-            ("cmd+f", AppCommand::Search(SearchAction::Find)),
-            ("cmd+g", AppCommand::Search(SearchAction::FindNext)),
-            (
-                "cmd+shift+g",
-                AppCommand::Search(SearchAction::FindPrevious),
-            ),
-            (
-                "shift+arrowleft",
-                AppCommand::CopyMode(CopyModeAction::Extend(CopyDirection::Left)),
-            ),
-            (
-                "shift+arrowright",
-                AppCommand::CopyMode(CopyModeAction::Extend(CopyDirection::Right)),
-            ),
-            (
-                "shift+arrowup",
-                AppCommand::CopyMode(CopyModeAction::Extend(CopyDirection::Up)),
-            ),
-            (
-                "shift+arrowdown",
-                AppCommand::CopyMode(CopyModeAction::Extend(CopyDirection::Down)),
-            ),
-            (
-                "shift+pageup",
-                AppCommand::ScrollViewport(ViewportScroll::PageUp),
-            ),
-            (
-                "shift+pagedown",
-                AppCommand::ScrollViewport(ViewportScroll::PageDown),
-            ),
-            (
-                "shift+home",
-                AppCommand::ScrollViewport(ViewportScroll::Top),
-            ),
-            (
-                "shift+end",
-                AppCommand::ScrollViewport(ViewportScroll::Bottom),
-            ),
-            (
-                "cmd+arrowup",
-                AppCommand::ScrollViewport(ViewportScroll::PrevPrompt),
-            ),
-            (
-                "cmd+arrowdown",
-                AppCommand::ScrollViewport(ViewportScroll::NextPrompt),
-            ),
-            (
-                "cmd+ctrl+arrowleft",
-                AppCommand::FocusDirection(Direction::Left),
-            ),
-            (
-                "cmd+ctrl+arrowright",
-                AppCommand::FocusDirection(Direction::Right),
-            ),
-            (
-                "cmd+ctrl+arrowup",
-                AppCommand::FocusDirection(Direction::Up),
-            ),
-            (
-                "cmd+ctrl+arrowdown",
-                AppCommand::FocusDirection(Direction::Down),
-            ),
-            (
-                "cmd+alt+arrowleft",
-                AppCommand::FocusDirection(Direction::Left),
-            ),
-            (
-                "cmd+alt+arrowright",
-                AppCommand::FocusDirection(Direction::Right),
-            ),
-            ("cmd+alt+arrowup", AppCommand::FocusDirection(Direction::Up)),
-            (
-                "cmd+alt+arrowdown",
-                AppCommand::FocusDirection(Direction::Down),
-            ),
-            (
-                "cmd+ctrl+shift+arrowleft",
-                AppCommand::ResizeSplit(Direction::Left),
-            ),
-            (
-                "cmd+ctrl+shift+arrowright",
-                AppCommand::ResizeSplit(Direction::Right),
-            ),
-            (
-                "cmd+ctrl+shift+arrowup",
-                AppCommand::ResizeSplit(Direction::Up),
-            ),
-            (
-                "cmd+ctrl+shift+arrowdown",
-                AppCommand::ResizeSplit(Direction::Down),
-            ),
-            ("cmd+ctrl+=", AppCommand::EqualizeSplits),
-            ("cmd+shift+enter", AppCommand::ToggleSplitZoom),
-            ("cmd+shift+o", AppCommand::ToggleTabOverview),
-            ("cmd+ctrl+f", AppCommand::ToggleFullscreen),
-            ("cmd+shift+p", AppCommand::ToggleCommandPalette),
-            ("cmd+shift+s", AppCommand::ToggleSidebar),
-            // R-24: default chord for the theme picker half of the split
-            // overlay (verified unused in this list before adding it).
-            ("cmd+shift+,", AppCommand::OpenThemePicker),
-            // scratch-terminal R1: default chord for the scratch terminal
-            // popup (verified unused in this list before adding it).
-            ("cmd+shift+t", AppCommand::ToggleScratchTerminal),
-        ];
-        let bindings = specs
+        let bindings = default_specs()
             .into_iter()
             .map(|(trigger, command)| {
                 KeyBinding::parse(trigger, command).expect("default keybind should parse")
@@ -173,6 +37,288 @@ impl Default for KeybindEngine {
             .collect();
         Self { bindings }
     }
+}
+
+/// The macOS default chords: Ghostty's macOS set (Command-based), plus noa's
+/// own additions.
+#[cfg(target_os = "macos")]
+fn default_specs() -> Vec<(&'static str, AppCommand)> {
+    vec![
+        ("cmd+q", AppCommand::Quit),
+        ("cmd+t", AppCommand::NewTab),
+        ("cmd+n", AppCommand::NewWindow),
+        ("cmd+d", AppCommand::NewSplitRight),
+        ("cmd+shift+d", AppCommand::NewSplitDown),
+        ("cmd+w", AppCommand::CloseTab),
+        ("cmd+shift+w", AppCommand::CloseWindow),
+        ("cmd+1", AppCommand::SelectTab(1)),
+        ("cmd+2", AppCommand::SelectTab(2)),
+        ("cmd+3", AppCommand::SelectTab(3)),
+        ("cmd+4", AppCommand::SelectTab(4)),
+        ("cmd+5", AppCommand::SelectTab(5)),
+        ("cmd+6", AppCommand::SelectTab(6)),
+        ("cmd+7", AppCommand::SelectTab(7)),
+        ("cmd+8", AppCommand::SelectTab(8)),
+        ("cmd+9", AppCommand::SelectTab(9)),
+        ("cmd+shift+]", AppCommand::NextTab),
+        ("cmd+shift+[", AppCommand::PrevTab),
+        ("cmd+c", AppCommand::Copy),
+        ("cmd+v", AppCommand::Paste),
+        ("cmd+shift+m", AppCommand::SendSelectionToPane),
+        ("cmd+shift+j", AppCommand::NextNotification),
+        ("cmd+k", AppCommand::Terminal(TerminalAction::Clear)),
+        ("cmd+a", AppCommand::Terminal(TerminalAction::SelectAll)),
+        ("cmd+=", AppCommand::FontSize(FontSizeAction::Increase)),
+        (
+            "cmd+shift+plus",
+            AppCommand::FontSize(FontSizeAction::Increase),
+        ),
+        ("cmd+-", AppCommand::FontSize(FontSizeAction::Decrease)),
+        ("cmd+0", AppCommand::FontSize(FontSizeAction::Reset)),
+        ("cmd+f", AppCommand::Search(SearchAction::Find)),
+        ("cmd+g", AppCommand::Search(SearchAction::FindNext)),
+        (
+            "cmd+shift+g",
+            AppCommand::Search(SearchAction::FindPrevious),
+        ),
+        (
+            "shift+arrowleft",
+            AppCommand::CopyMode(CopyModeAction::Extend(CopyDirection::Left)),
+        ),
+        (
+            "shift+arrowright",
+            AppCommand::CopyMode(CopyModeAction::Extend(CopyDirection::Right)),
+        ),
+        (
+            "shift+arrowup",
+            AppCommand::CopyMode(CopyModeAction::Extend(CopyDirection::Up)),
+        ),
+        (
+            "shift+arrowdown",
+            AppCommand::CopyMode(CopyModeAction::Extend(CopyDirection::Down)),
+        ),
+        (
+            "shift+pageup",
+            AppCommand::ScrollViewport(ViewportScroll::PageUp),
+        ),
+        (
+            "shift+pagedown",
+            AppCommand::ScrollViewport(ViewportScroll::PageDown),
+        ),
+        (
+            "shift+home",
+            AppCommand::ScrollViewport(ViewportScroll::Top),
+        ),
+        (
+            "shift+end",
+            AppCommand::ScrollViewport(ViewportScroll::Bottom),
+        ),
+        (
+            "cmd+arrowup",
+            AppCommand::ScrollViewport(ViewportScroll::PrevPrompt),
+        ),
+        (
+            "cmd+arrowdown",
+            AppCommand::ScrollViewport(ViewportScroll::NextPrompt),
+        ),
+        (
+            "cmd+ctrl+arrowleft",
+            AppCommand::FocusDirection(Direction::Left),
+        ),
+        (
+            "cmd+ctrl+arrowright",
+            AppCommand::FocusDirection(Direction::Right),
+        ),
+        (
+            "cmd+ctrl+arrowup",
+            AppCommand::FocusDirection(Direction::Up),
+        ),
+        (
+            "cmd+ctrl+arrowdown",
+            AppCommand::FocusDirection(Direction::Down),
+        ),
+        (
+            "cmd+alt+arrowleft",
+            AppCommand::FocusDirection(Direction::Left),
+        ),
+        (
+            "cmd+alt+arrowright",
+            AppCommand::FocusDirection(Direction::Right),
+        ),
+        ("cmd+alt+arrowup", AppCommand::FocusDirection(Direction::Up)),
+        (
+            "cmd+alt+arrowdown",
+            AppCommand::FocusDirection(Direction::Down),
+        ),
+        (
+            "cmd+ctrl+shift+arrowleft",
+            AppCommand::ResizeSplit(Direction::Left),
+        ),
+        (
+            "cmd+ctrl+shift+arrowright",
+            AppCommand::ResizeSplit(Direction::Right),
+        ),
+        (
+            "cmd+ctrl+shift+arrowup",
+            AppCommand::ResizeSplit(Direction::Up),
+        ),
+        (
+            "cmd+ctrl+shift+arrowdown",
+            AppCommand::ResizeSplit(Direction::Down),
+        ),
+        ("cmd+ctrl+=", AppCommand::EqualizeSplits),
+        ("cmd+shift+enter", AppCommand::ToggleSplitZoom),
+        ("cmd+shift+o", AppCommand::ToggleTabOverview),
+        ("cmd+ctrl+f", AppCommand::ToggleFullscreen),
+        ("cmd+shift+p", AppCommand::ToggleCommandPalette),
+        ("cmd+shift+s", AppCommand::ToggleSidebar),
+        // R-24: default chord for the theme picker half of the split
+        // overlay (verified unused in this list before adding it).
+        ("cmd+shift+,", AppCommand::OpenThemePicker),
+        // scratch-terminal R1: default chord for the scratch terminal
+        // popup (verified unused in this list before adding it).
+        ("cmd+shift+t", AppCommand::ToggleScratchTerminal),
+    ]
+}
+
+/// The Linux default chords, following Ghostty's GTK defaults: Ctrl+Shift for
+/// app commands (plain Ctrl chords belong to the shell), Alt+digit for tab
+/// selection, Ctrl+Alt+arrow for split focus. Super stays free for the
+/// desktop. Shifted symbols are listed under their shifted character too
+/// (`ctrl+shift+<` beside `ctrl+shift+,`): X11/Wayland report the shifted
+/// keysym, which the chord's base character would not match.
+#[cfg(not(target_os = "macos"))]
+fn default_specs() -> Vec<(&'static str, AppCommand)> {
+    vec![
+        ("ctrl+shift+q", AppCommand::Quit),
+        ("ctrl+shift+t", AppCommand::NewTab),
+        ("ctrl+shift+n", AppCommand::NewWindow),
+        ("ctrl+shift+o", AppCommand::NewSplitRight),
+        ("ctrl+shift+e", AppCommand::NewSplitDown),
+        ("ctrl+shift+w", AppCommand::CloseTab),
+        ("alt+f4", AppCommand::CloseWindow),
+        ("alt+1", AppCommand::SelectTab(1)),
+        ("alt+2", AppCommand::SelectTab(2)),
+        ("alt+3", AppCommand::SelectTab(3)),
+        ("alt+4", AppCommand::SelectTab(4)),
+        ("alt+5", AppCommand::SelectTab(5)),
+        ("alt+6", AppCommand::SelectTab(6)),
+        ("alt+7", AppCommand::SelectTab(7)),
+        ("alt+8", AppCommand::SelectTab(8)),
+        ("alt+9", AppCommand::SelectTab(9)),
+        ("ctrl+pagedown", AppCommand::NextTab),
+        ("ctrl+pageup", AppCommand::PrevTab),
+        ("ctrl+tab", AppCommand::NextTab),
+        ("ctrl+shift+tab", AppCommand::PrevTab),
+        ("ctrl+shift+c", AppCommand::Copy),
+        ("ctrl+shift+v", AppCommand::Paste),
+        ("ctrl+insert", AppCommand::Copy),
+        ("shift+insert", AppCommand::Paste),
+        ("ctrl+shift+m", AppCommand::SendSelectionToPane),
+        ("ctrl+shift+j", AppCommand::NextNotification),
+        ("ctrl+shift+k", AppCommand::Terminal(TerminalAction::Clear)),
+        (
+            "ctrl+shift+a",
+            AppCommand::Terminal(TerminalAction::SelectAll),
+        ),
+        ("ctrl+=", AppCommand::FontSize(FontSizeAction::Increase)),
+        ("ctrl+plus", AppCommand::FontSize(FontSizeAction::Increase)),
+        (
+            "ctrl+shift+plus",
+            AppCommand::FontSize(FontSizeAction::Increase),
+        ),
+        ("ctrl+-", AppCommand::FontSize(FontSizeAction::Decrease)),
+        ("ctrl+0", AppCommand::FontSize(FontSizeAction::Reset)),
+        ("ctrl+shift+f", AppCommand::Search(SearchAction::Find)),
+        ("ctrl+shift+g", AppCommand::Search(SearchAction::FindNext)),
+        (
+            "ctrl+shift+h",
+            AppCommand::Search(SearchAction::FindPrevious),
+        ),
+        (
+            "shift+arrowleft",
+            AppCommand::CopyMode(CopyModeAction::Extend(CopyDirection::Left)),
+        ),
+        (
+            "shift+arrowright",
+            AppCommand::CopyMode(CopyModeAction::Extend(CopyDirection::Right)),
+        ),
+        (
+            "shift+arrowup",
+            AppCommand::CopyMode(CopyModeAction::Extend(CopyDirection::Up)),
+        ),
+        (
+            "shift+arrowdown",
+            AppCommand::CopyMode(CopyModeAction::Extend(CopyDirection::Down)),
+        ),
+        (
+            "shift+pageup",
+            AppCommand::ScrollViewport(ViewportScroll::PageUp),
+        ),
+        (
+            "shift+pagedown",
+            AppCommand::ScrollViewport(ViewportScroll::PageDown),
+        ),
+        (
+            "shift+home",
+            AppCommand::ScrollViewport(ViewportScroll::Top),
+        ),
+        (
+            "shift+end",
+            AppCommand::ScrollViewport(ViewportScroll::Bottom),
+        ),
+        (
+            "ctrl+shift+pageup",
+            AppCommand::ScrollViewport(ViewportScroll::PrevPrompt),
+        ),
+        (
+            "ctrl+shift+pagedown",
+            AppCommand::ScrollViewport(ViewportScroll::NextPrompt),
+        ),
+        (
+            "ctrl+alt+arrowleft",
+            AppCommand::FocusDirection(Direction::Left),
+        ),
+        (
+            "ctrl+alt+arrowright",
+            AppCommand::FocusDirection(Direction::Right),
+        ),
+        (
+            "ctrl+alt+arrowup",
+            AppCommand::FocusDirection(Direction::Up),
+        ),
+        (
+            "ctrl+alt+arrowdown",
+            AppCommand::FocusDirection(Direction::Down),
+        ),
+        (
+            "super+ctrl+shift+arrowleft",
+            AppCommand::ResizeSplit(Direction::Left),
+        ),
+        (
+            "super+ctrl+shift+arrowright",
+            AppCommand::ResizeSplit(Direction::Right),
+        ),
+        (
+            "super+ctrl+shift+arrowup",
+            AppCommand::ResizeSplit(Direction::Up),
+        ),
+        (
+            "super+ctrl+shift+arrowdown",
+            AppCommand::ResizeSplit(Direction::Down),
+        ),
+        ("super+ctrl+shift+plus", AppCommand::EqualizeSplits),
+        ("ctrl+shift+enter", AppCommand::ToggleSplitZoom),
+        ("ctrl+enter", AppCommand::ToggleFullscreen),
+        ("ctrl+shift+p", AppCommand::ToggleCommandPalette),
+        ("ctrl+shift+s", AppCommand::ToggleSidebar),
+        ("ctrl+,", AppCommand::Preferences),
+        ("ctrl+shift+,", AppCommand::ReloadConfig),
+        ("ctrl+shift+<", AppCommand::ReloadConfig),
+        // Not `ctrl+shift+t` as on macOS (that is New Tab here); see
+        // `noa_config::DEFAULT_SCRATCH_TERMINAL_KEY`.
+        ("ctrl+shift+x", AppCommand::ToggleScratchTerminal),
+    ]
 }
 
 impl KeybindEngine {
@@ -504,6 +650,8 @@ mod tests {
     use super::*;
     use winit::keyboard::{Key, ModifiersState};
 
+    // Asserts the macOS (Command-based) default chords.
+    #[cfg(target_os = "macos")]
     #[test]
     fn configured_keybinds_override_unbind_and_clear_in_order() {
         let (engine, diagnostics) = KeybindEngine::from_config_test(&[
@@ -552,6 +700,8 @@ mod tests {
         );
     }
 
+    // Asserts the macOS (Command-based) default chords.
+    #[cfg(target_os = "macos")]
     #[test]
     fn invalid_configured_keybinds_do_not_remove_existing_bindings() {
         let (engine, diagnostics) = KeybindEngine::from_config_test(&[
@@ -575,6 +725,8 @@ mod tests {
         );
     }
 
+    // Asserts the macOS (Command-based) default chords.
+    #[cfg(target_os = "macos")]
     #[test]
     fn grave_aliases_bind_quick_terminal() {
         for trigger in ["cmd+grave", "cmd+backtick", "cmd+`"] {
@@ -604,6 +756,8 @@ mod tests {
 
     // AC-33 (R-24): the default engine resolves `cmd+shift+,` to
     // `OpenThemePicker`.
+    // Asserts the macOS (Command-based) default chords.
+    #[cfg(target_os = "macos")]
     #[test]
     fn default_engine_binds_cmd_shift_comma_to_open_theme_picker() {
         let engine = KeybindEngine::default();
@@ -728,6 +882,8 @@ mod tests {
     // (diagnosed, defaults kept): the fixed native-menu accelerators mirror
     // those defaults and AppKit dispatches them before winit, so the other
     // command's menu item would win over the sidebar anyway.
+    // Asserts the macOS (Command-based) default chords.
+    #[cfg(target_os = "macos")]
     #[test]
     fn sidebar_hotkey_conflicting_with_another_binding_is_rejected() {
         for spec in ["cmd+t", "cmd+,"] {
@@ -772,6 +928,8 @@ mod tests {
     // conflict, and a later explicit keybind on a JIS alternate (`cmd+jis-yen`
     // vs an earlier `cmd+backslash`) still removes the binding it would
     // otherwise shadow.
+    // Asserts the macOS (Command-based) default chords.
+    #[cfg(target_os = "macos")]
     #[test]
     fn trigger_overlap_governs_conflicts_and_overrides() {
         // cmd+shift+{ would always lose to the default cmd+shift+[ (PrevTab)
@@ -819,6 +977,8 @@ mod tests {
     // focus loss. This locks the resolution semantics that reset relies on —
     // a plain `f` under the reset (empty) modifiers must NOT resolve to
     // Search/Find, while a live SUPER still does.
+    // Asserts the macOS (Command-based) default chords.
+    #[cfg(target_os = "macos")]
     #[test]
     fn plain_f_with_reset_modifiers_does_not_resolve_to_find() {
         let engine = KeybindEngine::default();
@@ -836,6 +996,8 @@ mod tests {
 
     // scratch-terminal R1: the default engine binds `cmd+shift+t` to
     // `ToggleScratchTerminal` out of the box.
+    // Asserts the macOS (Command-based) default chords.
+    #[cfg(target_os = "macos")]
     #[test]
     fn default_engine_binds_cmd_shift_t_to_toggle_scratch_terminal() {
         let engine = KeybindEngine::default();
@@ -902,6 +1064,8 @@ mod tests {
 
     // A chord already serving another command is rejected (diagnosed,
     // default kept) — same policy as `sidebar-hotkey`.
+    // Asserts the macOS (Command-based) default chords.
+    #[cfg(target_os = "macos")]
     #[test]
     fn scratch_terminal_key_conflicting_with_another_binding_is_rejected() {
         let mut engine = KeybindEngine::default();
@@ -943,6 +1107,8 @@ mod tests {
     }
 
     // `None` (no config override) leaves the default binding untouched.
+    // Asserts the macOS (Command-based) default chords.
+    #[cfg(target_os = "macos")]
     #[test]
     fn scratch_terminal_key_none_keeps_default_binding() {
         let mut engine = KeybindEngine::default();
@@ -959,6 +1125,8 @@ mod tests {
 
     // The empty sentinel (`sidebar-hotkey = none`) keeps the default
     // `cmd+shift+s` binding; an unparseable chord is diagnosed and ignored.
+    // Asserts the macOS (Command-based) default chords.
+    #[cfg(target_os = "macos")]
     #[test]
     fn sidebar_hotkey_empty_or_invalid_keeps_default_binding() {
         for spec in ["", "cmd+not-a-key"] {

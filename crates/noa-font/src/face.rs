@@ -440,9 +440,21 @@ fn default_monospace_family_names() -> &'static [&'static str] {
     &["Menlo"]
 }
 
+/// Off macOS there is no single system coding face, and fontconfig's
+/// `monospace` alias often resolves to a CJK family on East-Asian locales
+/// (Ubuntu ja: Noto Sans Mono CJK JP), whose Latin cut is a poor terminal
+/// default. Prefer the common dedicated coding fonts first — JetBrains Mono is
+/// Ghostty's own default — and fall back to the generic alias only when none
+/// is installed.
 #[cfg(not(target_os = "macos"))]
 fn default_monospace_family_names() -> &'static [&'static str] {
-    &[]
+    &[
+        "JetBrains Mono",
+        "DejaVu Sans Mono",
+        "Noto Sans Mono",
+        "Ubuntu Mono",
+        "Liberation Mono",
+    ]
 }
 
 fn load_default_monospace_family(
@@ -709,8 +721,15 @@ fn postscript_fallback_face(source: &SystemSource, postscript_name: &str) -> Opt
 /// `select_family_by_name` resolves this the same way it resolves any other
 /// installed family, whether the backing source is CoreText (macOS) or
 /// another platform's font database (where it will simply not be found).
+#[cfg(target_os = "macos")]
 fn emoji_fallback_family_name() -> &'static str {
     "Apple Color Emoji"
+}
+
+/// The de-facto Linux color-emoji family (shipped by every major distro).
+#[cfg(not(target_os = "macos"))]
+fn emoji_fallback_family_name() -> &'static str {
+    "Noto Color Emoji"
 }
 
 /// Nerd Font family names usable as fallbacks on this system.
@@ -899,7 +918,100 @@ pub(crate) fn cascade_fallback_face(ch: char) -> Option<FontData> {
     covers.then_some(data)
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Ask fontconfig which installed font can render `ch` — the Linux/BSD
+/// counterpart of the CoreText cascade above (and of Ghostty's fontconfig
+/// discovery, which sorts by a charset pattern the same way).
+///
+/// `FcFontSort` returns every font ordered by how well it matches a
+/// monospace pattern carrying `ch` in its charset; the first candidate whose
+/// own charset actually holds `ch` wins. The file is memory-mapped like every
+/// other face, and the result is re-verified with swash's charmap so a
+/// `Some` always covers the codepoint (the caller's retry-after-push relies
+/// on that to never loop).
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn cascade_fallback_face(ch: char) -> Option<FontData> {
+    use fontconfig_sys::constants::{FC_CHARSET, FC_FAMILY, FC_FILE, FC_INDEX};
+    use fontconfig_sys::*;
+    use std::ffi::CStr;
+
+    // SAFETY: plain fontconfig C API usage. Every object created here is
+    // destroyed before return; strings borrowed from a pattern are copied out
+    // before the font set that owns them is destroyed.
+    unsafe {
+        if FcInit() == 0 {
+            return None;
+        }
+        let pattern = FcPatternCreate();
+        if pattern.is_null() {
+            return None;
+        }
+        let charset = FcCharSetCreate();
+        if charset.is_null() {
+            FcPatternDestroy(pattern);
+            return None;
+        }
+        FcCharSetAddChar(charset, ch as u32);
+        FcPatternAddCharSet(pattern, FC_CHARSET.as_ptr(), charset);
+        FcPatternAddString(pattern, FC_FAMILY.as_ptr(), c"monospace".as_ptr().cast());
+        FcConfigSubstitute(std::ptr::null_mut(), pattern, FcMatchPattern);
+        FcDefaultSubstitute(pattern);
+
+        let mut result: FcResult = 0;
+        let set = FcFontSort(
+            std::ptr::null_mut(),
+            pattern,
+            1,
+            std::ptr::null_mut(),
+            &mut result,
+        );
+        let mut found: Option<(std::path::PathBuf, usize)> = None;
+        if !set.is_null() {
+            // An empty set may carry a null `fonts`, which `from_raw_parts`
+            // rejects even at length 0.
+            let fonts: &[_] = if (*set).fonts.is_null() || (*set).nfont <= 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts((*set).fonts, (*set).nfont as usize)
+            };
+            for &font in fonts {
+                let mut font_charset: *mut FcCharSet = std::ptr::null_mut();
+                if FcPatternGetCharSet(font, FC_CHARSET.as_ptr(), 0, &mut font_charset)
+                    != FcResultMatch
+                    || FcCharSetHasChar(font_charset, ch as u32) == 0
+                {
+                    continue;
+                }
+                let mut file: *mut FcChar8 = std::ptr::null_mut();
+                if FcPatternGetString(font, FC_FILE.as_ptr(), 0, &mut file) != FcResultMatch
+                    || file.is_null()
+                {
+                    continue;
+                }
+                let mut index: std::os::raw::c_int = 0;
+                FcPatternGetInteger(font, FC_INDEX.as_ptr(), 0, &mut index);
+                let path = CStr::from_ptr(file.cast()).to_string_lossy().into_owned();
+                found = Some((path.into(), index.max(0) as usize));
+                break;
+            }
+            FcFontSetDestroy(set);
+        }
+        FcCharSetDestroy(charset);
+        FcPatternDestroy(pattern);
+
+        let (path, index) = found?;
+        let file = std::fs::File::open(&path).ok()?;
+        // SAFETY: see the `Handle::Path` arm of `handle_to_data`.
+        let map = memmap2::Mmap::map(&file).ok()?;
+        let data = FontData {
+            bytes: FontBytes::Mapped(map),
+            index,
+        };
+        let covers = data.font_ref().ok()?.charmap().map(ch) != 0;
+        covers.then_some(data)
+    }
+}
+
+#[cfg(not(unix))]
 pub(crate) fn cascade_fallback_face(_ch: char) -> Option<FontData> {
     None
 }

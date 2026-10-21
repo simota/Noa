@@ -699,7 +699,7 @@ impl App {
         event_loop: &ActiveEventLoop,
         geometry: QuickTerminalGeometry,
     ) -> Option<WindowId> {
-        let attrs = WindowAttributes::default()
+        let attrs = with_desktop_app_id(WindowAttributes::default())
             .with_title("Quick Terminal")
             .with_decorations(false)
             .with_inner_size(PhysicalSize::new(geometry.width, geometry.height))
@@ -815,7 +815,7 @@ impl App {
                 group,
                 tab_id: crate::macos_applescript::alloc_tab_id(),
                 ax: Default::default(),
-                surface,
+                surface: Arc::new(surface),
                 surface_config,
                 renderer,
                 split_tree: SplitTree::leaf(initial_pane),
@@ -830,6 +830,7 @@ impl App {
                 modifiers: ModifiersState::empty(),
                 key_modifiers: input::KeyModifierState::default(),
                 occluded: false,
+                background_tab: false,
                 title: "Noa".to_string(),
                 title_override: None,
                 proxy_icon_cwd: None,

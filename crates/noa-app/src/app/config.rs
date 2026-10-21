@@ -5,7 +5,6 @@ use noa_core::{DEFAULT_GRID_PADDING, GridPadding};
 use noa_grid::CursorStyle;
 #[cfg(target_os = "macos")]
 use winit::platform::macos::{OptionAsAlt, WindowAttributesExtMacOS};
-#[cfg(target_os = "macos")]
 use winit::window::WindowAttributes;
 
 const BUILTIN_WALLPAPER_SOURCE: &str = "noa";
@@ -32,6 +31,8 @@ pub struct AppConfig {
     /// OSC 52 clipboard read (query) policy.
     pub clipboard_read: noa_config::ClipboardAccess,
     pub mouse_shift_capture: noa_config::MouseShiftCapture,
+    /// Where a finished mouse selection is copied (`copy-on-select`).
+    pub copy_on_select: noa_config::CopyOnSelect,
     /// Whether to confirm before pasting content that could run commands.
     pub clipboard_paste_protection: bool,
     pub file_link_editor: noa_config::FileLinkEditor,
@@ -284,6 +285,7 @@ impl AppConfig {
             palette: config.palette,
             clipboard_read: config.clipboard_read,
             mouse_shift_capture: config.mouse_shift_capture,
+            copy_on_select: config.copy_on_select,
             clipboard_paste_protection: config.clipboard_paste_protection,
             file_link_editor: config.file_link_editor,
             confirm_quit: config.confirm_quit,
@@ -618,6 +620,7 @@ impl BackgroundImageRuntime {
         }
     }
 
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(super) fn has_visible_image(&self) -> bool {
         match self {
             Self::Static(image) => image.as_ref().is_some_and(background_image_is_visible),
@@ -682,6 +685,7 @@ impl BackgroundImageSlideshow {
         self.current.clone()
     }
 
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn has_visible_image(&self) -> bool {
         self.current
             .as_ref()
@@ -781,6 +785,7 @@ fn has_supported_image_extension(path: &Path) -> bool {
         })
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn background_image_is_visible(image: &noa_render::BackgroundImage) -> bool {
     image.opacity > 0.0 && image.width > 0 && image.height > 0 && !image.rgba.is_empty()
 }
@@ -1098,6 +1103,28 @@ pub(super) fn window_created_transparent(background_opacity: f32) -> bool {
     background_opacity < 1.0
 }
 
+/// Reverse-DNS application id shared with the macOS bundle identifier. On
+/// Linux it is the Wayland `app_id` and the X11 `WM_CLASS` class, so desktop
+/// shells match windows to `com.simota.noa.desktop` (icon, dock grouping) the
+/// way Ghostty uses `com.mitchellh.ghostty`.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) const LINUX_APP_ID: &str = "com.simota.noa";
+
+/// Tag window attributes with [`LINUX_APP_ID`] for both Wayland and X11
+/// (winit applies whichever backend is active). Identity elsewhere.
+pub(super) fn with_desktop_app_id(attrs: WindowAttributes) -> WindowAttributes {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use winit::platform::{wayland::WindowAttributesExtWayland, x11::WindowAttributesExtX11};
+        let attrs = WindowAttributesExtWayland::with_name(attrs, LINUX_APP_ID, "noa");
+        WindowAttributesExtX11::with_name(attrs, LINUX_APP_ID, "noa")
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        attrs
+    }
+}
+
 /// Whether the native titlebar/tab-bar strip needs one of noa's backdrop
 /// views behind it (`macos_window::install_titlebar_backdrop`).
 ///
@@ -1110,6 +1137,7 @@ pub(super) fn window_created_transparent(background_opacity: f32) -> bool {
 /// visible would leave the titlebar as the one un-frosted surface on
 /// screen, so glass keeps its backdrop whenever the window is see-through
 /// at all.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn needs_macos_titlebar_backdrop(
     style: noa_config::MacosTitlebarStyle,
     background_opacity: f32,

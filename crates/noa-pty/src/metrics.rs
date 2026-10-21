@@ -1,8 +1,9 @@
 //! Pane metrics collection (spec `docs/specs/panel-metrics-view.md`,
 //! FR-4/FR-8): the foreground-process-tree CPU/memory/process-count/elapsed
-//! numbers behind the process-monitor overlay. macOS-only measurement;
-//! everything degrades to `None`/empty off macOS (ASSUME-3, NFR-4/5) rather
-//! than adding a new dependency (`sysinfo` was deliberately rejected).
+//! numbers behind the process-monitor overlay. Measured through libproc on
+//! macOS and `/proc` on Linux; everything degrades to `None`/empty elsewhere
+//! (ASSUME-3, NFR-4/5) rather than adding a new dependency (`sysinfo` was
+//! deliberately rejected).
 //!
 //! Capturing a snapshot ([`ProcSnapshot::capture`]) is the one syscall-heavy
 //! step (`proc_listallpids` + one `proc_pidinfo` per pid) — it runs once per
@@ -47,7 +48,13 @@ impl ProcSnapshot {
                 procs: macos::capture_all(),
             }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        {
+            Self {
+                procs: linux::capture_all(),
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             Self::default()
         }
@@ -277,6 +284,114 @@ mod macos {
 #[cfg(target_os = "macos")]
 pub(crate) use macos::rusage_ns_and_footprint;
 
+/// The fields of `/proc/<pid>/stat` the metrics need. `utime`/`stime`/
+/// `starttime` are in clock ticks (`sysconf(_SC_CLK_TCK)`), `starttime`
+/// counted from boot.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProcStat {
+    ppid: u32,
+    pgid: u32,
+    utime: u64,
+    stime: u64,
+    starttime: u64,
+}
+
+/// Parse one `/proc/<pid>/stat` line. The command name sits in parentheses
+/// and may itself contain spaces or `)`, so fields are counted after the
+/// *last* `)` (`proc(5)`: state is field 3, ppid 4, pgrp 5, utime 14,
+/// stime 15, starttime 22).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_proc_stat(line: &str) -> Option<ProcStat> {
+    let rest = &line[line.rfind(')')? + 1..];
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    let field = |n: usize| fields.get(n - 3)?.parse::<u64>().ok();
+    Some(ProcStat {
+        ppid: field(4)? as u32,
+        pgid: field(5)? as u32,
+        utime: field(14)?,
+        stime: field(15)?,
+        starttime: field(22)?,
+    })
+}
+
+/// `VmRSS` from `/proc/<pid>/status`, in bytes. Linux has no
+/// physical-footprint counter; resident set size is the closest analog.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_vm_rss_bytes(status: &str) -> Option<u64> {
+    let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
+    let kib: u64 = line["VmRSS:".len()..]
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    Some(kib.saturating_mul(1024))
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use super::ProcRecord;
+
+    fn clock_ticks_per_sec() -> u64 {
+        static TICKS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *TICKS.get_or_init(|| {
+            // SAFETY: plain sysconf query.
+            let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+            if ticks > 0 { ticks as u64 } else { 100 }
+        })
+    }
+
+    /// Boot time (`btime` in `/proc/stat`), seconds since the epoch.
+    fn boot_time_secs() -> u64 {
+        std::fs::read_to_string("/proc/stat")
+            .ok()
+            .and_then(|stat| {
+                stat.lines()
+                    .find_map(|line| line.strip_prefix("btime "))
+                    .and_then(|secs| secs.trim().parse().ok())
+            })
+            .unwrap_or(0)
+    }
+
+    pub(super) fn capture_all() -> Vec<ProcRecord> {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return Vec::new();
+        };
+        let boot = boot_time_secs();
+        let ticks = clock_ticks_per_sec();
+        entries
+            .filter_map(|entry| {
+                let pid: i32 = entry.ok()?.file_name().to_str()?.parse().ok()?;
+                // A pid that exited between the listing and this read is
+                // skipped rather than aborting the capture.
+                let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+                let stat = super::parse_proc_stat(&stat)?;
+                Some(ProcRecord {
+                    pid,
+                    ppid: stat.ppid,
+                    pgid: stat.pgid,
+                    start_tvsec: boot + stat.starttime / ticks,
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn rusage_ns_and_footprint(pid: libc::pid_t) -> Option<(u64, u64)> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let stat = super::parse_proc_stat(&stat)?;
+        let rss = std::fs::read_to_string(format!("/proc/{pid}/status"))
+            .ok()
+            .and_then(|status| super::parse_vm_rss_bytes(&status))
+            .unwrap_or(0);
+        let cpu_ticks = stat.utime.saturating_add(stat.stime);
+        let cpu_ns = (cpu_ticks as u128 * 1_000_000_000 / clock_ticks_per_sec() as u128) as u64;
+        Some((cpu_ns, rss))
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) use linux::rusage_ns_and_footprint;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,6 +481,41 @@ mod tests {
     // own process must be present. (pid 1 is NOT asserted: launchd's
     // `proc_pidinfo` is permission-denied for unprivileged callers and is
     // legitimately skipped.)
+    #[test]
+    fn proc_stat_parses_fields_after_a_parenthesized_name() {
+        let line = "4242 (tmux: server) (x) S 1 4242 4242 0 -1 4194560 120 0 0 0 \
+                    37 12 0 0 20 0 1 0 98765 1000000 300 18446744073709551615";
+        assert_eq!(
+            parse_proc_stat(line),
+            Some(ProcStat {
+                ppid: 1,
+                pgid: 4242,
+                utime: 37,
+                stime: 12,
+                starttime: 98765,
+            })
+        );
+        assert_eq!(parse_proc_stat("garbage"), None);
+    }
+
+    #[test]
+    fn vm_rss_is_read_in_bytes() {
+        let status = "Name:\tzsh\nVmPeak:\t  9000 kB\nVmRSS:\t    5120 kB\nThreads:\t1\n";
+        assert_eq!(parse_vm_rss_bytes(status), Some(5120 * 1024));
+        assert_eq!(parse_vm_rss_bytes("Name:\tkthreadd\n"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_capture_includes_this_process_and_its_parent() {
+        let snap = ProcSnapshot::capture();
+        let me = std::process::id() as i32;
+        let record = snap.procs.iter().find(|p| p.pid == me).expect("own pid");
+        assert_eq!(record.ppid, std::os::unix::process::parent_id());
+        assert!(record.start_tvsec > 0);
+        assert!(rusage_ns_and_footprint(me).is_some_and(|(_, rss)| rss > 0));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn capture_returns_the_full_process_table() {

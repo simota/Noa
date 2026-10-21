@@ -161,6 +161,10 @@ pub(super) struct ChromeTextures {
     /// The palette block texture, cached with its size so it is reused
     /// frame-to-frame and only reallocated when the block dimensions change.
     pub(super) palette_scratch: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
+    /// The non-macOS in-window tab bar strip, cached like `palette_scratch`.
+    pub(super) tab_bar_scratch: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
+    /// The non-macOS right-click menu card, cached like `palette_scratch`.
+    pub(super) context_menu_scratch: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
     /// 1x1 theme-tinted texture for the scrollback thumb drawn along a
     /// scrolled pane's right edge (its alpha carries the thumb opacity).
     pub(super) scrollbar_tex: Option<(wgpu::Texture, wgpu::TextureView)>,
@@ -202,6 +206,8 @@ impl ChromeTextures {
         self.sidebar_progress_tex = None;
         self.sidebar_rule_tex = None;
         self.palette_scratch = None;
+        self.tab_bar_scratch = None;
+        self.context_menu_scratch = None;
         self.scrollbar_tex = None;
         self.bell_flash_tex = None;
         // `rebuild_count` is deliberately left untouched — it counts total
@@ -270,7 +276,7 @@ pub(super) struct WindowState {
     /// REQ-014), kept in line with the split layout by
     /// `App::sync_accessibility`.
     pub(super) ax: crate::macos_accessibility::WindowAx,
-    pub(super) surface: wgpu::Surface<'static>,
+    pub(super) surface: Arc<wgpu::Surface<'static>>,
     pub(super) surface_config: wgpu::SurfaceConfiguration,
     pub(super) renderer: Renderer,
     pub(super) split_tree: SplitTree,
@@ -294,6 +300,10 @@ pub(super) struct WindowState {
     pub(super) modifiers: ModifiersState,
     pub(super) key_modifiers: input::KeyModifierState,
     pub(super) occluded: bool,
+    /// Off macOS, set while this tab sits behind a sibling in a shared OS
+    /// window (see `linux_tabs`). Such a tab is also `occluded`, but it does
+    /// not own the shared surface, so it must never (re)configure it.
+    pub(super) background_tab: bool,
     /// Whether this window was *created* with `with_transparent(true)`.
     /// AppKit fixes a window's opacity at creation — a window built opaque
     /// can never become see-through in place, and one built transparent
@@ -375,6 +385,7 @@ pub(super) struct WindowState {
     /// Last-synced native (AppKit) overlay model hashes — palette, theme
     /// settings, confirm dialog, toast. Plain data on every platform; only
     /// the macOS redraw path feeds it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(super) native_overlays: crate::macos_overlay::NativeOverlayCache,
     /// The `(theme bg, opacity bits)` last applied via
     /// `set_window_background_color`, so `redraw` only touches the NSWindow
@@ -382,6 +393,7 @@ pub(super) struct WindowState {
     /// free: each `setBackgroundColor:` dirties the window's backdrop layer,
     /// dragging a full AppKit layout + CA commit into every cursor-blink
     /// frame (measured as the largest single main-thread idle cost).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(super) applied_window_bg: Option<(noa_core::Rgb, u32)>,
     /// Last time this window's pane cache was refreshed while occluded (tab
     /// switch stall fix). `None` means no background refresh has run yet
@@ -1510,6 +1522,8 @@ mod chrome_textures_tests {
         assert!(textures.sidebar_progress_tex.is_none());
         assert!(textures.sidebar_rule_tex.is_none());
         assert!(textures.palette_scratch.is_none());
+        assert!(textures.tab_bar_scratch.is_none());
+        assert!(textures.context_menu_scratch.is_none());
         assert!(textures.scrollbar_tex.is_none());
         assert!(textures.bell_flash_tex.is_none());
     }

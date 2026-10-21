@@ -75,6 +75,7 @@ mod auto_approve;
 mod commands;
 mod config;
 mod config_reload;
+mod context_menu;
 #[cfg(target_os = "macos")]
 mod ember;
 mod event_loop;
@@ -83,6 +84,7 @@ mod helpers;
 mod input_ops;
 mod ipc;
 mod lifecycle;
+mod linux_tabs;
 mod overview;
 mod pane_drag;
 mod pane_drag_render;
@@ -110,7 +112,7 @@ use state::*;
 use config::{
     BackgroundImageRuntime, alpha_blending_mode, apply_palette_overrides, effective_theme_name,
     font_config_from_noa_config, load_background_image_runtime, resolve_cursor_style,
-    resolve_grid_padding, window_created_transparent,
+    resolve_grid_padding, window_created_transparent, with_desktop_app_id,
 };
 #[cfg(target_os = "macos")]
 use config::{apply_macos_titlebar_style, macos_option_as_alt, needs_macos_titlebar_backdrop};
@@ -190,6 +192,12 @@ pub struct App {
     gpu: Option<GpuState>,
     windows: HashMap<WindowId, WindowState>,
     window_order: Vec<WindowId>,
+    /// Off macOS, a logical window's tabs share one OS window: maps that OS
+    /// window's id to the tab currently shown in it (see `linux_tabs`). Empty
+    /// on macOS, where every tab is its own native window.
+    tab_hosts: HashMap<WindowId, WindowId>,
+    /// Counter behind the synthetic `WindowId`s minted for in-window tabs.
+    next_tab_id: u64,
     overview_window: Option<OverviewWindowState>,
     /// Per-TAB overview tile render state (Overview U1): the grid lays out one
     /// tile per tab (window), so dirty/last-render is tracked by `WindowId`.
@@ -300,6 +308,11 @@ pub struct App {
     command_palette: Option<CommandPaletteSession>,
     /// The open send-selection target picker, if any.
     send_selection_picker: Option<SendSelectionPickerSession>,
+    /// The open right-click menu off macOS (`context_menu`), if any.
+    context_menu: Option<context_menu::ContextMenuSession>,
+    /// The button whose press the menu consumed; its release is swallowed so
+    /// the pane never sees a mouse-up it got no press for.
+    context_menu_swallowed_release: Option<MouseButton>,
     #[cfg(target_os = "macos")]
     text_panel: Option<crate::text_panel::TextPanel>,
     prompt_drafts: HashMap<PaneId, String>,
@@ -789,6 +802,8 @@ impl App {
             gpu: None,
             windows: HashMap::new(),
             window_order: Vec::new(),
+            tab_hosts: HashMap::new(),
+            next_tab_id: 0,
             overview_window: None,
             overview_tiles: HashMap::new(),
             focused: None,
@@ -826,6 +841,8 @@ impl App {
             held_pane_close_keys: HashSet::new(),
             command_palette: None,
             send_selection_picker: None,
+            context_menu: None,
+            context_menu_swallowed_release: None,
             #[cfg(target_os = "macos")]
             text_panel: None,
             prompt_drafts: HashMap::new(),

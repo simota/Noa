@@ -49,3 +49,46 @@ jobs:
 
       - name: Test workspace
         run: cargo test --workspace --locked
+
+  build-and-test-linux:
+    name: Build and test (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libfontconfig1-dev libfreetype-dev \
+            libxkbcommon-dev libwayland-dev \
+            fonts-dejavu-core desktop-file-utils appstream
+
+      - name: Install Rust 1.92.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.92.0 \
+            --profile minimal \
+            --component clippy \
+            --no-self-update
+          rustup default 1.92.0
+
+      - name: Build workspace
+        run: cargo build --workspace --locked
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test workspace
+        run: cargo test --workspace --locked
+
+      - name: Validate desktop integration files
+        run: |
+          desktop-file-validate dist/linux/com.simota.noa.desktop
+          appstreamcli validate --no-net dist/linux/com.simota.noa.metainfo.xml

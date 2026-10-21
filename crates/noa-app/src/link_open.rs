@@ -31,6 +31,14 @@ pub fn is_allowed_uri(uri: &str) -> bool {
     })
 }
 
+/// The desktop's "open with the default application" command: `open` on
+/// macOS, `xdg-open` on freedesktop systems (Ghostty uses the same pair).
+/// Never run a bare `open` off macOS — on Debian/Ubuntu it is `openvt`.
+#[cfg(target_os = "macos")]
+pub(crate) const SYSTEM_OPEN_COMMAND: &str = "open";
+#[cfg(not(target_os = "macos"))]
+pub(crate) const SYSTEM_OPEN_COMMAND: &str = "xdg-open";
+
 /// Open `uri` in the user's default handler for it, if its scheme is
 /// allowed. Silently refuses (with a log warning) otherwise — this is a
 /// best-effort UI action, not a boundary that should ever panic.
@@ -45,15 +53,18 @@ pub fn open_uri(uri: &str) {
     // audit). `open` returns as soon as the handler is launched, so the
     // thread is short-lived; the main thread must not block on it.
     let uri = uri.to_owned();
-    std::thread::spawn(
-        move || match std::process::Command::new("open").arg(&uri).status() {
+    std::thread::spawn(move || {
+        match std::process::Command::new(SYSTEM_OPEN_COMMAND)
+            .arg(&uri)
+            .status()
+        {
             Ok(status) if !status.success() => {
-                log::warn!("`open` failed for hyperlink {uri} ({status})");
+                log::warn!("`{SYSTEM_OPEN_COMMAND}` failed for hyperlink {uri} ({status})");
             }
             Ok(_) => {}
             Err(err) => log::warn!("failed to open hyperlink {uri}: {err}"),
-        },
-    );
+        }
+    });
 }
 
 /// Open `path` (already resolved to an absolute filesystem path) in the
@@ -85,9 +96,10 @@ pub fn open_file_uri(path: std::path::PathBuf, editor: noa_config::FileLinkEdito
     });
 }
 
-/// Extensions macOS `open` executes, installs, or follows instead of
-/// displaying (bundles are directories, so this applies to both kinds).
-const LAUNCHABLE_EXTENSIONS: [&str; 18] = [
+/// Extensions macOS `open` or `xdg-open` executes, installs, or follows
+/// instead of displaying (bundles are directories, so this applies to both
+/// kinds). Files with an execute bit are refused separately.
+const LAUNCHABLE_EXTENSIONS: [&str; 26] = [
     "app",
     "command",
     "tool",
@@ -106,6 +118,14 @@ const LAUNCHABLE_EXTENSIONS: [&str; 18] = [
     "fileloc",
     "url",
     "jar",
+    "desktop",
+    "appimage",
+    "flatpakref",
+    "snap",
+    "deb",
+    "rpm",
+    "run",
+    "sh",
 ];
 
 /// The resolved target of a `file://` link, or why it must not be opened.
@@ -210,9 +230,15 @@ fn open_path_blocking(
             return;
         }
     };
-    match std::process::Command::new("open").arg(&path).status() {
+    match std::process::Command::new(SYSTEM_OPEN_COMMAND)
+        .arg(&path)
+        .status()
+    {
         Ok(status) if !status.success() => {
-            log::warn!("`open` failed for path {} ({status})", path.display());
+            log::warn!(
+                "`{SYSTEM_OPEN_COMMAND}` failed for path {} ({status})",
+                path.display()
+            );
         }
         Ok(_) => {}
         Err(err) => log::warn!("failed to open path {}: {err}", path.display()),

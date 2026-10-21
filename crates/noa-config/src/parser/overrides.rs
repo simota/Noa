@@ -28,6 +28,7 @@ pub(crate) fn build_overrides(
     let mut clipboard_read = None;
     let mut clipboard_paste_protection = None;
     let mut mouse_shift_capture = None;
+    let mut copy_on_select = None;
     let mut file_link_editor = None;
     let mut confirm_quit = None;
     let mut title_report = None;
@@ -172,6 +173,19 @@ pub(crate) fn build_overrides(
             }
             "clipboard-read" => {
                 clipboard_read = parse_clipboard_read(path, directive, &mut diagnostics);
+            }
+            "copy-on-select" => {
+                use crate::CopyOnSelect;
+                let value = directive.value.as_deref().unwrap_or("");
+                copy_on_select = match value {
+                    "false" => Some(CopyOnSelect::False),
+                    "true" => Some(CopyOnSelect::True),
+                    "clipboard" => Some(CopyOnSelect::Clipboard),
+                    _ => {
+                        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+                        None
+                    }
+                };
             }
             "mouse-shift-capture" => {
                 use crate::MouseShiftCapture;
@@ -468,6 +482,7 @@ pub(crate) fn build_overrides(
             clipboard_read,
             clipboard_paste_protection,
             mouse_shift_capture,
+            copy_on_select,
             file_link_editor,
             confirm_quit,
             title_report,
@@ -582,6 +597,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "theme"
             | "clipboard-read"
             | "clipboard-paste-protection"
+            | "copy-on-select"
             | "file-link-editor"
             | "confirm-quit"
             | "title-report"

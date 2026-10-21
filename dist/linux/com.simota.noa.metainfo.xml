@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.simota.noa</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Noa</name>
+  <summary>GPU-accelerated terminal emulator written in Rust</summary>
+  <description>
+    <p>
+      Noa is a Ghostty-compatible terminal emulator written in Rust. It reads
+      Ghostty-style configuration files, ships the Ghostty theme catalog, and
+      renders with a GPU-accelerated cell renderer.
+    </p>
+  </description>
+  <launchable type="desktop-id">com.simota.noa.desktop</launchable>
+  <url type="homepage">https://github.com/simota/Noa</url>
+  <url type="bugtracker">https://github.com/simota/Noa/issues</url>
+  <developer id="com.simota">
+    <name>simota</name>
+  </developer>
+  <categories>
+    <category>System</category>
+    <category>TerminalEmulator</category>
+  </categories>
+  <provides>
+    <binary>Noa</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+</component>

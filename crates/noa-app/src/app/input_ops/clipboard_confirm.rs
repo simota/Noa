@@ -32,6 +32,49 @@ impl App {
         }
     }
 
+    /// Ghostty's `copy-on-select`: a mouse selection finished with a button
+    /// release is copied to the PRIMARY selection (and, for `clipboard`, the
+    /// system clipboard too) without an explicit copy command.
+    pub(in crate::app) fn copy_selection_on_select(
+        &mut self,
+        window_id: WindowId,
+        pane_id: PaneId,
+    ) {
+        let copy_on_select = self.config.copy_on_select;
+        if copy_on_select == noa_config::CopyOnSelect::False {
+            return;
+        }
+        let Some(text) = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&pane_id))
+            .and_then(|surface| surface.terminal.lock().selected_text())
+            .filter(|text| !text.is_empty())
+        else {
+            return;
+        };
+        if let Err(err) = self.clipboard.set_primary_text(&text) {
+            log::warn!("failed to copy selection to the primary selection: {err}");
+        }
+        if copy_on_select == noa_config::CopyOnSelect::Clipboard {
+            self.write_text_to_clipboard(&text);
+        }
+    }
+
+    /// A middle click (with mouse reporting off) pastes the PRIMARY
+    /// selection, the X11/Wayland convention Ghostty follows.
+    pub(in crate::app) fn paste_primary_selection_to_pane(
+        &mut self,
+        window_id: WindowId,
+        pane_id: PaneId,
+    ) {
+        match self.clipboard.get_primary_text() {
+            Ok(text) if !text.is_empty() => self.paste_text_to_pane(window_id, pane_id, text),
+            Ok(_) => {}
+            Err(err) => log::warn!("failed to read the primary selection for paste: {err}"),
+        }
+    }
+
     pub(in crate::app) fn paste_clipboard_to_pty(&mut self) {
         let Some((window_id, pane_id)) = self.resolve_pane_command_target(AppCommand::Paste) else {
             return;

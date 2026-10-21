@@ -310,16 +310,11 @@ impl App {
     /// GUI-agnostic window id back to the winit `WindowId`.
     fn focus_session_card(&mut self, card: SessionCardId) {
         let window_id = WindowId::from(card.window_id.0);
-        let Some(window) = self
-            .windows
-            .get(&window_id)
-            .map(|state| state.window.clone())
-        else {
+        if !self.windows.contains_key(&window_id) {
             return;
-        };
+        }
         self.focus_pane(window_id, card.pane_id);
-        self.focused = Some(window_id);
-        window.focus_window();
+        self.focus_tab(window_id);
     }
 
     /// Advance an in-flight sidebar card drag on a cursor move. Returns `true`

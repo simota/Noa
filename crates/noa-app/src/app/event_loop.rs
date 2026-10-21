@@ -217,7 +217,7 @@ impl ApplicationHandler<UserEvent> for App {
                             && crate::notification::should_notify(self.os_focused, window_id)
                             && !self.agent_bell_will_bounce_dock(*id)
                         {
-                            crate::notification::bounce_dock();
+                            self.request_window_attention(window_id);
                         }
                     }
                     // `visual-bell`: BEL flashes its window briefly (the
@@ -303,6 +303,10 @@ impl ApplicationHandler<UserEvent> for App {
                 };
                 if crate::notification::should_notify(self.os_focused, window_id) {
                     crate::notification::post_notification(title.as_deref(), &body);
+                    // macOS's post already bounced the Dock; elsewhere mark
+                    // the window urgent so the taskbar/dock highlights it.
+                    #[cfg(not(target_os = "macos"))]
+                    self.request_window_attention(window_id);
                 }
                 // Desktop alerts are window-scoped; unread state is pane-scoped.
                 self.apply_session_delta(crate::session_store::SessionDelta::Attention {
@@ -525,6 +529,37 @@ impl ApplicationHandler<UserEvent> for App {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        // Off macOS an OS window may host several tabs (`linux_tabs`): its
+        // events belong to the tab in front, and geometry changes reach the
+        // tabs behind it too.
+        #[cfg(not(target_os = "macos"))]
+        let window_id = {
+            let front = self.tab_hosts.get(&window_id).copied().unwrap_or(window_id);
+            let background = || {
+                self.tab_siblings(front)
+                    .into_iter()
+                    .filter(move |id| *id != front)
+            };
+            match &event {
+                WindowEvent::Resized(size) => {
+                    for tab in background().collect::<Vec<_>>() {
+                        self.on_resize(tab, *size);
+                    }
+                }
+                WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                    for tab in background().collect::<Vec<_>>() {
+                        self.on_scale_factor_changed(tab, *scale_factor);
+                    }
+                }
+                WindowEvent::Moved(_) => {
+                    for tab in background().collect::<Vec<_>>() {
+                        self.refresh_redraw_floor(tab);
+                    }
+                }
+                _ => {}
+            }
+            front
+        };
         if !self.windows.contains_key(&window_id) {
             return;
         }
@@ -590,6 +625,11 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CloseRequested if self.is_scratch_terminal_window(window_id) => {
                 self.destroy_scratch_terminal();
             }
+            // The window's close button closes every tab it hosts off macOS;
+            // on macOS each native tab is its own window.
+            #[cfg(not(target_os = "macos"))]
+            WindowEvent::CloseRequested => self.request_close_window_of(event_loop, window_id),
+            #[cfg(target_os = "macos")]
             WindowEvent::CloseRequested => self.request_close_tab(event_loop, window_id),
             WindowEvent::RedrawRequested => self.redraw(window_id),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
@@ -602,6 +642,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Moved(_) => self.refresh_redraw_floor(window_id),
             WindowEvent::Resized(size) => {
                 self.end_copy_mode_for_window(window_id);
+                self.close_context_menu(window_id);
                 self.on_resize(window_id, size);
             }
             WindowEvent::ThemeChanged(theme) => self.on_system_appearance_changed(theme),
@@ -653,6 +694,7 @@ impl ApplicationHandler<UserEvent> for App {
                     state.key_modifiers.clear();
                 }
                 self.end_copy_mode_for_window(window_id);
+                self.close_context_menu(window_id);
                 // Only clear if this window is the one we recorded as focused —
                 // when macOS switches between our own windows the incoming
                 // `Focused(true)` may already have repointed `os_focused`, and
@@ -895,6 +937,14 @@ impl ApplicationHandler<UserEvent> for App {
                     window_id,
                     pane_preedit_active,
                 ) {
+                    return;
+                }
+                // An open right-click menu is the topmost layer: it takes
+                // the keyboard until it is dismissed.
+                if self.context_menu_open_in(window_id) {
+                    if pressed {
+                        self.handle_context_menu_key(event_loop, window_id, &event);
+                    }
                     return;
                 }
                 // A confirmation dialog is fully modal — it sits ahead of
@@ -1230,6 +1280,23 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 impl App {
+    /// Ask the desktop to draw the user's eye to `window_id` once: a single
+    /// Dock bounce on macOS, the window's urgency hint (taskbar/dock
+    /// highlight, cleared on focus) on X11/Wayland.
+    pub(super) fn request_window_attention(&self, window_id: WindowId) {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = window_id;
+            crate::notification::bounce_dock();
+        }
+        #[cfg(not(target_os = "macos"))]
+        if let Some(state) = self.windows.get(&window_id) {
+            state
+                .window
+                .request_user_attention(Some(winit::window::UserAttentionType::Informational));
+        }
+    }
+
     fn agent_bell_will_bounce_dock(&self, id: SessionCardId) -> bool {
         let window_id = WindowId::from(id.window_id.0);
         self.os_focused != Some(window_id)
@@ -1385,12 +1452,16 @@ impl App {
         }
         state.surface_config.width = size.width;
         state.surface_config.height = size.height;
-        configure_wgpu_surface(
-            &state.surface,
-            &gpu.device,
-            &state.surface_config,
-            state.occluded,
-        );
+        // A background in-window tab shares its host's surface; only the
+        // shown tab configures it.
+        if !state.background_tab {
+            configure_wgpu_surface(
+                &state.surface,
+                &gpu.device,
+                &state.surface_config,
+                state.occluded,
+            );
+        }
         state.renderer.resize(PixelSize {
             w: size.width,
             h: size.height,
@@ -1428,7 +1499,11 @@ impl App {
         // pointer before any early return below; a no-op when the sidebar is
         // hidden (inset 0).
         self.update_sidebar_button_hover(window_id, point);
+        if point.is_some_and(|point| self.context_menu_cursor_moved(window_id, point)) {
+            return;
+        }
         let Some(point) = point else {
+            self.context_menu_pointer_left(window_id);
             if let Some(state) = self.windows.get_mut(&window_id) {
                 state.last_mouse_pane = None;
             }
@@ -1557,6 +1632,7 @@ impl App {
             }
         }
         self.update_sidebar_button_hover(window_id, None);
+        self.context_menu_pointer_left(window_id);
         self.sync_hover_link(window_id);
 
         let overview_changed = self
@@ -1670,6 +1746,38 @@ impl App {
             .windows
             .get(&window_id)
             .and_then(|tab| self.script_target(tab));
+        // An open right-click menu owns the next press (see `context_menu`),
+        // and then that press's release.
+        if scripted.is_none() {
+            match state {
+                ElementState::Pressed
+                    if self.context_menu_mouse_press(event_loop, window_id, button) =>
+                {
+                    return;
+                }
+                ElementState::Released if self.context_menu_swallows_release(button) => {
+                    return;
+                }
+                _ => {}
+            }
+        }
+        // Off macOS a left press on the in-window tab bar selects or closes
+        // a tab and goes no further.
+        if button == MouseButton::Left
+            && state == ElementState::Pressed
+            && scripted.is_none()
+            && let Some(point) = self
+                .windows
+                .get(&window_id)
+                .and_then(|s| s.last_mouse_point)
+            && let Some(hit) = self.tab_bar_hit(window_id, point)
+        {
+            match hit {
+                linux_tabs::TabBarHit::Select(tab) => self.focus_tab(tab),
+                linux_tabs::TabBarHit::Close(tab) => self.request_close_tab(event_loop, tab),
+            }
+            return;
+        }
         // A left press inside the sidebar band is consumed there (card switch,
         // toolbar `+`/`…`, per-card menu) and never reaches the terminal/split
         // handling (FR-3/FR-6/FR-7).
@@ -1829,10 +1937,19 @@ impl App {
                     self.install_macos_menu_if_needed();
                     self.show_macos_split_context_menu(window_id);
                 }
+                #[cfg(not(target_os = "macos"))]
+                self.open_context_menu(window_id);
             }
             return;
         }
 
+        if button == MouseButton::Middle {
+            if state == ElementState::Pressed {
+                self.focus_pane(window_id, pane_id);
+                self.paste_primary_selection_to_pane(window_id, pane_id);
+            }
+            return;
+        }
         if button != MouseButton::Left {
             return;
         }
@@ -1857,13 +1974,19 @@ impl App {
             })
             .unwrap_or(SelectionGesture::None);
         self.apply_selection_gesture(window_id, pane_id, gesture);
-        if state == ElementState::Released && scripted.is_none() {
-            self.release_mouse_capture(window_id);
+        if state == ElementState::Released {
+            self.copy_selection_on_select(window_id, pane_id);
+            if scripted.is_none() {
+                self.release_mouse_capture(window_id);
+            }
         }
     }
 
     pub(super) fn on_mouse_wheel(&mut self, window_id: WindowId, delta: MouseScrollDelta) {
         self.end_copy_mode_for_window(window_id);
+        // Scrolling under an open menu would move the content its commands
+        // act on; dismiss it like a GTK popover.
+        self.close_context_menu(window_id);
         // A wheel turn over the sidebar band scrolls its card list (FR-15),
         // consuming the event so the terminal viewport doesn't also scroll.
         let sidebar_lines = match delta {

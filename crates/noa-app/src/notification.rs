@@ -5,7 +5,10 @@
 //! right entitlements, so it silently no-ops for a bare `cargo run` binary or
 //! an ad-hoc-signed dev build. `NSUserNotification` still posts from an
 //! unbundled process — the common case for a terminal launched from a dev
-//! checkout. A no-op on every non-macOS platform.
+//! checkout. On Linux notifications go through the freedesktop notification
+//! service via `notify-send` (libnotify), and the bell plays the sound theme's
+//! `bell` event via `canberra-gtk-play`; both degrade silently when the tool
+//! is missing.
 
 /// Whether a terminal-requested notification should surface. Ghostty suppresses
 /// notifications only for the window that *actually* holds OS focus (the user is
@@ -41,13 +44,59 @@ pub(crate) fn post_notification(title: Option<&str>, body: &str) {
     post(notification_title(title), body);
 }
 
-/// Play the macOS system alert sound for terminal BEL. A no-op off macOS.
+/// Play the system alert sound for terminal BEL: `NSBeep` on macOS, the
+/// XDG sound theme's `bell` event elsewhere.
 pub(crate) fn beep() {
     #[cfg(target_os = "macos")]
     // SAFETY: `NSBeep` is a documented AppKit function and is called on the
     // winit main thread from BEL event handling.
     unsafe {
         NSBeep();
+    }
+    #[cfg(not(target_os = "macos"))]
+    if bell_rate_limit_allows(std::time::Instant::now()) {
+        spawn_detached(
+            "canberra-gtk-play",
+            &["--id=bell", "--description=Noa bell"],
+        );
+    }
+}
+
+/// A BEL flood (`yes $'\a'`) must not fork a sound player per byte: at most
+/// one bell sound per [`BELL_MIN_INTERVAL`].
+#[cfg(not(target_os = "macos"))]
+const BELL_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+#[cfg(not(target_os = "macos"))]
+fn bell_rate_limit_allows(now: std::time::Instant) -> bool {
+    use std::sync::Mutex;
+    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|poison| poison.into_inner());
+    if last.is_some_and(|at| now.saturating_duration_since(at) < BELL_MIN_INTERVAL) {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
+
+/// Run a helper program without blocking the event loop; its exit is reaped
+/// on a throwaway thread so it never lingers as a zombie. A missing program
+/// is not an error worth surfacing (headless box, minimal desktop).
+#[cfg(not(target_os = "macos"))]
+fn spawn_detached(program: &'static str, args: &[&str]) {
+    let mut command = std::process::Command::new(program);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    match command.spawn() {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(err) => log::debug!("{program} unavailable: {err}"),
     }
 }
 
@@ -100,6 +149,7 @@ fn post(title: &str, body: &str) {
 /// when an agent session rings the bell to request attention, where a full
 /// notification-center entry per bell would be too noisy. Call only from the
 /// main thread. A no-op off macOS.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn bounce_dock() {
     #[cfg(target_os = "macos")]
     // SAFETY: `request_dock_attention` sends the documented AppKit
@@ -133,11 +183,47 @@ unsafe fn request_dock_attention() {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn post(_title: &str, _body: &str) {}
+fn post(title: &str, body: &str) {
+    spawn_detached("notify-send", &notify_send_args(title, body));
+}
+
+/// `notify-send` arguments: `--` ends option parsing so a body that starts
+/// with `-` (an OSC 9 payload is arbitrary program output) is never read as
+/// a flag.
+#[cfg(not(target_os = "macos"))]
+fn notify_send_args<'a>(title: &'a str, body: &'a str) -> [&'a str; 5] {
+    ["--app-name=Noa", "--icon=com.simota.noa", "--", title, body]
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn notify_send_args_end_option_parsing_before_payload() {
+        assert_eq!(
+            notify_send_args("--title", "-rf body"),
+            [
+                "--app-name=Noa",
+                "--icon=com.simota.noa",
+                "--",
+                "--title",
+                "-rf body"
+            ]
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn bell_sound_is_rate_limited() {
+        let start = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+        assert!(bell_rate_limit_allows(start));
+        assert!(!bell_rate_limit_allows(
+            start + std::time::Duration::from_millis(10)
+        ));
+        assert!(bell_rate_limit_allows(start + BELL_MIN_INTERVAL));
+    }
 
     #[test]
     fn suppresses_notifications_only_for_the_os_focused_window() {

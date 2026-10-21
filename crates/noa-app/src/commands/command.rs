@@ -146,6 +146,8 @@ pub enum ViewportScroll {
     NextPrompt,
 }
 
+// Menu identifiers are only consumed by the native macOS menu bar.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 impl AppCommand {
     pub(crate) const ABOUT_MENU_ID: &'static str = "noa.app.about";
     pub(crate) const PREFERENCES_MENU_ID: &'static str = "noa.app.preferences";

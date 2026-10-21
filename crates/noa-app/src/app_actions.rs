@@ -46,12 +46,19 @@ pub(crate) const CONFIG_TEMPLATE: &str = "\
 
 /// Show the standard macOS About panel for Noa, seeded with the app name and
 /// the crate version (a plain `cargo run` has no Info.plist to read them
-/// from). A no-op off macOS.
+/// from). Elsewhere (no native About panel without a GTK dependency) the
+/// same version string is shown as a desktop notification.
 pub(crate) fn show_about() {
     #[cfg(target_os = "macos")]
     show_about_macos();
     #[cfg(not(target_os = "macos"))]
-    log::info!("About Noa (v{})", env!("CARGO_PKG_VERSION"));
+    crate::notification::post_notification(
+        Some("About Noa"),
+        &format!(
+            "Noa {}\nA Ghostty-compatible terminal emulator",
+            version_string()
+        ),
+    );
 }
 
 /// The About panel's version string: `CARGO_PKG_VERSION` extended with the
@@ -81,6 +88,7 @@ fn compose_version(version: &str, git_hash: &str, build_date: &str) -> String {
 /// candidates: the first one that exists on disk wins (R-1). `None` when none
 /// of them exist, so the caller can fall back to the AppKit standard icon
 /// instead of panicking (R-2).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn icon_path_from_candidates(candidates: &[PathBuf]) -> Option<PathBuf> {
     candidates.iter().find(|path| path.exists()).cloned()
 }
@@ -166,15 +174,30 @@ pub(crate) fn open_config_file() {
         return;
     };
     ensure_config_file(&path);
-    // `open -t` forces the default *text* editor; the config file is
-    // extensionless, so a plain `open` could route it to an arbitrary handler.
-    if let Err(err) = std::process::Command::new("open")
-        .arg("-t")
-        .arg(&path)
-        .spawn()
-    {
-        log::warn!("failed to open config file {}: {err}", path.display());
-    }
+    // Reap on a detached thread: a dropped `Child` is never waited on.
+    std::thread::spawn(move || {
+        if let Err(err) = config_open_command(&path).status() {
+            log::warn!("failed to open config file {}: {err}", path.display());
+        }
+    });
+}
+
+/// `open -t` forces the default *text* editor; the config file is
+/// extensionless, so a plain `open` could route it to an arbitrary handler.
+#[cfg(target_os = "macos")]
+fn config_open_command(path: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("open");
+    command.arg("-t").arg(path);
+    command
+}
+
+/// `xdg-open` picks the handler by MIME type; an extensionless file with
+/// text content sniffs as `text/plain`, which maps to the text editor.
+#[cfg(not(target_os = "macos"))]
+fn config_open_command(path: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new(crate::link_open::SYSTEM_OPEN_COMMAND);
+    command.arg(path);
+    command
 }
 
 /// Create the config file (and its parent directory) seeded with the template

@@ -125,6 +125,7 @@ impl App {
         self.request_window_redraw(source_window_id);
     }
 
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(in crate::app) fn can_open_send_selection_picker_for_pane(
         &self,
         source_window_id: WindowId,

@@ -41,6 +41,12 @@ impl App {
         path: std::path::PathBuf,
         line: Option<u32>,
     ) {
+        // The preview is a native AppKit text panel; elsewhere Alt+click
+        // degrades to the plain open path (editor / xdg-open).
+        if !cfg!(target_os = "macos") {
+            crate::link_open::open_path(&path, line, None, self.config.file_link_editor);
+            return;
+        }
         let Some(pane_id) = self
             .windows
             .get(&window_id)
@@ -105,6 +111,8 @@ impl App {
         title: String,
         text: String,
     ) {
+        #[cfg(not(target_os = "macos"))]
+        let _ = (window_id, pane_id, title, text);
         #[cfg(target_os = "macos")]
         if self.resolve_pane_window(window_id, pane_id).is_some() {
             if let Some(panel) = &self.text_panel {
@@ -293,6 +301,7 @@ impl App {
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn quote_selection(selection: &str) -> String {
     let text = crate::text_panel::bounded_text(selection);
     let quoted = text

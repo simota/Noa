@@ -54,11 +54,23 @@ pub const DEFAULT_QUICK_TERMINAL_ANIMATION_DURATION: f32 = 0.2;
 /// `quick-terminal-hotkey` default: `cmd+grave` (⌘`). (Ghostty ships no
 /// default; noa binds one so the drop-down works out of the box. Set
 /// `quick-terminal-hotkey = none` to disable it.)
+///
+/// Off macOS there is no global-hotkey backend, so the default is empty
+/// (disabled) rather than a chord that only produces a warning; the quick
+/// terminal stays reachable through the palette or a `keybind`.
+#[cfg(target_os = "macos")]
 pub const DEFAULT_QUICK_TERMINAL_HOTKEY: &str = "cmd+grave";
-/// `scratch-terminal-key` default: `cmd+shift+t`, an in-app keybind (not a
-/// global hotkey — see [`crate::KeybindConfig`]/`noa-app`'s `KeybindEngine`).
-/// Set `scratch-terminal-key = none` to disable it.
+#[cfg(not(target_os = "macos"))]
+pub const DEFAULT_QUICK_TERMINAL_HOTKEY: &str = "";
+/// `scratch-terminal-key` default: `cmd+shift+t` on macOS, `ctrl+shift+x`
+/// elsewhere (`ctrl+shift+t` is New Tab in Ghostty's Linux defaults). An
+/// in-app keybind (not a global hotkey — see [`crate::KeybindConfig`]/
+/// `noa-app`'s `KeybindEngine`). Set `scratch-terminal-key = none` to
+/// disable it.
+#[cfg(target_os = "macos")]
 pub const DEFAULT_SCRATCH_TERMINAL_KEY: &str = "cmd+shift+t";
+#[cfg(not(target_os = "macos"))]
+pub const DEFAULT_SCRATCH_TERMINAL_KEY: &str = "ctrl+shift+x";
 /// `scratch-terminal-size` default: 100x25 cells.
 pub const DEFAULT_SCRATCH_TERMINAL_SIZE: ScratchTerminalSize = ScratchTerminalSize {
     cols: 100,
@@ -263,6 +275,27 @@ impl MouseShiftCapture {
             Self::True => "true",
             Self::Always => "always",
             Self::Never => "never",
+        }
+    }
+}
+
+/// Ghostty's `copy-on-select`: where a finished mouse selection is copied.
+/// `true` writes the selection clipboard (X11/Wayland PRIMARY, pasted with a
+/// middle click); `clipboard` writes both PRIMARY and the system clipboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CopyOnSelect {
+    False,
+    #[default]
+    True,
+    Clipboard,
+}
+
+impl CopyOnSelect {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::False => "false",
+            Self::True => "true",
+            Self::Clipboard => "clipboard",
         }
     }
 }
@@ -675,6 +708,8 @@ pub struct StartupConfig {
     /// Whether to confirm before pasting content that could run commands
     /// (`clipboard-paste-protection`). Ghostty default is on.
     pub clipboard_paste_protection: bool,
+    /// Where a finished mouse selection is copied (`copy-on-select`).
+    pub copy_on_select: CopyOnSelect,
     pub mouse_shift_capture: MouseShiftCapture,
     /// Editor command for Cmd-clicking local paths, including line/column.
     pub file_link_editor: FileLinkEditor,
@@ -961,6 +996,7 @@ impl Default for StartupConfig {
             palette: Vec::new(),
             clipboard_read: ClipboardAccess::default(),
             clipboard_paste_protection: true,
+            copy_on_select: CopyOnSelect::default(),
             mouse_shift_capture: MouseShiftCapture::default(),
             file_link_editor: FileLinkEditor::Default,
             confirm_quit: true,
@@ -1081,6 +1117,7 @@ pub struct ConfigOverrides {
     pub palette: Vec<PaletteOverride>,
     pub clipboard_read: Option<ClipboardAccess>,
     pub clipboard_paste_protection: Option<bool>,
+    pub copy_on_select: Option<CopyOnSelect>,
     pub mouse_shift_capture: Option<MouseShiftCapture>,
     pub file_link_editor: Option<FileLinkEditor>,
     pub confirm_quit: Option<bool>,
@@ -1165,6 +1202,7 @@ macro_rules! impl_redacted_config_debug {
                 s.field("font", &self.font)
                     .field("palette", &self.palette)
                     .field("clipboard_read", &self.clipboard_read)
+                    .field("copy_on_select", &self.copy_on_select)
                     .field("mouse_shift_capture", &self.mouse_shift_capture)
                     .field(
                         "clipboard_paste_protection",
@@ -1281,6 +1319,7 @@ impl ConfigOverrides {
             font: self.font.merge(higher_priority.font),
             palette: merge_list(self.palette, higher_priority.palette),
             clipboard_read: higher_priority.clipboard_read.or(self.clipboard_read),
+            copy_on_select: higher_priority.copy_on_select.or(self.copy_on_select),
             mouse_shift_capture: higher_priority
                 .mouse_shift_capture
                 .or(self.mouse_shift_capture),
@@ -1447,6 +1486,7 @@ impl ConfigOverrides {
             },
             clipboard_read: self.clipboard_read.unwrap_or(base.clipboard_read),
             mouse_shift_capture: self.mouse_shift_capture.unwrap_or(base.mouse_shift_capture),
+            copy_on_select: self.copy_on_select.unwrap_or(base.copy_on_select),
             clipboard_paste_protection: self
                 .clipboard_paste_protection
                 .unwrap_or(base.clipboard_paste_protection),
@@ -1945,6 +1985,7 @@ mod tests {
                 palette: Vec::new(),
                 clipboard_read: ClipboardAccess::Ask,
                 clipboard_paste_protection: true,
+                copy_on_select: CopyOnSelect::True,
                 mouse_shift_capture: MouseShiftCapture::default(),
                 file_link_editor: FileLinkEditor::Default,
                 confirm_quit: true,
@@ -2034,11 +2075,17 @@ mod tests {
         assert!(config.send_selection_send_enter);
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn quick_terminal_hotkey_constant_is_cmd_grave_on_macos() {
+        assert_eq!(DEFAULT_QUICK_TERMINAL_HOTKEY, "cmd+grave");
+    }
+
     #[test]
     fn quick_terminal_hotkey_defaults_to_cmd_grave() {
         assert_eq!(
             StartupConfig::default().quick_terminal_hotkey.as_deref(),
-            Some("cmd+grave")
+            Some(DEFAULT_QUICK_TERMINAL_HOTKEY)
         );
     }
 
@@ -2073,7 +2120,11 @@ mod tests {
     fn scratch_terminal_key_defaults_to_cmd_shift_t() {
         assert_eq!(
             StartupConfig::default().scratch_terminal_key.as_deref(),
-            Some("cmd+shift+t")
+            Some(if cfg!(target_os = "macos") {
+                "cmd+shift+t"
+            } else {
+                "ctrl+shift+x"
+            })
         );
     }
 

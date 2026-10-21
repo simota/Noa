@@ -240,6 +240,14 @@ impl App {
                 state.window.select_tab_at_index(saved.focused_tab);
             }
         }
+        // Off macOS each spawned tab took the front of its shared OS window,
+        // leaving the group's last tab in front; bring the saved one forward.
+        #[cfg(not(target_os = "macos"))]
+        for (group, saved) in restored_groups.iter().zip(&state.windows) {
+            if let Some(&tab) = group.get(saved.focused_tab) {
+                self.activate_tab(tab);
+            }
+        }
 
         if let Some(focused_window) = state.focused_window
             && let (Some(group), Some(saved)) = (
@@ -248,10 +256,7 @@ impl App {
             )
             && let Some(window_id) = group.get(saved.focused_tab).or_else(|| group.first())
         {
-            self.focused = Some(*window_id);
-            if let Some(target) = self.windows.get(window_id) {
-                target.window.clone().focus_window();
-            }
+            self.focus_tab(*window_id);
         }
     }
 

@@ -355,6 +355,13 @@ impl App {
             }
         };
         if let Some(title) = tab_title_update(&state.title, &title) {
+            // A tab behind another in a shared OS window (`linux_tabs`) owns
+            // only its tab bar label, which the front tab paints.
+            if state.background_tab {
+                state.title = title;
+                state.window.request_redraw();
+                return;
+            }
             state.window.set_title(&title);
             // `set_title` alone updates the titlebar but not an already-laid-out
             // native tab button (AppKit caches its label at layout time), so
@@ -469,6 +476,12 @@ impl App {
         self.update_focused_ime_cursor_area(window_id);
         #[cfg(target_os = "macos")]
         let has_visible_background_image = self.background_image.has_visible_image();
+        // In-window tab bar (non-macOS): resolved before the borrows below
+        // because sibling titles live in other `WindowState`s.
+        #[cfg(not(target_os = "macos"))]
+        let tab_bar = self
+            .tab_bar_model(window_id)
+            .map(|model| (model, self.window_sidebar_inset_px(window_id)));
         let (Some(gpu), Some(state)) = (self.gpu.as_mut(), self.windows.get_mut(&window_id)) else {
             return;
         };
@@ -1173,6 +1186,43 @@ impl App {
                 snapshot.cols,
                 snapshot.rows_n,
                 padding,
+                state.window.scale_factor() as f32,
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        if let Some(((titles, active), x)) = tab_bar.as_ref() {
+            let surface_size = PixelSize {
+                w: state.surface_config.width,
+                h: state.surface_config.height,
+            };
+            sidebar::draw_tab_bar(
+                gpu,
+                state.font_px,
+                state.surface_config.format,
+                &view,
+                surface_size,
+                *x,
+                titles,
+                *active,
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        if let Some(menu) = self
+            .context_menu
+            .as_ref()
+            .filter(|menu| menu.window_id == window_id)
+        {
+            let surface_size = PixelSize {
+                w: state.surface_config.width,
+                h: state.surface_config.height,
+            };
+            sidebar::draw_context_menu(
+                gpu,
+                state.font_px,
+                state.surface_config.format,
+                &view,
+                surface_size,
+                menu,
                 state.window.scale_factor() as f32,
             );
         }

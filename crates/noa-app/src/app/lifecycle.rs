@@ -185,39 +185,55 @@ impl App {
         // screen long before fonts/renderer are ready and never flashes
         // unpainted/system-default content.
         let early_show = first_window;
-        let window_attrs = self
-            .tab_window_attributes(inner_size, group)
-            .with_visible(!early_show);
-        let window = Arc::new(
-            event_loop
-                .create_window(window_attrs)
-                .expect("failed to create window"),
-        );
-        crate::startup_trace::mark("window-created");
+        // Off macOS a tab joining a live group shares that group's OS window
+        // and surface instead of opening a window of its own (see
+        // `linux_tabs`).
+        let shared_host = self.shared_tab_host(group);
+        let joins_shared_window = shared_host.is_some();
+        let window = match &shared_host {
+            Some((window, _, _)) => window.clone(),
+            None => {
+                let window_attrs = self
+                    .tab_window_attributes(inner_size, group)
+                    .with_visible(!early_show);
+                let window = Arc::new(
+                    event_loop
+                        .create_window(window_attrs)
+                        .expect("failed to create window"),
+                );
+                crate::startup_trace::mark("window-created");
+                // Seed the system-appearance snapshot from the first real
+                // window we get a chance to ask (only meaningfully read once,
+                // at startup — a `theme = light:...,dark:...` pair's initial
+                // pick depends on it; live changes arrive via
+                // `WindowEvent::ThemeChanged` afterward).
+                if let Some(theme) = window.theme() {
+                    self.system_appearance = theme;
+                }
+                window.set_ime_allowed(true);
+                crate::macos_blur::apply_background_blur(
+                    &window,
+                    self.config.background_blur_radius,
+                    self.config.background_opacity,
+                );
+                update_ime_cursor_area(
+                    &window,
+                    metrics,
+                    0,
+                    0,
+                    PaneRectApp::new(0, 0, 0, 0),
+                    self.padding,
+                );
+                window
+            }
+        };
         let window_scale_factor = window.scale_factor();
-        // Seed the system-appearance snapshot from the first real window we
-        // get a chance to ask (only meaningfully read once, at startup — a
-        // `theme = light:...,dark:...` pair's initial pick depends on it;
-        // live changes arrive via `WindowEvent::ThemeChanged` afterward).
-        if let Some(theme) = window.theme() {
-            self.system_appearance = theme;
-        }
-        window.set_ime_allowed(true);
-        crate::macos_blur::apply_background_blur(
-            &window,
-            self.config.background_blur_radius,
-            self.config.background_opacity,
-        );
-        update_ime_cursor_area(
-            &window,
-            metrics,
-            0,
-            0,
-            PaneRectApp::new(0, 0, 0, 0),
-            self.padding,
-        );
 
-        let (surface, early_surface_config) = if let Some(gpu) = &self.gpu {
+        let (surface, early_surface_config) = if let Some((_, surface, config)) = shared_host {
+            // The shared surface is already configured; the config rides the
+            // same no-reconfigure path as the first window's.
+            (surface, Some(config))
+        } else if let Some(gpu) = &self.gpu {
             let surface = gpu
                 .instance
                 .create_surface(window.clone())
@@ -228,7 +244,7 @@ impl App {
                         e,
                     )
                 });
-            (surface, None)
+            (Arc::new(surface), None)
         } else {
             // The GPU foundation (instance/adapter/device) has been warming on
             // a startup worker since the top of `crate::run`; by now it is
@@ -291,6 +307,17 @@ impl App {
             crate::chrome::select_palette(theme.is_light(), self.config.glassmorphism);
 
             let caps = surface.get_capabilities(&adapter);
+            // The adapter is picked before any window exists (prewarm), so on
+            // multi-GPU / mixed Vulkan+GL Linux systems it may be unable to
+            // present to this surface; `preferred_surface_format` would then
+            // index an empty format list.
+            if caps.formats.is_empty() {
+                gpu_init_fatal(
+                    &mut self.session_persister,
+                    "the GPU adapter cannot present to this window",
+                    adapter.get_info().name,
+                );
+            }
             let alpha_blending = alpha_blending_mode(&self.config.font);
 
             // If the window landed on a scale factor the monitor probe didn't
@@ -468,7 +495,7 @@ impl App {
                 palette_scrim: None,
                 palette_shadow_source: None,
             });
-            (surface, Some(surface_config))
+            (Arc::new(surface), Some(surface_config))
         };
 
         let (surface_config, renderer) = {
@@ -478,6 +505,8 @@ impl App {
                 // First window: the surface was configured (and painted)
                 // before the fonts joined — reconfiguring here would discard
                 // the already-presented solid startup frame.
+                // A tab joining a shared window: the surface belongs to the
+                // front tab and is already configured.
                 Some(config) => config,
                 None => {
                     let caps = surface.get_capabilities(&gpu.adapter);
@@ -568,13 +597,33 @@ impl App {
             }
         }
 
-        let window_id = window.id();
+        let window_id = if joins_shared_window {
+            self.mint_tab_window_id()
+        } else {
+            window.id()
+        };
         let initial_pane = self.next_pane_id();
+        // A joining tab means the shared window has at least two tabs, so
+        // the tab bar is up; the relayout after activation settles the rest.
+        #[cfg(not(target_os = "macos"))]
+        let tab_bar_px = if joins_shared_window {
+            let gpu = self.gpu.as_ref().expect("gpu initialized");
+            sidebar::tab_bar_geometry(
+                gpu.fonts
+                    .get(font_pixel_size(self.runtime_font_size, window_scale_factor))
+                    .metrics(),
+            )
+            .1
+        } else {
+            0
+        };
+        #[cfg(target_os = "macos")]
+        let tab_bar_px = 0;
         let initial_rect = content_inset_bounds(
             PaneRectApp::new(0, 0, surface_config.width, surface_config.height),
             crate::macos_window::top_chrome_inset_px(&window).unwrap_or_else(|| {
                 titlebar_top_inset_px(self.config.macos_titlebar_style, window.scale_factor())
-            }),
+            }) + tab_bar_px,
             content_margin_px(self.config.macos_titlebar_style, window.scale_factor()),
         );
         let auto_approve_enabled = Arc::new(AtomicBool::new(
@@ -637,6 +686,7 @@ impl App {
                 modifiers: ModifiersState::empty(),
                 key_modifiers: input::KeyModifierState::default(),
                 occluded: false,
+                background_tab: false,
                 title: "Noa".to_string(),
                 proxy_icon_cwd: None,
                 last_touchpad_stage: 0,
@@ -665,7 +715,10 @@ impl App {
         }
         let inserted_after_anchor = tab_anchor
             .and_then(|anchor_id| self.windows.get(&anchor_id))
-            .is_some_and(|anchor| crate::macos_window::insert_tab_after(&anchor.window, &window));
+            .is_some_and(|anchor| {
+                joins_shared_window
+                    || crate::macos_window::insert_tab_after(&anchor.window, &window)
+            });
         if inserted_after_anchor {
             self.window_order.insert(tab_insert_at, window_id);
         } else {
@@ -678,7 +731,17 @@ impl App {
         // A window seeded with the sidebar visible (`sidebar-enabled`) must turn
         // the io-thread gate on so its panes start publishing card state.
         self.refresh_sidebar_visible_gate();
-        self.focused = Some(window_id);
+        if joins_shared_window {
+            // Bring the new tab to the front of the shared window; every
+            // sibling relayouts because the tab bar may just have appeared.
+            self.activate_tab(window_id);
+            self.focused = Some(window_id);
+            self.relayout_tab_siblings(window_id);
+        } else {
+            #[cfg(not(target_os = "macos"))]
+            self.tab_hosts.insert(window.id(), window_id);
+            self.focused = Some(window_id);
+        }
         if self.script_spawn.is_some() {
             crate::macos_window::make_key_without_activating(&window);
         } else {
@@ -694,7 +757,7 @@ impl App {
         inner_size: LogicalSize<f64>,
         group: WindowGroupId,
     ) -> WindowAttributes {
-        let attrs = WindowAttributes::default()
+        let attrs = with_desktop_app_id(WindowAttributes::default())
             .with_title("Noa")
             .with_inner_size(inner_size)
             // A transparent window is required for `background-opacity` to
@@ -1069,6 +1132,16 @@ impl App {
     pub(super) fn request_close_tab(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId) {
         let count = self.tab_running_program_count(window_id);
         if count > 0 {
+            // Only the front tab of a shared OS window (off macOS) draws the
+            // dialog and receives its keys, so a background tab closed from
+            // the tab bar must come forward first.
+            if self
+                .windows
+                .get(&window_id)
+                .is_some_and(|state| state.background_tab)
+            {
+                self.focus_tab(window_id);
+            }
             self.open_confirm_dialog(
                 window_id,
                 close_confirm_message(CloseConfirmTarget::Session, count),
@@ -1097,6 +1170,27 @@ impl App {
         // survive (a no-op when the host closed above, or when no drag exists —
         // including the `move_pane_to_tab_at` self-call after it took the drag).
         self.cancel_overview_pane_drag();
+        // Off macOS, closing the front tab of a shared window brings its
+        // neighbour (next, else previous) to the front first, so the focus
+        // repoint below lands inside the same OS window.
+        let siblings: Vec<WindowId> = self
+            .tab_siblings(window_id)
+            .into_iter()
+            .filter(|id| *id != window_id)
+            .collect();
+        let os_window = self.windows.get(&window_id).map(|state| state.window.id());
+        let was_front_tab = !cfg!(target_os = "macos")
+            && os_window.is_some_and(|os| self.tab_hosts.get(&os) == Some(&window_id));
+        if was_front_tab {
+            let index = self
+                .tab_siblings(window_id)
+                .iter()
+                .position(|id| *id == window_id)
+                .unwrap_or(0);
+            if let Some(successor) = siblings.get(index).or(siblings.last()).copied() {
+                self.activate_tab(successor);
+            }
+        }
         let outcome = close_tab_outcome(
             &self.window_order,
             self.focused,
@@ -1122,6 +1216,15 @@ impl App {
         // Overview tiles are tab-unit (U1): drop the closed tab's tile state.
         self.overview_tiles.remove(&window_id);
         self.clear_window_bound_overlays(window_id);
+        if let Some(os_window) = os_window
+            && self.tab_hosts.get(&os_window) == Some(&window_id)
+        {
+            self.tab_hosts.remove(&os_window);
+        }
+        // The tab bar may just have gone away (one tab left).
+        for sibling in siblings {
+            self.relayout_and_resize_window(sibling);
+        }
 
         match outcome {
             TabCloseOutcome::Stale => {}
@@ -1139,6 +1242,9 @@ impl App {
                         let _ = self.proxy.send_event(UserEvent::RestoreFocus { window_id });
                     }
                     TabCloseFocusDecision::Immediate(window_id) => {
+                        // Off macOS the target may sit behind another tab of
+                        // its own OS window.
+                        self.focus_tab(window_id);
                         if let Some(state) = self.windows.get_mut(&window_id) {
                             // Mirror the deferred path's title re-assert: clear
                             // the applied-title mirror and request a redraw so
@@ -1146,7 +1252,6 @@ impl App {
                             // than relying on `tab_title_update`'s steady-state
                             // skip (tab-close title-freeze fix).
                             state.title.clear();
-                            state.window.focus_window();
                             state.window.request_redraw();
                         }
                     }
@@ -1271,6 +1376,16 @@ impl App {
         let Some(window_id) = self.focused else {
             return;
         };
+        self.request_close_window_of(event_loop, window_id);
+    }
+
+    /// [`App::request_close_window`] for the logical window holding
+    /// `window_id`.
+    pub(super) fn request_close_window_of(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+    ) {
         let Some(group) = self.windows.get(&window_id).map(|state| state.group) else {
             return;
         };
@@ -1479,11 +1594,11 @@ impl App {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            if let Some(window_id) = self.window_order.get(index - 1).copied() {
-                self.focused = Some(window_id);
-                if let Some(window) = self.focused_window() {
-                    window.focus_window();
-                }
+            let Some(focused) = self.focused else {
+                return;
+            };
+            if let Some(tab) = self.tab_siblings(focused).get(index - 1).copied() {
+                self.focus_tab(tab);
             }
         }
     }
@@ -1512,21 +1627,16 @@ impl App {
 
     #[cfg(not(target_os = "macos"))]
     fn cycle_fallback_tab(&mut self, direction: isize) {
-        if self.window_order.is_empty() {
-            return;
-        }
         let Some(focused) = self.focused else {
             return;
         };
-        let Some(current) = self.window_order.iter().position(|id| *id == focused) else {
+        let siblings = self.tab_siblings(focused);
+        let Some(current) = siblings.iter().position(|id| *id == focused) else {
             return;
         };
-        let len = self.window_order.len() as isize;
+        let len = siblings.len() as isize;
         let next = (current as isize + direction).rem_euclid(len) as usize;
-        self.focused = Some(self.window_order[next]);
-        if let Some(window) = self.focused_window() {
-            window.focus_window();
-        }
+        self.focus_tab(siblings[next]);
     }
 
     #[cfg(target_os = "macos")]

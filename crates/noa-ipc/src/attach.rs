@@ -226,12 +226,21 @@ impl AttachRegistry {
 }
 
 fn next_attach_generation() -> u64 {
-    let previous = NEXT_ATTACH_GENERATION
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-            Some(current.wrapping_add(1).max(1))
-        })
-        .expect("the generation update closure always returns Some");
-    previous.wrapping_add(1).max(1)
+    // A hand-rolled CAS loop: `fetch_update` is deprecated and its
+    // successor `try_update` is not stable on the 1.92 MSRV.
+    let mut current = NEXT_ATTACH_GENERATION.load(Ordering::Relaxed);
+    loop {
+        let next = current.wrapping_add(1).max(1);
+        match NEXT_ATTACH_GENERATION.compare_exchange_weak(
+            current,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return next,
+            Err(actual) => current = actual,
+        }
+    }
 }
 
 fn cleanup_expired(state: &mut RegistryState, now: Instant) {

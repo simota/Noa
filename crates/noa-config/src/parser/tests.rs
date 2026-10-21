@@ -1609,6 +1609,15 @@ fn send_selection_send_enter_parses_and_is_supported_scalar_key_for_import() {
 }
 
 #[test]
+fn ember_parses_and_is_supported_scalar_key_for_import() {
+    let (overrides, diagnostics) = parse_overrides(path(), "ember = true");
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(overrides.ember, Some(true));
+    assert!(is_supported_scalar_key("ember"));
+}
+
+#[test]
 fn invalid_values_warn_and_fall_back() {
     let (overrides, diagnostics) = parse_overrides(path(), "font-size = not-a-number");
 

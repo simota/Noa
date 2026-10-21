@@ -159,6 +159,7 @@ or fails to decode, a diagnostic is shown and the background image is disabled.
 | `audible-bell-dock-bounce` | `true`, `false` | `false` | Trigger Dock attention on an unfocused audible BEL. macOS only |
 | `auto-approve` | `true`, `false` | `false` | Initial value for agent CLI auto approval in new tabs |
 | `send-selection-send-enter` | `true`, `false` | `false` | Send Enter after the send-selection picker pastes into the target pane |
+| `ember` | `true`, `false` | `false` | Show Ember, the pane list in the macOS menu bar, at launch. View → Ember in Menu Bar toggles it for the session. macOS only |
 
 ## Server and remote client
 

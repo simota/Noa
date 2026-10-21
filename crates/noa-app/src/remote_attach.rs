@@ -644,15 +644,25 @@ struct BudgetedInput {
 impl BudgetedInput {
     fn reserve(bytes: Vec<u8>, pending_bytes: Arc<AtomicUsize>) -> Result<Self, Vec<u8>> {
         let charge = bytes.len().max(REMOTE_INPUT_PENDING_MIN_CHARGE);
-        if pending_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current
-                    .checked_add(charge)
-                    .filter(|next| *next <= REMOTE_INPUT_PENDING_BYTE_CAP)
-            })
-            .is_err()
-        {
-            return Err(bytes);
+        // A hand-rolled CAS loop: `fetch_update` is deprecated and its
+        // successor `try_update` is not stable on the 1.92 MSRV.
+        let mut current = pending_bytes.load(Ordering::Acquire);
+        loop {
+            let Some(next) = current
+                .checked_add(charge)
+                .filter(|next| *next <= REMOTE_INPUT_PENDING_BYTE_CAP)
+            else {
+                return Err(bytes);
+            };
+            match pending_bytes.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
         }
         Ok(Self {
             bytes,

@@ -75,6 +75,8 @@ mod auto_approve;
 mod commands;
 mod config;
 mod config_reload;
+#[cfg(target_os = "macos")]
+mod ember;
 mod event_loop;
 mod font_cache;
 mod helpers;
@@ -208,6 +210,9 @@ pub struct App {
     os_focused: Option<WindowId>,
     #[cfg(target_os = "macos")]
     macos_menu: Option<crate::macos_menu::MacosMenu>,
+    /// Ember's menu bar pane list, while shown.
+    #[cfg(target_os = "macos")]
+    ember: Option<ember::EmberState>,
     modifiers: ModifiersState,
     clipboard: SystemClipboard,
     keybinds: KeybindEngine,
@@ -790,6 +795,8 @@ impl App {
             os_focused: None,
             #[cfg(target_os = "macos")]
             macos_menu: None,
+            #[cfg(target_os = "macos")]
+            ember: None,
             modifiers: ModifiersState::empty(),
             clipboard: SystemClipboard::new(),
             keybinds,

@@ -64,6 +64,8 @@ pub(crate) struct MacosMenu {
     /// The "Sidebar" item, retained so its accelerator can track the
     /// `sidebar-hotkey` config (see [`MacosMenu::set_sidebar_hotkey`]).
     sidebar: MenuItem,
+    /// "Ember in Menu Bar", checked while Ember's status item is shown.
+    ember: CheckMenuItem,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -159,6 +161,13 @@ impl MacosMenu {
         let auto_approve = CheckMenuItem::with_id(
             AppCommand::ToggleAutoApprove.menu_id(),
             auto_approve_menu_label(false),
+            true,
+            false,
+            None,
+        );
+        let ember = CheckMenuItem::with_id(
+            AppCommand::ToggleEmber.menu_id(),
+            "Ember in Menu Bar",
             true,
             false,
             None,
@@ -379,6 +388,7 @@ impl MacosMenu {
                 &quick_terminal,
                 &scratch_terminal,
                 &sidebar,
+                &ember,
                 &auto_approve,
                 &PredefinedMenuItem::separator(),
                 &MenuItem::with_id(
@@ -475,12 +485,18 @@ impl MacosMenu {
             quick_terminal,
             scratch_terminal,
             sidebar,
+            ember,
         })
     }
 
     /// Reflect the current Secure Keyboard Entry state in the menu checkmark.
     pub(crate) fn set_secure_keyboard_entry_checked(&self, checked: bool) {
         self.secure_keyboard_entry.set_checked(checked);
+    }
+
+    /// Reflect whether Ember's status item is shown.
+    pub(crate) fn set_ember_checked(&self, checked: bool) {
+        self.ember.set_checked(checked);
     }
 
     /// Reflect the focused tab's Auto Approve state in both the app menu and

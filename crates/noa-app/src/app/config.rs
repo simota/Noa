@@ -212,6 +212,8 @@ pub struct AppConfig {
     /// `send-selection-send-enter`: follow the send-selection picker's paste
     /// with an Enter write so the pasted text is submitted immediately.
     pub send_selection_send_enter: bool,
+    /// `ember`: show Ember in the macOS menu bar at launch.
+    pub ember: bool,
     /// Raw `keybind = ...` entries from config. Parsed into the runtime
     /// [`crate::commands::KeybindEngine`] by `App::new` and live reload.
     pub keybinds: Vec<noa_config::KeybindConfig>,
@@ -344,6 +346,7 @@ impl AppConfig {
             audible_bell_dock_bounce: config.audible_bell_dock_bounce,
             auto_approve: config.auto_approve,
             send_selection_send_enter: config.send_selection_send_enter,
+            ember: config.ember,
             keybinds: config.keybinds,
             server_enable: config.server_enable,
             server_port: config.server_port,

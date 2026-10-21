@@ -71,13 +71,21 @@ impl<T> BudgetedWrite<T> {
 impl PtyWriteBudget {
     fn reserve_len(&self, len: usize) -> Option<WriteReservation> {
         let charge = len.max(WRITE_MIN_CHARGE);
-        self.0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current
-                    .checked_add(charge)
-                    .filter(|&next| next <= WRITE_BYTE_CAP)
-            })
-            .ok()?;
+        // A hand-rolled CAS loop: `fetch_update` is deprecated and its
+        // successor `try_update` is not stable on the 1.92 MSRV.
+        let mut current = self.0.load(Ordering::Acquire);
+        loop {
+            let next = current
+                .checked_add(charge)
+                .filter(|&next| next <= WRITE_BYTE_CAP)?;
+            match self
+                .0
+                .compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
         Some(WriteReservation {
             budget: self.clone(),
             charge,

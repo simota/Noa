@@ -1545,6 +1545,7 @@ impl App {
                 )
                 .expect("failed to install macOS app menu"),
             );
+            self.set_ember_visible(self.config.ember);
         }
         if let Some(window_id) = self.focused {
             self.sync_macos_auto_approve_menu_state(window_id);

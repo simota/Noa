@@ -3,15 +3,39 @@
 
 use std::collections::{HashMap, HashSet};
 
-use noa_ipc::Panel;
+use crate::session_store::{SessionCard, SessionCardId};
+
+/// What Ember reads of one pane: the session card fields the menu shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Pane {
+    pub id: SessionCardId,
+    pub name: String,
+    pub cwd: String,
+    pub branch: Option<String>,
+    pub process: Option<String>,
+    pub busy: bool,
+    pub attention: bool,
+}
+
+impl Pane {
+    pub(crate) fn from_card(id: SessionCardId, card: &SessionCard) -> Self {
+        Pane {
+            id,
+            name: card.display_name().to_string(),
+            cwd: card.cwd.clone(),
+            branch: card.branch.clone(),
+            process: card.process.clone(),
+            busy: card.busy,
+            // An agent's own approval-pending report counts as waiting too.
+            attention: card.attention || card.agent_needs_attention(),
+        }
+    }
+}
 
 /// Short, flat status words (brand voice: no exclamation, no emoji).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PaneState {
-    /// The pane raised attention (an agent asking, a notification). Until a
-    /// dedicated approval-pending signal exists on the wire, `attention` is
-    /// the best proxy for "waiting on you"; it already ranks first, so an
-    /// approval state only has to map here to stay on top.
+pub(crate) enum PaneState {
+    /// The pane raised attention (an agent asking, a notification).
     Waiting,
     Running,
     Idle,
@@ -21,7 +45,7 @@ pub enum PaneState {
 }
 
 impl PaneState {
-    pub fn word(self) -> &'static str {
+    pub(crate) fn word(self) -> &'static str {
         match self {
             PaneState::Waiting => "waiting.",
             PaneState::Running => "running…",
@@ -42,8 +66,8 @@ impl PaneState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PaneRow {
-    pub pane_id: u64,
+pub(crate) struct PaneRow {
+    pub id: SessionCardId,
     /// Line 1: `name · process`.
     pub title: String,
     /// Line 2: `branch · ~/cwd`.
@@ -54,18 +78,18 @@ pub struct PaneRow {
 /// Remembers the previous `busy` of each pane so a running → quiet
 /// transition can read as `done.`.
 #[derive(Default)]
-pub struct Tracker {
-    last_busy: HashMap<u64, bool>,
-    done: HashSet<u64>,
+pub(crate) struct Tracker {
+    last_busy: HashMap<SessionCardId, bool>,
+    done: HashSet<SessionCardId>,
 }
 
 impl Tracker {
-    pub fn observe(&mut self, panels: &[Panel]) {
-        let live: HashSet<u64> = panels.iter().map(|p| p.pane_id.0).collect();
+    pub(crate) fn observe(&mut self, panes: &[Pane]) {
+        let live: HashSet<SessionCardId> = panes.iter().map(|p| p.id).collect();
         self.done.retain(|id| live.contains(id));
         self.last_busy.retain(|id, _| live.contains(id));
-        for panel in panels {
-            let id = panel.pane_id.0;
+        for panel in panes {
+            let id = panel.id;
             let was_busy = self.last_busy.insert(id, panel.busy).unwrap_or(false);
             if panel.busy {
                 self.done.remove(&id);
@@ -76,16 +100,16 @@ impl Tracker {
     }
 
     /// You looked at it; it no longer needs to say `done.`.
-    pub fn acknowledge(&mut self, pane_id: u64) {
-        self.done.remove(&pane_id);
+    pub(crate) fn acknowledge(&mut self, id: SessionCardId) {
+        self.done.remove(&id);
     }
 
-    pub fn state(&self, panel: &Panel) -> PaneState {
+    pub(crate) fn state(&self, panel: &Pane) -> PaneState {
         if panel.attention {
             PaneState::Waiting
         } else if panel.busy {
             PaneState::Running
-        } else if self.done.contains(&panel.pane_id.0) {
+        } else if self.done.contains(&panel.id) {
             PaneState::Done
         } else {
             PaneState::Idle
@@ -93,12 +117,12 @@ impl Tracker {
     }
 
     /// Rows in "needs you first" order. The sort is stable, so panes with the
-    /// same state keep the server's (sidebar) order.
-    pub fn rows(&self, panels: &[Panel], home: Option<&str>) -> Vec<PaneRow> {
-        let mut rows: Vec<PaneRow> = panels
+    /// same state keep the sidebar order.
+    pub(crate) fn rows(&self, panes: &[Pane], home: Option<&str>) -> Vec<PaneRow> {
+        let mut rows: Vec<PaneRow> = panes
             .iter()
             .map(|panel| PaneRow {
-                pane_id: panel.pane_id.0,
+                id: panel.id,
                 title: title(panel),
                 detail: detail(panel, home),
                 state: self.state(panel),
@@ -111,7 +135,7 @@ impl Tracker {
 
 const MAX_LINE_CHARS: usize = 44;
 
-fn title(panel: &Panel) -> String {
+fn title(panel: &Pane) -> String {
     let name = panel.name.trim();
     let line = match panel.process.as_deref().map(str::trim).map(process_label) {
         Some(process) if !process.is_empty() && process != name => {
@@ -136,7 +160,7 @@ fn process_label(process: &str) -> &str {
     if bare_version { "claude" } else { process }
 }
 
-fn detail(panel: &Panel, home: Option<&str>) -> String {
+fn detail(panel: &Pane, home: Option<&str>) -> String {
     let cwd = tilde(&panel.cwd, home);
     let line = match panel.branch.as_deref().filter(|b| !b.is_empty()) {
         Some(branch) if !cwd.is_empty() => format!("{branch} · {cwd}"),
@@ -169,26 +193,27 @@ fn truncate(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use noa_ipc::WireId;
+    use crate::session_store::{SessionDelta, SessionStore, SessionWindowId, WallClock};
+    use crate::split_tree::PaneId;
 
-    fn panel(id: u64, name: &str, busy: bool, attention: bool) -> Panel {
-        Panel {
-            window_group_id: WireId(1),
-            window_id: WireId(1),
-            pane_id: WireId(id),
+    fn card_id(id: u64) -> SessionCardId {
+        SessionCardId::new(SessionWindowId(1), PaneId::new(id))
+    }
+
+    fn panel(id: u64, name: &str, busy: bool, attention: bool) -> Pane {
+        Pane {
+            id: card_id(id),
             name: name.to_string(),
             cwd: "/Users/me/src/api".to_string(),
             branch: None,
             process: None,
             busy,
             attention,
-            attachable: true,
-            preview: Vec::new(),
         }
     }
 
     fn order(rows: &[PaneRow]) -> Vec<(u64, PaneState)> {
-        rows.iter().map(|r| (r.pane_id, r.state)).collect()
+        rows.iter().map(|r| (r.id.pane_id.get(), r.state)).collect()
     }
 
     #[test]
@@ -220,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn equal_states_keep_server_order() {
+    fn equal_states_keep_sidebar_order() {
         let tracker = Tracker::default();
         let panels = [
             panel(9, "a", true, false),
@@ -230,9 +255,40 @@ mod tests {
         let ids: Vec<u64> = tracker
             .rows(&panels, None)
             .iter()
-            .map(|r| r.pane_id)
+            .map(|r| r.id.pane_id.get())
             .collect();
         assert_eq!(ids, vec![9, 2, 5]);
+    }
+
+    #[test]
+    fn an_agent_asking_for_approval_reads_as_waiting() {
+        let mut store = SessionStore::new();
+        let id = card_id(1);
+        store.apply(SessionDelta::Upsert {
+            id,
+            seq: 1,
+            name: "api".to_string(),
+            cwd: "/Users/me/src/api".to_string(),
+            busy: true,
+            updated_at: WallClock {
+                year: 2026,
+                month: 10,
+                day: 21,
+                hour: 9,
+                minute: 41,
+            },
+            preview: None,
+        });
+        let mut card = store.get(&id).unwrap().clone();
+        assert!(!Pane::from_card(id, &card).attention);
+
+        card.agent_status = Some(noa_grid::AgentStatus {
+            state: noa_grid::AgentState::Permission,
+            detail: String::new(),
+        });
+        let pane = Pane::from_card(id, &card);
+        assert!(pane.attention);
+        assert_eq!(Tracker::default().state(&pane), PaneState::Waiting);
     }
 
     #[test]
@@ -256,7 +312,7 @@ mod tests {
         tracker.observe(&[panel(1, "a", false, false)]);
         assert_eq!(tracker.state(&panel(1, "a", false, false)), PaneState::Done);
 
-        tracker.acknowledge(1);
+        tracker.acknowledge(card_id(1));
         assert_eq!(tracker.state(&panel(1, "a", false, false)), PaneState::Idle);
 
         tracker.observe(&[panel(1, "a", true, false)]);

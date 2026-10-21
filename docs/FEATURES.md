@@ -80,7 +80,7 @@ For the type, allowed values, defaults, and clamp/fallback rules of every key, s
 | Background image | `background-image`, `background-image-opacity/-position/-fit/-repeat/-interval` |
 | Cursor | `cursor-style`, `cursor-style-blink`, `cursor-stop-blinking-after` |
 | Bell | `visual-bell`, `audible-bell`, `audible-bell-dock-bounce`, `audible-bell-when-unfocused` |
-| Behavior | `scrollback-limit`, `clipboard-read`, `clipboard-paste-protection`, `confirm-quit`, `alpha-blending`, `title-report`, `resize-overlay`, `auto-approve`, `send-selection-send-enter` |
+| Behavior | `scrollback-limit`, `clipboard-read`, `clipboard-paste-protection`, `confirm-quit`, `alpha-blending`, `title-report`, `resize-overlay`, `auto-approve`, `send-selection-send-enter`, `ember` |
 | macOS | `macos-option-as-alt`, `macos-titlebar-style`, `macos-non-native-fullscreen`, `macos-titlebar-proxy-icon` |
 | Quick Terminal | `quick-terminal-hotkey/-size/-autohide` |
 | Scratch Terminal | `scratch-terminal-key/-size` |
@@ -99,6 +99,7 @@ For the type, allowed values, defaults, and clamp/fallback rules of every key, s
 - **Quick Terminal** — a dropdown terminal triggered by a global hotkey (default ⌘\`), with auto-hide support
 - **Scratch Terminal** — a disposable popup terminal (default ⌘⇧T, in-app only) centered on the focused window, opened in the focused pane's cwd; closes on toggle/focus-loss/shell-exit/⌘W, with no persistence
 - **Secure keyboard entry** — toggleable
+- **Ember** — Noa's ghost in the menu bar: every pane ordered `waiting.` → `running…` → `idle` → `done.`, with the waiting count beside the ghost; pick a row to jump there. View → Ember in Menu Bar, or `ember = true` at launch
 - **Titlebar proxy icon** — reflects the focused pane's OSC 7 pwd in the titlebar proxy icon; disabled with `macos-titlebar-proxy-icon = hidden`
 - **Quick Look word lookup** — a trackpad force click (deep press) shows a dictionary popup for the word under the pointer; does not change the selection
 - **Desktop notifications** — OSC 9 / 777, Dock attention

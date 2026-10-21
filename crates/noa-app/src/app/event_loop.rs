@@ -410,6 +410,12 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::RemoteRequestCompleted { request_id } => {
                 self.handle_remote_request_completed(event_loop, request_id)
             }
+            UserEvent::EmberJump(id) => {
+                #[cfg(target_os = "macos")]
+                self.ember_jump(id);
+                #[cfg(not(target_os = "macos"))]
+                let _ = id;
+            }
             UserEvent::RestoreFocus { window_id } => {
                 let target_exists = self.windows.contains_key(&window_id);
                 if should_apply_deferred_focus_restore(window_id, self.focused, target_exists)
@@ -1168,6 +1174,8 @@ impl ApplicationHandler<UserEvent> for App {
         // Keep the noa-ipc read snapshot fresh (a no-op when the server was
         // never started).
         self.sync_ipc_snapshot();
+        #[cfg(target_os = "macos")]
+        self.sync_ember();
         // Each tick reports its own next wake-up instead of setting
         // `ControlFlow` directly, so a `WaitUntil` from one can't clobber a
         // more urgent one from the others — this pass sets it exactly once,

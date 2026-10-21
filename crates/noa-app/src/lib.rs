@@ -17,6 +17,8 @@ mod command_palette;
 mod commands;
 mod connection_qr;
 pub mod debounce;
+#[cfg(target_os = "macos")]
+mod ember;
 mod events;
 mod input;
 mod io_thread;

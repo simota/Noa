@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   approval-pending report (`OSC 777;noa-agent`) now counts as `waiting.`.
   The menu ends with `Hide Ember`.
 
+### Removed
+
+- The standalone `ember` binary (`bin/ember`, `cargo run -p ember`).
+
 ## [0.4.0] - 2026-10-21
 
 ### Added

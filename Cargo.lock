@@ -797,22 +797,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ember"
-version = "0.4.0"
-dependencies = [
- "crossbeam-channel",
- "dirs",
- "env_logger",
- "log",
- "noa-config",
- "noa-ipc",
- "objc2 0.6.4",
- "objc2-foundation 0.3.2",
- "parking_lot",
- "png",
-]
-
-[[package]]
 name = "env_filter"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

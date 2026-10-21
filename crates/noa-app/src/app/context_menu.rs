@@ -249,6 +249,20 @@ impl App {
         inside
     }
 
+    /// The pointer left the window (or has no usable position): drop the
+    /// highlight so Enter can't run a row the pointer is no longer over.
+    pub(super) fn context_menu_pointer_left(&mut self, window_id: WindowId) {
+        let Some(menu) = self
+            .context_menu
+            .as_mut()
+            .filter(|menu| menu.window_id == window_id && menu.hovered.is_some())
+        else {
+            return;
+        };
+        menu.hovered = None;
+        self.request_window_redraw(window_id);
+    }
+
     /// A mouse press while the menu is open. Returns `true` when the press is
     /// consumed. A left press on an enabled item runs it; any other press
     /// dismisses the menu — a right press then falls through so it reopens
@@ -259,9 +273,12 @@ impl App {
         window_id: WindowId,
         button: MouseButton,
     ) -> bool {
-        // A release that landed in another window must not leave a stale
-        // swallow armed for the next unrelated click.
-        self.context_menu_swallowed_release = None;
+        // A second press of the armed button means its release landed in
+        // another window; disarm so this press's own release goes through.
+        // A different button pressed mid-hold leaves the arm alone.
+        if self.context_menu_swallowed_release == Some(button) {
+            self.context_menu_swallowed_release = None;
+        }
         let Some(menu) = self.context_menu.take() else {
             return false;
         };

@@ -1503,6 +1503,7 @@ impl App {
             return;
         }
         let Some(point) = point else {
+            self.context_menu_pointer_left(window_id);
             if let Some(state) = self.windows.get_mut(&window_id) {
                 state.last_mouse_pane = None;
             }
@@ -1631,6 +1632,7 @@ impl App {
             }
         }
         self.update_sidebar_button_hover(window_id, None);
+        self.context_menu_pointer_left(window_id);
         self.sync_hover_link(window_id);
 
         let overview_changed = self

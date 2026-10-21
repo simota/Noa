@@ -512,6 +512,7 @@ fn show_config_output(config: &StartupConfig) -> String {
         "send-selection-send-enter",
         &config.send_selection_send_enter.to_string(),
     );
+    push_line(&mut out, "ember", &config.ember.to_string());
     push_repeatable_lines(
         &mut out,
         "keybind",
@@ -795,6 +796,7 @@ mod tests {
         assert!(output.contains("audible-bell-dock-bounce = false\n"));
         assert!(output.contains("auto-approve = false\n"));
         assert!(output.contains("send-selection-send-enter = false\n"));
+        assert!(output.contains("ember = false\n"));
         assert!(output.contains("client-remote = \n"));
         assert!(output.contains("client-token = \n"));
         assert!(output.contains("client-token-file = \n"));

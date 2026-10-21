@@ -485,6 +485,7 @@ fn ghostty_action_alias(action: &str) -> Option<AppCommand> {
         "toggle_secure_keyboard_entry" => Some(AppCommand::ToggleSecureKeyboardEntry),
         "toggle_sidebar" => Some(AppCommand::ToggleSidebar),
         "toggle_auto_approve" => Some(AppCommand::ToggleAutoApprove),
+        "toggle_ember" => Some(AppCommand::ToggleEmber),
         // Legacy: the combined overlay's Ghostty-style action name. Kept as
         // an alias for `OpenThemePicker` (the theme-picker half) so existing
         // user keybind configs keep working after the split (DEC-1).

@@ -243,6 +243,8 @@ impl App {
         let quick_terminal_hotkey_changed =
             previous.quick_terminal_hotkey != applied.quick_terminal_hotkey;
         let hotkeys_changed = quick_terminal_hotkey_changed;
+        #[cfg(target_os = "macos")]
+        let ember_changed = previous.ember != applied.ember;
 
         let scrollback_persist_disabled = previous.scrollback_persist.persists()
             && !(applied.scrollback_persist.persists() && applied.window_save_state.restores());
@@ -324,6 +326,9 @@ impl App {
         }
         #[cfg(target_os = "macos")]
         {
+            if ember_changed {
+                self.set_ember_visible(self.config.ember);
+            }
             if quick_terminal_hotkey_changed && let Some(menu) = self.macos_menu.as_ref() {
                 menu.set_quick_terminal_hotkey(self.config.quick_terminal_hotkey.as_deref());
             }

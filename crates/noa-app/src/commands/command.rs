@@ -72,6 +72,9 @@ pub enum AppCommand {
     ToggleSecureKeyboardEntry,
     ToggleSidebar,
     ToggleAutoApprove,
+    /// Show or hide Ember, the pane list in the macOS menu bar, for this
+    /// session (`ember` sets the launch state).
+    ToggleEmber,
     /// Open the "Theme" picker half of the split theme-settings overlay
     /// (theme-settings-ui R-1, later split into two overlays). Reachable
     /// only from the command palette — deliberately unbound in
@@ -208,6 +211,7 @@ impl AppCommand {
         "noa.app.toggle-secure-keyboard-entry";
     pub(crate) const TOGGLE_SIDEBAR_MENU_ID: &'static str = "noa.view.toggle-sidebar";
     pub(crate) const TOGGLE_AUTO_APPROVE_MENU_ID: &'static str = "noa.view.toggle-auto-approve";
+    pub(crate) const TOGGLE_EMBER_MENU_ID: &'static str = "noa.view.toggle-ember";
     pub(crate) const OPEN_SETTINGS_MENU_ID: &'static str = "noa.view.open-settings";
 
     pub(crate) fn menu_id(self) -> &'static str {
@@ -284,6 +288,7 @@ impl AppCommand {
             AppCommand::ToggleSecureKeyboardEntry => Self::TOGGLE_SECURE_KEYBOARD_ENTRY_MENU_ID,
             AppCommand::ToggleSidebar => Self::TOGGLE_SIDEBAR_MENU_ID,
             AppCommand::ToggleAutoApprove => Self::TOGGLE_AUTO_APPROVE_MENU_ID,
+            AppCommand::ToggleEmber => Self::TOGGLE_EMBER_MENU_ID,
         }
     }
 
@@ -354,6 +359,7 @@ impl AppCommand {
             Self::TOGGLE_SECURE_KEYBOARD_ENTRY_MENU_ID => Some(Self::ToggleSecureKeyboardEntry),
             Self::TOGGLE_SIDEBAR_MENU_ID => Some(Self::ToggleSidebar),
             Self::TOGGLE_AUTO_APPROVE_MENU_ID => Some(Self::ToggleAutoApprove),
+            Self::TOGGLE_EMBER_MENU_ID => Some(Self::ToggleEmber),
             Self::OPEN_SETTINGS_MENU_ID => Some(Self::OpenSettings),
             _ => None,
         }
@@ -451,6 +457,7 @@ impl AppCommand {
             Self::ToggleSecureKeyboardEntry => "secure-keyboard-entry.toggle",
             Self::ToggleSidebar => "sidebar.toggle",
             Self::ToggleAutoApprove => "auto-approve.toggle",
+            Self::ToggleEmber => "ember.toggle",
             Self::OpenThemePicker => "theme.open",
             Self::OpenSettings => "settings.open",
             Self::ToggleProcessMonitor => "process-monitor.toggle",
@@ -536,6 +543,7 @@ impl AppCommand {
             "secure-keyboard-entry.toggle" => Some(Self::ToggleSecureKeyboardEntry),
             "sidebar.toggle" => Some(Self::ToggleSidebar),
             "auto-approve.toggle" => Some(Self::ToggleAutoApprove),
+            "ember.toggle" => Some(Self::ToggleEmber),
             "theme.open" | "theme-settings.open" => Some(Self::OpenThemePicker),
             "settings.open" => Some(Self::OpenSettings),
             "process-monitor.toggle" => Some(Self::ToggleProcessMonitor),

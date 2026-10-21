@@ -377,6 +377,7 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::ToggleQuickTerminal
         | AppCommand::ToggleScratchTerminal
         | AppCommand::ToggleSecureKeyboardEntry
+        | AppCommand::ToggleEmber
         | AppCommand::ToggleSidebar
         | AppCommand::CloseWindow
         | AppCommand::Quit => CommandScope::App,
@@ -431,6 +432,7 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::ToggleQuickTerminal
         | AppCommand::ToggleScratchTerminal
         | AppCommand::ToggleSecureKeyboardEntry
+        | AppCommand::ToggleEmber
         | AppCommand::ToggleSidebar => CommandScope::App,
         // The palette does not open while the overview is focused (v1, R-10):
         // Overview scope makes `ToggleCommandPalette` a no-op there (AC-15).

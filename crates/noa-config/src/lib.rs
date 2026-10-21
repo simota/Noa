@@ -910,6 +910,10 @@ pub struct StartupConfig {
     /// text is submitted immediately. Default off. noa-specific key (no
     /// Ghostty analog).
     pub send_selection_send_enter: bool,
+    /// `ember`: show Ember, noa's pane list in the macOS menu bar, at launch.
+    /// The View menu toggles it for the session. Default off. noa-specific
+    /// key (no Ghostty analog).
+    pub ember: bool,
     /// `keybind`: repeatable in-app keybinding edits applied to the default
     /// [`noa-app`] keybinding engine in config order.
     pub keybinds: Vec<KeybindConfig>,
@@ -1016,6 +1020,7 @@ impl Default for StartupConfig {
             audible_bell_dock_bounce: false,
             auto_approve: false,
             send_selection_send_enter: false,
+            ember: false,
             keybinds: Vec::new(),
             server_enable: false,
             server_port: DEFAULT_SERVER_PORT,
@@ -1133,6 +1138,7 @@ pub struct ConfigOverrides {
     pub audible_bell_dock_bounce: Option<bool>,
     pub auto_approve: Option<bool>,
     pub send_selection_send_enter: Option<bool>,
+    pub ember: Option<bool>,
     pub keybinds: Vec<KeybindConfig>,
     pub server_enable: Option<bool>,
     pub server_port: Option<u16>,
@@ -1244,6 +1250,7 @@ macro_rules! impl_redacted_config_debug {
                     .field("audible_bell_dock_bounce", &self.audible_bell_dock_bounce)
                     .field("auto_approve", &self.auto_approve)
                     .field("send_selection_send_enter", &self.send_selection_send_enter)
+                    .field("ember", &self.ember)
                     .field("keybinds", &self.keybinds)
                     .field("server_enable", &self.server_enable)
                     .field("server_port", &self.server_port)
@@ -1402,6 +1409,7 @@ impl ConfigOverrides {
             send_selection_send_enter: higher_priority
                 .send_selection_send_enter
                 .or(self.send_selection_send_enter),
+            ember: higher_priority.ember.or(self.ember),
             keybinds,
             server_enable: higher_priority.server_enable.or(self.server_enable),
             server_port: higher_priority.server_port.or(self.server_port),
@@ -1549,6 +1557,7 @@ impl ConfigOverrides {
             send_selection_send_enter: self
                 .send_selection_send_enter
                 .unwrap_or(base.send_selection_send_enter),
+            ember: self.ember.unwrap_or(base.ember),
             keybinds,
             server_enable: self.server_enable.unwrap_or(base.server_enable),
             server_port: self.server_port.unwrap_or(base.server_port),
@@ -1995,6 +2004,7 @@ mod tests {
                 audible_bell_dock_bounce: false,
                 auto_approve: false,
                 send_selection_send_enter: false,
+                ember: false,
                 keybinds: Vec::new(),
                 server_enable: false,
                 server_port: DEFAULT_SERVER_PORT,

@@ -119,4 +119,6 @@ pub enum UserEvent {
     RestoreFocus {
         window_id: WindowId,
     },
+    /// A pane was picked in Ember's menu bar list.
+    EmberJump(SessionCardId),
 }

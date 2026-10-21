@@ -53,7 +53,7 @@ names — such as `new_tab`, `prompt_surface_title`,
 | Tab | `tab.new`, `tab.close`, `tab.next`, `tab.previous`, `tab.set-title`, `tab.select-1` … `tab.select-9` |
 | Window | `window.new`, `window.close`, `fullscreen.toggle` |
 | Split | `split.new-left`, `split.new-right`, `split.new-up`, `split.new-down`, `split.focus-left`, `split.focus-right`, `split.focus-up`, `split.focus-down`, `split.resize-left`, `split.resize-right`, `split.resize-up`, `split.resize-down`, `split.equalize`, `split.toggle-zoom` |
-| UI | `session-overview.toggle`, `command-palette.toggle`, `quick-terminal.toggle`, `secure-keyboard-entry.toggle`, `sidebar.toggle`, `auto-approve.toggle`, `theme-settings.open` |
+| UI | `session-overview.toggle`, `command-palette.toggle`, `quick-terminal.toggle`, `secure-keyboard-entry.toggle`, `sidebar.toggle`, `auto-approve.toggle`, `ember.toggle`, `theme-settings.open` |
 | Agent workflows | `session.next-notification`, `agent.compose-prompt`, `terminal.read-output` |
 
 `tab-overview.toggle` is also accepted as a compatible name for

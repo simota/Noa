@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Ember is now part of Noa instead of a separate app: View → Ember in Menu
+  Bar (or `ember = true` at launch, `ember.toggle` as an action) shows the
+  ghost and its pane list. It reads panes in-process, so it no longer needs
+  `server-enable`, a token or the `control` scope, and an agent's own
+  approval-pending report (`OSC 777;noa-agent`) now counts as `waiting.`.
+  The menu ends with `Hide Ember`.
+
 ## [0.4.0] - 2026-10-21
 
 ### Added

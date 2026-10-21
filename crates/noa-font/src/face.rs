@@ -966,7 +966,13 @@ pub(crate) fn cascade_fallback_face(ch: char) -> Option<FontData> {
         );
         let mut found: Option<(std::path::PathBuf, usize)> = None;
         if !set.is_null() {
-            let fonts = std::slice::from_raw_parts((*set).fonts, (*set).nfont.max(0) as usize);
+            // An empty set may carry a null `fonts`, which `from_raw_parts`
+            // rejects even at length 0.
+            let fonts: &[_] = if (*set).fonts.is_null() || (*set).nfont <= 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts((*set).fonts, (*set).nfont as usize)
+            };
             for &font in fonts {
                 let mut font_charset: *mut FcCharSet = std::ptr::null_mut();
                 if FcPatternGetCharSet(font, FC_CHARSET.as_ptr(), 0, &mut font_charset)

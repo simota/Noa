@@ -312,6 +312,9 @@ fn default_specs() -> Vec<(&'static str, AppCommand)> {
         ("ctrl+enter", AppCommand::ToggleFullscreen),
         ("ctrl+shift+p", AppCommand::ToggleCommandPalette),
         ("ctrl+shift+s", AppCommand::ToggleSidebar),
+        // Not `ctrl+shift+o` as macOS's `cmd+shift+o` would map: that is
+        // Split Right here.
+        ("ctrl+shift+l", AppCommand::ToggleTabOverview),
         ("ctrl+,", AppCommand::Preferences),
         ("ctrl+shift+,", AppCommand::ReloadConfig),
         ("ctrl+shift+<", AppCommand::ReloadConfig),

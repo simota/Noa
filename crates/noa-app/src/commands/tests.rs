@@ -714,6 +714,14 @@ fn linux_defaults_follow_ghostty_gtk_chords() {
         Some(AppCommand::ToggleCommandPalette)
     );
     assert_eq!(
+        engine.resolve(&ch("L"), ctrl_shift),
+        Some(AppCommand::ToggleTabOverview)
+    );
+    assert_eq!(
+        engine.resolve(&ch("O"), ctrl_shift),
+        Some(AppCommand::NewSplitRight)
+    );
+    assert_eq!(
         engine.resolve(&ch("3"), ModifiersState::ALT),
         Some(AppCommand::SelectTab(3))
     );

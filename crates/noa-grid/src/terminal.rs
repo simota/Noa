@@ -745,7 +745,11 @@ impl Terminal {
     /// Set the Kitty/SIXEL image storage byte budget (`image-storage-limit`),
     /// evicting immediately if the new limit is smaller.
     pub fn set_kitty_image_limit(&mut self, bytes: usize) {
-        self.kitty_images.set_byte_limit(bytes);
+        // #TODO(agent): OUT-OF-SCOPE — `set_byte_limit` evicts as if nothing
+        // were placed; pass the referenced ids so a lowered limit spares
+        // images still on screen, as transmit-time eviction does.
+        let evicted = self.kitty_images.set_byte_limit(bytes);
+        self.drop_kitty_placements_of(&evicted);
     }
 
     /// Advance Kitty graphics animations to the monotonic time `now_ms` (supplied

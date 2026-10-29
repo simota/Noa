@@ -1,8 +1,9 @@
 use crate::kitty::{KittyError, KittyImage, TransmitStep};
 use crate::kitty_placeholder::scan_row;
-use crate::screen::{KittyPlacement, VisibleKittyPlacement};
+use crate::screen::{KittyParent, KittyPlacement, VisibleKittyPlacement};
 use crate::sixel;
 use noa_vt::{KittyAction, KittyDelete, KittyGraphicsCommand, SixelGraphicsCommand};
+use std::collections::HashMap;
 
 use super::Terminal;
 
@@ -16,6 +17,7 @@ struct ImagePlace {
     z: i32,
     cursor_no_move: bool,
     virtual_placement: bool,
+    parent: Option<KittyParent>,
 }
 
 impl Terminal {
@@ -75,6 +77,20 @@ impl Terminal {
     /// Feed a data-carrying Kitty graphics command (`a=t`/`a=T`/`a=q`) into the
     /// image store, then—for `a=T`—place it, replying on completion.
     pub(super) fn kitty_transmit(&mut self, cmd: KittyGraphicsCommand) {
+        let starts_retransmit = !self.kitty_images.transfer_in_progress()
+            && matches!(
+                cmd.action,
+                KittyAction::Transmit | KittyAction::TransmitAndDisplay
+            )
+            && cmd.image_id != 0
+            && self.kitty_images.contains(cmd.image_id);
+        if starts_retransmit {
+            // Kitty spec / Ghostty 1.4.0: re-transmitting an id deletes the
+            // image and all its placements as soon as the transfer begins, so
+            // an interrupted or failed one leaves nothing stale on screen.
+            self.drop_kitty_placements_of(&[cmd.image_id]);
+            self.kitty_images.remove(cmd.image_id);
+        }
         match self.kitty_images.transmit(&cmd) {
             TransmitStep::NeedMore => {}
             TransmitStep::Done(done) => {
@@ -87,8 +103,7 @@ impl Terminal {
                     }
                 });
                 let assigned = *result.as_ref().unwrap_or(&ctrl.image_id);
-                self.kitty_images
-                    .enforce_quota(&self.referenced_image_ids());
+                self.enforce_kitty_quota();
                 self.kitty_reply(
                     ctrl.image_id,
                     ctrl.image_number,
@@ -160,7 +175,8 @@ impl Terminal {
     }
 
     /// Create a placement of image `image_id` on the active screen from `ctrl`,
-    /// resolving the effective cell span and moving the cursor unless `C=1`.
+    /// resolving the effective cell span and moving the cursor unless `C=1`
+    /// or the placement is relative (`P=`).
     fn kitty_place(
         &mut self,
         ctrl: &KittyGraphicsCommand,
@@ -170,6 +186,20 @@ impl Terminal {
             Some(img) => (img.width, img.height),
             None => return Err(KittyError::NoEnt),
         };
+        let parent = (ctrl.parent_image_id != 0).then_some(KittyParent {
+            image_id: ctrl.parent_image_id,
+            placement_id: ctrl.parent_placement_id,
+            x_off: ctrl.parent_x_off,
+            y_off: ctrl.parent_y_off,
+        });
+        if let Some(parent) = parent {
+            // A virtual placement may be a parent but never relative itself.
+            if ctrl.virtual_placement {
+                return Err(KittyError::Invalid);
+            }
+            self.active()
+                .check_kitty_parent((image_id, ctrl.placement_id), parent)?;
+        }
         let (cell_w, cell_h) = (self.cell_width_px, self.cell_height_px);
         if cell_w == 0 || cell_h == 0 {
             // Cell metrics arrive with the first resize; without them the cell
@@ -202,8 +232,9 @@ impl Terminal {
         };
         let cols = cols.clamp(1, u16::MAX as u32) as u16;
         let rows = rows.clamp(1, u16::MAX as u32) as u16;
-        let cropped = ctrl.src_x != 0 || ctrl.src_y != 0 || ctrl.src_w != 0 || ctrl.src_h != 0;
-        let src = cropped.then_some([ctrl.src_x, ctrl.src_y, src_w, src_h]);
+        // Always explicit (not `None` = whole image) so a region scroll can
+        // clip it without the image's size.
+        let src = Some([ctrl.src_x, ctrl.src_y, src_w, src_h]);
         let cell_x_off = ctrl.cell_x_off.min(cell_w - 1) as u16;
         let cell_y_off = ctrl.cell_y_off.min(cell_h - 1) as u16;
 
@@ -219,6 +250,7 @@ impl Terminal {
                 z: ctrl.z_index,
                 cursor_no_move: ctrl.cursor_no_move,
                 virtual_placement: ctrl.virtual_placement,
+                parent,
             },
         )
     }
@@ -240,9 +272,12 @@ impl Terminal {
             rows: spec.rows,
             z: spec.z,
             is_virtual: spec.virtual_placement,
+            parent: spec.parent,
         });
 
-        if !spec.cursor_no_move && !spec.virtual_placement {
+        // Kitty spec: the cursor never moves after a relative placement,
+        // whatever `C=` says.
+        if !spec.cursor_no_move && !spec.virtual_placement && spec.parent.is_none() {
             // Move to the image's last row, one column past its right edge.
             for _ in 1..spec.rows {
                 screen.index();
@@ -286,18 +321,18 @@ impl Terminal {
                     placement_id: 0,
                     cell_x_off: 0,
                     cell_y_off: 0,
-                    src: None,
+                    src: Some([0, 0, raster.width, raster.height]),
                     cols,
                     rows,
                     z: 0,
                     cursor_no_move: false,
                     virtual_placement: false,
+                    parent: None,
                 },
             )
             .is_ok()
         {
-            self.kitty_images
-                .enforce_quota(&self.referenced_image_ids());
+            self.enforce_kitty_quota();
         }
     }
 
@@ -326,24 +361,36 @@ impl Terminal {
                 .map(|image| image.id),
             _ => None,
         };
-        let (cursor_abs, cursor_col) = {
-            let s = self.active();
-            (
-                s.rows_evicted() + s.scrollback_len() + s.cursor.y as usize,
-                s.cursor.x,
-            )
-        };
         let live_top = {
             let s = self.active();
-            s.rows_evicted() + s.scrollback_len()
+            (s.rows_evicted() + s.scrollback_len()) as i64
+        };
+        let (cursor_abs, cursor_col) = {
+            let s = self.active();
+            (live_top + i64::from(s.cursor.y), i64::from(s.cursor.x))
         };
         // Cell coords in `a=d` are 1-based grid columns/rows; convert to
         // session-absolute for intersection tests.
-        let target_col = cmd.src_x.saturating_sub(1) as u16;
-        let target_abs = live_top + cmd.src_y.saturating_sub(1) as usize;
+        let target_col = i64::from(cmd.src_x.saturating_sub(1));
+        let target_abs = live_top + i64::from(cmd.src_y.saturating_sub(1));
+        let origins = self.kitty_placement_origins();
+        let origin = |p: &KittyPlacement| origins.get(&p.key()).copied();
+        let covers = |p: &KittyPlacement, row: i64, col: i64| {
+            origin(p).is_some_and(|(top, left)| {
+                (top..top + i64::from(p.rows)).contains(&row)
+                    && (left..left + i64::from(p.cols)).contains(&col)
+            })
+        };
 
+        let rows = i64::from(self.active().rows);
         let removed = self.active_mut().delete_kitty_placements(|p| match spec {
-            KittyDelete::All { .. } => true,
+            // Only placements on the active screen: scrollback keeps its own.
+            KittyDelete::All { .. } => {
+                !p.is_virtual
+                    && origin(p).is_some_and(|(top, _)| {
+                        top < live_top + rows && top + i64::from(p.rows) > live_top
+                    })
+            }
             KittyDelete::ById { .. } => {
                 p.image_id == cmd.image_id
                     && (cmd.placement_id == 0 || p.placement_id == cmd.placement_id)
@@ -352,39 +399,89 @@ impl Terminal {
                 number_id == Some(p.image_id)
                     && (cmd.placement_id == 0 || p.placement_id == cmd.placement_id)
             }
-            KittyDelete::AtCursor { .. } => p.covers_abs(cursor_abs, cursor_col),
-            KittyDelete::AtCell { .. } => p.covers_abs(target_abs, target_col),
-            KittyDelete::AtCellZ { .. } => {
-                p.covers_abs(target_abs, target_col) && p.z == cmd.z_index
-            }
+            KittyDelete::AtCursor { .. } => covers(p, cursor_abs, cursor_col),
+            KittyDelete::AtCell { .. } => covers(p, target_abs, target_col),
+            KittyDelete::AtCellZ { .. } => covers(p, target_abs, target_col) && p.z == cmd.z_index,
             KittyDelete::ByIdRange { .. } => p.image_id >= cmd.src_x && p.image_id <= cmd.src_y,
-            KittyDelete::ByColumn { .. } => {
-                target_col >= p.anchor_col && target_col < p.anchor_col.saturating_add(p.cols)
-            }
-            KittyDelete::ByRow { .. } => {
-                target_abs >= p.anchor_abs_row && target_abs < p.anchor_abs_row + p.rows as usize
-            }
+            KittyDelete::ByColumn { .. } => origin(p)
+                .is_some_and(|(_, left)| (left..left + i64::from(p.cols)).contains(&target_col)),
+            KittyDelete::ByRow { .. } => origin(p)
+                .is_some_and(|(top, _)| (top..top + i64::from(p.rows)).contains(&target_abs)),
             KittyDelete::ByZ { .. } => p.z == cmd.z_index,
             KittyDelete::AnimationFrames { .. } => false,
         });
 
-        if free {
-            // Candidates are the images whose placements were just removed
-            // *plus* the images the command named directly: an image that was
-            // transmitted but never placed has no placement to remove, yet
-            // `d=I`/`d=N` must still free its data.
-            let mut candidates = removed;
-            match spec {
-                KittyDelete::ById { .. } if cmd.image_id != 0 => candidates.push(cmd.image_id),
-                KittyDelete::ByNumber { .. } => candidates.extend(number_id),
-                _ => {}
+        if !free {
+            return;
+        }
+        // The images whose placements were just removed — including relative
+        // placements deleted along with their parent — *and* the images the
+        // command named directly: an image that was transmitted but never
+        // placed has no placement to remove, yet `d=I`/`d=N`/`d=R` must still
+        // free its data. A named placement (`p=`) that matched nothing leaves
+        // its image alone.
+        let mut candidates = removed;
+        match spec {
+            KittyDelete::ById { .. } if cmd.image_id != 0 && cmd.placement_id == 0 => {
+                candidates.push(cmd.image_id);
             }
-            for id in candidates {
-                if !self.image_referenced(id) {
-                    self.kitty_images.remove(id);
-                }
+            KittyDelete::ByNumber { .. } if cmd.placement_id == 0 => candidates.extend(number_id),
+            KittyDelete::ByIdRange { .. } => candidates.extend(
+                self.kitty_images
+                    .ids()
+                    .filter(|id| (cmd.src_x..=cmd.src_y).contains(id)),
+            ),
+            _ => {}
+        }
+        for id in candidates {
+            if !self.image_referenced(id) {
+                self.kitty_images.remove(id);
             }
         }
+    }
+
+    /// Session-absolute top-left `(row, col)` of each placement on the active
+    /// screen as cell-based deletes see it: a relative placement where it is
+    /// drawn (unclamped, so a negative offset can't pull it onto cells it
+    /// doesn't cover), anything else at its anchor. A relative placement rooted
+    /// at a virtual placement with no placeholder cells in the viewport is not
+    /// drawn and has no entry.
+    fn kitty_placement_origins(&self) -> HashMap<(u32, u32), (i64, i64)> {
+        let screen = self.active();
+        let virtual_origins = if screen.kitty_placements.iter().any(|p| p.is_virtual)
+            && screen.kitty_placements.iter().any(|p| p.parent.is_some())
+        {
+            screen.visible_virtual_placement_origins()
+        } else {
+            HashMap::new()
+        };
+        screen
+            .kitty_placements
+            .iter()
+            .filter_map(|p| {
+                let origin = if p.parent.is_some() {
+                    screen.relative_placement_origin(p, &virtual_origins)?
+                } else {
+                    (p.anchor_abs_row as i64, i64::from(p.anchor_col))
+                };
+                Some((p.key(), origin))
+            })
+            .collect()
+    }
+
+    /// Free every image no placement on either screen references.
+    pub(super) fn reclaim_unreferenced_images(&mut self) {
+        let referenced = self.referenced_image_ids();
+        let unreferenced: Vec<u32> = self
+            .kitty_images
+            .ids()
+            .filter(|id| !referenced.contains(id))
+            .collect();
+        for id in unreferenced {
+            self.kitty_images.remove(id);
+        }
+        // Outside `Terminal::kitty_graphics`, which resyncs after each command.
+        self.kitty_images.sync_animation_flag();
     }
 
     /// Whether any placement on either screen still references image `id`.
@@ -394,6 +491,27 @@ impl Terminal {
             .iter()
             .chain(self.alt.iter().flat_map(|s| s.kitty_placements.iter()))
             .any(|p| p.image_id == id)
+    }
+
+    /// Evict images over the byte budget, with their placements on both
+    /// screens.
+    fn enforce_kitty_quota(&mut self) {
+        let evicted = self
+            .kitty_images
+            .enforce_quota(&self.referenced_image_ids());
+        self.drop_kitty_placements_of(&evicted);
+    }
+
+    /// Delete every placement of the images `ids` on both screens.
+    pub(super) fn drop_kitty_placements_of(&mut self, ids: &[u32]) {
+        if ids.is_empty() {
+            return;
+        }
+        self.primary
+            .delete_kitty_placements(|p| ids.contains(&p.image_id));
+        if let Some(alt) = &mut self.alt {
+            alt.delete_kitty_placements(|p| ids.contains(&p.image_id));
+        }
     }
 
     /// Image ids kept alive by a placement on either screen (spared by the quota
@@ -424,6 +542,11 @@ impl Terminal {
     /// encodes one); the virtual placement supplies the image's cell grid
     /// (`cols`×`rows`), any crop, and the z-index, from which the run's source
     /// rectangle is carved.
+    ///
+    /// Also returns the visible relative placements whose chain is rooted at a
+    /// virtual placement: that root sits at the minimum x and y of its
+    /// placeholder cells in the viewport — as in Ghostty, which positions it
+    /// from the rows it renders, a root with none there draws no children.
     pub fn kitty_placeholder_placements(&self) -> Vec<VisibleKittyPlacement> {
         let screen = self.active();
         if !screen.kitty_placements.iter().any(|p| p.is_virtual) {
@@ -435,11 +558,7 @@ impl Terminal {
                 continue;
             };
             for run in scan_row(&row.cells) {
-                let Some(vp) = screen.kitty_placements.iter().find(|p| {
-                    p.is_virtual
-                        && p.image_id == run.image_id
-                        && (run.placement_id == 0 || p.placement_id == run.placement_id)
-                }) else {
+                let Some(vp) = screen.virtual_placement_for(run.image_id, run.placement_id) else {
                     continue;
                 };
                 let Some(img) = self.kitty_images.get(run.image_id) else {
@@ -472,6 +591,26 @@ impl Terminal {
                     src: Some(src),
                     z: vp.z,
                 });
+            }
+        }
+        let rooted: Vec<&KittyPlacement> = screen
+            .kitty_placements
+            .iter()
+            .filter(|p| {
+                p.parent.is_some()
+                    && screen
+                        .kitty_relative_origin(p)
+                        .is_some_and(|(root, _, _)| root.is_virtual)
+            })
+            .collect();
+        if rooted.is_empty() {
+            return out;
+        }
+        let origins = screen.visible_virtual_placement_origins();
+        let view_top = (screen.rows_evicted() + screen.visible_row_base()) as i64;
+        for p in rooted {
+            if let Some((row, col)) = screen.relative_placement_origin(p, &origins) {
+                out.extend(p.project(col, row - view_top, screen.rows));
             }
         }
         out

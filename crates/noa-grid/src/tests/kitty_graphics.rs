@@ -154,6 +154,7 @@ fn kitty_placement_count_is_hard_capped() {
         rows: 1,
         z: 0,
         is_virtual: false,
+        parent: None,
     };
     let cap = crate::screen::KITTY_PLACEMENT_CAP;
     for id in 0..(cap as u32 + 8) {
@@ -703,7 +704,7 @@ fn placeholder_column_jump_splits_run() {
 }
 
 #[test]
-fn kitty_rectangle_scroll_keeps_placements_outside_the_margins() {
+fn kitty_rectangle_scroll_moves_only_placements_inside_the_margins() {
     let mut t = kitty_terminal();
     // One image left of the margins (col 1) and one inside them (col 8).
     feed(&mut t, b"\x1b[6;1H");
@@ -719,18 +720,8 @@ fn kitty_rectangle_scroll_keeps_placements_outside_the_margins() {
     // DECSLRM 5..15 + DECSTBM 2..12, then LF at the region bottom scrolls only
     // the rectangle; columns outside the margins are untouched.
     feed(&mut t, b"\x1b[?69h\x1b[5;15s\x1b[2;12r\x1b[12;5H\n");
-    let ids: Vec<u32> = t
-        .primary
-        .kitty_placements
-        .iter()
-        .map(|p| p.image_id)
-        .collect();
-    assert_eq!(
-        ids,
-        vec![1],
-        "only the image inside the margins is scrolled away"
-    );
-    assert_eq!(t.kitty_visible_placements()[0].grid_y, 5);
+    assert_eq!(placement_at(&t, 1, 0), (0, 5), "outside the margins: untouched");
+    assert_eq!(placement_at(&t, 2, 0), (7, 4), "inside: moves with the text");
 }
 
 // N06: the app's "Clear Scrollback" (`Terminal::clear_scrollback`, not
@@ -776,4 +767,621 @@ fn kitty_clear_scrollback_reanchors_live_placements_and_drops_history_ones() {
         (2, 2),
         "the live image keeps its screen row"
     );
+}
+
+// ── Relative placements (`P=`/`Q=`/`H=`/`V=`) ───────────────────────
+
+/// Send a data-less Kitty graphics command (`a=p`, `a=d`, ...).
+fn kitty_cmd(t: &mut Terminal, ctrl: &str) {
+    feed(t, format!("\x1b_G{ctrl}\x1b\\").as_bytes());
+}
+
+/// A 20×24 terminal (10×20 px cells) holding one-cell images 1 and 2, with
+/// image 1 placed as `p=1` at grid (2, 3) without moving the cursor.
+fn kitty_parent_terminal() -> Terminal {
+    let mut t = kitty_terminal();
+    for id in [1, 2] {
+        feed(
+            &mut t,
+            &kitty_apc(&format!("a=t,f=32,s=10,v=20,i={id},q=2"), &[0u8; 10 * 20 * 4]),
+        );
+    }
+    feed(&mut t, b"\x1b[4;3H");
+    kitty_cmd(&mut t, "a=p,i=1,p=1,C=1,q=2");
+    t
+}
+
+fn placement_at(t: &Terminal, image_id: u32, placement_id: u32) -> (i32, i32) {
+    let p = t
+        .kitty_visible_placements()
+        .into_iter()
+        .chain(t.kitty_placeholder_placements())
+        .find(|p| (p.image_id, p.placement_id) == (image_id, placement_id))
+        .expect("placement is visible");
+    (p.grid_x, p.grid_y)
+}
+
+#[test]
+fn relative_placement_is_offset_from_parent_and_keeps_cursor() {
+    let mut t = kitty_parent_terminal();
+    feed(&mut t, b"\x1b[10;10H");
+    kitty_cmd(&mut t, "a=p,i=2,p=5,P=1,Q=1,H=3,V=2");
+    assert_eq!(t.pending_writes, b"\x1b_Gi=2,p=5;OK\x1b\\");
+    assert_eq!(placement_at(&t, 2, 5), (5, 5), "parent (2,3) + (3,2)");
+    assert_eq!(
+        (t.primary.cursor.x, t.primary.cursor.y),
+        (9, 9),
+        "relative placements never move the cursor, even without C=1"
+    );
+}
+
+#[test]
+fn relative_placement_negative_offset_may_leave_the_grid() {
+    let mut t = kitty_parent_terminal();
+    kitty_cmd(&mut t, "a=p,i=2,p=5,P=1,Q=1,H=-4,V=-1,q=2");
+    assert_eq!(placement_at(&t, 2, 5), (-2, 2));
+}
+
+#[test]
+fn relative_placement_follows_parent_when_parent_moves() {
+    let mut t = kitty_parent_terminal();
+    kitty_cmd(&mut t, "a=p,i=2,p=5,P=1,Q=1,H=1,q=2");
+    // Re-putting p=1 elsewhere replaces (moves) the parent.
+    feed(&mut t, b"\x1b[8;6H");
+    kitty_cmd(&mut t, "a=p,i=1,p=1,C=1,q=2");
+    assert_eq!(placement_at(&t, 2, 5), (6, 7));
+    // The child's stored anchor tracks it too, so cell deletes find it there.
+    kitty_cmd(&mut t, "a=d,d=p,x=7,y=8");
+    assert!(t.primary.kitty_placement((2, 5)).is_none());
+}
+
+#[test]
+fn relative_placement_chain_offsets_accumulate() {
+    let mut t = kitty_parent_terminal();
+    kitty_cmd(&mut t, "a=p,i=2,p=5,P=1,Q=1,H=1,V=1,q=2");
+    kitty_cmd(&mut t, "a=p,i=2,p=6,P=2,Q=5,H=1,V=1,q=2");
+    assert_eq!(placement_at(&t, 2, 6), (4, 5));
+}
+
+#[test]
+fn relative_placement_missing_parent_is_enoparent() {
+    let mut t = kitty_parent_terminal();
+    kitty_cmd(&mut t, "a=p,i=2,p=5,P=1,Q=9");
+    assert_eq!(
+        t.pending_writes,
+        b"\x1b_Gi=2,p=5;ENOPARENT:parent placement not found\x1b\\"
+    );
+    assert!(t.primary.kitty_placement((2, 5)).is_none());
+}
+
+#[test]
+fn relative_placement_cycle_is_ecycle() {
+    let mut t = kitty_parent_terminal();
+    kitty_cmd(&mut t, "a=p,i=2,p=5,P=1,Q=1,q=2");
+    // Re-putting the root relative to its own child would close a loop.
+    kitty_cmd(&mut t, "a=p,i=1,p=1,P=2,Q=5");
+    assert_eq!(
+        t.pending_writes,
+        b"\x1b_Gi=1,p=1;ECYCLE:relative placement cycle\x1b\\"
+    );
+    // A placement cannot be its own parent either.
+    t.pending_writes.clear();
+    kitty_cmd(&mut t, "a=p,i=1,p=1,P=1,Q=1");
+    assert_eq!(
+        t.pending_writes,
+        b"\x1b_Gi=1,p=1;ECYCLE:relative placement cycle\x1b\\"
+    );
+    assert_eq!(placement_at(&t, 1, 1), (2, 3), "rejected re-put keeps the root");
+}
+
+#[test]
+fn relative_placement_chain_depth_is_capped() {
+    let mut t = kitty_parent_terminal();
+    let max = crate::screen::KITTY_MAX_RELATIVE_DEPTH as u32;
+    // Chain links 1..=max are accepted: p=10+n is relative to its predecessor.
+    let mut parent = (1, 1);
+    for n in 1..=max {
+        kitty_cmd(
+            &mut t,
+            &format!("a=p,i=2,p={},P={},Q={},H=1,q=1", 10 + n, parent.0, parent.1),
+        );
+        parent = (2, 10 + n);
+    }
+    assert!(t.pending_writes.is_empty(), "every link within the cap is OK");
+    kitty_cmd(
+        &mut t,
+        &format!("a=p,i=2,p=99,P={},Q={}", parent.0, parent.1),
+    );
+    assert_eq!(
+        t.pending_writes,
+        b"\x1b_Gi=2,p=99;ETOODEEP:relative placement chain too deep\x1b\\"
+    );
+}
+
+#[test]
+fn relative_virtual_placement_is_invalid() {
+    let mut t = kitty_parent_terminal();
+    kitty_cmd(&mut t, "a=p,i=2,p=5,U=1,P=1,Q=1");
+    assert_eq!(t.pending_writes, b"\x1b_Gi=2,p=5;EINVAL:invalid request\x1b\\");
+}
+
+#[test]
+fn deleting_parent_deletes_children_but_lowercase_keeps_their_images() {
+    let mut t = kitty_parent_terminal();
+    kitty_cmd(&mut t, "a=p,i=2,p=5,P=1,Q=1,q=2");
+    kitty_cmd(&mut t, "a=p,i=2,p=6,P=2,Q=5,q=2");
+    kitty_cmd(&mut t, "a=d,d=i,i=1,p=1");
+    assert!(t.primary.kitty_placements.is_empty());
+    assert!(t.kitty_images.get(1).is_some());
+    assert!(t.kitty_images.get(2).is_some(), "as Ghostty: only d=I frees");
+}
+
+#[test]
+fn uppercase_delete_of_parent_frees_its_childrens_orphaned_images() {
+    let mut t = kitty_parent_terminal();
+    kitty_cmd(&mut t, "a=p,i=2,p=5,P=1,Q=1,q=2");
+    kitty_cmd(&mut t, "a=p,i=2,p=6,P=2,Q=5,q=2");
+    kitty_cmd(&mut t, "a=d,d=I,i=1,p=1");
+    assert!(t.primary.kitty_placements.is_empty());
+    assert!(t.kitty_images.get(1).is_none());
+    assert!(t.kitty_images.get(2).is_none(), "child image had no placements left");
+}
+
+#[test]
+fn cascaded_child_image_survives_while_still_placed_elsewhere() {
+    let mut t = kitty_parent_terminal();
+    kitty_cmd(&mut t, "a=p,i=2,p=5,P=1,Q=1,q=2");
+    kitty_cmd(&mut t, "a=p,i=2,p=7,C=1,q=2");
+    kitty_cmd(&mut t, "a=d,d=I,i=1,p=1");
+    assert!(t.primary.kitty_placement((2, 5)).is_none());
+    assert!(t.primary.kitty_placement((2, 7)).is_some());
+    assert!(t.kitty_images.get(2).is_some());
+}
+
+#[test]
+fn parent_scrolled_out_of_region_takes_children_with_it() {
+    let mut t = kitty_parent_terminal();
+    // Child sits outside the scroll region; parent (row 3) is inside it.
+    kitty_cmd(&mut t, "a=p,i=2,p=5,P=1,Q=1,V=10,q=2");
+    feed(&mut t, b"\x1b[2;6r\x1b[6;1H\n\n\n");
+    assert!(t.primary.kitty_placement((1, 1)).is_none());
+    assert!(
+        t.primary.kitty_placement((2, 5)).is_none(),
+        "orphaned child is deleted, not left dangling"
+    );
+}
+
+#[test]
+fn parent_scrolled_out_of_region_keeps_its_childs_image() {
+    let mut t = kitty_parent_terminal();
+    kitty_cmd(&mut t, "a=p,i=2,p=5,P=1,Q=1,V=10,q=2");
+    feed(&mut t, b"\x1b[2;6r\x1b[6;1H\n\n\n");
+    assert!(t.primary.kitty_placement((2, 5)).is_none());
+    // Ghostty frees orphaned children's images only for `a=d`; automatic
+    // removals keep the data.
+    assert!(t.kitty_images.get(2).is_some());
+}
+
+#[test]
+fn relative_placement_of_virtual_parent_uses_placeholder_origin() {
+    let mut t = kitty_virtual_terminal();
+    feed(
+        &mut t,
+        &kitty_apc("a=t,f=32,s=10,v=20,i=2,q=2", &[0u8; 10 * 20 * 4]),
+    );
+    // The virtual placement (image 1, p=0) is drawn by placeholders whose
+    // top-left cell is (4, 2).
+    put_placeholder(&mut t, 4, 2, 1, &[DIA[0], DIA[0]]);
+    put_placeholder(&mut t, 5, 2, 1, &[]);
+    put_placeholder(&mut t, 4, 3, 1, &[DIA[1], DIA[0]]);
+    kitty_cmd(&mut t, "a=p,i=2,p=5,P=1,Q=0,H=1,V=-1,q=2");
+    assert!(
+        t.kitty_visible_placements().is_empty(),
+        "virtual-rooted chains are positioned by the placeholder pass"
+    );
+    assert_eq!(placement_at(&t, 2, 5), (5, 1));
+}
+
+#[test]
+fn relative_placement_below_the_grid_survives_reflow_with_its_parent() {
+    let mut t = kitty_parent_terminal();
+    // Parent on row 3; child 22 rows lower, past the 24-row grid.
+    kitty_cmd(&mut t, "a=p,i=2,p=5,P=1,Q=1,V=22,q=2");
+    // Width change → reflow; growing to 30 rows brings row 25 on screen.
+    t.resize(GridSize::new(30, 30));
+    assert_eq!(placement_at(&t, 1, 1), (2, 3));
+    assert_eq!(placement_at(&t, 2, 5), (2, 25), "child follows the reflowed parent");
+}
+
+#[test]
+fn cell_delete_hits_child_of_virtual_parent_where_it_is_drawn() {
+    let mut t = kitty_virtual_terminal();
+    feed(
+        &mut t,
+        &kitty_apc("a=t,f=32,s=10,v=20,i=2,q=2", &[0u8; 10 * 20 * 4]),
+    );
+    put_placeholder(&mut t, 4, 2, 1, &[DIA[0], DIA[0]]);
+    kitty_cmd(&mut t, "a=p,i=2,p=5,P=1,Q=0,H=1,V=-1,q=2");
+    assert_eq!(placement_at(&t, 2, 5), (5, 1));
+    kitty_cmd(&mut t, "a=d,d=p,x=6,y=2");
+    assert!(t.primary.kitty_placement((2, 5)).is_none());
+}
+
+#[test]
+fn child_of_virtual_parent_is_hidden_once_its_placeholders_leave_the_viewport() {
+    let mut t = kitty_virtual_terminal();
+    feed(
+        &mut t,
+        &kitty_apc("a=t,f=32,s=10,v=20,i=2,q=2", &[0u8; 10 * 20 * 4]),
+    );
+    // Placeholder block (image rows 0–1) at the top-left; child 3 rows down.
+    put_placeholder(&mut t, 0, 0, 1, &[DIA[0], DIA[0]]);
+    put_placeholder(&mut t, 0, 1, 1, &[DIA[1], DIA[0]]);
+    kitty_cmd(&mut t, "a=p,i=2,p=5,P=1,Q=0,H=4,V=3,q=2");
+    // Scroll two lines: the whole placeholder block moves into scrollback.
+    feed(&mut t, b"\x1b[24;1H\n\n");
+    assert!(
+        t.kitty_placeholder_placements()
+            .iter()
+            .all(|p| p.image_id != 1),
+        "parent's placeholders are off-screen"
+    );
+    // As Ghostty: the root is positioned from the rows it renders, so with
+    // no placeholder there the child is not drawn even though it would fit.
+    assert!(
+        t.kitty_placeholder_placements()
+            .iter()
+            .all(|p| p.image_id != 2)
+    );
+}
+
+#[test]
+fn virtual_parent_origin_comes_from_its_placeholders_in_the_viewport() {
+    let mut t = kitty_virtual_terminal();
+    feed(
+        &mut t,
+        &kitty_apc("a=t,f=32,s=10,v=20,i=2,q=2", &[0u8; 10 * 20 * 4]),
+    );
+    // Two placeholder copies of the same virtual placement: rows 0 and 20.
+    put_placeholder(&mut t, 0, 0, 1, &[DIA[0], DIA[0]]);
+    put_placeholder(&mut t, 3, 20, 1, &[DIA[0], DIA[0]]);
+    kitty_cmd(&mut t, "a=p,i=2,p=5,P=1,Q=0,q=2");
+    assert_eq!(placement_at(&t, 2, 5), (0, 0));
+    // Ten lines up, only the row-20 copy (now row 10) is in the viewport.
+    feed(&mut t, b"\x1b[24;1H\n\n\n\n\n\n\n\n\n\n");
+    assert_eq!(placement_at(&t, 2, 5), (3, 10));
+}
+
+#[test]
+fn cell_delete_ignores_child_drawn_left_of_the_grid() {
+    let mut t = kitty_parent_terminal();
+    // Drawn at (-2, 2): it covers no on-grid cell.
+    kitty_cmd(&mut t, "a=p,i=2,p=5,P=1,Q=1,H=-4,V=-1,q=2");
+    kitty_cmd(&mut t, "a=d,d=p,x=1,y=3");
+    kitty_cmd(&mut t, "a=d,d=x,x=1");
+    assert!(
+        t.primary.kitty_placement((2, 5)).is_some(),
+        "negative positions are not clamped onto column 0"
+    );
+}
+
+#[test]
+fn positional_removals_ignore_a_relative_placements_own_anchor() {
+    let mut t = kitty_parent_terminal();
+    // Created with the cursor on row 10, but drawn beside the parent (row 3).
+    feed(&mut t, b"\x1b[11;1H");
+    kitty_cmd(&mut t, "a=p,i=2,p=5,P=1,Q=1,H=1,q=2");
+    // Scroll a region covering row 10 but not the parent.
+    feed(&mut t, b"\x1b[9;13r\x1b[13;1H\n");
+    assert_eq!(placement_at(&t, 2, 5), (3, 3), "child lives with its parent");
+}
+
+// ── Ghostty 1.4.0 delete / transmit parity ─────────────────────────────
+
+/// `kitty_terminal` with one-cell image `id` transmitted (not placed).
+fn transmit_cell_image(t: &mut Terminal, id: u32, extra: &str) {
+    feed(
+        t,
+        &kitty_apc(&format!("a=t,f=32,s=10,v=20,i={id},q=2{extra}"), &[0u8; 10 * 20 * 4]),
+    );
+}
+
+#[test]
+fn delete_all_spares_placements_in_scrollback_and_virtual_ones() {
+    let mut t = kitty_terminal();
+    for id in [1, 2, 3] {
+        transmit_cell_image(&mut t, id, "");
+    }
+    kitty_cmd(&mut t, "a=p,i=1,q=2");
+    feed(&mut t, &b"\n".repeat(30)); // image 1 scrolls into scrollback
+    kitty_cmd(&mut t, "a=p,i=2,q=2");
+    kitty_cmd(&mut t, "a=p,i=3,U=1,c=1,r=1,q=2");
+    kitty_cmd(&mut t, "a=d,d=A");
+    let left: Vec<u32> = t.primary.kitty_placements.iter().map(|p| p.image_id).collect();
+    assert_eq!(left, [1, 3]);
+    assert!(t.kitty_images.get(2).is_none());
+}
+
+#[test]
+fn delete_all_keeps_unrelated_unplaced_images() {
+    let mut t = kitty_terminal();
+    transmit_cell_image(&mut t, 1, "");
+    kitty_cmd(&mut t, "a=d,d=A");
+    assert!(t.kitty_images.get(1).is_some());
+}
+
+#[test]
+fn uppercase_delete_of_a_missing_placement_keeps_the_image() {
+    let mut t = kitty_terminal();
+    transmit_cell_image(&mut t, 1, ",I=5");
+    kitty_cmd(&mut t, "a=d,d=I,i=1,p=9");
+    kitty_cmd(&mut t, "a=d,d=N,I=5,p=9");
+    assert!(t.kitty_images.get(1).is_some());
+    kitty_cmd(&mut t, "a=d,d=I,i=1");
+    assert!(t.kitty_images.get(1).is_none(), "without p= the image is freed");
+}
+
+#[test]
+fn range_delete_frees_unplaced_images_and_accepts_empty_ranges() {
+    let mut t = kitty_terminal();
+    for id in [1, 2, 3] {
+        transmit_cell_image(&mut t, id, "");
+    }
+    kitty_cmd(&mut t, "a=d,d=R,x=3,y=2");
+    assert_eq!(t.kitty_images.len(), 3, "x > y is an empty range");
+    kitty_cmd(&mut t, "a=d,d=R,y=2");
+    assert!(t.kitty_images.get(1).is_none() && t.kitty_images.get(2).is_none());
+    assert!(t.kitty_images.get(3).is_some());
+}
+
+#[test]
+fn erase_display_reclaims_unplaced_images_but_not_scrollback_ones() {
+    let mut t = kitty_terminal();
+    for id in [1, 2, 3] {
+        transmit_cell_image(&mut t, id, "");
+    }
+    kitty_cmd(&mut t, "a=p,i=1,q=2");
+    feed(&mut t, &b"\n".repeat(30));
+    kitty_cmd(&mut t, "a=p,i=2,q=2");
+    feed(&mut t, b"\x1b[2J");
+    assert!(t.kitty_images.get(1).is_some(), "placed in scrollback");
+    assert!(t.kitty_images.get(2).is_none(), "its on-screen placement was erased");
+    assert!(t.kitty_images.get(3).is_none(), "never placed");
+}
+
+#[test]
+fn retransmitting_an_id_drops_its_placements_as_the_transfer_begins() {
+    let mut t = kitty_terminal();
+    transmit_cell_image(&mut t, 1, "");
+    kitty_cmd(&mut t, "a=p,i=1,q=2");
+    // First chunk of a replacement: the old image is gone at once.
+    kitty_cmd(&mut t, "a=t,f=32,s=10,v=20,i=1,m=1,q=2;AAAA");
+    assert!(t.primary.kitty_placements.is_empty());
+    assert!(t.kitty_images.get(1).is_none());
+    // Interrupted by another command: nothing stale comes back.
+    kitty_cmd(&mut t, "a=p,i=1,q=1");
+    assert!(t.primary.kitty_placements.is_empty());
+}
+
+#[test]
+fn query_with_an_existing_id_keeps_the_image() {
+    let mut t = kitty_terminal();
+    transmit_cell_image(&mut t, 1, "");
+    kitty_cmd(&mut t, "a=p,i=1,q=2");
+    feed(
+        &mut t,
+        &kitty_apc("a=q,f=32,s=10,v=20,i=1,q=2", &[0u8; 10 * 20 * 4]),
+    );
+    assert_eq!(t.primary.kitty_placements.len(), 1);
+    assert!(t.kitty_images.get(1).is_some());
+}
+
+#[test]
+fn quota_evicts_transient_images_first() {
+    let mut t = kitty_terminal();
+    // Room for exactly two one-cell images.
+    t.set_kitty_image_limit(2 * 10 * 20 * 4);
+    transmit_cell_image(&mut t, 1, "");
+    transmit_cell_image(&mut t, 2, ",N=1");
+    transmit_cell_image(&mut t, 3, "");
+    assert!(t.kitty_images.get(2).is_none(), "the newer but transient image goes first");
+    assert!(t.kitty_images.get(1).is_some() && t.kitty_images.get(3).is_some());
+}
+
+#[test]
+fn quota_evicts_placed_transient_images_after_unplaced_ones() {
+    let mut t = kitty_terminal();
+    t.set_kitty_image_limit(10 * 20 * 4);
+    transmit_cell_image(&mut t, 1, ",N=1");
+    kitty_cmd(&mut t, "a=p,i=1,q=2");
+    transmit_cell_image(&mut t, 2, "");
+    assert!(t.kitty_images.get(1).is_some(), "placed images outrank the hint");
+    assert!(t.kitty_images.get(2).is_none());
+}
+
+// ── Region scrolls move images (Ghostty 1.4.0 `scroll margins` tests) ──
+
+/// Place a 10×(20·`rows`) px image `id` (one cell wide, `rows` tall) at grid
+/// row `row`, column 0, without moving the cursor. Extra keys go in `extra`.
+fn place_tall(t: &mut Terminal, id: u32, rows: u32, row: u16, extra: &str) {
+    let h = 20 * rows;
+    feed(t, &kitty_apc(&format!("a=t,f=32,s=10,v={h},i={id},q=2"), &vec![0u8; (10 * h * 4) as usize]));
+    feed(t, format!("\x1b[{};1H", row + 1).as_bytes());
+    kitty_cmd(t, &format!("a=p,i={id},C=1,q=2{extra}"));
+}
+
+/// `(grid_y, rows, src)` of image `id`'s placement, if it still exists.
+fn tall_state(t: &Terminal, id: u32) -> Option<(i32, u16, Option<[u32; 4]>)> {
+    t.kitty_visible_placements()
+        .into_iter()
+        .find(|p| p.image_id == id)
+        .map(|p| (p.grid_y, p.rows, p.src))
+}
+
+#[test]
+fn region_scroll_moves_an_inside_image_and_clips_it_at_the_top() {
+    let mut t = kitty_terminal();
+    place_tall(&mut t, 1, 2, 2, "");
+    feed(&mut t, b"\x1b[2;5r\x1b[5;1H\n");
+    assert_eq!(tall_state(&t, 1), Some((1, 2, Some([0, 0, 10, 40]))));
+    feed(&mut t, b"\n");
+    assert_eq!(tall_state(&t, 1), Some((1, 1, Some([0, 20, 10, 20]))));
+    feed(&mut t, b"\n");
+    assert_eq!(tall_state(&t, 1), None, "clipped away entirely");
+    assert!(t.kitty_images.get(1).is_some(), "the image is retained");
+}
+
+#[test]
+fn reverse_index_clips_an_inside_image_at_the_bottom() {
+    let mut t = kitty_terminal();
+    place_tall(&mut t, 1, 2, 3, "");
+    feed(&mut t, b"\x1b[2;5r\x1b[2;1H\x1bM");
+    assert_eq!(tall_state(&t, 1), Some((4, 1, Some([0, 0, 10, 20]))));
+    feed(&mut t, b"\x1bM");
+    assert_eq!(tall_state(&t, 1), None);
+}
+
+#[test]
+fn region_scroll_clips_a_scaled_image_proportionally() {
+    let mut t = kitty_terminal();
+    // 10×80 px squeezed into 2 rows: each row shows 40 source px.
+    feed(&mut t, &kitty_apc("a=t,f=32,s=10,v=80,i=1,q=2", &vec![0u8; 10 * 80 * 4]));
+    feed(&mut t, b"\x1b[2;1H");
+    kitty_cmd(&mut t, "a=p,i=1,r=2,C=1,q=2");
+    feed(&mut t, b"\x1b[2;3r\x1b[3;1H\n");
+    assert_eq!(tall_state(&t, 1), Some((1, 1, Some([0, 40, 10, 40]))));
+}
+
+#[test]
+fn region_scroll_leaves_straddling_and_outside_images_alone() {
+    let mut t = kitty_terminal();
+    place_tall(&mut t, 1, 3, 0, ""); // rows 0–2, region is rows 0–1
+    place_tall(&mut t, 2, 1, 5, ""); // below the region
+    feed(&mut t, b"\x1b[1;2r\x1b[2;1H\n\n");
+    assert_eq!(tall_state(&t, 1), Some((0, 3, Some([0, 0, 10, 60]))));
+    assert_eq!(tall_state(&t, 2), Some((5, 1, Some([0, 0, 10, 20]))));
+}
+
+#[test]
+fn region_scroll_keeps_rows_below_a_scrollback_recording_region() {
+    let mut t = kitty_terminal();
+    // A top-anchored region records scrollback, moving the live area down.
+    place_tall(&mut t, 1, 1, 2, "");
+    place_tall(&mut t, 2, 1, 10, "");
+    feed(&mut t, b"\x1b[1;4r\x1b[2S");
+    assert_eq!(tall_state(&t, 1), Some((0, 1, Some([0, 0, 10, 20]))));
+    assert_eq!(tall_state(&t, 2), Some((10, 1, Some([0, 0, 10, 20]))));
+    feed(&mut t, b"\x1b[2S");
+    assert_eq!(tall_state(&t, 1), None, "scrolled out of the region");
+}
+
+#[test]
+fn region_scroll_larger_than_the_region_deletes_inside_images() {
+    let mut t = kitty_terminal();
+    place_tall(&mut t, 1, 1, 2, "");
+    feed(&mut t, b"\x1b[2;5r\x1b[10S");
+    assert_eq!(tall_state(&t, 1), None);
+}
+
+#[test]
+fn insert_and_delete_lines_do_not_move_images() {
+    let mut t = kitty_terminal();
+    place_tall(&mut t, 1, 1, 2, "");
+    feed(&mut t, b"\x1b[2;5r\x1b[3;1H\x1b[M\x1b[L");
+    assert_eq!(tall_state(&t, 1), Some((2, 1, Some([0, 0, 10, 20]))));
+}
+
+#[test]
+fn quota_eviction_drops_the_evicted_images_placements() {
+    let mut t = kitty_terminal();
+    t.set_kitty_image_limit(10 * 20 * 4);
+    let px = [0u8; 10 * 20 * 4];
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=20,I=1,C=1,q=2", &px));
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=20,I=2,C=1,q=2", &px));
+    assert!(t.kitty_images.get(1).is_none(), "id 1 was evicted");
+    let placed: Vec<u32> = t.primary.kitty_placements.iter().map(|p| p.image_id).collect();
+    assert_eq!(placed, [2]);
+    // The smallest free id is 1 again; the new image must not inherit a place.
+    t.set_kitty_image_limit(2 * 10 * 20 * 4);
+    feed(&mut t, &kitty_apc("a=t,f=32,s=10,v=20,I=7,q=2", &px));
+    assert!(t.kitty_images.get(1).is_some(), "id 1 reused");
+    assert!(t.kitty_visible_placements().iter().all(|p| p.image_id != 1));
+}
+
+#[test]
+fn lowering_the_image_limit_drops_the_evicted_images_placements() {
+    let mut t = kitty_terminal();
+    transmit_cell_image(&mut t, 1, "");
+    kitty_cmd(&mut t, "a=p,i=1,q=2");
+    t.set_kitty_image_limit(0);
+    assert!(t.kitty_images.get(1).is_none());
+    assert!(t.primary.kitty_placements.is_empty());
+}
+
+#[test]
+fn margin_scroll_handles_an_image_wider_than_the_column_range() {
+    let mut t = kitty_terminal();
+    transmit_cell_image(&mut t, 1, "");
+    // Starts inside the margins (col 6) but runs far past the right one.
+    feed(&mut t, b"\x1b[6;7H");
+    kitty_cmd(&mut t, "a=p,i=1,c=65535,r=1,C=1,q=2");
+    feed(&mut t, b"\x1b[?69h\x1b[5;15s\x1b[2;12r\x1b[12;5H\n");
+    assert_eq!(placement_at(&t, 1, 0), (6, 5), "straddles the margins: untouched");
+}
+
+#[test]
+fn region_scroll_clip_survives_a_source_rectangle_at_the_coordinate_limit() {
+    let mut t = kitty_terminal();
+    transmit_cell_image(&mut t, 1, "");
+    feed(&mut t, b"\x1b[3;1H");
+    kitty_cmd(&mut t, "a=p,i=1,y=4294967295,h=2,r=2,C=1,q=2");
+    feed(&mut t, b"\x1b[2;5r\x1b[5;1H\n\n");
+    assert_eq!(tall_state(&t, 1).map(|(y, rows, _)| (y, rows)), Some((1, 1)));
+}
+
+#[test]
+fn region_scroll_leaves_virtual_placements_to_their_placeholders() {
+    let mut t = kitty_virtual_terminal();
+    put_placeholder(&mut t, 0, 0, 1, &[DIA[0], DIA[0]]);
+    put_placeholder(&mut t, 0, 1, 1, &[DIA[1], DIA[0]]);
+    feed(&mut t, b"\x1b[1;4r\x1b[4;1H\n");
+    let placements = t.kitty_placeholder_placements();
+    assert_eq!(placements.len(), 1, "only image row 1 is left on screen");
+    assert_eq!(placements[0].grid_y, 0);
+    assert_eq!(placements[0].src, Some([0, 20, 10, 20]));
+}
+
+#[test]
+fn reparenting_a_chain_root_counts_its_descendants_toward_the_cap() {
+    let mut t = kitty_parent_terminal();
+    let max = crate::screen::KITTY_MAX_RELATIVE_DEPTH as u32;
+    let mut parent = (1, 1);
+    for n in 1..=max {
+        kitty_cmd(
+            &mut t,
+            &format!("a=p,i=2,p={},P={},Q={},H=1,q=1", 10 + n, parent.0, parent.1),
+        );
+        parent = (2, 10 + n);
+    }
+    kitty_cmd(&mut t, "a=p,i=1,p=2,C=1,q=1");
+    assert!(t.pending_writes.is_empty());
+    // Hanging the full-depth chain under (1, 2) would make it max + 1 deep.
+    kitty_cmd(&mut t, "a=p,i=1,p=1,P=1,Q=2");
+    assert_eq!(
+        t.pending_writes,
+        b"\x1b_Gi=1,p=1;ETOODEEP:relative placement chain too deep\x1b\\"
+    );
+}
+
+#[test]
+fn erase_display_removes_a_child_on_screen_whose_parent_is_in_scrollback() {
+    let mut t = kitty_terminal();
+    transmit_cell_image(&mut t, 1, "");
+    transmit_cell_image(&mut t, 2, "");
+    kitty_cmd(&mut t, "a=p,i=1,p=1,C=1,q=2");
+    kitty_cmd(&mut t, "a=p,i=2,p=2,P=1,Q=1,V=2,q=2");
+    feed(&mut t, b"\x1b[24;1H\n");
+    assert_eq!(placement_at(&t, 2, 2), (0, 1), "only the child is on screen");
+    feed(&mut t, b"\x1b[2J");
+    assert!(t.kitty_visible_placements().is_empty());
 }

@@ -57,7 +57,8 @@ impl Screen {
                     row.is_blank()
                         && !row.wrapped
                         && !self.kitty_placements.iter().any(|placement| {
-                            abs_row >= placement.anchor_abs_row
+                            placement.parent.is_none()
+                                && abs_row >= placement.anchor_abs_row
                                 && abs_row < placement.anchor_abs_row + placement.rows as usize
                         })
                 })
@@ -218,7 +219,7 @@ impl Screen {
         }
         let evicted = self.rows_evicted;
         let front_dropped = grid_start.saturating_sub(self.scrollback.len());
-        self.kitty_placements.retain_mut(|p| {
+        self.retain_kitty_placements(|p| {
             let Some(old_pos) = p.anchor_abs_row.checked_sub(evicted) else {
                 return false;
             };

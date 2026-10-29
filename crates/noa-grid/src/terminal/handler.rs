@@ -303,6 +303,11 @@ impl Handler for Terminal {
             self.invalidate_grid_coordinate_space();
         }
         self.active_mut().erase_display(mode);
+        if mode == EraseDisplay::Complete {
+            // Ghostty 1.4.0: ED 2 also reclaims every image left without a
+            // placement on either screen, scrollback ones keeping theirs.
+            self.reclaim_unreferenced_images();
+        }
     }
     fn erase_line(&mut self, mode: EraseLine) {
         self.active_mut().erase_line(mode);

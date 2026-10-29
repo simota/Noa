@@ -551,10 +551,14 @@ impl ImageStore {
         let file_len = meta.len();
         let offset = cmd.file_offset as u64;
         let avail = file_len.saturating_sub(offset);
+        // A non-zero `S` is the exact byte count, not a maximum (Ghostty
+        // #13892): fewer bytes past the offset is an error.
         let want = if cmd.file_size == 0 {
             avail
+        } else if u64::from(cmd.file_size) <= avail {
+            u64::from(cmd.file_size)
         } else {
-            (cmd.file_size as u64).min(avail)
+            return Err(KittyError::NoData);
         };
         if want as usize > self.byte_limit {
             return Err(KittyError::TooBig);

@@ -567,6 +567,30 @@ fn apc_can_aborts_without_dispatch() {
 }
 
 #[test]
+fn apc_c1_aborts_without_dispatch() {
+    // Any C1 but ST aborts the APC (ECMA-48; Ghostty 1.4.0): a late ST does
+    // not revive it, and an introducer such as CSI starts its own sequence.
+    let acts = actions(b"\x1b_Gi=1;AAAA\x9b2J\x1b\\");
+    assert!(
+        acts.iter()
+            .all(|a| !matches!(a, Action::ApcDispatch { .. })),
+        "C1 should abort the APC"
+    );
+    assert!(
+        acts.iter()
+            .any(|a| matches!(a, Action::CsiDispatch(csi) if csi.final_byte == b'J')),
+        "{acts:?}"
+    );
+}
+
+#[test]
+fn apc_utf8_continuation_byte_is_not_a_c1() {
+    // U+201B is E2 80 9B: its 0x9b is payload, not an 8-bit CSI.
+    let acts = actions("\x1b_G\u{201B}\x1b\\".as_bytes());
+    assert!(acts.iter().any(|a| matches!(a, Action::ApcDispatch { .. })));
+}
+
+#[test]
 fn apc_overflow_dispatches_truncated() {
     let mut bytes = b"\x1b_G".to_vec();
     bytes.extend(std::iter::repeat_n(b'a', (1 << 20) + 10));

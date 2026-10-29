@@ -55,6 +55,12 @@ pub enum KittyError {
     /// `EUNSUPPORTED` — a request unsupported on this platform (e.g. shared
     /// memory off Unix).
     Unsupported,
+    /// `ENOPARENT` — a relative placement's `P=`/`Q=` parent does not exist.
+    NoParent,
+    /// `ECYCLE` — a relative placement would become its own ancestor.
+    Cycle,
+    /// `ETOODEEP` — a relative placement chain exceeds the supported depth.
+    TooDeep,
 }
 
 impl KittyError {
@@ -67,6 +73,9 @@ impl KittyError {
             KittyError::BadPng => "EBADPNG:png decode failed",
             KittyError::NoEnt => "ENOENT:file not found",
             KittyError::Unsupported => "EUNSUPPORTED:unsupported request",
+            KittyError::NoParent => "ENOPARENT:parent placement not found",
+            KittyError::Cycle => "ECYCLE:relative placement cycle",
+            KittyError::TooDeep => "ETOODEEP:relative placement chain too deep",
         }
     }
 }

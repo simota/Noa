@@ -26,6 +26,11 @@ const DEFAULT_SCROLLBACK_LIMIT_BYTES: usize = 10_000_000;
 /// Far above any legitimate simultaneous-placement count.
 pub(crate) const KITTY_PLACEMENT_CAP: usize = 4096;
 
+/// Longest chain of Kitty relative placements (`P=`/`Q=` links from a
+/// placement to its root) accepted at creation; deeper requests get
+/// `ETOODEEP`. The spec requires supporting at least 8.
+pub(crate) const KITTY_MAX_RELATIVE_DEPTH: usize = 8;
+
 #[derive(Clone, Copy)]
 struct ReflowPoint {
     x: u16,
@@ -91,15 +96,56 @@ pub struct KittyPlacement {
     /// `U=1` — a virtual placement referenced only by Unicode placeholders; it is
     /// never drawn directly.
     pub is_virtual: bool,
+    /// `P=`/`Q=` — set for a relative placement, which is drawn at its
+    /// parent's top-left plus the offset and lives exactly as long as the
+    /// parent. Its position is always derived from the parent chain, so the
+    /// anchor fields above are meaningless for it and scrolls, reflow and
+    /// eviction never move or prune it on their own.
+    pub parent: Option<KittyParent>,
+}
+
+/// The parent link of a Kitty relative placement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KittyParent {
+    pub image_id: u32,
+    pub placement_id: u32,
+    /// `H=`/`V=` — cell offset from the parent's top-left cell.
+    pub x_off: i32,
+    pub y_off: i32,
 }
 
 impl KittyPlacement {
-    /// Whether the placement's cell rectangle covers session-absolute `(row, col)`.
-    pub(crate) fn covers_abs(&self, abs_row: usize, col: u16) -> bool {
-        abs_row >= self.anchor_abs_row
-            && abs_row < self.anchor_abs_row + self.rows as usize
-            && col >= self.anchor_col
-            && col < self.anchor_col.saturating_add(self.cols)
+    /// The `(image_id, placement_id)` pair that identifies a placement on its
+    /// screen (and that a relative placement's [`KittyParent`] refers to).
+    pub(crate) fn key(&self) -> (u32, u32) {
+        (self.image_id, self.placement_id)
+    }
+
+    /// This placement drawn with its top-left at viewport cell
+    /// `(grid_x, grid_y)`, or `None` when its row span misses a
+    /// `screen_rows`-tall viewport (or `grid_x` is beyond `i32`, which only a
+    /// summed relative offset can reach).
+    pub(crate) fn project(
+        &self,
+        grid_x: i64,
+        grid_y: i64,
+        screen_rows: u16,
+    ) -> Option<VisibleKittyPlacement> {
+        if grid_y + i64::from(self.rows) <= 0 || grid_y >= i64::from(screen_rows) {
+            return None;
+        }
+        Some(VisibleKittyPlacement {
+            image_id: self.image_id,
+            placement_id: self.placement_id,
+            grid_x: i32::try_from(grid_x).ok()?,
+            grid_y: grid_y as i32,
+            cell_x_off: self.cell_x_off,
+            cell_y_off: self.cell_y_off,
+            cols: self.cols,
+            rows: self.rows,
+            src: self.src,
+            z: self.z,
+        })
     }
 }
 

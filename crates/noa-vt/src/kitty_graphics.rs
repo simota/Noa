@@ -153,6 +153,14 @@ pub struct KittyGraphicsCommand {
     pub cursor_no_move: bool,
     /// `U=1` — create a virtual placement (Unicode placeholder).
     pub virtual_placement: bool,
+    /// `P=` — parent image id of a relative placement (0 = not relative).
+    pub parent_image_id: u32,
+    /// `Q=` — parent placement id of a relative placement.
+    pub parent_placement_id: u32,
+    /// `H=` — horizontal cell offset from the parent's top-left (signed).
+    pub parent_x_off: i32,
+    /// `V=` — vertical cell offset from the parent's top-left (signed).
+    pub parent_y_off: i32,
     /// `d=` specifier, resolved only when `a=d`.
     pub delete: Option<KittyDelete>,
     /// Raw (still base64-encoded) payload after the first `;`.
@@ -190,6 +198,10 @@ impl KittyGraphicsCommand {
             z_index: 0,
             cursor_no_move: false,
             virtual_placement: false,
+            parent_image_id: 0,
+            parent_placement_id: 0,
+            parent_x_off: 0,
+            parent_y_off: 0,
             delete: None,
             payload: Vec::new(),
             truncated,
@@ -317,6 +329,16 @@ pub fn parse(data: &[u8], truncated: bool) -> KittyGraphicsCommand {
                 Some(n) => cmd.z_index = n,
                 None => cmd.parse_error = true,
             },
+            b'H' => match i32val(val) {
+                Some(n) => cmd.parent_x_off = n,
+                None => cmd.parse_error = true,
+            },
+            b'V' => match i32val(val) {
+                Some(n) => cmd.parent_y_off = n,
+                None => cmd.parse_error = true,
+            },
+            b'P' => set_u32(&mut cmd.parent_image_id, val, &mut cmd.parse_error),
+            b'Q' => set_u32(&mut cmd.parent_placement_id, val, &mut cmd.parse_error),
             b's' => set_u32(&mut cmd.width, val, &mut cmd.parse_error),
             b'v' => set_u32(&mut cmd.height, val, &mut cmd.parse_error),
             b'S' => set_u32(&mut cmd.file_size, val, &mut cmd.parse_error),
@@ -402,6 +424,22 @@ mod tests {
         assert!(c.cursor_no_move);
         assert!(c.virtual_placement);
         assert!(!c.parse_error);
+    }
+
+    #[test]
+    fn relative_placement_keys_parse() {
+        let c = parse(b"a=p,i=2,p=3,P=7,Q=9,H=-4,V=5", false);
+        assert_eq!((c.parent_image_id, c.parent_placement_id), (7, 9));
+        assert_eq!((c.parent_x_off, c.parent_y_off), (-4, 5));
+        assert!(!c.parse_error);
+    }
+
+    #[test]
+    fn relative_placement_keys_reject_bad_values() {
+        assert!(parse(b"a=p,P=-1", false).parse_error, "P= is unsigned");
+        assert!(parse(b"a=p,Q=x", false).parse_error);
+        assert!(parse(b"a=p,H=1.5", false).parse_error);
+        assert!(parse(b"a=p,V=", false).parse_error);
     }
 
     #[test]

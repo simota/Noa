@@ -46,7 +46,7 @@ pub use osc::{
     TerminalColors, TerminalProgress, local_file_uri_path,
 };
 pub use path::{PathMatch, detect_path_at_column};
-pub use screen::{KittyPlacement, Screen, VisibleKittyPlacement};
+pub use screen::{KittyParent, KittyPlacement, Screen, VisibleKittyPlacement};
 pub use search::{SearchAnchor, SearchMatch, SearchState};
 pub use selection::{Selection, SelectionPoint};
 pub use snapshot::{ScrollbackSnapshot, ScrollbackSnapshotInput};

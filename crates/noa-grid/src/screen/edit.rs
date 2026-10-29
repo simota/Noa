@@ -2,6 +2,9 @@
 //! tab stops, margins, and erase/insert/delete.
 
 use super::*;
+use crate::kitty::KittyError;
+use crate::kitty_placeholder::scan_row;
+use std::collections::{HashMap, HashSet};
 
 impl Screen {
     pub(crate) fn clear_scrollback(&mut self) {
@@ -26,7 +29,7 @@ impl Screen {
         }
         self.scrollback.clear();
         self.viewport_offset = 0;
-        self.kitty_placements.retain_mut(|p| {
+        self.retain_kitty_placements(|p| {
             if p.anchor_abs_row < old_live_top {
                 false
             } else {
@@ -82,11 +85,10 @@ impl Screen {
 
     /// Insert a placement, replacing any existing one with the same
     /// `(image_id, placement_id)` — this is how an unnamed placement (`p=0`) of
-    /// an image overwrites its predecessor.
+    /// an image overwrites its predecessor. A replaced parent keeps its
+    /// relative children: they follow it to its new position.
     pub fn insert_kitty_placement(&mut self, placement: KittyPlacement) {
-        self.kitty_placements.retain(|p| {
-            !(p.image_id == placement.image_id && p.placement_id == placement.placement_id)
-        });
+        self.kitty_placements.retain(|p| p.key() != placement.key());
         // Abuse guard: a client minting a fresh `p=` id per put grows this
         // vec without bound (image *data* is quota-capped in `ImageStore`,
         // placements were not). Drop the oldest placement past the cap —
@@ -95,10 +97,12 @@ impl Screen {
             self.kitty_placements.remove(0);
         }
         self.kitty_placements.push(placement);
+        self.drop_orphaned_kitty_placements();
     }
 
-    /// Remove placements for which `should_delete` returns true, returning the
-    /// image ids of the removed placements (for uppercase-`d=` data freeing).
+    /// Remove placements for which `should_delete` returns true, along with
+    /// their relative descendants. Returns the image ids of all removed
+    /// placements.
     pub fn delete_kitty_placements<F>(&mut self, should_delete: F) -> Vec<u32>
     where
         F: Fn(&KittyPlacement) -> bool,
@@ -112,6 +116,7 @@ impl Screen {
                 true
             }
         });
+        removed.extend(self.drop_orphaned_kitty_placements());
         removed
     }
 
@@ -119,8 +124,175 @@ impl Screen {
     /// scrollback (session-absolute rows below `rows_evicted`).
     pub fn prune_evicted_placements(&mut self) {
         let floor = self.rows_evicted;
+        self.retain_kitty_placements(|p| p.anchor_abs_row + p.rows as usize > floor);
+    }
+
+    /// `retain_mut` over the placements whose position is their own anchor,
+    /// then delete the relative placements whose parent did not survive. The
+    /// automatic, position-driven removals (scrolls, reflow, eviction) go
+    /// through here; relative placements are skipped by `keep` since their
+    /// anchors are meaningless and they follow their parent instead.
+    pub(super) fn retain_kitty_placements(
+        &mut self,
+        mut keep: impl FnMut(&mut KittyPlacement) -> bool,
+    ) {
         self.kitty_placements
-            .retain(|p| p.anchor_abs_row + p.rows as usize > floor);
+            .retain_mut(|p| p.parent.is_some() || keep(p));
+        // The cascaded children's images are kept, as Ghostty keeps them on
+        // every automatic removal path (its `removeOrphans` frees only for an
+        // uppercase `a=d`).
+        self.drop_orphaned_kitty_placements();
+    }
+
+    /// Kitty spec: "If its parent is deleted, it is deleted as well" —
+    /// transitively. Returns the image ids of the placements removed.
+    fn drop_orphaned_kitty_placements(&mut self) -> Vec<u32> {
+        let mut removed = Vec::new();
+        if !self.kitty_placements.iter().any(|p| p.parent.is_some()) {
+            return removed;
+        }
+        loop {
+            let keys: HashSet<(u32, u32)> = self
+                .kitty_placements
+                .iter()
+                .map(KittyPlacement::key)
+                .collect();
+            let before = removed.len();
+            self.kitty_placements.retain(|p| {
+                let orphan = p
+                    .parent
+                    .is_some_and(|parent| !keys.contains(&(parent.image_id, parent.placement_id)));
+                if orphan {
+                    removed.push(p.image_id);
+                }
+                !orphan
+            });
+            if removed.len() == before {
+                return removed;
+            }
+        }
+    }
+
+    /// The placement identified by `key` (`(image_id, placement_id)`).
+    pub(crate) fn kitty_placement(&self, key: (u32, u32)) -> Option<&KittyPlacement> {
+        self.kitty_placements.iter().find(|p| p.key() == key)
+    }
+
+    /// Walk `p`'s relative-parent chain to its root, returning the root and
+    /// `p`'s summed `(x, y)` cell offset from the root's top-left. `None` only
+    /// if a link is missing, which the orphan cascade never leaves behind.
+    pub(crate) fn kitty_relative_origin<'a>(
+        &'a self,
+        p: &'a KittyPlacement,
+    ) -> Option<(&'a KittyPlacement, i64, i64)> {
+        let (mut current, mut dx, mut dy) = (p, 0i64, 0i64);
+        // Cycles are rejected at creation, so a chain has at most `len` links.
+        for _ in 0..=self.kitty_placements.len() {
+            let Some(parent) = current.parent else {
+                return Some((current, dx, dy));
+            };
+            dx += i64::from(parent.x_off);
+            dy += i64::from(parent.y_off);
+            current = self.kitty_placement((parent.image_id, parent.placement_id))?;
+        }
+        None
+    }
+
+    /// Session-absolute top-left `(row, col)` of relative placement `p`: its
+    /// root's position plus the summed offsets, unclamped. A virtual root is
+    /// positioned by `virtual_origins` (see [`Self::virtual_placement_origins`]);
+    /// `None` when it has no entry there.
+    pub(crate) fn relative_placement_origin(
+        &self,
+        p: &KittyPlacement,
+        virtual_origins: &HashMap<(u32, u32), (i64, i64)>,
+    ) -> Option<(i64, i64)> {
+        let (root, dx, dy) = self.kitty_relative_origin(p)?;
+        let (row, col) = if root.is_virtual {
+            *virtual_origins.get(&root.key())?
+        } else {
+            (root.anchor_abs_row as i64, i64::from(root.anchor_col))
+        };
+        Some((row + dy, col + dx))
+    }
+
+    /// The virtual placement a placeholder run for `image_id` (and
+    /// `placement_id`, when the placeholder encodes one) resolves to.
+    pub(crate) fn virtual_placement_for(
+        &self,
+        image_id: u32,
+        placement_id: u32,
+    ) -> Option<&KittyPlacement> {
+        self.kitty_placements.iter().find(|p| {
+            p.is_virtual
+                && p.image_id == image_id
+                && (placement_id == 0 || p.placement_id == placement_id)
+        })
+    }
+
+    /// Session-absolute `(row, col)` origins of the virtual placements whose
+    /// placeholder cells appear in storage rows `rows` (`0` = oldest retained
+    /// row) — per the Kitty spec, the minimum y and x of those cells.
+    pub(crate) fn virtual_placement_origins(
+        &self,
+        rows: Range<usize>,
+    ) -> HashMap<(u32, u32), (i64, i64)> {
+        let mut origins: HashMap<(u32, u32), (i64, i64)> = HashMap::new();
+        for idx in rows {
+            let Some(row) = self.storage_row(idx) else {
+                continue;
+            };
+            for run in scan_row(&row.cells) {
+                let Some(vp) = self.virtual_placement_for(run.image_id, run.placement_id) else {
+                    continue;
+                };
+                let origin = ((self.rows_evicted + idx) as i64, i64::from(run.screen_x));
+                origins
+                    .entry(vp.key())
+                    .and_modify(|(min_row, min_col)| {
+                        *min_row = (*min_row).min(origin.0);
+                        *min_col = (*min_col).min(origin.1);
+                    })
+                    .or_insert(origin);
+            }
+        }
+        origins
+    }
+
+    /// [`Self::virtual_placement_origins`] over the viewport rows.
+    pub(crate) fn visible_virtual_placement_origins(&self) -> HashMap<(u32, u32), (i64, i64)> {
+        let base = self.visible_row_base();
+        self.virtual_placement_origins(base..(base + self.rows as usize).min(self.total_rows()))
+    }
+
+    /// Validate making the placement keyed `key` relative to `parent`: the
+    /// parent must exist (`ENOPARENT`), `key` must not be among its ancestors
+    /// (`ECYCLE` — a re-put of a parent onto its own descendant), and the
+    /// chain must stay within [`KITTY_MAX_RELATIVE_DEPTH`] (`ETOODEEP`).
+    pub(crate) fn check_kitty_parent(
+        &self,
+        key: (u32, u32),
+        parent: KittyParent,
+    ) -> Result<(), KittyError> {
+        let mut current = self
+            .kitty_placement((parent.image_id, parent.placement_id))
+            .ok_or(KittyError::NoParent)?;
+        let mut depth = 1;
+        loop {
+            if current.key() == key {
+                return Err(KittyError::Cycle);
+            }
+            let Some(next) = current.parent else {
+                return Ok(());
+            };
+            depth += 1;
+            if depth > KITTY_MAX_RELATIVE_DEPTH {
+                return Err(KittyError::TooDeep);
+            }
+            current = self
+                .kitty_placement((next.image_id, next.placement_id))
+                .ok_or(KittyError::NoParent)?;
+        }
     }
 
     /// Placements projected into the current viewport (non-virtual, intersecting
@@ -135,23 +307,15 @@ impl Screen {
             .iter()
             .filter(|p| !p.is_virtual)
             .filter_map(|p| {
-                let grid_y = p.anchor_abs_row as i64 - base_abs;
-                // Keep if the image's row span intersects [0, rows).
-                if grid_y + p.rows as i64 <= 0 || grid_y >= self.rows as i64 {
-                    return None;
-                }
-                Some(VisibleKittyPlacement {
-                    image_id: p.image_id,
-                    placement_id: p.placement_id,
-                    grid_x: p.anchor_col as i32,
-                    grid_y: grid_y as i32,
-                    cell_x_off: p.cell_x_off,
-                    cell_y_off: p.cell_y_off,
-                    cols: p.cols,
-                    rows: p.rows,
-                    src: p.src,
-                    z: p.z,
-                })
+                let (abs_row, col) = if p.parent.is_some() {
+                    // A chain rooted at a virtual placement has no origin
+                    // here; it is projected with its placeholder cells
+                    // (`Terminal::kitty_placeholder_placements`).
+                    self.relative_placement_origin(p, &HashMap::new())?
+                } else {
+                    (p.anchor_abs_row as i64, i64::from(p.anchor_col))
+                };
+                p.project(col, abs_row - base_abs, self.rows)
             })
             .collect();
         out.sort_by_key(|p| p.z);
@@ -168,7 +332,7 @@ impl Screen {
         let base = self.live_area_abs_top();
         let r_top = base + top;
         let r_bot = base + bottom;
-        self.kitty_placements.retain(|p| {
+        self.retain_kitty_placements(|p| {
             let p_top = p.anchor_abs_row;
             let p_bot = p.anchor_abs_row + p.rows as usize;
             p_bot <= r_top || p_top > r_bot
@@ -187,7 +351,7 @@ impl Screen {
         let full = top == 0 && bottom == self.rows as usize - 1;
         if full {
             let base = self.live_area_abs_top();
-            self.kitty_placements.retain_mut(|p| {
+            self.retain_kitty_placements(|p| {
                 if p.anchor_abs_row + p.rows as usize <= base + n {
                     false
                 } else {
@@ -212,7 +376,7 @@ impl Screen {
         if full {
             let base = self.live_area_abs_top();
             let floor = base + self.rows as usize;
-            self.kitty_placements.retain_mut(|p| {
+            self.retain_kitty_placements(|p| {
                 p.anchor_abs_row += n;
                 p.anchor_abs_row < floor
             });
@@ -447,7 +611,7 @@ impl Screen {
         let r_bot = base + bottom;
         let left = self.left_margin();
         let right = self.right_margin();
-        self.kitty_placements.retain(|p| {
+        self.retain_kitty_placements(|p| {
             let p_top = p.anchor_abs_row;
             let p_bot = p.anchor_abs_row + p.rows as usize;
             let p_right = p.anchor_col.saturating_add(p.cols);

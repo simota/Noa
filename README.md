@@ -146,7 +146,7 @@ Every number is reproducible with the bundled benchmark harness
 - Tabs, splits, multiple windows, session restore, and a quick terminal
 - DEC/ANSI VT handling, Kitty keyboard protocol, shell integration, and search
 - Font fallback, ligatures, background images, opacity, and blur
-- Ghostty-compatible configuration, live reload, and 574 bundled themes
+- Ghostty-compatible configuration, live reload, and 575 bundled themes (574 from Ghostty plus `Noa`)
 - macOS menus, command palette, notifications, and secure keyboard entry
 
 See [Features](docs/FEATURES.md) for the complete feature inventory.

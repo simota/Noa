@@ -222,7 +222,7 @@ impl Terminal {
         let cell_x_off = ctrl.cell_x_off.min(cell_w - 1);
         let cell_y_off = ctrl.cell_y_off.min(cell_h - 1);
         let (cols, rows) = crate::screen::kitty_cell_span(
-            [src_w, src_h],
+            [src_w, src_h].map(f64::from),
             [ctrl.columns, ctrl.rows],
             [cell_w, cell_h],
             [cell_x_off, cell_y_off],
@@ -265,6 +265,7 @@ impl Terminal {
             cell_x_off: spec.cell_x_off,
             cell_y_off: spec.cell_y_off,
             src: spec.src,
+            src_trim_y: [0.0; 2],
             cols: spec.cols,
             rows: spec.rows,
             req_cols: spec.req_cols,
@@ -595,6 +596,7 @@ impl Terminal {
                     req_cols: u32::from(run.cols),
                     req_rows: 1,
                     src: Some(src),
+                    src_trim_y: [0.0; 2],
                     z: vp.z,
                 });
             }

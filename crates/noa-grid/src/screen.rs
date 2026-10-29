@@ -75,7 +75,7 @@ struct ReflowedLine {
 /// adjustment — the absolute coordinate keeps pointing at the same content; only
 /// scrolls that discard content (alternate screen, region scrolls) shift or drop
 /// placements.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct KittyPlacement {
     pub image_id: u32,
     /// `p=` placement id (0 = unnamed; the unnamed placement of an image is
@@ -89,6 +89,10 @@ pub struct KittyPlacement {
     pub cell_y_off: u16,
     /// Source crop `[x, y, w, h]` in image pixels, if the request cropped.
     pub src: Option<[u32; 4]>,
+    /// Source pixels trimmed off the top and bottom of `src` beyond its whole
+    /// pixels: a region scroll clipping an image scaled up by `c=` can cut a
+    /// fraction of a source pixel per row.
+    pub src_trim_y: [f32; 2],
     /// Effective cell span, resolved at creation from `c=`/`r=` or the image size.
     pub cols: u16,
     pub rows: u16,
@@ -156,6 +160,7 @@ impl KittyPlacement {
             req_cols: self.req_cols,
             req_rows: self.req_rows,
             src: self.src,
+            src_trim_y: self.src_trim_y,
             z: self.z,
         })
     }
@@ -166,7 +171,7 @@ impl KittyPlacement {
 /// offset into the first cell, rounded up to whole cells. `offset` is clamped
 /// into the cell first.
 pub(crate) fn kitty_cell_span(
-    src: [u32; 2],
+    src: [f64; 2],
     req: [u32; 2],
     cell: [u32; 2],
     offset: [u32; 2],
@@ -192,12 +197,12 @@ pub(crate) fn kitty_cell_span(
 /// the far edge stays on the cell boundary. `src` is the source rectangle's
 /// size, already intersected with the image.
 pub fn kitty_image_size(
-    src: [u32; 2],
+    src: [f64; 2],
     req: [u32; 2],
     cell: [f64; 2],
     offset: [f64; 2],
 ) -> [f64; 2] {
-    let [sw, sh] = src.map(f64::from);
+    let [sw, sh] = src;
     let side = |n: u32, cell: f64, offset: f64| (f64::from(n) * cell - offset).max(0.0);
     let scale = |value: f64, num: f64, den: f64| if den == 0.0 { 0.0 } else { value * num / den };
     match req {
@@ -231,6 +236,8 @@ pub struct VisibleKittyPlacement {
     pub req_cols: u32,
     pub req_rows: u32,
     pub src: Option<[u32; 4]>,
+    /// See [`KittyPlacement::src_trim_y`].
+    pub src_trim_y: [f32; 2],
     pub z: i32,
 }
 

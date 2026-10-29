@@ -90,26 +90,23 @@ pub fn resolve_image_quad(
     let off_y = f32::from(placement.cell_y_off).min((cell_h - 1.0).max(0.0));
     let origin_x = pane.x as f32 + padding.left + placement.grid_x as f32 * cell_w + off_x;
     let origin_y = pane.y as f32 + padding.top + placement.grid_y as f32 * cell_h + off_y;
-    let [src_w, src_h] = match placement.src {
-        Some([_, _, w, h]) => [w, h],
-        None => [image.width, image.height],
+    let [trim_top, trim_bottom] = placement.src_trim_y;
+    let [src_x, src_y, src_w, src_h] = match placement.src {
+        Some([x, y, w, h]) => [x, y, w, h].map(|v| v as f32),
+        None => [0.0, 0.0, image.width as f32, image.height as f32],
     };
+    let (src_y, src_h) = (src_y + trim_top, src_h - trim_top - trim_bottom);
     let [dest_w, dest_h] = noa_grid::kitty_image_size(
-        [src_w, src_h],
+        [f64::from(src_w), f64::from(src_h)],
         [placement.req_cols, placement.req_rows],
         [f64::from(cell_w), f64::from(cell_h)],
         [f64::from(off_x), f64::from(off_y)],
     )
     .map(|v| v as f32);
 
-    let src_uv = match placement.src {
-        Some([x, y, w, h]) => {
-            let iw = image.width.max(1) as f32;
-            let ih = image.height.max(1) as f32;
-            [x as f32 / iw, y as f32 / ih, w as f32 / iw, h as f32 / ih]
-        }
-        None => [0.0, 0.0, 1.0, 1.0],
-    };
+    let iw = image.width.max(1) as f32;
+    let ih = image.height.max(1) as f32;
+    let src_uv = [src_x / iw, src_y / ih, src_w / iw, src_h / ih];
 
     ResolvedImageQuad {
         image_id: placement.image_id,
@@ -573,6 +570,7 @@ mod tests {
             req_cols: 1,
             req_rows: 1,
             src: None,
+            src_trim_y: [0.0; 2],
             z: 0,
         };
         for frame in 0..3 {
@@ -652,6 +650,7 @@ mod tests {
             req_cols: 6,
             req_rows: 7,
             src: None,
+            src_trim_y: [0.0; 2],
             z: 0,
         };
         let image = snapshot_image(1, 100, 50);
@@ -689,6 +688,7 @@ mod tests {
             req_cols: 3,
             req_rows: 3,
             src: None,
+            src_trim_y: [0.0; 2],
             z: -5,
         };
         let image = snapshot_image(1, 10, 10);
@@ -718,6 +718,7 @@ mod tests {
             req_cols: 1,
             req_rows: 1,
             src: Some([25, 10, 50, 20]),
+            src_trim_y: [0.0; 2],
             z: 0,
         };
         let image = snapshot_image(1, 100, 40);
@@ -746,6 +747,7 @@ mod tests {
             req_cols: 0,
             req_rows: 0,
             src: Some([0, 0, 15, 50]),
+            src_trim_y: [0.0; 2],
             z: 0,
         };
         let image = snapshot_image(1, 15, 50);
@@ -774,6 +776,7 @@ mod tests {
             req_cols: 1,
             req_rows: 1,
             src: None,
+            src_trim_y: [0.0; 2],
             z: 0,
         };
         let image = snapshot_image(1, 10, 20);
@@ -786,6 +789,43 @@ mod tests {
             10.0,
         );
         assert_eq!(quad.dest_rect, [4.0, 9.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn resolve_trims_a_fraction_of_a_source_pixel() {
+        // 1×2 px at c=10 in 10×20 px cells, with 0.2 source px clipped off
+        // the top: 1.8 source px drawn 180 px tall.
+        let placement = ImagePlacementSnapshot {
+            image_id: 1,
+            epoch: 0,
+            grid_x: 0,
+            grid_y: 0,
+            cell_x_off: 0,
+            cell_y_off: 0,
+            cols: 10,
+            rows: 9,
+            req_cols: 10,
+            req_rows: 0,
+            src: Some([0, 0, 1, 2]),
+            src_trim_y: [0.2, 0.0],
+            z: 0,
+        };
+        let image = snapshot_image(1, 1, 2);
+        let quad = resolve_image_quad(
+            &placement,
+            &image,
+            PaneRect::new(0, 0, 200, 400),
+            GridPadding::new(0.0, 0.0, 0.0, 0.0),
+            10.0,
+            20.0,
+        );
+        assert_eq!(quad.dest_rect[3].round(), 180.0);
+        let [_, v, _, vh] = quad.src_uv;
+        assert!(
+            (v - 0.1).abs() < 1e-6 && (vh - 0.9).abs() < 1e-6,
+            "{:?}",
+            quad.src_uv
+        );
     }
 
     #[test]

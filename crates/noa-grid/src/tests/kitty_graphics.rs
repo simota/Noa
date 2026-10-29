@@ -150,6 +150,7 @@ fn kitty_placement_count_is_hard_capped() {
         cell_x_off: 0,
         cell_y_off: 0,
         src: None,
+        src_trim_y: [0.0; 2],
         cols: 1,
         rows: 1,
         req_cols: 0,
@@ -1546,8 +1547,9 @@ fn drawn_size(t: &Terminal, id: u32) -> [f64; 2] {
         .find(|p| p.image_id == id)
         .expect("placement is visible");
     let [_, _, w, h] = p.src.expect("explicit source");
+    let [trim_top, trim_bottom] = p.src_trim_y.map(f64::from);
     crate::kitty_image_size(
-        [w, h],
+        [f64::from(w), f64::from(h) - trim_top - trim_bottom],
         [p.req_cols, p.req_rows],
         [10.0, 20.0],
         [f64::from(p.cell_x_off), f64::from(p.cell_y_off)],
@@ -1559,12 +1561,12 @@ fn drawn_size(t: &Terminal, id: u32) -> [f64; 2] {
 fn image_size_formula_matches_ghostty() {
     use crate::kitty_image_size as size;
     // "aspect ratio calculation when only columns or rows specified"
-    assert_eq!(size([16, 9], [10, 0], [10.0, 20.0], [0.0; 2]).map(f64::round), [100.0, 56.0]);
-    assert_eq!(size([16, 9], [0, 5], [10.0, 20.0], [0.0; 2]).map(f64::round), [178.0, 100.0]);
+    assert_eq!(size([16.0, 9.0], [10, 0], [10.0, 20.0], [0.0; 2]).map(f64::round), [100.0, 56.0]);
+    assert_eq!(size([16.0, 9.0], [0, 5], [10.0, 20.0], [0.0; 2]).map(f64::round), [178.0, 100.0]);
     // "cell offsets stay within explicit destination rectangle"
-    assert_eq!(size([4, 3], [2, 1], [10.0, 20.0], [3.0, 4.0]), [17.0, 16.0]);
+    assert_eq!(size([4.0, 3.0], [2, 1], [10.0, 20.0], [3.0, 4.0]), [17.0, 16.0]);
     // No c= / r=: the source keeps its own size.
-    assert_eq!(size([15, 30], [0, 0], [10.0, 20.0], [5.0, 5.0]), [15.0, 30.0]);
+    assert_eq!(size([15.0, 30.0], [0, 0], [10.0, 20.0], [5.0, 5.0]), [15.0, 30.0]);
 }
 
 #[test]
@@ -1676,11 +1678,31 @@ fn region_scroll_clips_a_columns_scaled_image_by_its_scale() {
     assert_eq!(drawn_size(&t, 1), [20.0, 160.0]);
     // Region rows 2..=9: one scroll up crops one 20 px row = 10 source px.
     feed(&mut t, b"\x1b[3;10r\x1b[10;1H\n");
-    assert_eq!(t.primary.kitty_placements[0].src, Some([0, 10, 10, 70]));
+    assert_eq!(t.primary.kitty_placements[0].src_trim_y, [10.0, 0.0]);
     assert_eq!(drawn_size(&t, 1), [20.0, 140.0]);
     // Two rows down: one row passes the bottom, leaving six rows = 120 px.
     feed(&mut t, b"\x1b[3;1H\x1bM\x1bM");
     let p = &t.primary.kitty_placements[0];
-    assert_eq!((p.rows, p.src), (6, Some([0, 10, 10, 60])));
+    assert_eq!((p.rows, p.src_trim_y), (6, [10.0, 10.0]));
     assert_eq!(drawn_size(&t, 1), [20.0, 120.0]);
+}
+
+#[test]
+fn region_scroll_clips_a_strongly_upscaled_image_by_a_fraction_of_a_source_pixel() {
+    let mut t = kitty_terminal();
+    // 1×2 px at c=10: drawn 100×200 px over ten rows (1..=10).
+    feed(&mut t, &kitty_apc("a=t,f=32,s=1,v=2,i=1,q=2", &[0u8; 2 * 4]));
+    feed(&mut t, b"\x1b[2;1H");
+    kitty_cmd(&mut t, "a=p,i=1,c=10,C=1,q=2");
+    assert_eq!(drawn_size(&t, 1), [100.0, 200.0]);
+    // Region rows 1..=10: one row (0.2 source px) leaves the top.
+    feed(&mut t, b"\x1b[2;11r\x1b[11;1H\n");
+    let p = &t.primary.kitty_placements[0];
+    assert_eq!(p.rows, 9);
+    assert_eq!(drawn_size(&t, 1), [100.0, 180.0]);
+    // Two rows down: one row passes the bottom, leaving eight rows = 160 px.
+    feed(&mut t, b"\x1b[2;1H\x1bM\x1bM");
+    let p = &t.primary.kitty_placements[0];
+    assert_eq!(p.rows, 8);
+    assert_eq!(drawn_size(&t, 1), [100.0, 160.0]);
 }

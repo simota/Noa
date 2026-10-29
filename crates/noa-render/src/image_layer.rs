@@ -92,8 +92,20 @@ pub fn resolve_image_quad(
         + padding.top
         + placement.grid_y as f32 * cell_h
         + f32::from(placement.cell_y_off);
-    let dest_w = f32::from(placement.cols) * cell_w;
-    let dest_h = f32::from(placement.rows) * cell_h;
+    let [src_w, src_h] = match placement.src {
+        Some([_, _, w, h]) => [w, h],
+        None => [image.width, image.height],
+    };
+    let [dest_w, dest_h] = noa_grid::kitty_image_size(
+        [src_w, src_h],
+        [placement.req_cols, placement.req_rows],
+        [f64::from(cell_w), f64::from(cell_h)],
+        [
+            f64::from(placement.cell_x_off),
+            f64::from(placement.cell_y_off),
+        ],
+    )
+    .map(|v| v as f32);
 
     let src_uv = match placement.src {
         Some([x, y, w, h]) => {
@@ -563,6 +575,8 @@ mod tests {
             cell_y_off: 0,
             cols: 1,
             rows: 1,
+            req_cols: 1,
+            req_rows: 1,
             src: None,
             z: 0,
         };
@@ -640,6 +654,8 @@ mod tests {
             cell_y_off: 5,
             cols: 6,
             rows: 7,
+            req_cols: 6,
+            req_rows: 7,
             src: None,
             z: 0,
         };
@@ -654,7 +670,12 @@ mod tests {
         );
         // x = pane.x(10) + pad.left(8) + grid_x(2)*9 + cell_x_off(4) = 40
         // y = pane.y(20) + pad.top(1) + grid_y(3)*18 + cell_y_off(5) = 80
-        assert_eq!(quad.dest_rect, [40.0, 80.0, 6.0 * 9.0, 7.0 * 18.0]);
+        // The offset comes off the requested cells: the far edge stays on the
+        // cell boundary (Ghostty #13891).
+        assert_eq!(
+            quad.dest_rect,
+            [40.0, 80.0, 6.0 * 9.0 - 4.0, 7.0 * 18.0 - 5.0]
+        );
         assert_eq!(quad.src_uv, [0.0, 0.0, 1.0, 1.0]);
         assert_eq!(quad.band, ImageBand::AboveText);
     }
@@ -670,6 +691,8 @@ mod tests {
             cell_y_off: 0,
             cols: 3,
             rows: 3,
+            req_cols: 3,
+            req_rows: 3,
             src: None,
             z: -5,
         };
@@ -697,6 +720,8 @@ mod tests {
             cell_y_off: 0,
             cols: 1,
             rows: 1,
+            req_cols: 1,
+            req_rows: 1,
             src: Some([25, 10, 50, 20]),
             z: 0,
         };
@@ -710,6 +735,34 @@ mod tests {
             10.0,
         );
         assert_eq!(quad.src_uv, [0.25, 0.25, 0.5, 0.5]);
+    }
+
+    #[test]
+    fn resolve_draws_an_image_without_c_or_r_at_its_pixel_size() {
+        let placement = ImagePlacementSnapshot {
+            image_id: 1,
+            epoch: 0,
+            grid_x: 0,
+            grid_y: 0,
+            cell_x_off: 3,
+            cell_y_off: 0,
+            cols: 2,
+            rows: 3,
+            req_cols: 0,
+            req_rows: 0,
+            src: Some([0, 0, 15, 50]),
+            z: 0,
+        };
+        let image = snapshot_image(1, 15, 50);
+        let quad = resolve_image_quad(
+            &placement,
+            &image,
+            PaneRect::new(0, 0, 100, 100),
+            GridPadding::new(0.0, 0.0, 0.0, 0.0),
+            10.0,
+            20.0,
+        );
+        assert_eq!(quad.dest_rect, [3.0, 0.0, 15.0, 50.0]);
     }
 
     #[test]

@@ -92,6 +92,15 @@ pub struct KittyPlacement {
     /// Effective cell span, resolved at creation from `c=`/`r=` or the image size.
     pub cols: u16,
     pub rows: u16,
+    /// `c=`/`r=` as requested (0 = unset). The drawn size follows from these,
+    /// the source rectangle and the cell size ([`kitty_image_size`]), so an
+    /// image without them keeps its own pixel size instead of filling `cols ×
+    /// rows` cells.
+    pub req_cols: u32,
+    pub req_rows: u32,
+    /// Cell height (px) when placed. A region scroll clips a placement with no
+    /// `r=` by whole cells of it, as Ghostty does.
+    pub cell_h_px: u32,
     pub z: i32,
     /// `U=1` — a virtual placement referenced only by Unicode placeholders; it is
     /// never drawn directly.
@@ -143,9 +152,40 @@ impl KittyPlacement {
             cell_y_off: self.cell_y_off,
             cols: self.cols,
             rows: self.rows,
+            req_cols: self.req_cols,
+            req_rows: self.req_rows,
             src: self.src,
             z: self.z,
         })
+    }
+}
+
+/// The drawn pixel size of a Kitty placement (Ghostty 1.4.0's
+/// `Placement.pixelSize`): with neither `c=` nor `r=` the source keeps its own
+/// size; with both it fills the cells; with one the other side follows the
+/// source's aspect ratio. The cell offset comes off the requested side, so
+/// the far edge stays on the cell boundary. `src` is the source rectangle's
+/// size, already intersected with the image.
+pub fn kitty_image_size(
+    src: [u32; 2],
+    req: [u32; 2],
+    cell: [f64; 2],
+    offset: [f64; 2],
+) -> [f64; 2] {
+    let [sw, sh] = src.map(f64::from);
+    let side = |n: u32, cell: f64, offset: f64| (f64::from(n) * cell - offset).max(0.0);
+    let scale = |value: f64, num: f64, den: f64| if den == 0.0 { 0.0 } else { value * num / den };
+    match req {
+        [0, 0] => [sw, sh],
+        [c, 0] => {
+            let w = side(c, cell[0], offset[0]);
+            [w, scale(w, sh, sw)]
+        }
+        [0, r] => {
+            let h = side(r, cell[1], offset[1]);
+            [scale(h, sw, sh), h]
+        }
+        [c, r] => [side(c, cell[0], offset[0]), side(r, cell[1], offset[1])],
     }
 }
 
@@ -162,6 +202,9 @@ pub struct VisibleKittyPlacement {
     pub cell_y_off: u16,
     pub cols: u16,
     pub rows: u16,
+    /// `c=`/`r=` as requested (0 = unset); see [`kitty_image_size`].
+    pub req_cols: u32,
+    pub req_rows: u32,
     pub src: Option<[u32; 4]>,
     pub z: i32,
 }

@@ -152,6 +152,9 @@ fn kitty_placement_count_is_hard_capped() {
         src: None,
         cols: 1,
         rows: 1,
+        req_cols: 0,
+        req_rows: 0,
+        cell_h_px: 20,
         z: 0,
         is_virtual: false,
         parent: None,
@@ -1331,13 +1334,13 @@ fn margin_scroll_handles_an_image_wider_than_the_column_range() {
 }
 
 #[test]
-fn region_scroll_clip_survives_a_source_rectangle_at_the_coordinate_limit() {
+fn a_source_rectangle_past_the_image_is_intersected_at_placement() {
     let mut t = kitty_terminal();
     transmit_cell_image(&mut t, 1, "");
-    feed(&mut t, b"\x1b[3;1H");
-    kitty_cmd(&mut t, "a=p,i=1,y=4294967295,h=2,r=2,C=1,q=2");
-    feed(&mut t, b"\x1b[2;5r\x1b[5;1H\n\n");
-    assert_eq!(tall_state(&t, 1).map(|(y, rows, _)| (y, rows)), Some((1, 1)));
+    // y at the coordinate limit leaves nothing of the 10×20 image to show.
+    kitty_cmd(&mut t, "a=p,i=1,y=4294967295,h=2,r=2,C=1,q=1");
+    assert_eq!(t.pending_writes, b"\x1b_Gi=1;EINVAL:invalid request\x1b\\");
+    assert!(t.primary.kitty_placements.is_empty());
 }
 
 #[test]
@@ -1530,4 +1533,101 @@ fn chunked_replies_keep_the_first_chunks_identifiers() {
     kitty_cmd(&mut t, "a=t,f=24,s=1,v=2,i=5,m=1;AAAA");
     kitty_cmd(&mut t, "m=0;!!!!");
     assert_eq!(t.pending_writes, b"\x1b_Gi=5;EINVAL:invalid request\x1b\\");
+}
+
+// ── Placement pixel geometry (Ghostty 1.4.0 #13890 / #13891) ──
+
+/// Drawn `[w, h]` of image `id`'s visible placement, rounded like Ghostty's
+/// integer `pixelSize`, in `kitty_terminal`'s 10×20 px cells.
+fn drawn_size(t: &Terminal, id: u32) -> [f64; 2] {
+    let p = t
+        .kitty_visible_placements()
+        .into_iter()
+        .find(|p| p.image_id == id)
+        .expect("placement is visible");
+    let [_, _, w, h] = p.src.expect("explicit source");
+    crate::kitty_image_size(
+        [w, h],
+        [p.req_cols, p.req_rows],
+        [10.0, 20.0],
+        [f64::from(p.cell_x_off), f64::from(p.cell_y_off)],
+    )
+    .map(f64::round)
+}
+
+#[test]
+fn image_size_formula_matches_ghostty() {
+    use crate::kitty_image_size as size;
+    // "aspect ratio calculation when only columns or rows specified"
+    assert_eq!(size([16, 9], [10, 0], [10.0, 20.0], [0.0; 2]).map(f64::round), [100.0, 56.0]);
+    assert_eq!(size([16, 9], [0, 5], [10.0, 20.0], [0.0; 2]).map(f64::round), [178.0, 100.0]);
+    // "cell offsets stay within explicit destination rectangle"
+    assert_eq!(size([4, 3], [2, 1], [10.0, 20.0], [3.0, 4.0]), [17.0, 16.0]);
+    // No c= / r=: the source keeps its own size.
+    assert_eq!(size([15, 30], [0, 0], [10.0, 20.0], [5.0, 5.0]), [15.0, 30.0]);
+}
+
+#[test]
+fn an_image_without_c_or_r_keeps_its_pixel_size() {
+    let mut t = kitty_terminal();
+    feed(&mut t, &kitty_apc("a=T,f=32,s=15,v=30,i=1,C=1,q=2", &[0u8; 15 * 30 * 4]));
+    assert_eq!(drawn_size(&t, 1), [15.0, 30.0]);
+    let p = &t.primary.kitty_placements[0];
+    assert_eq!((p.cols, p.rows), (2, 2));
+}
+
+#[test]
+fn columns_alone_scale_the_rows_by_aspect_ratio() {
+    let mut t = kitty_terminal();
+    feed(&mut t, &kitty_apc("a=T,f=32,s=16,v=9,i=1,c=10,C=1,q=2", &[0u8; 16 * 9 * 4]));
+    assert_eq!(drawn_size(&t, 1), [100.0, 56.0]);
+    let p = &t.primary.kitty_placements[0];
+    assert_eq!((p.cols, p.rows), (10, 3), "56 px tall spans three 20 px rows");
+}
+
+#[test]
+fn a_crop_past_the_image_is_intersected_before_sizing() {
+    let mut t = kitty_terminal();
+    transmit_cell_image(&mut t, 1, "");
+    // 8×8 at (8, 7) of the 10×20 image leaves 2×8; two columns keep 2:8.
+    kitty_cmd(&mut t, "a=p,i=1,x=8,y=7,w=8,h=8,c=2,C=1,q=2");
+    let p = &t.primary.kitty_placements[0];
+    assert_eq!(p.src, Some([8, 7, 2, 8]));
+    assert_eq!(drawn_size(&t, 1), [20.0, 80.0]);
+    assert_eq!((p.cols, p.rows), (2, 4));
+}
+
+#[test]
+fn cell_offsets_are_clamped_and_come_off_the_requested_cells() {
+    // "kittygfx display clamps cell offsets"
+    let mut t = kitty_terminal();
+    feed(&mut t, &kitty_apc("a=T,f=24,i=1,s=1,v=1,c=2,r=1,X=99,Y=99,C=1,q=2", &[0u8; 3]));
+    let p = &t.primary.kitty_placements[0];
+    assert_eq!((p.cell_x_off, p.cell_y_off), (9, 19));
+    assert_eq!(drawn_size(&t, 1), [11.0, 1.0]);
+    assert_eq!((p.cols, p.rows), (2, 1));
+}
+
+#[test]
+fn an_offset_widens_the_span_of_a_native_size_image() {
+    let mut t = kitty_terminal();
+    // 10 px wide from x offset 5 reaches into a second column.
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=20,i=1,X=5,C=1,q=2", &[0u8; 800]));
+    let p = &t.primary.kitty_placements[0];
+    assert_eq!((p.cols, p.rows), (2, 1));
+}
+
+#[test]
+fn region_scroll_clips_a_native_size_image_by_whole_cells_and_keeps_its_offset() {
+    let mut t = kitty_terminal();
+    // 10×30 px from y offset 5: 35 px, two 20 px rows (2 and 3).
+    feed(&mut t, &kitty_apc("a=t,f=32,s=10,v=30,i=1,q=2", &[0u8; 10 * 30 * 4]));
+    feed(&mut t, b"\x1b[3;1H");
+    kitty_cmd(&mut t, "a=p,i=1,Y=5,C=1,q=2");
+    // Region rows 2..=5; one scroll pushes the first row past the top.
+    feed(&mut t, b"\x1b[3;6r\x1b[6;1H\n");
+    let p = &t.primary.kitty_placements[0];
+    assert_eq!(p.src, Some([0, 20, 10, 10]), "one whole 20 px cell cropped");
+    assert_eq!((p.rows, p.cell_y_off), (1, 5));
+    assert_eq!(tall_state(&t, 1).map(|(y, ..)| y), Some(2));
 }

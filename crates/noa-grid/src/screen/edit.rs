@@ -1226,22 +1226,54 @@ impl Screen {
 }
 
 /// Cut `top` rows off the top and `bottom` off the bottom of placement `p`,
-/// cropping its source rectangle in proportion. `false` when `p` carries no
-/// source rectangle to crop.
+/// as Ghostty 1.4.0's `clipTop` / `clipBottom`: a placement sized by `r=`
+/// loses an equal share of its source per row, one drawn at its own size loses
+/// whole cells (`cell_h_px`) of source pixels. The cell offset stays. `false`
+/// when no source pixels would remain (or `p` has no source rectangle), so
+/// the caller deletes it.
 fn clip_placement_rows(p: &mut KittyPlacement, top: i64, bottom: i64) -> bool {
-    let Some([x, y, w, h]) = p.src else {
+    let Some([x, mut y, w, mut h]) = p.src else {
         return false;
     };
-    let rows = u64::from(p.rows);
-    let cut = |k: i64| (u64::from(h) * k as u64 / rows) as u32;
-    let (cut_top, cut_bottom) = (cut(top), cut(bottom));
-    // `kitty_place` keeps an explicit source rectangle as given, so `y` can
-    // sit at the coordinate limit.
-    p.src = Some([x, y.saturating_add(cut_top), w, h - cut_top - cut_bottom]);
-    p.rows -= (top + bottom) as u16;
+    let cell_h = u64::from(p.cell_h_px);
     if top > 0 {
-        // The pixel offset belonged to the clipped first row.
-        p.cell_y_off = 0;
+        let (count, span) = (top as u64, u64::from(p.rows));
+        let crop = if p.req_rows > 0 {
+            u64::from(h) * count / span
+        } else {
+            cell_h * count
+        };
+        if crop >= u64::from(h) {
+            return false;
+        }
+        // `kitty_place` intersected the source with the image, so this stays
+        // within the image's (bounded) height.
+        y += crop as u32;
+        h -= crop as u32;
+        p.rows -= top as u16;
+        p.req_rows = p.req_rows.saturating_sub(top as u32);
     }
+    if bottom > 0 {
+        let (count, span) = (bottom as u64, u64::from(p.rows));
+        if p.req_rows > 0 {
+            let crop = u64::from(h) * count / span;
+            if crop >= u64::from(h) {
+                return false;
+            }
+            h -= crop as u32;
+            p.req_rows -= bottom as u32;
+        } else {
+            // The rows left show this many source pixels, less the offset
+            // into the first cell.
+            let visible = cell_h * (span - count);
+            let offset = u64::from(p.cell_y_off);
+            if visible <= offset {
+                return false;
+            }
+            h = (u64::from(h)).min(visible - offset) as u32;
+        }
+        p.rows -= bottom as u16;
+    }
+    p.src = Some([x, y, w, h]);
     true
 }

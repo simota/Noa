@@ -878,7 +878,7 @@ impl ImageStore {
     /// Apply an `a=c` compose command: blend source frame `r=`'s rectangle at
     /// `X=`/`Y=` onto destination frame `c=` at `x=`/`y=`, sized `w=`/`h=`
     /// (default the whole frame), overwriting for a non-zero `C=` — Ghostty
-    /// 1.4.0's mapping (the spec's reference table has `c`/`r` backwards).
+    /// 1.4.0 and the Kitty spec.
     pub fn compose(&mut self, cmd: &KittyGraphicsCommand) -> Result<(), KittyError> {
         let Some(target_id) = self.resolve_anim_target(cmd) else {
             return Err(KittyError::NoEnt);

@@ -1113,7 +1113,8 @@ fn delete_all_keeps_unrelated_unplaced_images() {
 #[test]
 fn uppercase_delete_of_a_missing_placement_keeps_the_image() {
     let mut t = kitty_terminal();
-    transmit_cell_image(&mut t, 1, ",I=5");
+    // `I=` alone: auto id 1 (with `i=` too it would be rejected).
+    feed(&mut t, &kitty_apc("a=t,f=32,s=10,v=20,I=5,q=2", &[0u8; 10 * 20 * 4]));
     kitty_cmd(&mut t, "a=d,d=I,i=1,p=9");
     kitty_cmd(&mut t, "a=d,d=N,I=5,p=9");
     assert!(t.kitty_images.get(1).is_some());
@@ -1384,4 +1385,149 @@ fn erase_display_removes_a_child_on_screen_whose_parent_is_in_scrollback() {
     assert_eq!(placement_at(&t, 2, 2), (0, 1), "only the child is on screen");
     feed(&mut t, b"\x1b[2J");
     assert!(t.kitty_visible_placements().is_empty());
+}
+
+// ── Ghostty 1.4.0 command validation (#13889 / #13933 / #13892 / #14811) ──
+
+#[test]
+fn image_id_and_number_together_are_rejected_before_any_action() {
+    let mut t = kitty_terminal();
+    feed(&mut t, &kitty_apc("a=t,f=24,s=1,v=1,i=31,I=5", &[0u8; 3]));
+    assert_eq!(t.pending_writes, b"\x1b_Gi=31,I=5;EINVAL:invalid request\x1b\\");
+    assert!(t.kitty_images.get(31).is_none());
+    t.pending_writes.clear();
+    // `I=` alone: auto id 1 (with `i=` too it would be rejected).
+    feed(&mut t, &kitty_apc("a=t,f=32,s=10,v=20,I=7,q=2", &[0u8; 10 * 20 * 4]));
+    kitty_cmd(&mut t, "a=p,i=1,I=7,p=3,q=1");
+    assert_eq!(t.pending_writes, b"\x1b_Gi=1,I=7,p=3;EINVAL:invalid request\x1b\\");
+    assert!(t.primary.kitty_placements.is_empty());
+    t.pending_writes.clear();
+    kitty_cmd(&mut t, "a=d,d=I,i=1,I=7,q=2");
+    assert!(t.pending_writes.is_empty(), "q=2 silences the rejection");
+    assert!(t.kitty_images.get(1).is_some(), "the delete never ran");
+}
+
+#[test]
+fn quiet_values_above_two_suppress_every_reply() {
+    let mut t = kitty_terminal();
+    feed(&mut t, &kitty_apc("a=t,f=42,i=31,s=1,v=1,q=3", &[0u8; 4]));
+    assert!(t.pending_writes.is_empty());
+}
+
+#[test]
+fn unknown_format_replies_einval_with_the_image_id() {
+    let mut t = kitty_terminal();
+    feed(&mut t, &kitty_apc("a=q,f=42,i=31,s=1,v=1", &[0u8; 4]));
+    assert_eq!(t.pending_writes, b"\x1b_Gi=31;EINVAL:invalid request\x1b\\");
+}
+
+#[test]
+fn zero_format_is_rgba() {
+    let mut t = kitty_terminal();
+    feed(&mut t, &kitty_apc("a=t,f=0,i=1,s=1,v=2,q=2", &[0u8; 8]));
+    assert!(t.kitty_images.get(1).is_some());
+}
+
+#[test]
+fn out_of_range_display_flags_are_tolerated() {
+    let mut t = kitty_terminal();
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=20,i=1,C=2,q=1", &[0u8; 800]));
+    assert!(t.pending_writes.is_empty(), "accepted");
+    assert_ne!(t.primary.cursor.x, 0, "C=2 moves the cursor like C=0");
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=20,i=2,U=2,q=1", &[0u8; 800]));
+    assert!(t.pending_writes.is_empty(), "accepted");
+    let p = t.primary.kitty_placements.iter().find(|p| p.image_id == 2).unwrap();
+    assert!(p.is_virtual, "U=2 is virtual");
+}
+
+#[test]
+fn file_size_is_an_exact_byte_count() {
+    let dir = std::env::temp_dir().join(format!("noa-kitty-s-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("image.data");
+    std::fs::write(&path, [1u8, 2, 3, 4, 5, 6]).unwrap();
+    let path = std::fs::canonicalize(&path).unwrap();
+    let mut b64 = Vec::new();
+    crate::osc::encode_base64(path.to_str().unwrap().as_bytes(), &mut b64);
+    let cmd = |ctrl: &str| {
+        let mut out = format!("\x1b_G{ctrl};").into_bytes();
+        out.extend_from_slice(&b64);
+        out.extend_from_slice(b"\x1b\\");
+        out
+    };
+    let mut t = kitty_terminal();
+    feed(&mut t, &cmd("a=t,t=f,f=24,s=1,v=1,S=3,O=3,i=1,q=1"));
+    assert_eq!(&*t.kitty_images.get(1).unwrap().rgba, &[4, 5, 6, 255]);
+    // Fewer than S bytes remain past the offset: the read fails.
+    feed(&mut t, &cmd("a=t,t=f,f=24,s=1,v=1,S=3,O=4,i=2,q=1"));
+    assert_eq!(t.pending_writes, b"\x1b_Gi=2;ENODATA:data size mismatch\x1b\\");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_non_direct_transmit_ends_a_chunked_load_and_runs_on_its_own() {
+    let dir = std::env::temp_dir().join(format!("noa-kitty-mid-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("image.data");
+    std::fs::write(&path, [7u8, 8, 9]).unwrap();
+    let path = std::fs::canonicalize(&path).unwrap();
+    let mut b64 = Vec::new();
+    crate::osc::encode_base64(path.to_str().unwrap().as_bytes(), &mut b64);
+    let mut t = kitty_terminal();
+    kitty_cmd(&mut t, "a=t,f=24,s=1,v=1,i=1,m=1,q=2;AAAA");
+    let mut file_cmd = b"\x1b_Ga=t,t=f,f=24,s=1,v=1,i=2,q=1;".to_vec();
+    file_cmd.extend_from_slice(&b64);
+    file_cmd.extend_from_slice(b"\x1b\\");
+    feed(&mut t, &file_cmd);
+    assert_eq!(&*t.kitty_images.get(2).unwrap().rgba, &[7, 8, 9, 255]);
+    assert!(t.pending_writes.is_empty(), "its own q=1 applies");
+    assert!(t.kitty_images.get(1).is_none(), "the interrupted load is dropped");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// ── Cancelled / aborted APC and OSC are discarded (#14453 / #14812) ──
+
+#[test]
+fn cancelled_or_aborted_apc_is_discarded() {
+    for ending in [&b"\x18"[..], b"\x1a", b"\x9b"] {
+        let mut t = kitty_terminal();
+        let mut bytes = b"\x1b_Ga=t,f=24,s=1,v=1,i=7;AAAA".to_vec();
+        bytes.extend_from_slice(ending);
+        // A late ST must not revive the abandoned string.
+        bytes.extend_from_slice(b"\x1b\\");
+        feed(&mut t, &bytes);
+        assert!(t.kitty_images.get(7).is_none(), "ending {ending:?}");
+        assert!(t.pending_writes.is_empty(), "ending {ending:?}");
+    }
+}
+
+#[test]
+fn cancelled_osc_is_discarded() {
+    for ending in [b'\x18', b'\x1a'] {
+        let mut t = kitty_terminal();
+        feed(&mut t, &[b"\x1b]2;title".as_slice(), &[ending]].concat());
+        assert_eq!(t.title, "", "ending {ending:#x}");
+    }
+}
+
+#[test]
+fn query_with_invalid_image_data_reports_the_error() {
+    let mut t = kitty_terminal();
+    // Two bytes for a 1×1 RGB image: truncated.
+    feed(&mut t, &kitty_apc("a=q,f=24,s=1,v=1,i=31", &[0u8; 2]));
+    assert_eq!(t.pending_writes, b"\x1b_Gi=31;ENODATA:data size mismatch\x1b\\");
+}
+
+#[test]
+fn chunked_replies_keep_the_first_chunks_identifiers() {
+    let mut t = kitty_terminal();
+    // 1×2 RGB, sent as two 3-byte chunks.
+    kitty_cmd(&mut t, "a=T,f=24,s=1,v=2,I=9,p=4,m=1;AAAA");
+    kitty_cmd(&mut t, "m=0;AAAA");
+    assert_eq!(t.pending_writes, b"\x1b_Gi=1,I=9,p=4;OK\x1b\\");
+    t.pending_writes.clear();
+    // An invalid final payload is still reported against the first chunk.
+    kitty_cmd(&mut t, "a=t,f=24,s=1,v=2,i=5,m=1;AAAA");
+    kitty_cmd(&mut t, "m=0;!!!!");
+    assert_eq!(t.pending_writes, b"\x1b_Gi=5;EINVAL:invalid request\x1b\\");
 }

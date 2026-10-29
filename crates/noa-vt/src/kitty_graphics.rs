@@ -291,7 +291,8 @@ pub fn parse(data: &[u8], truncated: bool) -> KittyGraphicsCommand {
             },
             b'f' => match u32val(val) {
                 Some(24) => cmd.format = KittyFormat::Rgb,
-                Some(32) => cmd.format = KittyFormat::Rgba,
+                // Kitty reads `f=0` as an absent `f`.
+                Some(0 | 32) => cmd.format = KittyFormat::Rgba,
                 Some(100) => cmd.format = KittyFormat::Png,
                 _ => cmd.parse_error = true,
             },
@@ -311,23 +312,24 @@ pub fn parse(data: &[u8], truncated: bool) -> KittyGraphicsCommand {
                 Some(1) => cmd.more_chunks = true,
                 _ => cmd.parse_error = true,
             },
+            // Kitty (and Ghostty 1.4.0) read these flags C-style rather than
+            // range-checking them: `q` above 1 silences everything, only `C=1`
+            // pins the cursor, and any non-zero `U` is virtual.
             b'q' => match u32val(val) {
-                Some(n @ 0..=2) => cmd.quiet = n as u8,
-                _ => cmd.parse_error = true,
+                Some(n) => cmd.quiet = n.min(2) as u8,
+                None => cmd.parse_error = true,
             },
             b'C' => match u32val(val) {
-                Some(0) => cmd.cursor_no_move = false,
-                Some(1) => cmd.cursor_no_move = true,
-                _ => cmd.parse_error = true,
+                Some(n) => cmd.cursor_no_move = n == 1,
+                None => cmd.parse_error = true,
             },
             b'N' => match u32val(val) {
                 Some(n) => cmd.transient = n == 1,
                 None => cmd.parse_error = true,
             },
             b'U' => match u32val(val) {
-                Some(0) => cmd.virtual_placement = false,
-                Some(1) => cmd.virtual_placement = true,
-                _ => cmd.parse_error = true,
+                Some(n) => cmd.virtual_placement = n != 0,
+                None => cmd.parse_error = true,
             },
             b'd' => match single(val) {
                 Some(c) => delete_char = Some(c),
@@ -489,8 +491,18 @@ mod tests {
         assert!(parse(b"i=notanumber", false).parse_error);
         assert!(parse(b"f=99", false).parse_error);
         assert!(parse(b"t=x", false).parse_error);
-        assert!(parse(b"q=5", false).parse_error);
+        assert!(parse(b"q=x", false).parse_error);
         assert!(parse(b"z=1.5", false).parse_error);
+    }
+
+    #[test]
+    fn flags_are_read_c_style_like_kitty() {
+        let c = parse(b"a=T,q=5,C=2,U=2,f=0", false);
+        assert!(!c.parse_error);
+        assert_eq!(c.quiet, 2, "anything above 1 silences everything");
+        assert!(!c.cursor_no_move, "only C=1 pins the cursor");
+        assert!(c.virtual_placement, "any non-zero U is virtual");
+        assert_eq!(c.format, KittyFormat::Rgba, "f=0 reads as an absent f");
     }
 
     #[test]

@@ -877,16 +877,32 @@ impl Handler for Terminal {
             return;
         }
 
+        // The protocol makes `i=` and `I=` mutually exclusive for every
+        // action; reject before anything can run (Ghostty 1.4.0, #13889).
+        if cmd.image_id != 0 && cmd.image_number != 0 {
+            self.kitty_reply(
+                cmd.image_id,
+                cmd.image_number,
+                cmd.image_id,
+                cmd.placement_id,
+                cmd.quiet,
+                Err(crate::kitty::KittyError::Invalid),
+            );
+            return;
+        }
+
         // A non-transmit command arriving mid-chunk aborts the pending transfer
         // (continuation chunks always parse as `Transmit`). Frame transfers
         // (`a=f`) are also chunkable, so they must not abort a pending one.
+        // Only direct data is chunked, so a file / temp-file / shared-memory
+        // transmit is a new load, never a continuation (Kitty; Ghostty #14811).
         if self.kitty_images.transfer_in_progress()
-            && !matches!(
+            && (!matches!(
                 cmd.action,
                 KittyAction::Transmit
                     | KittyAction::TransmitAndDisplay
                     | KittyAction::TransmitFrame
-            )
+            ) || cmd.medium != noa_vt::KittyMedium::Direct)
         {
             self.kitty_images.abort();
         }

@@ -496,7 +496,21 @@ impl Parser {
             return false;
         }
         match self.state {
-            State::DcsPassthrough | State::ApcString => return false,
+            State::DcsPassthrough => return false,
+            State::ApcString => {
+                if b == 0x9c || self.string_utf8_rem > 0 {
+                    return false; // ST, or a payload UTF-8 continuation byte
+                }
+                // ECMA-48 / Ghostty 1.4.0: any other C1 aborts the APC, which
+                // is discarded unrun; an introducer then starts its own
+                // sequence.
+                self.apc.clear();
+                self.apc_overflow = false;
+                self.state = State::Ground;
+                if !matches!(b, 0x90 | 0x98 | 0x9b | 0x9d | 0x9e | 0x9f) {
+                    return true;
+                }
+            }
             // 0x9c inside a payload UTF-8 sequence is a continuation byte,
             // not 8-bit ST — fall through to the string accumulator.
             State::OscString if b != 0x9c || self.string_utf8_rem > 0 => return false,

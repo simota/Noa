@@ -3,6 +3,17 @@
 use super::*;
 use unicode_segmentation::UnicodeSegmentation;
 
+/// The scalar takes part in no UAX #29 joining rule, so a boundary always
+/// separates it from a neighbor that also has this property. The rules that
+/// suppress a boundary all need a non-`Other` side — CR LF, Hangul
+/// L/V/T/LV/LVT, Extend/ZWJ/SpacingMark after, Prepend before, a
+/// Linker/ZWJ/RI before — and each probe pair exposes one of those classes.
+const NEVER_JOINS: u8 = 1 << 1;
+/// Extend, ZWJ or SpacingMark: joins any non-control predecessor (GB9/GB9a).
+const ATTACHES: u8 = 1 << 2;
+/// Not a GB4 control: an [`ATTACHES`] scalar after it always joins.
+const ACCEPTS_EXTEND: u8 = 1 << 3;
+
 impl Screen {
     // ── printing ───────────────────────────────────────────────────
 
@@ -497,6 +508,109 @@ impl Screen {
         }
     }
 
+    /// Whether `c` qualifies for [`Self::print_narrow_scalars`]: a non-ASCII
+    /// width-1 scalar (Cyrillic, Greek, most symbols) that no other
+    /// qualifying scalar can join, so only a run prefix can extend a cluster.
+    pub(crate) fn is_plain_narrow(c: char) -> bool {
+        !c.is_ascii() && Self::print_width_fast(c) == 1 && Self::join_props(c) & NEVER_JOINS != 0
+    }
+
+    /// Bulk print a run of [`Self::is_plain_narrow`] scalars, semantically
+    /// identical to calling [`Self::print`] once per scalar — the non-ASCII
+    /// sibling of [`Self::print_ascii_run`], iterator-driven like
+    /// [`Self::print_wide_scalars`] so `print_str`'s classification decode
+    /// feeds it directly.
+    pub(crate) fn print_narrow_scalars<I>(
+        &mut self,
+        chars: I,
+        autowrap: bool,
+        grapheme_clustering: bool,
+    ) where
+        I: Iterator<Item = char>,
+    {
+        if self.cursor.x < self.left_margin() || self.cursor.x > self.right_margin() {
+            for c in chars {
+                self.print(c, autowrap, grapheme_clustering);
+            }
+            return;
+        }
+        let mut chars = chars.peekable();
+        if grapheme_clustering {
+            // Only a prefix can extend a pre-existing cluster (for example a
+            // pictograph after ZWJ); plain-narrow scalars never join each other.
+            while chars
+                .next_if(|&c| self.extend_cluster_at_cursor(c))
+                .is_some()
+            {}
+        }
+        let Some(mut cur) = chars.next() else {
+            return;
+        };
+        let bg = self.cursor.bg;
+        let template = Cell {
+            ch: ' ',
+            fg: self.cursor.fg,
+            bg,
+            underline_color: self.cursor.underline_color,
+            hyperlink: self.cursor.hyperlink,
+            attrs: self.pen_attrs(),
+            grapheme: None,
+        };
+        let left = self.left_margin();
+        let right = self.right_margin();
+        loop {
+            if self.cursor.pending_wrap && autowrap {
+                if let Some(row) = self.grid.get_mut(self.cursor.y as usize) {
+                    row.wrapped = true;
+                }
+                self.index();
+                self.cursor.x = left;
+                self.cursor.pending_wrap = false;
+            }
+            let x = self.cursor.x as usize;
+            let Some(row) = self.grid.get_mut(self.cursor.y as usize) else {
+                return;
+            };
+            if x + 1 > row.cells.len() {
+                return;
+            }
+            let seg_end = (right as usize + 1).min(row.cells.len());
+            let mut k = x;
+            let more = loop {
+                if row.cells[k]
+                    .attrs
+                    .intersects(CellAttrs::WIDE | CellAttrs::WIDE_SPACER)
+                {
+                    Self::clear_wide_at(row, k, &Cell::blank(bg));
+                }
+                row.cells[k] = Cell {
+                    ch: cur,
+                    ..template
+                };
+                self.last_printed = Some(cur);
+                k += 1;
+                match chars.next() {
+                    Some(next) => cur = next,
+                    None => break false,
+                }
+                if k == seg_end {
+                    break true;
+                }
+            };
+            row.dirty = true;
+            row.mark_occupied(k);
+            if k > right as usize {
+                self.cursor.x = right;
+                self.cursor.pending_wrap = true; // latch; stay in the last column
+            } else {
+                self.cursor.x = k as u16;
+            }
+            if !more {
+                return;
+            }
+        }
+    }
+
     pub(super) fn attach_combining_mark(&mut self, c: char) {
         let y = self.cursor.y as usize;
         let Some(row) = self.grid.get_mut(y) else {
@@ -562,10 +676,9 @@ impl Screen {
         if !Self::extends_cluster(&row.cells[x], c) {
             return false;
         }
-        row.cells[x].push_combining(c);
+        let wants_wide = Self::push_cluster_scalar(&mut row.cells[x], c);
         row.dirty = true;
         let was_wide = row.cells[x].attrs.contains(CellAttrs::WIDE);
-        let wants_wide = Self::cluster_wants_wide(&row.cells[x]);
         if !was_wide && wants_wide {
             self.promote_cluster_to_wide(x);
         } else if was_wide && !wants_wide && c == '\u{fe0e}' {
@@ -587,7 +700,22 @@ impl Screen {
     /// cannot widen it. Keycaps without VS16 also have an emoji footprint.
     pub(super) fn cluster_wants_wide(cell: &Cell) -> bool {
         (matches!(cell.ch, '#' | '*' | '0'..='9') && cell.combining().ends_with('\u{20e3}'))
-            || unicode_width::UnicodeWidthStr::width(cell.text().as_str()) >= 2
+            || Self::with_cell_text(cell, None, unicode_width::UnicodeWidthStr::width) >= 2
+    }
+
+    /// Run `f` over the cell's cluster text, plus `next` if given, from a
+    /// stack buffer: the cluster paths run per scalar of every emoji/accent
+    /// sequence, where a heap `String` per call dominated their cost.
+    fn with_cell_text<R>(cell: &Cell, next: Option<char>, f: impl FnOnce(&str) -> R) -> R {
+        let mut buf = [0u8; 4 + Cell::MAX_COMBINING_BYTES + 4];
+        let tail = cell.combining();
+        let mut len = cell.ch.encode_utf8(&mut buf).len();
+        buf[len..len + tail.len()].copy_from_slice(tail.as_bytes());
+        len += tail.len();
+        if let Some(next) = next {
+            len += next.encode_utf8(&mut buf[len..]).len();
+        }
+        f(std::str::from_utf8(&buf[..len]).expect("concatenated UTF-8"))
     }
 
     /// A cluster at `x` on the cursor row grew from one rendered cell to two
@@ -637,14 +765,240 @@ impl Screen {
         }
     }
 
+    /// UAX #29 joining properties of `c` ([`NEVER_JOINS`], [`ATTACHES`],
+    /// [`ACCEPTS_EXTEND`]) that let [`Self::extends_cluster`] settle the
+    /// common cases without segmenting: the bulk unicode ingest profile spent
+    /// ~40% of its time in per-scalar `String` + segmentation there. Each
+    /// property is probed through the segmenter itself (like
+    /// [`Self::print_width_fast`]'s table), so the fast answers can never
+    /// disagree with the slow path. Memoized per scalar for planes 0-1.
+    fn join_props(c: char) -> u8 {
+        const COMPUTED: u8 = 1;
+        static CACHE: [std::sync::atomic::AtomicU8; 0x20000] =
+            [const { std::sync::atomic::AtomicU8::new(0) }; 0x20000];
+        let compute = || {
+            let breaks = |a: char, b: char| {
+                let mut buf = [0u8; 8];
+                let n = a.encode_utf8(&mut buf).len();
+                let m = b.encode_utf8(&mut buf[n..]).len();
+                let s = std::str::from_utf8(&buf[..n + m]).expect("two encoded scalars");
+                s.graphemes(true).nth(1).is_some()
+            };
+            const L: char = '\u{1100}';
+            const V: char = '\u{1161}';
+            const T: char = '\u{11a8}';
+            const LV: char = '\u{ac00}';
+            const RI: char = '\u{1f1e6}';
+            const EXTEND: char = '\u{0300}';
+            let mut props = COMPUTED;
+            if !c.is_control()
+                && [L, V, LV, RI, 'a'].iter().all(|&p| breaks(p, c))
+                && [V, T, RI, 'a'].iter().all(|&n| breaks(c, n))
+            {
+                props |= NEVER_JOINS;
+            }
+            if !breaks('a', c) {
+                props |= ATTACHES;
+            }
+            if !breaks(c, EXTEND) {
+                props |= ACCEPTS_EXTEND;
+            }
+            props
+        };
+        let Some(slot) = CACHE.get(c as usize) else {
+            return compute();
+        };
+        let cached = slot.load(std::sync::atomic::Ordering::Relaxed);
+        if cached & COMPUTED != 0 {
+            return cached;
+        }
+        let props = compute();
+        slot.store(props, std::sync::atomic::Ordering::Relaxed);
+        props
+    }
+
+    /// Slot in a 256-entry direct-mapped memo keyed on a cluster (base scalar
+    /// + interned tail) and the scalar being added to it.
+    fn memo_slot(ch: char, tail: Option<crate::grapheme::GraphemeId>, next: char) -> usize {
+        let tail = tail.map_or(0, crate::grapheme::GraphemeId::raw);
+        let key = (u64::from(ch) << 42) ^ (u64::from(tail) << 21) ^ u64::from(next);
+        (key.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 56) as usize
+    }
+
+    /// [`Cell::push_combining`] then [`Self::cluster_wants_wide`], memoized:
+    /// both are pure in (base, tail, scalar) because interned tails never
+    /// change, and together they were ~9% of the bulk unicode ingest profile
+    /// (interner lock + hash, width of the grown cluster).
+    fn push_cluster_scalar(cell: &mut Cell, c: char) -> bool {
+        type Tail = Option<crate::grapheme::GraphemeId>;
+        type Memo = [Option<(char, Tail, char, Tail, bool)>; 256];
+        thread_local! {
+            static MEMO: std::cell::RefCell<Memo> = const { std::cell::RefCell::new([None; 256]) };
+        }
+        let (ch, tail) = (cell.ch, cell.grapheme);
+        let slot = Self::memo_slot(ch, tail, c);
+        MEMO.with_borrow_mut(|memo| {
+            if let Some((memo_ch, memo_tail, memo_c, grown, wants_wide)) = memo[slot]
+                && (memo_ch, memo_tail, memo_c) == (ch, tail, c)
+            {
+                cell.grapheme = grown;
+                return wants_wide;
+            }
+            cell.push_combining(c);
+            let wants_wide = Self::cluster_wants_wide(cell);
+            // A tail the interner refused (cap reached) may intern later;
+            // only a tail that actually grew is stable enough to replay.
+            if cell.grapheme != tail {
+                memo[slot] = Some((ch, tail, c, cell.grapheme, wants_wide));
+            }
+            wants_wide
+        })
+    }
+
     /// UAX #29 boundaries prevent a trailing ZWJ from swallowing unrelated
     /// text and keep regional-indicator pairs separate from the next flag.
     pub(super) fn extends_cluster(target: &Cell, next: char) -> bool {
         if target.ch.is_ascii() && next.is_ascii() {
             return false;
         }
+        // A tail-less cell is trivially one cluster, so the pair rules decide
+        // alone. A tail may already hold several clusters (marks attached
+        // with mode 2027 off), which only the whole-text segmentation sees.
+        if target.grapheme.is_none() {
+            let (ch_props, next_props) = (Self::join_props(target.ch), Self::join_props(next));
+            if next_props & ATTACHES != 0 && ch_props & ACCEPTS_EXTEND != 0 {
+                return true;
+            }
+            if ch_props & next_props & NEVER_JOINS != 0 {
+                return false;
+            }
+        }
+        // Tailed cells (emoji with VS16, ZWJ sequences) come from a small set
+        // per stream, and an interned tail never changes, so the whole-text
+        // verdict is memoized on (base, tail id, next) in a direct-mapped
+        // table.
+        type Memo = [Option<(char, crate::grapheme::GraphemeId, char, bool)>; 256];
+        thread_local! {
+            static MEMO: std::cell::RefCell<Memo> = const { std::cell::RefCell::new([None; 256]) };
+        }
+        let segment = || {
+            Self::with_cell_text(target, Some(next), |text| {
+                text.graphemes(true).nth(1).is_none()
+            })
+        };
+        let Some(id) = target.grapheme else {
+            return segment();
+        };
+        let slot = Self::memo_slot(target.ch, Some(id), next);
+        MEMO.with_borrow_mut(|memo| match memo[slot] {
+            Some((ch, memo_id, memo_next, extends))
+                if ch == target.ch && memo_id == id && memo_next == next =>
+            {
+                extends
+            }
+            _ => {
+                let extends = segment();
+                memo[slot] = Some((target.ch, id, next, extends));
+                extends
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One scalar per UAX #29 class, plus the bulk-corpus scalars.
+    const CLASSES: &[char] = &[
+        'a',
+        '#',
+        '\u{e9}',
+        '\u{441}',
+        '\u{300}',
+        '\u{fe0f}',
+        '\u{fe0e}',
+        '\u{200d}',
+        '\u{200b}',
+        '\u{ad}',
+        '\u{903}',
+        '\u{600}',
+        '\u{1100}',
+        '\u{1161}',
+        '\u{11a8}',
+        '\u{ac00}',
+        '\u{ac01}',
+        '\u{1f1e6}',
+        '\u{1f1ef}',
+        '\u{1f600}',
+        '\u{1f3fb}',
+        '\u{2764}',
+        '\u{915}',
+        '\u{94d}',
+        'あ',
+        '漢',
+        '、',
+        '\u{3099}',
+        '\u{ff9e}',
+        '\u{e0061}',
+        '\u{20e3}',
+        '\u{1f441}',
+        '\u{1f5e8}',
+        '\u{103aa}',
+        '\u{20000}',
+    ];
+
+    fn segmenter_extends(target: &Cell, next: char) -> bool {
         let mut text = target.text();
         text.push(next);
         text.graphemes(true).nth(1).is_none()
+    }
+
+    #[test]
+    fn extends_cluster_fast_paths_agree_with_the_segmenter() {
+        let mut targets = Vec::new();
+        for &ch in CLASSES {
+            let cell = Cell {
+                ch,
+                ..Cell::default()
+            };
+            targets.push(cell);
+            for &tail in CLASSES {
+                let mut with_tail = cell;
+                with_tail.set_combining(&tail.to_string());
+                targets.push(with_tail);
+            }
+        }
+        for target in &targets {
+            for &next in CLASSES {
+                assert_eq!(
+                    Screen::extends_cluster(target, next),
+                    segmenter_extends(target, next),
+                    "target {:?} next {next:?}",
+                    target.text()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn never_joining_scalars_always_break_against_each_other() {
+        let reps: Vec<char> = CLASSES
+            .iter()
+            .copied()
+            .filter(|&c| Screen::join_props(c) & NEVER_JOINS != 0)
+            .collect();
+        assert!(reps.contains(&'あ') && reps.contains(&'\u{1f600}') && reps.contains(&'\u{915}'));
+        for c in (0..0x20000).step_by(7).filter_map(char::from_u32) {
+            if Screen::join_props(c) & NEVER_JOINS == 0 {
+                continue;
+            }
+            for &r in &reps {
+                for pair in [[c, r], [r, c]] {
+                    let text: String = pair.iter().collect();
+                    assert_eq!(text.graphemes(true).count(), 2, "{pair:?} joined");
+                }
+            }
+        }
     }
 }

@@ -71,7 +71,48 @@ mod tests {
     }
 
     #[test]
-    fn generated_catalog_matches_vendor_snapshot_size() {
-        assert_eq!(THEMES.len(), 574);
+    fn generated_catalog_matches_vendor_snapshot_plus_noa_themes() {
+        // 574 vendored Ghostty themes + Noa's own `themes/Noa.conf`.
+        assert_eq!(THEMES.len(), 575);
+    }
+
+    fn relative_luminance(color: Rgb) -> f64 {
+        let channel = |value: u8| {
+            let c = f64::from(value) / 255.0;
+            if c <= 0.03928 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
+    }
+
+    fn contrast_ratio(a: Rgb, b: Rgb) -> f64 {
+        let (la, lb) = (relative_luminance(a), relative_luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    #[test]
+    fn noa_theme_uses_the_brand_palette() {
+        let theme = resolve("Noa").expect("Noa ships its own theme");
+        let orange = Rgb::new(0xe8, 0xa3, 0x3d);
+
+        assert_eq!(theme.default_bg, Rgb::new(0x1b, 0x1d, 0x21));
+        assert_eq!(theme.default_fg, Rgb::new(0xf7, 0xf7, 0xf2));
+        assert_eq!(theme.cursor, orange);
+        assert_eq!(theme.palette[3], orange);
+    }
+
+    #[test]
+    fn noa_theme_ansi_colors_clear_minimum_contrast() {
+        let theme = resolve("Noa").expect("Noa ships its own theme");
+
+        // Index 0 is black: a background color, not text.
+        for index in 1..16 {
+            let ratio = contrast_ratio(theme.palette[index], theme.default_bg);
+            assert!(ratio >= 4.5, "palette {index} contrast {ratio:.2} < 4.5");
+        }
+        assert!(contrast_ratio(theme.selection_fg, theme.selection_bg) >= 4.5);
     }
 }

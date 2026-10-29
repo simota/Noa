@@ -112,7 +112,7 @@ font-variation = wght=550
 
 | Key | Accepted values | Default | Description |
 |---|---|---|---|
-| `theme` | one bundled theme name | unspecified | Name of a `.conf` file under `crates/noa-theme/vendor/themes/`, minus the extension. Paired `light:...` / `dark:...` specification is not yet supported |
+| `theme` | one bundled theme name | unspecified | Name of a `.conf` file under `crates/noa-theme/vendor/themes/` or `crates/noa-theme/themes/` (Noa's own `Noa` theme), minus the extension. Paired `light:...` / `dark:...` specification is not yet supported |
 | `background` | `#RRGGBB` or `RRGGBB` | theme value | Background color override |
 | `foreground` | `#RRGGBB` or `RRGGBB` | theme value | Foreground color override |
 | `cursor-color` | `#RRGGBB` or `RRGGBB` | theme value | Cursor color override |

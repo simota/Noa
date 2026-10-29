@@ -64,7 +64,7 @@ A from-scratch DFA parser plus a `Handler` trait separating parsing from state.
 - **Emoji presentation** — VS16 selects color emoji, VS15 prefers text glyphs, and color artwork fits its actual cell width and line height. Skin tones, ZWJ families/professions, flags, and keycaps compose in ordinary shell and agent output, including across PTY reads. Grapheme mode 2027 defaults on; applications can query it with `CSI ? 2027 $ p` or disable it with `CSI ? 2027 l` for scalar-width compatibility. A selector arriving at the last column keeps the existing one-cell footprint and the artwork fits that space.
 - **Ligatures / fallback** — liga / calt, CJK fallback, Nerd Font and box-drawing glyphs
 - **Synthetic styles** — synthetic bold / italic, `font-thicken`
-- **Themes** — bundles 574 Ghostty-compatible themes
+- **Themes** — bundles 574 Ghostty-compatible themes plus `Noa`, built from the brand palette (charcoal, Ember white, one orange accent on the cursor and ANSI yellow; not the default)
 
 ## Configuration (noa-config)
 

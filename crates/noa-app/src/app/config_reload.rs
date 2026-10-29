@@ -187,6 +187,15 @@ impl App {
         log::info!("config reloaded");
     }
 
+    /// Shared by config reload and Settings preview/save/undo.
+    pub(super) fn apply_ember_idle_after(&mut self, seconds: u64) {
+        if self.config.ember_idle_after_secs != seconds {
+            self.config.ember_idle_after_secs = seconds;
+            self.note_user_activity();
+            self.clear_idle_ember();
+        }
+    }
+
     fn apply_reloaded_config(&mut self, next: AppConfig) {
         // scratch-terminal R4-e: config reload never applies to a live
         // popup (Scope: out — no live-reload path for it), so a shown
@@ -249,12 +258,8 @@ impl App {
         let scrollback_persist_disabled = previous.scrollback_persist.persists()
             && !(applied.scrollback_persist.persists() && applied.window_save_state.restores());
 
-        let idle_ember_changed = previous.ember_idle_after_secs != applied.ember_idle_after_secs;
+        self.apply_ember_idle_after(applied.ember_idle_after_secs);
         self.config = applied;
-        if idle_ember_changed {
-            self.note_user_activity();
-            self.clear_idle_ember();
-        }
 
         if scrollback_persist_disabled {
             // Turning it off means "stop keeping this", not "stop keeping it

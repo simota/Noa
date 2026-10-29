@@ -44,6 +44,7 @@ fn settings_init() -> ThemeSettingsInit {
         background_image_fit: noa_config::BackgroundImageFit::Contain,
         background_image_repeat: false,
         background_image_interval_secs: noa_config::DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
+        ember_idle_after_secs: 0,
         window_padding_x: 2.0,
         window_padding_y: 2.0,
         macos_titlebar_style: noa_config::MacosTitlebarStyle::Native,
@@ -129,6 +130,19 @@ fn view_model_liveness_is_unaffected_by_editing_a_live_row() {
     let vm = theme_settings_view_model(&state);
 
     assert_eq!(vm.rows[0].liveness, Liveness::Live);
+}
+
+#[test]
+fn view_model_includes_live_idle_ember_row() {
+    let state = ThemeSettings::open(settings_init());
+    let vm = theme_settings_view_model(&state);
+    let idx = crate::theme_settings::SettingsRowKind::ALL
+        .iter()
+        .position(|kind| *kind == crate::theme_settings::SettingsRowKind::EmberIdleAfter)
+        .unwrap();
+    assert_eq!(vm.rows[idx].liveness, Liveness::Live);
+    assert_eq!(vm.rows[idx].label, "Idle Ember");
+    assert_eq!(vm.rows[idx].value, "Off");
 }
 
 // AC-17: `selected_description` always matches
@@ -244,6 +258,7 @@ fn test_theme_settings_init() -> ThemeSettingsInit {
         background_image_fit: noa_config::BackgroundImageFit::Contain,
         background_image_repeat: false,
         background_image_interval_secs: noa_config::DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
+        ember_idle_after_secs: 0,
         window_padding_x: 2.0,
         window_padding_y: 2.0,
         macos_titlebar_style: noa_config::MacosTitlebarStyle::Native,

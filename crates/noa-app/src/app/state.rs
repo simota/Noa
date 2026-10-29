@@ -813,6 +813,7 @@ mod theme_settings_session_tests {
             background_image_fit: noa_config::BackgroundImageFit::Contain,
             background_image_repeat: false,
             background_image_interval_secs: noa_config::DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
+            ember_idle_after_secs: 0,
             window_padding_x: 2.0,
             window_padding_y: 2.0,
             macos_titlebar_style: noa_config::MacosTitlebarStyle::Native,

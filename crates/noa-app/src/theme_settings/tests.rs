@@ -30,6 +30,7 @@ fn init() -> ThemeSettingsInit {
         background_image_fit: BackgroundImageFit::Contain,
         background_image_repeat: false,
         background_image_interval_secs: noa_config::DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
+        ember_idle_after_secs: 0,
         window_padding_x: 2.0,
         window_padding_y: 2.0,
         macos_titlebar_style: MacosTitlebarStyle::Native,
@@ -2693,8 +2694,85 @@ fn default_for_maps_every_row_kind_to_its_documented_startup_default() {
 // row brings it to 34. File Link Editor and Agent Workflows add two rows.
 #[test]
 fn settings_row_kind_count_includes_remote_app_qr_action() {
-    assert_eq!(SettingsRowKind::COUNT, 36);
-    assert_eq!(SettingsRowKind::ALL.len(), 36);
+    assert_eq!(SettingsRowKind::COUNT, 37);
+    assert_eq!(SettingsRowKind::ALL.len(), 37);
+    assert_eq!(
+        row_index(SettingsRowKind::EmberIdleAfter),
+        row_index(SettingsRowKind::SendSelectionSendEnter) + 1
+    );
+}
+
+#[test]
+fn ember_idle_after_steps_clamps_and_displays_off() {
+    let now = Instant::now();
+    let idx = row_index(SettingsRowKind::EmberIdleAfter);
+    let mut settings = ThemeSettings::open(settings_init());
+    move_to_row(&mut settings, SettingsRowKind::EmberIdleAfter);
+    assert_eq!(settings.rows()[idx].draft.display_value(), "Off");
+    assert_eq!(settings.adjust(-1, now), RowEffect::None);
+    assert!(!settings.rows()[idx].touched);
+    assert_eq!(settings.adjust(1, now), RowEffect::EmberIdleAfter(30));
+    assert_eq!(settings.rows()[idx].draft.display_value(), "30s");
+    assert_eq!(settings.adjust(-1, now), RowEffect::EmberIdleAfter(0));
+    assert_eq!(
+        settings.adjust(i32::MAX, now),
+        RowEffect::EmberIdleAfter(86_400)
+    );
+    assert_eq!(settings.adjust(1, now), RowEffect::None);
+    assert_eq!(settings.rows()[idx].draft, RowDraft::EmberIdleAfter(86_400));
+    assert_eq!(settings.adjust(-1, now), RowEffect::EmberIdleAfter(86_370));
+    assert_eq!(settings.adjust(i32::MIN, now), RowEffect::EmberIdleAfter(0));
+}
+
+#[test]
+fn ember_idle_after_initializes_saves_reverts_and_resets_live() {
+    let mut settings = ThemeSettings::open(ThemeSettingsInit {
+        ember_idle_after_secs: 45,
+        ..settings_init()
+    });
+    let kind = SettingsRowKind::EmberIdleAfter;
+    let idx = row_index(kind);
+    move_to_row(&mut settings, kind);
+    assert_eq!(settings.rows()[idx].draft, RowDraft::EmberIdleAfter(45));
+    assert_eq!(kind.label(), "Idle Ember");
+    assert!(kind.is_live());
+    assert_eq!(settings.liveness(kind), Liveness::Live);
+    assert!(!settings.restart_note(kind));
+    assert!(
+        !settings
+            .commit_updates()
+            .iter()
+            .any(|(key, _)| key == "ember-idle-after")
+    );
+    let before = settings.view_fingerprint_u64();
+    assert_eq!(
+        settings.adjust(1, Instant::now()),
+        RowEffect::EmberIdleAfter(75)
+    );
+    assert_ne!(settings.view_fingerprint_u64(), before);
+    assert!(
+        settings
+            .commit_updates()
+            .contains(&("ember-idle-after".into(), "75".into()))
+    );
+    assert!(!settings.restart_note(kind));
+    let (snapshot, pair) = settings.pre_commit_snapshot();
+    assert!(
+        revert_updates(&snapshot, pair.as_ref())
+            .contains(&("ember-idle-after".into(), "45".into()))
+    );
+    assert_eq!(settings.revert().ember_idle_after_secs, 45);
+    assert_eq!(RowDraft::default_for(kind), RowDraft::EmberIdleAfter(0));
+    assert_eq!(
+        settings.reset_selected_row(Instant::now()),
+        RowEffect::EmberIdleAfter(0)
+    );
+    assert_eq!(settings.rows()[idx].draft.display_value(), "Off");
+    assert!(
+        settings
+            .commit_updates()
+            .contains(&("ember-idle-after".into(), "0".into()))
+    );
 }
 
 // settings-panel-server-status: the status row is read-only (mirrors
@@ -4247,6 +4325,7 @@ fn sample_revert(theme_name: &str) -> RevertValues {
         background_image_fit: BackgroundImageFit::Cover,
         background_image_repeat: true,
         background_image_interval_secs: 30,
+        ember_idle_after_secs: 90,
         sidebar_preview_lines: 3,
         sidebar_width: 360.0,
         sidebar_font_size: 11.5,

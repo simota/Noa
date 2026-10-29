@@ -298,6 +298,7 @@ impl ThemeSettings {
             ),
             None => (
                 RevertValues {
+                    ember_idle_after_secs: init.ember_idle_after_secs,
                     theme_name: init.current_theme.clone(),
                     font_size: init.font_size,
                     cursor_style: init.cursor_style,
@@ -408,6 +409,10 @@ impl ThemeSettings {
                     },
                     SettingsRow {
                         draft: RowDraft::SendSelectionSendEnter(init.send_selection_send_enter),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::EmberIdleAfter(init.ember_idle_after_secs),
                         touched: false,
                     },
                     SettingsRow {
@@ -1303,6 +1308,25 @@ impl ThemeSettings {
                 }
                 RowEffect::None
             }
+            SettingsRowKind::EmberIdleAfter => {
+                let RowDraft::EmberIdleAfter(current) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let step = 30 * u64::from(delta.unsigned_abs());
+                let new = if delta.is_negative() {
+                    current.saturating_sub(step)
+                } else {
+                    current.saturating_add(step)
+                }
+                // Same upper bound as noa-config's parse_ember_idle_after.
+                .min(86_400);
+                if new == current {
+                    return RowEffect::None;
+                }
+                self.rows[idx].draft = RowDraft::EmberIdleAfter(new);
+                self.rows[idx].touched = true;
+                RowEffect::EmberIdleAfter(new)
+            }
             SettingsRowKind::CursorStyle => {
                 let RowDraft::CursorStyle(current) = self.rows[idx].draft else {
                     return RowEffect::None;
@@ -1873,6 +1897,9 @@ impl ThemeSettings {
             (SettingsRowKind::SidebarFontSize, RowDraft::SidebarFontSize(value)) => {
                 RowEffect::SidebarFontSize(value)
             }
+            (SettingsRowKind::EmberIdleAfter, RowDraft::EmberIdleAfter(value)) => {
+                RowEffect::EmberIdleAfter(value)
+            }
             _ => RowEffect::None,
         }
     }
@@ -2251,6 +2278,9 @@ impl ThemeSettings {
                 RowDraft::ConfirmQuit(confirm) => {
                     updates.push(("confirm-quit".to_string(), confirm.to_string()));
                 }
+                RowDraft::EmberIdleAfter(secs) => {
+                    updates.push(("ember-idle-after".to_string(), secs.to_string()));
+                }
                 RowDraft::SendSelectionSendEnter(send_enter) => {
                     updates.push((
                         "send-selection-send-enter".to_string(),
@@ -2468,6 +2498,10 @@ pub(crate) fn revert_updates(
             None => updates.push(("theme".to_string(), revert.theme_name.clone())),
         }
     }
+    updates.push((
+        "ember-idle-after".to_string(),
+        revert.ember_idle_after_secs.to_string(),
+    ));
     updates.push(("font-size".to_string(), format!("{}", revert.font_size)));
     // The *configured* pair, never the effective one: while `glassmorphism`
     // is on the effective values are derived
@@ -2716,7 +2750,7 @@ fn hash_row_draft_value(draft: &RowDraft, hasher: &mut impl Hasher) {
         // minimal like every other `noa_config` enum here), so reuse its
         // `Display` string the same way the other config enums below do.
         RowDraft::Glassmorphism(level) => level.to_string().hash(hasher),
-        RowDraft::BackgroundImageInterval(v) => v.hash(hasher),
+        RowDraft::BackgroundImageInterval(v) | RowDraft::EmberIdleAfter(v) => v.hash(hasher),
         RowDraft::CursorStyle(shape) => cursor_shape_config_value(*shape).hash(hasher),
         RowDraft::WindowPadding(x, y) => {
             x.to_bits().hash(hasher);

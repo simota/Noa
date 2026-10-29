@@ -875,45 +875,58 @@ impl ImageStore {
         Ok(())
     }
 
-    /// Apply an `a=c` compose command: blend source frame `c=`'s pixels onto
-    /// destination frame `r=` over the rectangle `x=`/`y=`/`w=`/`h=` (default the
-    /// whole frame), with mode `X=`.
+    /// Apply an `a=c` compose command: blend source frame `r=`'s rectangle at
+    /// `X=`/`Y=` onto destination frame `c=` at `x=`/`y=`, sized `w=`/`h=`
+    /// (default the whole frame), overwriting for a non-zero `C=` — Ghostty
+    /// 1.4.0's mapping (the spec's reference table has `c`/`r` backwards).
     pub fn compose(&mut self, cmd: &KittyGraphicsCommand) -> Result<(), KittyError> {
         let Some(target_id) = self.resolve_anim_target(cmd) else {
             return Err(KittyError::NoEnt);
         };
-        let dst_idx = cmd.rows as usize; // r=
-        let src_idx = cmd.columns as usize; // c=
-        if dst_idx == 0 || src_idx == 0 {
-            return Err(KittyError::Invalid);
-        }
         let img = self
             .images
             .get_mut(&target_id)
             .expect("target resolved above");
-        if dst_idx > img.frames.len() || src_idx > img.frames.len() {
+        let frames = img.frames.len();
+        let src_idx = cmd.rows as usize; // r=
+        let dst_idx = cmd.columns as usize; // c=
+        if !(1..=frames).contains(&src_idx) || !(1..=frames).contains(&dst_idx) {
+            return Err(KittyError::NoEnt);
+        }
+        let (canvas_w, canvas_h) = (u64::from(img.width), u64::from(img.height));
+        let w = if cmd.src_w != 0 {
+            u64::from(cmd.src_w)
+        } else {
+            canvas_w
+        };
+        let h = if cmd.src_h != 0 {
+            u64::from(cmd.src_h)
+        } else {
+            canvas_h
+        };
+        let (dx, dy) = (u64::from(cmd.src_x), u64::from(cmd.src_y));
+        let (sx, sy) = (u64::from(cmd.cell_x_off), u64::from(cmd.cell_y_off)); // X= / Y=
+        // In u64 so hostile 32-bit values cannot wrap past the bounds check.
+        let fits = |x: u64, y: u64| x + w <= canvas_w && y + h <= canvas_h;
+        if !fits(dx, dy) || !fits(sx, sy) {
             return Err(KittyError::Invalid);
         }
-        let (canvas_w, canvas_h) = (img.width, img.height);
-        let rect_x = cmd.src_x;
-        let rect_y = cmd.src_y;
-        let rect_w = if cmd.src_w != 0 { cmd.src_w } else { canvas_w };
-        let rect_h = if cmd.src_h != 0 { cmd.src_h } else { canvas_h };
-        // Reject attacker-controlled x=/y=/w=/h= geometry that overflows or falls
-        // outside the canvas. Plain `rect_x + rect_w` wraps in release builds (no
-        // overflow-checks), slipping past the bound into composite_from's indexing.
-        let fits = rect_x
-            .checked_add(rect_w)
-            .zip(rect_y.checked_add(rect_h))
-            .is_some_and(|(x_end, y_end)| x_end <= canvas_w && y_end <= canvas_h);
-        if !fits {
-            return Err(KittyError::Invalid);
+        if src_idx == dst_idx {
+            let overlaps = |a: u64, b: u64, len: u64| a.max(b) < a.min(b) + len;
+            if overlaps(sx, dx, w) && overlaps(sy, dy, h) {
+                return Err(KittyError::Invalid);
+            }
         }
-        let overwrite = cmd.cell_x_off == 1; // X=1 replaces
         let src = Arc::clone(&img.frames[src_idx - 1].rgba);
         let mut dst = img.frames[dst_idx - 1].rgba.to_vec();
         composite_from(
-            &mut dst, &src, canvas_w, rect_x, rect_y, rect_w, rect_h, overwrite,
+            &mut dst,
+            &src,
+            img.width,
+            [sx as u32, sy as u32],
+            [dx as u32, dy as u32],
+            [w as u32, h as u32],
+            cmd.compose_overwrite,
         );
         img.frames[dst_idx - 1].rgba = Arc::from(dst);
         img.refresh_current();
@@ -1064,26 +1077,24 @@ fn composite_rect(
     }
 }
 
-/// Composite `src` (same dimensions as the destination canvas, width `canvas_w`)
-/// onto `dst` over the rectangle (`rx`,`ry`,`rw`,`rh`). Used by `a=c` compose.
-#[allow(clippy::too_many_arguments)]
+/// Composite the `size` rectangle of `src` at `from` onto `dst` at `to` (both
+/// canvases `canvas_w` wide). Used by `a=c` compose, which bounds-checks both
+/// rectangles first.
 fn composite_from(
     dst: &mut [u8],
     src: &[u8],
     canvas_w: u32,
-    rx: u32,
-    ry: u32,
-    rw: u32,
-    rh: u32,
+    from: [u32; 2],
+    to: [u32; 2],
+    size: [u32; 2],
     overwrite: bool,
 ) {
-    for row in 0..rh {
-        for col in 0..rw {
-            // Index in usize so the arithmetic cannot wrap even if a future caller
-            // forgets the bounds check the compose path performs.
-            let idx = ((ry + row) as usize * canvas_w as usize + (rx + col) as usize) * 4;
-            let s: [u8; 4] = [src[idx], src[idx + 1], src[idx + 2], src[idx + 3]];
-            blend_pixel(dst, idx, &s, overwrite);
+    let index = |x: u32, y: u32| (y as usize * canvas_w as usize + x as usize) * 4;
+    for row in 0..size[1] {
+        for col in 0..size[0] {
+            let s = index(from[0] + col, from[1] + row);
+            let s: [u8; 4] = [src[s], src[s + 1], src[s + 2], src[s + 3]];
+            blend_pixel(dst, index(to[0] + col, to[1] + row), &s, overwrite);
         }
     }
 }
@@ -1885,9 +1896,71 @@ mod tests {
         // Frame 2 = distinct pixels.
         let frame = vec![100u8, 100, 100, 255, 200, 200, 200, 255];
         store.transmit(&direct("a=f,i=1,f=32,s=2,v=1,X=1", &frame));
-        // a=c: copy frame 2 (c=2) onto frame 1 (r=1), overwrite (X=1).
-        assert_eq!(store.compose(&direct("a=c,i=1,r=1,c=2,X=1", &[])), Ok(()));
+        // a=c: copy source frame 2 (r=2) onto destination frame 1 (c=1),
+        // overwrite (C=1) — Ghostty 1.4.0's key mapping.
+        assert_eq!(store.compose(&direct("a=c,i=1,r=2,c=1,C=1", &[])), Ok(()));
         assert_eq!(&*store.get(1).unwrap().frames[0].rgba, frame.as_slice());
+    }
+
+    #[test]
+    fn compose_takes_source_offsets_from_upper_x_and_y() {
+        // Ghostty 1.4.0 "compose frames": the root's pixel at (1,0) (X=1)
+        // blends onto frame 2 at (0,0) (x=0).
+        let mut store = store_with_base(); // 2x1: [10,20,30,255] [40,50,60,255]
+        store.transmit(&direct("a=f,i=1,f=32,s=1,v=1", &[255u8, 255, 255, 255]));
+        assert_eq!(
+            store.compose(&direct("a=c,i=1,r=1,c=2,w=1,h=1,X=1,x=0", &[])),
+            Ok(())
+        );
+        assert_eq!(
+            &*store.get(1).unwrap().frames[1].rgba,
+            &[40u8, 50, 60, 255, 0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn compose_mode_overwrites_for_any_non_zero_c() {
+        let mut store = store_with_base();
+        // Frame 2: fully transparent (overwrite keeps the zero alpha).
+        store.transmit(&direct("a=f,i=1,f=32,s=2,v=1,X=1", &[0u8; 8]));
+        assert_eq!(store.compose(&direct("a=c,i=1,r=2,c=1,C=2", &[])), Ok(()));
+        assert_eq!(&*store.get(1).unwrap().frames[0].rgba, &[0u8; 8]);
+    }
+
+    #[test]
+    fn compose_errors_match_ghostty() {
+        let mut store = store_with_base(); // 2x1, one frame
+        let compose = |store: &mut ImageStore, ctrl: &str| store.compose(&direct(ctrl, &[]));
+        assert_eq!(
+            compose(&mut store, "a=c,i=9,r=1,c=1"),
+            Err(KittyError::NoEnt)
+        );
+        assert_eq!(
+            compose(&mut store, "a=c,i=1,r=2,c=1"),
+            Err(KittyError::NoEnt)
+        );
+        assert_eq!(
+            compose(&mut store, "a=c,i=1,r=1,c=2"),
+            Err(KittyError::NoEnt)
+        );
+        assert_eq!(
+            compose(&mut store, "a=c,i=1,r=1,c=1,w=1,x=2"),
+            Err(KittyError::Invalid)
+        );
+        assert_eq!(
+            compose(&mut store, "a=c,i=1,r=1,c=1,w=1,X=2"),
+            Err(KittyError::Invalid)
+        );
+        // Same frame: the rectangles must not overlap.
+        assert_eq!(
+            compose(&mut store, "a=c,i=1,r=1,c=1"),
+            Err(KittyError::Invalid)
+        );
+        assert_eq!(compose(&mut store, "a=c,i=1,r=1,c=1,w=1,x=1,C=1"), Ok(()));
+        assert_eq!(
+            &*store.get(1).unwrap().frames[0].rgba,
+            &[10u8, 20, 30, 255, 10, 20, 30, 255]
+        );
     }
 
     #[test]

@@ -151,6 +151,10 @@ pub struct KittyGraphicsCommand {
     pub z_index: i32,
     /// `C=1` — do not move the cursor after display.
     pub cursor_no_move: bool,
+    /// `C=` read for `a=c`: any non-zero value overwrites instead of
+    /// alpha-blending (Kitty tests the compose mode against 0, the display
+    /// flag against 1).
+    pub compose_overwrite: bool,
     /// `N=1` — the transient usage hint: evict this image first under memory
     /// pressure. Other values carry no hint.
     pub transient: bool,
@@ -200,6 +204,7 @@ impl KittyGraphicsCommand {
             rows: 0,
             z_index: 0,
             cursor_no_move: false,
+            compose_overwrite: false,
             transient: false,
             virtual_placement: false,
             parent_image_id: 0,
@@ -320,7 +325,10 @@ pub fn parse(data: &[u8], truncated: bool) -> KittyGraphicsCommand {
                 None => cmd.parse_error = true,
             },
             b'C' => match u32val(val) {
-                Some(n) => cmd.cursor_no_move = n == 1,
+                Some(n) => {
+                    cmd.cursor_no_move = n == 1;
+                    cmd.compose_overwrite = n != 0;
+                }
                 None => cmd.parse_error = true,
             },
             b'N' => match u32val(val) {

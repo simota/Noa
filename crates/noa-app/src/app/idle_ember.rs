@@ -154,12 +154,30 @@ impl App {
         let now = Instant::now();
         self.idle_ember_reset_at = now;
         self.idle_ember_deadline = None;
+        let gate = self
+            .idle_ember
+            .as_ref()
+            .and_then(|(id, _)| self.idle_ember_gate(*id));
         if let Some((id, ember)) = self.idle_ember.as_mut() {
             let id = *id;
-            if ember.reset(now) {
-                self.request_window_redraw(id);
-                self.clear_idle_ember_texture();
+            let was_visible = ember.visible();
+            if let Some(gate) = &gate {
+                ember.update_gate(gate);
             }
+            ember.reset(now);
+            if let Some(gate) = &gate {
+                self.idle_ember_deadline = ember.tick(now, gate, crate::idle_ember::reduce_motion);
+            }
+            if was_visible {
+                self.request_window_redraw(id);
+            }
+        }
+        if self
+            .idle_ember
+            .as_ref()
+            .is_none_or(|(_, ember)| !ember.visible())
+        {
+            self.clear_idle_ember_texture();
         }
     }
 
@@ -174,16 +192,28 @@ impl App {
         if state.focused_pane != pane_id {
             return;
         }
+        let gate = self.idle_ember_gate(id);
         if let Some((host, ember)) = self.idle_ember.as_mut()
             && *host == id
         {
             let visible = ember.visible();
-            ember.note_focused_output(now);
-            if visible {
-                self.idle_ember_deadline = None;
-                self.request_window_redraw(id);
-                self.clear_idle_ember_texture();
+            if let Some(gate) = &gate {
+                ember.update_gate(gate);
             }
+            ember.note_focused_output(now);
+            if let Some(gate) = &gate {
+                self.idle_ember_deadline = ember.tick(now, gate, crate::idle_ember::reduce_motion);
+            }
+            if visible {
+                self.request_window_redraw(id);
+            }
+        }
+        if self
+            .idle_ember
+            .as_ref()
+            .is_none_or(|(_, ember)| !ember.visible())
+        {
+            self.clear_idle_ember_texture();
         }
     }
 
@@ -224,10 +254,7 @@ impl App {
         let deadline = ember.tick(now, &gate, crate::idle_ember::reduce_motion);
         let visible_now = ember.visible();
         self.idle_ember_deadline = deadline;
-        if gate.os_focused
-            && !gate.occluded
-            && (visible != visible_now || (visible_now && frame_due))
-        {
+        if needs_redraw(&gate, visible, visible_now, frame_due) {
             self.request_window_redraw(id);
         }
         if !visible_now {
@@ -260,6 +287,13 @@ impl App {
         }
         ember.visible().then(|| ember.pose(Instant::now()))
     }
+}
+
+fn needs_redraw(gate: &Gate, visible: bool, visible_now: bool, frame_due: bool) -> bool {
+    (visible && !visible_now)
+        || (gate.os_focused
+            && !gate.occluded
+            && (visible != visible_now || (visible_now && frame_due)))
 }
 
 fn sprite_format(target: wgpu::TextureFormat) -> wgpu::TextureFormat {
@@ -407,6 +441,43 @@ pub(super) fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_loss_mid_fade_requests_clear_redraw() {
+        let now = Instant::now();
+        let mut gate = Gate {
+            enabled_secs: 10,
+            os_focused: true,
+            occluded: false,
+            is_main_window: true,
+            overlay_active: false,
+            ime_composing: false,
+            focused_pane_last_output: now,
+        };
+        let mut ember = crate::idle_ember::IdleEmber::new(now);
+        let start = now + Duration::from_secs(10);
+        ember.tick(start, &gate, || false);
+        ember.reset(start + Duration::from_secs(1));
+        ember.tick(start + Duration::from_millis(1100), &gate, || false);
+        assert!(matches!(
+            ember.state,
+            crate::idle_ember::State::Dismissing { .. }
+        ));
+        let visible = ember.visible();
+        gate.os_focused = false;
+        assert_eq!(
+            ember.tick(start + Duration::from_millis(1150), &gate, || false),
+            None
+        );
+        assert_eq!(ember.state, crate::idle_ember::State::Waiting);
+        assert!(needs_redraw(&gate, visible, ember.visible(), false));
+        assert!(!needs_redraw(
+            &gate,
+            ember.visible(),
+            ember.visible(),
+            false
+        ));
+    }
 
     #[test]
     fn ember_gate_blocks_every_modal() {

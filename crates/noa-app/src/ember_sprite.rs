@@ -55,9 +55,12 @@ fn sample(x: f32, y: f32, pose: Pose, outline: f32, hairline: f32) -> [f32; 4] {
     if d <= 0.0 {
         for ex in [0.39, 0.61] {
             let ex = ex + pose.eye_dx * 0.055;
-            if ellipse(bx, by, ex, 0.57, 0.037, 0.055) {
+            let open = pose.eye_open.clamp(0.0, 1.0);
+            if open > 0.0 && ellipse(bx, by, ex, 0.57, 0.037, 0.055 * open) {
                 color = [26.0, 26.0, 26.0, 255.0];
-                if ellipse(bx, by, ex - 0.011, 0.55, 0.011, 0.0165) {
+                if open > 0.2
+                    && ellipse(bx, by, ex - 0.011, 0.57 - 0.02 * open, 0.011, 0.0165 * open)
+                {
                     color = [255.0; 4];
                 }
             }
@@ -157,6 +160,29 @@ mod tests {
         assert_eq!(sample(0.17, 0.7, p, 0.04, 0.01), [255.0; 4]);
         assert!(sample(0.145, 0.7, p, 0.04, 0.01)[3] > 0.0);
         assert_eq!(sample(0.0, 0.0, p, 0.04, 0.01)[3], 0.0);
+    }
+
+    #[test]
+    fn closed_eyes_have_no_dark_pixels_or_catchlights() {
+        let p = Pose {
+            eye_open: 0.0,
+            ..pose(0.4)
+        };
+        let mut pixels = Vec::new();
+        raster(&mut pixels, 160, 200, 20.0, p);
+        for ex in [0.39_f32, 0.61] {
+            for y in 104..124 {
+                for x in ((ex - 0.03) * 160.0) as usize..((ex + 0.03) * 160.0) as usize {
+                    let offset = (y * 160 + x) * 4;
+                    assert!(
+                        pixels[offset..offset + 3]
+                            .iter()
+                            .all(|c| (220..255).contains(c))
+                    );
+                    assert_eq!(pixels[offset + 3], 255);
+                }
+            }
+        }
     }
 
     #[test]

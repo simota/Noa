@@ -221,26 +221,12 @@ impl Terminal {
         // Offsets stay within the first cell (Ghostty #13891).
         let cell_x_off = ctrl.cell_x_off.min(cell_w - 1);
         let cell_y_off = ctrl.cell_y_off.min(cell_h - 1);
-        let (cols, rows) = if ctrl.columns != 0 && ctrl.rows != 0 {
-            (ctrl.columns, ctrl.rows)
-        } else {
-            // The span covers the drawn size plus the offset into the first
-            // cell (Ghostty's `gridSize`).
-            let [w, h] = crate::screen::kitty_image_size(
-                [src_w, src_h],
-                [ctrl.columns, ctrl.rows],
-                [f64::from(cell_w), f64::from(cell_h)],
-                [f64::from(cell_x_off), f64::from(cell_y_off)],
-            );
-            let span =
-                |px: f64, off: u32, cell: u32| (px.round() + f64::from(off)) / f64::from(cell);
-            (
-                span(w, cell_x_off, cell_w).ceil() as u32,
-                span(h, cell_y_off, cell_h).ceil() as u32,
-            )
-        };
-        let cols = cols.clamp(1, u16::MAX as u32) as u16;
-        let rows = rows.clamp(1, u16::MAX as u32) as u16;
+        let (cols, rows) = crate::screen::kitty_cell_span(
+            [src_w, src_h],
+            [ctrl.columns, ctrl.rows],
+            [cell_w, cell_h],
+            [cell_x_off, cell_y_off],
+        );
         // Always explicit (not `None` = whole image) so a region scroll can
         // clip it without the image's size.
         let src = Some([src_x, src_y, src_w, src_h]);

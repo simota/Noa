@@ -160,6 +160,30 @@ impl KittyPlacement {
     }
 }
 
+/// The cells a Kitty placement spans (Ghostty 1.4.0's `Placement.gridSize`):
+/// `c=` and `r=` together pin it; otherwise it is the drawn size plus the
+/// offset into the first cell, rounded up to whole cells. `offset` is clamped
+/// into the cell first.
+pub(crate) fn kitty_cell_span(
+    src: [u32; 2],
+    req: [u32; 2],
+    cell: [u32; 2],
+    offset: [u32; 2],
+) -> (u16, u16) {
+    let (cols, rows) = if req[0] != 0 && req[1] != 0 {
+        (req[0], req[1])
+    } else {
+        let offset = [0, 1].map(|i| offset[i].min(cell[i].saturating_sub(1)));
+        let size = kitty_image_size(src, req, cell.map(f64::from), offset.map(f64::from));
+        let span = |i: usize| {
+            ((size[i].round() + f64::from(offset[i])) / f64::from(cell[i])).ceil() as u32
+        };
+        (span(0), span(1))
+    };
+    let clamp = |n: u32| n.clamp(1, u32::from(u16::MAX)) as u16;
+    (clamp(cols), clamp(rows))
+}
+
 /// The drawn pixel size of a Kitty placement (Ghostty 1.4.0's
 /// `Placement.pixelSize`): with neither `c=` nor `r=` the source keeps its own
 /// size; with both it fills the cells; with one the other side follows the

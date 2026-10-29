@@ -84,14 +84,12 @@ pub fn resolve_image_quad(
     cell_w: f32,
     cell_h: f32,
 ) -> ResolvedImageQuad {
-    let origin_x = pane.x as f32
-        + padding.left
-        + placement.grid_x as f32 * cell_w
-        + f32::from(placement.cell_x_off);
-    let origin_y = pane.y as f32
-        + padding.top
-        + placement.grid_y as f32 * cell_h
-        + f32::from(placement.cell_y_off);
+    // The offset stays within the current cell (Ghostty's `cellOffset`); the
+    // cell may have shrunk since the placement was made.
+    let off_x = f32::from(placement.cell_x_off).min((cell_w - 1.0).max(0.0));
+    let off_y = f32::from(placement.cell_y_off).min((cell_h - 1.0).max(0.0));
+    let origin_x = pane.x as f32 + padding.left + placement.grid_x as f32 * cell_w + off_x;
+    let origin_y = pane.y as f32 + padding.top + placement.grid_y as f32 * cell_h + off_y;
     let [src_w, src_h] = match placement.src {
         Some([_, _, w, h]) => [w, h],
         None => [image.width, image.height],
@@ -100,10 +98,7 @@ pub fn resolve_image_quad(
         [src_w, src_h],
         [placement.req_cols, placement.req_rows],
         [f64::from(cell_w), f64::from(cell_h)],
-        [
-            f64::from(placement.cell_x_off),
-            f64::from(placement.cell_y_off),
-        ],
+        [f64::from(off_x), f64::from(off_y)],
     )
     .map(|v| v as f32);
 
@@ -763,6 +758,34 @@ mod tests {
             20.0,
         );
         assert_eq!(quad.dest_rect, [3.0, 0.0, 15.0, 50.0]);
+    }
+
+    #[test]
+    fn resolve_clamps_an_offset_into_a_shrunken_cell() {
+        let placement = ImagePlacementSnapshot {
+            image_id: 1,
+            epoch: 0,
+            grid_x: 0,
+            grid_y: 0,
+            cell_x_off: 9,
+            cell_y_off: 19,
+            cols: 1,
+            rows: 1,
+            req_cols: 1,
+            req_rows: 1,
+            src: None,
+            z: 0,
+        };
+        let image = snapshot_image(1, 10, 20);
+        let quad = resolve_image_quad(
+            &placement,
+            &image,
+            PaneRect::new(0, 0, 100, 100),
+            GridPadding::new(0.0, 0.0, 0.0, 0.0),
+            5.0,
+            10.0,
+        );
+        assert_eq!(quad.dest_rect, [4.0, 9.0, 1.0, 1.0]);
     }
 
     #[test]

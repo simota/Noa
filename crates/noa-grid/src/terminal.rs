@@ -905,6 +905,13 @@ impl Terminal {
         text_area_w: u32,
         text_area_h: u32,
     ) {
+        if (cell_w, cell_h) != (self.cell_width_px, self.cell_height_px) && cell_w > 0 && cell_h > 0
+        {
+            self.primary.rescale_kitty_placements(cell_w, cell_h);
+            if let Some(alt) = &mut self.alt {
+                alt.rescale_kitty_placements(cell_w, cell_h);
+            }
+        }
         self.cell_width_px = cell_w;
         self.cell_height_px = cell_h;
         self.text_area_width_px = text_area_w;

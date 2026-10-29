@@ -1631,3 +1631,22 @@ fn region_scroll_clips_a_native_size_image_by_whole_cells_and_keeps_its_offset()
     assert_eq!((p.rows, p.cell_y_off), (1, 5));
     assert_eq!(tall_state(&t, 1).map(|(y, ..)| y), Some(2));
 }
+
+#[test]
+fn a_cell_size_change_recomputes_the_span_of_a_native_size_image() {
+    let mut t = kitty_terminal();
+    // 10×80 px: four 20 px rows.
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=80,i=1,C=1,q=2", &[0u8; 10 * 80 * 4]));
+    // c= and r= together pin the span whatever the cell size.
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=80,i=2,c=1,r=2,C=1,q=2", &[0u8; 10 * 80 * 4]));
+    t.set_pixel_metrics(5, 10, 100, 240);
+    let span = |id: u32| {
+        let p = t.primary.kitty_placements.iter().find(|p| p.image_id == id).unwrap();
+        (p.cols, p.rows, p.cell_h_px)
+    };
+    assert_eq!(span(1), (2, 8, 10), "80 px now spans eight 10 px rows");
+    assert_eq!(span(2), (1, 2, 10));
+    // Four rows up, half the image is still on screen.
+    feed(&mut t, b"\x1b[24;1H\n\n\n\n");
+    assert_eq!(tall_state(&t, 1).map(|(y, rows, _)| (y, rows)), Some((-4, 8)));
+}

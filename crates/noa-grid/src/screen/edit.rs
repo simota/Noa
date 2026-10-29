@@ -83,6 +83,25 @@ impl Screen {
         ));
     }
 
+    /// Re-derive every placement's cell span (and the cell height its
+    /// clipping uses) for a new cell size: Ghostty sizes placements from the
+    /// current cell metrics, so an image drawn at its own pixel size covers
+    /// more rows once the font shrinks.
+    pub(crate) fn rescale_kitty_placements(&mut self, cell_w: u32, cell_h: u32) {
+        for p in &mut self.kitty_placements {
+            let Some([_, _, w, h]) = p.src else {
+                continue;
+            };
+            (p.cols, p.rows) = super::kitty_cell_span(
+                [w, h],
+                [p.req_cols, p.req_rows],
+                [cell_w, cell_h],
+                [u32::from(p.cell_x_off), u32::from(p.cell_y_off)],
+            );
+            p.cell_h_px = cell_h;
+        }
+    }
+
     /// Insert a placement, replacing any existing one with the same
     /// `(image_id, placement_id)` — this is how an unnamed placement (`p=0`) of
     /// an image overwrites its predecessor. A replaced parent keeps its

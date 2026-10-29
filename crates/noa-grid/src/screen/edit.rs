@@ -415,7 +415,8 @@ impl Screen {
             }
             let r1 = r0 + i64::from(p.rows) - 1;
             let inside_cols = columns.is_none_or(|(left, right)| {
-                p.anchor_col >= left && p.anchor_col + p.cols.saturating_sub(1) <= right
+                p.anchor_col >= left
+                    && u32::from(p.anchor_col) + u32::from(p.cols) - 1 <= u32::from(right)
             });
             let mut new_r0 = r0;
             if inside_cols && r0 >= top && r1 <= bottom {
@@ -1197,7 +1198,9 @@ fn clip_placement_rows(p: &mut KittyPlacement, top: i64, bottom: i64) -> bool {
     let rows = u64::from(p.rows);
     let cut = |k: i64| (u64::from(h) * k as u64 / rows) as u32;
     let (cut_top, cut_bottom) = (cut(top), cut(bottom));
-    p.src = Some([x, y + cut_top, w, h - cut_top - cut_bottom]);
+    // `kitty_place` keeps an explicit source rectangle as given, so `y` can
+    // sit at the coordinate limit.
+    p.src = Some([x, y.saturating_add(cut_top), w, h - cut_top - cut_bottom]);
     p.rows -= (top + bottom) as u16;
     if top > 0 {
         // The pixel offset belonged to the clipped first row.

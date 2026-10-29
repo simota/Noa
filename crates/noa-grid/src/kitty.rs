@@ -249,9 +249,10 @@ impl ImageStore {
 
     /// Set the total decoded-byte budget (`image-storage-limit`). Evicts down to
     /// the new limit immediately; images with a live placement are spared last.
-    pub fn set_byte_limit(&mut self, bytes: usize) {
+    /// Returns the evicted ids, whose placements the caller must drop.
+    pub fn set_byte_limit(&mut self, bytes: usize) -> Vec<u32> {
         self.byte_limit = bytes;
-        self.enforce_quota(&HashSet::new());
+        self.enforce_quota(&HashSet::new())
     }
 
     /// Allow or refuse the file / temp-file / shared-memory media. Refused
@@ -675,9 +676,11 @@ impl ImageStore {
     /// Evict images until the total byte budget is satisfied, in Ghostty
     /// 1.4.0's order: unplaced images (id not in `referenced`) before placed
     /// ones, transient (`N=1`) before the rest within each, oldest by `seq`
-    /// within that.
-    pub fn enforce_quota(&mut self, referenced: &HashSet<u32>) {
-        let mut evicted_any = false;
+    /// within that. Returns the evicted ids: their placements must go too, or
+    /// a later image reusing the id (auto ids take the smallest free one)
+    /// would appear where the evicted one was placed.
+    pub fn enforce_quota(&mut self, referenced: &HashSet<u32>) -> Vec<u32> {
+        let mut evicted = Vec::new();
         while self.total_bytes > self.byte_limit {
             let rank = |id: &u32| (referenced.contains(id), !self.images[id].transient);
             let victim = self
@@ -688,12 +691,12 @@ impl ImageStore {
             match victim {
                 Some(id) => {
                     self.remove(id);
-                    evicted_any = true;
+                    evicted.push(id);
                 }
                 None => break,
             }
         }
-        if evicted_any {
+        if !evicted.is_empty() {
             // Eviction can drop a running animation without any
             // `Anim.running` transition (the image just stops existing), and
             // is reachable from callers other than `Terminal::kitty_graphics`
@@ -701,6 +704,7 @@ impl ImageStore {
             // centralize it here so none of them need to remember to.
             self.sync_animation_flag();
         }
+        evicted
     }
 
     // ── Animation (a=f / a=a / a=c) ─────────────────────────────────────

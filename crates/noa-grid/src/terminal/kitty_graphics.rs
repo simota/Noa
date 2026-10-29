@@ -88,12 +88,8 @@ impl Terminal {
             // Kitty spec / Ghostty 1.4.0: re-transmitting an id deletes the
             // image and all its placements as soon as the transfer begins, so
             // an interrupted or failed one leaves nothing stale on screen.
-            let id = cmd.image_id;
-            self.primary.delete_kitty_placements(|p| p.image_id == id);
-            if let Some(alt) = &mut self.alt {
-                alt.delete_kitty_placements(|p| p.image_id == id);
-            }
-            self.kitty_images.remove(id);
+            self.drop_kitty_placements_of(&[cmd.image_id]);
+            self.kitty_images.remove(cmd.image_id);
         }
         match self.kitty_images.transmit(&cmd) {
             TransmitStep::NeedMore => {}
@@ -107,8 +103,7 @@ impl Terminal {
                     }
                 });
                 let assigned = *result.as_ref().unwrap_or(&ctrl.image_id);
-                self.kitty_images
-                    .enforce_quota(&self.referenced_image_ids());
+                self.enforce_kitty_quota();
                 self.kitty_reply(
                     ctrl.image_id,
                     ctrl.image_number,
@@ -337,8 +332,7 @@ impl Terminal {
             )
             .is_ok()
         {
-            self.kitty_images
-                .enforce_quota(&self.referenced_image_ids());
+            self.enforce_kitty_quota();
         }
     }
 
@@ -497,6 +491,27 @@ impl Terminal {
             .iter()
             .chain(self.alt.iter().flat_map(|s| s.kitty_placements.iter()))
             .any(|p| p.image_id == id)
+    }
+
+    /// Evict images over the byte budget, with their placements on both
+    /// screens.
+    fn enforce_kitty_quota(&mut self) {
+        let evicted = self
+            .kitty_images
+            .enforce_quota(&self.referenced_image_ids());
+        self.drop_kitty_placements_of(&evicted);
+    }
+
+    /// Delete every placement of the images `ids` on both screens.
+    pub(super) fn drop_kitty_placements_of(&mut self, ids: &[u32]) {
+        if ids.is_empty() {
+            return;
+        }
+        self.primary
+            .delete_kitty_placements(|p| ids.contains(&p.image_id));
+        if let Some(alt) = &mut self.alt {
+            alt.delete_kitty_placements(|p| ids.contains(&p.image_id));
+        }
     }
 
     /// Image ids kept alive by a placement on either screen (spared by the quota

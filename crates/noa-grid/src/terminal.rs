@@ -748,7 +748,8 @@ impl Terminal {
         // #TODO(agent): OUT-OF-SCOPE — `set_byte_limit` evicts as if nothing
         // were placed; pass the referenced ids so a lowered limit spares
         // images still on screen, as transmit-time eviction does.
-        self.kitty_images.set_byte_limit(bytes);
+        let evicted = self.kitty_images.set_byte_limit(bytes);
+        self.drop_kitty_placements_of(&evicted);
     }
 
     /// Advance Kitty graphics animations to the monotonic time `now_ms` (supplied

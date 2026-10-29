@@ -1290,3 +1290,51 @@ fn insert_and_delete_lines_do_not_move_images() {
     feed(&mut t, b"\x1b[2;5r\x1b[3;1H\x1b[M\x1b[L");
     assert_eq!(tall_state(&t, 1), Some((2, 1, Some([0, 0, 10, 20]))));
 }
+
+#[test]
+fn quota_eviction_drops_the_evicted_images_placements() {
+    let mut t = kitty_terminal();
+    t.set_kitty_image_limit(10 * 20 * 4);
+    let px = [0u8; 10 * 20 * 4];
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=20,I=1,C=1,q=2", &px));
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=20,I=2,C=1,q=2", &px));
+    assert!(t.kitty_images.get(1).is_none(), "id 1 was evicted");
+    let placed: Vec<u32> = t.primary.kitty_placements.iter().map(|p| p.image_id).collect();
+    assert_eq!(placed, [2]);
+    // The smallest free id is 1 again; the new image must not inherit a place.
+    t.set_kitty_image_limit(2 * 10 * 20 * 4);
+    feed(&mut t, &kitty_apc("a=t,f=32,s=10,v=20,I=7,q=2", &px));
+    assert!(t.kitty_images.get(1).is_some(), "id 1 reused");
+    assert!(t.kitty_visible_placements().iter().all(|p| p.image_id != 1));
+}
+
+#[test]
+fn lowering_the_image_limit_drops_the_evicted_images_placements() {
+    let mut t = kitty_terminal();
+    transmit_cell_image(&mut t, 1, "");
+    kitty_cmd(&mut t, "a=p,i=1,q=2");
+    t.set_kitty_image_limit(0);
+    assert!(t.kitty_images.get(1).is_none());
+    assert!(t.primary.kitty_placements.is_empty());
+}
+
+#[test]
+fn margin_scroll_handles_an_image_wider_than_the_column_range() {
+    let mut t = kitty_terminal();
+    transmit_cell_image(&mut t, 1, "");
+    // Starts inside the margins (col 6) but runs far past the right one.
+    feed(&mut t, b"\x1b[6;7H");
+    kitty_cmd(&mut t, "a=p,i=1,c=65535,r=1,C=1,q=2");
+    feed(&mut t, b"\x1b[?69h\x1b[5;15s\x1b[2;12r\x1b[12;5H\n");
+    assert_eq!(placement_at(&t, 1, 0), (6, 5), "straddles the margins: untouched");
+}
+
+#[test]
+fn region_scroll_clip_survives_a_source_rectangle_at_the_coordinate_limit() {
+    let mut t = kitty_terminal();
+    transmit_cell_image(&mut t, 1, "");
+    feed(&mut t, b"\x1b[3;1H");
+    kitty_cmd(&mut t, "a=p,i=1,y=4294967295,h=2,r=2,C=1,q=2");
+    feed(&mut t, b"\x1b[2;5r\x1b[5;1H\n\n");
+    assert_eq!(tall_state(&t, 1).map(|(y, rows, _)| (y, rows)), Some((1, 1)));
+}

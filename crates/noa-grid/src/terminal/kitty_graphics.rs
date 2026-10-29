@@ -77,6 +77,24 @@ impl Terminal {
     /// Feed a data-carrying Kitty graphics command (`a=t`/`a=T`/`a=q`) into the
     /// image store, then—for `a=T`—place it, replying on completion.
     pub(super) fn kitty_transmit(&mut self, cmd: KittyGraphicsCommand) {
+        let starts_retransmit = !self.kitty_images.transfer_in_progress()
+            && matches!(
+                cmd.action,
+                KittyAction::Transmit | KittyAction::TransmitAndDisplay
+            )
+            && cmd.image_id != 0
+            && self.kitty_images.contains(cmd.image_id);
+        if starts_retransmit {
+            // Kitty spec / Ghostty 1.4.0: re-transmitting an id deletes the
+            // image and all its placements as soon as the transfer begins, so
+            // an interrupted or failed one leaves nothing stale on screen.
+            let id = cmd.image_id;
+            self.primary.delete_kitty_placements(|p| p.image_id == id);
+            if let Some(alt) = &mut self.alt {
+                alt.delete_kitty_placements(|p| p.image_id == id);
+            }
+            self.kitty_images.remove(id);
+        }
         match self.kitty_images.transmit(&cmd) {
             TransmitStep::NeedMore => {}
             TransmitStep::Done(done) => {
@@ -219,8 +237,9 @@ impl Terminal {
         };
         let cols = cols.clamp(1, u16::MAX as u32) as u16;
         let rows = rows.clamp(1, u16::MAX as u32) as u16;
-        let cropped = ctrl.src_x != 0 || ctrl.src_y != 0 || ctrl.src_w != 0 || ctrl.src_h != 0;
-        let src = cropped.then_some([ctrl.src_x, ctrl.src_y, src_w, src_h]);
+        // Always explicit (not `None` = whole image) so a region scroll can
+        // clip it without the image's size.
+        let src = Some([ctrl.src_x, ctrl.src_y, src_w, src_h]);
         let cell_x_off = ctrl.cell_x_off.min(cell_w - 1) as u16;
         let cell_y_off = ctrl.cell_y_off.min(cell_h - 1) as u16;
 
@@ -307,7 +326,7 @@ impl Terminal {
                     placement_id: 0,
                     cell_x_off: 0,
                     cell_y_off: 0,
-                    src: None,
+                    src: Some([0, 0, raster.width, raster.height]),
                     cols,
                     rows,
                     z: 0,
@@ -369,8 +388,15 @@ impl Terminal {
             })
         };
 
+        let rows = i64::from(self.active().rows);
         let removed = self.active_mut().delete_kitty_placements(|p| match spec {
-            KittyDelete::All { .. } => true,
+            // Only placements on the active screen: scrollback keeps its own.
+            KittyDelete::All { .. } => {
+                !p.is_virtual
+                    && origin(p).is_some_and(|(top, _)| {
+                        top < live_top + rows && top + i64::from(p.rows) > live_top
+                    })
+            }
             KittyDelete::ById { .. } => {
                 p.image_id == cmd.image_id
                     && (cmd.placement_id == 0 || p.placement_id == cmd.placement_id)
@@ -397,12 +423,20 @@ impl Terminal {
         // The images whose placements were just removed — including relative
         // placements deleted along with their parent — *and* the images the
         // command named directly: an image that was transmitted but never
-        // placed has no placement to remove, yet `d=I`/`d=N` must still free
-        // its data.
+        // placed has no placement to remove, yet `d=I`/`d=N`/`d=R` must still
+        // free its data. A named placement (`p=`) that matched nothing leaves
+        // its image alone.
         let mut candidates = removed;
         match spec {
-            KittyDelete::ById { .. } if cmd.image_id != 0 => candidates.push(cmd.image_id),
-            KittyDelete::ByNumber { .. } => candidates.extend(number_id),
+            KittyDelete::ById { .. } if cmd.image_id != 0 && cmd.placement_id == 0 => {
+                candidates.push(cmd.image_id);
+            }
+            KittyDelete::ByNumber { .. } if cmd.placement_id == 0 => candidates.extend(number_id),
+            KittyDelete::ByIdRange { .. } => candidates.extend(
+                self.kitty_images
+                    .ids()
+                    .filter(|id| (cmd.src_x..=cmd.src_y).contains(id)),
+            ),
             _ => {}
         }
         for id in candidates {
@@ -439,6 +473,21 @@ impl Terminal {
                 Some((p.key(), origin))
             })
             .collect()
+    }
+
+    /// Free every image no placement on either screen references.
+    pub(super) fn reclaim_unreferenced_images(&mut self) {
+        let referenced = self.referenced_image_ids();
+        let unreferenced: Vec<u32> = self
+            .kitty_images
+            .ids()
+            .filter(|id| !referenced.contains(id))
+            .collect();
+        for id in unreferenced {
+            self.kitty_images.remove(id);
+        }
+        // Outside `Terminal::kitty_graphics`, which resyncs after each command.
+        self.kitty_images.sync_animation_flag();
     }
 
     /// Whether any placement on either screen still references image `id`.

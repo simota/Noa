@@ -151,6 +151,9 @@ pub struct KittyGraphicsCommand {
     pub z_index: i32,
     /// `C=1` — do not move the cursor after display.
     pub cursor_no_move: bool,
+    /// `N=1` — the transient usage hint: evict this image first under memory
+    /// pressure. Other values carry no hint.
+    pub transient: bool,
     /// `U=1` — create a virtual placement (Unicode placeholder).
     pub virtual_placement: bool,
     /// `P=` — parent image id of a relative placement (0 = not relative).
@@ -197,6 +200,7 @@ impl KittyGraphicsCommand {
             rows: 0,
             z_index: 0,
             cursor_no_move: false,
+            transient: false,
             virtual_placement: false,
             parent_image_id: 0,
             parent_placement_id: 0,
@@ -316,6 +320,10 @@ pub fn parse(data: &[u8], truncated: bool) -> KittyGraphicsCommand {
                 Some(1) => cmd.cursor_no_move = true,
                 _ => cmd.parse_error = true,
             },
+            b'N' => match u32val(val) {
+                Some(n) => cmd.transient = n == 1,
+                None => cmd.parse_error = true,
+            },
             b'U' => match u32val(val) {
                 Some(0) => cmd.virtual_placement = false,
                 Some(1) => cmd.virtual_placement = true,
@@ -432,6 +440,17 @@ mod tests {
         assert_eq!((c.parent_image_id, c.parent_placement_id), (7, 9));
         assert_eq!((c.parent_x_off, c.parent_y_off), (-4, 5));
         assert!(!c.parse_error);
+    }
+
+    #[test]
+    fn transient_hint_parses() {
+        assert!(parse(b"a=t,N=1", false).transient);
+        assert!(
+            !parse(b"a=t,N=2", false).transient,
+            "unknown hints are ignored"
+        );
+        assert!(!parse(b"a=t", false).transient);
+        assert!(parse(b"a=t,N=x", false).parse_error);
     }
 
     #[test]

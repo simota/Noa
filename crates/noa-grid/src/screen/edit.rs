@@ -323,8 +323,7 @@ impl Screen {
     }
 
     /// Remove placements intersecting a grid row band `[top, bottom]` (0-based
-    /// grid rows). Used for region scrolls / IL / DL where v1 does not reflow
-    /// images with the moved lines.
+    /// grid rows). Used by the screen clears.
     pub(super) fn remove_placements_intersecting_grid_rows(&mut self, top: usize, bottom: usize) {
         if self.kitty_placements.is_empty() {
             return;
@@ -340,16 +339,20 @@ impl Screen {
     }
 
     /// Track placements across a scroll-up of grid rows `[top, bottom]` by `n`.
-    /// When the scroll recorded scrollback (primary full-screen), absolute
-    /// coordinates already follow the pushed rows. Otherwise a full-screen scroll
-    /// shifts anchors up by `n` (dropping those that fall off the top), and a
-    /// partial-region scroll drops intersecting placements (v1 approximation).
+    /// A full-screen scroll that recorded scrollback needs nothing (absolute
+    /// coordinates already follow the pushed rows); one that didn't shifts
+    /// anchors up by `n`, dropping those that fall off the top. A partial
+    /// region scrolls the placements inside it (see
+    /// [`Self::scroll_placements_in_region`]).
     pub(super) fn track_scroll_up(&mut self, top: usize, bottom: usize, n: usize, recorded: bool) {
-        if self.kitty_placements.is_empty() || recorded {
+        if self.kitty_placements.is_empty() {
             return;
         }
         let full = top == 0 && bottom == self.rows as usize - 1;
-        if full {
+        if !full {
+            let pushed = if recorded { n } else { 0 };
+            self.scroll_placements_in_region(top, bottom, -(n as i64), pushed, None);
+        } else if !recorded {
             let base = self.live_area_abs_top();
             self.retain_kitty_placements(|p| {
                 if p.anchor_abs_row + p.rows as usize <= base + n {
@@ -359,15 +362,13 @@ impl Screen {
                     true
                 }
             });
-        } else {
-            self.remove_placements_intersecting_grid_rows(top, bottom);
         }
     }
 
     /// Track placements across a scroll-down of grid rows `[top, bottom]` by `n`
     /// (`scroll_down_region` never records scrollback). A full-screen scroll
     /// shifts anchors down by `n` (dropping those pushed past the bottom); a
-    /// partial-region scroll drops intersecting placements.
+    /// partial region scrolls the placements inside it.
     pub(super) fn track_scroll_down(&mut self, top: usize, bottom: usize, n: usize) {
         if self.kitty_placements.is_empty() {
             return;
@@ -381,8 +382,57 @@ impl Screen {
                 p.anchor_abs_row < floor
             });
         } else {
-            self.remove_placements_intersecting_grid_rows(top, bottom);
+            self.scroll_placements_in_region(top, bottom, n as i64, 0, None);
         }
+    }
+
+    /// Move the placements lying wholly inside the scroll region — grid rows
+    /// `[top, bottom]` and, with narrow horizontal margins, `columns` — by
+    /// `delta` rows with the text, clipping what passes the region's edge and
+    /// deleting those clipped away entirely (Ghostty 1.4.0, after Kitty).
+    /// Placements straddling the region stay on their grid row. `pushed` is
+    /// how many rows the scroll sealed into scrollback, moving the live area
+    /// down in absolute rows.
+    fn scroll_placements_in_region(
+        &mut self,
+        top: usize,
+        bottom: usize,
+        delta: i64,
+        pushed: usize,
+        columns: Option<(u16, u16)>,
+    ) {
+        if self.kitty_placements.is_empty() {
+            return;
+        }
+        let base_after = self.live_area_abs_top() as i64;
+        let base_before = base_after - pushed as i64;
+        let (top, bottom) = (top as i64, bottom as i64);
+        self.retain_kitty_placements(|p| {
+            let r0 = p.anchor_abs_row as i64 - base_before;
+            if r0 < 0 {
+                // Starts in scrollback, which a region scroll never touches.
+                return true;
+            }
+            let r1 = r0 + i64::from(p.rows) - 1;
+            let inside_cols = columns.is_none_or(|(left, right)| {
+                p.anchor_col >= left && p.anchor_col + p.cols.saturating_sub(1) <= right
+            });
+            let mut new_r0 = r0;
+            if inside_cols && r0 >= top && r1 <= bottom {
+                let (moved_top, moved_bottom) = (r0 + delta, r1 + delta);
+                if moved_bottom < top || moved_top > bottom {
+                    return false;
+                }
+                let clip_top = (top - moved_top).max(0);
+                let clip_bottom = (moved_bottom - bottom).max(0);
+                if clip_top + clip_bottom > 0 && !clip_placement_rows(p, clip_top, clip_bottom) {
+                    return false;
+                }
+                new_r0 = moved_top + clip_top;
+            }
+            p.anchor_abs_row = (base_after + new_r0) as usize;
+            true
+        });
     }
 
     // ── vertical motion / scroll ────────────────────────────────────
@@ -449,7 +499,8 @@ impl Screen {
         }
         if self.has_narrow_horizontal_margins() {
             self.scroll_rectangle_up(top, bottom, n);
-            self.remove_placements_intersecting_margin_rows(top, bottom);
+            let columns = (self.left_margin(), self.right_margin());
+            self.scroll_placements_in_region(top, bottom, -(n as i64), 0, Some(columns));
             return;
         }
         let recorded = self.records_scrollback_for_region(top, bottom);
@@ -584,7 +635,8 @@ impl Screen {
         }
         if self.has_narrow_horizontal_margins() {
             self.scroll_rectangle_down(top, bottom, n);
-            self.remove_placements_intersecting_margin_rows(top, bottom);
+            let columns = (self.left_margin(), self.right_margin());
+            self.scroll_placements_in_region(top, bottom, n as i64, 0, Some(columns));
             return;
         }
         let blank = self.blank();
@@ -596,27 +648,6 @@ impl Screen {
             r.dirty = true;
         }
         self.track_scroll_down(top, bottom, n);
-    }
-
-    /// Like [`Self::remove_placements_intersecting_grid_rows`], but only for
-    /// placements that also overlap the active horizontal margins. A rectangle
-    /// scroll leaves the columns outside the margins untouched, so images
-    /// living there must survive it.
-    fn remove_placements_intersecting_margin_rows(&mut self, top: usize, bottom: usize) {
-        if self.kitty_placements.is_empty() {
-            return;
-        }
-        let base = self.live_area_abs_top();
-        let r_top = base + top;
-        let r_bot = base + bottom;
-        let left = self.left_margin();
-        let right = self.right_margin();
-        self.retain_kitty_placements(|p| {
-            let p_top = p.anchor_abs_row;
-            let p_bot = p.anchor_abs_row + p.rows as usize;
-            let p_right = p.anchor_col.saturating_add(p.cols);
-            p_bot <= r_top || p_top > r_bot || p_right <= left || p.anchor_col > right
-        });
     }
 
     fn has_narrow_horizontal_margins(&self) -> bool {
@@ -1094,7 +1125,6 @@ impl Screen {
         let n = (n.max(1) as usize).min(len);
         if self.has_narrow_horizontal_margins() {
             self.scroll_rectangle_down(start, bottom, n);
-            self.remove_placements_intersecting_margin_rows(start, bottom);
             return;
         }
         let blank = self.blank();
@@ -1105,7 +1135,8 @@ impl Screen {
         for r in &mut self.grid.canonicalize()[start..=bottom] {
             r.dirty = true;
         }
-        self.remove_placements_intersecting_grid_rows(start, bottom);
+        // Placements stay put: Kitty (and Ghostty 1.4.0) scroll images only
+        // for IND/RI/SU/SD, not IL/DL.
     }
 
     pub fn delete_lines(&mut self, n: u16) {
@@ -1123,7 +1154,6 @@ impl Screen {
         let n = (n.max(1) as usize).min(len);
         if self.has_narrow_horizontal_margins() {
             self.scroll_rectangle_up(start, bottom, n);
-            self.remove_placements_intersecting_margin_rows(start, bottom);
             return;
         }
         let blank = self.blank();
@@ -1134,7 +1164,8 @@ impl Screen {
         for r in &mut self.grid.canonicalize()[start..=bottom] {
             r.dirty = true;
         }
-        self.remove_placements_intersecting_grid_rows(start, bottom);
+        // Placements stay put: Kitty (and Ghostty 1.4.0) scroll images only
+        // for IND/RI/SU/SD, not IL/DL.
     }
 
     pub fn repeat_preceding_char(
@@ -1154,4 +1185,23 @@ impl Screen {
             }
         }
     }
+}
+
+/// Cut `top` rows off the top and `bottom` off the bottom of placement `p`,
+/// cropping its source rectangle in proportion. `false` when `p` carries no
+/// source rectangle to crop.
+fn clip_placement_rows(p: &mut KittyPlacement, top: i64, bottom: i64) -> bool {
+    let Some([x, y, w, h]) = p.src else {
+        return false;
+    };
+    let rows = u64::from(p.rows);
+    let cut = |k: i64| (u64::from(h) * k as u64 / rows) as u32;
+    let (cut_top, cut_bottom) = (cut(top), cut(bottom));
+    p.src = Some([x, y + cut_top, w, h - cut_top - cut_bottom]);
+    p.rows -= (top + bottom) as u16;
+    if top > 0 {
+        // The pixel offset belonged to the clipped first row.
+        p.cell_y_off = 0;
+    }
+    true
 }

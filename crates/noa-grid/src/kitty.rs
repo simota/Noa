@@ -138,6 +138,8 @@ pub struct KittyImage {
     pub epoch: u64,
     /// Monotonic transfer order, used to pick the oldest victim under quota.
     pub seq: u64,
+    /// Transmitted with the transient hint (`N=1`): evicted first.
+    pub transient: bool,
     /// All animation frames; `frames[0]` is the root (frame 1).
     frames: Vec<KittyFrame>,
     anim: Anim,
@@ -210,7 +212,6 @@ pub struct ImageStore {
     /// per-image / intermediate-decode ceiling so an inflating `o=z` stream or
     /// oversized frame can't exceed the whole terminal's budget.
     byte_limit: usize,
-    next_auto_id: u32,
     next_seq: u64,
     transfer: Option<PendingTransfer>,
     /// Mirrors [`Self::has_running_animation`], refreshed by
@@ -233,7 +234,6 @@ impl Default for ImageStore {
             total_frames: 0,
             total_bytes: 0,
             byte_limit: TOTAL_BYTES_LIMIT,
-            next_auto_id: 1,
             next_seq: 0,
             transfer: None,
             animation_flag: Arc::new(AtomicBool::new(false)),
@@ -279,6 +279,11 @@ impl ImageStore {
             .flatten()
             .map(|(_, id)| *id)
             .collect()
+    }
+
+    /// All stored image ids.
+    pub fn ids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.images.keys().copied()
     }
 
     /// All stored image ids (used by the quota sweep's "referenced" set).
@@ -366,7 +371,7 @@ impl ImageStore {
             return Err(KittyError::TooBig);
         }
         let id = self.assign_auto_id();
-        self.insert(id, 0, width, height, rgba)?;
+        self.insert(id, 0, false, width, height, rgba)?;
         Ok(id)
     }
 
@@ -602,7 +607,7 @@ impl ImageStore {
         }
 
         let id = self.assign_id(cmd);
-        self.insert(id, cmd.image_number, width, height, rgba)?;
+        self.insert(id, cmd.image_number, cmd.transient, width, height, rgba)?;
         Ok(id)
     }
 
@@ -614,21 +619,19 @@ impl ImageStore {
         self.assign_auto_id()
     }
 
-    fn assign_auto_id(&mut self) -> u32 {
-        // Auto-assign the next free id (skipping any in use).
-        loop {
-            let id = self.next_auto_id;
-            self.next_auto_id = self.next_auto_id.wrapping_add(1).max(1);
-            if id != 0 && !self.contains(id) {
-                return id;
-            }
-        }
+    /// The smallest id not in use, as Ghostty 1.4.0 and Kitty assign it. The
+    /// store holds at most `MAX_STORED_IMAGES`, so the probe is short.
+    fn assign_auto_id(&self) -> u32 {
+        (1..=u32::MAX)
+            .find(|&id| !self.contains(id))
+            .expect("fewer images than ids")
     }
 
     fn insert(
         &mut self,
         id: u32,
         number: u32,
+        transient: bool,
         width: u32,
         height: u32,
         rgba: Vec<u8>,
@@ -656,6 +659,7 @@ impl ImageStore {
                 rgba: Arc::clone(&rgba),
                 epoch: next_image_epoch(),
                 seq,
+                transient,
                 frames: vec![KittyFrame {
                     rgba,
                     gap_ms: DEFAULT_FRAME_GAP_MS,
@@ -668,17 +672,18 @@ impl ImageStore {
         Ok(())
     }
 
-    /// Evict images until the total byte budget is satisfied. Images whose id is
-    /// not in `referenced` (no visible placement) are dropped first, oldest by
-    /// `seq`; then, if still over budget, the oldest overall.
+    /// Evict images until the total byte budget is satisfied, in Ghostty
+    /// 1.4.0's order: unplaced images (id not in `referenced`) before placed
+    /// ones, transient (`N=1`) before the rest within each, oldest by `seq`
+    /// within that.
     pub fn enforce_quota(&mut self, referenced: &HashSet<u32>) {
         let mut evicted_any = false;
         while self.total_bytes > self.byte_limit {
+            let rank = |id: &u32| (referenced.contains(id), !self.images[id].transient);
             let victim = self
                 .order
                 .iter()
-                .find(|(_, id)| !referenced.contains(id))
-                .or_else(|| self.order.first())
+                .min_by_key(|(seq, id)| (rank(id), *seq))
                 .map(|(_, id)| *id);
             match victim {
                 Some(id) => {
@@ -1546,6 +1551,32 @@ mod tests {
         let id = done.result.unwrap();
         assert_ne!(id, 1);
         assert_eq!(store.get(id).unwrap().number, 7);
+    }
+
+    #[test]
+    fn auto_id_is_the_smallest_free_id() {
+        let mut store = ImageStore::new();
+        let px = vec![0u8; 4];
+        for cmd in [
+            "a=t,f=32,s=1,v=1,i=1",
+            "a=t,f=32,s=1,v=1,i=2",
+            "a=t,f=32,s=1,v=1,i=4",
+        ] {
+            store.transmit(&direct(cmd, &px));
+        }
+        store.remove(2);
+        let auto = |store: &mut ImageStore| {
+            let TransmitStep::Done(done) = store.transmit(&direct("a=t,f=32,s=1,v=1,I=7", &px))
+            else {
+                panic!()
+            };
+            done.result.unwrap()
+        };
+        assert_eq!(auto(&mut store), 2, "reuses a freed id");
+        assert_eq!(auto(&mut store), 3);
+        assert_eq!(auto(&mut store), 5, "skips the client's id 4");
+        store.remove(3);
+        assert_eq!(auto(&mut store), 3, "back down to a freed id, not onward");
     }
 
     #[test]

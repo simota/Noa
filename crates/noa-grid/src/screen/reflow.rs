@@ -129,10 +129,24 @@ impl Screen {
         // A cursor above populated rows must not make the reflow discard
         // those rows. Keep the last content row in the window and send any
         // displaced top rows to scrollback, just like a row-only shrink.
-        let grid_start = cursor_row
+        let mut grid_start = cursor_row
             .saturating_sub(target_rows.saturating_sub(1))
             .max(content_end.saturating_sub(target_rows))
             .min(max_grid_start);
+        // Growing with the cursor above the last row keeps the old top in
+        // place and adds rows below (Ghostty parity): pulling history back
+        // would shove a just-cleared prompt down the screen.
+        let old_rows = self.grid.len();
+        if target_rows > old_rows && usize::from(self.cursor.y) + 1 < old_rows {
+            let old_top = line_remaps
+                .iter()
+                .find(|r| {
+                    old_scrollback_len >= r.old_start
+                        && old_scrollback_len < r.old_start + r.old_len
+                })
+                .map_or(0, |r| r.new_base);
+            grid_start = grid_start.max(old_top);
+        }
         let grid_end = (grid_start + target_rows).min(reflowed_len);
 
         // Reflow trimming does not bump `rows_evicted` (pre-existing quirk:

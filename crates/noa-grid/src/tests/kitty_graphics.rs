@@ -1372,3 +1372,16 @@ fn reparenting_a_chain_root_counts_its_descendants_toward_the_cap() {
         b"\x1b_Gi=1,p=1;ETOODEEP:relative placement chain too deep\x1b\\"
     );
 }
+
+#[test]
+fn erase_display_removes_a_child_on_screen_whose_parent_is_in_scrollback() {
+    let mut t = kitty_terminal();
+    transmit_cell_image(&mut t, 1, "");
+    transmit_cell_image(&mut t, 2, "");
+    kitty_cmd(&mut t, "a=p,i=1,p=1,C=1,q=2");
+    kitty_cmd(&mut t, "a=p,i=2,p=2,P=1,Q=1,V=2,q=2");
+    feed(&mut t, b"\x1b[24;1H\n");
+    assert_eq!(placement_at(&t, 2, 2), (0, 1), "only the child is on screen");
+    feed(&mut t, b"\x1b[2J");
+    assert!(t.kitty_visible_placements().is_empty());
+}

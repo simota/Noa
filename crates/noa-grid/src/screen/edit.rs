@@ -353,6 +353,24 @@ impl Screen {
             let p_bot = p.anchor_abs_row + p.rows as usize;
             p_bot <= r_top || p_top > r_bot
         });
+        // `retain_kitty_placements` keeps relative placements with their
+        // parent, but a clear removes what it covers wherever the parent is
+        // (one in scrollback can hang a child on screen), so test their
+        // resolved rows too.
+        let (r_top, r_bot) = (r_top as i64, r_bot as i64);
+        let covered: HashSet<(u32, u32)> = self
+            .kitty_placements
+            .iter()
+            .filter(|p| p.parent.is_some())
+            .filter(|p| {
+                self.relative_placement_origin(p, &HashMap::new())
+                    .is_some_and(|(row, _)| row + i64::from(p.rows) > r_top && row <= r_bot)
+            })
+            .map(KittyPlacement::key)
+            .collect();
+        if !covered.is_empty() {
+            self.delete_kitty_placements(|p| covered.contains(&p.key()));
+        }
     }
 
     /// Track placements across a scroll-up of grid rows `[top, bottom]` by `n`.

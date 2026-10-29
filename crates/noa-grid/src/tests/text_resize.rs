@@ -500,3 +500,34 @@ fn seed_mark_wide_pad_keeps_the_occupancy_watermark() {
     Stream::new().feed(b"\x1b[2J", &mut t);
     assert!(t.primary.grid[0].is_blank());
 }
+
+#[test]
+fn resize_reflow_grow_keeps_top_when_cursor_is_above_bottom() {
+    // Ghostty parity: growing with the cursor above the last row adds rows at
+    // the bottom instead of pulling history back above (e.g. after Ctrl+L).
+    let mut t = run_size(
+        10,
+        5,
+        b"L1\r\nL2\r\nL3\r\nL4\r\nL5\r\nL6\r\nL7\r\nL8\x1b[H\x1b[JP",
+    );
+    assert_eq!(t.scrollback_len(), 3);
+
+    t.resize(GridSize::new(12, 9));
+
+    assert_eq!(t.scrollback_len(), 3);
+    assert_eq!(row_text(&t, 0, 2), "P ");
+    assert_eq!(t.primary.cursor.y, 0);
+}
+
+#[test]
+fn resize_reflow_grow_pulls_history_when_cursor_is_on_last_row() {
+    let mut t = run_size(10, 5, b"L1\r\nL2\r\nL3\r\nL4\r\nL5\r\nL6\r\nL7\r\nL8");
+    assert_eq!(t.scrollback_len(), 3);
+
+    t.resize(GridSize::new(12, 9));
+
+    assert_eq!(t.scrollback_len(), 0);
+    assert_eq!(row_text(&t, 0, 2), "L1");
+    assert_eq!(row_text(&t, 7, 2), "L8");
+    assert_eq!(t.primary.cursor.y, 7);
+}

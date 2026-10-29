@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-29
+
+### Changed
+
+- Faster ingest of non-ASCII output: grapheme cluster checks skip full
+  segmentation on the common path (headless 150 MB unicode feed
+  920 ms → 591 ms).
+
+### Fixed
+
+- A resize that changes the column count (e.g. entering fullscreen) no longer
+  pulls scrollback back above the screen when the cursor is above the last
+  row, so after Ctrl+L the prompt stays at the top, matching Ghostty.
+
 ## [0.6.0] - 2026-10-29
 
 ### Added

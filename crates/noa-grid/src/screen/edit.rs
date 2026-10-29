@@ -268,7 +268,8 @@ impl Screen {
     /// Validate making the placement keyed `key` relative to `parent`: the
     /// parent must exist (`ENOPARENT`), `key` must not be among its ancestors
     /// (`ECYCLE` — a re-put of a parent onto its own descendant), and the
-    /// chain must stay within [`KITTY_MAX_RELATIVE_DEPTH`] (`ETOODEEP`).
+    /// chain — down to `key`'s deepest existing descendant — must stay within
+    /// [`KITTY_MAX_RELATIVE_DEPTH`] (`ETOODEEP`).
     pub(crate) fn check_kitty_parent(
         &self,
         key: (u32, u32),
@@ -283,6 +284,9 @@ impl Screen {
                 return Err(KittyError::Cycle);
             }
             let Some(next) = current.parent else {
+                if depth + self.kitty_descendant_depth(key) > KITTY_MAX_RELATIVE_DEPTH {
+                    return Err(KittyError::TooDeep);
+                }
                 return Ok(());
             };
             depth += 1;
@@ -293,6 +297,19 @@ impl Screen {
                 .kitty_placement((next.image_id, next.placement_id))
                 .ok_or(KittyError::NoParent)?;
         }
+    }
+
+    /// How many generations of relative placements hang below `key`.
+    fn kitty_descendant_depth(&self, key: (u32, u32)) -> usize {
+        self.kitty_placements
+            .iter()
+            .filter(|p| {
+                p.parent
+                    .is_some_and(|q| (q.image_id, q.placement_id) == key)
+            })
+            .map(|p| 1 + self.kitty_descendant_depth(p.key()))
+            .max()
+            .unwrap_or(0)
     }
 
     /// Placements projected into the current viewport (non-virtual, intersecting
@@ -419,7 +436,9 @@ impl Screen {
                     && u32::from(p.anchor_col) + u32::from(p.cols) - 1 <= u32::from(right)
             });
             let mut new_r0 = r0;
-            if inside_cols && r0 >= top && r1 <= bottom {
+            // A virtual placement's image grid is fixed; its placeholder
+            // cells scroll with the text and carry the image rows they show.
+            if !p.is_virtual && inside_cols && r0 >= top && r1 <= bottom {
                 let (moved_top, moved_bottom) = (r0 + delta, r1 + delta);
                 if moved_bottom < top || moved_top > bottom {
                     return false;

@@ -1338,3 +1338,37 @@ fn region_scroll_clip_survives_a_source_rectangle_at_the_coordinate_limit() {
     feed(&mut t, b"\x1b[2;5r\x1b[5;1H\n\n");
     assert_eq!(tall_state(&t, 1).map(|(y, rows, _)| (y, rows)), Some((1, 1)));
 }
+
+#[test]
+fn region_scroll_leaves_virtual_placements_to_their_placeholders() {
+    let mut t = kitty_virtual_terminal();
+    put_placeholder(&mut t, 0, 0, 1, &[DIA[0], DIA[0]]);
+    put_placeholder(&mut t, 0, 1, 1, &[DIA[1], DIA[0]]);
+    feed(&mut t, b"\x1b[1;4r\x1b[4;1H\n");
+    let placements = t.kitty_placeholder_placements();
+    assert_eq!(placements.len(), 1, "only image row 1 is left on screen");
+    assert_eq!(placements[0].grid_y, 0);
+    assert_eq!(placements[0].src, Some([0, 20, 10, 20]));
+}
+
+#[test]
+fn reparenting_a_chain_root_counts_its_descendants_toward_the_cap() {
+    let mut t = kitty_parent_terminal();
+    let max = crate::screen::KITTY_MAX_RELATIVE_DEPTH as u32;
+    let mut parent = (1, 1);
+    for n in 1..=max {
+        kitty_cmd(
+            &mut t,
+            &format!("a=p,i=2,p={},P={},Q={},H=1,q=1", 10 + n, parent.0, parent.1),
+        );
+        parent = (2, 10 + n);
+    }
+    kitty_cmd(&mut t, "a=p,i=1,p=2,C=1,q=1");
+    assert!(t.pending_writes.is_empty());
+    // Hanging the full-depth chain under (1, 2) would make it max + 1 deep.
+    kitty_cmd(&mut t, "a=p,i=1,p=1,P=1,Q=2");
+    assert_eq!(
+        t.pending_writes,
+        b"\x1b_Gi=1,p=1;ETOODEEP:relative placement chain too deep\x1b\\"
+    );
+}

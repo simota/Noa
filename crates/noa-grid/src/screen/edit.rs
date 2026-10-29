@@ -1285,7 +1285,10 @@ fn clip_placement_rows(p: &mut KittyPlacement, top: i64, bottom: i64) -> bool {
             // The rows left show this many source pixels, less the offset
             // into the first cell.
             let visible = cell_h * (span - count);
-            let offset = u64::from(p.cell_y_off);
+            // The offset in effect: clamped into the current cell, which may
+            // have shrunk since the placement was made (Ghostty's
+            // `cellOffset`).
+            let offset = u64::from(p.cell_y_off).min(cell_h.saturating_sub(1));
             if visible <= offset {
                 return false;
             }

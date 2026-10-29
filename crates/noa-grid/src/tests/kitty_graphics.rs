@@ -1650,3 +1650,18 @@ fn a_cell_size_change_recomputes_the_span_of_a_native_size_image() {
     feed(&mut t, b"\x1b[24;1H\n\n\n\n");
     assert_eq!(tall_state(&t, 1).map(|(y, rows, _)| (y, rows)), Some((-4, 8)));
 }
+
+#[test]
+fn bottom_clip_uses_the_offset_clamped_into_the_current_cell() {
+    let mut t = kitty_terminal();
+    feed(&mut t, b"\x1b[3;1H");
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=20,i=1,Y=19,C=1,q=2", &[0u8; 800]));
+    // 10 px cells: the offset takes effect as 9 px, so the image spans
+    // 20 + 9 px = three rows (2..=4).
+    t.set_pixel_metrics(10, 10, 200, 240);
+    assert_eq!(t.primary.kitty_placements[0].rows, 3);
+    // Region rows 2..=4; RI pushes the last row past the bottom.
+    feed(&mut t, b"\x1b[3;5r\x1b[3;1H\x1bM");
+    let p = &t.primary.kitty_placements[0];
+    assert_eq!((p.rows, p.src), (2, Some([0, 0, 10, 11])), "20 px of rows less the 9 px offset");
+}

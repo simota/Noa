@@ -169,7 +169,7 @@ jobs:
             find Noa.app -print | LC_ALL=C sort |
               zip -X -q "${GITHUB_WORKSPACE}/${archive}" -@
           )
-          unzip -Z1 "${archive}" | grep -qx "Noa.app/Contents/MacOS/Noa"
+          unzip -Z1 "${archive}" | grep -x "Noa.app/Contents/MacOS/Noa" >/dev/null
           shasum -a 256 "${archive}" > "${archive}.sha256"
           echo "archive=${archive}" >> "${GITHUB_OUTPUT}"
 
@@ -253,7 +253,7 @@ jobs:
         run: |
           set -euo pipefail
           name="Noa-${{ steps.version.outputs.version }}-linux-x86_64"
-          tar -tzf "target/release/${name}.tar.gz" | grep -qx "${name}/bin/Noa"
+          tar -tzf "target/release/${name}.tar.gz" | grep -x "${name}/bin/Noa" >/dev/null
           cp "target/release/${name}.tar.gz" "target/release/${name}.tar.gz.sha256" .
           echo "archive=${name}.tar.gz" >> "${GITHUB_OUTPUT}"
 

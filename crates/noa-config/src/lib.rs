@@ -758,6 +758,8 @@ pub struct StartupConfig {
     /// Default [`DEFAULT_CURSOR_STOP_BLINKING_AFTER_SECS`]; set `0` to
     /// restore Ghostty-parity behavior.
     pub cursor_stop_blinking_after_secs: u64,
+    /// `ember-idle-after`: opt-in idle companion, in seconds (`0` disables).
+    pub ember_idle_after_secs: u64,
     /// `background-opacity`: 0.0..=1.0, clamped. Default is fully opaque.
     /// **Ignored while `glassmorphism` is on** — that toggle installs
     /// [`glass_background_opacity`] (at the configured level) instead (see
@@ -1012,6 +1014,7 @@ impl Default for StartupConfig {
             cursor_style: None,
             cursor_style_blink: None,
             cursor_stop_blinking_after_secs: DEFAULT_CURSOR_STOP_BLINKING_AFTER_SECS,
+            ember_idle_after_secs: 0,
             background_opacity: 1.0,
             background_blur_radius: 0,
             configured_background_opacity: 1.0,
@@ -1133,6 +1136,7 @@ pub struct ConfigOverrides {
     pub cursor_style: Option<CursorShape>,
     pub cursor_style_blink: Option<bool>,
     pub cursor_stop_blinking_after_secs: Option<u64>,
+    pub ember_idle_after_secs: Option<u64>,
     pub background_opacity: Option<f32>,
     pub background_blur_radius: Option<u16>,
     pub glassmorphism: Option<GlassLevel>,
@@ -1226,6 +1230,7 @@ macro_rules! impl_redacted_config_debug {
                         &self.cursor_stop_blinking_after_secs,
                     )
                     .field("background_opacity", &self.background_opacity)
+                    .field("ember_idle_after_secs", &self.ember_idle_after_secs)
                     .field("background_blur_radius", &self.background_blur_radius)
                     .field("glassmorphism", &self.glassmorphism)
                     .field("background_image", &self.background_image)
@@ -1348,6 +1353,9 @@ impl ConfigOverrides {
             cursor_stop_blinking_after_secs: higher_priority
                 .cursor_stop_blinking_after_secs
                 .or(self.cursor_stop_blinking_after_secs),
+            ember_idle_after_secs: higher_priority
+                .ember_idle_after_secs
+                .or(self.ember_idle_after_secs),
             background_opacity: higher_priority
                 .background_opacity
                 .or(self.background_opacity),
@@ -1506,6 +1514,9 @@ impl ConfigOverrides {
             cursor_stop_blinking_after_secs: self
                 .cursor_stop_blinking_after_secs
                 .unwrap_or(base.cursor_stop_blinking_after_secs),
+            ember_idle_after_secs: self
+                .ember_idle_after_secs
+                .unwrap_or(base.ember_idle_after_secs),
             background_opacity: self.background_opacity.unwrap_or(base.background_opacity),
             background_blur_radius: self
                 .background_blur_radius
@@ -2001,6 +2012,7 @@ mod tests {
                 cursor_style: None,
                 cursor_style_blink: None,
                 cursor_stop_blinking_after_secs: DEFAULT_CURSOR_STOP_BLINKING_AFTER_SECS,
+                ember_idle_after_secs: 0,
                 background_opacity: 1.0,
                 background_blur_radius: 0,
                 configured_background_opacity: 1.0,

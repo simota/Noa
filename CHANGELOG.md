@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in idle Ember companion (`ember-idle-after`, default `0`): one silent animation and a still question emote in the focused main pane, dismissed by activity, with macOS Reduce Motion support.
+
 ## [0.5.0] - 2026-10-21
 
 ### Changed

@@ -187,6 +187,9 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::AppCommand(command) => {
+                // Only the native menus send this, and they produce no winit
+                // input event for the idle clock to see.
+                self.note_user_activity();
                 self.handle_app_command(event_loop, command, CommandOrigin::App)
             }
             UserEvent::ToggleQuickTerminal => self.toggle_quick_terminal(event_loop),
@@ -352,6 +355,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let Some(window_id) = self.resolve_pane_window(window_id, pane_id) else {
                     return;
                 };
+                self.note_idle_ember_output(window_id, pane_id);
                 // Every pty-driven redraw pushes the post-burst memory trim
                 // out; it fires once, MEMORY_TRIM_QUIESCENCE after the burst.
                 self.arm_memory_trim();
@@ -594,6 +598,9 @@ impl ApplicationHandler<UserEvent> for App {
                 .get(&window_id)
                 .map_or(ModifiersState::empty(), |state| state.modifiers);
             self.modifiers = input_modifiers_for_window(self.modifiers, window_modifiers);
+        }
+        if idle_ember::is_user_activity(&event) {
+            self.note_user_activity();
         }
         // While the Session Overview overlay is visible, its host window's
         // redraws and input belong to the Overview; structural events
@@ -1247,6 +1254,7 @@ impl ApplicationHandler<UserEvent> for App {
         let transient_overlay_deadline = self.tick_transient_overlays();
         let theme_settings_deadline = self.tick_theme_settings_debounce();
         let config_watch_deadline = self.tick_config_watch();
+        let idle_ember_deadline = self.tick_idle_ember();
         let live_wallpaper_deadline = self.tick_live_wallpaper();
         let kitty_anim_deadline = self.tick_kitty_animations();
         let memory_trim_deadline = self.tick_memory_trim();
@@ -1263,6 +1271,7 @@ impl ApplicationHandler<UserEvent> for App {
             transient_overlay_deadline,
             theme_settings_deadline,
             config_watch_deadline,
+            idle_ember_deadline,
             live_wallpaper_deadline,
             kitty_anim_deadline,
             memory_trim_deadline,
@@ -2087,6 +2096,7 @@ impl App {
         // paused past the idle window freezes the cursor solid mid-preedit.
         if timers::ime_event_is_cursor_blink_activity(&event) {
             self.reset_cursor_blink_phase();
+            self.note_user_activity();
         }
         // The modal layers own the keyboard in the same order as
         // `KeyboardInput`: confirm dialog → search prompt → palette → rename.

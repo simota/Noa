@@ -40,6 +40,7 @@ A from-scratch DFA parser plus a `Handler` trait separating parsing from state.
 
 ## UI overlays
 
+- **Idle Ember** — opt in with `ember-idle-after` (default off): a silent, display-only companion in the focused main pane, with a 4.8-second play and a still question emote; respects macOS Reduce Motion and stops scheduling frames when resting.
 - **Command palette** — fuzzy (subsequence) search to run actions
 - **Search prompt** — incremental search UI
 - **Theme & settings overlay** — a theme/settings editor with live preview opened from `Settings…` (⌘,), writes back to config

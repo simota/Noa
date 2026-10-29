@@ -490,6 +490,10 @@ impl App {
                 chrome_textures: ChromeTextures::default(),
                 palette_renderer: None,
                 palette_card: None,
+                idle_ember_card: None,
+                idle_ember_texture: None,
+                idle_ember_pixels: Vec::new(),
+                idle_ember_pose: None,
                 palette_padding: noa_core::GridPadding::ZERO,
                 palette_font_px: 0.0,
                 palette_scrim: None,
@@ -1288,6 +1292,13 @@ impl App {
     /// Shared by [`Self::close_tab`] and [`Self::destroy_scratch_terminal`]
     /// so the two teardown paths can't drift apart.
     pub(super) fn clear_window_bound_overlays(&mut self, window_id: WindowId) {
+        if self
+            .idle_ember
+            .as_ref()
+            .is_some_and(|(id, _)| *id == window_id)
+        {
+            self.clear_idle_ember();
+        }
         if self
             .search_prompt
             .as_ref()

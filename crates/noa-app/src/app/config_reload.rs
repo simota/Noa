@@ -249,7 +249,12 @@ impl App {
         let scrollback_persist_disabled = previous.scrollback_persist.persists()
             && !(applied.scrollback_persist.persists() && applied.window_save_state.restores());
 
+        let idle_ember_changed = previous.ember_idle_after_secs != applied.ember_idle_after_secs;
         self.config = applied;
+        if idle_ember_changed {
+            self.note_user_activity();
+            self.clear_idle_ember();
+        }
 
         if scrollback_persist_disabled {
             // Turning it off means "stop keeping this", not "stop keeping it

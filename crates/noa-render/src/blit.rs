@@ -389,6 +389,12 @@ pub struct CardPipeline {
 }
 
 impl CardPipeline {
+    /// Release cached bindings for transient overlays when their source is
+    /// discarded. Submitted command buffers retain their own bindings.
+    pub fn clear_texture_cache(&self) {
+        self.pool.borrow_mut().clear();
+    }
+
     /// Alpha-replace blend for sidebar composites: color is the usual
     /// src-over, but the alpha channel is *written* (src·1 + dst·0) rather
     /// than accumulated. Overlapping band/card composites all settle to the

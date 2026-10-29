@@ -43,6 +43,7 @@ pub(crate) fn build_overrides(
     let mut cursor_style = None;
     let mut cursor_style_blink = None;
     let mut cursor_stop_blinking_after_secs = None;
+    let mut ember_idle_after_secs = None;
     let mut background_opacity = None;
     let mut background_blur_radius = None;
     let mut glassmorphism = None;
@@ -244,6 +245,9 @@ pub(crate) fn build_overrides(
             "cursor-stop-blinking-after" => {
                 cursor_stop_blinking_after_secs =
                     parse_cursor_stop_blinking_after(path, directive, &mut diagnostics);
+            }
+            "ember-idle-after" => {
+                ember_idle_after_secs = parse_ember_idle_after(path, directive, &mut diagnostics);
             }
             "background-opacity" => {
                 background_opacity = parse_opacity(path, directive, &mut diagnostics);
@@ -497,6 +501,7 @@ pub(crate) fn build_overrides(
             cursor_style,
             cursor_style_blink,
             cursor_stop_blinking_after_secs,
+            ember_idle_after_secs,
             background_opacity,
             background_blur_radius,
             glassmorphism,
@@ -612,6 +617,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "cursor-style"
             | "cursor-style-blink"
             | "cursor-stop-blinking-after"
+            | "ember-idle-after"
             | "alpha-blending"
             | "background-opacity"
             | "background-blur-radius"

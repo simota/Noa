@@ -347,6 +347,11 @@ fn show_config_output(config: &StartupConfig) -> String {
     );
     push_line(
         &mut out,
+        "ember-idle-after",
+        &config.ember_idle_after_secs.to_string(),
+    );
+    push_line(
+        &mut out,
         "background-opacity",
         &config.background_opacity.to_string(),
     );

@@ -87,6 +87,7 @@ pub(crate) enum SettingsRowKind {
     /// mirrors it into `self.config` the moment the overlay saves (the
     /// send-selection picker reads it from there at commit time).
     SendSelectionSendEnter,
+    EmberIdleAfter,
     /// R-9: `scrollback-limit`. `is_live() == false` (no runtime-apply path
     /// from this row directly), but reload-exempt (`Liveness::OnSave`,
     /// `RestartReason::None`) — `ConfigWatcher` re-applies it within 500ms
@@ -182,7 +183,7 @@ pub(crate) enum SettingsRowKind {
 }
 
 impl SettingsRowKind {
-    pub(crate) const COUNT: usize = 36;
+    pub(crate) const COUNT: usize = 37;
     pub(crate) const ALL: [SettingsRowKind; Self::COUNT] = [
         Self::FontSize,
         Self::BackgroundOpacity,
@@ -204,6 +205,7 @@ impl SettingsRowKind {
         Self::Glassmorphism,
         Self::ConfirmQuit,
         Self::SendSelectionSendEnter,
+        Self::EmberIdleAfter,
         Self::ScrollbackLimit,
         Self::CursorStyleBlink,
         Self::MinimumContrast,
@@ -238,6 +240,7 @@ impl SettingsRowKind {
                 | Self::SidebarPreviewLines
                 | Self::SidebarWidth
                 | Self::SidebarFontSize
+                | Self::EmberIdleAfter
                 | Self::ServerTokenCopy
                 | Self::ServerRemoteAppQr
                 | Self::ServerStatus
@@ -272,6 +275,7 @@ impl SettingsRowKind {
             Self::Glassmorphism => "Glassmorphism",
             Self::ConfirmQuit => "Confirm Quit",
             Self::SendSelectionSendEnter => "Send Selection Enter",
+            Self::EmberIdleAfter => "Idle Ember",
             Self::ScrollbackLimit => "Scrollback Limit",
             Self::CursorStyleBlink => "Cursor Blink",
             Self::MinimumContrast => "Minimum Contrast",
@@ -326,6 +330,7 @@ impl SettingsRowKind {
                 "Frosted translucent sidebar and tab-overview chrome, 4 steps (Off/1/2/3, higher = more transparent). Takes over window opacity and blur with the level's own recommended pair. Applies on save."
             }
             Self::ConfirmQuit => "Ask for confirmation before quitting the app.",
+            Self::EmberIdleAfter => "Seconds of quiet before Ember appears. 0 = off.",
             Self::SendSelectionSendEnter => {
                 "Send Enter after the send-selection picker pastes. Applies on save."
             }
@@ -462,6 +467,7 @@ pub(crate) enum RowDraft {
     Glassmorphism(GlassLevel),
     ConfirmQuit(bool),
     SendSelectionSendEnter(bool),
+    EmberIdleAfter(u64),
     ScrollbackLimit(usize),
     /// Normalizes `noa_config::StartupConfig::cursor_style_blink`'s
     /// `Option<bool>` (`None` = terminal default) to a plain `bool` the row
@@ -552,6 +558,8 @@ impl RowDraft {
                 }
             }
             RowDraft::BackgroundImageInterval(secs) => format!("{secs}s"),
+            RowDraft::EmberIdleAfter(0) => "Off".to_string(),
+            RowDraft::EmberIdleAfter(secs) => format!("{secs}s"),
             RowDraft::CursorStyle(shape) => format!("{shape:?}"),
             RowDraft::FontFamily(name) => name.clone(),
             RowDraft::WindowPadding(x, y) => format!("{x:.1} x {y:.1}"),
@@ -700,6 +708,7 @@ impl RowDraft {
             }
             SettingsRowKind::Glassmorphism => RowDraft::Glassmorphism(d.glassmorphism),
             SettingsRowKind::ConfirmQuit => RowDraft::ConfirmQuit(d.confirm_quit),
+            SettingsRowKind::EmberIdleAfter => RowDraft::EmberIdleAfter(0),
             SettingsRowKind::SendSelectionSendEnter => {
                 RowDraft::SendSelectionSendEnter(d.send_selection_send_enter)
             }
@@ -781,6 +790,7 @@ pub(crate) struct SettingsRow {
 /// it always routes through the debouncer (`poll_font_size`), per R-9.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum RowEffect {
+    EmberIdleAfter(u64),
     OpenAgentWorkflowGuide,
     /// Nothing to apply outside the state machine (commit-only rows, or a
     /// live row whose value didn't actually change).
@@ -815,6 +825,7 @@ pub(crate) enum RowEffect {
 /// highlight = the currently active theme).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RevertValues {
+    pub(crate) ember_idle_after_secs: u64,
     pub(crate) theme_name: String,
     pub(crate) font_size: f32,
     pub(crate) cursor_style: CursorShape,
@@ -911,6 +922,7 @@ pub(crate) struct ThemeSettingsCarryover {
 /// out of this pure module so it stays deterministic/testable without
 /// font-kit).
 pub(crate) struct ThemeSettingsInit {
+    pub(crate) ember_idle_after_secs: u64,
     /// Which half of the split overlay this session is ("Theme" picker or
     /// "Settings" rows) — fixed for the session's whole lifetime.
     pub(crate) mode: ThemeSettingsMode,

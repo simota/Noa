@@ -384,6 +384,7 @@ impl App {
     /// (i.e. before the first real window), which also means it can't be the
     /// app's only window.
     pub(super) fn toggle_quick_terminal(&mut self, event_loop: &ActiveEventLoop) {
+        self.note_user_activity();
         if self.gpu.is_none() {
             return;
         }

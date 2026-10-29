@@ -56,6 +56,15 @@ pub(super) struct GpuState {
     /// Rounded-card pipeline reused to composite the rasterized palette block as
     /// a single rounded card (rounded corners + border + drop shadow, H).
     pub(super) palette_card: Option<OverviewChromeCardPipeline>,
+    pub(super) idle_ember_card: Option<OverviewChromeCardPipeline>,
+    pub(super) idle_ember_texture: Option<(
+        PixelSize,
+        wgpu::TextureFormat,
+        wgpu::Texture,
+        wgpu::TextureView,
+    )>,
+    pub(super) idle_ember_pixels: Vec<u8>,
+    pub(super) idle_ember_pose: Option<crate::idle_ember::Pose>,
     /// The interior pixel padding the current `palette_renderer` was built
     /// with; the renderer is rebuilt when this drifts (font size change).
     pub(super) palette_padding: noa_core::GridPadding,
@@ -804,6 +813,7 @@ mod theme_settings_session_tests {
             background_image_fit: noa_config::BackgroundImageFit::Contain,
             background_image_repeat: false,
             background_image_interval_secs: noa_config::DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
+            ember_idle_after_secs: 0,
             window_padding_x: 2.0,
             window_padding_y: 2.0,
             macos_titlebar_style: noa_config::MacosTitlebarStyle::Native,
@@ -1085,6 +1095,7 @@ pub(super) struct Surface {
     pub(super) last_mouse_pixel: Option<crate::mouse::MousePos>,
     pub(super) pressed_mouse_button: Option<MouseButton>,
     pub(super) ime_state: input::ImeState,
+    pub(super) last_output_at: Instant,
     pub(super) auto_approve_guards: Arc<Mutex<crate::auto_approve::AutoApproveInputGuards>>,
     pub(super) rect: PaneRectApp,
     /// The Cmd+hover underline target for this pane, recomputed on every
@@ -1314,6 +1325,7 @@ impl Surface {
             last_mouse_pixel: None,
             pressed_mouse_button: None,
             ime_state: input::ImeState::default(),
+            last_output_at: Instant::now(),
             auto_approve_guards,
             rect,
             hover_link: None,

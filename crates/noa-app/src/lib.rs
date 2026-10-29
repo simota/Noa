@@ -25,7 +25,9 @@ mod connection_qr;
 pub mod debounce;
 #[cfg(target_os = "macos")]
 mod ember;
+mod ember_sprite;
 mod events;
+mod idle_ember;
 mod input;
 mod io_thread;
 mod ipc_bridge;

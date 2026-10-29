@@ -81,6 +81,7 @@ mod ember;
 mod event_loop;
 mod font_cache;
 mod helpers;
+mod idle_ember;
 mod input_ops;
 mod ipc;
 mod lifecycle;
@@ -254,6 +255,10 @@ pub struct App {
     /// transitions, config reload) and by pty-driven redraws targeting the
     /// focused surface.
     cursor_blink_activity_at: Instant,
+    idle_ember: Option<(WindowId, crate::idle_ember::IdleEmber)>,
+    idle_ember_reset_at: Instant,
+    idle_ember_deadline: Option<Instant>,
+    idle_ember_geometry: Option<(WindowId, PaneId, PaneRectApp)>,
     /// One-shot deadline for the post-burst memory trim
     /// (`tick_memory_trim`): re-armed by every pty-driven redraw and once at
     /// startup, `None` after firing — an idle app pays no wake-up for this.
@@ -821,6 +826,10 @@ impl App {
             cursor_blink_visible: true,
             cursor_blink_deadline: None,
             cursor_blink_activity_at: Instant::now(),
+            idle_ember: None,
+            idle_ember_reset_at: Instant::now(),
+            idle_ember_deadline: None,
+            idle_ember_geometry: None,
             // Armed at startup so the launch transients (font-discovery and
             // config-parse scratch) are returned to the OS shortly after the
             // first window settles.

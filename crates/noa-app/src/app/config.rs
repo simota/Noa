@@ -63,6 +63,7 @@ pub struct AppConfig {
     /// settles solid, letting an idle app stop its blink wake-ups entirely.
     /// `0` never stops (Ghostty-parity behavior).
     pub cursor_stop_blinking_after_secs: u64,
+    pub ember_idle_after_secs: u64,
     /// `background-opacity`, clamped to `0.0..=1.0`. Drives window
     /// transparency: below 1.0 the window is created transparent, a
     /// non-Opaque surface alpha mode is chosen, and the renderer scales its
@@ -301,6 +302,7 @@ impl AppConfig {
             cursor_style: config.cursor_style,
             cursor_style_blink: config.cursor_style_blink,
             cursor_stop_blinking_after_secs: config.cursor_stop_blinking_after_secs,
+            ember_idle_after_secs: config.ember_idle_after_secs,
             background_opacity: config.background_opacity,
             background_blur_radius: config.background_blur_radius,
             configured_background_opacity: config.configured_background_opacity,

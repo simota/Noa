@@ -390,6 +390,7 @@ impl App {
         // layout, AC-17) before borrowing `gpu`/`state` mutably, so the band can
         // be composited inline after the panes without a second borrow.
         let sidebar_model = self.sidebar_draw_model(window_id);
+        let idle_ember_pose = self.idle_ember_for_draw(window_id);
         let copy_mode_pane = self.copy_mode_pane_for_redraw(window_id);
         let padding = self.padding;
         // scratch-terminal kaizen item 4: resolved up front for the same
@@ -879,6 +880,18 @@ impl App {
                 &view,
                 surface_size,
                 model,
+            );
+        }
+        if let Some(pose) = idle_ember_pose {
+            idle_ember::draw(
+                gpu,
+                state,
+                &view,
+                PixelSize {
+                    w: state.surface_config.width,
+                    h: state.surface_config.height,
+                },
+                pose,
             );
         }
         // On macOS the four modal overlays (palette, theme settings, confirm

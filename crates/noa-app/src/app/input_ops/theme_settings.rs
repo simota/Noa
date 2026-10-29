@@ -219,6 +219,7 @@ impl App {
             background_image_fit: self.config.background_image_fit,
             background_image_repeat: self.config.background_image_repeat,
             background_image_interval_secs: self.config.background_image_interval_secs,
+            ember_idle_after_secs: self.config.ember_idle_after_secs,
             window_padding_x: self.config.window_padding_x.unwrap_or(0.0),
             window_padding_y: self.config.window_padding_y.unwrap_or(0.0),
             macos_titlebar_style: self.config.macos_titlebar_style,
@@ -582,6 +583,7 @@ impl App {
     /// [`RowEffect`] a row edit produced.
     fn apply_theme_settings_row_effect(&mut self, effect: RowEffect) {
         match effect {
+            RowEffect::EmberIdleAfter(secs) => self.apply_ember_idle_after(secs),
             RowEffect::None => {}
             RowEffect::CursorStyle(shape) => self.apply_live_cursor_style(shape),
             RowEffect::Opacity(opacity) => self.apply_live_background_opacity(opacity),
@@ -757,6 +759,7 @@ impl App {
             self.apply_live_sidebar_preview_lines(values.sidebar_preview_lines);
             self.apply_live_sidebar_width(values.sidebar_width);
             self.apply_live_sidebar_font_size(values.sidebar_font_size);
+            self.apply_ember_idle_after(values.ember_idle_after_secs);
         }
         self.request_window_redraw(session.window_id);
     }
@@ -1056,6 +1059,7 @@ impl App {
         self.config.background_image_fit = payload.revert.background_image_fit;
         self.config.background_image_repeat = payload.revert.background_image_repeat;
         self.config.background_image_interval_secs = payload.revert.background_image_interval_secs;
+        self.apply_ember_idle_after(payload.revert.ember_idle_after_secs);
         self.config.cursor_style = Some(payload.revert.cursor_style);
         sync_reverted_confirm_quit_and_quick_terminal_size(&mut self.config, &payload.revert);
         self.apply_runtime_font_size(window_id, payload.revert.font_size);
@@ -1158,6 +1162,7 @@ impl App {
                     self.config.background_image_interval_secs = *v;
                     reset_background_image_deadline = true;
                 }
+                RowDraft::EmberIdleAfter(v) => self.apply_ember_idle_after(*v),
                 RowDraft::CursorStyle(v) => {
                     self.config.cursor_style = Some(*v);
                 }
@@ -1755,6 +1760,7 @@ mod commit_theme_settings_tests {
             background_image_fit: noa_config::BackgroundImageFit::Contain,
             background_image_repeat: false,
             background_image_interval_secs: noa_config::DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
+            ember_idle_after_secs: 0,
             window_padding_x: 2.0,
             window_padding_y: 2.0,
             macos_titlebar_style: noa_config::MacosTitlebarStyle::Native,
@@ -1842,6 +1848,7 @@ mod commit_theme_settings_tests {
             background_image_fit: noa_config::BackgroundImageFit::Contain,
             background_image_repeat: false,
             background_image_interval_secs: noa_config::DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
+            ember_idle_after_secs: 0,
             sidebar_preview_lines: noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES,
             sidebar_width: noa_config::DEFAULT_SIDEBAR_WIDTH,
             sidebar_font_size: noa_config::DEFAULT_SIDEBAR_FONT_SIZE,
@@ -1910,6 +1917,7 @@ mod commit_theme_settings_tests {
             background_image_fit: noa_config::BackgroundImageFit::Contain,
             background_image_repeat: false,
             background_image_interval_secs: noa_config::DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
+            ember_idle_after_secs: 0,
             window_padding_x: 2.0,
             window_padding_y: 2.0,
             macos_titlebar_style: noa_config::MacosTitlebarStyle::Native,

@@ -906,6 +906,61 @@ fn cursor_stop_blinking_after_parses_seconds_including_zero() {
 }
 
 #[test]
+fn ember_idle_after_range_default_and_precedence() {
+    assert!(is_supported_scalar_key("ember-idle-after"));
+    assert_eq!(crate::StartupConfig::default().ember_idle_after_secs, 0);
+    for value in [0, 1, 60, 86_400] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("ember-idle-after = {value}"));
+        assert!(diagnostics.is_empty());
+        assert_eq!(overrides.ember_idle_after_secs, Some(value));
+        assert_eq!(
+            overrides
+                .apply_to(crate::StartupConfig::default())
+                .ember_idle_after_secs,
+            value
+        );
+    }
+    let (file, _) = parse_overrides(path(), "ember-idle-after = 30");
+    let (cli, _) = parse_overrides(path(), "ember-idle-after = 0");
+    assert_eq!(
+        file.merge(cli)
+            .apply_to(crate::StartupConfig::default())
+            .ember_idle_after_secs,
+        0
+    );
+}
+
+#[test]
+fn ember_idle_after_rejects_invalid_and_u64_max() {
+    for value in [
+        "-1",
+        "1.5",
+        "never",
+        "",
+        "86401",
+        "18446744073709551615",
+        "18446744073709551616",
+    ] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("ember-idle-after = {value}"));
+        assert_eq!(overrides.ember_idle_after_secs, None);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(
+            diagnostics[0]
+                .message
+                .contains("invalid value for `ember-idle-after`")
+        );
+        assert_eq!(
+            overrides
+                .apply_to(crate::StartupConfig::default())
+                .ember_idle_after_secs,
+            0
+        );
+    }
+}
+
+#[test]
 fn cursor_stop_blinking_after_rejects_negative_and_non_integer_values() {
     for value in ["-1", "1.5", "never", ""] {
         let (overrides, diagnostics) =
@@ -1963,4 +2018,51 @@ fn included_file_paths_lists_transitive_and_missing_optional_includes() {
         vec![child.clone(), grandchild.clone(), dir.join("absent")]
     );
     fs::remove_dir_all(&dir).unwrap();
+}
+
+/// AC-01 acceptance (expected values from the AC text): range 0..=86400,
+/// default 0, invalid / out-of-range values get the same diagnostic class as
+/// `cursor-stop-blinking-after`.
+#[test]
+fn acceptance_ac01_ember_idle_after_range_default_and_diagnostic_class() {
+    assert_eq!(crate::StartupConfig::default().ember_idle_after_secs, 0);
+    assert_eq!(
+        ConfigOverrides::default()
+            .apply_to(crate::StartupConfig::default())
+            .ember_idle_after_secs,
+        0
+    );
+    for (value, expected) in [("0", 0u64), ("1", 1), ("86400", 86_400)] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("ember-idle-after = {value}"));
+        assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+        assert_eq!(overrides.ember_idle_after_secs, Some(expected), "{value:?}");
+    }
+
+    let cursor_class = |value: &str| {
+        let (_, diagnostics) =
+            parse_overrides(path(), &format!("cursor-stop-blinking-after = {value}"));
+        assert_eq!(diagnostics.len(), 1, "{value:?}: {diagnostics:?}");
+        diagnostics[0]
+            .message
+            .replace("cursor-stop-blinking-after", "ember-idle-after")
+    };
+    let max = u64::MAX.to_string();
+    for value in ["86401", "-1", "abc", max.as_str()] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("ember-idle-after = {value}"));
+        assert_eq!(overrides.ember_idle_after_secs, None, "{value:?}");
+        assert_eq!(diagnostics.len(), 1, "{value:?}: {diagnostics:?}");
+        assert_eq!(
+            overrides
+                .apply_to(crate::StartupConfig::default())
+                .ember_idle_after_secs,
+            0,
+            "{value:?}"
+        );
+        // Same class: identical wording to cursor-stop-blinking-after's invalid
+        // diagnostic for a value that key rejects ("abc"), modulo key and value.
+        let expected = cursor_class("abc").replace("abc", value);
+        assert_eq!(diagnostics[0].message, expected, "{value:?}");
+    }
 }

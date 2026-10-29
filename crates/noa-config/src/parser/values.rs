@@ -552,6 +552,21 @@ pub(super) fn parse_cursor_stop_blinking_after(
     }
 }
 
+pub(super) fn parse_ember_idle_after(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<u64> {
+    let value = directive.value.as_deref().unwrap_or("");
+    match value.parse::<u64>() {
+        Ok(seconds) if seconds <= 86_400 => Some(seconds),
+        _ => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+            None
+        }
+    }
+}
+
 /// Parse one `quick-terminal-size` side: a percentage (`40%`) or a pixel
 /// count in AppKit points (`400px`). `None` for anything else, including a
 /// non-positive magnitude.

@@ -95,12 +95,14 @@ impl Cell {
         if current.len() + c.len_utf8() > Self::MAX_COMBINING_BYTES {
             return;
         }
-        let mut tail = String::with_capacity(current.len() + c.len_utf8());
-        tail.push_str(current);
-        tail.push(c);
+        // Stack-built: this runs per scalar of every emoji/accent sequence.
+        let mut buf = [0u8; Self::MAX_COMBINING_BYTES];
+        buf[..current.len()].copy_from_slice(current.as_bytes());
+        let len = current.len() + c.encode_utf8(&mut buf[current.len()..]).len();
+        let tail = std::str::from_utf8(&buf[..len]).expect("concatenated UTF-8");
         // Interner cap reached (hostile stream): drop the mark, keep the tail
         // the cell already had.
-        if let Some(id) = grapheme::intern(&tail) {
+        if let Some(id) = grapheme::intern(tail) {
             self.grapheme = Some(id);
         }
     }

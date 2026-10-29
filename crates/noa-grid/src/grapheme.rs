@@ -25,6 +25,12 @@ use std::sync::{LazyLock, RwLock};
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct GraphemeId(NonZeroU32);
 
+impl GraphemeId {
+    pub(crate) fn raw(self) -> u32 {
+        self.0.get()
+    }
+}
+
 /// Hard cap on distinct interned tails. Each entry costs its string bytes
 /// (≤ [`crate::Cell::MAX_COMBINING_BYTES`]) plus map/vec overhead, so the
 /// worst case is a few hundred MB *if* a hostile stream mints the maximum —

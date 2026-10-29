@@ -318,3 +318,37 @@ fn bulk_wide_candidates_have_boundaries_between_repeated_scalars() {
         }
     }
 }
+
+#[test]
+fn bulk_narrow_run_matches_per_scalar_for_wrap_and_autowrap_off() {
+    for cols in [7, 10] {
+        assert_bulk_print_matches_per_scalar(cols, 6, b"", &"Русский текст αβγ".repeat(4));
+    }
+    // Ends exactly at the margin: the deferred-wrap latch must match.
+    assert_bulk_print_matches_per_scalar(10, 4, b"", &"ж".repeat(10));
+    assert_bulk_print_matches_per_scalar(10, 4, b"\x1b[?7l", &"щ".repeat(25));
+}
+
+#[test]
+fn bulk_narrow_run_matches_per_scalar_inside_and_across_margins() {
+    for col in [1, 3, 5, 7, 9] {
+        let setup = format!("\x1b[?69h\x1b[3;7s\x1b[1;{col}H");
+        assert_bulk_print_matches_per_scalar(10, 6, setup.as_bytes(), "абвгдежзийкл");
+    }
+}
+
+#[test]
+fn bulk_narrow_run_matches_per_scalar_overwriting_wide_and_mixed() {
+    assert_bulk_print_matches_per_scalar(20, 6, "日本語あいう\x1b[1;2H".as_bytes(), "абвгд");
+    assert_bulk_print_matches_per_scalar(20, 6, "日本語\r".as_bytes(), "ы日ж\u{0301}з📢й");
+    assert_bulk_print_matches_per_scalar(20, 6, b"\x1b[32;41;1m", "смесь mix 𐎪𐎫𐎬 €");
+}
+
+#[test]
+fn bulk_narrow_run_matches_per_scalar_extending_a_cluster_under_mode_2027() {
+    // Trailing ZWJ: a narrow pictograph prefix extends the cluster.
+    let setup = "\x1b[?2027h👩\u{200D}".as_bytes();
+    assert_bulk_print_matches_per_scalar(80, 24, setup, "☺жз");
+    let setup = "\x1b[?2027hé".as_bytes();
+    assert_bulk_print_matches_per_scalar(80, 24, setup, "\u{0301}жз");
+}

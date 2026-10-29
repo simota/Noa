@@ -79,6 +79,15 @@ impl Handler for Terminal {
                         .inspect(|c| consumed += c.len_utf8());
                     screen.print_wide_scalars(run, autowrap, grapheme_clustering);
                     i += consumed;
+                } else if crate::screen::Screen::is_plain_narrow(c) {
+                    // Same shape for non-ASCII width-1 runs (Cyrillic, Greek…).
+                    let mut consumed = 0usize;
+                    let run = s[i..]
+                        .chars()
+                        .take_while(|&c| crate::screen::Screen::is_plain_narrow(c))
+                        .inspect(|c| consumed += c.len_utf8());
+                    screen.print_narrow_scalars(run, autowrap, grapheme_clustering);
+                    i += consumed;
                 } else {
                     // Combining/cluster scalars stay on the per-scalar path.
                     screen.print(c, autowrap, grapheme_clustering);

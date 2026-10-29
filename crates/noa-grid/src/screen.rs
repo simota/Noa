@@ -98,9 +98,10 @@ pub struct KittyPlacement {
     /// rows` cells.
     pub req_cols: u32,
     pub req_rows: u32,
-    /// Cell height (px) when placed. A region scroll clips a placement with no
-    /// `r=` by whole cells of it, as Ghostty does.
-    pub cell_h_px: u32,
+    /// Cell `[width, height]` (px) the span was derived from (kept current by
+    /// `Screen::rescale_kitty_placements`). A region scroll clips a placement
+    /// with no `r=` by whole cells of it.
+    pub cell_px: [u32; 2],
     pub z: i32,
     /// `U=1` — a virtual placement referenced only by Unicode placeholders; it is
     /// never drawn directly.

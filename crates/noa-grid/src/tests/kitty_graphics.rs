@@ -154,7 +154,7 @@ fn kitty_placement_count_is_hard_capped() {
         rows: 1,
         req_cols: 0,
         req_rows: 0,
-        cell_h_px: 20,
+        cell_px: [10, 20],
         z: 0,
         is_virtual: false,
         parent: None,
@@ -1642,7 +1642,7 @@ fn a_cell_size_change_recomputes_the_span_of_a_native_size_image() {
     t.set_pixel_metrics(5, 10, 100, 240);
     let span = |id: u32| {
         let p = t.primary.kitty_placements.iter().find(|p| p.image_id == id).unwrap();
-        (p.cols, p.rows, p.cell_h_px)
+        (p.cols, p.rows, p.cell_px[1])
     };
     assert_eq!(span(1), (2, 8, 10), "80 px now spans eight 10 px rows");
     assert_eq!(span(2), (1, 2, 10));
@@ -1664,4 +1664,23 @@ fn bottom_clip_uses_the_offset_clamped_into_the_current_cell() {
     feed(&mut t, b"\x1b[3;5r\x1b[3;1H\x1bM");
     let p = &t.primary.kitty_placements[0];
     assert_eq!((p.rows, p.src), (2, Some([0, 0, 10, 11])), "20 px of rows less the 9 px offset");
+}
+
+#[test]
+fn region_scroll_clips_a_columns_scaled_image_by_its_scale() {
+    let mut t = kitty_terminal();
+    // 10×80 px at c=2: drawn 20×160 px over eight rows (2..=9).
+    feed(&mut t, &kitty_apc("a=t,f=32,s=10,v=80,i=1,q=2", &[0u8; 10 * 80 * 4]));
+    feed(&mut t, b"\x1b[3;1H");
+    kitty_cmd(&mut t, "a=p,i=1,c=2,C=1,q=2");
+    assert_eq!(drawn_size(&t, 1), [20.0, 160.0]);
+    // Region rows 2..=9: one scroll up crops one 20 px row = 10 source px.
+    feed(&mut t, b"\x1b[3;10r\x1b[10;1H\n");
+    assert_eq!(t.primary.kitty_placements[0].src, Some([0, 10, 10, 70]));
+    assert_eq!(drawn_size(&t, 1), [20.0, 140.0]);
+    // Two rows down: one row passes the bottom, leaving six rows = 120 px.
+    feed(&mut t, b"\x1b[3;1H\x1bM\x1bM");
+    let p = &t.primary.kitty_placements[0];
+    assert_eq!((p.rows, p.src), (6, Some([0, 10, 10, 60])));
+    assert_eq!(drawn_size(&t, 1), [20.0, 120.0]);
 }

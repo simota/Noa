@@ -98,7 +98,7 @@ impl Screen {
                 [cell_w, cell_h],
                 [u32::from(p.cell_x_off), u32::from(p.cell_y_off)],
             );
-            p.cell_h_px = cell_h;
+            p.cell_px = [cell_w, cell_h];
         }
     }
 
@@ -1246,21 +1246,38 @@ impl Screen {
 
 /// Cut `top` rows off the top and `bottom` off the bottom of placement `p`,
 /// as Ghostty 1.4.0's `clipTop` / `clipBottom`: a placement sized by `r=`
-/// loses an equal share of its source per row, one drawn at its own size loses
-/// whole cells (`cell_h_px`) of source pixels. The cell offset stays. `false`
-/// when no source pixels would remain (or `p` has no source rectangle), so
-/// the caller deletes it.
+/// loses an equal share of its source per row, one without loses whole cells
+/// of drawn pixels. The cell offset stays. `false` when no source pixels would
+/// remain (or `p` has no source rectangle), so the caller deletes it.
+///
+/// Deliberate divergence: Ghostty treats every placement without `r=` as
+/// drawn at its own size, so one scaled by `c=` alone loses the wrong amount
+/// of source (or all of it). Here the drawn cells are converted back to
+/// source pixels by the `c=` scale.
 fn clip_placement_rows(p: &mut KittyPlacement, top: i64, bottom: i64) -> bool {
     let Some([x, mut y, w, mut h]) = p.src else {
         return false;
     };
-    let cell_h = u64::from(p.cell_h_px);
+    let [cell_w, cell_h] = p.cell_px.map(u64::from);
+    // The offset in effect: clamped into the current cell, which may have
+    // shrunk since the placement was made (Ghostty's `cellOffset`).
+    let offset_x = u64::from(p.cell_x_off).min(cell_w.saturating_sub(1));
+    let offset_y = u64::from(p.cell_y_off).min(cell_h.saturating_sub(1));
+    // Source pixels per drawn pixel for a placement without `r=`: 1 at its own
+    // size, the inverse of the `c=` scale otherwise.
+    let source_per_drawn = if p.req_cols > 0 {
+        let drawn_w = (u64::from(p.req_cols) * cell_w).saturating_sub(offset_x);
+        f64::from(w) / drawn_w.max(1) as f64
+    } else {
+        1.0
+    };
+    let to_source = |drawn: u64| (drawn as f64 * source_per_drawn).round() as u64;
     if top > 0 {
         let (count, span) = (top as u64, u64::from(p.rows));
         let crop = if p.req_rows > 0 {
             u64::from(h) * count / span
         } else {
-            cell_h * count
+            to_source(cell_h * count)
         };
         if crop >= u64::from(h) {
             return false;
@@ -1282,17 +1299,17 @@ fn clip_placement_rows(p: &mut KittyPlacement, top: i64, bottom: i64) -> bool {
             h -= crop as u32;
             p.req_rows -= bottom as u32;
         } else {
-            // The rows left show this many source pixels, less the offset
-            // into the first cell.
+            // The rows left show this many drawn pixels, less the offset into
+            // the first cell.
             let visible = cell_h * (span - count);
-            // The offset in effect: clamped into the current cell, which may
-            // have shrunk since the placement was made (Ghostty's
-            // `cellOffset`).
-            let offset = u64::from(p.cell_y_off).min(cell_h.saturating_sub(1));
-            if visible <= offset {
+            if visible <= offset_y {
                 return false;
             }
-            h = (u64::from(h)).min(visible - offset) as u32;
+            let shown = to_source(visible - offset_y);
+            if shown == 0 {
+                return false;
+            }
+            h = u64::from(h).min(shown) as u32;
         }
         p.rows -= bottom as u16;
     }

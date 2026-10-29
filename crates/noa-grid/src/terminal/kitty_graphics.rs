@@ -252,7 +252,7 @@ impl Terminal {
     }
 
     fn place_image(&mut self, image_id: u32, spec: ImagePlace) -> Result<(), KittyError> {
-        let cell_h_px = self.cell_height_px;
+        let cell_px = [self.cell_width_px, self.cell_height_px];
         let screen = self.active_mut();
         let anchor_abs_row =
             screen.rows_evicted() + screen.scrollback_len() + screen.cursor.y as usize;
@@ -269,7 +269,7 @@ impl Terminal {
             rows: spec.rows,
             req_cols: spec.req_cols,
             req_rows: spec.req_rows,
-            cell_h_px,
+            cell_px,
             z: spec.z,
             is_virtual: spec.virtual_placement,
             parent: spec.parent,

@@ -7,8 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-29
+
 ### Added
 
+- Linux support (X11 and Wayland) with native desktop integration:
+  fontconfig font fallback, clipboard with the PRIMARY selection and
+  middle-click paste, `xdg-open` links, `notify-send` notifications, and
+  Ghostty's GTK default keybindings. New tabs open inside the same window
+  with an in-window tab bar, and right-click opens a context menu. See
+  [docs/LINUX.md](docs/LINUX.md).
+- Linux release tarball `Noa-<version>-linux-x86_64.tar.gz` with a desktop
+  entry, AppStream metainfo, icons and an `install.sh` (`--uninstall`).
+- On Linux the context menu names Close Pane when the tab is split and shows
+  each command's chord; `ctrl+shift+l` opens the session overview.
+- `Noa`, Noa's own theme built from the brand palette (`theme = Noa`). The
+  default theme is unchanged.
 - Opt-in idle Ember companion (`ember-idle-after`, default `0`, also editable as Idle Ember in Settings): fade-in/out, a silent play and question emote in the focused main pane, with gentle gestures every 20 seconds that stop after 10 minutes of resting. Respects macOS Reduce Motion.
 
 ## [0.5.0] - 2026-10-21

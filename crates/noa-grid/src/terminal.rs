@@ -854,11 +854,6 @@ impl Terminal {
         self.kitty_clipboard.grants.grant(pw, read, write, one_time);
     }
 
-    /// Withdraw a grant (a paste event that could not be delivered).
-    pub fn revoke_kitty_clipboard_grant(&mut self, pw: &str) {
-        self.kitty_clipboard.grants.revoke(pw);
-    }
-
     /// Drain queued desktop notifications (OSC 9 / OSC 777) for the app layer,
     /// oldest first. Empty when nothing was requested since the last drain.
     pub fn take_pending_notifications(&mut self) -> Vec<Notification> {

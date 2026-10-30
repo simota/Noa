@@ -188,8 +188,8 @@ impl App {
         self.send_kitty_reply(window_id, pane_id, packets);
     }
 
-    /// Send OSC 5522 reply packets to the pane, in order with its earlier
-    /// replies. A large reply (an image, say) would exceed the pane's
+    /// Send OSC 5522 reply packets (or a paste event) to the pane, in order
+    /// with its earlier replies. A large reply (an image, say) would exceed the pane's
     /// pending-input budget as one write and be dropped whole, leaving the
     /// program waiting; a helper thread feeds it packet by packet instead,
     /// each waiting for budget to free up, and replies arriving meanwhile
@@ -216,11 +216,23 @@ impl App {
             pending.packets.extend(packets);
             return;
         }
-        let Some((input, writer)) = local.filter(|_| total > STREAMED_REPLY_BYTES) else {
+        let Some((input, writer)) = local else {
             drop(pending);
             self.write_pane_pty_bytes(window_id, pane_id, packets.concat());
             return;
         };
+        // A small reply goes straight out when the budget has room; if it
+        // doesn't, it waits in the queue like a large one rather than being
+        // dropped.
+        if total <= STREAMED_REPLY_BYTES {
+            let bytes = packets.concat();
+            if let Some(reserved) = input.reserve(bytes.clone().into_boxed_slice()) {
+                if writer.write_reserved(reserved).is_err() {
+                    log::warn!("failed to send an OSC 5522 reply: the pane is gone");
+                }
+                return;
+            }
+        }
         pending.queued_bytes += total;
         pending.packets.extend(packets);
         pending.draining = true;
@@ -393,7 +405,9 @@ impl App {
                 return true;
             }
         };
-        // Grant before the program can see the password.
+        // Grant before the program can see the password. Unlike Ghostty,
+        // which revokes it if the write fails, a queued event's outcome is
+        // not known here; an undelivered password is simply never used.
         terminal
             .lock()
             .grant_kitty_clipboard(&pw, true, false, true);
@@ -402,14 +416,9 @@ impl App {
             location,
             &mimes[..mimes.len().min(MAX_PASTE_EVENT_MIMES)],
         );
-        let result = self.queue_pane_pty_bytes(window_id, pane_id, bytes);
-        if matches!(
-            result,
-            crate::io_thread::QueueInputResult::Dropped
-                | crate::io_thread::QueueInputResult::Disconnected
-        ) {
-            terminal.lock().revoke_kitty_clipboard_grant(&pw);
-        }
+        // Through the reply queue, so it can't land inside a read reply
+        // that is still streaming.
+        self.send_kitty_reply(window_id, pane_id, vec![bytes]);
         true
     }
 }

@@ -754,10 +754,6 @@ impl Grants {
         });
     }
 
-    pub(crate) fn revoke(&mut self, pw: &str) {
-        self.entries.retain(|g| g.pw != pw);
-    }
-
     /// Whether `pw` is granted for the direction. A one-time grant is used up
     /// by any check, even one for the other direction.
     fn use_grant(&mut self, pw: &str, write: bool) -> bool {

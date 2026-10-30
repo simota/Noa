@@ -488,10 +488,10 @@ fn dispatch<H: Handler>(action: Action, h: &mut H, sgr_attrs: &mut Vec<SgrAttr>)
                 h.dcs_dispatch(&payload.data);
             }
         }
-        Action::ApcDispatch { data, truncated } => {
+        Action::ApcDispatch { data } => {
             // Only Kitty graphics (`G`) is captured; other APC strings are dropped.
             if let [b'G', rest @ ..] = data.as_slice() {
-                h.kitty_graphics(crate::kitty_graphics::parse(rest, truncated));
+                h.kitty_graphics(crate::kitty_graphics::parse(rest));
             }
         }
     }

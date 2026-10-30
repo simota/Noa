@@ -3,7 +3,7 @@ use super::*;
 fn command(ctrl: &str, bytes: &[u8]) -> KittyGraphicsCommand {
     let mut full = format!("{ctrl};").into_bytes();
     crate::osc::encode_base64(bytes, &mut full);
-    noa_vt::kitty_graphics::parse(&full, false)
+    noa_vt::kitty_graphics::parse(&full)
 }
 
 fn transmit(store: &mut ImageStore, ctrl: &str, bytes: &[u8]) -> Result<u32, KittyError> {

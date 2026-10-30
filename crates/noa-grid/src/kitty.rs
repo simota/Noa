@@ -44,7 +44,7 @@ fn next_image_epoch() -> u64 {
 pub enum KittyError {
     /// `EINVAL` — malformed request (bad key, missing dimension, bad path).
     Invalid,
-    /// `EFBIG` — image too large (dimension or byte budget) / APC truncated.
+    /// `EFBIG` — image too large (dimension or byte budget).
     TooBig,
     /// `ENODATA` — declared size does not match the payload length.
     NoData,
@@ -1397,7 +1397,7 @@ mod tests {
         let mut full = ctrl.as_bytes().to_vec();
         full.push(b';');
         full.extend_from_slice(&b64(data));
-        noa_vt::kitty_graphics::parse(&full, false)
+        noa_vt::kitty_graphics::parse(&full)
     }
 
     #[test]
@@ -1495,12 +1495,12 @@ mod tests {
         // First chunk: control + first 4 bytes, m=1.
         let mut first = b"a=t,f=32,s=2,v=1,i=3,m=1;".to_vec();
         first.extend_from_slice(&b64(&px[..4]));
-        let c1 = noa_vt::kitty_graphics::parse(&first, false);
+        let c1 = noa_vt::kitty_graphics::parse(&first);
         assert!(matches!(store.transmit(&c1), TransmitStep::NeedMore));
         // Final chunk: remaining bytes, m=0.
         let mut last = b"m=0;".to_vec();
         last.extend_from_slice(&b64(&px[4..]));
-        let c2 = noa_vt::kitty_graphics::parse(&last, false);
+        let c2 = noa_vt::kitty_graphics::parse(&last);
         let TransmitStep::Done(done) = store.transmit(&c2) else {
             panic!("expected done")
         };
@@ -1515,11 +1515,11 @@ mod tests {
         let mut store = ImageStore::new();
         let mut first = b"a=t,f=32,s=2,v=1,i=5,q=0,m=1;".to_vec();
         first.extend_from_slice(&b64(&[1, 2, 3, 4]));
-        let c1 = noa_vt::kitty_graphics::parse(&first, false);
+        let c1 = noa_vt::kitty_graphics::parse(&first);
         assert!(matches!(store.transmit(&c1), TransmitStep::NeedMore));
 
         // Continuation chunk with invalid base64.
-        let bad = noa_vt::kitty_graphics::parse(b"m=0;@@@not base64@@@", false);
+        let bad = noa_vt::kitty_graphics::parse(b"m=0;@@@not base64@@@");
         assert_eq!(bad.image_id, 0, "continuation chunk carries no i=");
         let TransmitStep::Done(done) = store.transmit(&bad) else {
             panic!("expected done")
@@ -1535,7 +1535,7 @@ mod tests {
         let mut store = ImageStore::new();
         let mut first = b"a=t,f=32,s=2,v=1,i=3,m=1;".to_vec();
         first.extend_from_slice(&b64(&[1, 2, 3, 4]));
-        let c1 = noa_vt::kitty_graphics::parse(&first, false);
+        let c1 = noa_vt::kitty_graphics::parse(&first);
         assert!(matches!(store.transmit(&c1), TransmitStep::NeedMore));
         assert!(store.transfer_in_progress());
         store.abort();

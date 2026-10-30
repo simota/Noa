@@ -1525,6 +1525,23 @@ fn a_non_direct_transmit_ends_a_chunked_load_and_runs_on_its_own() {
 // ── Cancelled / aborted APC and OSC are discarded (#14453 / #14812) ──
 
 #[test]
+fn an_over_limit_apc_is_dropped_without_a_reply_or_touching_a_chunked_load() {
+    // Ghostty 1.4.0 caps a Kitty APC's payload at 65 MiB and ignores one
+    // over it, so the chunked load around it still completes.
+    let mut t = kitty_terminal();
+    kitty_cmd(&mut t, "a=t,f=24,s=1,v=2,i=5,m=1;AAAA");
+    let mut oversized = b"\x1b_Ga=t,i=9;".to_vec();
+    oversized.extend(std::iter::repeat_n(b'A', 65 * (1 << 20) + 1));
+    oversized.extend_from_slice(b"\x1b\\");
+    feed(&mut t, &oversized);
+    assert!(t.pending_writes.is_empty(), "no reply to the dropped APC");
+    kitty_cmd(&mut t, "m=0;AAAA");
+    assert!(t.kitty_images.get(9).is_none());
+    assert_eq!(&*t.kitty_images.get(5).unwrap().rgba, &[0, 0, 0, 255, 0, 0, 0, 255]);
+    assert_eq!(t.pending_writes, b"\x1b_Gi=5;OK\x1b\\");
+}
+
+#[test]
 fn cancelled_or_aborted_apc_is_discarded() {
     for ending in [&b"\x18"[..], b"\x1a", b"\x9b"] {
         let mut t = kitty_terminal();

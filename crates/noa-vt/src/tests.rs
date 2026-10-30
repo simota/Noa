@@ -361,10 +361,9 @@ fn dcs_and_apc_utf8_payloads_with_9c_continuation_are_not_terminated() {
             data: "検".as_bytes().to_vec(),
         })]
     );
-    let apc = ["\x1b_".as_bytes(), "作".as_bytes(), b"\x1b\\"].concat();
+    let apc = ["\x1b_G".as_bytes(), "作".as_bytes(), b"\x1b\\"].concat();
     assert!(actions(&apc).contains(&Action::ApcDispatch {
-        data: "作".as_bytes().to_vec(),
-        truncated: false,
+        data: "G作".as_bytes().to_vec(),
     }));
 }
 
@@ -513,29 +512,25 @@ fn ground_c1_bytes_are_invalid_utf8_instead_of_control_introducers() {
 // ── APC bounded capture (Kitty graphics transport) ─────────────────
 
 /// Extract the single APC dispatch in `bytes` (panics otherwise).
-fn only_apc(bytes: &[u8]) -> (Vec<u8>, bool) {
+fn only_apc(bytes: &[u8]) -> Vec<u8> {
     match actions(bytes)
         .into_iter()
         .find(|a| matches!(a, Action::ApcDispatch { .. }))
     {
-        Some(Action::ApcDispatch { data, truncated }) => (data, truncated),
+        Some(Action::ApcDispatch { data }) => data,
         _ => panic!("no APC dispatch in {bytes:?}"),
     }
 }
 
 #[test]
 fn apc_payload_dispatches_on_st() {
-    let (data, truncated) = only_apc(b"\x1b_Gi=1,a=q;AAAA\x1b\\");
-    assert_eq!(data, b"Gi=1,a=q;AAAA");
-    assert!(!truncated);
+    assert_eq!(only_apc(b"\x1b_Gi=1,a=q;AAAA\x1b\\"), b"Gi=1,a=q;AAAA");
 }
 
 #[test]
 fn apc_payload_dispatches_on_c1_st() {
     // 8-bit ST (0x9c) terminates the APC just like 7-bit `ESC \`.
-    let (data, truncated) = only_apc(b"\x1b_Gf=24;payload\x9c");
-    assert_eq!(data, b"Gf=24;payload");
-    assert!(!truncated);
+    assert_eq!(only_apc(b"\x1b_Gf=24;payload\x9c"), b"Gf=24;payload");
 }
 
 #[test]
@@ -590,16 +585,59 @@ fn apc_utf8_continuation_byte_is_not_a_c1() {
     assert!(acts.iter().any(|a| matches!(a, Action::ApcDispatch { .. })));
 }
 
-#[test]
-fn apc_overflow_dispatches_truncated() {
-    let mut bytes = b"\x1b_G".to_vec();
-    bytes.extend(std::iter::repeat_n(b'a', (1 << 20) + 10));
+/// `\x1b_G<control>;` followed by `payload_len` payload bytes and ST.
+fn kitty_apc_with_payload(control: &str, payload_len: usize) -> Vec<u8> {
+    let mut bytes = format!("\x1b_G{control};").into_bytes();
+    bytes.extend(std::iter::repeat_n(b'A', payload_len));
     bytes.extend_from_slice(b"\x1b\\");
+    bytes
+}
 
-    let (data, truncated) = only_apc(&bytes);
-    assert!(truncated, "over-limit APC must be flagged truncated");
-    assert_eq!(data.len(), 1 << 20, "capture caps at MAX_APC_BYTES");
-    assert!(data.starts_with(b"Ga"));
+#[test]
+fn apc_payload_up_to_ghosttys_cap_dispatches() {
+    // Ghostty 1.4.0 counts only the payload after `;` against 65 MiB.
+    let max = 65 * (1 << 20);
+    let data = only_apc(&kitty_apc_with_payload("i=1,a=q", max));
+    assert_eq!(data.len(), "Gi=1,a=q;".len() + max);
+    assert_eq!(
+        data.capacity(),
+        data.len(),
+        "growth stops at the cap, not 128 MiB"
+    );
+}
+
+#[test]
+fn apc_payload_over_the_cap_is_dropped_and_the_parser_recovers() {
+    // One byte over: the APC is discarded unrun (no reply), as in Ghostty.
+    let mut bytes = kitty_apc_with_payload("i=1,a=q", crate::parser::MAX_APC_BYTES + 1);
+    bytes.extend_from_slice(b"\x1b_Gi=2;AAAA\x1b\\");
+    let dispatched: Vec<_> = actions(&bytes)
+        .into_iter()
+        .filter_map(|a| match a {
+            Action::ApcDispatch { data } => Some(data),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dispatched, vec![b"Gi=2;AAAA".to_vec()]);
+}
+
+#[test]
+fn an_apc_control_section_over_its_cap_is_dropped() {
+    let cap = crate::parser::MAX_APC_CONTROL_BYTES;
+    // `G` plus keys filling the cap still dispatches; one more byte does not.
+    let fits = format!("\x1b_G{}\x1b\\", "q".repeat(cap - 1));
+    assert_eq!(only_apc(fits.as_bytes()).len(), cap);
+    let over = format!("\x1b_G{};AAAA\x1b\\", "q".repeat(cap));
+    assert!(
+        actions(over.as_bytes())
+            .iter()
+            .all(|a| !matches!(a, Action::ApcDispatch { .. }))
+    );
+}
+
+#[test]
+fn a_non_kitty_apc_keeps_only_its_first_byte() {
+    assert_eq!(only_apc(b"\x1b_Xother\x1b\\"), b"X");
 }
 
 #[test]
@@ -613,11 +651,11 @@ fn apc_survives_byte_at_a_time_feed() {
     let dispatched: Vec<_> = out
         .into_iter()
         .filter_map(|a| match a {
-            Action::ApcDispatch { data, truncated } => Some((data, truncated)),
+            Action::ApcDispatch { data } => Some(data),
             _ => None,
         })
         .collect();
-    assert_eq!(dispatched, vec![(b"Gi=2,f=100;Zm9v".to_vec(), false)]);
+    assert_eq!(dispatched, vec![b"Gi=2,f=100;Zm9v".to_vec()]);
 }
 
 #[test]
@@ -768,14 +806,42 @@ fn apc_non_g_is_ignored() {
     assert!(kitty_commands(b"\x1b_Xother\x1b\\").is_empty());
 }
 
+/// Actions `tail` produces after `head` in one parser, and after a fresh
+/// parser replays the first's `pending_bytes()` (a raw attach mid-sequence).
+fn replayed_actions(head: &[u8], tail: &[u8]) -> (Vec<Action>, Vec<Action>) {
+    let mut source = Parser::new();
+    for &b in head {
+        source.advance(b, &mut |_| {});
+    }
+    let mut replay = Parser::new();
+    for b in source.pending_bytes().expect("replayable") {
+        replay.advance(b, &mut |_| {});
+    }
+    let run = |p: &mut Parser| {
+        let mut out = Vec::new();
+        for &b in tail {
+            p.advance(b, &mut |a| out.push(a));
+        }
+        out
+    };
+    (run(&mut source), run(&mut replay))
+}
+
 #[test]
-fn apc_truncated_still_dispatches() {
-    let mut bytes = b"\x1b_Gi=1;".to_vec();
-    bytes.extend(std::iter::repeat_n(b'A', (1 << 20) + 4));
-    bytes.extend_from_slice(b"\x1b\\");
-    let cmds = kitty_commands(&bytes);
-    assert_eq!(cmds.len(), 1);
-    assert!(cmds[0].truncated);
+fn a_non_kitty_apc_replays_its_utf8_state() {
+    // Mid "佐" (E4 BD 90): 0x9c continues the character, not an 8-bit ST.
+    let (source, replay) = replayed_actions(b"\x1b_X\xe4\xbd", b"\x9cab\x1b\\c");
+    assert_eq!(source, replay);
+    assert_eq!(source.last(), Some(&Action::Print('c')));
+    // A complete character as the first byte leaves no UTF-8 state behind.
+    let (source, replay) = replayed_actions(b"\x1b_\xe4\xbd\x90", b"\x9cc");
+    assert_eq!(source, replay);
+}
+
+#[test]
+fn an_over_limit_kitty_apc_never_reaches_the_handler() {
+    let bytes = kitty_apc_with_payload("i=1", crate::parser::MAX_APC_BYTES + 4);
+    assert!(kitty_commands(&bytes).is_empty());
 }
 
 // ── Stream ground-state text-run fast path ──────────────────────────

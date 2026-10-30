@@ -172,14 +172,12 @@ pub struct KittyGraphicsCommand {
     pub delete: Option<KittyDelete>,
     /// Raw (still base64-encoded) payload after the first `;`.
     pub payload: Vec<u8>,
-    /// The APC exceeded the parser's capture limit.
-    pub truncated: bool,
     /// A key carried a value of the wrong type (grid replies `EINVAL`).
     pub parse_error: bool,
 }
 
 impl KittyGraphicsCommand {
-    fn empty(truncated: bool) -> Self {
+    fn empty() -> Self {
         Self {
             action: KittyAction::default(),
             format: KittyFormat::default(),
@@ -213,7 +211,6 @@ impl KittyGraphicsCommand {
             parent_y_off: 0,
             delete: None,
             payload: Vec::new(),
-            truncated,
             parse_error: false,
         }
     }
@@ -255,10 +252,9 @@ fn resolve_delete(c: u8) -> Option<KittyDelete> {
 
 /// Parse Kitty graphics control data (the bytes after the leading `G`).
 ///
-/// `data` is `<control>[;<payload>]`; `truncated` is threaded from the APC
-/// capture so an over-limit transfer still reaches the grid as `EFBIG`.
-pub fn parse(data: &[u8], truncated: bool) -> KittyGraphicsCommand {
-    let mut cmd = KittyGraphicsCommand::empty(truncated);
+/// `data` is `<control>[;<payload>]`.
+pub fn parse(data: &[u8]) -> KittyGraphicsCommand {
+    let mut cmd = KittyGraphicsCommand::empty();
 
     let (ctrl, payload): (&[u8], &[u8]) = match data.iter().position(|&b| b == b';') {
         Some(i) => (&data[..i], &data[i + 1..]),
@@ -400,7 +396,7 @@ mod tests {
 
     #[test]
     fn defaults_when_only_action() {
-        let c = parse(b"a=q", false);
+        let c = parse(b"a=q");
         assert_eq!(c.action, KittyAction::Query);
         assert_eq!(c.format, KittyFormat::Rgba);
         assert_eq!(c.medium, KittyMedium::Direct);
@@ -413,7 +409,7 @@ mod tests {
 
     #[test]
     fn empty_control_data_is_all_defaults() {
-        let c = parse(b"", false);
+        let c = parse(b"");
         assert_eq!(c.action, KittyAction::Transmit);
         assert_eq!(c.format, KittyFormat::Rgba);
         assert!(!c.parse_error);
@@ -424,7 +420,6 @@ mod tests {
         let c = parse(
             b"a=T,f=24,t=f,s=10,v=20,S=100,O=8,o=z,m=1,i=7,I=3,p=9,q=1,\
               x=1,y=2,w=3,h=4,X=5,Y=6,c=8,r=9,z=-2,C=1,U=1",
-            false,
         );
         assert_eq!(c.action, KittyAction::TransmitAndDisplay);
         assert_eq!(c.format, KittyFormat::Rgb);
@@ -446,7 +441,7 @@ mod tests {
 
     #[test]
     fn relative_placement_keys_parse() {
-        let c = parse(b"a=p,i=2,p=3,P=7,Q=9,H=-4,V=5", false);
+        let c = parse(b"a=p,i=2,p=3,P=7,Q=9,H=-4,V=5");
         assert_eq!((c.parent_image_id, c.parent_placement_id), (7, 9));
         assert_eq!((c.parent_x_off, c.parent_y_off), (-4, 5));
         assert!(!c.parse_error);
@@ -454,26 +449,23 @@ mod tests {
 
     #[test]
     fn transient_hint_parses() {
-        assert!(parse(b"a=t,N=1", false).transient);
-        assert!(
-            !parse(b"a=t,N=2", false).transient,
-            "unknown hints are ignored"
-        );
-        assert!(!parse(b"a=t", false).transient);
-        assert!(parse(b"a=t,N=x", false).parse_error);
+        assert!(parse(b"a=t,N=1").transient);
+        assert!(!parse(b"a=t,N=2").transient, "unknown hints are ignored");
+        assert!(!parse(b"a=t").transient);
+        assert!(parse(b"a=t,N=x").parse_error);
     }
 
     #[test]
     fn relative_placement_keys_reject_bad_values() {
-        assert!(parse(b"a=p,P=-1", false).parse_error, "P= is unsigned");
-        assert!(parse(b"a=p,Q=x", false).parse_error);
-        assert!(parse(b"a=p,H=1.5", false).parse_error);
-        assert!(parse(b"a=p,V=", false).parse_error);
+        assert!(parse(b"a=p,P=-1").parse_error, "P= is unsigned");
+        assert!(parse(b"a=p,Q=x").parse_error);
+        assert!(parse(b"a=p,H=1.5").parse_error);
+        assert!(parse(b"a=p,V=").parse_error);
     }
 
     #[test]
     fn payload_split_on_first_semicolon() {
-        let c = parse(b"a=T,f=100;iVBORw0KGgo=", false);
+        let c = parse(b"a=T,f=100;iVBORw0KGgo=");
         assert_eq!(c.action, KittyAction::TransmitAndDisplay);
         assert_eq!(c.format, KittyFormat::Png);
         assert_eq!(c.payload, b"iVBORw0KGgo=");
@@ -483,29 +475,29 @@ mod tests {
     #[test]
     fn payload_may_contain_semicolons() {
         // Only the first ';' splits; base64 never contains ';' but be robust.
-        let c = parse(b"a=t;AA;BB", false);
+        let c = parse(b"a=t;AA;BB");
         assert_eq!(c.payload, b"AA;BB");
     }
 
     #[test]
     fn unknown_key_is_ignored_not_error() {
-        let c = parse(b"a=t,Q=99,zz=1", false);
+        let c = parse(b"a=t,Q=99,zz=1");
         assert_eq!(c.action, KittyAction::Transmit);
         assert!(!c.parse_error, "unknown keys must not flag parse_error");
     }
 
     #[test]
     fn bad_value_flags_parse_error() {
-        assert!(parse(b"i=notanumber", false).parse_error);
-        assert!(parse(b"f=99", false).parse_error);
-        assert!(parse(b"t=x", false).parse_error);
-        assert!(parse(b"q=x", false).parse_error);
-        assert!(parse(b"z=1.5", false).parse_error);
+        assert!(parse(b"i=notanumber").parse_error);
+        assert!(parse(b"f=99").parse_error);
+        assert!(parse(b"t=x").parse_error);
+        assert!(parse(b"q=x").parse_error);
+        assert!(parse(b"z=1.5").parse_error);
     }
 
     #[test]
     fn flags_are_read_c_style_like_kitty() {
-        let c = parse(b"a=T,q=5,C=2,U=2,f=0", false);
+        let c = parse(b"a=T,q=5,C=2,U=2,f=0");
         assert!(!c.parse_error);
         assert_eq!(c.quiet, 2, "anything above 1 silences everything");
         assert!(!c.cursor_no_move, "only C=1 pins the cursor");
@@ -515,9 +507,9 @@ mod tests {
 
     #[test]
     fn animation_actions_parse() {
-        assert_eq!(parse(b"a=f", false).action, KittyAction::TransmitFrame);
-        assert_eq!(parse(b"a=a", false).action, KittyAction::Animate);
-        assert_eq!(parse(b"a=c", false).action, KittyAction::Compose);
+        assert_eq!(parse(b"a=f").action, KittyAction::TransmitFrame);
+        assert_eq!(parse(b"a=a").action, KittyAction::Animate);
+        assert_eq!(parse(b"a=c").action, KittyAction::Compose);
     }
 
     #[test]
@@ -548,7 +540,7 @@ mod tests {
             (b"a=d,d=Z", KittyDelete::ByZ { free: true }),
         ];
         for (input, expected) in cases {
-            let c = parse(input, false);
+            let c = parse(input);
             assert_eq!(c.action, KittyAction::Delete, "input {input:?}");
             assert_eq!(c.delete, Some(*expected), "input {input:?}");
             assert!(!c.parse_error, "input {input:?}");
@@ -558,18 +550,13 @@ mod tests {
     #[test]
     fn delete_specifier_only_resolved_for_delete_action() {
         // d= present but a!=d ⇒ no delete resolution.
-        let c = parse(b"a=t,d=i", false);
+        let c = parse(b"a=t,d=i");
         assert_eq!(c.delete, None);
     }
 
     #[test]
     fn bad_delete_specifier_flags_error() {
-        let c = parse(b"a=d,d=!", false);
+        let c = parse(b"a=d,d=!");
         assert!(c.parse_error);
-    }
-
-    #[test]
-    fn truncated_flag_threaded_through() {
-        assert!(parse(b"a=T,f=100", true).truncated);
     }
 }

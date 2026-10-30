@@ -83,6 +83,26 @@ impl Screen {
         ));
     }
 
+    /// Re-derive every placement's cell span (and the cell height its
+    /// clipping uses) for a new cell size: Ghostty sizes placements from the
+    /// current cell metrics, so an image drawn at its own pixel size covers
+    /// more rows once the font shrinks.
+    pub(crate) fn rescale_kitty_placements(&mut self, cell_w: u32, cell_h: u32) {
+        for p in &mut self.kitty_placements {
+            let Some([_, _, w, h]) = p.src else {
+                continue;
+            };
+            let [trim_top, trim_bottom] = p.src_trim_y.map(f64::from);
+            (p.cols, p.rows) = super::kitty_cell_span(
+                [f64::from(w), f64::from(h) - trim_top - trim_bottom],
+                [p.req_cols, p.req_rows],
+                [cell_w, cell_h],
+                [u32::from(p.cell_x_off), u32::from(p.cell_y_off)],
+            );
+            p.cell_px = [cell_w, cell_h];
+        }
+    }
+
     /// Insert a placement, replacing any existing one with the same
     /// `(image_id, placement_id)` — this is how an unnamed placement (`p=0`) of
     /// an image overwrites its predecessor. A replaced parent keeps its
@@ -1226,22 +1246,82 @@ impl Screen {
 }
 
 /// Cut `top` rows off the top and `bottom` off the bottom of placement `p`,
-/// cropping its source rectangle in proportion. `false` when `p` carries no
-/// source rectangle to crop.
+/// as Ghostty 1.4.0's `clipTop` / `clipBottom` for an image drawn at its own
+/// size: it loses whole cells of source pixels. The cell offset stays.
+/// `false` when no source pixels would remain (or `p` has no source
+/// rectangle), so the caller deletes it.
+///
+/// Deliberate divergence for a scaled image (`c=` and/or `r=`): Ghostty crops
+/// one with `r=` by an integer share of its source per row and treats one with
+/// `c=` alone as unscaled, so a strongly scaled image loses too little source
+/// and shrinks (or keeps) its drawn size wrongly. Here the drawn rows cut are
+/// converted back to source pixels by the image's scale, kept fractional in
+/// [`KittyPlacement::src_trim_y`], so the rest of the image keeps its scale.
 fn clip_placement_rows(p: &mut KittyPlacement, top: i64, bottom: i64) -> bool {
-    let Some([x, y, w, h]) = p.src else {
+    let Some([x, mut y, w, mut h]) = p.src else {
         return false;
     };
-    let rows = u64::from(p.rows);
-    let cut = |k: i64| (u64::from(h) * k as u64 / rows) as u32;
-    let (cut_top, cut_bottom) = (cut(top), cut(bottom));
-    // `kitty_place` keeps an explicit source rectangle as given, so `y` can
-    // sit at the coordinate limit.
-    p.src = Some([x, y.saturating_add(cut_top), w, h - cut_top - cut_bottom]);
-    p.rows -= (top + bottom) as u16;
-    if top > 0 {
-        // The pixel offset belonged to the clipped first row.
-        p.cell_y_off = 0;
+    let [cell_w, cell_h] = p.cell_px.map(u64::from);
+    // The offset in effect: clamped into the current cell, which may have
+    // shrunk since the placement was made (Ghostty's `cellOffset`).
+    let offset_y = u64::from(p.cell_y_off).min(cell_h.saturating_sub(1));
+    if p.req_cols > 0 || p.req_rows > 0 {
+        let [mut trim_top, mut trim_bottom] = p.src_trim_y.map(f64::from);
+        // Source pixels per drawn pixel: the drawn height of an `r=` image
+        // fills its rows less the offset; one sized by `c=` alone follows its
+        // drawn width.
+        let source_per_drawn = if p.req_rows > 0 {
+            let drawn_h = (u64::from(p.req_rows) * cell_h).saturating_sub(offset_y);
+            (f64::from(h) - trim_top - trim_bottom) / drawn_h.max(1) as f64
+        } else {
+            let offset_x = u64::from(p.cell_x_off).min(cell_w.saturating_sub(1));
+            let drawn_w = (u64::from(p.req_cols) * cell_w).saturating_sub(offset_x);
+            f64::from(w) / drawn_w.max(1) as f64
+        };
+        if top > 0 {
+            trim_top += (cell_h * top as u64) as f64 * source_per_drawn;
+            if f64::from(h) - trim_top - trim_bottom <= 0.0 {
+                return false;
+            }
+            p.rows -= top as u16;
+            p.req_rows = p.req_rows.saturating_sub(top as u32);
+        }
+        if bottom > 0 {
+            // The rows left show this many drawn pixels, less the offset into
+            // the first cell.
+            let visible = cell_h * u64::from(p.rows - bottom as u16);
+            if visible <= offset_y {
+                return false;
+            }
+            let shown = (visible - offset_y) as f64 * source_per_drawn;
+            trim_bottom = trim_bottom.max(f64::from(h) - trim_top - shown);
+            p.rows -= bottom as u16;
+            p.req_rows = p.req_rows.saturating_sub(bottom as u32);
+        }
+        p.src_trim_y = [trim_top as f32, trim_bottom as f32];
+        return true;
     }
+    if top > 0 {
+        let crop = cell_h * top as u64;
+        if crop >= u64::from(h) {
+            return false;
+        }
+        // `kitty_place` intersected the source with the image, so this stays
+        // within the image's (bounded) height.
+        y += crop as u32;
+        h -= crop as u32;
+        p.rows -= top as u16;
+    }
+    if bottom > 0 {
+        // The rows left show this many source pixels, less the offset into
+        // the first cell.
+        let visible = cell_h * u64::from(p.rows - bottom as u16);
+        if visible <= offset_y {
+            return false;
+        }
+        h = u64::from(h).min(visible - offset_y) as u32;
+        p.rows -= bottom as u16;
+    }
+    p.src = Some([x, y, w, h]);
     true
 }

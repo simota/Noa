@@ -264,7 +264,10 @@ pub(crate) fn image_snapshot(
             cell_y_off: 0,
             cols,
             rows: rows_n,
+            req_cols: u32::from(cols),
+            req_rows: u32::from(rows_n),
             src: None,
+            src_trim_y: [0.0; 2],
             z,
         }],
         images: vec![SnapshotImage {

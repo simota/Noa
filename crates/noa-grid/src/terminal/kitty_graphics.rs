@@ -14,6 +14,8 @@ struct ImagePlace {
     src: Option<[u32; 4]>,
     cols: u16,
     rows: u16,
+    req_cols: u32,
+    req_rows: u32,
     z: i32,
     cursor_no_move: bool,
     virtual_placement: bool,
@@ -207,36 +209,28 @@ impl Terminal {
             return Err(KittyError::Invalid);
         }
 
-        let src_w = if ctrl.src_w != 0 {
-            ctrl.src_w
-        } else {
-            img_w.saturating_sub(ctrl.src_x)
-        };
-        let src_h = if ctrl.src_h != 0 {
-            ctrl.src_h
-        } else {
-            img_h.saturating_sub(ctrl.src_y)
-        };
+        // Intersect the source rectangle with the image before sizing, so a
+        // crop reaching past the image is not stretched (Ghostty #13890).
+        let src_x = ctrl.src_x.min(img_w);
+        let src_y = ctrl.src_y.min(img_h);
+        let src_w = if ctrl.src_w != 0 { ctrl.src_w } else { img_w }.min(img_w - src_x);
+        let src_h = if ctrl.src_h != 0 { ctrl.src_h } else { img_h }.min(img_h - src_y);
         if src_w == 0 || src_h == 0 {
             return Err(KittyError::Invalid);
         }
-        let cols = if ctrl.columns != 0 {
-            ctrl.columns
-        } else {
-            src_w.div_ceil(cell_w)
-        };
-        let rows = if ctrl.rows != 0 {
-            ctrl.rows
-        } else {
-            src_h.div_ceil(cell_h)
-        };
-        let cols = cols.clamp(1, u16::MAX as u32) as u16;
-        let rows = rows.clamp(1, u16::MAX as u32) as u16;
+        // Offsets stay within the first cell (Ghostty #13891).
+        let cell_x_off = ctrl.cell_x_off.min(cell_w - 1);
+        let cell_y_off = ctrl.cell_y_off.min(cell_h - 1);
+        let (cols, rows) = crate::screen::kitty_cell_span(
+            [src_w, src_h].map(f64::from),
+            [ctrl.columns, ctrl.rows],
+            [cell_w, cell_h],
+            [cell_x_off, cell_y_off],
+        );
         // Always explicit (not `None` = whole image) so a region scroll can
         // clip it without the image's size.
-        let src = Some([ctrl.src_x, ctrl.src_y, src_w, src_h]);
-        let cell_x_off = ctrl.cell_x_off.min(cell_w - 1) as u16;
-        let cell_y_off = ctrl.cell_y_off.min(cell_h - 1) as u16;
+        let src = Some([src_x, src_y, src_w, src_h]);
+        let (cell_x_off, cell_y_off) = (cell_x_off as u16, cell_y_off as u16);
 
         self.place_image(
             image_id,
@@ -247,6 +241,8 @@ impl Terminal {
                 src,
                 cols,
                 rows,
+                req_cols: ctrl.columns,
+                req_rows: ctrl.rows,
                 z: ctrl.z_index,
                 cursor_no_move: ctrl.cursor_no_move,
                 virtual_placement: ctrl.virtual_placement,
@@ -256,6 +252,7 @@ impl Terminal {
     }
 
     fn place_image(&mut self, image_id: u32, spec: ImagePlace) -> Result<(), KittyError> {
+        let cell_px = [self.cell_width_px, self.cell_height_px];
         let screen = self.active_mut();
         let anchor_abs_row =
             screen.rows_evicted() + screen.scrollback_len() + screen.cursor.y as usize;
@@ -268,8 +265,12 @@ impl Terminal {
             cell_x_off: spec.cell_x_off,
             cell_y_off: spec.cell_y_off,
             src: spec.src,
+            src_trim_y: [0.0; 2],
             cols: spec.cols,
             rows: spec.rows,
+            req_cols: spec.req_cols,
+            req_rows: spec.req_rows,
+            cell_px,
             z: spec.z,
             is_virtual: spec.virtual_placement,
             parent: spec.parent,
@@ -324,6 +325,9 @@ impl Terminal {
                     src: Some([0, 0, raster.width, raster.height]),
                     cols,
                     rows,
+                    // Drawn at its own pixel size, like a Kitty image without `c=`/`r=`.
+                    req_cols: 0,
+                    req_rows: 0,
                     z: 0,
                     cursor_no_move: false,
                     virtual_placement: false,
@@ -588,7 +592,11 @@ impl Terminal {
                     cell_y_off: 0,
                     cols: run.cols,
                     rows: 1,
+                    // A placeholder tile fills its cells.
+                    req_cols: u32::from(run.cols),
+                    req_rows: 1,
                     src: Some(src),
+                    src_trim_y: [0.0; 2],
                     z: vp.z,
                 });
             }

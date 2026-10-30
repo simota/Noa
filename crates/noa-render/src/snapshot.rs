@@ -104,9 +104,17 @@ pub struct ImagePlacementSnapshot {
     pub cell_y_off: u16,
     pub cols: u16,
     pub rows: u16,
+    /// `c=`/`r=` as requested (0 = unset): with [`Self::src`] they set the
+    /// drawn size ([`noa_grid::kitty_image_size`]); `cols`/`rows` are only the
+    /// cell span.
+    pub req_cols: u32,
+    pub req_rows: u32,
     /// Crop rectangle in image pixels (`[x, y, w, h]`), or `None` for the whole
     /// image.
     pub src: Option<[u32; 4]>,
+    /// Source pixels trimmed off the top and bottom of `src`
+    /// ([`noa_grid::KittyPlacement::src_trim_y`]).
+    pub src_trim_y: [f32; 2],
     pub z: i32,
 }
 
@@ -153,7 +161,10 @@ fn kitty_snapshot(terminal: &Terminal) -> (Vec<ImagePlacementSnapshot>, Vec<Snap
             cell_y_off: placement.cell_y_off,
             cols: placement.cols,
             rows: placement.rows,
+            req_cols: placement.req_cols,
+            req_rows: placement.req_rows,
             src: placement.src,
+            src_trim_y: placement.src_trim_y,
             z: placement.z,
         });
         if !images.iter().any(|existing| existing.id == image.id) {

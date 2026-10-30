@@ -75,7 +75,7 @@ struct ReflowedLine {
 /// adjustment — the absolute coordinate keeps pointing at the same content; only
 /// scrolls that discard content (alternate screen, region scrolls) shift or drop
 /// placements.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct KittyPlacement {
     pub image_id: u32,
     /// `p=` placement id (0 = unnamed; the unnamed placement of an image is
@@ -89,9 +89,23 @@ pub struct KittyPlacement {
     pub cell_y_off: u16,
     /// Source crop `[x, y, w, h]` in image pixels, if the request cropped.
     pub src: Option<[u32; 4]>,
+    /// Source pixels trimmed off the top and bottom of `src` beyond its whole
+    /// pixels: a region scroll clipping an image scaled up by `c=` can cut a
+    /// fraction of a source pixel per row.
+    pub src_trim_y: [f32; 2],
     /// Effective cell span, resolved at creation from `c=`/`r=` or the image size.
     pub cols: u16,
     pub rows: u16,
+    /// `c=`/`r=` as requested (0 = unset). The drawn size follows from these,
+    /// the source rectangle and the cell size ([`kitty_image_size`]), so an
+    /// image without them keeps its own pixel size instead of filling `cols ×
+    /// rows` cells.
+    pub req_cols: u32,
+    pub req_rows: u32,
+    /// Cell `[width, height]` (px) the span was derived from (kept current by
+    /// `Screen::rescale_kitty_placements`). A region scroll clips a placement
+    /// with no `r=` by whole cells of it.
+    pub cell_px: [u32; 2],
     pub z: i32,
     /// `U=1` — a virtual placement referenced only by Unicode placeholders; it is
     /// never drawn directly.
@@ -143,9 +157,65 @@ impl KittyPlacement {
             cell_y_off: self.cell_y_off,
             cols: self.cols,
             rows: self.rows,
+            req_cols: self.req_cols,
+            req_rows: self.req_rows,
             src: self.src,
+            src_trim_y: self.src_trim_y,
             z: self.z,
         })
+    }
+}
+
+/// The cells a Kitty placement spans (Ghostty 1.4.0's `Placement.gridSize`):
+/// `c=` and `r=` together pin it; otherwise it is the drawn size plus the
+/// offset into the first cell, rounded up to whole cells. `offset` is clamped
+/// into the cell first.
+pub(crate) fn kitty_cell_span(
+    src: [f64; 2],
+    req: [u32; 2],
+    cell: [u32; 2],
+    offset: [u32; 2],
+) -> (u16, u16) {
+    let (cols, rows) = if req[0] != 0 && req[1] != 0 {
+        (req[0], req[1])
+    } else {
+        let offset = [0, 1].map(|i| offset[i].min(cell[i].saturating_sub(1)));
+        let size = kitty_image_size(src, req, cell.map(f64::from), offset.map(f64::from));
+        let span = |i: usize| {
+            ((size[i].round() + f64::from(offset[i])) / f64::from(cell[i])).ceil() as u32
+        };
+        (span(0), span(1))
+    };
+    let clamp = |n: u32| n.clamp(1, u32::from(u16::MAX)) as u16;
+    (clamp(cols), clamp(rows))
+}
+
+/// The drawn pixel size of a Kitty placement (Ghostty 1.4.0's
+/// `Placement.pixelSize`): with neither `c=` nor `r=` the source keeps its own
+/// size; with both it fills the cells; with one the other side follows the
+/// source's aspect ratio. The cell offset comes off the requested side, so
+/// the far edge stays on the cell boundary. `src` is the source rectangle's
+/// size, already intersected with the image.
+pub fn kitty_image_size(
+    src: [f64; 2],
+    req: [u32; 2],
+    cell: [f64; 2],
+    offset: [f64; 2],
+) -> [f64; 2] {
+    let [sw, sh] = src;
+    let side = |n: u32, cell: f64, offset: f64| (f64::from(n) * cell - offset).max(0.0);
+    let scale = |value: f64, num: f64, den: f64| if den == 0.0 { 0.0 } else { value * num / den };
+    match req {
+        [0, 0] => [sw, sh],
+        [c, 0] => {
+            let w = side(c, cell[0], offset[0]);
+            [w, scale(w, sh, sw)]
+        }
+        [0, r] => {
+            let h = side(r, cell[1], offset[1]);
+            [scale(h, sw, sh), h]
+        }
+        [c, r] => [side(c, cell[0], offset[0]), side(r, cell[1], offset[1])],
     }
 }
 
@@ -162,7 +232,12 @@ pub struct VisibleKittyPlacement {
     pub cell_y_off: u16,
     pub cols: u16,
     pub rows: u16,
+    /// `c=`/`r=` as requested (0 = unset); see [`kitty_image_size`].
+    pub req_cols: u32,
+    pub req_rows: u32,
     pub src: Option<[u32; 4]>,
+    /// See [`KittyPlacement::src_trim_y`].
+    pub src_trim_y: [f32; 2],
     pub z: i32,
 }
 

@@ -23,9 +23,14 @@ const MAX_OSC_BYTES: usize = 12 * (1 << 20); // 12 MiB
 pub(crate) const MAX_DCS_BYTES: usize = 8 * (1 << 20); // 8 MiB
 /// Ghostty 1.4.0's Kitty-graphics cap (`apc.Protocol.defaultMaxBytes`):
 /// payloads carry whole base64 images, so the data after the first `;` may
-/// reach 65 MiB (the control keys before it are bounded by the same cap).
-/// Overflow discards the APC unrun and unanswered, as Ghostty does.
+/// reach 65 MiB. Overflow discards the APC unrun and unanswered, as Ghostty
+/// does.
 pub(crate) const MAX_APC_BYTES: usize = 65 * (1 << 20);
+/// Cap on the control keys before the first `;`. Ghostty never stores them
+/// (each value goes through an 11-byte buffer); a full key set is a few
+/// hundred bytes, so a longer control section is discarded like an
+/// over-limit payload.
+pub(crate) const MAX_APC_CONTROL_BYTES: usize = 4096;
 
 /// The from-scratch VT parser. Cheap to construct; holds only small buffers.
 pub struct Parser {
@@ -479,15 +484,18 @@ impl Parser {
                 // Only Kitty graphics (`G`) is captured; any other APC keeps
                 // just its first byte, so the stream drops it.
                 if !self.apc_overflow && self.apc.first().is_none_or(|&f| f == b'G') {
-                    let start = self.apc_data_start.unwrap_or(0);
-                    if self.apc.len() - start < MAX_APC_BYTES {
+                    let room = match self.apc_data_start {
+                        Some(start) => MAX_APC_BYTES - (self.apc.len() - start),
+                        None => MAX_APC_CONTROL_BYTES.saturating_sub(self.apc.len()),
+                    };
+                    if room > 0 {
                         self.apc.push(b);
                         if b == b';' && self.apc_data_start.is_none() {
                             self.apc_data_start = Some(self.apc.len());
                         }
                     } else {
-                        // Free, don't clear, as for OSC: the buffer is at its
-                        // 65 MiB cap.
+                        // Free, don't clear, as for OSC: the buffer may be at
+                        // its 65 MiB cap.
                         self.apc = Vec::new();
                         self.apc_overflow = true;
                     }

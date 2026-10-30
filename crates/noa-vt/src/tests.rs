@@ -617,6 +617,20 @@ fn apc_payload_over_the_cap_is_dropped_and_the_parser_recovers() {
 }
 
 #[test]
+fn an_apc_control_section_over_its_cap_is_dropped() {
+    let cap = crate::parser::MAX_APC_CONTROL_BYTES;
+    // `G` plus keys filling the cap still dispatches; one more byte does not.
+    let fits = format!("\x1b_G{}\x1b\\", "q".repeat(cap - 1));
+    assert_eq!(only_apc(fits.as_bytes()).len(), cap);
+    let over = format!("\x1b_G{};AAAA\x1b\\", "q".repeat(cap));
+    assert!(
+        actions(over.as_bytes())
+            .iter()
+            .all(|a| !matches!(a, Action::ApcDispatch { .. }))
+    );
+}
+
+#[test]
 fn a_non_kitty_apc_keeps_only_its_first_byte() {
     assert_eq!(only_apc(b"\x1b_Xother\x1b\\"), b"X");
 }

@@ -489,6 +489,11 @@ impl Parser {
                         None => MAX_APC_CONTROL_BYTES.saturating_sub(self.apc.len()),
                     };
                     if room > 0 {
+                        if self.apc.len() == self.apc.capacity() {
+                            // Double, but never past what the cap still
+                            // admits: plain doubling would reach 128 MiB.
+                            self.apc.reserve_exact(self.apc.len().max(64).min(room));
+                        }
                         self.apc.push(b);
                         if b == b';' && self.apc_data_start.is_none() {
                             self.apc_data_start = Some(self.apc.len());

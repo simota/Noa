@@ -599,6 +599,11 @@ fn apc_payload_up_to_ghosttys_cap_dispatches() {
     let max = 65 * (1 << 20);
     let data = only_apc(&kitty_apc_with_payload("i=1,a=q", max));
     assert_eq!(data.len(), "Gi=1,a=q;".len() + max);
+    assert_eq!(
+        data.capacity(),
+        data.len(),
+        "growth stops at the cap, not 128 MiB"
+    );
 }
 
 #[test]

@@ -1254,7 +1254,40 @@ fn region_scroll_clips_a_scaled_image_proportionally() {
     feed(&mut t, b"\x1b[2;1H");
     kitty_cmd(&mut t, "a=p,i=1,r=2,C=1,q=2");
     feed(&mut t, b"\x1b[2;3r\x1b[3;1H\n");
-    assert_eq!(tall_state(&t, 1), Some((1, 1, Some([0, 40, 10, 40]))));
+    let p = &t.primary.kitty_placements[0];
+    assert_eq!((p.rows, p.req_rows, p.src_trim_y), (1, 1, [40.0, 0.0]));
+    assert_eq!(drawn_size(&t, 1), [5.0, 20.0]);
+}
+
+#[test]
+fn region_scroll_keeps_the_width_of_a_rows_scaled_image() {
+    let mut t = kitty_terminal();
+    // 1×1 px at r=10: drawn 200×200 px over ten rows (1..=10).
+    feed(&mut t, &kitty_apc("a=t,f=32,s=1,v=1,i=1,q=2", &[0u8; 4]));
+    feed(&mut t, b"\x1b[2;1H");
+    kitty_cmd(&mut t, "a=p,i=1,r=10,C=1,q=2");
+    assert_eq!(drawn_size(&t, 1), [200.0, 200.0]);
+    // Region rows 1..=10: one row leaves the top.
+    feed(&mut t, b"\x1b[2;11r\x1b[11;1H\n");
+    assert_eq!(t.primary.kitty_placements[0].rows, 9);
+    assert_eq!(drawn_size(&t, 1), [200.0, 180.0]);
+    // Two rows down: one row passes the bottom.
+    feed(&mut t, b"\x1b[2;1H\x1bM\x1bM");
+    assert_eq!(t.primary.kitty_placements[0].rows, 8);
+    assert_eq!(drawn_size(&t, 1), [200.0, 160.0]);
+}
+
+#[test]
+fn region_scroll_keeps_the_scale_of_a_columns_and_rows_image() {
+    let mut t = kitty_terminal();
+    // 1×1 px at c=20,r=10 fills 200×200 px; one clipped row leaves 200×180.
+    feed(&mut t, &kitty_apc("a=t,f=32,s=1,v=1,i=1,q=2", &[0u8; 4]));
+    feed(&mut t, b"\x1b[2;1H");
+    kitty_cmd(&mut t, "a=p,i=1,c=20,r=10,C=1,q=2");
+    feed(&mut t, b"\x1b[2;11r\x1b[11;1H\n");
+    let p = &t.primary.kitty_placements[0];
+    assert_eq!((p.rows, p.req_rows, p.src_trim_y), (9, 9, [0.1, 0.0]));
+    assert_eq!(drawn_size(&t, 1), [200.0, 180.0]);
 }
 
 #[test]

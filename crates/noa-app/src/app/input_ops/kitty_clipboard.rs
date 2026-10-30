@@ -175,7 +175,17 @@ impl App {
         listing: &[String],
         data: &[Option<Vec<u8>>],
     ) {
-        self.send_kitty_reply(window_id, pane_id, read.reply_packets(listing, data));
+        let packets = read.reply_packets(listing, data);
+        let total: usize = packets.iter().map(Vec::len).sum();
+        // A program that keeps asking without reading its replies would
+        // otherwise grow the queue without bound: past the cap it gets EIO.
+        if self.queued_kitty_reply_bytes(pane_id) + total > MAX_QUEUED_REPLY_BYTES {
+            log::warn!("failing an OSC 5522 read: the pane has not read earlier replies");
+            let eio = read.reply_status(KittyClipboardStatus::Eio);
+            self.send_kitty_reply(window_id, pane_id, vec![eio]);
+            return;
+        }
+        self.send_kitty_reply(window_id, pane_id, packets);
     }
 
     /// Send OSC 5522 reply packets to the pane, in order with its earlier
@@ -196,9 +206,13 @@ impl App {
                 }
                 SurfaceTransport::Remote(_) => None,
             });
+        // Only panes with a reply still streaming need a queue.
+        self.kitty_reply_queues
+            .retain(|pane, queue| *pane == pane_id || queue.lock().draining);
         let queue = self.kitty_reply_queues.entry(pane_id).or_default().clone();
         let mut pending = queue.lock();
         if pending.draining {
+            pending.queued_bytes += total;
             pending.packets.extend(packets);
             return;
         }
@@ -207,6 +221,7 @@ impl App {
             self.write_pane_pty_bytes(window_id, pane_id, packets.concat());
             return;
         };
+        pending.queued_bytes += total;
         pending.packets.extend(packets);
         pending.draining = true;
         drop(pending);
@@ -218,8 +233,16 @@ impl App {
             log::warn!("failed to start the OSC 5522 reply thread: {err}");
             let mut pending = queue.lock();
             pending.packets.clear();
+            pending.queued_bytes = 0;
             pending.draining = false;
         }
+    }
+
+    /// Bytes of OSC 5522 replies already waiting for the pane.
+    fn queued_kitty_reply_bytes(&self, pane_id: PaneId) -> usize {
+        self.kitty_reply_queues
+            .get(&pane_id)
+            .map_or(0, |queue| queue.lock().queued_bytes)
     }
 
     /// Raise the confirmation for an OSC 5522 request. Like an OSC 52 read,
@@ -399,10 +422,16 @@ fn drain_kitty_replies(
     writer: &noa_pty::PtyWriter,
 ) {
     loop {
+        // `draining` stays set until a packet has been written and nothing
+        // is left, so a reply sent meanwhile queues rather than overtakes.
         let Some(packet) = ({
             let mut pending = queue.lock();
             let next = pending.packets.pop_front();
-            pending.draining = next.is_some();
+            if let Some(packet) = &next {
+                pending.queued_bytes -= packet.len();
+            } else {
+                pending.draining = false;
+            }
             next
         }) else {
             return;
@@ -422,6 +451,7 @@ fn drain_kitty_replies(
             log::warn!("abandoning OSC 5522 replies: the pane stopped reading or closed");
             let mut pending = queue.lock();
             pending.packets.clear();
+            pending.queued_bytes = 0;
             pending.draining = false;
             return;
         }
@@ -431,16 +461,16 @@ fn drain_kitty_replies(
 /// Read replies above this go out packet by packet; see
 /// [`App::send_kitty_reply`].
 const STREAMED_REPLY_BYTES: usize = 1 << 20;
+/// Most reply bytes queued for one pane; a read past it fails with EIO.
+const MAX_QUEUED_REPLY_BYTES: usize = 64 * 1024 * 1024;
 /// How long a streamed reply waits for the pane to accept its next packet.
 const REPLY_STALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// What a write would put on the clipboard, for the prompt: its text, or its
-/// types and sizes.
+/// What a write would put on the clipboard, for the prompt: its
+/// `text/plain` (the representation a paste uses, as Ghostty's prompt shows),
+/// or its types and sizes.
 fn describe_write(contents: &[(String, std::sync::Arc<[u8]>)]) -> String {
-    if let Some((_, text)) = contents
-        .iter()
-        .find(|(mime, _)| noa_grid::kitty_clipboard::is_text_mime(mime))
-    {
+    if let Some((_, text)) = contents.iter().find(|(mime, _)| mime == "text/plain") {
         let text = String::from_utf8_lossy(text);
         let mut preview: String = text.chars().take(80).collect();
         if preview.len() < text.len() {
@@ -497,8 +527,9 @@ mod tests {
     #[test]
     fn a_write_is_described_by_its_text_or_types() {
         let png = ("image/png".to_string(), std::sync::Arc::from(&[0u8; 3][..]));
-        let text = ("TEXT".to_string(), std::sync::Arc::from(&b"hi\n"[..]));
-        assert_eq!(describe_write(&[png.clone(), text]), "\"hi\\n\"");
+        let alias = ("TEXT".to_string(), std::sync::Arc::from(&b"other"[..]));
+        let text = ("text/plain".to_string(), std::sync::Arc::from(&b"hi\n"[..]));
+        assert_eq!(describe_write(&[png.clone(), alias, text]), "\"hi\\n\"");
         assert_eq!(describe_write(&[png]), "\"image/png\" (3 bytes)");
         // A program-chosen name can't break out of its quotes.
         let sneaky = (

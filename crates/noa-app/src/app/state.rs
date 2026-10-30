@@ -1030,6 +1030,8 @@ pub(super) struct ConfirmDialogSession {
 #[derive(Default)]
 pub(super) struct KittyReplyQueue {
     pub(super) packets: std::collections::VecDeque<Vec<u8>>,
+    /// Total length of `packets`.
+    pub(super) queued_bytes: usize,
     /// A helper thread is draining `packets`; new replies queue behind it.
     pub(super) draining: bool,
 }

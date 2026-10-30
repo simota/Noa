@@ -39,7 +39,7 @@ impl App {
     ) {
         let reply = |status| read.reply_status(status);
         if self.config.clipboard_read == noa_config::ClipboardAccess::Deny {
-            self.write_pane_pty_bytes(window_id, pane_id, reply(KittyClipboardStatus::Eperm));
+            self.send_kitty_reply(window_id, pane_id, vec![reply(KittyClipboardStatus::Eperm)]);
             return;
         }
         // The data is read before any prompt, so the user approves exactly
@@ -47,12 +47,16 @@ impl App {
         let data = match self.clipboard.read_mimes(read.location, &read.mimes) {
             Ok(Some(data)) => data,
             Ok(None) => {
-                self.write_pane_pty_bytes(window_id, pane_id, reply(KittyClipboardStatus::Enosys));
+                self.send_kitty_reply(
+                    window_id,
+                    pane_id,
+                    vec![reply(KittyClipboardStatus::Enosys)],
+                );
                 return;
             }
             Err(err) => {
                 log::warn!("failed to read the clipboard for OSC 5522: {err}");
-                self.write_pane_pty_bytes(window_id, pane_id, reply(KittyClipboardStatus::Eio));
+                self.send_kitty_reply(window_id, pane_id, vec![reply(KittyClipboardStatus::Eio)]);
                 return;
             }
         };
@@ -61,7 +65,11 @@ impl App {
                 Ok(listing) => listing.unwrap_or_default(),
                 Err(err) => {
                     log::warn!("failed to list the clipboard's types for OSC 5522: {err}");
-                    self.write_pane_pty_bytes(window_id, pane_id, reply(KittyClipboardStatus::Eio));
+                    self.send_kitty_reply(
+                        window_id,
+                        pane_id,
+                        vec![reply(KittyClipboardStatus::Eio)],
+                    );
                     return;
                 }
             }
@@ -80,8 +88,15 @@ impl App {
             return;
         }
         // Name what was asked for: like Ghostty, the prompt appears even when
-        // none of it is on the clipboard (only the listing would go out).
-        let types = read.mimes.join(", ");
+        // none of it is on the clipboard (only the listing would go out). The
+        // names are the program's, so they are quoted and escaped rather
+        // than able to pass for the prompt's own words.
+        let types = read
+            .mimes
+            .iter()
+            .map(|mime| format!("{mime:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let remember = !read.pw.is_empty();
         self.prompt_kitty_clipboard(
             window_id,
@@ -105,13 +120,13 @@ impl App {
     ) {
         if self.config.clipboard_write == noa_config::ClipboardAccess::Deny {
             let bytes = write.reply_status(KittyClipboardStatus::Eperm);
-            self.write_pane_pty_bytes(window_id, pane_id, bytes);
+            self.send_kitty_reply(window_id, pane_id, vec![bytes]);
             return;
         }
         if self.config.clipboard_write == noa_config::ClipboardAccess::Ask && !write.granted {
             if !self.clipboard.supports(write.location) {
                 let bytes = write.reply_status(KittyClipboardStatus::Enosys);
-                self.write_pane_pty_bytes(window_id, pane_id, bytes);
+                self.send_kitty_reply(window_id, pane_id, vec![bytes]);
                 return;
             }
             let remember = !write.pw.is_empty();
@@ -148,62 +163,62 @@ impl App {
                 KittyClipboardStatus::Eio
             }
         };
-        self.write_pane_pty_bytes(window_id, pane_id, write.reply_status(status));
+        self.send_kitty_reply(window_id, pane_id, vec![write.reply_status(status)]);
     }
 
-    /// Send a successful read's replies. A large one (an image, say) would
-    /// exceed the pane's pending-input budget as one write and be dropped
-    /// whole, leaving the program waiting; it is fed packet by packet from a
-    /// helper thread instead, each waiting for budget to free up.
+    /// Send a successful read's replies; see [`Self::send_kitty_reply`].
     fn write_kitty_read_reply(
-        &self,
+        &mut self,
         window_id: WindowId,
         pane_id: PaneId,
         read: &KittyClipboardRead,
         listing: &[String],
         data: &[Option<Vec<u8>>],
     ) {
-        let packets = read.reply_packets(listing, data);
+        self.send_kitty_reply(window_id, pane_id, read.reply_packets(listing, data));
+    }
+
+    /// Send OSC 5522 reply packets to the pane, in order with its earlier
+    /// replies. A large reply (an image, say) would exceed the pane's
+    /// pending-input budget as one write and be dropped whole, leaving the
+    /// program waiting; a helper thread feeds it packet by packet instead,
+    /// each waiting for budget to free up, and replies arriving meanwhile
+    /// queue behind it.
+    fn send_kitty_reply(&mut self, window_id: WindowId, pane_id: PaneId, packets: Vec<Vec<u8>>) {
         let total: usize = packets.iter().map(Vec::len).sum();
         let local = self
             .windows
             .get(&window_id)
             .and_then(|state| state.surfaces.get(&pane_id))
             .and_then(|surface| match &surface.transport {
-                SurfaceTransport::Local(local) => Some(local),
+                SurfaceTransport::Local(local) => {
+                    Some((local.pty_input_tx.clone(), local.pty_writer.clone()))
+                }
                 SurfaceTransport::Remote(_) => None,
             });
-        let Some(local) = local.filter(|_| total > STREAMED_REPLY_BYTES) else {
+        let queue = self.kitty_reply_queues.entry(pane_id).or_default().clone();
+        let mut pending = queue.lock();
+        if pending.draining {
+            pending.packets.extend(packets);
+            return;
+        }
+        let Some((input, writer)) = local.filter(|_| total > STREAMED_REPLY_BYTES) else {
+            drop(pending);
             self.write_pane_pty_bytes(window_id, pane_id, packets.concat());
             return;
         };
-        let (queue, writer) = (local.pty_input_tx.clone(), local.pty_writer.clone());
+        pending.packets.extend(packets);
+        pending.draining = true;
+        drop(pending);
+        let drain = queue.clone();
         let spawned = std::thread::Builder::new()
             .name("noa-kitty-clipboard-reply".to_string())
-            .spawn(move || {
-                for packet in packets {
-                    // A program that stops reading leaves the budget full;
-                    // give up rather than wait on it forever.
-                    let deadline = std::time::Instant::now() + REPLY_STALL_LIMIT;
-                    let reserved = loop {
-                        match queue.reserve(packet.clone().into_boxed_slice()) {
-                            Some(reserved) => break reserved,
-                            None if std::time::Instant::now() >= deadline => {
-                                log::warn!(
-                                    "abandoning an OSC 5522 reply: the pane stopped reading"
-                                );
-                                return;
-                            }
-                            None => std::thread::sleep(std::time::Duration::from_millis(5)),
-                        }
-                    };
-                    if writer.write_reserved(reserved).is_err() {
-                        return; // the pane is gone
-                    }
-                }
-            });
+            .spawn(move || drain_kitty_replies(&drain, &input, &writer));
         if let Err(err) = spawned {
             log::warn!("failed to start the OSC 5522 reply thread: {err}");
+            let mut pending = queue.lock();
+            pending.packets.clear();
+            pending.draining = false;
         }
     }
 
@@ -289,7 +304,7 @@ impl App {
             _ => return,
         };
         if let Some(window_id) = self.resolve_pane_window(window_id, pane_id) {
-            self.write_pane_pty_bytes(window_id, pane_id, bytes);
+            self.send_kitty_reply(window_id, pane_id, vec![bytes]);
         }
     }
 
@@ -376,8 +391,45 @@ impl App {
     }
 }
 
+/// Helper-thread body for [`App::send_kitty_reply`]: write queued packets
+/// until the queue is empty, then hand back to direct writes.
+fn drain_kitty_replies(
+    queue: &Mutex<KittyReplyQueue>,
+    input: &crate::io_thread::PtyInputQueue,
+    writer: &noa_pty::PtyWriter,
+) {
+    loop {
+        let Some(packet) = ({
+            let mut pending = queue.lock();
+            let next = pending.packets.pop_front();
+            pending.draining = next.is_some();
+            next
+        }) else {
+            return;
+        };
+        // A program that stops reading leaves the budget full; give up
+        // rather than wait on it forever.
+        let deadline = std::time::Instant::now() + REPLY_STALL_LIMIT;
+        let reserved = loop {
+            match input.reserve(packet.clone().into_boxed_slice()) {
+                Some(reserved) => break Some(reserved),
+                None if std::time::Instant::now() >= deadline => break None,
+                None => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        };
+        let written = reserved.is_some_and(|reserved| writer.write_reserved(reserved).is_ok());
+        if !written {
+            log::warn!("abandoning OSC 5522 replies: the pane stopped reading or closed");
+            let mut pending = queue.lock();
+            pending.packets.clear();
+            pending.draining = false;
+            return;
+        }
+    }
+}
+
 /// Read replies above this go out packet by packet; see
-/// [`App::write_kitty_read_reply`].
+/// [`App::send_kitty_reply`].
 const STREAMED_REPLY_BYTES: usize = 1 << 20;
 /// How long a streamed reply waits for the pane to accept its next packet.
 const REPLY_STALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -401,7 +453,7 @@ fn describe_write(contents: &[(String, std::sync::Arc<[u8]>)]) -> String {
     }
     contents
         .iter()
-        .map(|(mime, data)| format!("{mime} ({} bytes)", data.len()))
+        .map(|(mime, data)| format!("{mime:?} ({} bytes)", data.len()))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -447,7 +499,16 @@ mod tests {
         let png = ("image/png".to_string(), std::sync::Arc::from(&[0u8; 3][..]));
         let text = ("TEXT".to_string(), std::sync::Arc::from(&b"hi\n"[..]));
         assert_eq!(describe_write(&[png.clone(), text]), "\"hi\\n\"");
-        assert_eq!(describe_write(&[png]), "image/png (3 bytes)");
+        assert_eq!(describe_write(&[png]), "\"image/png\" (3 bytes)");
+        // A program-chosen name can't break out of its quotes.
+        let sneaky = (
+            "a\u{202e}\". OK".to_string(),
+            std::sync::Arc::from(&[0u8][..]),
+        );
+        assert_eq!(
+            describe_write(&[sneaky]),
+            "\"a\\u{202e}\\\". OK\" (1 bytes)"
+        );
         assert_eq!(describe_write(&[]), "clear it");
     }
 }

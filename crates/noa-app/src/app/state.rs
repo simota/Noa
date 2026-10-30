@@ -1026,6 +1026,14 @@ pub(super) struct ConfirmDialogSession {
     pub(super) armed_at: Option<Instant>,
 }
 
+/// OSC 5522 reply packets a helper thread is feeding to one pane's pty.
+#[derive(Default)]
+pub(super) struct KittyReplyQueue {
+    pub(super) packets: std::collections::VecDeque<Vec<u8>>,
+    /// A helper thread is draining `packets`; new replies queue behind it.
+    pub(super) draining: bool,
+}
+
 /// The deferred side effect a [`ConfirmDialogSession`] runs on confirmation.
 pub(super) enum ConfirmAction {
     /// Continue a previously gated non-loopback remote discovery. The token

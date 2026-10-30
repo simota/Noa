@@ -339,6 +339,9 @@ pub struct App {
     /// The open confirmation dialog (paste protection / clipboard-read), if
     /// any — see [`ConfirmDialogSession`].
     confirm_dialog: Option<ConfirmDialogSession>,
+    /// Per-pane OSC 5522 replies waiting behind a large read reply that is
+    /// still being fed to the pty, so later replies can't overtake it.
+    kitty_reply_queues: HashMap<PaneId, Arc<Mutex<KittyReplyQueue>>>,
     /// The open inline sidebar-card rename, if any — see
     /// [`SidebarRenameSession`].
     sidebar_rename: Option<SidebarRenameSession>,
@@ -860,6 +863,7 @@ impl App {
             process_monitor: None,
             theme_favorites: crate::theme_favorites::ThemeFavorites::new(),
             confirm_dialog: None,
+            kitty_reply_queues: HashMap::new(),
             sidebar_rename: None,
             tab_title_prompt: None,
             modal_preedit: None,

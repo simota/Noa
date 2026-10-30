@@ -1,6 +1,9 @@
 //! Clipboard access kept at the app/platform boundary.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use noa_grid::kitty_clipboard::ClipboardLocation;
 
 #[derive(Debug, Default)]
 pub(crate) struct SystemClipboard;
@@ -36,6 +39,69 @@ impl SystemClipboard {
     /// of raw pasteboard data.
     pub(crate) fn get_paste_contents(&mut self) -> anyhow::Result<PasteContents> {
         platform::get_paste_contents()
+    }
+
+    /// Whether this platform has the clipboard at `location` (macOS has no
+    /// primary selection).
+    pub(crate) fn supports(&self, location: ClipboardLocation) -> bool {
+        platform::supports(location)
+    }
+
+    /// The MIME types `location` holds (OSC 5522's `.` listing), without
+    /// reading any data. `None` when this platform has no such clipboard.
+    pub(crate) fn available_mimes(
+        &mut self,
+        location: ClipboardLocation,
+    ) -> anyhow::Result<Option<Vec<String>>> {
+        platform::available_mimes(location)
+    }
+
+    /// The data for each MIME type in `mimes` (`None` where unavailable);
+    /// every text alias reads the clipboard's text. `None` when this platform
+    /// has no such clipboard.
+    pub(crate) fn read_mimes(
+        &mut self,
+        location: ClipboardLocation,
+        mimes: &[String],
+    ) -> anyhow::Result<Option<Vec<Option<Vec<u8>>>>> {
+        platform::read_mimes(location, mimes)
+    }
+
+    /// Replace `location`'s contents with these representations; an empty
+    /// list clears it. `None` when this platform has no such clipboard.
+    pub(crate) fn write_mimes(
+        &mut self,
+        location: ClipboardLocation,
+        contents: &[(String, Arc<[u8]>)],
+    ) -> anyhow::Result<Option<()>> {
+        platform::write_mimes(location, contents)
+    }
+}
+
+/// A `file://` URL for an absolute path, percent-encoding everything but
+/// unreserved characters and `/`.
+#[cfg(unix)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn file_url(path: &std::path::Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut url = String::from("file://");
+    for &b in path.as_os_str().as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'/') {
+            url.push(char::from(b));
+        } else {
+            url.push_str(&format!("%{b:02X}"));
+        }
+    }
+    url
+}
+
+/// `text/plain` stands in for every text alias (Ghostty's apprt is always
+/// asked for `text/plain`).
+fn canonical_mime(mime: &str) -> &str {
+    if noa_grid::kitty_clipboard::is_text_mime(mime) {
+        "text/plain"
+    } else {
+        mime
     }
 }
 
@@ -166,13 +232,197 @@ mod platform {
     use std::process::Command;
 
     use anyhow::{Context, ensure};
+    use objc2::msg_send;
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyClass, AnyObject};
     use objc2_app_kit::{
         NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard, NSPasteboardTypeFileURL,
         NSPasteboardTypePNG, NSPasteboardTypeString, NSPasteboardTypeTIFF,
     };
-    use objc2_foundation::{NSDictionary, NSString, NSURL};
+    use objc2_foundation::{NSArray, NSCopying, NSData, NSDictionary, NSString, NSURL};
 
-    use super::PasteContents;
+    use super::{Arc, ClipboardLocation, PasteContents};
+
+    // `UTType` is looked up at runtime; make sure its framework is loaded.
+    #[link(name = "UniformTypeIdentifiers", kind = "framework")]
+    unsafe extern "C" {}
+
+    fn ut_type_class() -> Option<&'static AnyClass> {
+        AnyClass::get(c"UTType")
+    }
+
+    /// `UTType(identifier).preferredMIMEType`, folding
+    /// `text/plain;charset=utf-8` into `text/plain`.
+    fn mime_for_pasteboard_type(pasteboard_type: &NSString) -> Option<String> {
+        let class = ut_type_class()?;
+        let ut: Option<Retained<AnyObject>> =
+            unsafe { msg_send![class, typeWithIdentifier: pasteboard_type] };
+        let mime: Option<Retained<NSString>> = unsafe { msg_send![&*ut?, preferredMIMEType] };
+        let mime = mime?.to_string();
+        Some(if mime == "text/plain;charset=utf-8" {
+            "text/plain".to_string()
+        } else {
+            mime
+        })
+    }
+
+    /// The pasteboard type for a MIME type, as Ghostty maps it: `text/plain`
+    /// is the string type, others go through `UTType(mimeType:)`, and an
+    /// unknown MIME type is used as the identifier itself.
+    fn pasteboard_type_for_mime(mime: &str) -> Retained<NSString> {
+        if mime == "text/plain" {
+            return unsafe { NSPasteboardTypeString }.copy();
+        }
+        let mime = NSString::from_str(mime);
+        if let Some(class) = ut_type_class() {
+            let ut: Option<Retained<AnyObject>> =
+                unsafe { msg_send![class, typeWithMIMEType: &*mime] };
+            if let Some(ut) = ut {
+                let identifier: Retained<NSString> = unsafe { msg_send![&*ut, identifier] };
+                return identifier;
+            }
+        }
+        mime
+    }
+
+    pub(super) fn supports(location: ClipboardLocation) -> bool {
+        location == ClipboardLocation::Standard
+    }
+
+    /// The standard pasteboard; macOS has no primary selection.
+    fn pasteboard(location: ClipboardLocation) -> Option<Retained<NSPasteboard>> {
+        (location == ClipboardLocation::Standard).then(NSPasteboard::generalPasteboard)
+    }
+
+    pub(super) fn available_mimes(
+        location: ClipboardLocation,
+    ) -> anyhow::Result<Option<Vec<String>>> {
+        let Some(pasteboard) = pasteboard(location) else {
+            return Ok(None);
+        };
+        let types: Vec<Retained<NSString>> =
+            pasteboard.types().map(|t| t.to_vec()).unwrap_or_default();
+        let file_url = unsafe { NSPasteboardTypeFileURL };
+        let has_file_url = types.iter().any(|t| t.isEqualToString(file_url));
+        let mimes: Vec<Option<String>> =
+            types.iter().map(|t| mime_for_pasteboard_type(t)).collect();
+        let mut result: Vec<String> = Vec::new();
+        // Copied files serve as text (their escaped paths) and as a URI list;
+        // both are inferred from the declared types without reading data.
+        if has_file_url || mimes.iter().flatten().any(|m| m == "text/plain") {
+            result.push("text/plain".to_string());
+        }
+        if has_file_url {
+            result.push("text/uri-list".to_string());
+        }
+        for mime in mimes.into_iter().flatten() {
+            if !result.contains(&mime) {
+                result.push(mime);
+            }
+        }
+        Ok(Some(result))
+    }
+
+    pub(super) fn read_mimes(
+        location: ClipboardLocation,
+        mimes: &[String],
+    ) -> anyhow::Result<Option<Vec<Option<Vec<u8>>>>> {
+        let Some(pasteboard) = pasteboard(location) else {
+            return Ok(None);
+        };
+        Ok(Some(
+            mimes
+                .iter()
+                .map(|mime| data_for_mime(&pasteboard, super::canonical_mime(mime)))
+                .collect(),
+        ))
+    }
+
+    /// Ghostty's `ghosttyData(forMime:)`: text is the paste text (a copied
+    /// file's escaped path), copied files are also a `text/uri-list`.
+    fn data_for_mime(pasteboard: &NSPasteboard, mime: &str) -> Option<Vec<u8>> {
+        match mime {
+            "text/plain" => opinionated_text(pasteboard).map(String::into_bytes),
+            "text/uri-list" => {
+                let urls = file_url_strings(pasteboard);
+                (!urls.is_empty()).then(|| {
+                    urls.iter()
+                        .map(|url| format!("{url}\r\n"))
+                        .collect::<String>()
+                        .into_bytes()
+                })
+            }
+            _ => pasteboard
+                .dataForType(&pasteboard_type_for_mime(mime))
+                .map(|data| data.to_vec()),
+        }
+    }
+
+    /// Each item's file path (shell-escaped) or string, joined by spaces.
+    fn opinionated_text(pasteboard: &NSPasteboard) -> Option<String> {
+        let items = pasteboard.pasteboardItems()?;
+        let strings: Vec<String> = items
+            .iter()
+            .filter_map(|item| {
+                let file = item
+                    .stringForType(unsafe { NSPasteboardTypeFileURL })
+                    .and_then(|url| NSURL::URLWithString(&url))
+                    .filter(|url| url.isFileURL())
+                    .and_then(|url| url.path());
+                match file {
+                    Some(path) => Some(super::shell_escape(&path.to_string())),
+                    None => item
+                        .stringForType(unsafe { NSPasteboardTypeString })
+                        .map(|s| s.to_string()),
+                }
+            })
+            .collect();
+        (!strings.is_empty()).then(|| strings.join(" "))
+    }
+
+    fn file_url_strings(pasteboard: &NSPasteboard) -> Vec<String> {
+        let Some(items) = pasteboard.pasteboardItems() else {
+            return Vec::new();
+        };
+        items
+            .iter()
+            .filter_map(|item| item.stringForType(unsafe { NSPasteboardTypeFileURL }))
+            .filter_map(|url| NSURL::URLWithString(&url))
+            .filter(|url| url.isFileURL())
+            .filter_map(|url| url.absoluteString())
+            .map(|url| url.to_string())
+            .collect()
+    }
+
+    pub(super) fn write_mimes(
+        location: ClipboardLocation,
+        contents: &[(String, Arc<[u8]>)],
+    ) -> anyhow::Result<Option<()>> {
+        let Some(pasteboard) = pasteboard(location) else {
+            return Ok(None);
+        };
+        // An empty write clears the clipboard with one empty text entry.
+        let empty = [("text/plain".to_string(), Arc::<[u8]>::from(&[][..]))];
+        let contents = if contents.is_empty() {
+            &empty[..]
+        } else {
+            contents
+        };
+        let types: Vec<Retained<NSString>> = contents
+            .iter()
+            .map(|(mime, _)| pasteboard_type_for_mime(mime))
+            .collect();
+        let refs: Vec<&NSString> = types.iter().map(|t| &**t).collect();
+        unsafe { pasteboard.declareTypes_owner(&NSArray::from_slice(&refs), None) };
+        for (pasteboard_type, (_, data)) in types.iter().zip(contents) {
+            let ok = pasteboard.setData_forType(Some(&NSData::with_bytes(data)), pasteboard_type);
+            ensure!(
+                ok,
+                "failed to write {pasteboard_type} to the macOS clipboard"
+            );
+        }
+        Ok(Some(()))
+    }
 
     pub(super) fn get_text() -> anyhow::Result<String> {
         let pasteboard = NSPasteboard::generalPasteboard();
@@ -279,6 +529,35 @@ mod platform {
         }?;
         Some(png.to_vec())
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn mime_types_map_to_pasteboard_types_through_uttype() {
+            assert_eq!(
+                pasteboard_type_for_mime("text/plain").to_string(),
+                "public.utf8-plain-text"
+            );
+            assert_eq!(
+                pasteboard_type_for_mime("image/png").to_string(),
+                "public.png"
+            );
+            assert_eq!(
+                mime_for_pasteboard_type(&NSString::from_str("public.png")).as_deref(),
+                Some("image/png")
+            );
+            assert_eq!(
+                mime_for_pasteboard_type(&NSString::from_str("public.utf8-plain-text")).as_deref(),
+                Some("text/plain")
+            );
+            assert_eq!(
+                mime_for_pasteboard_type(&NSString::from_str("com.example.no-such-type")),
+                None
+            );
+        }
+    }
 }
 
 /// X11 / Wayland through `arboard`. One process-wide handle is kept alive:
@@ -292,7 +571,100 @@ mod platform {
     use anyhow::Context;
     use arboard::{Clipboard, GetExtLinux, LinuxClipboardKind, SetExtLinux};
 
-    use super::PasteContents;
+    use super::{Arc, ClipboardLocation, PasteContents};
+
+    fn kind(location: ClipboardLocation) -> LinuxClipboardKind {
+        match location {
+            ClipboardLocation::Standard => LinuxClipboardKind::Clipboard,
+            ClipboardLocation::Primary => LinuxClipboardKind::Primary,
+        }
+    }
+
+    fn text(
+        clipboard: &mut Clipboard,
+        location: ClipboardLocation,
+    ) -> Result<String, arboard::Error> {
+        text_or_empty(clipboard.get().clipboard(kind(location)).text())
+    }
+
+    /// Copied files, as `file://` URLs.
+    fn file_urls(clipboard: &mut Clipboard, location: ClipboardLocation) -> Vec<String> {
+        clipboard
+            .get()
+            .clipboard(kind(location))
+            .file_list()
+            .unwrap_or_default()
+            .iter()
+            .map(|path| super::file_url(path))
+            .collect()
+    }
+
+    pub(super) fn supports(_location: ClipboardLocation) -> bool {
+        true
+    }
+
+    // arboard reaches text and file lists only, so those are the types served.
+    pub(super) fn available_mimes(
+        location: ClipboardLocation,
+    ) -> anyhow::Result<Option<Vec<String>>> {
+        with_clipboard(|clipboard| {
+            let mut mimes = Vec::new();
+            if !text(clipboard, location)?.is_empty() {
+                mimes.push("text/plain".to_string());
+            }
+            if !file_urls(clipboard, location).is_empty() {
+                mimes.push("text/uri-list".to_string());
+            }
+            Ok(Some(mimes))
+        })
+    }
+
+    pub(super) fn read_mimes(
+        location: ClipboardLocation,
+        mimes: &[String],
+    ) -> anyhow::Result<Option<Vec<Option<Vec<u8>>>>> {
+        with_clipboard(|clipboard| {
+            let mut out = Vec::with_capacity(mimes.len());
+            for mime in mimes {
+                out.push(match super::canonical_mime(mime) {
+                    "text/plain" => {
+                        Some(text(clipboard, location)?.into_bytes()).filter(|d| !d.is_empty())
+                    }
+                    "text/uri-list" => {
+                        let urls = file_urls(clipboard, location);
+                        (!urls.is_empty()).then(|| {
+                            urls.iter()
+                                .map(|url| format!("{url}\r\n"))
+                                .collect::<String>()
+                                .into_bytes()
+                        })
+                    }
+                    _ => None,
+                });
+            }
+            Ok(Some(out))
+        })
+    }
+
+    /// Only text is written here: the first text representation is kept and
+    /// the others are dropped. A write with no text at all (but not an empty
+    /// one, which clears) is unsupported, leaving the clipboard untouched.
+    pub(super) fn write_mimes(
+        location: ClipboardLocation,
+        contents: &[(String, Arc<[u8]>)],
+    ) -> anyhow::Result<Option<()>> {
+        let text = contents
+            .iter()
+            .find(|(mime, _)| noa_grid::kitty_clipboard::is_text_mime(mime))
+            .map(|(_, data)| String::from_utf8_lossy(data).into_owned());
+        let text = match text {
+            Some(text) => text,
+            None if contents.is_empty() => String::new(),
+            None => return Ok(None),
+        };
+        with_clipboard(|clipboard| clipboard.set().clipboard(kind(location)).text(text))?;
+        Ok(Some(()))
+    }
 
     static CLIPBOARD: Mutex<Option<Clipboard>> = Mutex::new(None);
 
@@ -381,11 +753,58 @@ mod platform {
     pub(super) fn get_paste_contents() -> anyhow::Result<super::PasteContents> {
         anyhow::bail!("clipboard is not implemented on this platform")
     }
+
+    pub(super) fn supports(_location: super::ClipboardLocation) -> bool {
+        false
+    }
+
+    pub(super) fn available_mimes(
+        _location: super::ClipboardLocation,
+    ) -> anyhow::Result<Option<Vec<String>>> {
+        Ok(None)
+    }
+
+    pub(super) fn read_mimes(
+        _location: super::ClipboardLocation,
+        _mimes: &[String],
+    ) -> anyhow::Result<Option<Vec<Option<Vec<u8>>>>> {
+        Ok(None)
+    }
+
+    pub(super) fn write_mimes(
+        _location: super::ClipboardLocation,
+        _contents: &[(String, super::Arc<[u8]>)],
+    ) -> anyhow::Result<Option<()>> {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn file_url_percent_encodes_the_path() {
+        assert_eq!(
+            file_url(std::path::Path::new("/tmp/a b/日.txt")),
+            "file:///tmp/a%20b/%E6%97%A5.txt"
+        );
+    }
+
+    #[test]
+    fn text_aliases_read_as_text_plain() {
+        for mime in [
+            "text/plain",
+            "text/plain;charset=utf-8",
+            "UTF8_STRING",
+            "TEXT",
+            "STRING",
+        ] {
+            assert_eq!(canonical_mime(mime), "text/plain");
+        }
+        assert_eq!(canonical_mime("image/png"), "image/png");
+    }
 
     #[test]
     fn shell_escape_leaves_plain_tokens_unescaped() {

@@ -236,8 +236,13 @@ pub const MIN_BACKGROUND_IMAGE_INTERVAL_SECS: u64 = 5;
 /// for the deviation rationale; `0` restores Ghostty parity (never stop).
 pub const DEFAULT_CURSOR_STOP_BLINKING_AFTER_SECS: u64 = 10;
 
-/// `clipboard-read` policy for OSC 52 clipboard *read* (query) requests.
-/// Mirrors Ghostty, whose default is `ask`.
+/// Ghostty 1.4.0's `clipboard-write-limit-bytes` default: 64 MiB, the minimum
+/// a conforming Kitty clipboard protocol implementation must accept.
+pub const DEFAULT_CLIPBOARD_WRITE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+
+/// `clipboard-read` / `clipboard-write` policy for programs reading or writing
+/// the clipboard (OSC 52 and Kitty's OSC 5522). Ghostty defaults reads to
+/// `ask` and writes to `allow`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClipboardAccess {
     /// Never honor a read request.
@@ -703,8 +708,13 @@ pub struct StartupConfig {
     /// `palette = N=#rrggbb` 256-color overrides, applied over the resolved
     /// theme's palette. Repeatable; later entries win.
     pub palette: Vec<PaletteOverride>,
-    /// OSC 52 clipboard read (query) policy.
+    /// Clipboard read (query) policy for OSC 52 and OSC 5522.
     pub clipboard_read: ClipboardAccess,
+    /// Clipboard write policy for OSC 52 and OSC 5522.
+    pub clipboard_write: ClipboardAccess,
+    /// Largest OSC 5522 write, in decoded bytes (`clipboard-write-limit-bytes`);
+    /// `None` is `unlimited`.
+    pub clipboard_write_limit_bytes: Option<usize>,
     /// Whether to confirm before pasting content that could run commands
     /// (`clipboard-paste-protection`). Ghostty default is on.
     pub clipboard_paste_protection: bool,
@@ -997,6 +1007,8 @@ impl Default for StartupConfig {
             font: FontConfig::default(),
             palette: Vec::new(),
             clipboard_read: ClipboardAccess::default(),
+            clipboard_write: ClipboardAccess::Allow,
+            clipboard_write_limit_bytes: Some(DEFAULT_CLIPBOARD_WRITE_LIMIT_BYTES),
             clipboard_paste_protection: true,
             copy_on_select: CopyOnSelect::default(),
             mouse_shift_capture: MouseShiftCapture::default(),
@@ -1119,6 +1131,9 @@ pub struct ConfigOverrides {
     pub font: FontConfig,
     pub palette: Vec<PaletteOverride>,
     pub clipboard_read: Option<ClipboardAccess>,
+    pub clipboard_write: Option<ClipboardAccess>,
+    /// `Some(None)` is an explicit `unlimited`.
+    pub clipboard_write_limit_bytes: Option<Option<usize>>,
     pub clipboard_paste_protection: Option<bool>,
     pub copy_on_select: Option<CopyOnSelect>,
     pub mouse_shift_capture: Option<MouseShiftCapture>,
@@ -1206,6 +1221,8 @@ macro_rules! impl_redacted_config_debug {
                 s.field("font", &self.font)
                     .field("palette", &self.palette)
                     .field("clipboard_read", &self.clipboard_read)
+                    .field("clipboard_write", &self.clipboard_write)
+                    .field("clipboard_write_limit_bytes", &self.clipboard_write_limit_bytes)
                     .field("copy_on_select", &self.copy_on_select)
                     .field("mouse_shift_capture", &self.mouse_shift_capture)
                     .field(
@@ -1324,6 +1341,10 @@ impl ConfigOverrides {
             font: self.font.merge(higher_priority.font),
             palette: merge_list(self.palette, higher_priority.palette),
             clipboard_read: higher_priority.clipboard_read.or(self.clipboard_read),
+            clipboard_write: higher_priority.clipboard_write.or(self.clipboard_write),
+            clipboard_write_limit_bytes: higher_priority
+                .clipboard_write_limit_bytes
+                .or(self.clipboard_write_limit_bytes),
             copy_on_select: higher_priority.copy_on_select.or(self.copy_on_select),
             mouse_shift_capture: higher_priority
                 .mouse_shift_capture
@@ -1493,6 +1514,10 @@ impl ConfigOverrides {
                 self.palette
             },
             clipboard_read: self.clipboard_read.unwrap_or(base.clipboard_read),
+            clipboard_write: self.clipboard_write.unwrap_or(base.clipboard_write),
+            clipboard_write_limit_bytes: self
+                .clipboard_write_limit_bytes
+                .unwrap_or(base.clipboard_write_limit_bytes),
             mouse_shift_capture: self.mouse_shift_capture.unwrap_or(base.mouse_shift_capture),
             copy_on_select: self.copy_on_select.unwrap_or(base.copy_on_select),
             clipboard_paste_protection: self
@@ -1995,6 +2020,8 @@ mod tests {
                 font: FontConfig::default(),
                 palette: Vec::new(),
                 clipboard_read: ClipboardAccess::Ask,
+                clipboard_write: ClipboardAccess::Allow,
+                clipboard_write_limit_bytes: Some(DEFAULT_CLIPBOARD_WRITE_LIMIT_BYTES),
                 clipboard_paste_protection: true,
                 copy_on_select: CopyOnSelect::True,
                 mouse_shift_capture: MouseShiftCapture::default(),

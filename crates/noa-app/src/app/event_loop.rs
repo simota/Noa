@@ -258,11 +258,21 @@ impl ApplicationHandler<UserEvent> for App {
                 // P1-1: a stale `window_id` must not drop a still-live pane's
                 // OSC 52 write just because it moved tabs after this event was
                 // queued.
-                if self.resolve_pane_window(window_id, pane_id).is_none() {
+                let Some(window_id) = self.resolve_pane_window(window_id, pane_id) else {
                     return;
-                }
-                if let Err(err) = self.clipboard.set_text(&text) {
-                    log::warn!("failed to write OSC 52 clipboard text: {err}");
+                };
+                match self.config.clipboard_write {
+                    noa_config::ClipboardAccess::Allow => {
+                        if let Err(err) = self.clipboard.set_text(&text) {
+                            log::warn!("failed to write OSC 52 clipboard text: {err}");
+                        }
+                    }
+                    noa_config::ClipboardAccess::Ask => {
+                        self.prompt_clipboard_write(window_id, text)
+                    }
+                    // The grid drops writes when denied; a Deny here is a
+                    // stale policy.
+                    noa_config::ClipboardAccess::Deny => {}
                 }
             }
             UserEvent::ClipboardRead {
@@ -287,6 +297,11 @@ impl ApplicationHandler<UserEvent> for App {
                     noa_config::ClipboardAccess::Deny => {}
                 }
             }
+            UserEvent::KittyClipboard {
+                window_id,
+                pane_id,
+                request,
+            } => self.handle_kitty_clipboard(window_id, pane_id, request),
             UserEvent::MouseShapeChanged(window_id, pane_id) => {
                 if let Some(window_id) = self.resolve_pane_window(window_id, pane_id) {
                     self.update_cursor_icon(window_id);

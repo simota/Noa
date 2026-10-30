@@ -97,6 +97,7 @@ impl ModeState {
                     | 2004
                     | 2026
                     | 2027
+                    | 5522
             )
         }
     }
@@ -153,6 +154,11 @@ impl ModeState {
     /// IRM — printable characters insert cells instead of overwriting them.
     pub fn insert_mode(&self) -> bool {
         self.get(4, true)
+    }
+    /// DECSET 5522 — Kitty paste events: a user paste sends the program an
+    /// OSC 5522 listing of the clipboard's types instead of its text.
+    pub fn kitty_paste_events(&self) -> bool {
+        self.get(5522, false)
     }
     /// DECSET 2004 — bracketed paste mode.
     pub fn bracketed_paste(&self) -> bool {

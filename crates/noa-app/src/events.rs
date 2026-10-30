@@ -42,6 +42,14 @@ pub enum UserEvent {
         pane_id: PaneId,
         target: String,
     },
+    /// A Kitty clipboard protocol (OSC 5522) read or committed write for the
+    /// app to complete under `clipboard-read` / `clipboard-write`, replying
+    /// on the pane's pty.
+    KittyClipboard {
+        window_id: WindowId,
+        pane_id: PaneId,
+        request: noa_grid::kitty_clipboard::KittyClipboardRequest,
+    },
     /// A desktop notification requested by the terminal via OSC 9 / OSC 777.
     /// The app posts it to the macOS notification center (unless the target
     /// window is focused) and bounces the Dock.

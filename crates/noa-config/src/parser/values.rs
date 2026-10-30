@@ -271,7 +271,7 @@ pub(super) fn parse_font_thicken_strength(
     Some(parsed)
 }
 
-pub(super) fn parse_clipboard_read(
+pub(super) fn parse_clipboard_access(
     path: &Path,
     directive: &Directive,
     diagnostics: &mut Vec<Diagnostic>,
@@ -790,6 +790,25 @@ pub(super) fn parse_scrollback_persist(
 /// valid and disables expiry. Matches the crate's plain-integer convention for
 /// time-valued keys (`cursor-stop-blinking-after`, `background-image-interval`)
 /// — there is no unit-suffix syntax anywhere in noa's config.
+/// A byte count, or `unlimited` (`Some(None)`), as Ghostty's `Limit` values.
+pub(super) fn parse_byte_limit(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Option<usize>> {
+    let value = directive.value.as_deref()?;
+    if value == "unlimited" {
+        return Some(None);
+    }
+    match value.parse::<usize>() {
+        Ok(parsed) => Some(Some(parsed)),
+        Err(_) => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+            None
+        }
+    }
+}
+
 pub(super) fn parse_u64(
     path: &Path,
     directive: &Directive,

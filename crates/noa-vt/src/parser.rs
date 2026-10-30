@@ -9,7 +9,7 @@
 //! (Ghostty keeps a dedicated UTF-8 fast path in `stream.zig`); escape/CSI/OSC
 //! control bytes are 7-bit ASCII.
 
-use crate::action::Action;
+use crate::action::{Action, OscTerminator};
 use crate::csi::{Csi, DcsPayload, Esc, Intermediates, MAX_PARAMS, Params, Separators};
 use crate::state::State;
 
@@ -41,6 +41,8 @@ pub struct Parser {
     private: u8,
     osc: Vec<u8>,
     osc_overflow: bool,
+    /// The OSC being captured ended with BEL.
+    osc_bel: bool,
     dcs: Vec<u8>,
     dcs_overflow: bool,
     apc: Vec<u8>,
@@ -74,6 +76,7 @@ impl Parser {
             private: 0,
             osc: Vec::new(),
             osc_overflow: false,
+            osc_bel: false,
             dcs: Vec::new(),
             dcs_overflow: false,
             apc: Vec::new(),
@@ -423,7 +426,11 @@ impl Parser {
 
     fn st_osc<F: FnMut(Action)>(&mut self, b: u8, sink: &mut F) {
         match b {
-            0x07 => self.goto(State::Ground, sink), // BEL terminates OSC
+            0x07 => {
+                // BEL terminates OSC
+                self.osc_bel = true;
+                self.goto(State::Ground, sink);
+            }
             // 8-bit ST — only outside a payload UTF-8 sequence, where 0x9c
             // is a continuation byte.
             0x9c if self.string_utf8_rem == 0 => self.goto(State::Ground, sink),
@@ -685,9 +692,14 @@ impl Parser {
     /// target state's entry action (OSC end/start, `clear` on escape/CSI entry).
     fn goto<F: FnMut(Action)>(&mut self, new: State, sink: &mut F) {
         if self.state == State::OscString {
+            let terminator = if std::mem::take(&mut self.osc_bel) {
+                OscTerminator::Bel
+            } else {
+                OscTerminator::St
+            };
             if !self.osc_overflow {
                 let data = std::mem::take(&mut self.osc);
-                sink(Action::OscDispatch(data));
+                sink(Action::OscDispatch(data, terminator));
             } else {
                 self.osc.clear();
                 self.osc_overflow = false;

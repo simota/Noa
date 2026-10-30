@@ -282,6 +282,22 @@ fn show_config_output(config: &StartupConfig) -> String {
     );
     push_line(
         &mut out,
+        "clipboard-write",
+        match config.clipboard_write {
+            ClipboardAccess::Deny => "deny",
+            ClipboardAccess::Ask => "ask",
+            ClipboardAccess::Allow => "allow",
+        },
+    );
+    push_line(
+        &mut out,
+        "clipboard-write-limit-bytes",
+        &config
+            .clipboard_write_limit_bytes
+            .map_or_else(|| "unlimited".to_string(), |limit| limit.to_string()),
+    );
+    push_line(
+        &mut out,
         "clipboard-paste-protection",
         &config.clipboard_paste_protection.to_string(),
     );

@@ -500,8 +500,8 @@ pub trait Handler {
     fn set_modify_other_keys(&mut self, _level: u16) {}
 
     // ── parsed but inc-1 no-ops ────────────────────────────────────
-    /// OSC payload (`ESC ] … ST`). Inc-1: parse title (`0`/`2`), drop the rest.
-    fn osc_dispatch(&mut self, _data: &[u8]) {}
+    /// OSC payload (`ESC ] … ST`) and how it ended.
+    fn osc_dispatch(&mut self, _data: &[u8], _terminator: crate::OscTerminator) {}
     /// DCS payload (`ESC P … ST`) for query protocols such as DECRQSS and XTGETTCAP.
     fn dcs_dispatch(&mut self, _data: &[u8]) {}
     /// SIXEL graphics (`DCS Pa;Pb;Ph q Ps..Ps ST`). Parsed by `noa-vt`; the

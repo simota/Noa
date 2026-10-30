@@ -25,7 +25,7 @@ A from-scratch DFA parser plus a `Handler` trait separating parsing from state.
 - **DA / DSR responses** — DA1 `ESC[?62;4;22c`, cursor position report, etc.
 - **DEC private modes** — DECAWM, DECTCEM, DECCKM, DECNKM / DECPAM, DECLRMM, DECOM, etc.
 - **Mouse tracking** — X10 / 1000 / 1002 / 1003, encodings Legacy / UTF-8 (1005) / Urxvt (1015) / SGR (1006)
-- **OSC** — 0/2 (title, stack via 22/23), 7 (cwd), 8 (hyperlinks), 9/777 (notifications), 9;4 (task progress), 52 (clipboard, with policy), 4 / color family, 133 (shell integration marks)
+- **OSC** — 0/2 (title, stack via 22/23), 7 (cwd), 8 (hyperlinks), 9/777 (notifications), 9;4 (task progress), 52 (clipboard, with policy), 5522 (Kitty clipboard protocol: multi-type read/write, paste events via mode 5522), 4 / color family, 133 (shell integration marks)
 - **Kitty graphics protocol** — image command parsing + image-layer rendering
 - **Sixel graphics** — parsing of `DCS Pa;Pb;Ph q ... ST`, Sixel rasterization, rendering through the existing image layer
 - **Kitty keyboard protocol** — full support for all 5 flags (disambiguate / event-types / alternate-keys / all-keys / associated-text), push / pop / set stack
@@ -49,7 +49,7 @@ A from-scratch DFA parser plus a `Handler` trait separating parsing from state.
 - **Agent workflows** — pane-scoped notifications, next-unread navigation (⌘⇧J), explicit agent state and a Claude Code hook adapter, native multiline prompt drafts, and read-only output snapshots with search/code copying; see [Agent workflows](AGENT_WORKFLOW.md)
 - **Local file navigation** — configurable editor line/column navigation on ⌘-click; UTF-8 file preview on ⌘⌥-click
 - **About panel** — version + git hash + build date, bundled-icon resolution
-- **Confirmation dialogs** — paste protection / OSC 52 / close confirmation
+- **Confirmation dialogs** — paste protection / clipboard read and write (OSC 52, OSC 5522, with "allow and remember") / close confirmation
 - **IME preedit** — underlined display of in-progress composition text
 
 ## Rendering and appearance (noa-render + noa-font)
@@ -81,7 +81,7 @@ For the type, allowed values, defaults, and clamp/fallback rules of every key, s
 | Background image | `background-image`, `background-image-opacity/-position/-fit/-repeat/-interval` |
 | Cursor | `cursor-style`, `cursor-style-blink`, `cursor-stop-blinking-after` |
 | Bell | `visual-bell`, `audible-bell`, `audible-bell-dock-bounce`, `audible-bell-when-unfocused` |
-| Behavior | `scrollback-limit`, `clipboard-read`, `clipboard-paste-protection`, `confirm-quit`, `alpha-blending`, `title-report`, `resize-overlay`, `auto-approve`, `send-selection-send-enter`, `ember` |
+| Behavior | `scrollback-limit`, `clipboard-read`, `clipboard-write`, `clipboard-write-limit-bytes`, `clipboard-paste-protection`, `confirm-quit`, `alpha-blending`, `title-report`, `resize-overlay`, `auto-approve`, `send-selection-send-enter`, `ember` |
 | macOS | `macos-option-as-alt`, `macos-titlebar-style`, `macos-non-native-fullscreen`, `macos-titlebar-proxy-icon` |
 | Quick Terminal | `quick-terminal-hotkey/-size/-autohide` |
 | Scratch Terminal | `scratch-terminal-key/-size` |
@@ -104,7 +104,7 @@ For the type, allowed values, defaults, and clamp/fallback rules of every key, s
 - **Titlebar proxy icon** — reflects the focused pane's OSC 7 pwd in the titlebar proxy icon; disabled with `macos-titlebar-proxy-icon = hidden`
 - **Quick Look word lookup** — a trackpad force click (deep press) shows a dictionary popup for the word under the pointer; does not change the selection
 - **Desktop notifications** — OSC 9 / 777, Dock attention
-- **Clipboard** — OSC 52 (read/write policy), paste protection
+- **Clipboard** — OSC 52 and Kitty OSC 5522 (read/write policy, `clipboard-write-limit-bytes`), paste protection
 - **`.app` bundle** — `scripts/bundle-macos.sh` produces an ad-hoc signed bundle
 - **CLI actions** — `+version`, `+list-themes`, `+list-keybinds`, `+list-fonts`, `+show-config`, `+list-actions`, `+help`
 

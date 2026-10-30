@@ -23,7 +23,7 @@ pub mod stream;
 #[cfg(test)]
 mod tests;
 
-pub use action::Action;
+pub use action::{Action, OscTerminator};
 pub use csi::{Csi, DcsPayload, Esc};
 pub use handler::{
     AsciiLine, AsciiLines, Charset, CharsetSlot, CursorStyle, DaKind, DsrKind, EraseDisplay,

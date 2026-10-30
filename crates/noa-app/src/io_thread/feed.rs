@@ -55,6 +55,7 @@ pub(super) struct TerminalOutput {
     pub(super) pending_writes: Vec<u8>,
     pub(super) pending_clipboard_writes: Vec<String>,
     pub(super) pending_clipboard_reads: Vec<String>,
+    pub(super) pending_kitty_clipboard: Vec<noa_grid::kitty_clipboard::KittyClipboardRequest>,
     pub(super) pending_notifications: Vec<noa_grid::Notification>,
     pub(super) agent_status: Option<Option<noa_grid::AgentStatus>>,
     /// The `OSC 22` pointer shape changed in this batch.
@@ -324,6 +325,7 @@ pub(super) fn feed_terminal_batch<T: AsRef<[u8]>>(
         pending_writes: term.take_pending_writes(),
         pending_clipboard_writes: term.take_pending_clipboard_writes(),
         pending_clipboard_reads: term.take_pending_clipboard_reads(),
+        pending_kitty_clipboard: term.take_pending_kitty_clipboard(),
         pending_notifications: term.take_pending_notifications(),
         agent_status: term.take_pending_agent_status(),
         mouse_shape_changed: term.take_mouse_shape_changed(),

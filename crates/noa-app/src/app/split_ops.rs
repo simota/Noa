@@ -32,8 +32,11 @@ fn confirm_action_references_pane(action: &ConfirmAction, pane_id: PaneId) -> bo
         ConfirmAction::RetryDetachedRemote { pane_id: p, .. }
         | ConfirmAction::Paste { pane_id: p, .. }
         | ConfirmAction::ClipboardRead { pane_id: p, .. }
+        | ConfirmAction::KittyClipboardRead { pane_id: p, .. }
+        | ConfirmAction::KittyClipboardWrite { pane_id: p, .. }
         | ConfirmAction::ClosePane { pane_id: p, .. } => *p == pane_id,
         ConfirmAction::AttachRemote { .. }
+        | ConfirmAction::ClipboardWrite { .. }
         | ConfirmAction::CloseTab { .. }
         | ConfirmAction::CloseWindow { .. }
         | ConfirmAction::Quit => false,
@@ -391,8 +394,9 @@ impl App {
         if self.confirm_dialog.as_ref().is_some_and(|session| {
             session.window_id == source_window
                 && confirm_action_references_pane(&session.action, pane)
-        }) {
-            self.confirm_dialog = None;
+        }) && let Some(session) = self.confirm_dialog.take()
+        {
+            self.cancel_confirm_action(session.action);
             self.request_window_redraw(source_window);
         }
         if self

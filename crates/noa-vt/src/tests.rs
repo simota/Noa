@@ -1,7 +1,7 @@
 //! Parser + SGR conformance tests (byte-sequence → action assertions),
 //! ported from the semantics of Ghostty's `Parser.zig` unit tests.
 
-use crate::action::Action;
+use crate::action::{Action, OscTerminator};
 use crate::csi::{Csi, Esc};
 use crate::parser::Parser;
 use crate::sgr::{SgrAttr, parse_sgr, parse_sgr_into};
@@ -321,14 +321,29 @@ fn utf8_overlong_and_out_of_range_yield_replacement() {
 fn osc_title_captured() {
     // ESC ] 0 ; hi BEL
     let acts = actions(b"\x1b]0;hi\x07");
-    assert_eq!(acts, vec![Action::OscDispatch(b"0;hi".to_vec())]);
+    assert_eq!(
+        acts,
+        vec![Action::OscDispatch(b"0;hi".to_vec(), OscTerminator::Bel)]
+    );
+}
+
+#[test]
+fn osc_8bit_st_and_an_escape_end_as_st() {
+    assert!(
+        actions(b"\x1b]2;t\x9c").contains(&Action::OscDispatch(b"2;t".to_vec(), OscTerminator::St))
+    );
+    // ESC followed by a non-`\` still ends the OSC; Ghostty calls that ST.
+    assert!(
+        actions(b"\x1b]2;t\x1b[m")
+            .contains(&Action::OscDispatch(b"2;t".to_vec(), OscTerminator::St))
+    );
 }
 
 #[test]
 fn osc_terminated_by_st() {
     // ESC ] 2 ; t ESC \
     let acts = actions(b"\x1b]2;t\x1b\\");
-    assert!(acts.contains(&Action::OscDispatch(b"2;t".to_vec())));
+    assert!(acts.contains(&Action::OscDispatch(b"2;t".to_vec(), OscTerminator::St)));
 }
 
 // Regression: UTF-8 payload bytes equal to 0x9c (continuation byte of e.g.
@@ -340,7 +355,10 @@ fn osc_utf8_payload_with_9c_continuation_is_not_terminated() {
     // ESC ] 0 ; ⠐ 俳句を2つ作成する BEL — the exact shape Claude Code emits.
     let payload = "0;⠐ 俳句を2つ作成する".as_bytes().to_vec();
     let bytes = [b"\x1b]".as_slice(), &payload, b"\x07"].concat();
-    assert_eq!(actions(&bytes), vec![Action::OscDispatch(payload)]);
+    assert_eq!(
+        actions(&bytes),
+        vec![Action::OscDispatch(payload, OscTerminator::Bel)]
+    );
 }
 
 #[test]
@@ -349,7 +367,10 @@ fn osc_8bit_st_still_terminates_between_utf8_scalars() {
     bytes.extend_from_slice("作".as_bytes()); // complete scalar
     bytes.push(0x9c); // real 8-bit ST at a scalar boundary
     let acts = actions(&bytes);
-    assert!(acts.contains(&Action::OscDispatch("2;作".as_bytes().to_vec())));
+    assert!(acts.contains(&Action::OscDispatch(
+        "2;作".as_bytes().to_vec(),
+        OscTerminator::St
+    )));
 }
 
 #[test]
@@ -386,7 +407,8 @@ fn osc8_hyperlink_payload_captured() {
     let acts = actions(b"\x1b]8;id=docs;https://example.test\x1b\\");
 
     assert!(acts.contains(&Action::OscDispatch(
-        b"8;id=docs;https://example.test".to_vec()
+        b"8;id=docs;https://example.test".to_vec(),
+        OscTerminator::St,
     )));
 }
 
@@ -427,7 +449,10 @@ fn dcs_overflow_is_discarded_without_dispatch() {
 fn osc133_prompt_mark_payload_captured() {
     let acts = actions(b"\x1b]133;D;0\x07");
 
-    assert_eq!(acts, vec![Action::OscDispatch(b"133;D;0".to_vec())]);
+    assert_eq!(
+        acts,
+        vec![Action::OscDispatch(b"133;D;0".to_vec(), OscTerminator::Bel)]
+    );
 }
 
 #[test]
@@ -442,7 +467,7 @@ fn osc_payload_over_limit_is_dropped() {
     assert!(
         !acts
             .iter()
-            .any(|action| matches!(action, Action::OscDispatch(_)))
+            .any(|action| matches!(action, Action::OscDispatch(..)))
     );
 }
 

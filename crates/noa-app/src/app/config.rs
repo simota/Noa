@@ -28,8 +28,12 @@ pub struct AppConfig {
     /// `palette = N=#rrggbb` 256-color overrides, applied over the resolved
     /// theme's palette (last entry per index wins).
     pub palette: Vec<noa_config::PaletteOverride>,
-    /// OSC 52 clipboard read (query) policy.
+    /// Clipboard read (query) policy for OSC 52 and OSC 5522.
     pub clipboard_read: noa_config::ClipboardAccess,
+    /// Clipboard write policy for OSC 52 and OSC 5522.
+    pub clipboard_write: noa_config::ClipboardAccess,
+    /// Largest OSC 5522 write (`None`: unlimited).
+    pub clipboard_write_limit_bytes: Option<usize>,
     pub mouse_shift_capture: noa_config::MouseShiftCapture,
     /// Where a finished mouse selection is copied (`copy-on-select`).
     pub copy_on_select: noa_config::CopyOnSelect,
@@ -285,6 +289,8 @@ impl AppConfig {
             font: config.font,
             palette: config.palette,
             clipboard_read: config.clipboard_read,
+            clipboard_write: config.clipboard_write,
+            clipboard_write_limit_bytes: config.clipboard_write_limit_bytes,
             mouse_shift_capture: config.mouse_shift_capture,
             copy_on_select: config.copy_on_select,
             clipboard_paste_protection: config.clipboard_paste_protection,

@@ -657,8 +657,7 @@ impl App {
         for state in self.windows.values() {
             for surface in state.surfaces.values() {
                 let mut terminal = surface.terminal.lock();
-                terminal.osc52_policy.allow_read =
-                    self.config.clipboard_read != noa_config::ClipboardAccess::Deny;
+                super::lifecycle::apply_clipboard_policy(&mut terminal, &self.config);
                 terminal.title_report = self.config.title_report;
                 terminal.set_scrollback_limit_bytes(self.config.scrollback_limit);
                 terminal.set_kitty_image_limit(self.config.image_storage_limit);
@@ -800,6 +799,8 @@ fn decide_server_restart(previous: &AppConfig, next: &AppConfig) -> ServerRestar
 
 fn terminal_policy_inputs_changed(previous: &AppConfig, next: &AppConfig) -> bool {
     previous.clipboard_read != next.clipboard_read
+        || previous.clipboard_write != next.clipboard_write
+        || previous.clipboard_write_limit_bytes != next.clipboard_write_limit_bytes
         || previous.title_report != next.title_report
         || previous.scrollback_limit != next.scrollback_limit
         || previous.image_storage_limit != next.image_storage_limit

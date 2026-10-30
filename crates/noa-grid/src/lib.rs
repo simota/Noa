@@ -12,6 +12,7 @@ pub mod copy_mode;
 pub mod cursor;
 mod grapheme;
 pub mod kitty;
+pub mod kitty_clipboard;
 pub mod kitty_keyboard;
 pub mod kitty_placeholder;
 pub mod modes;

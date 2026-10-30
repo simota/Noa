@@ -851,20 +851,6 @@ impl Handler for Terminal {
     }
 
     fn kitty_graphics(&mut self, cmd: KittyGraphicsCommand) {
-        // A truncated APC still identifies itself; reply EFBIG so the client
-        // isn't left waiting on the response protocol.
-        if cmd.truncated {
-            self.kitty_images.abort();
-            self.kitty_reply(
-                cmd.image_id,
-                cmd.image_number,
-                cmd.image_id,
-                cmd.placement_id,
-                cmd.quiet,
-                Err(crate::kitty::KittyError::TooBig),
-            );
-            return;
-        }
         if cmd.parse_error {
             self.kitty_reply(
                 cmd.image_id,

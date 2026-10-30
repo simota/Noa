@@ -21,10 +21,11 @@ const MAX_OSC_BYTES: usize = 12 * (1 << 20); // 12 MiB
 /// Overflow still drops the unterminated payload, but the cap must be large
 /// enough for ordinary CLI-generated images.
 pub(crate) const MAX_DCS_BYTES: usize = 8 * (1 << 20); // 8 MiB
-/// APC payloads carry whole Kitty-graphics transfers, so the cap is generous
-/// (spec-compliant clients chunk at ≤4096B, but non-conforming tools send in
-/// one shot). Overflow truncates rather than discards — see [`Action::ApcDispatch`].
-const MAX_APC_BYTES: usize = 1 << 20; // 1 MiB
+/// Ghostty 1.4.0's Kitty-graphics cap (`apc.Protocol.defaultMaxBytes`):
+/// payloads carry whole base64 images, so the data after the first `;` may
+/// reach 65 MiB (the control keys before it are bounded by the same cap).
+/// Overflow discards the APC unrun and unanswered, as Ghostty does.
+pub(crate) const MAX_APC_BYTES: usize = 65 * (1 << 20);
 
 /// The from-scratch VT parser. Cheap to construct; holds only small buffers.
 pub struct Parser {
@@ -39,6 +40,8 @@ pub struct Parser {
     dcs_overflow: bool,
     apc: Vec<u8>,
     apc_overflow: bool,
+    /// Index in `apc` just past the first `;`, where the payload starts.
+    apc_data_start: Option<usize>,
     utf8_acc: u32,
     utf8_rem: u8,
     utf8_min: u32,
@@ -70,6 +73,7 @@ impl Parser {
             dcs_overflow: false,
             apc: Vec::new(),
             apc_overflow: false,
+            apc_data_start: None,
             utf8_acc: 0,
             utf8_rem: 0,
             utf8_min: 0,
@@ -161,7 +165,16 @@ impl Parser {
                     return None;
                 }
                 bytes.extend_from_slice(b"\x1b_");
-                bytes.extend_from_slice(&self.apc);
+                if let Some(&first) = self.apc.first().filter(|&&f| f != b'G') {
+                    // A non-Kitty APC keeps only its first byte. After it, an
+                    // ASCII byte (not kept) resets the UTF-8 state the first
+                    // byte may have opened, and a lead byte restores the
+                    // real one.
+                    bytes.extend_from_slice(&[first, b'X']);
+                    append_string_utf8_lead(&mut bytes, self.string_utf8_rem);
+                } else {
+                    bytes.extend_from_slice(&self.apc);
+                }
                 if self.state == State::ApcEscape {
                     bytes.push(0x1b);
                 }
@@ -463,12 +476,19 @@ impl Parser {
             0x9c if self.string_utf8_rem == 0 => self.finish_apc(sink), // 8-bit ST
             0x20..=0x7e | 0x80..=0xff => {
                 self.track_string_utf8(b);
-                // Unlike OSC/DCS, overflow keeps the captured prefix and marks
-                // it truncated so the dispatch still fires (Kitty must reply).
-                if !self.apc_overflow {
-                    if self.apc.len() < MAX_APC_BYTES {
+                // Only Kitty graphics (`G`) is captured; any other APC keeps
+                // just its first byte, so the stream drops it.
+                if !self.apc_overflow && self.apc.first().is_none_or(|&f| f == b'G') {
+                    let start = self.apc_data_start.unwrap_or(0);
+                    if self.apc.len() - start < MAX_APC_BYTES {
                         self.apc.push(b);
+                        if b == b';' && self.apc_data_start.is_none() {
+                            self.apc_data_start = Some(self.apc.len());
+                        }
                     } else {
+                        // Free, don't clear, as for OSC: the buffer is at its
+                        // 65 MiB cap.
+                        self.apc = Vec::new();
                         self.apc_overflow = true;
                     }
                 }
@@ -482,8 +502,9 @@ impl Parser {
             self.finish_apc(sink);
         } else {
             // Not an ST: abandon the APC and reprocess the byte from Escape.
-            self.apc.clear();
+            self.apc = Vec::new();
             self.apc_overflow = false;
+            self.apc_data_start = None;
             self.goto(State::Escape, sink);
             self.advance(b, sink);
         }
@@ -504,8 +525,9 @@ impl Parser {
                 // ECMA-48 / Ghostty 1.4.0: any other C1 aborts the APC, which
                 // is discarded unrun; an introducer then starts its own
                 // sequence.
-                self.apc.clear();
+                self.apc = Vec::new();
                 self.apc_overflow = false;
+                self.apc_data_start = None;
                 self.state = State::Ground;
                 if !matches!(b, 0x90 | 0x98 | 0x9b | 0x9d | 0x9e | 0x9f) {
                     return true;
@@ -635,10 +657,14 @@ impl Parser {
     }
 
     fn finish_apc<F: FnMut(Action)>(&mut self, sink: &mut F) {
-        let data = std::mem::take(&mut self.apc);
-        let truncated = self.apc_overflow;
-        self.apc_overflow = false;
-        sink(Action::ApcDispatch { data, truncated });
+        if !self.apc_overflow {
+            let data = std::mem::take(&mut self.apc);
+            sink(Action::ApcDispatch { data });
+        } else {
+            self.apc = Vec::new();
+            self.apc_overflow = false;
+        }
+        self.apc_data_start = None;
         self.state = State::Ground;
     }
 
@@ -677,6 +703,7 @@ impl Parser {
             State::ApcString => {
                 self.apc = Vec::with_capacity(64);
                 self.apc_overflow = false;
+                self.apc_data_start = None;
             }
             _ => {}
         }

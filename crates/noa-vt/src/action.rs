@@ -19,9 +19,6 @@ pub enum Action {
     /// A completed DCS string (raw bytes between `ESC P` and `ST`).
     DcsDispatch(DcsPayload),
     /// A completed APC string (raw bytes between `ESC _` and `ST`/`BEL`).
-    ///
-    /// `truncated` is set when the payload exceeded the capture limit; unlike
-    /// OSC/DCS overflow (silently dropped), APC is still dispatched so the
-    /// Kitty graphics layer can reply `EFBIG` instead of hanging the client.
-    ApcDispatch { data: Vec<u8>, truncated: bool },
+    /// One over the capture limit is dropped silently, like OSC/DCS.
+    ApcDispatch { data: Vec<u8> },
 }

@@ -416,6 +416,12 @@ fn ac_win_001_report_size_in_chars() {
 }
 
 #[test]
+fn report_screen_size_in_chars_is_the_text_area() {
+    let t = run_size(80, 24, b"\x1b[19t");
+    assert_eq!(t.pending_writes, b"\x1b[9;24;80t");
+}
+
+#[test]
 fn ac_win_002_report_window_title() {
     let t = run_title_report(b"\x1b]2;foo\x1b\\\x1b[21t");
     assert_eq!(t.pending_writes, b"\x1b]lfoo\x1b\\");
@@ -480,7 +486,7 @@ fn ac_win_008_ps1_one_icon_only_is_a_noop() {
 
 #[test]
 fn ac_win_009_unsupported_ps_values_produce_no_reply() {
-    let t = run(b"\x1b[4t\x1b[8t\x1b[9t\x1b[10t\x1b[19t\x1b[20t");
+    let t = run(b"\x1b[4t\x1b[8t\x1b[9t\x1b[10t\x1b[20t");
     assert!(t.pending_writes.is_empty());
 }
 

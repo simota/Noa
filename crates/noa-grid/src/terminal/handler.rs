@@ -685,6 +685,11 @@ impl Handler for Terminal {
             18 => self.pending_writes.extend_from_slice(
                 format!("\x1b[8;{};{}t", self.size.rows, self.size.cols).as_bytes(),
             ),
+            // No knowledge of the physical screen, so like Ghostty (and VTE)
+            // the "screen size" is the text area in characters.
+            19 => self.pending_writes.extend_from_slice(
+                format!("\x1b[9;{};{}t", self.size.rows, self.size.cols).as_bytes(),
+            ),
             // Gated on `title-report` (default off, Ghostty parity): the
             // title is program-settable via OSC 0/2, so an unconditional
             // reply lets any displayed byte stream inject text into stdin.
@@ -698,7 +703,7 @@ impl Handler for Terminal {
             // falls through to the no-op/no-reply arm below.
             22 if matches!(p1, 0 | 2) => self.push_title(),
             23 if matches!(p1, 0 | 2) => self.pop_title(),
-            _ => {} // 4/8/9/10/19/20, icon-only push/pop, unknown Ps — ignore (Ghostty parity).
+            _ => {} // 4/8/9/10/20, icon-only push/pop, unknown Ps — ignore (Ghostty parity).
         }
     }
 

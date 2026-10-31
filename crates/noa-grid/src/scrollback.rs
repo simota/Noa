@@ -2646,6 +2646,25 @@ mod tests {
         assert!(sb.open.is_some());
     }
 
+    #[cfg(target_os = "macos")]
+    fn probe_footprint() -> u64 {
+        unsafe extern "C" {
+            fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+        }
+        // Return freed pages first, as the app's idle trim does.
+        unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
+        let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+        let ret = unsafe {
+            libc::proc_pid_rusage(
+                std::process::id() as i32,
+                libc::RUSAGE_INFO_V4,
+                &mut info as *mut _ as *mut libc::rusage_info_t,
+            )
+        };
+        assert_eq!(ret, 0);
+        info.ri_phys_footprint
+    }
+
     /// Physical footprint before and after idle compression of a full
     /// default-size (10 MB) scrollback of code-like text (macOS):
     /// `cargo test -p noa-grid --release --offline scrollback_compression_footprint_probe -- --ignored --nocapture`
@@ -2653,23 +2672,7 @@ mod tests {
     #[test]
     #[ignore = "manual footprint probe"]
     fn scrollback_compression_footprint_probe() {
-        fn footprint() -> u64 {
-            unsafe extern "C" {
-                fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
-            }
-            // Return freed pages first, as the app's idle trim does.
-            unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
-            let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
-            let ret = unsafe {
-                libc::proc_pid_rusage(
-                    std::process::id() as i32,
-                    libc::RUSAGE_INFO_V4,
-                    &mut info as *mut _ as *mut libc::rusage_info_t,
-                )
-            };
-            assert_eq!(ret, 0);
-            info.ri_phys_footprint
-        }
+        let footprint = probe_footprint;
         let start = footprint();
         let mut sb = PagedScrollback::new(10_000_000);
         for i in 0..200_000 {
@@ -2690,6 +2693,35 @@ mod tests {
             mib(compressed.saturating_sub(start)),
             rows,
             mib(start)
+        );
+    }
+
+    /// Footprint of a flood-filled (deferred, worker-packed) 10 MB scrollback
+    /// against its accounted bytes, without compression:
+    /// `cargo test -p noa-grid --release --offline worker_packed_scrollback_footprint_probe -- --ignored --nocapture`
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "manual footprint probe"]
+    fn worker_packed_scrollback_footprint_probe() {
+        let start = probe_footprint();
+        let mut sb = PagedScrollback::new(10_000_000);
+        for i in 0..200_000 {
+            sb.push_row_deferred(varied_row(i, 120));
+        }
+        sb.trim_memory();
+        let full = probe_footprint();
+        let (accounted, pages) = (sb.total_bytes, sb.page_count());
+        drop(sb);
+        release_arena_pool();
+        // Unmapping the arenas returns their resident pages; malloc'd memory
+        // (rows, tables) stays in the footprint either way.
+        let arenas = full.saturating_sub(probe_footprint());
+        let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
+        eprintln!(
+            "worker-packed scrollback: arenas {:.1} MiB resident for {:.1} MiB accounted ({pages} pages; total footprint {:.1} MiB)",
+            mib(arenas),
+            mib(accounted as u64),
+            mib(full.saturating_sub(start)),
         );
     }
 

@@ -686,3 +686,12 @@ fn mode_2033_is_reported_by_decrqm() {
     Stream::new().feed(b"\x1b[?2033$p", &mut t);
     assert_eq!(t.take_pending_writes(), b"\x1b[?2033;1$y");
 }
+
+#[test]
+fn replica_terminals_never_send_visibility_reports() {
+    let mut t = run(b"\x1b[?2033h");
+    t.set_reply_writes_enabled(false);
+    assert_eq!(t.set_visible(false), None);
+    Stream::new().feed(b"\x1b[?998n", &mut t);
+    assert!(t.take_pending_writes().is_empty());
+}

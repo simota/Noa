@@ -844,14 +844,14 @@ impl Terminal {
     /// The queue is always drained, but suppressed terminals return no bytes.
     /// Record whether the host window may be visible. Returns the DEC mode
     /// 2033 report to send when visibility changed while the program has
-    /// visibility reports enabled.
+    /// visibility reports enabled. Like [`Self::take_pending_writes`], a
+    /// replica terminal never reports: the server-side terminal does.
     pub fn set_visible(&mut self, visible: bool) -> Option<&'static [u8]> {
         if self.visible == visible {
             return None;
         }
         self.visible = visible;
-        self.modes
-            .report_visibility()
+        (self.reply_writes_enabled && self.modes.report_visibility())
             .then(|| visibility_report(visible))
     }
 

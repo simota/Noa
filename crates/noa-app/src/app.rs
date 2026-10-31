@@ -1003,10 +1003,17 @@ impl App {
     /// sending DEC mode 2033 visibility reports where enabled — Ghostty's
     /// `Surface.occlusionCallback`.
     fn sync_pane_visibility(&self, window_id: WindowId) {
+        if let Some(state) = self.windows.get(&window_id) {
+            self.set_panes_visible(window_id, !state.occluded);
+        }
+    }
+
+    /// [`Self::sync_pane_visibility`] with an explicit state, for the quick
+    /// terminal, which tracks its own shown/hidden state instead of occlusion.
+    fn set_panes_visible(&self, window_id: WindowId, visible: bool) {
         let Some(state) = self.windows.get(&window_id) else {
             return;
         };
-        let visible = !state.occluded;
         for (&pane_id, surface) in &state.surfaces {
             let report = surface.terminal.lock().set_visible(visible);
             if let Some(bytes) = report {

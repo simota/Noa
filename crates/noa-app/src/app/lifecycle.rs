@@ -879,6 +879,14 @@ impl App {
         }
         let mut terminal = self.new_terminal(grid_size);
         apply_clipboard_policy(&mut terminal, &self.config);
+        // A pane split into an occluded window or background tab starts hidden.
+        if self
+            .windows
+            .get(&window_id)
+            .is_some_and(|state| state.occluded)
+        {
+            terminal.set_visible(false);
+        }
         let kitty_animation_flag = terminal.kitty_animation_flag();
         let terminal = Arc::new(Mutex::new(terminal));
         let (resize_tx, resize_rx) = crossbeam_channel::unbounded();

@@ -452,6 +452,14 @@ fn cursor_click_to_move_defaults_on_and_parses_a_bool() {
 }
 
 #[test]
+fn vt_window_resize_allowed_defaults_off_and_parses_a_bool() {
+    assert!(!crate::StartupConfig::default().vt_window_resize_allowed);
+    let (overrides, diagnostics) = parse_overrides(path(), "vt-window-resize-allowed = true");
+    assert_eq!(overrides.vt_window_resize_allowed, Some(true));
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
 fn clipboard_write_parses_each_mode_and_defaults_to_allow() {
     assert_eq!(
         crate::StartupConfig::default().clipboard_write,

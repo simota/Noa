@@ -302,6 +302,15 @@ impl ApplicationHandler<UserEvent> for App {
                 pane_id,
                 request,
             } => self.handle_kitty_clipboard(window_id, pane_id, request),
+            UserEvent::WindowResizeRequest {
+                window_id,
+                pane_id,
+                request,
+            } => {
+                if let Some(window_id) = self.resolve_pane_window(window_id, pane_id) {
+                    self.handle_window_resize_request(window_id, request);
+                }
+            }
             UserEvent::MouseShapeChanged(window_id, pane_id) => {
                 if let Some(window_id) = self.resolve_pane_window(window_id, pane_id) {
                     self.update_cursor_icon(window_id);

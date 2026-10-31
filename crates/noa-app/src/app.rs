@@ -100,6 +100,7 @@ mod split_ops;
 use split_ops::DestPlacement;
 mod state;
 mod timers;
+mod window_resize;
 
 use applescript::ScriptSpawn;
 pub use config::AppConfig;

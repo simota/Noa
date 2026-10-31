@@ -1352,3 +1352,63 @@ mod tests {
         assert!(resolve_font("Definitely-Not-A-Real-Font-XYZ-12345", 12.0).is_none());
     }
 }
+
+/// Grow or shrink `window` by `dw`×`dh` points (a terminal-area delta, so
+/// titlebar and sidebar chrome stay as they are), clamped to the screen's
+/// visible frame with the top-left corner kept in place — Ghostty's
+/// `TerminalController.resizeWindow`. A no-op when the NSWindow can't be
+/// reached.
+pub(crate) fn resize_window_by(window: &Window, dw: f64, dh: f64) {
+    resize_window_by_impl(window, dw, dh);
+}
+
+#[cfg(target_os = "macos")]
+fn resize_window_by_impl(window: &Window, dw: f64, dh: f64) {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyObject, Bool};
+    use objc2_foundation::NSRect;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    let ns_view = appkit.ns_view.as_ptr().cast::<AnyObject>();
+
+    // SAFETY: `ns_view` is winit's live AppKit `NSView` and we are on the main
+    // (window-owning) thread. Object returns are nil-checked; `frame` and
+    // `visibleFrame` are struct-returning property reads.
+    unsafe {
+        let ns_window: *mut AnyObject = msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        let mut screen: *mut AnyObject = msg_send![ns_window, screen];
+        if screen.is_null() {
+            screen = msg_send![objc2::class!(NSScreen), mainScreen];
+        }
+        if screen.is_null() {
+            return;
+        }
+        let visible: NSRect = msg_send![screen, visibleFrame];
+        let current: NSRect = msg_send![ns_window, frame];
+
+        // Clamp to the screen first so the terminal is resized only once, and
+        // keep the top edge (AppKit's origin is bottom-left).
+        let mut frame = current;
+        frame.size.width = (current.size.width + dw).min(visible.size.width);
+        frame.size.height = (current.size.height + dh).min(visible.size.height);
+        frame.origin.y = current.origin.y + current.size.height - frame.size.height;
+        // Then keep the whole window on screen (Ghostty's `constrainToScreen`).
+        let max_x = visible.origin.x + visible.size.width - frame.size.width;
+        let max_y = visible.origin.y + visible.size.height - frame.size.height;
+        frame.origin.x = frame.origin.x.min(max_x).max(visible.origin.x);
+        frame.origin.y = frame.origin.y.min(max_y).max(visible.origin.y);
+        let _: () = msg_send![ns_window, setFrame: frame, display: Bool::YES];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn resize_window_by_impl(_window: &Window, _dw: f64, _dh: f64) {}

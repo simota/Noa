@@ -50,6 +50,9 @@ pub struct AppConfig {
     /// Send prompt clicks to a shell that asked for OSC 133 `click_events`
     /// (`cursor-click-to-move`).
     pub cursor_click_to_move: bool,
+    /// Let a program resize the window with `CSI 8 t`
+    /// (`vt-window-resize-allowed`).
+    pub vt_window_resize_allowed: bool,
     /// `window-padding-x/y`: `None` keeps the built-in default for that axis.
     /// Resolved to a `GridPadding` once in [`App::new`].
     pub window_padding_x: Option<f32>,
@@ -304,6 +307,7 @@ impl AppConfig {
             title_report: config.title_report,
             scrollback_compression: config.scrollback_compression,
             cursor_click_to_move: config.cursor_click_to_move,
+            vt_window_resize_allowed: config.vt_window_resize_allowed,
             window_padding_x: config.window_padding_x,
             window_padding_y: config.window_padding_y,
             background: config.background,

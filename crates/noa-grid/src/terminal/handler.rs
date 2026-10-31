@@ -529,6 +529,7 @@ impl Handler for Terminal {
         self.set_mouse_shape(None);
         self.mouse_shift_capture = None;
         self.pending_bell = false;
+        self.pending_window_resize = None;
         self.kitty_keyboard.reset();
         self.modify_other_keys_2 = false;
         self.kitty_images.clear();
@@ -670,8 +671,12 @@ impl Handler for Terminal {
         }
     }
 
-    fn window_op(&mut self, ps: u16, p1: u16, _p2: u16) {
+    fn window_op(&mut self, ps: u16, p1: u16, p2: u16) {
         match ps {
+            8 => {
+                self.pending_window_resize =
+                    Some(crate::WindowResizeRequest { rows: p1, cols: p2 });
+            }
             14 => self.pending_writes.extend_from_slice(
                 format!(
                     "\x1b[4;{};{}t",
@@ -703,7 +708,7 @@ impl Handler for Terminal {
             // falls through to the no-op/no-reply arm below.
             22 if matches!(p1, 0 | 2) => self.push_title(),
             23 if matches!(p1, 0 | 2) => self.pop_title(),
-            _ => {} // 4/8/9/10/20, icon-only push/pop, unknown Ps — ignore (Ghostty parity).
+            _ => {} // 4/9/10/20, icon-only push/pop, unknown Ps — ignore (Ghostty parity).
         }
     }
 

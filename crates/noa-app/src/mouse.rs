@@ -98,6 +98,13 @@ impl MouseSelectionState {
         }
     }
 
+    /// Whether a release now ends a plain click: the press reached this
+    /// pane's selection handling (not the sidebar, tab bar or a mouse
+    /// report) and never moved off its cell.
+    pub fn is_plain_click(&self) -> bool {
+        self.left_down && !self.drag_started
+    }
+
     pub fn left_released(&mut self) -> SelectionGesture {
         self.cancel_drag();
         SelectionGesture::None
@@ -452,6 +459,20 @@ mod tests {
 
     fn point(x: u16, y: u16) -> Point {
         Point { x, y }
+    }
+
+    #[test]
+    fn plain_click_needs_a_press_that_stayed_on_its_cell() {
+        let mut state = MouseSelectionState::default();
+        state.cursor_moved(point(1, 1));
+        assert!(!state.is_plain_click(), "a release with no press seen here");
+
+        state.left_pressed(Instant::now());
+        assert!(state.is_plain_click());
+        state.cursor_moved(point(2, 1));
+        assert!(!state.is_plain_click(), "dragged off the pressed cell");
+        state.left_released();
+        assert!(!state.is_plain_click());
     }
 
     #[test]

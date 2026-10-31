@@ -18,7 +18,8 @@ use crate::kitty::ImageStore;
 use crate::kitty_keyboard::KittyKeyboard;
 use crate::modes::ModeState;
 use crate::osc::{
-    Notification, Osc52Policy, ProgressCue, ProgressUpdate, TerminalColors, TerminalProgress,
+    Notification, Osc52Policy, ProgressCue, ProgressUpdate, PromptClickEvents, TerminalColors,
+    TerminalProgress,
 };
 use crate::screen::Screen;
 use crate::search::SearchMatch;
@@ -203,6 +204,9 @@ pub struct ShellIntegrationMark {
     pub kind: ShellIntegrationMarkKind,
     pub point: SelectionPoint,
     pub exit_status: Option<i32>,
+    /// A `PromptStart` from `133;A;k=c` / `k=s`: a continuation line of the
+    /// prompt above it, not a new prompt.
+    pub continuation: bool,
 }
 
 impl Terminal {
@@ -686,6 +690,44 @@ impl Terminal {
             })
     }
 
+    /// Ghostty's `Surface.maybePromptClick` for OSC 133 `click_events`: the
+    /// SGR left press to send the shell for a plain left click at viewport
+    /// cell `point`. `None` unless the shell's prompt asked for click events,
+    /// the cursor is at that prompt, and the click is on or below the
+    /// prompt's first row — continuation prompts (`k=c` / `k=s`) belong to
+    /// the prompt above them, and later rows are included since the shell
+    /// validates out-of-range clicks itself (as Kitty and Ghostty do). Like
+    /// Ghostty, `click_events=1` reports the viewport row.
+    pub fn prompt_click_report(&self, point: Point) -> Option<String> {
+        let mode = self.primary.prompt_click_events?;
+        if !self.cursor_is_at_prompt() {
+            return None;
+        }
+        let rows_evicted = self.primary.rows_evicted();
+        let cursor_abs =
+            rows_evicted + self.primary.scrollback_len() + usize::from(self.primary.cursor.y);
+        let prompt = self
+            .shell_marks
+            .iter()
+            .rev()
+            .find(|mark| {
+                mark.kind == ShellIntegrationMarkKind::PromptStart
+                    && !mark.continuation
+                    && mark.point.y <= cursor_abs
+            })?
+            .point;
+        let click = self.primary.viewport_point_to_selection_point(point);
+        let click_abs = rows_evicted + click.y;
+        if click_abs < prompt.y {
+            return None;
+        }
+        let row = match mode {
+            PromptClickEvents::Absolute => usize::from(point.y) + 1,
+            PromptClickEvents::Relative => click_abs - prompt.y + 1,
+        };
+        Some(format!("\x1b[<0;{};{row}M", point.x + 1))
+    }
+
     /// Ghostty parity: `Termio.clearScreen(history=true)` — the `clear_screen`
     /// keybind (Cmd+K). An emulator-level clear on the alternate screen would
     /// corrupt a running full-screen program's own idea of the display, so
@@ -1034,7 +1076,12 @@ impl Terminal {
         self.active_mut().cursor.hyperlink = None;
     }
 
-    fn record_shell_mark(&mut self, kind: ShellIntegrationMarkKind, exit_status: Option<i32>) {
+    fn record_shell_mark(
+        &mut self,
+        kind: ShellIntegrationMarkKind,
+        exit_status: Option<i32>,
+        continuation: bool,
+    ) {
         let screen = self.active();
         // Session-absolute row: stays valid across scrollback trimming, so a
         // recorded mark keeps pointing at the same line as history scrolls off
@@ -1054,6 +1101,7 @@ impl Terminal {
             kind,
             point,
             exit_status,
+            continuation,
         });
     }
 
@@ -1097,7 +1145,7 @@ impl Terminal {
         let target = self
             .shell_marks
             .iter()
-            .filter(|mark| mark.kind == ShellIntegrationMarkKind::PromptStart)
+            .filter(|mark| mark.kind == ShellIntegrationMarkKind::PromptStart && !mark.continuation)
             .map(|mark| mark.point.y)
             .filter(|&abs| abs >= rows_evicted)
             .fold(None, |best: Option<usize>, abs| match direction {

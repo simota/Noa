@@ -157,6 +157,7 @@ or fails to decode, a diagnostic is shown and the background image is disabled.
 | `file-link-editor` | `default`, `code`, `cursor`, `zed`, `subl` | `default` | Editor CLI for Cmd-clicked local paths with line/column navigation. Must be in Noa's inherited PATH. Directories and launch failures use the default macOS handler. See [Agent workflows](AGENT_WORKFLOW.md) |
 | `scrollback-compression` | `true`, `false` | `true` | Compress scrollback pages while the terminal is idle (about 10–30% of their memory for text). History kept is unchanged; a page decompresses when it is next read |
 | `title-report` | `true`, `false` | `false` | Allow window title responses via `CSI 21 t` |
+| `cursor-click-to-move` | `true`, `false` | `true` | When the shell asks for click events at its prompt (OSC 133 `click_events=1` or `2`), a plain left click at or below the prompt is sent to the shell as an SGR mouse press so it can move its cursor there. The `cl=` arrow-key form is not supported |
 | `visual-bell` | `true`, `false` | `false` | Flash the window on BEL |
 | `audible-bell` | `true`, `false` | `false` | Play a platform sound on BEL |
 | `audible-bell-when-unfocused` | `true`, `false` | `false` | Only sound the audible bell when unfocused |

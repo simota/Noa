@@ -444,6 +444,14 @@ fn scrollback_compression_defaults_on_and_parses_a_bool() {
 }
 
 #[test]
+fn cursor_click_to_move_defaults_on_and_parses_a_bool() {
+    assert!(crate::StartupConfig::default().cursor_click_to_move);
+    let (overrides, diagnostics) = parse_overrides(path(), "cursor-click-to-move = false");
+    assert_eq!(overrides.cursor_click_to_move, Some(false));
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
 fn clipboard_write_parses_each_mode_and_defaults_to_allow() {
     assert_eq!(
         crate::StartupConfig::default().clipboard_write,

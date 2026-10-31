@@ -319,6 +319,11 @@ fn show_config_output(config: &StartupConfig) -> String {
         "scrollback-compression",
         &config.scrollback_compression.to_string(),
     );
+    push_line(
+        &mut out,
+        "cursor-click-to-move",
+        &config.cursor_click_to_move.to_string(),
+    );
     push_optional_line(&mut out, "window-padding-x", config.window_padding_x);
     push_optional_line(&mut out, "window-padding-y", config.window_padding_y);
     push_color_line(&mut out, "background", config.background);

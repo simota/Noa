@@ -809,14 +809,23 @@ impl Handler for Terminal {
             return;
         }
         if let Some(action) = parse_shell_integration_osc(data) {
-            if let ShellIntegrationOsc::Mark { kind, exit_status } = action {
+            if let ShellIntegrationOsc::Mark {
+                kind,
+                exit_status,
+                click_events,
+                continuation,
+            } = action
+            {
+                if click_events.is_some() {
+                    self.active_mut().prompt_click_events = click_events;
+                }
                 let kind = match kind {
                     ShellIntegrationOscKind::PromptStart => ShellIntegrationMarkKind::PromptStart,
                     ShellIntegrationOscKind::InputStart => ShellIntegrationMarkKind::InputStart,
                     ShellIntegrationOscKind::CommandStart => ShellIntegrationMarkKind::CommandStart,
                     ShellIntegrationOscKind::CommandEnd => ShellIntegrationMarkKind::CommandEnd,
                 };
-                self.record_shell_mark(kind, exit_status);
+                self.record_shell_mark(kind, exit_status, continuation);
                 // The title→cwd rebind window opens at OSC 2, is consumed by the
                 // next OSC 7, and closes at 133;A (PromptStart) or 133;C
                 // (CommandStart), whichever comes first — bounding it to a

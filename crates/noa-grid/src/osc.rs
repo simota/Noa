@@ -37,11 +37,23 @@ pub(crate) enum ShellIntegrationOscKind {
     CommandEnd,
 }
 
+/// Kitty's OSC 133;A `click_events` option: a click in the prompt is sent to
+/// the shell as an SGR left press, with the row counted from the top of the
+/// viewport (`1`) or from the prompt's first row (`2`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PromptClickEvents {
+    Absolute,
+    Relative,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ShellIntegrationOsc {
     Mark {
         kind: ShellIntegrationOscKind,
         exit_status: Option<i32>,
+        click_events: Option<PromptClickEvents>,
+        /// 133;A with `k=c` or `k=s`: a continuation of the prompt above.
+        continuation: bool,
     },
     Malformed,
 }
@@ -743,11 +755,10 @@ pub(crate) fn parse_shell_integration_osc(data: &[u8]) -> Option<ShellIntegratio
         return Some(ShellIntegrationOsc::Malformed);
     }
 
-    let mut parts = rest.split(|&b| b == b';');
-    let Some(action) = parts.next() else {
-        return Some(ShellIntegrationOsc::Malformed);
+    let (action, options) = match rest.iter().position(|&b| b == b';') {
+        Some(i) => (&rest[..i], &rest[i + 1..]),
+        None => (rest, &b""[..]),
     };
-
     let kind = match action {
         b"A" => ShellIntegrationOscKind::PromptStart,
         b"B" => ShellIntegrationOscKind::InputStart,
@@ -755,23 +766,43 @@ pub(crate) fn parse_shell_integration_osc(data: &[u8]) -> Option<ShellIntegratio
         b"D" => ShellIntegrationOscKind::CommandEnd,
         _ => return Some(ShellIntegrationOsc::Malformed),
     };
-    let status = parts.next();
-    if parts.next().is_some() {
-        return Some(ShellIntegrationOsc::Malformed);
-    }
-    let exit_status = match (kind, status) {
-        (ShellIntegrationOscKind::CommandEnd, None | Some(b"")) => None,
-        (ShellIntegrationOscKind::CommandEnd, Some(status)) => {
-            let Some(status) = parse_i32_ascii(status) else {
-                return Some(ShellIntegrationOsc::Malformed);
-            };
-            Some(status)
-        }
-        (_, None) => None,
-        (_, Some(_)) => return Some(ShellIntegrationOsc::Malformed),
+    // Options are `;`-separated; unknown or malformed ones are ignored, as
+    // the semantic-prompts spec asks (Ghostty's `Option.read`). 133;D's
+    // first field is the exit status.
+    let exit_status = match kind {
+        ShellIntegrationOscKind::CommandEnd => options
+            .split(|&b| b == b';')
+            .next()
+            .and_then(parse_i32_ascii),
+        _ => None,
     };
+    let click_events = match kind {
+        ShellIntegrationOscKind::PromptStart => {
+            match shell_integration_option(options, b"click_events") {
+                Some(b"1") => Some(PromptClickEvents::Absolute),
+                Some(b"2") => Some(PromptClickEvents::Relative),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    let continuation = kind == ShellIntegrationOscKind::PromptStart
+        && matches!(shell_integration_option(options, b"k"), Some(b"c" | b"s"));
 
-    Some(ShellIntegrationOsc::Mark { kind, exit_status })
+    Some(ShellIntegrationOsc::Mark {
+        kind,
+        exit_status,
+        click_events,
+        continuation,
+    })
+}
+
+/// The value of the first `key=value` option named `key`.
+fn shell_integration_option<'a>(options: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
+    options.split(|&b| b == b';').find_map(|option| {
+        let (name, value) = option.split_at(option.iter().position(|&b| b == b'=')?);
+        (name == key).then_some(&value[1..])
+    })
 }
 
 fn hyperlink_id(params: &[u8]) -> Option<Option<String>> {

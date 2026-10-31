@@ -733,6 +733,10 @@ pub struct StartupConfig {
     /// `scrollback-compression`: compress idle scrollback pages (Ghostty
     /// 1.4.0, default on). History kept is unchanged; only memory drops.
     pub scrollback_compression: bool,
+    /// `cursor-click-to-move`: a click in an OSC 133 prompt that asked for
+    /// `click_events` is sent to the shell to move its cursor (Ghostty
+    /// default on).
+    pub cursor_click_to_move: bool,
     /// `window-padding-x`: horizontal padding (left = right) in physical
     /// pixels. `None` keeps the built-in default for that axis; the concrete
     /// `GridPadding` is derived in `noa-app`.
@@ -1019,6 +1023,7 @@ impl Default for StartupConfig {
             confirm_quit: true,
             title_report: false,
             scrollback_compression: true,
+            cursor_click_to_move: true,
             window_padding_x: None,
             window_padding_y: None,
             background: None,
@@ -1145,6 +1150,7 @@ pub struct ConfigOverrides {
     pub confirm_quit: Option<bool>,
     pub title_report: Option<bool>,
     pub scrollback_compression: Option<bool>,
+    pub cursor_click_to_move: Option<bool>,
     pub window_padding_x: Option<f32>,
     pub window_padding_y: Option<f32>,
     pub background: Option<Rgb>,
@@ -1238,6 +1244,7 @@ macro_rules! impl_redacted_config_debug {
                     .field("file_link_editor", &self.file_link_editor)
                     .field("title_report", &self.title_report)
                     .field("scrollback_compression", &self.scrollback_compression)
+                    .field("cursor_click_to_move", &self.cursor_click_to_move)
                     .field("window_padding_x", &self.window_padding_x)
                     .field("window_padding_y", &self.window_padding_y)
                     .field("background", &self.background)
@@ -1364,6 +1371,9 @@ impl ConfigOverrides {
             scrollback_compression: higher_priority
                 .scrollback_compression
                 .or(self.scrollback_compression),
+            cursor_click_to_move: higher_priority
+                .cursor_click_to_move
+                .or(self.cursor_click_to_move),
             window_padding_x: higher_priority.window_padding_x.or(self.window_padding_x),
             window_padding_y: higher_priority.window_padding_y.or(self.window_padding_y),
             background: higher_priority.background.or(self.background),
@@ -1538,6 +1548,9 @@ impl ConfigOverrides {
             scrollback_compression: self
                 .scrollback_compression
                 .unwrap_or(base.scrollback_compression),
+            cursor_click_to_move: self
+                .cursor_click_to_move
+                .unwrap_or(base.cursor_click_to_move),
             window_padding_x: self.window_padding_x.or(base.window_padding_x),
             window_padding_y: self.window_padding_y.or(base.window_padding_y),
             background: self.background.or(base.background),
@@ -2041,6 +2054,7 @@ mod tests {
                 confirm_quit: true,
                 title_report: false,
                 scrollback_compression: true,
+                cursor_click_to_move: true,
                 window_padding_x: None,
                 window_padding_y: None,
                 background: None,

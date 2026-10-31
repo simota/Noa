@@ -1989,18 +1989,25 @@ impl App {
             let _ = surface.mouse_selection.cursor_moved(cell);
         }
 
+        let mut plain_click = false;
         let gesture = self
             .windows
             .get_mut(&window_id)
             .and_then(|tab| tab.surfaces.get_mut(&pane_id))
             .map(|surface| match state {
                 ElementState::Pressed => surface.mouse_selection.left_pressed(Instant::now()),
-                ElementState::Released => surface.mouse_selection.left_released(),
+                ElementState::Released => {
+                    plain_click = surface.mouse_selection.is_plain_click();
+                    surface.mouse_selection.left_released()
+                }
             })
             .unwrap_or(SelectionGesture::None);
         self.apply_selection_gesture(window_id, pane_id, gesture);
         if state == ElementState::Released {
             self.copy_selection_on_select(window_id, pane_id);
+            if plain_click {
+                self.send_prompt_click(window_id, pane_id);
+            }
             if scripted.is_none() {
                 self.release_mouse_capture(window_id);
             }

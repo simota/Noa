@@ -357,14 +357,14 @@ fn osc133_prompt_marks_record_cursor_positions_and_exit_status() {
 
     assert_eq!(t.shell_marks.len(), 4);
     assert_eq!(t.shell_marks[0].kind, ShellIntegrationMarkKind::PromptStart);
-    assert_eq!(t.shell_marks[0].point, crate::SelectionPoint::new(0, 0));
+    assert_eq!(t.shell_marks[0].point, crate::SelectionPoint { x: 0, y: 0 });
     assert_eq!(t.shell_marks[1].kind, ShellIntegrationMarkKind::InputStart);
-    assert_eq!(t.shell_marks[1].point, crate::SelectionPoint::new(2, 0));
+    assert_eq!(t.shell_marks[1].point, crate::SelectionPoint { x: 2, y: 0 });
     assert_eq!(
         t.shell_marks[2].kind,
         ShellIntegrationMarkKind::CommandStart
     );
-    assert_eq!(t.shell_marks[2].point, crate::SelectionPoint::new(5, 0));
+    assert_eq!(t.shell_marks[2].point, crate::SelectionPoint { x: 5, y: 0 });
     assert_eq!(t.shell_marks[3].kind, ShellIntegrationMarkKind::CommandEnd);
     assert_eq!(t.shell_marks[3].exit_status, Some(7));
 }
@@ -435,6 +435,24 @@ fn scroll_to_prompt_jumps_between_prompt_marks() {
     assert!(t.scroll_to_prompt(PromptJump::Next));
     assert_eq!(t.viewport_offset(), 1);
     assert_eq!(top_line(&t), "p1");
+}
+
+#[test]
+fn scroll_to_prompt_skips_continuation_prompts() {
+    // history = [p0, k1, k2, x, p1, y] on a 2-row screen: p0's two
+    // continuation lines (`133;A;k=s`) are not jump targets.
+    let mut t = Terminal::new(GridSize::new(20, 2));
+    let mut s = Stream::new();
+    s.feed(
+        b"\x1b]133;A\x07p0\r\n\x1b]133;A;k=s\x07k1\r\n\x1b]133;A;k=s\x07k2\r\nx\r\n",
+        &mut t,
+    );
+    s.feed(b"\x1b]133;A\x07p1\r\ny", &mut t);
+    t.scroll_viewport_to_bottom();
+    assert!(t.scroll_to_prompt(PromptJump::Prev));
+    assert_eq!(t.viewport_offset(), 4, "lands on p0, not k2");
+    assert!(t.scroll_to_prompt(PromptJump::Next));
+    assert_eq!(t.viewport_offset(), 0, "skips k1/k2 on the way back to p1");
 }
 
 #[test]
@@ -1159,4 +1177,115 @@ fn oversized_hyperlink_uri_prints_as_plain_text() {
     let t = run(&input);
     assert_eq!(cell(&t, 0, 0).hyperlink, None);
     assert!(t.hyperlinks.is_empty());
+}
+
+// ── OSC 133 options and `click_events` prompt clicks ─────────────────
+
+#[test]
+fn osc133_marks_accept_options() {
+    let t = run(b"\x1b]133;A;aid=1;click_events=1\x07$ \x1b]133;B;x=y\x07cmd\
+          \x1b]133;C;cmdline=ls\x07\x1b]133;D;3;aid=1\x07");
+    let kinds: Vec<_> = t.shell_marks.iter().map(|mark| mark.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            ShellIntegrationMarkKind::PromptStart,
+            ShellIntegrationMarkKind::InputStart,
+            ShellIntegrationMarkKind::CommandStart,
+            ShellIntegrationMarkKind::CommandEnd,
+        ]
+    );
+    assert_eq!(t.shell_marks[3].exit_status, Some(3));
+}
+
+#[test]
+fn osc133_d_with_a_non_numeric_status_still_ends_the_command() {
+    let t = run(b"\x1b]133;C\x07\x1b]133;D;err\x07");
+    assert_eq!(
+        t.shell_marks.last().map(|mark| (mark.kind, mark.exit_status)),
+        Some((ShellIntegrationMarkKind::CommandEnd, None))
+    );
+}
+
+/// A two-row prompt (`p1` / `$ `) starting on viewport row 1 after one row
+/// of output, with the shell asking for `click_events=<mode>`.
+fn prompt_click_terminal(mode: &str) -> Terminal {
+    run(format!("out\r\n\x1b]133;A;click_events={mode}\x07p1\r\n$ \x1b]133;B\x07").as_bytes())
+}
+
+#[test]
+fn prompt_click_reports_absolute_rows_for_click_events_1() {
+    let t = prompt_click_terminal("1");
+    assert_eq!(
+        t.prompt_click_report(Point { x: 4, y: 2 }).as_deref(),
+        Some("\x1b[<0;5;3M")
+    );
+}
+
+#[test]
+fn prompt_click_reports_rows_relative_to_the_prompt_for_click_events_2() {
+    let t = prompt_click_terminal("2");
+    assert_eq!(
+        t.prompt_click_report(Point { x: 4, y: 2 }).as_deref(),
+        Some("\x1b[<0;5;2M")
+    );
+    assert_eq!(
+        t.prompt_click_report(Point { x: 0, y: 1 }).as_deref(),
+        Some("\x1b[<0;1;1M")
+    );
+    assert_eq!(
+        t.prompt_click_report(Point { x: 7, y: 5 }).as_deref(),
+        Some("\x1b[<0;8;5M"),
+        "clicks below the prompt go to the shell to validate"
+    );
+}
+
+#[test]
+fn prompt_click_ignores_rows_above_the_prompt() {
+    // Like Ghostty, the prompt starts at column 0 of its first row.
+    let t = run(b"out\r\nab\x1b]133;A;click_events=2\x07$ \x1b]133;B\x07");
+    assert_eq!(t.prompt_click_report(Point { x: 0, y: 0 }), None, "earlier row");
+    assert_eq!(
+        t.prompt_click_report(Point { x: 1, y: 1 }).as_deref(),
+        Some("\x1b[<0;2;1M")
+    );
+}
+
+#[test]
+fn prompt_click_measures_from_the_primary_prompt_above_continuations() {
+    let t = run(b"\x1b]133;A;click_events=2\x07p1\r\n\x1b]133;A;k=s\x07> \x1b]133;B\x07");
+    assert_eq!(
+        t.prompt_click_report(Point { x: 1, y: 0 }).as_deref(),
+        Some("\x1b[<0;2;1M"),
+        "the primary prompt's row stays clickable"
+    );
+    assert_eq!(
+        t.prompt_click_report(Point { x: 3, y: 1 }).as_deref(),
+        Some("\x1b[<0;4;2M")
+    );
+}
+
+#[test]
+fn prompt_click_needs_click_events_and_a_prompt_cursor() {
+    let plain = run(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+    assert_eq!(plain.prompt_click_report(Point { x: 3, y: 0 }), None, "no click_events");
+    let off = run(b"\x1b]133;A;click_events=0\x07$ \x1b]133;B\x07");
+    assert_eq!(off.prompt_click_report(Point { x: 3, y: 0 }), None, "click_events=0");
+    let running = run(b"\x1b]133;A;click_events=1\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\n");
+    assert_eq!(running.prompt_click_report(Point { x: 0, y: 0 }), None, "command running");
+    let alt = run(b"\x1b]133;A;click_events=1\x07$ \x1b]133;B\x07\x1b[?1049h");
+    assert_eq!(alt.prompt_click_report(Point { x: 3, y: 0 }), None, "alternate screen");
+}
+
+#[test]
+fn prompt_click_mode_persists_across_prompts_and_ris_clears_it() {
+    let mut t = run(b"\x1b]133;A;click_events=2\x07$ \x1b]133;B\x07\x1b]133;C\x07\r\n\
+          \x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+    assert_eq!(
+        t.prompt_click_report(Point { x: 2, y: 1 }).as_deref(),
+        Some("\x1b[<0;3;1M"),
+        "a prompt without click_events keeps the earlier mode"
+    );
+    Stream::new().feed(b"\x1bc\x1b]133;A\x07$ \x1b]133;B\x07", &mut t);
+    assert_eq!(t.prompt_click_report(Point { x: 2, y: 0 }), None);
 }

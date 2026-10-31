@@ -97,8 +97,6 @@ struct CrossTabMove {
 /// has no pixel geometry of its own; the axis cap
 /// (`MAX_PANES_PER_AXIS`) is checked here via `can_add_pane_in_direction`.
 ///
-/// What this function does **not** decide (the caller's job, since it isn't
-/// a tree property): the window-group filter (AC-29).
 fn cross_tab_move(
     source: &SplitTree,
     pane: PaneId,
@@ -246,8 +244,8 @@ impl App {
     ///
     /// Returns `false` (no-op, both trees/surface maps/the session store left
     /// byte-for-byte unchanged) when: `source_window == dest_window`; `pane`
-    /// isn't live in `source_window`; `dest_window` doesn't exist or belongs
-    /// to a different window group (AC-29); the named `dest_target` pane isn't
+    /// isn't live in `source_window`; `dest_window` doesn't exist; the named
+    /// `dest_target` pane isn't
     /// live in `dest_window`; or either pane-count cap would be exceeded
     /// (AC-28, via [`cross_tab_move`]).
     ///
@@ -270,9 +268,6 @@ impl App {
         if source_window == dest_window {
             return false;
         }
-        let Some(source_group) = self.windows.get(&source_window).map(|state| state.group) else {
-            return false;
-        };
         if !self
             .windows
             .get(&source_window)
@@ -283,11 +278,6 @@ impl App {
         let Some(dest_state) = self.windows.get(&dest_window) else {
             return false;
         };
-        // AC-29: cross-tab move is confined to the drag source's own window
-        // group — a different group is never a valid drop target.
-        if dest_state.group != source_group {
-            return false;
-        }
         // See this method's doc comment: with `PaneId` allocation now global,
         // `dest` cannot already hold a pane with `pane`'s id while `pane` is
         // still live in `source`.
@@ -715,11 +705,12 @@ impl App {
         }
 
         if transform.remove_outcome.tab_should_close {
-            // FR-2/FR-8/ASSUME-9's window-group filter means a same-group
-            // destination tab always exists whenever this move was valid, so
-            // `source_window` can never be its group's last tab here — the
+            // The destination tab exists whenever this move was valid, so
+            // `source_window` is never the last window here — the
             // `TabCloseOutcome::Quit` app-exit cascade is unreachable
-            // (L2(e)), and `close_tab` only ever tears down this one window.
+            // (L2(e)). It may be the last tab of its own window group (a
+            // move to another group), which `close_tab` closes like any
+            // emptied window.
             self.close_tab(event_loop, source_window);
         } else {
             self.relayout_and_resize_window(source_window);

@@ -632,8 +632,9 @@ pub(super) struct OverviewWindowState {
 /// `window_id` and `pane_id`). A release resolves against the pane under the
 /// pointer and its 60/40 zone (`session_overview::resolve_overview_drop`):
 /// an in-tab center/edge drop swaps/splits within the tab, a cross-tab drop
-/// moves the pane into another tab at the target pane's edge, and a
-/// self/foreign-group/no-pane release cancels.
+/// moves the pane into another tab (of any window group) at the target pane's
+/// edge, an empty-space drop detaches it into a new tab or window, and a
+/// self/no-op/no-target release cancels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct OverviewPaneDrag {
     /// The pane the press landed on — the pane being moved (and its tab).

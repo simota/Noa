@@ -115,35 +115,79 @@ pub enum OverviewDrop<W, P> {
         target: P,
         direction: Direction,
     },
-    /// No move — a self-drop (the source pane's own tile/pane), a foreign
-    /// window group, or a release over no pane at all.
+    /// Drop on empty grid space: detach the pane into a new tab of its own
+    /// window group, or into a new window when `new_window` (Option held) —
+    /// Ghostty 1.4.0's "drag a split out to make a new tab or window".
+    Detach {
+        source_window: W,
+        source: P,
+        new_window: bool,
+    },
+    /// No move — a self-drop (the source pane's own tile/pane), a detach that
+    /// would change nothing, or a release over no target at all.
     Cancel,
+}
+
+/// What an Overview pane-drag release lands on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropOver<W, P> {
+    /// A pane inside a tab tile, and the 60/40 zone the pointer sits in within
+    /// that pane's scaled rect ([`classify_pane_zone`]).
+    Pane(W, P, PaneZone),
+    /// Grid space outside every tile.
+    Empty,
+    /// No target: a divider gap inside a tile, the chrome bands, or outside
+    /// the grid.
+    Nothing,
+}
+
+/// The source side of an Overview drop, for deciding whether a detach would
+/// change anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DropSource {
+    /// Panes in the source pane's tab.
+    pub tab_panes: usize,
+    /// Tabs in the source tab's window group.
+    pub group_tabs: usize,
+    /// Option is held: an empty-space drop makes a new window, not a new tab.
+    pub new_window: bool,
 }
 
 /// Resolve an Overview pane-drag drop (pure, unit-tested — U2/U3/U4).
 ///
-/// `over` names the pane the release landed on: its window/tab, the pane id,
-/// and the 60/40 zone the pointer sits in within that pane's scaled tile rect
-/// ([`classify_pane_zone`]). `None` — a release over no pane (an empty tile
-/// gap, the chrome bands, outside the grid) — cancels.
-///
-/// `same_group` says whether the target tab is in the *same* window group as
-/// the source; it is consulted only for a cross-tab drop, since the engine
-/// (`App::move_pane_to_tab_at`) rejects a cross-group move (AC-29), so a
-/// foreign-group target cancels here too — the front-line half of that guard.
-///
-/// An in-tab drop onto the source's own pane cancels regardless of zone (a
-/// pane never swaps or splits with itself); a cross-tab drop can never target
-/// the source pane, since `PaneId`s are process-global and the target lives in
-/// a different window.
+/// A pane target resolves by its tab and 60/40 zone: in the source's own tab
+/// a center zone swaps and an edge zone split-inserts (a drop onto the source
+/// pane itself cancels); in any other tab — of any window group — the pane
+/// moves there, inserting at the target's edge (center: to its right). Empty
+/// grid space detaches the pane into a new tab of its group, or with Option
+/// into a new window; a detach that would only reorder (the tab's only pane
+/// to a new tab, or the group's only tab with its only pane to a new window)
+/// cancels. [`DropOver::Nothing`] cancels.
 pub fn resolve_overview_drop<W: PartialEq + Copy, P: PartialEq + Copy>(
     source_window: W,
     source_pane: P,
-    over: Option<(W, P, PaneZone)>,
-    same_group: bool,
+    over: DropOver<W, P>,
+    from: DropSource,
 ) -> OverviewDrop<W, P> {
-    let Some((window, target, zone)) = over else {
-        return OverviewDrop::Cancel;
+    let (window, target, zone) = match over {
+        DropOver::Pane(window, target, zone) => (window, target, zone),
+        DropOver::Empty => {
+            let changes = if from.new_window {
+                from.tab_panes > 1 || from.group_tabs > 1
+            } else {
+                from.tab_panes > 1
+            };
+            return if changes {
+                OverviewDrop::Detach {
+                    source_window,
+                    source: source_pane,
+                    new_window: from.new_window,
+                }
+            } else {
+                OverviewDrop::Cancel
+            };
+        }
+        DropOver::Nothing => return OverviewDrop::Cancel,
     };
     if window == source_window {
         // In-tab rearrange (U2). A drop onto the source's own pane is a no-op
@@ -165,10 +209,6 @@ pub fn resolve_overview_drop<W: PartialEq + Copy, P: PartialEq + Copy>(
             },
         };
     }
-    // Cross-tab (U3): only within the same window group.
-    if !same_group {
-        return OverviewDrop::Cancel;
-    }
     let direction = match zone {
         PaneZone::Center => Direction::Right,
         PaneZone::Edge(direction) => direction,
@@ -186,6 +226,13 @@ pub fn resolve_overview_drop<W: PartialEq + Copy, P: PartialEq + Copy>(
 mod tests {
     use super::*;
     use crate::split_tree::{SplitOrientation, SplitTree};
+
+    /// A source pane sharing its tab with others, in a one-tab group.
+    const SPLIT_TAB: DropSource = DropSource {
+        tab_panes: 2,
+        group_tabs: 1,
+        new_window: false,
+    };
 
     fn pane(n: u64) -> PaneId {
         PaneId::new(n)
@@ -285,7 +332,12 @@ mod tests {
     // U2: an in-tab center drop swaps; an in-tab edge drop splits at that edge.
     #[test]
     fn in_tab_center_swaps_and_edge_splits() {
-        let swap = resolve_overview_drop(1u64, 10u64, Some((1u64, 20u64, PaneZone::Center)), true);
+        let swap = resolve_overview_drop(
+            1u64,
+            10u64,
+            DropOver::Pane(1u64, 20u64, PaneZone::Center),
+            SPLIT_TAB,
+        );
         assert_eq!(
             swap,
             OverviewDrop::Swap {
@@ -297,8 +349,8 @@ mod tests {
         let split = resolve_overview_drop(
             1u64,
             10u64,
-            Some((1u64, 20u64, PaneZone::Edge(Direction::Down))),
-            true,
+            DropOver::Pane(1u64, 20u64, PaneZone::Edge(Direction::Down)),
+            SPLIT_TAB,
         );
         assert_eq!(
             split,
@@ -315,15 +367,20 @@ mod tests {
     #[test]
     fn in_tab_self_pane_drop_cancels() {
         assert_eq!(
-            resolve_overview_drop(1u64, 10u64, Some((1u64, 10u64, PaneZone::Center)), true),
+            resolve_overview_drop(
+                1u64,
+                10u64,
+                DropOver::Pane(1u64, 10u64, PaneZone::Center),
+                SPLIT_TAB
+            ),
             OverviewDrop::Cancel
         );
         assert_eq!(
             resolve_overview_drop(
                 1u64,
                 10u64,
-                Some((1u64, 10u64, PaneZone::Edge(Direction::Left))),
-                true
+                DropOver::Pane(1u64, 10u64, PaneZone::Edge(Direction::Left)),
+                SPLIT_TAB
             ),
             OverviewDrop::Cancel
         );
@@ -336,8 +393,8 @@ mod tests {
         let edge = resolve_overview_drop(
             1u64,
             10u64,
-            Some((2u64, 20u64, PaneZone::Edge(Direction::Up))),
-            true,
+            DropOver::Pane(2u64, 20u64, PaneZone::Edge(Direction::Up)),
+            SPLIT_TAB,
         );
         assert_eq!(
             edge,
@@ -349,8 +406,12 @@ mod tests {
                 direction: Direction::Up
             }
         );
-        let center =
-            resolve_overview_drop(1u64, 10u64, Some((2u64, 20u64, PaneZone::Center)), true);
+        let center = resolve_overview_drop(
+            1u64,
+            10u64,
+            DropOver::Pane(2u64, 20u64, PaneZone::Center),
+            SPLIT_TAB,
+        );
         assert_eq!(
             center,
             OverviewDrop::CrossTab {
@@ -363,20 +424,87 @@ mod tests {
         );
     }
 
-    // U3/AC-29: a cross-tab drop onto a foreign window group cancels.
+    // Ghostty 1.4.0 moves splits between windows: a tab of any window group
+    // is a cross-tab target.
     #[test]
-    fn cross_tab_foreign_group_cancels() {
+    fn cross_tab_drop_moves_regardless_of_window_group() {
+        assert!(matches!(
+            resolve_overview_drop(
+                1u64,
+                10u64,
+                DropOver::Pane(2u64, 20u64, PaneZone::Center),
+                SPLIT_TAB
+            ),
+            OverviewDrop::CrossTab { dest_window: 2, .. }
+        ));
+    }
+
+    // Empty grid space detaches: a new tab, or with Option a new window.
+    #[test]
+    fn empty_space_detaches_to_a_new_tab_or_window() {
         assert_eq!(
-            resolve_overview_drop(1u64, 10u64, Some((2u64, 20u64, PaneZone::Center)), false),
+            resolve_overview_drop(1u64, 10u64, DropOver::Empty, SPLIT_TAB),
+            OverviewDrop::Detach {
+                source_window: 1,
+                source: 10,
+                new_window: false
+            }
+        );
+        let option = DropSource {
+            new_window: true,
+            ..SPLIT_TAB
+        };
+        assert_eq!(
+            resolve_overview_drop(1u64, 10u64, DropOver::Empty, option),
+            OverviewDrop::Detach {
+                source_window: 1,
+                source: 10,
+                new_window: true
+            }
+        );
+    }
+
+    // A detach that would only reorder cancels: a tab's only pane to a new
+    // tab, or a lone tab's only pane to a new window. A lone pane in a tab of
+    // a larger group can still leave for its own window.
+    #[test]
+    fn a_detach_that_changes_nothing_cancels() {
+        let lone_pane = DropSource {
+            tab_panes: 1,
+            group_tabs: 2,
+            new_window: false,
+        };
+        assert_eq!(
+            resolve_overview_drop(1u64, 10u64, DropOver::Empty, lone_pane),
             OverviewDrop::Cancel
         );
+        let lone_tab = DropSource {
+            tab_panes: 1,
+            group_tabs: 1,
+            new_window: true,
+        };
+        assert_eq!(
+            resolve_overview_drop(1u64, 10u64, DropOver::Empty, lone_tab),
+            OverviewDrop::Cancel
+        );
+        let own_window = DropSource {
+            new_window: true,
+            ..lone_pane
+        };
+        assert!(matches!(
+            resolve_overview_drop(1u64, 10u64, DropOver::Empty, own_window),
+            OverviewDrop::Detach {
+                new_window: true,
+                ..
+            }
+        ));
     }
 
     // U4: a release over no pane at all cancels.
     #[test]
     fn drop_over_no_pane_cancels() {
         assert_eq!(
-            resolve_overview_drop(1u64, 10u64, None, true),
+            resolve_overview_drop(1u64, 10u64, DropOver::Nothing, SPLIT_TAB),
             OverviewDrop::Cancel
         );
     }

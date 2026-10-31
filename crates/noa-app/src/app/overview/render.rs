@@ -808,27 +808,23 @@ impl App {
         // shapes are the non-color cue for swap vs split), the tab tile index
         // it lives in, and the `src_uv` sampling that zone out of the tab tile
         // texture. Resolved before the gpu/overview borrows. `None` (no
-        // highlight) whenever the release would `Cancel`: a self-drop, a
-        // foreign window group, or the pointer over a divider gap / no pane.
+        // highlight) whenever the release would `Cancel` (a self-drop, or the
+        // pointer over a divider gap / no pane) or lands on empty space.
         // Reuses the pure `pane_zone_highlight_rect` the main-view pane drag
         // draws, so the highlight always matches what a release resolves to.
         let drag_zone_highlight: Option<(usize, PaneRectApp, [f32; 4])> =
             active_drag.and_then(|drag| {
-                let (dest_tab, target_pane, zone) = self.overview_drop_target_at_last_cursor()?;
-                let same_group = {
-                    let source_group = self
-                        .windows
-                        .get(&drag.source.window_id)
-                        .map(|state| state.group);
-                    let dest_group = self.windows.get(&dest_tab).map(|state| state.group);
-                    source_group.is_some() && source_group == dest_group
+                let crate::session_overview::DropOver::Pane(dest_tab, target_pane, zone) =
+                    self.overview_drop_target_at_last_cursor()
+                else {
+                    return None;
                 };
                 if matches!(
                     crate::session_overview::resolve_overview_drop(
                         drag.source.window_id,
                         drag.source.pane_id,
-                        Some((dest_tab, target_pane, zone)),
-                        same_group,
+                        crate::session_overview::DropOver::Pane(dest_tab, target_pane, zone),
+                        self.overview_drop_source(drag.source.window_id),
                     ),
                     crate::session_overview::OverviewDrop::Cancel
                 ) {

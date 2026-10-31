@@ -41,8 +41,8 @@ pub use render::{
     select_due_overview_tile_ids, should_render_tile,
 };
 pub use tab_tiles::{
-    OverviewDrop, PaneZone, classify_pane_zone, resolve_overview_drop, tab_tile_content_rect,
-    tab_tile_pane_at_point, tab_tile_pane_rects,
+    DropOver, DropSource, OverviewDrop, PaneZone, classify_pane_zone, resolve_overview_drop,
+    tab_tile_content_rect, tab_tile_pane_at_point, tab_tile_pane_rects,
 };
 pub use text::{
     OVERVIEW_SEARCH_PLACEHOLDER, OverviewTileLabel, TITLE_BAR_CLOSE_GLYPH, center_label,

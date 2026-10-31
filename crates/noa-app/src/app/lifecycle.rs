@@ -107,7 +107,7 @@ impl App {
         };
         let tab_insert_at = tab_insert_index(&self.window_order, tab_anchor);
         let remote_card_identity = match &initial_spec {
-            InitialPane::Local { .. } => None,
+            InitialPane::Local { .. } | InitialPane::Placeholder => None,
             InitialPane::DetachedRemote(identity) => Some(identity.clone()),
         };
         let group = match group {
@@ -657,6 +657,7 @@ impl App {
             InitialPane::DetachedRemote(identity) => {
                 self.detached_remote_surface(initial_grid_size, initial_rect, identity)
             }
+            InitialPane::Placeholder => self.placeholder_surface(initial_grid_size, initial_rect),
         };
         let mut surfaces = HashMap::new();
         surfaces.insert(initial_pane, initial_surface);
@@ -993,6 +994,69 @@ impl App {
             );
         }
         terminal
+    }
+
+    /// A pane with no process behind it, standing in for one about to move in
+    /// (see [`InitialPane::Placeholder`]).
+    fn placeholder_surface(&self, grid_size: GridSize, rect: PaneRectApp) -> Surface {
+        let identity = crate::remote_attach::RemotePaneIdentity {
+            endpoint: String::new(),
+            pane_id: 0,
+            cached_title: None,
+        };
+        self.detached_remote_surface(grid_size, rect, identity)
+    }
+
+    /// Move `pane` out of `source_window` into a tab of its own: in the same
+    /// window group, or a new window (`new_window`) — Ghostty 1.4.0's
+    /// dragging a split out to a new tab or window, driven from the Overview.
+    /// The tab is created around a placeholder pane, the pane moves in
+    /// through the cross-tab engine ([`App::move_pane_to_tab_at`], which
+    /// carries the Pty and all per-pane state), and the placeholder closes —
+    /// all before the next frame, so it is never drawn. Returns whether the
+    /// pane moved.
+    pub(super) fn detach_pane_to_new_tab(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        source_window: WindowId,
+        pane: PaneId,
+        new_window: bool,
+    ) -> bool {
+        let Some(group) = self.windows.get(&source_window).map(|state| state.group) else {
+            return false;
+        };
+        let group = if new_window {
+            GroupChoice::Fresh
+        } else {
+            GroupChoice::Existing(group)
+        };
+        let new_tab = match self.spawn_tab_with_initial_pane_in_group(
+            event_loop,
+            group,
+            InitialPane::Placeholder,
+        ) {
+            Ok(window_id) => window_id,
+            Err(err) => {
+                log::warn!("failed to open a tab for the detached pane: {err}");
+                return false;
+            }
+        };
+        let Some(placeholder) = self.windows.get(&new_tab).map(|state| state.focused_pane) else {
+            return false;
+        };
+        let moved = self.move_pane_to_tab_at(
+            event_loop,
+            source_window,
+            pane,
+            new_tab,
+            Some((placeholder, Direction::Right)),
+        );
+        if moved {
+            self.close_pane(event_loop, new_tab, placeholder);
+        } else {
+            self.close_tab(event_loop, new_tab);
+        }
+        moved
     }
 
     pub(super) fn detached_remote_surface(
@@ -1773,8 +1837,13 @@ fn remote_session_card_content(
 }
 
 enum InitialPane {
-    Local { inherited_cwd: Option<String> },
+    Local {
+        inherited_cwd: Option<String>,
+    },
     DetachedRemote(crate::remote_attach::RemotePaneIdentity),
+    /// A process-less stand-in, replaced within the same call by a pane moved
+    /// in from another tab ([`App::detach_pane_to_new_tab`]) — never drawn.
+    Placeholder,
 }
 
 /// The clipboard settings a terminal enforces itself. An OSC 52 read is only

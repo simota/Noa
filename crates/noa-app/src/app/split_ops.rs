@@ -646,7 +646,7 @@ impl App {
         // here with `source` as `dest`). No other path can put a pre-existing
         // cache id back into a window: split creates fresh (never-cached) ids.
         dest_state.renderer.invalidate_pane(render_pane_id(pane));
-        dest_state.focused_pane = pane;
+        let dest_previous_focus = std::mem::replace(&mut dest_state.focused_pane, pane);
         dest_state.last_mouse_pane = None;
         let dest_window_handle = dest_state.window.clone();
 
@@ -735,11 +735,23 @@ impl App {
             // emptied window. The Overview lives in its host window: when the
             // host is the tab closing, it re-opens on the window that takes
             // focus, so a drag from the host's last pane doesn't end it.
-            let overview_was_hosted_here =
-                self.overview_visible && self.overview_host() == Some(source_window);
+            // The query and pointer carry over, so the re-opened Overview
+            // shows the same tiles and takes a click without a move first.
+            let overview_was_hosted_here = self
+                .overview_window
+                .as_ref()
+                .filter(|overview| self.overview_visible && overview.host == source_window)
+                .map(|overview| (overview.search_query.clone(), overview.last_cursor_point));
+            // Release the source window before the close so its native
+            // teardown happens there, not after the Overview moved hosts.
+            drop(source_window_handle);
             self.close_tab(event_loop, source_window);
-            if overview_was_hosted_here {
+            if let Some((search_query, last_cursor_point)) = overview_was_hosted_here {
                 self.show_tab_overview();
+                if let Some(overview) = self.overview_window.as_mut() {
+                    overview.search_query = search_query;
+                    overview.last_cursor_point = last_cursor_point;
+                }
             }
         } else {
             self.relayout_and_resize_window(source_window);
@@ -755,7 +767,30 @@ impl App {
         // its IME candidate window must anchor there, not linger at the
         // source tab's pre-move position.
         self.update_focused_ime_cursor_area(dest_window);
+        // The moved pane now holds `dest_window`'s keyboard focus. If that
+        // window has OS focus, report it: the pane got FocusOut when it left
+        // the source above, and no `Focused(true)` will follow for a window
+        // that already has it. The pane it displaced loses that focus.
+        if self.os_focused == Some(dest_window) {
+            if dest_previous_focus != pane
+                && let Some(previous) = self
+                    .windows
+                    .get(&dest_window)
+                    .and_then(|state| state.surfaces.get(&dest_previous_focus))
+            {
+                let reporting = previous.terminal.lock().modes.focus_reporting();
+                if let Some(bytes) = focus_report_bytes(false, reporting) {
+                    self.write_pane_pty_bytes(dest_window, dest_previous_focus, bytes);
+                }
+            }
+            if let Some(bytes) = focus_report_bytes(true, self.focus_reporting(dest_window)) {
+                self.write_pane_pty_bytes(dest_window, pane, bytes);
+            }
+        }
         dest_window_handle.request_redraw();
+        // A move between window groups takes the card from one group's
+        // sidebar to another's.
+        self.request_sidebar_redraw();
         self.mark_all_overview_tiles_dirty();
         self.request_overview_redraw();
         self.reconcile_session_store();

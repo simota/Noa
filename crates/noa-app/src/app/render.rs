@@ -624,6 +624,12 @@ impl App {
                 };
                 focused_cwd_update = proxy_icon_update(&state.proxy_icon_cwd, cwd);
             }
+            if term.take_scrollback_decompressed() {
+                // History read back in (a scroll or search) stays resident
+                // until the next idle trim; schedule it as output would.
+                self.memory_trim_deadline =
+                    Some(Instant::now() + super::timers::MEMORY_TRIM_QUIESCENCE);
+            }
             if term.viewport_offset() > 0 {
                 scroll_thumbs.push(sidebar::ScrollThumb {
                     rect: render_pane_rect(surface.rect),

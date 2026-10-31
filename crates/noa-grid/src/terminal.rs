@@ -371,6 +371,14 @@ impl Terminal {
         }
     }
 
+    /// Whether scrolling or searching history decompressed a scrollback page
+    /// since the last call. Such pages stay resident until the next
+    /// [`Terminal::trim_memory`], which the caller should then schedule:
+    /// without new output, its idle timer would not be armed.
+    pub fn take_scrollback_decompressed(&self) -> bool {
+        self.primary.take_scrollback_decompressed()
+    }
+
     /// Release any copy-mode viewport locks, including a screen that became
     /// inactive after a primary/alternate-screen switch.
     pub fn unlock_viewport(&mut self) {

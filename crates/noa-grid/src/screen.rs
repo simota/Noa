@@ -544,6 +544,11 @@ impl Screen {
         self.note_scrollback_evictions(evicted);
     }
 
+    /// Whether reading history decompressed a page since the last call.
+    pub fn take_scrollback_decompressed(&self) -> bool {
+        self.scrollback.take_decompressed()
+    }
+
     /// Compress idle scrollback pages in the background
     /// (`scrollback-compression`), sparing the rows the viewport shows.
     pub fn compress_scrollback(&self) {

@@ -314,11 +314,6 @@ impl StyleTable {
         }
     }
 
-    /// Intern `style`, returning its id and whether it was newly added (so the
-    /// caller can bill the extra `size_of::<Style>()`). Split so the
-    /// memo-hit path — taken for nearly every cell of bulk output — inlines
-    /// into the caller's loop; the table paths stay out of line.
-    #[inline]
     /// A table holding exactly `styles` (ids by position), as a compressed
     /// page restores it.
     fn from_styles(styles: Vec<Style>) -> Self {
@@ -334,6 +329,11 @@ impl StyleTable {
         }
     }
 
+    /// Intern `style`, returning its id and whether it was newly added (so the
+    /// caller can bill the extra `size_of::<Style>()`). Split so the
+    /// memo-hit path — taken for nearly every cell of bulk output — inlines
+    /// into the caller's loop; the table paths stay out of line.
+    #[inline]
     fn intern(&mut self, style: Style) -> (StyleId, bool) {
         if self.last.0 == style {
             return (self.last.1, false);
@@ -1057,11 +1057,15 @@ struct PageSlot {
     /// Uncompressed accounting size: compression never changes how much
     /// history `scrollback-limit` keeps.
     bytes: usize,
+    /// The owning scrollback's "a page was decompressed" flag.
+    decompressed: Arc<AtomicBool>,
     body: Mutex<PageBody>,
 }
 
 enum PageBody {
-    Resident(Page),
+    /// Shared so a reader takes it from under the lock and works without
+    /// holding the lock (a search visiting a whole page, a compression pass).
+    Resident(Arc<Page>),
     Compressed(CompressedPage),
 }
 
@@ -1074,12 +1078,13 @@ struct CompressedPage {
 }
 
 impl PageSlot {
-    fn new(page: Page) -> Self {
+    fn new(page: Page, decompressed: Arc<AtomicBool>) -> Self {
         PageSlot {
             cols: page.cols,
             rows: page.rows.len(),
             bytes: page.bytes,
-            body: Mutex::new(PageBody::Resident(page)),
+            decompressed,
+            body: Mutex::new(PageBody::Resident(Arc::new(page))),
         }
     }
 
@@ -1089,20 +1094,24 @@ impl PageSlot {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn make_resident(body: &mut PageBody, cols: u16, bytes: usize) -> &mut Page {
-        if let PageBody::Compressed(compressed) = body {
-            *body = PageBody::Resident(compressed.decode(cols, bytes));
+    /// The resident page, decompressing it first if needed. The lock is held
+    /// only for that, not while the caller reads the page.
+    fn resident(&self) -> Arc<Page> {
+        let mut body = self.lock();
+        if let PageBody::Compressed(compressed) = &*body {
+            *body = PageBody::Resident(Arc::new(compressed.decode(self.cols, self.bytes)));
+            // The page stays resident; the owner re-arms idle compression.
+            self.decompressed.store(true, Ordering::Release);
         }
-        match body {
-            PageBody::Resident(page) => page,
+        match &*body {
+            PageBody::Resident(page) => page.clone(),
             PageBody::Compressed(_) => unreachable!("decompressed above"),
         }
     }
 
     /// Run `f` on the page, decompressing it first if needed.
     fn with_page<R>(&self, f: impl FnOnce(&Page) -> R) -> R {
-        let mut body = self.lock();
-        f(Self::make_resident(&mut body, self.cols, self.bytes))
+        f(&self.resident())
     }
 
     fn has_text(&self) -> bool {
@@ -1116,11 +1125,18 @@ impl PageSlot {
         matches!(*self.lock(), PageBody::Compressed(_))
     }
 
-    /// Compress a resident page in place.
+    /// Compress a resident page. The encoding runs outside the lock, so
+    /// readers never wait on it; it is installed only if the page was not
+    /// replaced meanwhile.
     fn compress(&self) {
+        let page = match &*self.lock() {
+            PageBody::Resident(page) => page.clone(),
+            PageBody::Compressed(_) => return,
+        };
+        let compressed = CompressedPage::encode(&page);
         let mut body = self.lock();
-        if let PageBody::Resident(page) = &*body {
-            *body = PageBody::Compressed(CompressedPage::encode(page));
+        if matches!(&*body, PageBody::Resident(current) if Arc::ptr_eq(current, &page)) {
+            *body = PageBody::Compressed(compressed);
         }
     }
 
@@ -1131,7 +1147,7 @@ impl PageSlot {
             .into_inner()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
         {
-            PageBody::Resident(page) => Some(page),
+            PageBody::Resident(page) => Arc::try_unwrap(page).ok(),
             PageBody::Compressed(_) => None,
         }
     }
@@ -1279,6 +1295,9 @@ pub(crate) struct PagedScrollback {
     open: Option<Arc<Page>>,
     /// An idle compression pass is running (see [`Self::compress_idle`]).
     compressing: Arc<AtomicBool>,
+    /// A read decompressed a page since [`Self::take_decompressed`] last
+    /// looked (set by the pages, from any thread).
+    decompressed: Arc<AtomicBool>,
     /// Retained row count across `pages`, `sealing`, *and* `pending`.
     total_rows: usize,
     total_bytes: usize,
@@ -1347,6 +1366,7 @@ impl PagedScrollback {
             pages: VecDeque::new(),
             open: None,
             compressing: Arc::new(AtomicBool::new(false)),
+            decompressed: Arc::new(AtomicBool::new(false)),
             total_rows: 0,
             total_bytes: 0,
             limit_bytes,
@@ -2065,9 +2085,17 @@ impl PagedScrollback {
     fn push_page(&mut self, page: Page) {
         if let Some(open) = self.open.take() {
             let filled = Arc::try_unwrap(open).unwrap_or_else(|shared| Page::clone(&shared));
-            self.pages.push_back(Arc::new(PageSlot::new(filled)));
+            self.pages
+                .push_back(Arc::new(PageSlot::new(filled, self.decompressed.clone())));
         }
         self.open = Some(Arc::new(page));
+    }
+
+    /// Whether a read decompressed a page since the last call: those pages
+    /// stay resident until the next idle pass, so the app re-arms its idle
+    /// trim (without output, nothing else would).
+    pub(crate) fn take_decompressed(&self) -> bool {
+        self.decompressed.swap(false, Ordering::AcqRel)
     }
 
     fn ensure_page(&mut self, cols: u16) -> &mut Page {
@@ -2580,6 +2608,7 @@ mod tests {
             slot.compress();
         }
         assert!(sb.pages.iter().all(|slot| slot.is_compressed()));
+        assert!(!sb.take_decompressed());
         // Accounting, row lookup and the text check work without a read.
         assert_eq!(sb.bytes(), bytes);
         assert!(sb.has_text());
@@ -2587,6 +2616,11 @@ mod tests {
         let row = sb.row(1).unwrap();
         assert_eq!((row.cells, row.wrapped), before[1]);
         assert!(!sb.pages[0].is_compressed(), "a read decompresses its page");
+        assert!(
+            sb.take_decompressed(),
+            "and flags it for the next idle pass"
+        );
+        assert!(!sb.take_decompressed());
         assert!(sb.pages[1].is_compressed());
         assert_eq!(all_rows(&mut sb), before);
         // Packing continues on the (decompressed) newest page.

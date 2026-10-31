@@ -345,6 +345,30 @@ impl App {
         }
     }
 
+    /// Queue a report the main thread generated from terminal state (DEC
+    /// mode 2033 visibility) through the pane's io thread instead of the
+    /// direct writer fast path: the io thread writes the replies it took
+    /// from the terminal before reading its input channel, so reports reach
+    /// the pty in the order the terminal state changed. Remote replicas
+    /// never generate such reports (the server-side terminal does).
+    pub(in crate::app) fn queue_pane_report(
+        &self,
+        window_id: WindowId,
+        pane_id: PaneId,
+        bytes: &[u8],
+    ) {
+        let Some(surface) = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&pane_id))
+        else {
+            return;
+        };
+        if let SurfaceTransport::Local(local) = &surface.transport {
+            log_pty_input_result(local.pty_input_tx.queue(bytes.into()), bytes.len());
+        }
+    }
+
     pub(in crate::app) fn resolve_pane_command_target(
         &self,
         command: AppCommand,

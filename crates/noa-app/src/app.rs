@@ -1017,7 +1017,7 @@ impl App {
         for (&pane_id, surface) in &state.surfaces {
             let report = surface.terminal.lock().set_visible(visible);
             if let Some(bytes) = report {
-                self.write_pane_pty_bytes(window_id, pane_id, bytes);
+                self.queue_pane_report(window_id, pane_id, bytes);
             }
         }
     }

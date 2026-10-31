@@ -372,7 +372,8 @@ impl Handler for Terminal {
             | (1049, false)
             | (2026, false)
             | (2027, false)
-            | (2004, false) => {
+            | (2004, false)
+            | (5522, false) => {
                 if self.modes.get(request.value, request.ansi) {
                     1
                 } else {
@@ -513,6 +514,9 @@ impl Handler for Terminal {
         self.colors.reset_dynamic_overrides();
         self.pending_clipboard_writes.clear();
         self.pending_clipboard_reads.clear();
+        // Ghostty's RIS forgets the session grants but leaves an open OSC
+        // 5522 write running.
+        self.kitty_clipboard.grants.clear();
         self.pending_notifications.clear();
         self.pending_agent_status = Some(None);
         self.program_status_active = false;
@@ -700,7 +704,7 @@ impl Handler for Terminal {
             .set(self.active_is_alt, flags, SetMode::from_param(mode));
     }
 
-    fn osc_dispatch(&mut self, data: &[u8]) {
+    fn osc_dispatch(&mut self, data: &[u8], terminator: noa_vt::OscTerminator) {
         if data.starts_with(b"777;noa-agent;") {
             if let Some(status) = crate::osc::parse_agent_status_osc(data) {
                 self.pending_agent_status = Some(status);
@@ -725,6 +729,20 @@ impl Handler for Terminal {
             return;
         }
         if handle_color_osc(data, &mut self.colors, &mut self.pending_writes) {
+            return;
+        }
+        if let Some(body) = data.strip_prefix(crate::kitty_clipboard::OSC_NUMBER) {
+            let policy = crate::kitty_clipboard::WritePolicy {
+                deny: !self.osc52_policy.allow_write,
+                max_size: self.kitty_clipboard_write_limit,
+            };
+            self.kitty_clipboard.handle(
+                body,
+                terminator,
+                &policy,
+                &mut self.pending_writes,
+                &mut self.pending_kitty_clipboard,
+            );
             return;
         }
         if handle_clipboard_osc(

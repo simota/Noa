@@ -5,6 +5,7 @@
 mod clipboard_confirm;
 mod copy_mode;
 mod ime;
+mod kitty_clipboard;
 mod layout;
 mod overlays;
 mod pointer;

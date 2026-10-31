@@ -68,6 +68,13 @@ impl App {
         window_id: WindowId,
         pane_id: PaneId,
     ) {
+        if self.send_kitty_paste_event(
+            window_id,
+            pane_id,
+            noa_grid::kitty_clipboard::ClipboardLocation::Primary,
+        ) {
+            return;
+        }
         match self.clipboard.get_primary_text() {
             Ok(text) if !text.is_empty() => self.paste_text_to_pane(window_id, pane_id, text),
             Ok(_) => {}
@@ -79,6 +86,13 @@ impl App {
         let Some((window_id, pane_id)) = self.resolve_pane_command_target(AppCommand::Paste) else {
             return;
         };
+        if self.send_kitty_paste_event(
+            window_id,
+            pane_id,
+            noa_grid::kitty_clipboard::ClipboardLocation::Standard,
+        ) {
+            return;
+        }
         let contents = match self.clipboard.get_paste_contents() {
             Ok(contents) => contents,
             Err(err) => {
@@ -267,31 +281,78 @@ impl App {
         action: ConfirmAction,
         armed_at: Option<Instant>,
     ) {
+        self.open_confirm_dialog_with_hint(
+            window_id,
+            message,
+            "Enter: confirm    Esc: cancel".to_string(),
+            action,
+            armed_at,
+        );
+    }
+
+    pub(in crate::app) fn open_confirm_dialog_with_hint(
+        &mut self,
+        window_id: WindowId,
+        message: String,
+        hint: String,
+        action: ConfirmAction,
+        armed_at: Option<Instant>,
+    ) {
         self.end_copy_mode_for_window(window_id);
+        // A replaced dialog's request still gets its answer.
+        if let Some(replaced) = self.confirm_dialog.take() {
+            self.cancel_confirm_action(replaced.action);
+        }
         self.confirm_dialog = Some(ConfirmDialogSession {
             window_id,
             message,
-            hint: "Enter: confirm    Esc: cancel".to_string(),
+            hint,
             action,
             armed_at,
         });
         self.request_window_redraw(window_id);
     }
 
+    /// Ask before applying an OSC 52 write (`clipboard-write = ask`). Raised
+    /// by terminal output, so like a read it never displaces an open dialog
+    /// (the write is dropped) and ignores keys for a moment.
+    pub(in crate::app) fn prompt_clipboard_write(&mut self, window_id: WindowId, text: String) {
+        if self.confirm_dialog.is_some() {
+            log::info!("dropping OSC 52 clipboard write: another confirmation is open");
+            return;
+        }
+        let mut preview: String = text.chars().take(80).collect();
+        if preview.len() < text.len() {
+            preview.push('…');
+        }
+        self.open_confirm_dialog_armed(
+            window_id,
+            format!("A program in this pane wants to write to the clipboard: {preview:?}. Allow?"),
+            ConfirmAction::ClipboardWrite { text },
+            Some(Instant::now() + CLIPBOARD_READ_ARM_DELAY),
+        );
+    }
+
     /// Keystroke routing for the modal confirmation dialog. Enter (or `y`)
-    /// confirms and runs the deferred action; Escape (or `n`) cancels; every
-    /// other key is swallowed.
+    /// confirms and runs the deferred action; `a` also remembers it when the
+    /// dialog offers that (an OSC 5522 request with a password); Escape (or
+    /// `n`) cancels; every other key is swallowed.
     pub(in crate::app) fn handle_confirm_dialog_key(
         &mut self,
         event_loop: &ActiveEventLoop,
         window_id: WindowId,
         event: &KeyEvent,
     ) {
-        let confirm = match &event.logical_key {
-            Key::Named(NamedKey::Enter) => true,
-            Key::Named(NamedKey::Escape) => false,
-            Key::Character(s) if s.eq_ignore_ascii_case("y") => true,
-            Key::Character(s) if s.eq_ignore_ascii_case("n") => false,
+        let remembers = self
+            .confirm_dialog
+            .as_ref()
+            .is_some_and(|session| confirm_action_can_remember(&session.action));
+        let (confirm, remember) = match &event.logical_key {
+            Key::Named(NamedKey::Enter) => (true, false),
+            Key::Named(NamedKey::Escape) => (false, false),
+            Key::Character(s) if s.eq_ignore_ascii_case("y") => (true, false),
+            Key::Character(s) if s.eq_ignore_ascii_case("n") => (false, false),
+            Key::Character(s) if remembers && s.eq_ignore_ascii_case("a") => (true, true),
             _ => return, // swallow anything else while modal
         };
         if confirm
@@ -303,8 +364,12 @@ impl App {
         let Some(session) = self.confirm_dialog.take() else {
             return;
         };
-        if confirm {
+        if remember {
+            self.confirm_kitty_clipboard(session.action, true);
+        } else if confirm {
             self.run_confirm_action(event_loop, session.action);
+        } else {
+            self.cancel_confirm_action(session.action);
         }
         self.request_window_redraw(window_id);
     }
@@ -335,6 +400,11 @@ impl App {
                 pane_id,
                 target,
             } => self.fulfill_clipboard_read(window_id, pane_id, &target),
+            action @ (ConfirmAction::KittyClipboardRead { .. }
+            | ConfirmAction::KittyClipboardWrite { .. }) => {
+                self.confirm_kitty_clipboard(action, false)
+            }
+            ConfirmAction::ClipboardWrite { text } => self.write_text_to_clipboard(&text),
             ConfirmAction::ClosePane { window_id, pane_id } => {
                 self.close_pane(event_loop, window_id, pane_id)
             }
@@ -342,6 +412,16 @@ impl App {
             ConfirmAction::CloseWindow { group } => self.close_group(event_loop, group),
             ConfirmAction::Quit => event_loop.exit(),
         }
+    }
+}
+
+/// Whether the dialog offers "allow and remember": an OSC 5522 request that
+/// carried a password.
+fn confirm_action_can_remember(action: &ConfirmAction) -> bool {
+    match action {
+        ConfirmAction::KittyClipboardRead { read, .. } => !read.pw.is_empty(),
+        ConfirmAction::KittyClipboardWrite { write, .. } => !write.pw.is_empty(),
+        _ => false,
     }
 }
 
@@ -375,7 +455,7 @@ fn application_copy_bytes(terminal: &noa_grid::Terminal) -> Option<Vec<u8>> {
 }
 
 /// How long an output-raised clipboard-read prompt ignores confirm keys.
-const CLIPBOARD_READ_ARM_DELAY: Duration = Duration::from_millis(600);
+pub(super) const CLIPBOARD_READ_ARM_DELAY: Duration = Duration::from_millis(600);
 
 /// Whether a confirm key may answer a dialog armed at `armed_at`. Cancel keys
 /// are always honoured; only confirmation waits for the dialog to arm.

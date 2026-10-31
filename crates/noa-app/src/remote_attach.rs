@@ -1872,6 +1872,7 @@ fn feed_remote_seed<N: ConnectionNotifier>(
     let _ = terminal.take_pending_writes();
     let _ = terminal.take_pending_clipboard_reads();
     let _ = terminal.take_pending_clipboard_writes();
+    let _ = terminal.take_pending_kitty_clipboard();
     let progress = terminal.take_pending_progress_update();
     let _ = terminal.take_pending_progress_cue();
     let mouse_shape_changed = terminal.take_mouse_shape_changed();
@@ -1917,6 +1918,7 @@ fn feed_remote_bytes<N: ConnectionNotifier>(
     let _ = terminal.take_pending_writes();
     let _ = terminal.take_pending_clipboard_reads();
     let _ = terminal.take_pending_clipboard_writes();
+    let _ = terminal.take_pending_kitty_clipboard();
     notifier.publish_overview(&terminal);
     drop(terminal);
     if bell {

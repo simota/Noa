@@ -480,7 +480,7 @@ fn dispatch<H: Handler>(action: Action, h: &mut H, sgr_attrs: &mut Vec<SgrAttr>)
         Action::Execute(b) => h.execute_c0(b),
         Action::CsiDispatch(csi) => dispatch_csi(&csi, h, sgr_attrs),
         Action::EscDispatch(esc) => dispatch_esc(&esc, h),
-        Action::OscDispatch(data) => h.osc_dispatch(&data),
+        Action::OscDispatch(data, terminator) => h.osc_dispatch(&data, terminator),
         Action::DcsDispatch(payload) => {
             if let Some(cmd) = crate::sixel::parse(&payload.data) {
                 h.sixel_graphics(cmd);

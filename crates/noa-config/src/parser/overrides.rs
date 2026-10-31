@@ -26,6 +26,8 @@ pub(crate) fn build_overrides(
     let mut font = FontConfig::default();
     let mut palette = Vec::new();
     let mut clipboard_read = None;
+    let mut clipboard_write = None;
+    let mut clipboard_write_limit_bytes = None;
     let mut clipboard_paste_protection = None;
     let mut mouse_shift_capture = None;
     let mut copy_on_select = None;
@@ -173,7 +175,13 @@ pub(crate) fn build_overrides(
                     parse_font_thicken_strength(path, directive, &mut diagnostics);
             }
             "clipboard-read" => {
-                clipboard_read = parse_clipboard_read(path, directive, &mut diagnostics);
+                clipboard_read = parse_clipboard_access(path, directive, &mut diagnostics);
+            }
+            "clipboard-write" => {
+                clipboard_write = parse_clipboard_access(path, directive, &mut diagnostics);
+            }
+            "clipboard-write-limit-bytes" => {
+                clipboard_write_limit_bytes = parse_byte_limit(path, directive, &mut diagnostics);
             }
             "copy-on-select" => {
                 use crate::CopyOnSelect;
@@ -484,6 +492,8 @@ pub(crate) fn build_overrides(
             font,
             palette,
             clipboard_read,
+            clipboard_write,
+            clipboard_write_limit_bytes,
             clipboard_paste_protection,
             mouse_shift_capture,
             copy_on_select,
@@ -601,6 +611,8 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "font-size"
             | "theme"
             | "clipboard-read"
+            | "clipboard-write"
+            | "clipboard-write-limit-bytes"
             | "clipboard-paste-protection"
             | "copy-on-select"
             | "file-link-editor"

@@ -877,11 +877,7 @@ impl App {
             worker.register_process_probe(Self::session_card_id(window_id, pane_id), probe);
         }
         let mut terminal = self.new_terminal(grid_size);
-        // A read (query) request is only queued when reads aren't fully
-        // denied; the finer allow-vs-ask decision is made by the app layer
-        // when a request arrives.
-        terminal.osc52_policy.allow_read =
-            self.config.clipboard_read != noa_config::ClipboardAccess::Deny;
+        apply_clipboard_policy(&mut terminal, &self.config);
         let kitty_animation_flag = terminal.kitty_animation_flag();
         let terminal = Arc::new(Mutex::new(terminal));
         let (resize_tx, resize_rx) = crossbeam_channel::unbounded();
@@ -1355,8 +1351,9 @@ impl App {
             .confirm_dialog
             .as_ref()
             .is_some_and(|session| session.window_id == window_id)
+            && let Some(session) = self.confirm_dialog.take()
         {
-            self.confirm_dialog = None;
+            self.cancel_confirm_action(session.action);
         }
         if self
             .modal_preedit
@@ -1777,6 +1774,16 @@ fn remote_session_card_content(
 enum InitialPane {
     Local { inherited_cwd: Option<String> },
     DetachedRemote(crate::remote_attach::RemotePaneIdentity),
+}
+
+/// The clipboard settings a terminal enforces itself. An OSC 52 read is only
+/// queued when reads aren't fully denied, and a denied write is dropped
+/// (OSC 52) or answered `EPERM` (OSC 5522); the finer allow-vs-ask decision
+/// is made by the app layer when a request arrives.
+pub(super) fn apply_clipboard_policy(terminal: &mut noa_grid::Terminal, config: &AppConfig) {
+    terminal.osc52_policy.allow_read = config.clipboard_read != noa_config::ClipboardAccess::Deny;
+    terminal.osc52_policy.allow_write = config.clipboard_write != noa_config::ClipboardAccess::Deny;
+    terminal.kitty_clipboard_write_limit = config.clipboard_write_limit_bytes;
 }
 
 #[cfg(test)]

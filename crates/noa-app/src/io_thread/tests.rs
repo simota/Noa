@@ -290,6 +290,25 @@ fn raw_attach_forwards_only_pty_bytes_not_terminal_generated_side_effects() {
     assert_eq!(terminal_output.pending_clipboard_reads, vec!["c"]);
 }
 
+#[test]
+fn kitty_clipboard_requests_reach_the_terminal_output() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(8, 2))));
+    let raw_attach = RawAttachTap::default();
+    // `type=read` asking for text/plain (base64 dGV4dC9wbGFpbg==).
+    let terminal_output = feed_terminal_raw(
+        &terminal,
+        &mut noa_vt::Stream::new(),
+        b"\x1b]5522;type=read;dGV4dC9wbGFpbg==\x1b\\",
+        &raw_attach,
+    );
+    match terminal_output.pending_kitty_clipboard.as_slice() {
+        [noa_grid::kitty_clipboard::KittyClipboardRequest::Read(read)] => {
+            assert_eq!(read.mimes, ["text/plain"]);
+        }
+        other => panic!("expected one read, got {other:?}"),
+    }
+}
+
 /// A batch of pure report queries (a DSR probe / TUI capability poll) must
 /// come back `display_dirty: false` — the spawn loop skips its redraw poke,
 /// so a query round-trip burst never wakes the main thread to snapshot an

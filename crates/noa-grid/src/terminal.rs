@@ -120,6 +120,14 @@ pub struct Terminal {
     /// The grid can't read the system clipboard, so the app layer fulfills
     /// these and writes the base64 reply back to the pty.
     pub pending_clipboard_reads: Vec<String>,
+    /// OSC 5522 reads and committed writes for the app to complete; see
+    /// [`Terminal::take_pending_kitty_clipboard`].
+    pending_kitty_clipboard: Vec<crate::kitty_clipboard::KittyClipboardRequest>,
+    /// OSC 5522 grants and the open write transaction.
+    kitty_clipboard: crate::kitty_clipboard::KittyClipboardState,
+    /// `clipboard-write-limit-bytes` for OSC 5522 writes (`None`: unlimited).
+    /// A write takes the value in effect when it begins.
+    pub kitty_clipboard_write_limit: Option<usize>,
     /// Desktop notifications requested via OSC 9 / OSC 777, awaiting drain by
     /// [`Terminal::take_pending_notifications`]. Bounded at
     /// [`NOTIFICATION_QUEUE_CAP`]; the oldest is evicted on overflow.
@@ -217,6 +225,9 @@ impl Terminal {
             reply_writes_enabled: true,
             pending_clipboard_writes: Vec::new(),
             pending_clipboard_reads: Vec::new(),
+            pending_kitty_clipboard: Vec::new(),
+            kitty_clipboard: Default::default(),
+            kitty_clipboard_write_limit: Some(64 * 1024 * 1024),
             pending_notifications: VecDeque::new(),
             pending_agent_status: None,
             program_status_active: false,
@@ -827,6 +838,20 @@ impl Terminal {
     /// selection target string to echo in the base64 reply.
     pub fn take_pending_clipboard_reads(&mut self) -> Vec<String> {
         std::mem::take(&mut self.pending_clipboard_reads)
+    }
+
+    /// Drain OSC 5522 clipboard requests for the app to complete, oldest
+    /// first. Each carries the reply encoders its outcome needs.
+    pub fn take_pending_kitty_clipboard(
+        &mut self,
+    ) -> Vec<crate::kitty_clipboard::KittyClipboardRequest> {
+        std::mem::take(&mut self.pending_kitty_clipboard)
+    }
+
+    /// Grant OSC 5522 password `pw` reads and/or writes for this session
+    /// (a prompt's "remember", or a paste event's one-time password).
+    pub fn grant_kitty_clipboard(&mut self, pw: &str, read: bool, write: bool, one_time: bool) {
+        self.kitty_clipboard.grants.grant(pw, read, write, one_time);
     }
 
     /// Drain queued desktop notifications (OSC 9 / OSC 777) for the app layer,

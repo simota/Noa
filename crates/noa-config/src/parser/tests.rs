@@ -436,6 +436,39 @@ fn clipboard_read_invalid_value_warns() {
 }
 
 #[test]
+fn clipboard_write_parses_each_mode_and_defaults_to_allow() {
+    assert_eq!(
+        crate::StartupConfig::default().clipboard_write,
+        ClipboardAccess::Allow
+    );
+    for (value, expected) in [
+        ("deny", ClipboardAccess::Deny),
+        ("ask", ClipboardAccess::Ask),
+        ("allow", ClipboardAccess::Allow),
+    ] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("clipboard-write = {value}"));
+        assert_eq!(overrides.clipboard_write, Some(expected), "{value:?}");
+        assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+    }
+}
+
+#[test]
+fn clipboard_write_limit_bytes_takes_a_count_or_unlimited() {
+    assert_eq!(
+        crate::StartupConfig::default().clipboard_write_limit_bytes,
+        Some(64 * 1024 * 1024)
+    );
+    let (overrides, _) = parse_overrides(path(), "clipboard-write-limit-bytes = 0");
+    assert_eq!(overrides.clipboard_write_limit_bytes, Some(Some(0)));
+    let (overrides, _) = parse_overrides(path(), "clipboard-write-limit-bytes = unlimited");
+    assert_eq!(overrides.clipboard_write_limit_bytes, Some(None));
+    let (overrides, diagnostics) = parse_overrides(path(), "clipboard-write-limit-bytes = lots");
+    assert_eq!(overrides.clipboard_write_limit_bytes, None);
+    assert_eq!(diagnostics.len(), 1);
+}
+
+#[test]
 fn copy_on_select_parses_ghostty_values() {
     for (value, expected) in [
         ("true", crate::CopyOnSelect::True),

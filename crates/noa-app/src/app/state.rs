@@ -1013,8 +1013,8 @@ pub(super) struct ModalPreedit {
     pub(super) text: String,
 }
 
-/// An open confirmation dialog (paste protection or OSC 52 clipboard-read),
-/// bound to the window it was raised from.
+/// An open confirmation dialog (paste protection, or a program reading or
+/// writing the clipboard), bound to the window it was raised from.
 pub(super) struct ConfirmDialogSession {
     pub(super) window_id: WindowId,
     pub(super) message: String,
@@ -1024,6 +1024,16 @@ pub(super) struct ConfirmDialogSession {
     /// terminal output can raise (OSC 52 reads), so an Enter the user was
     /// already typing for the shell cannot answer a prompt they never saw.
     pub(super) armed_at: Option<Instant>,
+}
+
+/// OSC 5522 reply packets a helper thread is feeding to one pane's pty.
+#[derive(Default)]
+pub(super) struct KittyReplyQueue {
+    pub(super) packets: std::collections::VecDeque<Vec<u8>>,
+    /// Total length of `packets`.
+    pub(super) queued_bytes: usize,
+    /// A helper thread is draining `packets`; new replies queue behind it.
+    pub(super) draining: bool,
 }
 
 /// The deferred side effect a [`ConfirmDialogSession`] runs on confirmation.
@@ -1063,6 +1073,22 @@ pub(super) enum ConfirmAction {
         pane_id: PaneId,
         target: String,
     },
+    /// Answer an OSC 5522 read with the data already read for the prompt.
+    KittyClipboardRead {
+        window_id: WindowId,
+        pane_id: PaneId,
+        read: noa_grid::kitty_clipboard::KittyClipboardRead,
+        listing: Vec<String>,
+        data: Vec<Option<Vec<u8>>>,
+    },
+    /// Apply a committed OSC 5522 write.
+    KittyClipboardWrite {
+        window_id: WindowId,
+        pane_id: PaneId,
+        write: noa_grid::kitty_clipboard::KittyClipboardWrite,
+    },
+    /// Apply an OSC 52 write under `clipboard-write = ask`.
+    ClipboardWrite { text: String },
     /// Close one split pane, discarding its PTY.
     ClosePane {
         window_id: WindowId,

@@ -763,6 +763,7 @@ impl App {
             source_window_handle.request_redraw();
         }
         self.relayout_and_resize_window(dest_window);
+        self.sync_pane_visibility(dest_window);
         // P2-2: the moved pane now lives (and is focused) in `dest_window` —
         // its IME candidate window must anchor there, not linger at the
         // source tab's pre-move position.

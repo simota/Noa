@@ -109,6 +109,9 @@ pub struct Terminal {
     /// XTMODKEYS modifyOtherKeys is at level 2 (`CSI > 4 ; 2 m`), matching
     /// Ghostty's `modify_other_keys_2` flag. Levels 0/1 clear it.
     pub modify_other_keys_2: bool,
+    /// Whether the host window may be visible (Ghostty's `flags.visible`).
+    /// Unknown visibility counts as visible; see [`Terminal::set_visible`].
+    visible: bool,
     pub size: GridSize,
     /// Bytes the terminal must write back to the pty (query replies).
     pub pending_writes: Vec<u8>,
@@ -224,6 +227,7 @@ impl Terminal {
             title_report: false,
             scrollback_compression: true,
             modify_other_keys_2: false,
+            visible: true,
             size,
             pending_writes: Vec::new(),
             reply_writes_enabled: true,
@@ -838,6 +842,19 @@ impl Terminal {
 
     /// Take the queued report-reply bytes (for the io thread → pty writer).
     /// The queue is always drained, but suppressed terminals return no bytes.
+    /// Record whether the host window may be visible. Returns the DEC mode
+    /// 2033 report to send when visibility changed while the program has
+    /// visibility reports enabled.
+    pub fn set_visible(&mut self, visible: bool) -> Option<&'static [u8]> {
+        if self.visible == visible {
+            return None;
+        }
+        self.visible = visible;
+        self.modes
+            .report_visibility()
+            .then(|| visibility_report(visible))
+    }
+
     pub fn take_pending_writes(&mut self) -> Vec<u8> {
         let pending = std::mem::take(&mut self.pending_writes);
         if self.reply_writes_enabled {
@@ -1160,5 +1177,14 @@ impl Terminal {
                 alt.clear_search();
             }
         }
+    }
+}
+
+/// `CSI ? 999 ; Ps n`: 1 = potentially visible, 2 = not visible.
+pub(crate) fn visibility_report(visible: bool) -> &'static [u8] {
+    if visible {
+        b"\x1b[?999;1n"
+    } else {
+        b"\x1b[?999;2n"
     }
 }

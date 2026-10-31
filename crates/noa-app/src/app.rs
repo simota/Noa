@@ -998,6 +998,22 @@ impl App {
             self.write_pty_bytes(window_id, bytes);
         }
     }
+
+    /// Propagate the window's occlusion to each of its panes' terminals,
+    /// sending DEC mode 2033 visibility reports where enabled — Ghostty's
+    /// `Surface.occlusionCallback`.
+    fn sync_pane_visibility(&self, window_id: WindowId) {
+        let Some(state) = self.windows.get(&window_id) else {
+            return;
+        };
+        let visible = !state.occluded;
+        for (&pane_id, surface) in &state.surfaces {
+            let report = surface.terminal.lock().set_visible(visible);
+            if let Some(bytes) = report {
+                self.write_pane_pty_bytes(window_id, pane_id, bytes);
+            }
+        }
+    }
 }
 
 impl Drop for App {

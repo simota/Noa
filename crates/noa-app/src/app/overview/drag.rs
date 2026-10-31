@@ -6,8 +6,8 @@
 //! a press resolves to a specific pane inside the tab, and a release resolves
 //! against the pane under the pointer and its 60/40 zone. The whole drop
 //! decision — in-tab center=swap / edge=split (U2), cross-tab center=insert
-//! right / edge=directional insert (U3), and the self/foreign-group/no-pane
-//! cancels (U4) — is the pure, unit-tested
+//! right / edge=directional insert (U3), empty space = detach to a new tab
+//! (Option: a new window), and the self/no-op/no-target cancels (U4) — is the pure, unit-tested
 //! [`session_overview::resolve_overview_drop`]; this module only maps the
 //! cursor to `(tab, pane, zone)`, feeds that seam, and dispatches the returned
 //! [`session_overview::OverviewDrop`] onto the existing commit primitives
@@ -15,7 +15,7 @@
 
 use super::super::*;
 use crate::app::pane_drag::pane_drag_moved_past_threshold;
-use crate::session_overview::{OverviewDrop, resolve_overview_drop};
+use crate::session_overview::{DropOver, DropSource, OverviewDrop, resolve_overview_drop};
 
 /// 5px, matching the main-view pane drag and `SIDEBAR_DRAG_THRESHOLD`
 /// (spec FR-1). Kept as its own constant — the three drags are conceptually
@@ -40,22 +40,33 @@ impl App {
         Some(OverviewTileId::new(tab, pane))
     }
 
-    /// The `(tab, pane, zone)` under the last cursor point (Overview U2/U3), or
-    /// `None` when the pointer is over no pane at all (a divider gap between
-    /// panes, the chrome bands, or outside the grid — a `Cancel` release).
-    /// Resolves the tab tile, then the exact pane sub-rect the pointer sits in
-    /// (no focused-pane fallback here — a divider gap is a real "no target"),
-    /// and classifies the 60/40 zone within that pane's scaled rect via the
-    /// shared [`classify_pane_zone`].
-    pub(in crate::app) fn overview_drop_target_at_last_cursor(
-        &self,
-    ) -> Option<(WindowId, PaneId, PaneZone)> {
+    /// What a release at the last cursor point lands on (Overview U2/U3): the
+    /// `(tab, pane, zone)` under it, classified with the shared
+    /// [`classify_pane_zone`]; [`DropOver::Empty`] for grid space outside every
+    /// tile (a detach); or [`DropOver::Nothing`] for a divider gap inside a
+    /// tile (no focused-pane fallback here — a gap is a real "no target"), the
+    /// chrome bands, or outside the grid.
+    pub(in crate::app) fn overview_drop_target_at_last_cursor(&self) -> DropOver<WindowId, PaneId> {
+        self.overview_drop_target().unwrap_or(DropOver::Nothing)
+    }
+
+    fn overview_drop_target(&self) -> Option<DropOver<WindowId, PaneId>> {
         let overview = self.overview_window.as_ref()?;
         let point = overview.last_cursor_point?;
         let metrics = self.overview_metrics()?;
         let page_view = self.overview_page_view();
         let layout = self.overview_layout(&page_view.slice)?;
-        let tab = overview_tile_target_at_point(&page_view.slice, &layout.tiles, point)?;
+        let Some(tab) = overview_tile_target_at_point(&page_view.slice, &layout.tiles, point)
+        else {
+            let in_grid = self
+                .overview_chrome()
+                .is_some_and(|chrome| chrome.grid_bounds.contains(point));
+            return Some(if in_grid {
+                DropOver::Empty
+            } else {
+                DropOver::Nothing
+            });
+        };
         let index = page_view.slice.iter().position(|id| *id == tab)?;
         let tile = *layout.tiles.get(index)?;
         let state = self.windows.get(&tab)?;
@@ -65,7 +76,24 @@ impl App {
             .iter()
             .find(|(_, rect)| rect.contains(point))
             .copied()?;
-        Some((tab, pane, classify_pane_zone(rect, point)))
+        Some(DropOver::Pane(tab, pane, classify_pane_zone(rect, point)))
+    }
+
+    /// The source side of an Overview drop: its tab's pane count, its group's
+    /// tab count, and whether Option is held (an empty-space drop then makes a
+    /// new window rather than a new tab).
+    pub(in crate::app) fn overview_drop_source(&self, source_window: WindowId) -> DropSource {
+        let source = self.windows.get(&source_window);
+        let group = source.map(|state| state.group);
+        DropSource {
+            tab_panes: source.map_or(0, |state| state.pane_count()),
+            group_tabs: self
+                .windows
+                .values()
+                .filter(|state| Some(state.group) == group)
+                .count(),
+            new_window: self.modifiers.alt_key(),
+        }
     }
 
     /// Arm a pending overview pane drag from the tile under the press point
@@ -131,8 +159,9 @@ impl App {
     /// the result: an in-tab center-drop swaps (`commit_pane_swap`, U2), an
     /// in-tab edge-drop splits (`commit_pane_move`, U2), a cross-tab drop moves
     /// the pane into the target tab at the target pane's edge
-    /// ([`App::move_pane_to_tab_at`], U3), and a self / foreign-group / no-pane
-    /// release cancels (U4). A no-op when no drag was armed.
+    /// ([`App::move_pane_to_tab_at`], U3), an empty-space drop detaches it into
+    /// a new tab or window ([`App::detach_pane_to_new_tab`]), and a self /
+    /// no-op / no-target release cancels (U4). A no-op when no drag was armed.
     pub(in crate::app) fn finish_overview_pane_drag(&mut self, event_loop: &ActiveEventLoop) {
         let Some(drag) = self
             .overview_window
@@ -145,22 +174,9 @@ impl App {
             PaneDragPhase::Pending => self.focus_overview_tile_at_last_cursor(),
             PaneDragPhase::Active => {
                 let over = self.overview_drop_target_at_last_cursor();
-                // The cross-group filter (AC-29) the engine enforces, resolved
-                // up front so the pure decision stays window-state-free.
-                let same_group = over.is_some_and(|(dest_tab, _, _)| {
-                    let source_group = self
-                        .windows
-                        .get(&drag.source.window_id)
-                        .map(|state| state.group);
-                    let dest_group = self.windows.get(&dest_tab).map(|state| state.group);
-                    source_group.is_some() && source_group == dest_group
-                });
-                match resolve_overview_drop(
-                    drag.source.window_id,
-                    drag.source.pane_id,
-                    over,
-                    same_group,
-                ) {
+                let from = self.overview_drop_source(drag.source.window_id);
+                match resolve_overview_drop(drag.source.window_id, drag.source.pane_id, over, from)
+                {
                     OverviewDrop::Swap {
                         window,
                         source,
@@ -192,8 +208,15 @@ impl App {
                             source_window,
                             source,
                             dest_window,
-                            Some((target, direction)),
+                            DestPlacement::Insert(target, direction),
                         );
+                    }
+                    OverviewDrop::Detach {
+                        source_window,
+                        source,
+                        new_window,
+                    } => {
+                        self.detach_pane_to_new_tab(event_loop, source_window, source, new_window);
                     }
                     OverviewDrop::Cancel => {}
                 }
@@ -224,7 +247,7 @@ impl App {
 }
 
 // The drop-resolution decision (in-tab center/edge, cross-tab center/edge,
-// self-drop, foreign-group, no-pane) is the pure, unit-tested
+// empty-space detach, self-drop, no-op detach, no target) is the pure, unit-tested
 // `session_overview::resolve_overview_drop` — see its tests in
 // `session_overview::tab_tiles`. This module only maps the cursor to
 // `(tab, pane, zone)` (`overview_drop_target_at_last_cursor`) and dispatches

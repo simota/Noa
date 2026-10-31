@@ -55,18 +55,24 @@
   `move_pane_to_tab_at(source_window, pane, dest_window, Some((target, dir)))`
   — edge zones = insert at the target pane's edge in that direction, center =
   insert to the **right** of the target pane. Cross-tab swap does not exist
-  (the engine is one-way).
+  (the engine is one-way). The target tab may be in any window group (Ghostty
+  1.4.0 moves splits between windows).
+- **Detach** (drop on grid space outside every tile): the pane moves into a
+  new tab of its own window group; with **Option** held, into a new window
+  (`App::detach_pane_to_new_tab`). A detach that would only reorder — a tab's
+  only pane to a new tab, or a lone tab's only pane to a new window —
+  cancels. There is no zone ring for a detach. The new tab takes focus, so
+  the Overview closes.
 - **Zone feedback**: a ring around the resolved zone rect — center = inner-box
   outline, edge = edge band; the shape difference (not color alone)
   distinguishes swap vs insert. Only resolutions that would actually commit
-  light up: valid targets are same-window-group only, and the source pane's
-  own zones never highlight.
+  light up: the source pane's own zones never highlight.
 - **Floating chip**: the dragged pane's sub-rect sampled from the tile texture
   (`src_uv`), roughly half size at 70% opacity, cursor-following. All drag
   visuals are cached; no per-frame allocation.
 - **Cancel** (restores prior state, no tree change): release on the source
-  pane / a same-window sibling zone that resolves to no-op / no tile /
-  out-of-bounds; page or search change mid-drag; Overview close; host window
+  pane / a same-window sibling zone that resolves to no-op / a divider gap /
+  the chrome bands / a no-op detach; page or search change mid-drag; Overview close; host window
   focus loss; tab or pane close mid-drag. One shared teardown covers all
   paths. The Overview mouse path never forwards to a PTY.
 - No page auto-flip during a drag: drop targets are the current page's tiles.
@@ -90,7 +96,7 @@
   restore does not persist numeric PaneIds (fresh allocation on restore).
 
 ### Cross-tab move (`app/split_ops.rs::move_pane_to_tab_at`)
-On a validated move (destination in the same window group; both caps checked
+On a validated move (both caps checked
 against real destination geometry; named target must exist):
 1. Pre-detach teardown for the moved pane: copy mode, search prompt, confirm
    dialog / inline rename / send-selection picker / remote-ui Retry referencing
@@ -111,9 +117,19 @@ against real destination geometry; named target must exist):
 5. Focus: the moved pane becomes the destination's focused pane; the source
    keeps its focus unless the moved pane held it (successor then chosen).
    The destination renderer invalidates its cache for the moved PaneId.
-6. An emptied source tab closes through the normal close path. (A same-group
-   destination always exists at commit time, so the close can never cascade to
-   app exit.)
+6. An emptied source tab closes through the normal close path — even its
+   group's last tab, when the destination is another group. (The destination
+   always exists at commit time, so the close can never cascade to app exit.)
+   When that tab hosts the Overview, the Overview re-opens on the window that
+   takes focus.
+
+### Detach (`app/lifecycle.rs::detach_pane_to_new_tab`)
+The Overview closes, and the new tab (same group, or a fresh group for a new
+window) is spawned around a process-less placeholder pane; the pane then takes
+the placeholder's place through `move_pane_to_tab_at`
+(`DestPlacement::Replace` — all of the above applies), so it is laid out once
+at the new tab's full size and the placeholder is never drawn. A rejected move
+closes the new tab again.
 
 ### Event delivery
 Pane-scoped `UserEvent`s — including AppleScript WriteText / RaiseWindow /
@@ -129,7 +145,8 @@ deltas for panes that no longer resolve anywhere are dropped
 | FR-1 | Overview tiles are per-tab and reproduce the tab's internal split layout at scaled sub-rects. |
 | FR-2 | Click (< 5px) selects the tab and focuses the clicked pane; ≥ 5px starts a pane drag; no modifier key. |
 | FR-3 | In-tab drop: center 60% = swap, outer 40% = directional split insert, with force-unzoom on success and both caps enforced. |
-| FR-4 | Cross-tab drop: position-targeted insert via `move_pane_to_tab_at` (center = right of target), Pty carried alive, same-window-group only. |
+| FR-4 | Cross-tab drop: position-targeted insert via `move_pane_to_tab_at` (center = right of target), Pty carried alive, any window group. |
+| FR-4a | Empty-space drop detaches the pane into a new tab of its group (Option: a new window); a no-op detach cancels. |
 | FR-5 | All cancel paths (source/self, no tile, page/search change, overview close, focus loss, tab/pane close) restore the prior state via one shared teardown. |
 | FR-6 | All per-pane state follows a cross-tab move: session card, attention onset, auto-approve flash+flag, process probe, IPC registrations, redraw floor, io-thread event targets. |
 | FR-7 | Zone feedback is shape-distinguished (not color-only); invalid targets never highlight. |
@@ -141,8 +158,8 @@ deltas for panes that no longer resolve anywhere are dropped
 - Tree primitives, caps, zoom, PaneId uniqueness, and the operation-sequence
   invariant (`surfaces` keys == live leaf ids, no panics) are unit-tested in
   `split_tree/tree/tests.rs`.
-- Drop resolution (in-tab center/edge, cross-tab center/edge, self-drop,
-  foreign-group, no-tile) is unit-tested via
+- Drop resolution (in-tab center/edge, cross-tab center/edge, empty-space
+  detach, self-drop, no-op detach, no target) is unit-tested via
   `session_overview::resolve_overview_drop`; tile pane hit-testing via
   `tab_tile_pane_at_point`.
 - Cross-tab engine behavior (named-target insert, cap rejections, Surface
@@ -157,8 +174,10 @@ deltas for panes that no longer resolve anywhere are dropped
 ## Out of Scope
 - Pane movement in the main terminal view (drag gestures, keyboard commands,
   or menu items) — the Overview is the sole movement surface.
-- Cross-window-group moves, moving to a new window (detach), and D&D on the
-  macOS native tab bar.
+- Dragging a pane out of the Overview window itself, and D&D on the macOS
+  native tab bar.
+- Ghostty's per-split drag handle in the terminal view and its `drag-handle`
+  setting (the Overview remains the sole movement surface).
 - Cross-tab swap (the engine is one-way move).
 - Page auto-flip while dragging.
 

@@ -208,7 +208,7 @@ impl App {
                             source_window,
                             source,
                             dest_window,
-                            Some((target, direction)),
+                            DestPlacement::Insert(target, direction),
                         );
                     }
                     OverviewDrop::Detach {

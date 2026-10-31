@@ -97,6 +97,7 @@ mod scrollback_record;
 mod session_restore;
 mod sidebar;
 mod split_ops;
+use split_ops::DestPlacement;
 mod state;
 mod timers;
 

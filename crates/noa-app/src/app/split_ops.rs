@@ -71,6 +71,16 @@ struct CrossTabMove {
     remove_outcome: split_tree::RemoveOutcome,
 }
 
+/// Where a cross-tab move lands in the destination tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DestPlacement {
+    /// Split-insert at the target pane's `direction` edge (an Overview drop).
+    Insert(PaneId, Direction),
+    /// Take the place of a freshly spawned tab's only (placeholder) pane,
+    /// which shuts down ([`App::detach_pane_to_new_tab`]).
+    Replace(PaneId),
+}
+
 /// Pure cross-tree half of a cross-tab pane move (pane-dnd FR-8, L2(e)): the
 /// single-tree [`move_pane`] (`reposition.rs`) can't do this directly since
 /// `moved` and `target` live in two different `SplitTree`s here, so this
@@ -233,21 +243,20 @@ impl App {
         self.focus_pane(window_id, next);
     }
 
-    /// Cross-tab pane move with an explicit destination insertion target
-    /// (Overview U3). `dest_target` names *where* in `dest_window` the pane
-    /// lands: `None` keeps the sidebar-drop behavior (to the right of
-    /// `dest_window`'s currently-focused pane), while `Some((target_pane,
-    /// direction))` split-inserts the pane at `target_pane`'s `direction`-side
-    /// edge — an Overview edge-zone drop passes the zone's direction, a
-    /// center-zone drop passes `Direction::Right` (insert to the target's
-    /// right; cross-tab swap is out, the engine is one-way).
+    /// Cross-tab pane move (Overview U3 and detach). `placement` names
+    /// *where* in `dest_window` the pane lands: [`DestPlacement::Insert`]
+    /// split-inserts it at the target pane's `direction`-side edge — an
+    /// Overview edge-zone drop passes the zone's direction, a center-zone drop
+    /// passes `Direction::Right` (cross-tab swap is out, the engine is
+    /// one-way); [`DestPlacement::Replace`] puts it in place of a freshly
+    /// spawned tab's placeholder pane.
     ///
     /// Returns `false` (no-op, both trees/surface maps/the session store left
     /// byte-for-byte unchanged) when: `source_window == dest_window`; `pane`
     /// isn't live in `source_window`; `dest_window` doesn't exist; the named
-    /// `dest_target` pane isn't
-    /// live in `dest_window`; or either pane-count cap would be exceeded
-    /// (AC-28, via [`cross_tab_move`]).
+    /// target isn't live in `dest_window` (or, for `Replace`, isn't its only
+    /// pane); or either pane-count cap would be exceeded (AC-28, via
+    /// [`cross_tab_move`]).
     ///
     /// `PaneId` is a process-global, never-reused id ([`PaneId::alloc`],
     /// `split_tree/tree/types.rs`) — every tab's first pane used to be
@@ -263,7 +272,7 @@ impl App {
         source_window: WindowId,
         pane: PaneId,
         dest_window: WindowId,
-        dest_target: Option<(PaneId, Direction)>,
+        placement: DestPlacement,
     ) -> bool {
         if source_window == dest_window {
             return false;
@@ -285,27 +294,6 @@ impl App {
             !dest_state.contains_pane(pane),
             "PaneId is process-global; dest must never already contain the moved pane's id"
         );
-        // Resolve the insertion target: an explicit Overview target (U3), or
-        // the sidebar-drop default of "right of the destination's focused
-        // pane". A named target that no longer lives in `dest` rejects the
-        // whole move rather than silently falling back.
-        let (dest_target_pane, dest_direction) =
-            dest_target.unwrap_or((dest_state.focused_pane, Direction::Right));
-        if dest_target.is_some() && !dest_state.contains_pane(dest_target_pane) {
-            return false;
-        }
-        let Some(dest_rect) = dest_state
-            .surfaces
-            .get(&dest_target_pane)
-            .map(|surface| surface.rect)
-        else {
-            return false;
-        };
-        let tab_cap_ok = can_create_split(
-            dest_state.pane_count(),
-            dest_rect,
-            dest_direction.split_orientation(),
-        );
         // P2-1/P2-4: captured now, while `dest_state` is still borrowed here,
         // for the re-attach below — the moved pane's io thread must gate
         // auto-approve production and coalesce redraws against the
@@ -313,7 +301,6 @@ impl App {
         // pane's `Surface` is about to be detached from).
         let dest_auto_approve_enabled = dest_state.auto_approve_enabled.clone();
         let dest_redraw_floor = dest_state.redraw_floor.clone();
-
         let Some(source_tree) = self
             .windows
             .get(&source_window)
@@ -321,21 +308,51 @@ impl App {
         else {
             return false;
         };
-        let Some(dest_tree) = self
-            .windows
-            .get(&dest_window)
-            .map(|state| &state.split_tree)
-        else {
-            return false;
+        let transform = match placement {
+            DestPlacement::Replace(placeholder) => {
+                // A freshly spawned tab's only pane: the moved pane takes its
+                // leaf outright, so it is laid out once, at the tab's full
+                // size, instead of first splitting beside the placeholder.
+                if dest_state.pane_count() != 1 || !dest_state.contains_pane(placeholder) {
+                    return false;
+                }
+                let mut source_tree = source_tree.clone();
+                let remove_outcome = split_tree::extract_pane(&mut source_tree, pane);
+                Some(CrossTabMove {
+                    source_tree,
+                    dest_tree: SplitTree::leaf(pane),
+                    remove_outcome,
+                })
+            }
+            DestPlacement::Insert(dest_target_pane, dest_direction) => {
+                // A named target that no longer lives in `dest` rejects the
+                // whole move rather than silently falling back.
+                if !dest_state.contains_pane(dest_target_pane) {
+                    return false;
+                }
+                let Some(dest_rect) = dest_state
+                    .surfaces
+                    .get(&dest_target_pane)
+                    .map(|surface| surface.rect)
+                else {
+                    return false;
+                };
+                let tab_cap_ok = can_create_split(
+                    dest_state.pane_count(),
+                    dest_rect,
+                    dest_direction.split_orientation(),
+                );
+                cross_tab_move(
+                    source_tree,
+                    pane,
+                    &dest_state.split_tree,
+                    dest_target_pane,
+                    dest_direction,
+                    tab_cap_ok,
+                )
+            }
         };
-        let Some(transform) = cross_tab_move(
-            source_tree,
-            pane,
-            dest_tree,
-            dest_target_pane,
-            dest_direction,
-            tab_cap_ok,
-        ) else {
+        let Some(transform) = transform else {
             return false;
         };
 
@@ -582,6 +599,11 @@ impl App {
             return false;
         };
         dest_state.split_tree = transform.dest_tree;
+        if let DestPlacement::Replace(placeholder) = placement
+            && let Some(mut placeholder) = dest_state.surfaces.remove(&placeholder)
+        {
+            placeholder.shutdown();
+        }
         // FR-6: force-unzoom whenever the destination *tab* has any pane
         // zoomed, not only when it's exactly `dest_focused` — a zoomed pane
         // fills the whole tab regardless of which pane is zoomed, so any
@@ -710,8 +732,15 @@ impl App {
             // `TabCloseOutcome::Quit` app-exit cascade is unreachable
             // (L2(e)). It may be the last tab of its own window group (a
             // move to another group), which `close_tab` closes like any
-            // emptied window.
+            // emptied window. The Overview lives in its host window: when the
+            // host is the tab closing, it re-opens on the window that takes
+            // focus, so a drag from the host's last pane doesn't end it.
+            let overview_was_hosted_here =
+                self.overview_visible && self.overview_host() == Some(source_window);
             self.close_tab(event_loop, source_window);
+            if overview_was_hosted_here {
+                self.show_tab_overview();
+            }
         } else {
             self.relayout_and_resize_window(source_window);
             // P2-2: the source tab's focus moved to `next_focus`/a fallback

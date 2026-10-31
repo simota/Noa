@@ -1010,11 +1010,11 @@ impl App {
     /// Move `pane` out of `source_window` into a tab of its own: in the same
     /// window group, or a new window (`new_window`) — Ghostty 1.4.0's
     /// dragging a split out to a new tab or window, driven from the Overview.
-    /// The tab is created around a placeholder pane, the pane moves in
-    /// through the cross-tab engine ([`App::move_pane_to_tab_at`], which
-    /// carries the Pty and all per-pane state), and the placeholder closes —
-    /// all before the next frame, so it is never drawn. Returns whether the
-    /// pane moved.
+    /// The tab is created around a placeholder pane, and the pane takes its
+    /// place through the cross-tab engine ([`App::move_pane_to_tab_at`],
+    /// which carries the Pty and all per-pane state), so it is laid out once
+    /// at the new tab's full size. The new tab takes focus, so the Overview
+    /// closes first. Returns whether the pane moved.
     pub(super) fn detach_pane_to_new_tab(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -1030,6 +1030,12 @@ impl App {
         } else {
             GroupChoice::Existing(group)
         };
+        // The overlay lives in its host window, which the new tab is about to
+        // cover or take focus from: close it cleanly rather than leave it
+        // marked visible behind the new tab.
+        if self.overview_visible {
+            self.hide_tab_overview();
+        }
         let new_tab = match self.spawn_tab_with_initial_pane_in_group(
             event_loop,
             group,
@@ -1049,11 +1055,9 @@ impl App {
             source_window,
             pane,
             new_tab,
-            Some((placeholder, Direction::Right)),
+            DestPlacement::Replace(placeholder),
         );
-        if moved {
-            self.close_pane(event_loop, new_tab, placeholder);
-        } else {
+        if !moved {
             self.close_tab(event_loop, new_tab);
         }
         moved
@@ -1226,9 +1230,10 @@ impl App {
         // tears the overlay down with it (before `close_tab_outcome`, so the
         // last-window case quits instead of keeping a ghost overlay alive).
         if self.overview_host() == Some(window_id) {
+            // Through the regular hide, so the panes' mirror snapshots are
+            // released too, not just the overlay.
+            self.hide_tab_overview();
             self.overview_window = None;
-            self.overview_visible = false;
-            self.overview_visible_gate.store(false, Ordering::Relaxed);
         }
         // A non-host tab closing keeps the overlay alive but removes its tiles;
         // an in-flight overview drag referencing the vanished window must not

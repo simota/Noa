@@ -61,7 +61,8 @@
   new tab of its own window group; with **Option** held, into a new window
   (`App::detach_pane_to_new_tab`). A detach that would only reorder — a tab's
   only pane to a new tab, or a lone tab's only pane to a new window —
-  cancels. There is no zone ring for a detach.
+  cancels. There is no zone ring for a detach. The new tab takes focus, so
+  the Overview closes.
 - **Zone feedback**: a ring around the resolved zone rect — center = inner-box
   outline, edge = edge band; the shape difference (not color alone)
   distinguishes swap vs insert. Only resolutions that would actually commit
@@ -119,13 +120,16 @@ against real destination geometry; named target must exist):
 6. An emptied source tab closes through the normal close path — even its
    group's last tab, when the destination is another group. (The destination
    always exists at commit time, so the close can never cascade to app exit.)
+   When that tab hosts the Overview, the Overview re-opens on the window that
+   takes focus.
 
 ### Detach (`app/lifecycle.rs::detach_pane_to_new_tab`)
-The new tab (same group, or a fresh group for a new window) is spawned around
-a process-less placeholder pane; the pane then moves in through
-`move_pane_to_tab_at` (all of the above applies) and the placeholder closes —
-synchronously, before the next frame, so the placeholder is never drawn. A
-rejected move closes the new tab again.
+The Overview closes, and the new tab (same group, or a fresh group for a new
+window) is spawned around a process-less placeholder pane; the pane then takes
+the placeholder's place through `move_pane_to_tab_at`
+(`DestPlacement::Replace` — all of the above applies), so it is laid out once
+at the new tab's full size and the placeholder is never drawn. A rejected move
+closes the new tab again.
 
 ### Event delivery
 Pane-scoped `UserEvent`s — including AppleScript WriteText / RaiseWindow /

@@ -601,10 +601,13 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H, sgr_attrs: &mut Vec<SgrAttr>) 
             b'>' => h.device_attributes(DaKind::Secondary),
             _ => {}
         },
-        b'n' => match csi.param(0, 0) {
-            5 => h.device_status_report(DsrKind::Status),
-            6 => h.device_status_report(DsrKind::CursorPosition),
-            998 if csi.private == b'?' => h.device_status_report(DsrKind::Visibility),
+        // The `?` form is a different request, not a variant: `CSI ? 5 n`
+        // gets no reply, as in Ghostty.
+        b'n' => match (csi.private, csi.param(0, 0)) {
+            (0, 5) => h.device_status_report(DsrKind::Status),
+            (0, 6) => h.device_status_report(DsrKind::CursorPosition),
+            (b'?', 6) => h.device_status_report(DsrKind::ExtendedCursorPosition),
+            (b'?', 998) => h.device_status_report(DsrKind::Visibility),
             _ => {}
         },
         b'r' if csi.private == 0 => h.set_scroll_region(csi.param(0, 1), csi.param(1, 0)),

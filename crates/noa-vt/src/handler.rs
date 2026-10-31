@@ -42,6 +42,8 @@ pub enum DsrKind {
     Status,
     /// `CSI 6 n` — cursor position report.
     CursorPosition,
+    /// `CSI ? 6 n` — DECXCPR, the cursor position plus a page number.
+    ExtendedCursorPosition,
     /// `CSI ? 998 n` — window visibility report (DEC mode 2033's query form).
     Visibility,
 }

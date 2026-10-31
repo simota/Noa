@@ -338,6 +338,28 @@ fn dsr_cursor_position_reply() {
 }
 
 #[test]
+fn decxcpr_reports_cursor_position_with_page_one() {
+    let t = run(b"\x1b[3;5H\x1b[?6n");
+    assert_eq!(t.pending_writes, b"\x1b[?3;5;1R");
+}
+
+#[test]
+fn decxcpr_is_relative_to_the_scroll_region_under_decom() {
+    let t = run_size(
+        10,
+        8,
+        b"\x1b[?69h\x1b[3;8s\x1b[3;6r\x1b[?6h\x1b[2;2H\x1b[?6n",
+    );
+    assert_eq!(t.pending_writes, b"\x1b[?2;2;1R");
+}
+
+#[test]
+fn private_operating_status_request_gets_no_reply() {
+    let t = run(b"\x1b[?5n");
+    assert!(t.pending_writes.is_empty());
+}
+
+#[test]
 fn take_pending_writes_drains_queue() {
     let mut t = run(b"\x1b[3;5H\x1b[6n");
 

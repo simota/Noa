@@ -656,6 +656,14 @@ impl Handler for Terminal {
                 self.pending_writes
                     .extend_from_slice(format!("\x1b[{row};{col}R").as_bytes());
             }
+            // Noa has no page memory, so the page is always 1 (as in Ghostty).
+            DsrKind::ExtendedCursorPosition => {
+                let (row, col) = self
+                    .active()
+                    .reported_cursor_position(self.modes.origin_mode());
+                self.pending_writes
+                    .extend_from_slice(format!("\x1b[?{row};{col};1R").as_bytes());
+            }
             DsrKind::Visibility => self
                 .pending_writes
                 .extend_from_slice(super::visibility_report(self.visible)),

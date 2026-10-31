@@ -314,6 +314,11 @@ fn show_config_output(config: &StartupConfig) -> String {
         config.file_link_editor.as_str(),
     );
     push_line(&mut out, "title-report", &config.title_report.to_string());
+    push_line(
+        &mut out,
+        "scrollback-compression",
+        &config.scrollback_compression.to_string(),
+    );
     push_optional_line(&mut out, "window-padding-x", config.window_padding_x);
     push_optional_line(&mut out, "window-padding-y", config.window_padding_y);
     push_color_line(&mut out, "background", config.background);

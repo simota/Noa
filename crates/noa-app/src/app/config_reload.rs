@@ -659,6 +659,7 @@ impl App {
                 let mut terminal = surface.terminal.lock();
                 super::lifecycle::apply_clipboard_policy(&mut terminal, &self.config);
                 terminal.title_report = self.config.title_report;
+                terminal.scrollback_compression = self.config.scrollback_compression;
                 terminal.set_scrollback_limit_bytes(self.config.scrollback_limit);
                 terminal.set_kitty_image_limit(self.config.image_storage_limit);
             }
@@ -802,6 +803,7 @@ fn terminal_policy_inputs_changed(previous: &AppConfig, next: &AppConfig) -> boo
         || previous.clipboard_write != next.clipboard_write
         || previous.clipboard_write_limit_bytes != next.clipboard_write_limit_bytes
         || previous.title_report != next.title_report
+        || previous.scrollback_compression != next.scrollback_compression
         || previous.scrollback_limit != next.scrollback_limit
         || previous.image_storage_limit != next.image_storage_limit
 }

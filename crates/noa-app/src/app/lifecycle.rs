@@ -978,6 +978,7 @@ impl App {
             terminal.set_default_cursor_style(style);
         }
         terminal.title_report = self.config.title_report;
+        terminal.scrollback_compression = self.config.scrollback_compression;
         terminal.set_scrollback_limit_bytes(self.config.scrollback_limit);
         terminal.set_kitty_image_limit(self.config.image_storage_limit);
         if let Some(gpu) = self.gpu.as_ref() {

@@ -97,6 +97,7 @@ impl ModeState {
                     | 2004
                     | 2026
                     | 2027
+                    | 2033
                     | 5522
             )
         }
@@ -159,6 +160,10 @@ impl ModeState {
     /// OSC 5522 listing of the clipboard's types instead of its text.
     pub fn kitty_paste_events(&self) -> bool {
         self.get(5522, false)
+    }
+    /// DECSET 2033 — report window visibility changes (`CSI ? 999 ; Ps n`).
+    pub fn report_visibility(&self) -> bool {
+        self.get(2033, false)
     }
     /// DECSET 2004 — bracketed paste mode.
     pub fn bracketed_paste(&self) -> bool {

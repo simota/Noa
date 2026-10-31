@@ -162,6 +162,10 @@ impl App {
             self.os_focused = Some(tab);
         }
         self.relayout_and_resize_window(tab);
+        if let Some(prev) = prev {
+            self.sync_pane_visibility(prev);
+        }
+        self.sync_pane_visibility(tab);
         if was_os_focused {
             self.reset_cursor_blink_phase();
             self.report_focus_event(tab, true);

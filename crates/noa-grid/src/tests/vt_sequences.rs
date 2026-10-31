@@ -641,3 +641,68 @@ fn plain_csi_u_is_still_restore_cursor() {
     // And the DECSC/DECRC `CSI u` form leaves no pending writes (not a query).
     assert!(t.pending_writes.is_empty());
 }
+
+// ── Visibility reports (DEC mode 2033, `CSI ? 998 n`) ───────────────
+
+#[test]
+fn visibility_query_reports_current_visibility_regardless_of_mode() {
+    let mut t = run(b"\x1b[?998n");
+    assert_eq!(t.take_pending_writes(), b"\x1b[?999;1n");
+    assert!(!t.set_visible(false), "mode 2033 is off");
+    Stream::new().feed(b"\x1b[?998n", &mut t);
+    assert_eq!(t.take_pending_writes(), b"\x1b[?999;2n");
+}
+
+#[test]
+fn visibility_query_needs_the_private_marker() {
+    let t = run(b"\x1b[998n");
+    assert!(t.pending_writes.is_empty());
+}
+
+#[test]
+fn enabling_mode_2033_sends_the_current_visibility_every_time() {
+    let mut t = Terminal::new(GridSize::new(80, 24));
+    let mut s = Stream::new();
+    t.set_visible(false);
+    s.feed(b"\x1b[?2033h\x1b[?2033h\x1b[?2033l", &mut t);
+    assert_eq!(t.take_pending_writes(), b"\x1b[?999;2n\x1b[?999;2n");
+}
+
+#[test]
+fn visibility_changes_report_only_while_mode_2033_is_set() {
+    let mut t = run(b"\x1b[?2033h");
+    t.take_pending_writes();
+    assert!(t.set_visible(false));
+    assert!(!t.set_visible(false), "duplicates are ignored");
+    assert!(t.set_visible(true));
+    assert_eq!(t.take_pending_writes(), b"\x1b[?999;2n\x1b[?999;1n");
+    Stream::new().feed(b"\x1b[?2033l", &mut t);
+    assert!(!t.set_visible(false));
+    assert!(t.pending_writes.is_empty());
+}
+
+#[test]
+fn visibility_changes_queue_behind_earlier_replies() {
+    let mut t = run(b"\x1b[?2033h");
+    t.take_pending_writes();
+    Stream::new().feed(b"\x1b[?998n", &mut t);
+    assert!(t.set_visible(false));
+    assert_eq!(t.take_pending_writes(), b"\x1b[?999;1n\x1b[?999;2n");
+}
+
+#[test]
+fn mode_2033_is_reported_by_decrqm() {
+    let mut t = run(b"\x1b[?2033$p\x1b[?2033h");
+    t.pending_writes.clear();
+    Stream::new().feed(b"\x1b[?2033$p", &mut t);
+    assert_eq!(t.take_pending_writes(), b"\x1b[?2033;1$y");
+}
+
+#[test]
+fn replica_terminals_never_send_visibility_reports() {
+    let mut t = run(b"\x1b[?2033h");
+    t.set_reply_writes_enabled(false);
+    assert!(!t.set_visible(false));
+    Stream::new().feed(b"\x1b[?998n", &mut t);
+    assert!(t.take_pending_writes().is_empty());
+}

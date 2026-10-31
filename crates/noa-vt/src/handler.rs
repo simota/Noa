@@ -42,6 +42,8 @@ pub enum DsrKind {
     Status,
     /// `CSI 6 n` — cursor position report.
     CursorPosition,
+    /// `CSI ? 998 n` — window visibility report (DEC mode 2033's query form).
+    Visibility,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

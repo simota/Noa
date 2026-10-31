@@ -849,6 +849,7 @@ impl ApplicationHandler<UserEvent> for App {
                         crate::tab_switch_trace::on_surface_configured(trace_configure_start);
                     }
                 }
+                self.sync_pane_visibility(window_id);
                 if !occluded {
                     // A reveal redraws with fresh terminal content, so any
                     // pending background-refresh candidacy is obsolete; keep

@@ -372,6 +372,7 @@ impl Handler for Terminal {
             | (1049, false)
             | (2026, false)
             | (2027, false)
+            | (2033, false)
             | (2004, false)
             | (5522, false) => {
                 if self.modes.get(request.value, request.ansi) {
@@ -409,6 +410,10 @@ impl Handler for Terminal {
             match value {
                 6 => self.active_mut().home_cursor(on),
                 25 => self.active_mut().cursor.visible = on, // DECTCEM
+                // Enabling always sends the current state, even if already on.
+                2033 if on => self
+                    .pending_writes
+                    .extend_from_slice(super::visibility_report(self.visible)),
                 69 => {
                     if on {
                         self.active_mut().enable_horizontal_margins();
@@ -650,6 +655,9 @@ impl Handler for Terminal {
                 self.pending_writes
                     .extend_from_slice(format!("\x1b[{row};{col}R").as_bytes());
             }
+            DsrKind::Visibility => self
+                .pending_writes
+                .extend_from_slice(super::visibility_report(self.visible)),
         }
     }
 

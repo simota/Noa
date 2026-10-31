@@ -604,6 +604,7 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H, sgr_attrs: &mut Vec<SgrAttr>) 
         b'n' => match csi.param(0, 0) {
             5 => h.device_status_report(DsrKind::Status),
             6 => h.device_status_report(DsrKind::CursorPosition),
+            998 if csi.private == b'?' => h.device_status_report(DsrKind::Visibility),
             _ => {}
         },
         b'r' if csi.private == 0 => h.set_scroll_region(csi.param(0, 1), csi.param(1, 0)),

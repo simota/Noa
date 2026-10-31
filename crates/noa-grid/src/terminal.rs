@@ -204,6 +204,9 @@ pub struct ShellIntegrationMark {
     pub kind: ShellIntegrationMarkKind,
     pub point: SelectionPoint,
     pub exit_status: Option<i32>,
+    /// A `PromptStart` from `133;A;k=c` / `k=s`: a continuation line of the
+    /// prompt above it, not a new prompt.
+    pub continuation: bool,
 }
 
 impl Terminal {
@@ -690,9 +693,11 @@ impl Terminal {
     /// Ghostty's `Surface.maybePromptClick` for OSC 133 `click_events`: the
     /// SGR left press to send the shell for a plain left click at viewport
     /// cell `point`. `None` unless the shell's prompt asked for click events,
-    /// the cursor is at that prompt, and the click is at or after the
-    /// prompt's start — later rows included, since the shell validates
-    /// out-of-range clicks itself (as Kitty and Ghostty do).
+    /// the cursor is at that prompt, and the click is on or below the
+    /// prompt's first row — continuation prompts (`k=c` / `k=s`) belong to
+    /// the prompt above them, and later rows are included since the shell
+    /// validates out-of-range clicks itself (as Kitty and Ghostty do). Like
+    /// Ghostty, `click_events=1` reports the viewport row.
     pub fn prompt_click_report(&self, point: Point) -> Option<String> {
         let mode = self.primary.prompt_click_events?;
         if !self.cursor_is_at_prompt() {
@@ -706,12 +711,14 @@ impl Terminal {
             .iter()
             .rev()
             .find(|mark| {
-                mark.kind == ShellIntegrationMarkKind::PromptStart && mark.point.y <= cursor_abs
+                mark.kind == ShellIntegrationMarkKind::PromptStart
+                    && !mark.continuation
+                    && mark.point.y <= cursor_abs
             })?
             .point;
         let click = self.primary.viewport_point_to_selection_point(point);
         let click_abs = rows_evicted + click.y;
-        if (click_abs, click.x) < (prompt.y, prompt.x) {
+        if click_abs < prompt.y {
             return None;
         }
         let row = match mode {
@@ -1069,7 +1076,12 @@ impl Terminal {
         self.active_mut().cursor.hyperlink = None;
     }
 
-    fn record_shell_mark(&mut self, kind: ShellIntegrationMarkKind, exit_status: Option<i32>) {
+    fn record_shell_mark(
+        &mut self,
+        kind: ShellIntegrationMarkKind,
+        exit_status: Option<i32>,
+        continuation: bool,
+    ) {
         let screen = self.active();
         // Session-absolute row: stays valid across scrollback trimming, so a
         // recorded mark keeps pointing at the same line as history scrolls off
@@ -1089,6 +1101,7 @@ impl Terminal {
             kind,
             point,
             exit_status,
+            continuation,
         });
     }
 

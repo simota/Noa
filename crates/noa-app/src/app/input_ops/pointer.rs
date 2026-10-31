@@ -15,8 +15,8 @@ const PATH_PROBE_CACHE_CAP: usize = 1024;
 const PATH_PROBE_MAX_IN_FLIGHT: usize = 16;
 
 impl App {
-    /// OSC 133 `click_events`: a plain left click (no drag, no selection
-    /// left behind) at the shell's prompt is sent to the shell as an SGR
+    /// OSC 133 `click_events`: a plain left click (pressed in this pane, no
+    /// drag, no selection left behind) at the shell's prompt is sent to the shell as an SGR
     /// left press so it can move its cursor there (`cursor-click-to-move`).
     pub(in crate::app) fn send_prompt_click(&mut self, window_id: WindowId, pane_id: PaneId) {
         if !self.config.cursor_click_to_move {

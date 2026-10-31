@@ -52,6 +52,8 @@ pub(crate) enum ShellIntegrationOsc {
         kind: ShellIntegrationOscKind,
         exit_status: Option<i32>,
         click_events: Option<PromptClickEvents>,
+        /// 133;A with `k=c` or `k=s`: a continuation of the prompt above.
+        continuation: bool,
     },
     Malformed,
 }
@@ -784,11 +786,14 @@ pub(crate) fn parse_shell_integration_osc(data: &[u8]) -> Option<ShellIntegratio
         }
         _ => None,
     };
+    let continuation = kind == ShellIntegrationOscKind::PromptStart
+        && matches!(shell_integration_option(options, b"k"), Some(b"c" | b"s"));
 
     Some(ShellIntegrationOsc::Mark {
         kind,
         exit_status,
         click_events,
+        continuation,
     })
 }
 

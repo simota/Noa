@@ -1223,11 +1223,28 @@ fn prompt_click_reports_rows_relative_to_the_prompt_for_click_events_2() {
 }
 
 #[test]
-fn prompt_click_ignores_clicks_before_the_prompt() {
+fn prompt_click_ignores_rows_above_the_prompt() {
+    // Like Ghostty, the prompt starts at column 0 of its first row.
     let t = run(b"out\r\nab\x1b]133;A;click_events=2\x07$ \x1b]133;B\x07");
     assert_eq!(t.prompt_click_report(Point { x: 0, y: 0 }), None, "earlier row");
-    assert_eq!(t.prompt_click_report(Point { x: 1, y: 1 }), None, "same row, left of A");
-    assert!(t.prompt_click_report(Point { x: 2, y: 1 }).is_some());
+    assert_eq!(
+        t.prompt_click_report(Point { x: 1, y: 1 }).as_deref(),
+        Some("\x1b[<0;2;1M")
+    );
+}
+
+#[test]
+fn prompt_click_measures_from_the_primary_prompt_above_continuations() {
+    let t = run(b"\x1b]133;A;click_events=2\x07p1\r\n\x1b]133;A;k=s\x07> \x1b]133;B\x07");
+    assert_eq!(
+        t.prompt_click_report(Point { x: 1, y: 0 }).as_deref(),
+        Some("\x1b[<0;2;1M"),
+        "the primary prompt's row stays clickable"
+    );
+    assert_eq!(
+        t.prompt_click_report(Point { x: 3, y: 1 }).as_deref(),
+        Some("\x1b[<0;4;2M")
+    );
 }
 
 #[test]

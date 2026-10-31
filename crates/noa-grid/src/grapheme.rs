@@ -29,6 +29,12 @@ impl GraphemeId {
     pub(crate) fn raw(self) -> u32 {
         self.0.get()
     }
+
+    /// The id [`Self::raw`] returned (a compressed scrollback page stores ids
+    /// raw; the interner never forgets an entry, so they stay valid).
+    pub(crate) fn from_raw(raw: u32) -> Option<Self> {
+        NonZeroU32::new(raw).map(GraphemeId)
+    }
 }
 
 /// Hard cap on distinct interned tails. Each entry costs its string bytes

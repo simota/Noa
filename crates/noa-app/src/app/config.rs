@@ -45,6 +45,8 @@ pub struct AppConfig {
     /// Whether `CSI 21 t` may report the window title back to the program
     /// (`title-report`, default off — see `Terminal::title_report`).
     pub title_report: bool,
+    /// Compress idle scrollback pages (`scrollback-compression`).
+    pub scrollback_compression: bool,
     /// `window-padding-x/y`: `None` keeps the built-in default for that axis.
     /// Resolved to a `GridPadding` once in [`App::new`].
     pub window_padding_x: Option<f32>,
@@ -297,6 +299,7 @@ impl AppConfig {
             file_link_editor: config.file_link_editor,
             confirm_quit: config.confirm_quit,
             title_report: config.title_report,
+            scrollback_compression: config.scrollback_compression,
             window_padding_x: config.window_padding_x,
             window_padding_y: config.window_padding_y,
             background: config.background,

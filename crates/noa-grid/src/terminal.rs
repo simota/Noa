@@ -103,6 +103,9 @@ pub struct Terminal {
     /// Off by default, matching Ghostty: the reply echoes program-settable
     /// text (OSC 0/2) back into the pty as input — an injection vector.
     pub title_report: bool,
+    /// `scrollback-compression`: compress idle scrollback pages on
+    /// [`Terminal::trim_memory`] (Ghostty 1.4.0 default on).
+    pub scrollback_compression: bool,
     /// XTMODKEYS modifyOtherKeys is at level 2 (`CSI > 4 ; 2 m`), matching
     /// Ghostty's `modify_other_keys_2` flag. Levels 0/1 clear it.
     pub modify_other_keys_2: bool,
@@ -219,6 +222,7 @@ impl Terminal {
             colors: TerminalColors::default(),
             osc52_policy: Osc52Policy::default(),
             title_report: false,
+            scrollback_compression: true,
             modify_other_keys_2: false,
             size,
             pending_writes: Vec::new(),
@@ -354,12 +358,25 @@ impl Terminal {
 
     /// Post-burst memory trim (driven by the app's quiescence timer): settle
     /// deferred scrollback and drop flood-sized scratch buffers on both
-    /// screens. Cheap when idle-clean; never changes observable state.
+    /// screens, then (with `scrollback-compression`) compress idle history
+    /// pages off-thread. Cheap when idle-clean; never changes observable
+    /// state — a compressed page decompresses when it is next read.
     pub fn trim_memory(&mut self) {
         self.primary.trim_memory();
         if let Some(alt) = &mut self.alt {
             alt.trim_memory();
         }
+        if self.scrollback_compression {
+            self.primary.compress_scrollback();
+        }
+    }
+
+    /// Whether scrolling or searching history decompressed a scrollback page
+    /// since the last call. Such pages stay resident until the next
+    /// [`Terminal::trim_memory`], which the caller should then schedule:
+    /// without new output, its idle timer would not be armed.
+    pub fn take_scrollback_decompressed(&self) -> bool {
+        self.primary.take_scrollback_decompressed()
     }
 
     /// Release any copy-mode viewport locks, including a screen that became

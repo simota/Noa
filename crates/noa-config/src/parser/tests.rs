@@ -436,6 +436,14 @@ fn clipboard_read_invalid_value_warns() {
 }
 
 #[test]
+fn scrollback_compression_defaults_on_and_parses_a_bool() {
+    assert!(crate::StartupConfig::default().scrollback_compression);
+    let (overrides, diagnostics) = parse_overrides(path(), "scrollback-compression = false");
+    assert_eq!(overrides.scrollback_compression, Some(false));
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
 fn clipboard_write_parses_each_mode_and_defaults_to_allow() {
     assert_eq!(
         crate::StartupConfig::default().clipboard_write,

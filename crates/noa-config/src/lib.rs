@@ -730,6 +730,9 @@ pub struct StartupConfig {
     /// title back to the running program. Ghostty default is off — the reply
     /// echoes attacker-controllable text (OSC 0/2) into the pty as input.
     pub title_report: bool,
+    /// `scrollback-compression`: compress idle scrollback pages (Ghostty
+    /// 1.4.0, default on). History kept is unchanged; only memory drops.
+    pub scrollback_compression: bool,
     /// `window-padding-x`: horizontal padding (left = right) in physical
     /// pixels. `None` keeps the built-in default for that axis; the concrete
     /// `GridPadding` is derived in `noa-app`.
@@ -1015,6 +1018,7 @@ impl Default for StartupConfig {
             file_link_editor: FileLinkEditor::Default,
             confirm_quit: true,
             title_report: false,
+            scrollback_compression: true,
             window_padding_x: None,
             window_padding_y: None,
             background: None,
@@ -1140,6 +1144,7 @@ pub struct ConfigOverrides {
     pub file_link_editor: Option<FileLinkEditor>,
     pub confirm_quit: Option<bool>,
     pub title_report: Option<bool>,
+    pub scrollback_compression: Option<bool>,
     pub window_padding_x: Option<f32>,
     pub window_padding_y: Option<f32>,
     pub background: Option<Rgb>,
@@ -1232,6 +1237,7 @@ macro_rules! impl_redacted_config_debug {
                     .field("confirm_quit", &self.confirm_quit)
                     .field("file_link_editor", &self.file_link_editor)
                     .field("title_report", &self.title_report)
+                    .field("scrollback_compression", &self.scrollback_compression)
                     .field("window_padding_x", &self.window_padding_x)
                     .field("window_padding_y", &self.window_padding_y)
                     .field("background", &self.background)
@@ -1355,6 +1361,9 @@ impl ConfigOverrides {
             confirm_quit: higher_priority.confirm_quit.or(self.confirm_quit),
             file_link_editor: higher_priority.file_link_editor.or(self.file_link_editor),
             title_report: higher_priority.title_report.or(self.title_report),
+            scrollback_compression: higher_priority
+                .scrollback_compression
+                .or(self.scrollback_compression),
             window_padding_x: higher_priority.window_padding_x.or(self.window_padding_x),
             window_padding_y: higher_priority.window_padding_y.or(self.window_padding_y),
             background: higher_priority.background.or(self.background),
@@ -1526,6 +1535,9 @@ impl ConfigOverrides {
             confirm_quit: self.confirm_quit.unwrap_or(base.confirm_quit),
             file_link_editor: self.file_link_editor.unwrap_or(base.file_link_editor),
             title_report: self.title_report.unwrap_or(base.title_report),
+            scrollback_compression: self
+                .scrollback_compression
+                .unwrap_or(base.scrollback_compression),
             window_padding_x: self.window_padding_x.or(base.window_padding_x),
             window_padding_y: self.window_padding_y.or(base.window_padding_y),
             background: self.background.or(base.background),
@@ -2028,6 +2040,7 @@ mod tests {
                 file_link_editor: FileLinkEditor::Default,
                 confirm_quit: true,
                 title_report: false,
+                scrollback_compression: true,
                 window_padding_x: None,
                 window_padding_y: None,
                 background: None,

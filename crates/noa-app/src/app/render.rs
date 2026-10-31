@@ -700,6 +700,14 @@ impl App {
                     }
                 }
             };
+            // Checked after the snapshot read the viewport's rows, so a page
+            // this frame decompressed counts: history read back in (a scroll
+            // or a search) stays resident until the next idle trim, which is
+            // scheduled here as output would.
+            if term.take_scrollback_decompressed() {
+                self.memory_trim_deadline =
+                    Some(Instant::now() + super::timers::MEMORY_TRIM_QUIESCENCE);
+            }
             snapshot.search_prompt = self
                 .search_prompt
                 .as_ref()

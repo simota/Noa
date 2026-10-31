@@ -155,6 +155,7 @@ or fails to decode, a diagnostic is shown and the background image is disabled.
 | `mouse-shift-capture` | `false`, `true`, `always`, `never` | `false` | Send Shift-modified mouse input to programs that enable mouse reporting. `false` reserves Shift for terminal selection by default; `true` sends it by default. Programs can override either using XTSHIFTESCAPE. `always` and `never` force the policy |
 | `clipboard-paste-protection` | `true`, `false` | `true` | Confirmation for pastes that could trigger command execution |
 | `file-link-editor` | `default`, `code`, `cursor`, `zed`, `subl` | `default` | Editor CLI for Cmd-clicked local paths with line/column navigation. Must be in Noa's inherited PATH. Directories and launch failures use the default macOS handler. See [Agent workflows](AGENT_WORKFLOW.md) |
+| `scrollback-compression` | `true`, `false` | `true` | Compress scrollback pages while the terminal is idle (about 10–30% of their memory for text). History kept is unchanged; a page decompresses when it is next read |
 | `title-report` | `true`, `false` | `false` | Allow window title responses via `CSI 21 t` |
 | `visual-bell` | `true`, `false` | `false` | Flash the window on BEL |
 | `audible-bell` | `true`, `false` | `false` | Play a platform sound on BEL |

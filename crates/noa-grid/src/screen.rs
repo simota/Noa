@@ -544,6 +544,19 @@ impl Screen {
         self.note_scrollback_evictions(evicted);
     }
 
+    /// Whether reading history decompressed a page since the last call.
+    pub fn take_scrollback_decompressed(&self) -> bool {
+        self.scrollback.take_decompressed()
+    }
+
+    /// Compress idle scrollback pages in the background
+    /// (`scrollback-compression`), sparing the rows the viewport shows.
+    pub fn compress_scrollback(&self) {
+        let start = self.visible_row_base();
+        let end = (start + self.rows as usize).min(self.scrollback.len());
+        self.scrollback.compress_idle(start..end.max(start));
+    }
+
     /// Keep a historical viewport anchored when rows enter scrollback. An
     /// explicit live-bottom lock pins only full-height translations; a partial
     /// region leaves fixed live rows in place and must keep them visible.

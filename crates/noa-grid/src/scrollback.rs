@@ -41,6 +41,19 @@
 //! sealing degrades to the synchronous inline path, so eviction stays timely
 //! and the owner throttles itself instead of queueing unboundedly.
 //!
+//! ## Idle compression (`scrollback-compression`)
+//!
+//! Filled pages sit in [`PageSlot`]s that can hold their body deflated; the
+//! newest page stays a plain `Arc<Page>` so the per-row pack path is
+//! untouched. `Terminal::trim_memory` (the app's post-burst quiescence trim)
+//! compresses every filled page outside the viewport on a background thread;
+//! reading a row decompresses its page, which then stays resident until the
+//! next idle pass. Row counts and accounting sizes stay readable while
+//! compressed, so retention is unchanged. Page cells live in mmap'd
+//! [`CellArena`]s because macOS malloc keeps freed 64 KiB blocks resident:
+//! with malloc a compressed (or even dropped) 10 MB scrollback measured no
+//! footprint drop; with arenas it measures 12.8 → 4.0 MiB.
+//!
 //! ## Measured design floor (2026-07, wish #2 — read before "optimizing")
 //!
 //! The pack workers' flood cost (~250ms/worker per 150MB ascii flood) is
@@ -82,7 +95,8 @@ use crate::grapheme::GraphemeId;
 use noa_core::{CellAttrs, Color};
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 /// Soft target for a page's cell arena, in bytes. A page seals (and the next
 /// push starts a fresh one) once its arena reaches this; a single row is never
@@ -300,6 +314,21 @@ impl StyleTable {
         }
     }
 
+    /// A table holding exactly `styles` (ids by position), as a compressed
+    /// page restores it.
+    fn from_styles(styles: Vec<Style>) -> Self {
+        let lookup = styles
+            .iter()
+            .enumerate()
+            .map(|(id, style)| (*style, StyleId(id as u16)))
+            .collect();
+        StyleTable {
+            styles,
+            lookup,
+            last: (Style::default(), StyleId(0)),
+        }
+    }
+
     /// Intern `style`, returning its id and whether it was newly added (so the
     /// caller can bill the extra `size_of::<Style>()`). Split so the
     /// memo-hit path — taken for nearly every cell of bulk output — inlines
@@ -357,7 +386,7 @@ struct RowMeta {
 #[derive(Clone)]
 struct Page {
     cols: u16,
-    cells: Vec<PackedCell>,
+    cells: CellArena,
     rows: Vec<RowMeta>,
     styles: StyleTable,
     /// Cell index within `cells` -> interned combining tail, for
@@ -379,7 +408,7 @@ impl Page {
             // split across pages, so the final row can overshoot the seal
             // threshold by up to `cols` cells — reserve for that too, or
             // every page pays one last doubling realloc.
-            cells: Vec::with_capacity(PAGE_CELL_CAPACITY + cols as usize),
+            cells: CellArena::with_capacity(PAGE_CELL_CAPACITY + cols as usize),
             rows: Vec::with_capacity(PAGE_CELL_CAPACITY / cols.max(1) as usize + 1),
             styles,
             graphemes: HashMap::new(),
@@ -812,6 +841,442 @@ impl DeferredRow {
     }
 }
 
+// ── Page cell memory ────────────────────────────────────────────────
+
+/// A page's packed cells, in memory mapped straight from the OS rather than
+/// malloc'd: macOS malloc keeps freed 64 KiB blocks resident (measured: a
+/// dropped 10 MB scrollback left its whole footprint behind), so compressing
+/// or evicting a page would free nothing. Unmapping returns it at once. The
+/// subset of `Vec` the packers use, with the same semantics.
+struct CellArena {
+    ptr: std::ptr::NonNull<PackedCell>,
+    len: usize,
+    /// Cells the mapping holds.
+    cap: usize,
+}
+
+// SAFETY: the arena owns its mapping exclusively, like a `Vec`.
+unsafe impl Send for CellArena {}
+unsafe impl Sync for CellArena {}
+
+impl CellArena {
+    fn with_capacity(cells: usize) -> Self {
+        let (ptr, cap) = arena_map(cells);
+        CellArena { ptr, len: 0, cap }
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    fn capacity(&self) -> usize {
+        self.cap
+    }
+
+    #[inline]
+    fn as_mut_ptr(&mut self) -> *mut PackedCell {
+        self.ptr.as_ptr()
+    }
+
+    /// # Safety
+    /// `len <= capacity()`, and the first `len` cells are initialized.
+    #[inline]
+    unsafe fn set_len(&mut self, len: usize) {
+        debug_assert!(len <= self.cap);
+        self.len = len;
+    }
+
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    #[inline]
+    fn reserve(&mut self, additional: usize) {
+        if self.len + additional > self.cap {
+            self.grow(self.len + additional);
+        }
+    }
+
+    #[cold]
+    fn grow(&mut self, needed: usize) {
+        let mut bigger = CellArena::with_capacity(needed.max(self.cap * 2));
+        // SAFETY: both hold at least `self.len` cells; the mappings differ.
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.ptr.as_ptr(), bigger.ptr.as_ptr(), self.len);
+            bigger.set_len(self.len);
+        }
+        *self = bigger;
+    }
+
+    fn push(&mut self, cell: PackedCell) {
+        self.reserve(1);
+        // SAFETY: `reserve` made room for one more.
+        unsafe {
+            self.ptr.as_ptr().add(self.len).write(cell);
+        }
+        self.len += 1;
+    }
+}
+
+impl std::ops::Deref for CellArena {
+    type Target = [PackedCell];
+    #[inline]
+    fn deref(&self) -> &[PackedCell] {
+        // SAFETY: the first `len` cells are initialized.
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+}
+
+impl<'a> IntoIterator for &'a CellArena {
+    type Item = &'a PackedCell;
+    type IntoIter = std::slice::Iter<'a, PackedCell>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl Clone for CellArena {
+    fn clone(&self) -> Self {
+        let mut copy = CellArena::with_capacity(self.len);
+        // SAFETY: `copy` holds at least `self.len` cells.
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.ptr.as_ptr(), copy.ptr.as_ptr(), self.len);
+            copy.set_len(self.len);
+        }
+        copy
+    }
+}
+
+impl Drop for CellArena {
+    fn drop(&mut self) {
+        let mapped = arena_round(self.cap * PACKED_CELL_SIZE);
+        if mapped > 0 {
+            arena_release(self.ptr.cast(), mapped);
+        }
+    }
+}
+
+/// Mappings of dropped arenas kept for the next page, as `(address, bytes)`:
+/// mapping a fresh arena costs a syscall plus a fault per OS page on first
+/// touch, which a flood that turns pages over measurably pays (150 MB
+/// unicode flood ~155 vs ~185 MiB/s without it). Bounded, and returned to the
+/// OS by [`release_arena_pool`] once output goes idle.
+static ARENA_POOL: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+const ARENA_POOL_CAP: usize = 64;
+
+fn arena_pool() -> MutexGuard<'static, Vec<(usize, usize)>> {
+    ARENA_POOL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn arena_release(ptr: std::ptr::NonNull<u8>, bytes: usize) {
+    let mut pool = arena_pool();
+    if pool.len() < ARENA_POOL_CAP {
+        pool.push((ptr.as_ptr() as usize, bytes));
+    } else {
+        drop(pool);
+        // SAFETY: a whole arena mapping its owner no longer uses.
+        unsafe { arena_unmap(ptr.as_ptr(), bytes) };
+    }
+}
+
+/// Unmap every pooled arena, handing its memory back to the OS.
+pub(crate) fn release_arena_pool() {
+    let pooled = std::mem::take(&mut *arena_pool());
+    for (address, bytes) in pooled {
+        // SAFETY: pooled mappings belong to no arena.
+        unsafe { arena_unmap(address as *mut u8, bytes) };
+    }
+}
+
+/// The OS page size the arena maps in.
+fn arena_page_size() -> usize {
+    static SIZE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    // SAFETY: `sysconf` has no preconditions.
+    *SIZE.get_or_init(|| unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize)
+}
+
+fn arena_round(bytes: usize) -> usize {
+    bytes.div_ceil(arena_page_size()) * arena_page_size()
+}
+
+/// Map room for at least `cells` cells; returns the pointer and the cells the
+/// whole OS pages hold. Zero cells maps nothing.
+fn arena_map(cells: usize) -> (std::ptr::NonNull<PackedCell>, usize) {
+    let bytes = arena_round(cells * PACKED_CELL_SIZE);
+    if bytes == 0 {
+        return (std::ptr::NonNull::dangling(), 0);
+    }
+    {
+        let mut pool = arena_pool();
+        if let Some(index) = pool.iter().position(|&(_, size)| size == bytes) {
+            let (address, _) = pool.swap_remove(index);
+            let ptr = std::ptr::NonNull::new(address as *mut PackedCell).expect("pooled mapping");
+            return (ptr, bytes / PACKED_CELL_SIZE);
+        }
+    }
+    // SAFETY: an anonymous private mapping with no address hint.
+    let ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            bytes,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANON,
+            -1,
+            0,
+        )
+    };
+    if ptr == libc::MAP_FAILED {
+        std::alloc::handle_alloc_error(
+            std::alloc::Layout::from_size_align(bytes, arena_page_size()).expect("page layout"),
+        );
+    }
+    let ptr = std::ptr::NonNull::new(ptr.cast()).expect("mmap never returns null on success");
+    (ptr, bytes / PACKED_CELL_SIZE)
+}
+
+/// # Safety
+/// `[ptr, ptr + bytes)` is whole pages of a live arena mapping.
+unsafe fn arena_unmap(ptr: *mut u8, bytes: usize) {
+    // SAFETY: per the contract.
+    unsafe { libc::munmap(ptr.cast(), bytes) };
+}
+
+// ── Idle compression (`scrollback-compression`) ────────────────────
+
+/// A retained page other than the newest. Its row count and accounting size
+/// stay readable while the body is compressed, so retention, eviction and row lookup never touch
+/// the body; reading rows decompresses it, and it stays resident until the
+/// next idle compression (Ghostty 1.4.0's `scrollback-compression`).
+struct PageSlot {
+    cols: u16,
+    rows: usize,
+    /// Uncompressed accounting size: compression never changes how much
+    /// history `scrollback-limit` keeps.
+    bytes: usize,
+    /// The owning scrollback's "a page was decompressed" flag.
+    decompressed: Arc<AtomicBool>,
+    body: Mutex<PageBody>,
+}
+
+enum PageBody {
+    /// Shared so a reader takes it from under the lock and works without
+    /// holding the lock (a search visiting a whole page, a compression pass).
+    Resident(Arc<Page>),
+    Compressed(CompressedPage),
+}
+
+struct CompressedPage {
+    /// Deflated serialization (see [`CompressedPage::encode`]).
+    data: Box<[u8]>,
+    /// Whether any cell holds text, so [`PagedScrollback::has_text`] need
+    /// not decompress.
+    has_text: bool,
+}
+
+impl PageSlot {
+    fn new(page: Page, decompressed: Arc<AtomicBool>) -> Self {
+        PageSlot {
+            cols: page.cols,
+            rows: page.rows.len(),
+            bytes: page.bytes,
+            decompressed,
+            body: Mutex::new(PageBody::Resident(Arc::new(page))),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, PageBody> {
+        self.body
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The resident page, decompressing it first if needed. The lock is held
+    /// only for that, not while the caller reads the page.
+    fn resident(&self) -> Arc<Page> {
+        let mut body = self.lock();
+        if let PageBody::Compressed(compressed) = &*body {
+            *body = PageBody::Resident(Arc::new(compressed.decode(self.cols, self.bytes)));
+            // The page stays resident; the owner re-arms idle compression.
+            self.decompressed.store(true, Ordering::Release);
+        }
+        match &*body {
+            PageBody::Resident(page) => page.clone(),
+            PageBody::Compressed(_) => unreachable!("decompressed above"),
+        }
+    }
+
+    /// Run `f` on the page, decompressing it first if needed.
+    fn with_page<R>(&self, f: impl FnOnce(&Page) -> R) -> R {
+        f(&self.resident())
+    }
+
+    fn has_text(&self) -> bool {
+        match &*self.lock() {
+            PageBody::Resident(page) => page.cells.iter().any(PackedCell::has_text),
+            PageBody::Compressed(compressed) => compressed.has_text,
+        }
+    }
+
+    fn is_compressed(&self) -> bool {
+        matches!(*self.lock(), PageBody::Compressed(_))
+    }
+
+    /// Compress a resident page. The encoding runs outside the lock, so
+    /// readers never wait on it; it is installed only if the page was not
+    /// replaced meanwhile.
+    fn compress(&self) {
+        let page = match &*self.lock() {
+            PageBody::Resident(page) => page.clone(),
+            PageBody::Compressed(_) => return,
+        };
+        let compressed = CompressedPage::encode(&page);
+        let mut body = self.lock();
+        if matches!(&*body, PageBody::Resident(current) if Arc::ptr_eq(current, &page)) {
+            *body = PageBody::Compressed(compressed);
+        }
+    }
+
+    /// The resident page, for reuse once evicted.
+    fn into_resident(self) -> Option<Page> {
+        match self
+            .body
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        {
+            PageBody::Resident(page) => Arc::try_unwrap(page).ok(),
+            PageBody::Compressed(_) => None,
+        }
+    }
+}
+
+/// Sequential reads over a decompressed page.
+struct RawReader<'a> {
+    raw: &'a [u8],
+    at: usize,
+}
+
+impl RawReader<'_> {
+    fn array<const N: usize>(&mut self) -> [u8; N] {
+        let out = self.raw[self.at..self.at + N].try_into().expect("N bytes");
+        self.at += N;
+        out
+    }
+
+    fn u32(&mut self) -> u32 {
+        u32::from_le_bytes(self.array())
+    }
+}
+
+impl CompressedPage {
+    /// Serialize the page's cells (as their packed `u64` words), row
+    /// metadata, styles and grapheme table, then deflate. Fast deflate: it
+    /// runs off-thread at idle, and decompression is what a scroll waits on.
+    fn encode(page: &Page) -> Self {
+        use std::io::Write as _;
+        let mut raw = Vec::with_capacity(
+            16 + page.cells.len() * 8 + page.rows.len() * 7 + page.styles.styles.len() * 20,
+        );
+        let put = |raw: &mut Vec<u8>, v: u32| raw.extend_from_slice(&v.to_le_bytes());
+        put(&mut raw, page.cells.len() as u32);
+        for cell in page.cells.iter() {
+            let word = packed_word_base(cell.style, cell.flags) | cell.ch as u64;
+            raw.extend_from_slice(&word.to_le_bytes());
+        }
+        put(&mut raw, page.rows.len() as u32);
+        for row in &page.rows {
+            put(&mut raw, row.offset);
+            raw.extend_from_slice(&row.len.to_le_bytes());
+            raw.push(u8::from(row.wrapped));
+        }
+        put(&mut raw, page.styles.styles.len() as u32);
+        for style in &page.styles.styles {
+            for v in [style.fg, style.bg, style.underline, style.link, style.meta] {
+                put(&mut raw, v);
+            }
+        }
+        put(&mut raw, page.graphemes.len() as u32);
+        for (&index, id) in &page.graphemes {
+            put(&mut raw, index);
+            put(&mut raw, id.raw());
+        }
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder
+            .write_all(&raw)
+            .expect("deflating into a Vec cannot fail");
+        let data = encoder
+            .finish()
+            .expect("deflating into a Vec cannot fail")
+            .into_boxed_slice();
+        CompressedPage {
+            data,
+            has_text: page.cells.iter().any(PackedCell::has_text),
+        }
+    }
+
+    fn decode(&self, cols: u16, bytes: usize) -> Page {
+        use std::io::Read as _;
+        let mut raw = Vec::new();
+        flate2::read::DeflateDecoder::new(&*self.data)
+            .read_to_end(&mut raw)
+            .expect("a page deflated in-process inflates");
+        let mut r = RawReader { raw: &raw, at: 0 };
+        let n = r.u32() as usize;
+        let mut cells = CellArena::with_capacity(n);
+        for _ in 0..n {
+            let word = u64::from_le_bytes(r.array());
+            cells.push(PackedCell {
+                ch: char::from_u32(word as u32).expect("a stored cell char"),
+                style: StyleId((word >> 32) as u16),
+                flags: PackedFlags::from_bits_retain((word >> 48) as u8),
+            });
+        }
+        let n = r.u32() as usize;
+        let mut rows = Vec::with_capacity(n);
+        for _ in 0..n {
+            let offset = r.u32();
+            let len = u16::from_le_bytes(r.array());
+            let [wrapped] = r.array();
+            rows.push(RowMeta {
+                offset,
+                len,
+                wrapped: wrapped != 0,
+            });
+        }
+        let n = r.u32() as usize;
+        let mut styles = Vec::with_capacity(n);
+        for _ in 0..n {
+            let [fg, bg, underline, link, meta] = std::array::from_fn(|_| r.u32());
+            styles.push(Style {
+                fg,
+                bg,
+                underline,
+                link,
+                meta,
+            });
+        }
+        let n = r.u32() as usize;
+        let mut graphemes = HashMap::with_capacity(n);
+        for _ in 0..n {
+            let index = r.u32();
+            let id = GraphemeId::from_raw(r.u32()).expect("a stored grapheme id");
+            graphemes.insert(index, id);
+        }
+        Page {
+            cols,
+            cells,
+            rows,
+            styles: StyleTable::from_styles(styles),
+            graphemes,
+            bytes,
+        }
+    }
+}
+
 /// A published sealing batch: the deferred rows plus the span arena their
 /// [`SpanRow::bytes`] ranges index. Immutable while shared with the workers.
 struct SealBatch {
@@ -822,7 +1287,17 @@ struct SealBatch {
 /// Paged scrollback: a deque of byte-bounded [`Page`]s with a byte-quantity
 /// retention limit. `limit_bytes == 0` disables scrollback entirely.
 pub(crate) struct PagedScrollback {
-    pages: VecDeque<Arc<Page>>,
+    /// Filled pages, oldest first; idle compression works on these.
+    pages: VecDeque<Arc<PageSlot>>,
+    /// The newest page, still being filled: a plain `Page` so the per-row
+    /// pack path pays nothing for compression. It joins `pages` when the next
+    /// page starts.
+    open: Option<Arc<Page>>,
+    /// An idle compression pass is running (see [`Self::compress_idle`]).
+    compressing: Arc<AtomicBool>,
+    /// A read decompressed a page since [`Self::take_decompressed`] last
+    /// looked (set by the pages, from any thread).
+    decompressed: Arc<AtomicBool>,
     /// Retained row count across `pages`, `sealing`, *and* `pending`.
     total_rows: usize,
     total_bytes: usize,
@@ -889,6 +1364,9 @@ impl PagedScrollback {
     pub(crate) fn new(limit_bytes: usize) -> Self {
         PagedScrollback {
             pages: VecDeque::new(),
+            open: None,
+            compressing: Arc::new(AtomicBool::new(false)),
+            decompressed: Arc::new(AtomicBool::new(false)),
             total_rows: 0,
             total_bytes: 0,
             limit_bytes,
@@ -944,6 +1422,7 @@ impl PagedScrollback {
         }
         self.sealing = None;
         self.pages.clear();
+        self.open = None;
         self.pending.clear();
         self.pending_span_bytes = Vec::new();
         self.pending_cell_rows = 0;
@@ -979,6 +1458,7 @@ impl PagedScrollback {
         self.pending.shrink_to_fit();
         self.pending_span_bytes = Vec::new();
         self.spares = Vec::new();
+        release_arena_pool();
         evicted
     }
 
@@ -1013,8 +1493,7 @@ impl PagedScrollback {
         let mut evicted = self.flush_all();
 
         let cols = row.cells.len() as u16;
-        let page = self.ensure_page(cols);
-        let (delta, _) = page.pack_row(row);
+        let (delta, _) = self.ensure_page(cols).pack_row(row);
         self.total_bytes += delta;
         self.total_rows += 1;
 
@@ -1087,8 +1566,7 @@ impl PagedScrollback {
             template: *template,
             blank: *blank,
         };
-        let page = self.ensure_page(cols);
-        let delta = page.pack_span_row(&span, text);
+        let delta = self.ensure_page(cols).pack_span_row(&span, text);
         self.total_bytes += delta;
         self.total_rows += 1;
         self.evict_to_limit()
@@ -1111,8 +1589,7 @@ impl PagedScrollback {
             self.flush_all()
         };
         let cols = row.cells.len() as u16;
-        let page = self.ensure_page(cols);
-        let (delta, len) = page.pack_row(&row);
+        let (delta, len) = self.ensure_page(cols).pack_row(&row);
         self.total_bytes += delta;
         self.total_rows += 1;
         self.recycle_carcass(row, len);
@@ -1298,14 +1775,12 @@ impl PagedScrollback {
             match row {
                 DeferredRow::Cells(row) => {
                     let cols = row.cells.len() as u16;
-                    let page = self.ensure_page(cols);
-                    let (delta, len) = page.pack_row(&row);
+                    let (delta, len) = self.ensure_page(cols).pack_row(&row);
                     self.total_bytes += delta;
                     self.recycle_carcass(row, len);
                 }
                 DeferredRow::Span(span) => {
-                    let page = self.ensure_page(span.cols);
-                    let delta = page.pack_span_row(&span, &arena);
+                    let delta = self.ensure_page(span.cols).pack_span_row(&span, &arena);
                     self.total_bytes += delta;
                 }
             }
@@ -1336,7 +1811,7 @@ impl PagedScrollback {
         for result in results {
             for page in result.pages {
                 self.total_bytes += page.bytes;
-                self.pages.push_back(Arc::new(page));
+                self.push_page(page);
             }
             lens.extend(result.lens);
             // Last batch's carcasses come back pre-blanked by the workers.
@@ -1431,14 +1906,15 @@ impl PagedScrollback {
             });
         }
         let mut base = 0;
-        for page in &self.pages {
-            let n = page.rows.len();
+        for slot in &self.pages {
+            let n = slot.rows;
             if y < base + n {
-                return Some(page.materialize_row(y - base));
+                return Some(slot.with_page(|page| page.materialize_row(y - base)));
             }
             base += n;
         }
-        None
+        let page = self.open.as_ref()?;
+        (y < base + page.rows.len()).then(|| page.materialize_row(y - base))
     }
 
     /// Visit rows `range` in order without allocating per row (a reused scratch
@@ -1449,8 +1925,20 @@ impl PagedScrollback {
         }
         let mut scratch = std::mem::replace(&mut self.scratch, empty_row());
         let mut base = 0usize;
-        for page in &self.pages {
-            let n = page.rows.len();
+        let mut visit = |page: &Page, base: usize, scratch: &mut Row| {
+            for local in 0..page.rows.len() {
+                let y = base + local;
+                if y >= range.end {
+                    break;
+                }
+                if y >= range.start {
+                    page.materialize_row_into(local, scratch);
+                    f(y, scratch);
+                }
+            }
+        };
+        for slot in &self.pages {
+            let n = slot.rows;
             if range.start >= base + n {
                 base += n;
                 continue;
@@ -1458,17 +1946,13 @@ impl PagedScrollback {
             if base >= range.end {
                 break;
             }
-            for local in 0..n {
-                let y = base + local;
-                if y >= range.end {
-                    break;
-                }
-                if y >= range.start {
-                    page.materialize_row_into(local, &mut scratch);
-                    f(y, &scratch);
-                }
-            }
+            slot.with_page(|page| visit(page, base, &mut scratch));
             base += n;
+        }
+        if let Some(page) = &self.open
+            && base < range.end
+        {
+            visit(page, base, &mut scratch);
         }
         self.scratch = scratch;
 
@@ -1514,9 +1998,11 @@ impl PagedScrollback {
                 .any(|cell| !cell.is_blank()),
             DeferredRow::Span(span) => span.has_text(arena),
         };
-        self.pages
-            .iter()
-            .any(|page| page.cells.iter().any(PackedCell::has_text))
+        self.pages.iter().any(|slot| slot.has_text())
+            || self
+                .open
+                .as_ref()
+                .is_some_and(|page| page.cells.iter().any(PackedCell::has_text))
             || self.sealing.as_ref().is_some_and(|batch| {
                 batch
                     .rows
@@ -1543,8 +2029,77 @@ impl PagedScrollback {
         self.flush_all()
     }
 
+    /// Compress every filled page except those holding rows `keep` (the viewport, which would just decompress again
+    /// on the next frame), on a background thread. A no-op while an earlier
+    /// pass is still running.
+    pub(crate) fn compress_idle(&self, keep: Range<usize>) {
+        let mut candidates = Vec::new();
+        let mut base = 0;
+        for slot in &self.pages {
+            let rows = base..base + slot.rows;
+            base = rows.end;
+            let visible = rows.start < keep.end && keep.start < rows.end;
+            if !visible && !slot.is_compressed() {
+                candidates.push(slot.clone());
+            }
+        }
+        if candidates.is_empty() || self.compressing.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let compressing = self.compressing.clone();
+        let spawned = std::thread::Builder::new()
+            .name("noa-scrollback-compress".to_string())
+            .spawn(move || {
+                for slot in candidates {
+                    // A page evicted meanwhile is only referenced here.
+                    if Arc::strong_count(&slot) > 1 {
+                        slot.compress();
+                    }
+                }
+                // The compressed pages' arenas went to the pool; hand them
+                // back to the OS, which is the point of compressing.
+                release_arena_pool();
+                compressing.store(false, Ordering::Release);
+            });
+        if spawned.is_err() {
+            self.compressing.store(false, Ordering::Release);
+        }
+    }
+
+    /// A copy of page `index` (the open page last), decompressed (test
+    /// introspection).
+    #[cfg(test)]
+    fn page(&self, index: usize) -> Page {
+        match self.pages.get(index) {
+            Some(slot) => slot.with_page(Page::clone),
+            None => Page::clone(self.open.as_ref().expect("page index in range")),
+        }
+    }
+
+    #[cfg(test)]
+    fn page_count(&self) -> usize {
+        self.pages.len() + usize::from(self.open.is_some())
+    }
+
+    /// Start `page` as the open page, moving the current one into `pages`.
+    fn push_page(&mut self, page: Page) {
+        if let Some(open) = self.open.take() {
+            let filled = Arc::try_unwrap(open).unwrap_or_else(|shared| Page::clone(&shared));
+            self.pages
+                .push_back(Arc::new(PageSlot::new(filled, self.decompressed.clone())));
+        }
+        self.open = Some(Arc::new(page));
+    }
+
+    /// Whether a read decompressed a page since the last call: those pages
+    /// stay resident until the next idle pass, so the app re-arms its idle
+    /// trim (without output, nothing else would).
+    pub(crate) fn take_decompressed(&self) -> bool {
+        self.decompressed.swap(false, Ordering::AcqRel)
+    }
+
     fn ensure_page(&mut self, cols: u16) -> &mut Page {
-        let need_new = match self.pages.back() {
+        let need_new = match &self.open {
             None => true,
             Some(page) => page.cols != cols || page.is_full(),
         };
@@ -1560,9 +2115,9 @@ impl PagedScrollback {
                 None => Page::new(cols),
             };
             self.total_bytes += page.bytes;
-            self.pages.push_back(Arc::new(page));
+            self.push_page(page);
         }
-        Arc::make_mut(self.pages.back_mut().unwrap())
+        Arc::make_mut(self.open.as_mut().expect("an open page was just ensured"))
     }
 
     fn evict_to_limit(&mut self) -> usize {
@@ -1570,13 +2125,15 @@ impl PagedScrollback {
             return 0;
         }
         let mut evicted = 0;
-        while self.total_bytes > self.limit_bytes && self.pages.len() > 1 {
-            let page = self.pages.pop_front().unwrap();
-            self.total_bytes -= page.bytes;
-            self.total_rows -= page.rows.len();
-            evicted += page.rows.len();
+        // The open page is the newest and always stays.
+        while self.total_bytes > self.limit_bytes && !self.pages.is_empty() {
+            let slot = self.pages.pop_front().unwrap();
+            self.total_bytes -= slot.bytes;
+            self.total_rows -= slot.rows;
+            evicted += slot.rows;
             if self.spares.len() < SPARE_PAGE_CAP
-                && let Ok(page) = Arc::try_unwrap(page)
+                && let Ok(slot) = Arc::try_unwrap(slot)
+                && let Some(page) = slot.into_resident()
             {
                 self.spares.push(page);
             }
@@ -1590,7 +2147,8 @@ impl PagedScrollback {
 /// Immutable search input: packed pages and the sealing batch are shared;
 /// only the bounded pending suffix is copied while holding the terminal lock.
 pub(crate) struct HistorySnapshot {
-    pages: Vec<Arc<Page>>,
+    pages: Vec<Arc<PageSlot>>,
+    open: Option<Arc<Page>>,
     sealing: Option<Arc<SealBatch>>,
     pending: Vec<DeferredRow>,
     span_bytes: Vec<u8>,
@@ -1600,6 +2158,7 @@ impl PagedScrollback {
     pub(crate) fn search_snapshot(&self) -> HistorySnapshot {
         HistorySnapshot {
             pages: self.pages.iter().cloned().collect(),
+            open: self.open.clone(),
             sealing: self.sealing.clone(),
             pending: self.pending.iter().cloned().collect(),
             span_bytes: self.pending_span_bytes.clone(),
@@ -1611,7 +2170,22 @@ impl HistorySnapshot {
     pub(crate) fn for_each_row(&self, mut visit: impl FnMut(usize, &Row) -> bool) -> bool {
         let mut row = empty_row();
         let mut y = 0;
-        for page in &self.pages {
+        for slot in &self.pages {
+            let finished = slot.with_page(|page| {
+                for local in 0..page.rows.len() {
+                    page.materialize_row_into(local, &mut row);
+                    if !visit(y, &row) {
+                        return false;
+                    }
+                    y += 1;
+                }
+                true
+            });
+            if !finished {
+                return false;
+            }
+        }
+        if let Some(page) = &self.open {
             for local in 0..page.rows.len() {
                 page.materialize_row_into(local, &mut row);
                 if !visit(y, &row) {
@@ -1677,9 +2251,6 @@ fn pack_chunk(
             Some(page) => page.cols != cols || page.is_full(),
         };
         if need_new {
-            if let Some(page) = pages.last_mut() {
-                page.cells.shrink_to_fit();
-            }
             pages.push(Page::new(cols));
         }
         let page = pages.last_mut().unwrap();
@@ -1692,9 +2263,6 @@ fn pack_chunk(
                 page.pack_span_row(span, &batch.span_bytes);
             }
         }
-    }
-    if let Some(page) = pages.last_mut() {
-        page.cells.shrink_to_fit();
     }
     let cleared = to_clear
         .drain(..)
@@ -1945,6 +2513,247 @@ mod tests {
             cells.push(Cell::default());
         }
         row_from(cells)
+    }
+
+    #[test]
+    fn cell_arena_grows_and_clones() {
+        let cell = |i: u32| PackedCell {
+            ch: char::from_u32(0x41 + i % 26).unwrap(),
+            style: StyleId(i as u16),
+            flags: PackedFlags::empty(),
+        };
+        let mut arena = CellArena::with_capacity(4);
+        let first_cap = arena.capacity();
+        for i in 0..first_cap as u32 + 10 {
+            arena.push(cell(i));
+        }
+        assert!(arena.capacity() > first_cap, "pushing past capacity grows");
+        assert!(
+            arena
+                .iter()
+                .enumerate()
+                .all(|(i, c)| c.ch == cell(i as u32).ch)
+        );
+        let copy = arena.clone();
+        assert_eq!(copy.len(), arena.len());
+        assert!(
+            copy.iter()
+                .zip(arena.iter())
+                .all(|(a, b)| a.ch == b.ch && a.style == b.style)
+        );
+        // Mapping reuse through the process-wide pool is not asserted here:
+        // tests running in parallel share (and release) that pool.
+    }
+
+    /// Rows covering every packed feature: styles (colors, underline color,
+    /// attributes, hyperlinks), wide glyphs, grapheme tails, wrapping and
+    /// blank lines.
+    fn varied_rows(count: usize, cols: usize) -> Vec<Row> {
+        (0..count).map(|i| varied_row(i, cols)).collect()
+    }
+
+    fn varied_row(i: usize, cols: usize) -> Row {
+        if i % 7 == 3 {
+            return text_row("", cols);
+        }
+        let mut row = text_row(
+            &format!("{i:05} fn main() {{ println!(\"row {i}\"); }}"),
+            cols,
+        );
+        row.cells[0].fg = Color::Palette((i % 16) as u8);
+        row.cells[1].bg = Color::Rgb(Rgb::new(i as u8, 2, 3));
+        row.cells[2].attrs.insert(CellAttrs::BOLD);
+        row.cells[3].underline_color = Some(Color::Palette(5));
+        row.cells[4].hyperlink = HyperlinkId::new(1 + i % 3);
+        row.cells[6].ch = '漢';
+        row.cells[6].attrs.insert(CellAttrs::WIDE);
+        row.cells[7] = Cell::default();
+        row.cells[7].attrs.insert(CellAttrs::WIDE_SPACER);
+        row.cells[8].push_combining('\u{301}');
+        row.wrapped = i.is_multiple_of(5);
+        row
+    }
+
+    /// Every row's cells and wrap flag, for comparison.
+    fn all_rows(sb: &mut PagedScrollback) -> Vec<(Vec<Cell>, bool)> {
+        let mut rows = Vec::new();
+        sb.for_each_row(0..sb.len(), |_, row| {
+            rows.push((row.cells.clone(), row.wrapped))
+        });
+        rows
+    }
+
+    fn wait_for_compression(sb: &PagedScrollback) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while sb.compressing.load(Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "compression never finished"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn a_compressed_page_reads_back_identically_and_stays_resident() {
+        let mut sb = PagedScrollback::new(64 * 1024 * 1024);
+        for row in varied_rows(3000, 80) {
+            sb.push_row(&row);
+        }
+        assert!(sb.page_count() > 2);
+        let before = all_rows(&mut sb);
+        let bytes = sb.bytes();
+        for slot in &sb.pages {
+            slot.compress();
+        }
+        assert!(sb.pages.iter().all(|slot| slot.is_compressed()));
+        assert!(!sb.take_decompressed());
+        // Accounting, row lookup and the text check work without a read.
+        assert_eq!(sb.bytes(), bytes);
+        assert!(sb.has_text());
+        assert!(sb.pages.iter().all(|slot| slot.is_compressed()));
+        let row = sb.row(1).unwrap();
+        assert_eq!((row.cells, row.wrapped), before[1]);
+        assert!(!sb.pages[0].is_compressed(), "a read decompresses its page");
+        assert!(
+            sb.take_decompressed(),
+            "and flags it for the next idle pass"
+        );
+        assert!(!sb.take_decompressed());
+        assert!(sb.pages[1].is_compressed());
+        assert_eq!(all_rows(&mut sb), before);
+        // Packing continues on the (decompressed) newest page.
+        sb.push_row(&text_row("after", 80));
+        assert_eq!(sb.row(sb.len() - 1).unwrap().cells[0].ch, 'a');
+    }
+
+    #[test]
+    fn idle_compression_spares_the_newest_page_and_the_viewport() {
+        let mut sb = PagedScrollback::new(64 * 1024 * 1024);
+        for row in varied_rows(3000, 80) {
+            sb.push_row(&row);
+        }
+        assert!(sb.pages.len() >= 3);
+        // Keep a row inside the second filled page.
+        let second = sb.pages[0].rows..sb.pages[0].rows + sb.pages[1].rows;
+        sb.compress_idle(second.start + 1..second.start + 2);
+        wait_for_compression(&sb);
+        let compressed: Vec<bool> = sb.pages.iter().map(|s| s.is_compressed()).collect();
+        assert!(compressed[0]);
+        assert!(!compressed[1], "the viewport's page");
+        assert!(compressed[2..].iter().all(|&c| c));
+        // The newest page is never a candidate: it is still being filled.
+        assert!(sb.open.is_some());
+    }
+
+    #[cfg(target_os = "macos")]
+    fn probe_footprint() -> u64 {
+        unsafe extern "C" {
+            fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+        }
+        // Return freed pages first, as the app's idle trim does.
+        unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
+        let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+        let ret = unsafe {
+            libc::proc_pid_rusage(
+                std::process::id() as i32,
+                libc::RUSAGE_INFO_V4,
+                &mut info as *mut _ as *mut libc::rusage_info_t,
+            )
+        };
+        assert_eq!(ret, 0);
+        info.ri_phys_footprint
+    }
+
+    /// Physical footprint before and after idle compression of a full
+    /// default-size (10 MB) scrollback of code-like text (macOS):
+    /// `cargo test -p noa-grid --release --offline scrollback_compression_footprint_probe -- --ignored --nocapture`
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "manual footprint probe"]
+    fn scrollback_compression_footprint_probe() {
+        let footprint = probe_footprint;
+        let start = footprint();
+        let mut sb = PagedScrollback::new(10_000_000);
+        for i in 0..200_000 {
+            sb.push_row(&varied_row(i, 120));
+        }
+        let full = footprint();
+        sb.compress_idle(0..0);
+        wait_for_compression(&sb);
+        let compressed = footprint();
+        let rows = sb.len();
+        drop(sb);
+        let dropped = footprint();
+        let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
+        eprintln!("after drop: {:.1} MiB", mib(dropped.saturating_sub(start)));
+        eprintln!(
+            "scrollback footprint: {:.1} MiB full -> {:.1} MiB compressed ({} rows, start {:.1} MiB)",
+            mib(full - start),
+            mib(compressed.saturating_sub(start)),
+            rows,
+            mib(start)
+        );
+    }
+
+    /// Footprint of a flood-filled (deferred, worker-packed) 10 MB scrollback
+    /// against its accounted bytes, without compression:
+    /// `cargo test -p noa-grid --release --offline worker_packed_scrollback_footprint_probe -- --ignored --nocapture`
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "manual footprint probe"]
+    fn worker_packed_scrollback_footprint_probe() {
+        let start = probe_footprint();
+        let mut sb = PagedScrollback::new(10_000_000);
+        for i in 0..200_000 {
+            sb.push_row_deferred(varied_row(i, 120));
+        }
+        sb.trim_memory();
+        let full = probe_footprint();
+        let (accounted, pages) = (sb.total_bytes, sb.page_count());
+        drop(sb);
+        release_arena_pool();
+        // Unmapping the arenas returns their resident pages; malloc'd memory
+        // (rows, tables) stays in the footprint either way.
+        let arenas = full.saturating_sub(probe_footprint());
+        let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
+        eprintln!(
+            "worker-packed scrollback: arenas {:.1} MiB resident for {:.1} MiB accounted ({pages} pages; total footprint {:.1} MiB)",
+            mib(arenas),
+            mib(accounted as u64),
+            mib(full.saturating_sub(start)),
+        );
+    }
+
+    /// Prints the deflate ratio on code-like text (`--nocapture`); asserts
+    /// only that compression saves most of the page memory.
+    #[test]
+    fn compression_saves_most_of_a_text_page() {
+        let mut sb = PagedScrollback::new(64 * 1024 * 1024);
+        for row in varied_rows(5000, 120) {
+            sb.push_row(&row);
+        }
+        let resident: usize = sb
+            .pages
+            .iter()
+            .map(|s| s.with_page(|p| p.cells.len() * 8))
+            .sum();
+        for slot in &sb.pages {
+            slot.compress();
+        }
+        let compressed: usize = sb
+            .pages
+            .iter()
+            .map(|s| match &*s.lock() {
+                PageBody::Compressed(c) => c.data.len(),
+                PageBody::Resident(_) => unreachable!(),
+            })
+            .sum();
+        eprintln!(
+            "scrollback compression: {resident} cell bytes -> {compressed} ({:.1}%)",
+            compressed as f64 * 100.0 / resident as f64
+        );
+        assert!(compressed * 3 < resident);
     }
 
     #[test]
@@ -2209,7 +3018,7 @@ mod tests {
 
         // Stored length is 2 (through the BCE cell); the two default blanks
         // were trimmed and are restored on materialize.
-        assert_eq!(sb.pages[0].rows[0].len, 2);
+        assert_eq!(sb.page(0).rows[0].len, 2);
         let out = sb.row(0).unwrap();
         assert_eq!(out.cells.len(), 4);
         assert_eq!(out.cells[0], cell('a'));
@@ -2230,7 +3039,7 @@ mod tests {
             sb.push_row(&row_from(vec![styled; 4]));
         }
         // Default (id 0) + the one shared style = 2 entries.
-        assert_eq!(sb.pages[0].styles.len(), 2);
+        assert_eq!(sb.page(0).styles.len(), 2);
     }
 
     #[test]
@@ -2256,14 +3065,14 @@ mod tests {
         for _ in 0..1000 {
             total_evicted += sb.push_row(&text_row("hello world", 80));
         }
-        assert_eq!(sb.pages.len(), 1, "only the newest page is retained");
+        assert_eq!(sb.page_count(), 1, "only the newest page is retained");
         assert_eq!(
             sb.len() + total_evicted,
             1000,
             "every non-retained row is reported as evicted"
         );
         assert!(
-            sb.bytes() <= PAGE_TARGET_BYTES + PAGE_HEADER_COST * 4 + sb.pages[0].cells.len() * 8
+            sb.bytes() <= PAGE_TARGET_BYTES + PAGE_HEADER_COST * 4 + sb.page(0).cells.len() * 8
         );
     }
 
@@ -2284,9 +3093,9 @@ mod tests {
         sb.push_row(&text_row("bb", 10));
         sb.push_row(&text_row("cc", 20)); // wider -> new page
 
-        assert_eq!(sb.pages.len(), 2);
-        assert_eq!(sb.pages[0].cols, 10);
-        assert_eq!(sb.pages[1].cols, 20);
+        assert_eq!(sb.page_count(), 2);
+        assert_eq!(sb.page(0).cols, 10);
+        assert_eq!(sb.page(1).cols, 20);
         assert_eq!(sb.len(), 3);
         // Materialized rows keep their own page's width.
         assert_eq!(sb.row(0).unwrap().cells.len(), 10);
@@ -2350,7 +3159,7 @@ mod tests {
         for sb in [&span_sb, &row_sb] {
             assert!(sb.bytes() <= limit + PAGE_TARGET_BYTES + PAGE_HEADER_COST);
             assert!(sb.len() <= limit / ROW_META_SIZE + PAGE_ROW_CAPACITY);
-            assert!(sb.pages.len() > 1);
+            assert!(sb.page_count() > 1);
         }
     }
 
@@ -2412,7 +3221,7 @@ mod tests {
         assert_eq!(out.cells, source);
         // red (shared across grapheme/wide breaks), blue, linked, + default:
         // run packing must not mint duplicate style entries.
-        assert_eq!(sb.pages[0].styles.len(), 4);
+        assert_eq!(sb.page(0).styles.len(), 4);
     }
 
     #[test]
@@ -2460,7 +3269,7 @@ mod tests {
         assert_eq!(out.cells, source);
         // base, bg_diverges, underline_diverges, bold_diverges, + default:
         // each divergence must mint its own style, not fuse into `base`'s run.
-        assert_eq!(sb.pages[0].styles.len(), 5);
+        assert_eq!(sb.page(0).styles.len(), 5);
     }
 
     #[test]
@@ -2813,7 +3622,7 @@ mod tests {
         }
         assert!(total_evicted > 0, "tiny limit evicts during the pushes");
         assert_eq!(sb.len() + total_evicted, 300);
-        assert_eq!(sb.pages.len(), 1, "only the newest page is retained");
+        assert_eq!(sb.page_count(), 1, "only the newest page is retained");
     }
 
     #[test]

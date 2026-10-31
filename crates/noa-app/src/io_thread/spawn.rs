@@ -149,6 +149,7 @@ pub(super) fn current_card_target(
 pub(crate) struct IoThreadHandle {
     pub(super) shutdown_tx: Sender<()>,
     pub(super) ipc_output_refresh_tx: Sender<()>,
+    pub(super) reply_flush_tx: Sender<()>,
     pub(super) join: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -160,6 +161,14 @@ impl IoThreadHandle {
     /// mutations and never blocks the event loop.
     pub(crate) fn request_ipc_output_refresh(&self) {
         let _ = self.ipc_output_refresh_tx.try_send(());
+    }
+
+    /// Ask the io thread to write the terminal's queued replies now, for a
+    /// reply the main thread queued (a DEC mode 2033 visibility report). The
+    /// io thread is the only writer of queued replies, so they reach the pty
+    /// in queue order. The bounded channel coalesces repeated requests.
+    pub(crate) fn request_reply_flush(&self) {
+        let _ = self.reply_flush_tx.try_send(());
     }
 
     /// Signal shutdown and reap the io thread off the caller (Item 6): a pty
@@ -244,6 +253,7 @@ pub fn spawn(
     let IoThreadTarget { window_id, pane_id } = target;
     let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(1);
     let (ipc_output_refresh_tx, ipc_output_refresh_rx) = crossbeam_channel::bounded(1);
+    let (reply_flush_tx, reply_flush_rx) = crossbeam_channel::bounded::<()>(1);
     let join = std::thread::spawn(move || {
         let writer = pty.writer();
         let mut stream = noa_vt::Stream::with_shared_parser(raw_attach.parser());
@@ -313,16 +323,17 @@ pub fn spawn(
         // per-read chunk size) means every park below stays a plain block,
         // exactly as before the spin existed.
         let mut spin_traffic = SpinTraffic::default();
-        // One reusable six-op `Select` for every park below, built once:
+        // One reusable seven-op `Select` for every park below, built once:
         // during a reader-bottlenecked flood this thread parks once per pty
         // sliver (tens of thousands of times per second), and re-registering
-        // all six channels per park was measurable overhead. `ready`/
+        // all seven channels per park was measurable overhead. `ready`/
         // `ready_timeout` only report readiness — the fast-path `try_recv`s
         // at the top of the loop complete the actual operations — so the
         // registration list never needs to change between parks.
         let mut sel = crossbeam_channel::Select::new();
         sel.recv(&shutdown_rx);
         sel.recv(&ipc_output_refresh_rx);
+        sel.recv(&reply_flush_rx);
         sel.recv(pty.event_rx());
         sel.recv(&resize_rx);
         sel.recv(&input_rx);
@@ -348,6 +359,17 @@ pub fn spawn(
                         &mut ipc_row_cache,
                     );
                     ipc_publish_pending_at = None;
+                    did_work = true;
+                }
+                Err(TryRecvError::Disconnected) => break,
+                Err(TryRecvError::Empty) => {}
+            }
+            match reply_flush_rx.try_recv() {
+                Ok(()) => {
+                    let replies = terminal.lock().take_pending_writes();
+                    if !replies.is_empty() {
+                        write_pty_bytes(&writer, &replies);
+                    }
                     did_work = true;
                 }
                 Err(TryRecvError::Disconnected) => break,
@@ -751,6 +773,7 @@ pub fn spawn(
                         || !resize_rx.is_empty()
                         || !shutdown_rx.is_empty()
                         || !ipc_output_refresh_rx.is_empty()
+                        || !reply_flush_rx.is_empty()
                         || !auto_approve_feedback_rx.is_empty()
                     {
                         ready = true;
@@ -792,6 +815,7 @@ pub fn spawn(
     IoThreadHandle {
         shutdown_tx,
         ipc_output_refresh_tx,
+        reply_flush_tx,
         join: Some(join),
     }
 }

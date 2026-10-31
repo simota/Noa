@@ -1003,23 +1003,28 @@ impl App {
     /// sending DEC mode 2033 visibility reports where enabled — Ghostty's
     /// `Surface.occlusionCallback`.
     fn sync_pane_visibility(&self, window_id: WindowId) {
-        if let Some(state) = self.windows.get(&window_id) {
-            self.set_panes_visible(window_id, !state.occluded);
-        }
-    }
-
-    /// [`Self::sync_pane_visibility`] with an explicit state, for the quick
-    /// terminal, which tracks its own shown/hidden state instead of occlusion.
-    fn set_panes_visible(&self, window_id: WindowId, visible: bool) {
+        let visible = !self.window_hidden(window_id);
         let Some(state) = self.windows.get(&window_id) else {
             return;
         };
-        for (&pane_id, surface) in &state.surfaces {
-            let report = surface.terminal.lock().set_visible(visible);
-            if let Some(bytes) = report {
-                self.queue_pane_report(window_id, pane_id, bytes);
+        for surface in state.surfaces.values() {
+            if surface.terminal.lock().set_visible(visible)
+                && let SurfaceTransport::Local(local) = &surface.transport
+                && let Some(io_thread) = local.io_thread.as_ref()
+            {
+                io_thread.request_reply_flush();
             }
         }
+    }
+
+    /// Whether `window_id`'s panes are hidden for DEC mode 2033: the window
+    /// is occluded, or it is the fully hidden quick terminal (which ignores
+    /// occlusion events and tracks its own shown/hidden state).
+    fn window_hidden(&self, window_id: WindowId) -> bool {
+        self.windows
+            .get(&window_id)
+            .is_some_and(|state| state.occluded)
+            || self.quick_terminal_redraw_suppressed(window_id)
     }
 }
 

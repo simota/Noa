@@ -2312,6 +2312,7 @@ fn io_thread_handle_shutdown_joins_within_timeout() {
     let mut handle = IoThreadHandle {
         shutdown_tx,
         ipc_output_refresh_tx: crossbeam_channel::bounded::<()>(1).0,
+        reply_flush_tx: crossbeam_channel::bounded::<()>(1).0,
         join: Some(join),
     };
 
@@ -2330,6 +2331,7 @@ fn pane_io_thread_shutdown_joins_all_blocked_handles_within_timeout() {
         handles.push(IoThreadHandle {
             shutdown_tx,
             ipc_output_refresh_tx: crossbeam_channel::bounded::<()>(1).0,
+            reply_flush_tx: crossbeam_channel::bounded::<()>(1).0,
             join: Some(join),
         });
     }
@@ -2354,6 +2356,7 @@ fn shutdown_and_join_does_not_block_the_caller() {
     let handle = IoThreadHandle {
         shutdown_tx,
         ipc_output_refresh_tx: crossbeam_channel::bounded::<()>(1).0,
+        reply_flush_tx: crossbeam_channel::bounded::<()>(1).0,
         join: Some(join),
     };
 

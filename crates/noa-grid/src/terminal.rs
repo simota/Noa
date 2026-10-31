@@ -842,17 +842,23 @@ impl Terminal {
 
     /// Take the queued report-reply bytes (for the io thread → pty writer).
     /// The queue is always drained, but suppressed terminals return no bytes.
-    /// Record whether the host window may be visible. Returns the DEC mode
-    /// 2033 report to send when visibility changed while the program has
-    /// visibility reports enabled. Like [`Self::take_pending_writes`], a
-    /// replica terminal never reports: the server-side terminal does.
-    pub fn set_visible(&mut self, visible: bool) -> Option<&'static [u8]> {
+    /// Record whether the host window may be visible. When it changed while
+    /// the program has DEC mode 2033 set, queues the report on
+    /// [`Self::pending_writes`] — behind every reply already queued, so
+    /// reports leave in the order the state changed — and returns `true` so
+    /// the caller can have them flushed. A replica terminal never reports:
+    /// the server-side terminal does.
+    pub fn set_visible(&mut self, visible: bool) -> bool {
         if self.visible == visible {
-            return None;
+            return false;
         }
         self.visible = visible;
-        (self.reply_writes_enabled && self.modes.report_visibility())
-            .then(|| visibility_report(visible))
+        let report = self.reply_writes_enabled && self.modes.report_visibility();
+        if report {
+            self.pending_writes
+                .extend_from_slice(visibility_report(visible));
+        }
+        report
     }
 
     pub fn take_pending_writes(&mut self) -> Vec<u8> {

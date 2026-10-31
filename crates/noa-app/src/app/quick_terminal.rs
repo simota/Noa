@@ -564,7 +564,7 @@ impl App {
             state.window.set_visible(true);
             crate::macos_window::show_quick_terminal_window(&state.window);
         }
-        self.set_panes_visible(window_id, true);
+        self.sync_pane_visibility(window_id);
         self.focused = Some(window_id);
     }
 
@@ -659,7 +659,7 @@ impl App {
                 && let Some(state) = self.windows.get(&window_id)
             {
                 state.window.set_visible(false);
-                self.set_panes_visible(window_id, false);
+                self.sync_pane_visibility(window_id);
             }
             return None;
         }

@@ -648,7 +648,7 @@ fn plain_csi_u_is_still_restore_cursor() {
 fn visibility_query_reports_current_visibility_regardless_of_mode() {
     let mut t = run(b"\x1b[?998n");
     assert_eq!(t.take_pending_writes(), b"\x1b[?999;1n");
-    assert_eq!(t.set_visible(false), None, "mode 2033 is off");
+    assert!(!t.set_visible(false), "mode 2033 is off");
     Stream::new().feed(b"\x1b[?998n", &mut t);
     assert_eq!(t.take_pending_writes(), b"\x1b[?999;2n");
 }
@@ -672,11 +672,22 @@ fn enabling_mode_2033_sends_the_current_visibility_every_time() {
 fn visibility_changes_report_only_while_mode_2033_is_set() {
     let mut t = run(b"\x1b[?2033h");
     t.take_pending_writes();
-    assert_eq!(t.set_visible(false), Some(&b"\x1b[?999;2n"[..]));
-    assert_eq!(t.set_visible(false), None, "duplicates are ignored");
-    assert_eq!(t.set_visible(true), Some(&b"\x1b[?999;1n"[..]));
+    assert!(t.set_visible(false));
+    assert!(!t.set_visible(false), "duplicates are ignored");
+    assert!(t.set_visible(true));
+    assert_eq!(t.take_pending_writes(), b"\x1b[?999;2n\x1b[?999;1n");
     Stream::new().feed(b"\x1b[?2033l", &mut t);
-    assert_eq!(t.set_visible(false), None);
+    assert!(!t.set_visible(false));
+    assert!(t.pending_writes.is_empty());
+}
+
+#[test]
+fn visibility_changes_queue_behind_earlier_replies() {
+    let mut t = run(b"\x1b[?2033h");
+    t.take_pending_writes();
+    Stream::new().feed(b"\x1b[?998n", &mut t);
+    assert!(t.set_visible(false));
+    assert_eq!(t.take_pending_writes(), b"\x1b[?999;1n\x1b[?999;2n");
 }
 
 #[test]
@@ -691,7 +702,7 @@ fn mode_2033_is_reported_by_decrqm() {
 fn replica_terminals_never_send_visibility_reports() {
     let mut t = run(b"\x1b[?2033h");
     t.set_reply_writes_enabled(false);
-    assert_eq!(t.set_visible(false), None);
+    assert!(!t.set_visible(false));
     Stream::new().feed(b"\x1b[?998n", &mut t);
     assert!(t.take_pending_writes().is_empty());
 }

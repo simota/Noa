@@ -438,6 +438,24 @@ fn scroll_to_prompt_jumps_between_prompt_marks() {
 }
 
 #[test]
+fn scroll_to_prompt_skips_continuation_prompts() {
+    // history = [p0, k1, k2, x, p1, y] on a 2-row screen: p0's two
+    // continuation lines (`133;A;k=s`) are not jump targets.
+    let mut t = Terminal::new(GridSize::new(20, 2));
+    let mut s = Stream::new();
+    s.feed(
+        b"\x1b]133;A\x07p0\r\n\x1b]133;A;k=s\x07k1\r\n\x1b]133;A;k=s\x07k2\r\nx\r\n",
+        &mut t,
+    );
+    s.feed(b"\x1b]133;A\x07p1\r\ny", &mut t);
+    t.scroll_viewport_to_bottom();
+    assert!(t.scroll_to_prompt(PromptJump::Prev));
+    assert_eq!(t.viewport_offset(), 4, "lands on p0, not k2");
+    assert!(t.scroll_to_prompt(PromptJump::Next));
+    assert_eq!(t.viewport_offset(), 0, "skips k1/k2 on the way back to p1");
+}
+
+#[test]
 fn scroll_to_prompt_without_marks_is_a_noop() {
     let mut t = run_size(20, 3, b"hello\r\nworld\r\nfoo\r\nbar\r\n");
     let before = t.viewport_offset();

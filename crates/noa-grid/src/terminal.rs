@@ -1145,7 +1145,7 @@ impl Terminal {
         let target = self
             .shell_marks
             .iter()
-            .filter(|mark| mark.kind == ShellIntegrationMarkKind::PromptStart)
+            .filter(|mark| mark.kind == ShellIntegrationMarkKind::PromptStart && !mark.continuation)
             .map(|mark| mark.point.y)
             .filter(|&abs| abs >= rows_evicted)
             .fold(None, |best: Option<usize>, abs| match direction {

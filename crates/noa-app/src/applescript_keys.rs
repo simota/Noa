@@ -725,6 +725,7 @@ mod tests {
             false,
             kitty_flags,
             false,
+            false,
             pressed,
             false,
         )

@@ -443,6 +443,7 @@ fn application_copy_bytes(terminal: &noa_grid::Terminal) -> Option<Vec<u8>> {
             false,
             flags,
             false,
+            false,
             pressed,
             false,
         )

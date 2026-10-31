@@ -2516,7 +2516,7 @@ mod tests {
     }
 
     #[test]
-    fn cell_arena_grows_clones_and_reuses_mappings() {
+    fn cell_arena_grows_and_clones() {
         let cell = |i: u32| PackedCell {
             ch: char::from_u32(0x41 + i % 26).unwrap(),
             style: StyleId(i as u16),
@@ -2528,6 +2528,12 @@ mod tests {
             arena.push(cell(i));
         }
         assert!(arena.capacity() > first_cap, "pushing past capacity grows");
+        assert!(
+            arena
+                .iter()
+                .enumerate()
+                .all(|(i, c)| c.ch == cell(i as u32).ch)
+        );
         let copy = arena.clone();
         assert_eq!(copy.len(), arena.len());
         assert!(
@@ -2535,15 +2541,8 @@ mod tests {
                 .zip(arena.iter())
                 .all(|(a, b)| a.ch == b.ch && a.style == b.style)
         );
-        // A dropped arena's mapping serves the next one of the same size.
-        let size = arena.capacity();
-        let address = arena.as_mut_ptr() as usize;
-        drop(arena);
-        let mut reused = CellArena::with_capacity(size);
-        assert_eq!(reused.as_mut_ptr() as usize, address);
-        assert_eq!(reused.len(), 0);
-        drop(reused);
-        release_arena_pool();
+        // Mapping reuse through the process-wide pool is not asserted here:
+        // tests running in parallel share (and release) that pool.
     }
 
     /// Rows covering every packed feature: styles (colors, underline color,

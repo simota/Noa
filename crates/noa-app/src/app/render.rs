@@ -624,12 +624,6 @@ impl App {
                 };
                 focused_cwd_update = proxy_icon_update(&state.proxy_icon_cwd, cwd);
             }
-            if term.take_scrollback_decompressed() {
-                // History read back in (a scroll or search) stays resident
-                // until the next idle trim; schedule it as output would.
-                self.memory_trim_deadline =
-                    Some(Instant::now() + super::timers::MEMORY_TRIM_QUIESCENCE);
-            }
             if term.viewport_offset() > 0 {
                 scroll_thumbs.push(sidebar::ScrollThumb {
                     rect: render_pane_rect(surface.rect),
@@ -706,6 +700,14 @@ impl App {
                     }
                 }
             };
+            // Checked after the snapshot read the viewport's rows, so a page
+            // this frame decompressed counts: history read back in (a scroll
+            // or a search) stays resident until the next idle trim, which is
+            // scheduled here as output would.
+            if term.take_scrollback_decompressed() {
+                self.memory_trim_deadline =
+                    Some(Instant::now() + super::timers::MEMORY_TRIM_QUIESCENCE);
+            }
             snapshot.search_prompt = self
                 .search_prompt
                 .as_ref()

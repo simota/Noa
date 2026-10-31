@@ -54,6 +54,7 @@ pub fn encode_key(
         false,
         0,
         false,
+        false,
         true,
         false,
     )
@@ -74,6 +75,11 @@ pub fn encode_key(
 /// as `CSI 27 ; mods ; codepoint ~` instead of the legacy C0/ESC forms. The
 /// Kitty protocol, when active, still takes precedence.
 ///
+/// `backarrow_key_mode` mirrors DECBKM (mode 67): when set, Backspace sends
+/// BS (0x08) and Ctrl+Backspace sends DEL (0x7f), swapping the defaults.
+/// Other modifier combinations and the Kitty protocol ignore it, as in
+/// Ghostty.
+///
 /// `alt_sends_esc` says whether Alt held with this press should ESC-prefix the
 /// produced text. On macOS the Option key composes characters unless
 /// `macos-option-as-alt` claims it, so the caller retains the press's verdict
@@ -90,6 +96,7 @@ pub fn encode_key_with_modes(
     app_keypad: bool,
     kitty_flags: u8,
     modify_other_keys: bool,
+    backarrow_key_mode: bool,
     pressed: bool,
     repeat: bool,
 ) -> Option<Vec<u8>> {
@@ -183,8 +190,21 @@ pub fn encode_key_with_modes(
         }
         Key::Named(NamedKey::Backspace) => {
             // Ctrl+Backspace sends BS (0x08); Alt prefixes ESC so readline
-            // deletes a word (Ghostty/Terminal.app behavior).
-            let byte = if mods.control_key() { 0x08 } else { 0x7f };
+            // deletes a word (Ghostty/Terminal.app behavior). DECBKM swaps
+            // the two bytes for bare and Ctrl-only Backspace; Ghostty leaves
+            // every Shift/Alt/Super combination as it was.
+            // Under the Kitty protocol a bare Backspace falls back to this
+            // path but stays DEL: Kitty has no DECBKM.
+            let swap = backarrow_key_mode
+                && kitty_flags == 0
+                && !mods.shift_key()
+                && !mods.alt_key()
+                && !mods.super_key();
+            let byte = if mods.control_key() != swap {
+                0x08
+            } else {
+                0x7f
+            };
             Some(alt_prefixed(vec![byte], mods))
         }
         Key::Named(NamedKey::Tab) => {
@@ -216,6 +236,7 @@ pub(crate) fn encode_enter_key(kitty_flags: u8) -> Vec<u8> {
         false,
         false,
         kitty_flags,
+        false,
         false,
         true,
         false,

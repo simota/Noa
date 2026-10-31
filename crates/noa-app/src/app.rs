@@ -964,12 +964,12 @@ impl App {
             .map(|state| state.window.clone())
     }
 
-    /// The three keyboard-encoding modes read on every key-encode pass,
-    /// returned `(app_cursor_keys, app_keypad, kitty_keyboard_flags)` under a
-    /// single terminal lock. One acquisition rather than three keeps the
+    /// The keyboard-encoding modes read on every key-encode pass, returned
+    /// `(app_cursor_keys, app_keypad, kitty_keyboard_flags,
+    /// modify_other_keys_2, backarrow_key_mode)` under a single terminal lock. One acquisition rather than three keeps the
     /// key-input path off the io thread's output-batch lock longer than
     /// necessary (input-latency under heavy pty output).
-    fn key_encode_modes(&self, window_id: WindowId) -> (bool, bool, u8, bool) {
+    fn key_encode_modes(&self, window_id: WindowId) -> (bool, bool, u8, bool, bool) {
         self.windows
             .get(&window_id)
             .and_then(WindowState::focused_surface)
@@ -980,9 +980,10 @@ impl App {
                     terminal.modes.app_keypad(),
                     terminal.kitty_keyboard_flags(),
                     terminal.modify_other_keys_2,
+                    terminal.modes.backarrow_key_mode(),
                 )
             })
-            .unwrap_or((false, false, 0, false))
+            .unwrap_or((false, false, 0, false, false))
     }
 
     fn focus_reporting(&self, window_id: WindowId) -> bool {

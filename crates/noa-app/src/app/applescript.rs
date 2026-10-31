@@ -725,20 +725,21 @@ impl App {
             option_as_alt,
             crate::applescript_keys::translate_with_current_layout,
         );
-        let (app_cursor_keys, app_keypad, kitty_flags, modify_other_keys) = self
-            .windows
-            .get(&window_id)
-            .and_then(|state| state.surfaces.get(&pane_id))
-            .map(|surface| {
-                let terminal = surface.terminal.lock();
-                (
-                    terminal.modes.app_cursor_keys(),
-                    terminal.modes.app_keypad(),
-                    terminal.kitty_keyboard_flags(),
-                    terminal.modify_other_keys_2,
-                )
-            })
-            .unwrap_or((false, false, 0, false));
+        let (app_cursor_keys, app_keypad, kitty_flags, modify_other_keys, backarrow_key_mode) =
+            self.windows
+                .get(&window_id)
+                .and_then(|state| state.surfaces.get(&pane_id))
+                .map(|surface| {
+                    let terminal = surface.terminal.lock();
+                    (
+                        terminal.modes.app_cursor_keys(),
+                        terminal.modes.app_keypad(),
+                        terminal.kitty_keyboard_flags(),
+                        terminal.modify_other_keys_2,
+                        terminal.modes.backarrow_key_mode(),
+                    )
+                })
+                .unwrap_or((false, false, 0, false, false));
         let bytes = input::encode_key_with_modes(
             &resolved.logical,
             Some(&resolved.unmodified),
@@ -750,6 +751,7 @@ impl App {
             app_keypad,
             kitty_flags,
             modify_other_keys,
+            backarrow_key_mode,
             pressed,
             false,
         );

@@ -1187,8 +1187,13 @@ impl ApplicationHandler<UserEvent> for App {
                 ) {
                     return;
                 }
-                let (app_cursor_keys, app_keypad, kitty_flags, modify_other_keys) =
-                    self.key_encode_modes(window_id);
+                let (
+                    app_cursor_keys,
+                    app_keypad,
+                    kitty_flags,
+                    modify_other_keys,
+                    backarrow_key_mode,
+                ) = self.key_encode_modes(window_id);
                 let unmodified_key = event.key_without_modifiers();
                 let bytes = input::encode_key_with_modes(
                     &event.logical_key,
@@ -1201,6 +1206,7 @@ impl ApplicationHandler<UserEvent> for App {
                     app_keypad,
                     kitty_flags,
                     modify_other_keys,
+                    backarrow_key_mode,
                     pressed,
                     event.repeat,
                 );

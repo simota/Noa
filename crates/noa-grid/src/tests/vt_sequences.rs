@@ -706,3 +706,16 @@ fn replica_terminals_never_send_visibility_reports() {
     Stream::new().feed(b"\x1b[?998n", &mut t);
     assert!(t.take_pending_writes().is_empty());
 }
+
+// ── DECBKM (mode 67) ────────────────────────────────────────────────
+
+#[test]
+fn decbkm_is_tracked_and_reported_by_decrqm() {
+    let mut t = run(b"\x1b[?67$p");
+    assert_eq!(t.take_pending_writes(), b"\x1b[?67;2$y");
+    Stream::new().feed(b"\x1b[?67h\x1b[?67$p", &mut t);
+    assert!(t.modes.backarrow_key_mode());
+    assert_eq!(t.take_pending_writes(), b"\x1b[?67;1$y");
+    Stream::new().feed(b"\x1b[?67l", &mut t);
+    assert!(!t.modes.backarrow_key_mode());
+}

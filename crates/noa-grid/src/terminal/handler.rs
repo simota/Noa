@@ -357,6 +357,7 @@ impl Handler for Terminal {
             | (25, false)
             | (47, false)
             | (66, false)
+            | (67, false)
             | (69, false)
             | (1004, false)
             | (1000, false)

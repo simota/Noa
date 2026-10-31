@@ -81,6 +81,7 @@ impl ModeState {
                     | 25
                     | 47
                     | 66
+                    | 67
                     | 69
                     | 1000
                     | 1002
@@ -160,6 +161,10 @@ impl ModeState {
     /// OSC 5522 listing of the clipboard's types instead of its text.
     pub fn kitty_paste_events(&self) -> bool {
         self.get(5522, false)
+    }
+    /// DECSET 67 (DECBKM) — Backspace sends BS instead of DEL.
+    pub fn backarrow_key_mode(&self) -> bool {
+        self.get(67, false)
     }
     /// DECSET 2033 — report window visibility changes (`CSI ? 999 ; Ps n`).
     pub fn report_visibility(&self) -> bool {

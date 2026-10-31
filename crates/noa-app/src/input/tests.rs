@@ -71,6 +71,7 @@ fn bench_encode_key_with_modes() {
                 false,
                 kitty_flags,
                 false,
+                false,
                 true,
                 false,
             ));
@@ -330,6 +331,68 @@ fn backspace_is_del() {
     );
 }
 
+/// Encode a Backspace press with DECBKM (mode 67) set or reset.
+fn backspace_with_decbkm(mods: ModifiersState, kitty_flags: u8, decbkm: bool) -> Option<Vec<u8>> {
+    encode_key_with_modes(
+        &Key::Named(NamedKey::Backspace),
+        None,
+        None,
+        None,
+        mods,
+        true,
+        false,
+        false,
+        kitty_flags,
+        false,
+        decbkm,
+        true,
+        false,
+    )
+}
+
+#[test]
+fn decbkm_swaps_bare_and_ctrl_backspace() {
+    let none = ModifiersState::empty();
+    let ctrl = ModifiersState::CONTROL;
+    assert_eq!(backspace_with_decbkm(none, 0, false), Some(vec![0x7f]));
+    assert_eq!(backspace_with_decbkm(none, 0, true), Some(vec![0x08]));
+    assert_eq!(backspace_with_decbkm(ctrl, 0, false), Some(vec![0x08]));
+    assert_eq!(backspace_with_decbkm(ctrl, 0, true), Some(vec![0x7f]));
+}
+
+#[test]
+fn decbkm_leaves_other_backspace_combinations_alone() {
+    // Ghostty's DECBKM sequences exist only for bare and Ctrl-only Backspace.
+    for (mods, expected) in [
+        (ModifiersState::ALT, vec![0x1b, 0x7f]),
+        (
+            ModifiersState::ALT | ModifiersState::CONTROL,
+            vec![0x1b, 0x08],
+        ),
+        (ModifiersState::SHIFT, vec![0x7f]),
+        (ModifiersState::CONTROL | ModifiersState::SHIFT, vec![0x08]),
+    ] {
+        assert_eq!(
+            backspace_with_decbkm(mods, 0, true),
+            Some(expected),
+            "{mods:?}"
+        );
+    }
+}
+
+#[test]
+fn decbkm_does_not_change_kitty_backspace() {
+    let flags = KITTY_DISAMBIGUATE | KITTY_REPORT_ALL_KEYS;
+    assert_eq!(
+        backspace_with_decbkm(ModifiersState::empty(), flags, true),
+        backspace_with_decbkm(ModifiersState::empty(), flags, false)
+    );
+    assert_eq!(
+        backspace_with_decbkm(ModifiersState::empty(), KITTY_DISAMBIGUATE, true),
+        Some(vec![0x7f])
+    );
+}
+
 #[test]
 fn tab_and_escape() {
     assert_eq!(
@@ -470,6 +533,7 @@ fn composed_option_text_passes_through_without_esc() {
             false,
             0,
             false,
+            false,
             true,
             false,
         ),
@@ -527,6 +591,7 @@ fn application_keypad_uses_ss3_for_numpad_digits_and_enter() {
             true,
             0,
             false,
+            false,
             true,
             false,
         ),
@@ -543,6 +608,7 @@ fn application_keypad_uses_ss3_for_numpad_digits_and_enter() {
             false,
             true,
             0,
+            false,
             false,
             true,
             false,
@@ -565,6 +631,7 @@ fn numeric_keypad_uses_text_or_standard_enter() {
             false,
             0,
             false,
+            false,
             true,
             false,
         ),
@@ -581,6 +648,7 @@ fn numeric_keypad_uses_text_or_standard_enter() {
             false,
             false,
             0,
+            false,
             false,
             true,
             false,
@@ -916,7 +984,7 @@ fn kitty_press(
     flags: u8,
 ) -> Option<Vec<u8>> {
     encode_key_with_modes(
-        logical, None, None, text, mods, true, false, false, flags, false, true, false,
+        logical, None, None, text, mods, true, false, false, flags, false, false, true, false,
     )
 }
 
@@ -1099,6 +1167,7 @@ fn kitty_shifted_symbol_reports_unshifted_base_key() {
             false,
             KITTY_REPORT_ALTERNATE_KEYS,
             false,
+            false,
             true,
             false,
         ),
@@ -1146,6 +1215,7 @@ fn kitty_event_types_report_release_and_repeat() {
             KITTY_REPORT_EVENT_TYPES,
             false,
             false,
+            false,
             // released
             false,
         ),
@@ -1163,6 +1233,7 @@ fn kitty_event_types_report_release_and_repeat() {
             false,
             false,
             KITTY_REPORT_EVENT_TYPES,
+            false,
             false,
             true,
             true, // repeat
@@ -1188,6 +1259,7 @@ fn kitty_release_of_text_key_without_report_all_is_dropped() {
             false,
             false,
             false,
+            false,
         ),
         None
     );
@@ -1209,6 +1281,7 @@ fn kitty_modifier_key_alone_reported_only_with_report_all() {
             false,
             KITTY_REPORT_ALL_KEYS,
             false,
+            false,
             true,
             false,
         ),
@@ -1226,6 +1299,7 @@ fn kitty_modifier_key_alone_reported_only_with_report_all() {
             false,
             false,
             KITTY_DISAMBIGUATE,
+            false,
             false,
             true,
             false,
@@ -1258,14 +1332,14 @@ fn legacy_release_sends_nothing() {
     for (logical, text, mods) in cases {
         assert!(
             encode_key_with_modes(
-                &logical, None, None, text, mods, true, false, false, 0, false, true, false
+                &logical, None, None, text, mods, true, false, false, 0, false, false, true, false
             )
             .is_some(),
             "press {logical:?} should still send"
         );
         assert_eq!(
             encode_key_with_modes(
-                &logical, None, None, text, mods, true, false, false, 0, false, false, false
+                &logical, None, None, text, mods, true, false, false, 0, false, false, false, false
             ),
             None,
             "release {logical:?} should send nothing"
@@ -1290,6 +1364,7 @@ fn kitty_event_types_repeat_legacy_keys_but_drop_their_release() {
             false,
             flags,
             false,
+            false,
             true,
             true, // repeat
         ),
@@ -1306,6 +1381,7 @@ fn kitty_event_types_repeat_legacy_keys_but_drop_their_release() {
             false,
             false,
             flags,
+            false,
             false,
             true,
             true, // repeat
@@ -1327,6 +1403,7 @@ fn kitty_event_types_repeat_legacy_keys_but_drop_their_release() {
             false,
             false,
             false,
+            false,
         ),
         None
     );
@@ -1341,6 +1418,7 @@ fn kitty_event_types_repeat_legacy_keys_but_drop_their_release() {
             false,
             false,
             flags,
+            false,
             false,
             false,
             false,
@@ -1359,6 +1437,7 @@ fn kitty_event_types_repeat_legacy_keys_but_drop_their_release() {
             false,
             false,
             flags,
+            false,
             false,
             true,
             true,
@@ -1380,6 +1459,7 @@ fn kitty_keypad_uses_dedicated_codes_under_report_all() {
             false,
             false,
             KITTY_REPORT_ALL_KEYS,
+            false,
             false,
             true,
             false,
@@ -1419,6 +1499,7 @@ fn ctrl_alt_letter_keeps_the_alt_esc_prefix() {
         false,
         0,
         false,
+        false,
         true,
         false,
     );
@@ -1434,6 +1515,7 @@ fn ctrl_alt_letter_keeps_the_alt_esc_prefix() {
         false,
         false,
         0,
+        false,
         false,
         true,
         false,
@@ -1455,6 +1537,7 @@ fn modify_other_keys_2_reports_modified_characters() {
             false,
             0,
             true,
+            false,
             true,
             false,
         )
@@ -1505,6 +1588,7 @@ fn modify_other_keys_2_preserves_shifted_symbols_and_layout_characters() {
                 false,
                 0,
                 true,
+                false,
                 true,
                 false,
             );
@@ -1533,6 +1617,7 @@ fn modify_other_keys_full_reset_restores_legacy_ctrl_bytes() {
             terminal.modes.app_keypad(),
             terminal.kitty_keyboard_flags(),
             terminal.modify_other_keys_2,
+            false,
             true,
             false,
         )
@@ -1558,6 +1643,7 @@ fn modify_other_keys_off_keeps_legacy_ctrl_bytes() {
         false,
         0,
         false,
+        false,
         true,
         false,
     );
@@ -1577,6 +1663,7 @@ fn kitty_flags_take_precedence_over_modify_other_keys() {
         false,
         1,
         true,
+        false,
         true,
         false,
     );
@@ -1601,6 +1688,7 @@ fn kitty_composing_option_is_not_alt() {
             false,
             false,
             flags,
+            false,
             false,
             true,
             false,
@@ -1639,6 +1727,7 @@ fn kitty_composing_option_is_not_alt() {
             false,
             false,
             false,
+            false,
         ),
         None
     );
@@ -1665,6 +1754,7 @@ fn option_classification_survives_repeat_and_release_per_physical_key() {
             false,
             false,
             flags,
+            false,
             false,
             false,
             false,
@@ -1704,6 +1794,7 @@ fn kitty_keypad_enter_uses_its_dedicated_code() {
             false,
             flags,
             false,
+            false,
             true,
             false,
         )
@@ -1736,6 +1827,7 @@ fn kitty_keypad_enter_uses_its_dedicated_code() {
             false,
             false,
             flags,
+            false,
             false,
             true,
             false,

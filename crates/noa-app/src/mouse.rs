@@ -98,6 +98,11 @@ impl MouseSelectionState {
         }
     }
 
+    /// Whether the held left button has moved off the cell it pressed.
+    pub fn is_dragging(&self) -> bool {
+        self.drag_started
+    }
+
     pub fn left_released(&mut self) -> SelectionGesture {
         self.cancel_drag();
         SelectionGesture::None

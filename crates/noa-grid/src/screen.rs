@@ -247,6 +247,10 @@ pub struct Screen {
     pub grid: RingGrid,
     pub cursor: Cursor,
     pub selection: Option<Selection>,
+    /// The OSC 133;A `click_events` mode the shell's latest prompt asked for
+    /// on this screen (Ghostty's `semantic_prompt.click`). It persists until
+    /// another prompt sets it; RIS rebuilds the screen, which clears it.
+    pub(crate) prompt_click_events: Option<crate::osc::PromptClickEvents>,
     pub search: SearchState,
     pub saved_cursor: Option<SavedCursor>,
     pub region: ScrollRegion,
@@ -316,6 +320,7 @@ impl Screen {
                 .into(),
             cursor: Cursor::default(),
             selection: None,
+            prompt_click_events: None,
             search: SearchState::default(),
             saved_cursor: None,
             region: ScrollRegion {

@@ -809,7 +809,15 @@ impl Handler for Terminal {
             return;
         }
         if let Some(action) = parse_shell_integration_osc(data) {
-            if let ShellIntegrationOsc::Mark { kind, exit_status } = action {
+            if let ShellIntegrationOsc::Mark {
+                kind,
+                exit_status,
+                click_events,
+            } = action
+            {
+                if click_events.is_some() {
+                    self.active_mut().prompt_click_events = click_events;
+                }
                 let kind = match kind {
                     ShellIntegrationOscKind::PromptStart => ShellIntegrationMarkKind::PromptStart,
                     ShellIntegrationOscKind::InputStart => ShellIntegrationMarkKind::InputStart,

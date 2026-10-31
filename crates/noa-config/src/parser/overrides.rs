@@ -35,6 +35,7 @@ pub(crate) fn build_overrides(
     let mut confirm_quit = None;
     let mut title_report = None;
     let mut scrollback_compression = None;
+    let mut cursor_click_to_move = None;
     let mut window_padding_x = None;
     let mut window_padding_y = None;
     let mut background = None;
@@ -223,6 +224,9 @@ pub(crate) fn build_overrides(
             }
             "scrollback-compression" => {
                 scrollback_compression = parse_bool_directive(path, directive, &mut diagnostics);
+            }
+            "cursor-click-to-move" => {
+                cursor_click_to_move = parse_bool_directive(path, directive, &mut diagnostics);
             }
             "window-padding-x" => {
                 window_padding_x = parse_non_negative_f32(path, directive, &mut diagnostics);
@@ -505,6 +509,7 @@ pub(crate) fn build_overrides(
             confirm_quit,
             title_report,
             scrollback_compression,
+            cursor_click_to_move,
             window_padding_x,
             window_padding_y,
             background,
@@ -624,6 +629,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "confirm-quit"
             | "title-report"
             | "scrollback-compression"
+            | "cursor-click-to-move"
             | "window-padding-x"
             | "window-padding-y"
             | "background"

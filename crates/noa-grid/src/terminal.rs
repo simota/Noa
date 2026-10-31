@@ -18,7 +18,8 @@ use crate::kitty::ImageStore;
 use crate::kitty_keyboard::KittyKeyboard;
 use crate::modes::ModeState;
 use crate::osc::{
-    Notification, Osc52Policy, ProgressCue, ProgressUpdate, TerminalColors, TerminalProgress,
+    Notification, Osc52Policy, ProgressCue, ProgressUpdate, PromptClickEvents, TerminalColors,
+    TerminalProgress,
 };
 use crate::screen::Screen;
 use crate::search::SearchMatch;
@@ -684,6 +685,40 @@ impl Terminal {
                     ShellIntegrationMarkKind::PromptStart | ShellIntegrationMarkKind::InputStart
                 )
             })
+    }
+
+    /// Ghostty's `Surface.maybePromptClick` for OSC 133 `click_events`: the
+    /// SGR left press to send the shell for a plain left click at viewport
+    /// cell `point`. `None` unless the shell's prompt asked for click events,
+    /// the cursor is at that prompt, and the click is at or after the
+    /// prompt's start — later rows included, since the shell validates
+    /// out-of-range clicks itself (as Kitty and Ghostty do).
+    pub fn prompt_click_report(&self, point: Point) -> Option<String> {
+        let mode = self.primary.prompt_click_events?;
+        if !self.cursor_is_at_prompt() {
+            return None;
+        }
+        let rows_evicted = self.primary.rows_evicted();
+        let cursor_abs =
+            rows_evicted + self.primary.scrollback_len() + usize::from(self.primary.cursor.y);
+        let prompt = self
+            .shell_marks
+            .iter()
+            .rev()
+            .find(|mark| {
+                mark.kind == ShellIntegrationMarkKind::PromptStart && mark.point.y <= cursor_abs
+            })?
+            .point;
+        let click = self.primary.viewport_point_to_selection_point(point);
+        let click_abs = rows_evicted + click.y;
+        if (click_abs, click.x) < (prompt.y, prompt.x) {
+            return None;
+        }
+        let row = match mode {
+            PromptClickEvents::Absolute => usize::from(point.y) + 1,
+            PromptClickEvents::Relative => click_abs - prompt.y + 1,
+        };
+        Some(format!("\x1b[<0;{};{row}M", point.x + 1))
     }
 
     /// Ghostty parity: `Termio.clearScreen(history=true)` — the `clear_screen`

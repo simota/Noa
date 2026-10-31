@@ -15,6 +15,36 @@ const PATH_PROBE_CACHE_CAP: usize = 1024;
 const PATH_PROBE_MAX_IN_FLIGHT: usize = 16;
 
 impl App {
+    /// OSC 133 `click_events`: a plain left click (no drag, no selection
+    /// left behind) at the shell's prompt is sent to the shell as an SGR
+    /// left press so it can move its cursor there (`cursor-click-to-move`).
+    pub(in crate::app) fn send_prompt_click(&mut self, window_id: WindowId, pane_id: PaneId) {
+        if !self.config.cursor_click_to_move {
+            return;
+        }
+        let Some(surface) = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&pane_id))
+        else {
+            return;
+        };
+        let Some(cell) = surface.last_mouse_cell else {
+            return;
+        };
+        let report = {
+            let terminal = surface.terminal.lock();
+            if terminal.active().selection.is_some() {
+                return;
+            }
+            terminal.prompt_click_report(cell)
+        };
+        if let Some(report) = report {
+            self.mark_pane_user_input(window_id, pane_id);
+            self.write_pane_pty_bytes(window_id, pane_id, report.into_bytes());
+        }
+    }
+
     pub(in crate::app) fn apply_selection_gesture(
         &mut self,
         window_id: WindowId,

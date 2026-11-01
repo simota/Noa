@@ -673,7 +673,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Moved(_) => self.refresh_redraw_floor(window_id),
             WindowEvent::Resized(size) => {
                 if let Some(state) = self.windows.get_mut(&window_id) {
-                    state.vt_resize_pending = None;
+                    window_resize::acknowledge_window_resize(&mut state.vt_resize_pending, size);
                 }
                 self.end_copy_mode_for_window(window_id);
                 self.close_context_menu(window_id);

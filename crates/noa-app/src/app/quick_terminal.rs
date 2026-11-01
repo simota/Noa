@@ -849,7 +849,7 @@ impl App {
                 file_drop: FileDropState::default(),
                 resize_throttle: crate::debounce::Throttle::new(RESIZE_REFLOW_THROTTLE_INTERVAL),
                 last_grid: None,
-                vt_resize_pending: None,
+                vt_resize_pending: Vec::new(),
                 resize_overlay: None,
                 bell_flash_until: None,
                 native_overlays: Default::default(),

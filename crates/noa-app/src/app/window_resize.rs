@@ -7,6 +7,11 @@ use super::*;
 const MIN_RESIZE_COLS: u16 = 40;
 const MIN_RESIZE_ROWS: u16 = 10;
 
+/// Off macOS, how many unacknowledged `CSI 8 t` sizes a window remembers. A
+/// window system that never answers must not grow the list without bound.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+const MAX_PENDING_RESIZES: usize = 8;
+
 impl App {
     /// Resize `window_id` so its terminal is `request`'s grid size. Ignored
     /// unless the config allows it and the pane is the only terminal in a
@@ -61,8 +66,12 @@ impl App {
         #[cfg(not(target_os = "macos"))]
         {
             let live = state.window.inner_size();
-            let mut target =
-                window_resize_target_inner(request, (dw, dh), live, state.vt_resize_pending);
+            let mut target = window_resize_target_inner(
+                request,
+                (dw, dh),
+                live,
+                state.vt_resize_pending.last().copied(),
+            );
             if let Some(monitor) = state.window.current_monitor() {
                 target.width = target.width.min(monitor.size().width);
                 target.height = target.height.min(monitor.size().height);
@@ -74,12 +83,19 @@ impl App {
             target.height = target.height.min(max_texture_dim);
             // Compared with the live size only: a pending size the window
             // manager silently refused must not swallow a repeat request.
-            if state.vt_resize_pending.is_none() && target == live {
+            if state.vt_resize_pending.is_empty() && target == live {
                 return;
             }
             let applied = state.window.request_inner_size(target);
             if let Some(state) = self.windows.get_mut(&window_id) {
-                state.vt_resize_pending = applied.is_none().then_some(target);
+                if applied.is_some() {
+                    state.vt_resize_pending.clear();
+                } else {
+                    if state.vt_resize_pending.len() == MAX_PENDING_RESIZES {
+                        state.vt_resize_pending.remove(0);
+                    }
+                    state.vt_resize_pending.push(target);
+                }
             }
             // Applied immediately: no `Resized` is guaranteed, so fold the new
             // size into the surface, layout and pty now (as the quick terminal
@@ -88,6 +104,22 @@ impl App {
                 self.on_resize(window_id, size);
             }
         }
+    }
+}
+
+/// Settle `pending` (oldest first) against a `Resized` to `size`. A size we
+/// asked for acknowledges that request and every older one, so a late answer
+/// to an earlier request keeps the newer ones. Any other size means the
+/// window system chose its own, so nothing we asked for is still on its way.
+pub(super) fn acknowledge_window_resize(
+    pending: &mut Vec<PhysicalSize<u32>>,
+    size: PhysicalSize<u32>,
+) {
+    match pending.iter().position(|requested| *requested == size) {
+        Some(index) => {
+            pending.drain(..=index);
+        }
+        None => pending.clear(),
     }
 }
 
@@ -206,6 +238,24 @@ mod tests {
             window_resize_target_inner(request(0, 100), (180, 0), live, None),
             PhysicalSize::new(980, 500)
         );
+    }
+
+    #[test]
+    fn a_late_resize_keeps_newer_pending_sizes() {
+        let first = PhysicalSize::new(800, 600);
+        let second = PhysicalSize::new(980, 600);
+        let mut pending = vec![first, second];
+        acknowledge_window_resize(&mut pending, first);
+        assert_eq!(pending, vec![second]);
+        acknowledge_window_resize(&mut pending, second);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn an_unrequested_resize_clears_every_pending_size() {
+        let mut pending = vec![PhysicalSize::new(800, 600), PhysicalSize::new(980, 600)];
+        acknowledge_window_resize(&mut pending, PhysicalSize::new(640, 480));
+        assert!(pending.is_empty());
     }
 
     #[test]

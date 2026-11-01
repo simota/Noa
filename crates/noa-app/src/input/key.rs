@@ -131,10 +131,17 @@ pub fn encode_key_with_modes(
         return None;
     }
 
+    // Keypad keys come first, as in Ghostty's PC-style function key table:
+    // a modifier never turns them into a C0 byte or a modifyOtherKeys report.
+    if let Some(bytes) = keypad_bytes(logical_key, physical_key, mods, app_keypad) {
+        return Some(bytes);
+    }
+
     // xterm modifyOtherKeys level 2: a Character key with Ctrl/Alt/Super
     // reports its codepoint after Shift/layout translation plus the modifier
-    // value, so Ctrl+I is distinguishable from Tab. Shift alone (and Option
-    // composing text on macOS) stays on the legacy path.
+    // value, so Ctrl+I is distinguishable from Tab. With Shift alone only
+    // U+0040..U+007F and Space are reported (Option composing text on macOS
+    // doesn't count as Alt).
     if modify_other_keys
         && let Some(bytes) = modify_other_keys_bytes(logical_key, mods, alt_sends_esc)
     {
@@ -167,13 +174,6 @@ pub fn encode_key_with_modes(
         }
     }
 
-    if app_keypad
-        && modifier_value(mods).is_none()
-        && let Some(bytes) = application_keypad_bytes(physical_key)
-    {
-        return Some(bytes);
-    }
-
     match logical_key {
         Key::Named(NamedKey::Enter) => {
             // Shift+Enter sends ESC CR so legacy-protocol line editors
@@ -182,39 +182,40 @@ pub fn encode_key_with_modes(
             // here, which those apps print as garbage; the upstream-blessed
             // fix is `keybind = shift+enter=text:\x1b\r`, adopted as our
             // default. Kitty-protocol apps still get CSI 13;2u above.
-            if mods.shift_key() && !mods.control_key() && !mods.alt_key() {
-                Some(b"\x1b\r".to_vec())
-            } else {
-                Some(alt_prefixed(vec![0x0d], mods))
+            if mods == ModifiersState::SHIFT {
+                return Some(b"\x1b\r".to_vec());
             }
+            Some(pc_style_key_bytes(0x0d, b"\r", mods, modify_other_keys))
         }
         Key::Named(NamedKey::Backspace) => {
-            // Ctrl+Backspace sends BS (0x08); Alt prefixes ESC so readline
-            // deletes a word (Ghostty/Terminal.app behavior). DECBKM swaps
-            // the two bytes for bare and Ctrl-only Backspace; Ghostty leaves
-            // every Shift/Alt/Super combination as it was.
+            // Ghostty's table: Ctrl sends BS and every other modifier set
+            // DEL, Alt prefixing ESC so readline deletes a word. Under
+            // modifyOtherKeys 2 every set except bare Ctrl reports CSI 27.
+            // DECBKM swaps the two bytes for bare and Ctrl-only Backspace.
             // Under the Kitty protocol a bare Backspace falls back to this
             // path but stays DEL: Kitty has no DECBKM.
-            let swap = backarrow_key_mode
-                && kitty_flags == 0
-                && !mods.shift_key()
-                && !mods.alt_key()
-                && !mods.super_key();
-            let byte = if mods.control_key() != swap {
-                0x08
-            } else {
-                0x7f
-            };
+            let swap = backarrow_key_mode && kitty_flags == 0;
+            if mods.is_empty() {
+                return Some(vec![if swap { 0x08 } else { 0x7f }]);
+            }
+            if mods == ModifiersState::CONTROL {
+                return Some(vec![if swap { 0x7f } else { 0x08 }]);
+            }
+            if modify_other_keys {
+                return Some(csi27_bytes(0x7f, mods));
+            }
+            let byte = if mods.control_key() { 0x08 } else { 0x7f };
             Some(alt_prefixed(vec![byte], mods))
         }
         Key::Named(NamedKey::Tab) => {
-            if mods.shift_key() {
-                Some(b"\x1b[Z".to_vec()) // backtab
-            } else {
-                Some(vec![b'\t'])
+            if mods == ModifiersState::SHIFT && !modify_other_keys {
+                return Some(b"\x1b[Z".to_vec()); // backtab
             }
+            Some(pc_style_key_bytes(b'\t', b"\t", mods, modify_other_keys))
         }
-        Key::Named(NamedKey::Escape) => Some(vec![0x1b]),
+        Key::Named(NamedKey::Escape) => {
+            Some(pc_style_key_bytes(0x1b, b"\x1b", mods, modify_other_keys))
+        }
         Key::Named(named) => special_key_bytes(*named, mods, app_cursor_keys)
             .or_else(|| encode_key_text(text, mods, alt_sends_esc)),
         _ => encode_key_text(text, mods, alt_sends_esc),
@@ -271,19 +272,18 @@ fn alt_esc_prefixed(mut bytes: Vec<u8>, mods: ModifiersState, alt_sends_esc: boo
     bytes
 }
 
-/// xterm `modifyOtherKeys=2` encoding: `CSI 27 ; <mods> ; <codepoint> ~` for
-/// a Character (or Space) key pressed with Ctrl, Alt-as-modifier, or Super.
-/// The logical key preserves Shift and keyboard-layout translation, so
-/// Ctrl+Shift+1 on a US layout reports `33` (`!`) with the Shift bit.
+/// xterm `modifyOtherKeys=2` encoding, as Ghostty 1.4.0 copies xterm's
+/// `ModifyOtherKeys`: `CSI 27 ; <mods> ; <codepoint> ~` for a Character (or
+/// Space) key pressed with Ctrl, Alt-as-modifier, or Super, or with Shift
+/// alone when the codepoint is in U+0040..U+007F or is Space. The logical
+/// key preserves Shift and keyboard-layout translation, so Ctrl+Shift+1 on a
+/// US layout reports `33` (`!`) with the Shift bit.
 fn modify_other_keys_bytes(
     logical_key: &Key,
     mods: ModifiersState,
     alt_sends_esc: bool,
 ) -> Option<Vec<u8>> {
     let alt = mods.alt_key() && alt_sends_esc;
-    if !(mods.control_key() || alt || mods.super_key()) {
-        return None;
-    }
     let codepoint = match logical_key {
         Key::Character(s) => {
             let mut chars = s.chars();
@@ -295,6 +295,13 @@ fn modify_other_keys_bytes(
         Key::Named(NamedKey::Space) => u32::from(' '),
         _ => return None,
     };
+    let modified = mods.control_key()
+        || alt
+        || mods.super_key()
+        || (mods.shift_key() && (matches!(codepoint, 0x40..=0x7f) || codepoint == 0x20));
+    if !modified {
+        return None;
+    }
     let mut value = 1;
     if mods.shift_key() {
         value += 1;
@@ -318,31 +325,77 @@ fn alt_prefixed(mut bytes: Vec<u8>, mods: ModifiersState) -> Vec<u8> {
     bytes
 }
 
-fn application_keypad_bytes(physical_key: Option<PhysicalKey>) -> Option<Vec<u8>> {
+/// Ghostty's keypad entries. With DECKPAM a key sends `SS3 <final>`, or
+/// `ESC O <mods> <final>` with modifiers; otherwise it sends its character
+/// whatever the modifiers. Only keys that produce their character (Num Lock
+/// on) qualify; the navigation keys a keypad sends otherwise are named keys.
+fn keypad_bytes(
+    logical_key: &Key,
+    physical_key: Option<PhysicalKey>,
+    mods: ModifiersState,
+    app_keypad: bool,
+) -> Option<Vec<u8>> {
     let PhysicalKey::Code(code) = physical_key? else {
         return None;
     };
-    let final_byte = match code {
-        KeyCode::Numpad0 => b'p',
-        KeyCode::Numpad1 => b'q',
-        KeyCode::Numpad2 => b'r',
-        KeyCode::Numpad3 => b's',
-        KeyCode::Numpad4 => b't',
-        KeyCode::Numpad5 => b'u',
-        KeyCode::Numpad6 => b'v',
-        KeyCode::Numpad7 => b'w',
-        KeyCode::Numpad8 => b'x',
-        KeyCode::Numpad9 => b'y',
-        KeyCode::NumpadDecimal => b'n',
-        KeyCode::NumpadAdd => b'k',
-        KeyCode::NumpadSubtract => b'm',
-        KeyCode::NumpadMultiply => b'j',
-        KeyCode::NumpadDivide => b'o',
-        KeyCode::NumpadEnter => b'M',
-        KeyCode::NumpadEqual => b'X',
+    let (final_byte, text) = match code {
+        KeyCode::Numpad0 => (b'p', b'0'),
+        KeyCode::Numpad1 => (b'q', b'1'),
+        KeyCode::Numpad2 => (b'r', b'2'),
+        KeyCode::Numpad3 => (b's', b'3'),
+        KeyCode::Numpad4 => (b't', b'4'),
+        KeyCode::Numpad5 => (b'u', b'5'),
+        KeyCode::Numpad6 => (b'v', b'6'),
+        KeyCode::Numpad7 => (b'w', b'7'),
+        KeyCode::Numpad8 => (b'x', b'8'),
+        KeyCode::Numpad9 => (b'y', b'9'),
+        KeyCode::NumpadDecimal => (b'n', b'.'),
+        KeyCode::NumpadAdd => (b'k', b'+'),
+        KeyCode::NumpadSubtract => (b'm', b'-'),
+        KeyCode::NumpadMultiply => (b'j', b'*'),
+        KeyCode::NumpadDivide => (b'o', b'/'),
+        KeyCode::NumpadEnter => (b'M', b'\r'),
         _ => return None,
     };
-    Some(vec![0x1b, b'O', final_byte])
+    if code != KeyCode::NumpadEnter && !matches!(logical_key, Key::Character(_)) {
+        return None;
+    }
+    Some(match (app_keypad, mods_value(mods)) {
+        (false, _) => vec![text],
+        (true, 1) => vec![0x1b, b'O', final_byte],
+        (true, value) => format!("\x1bO{value}{}", final_byte as char).into_bytes(),
+    })
+}
+
+/// xterm's modifier parameter: 1 plus Shift 1, Alt 2, Ctrl 4, Super 8.
+fn mods_value(mods: ModifiersState) -> u8 {
+    1 + u8::from(mods.shift_key())
+        + 2 * u8::from(mods.alt_key())
+        + 4 * u8::from(mods.control_key())
+        + 8 * u8::from(mods.super_key())
+}
+
+/// `CSI 27 ; <mods> ; <code> ~`, xterm's modifyOtherKeys form.
+fn csi27_bytes(code: u8, mods: ModifiersState) -> Vec<u8> {
+    format!("\x1b[27;{};{code}~", mods_value(mods)).into_bytes()
+}
+
+/// Ghostty's table for Enter, Tab and Escape: the plain key sends `plain`;
+/// Alt alone ESC-prefixes it unless modifyOtherKeys 2 is on; every other
+/// modifier set reports `CSI 27 ; <mods> ; <code> ~`.
+fn pc_style_key_bytes(
+    code: u8,
+    plain: &[u8],
+    mods: ModifiersState,
+    modify_other_keys: bool,
+) -> Vec<u8> {
+    if mods.is_empty() {
+        return plain.to_vec();
+    }
+    if mods == ModifiersState::ALT && !modify_other_keys {
+        return alt_prefixed(plain.to_vec(), mods);
+    }
+    csi27_bytes(code, mods)
 }
 
 fn encode_key_text(

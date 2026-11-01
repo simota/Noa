@@ -62,7 +62,7 @@ const ROW_ENCODED_BYTES: usize = 5;
 
 /// Ceiling on a single persisted hyperlink target.
 ///
-/// OSC 8 payloads are bounded only by the parser's 12 MiB `MAX_OSC_BYTES`, and
+/// Nothing in this module bounds an OSC 8 target, and
 /// a link lives in the side table rather than in any row, so one of them can
 /// carry a snapshot past its whole byte budget while the row walk sees nothing.
 /// A target longer than this is not something anyone is going to click; the
@@ -424,7 +424,7 @@ pub fn encode_tail(
 
     // The row walk above only accounts for row bodies. The style, hyperlink and
     // grapheme tables are written alongside them and are *not* bounded by cell
-    // count: one OSC 8 URI can reach the parser's 12 MiB ceiling on its own, so
+    // count: one OSC 8 URI can be far larger than its cells on its own, so
     // a link-heavy tail can blow a 1 MiB budget with a handful of rows. Encode
     // for real and drop the oldest rows until it fits, so the configured limit
     // is a limit rather than an estimate.

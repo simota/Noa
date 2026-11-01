@@ -78,10 +78,16 @@ impl Cell {
         self.ch == ' ' && self.grapheme.is_none()
     }
 
-    /// Longest legitimate cluster tails (subdivision flags: 6 tag scalars,
-    /// family ZWJ sequences: 7 scalars) fit well under this; anything past it
-    /// is a hostile or corrupt stream trying to grow one cell unboundedly.
-    pub const MAX_COMBINING_BYTES: usize = 64;
+    /// Ghostty 1.4.0 keeps at most 64 codepoints after a cell's base
+    /// (`page.grapheme_max_len`) and ignores the rest. Longest legitimate
+    /// cluster tails (subdivision flags: 6 tag scalars, family ZWJ sequences:
+    /// 7 scalars) fit well under this; it bounds a hostile or corrupt stream
+    /// trying to grow one cell unboundedly.
+    pub const MAX_COMBINING_CODEPOINTS: usize = 64;
+
+    /// The most UTF-8 bytes a tail of [`Self::MAX_COMBINING_CODEPOINTS`] can
+    /// take.
+    pub const MAX_COMBINING_BYTES: usize = Self::MAX_COMBINING_CODEPOINTS * 4;
 
     /// The combining-scalar tail attached to [`Self::ch`] (`""` when none).
     /// `&'static`: interned tails live for the process lifetime, so the text
@@ -92,7 +98,7 @@ impl Cell {
 
     pub fn push_combining(&mut self, c: char) {
         let current = self.combining();
-        if current.len() + c.len_utf8() > Self::MAX_COMBINING_BYTES {
+        if current.chars().count() >= Self::MAX_COMBINING_CODEPOINTS {
             return;
         }
         // Stack-built: this runs per scalar of every emoji/accent sequence.
@@ -110,7 +116,8 @@ impl Cell {
     /// Replace the whole combining tail (`""` clears it). Over-long or
     /// cap-rejected tails leave the cell tail-less rather than truncated.
     pub fn set_combining(&mut self, tail: &str) {
-        self.grapheme = if tail.is_empty() || tail.len() > Self::MAX_COMBINING_BYTES {
+        self.grapheme = if tail.is_empty() || tail.chars().count() > Self::MAX_COMBINING_CODEPOINTS
+        {
             None
         } else {
             grapheme::intern(tail)
@@ -480,16 +487,29 @@ mod tests {
     }
 
     #[test]
-    fn push_combining_caps_the_tail_length() {
+    fn push_combining_caps_the_tail_at_64_codepoints() {
         let mut cell = Cell::default();
-        // 64 bytes of two-byte scalars fill the cap exactly.
-        for _ in 0..32 {
-            cell.push_combining('\u{301}');
+        // 64 four-byte scalars fill the cap exactly, at its most bytes.
+        for _ in 0..Cell::MAX_COMBINING_CODEPOINTS {
+            cell.push_combining('\u{E0061}');
         }
         assert_eq!(cell.combining().len(), Cell::MAX_COMBINING_BYTES);
         // One more is rejected, tail unchanged.
         cell.push_combining('\u{302}');
-        assert_eq!(cell.combining().len(), Cell::MAX_COMBINING_BYTES);
+        assert_eq!(
+            cell.combining().chars().count(),
+            Cell::MAX_COMBINING_CODEPOINTS
+        );
         assert!(!cell.combining().contains('\u{302}'));
+    }
+
+    #[test]
+    fn set_combining_rejects_tails_over_64_codepoints() {
+        let mut cell = Cell::default();
+        let full = "\u{301}".repeat(Cell::MAX_COMBINING_CODEPOINTS);
+        cell.set_combining(&full);
+        assert_eq!(cell.combining(), full);
+        cell.set_combining(&format!("{full}\u{301}"));
+        assert_eq!(cell.combining(), "");
     }
 }

@@ -1149,24 +1149,26 @@ fn synthetic_seed_restores_the_pointer_shape() {
 }
 
 #[test]
-fn oversized_title_is_truncated_on_a_char_boundary() {
-    let mut input = b"\x1b]2;".to_vec();
-    input.extend("あ".repeat(4096).as_bytes());
-    input.push(0x07);
-    let t = run(&input);
-    assert!(t.title.len() <= crate::terminal::MAX_TITLE_BYTES);
-    assert!(t.title.chars().all(|c| c == 'あ'));
-    assert!(!t.title.is_empty());
+fn a_title_over_ghosttys_osc_limit_is_ignored() {
+    // Ghostty 1.4.0 drops an OSC whose payload passes 2048 bytes.
+    let title = |len: usize| {
+        let mut input = b"\x1b]2;kept\x07\x1b]2;".to_vec();
+        input.extend(std::iter::repeat_n(b'a', len));
+        input.push(0x07);
+        run(&input).title
+    };
+    assert_eq!(title(2048), "a".repeat(2048));
+    assert_eq!(title(2049), "kept");
 }
 
 #[test]
-fn oversized_hyperlink_uri_ends_the_open_link() {
+fn a_hyperlink_over_ghosttys_osc_limit_leaves_the_open_link() {
     let mut input = b"\x1b]8;;https://example.test/first\x1b\\A\x1b]8;;https://example.test/".to_vec();
-    input.extend(std::iter::repeat_n(b'a', crate::osc::MAX_HYPERLINK_URI_BYTES));
+    input.extend(std::iter::repeat_n(b'a', 2048));
     input.extend(b"\x1b\\B");
     let t = run(&input);
     assert!(cell(&t, 0, 0).hyperlink.is_some());
-    assert_eq!(cell(&t, 1, 0).hyperlink, None);
+    assert_eq!(cell(&t, 1, 0).hyperlink, cell(&t, 0, 0).hyperlink);
 }
 
 #[test]

@@ -13,10 +13,16 @@ use crate::action::{Action, OscTerminator};
 use crate::csi::{Csi, DcsPayload, Esc, Intermediates, MAX_PARAMS, Params, Separators};
 use crate::state::State;
 
-/// OSC payloads include OSC 52 clipboard writes, whose base64 must carry the
-/// grid's 8 MiB decoded clipboard cap (~10.7 MiB encoded) plus target/params.
-/// The buffer grows on demand; the cap only bounds a runaway unterminated OSC.
-const MAX_OSC_BYTES: usize = 12 * (1 << 20); // 12 MiB
+/// Ghostty 1.4.0's OSC limits (`osc.Parser.MAX_BUF` / `MAX_ALLOCATING_BUF`),
+/// counted after the `N;` that starts the payload: 2 KiB for most OSCs, and
+/// 8 MiB for those that carry bulk data ([`ALLOCATING_OSCS`]). An OSC over
+/// its limit is discarded whole. The buffer grows on demand.
+const MAX_OSC_BYTES: usize = 2048;
+const MAX_ALLOCATING_OSC_BYTES: usize = 8 * (1 << 20);
+/// The OSCs Ghostty gives the larger limit: clipboard (52), Kitty text
+/// sizing (66), drag and drop (72), notifications (99), Kitty clipboard
+/// (5522) and program status (7501).
+const ALLOCATING_OSCS: [&[u8]; 6] = [b"52", b"66", b"72", b"99", b"5522", b"7501"];
 /// DCS now carries SIXEL image data in addition to small query protocols.
 /// Overflow still drops the unterminated payload, but the cap must be large
 /// enough for ordinary CLI-generated images.
@@ -44,6 +50,8 @@ pub struct Parser {
     private: u8,
     osc: Vec<u8>,
     osc_overflow: bool,
+    /// The buffer length the OSC may reach, set once its first `;` is in.
+    osc_limit: Option<usize>,
     /// The OSC being captured ended with BEL.
     osc_bel: bool,
     dcs: Vec<u8>,
@@ -79,6 +87,7 @@ impl Parser {
             private: 0,
             osc: Vec::new(),
             osc_overflow: false,
+            osc_limit: None,
             osc_bel: false,
             dcs: Vec::new(),
             dcs_overflow: false,
@@ -441,12 +450,24 @@ impl Parser {
                 if self.osc_overflow {
                     return;
                 }
-                if self.osc.len() < MAX_OSC_BYTES {
+                // Before the first `;` only the number has arrived, which is
+                // never near the smaller limit.
+                if self.osc.len() < self.osc_limit.unwrap_or(MAX_OSC_BYTES) {
                     self.osc.push(b);
+                    if b == b';' && self.osc_limit.is_none() {
+                        let number = &self.osc[..self.osc.len() - 1];
+                        let max = if ALLOCATING_OSCS.contains(&number) {
+                            MAX_ALLOCATING_OSC_BYTES
+                        } else {
+                            MAX_OSC_BYTES
+                        };
+                        self.osc_limit = Some(self.osc.len() + max);
+                    }
                 } else {
-                    // Free, don't clear: the buffer is at its 12 MiB cap and
-                    // nothing accumulates until the runaway OSC terminates, so
-                    // clearing would pin the capacity for the parser's life.
+                    // Free, don't clear: the buffer may be at its 8 MiB cap
+                    // and nothing accumulates until the runaway OSC
+                    // terminates, so clearing would pin the capacity for the
+                    // parser's life.
                     self.osc = Vec::new();
                     self.osc_overflow = true;
                 }
@@ -728,6 +749,7 @@ impl Parser {
             State::OscString => {
                 self.osc = Vec::with_capacity(64);
                 self.osc_overflow = false;
+                self.osc_limit = None;
             }
             State::DcsPassthrough => {
                 self.dcs = Vec::with_capacity(64);

@@ -39,6 +39,8 @@ impl App {
             return;
         };
         let metrics = gpu.fonts.get(self.window_font_px(window_id)).metrics();
+        #[cfg(not(target_os = "macos"))]
+        let max_texture_dim = gpu.device.limits().max_texture_dimension_2d;
         // Measure from the pane bounds (the single pane's rect) derived from
         // the window's live size, not `surface.rect`, which lags until the
         // `Resized` of an earlier request is handled.
@@ -65,6 +67,11 @@ impl App {
                 target.width = target.width.min(monitor.size().width);
                 target.height = target.height.min(monitor.size().height);
             }
+            // The monitor can be unknown (a Wayland surface before it enters
+            // an output), and a size past the GPU's texture limit would fail
+            // surface configuration.
+            target.width = target.width.min(max_texture_dim);
+            target.height = target.height.min(max_texture_dim);
             // Compared with the live size only: a pending size the window
             // manager silently refused must not swallow a repeat request.
             if state.vt_resize_pending.is_none() && target == live {

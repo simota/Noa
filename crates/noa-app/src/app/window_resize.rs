@@ -35,14 +35,18 @@ impl App {
         if state.pane_count() != 1 || tabs != 1 || state.window.fullscreen().is_some() {
             return;
         }
-        let Some(surface) = state.focused_surface() else {
-            return;
-        };
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
         let metrics = gpu.fonts.get(self.window_font_px(window_id)).metrics();
-        let (dw, dh) = window_resize_delta_px(request, metrics, self.padding, surface.rect);
+        // Measure from the pane bounds (the single pane's rect) derived from
+        // the window's live size, not `surface.rect`, which lags until the
+        // `Resized` of an earlier request is handled.
+        let pane = self.window_pane_bounds(window_id);
+        let (dw, dh) = window_resize_delta_px(request, metrics, self.padding, pane);
+        if (dw, dh) == (0, 0) {
+            return;
+        }
         #[cfg(target_os = "macos")]
         {
             let scale = state.window.scale_factor();
@@ -51,11 +55,6 @@ impl App {
                 dw as f64 / scale,
                 dh as f64 / scale,
             );
-            // `Resized` arrives later through winit's queue, but the next
-            // request's delta is measured from `surface.rect`: relayout now
-            // from the frame AppKit already applied (`inner_size` reads it
-            // live) so back-to-back requests don't add the delta twice.
-            self.relayout_and_resize_window(window_id);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -66,15 +65,9 @@ impl App {
                 width = width.min(monitor.size().width);
                 height = height.min(monitor.size().height);
             }
-            // `Some` means the size applied immediately: relayout now, as on
-            // macOS, so the next request measures from the new pane rect.
-            if state
+            let _ = state
                 .window
-                .request_inner_size(PhysicalSize::new(width, height))
-                .is_some()
-            {
-                self.relayout_and_resize_window(window_id);
-            }
+                .request_inner_size(PhysicalSize::new(width, height));
         }
     }
 }

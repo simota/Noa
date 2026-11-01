@@ -327,7 +327,7 @@ pub(crate) fn handle_clipboard_osc(
 
 /// Longest OSC 8 URI kept. The registry caps the number of links, but each
 /// entry is stored for the life of the terminal, so without a per-URI bound
-/// output could pin `HYPERLINK_REGISTRY_CAP` × the 12 MiB OSC limit. A longer
+/// output could pin `HYPERLINK_REGISTRY_CAP` × the longest URI. A longer
 /// URI ends any open link, so the text it labels prints as plain text rather
 /// than keeping the previous link's target.
 pub(crate) const MAX_HYPERLINK_URI_BYTES: usize = 8192;

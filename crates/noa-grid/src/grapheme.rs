@@ -38,7 +38,7 @@ impl GraphemeId {
 }
 
 /// Hard cap on distinct interned tails. Each entry costs its string bytes
-/// (≤ [`crate::Cell::MAX_COMBINING_BYTES`]) plus map/vec overhead, so the
+/// (≤ [`crate::Cell::MAX_COMBINING_BYTES`], 256) plus map/vec overhead, so the
 /// worst case is a few hundred MB *if* a hostile stream mints the maximum —
 /// legitimate content (even kitty placeholder grids, which encode row/column
 /// pairs as diacritics) stays orders of magnitude below this.

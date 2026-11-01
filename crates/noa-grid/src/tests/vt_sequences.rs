@@ -354,7 +354,8 @@ fn combining_marks_are_capped_per_cell() {
         input.push('\u{0301}');
     }
     let t = run_size(10, 1, input.as_bytes());
-    assert!(cell(&t, 0, 0).combining().len() <= crate::cell::Cell::MAX_COMBINING_BYTES);
+    // Ghostty 1.4.0 keeps exactly the first 64 codepoints.
+    assert_eq!(cell(&t, 0, 0).combining(), "\u{0301}".repeat(64));
 }
 
 #[test]

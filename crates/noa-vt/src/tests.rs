@@ -455,33 +455,47 @@ fn osc133_prompt_mark_payload_captured() {
     );
 }
 
-#[test]
-fn osc_payload_over_limit_is_dropped() {
-    // One byte past the 12 MiB cap (sized for OSC 52 clipboard payloads).
-    let mut bytes = b"\x1b]0;".to_vec();
-    bytes.extend(std::iter::repeat_n(b'a', 12 * (1 << 20) + 1));
+/// Whether `OSC <number>;` followed by `len` payload bytes is dispatched.
+fn osc_dispatches(number: &str, len: usize) -> bool {
+    let mut bytes = format!("\x1b]{number};").into_bytes();
+    bytes.extend(std::iter::repeat_n(b'a', len));
     bytes.push(0x07);
+    actions(&bytes)
+        .iter()
+        .any(|action| matches!(action, Action::OscDispatch(..)))
+}
 
-    let acts = actions(&bytes);
+#[test]
+fn osc_payload_over_ghosttys_limit_is_dropped() {
+    // Ghostty 1.4.0 counts the payload after `N;`: 2048 bytes for most OSCs.
+    for number in ["0", "2", "7", "8", "9", "133", "777"] {
+        assert!(osc_dispatches(number, 2048), "OSC {number}");
+        assert!(!osc_dispatches(number, 2049), "OSC {number}");
+    }
+}
 
-    assert!(
-        !acts
-            .iter()
-            .any(|action| matches!(action, Action::OscDispatch(..)))
-    );
+#[test]
+fn bulk_osc_payloads_get_ghosttys_8_mib_limit() {
+    let max = 8 * (1 << 20);
+    for number in ["52", "66", "72", "99", "5522", "7501"] {
+        assert!(osc_dispatches(number, max), "OSC {number}");
+        assert!(!osc_dispatches(number, max + 1), "OSC {number}");
+    }
+    // Only the exact number counts.
+    assert!(!osc_dispatches("520", 4096));
 }
 
 #[test]
 fn osc_overflow_releases_the_buffer_allocation() {
-    // A runaway OSC that hits the cap must free the 12 MiB accumulation
+    // A runaway OSC that hits the cap must free the 8 MiB accumulation
     // buffer, not `clear()` it — clearing pins the capacity for the
     // parser's (i.e. the pane's) whole life.
     let mut parser = crate::parser::Parser::new();
     let mut sink = |_: Action| {};
-    for &b in b"\x1b]0;".iter() {
+    for &b in b"\x1b]52;".iter() {
         parser.advance(b, &mut sink);
     }
-    for _ in 0..(12 * (1 << 20) + 1) {
+    for _ in 0..(8 * (1 << 20) + 1) {
         parser.advance(b'a', &mut sink);
     }
     parser.advance(0x07, &mut sink); // BEL terminates the OSC

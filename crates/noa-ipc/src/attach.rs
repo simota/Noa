@@ -38,6 +38,9 @@ pub(crate) const ATTACH_BINARY_CHUNK_BYTES: usize = 64 * 1024;
 /// valid two-screen grid even when every cell carries full RGB/SGR state plus
 /// the bounded grapheme tail, while still bounding a peer that never sends
 /// the seed terminator.
+// #TODO(agent): UNVERIFIED — recheck this ceiling against the worst case now
+// that a cell's combining tail can hold 64 codepoints (`Cell::
+// MAX_COMBINING_CODEPOINTS`); the seed writes ~11–14 bytes per mark.
 pub(crate) const MAX_ATTACH_SEED_BYTES: usize = 512 * 1024 * 1024;
 
 /// Generations must remain unique across `Server::start` cycles. A registry is

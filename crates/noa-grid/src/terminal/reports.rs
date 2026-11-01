@@ -162,6 +162,11 @@ impl Terminal {
                 b"TN" => Some(b"noa".as_slice()),
                 b"RGB" => Some(b"8:8:8".as_slice()),
                 b"Co" => Some(b"256".as_slice()),
+                // Ghostty 1.4.0's terminfo entries, in xterm's encoded form.
+                b"Smol" => Some(b"\x1b[53m".as_slice()),
+                b"Rmol" => Some(b"\x1b[55m".as_slice()),
+                // `CSI 0 q` restores the configured `cursor-style`.
+                b"Se" => Some(b"\x1b[0 q".as_slice()),
                 _ => None,
             };
             if let Some(value) = value {

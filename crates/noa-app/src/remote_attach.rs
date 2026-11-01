@@ -1919,6 +1919,7 @@ fn feed_remote_bytes<N: ConnectionNotifier>(
     let _ = terminal.take_pending_clipboard_reads();
     let _ = terminal.take_pending_clipboard_writes();
     let _ = terminal.take_pending_kitty_clipboard();
+    let _ = terminal.take_pending_window_resize();
     notifier.publish_overview(&terminal);
     drop(terminal);
     if bell {

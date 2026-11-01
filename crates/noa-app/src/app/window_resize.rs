@@ -66,9 +66,15 @@ impl App {
                 width = width.min(monitor.size().width);
                 height = height.min(monitor.size().height);
             }
-            let _ = state
+            // `Some` means the size applied immediately: relayout now, as on
+            // macOS, so the next request measures from the new pane rect.
+            if state
                 .window
-                .request_inner_size(PhysicalSize::new(width, height));
+                .request_inner_size(PhysicalSize::new(width, height))
+                .is_some()
+            {
+                self.relayout_and_resize_window(window_id);
+            }
         }
     }
 }

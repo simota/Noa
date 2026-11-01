@@ -44,11 +44,11 @@ impl App {
         // `Resized` of an earlier request is handled.
         let pane = self.window_pane_bounds(window_id);
         let (dw, dh) = window_resize_delta_px(request, metrics, self.padding, pane);
-        if (dw, dh) == (0, 0) {
-            return;
-        }
         #[cfg(target_os = "macos")]
         {
+            if (dw, dh) == (0, 0) {
+                return;
+            }
             let scale = state.window.scale_factor();
             crate::macos_window::resize_window_by(
                 &state.window,
@@ -58,18 +58,47 @@ impl App {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let inner = state.window.inner_size();
-            let mut width = (i64::from(inner.width) + dw).max(1) as u32;
-            let mut height = (i64::from(inner.height) + dh).max(1) as u32;
+            let live = state.window.inner_size();
+            let mut target =
+                window_resize_target_inner(request, (dw, dh), live, state.vt_resize_pending);
             if let Some(monitor) = state.window.current_monitor() {
-                width = width.min(monitor.size().width);
-                height = height.min(monitor.size().height);
+                target.width = target.width.min(monitor.size().width);
+                target.height = target.height.min(monitor.size().height);
             }
-            let _ = state
-                .window
-                .request_inner_size(PhysicalSize::new(width, height));
+            if target == state.vt_resize_pending.unwrap_or(live) {
+                return;
+            }
+            let applied = state.window.request_inner_size(target).is_some();
+            if let Some(state) = self.windows.get_mut(&window_id) {
+                state.vt_resize_pending = (!applied).then_some(target);
+            }
         }
     }
+}
+
+/// The inner size to request off macOS, where a resize lands asynchronously:
+/// a requested axis is the live size plus its delta (both measured now), and
+/// a kept (zero) axis keeps the size still `pending` from an earlier request,
+/// so `8;30;0t` then `8;0;100t` don't undo each other before `Resized`.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(super) fn window_resize_target_inner(
+    request: noa_grid::WindowResizeRequest,
+    (dw, dh): (i64, i64),
+    live: PhysicalSize<u32>,
+    pending: Option<PhysicalSize<u32>>,
+) -> PhysicalSize<u32> {
+    let base = pending.unwrap_or(live);
+    let axis = |cells: u16, live: u32, delta: i64, base: u32| {
+        if cells == 0 {
+            base
+        } else {
+            (i64::from(live) + delta).max(1) as u32
+        }
+    };
+    PhysicalSize::new(
+        axis(request.cols, live.width, dw, base.width),
+        axis(request.rows, live.height, dh, base.height),
+    )
 }
 
 /// The change in physical pixels that makes `pane` hold `request`'s grid. A
@@ -146,6 +175,21 @@ mod tests {
         assert_eq!(
             window_resize_delta_px(request(30, 0), metrics(), GridPadding::ZERO, pane),
             (0, 108)
+        );
+    }
+
+    #[test]
+    fn kept_axis_inherits_a_pending_resize_off_macos() {
+        let live = PhysicalSize::new(800, 500);
+        let pending = Some(PhysicalSize::new(800, 600));
+        // `8;0;100t` while `8;30;0t`'s height is still pending.
+        assert_eq!(
+            window_resize_target_inner(request(0, 100), (180, 0), live, pending),
+            PhysicalSize::new(980, 600)
+        );
+        assert_eq!(
+            window_resize_target_inner(request(0, 100), (180, 0), live, None),
+            PhysicalSize::new(980, 500)
         );
     }
 

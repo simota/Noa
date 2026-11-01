@@ -83,6 +83,17 @@ pub struct ModeRequest {
     pub ansi: bool,
 }
 
+/// `DECRQCRA` request. Coordinates are 1-based and zero means the parameter
+/// was omitted; the page number (`Pg`) is dropped since there is one page.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct ChecksumRequest {
+    pub id: u16,
+    pub top: u16,
+    pub left: u16,
+    pub bottom: u16,
+    pub right: u16,
+}
+
 /// One complete line inside a [`Handler::print_ascii_lines`] batch: the
 /// (possibly empty) printable-ASCII text and whether its terminator was
 /// `CR LF` rather than a bare `LF`.
@@ -483,10 +494,16 @@ pub trait Handler {
     /// `XTVERSION` (`CSI > 0 q` / `CSI > q`) — report the terminal name/version.
     fn xtversion_query(&mut self) {}
     /// `XTWINOPS` (`CSI Ps ; Ps1 ; Ps2 t`) — window operation / report
-    /// request. Ghostty-parity subset only: `Ps` 14/16/18/21 report; 22/23
-    /// push/pop the window-title stack; every other `Ps` (4/8/9/10/19/20/…)
-    /// is ignored with no reply.
+    /// request. Ghostty-parity subset only: `Ps` 8 asks to resize the
+    /// window; 14/16/18/19/21 report; 22/23 push/pop the window-title stack;
+    /// every other `Ps` (4/9/10/20/…) is ignored with no reply.
     fn window_op(&mut self, _ps: u16, _p1: u16, _p2: u16) {}
+    /// `DECRQCRA` (`CSI Pi ; Pg ; Pt ; Pl ; Pb ; Pr * y`) — report the
+    /// checksum of a rectangle of the screen.
+    fn request_checksum(&mut self, _request: ChecksumRequest) {}
+    /// `XTCHECKSUM` (`CSI Ps # y`) — choose how `DECRQCRA` computes the
+    /// checksum (`Ps` is a bitset, omitted = 0).
+    fn select_checksum_extension(&mut self, _bits: u16) {}
 
     // ── Kitty keyboard protocol (`CSI ... u` with a private marker) ────
     /// `CSI ? u` — query the active progressive-enhancement flags; replies

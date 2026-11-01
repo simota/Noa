@@ -984,6 +984,7 @@ impl App {
             terminal.set_default_cursor_style(style);
         }
         terminal.title_report = self.config.title_report;
+        apply_xt_checksum_policy(&mut terminal, &self.config);
         terminal.scrollback_compression = self.config.scrollback_compression;
         terminal.set_scrollback_limit_bytes(self.config.scrollback_limit);
         terminal.set_kitty_image_limit(self.config.image_storage_limit);
@@ -1864,6 +1865,20 @@ pub(super) fn apply_clipboard_policy(terminal: &mut noa_grid::Terminal, config: 
     terminal.osc52_policy.allow_read = config.clipboard_read != noa_config::ClipboardAccess::Deny;
     terminal.osc52_policy.allow_write = config.clipboard_write != noa_config::ClipboardAccess::Deny;
     terminal.kitty_clipboard_write_limit = config.clipboard_write_limit_bytes;
+}
+
+/// DECRQCRA/XTCHECKSUM config. Like Ghostty, this also resets the variant a
+/// program chose with XTCHECKSUM to the configured one.
+pub(super) fn apply_xt_checksum_policy(terminal: &mut noa_grid::Terminal, config: &AppConfig) {
+    let ext = config.vt_xt_checksum_extension;
+    terminal.xt_checksum_report = config.vt_xt_checksum_report;
+    terminal.set_default_xt_checksum(noa_grid::XtChecksumFlags {
+        positive: !ext.negate,
+        no_attributes: !ext.attributes,
+        no_trim: !ext.trim,
+        undrawn: ext.undrawn,
+        full: ext.full,
+    });
 }
 
 #[cfg(test)]

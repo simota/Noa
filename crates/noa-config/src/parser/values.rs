@@ -9,7 +9,7 @@ use crate::{
     MIN_SIDEBAR_WIDTH, MacosOptionAsAlt, MacosTitlebarProxyIcon, MacosTitlebarStyle,
     PaletteOverride, QuickTerminalPosition, QuickTerminalScreen, QuickTerminalSize,
     QuickTerminalSizeDim, ResizeOverlay, ScratchTerminalSize, ScrollbackPersist,
-    SyntheticStyleMode, ThemeAppearancePair, ThemeSetting, WindowSaveState,
+    SyntheticStyleMode, ThemeAppearancePair, ThemeSetting, WindowSaveState, XtChecksumExtension,
 };
 
 use super::diagnostics::*;
@@ -839,6 +839,19 @@ pub(super) fn parse_resize_overlay(
             None
         }
     }
+}
+
+pub(super) fn parse_xt_checksum_extension(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<XtChecksumExtension> {
+    let value = directive.value.as_deref()?;
+    let parsed = XtChecksumExtension::parse(value);
+    if parsed.is_none() {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+    }
+    parsed
 }
 
 pub(super) fn parse_macos_option_as_alt(

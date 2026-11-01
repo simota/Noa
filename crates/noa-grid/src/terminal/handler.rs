@@ -530,6 +530,7 @@ impl Handler for Terminal {
         self.mouse_shift_capture = None;
         self.pending_bell = false;
         self.pending_window_resize = None;
+        self.xt_checksum = self.default_xt_checksum;
         self.kitty_keyboard.reset();
         self.modify_other_keys_2 = false;
         self.kitty_images.clear();
@@ -544,6 +545,7 @@ impl Handler for Terminal {
         // IRM (ANSI mode 4) off — DECSTR returns to replace mode.
         self.modes.set(4, true, false);
         self.charset = crate::charset::CharsetState::default();
+        self.xt_checksum = self.default_xt_checksum;
         let last_row = self.size.rows.saturating_sub(1);
         let screen = self.active_mut();
         screen.cursor.visible = true;
@@ -716,6 +718,41 @@ impl Handler for Terminal {
             22 if matches!(p1, 0 | 2) => self.push_title(),
             23 if matches!(p1, 0 | 2) => self.pop_title(),
             _ => {} // 4/9/10/20, icon-only push/pop, unknown Ps — ignore (Ghostty parity).
+        }
+    }
+
+    // Both gated on `vt-xt-checksum-report` (default off, Ghostty parity):
+    // asking one cell at a time reads back the whole screen, including other
+    // programs' output.
+    fn request_checksum(&mut self, request: noa_vt::ChecksumRequest) {
+        if !self.xt_checksum_report {
+            return;
+        }
+        let screen = self.active();
+        let origin = self.modes.origin_mode().then(|| {
+            (
+                screen.region.top,
+                screen.horizontal_margins.map_or(0, |m| m.left),
+            )
+        });
+        let sum = crate::xt_checksum::compute(
+            screen,
+            crate::xt_checksum::Rect {
+                top: request.top,
+                left: request.left,
+                bottom: request.bottom,
+                right: request.right,
+            },
+            origin,
+            self.xt_checksum,
+        );
+        self.pending_writes
+            .extend_from_slice(crate::xt_checksum::reply(request.id, sum).as_bytes());
+    }
+
+    fn select_checksum_extension(&mut self, bits: u16) {
+        if self.xt_checksum_report {
+            self.xt_checksum = crate::XtChecksumFlags::from_bits(bits);
         }
     }
 

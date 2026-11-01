@@ -27,6 +27,7 @@ pub mod snapshot;
 pub mod tabstops;
 pub mod terminal;
 pub mod url;
+mod xt_checksum;
 
 #[cfg(test)]
 mod tests;
@@ -56,3 +57,4 @@ pub use terminal::{
     PromptJump, ShellIntegrationMark, ShellIntegrationMarkKind, Terminal, WindowResizeRequest,
 };
 pub use url::{UrlMatch, detect_url_at_column};
+pub use xt_checksum::XtChecksumFlags;

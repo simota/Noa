@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use crate::action::Action;
 use crate::csi::{Csi, Esc, Intermediates, MAX_INTERMEDIATES, MAX_PARAMS, Params, Separators};
 use crate::handler::{
-    Charset, CharsetSlot, CursorStyle, DaKind, DsrKind, EraseDisplay, EraseLine, Handler,
-    ModeRequest,
+    Charset, CharsetSlot, ChecksumRequest, CursorStyle, DaKind, DsrKind, EraseDisplay, EraseLine,
+    Handler, ModeRequest,
 };
 use crate::parser::Parser;
 use crate::sgr::{SgrAttr, parse_sgr_into};
@@ -113,7 +113,8 @@ impl Stream {
 /// A CSI action that only reports state back to the application (the
 /// terminal queues a reply; nothing on screen can change): DSR (`CSI n`),
 /// DA1/DA2 (`CSI c` / `CSI > c`), DECRQM (`CSI ? Pd $ p`), XTVERSION
-/// (`CSI > q`), and the Kitty keyboard query (`CSI ? u`). Everything else —
+/// (`CSI > q`), the Kitty keyboard query (`CSI ? u`), and DECRQCRA
+/// (`CSI ... * y`). Everything else —
 /// prints, C0, other CSI/ESC/OSC/DCS/APC, and unknown sequences — counts as
 /// display-dirtying for [`Stream::take_display_dirty`].
 fn is_pure_query(action: &Action) -> bool {
@@ -130,8 +131,17 @@ fn is_pure_query_csi(csi: &Csi) -> bool {
         b'p' => csi.intermediates() == [b'$'],
         b'q' => csi.private == b'>' && csi.intermediates().is_empty(),
         b'u' => csi.private == b'?',
+        b'y' => csi.private == 0 && csi.intermediates() == [b'*'],
         _ => false,
     }
+}
+
+/// `params` padded with zeros (omitted) to `N`, or `None` when there are more
+/// than `N`.
+fn padded_params<const N: usize>(params: &[u16]) -> Option<[u16; N]> {
+    let mut out = [0; N];
+    out.get_mut(..params.len())?.copy_from_slice(params);
+    Some(out)
 }
 
 fn feed_parser<H: Handler>(
@@ -567,6 +577,24 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H, sgr_attrs: &mut Vec<SgrAttr>) 
             });
         }
         b'p' if csi.intermediates() == [b'!'] => h.soft_reset(), // DECSTR
+        // DECRQCRA. More than six parameters is malformed (as in Ghostty).
+        b'y' if csi.private == 0 && csi.intermediates() == [b'*'] => {
+            if let Some([id, _page, top, left, bottom, right]) = padded_params::<6>(csi.params()) {
+                h.request_checksum(ChecksumRequest {
+                    id,
+                    top,
+                    left,
+                    bottom,
+                    right,
+                });
+            }
+        }
+        // XTCHECKSUM. More than one parameter is malformed (as in Ghostty).
+        b'y' if csi.private == 0 && csi.intermediates() == [b'#'] => {
+            if let Some([bits]) = padded_params::<1>(csi.params()) {
+                h.select_checksum_extension(bits);
+            }
+        }
         b'q' if csi.private == 0 && csi.intermediates() == [b' '] => {
             // `param` collapses an explicit `0` to its default, but DECSCUSR 0
             // must reset to the configured default, so match the raw param:

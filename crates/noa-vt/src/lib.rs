@@ -26,8 +26,8 @@ mod tests;
 pub use action::{Action, OscTerminator};
 pub use csi::{Csi, DcsPayload, Esc};
 pub use handler::{
-    AsciiLine, AsciiLines, Charset, CharsetSlot, CursorStyle, DaKind, DsrKind, EraseDisplay,
-    EraseLine, Handler, ModeRequest, PlainSgrUnits, SgrAsciiLine, SgrAsciiLines,
+    AsciiLine, AsciiLines, Charset, CharsetSlot, ChecksumRequest, CursorStyle, DaKind, DsrKind,
+    EraseDisplay, EraseLine, Handler, ModeRequest, PlainSgrUnits, SgrAsciiLine, SgrAsciiLines,
 };
 pub use kitty_graphics::{
     KittyAction, KittyCompression, KittyDelete, KittyFormat, KittyGraphicsCommand, KittyMedium,

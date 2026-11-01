@@ -22,7 +22,7 @@ A from-scratch DFA parser plus a `Handler` trait separating parsing from state.
 
 - **Full C0 / CSI / SGR set** — 16-color + 256-color + truecolor, bold / faint / italic / inverse / invisible / strike, underline variants (single / double / curly / dotted / dashed)
 - **Cursor, erase, scroll, insert/delete families** — ICH / IL / DL / DCH / ECH / SU / SD / REP, etc.
-- **DA / DSR responses** — DA1 `ESC[?62;4;22c`, cursor position report (CPR, and DECXCPR `CSI ? 6 n` with page 1), etc.
+- **DA / DSR responses** — DA1 `ESC[?62;4;22c`, cursor position report (CPR, and DECXCPR `CSI ? 6 n` with page 1), DECRQCRA screen checksums (opt-in, `vt-xt-checksum-report`), etc.
 - **DEC private modes** — DECAWM, DECTCEM, DECCKM, DECNKM / DECPAM, DECBKM, DECLRMM, DECOM, etc.
 - **Mouse tracking** — X10 / 1000 / 1002 / 1003, encodings Legacy / UTF-8 (1005) / Urxvt (1015) / SGR (1006)
 - **OSC** — 0/2 (title, stack via 22/23), 7 (cwd), 8 (hyperlinks), 9/777 (notifications), 9;4 (task progress), 52 (clipboard, with policy), 5522 (Kitty clipboard protocol: multi-type read/write, paste events via mode 5522), 4 / color family, 133 (shell integration marks; `click_events` prompt clicks)
@@ -81,7 +81,7 @@ For the type, allowed values, defaults, and clamp/fallback rules of every key, s
 | Background image | `background-image`, `background-image-opacity/-position/-fit/-repeat/-interval` |
 | Cursor | `cursor-style`, `cursor-style-blink`, `cursor-stop-blinking-after` |
 | Bell | `visual-bell`, `audible-bell`, `audible-bell-dock-bounce`, `audible-bell-when-unfocused` |
-| Behavior | `scrollback-limit`, `scrollback-compression`, `cursor-click-to-move`, `vt-window-resize-allowed`, `clipboard-read`, `clipboard-write`, `clipboard-write-limit-bytes`, `clipboard-paste-protection`, `confirm-quit`, `alpha-blending`, `title-report`, `resize-overlay`, `auto-approve`, `send-selection-send-enter`, `ember` |
+| Behavior | `scrollback-limit`, `scrollback-compression`, `cursor-click-to-move`, `vt-window-resize-allowed`, `vt-xt-checksum-report`, `vt-xt-checksum-extension`, `clipboard-read`, `clipboard-write`, `clipboard-write-limit-bytes`, `clipboard-paste-protection`, `confirm-quit`, `alpha-blending`, `title-report`, `resize-overlay`, `auto-approve`, `send-selection-send-enter`, `ember` |
 | macOS | `macos-option-as-alt`, `macos-titlebar-style`, `macos-non-native-fullscreen`, `macos-titlebar-proxy-icon` |
 | Quick Terminal | `quick-terminal-hotkey/-size/-autohide` |
 | Scratch Terminal | `scratch-terminal-key/-size` |

@@ -100,6 +100,13 @@ pub struct Terminal {
     pub colors: TerminalColors,
     /// Policy for OSC 52 clipboard writes/queries.
     pub osc52_policy: Osc52Policy,
+    /// Whether DECRQCRA may report screen checksums, and XTCHECKSUM change
+    /// how they are computed (`vt-xt-checksum-report`).
+    pub xt_checksum_report: bool,
+    /// The checksum variant RIS and DECSTR restore (`vt-xt-checksum-extension`).
+    default_xt_checksum: crate::XtChecksumFlags,
+    /// The checksum variant DECRQCRA uses, as XTCHECKSUM last set it.
+    xt_checksum: crate::XtChecksumFlags,
     /// Whether `CSI 21 t` may report the window title (`title-report`).
     /// Off by default, matching Ghostty: the reply echoes program-settable
     /// text (OSC 0/2) back into the pty as input — an injection vector.
@@ -240,6 +247,9 @@ impl Terminal {
             colors: TerminalColors::default(),
             osc52_policy: Osc52Policy::default(),
             title_report: false,
+            xt_checksum_report: false,
+            default_xt_checksum: crate::XtChecksumFlags::default(),
+            xt_checksum: crate::XtChecksumFlags::default(),
             scrollback_compression: true,
             modify_other_keys_2: false,
             visible: true,
@@ -1000,6 +1010,14 @@ impl Terminal {
     /// otherwise. Mirrors [`Terminal::take_pending_writes`]'s drain shape.
     pub fn take_pending_bell(&mut self) -> bool {
         std::mem::take(&mut self.pending_bell)
+    }
+
+    /// Set the checksum variant RIS and DECSTR restore
+    /// (`vt-xt-checksum-extension`). Like a mode default, this also changes
+    /// the current variant.
+    pub fn set_default_xt_checksum(&mut self, flags: crate::XtChecksumFlags) {
+        self.default_xt_checksum = flags;
+        self.xt_checksum = flags;
     }
 
     /// Drain the `CSI 8 t` window-resize request since the previous call.

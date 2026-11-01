@@ -1293,6 +1293,7 @@ fn pure_report_queries_do_not_dirty_the_display() {
     assert!(!display_dirty_after(b"\x1b[4$p"), "DECRQM (ANSI)");
     assert!(!display_dirty_after(b"\x1b[>q"), "XTVERSION");
     assert!(!display_dirty_after(b"\x1b[?u"), "Kitty keyboard query");
+    assert!(!display_dirty_after(b"\x1b[1;1;1;1;1;1*y"), "DECRQCRA");
     assert!(
         !display_dirty_after(b"\x1b[6n\x1b[c\x1b[?2026$p\x1b[>q\x1b[?u"),
         "a whole capability-poll burst stays clean"

@@ -499,9 +499,14 @@ fn dispatch<H: Handler>(action: Action, h: &mut H, sgr_attrs: &mut Vec<SgrAttr>)
             }
         }
         Action::ApcDispatch { data } => {
-            // Only Kitty graphics (`G`) is captured; other APC strings are dropped.
+            // Only Kitty graphics (`G`) and the Glyph Protocol (`25a1;`) are
+            // captured; other APC strings are dropped.
             if let [b'G', rest @ ..] = data.as_slice() {
                 h.kitty_graphics(crate::kitty_graphics::parse(rest));
+            } else if let Some(rest) = data.strip_prefix(crate::glyph_protocol::APC_PREFIX)
+                && let Some(req) = crate::glyph_protocol::parse(rest)
+            {
+                h.glyph_protocol(req);
             }
         }
     }

@@ -12,6 +12,7 @@
 
 pub mod action;
 pub mod csi;
+pub mod glyph_protocol;
 pub mod handler;
 pub mod kitty_graphics;
 pub mod parser;
@@ -25,6 +26,7 @@ mod tests;
 
 pub use action::{Action, OscTerminator};
 pub use csi::{Csi, DcsPayload, Esc};
+pub use glyph_protocol::GlyphRequest;
 pub use handler::{
     AsciiLine, AsciiLines, Charset, CharsetSlot, ChecksumRequest, CursorStyle, DaKind, DsrKind,
     EraseDisplay, EraseLine, Handler, ModeRequest, PlainSgrUnits, SgrAsciiLine, SgrAsciiLines,

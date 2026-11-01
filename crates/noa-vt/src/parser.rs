@@ -31,6 +31,9 @@ pub(crate) const MAX_APC_BYTES: usize = 65 * (1 << 20);
 /// hundred bytes, so a longer control section is discarded like an
 /// over-limit payload.
 pub(crate) const MAX_APC_CONTROL_BYTES: usize = 4096;
+/// Ghostty 1.4.0's Glyph Protocol cap (`apc.Protocol.defaultMaxBytes`) on the
+/// data after `25a1;`: one base64 glyph outline.
+pub(crate) const MAX_GLYPH_APC_BYTES: usize = 1 << 20;
 
 /// The from-scratch VT parser. Cheap to construct; holds only small buffers.
 pub struct Parser {
@@ -173,15 +176,14 @@ impl Parser {
                     return None;
                 }
                 bytes.extend_from_slice(b"\x1b_");
-                if let Some(&first) = self.apc.first().filter(|&&f| f != b'G') {
-                    // A non-Kitty APC keeps only its first byte. After it, an
-                    // ASCII byte (not kept) resets the UTF-8 state the first
-                    // byte may have opened, and a lead byte restores the
-                    // real one.
-                    bytes.extend_from_slice(&[first, b'X']);
+                bytes.extend_from_slice(&self.apc);
+                if !captures_apc(&self.apc) {
+                    // Any other APC keeps only the bytes that told it apart.
+                    // After them, an ASCII byte (not kept) resets the UTF-8
+                    // state they may have opened, and a lead byte restores
+                    // the real one.
+                    bytes.push(b'X');
                     append_string_utf8_lead(&mut bytes, self.string_utf8_rem);
-                } else {
-                    bytes.extend_from_slice(&self.apc);
                 }
                 if self.state == State::ApcEscape {
                     bytes.push(0x1b);
@@ -488,11 +490,17 @@ impl Parser {
             0x9c if self.string_utf8_rem == 0 => self.finish_apc(sink), // 8-bit ST
             0x20..=0x7e | 0x80..=0xff => {
                 self.track_string_utf8(b);
-                // Only Kitty graphics (`G`) is captured; any other APC keeps
-                // just its first byte, so the stream drops it.
-                if !self.apc_overflow && self.apc.first().is_none_or(|&f| f == b'G') {
+                // Only Kitty graphics (`G`) and the Glyph Protocol (`25a1;`)
+                // are captured; any other APC keeps just the bytes that told
+                // it apart, so the stream drops it.
+                if !self.apc_overflow && captures_apc(&self.apc) {
+                    let max = if self.apc.first() == Some(&b'G') {
+                        MAX_APC_BYTES
+                    } else {
+                        MAX_GLYPH_APC_BYTES
+                    };
                     let room = match self.apc_data_start {
-                        Some(start) => MAX_APC_BYTES - (self.apc.len() - start),
+                        Some(start) => max - (self.apc.len() - start),
                         None => MAX_APC_CONTROL_BYTES.saturating_sub(self.apc.len()),
                     };
                     if room > 0 {
@@ -755,6 +763,17 @@ fn append_pending_utf8(bytes: &mut Vec<u8>, accumulator: u32, remaining: u8, min
     bytes.push(lead_mask | ((accumulator >> (consumed * 6)) as u8));
     for index in (0..consumed).rev() {
         bytes.push(0x80 | ((accumulator >> (index * 6)) as u8 & 0x3f));
+    }
+}
+
+/// Whether an APC that has buffered `apc` so far is still one the parser
+/// keeps: Kitty graphics (`G`), or the Glyph Protocol while `apc` is a
+/// prefix of `25a1;` or starts with it.
+fn captures_apc(apc: &[u8]) -> bool {
+    let glyph = crate::glyph_protocol::APC_PREFIX;
+    match apc.first() {
+        None | Some(b'G') => true,
+        Some(_) => glyph.starts_with(apc) || apc.starts_with(glyph),
     }
 }
 

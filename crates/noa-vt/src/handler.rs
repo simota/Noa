@@ -531,6 +531,9 @@ pub trait Handler {
     /// Kitty graphics command (`ESC _ G … ST`). Parsed by `noa-vt`; the grid
     /// layer decodes the payload, stores the image, and queues any reply.
     fn kitty_graphics(&mut self, _cmd: crate::kitty_graphics::KittyGraphicsCommand) {}
+    /// Glyph Protocol request (`ESC _ 25a1 ; … ST`). Parsed by `noa-vt`; the
+    /// grid layer keeps the glossary and queues any reply.
+    fn glyph_protocol(&mut self, _req: crate::glyph_protocol::GlyphRequest) {}
     /// `DECSTBM` — set the vertical scroll region (1-based; `bottom = 0` = last row).
     fn set_scroll_region(&mut self, _top: u16, _bottom: u16) {}
 }

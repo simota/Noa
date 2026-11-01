@@ -2051,3 +2051,26 @@ fn alt_prefixes_the_whole_non_ascii_text() {
         );
     }
 }
+
+#[test]
+fn kitty_flags_turn_off_modify_other_keys() {
+    let shift_a = |kitty_flags| {
+        encode_key_with_modes(
+            &Key::Character("A".into()),
+            Some(&Key::Character("a".into())),
+            Some(PhysicalKey::Code(KeyCode::KeyA)),
+            Some("A"),
+            ModifiersState::SHIFT,
+            true,
+            false,
+            false,
+            kitty_flags,
+            true,
+            false,
+            true,
+            false,
+        )
+    };
+    assert_eq!(shift_a(0), Some(b"\x1b[27;2;65~".to_vec()));
+    assert_eq!(shift_a(KITTY_DISAMBIGUATE), Some(b"A".to_vec()));
+}

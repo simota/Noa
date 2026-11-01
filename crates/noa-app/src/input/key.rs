@@ -131,6 +131,11 @@ pub fn encode_key_with_modes(
         return None;
     }
 
+    // Ghostty encodes with either the Kitty protocol or the legacy one, never
+    // both: a key the Kitty path leaves as text (Shift+A) must not become a
+    // modifyOtherKeys report when an app enabled both.
+    let modify_other_keys = modify_other_keys && kitty_flags == 0;
+
     // Shift+Enter's ESC CR (see the Enter arm below) covers the keypad Enter
     // too, as it did before the keypad table.
     if mods == ModifiersState::SHIFT

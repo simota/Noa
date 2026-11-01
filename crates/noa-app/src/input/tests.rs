@@ -301,7 +301,7 @@ fn shift_enter_is_esc_cr() {
         encode_key(&key, Some("\r"), ModifiersState::SHIFT, false),
         Some(b"\x1b\r".to_vec())
     );
-    // Ctrl/Alt combos keep the plain-CR (alt: ESC-prefixed CR) encoding.
+    // Shift with anything else follows Ghostty's table.
     assert_eq!(
         encode_key(
             &key,
@@ -309,7 +309,7 @@ fn shift_enter_is_esc_cr() {
             ModifiersState::SHIFT | ModifiersState::CONTROL,
             false
         ),
-        Some(vec![0x0d])
+        Some(b"\x1b[27;6;13~".to_vec())
     );
     assert_eq!(
         encode_key(
@@ -318,7 +318,7 @@ fn shift_enter_is_esc_cr() {
             ModifiersState::SHIFT | ModifiersState::ALT,
             true
         ),
-        Some(vec![0x1b, 0x0d])
+        Some(b"\x1b[27;4;13~".to_vec())
     );
 }
 
@@ -1556,8 +1556,13 @@ fn modify_other_keys_2_reports_modified_characters() {
         enc("x", ModifiersState::ALT),
         Some(b"\x1b[27;3;120~".to_vec())
     );
-    // Shift alone and unmodified keys stay legacy text.
-    assert_eq!(enc("A", ModifiersState::SHIFT), Some(b"A".to_vec()));
+    // Shift alone reports U+0040..U+007F and Space (xterm's
+    // `IsControlInput`); other shifted text and unmodified keys stay legacy.
+    assert_eq!(
+        enc("A", ModifiersState::SHIFT),
+        Some(b"\x1b[27;2;65~".to_vec())
+    );
+    assert_eq!(enc("!", ModifiersState::SHIFT), Some(b"!".to_vec()));
     assert_eq!(enc("a", ModifiersState::empty()), Some(b"a".to_vec()));
 }
 
@@ -1841,4 +1846,231 @@ fn kitty_keypad_enter_uses_its_dedicated_code() {
         digit(KITTY_DISAMBIGUATE, ModifiersState::CONTROL),
         Some(b"\x1b[57404;5u".to_vec())
     );
+}
+
+// ── Ghostty 1.4.0 legacy table (Backspace/Tab/Enter/Escape, keypad) ──
+
+/// A legacy press with `modify_other_keys` (xterm level 2) on or off.
+fn legacy_key(
+    key: Key,
+    physical: Option<PhysicalKey>,
+    text: Option<&str>,
+    mods: ModifiersState,
+    app_keypad: bool,
+    modify_other_keys: bool,
+) -> Option<Vec<u8>> {
+    encode_key_with_modes(
+        &key,
+        None,
+        physical,
+        text,
+        mods,
+        true,
+        false,
+        app_keypad,
+        0,
+        modify_other_keys,
+        false,
+        true,
+        false,
+    )
+}
+
+fn named(key: NamedKey, mods: ModifiersState, mok: bool) -> Option<Vec<u8>> {
+    legacy_key(Key::Named(key), None, None, mods, false, mok)
+}
+
+#[test]
+fn ctrl_alt_shift_backspace_matches_ghostty() {
+    let mods = ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT;
+    assert_eq!(
+        named(NamedKey::Backspace, mods, false),
+        Some(b"\x1b\x08".to_vec())
+    );
+    assert_eq!(
+        named(NamedKey::Backspace, mods, true),
+        Some(b"\x1b[27;8;127~".to_vec())
+    );
+}
+
+#[test]
+fn modify_other_keys_2_reports_modified_backspace_except_bare_ctrl() {
+    let shift = ModifiersState::SHIFT;
+    let ctrl = ModifiersState::CONTROL;
+    let alt = ModifiersState::ALT;
+    assert_eq!(
+        named(NamedKey::Backspace, shift, true),
+        Some(b"\x1b[27;2;127~".to_vec())
+    );
+    assert_eq!(
+        named(NamedKey::Backspace, alt, true),
+        Some(b"\x1b[27;3;127~".to_vec())
+    );
+    assert_eq!(named(NamedKey::Backspace, ctrl, true), Some(vec![0x08]));
+    assert_eq!(
+        named(NamedKey::Backspace, ModifiersState::empty(), true),
+        Some(vec![0x7f])
+    );
+    // Without it, Shift and Super leave DEL alone and Alt prefixes ESC.
+    assert_eq!(named(NamedKey::Backspace, shift, false), Some(vec![0x7f]));
+    assert_eq!(
+        named(NamedKey::Backspace, alt | shift, false),
+        Some(b"\x1b\x7f".to_vec())
+    );
+    assert_eq!(
+        named(NamedKey::Backspace, ctrl | shift, false),
+        Some(vec![0x08])
+    );
+}
+
+#[test]
+fn escape_follows_ghosttys_table() {
+    let alt = ModifiersState::ALT;
+    assert_eq!(
+        named(NamedKey::Escape, ModifiersState::empty(), true),
+        Some(vec![0x1b])
+    );
+    assert_eq!(
+        named(NamedKey::Escape, alt, false),
+        Some(b"\x1b\x1b".to_vec())
+    );
+    assert_eq!(
+        named(NamedKey::Escape, alt, true),
+        Some(b"\x1b[27;3;27~".to_vec())
+    );
+    for mok in [false, true] {
+        assert_eq!(
+            named(NamedKey::Escape, ModifiersState::SHIFT, mok),
+            Some(b"\x1b[27;2;27~".to_vec())
+        );
+        assert_eq!(
+            named(NamedKey::Escape, ModifiersState::CONTROL, mok),
+            Some(b"\x1b[27;5;27~".to_vec())
+        );
+    }
+}
+
+#[test]
+fn tab_and_enter_follow_ghosttys_table() {
+    let shift = ModifiersState::SHIFT;
+    let alt = ModifiersState::ALT;
+    let ctrl = ModifiersState::CONTROL;
+    assert_eq!(named(NamedKey::Tab, shift, false), Some(b"\x1b[Z".to_vec()));
+    assert_eq!(
+        named(NamedKey::Tab, shift, true),
+        Some(b"\x1b[27;2;9~".to_vec())
+    );
+    assert_eq!(named(NamedKey::Tab, alt, false), Some(b"\x1b\t".to_vec()));
+    assert_eq!(
+        named(NamedKey::Tab, alt, true),
+        Some(b"\x1b[27;3;9~".to_vec())
+    );
+    assert_eq!(named(NamedKey::Enter, alt, false), Some(b"\x1b\r".to_vec()));
+    assert_eq!(
+        named(NamedKey::Enter, alt, true),
+        Some(b"\x1b[27;3;13~".to_vec())
+    );
+    for mok in [false, true] {
+        assert_eq!(
+            named(NamedKey::Tab, ctrl, mok),
+            Some(b"\x1b[27;5;9~".to_vec())
+        );
+        assert_eq!(
+            named(NamedKey::Enter, ctrl, mok),
+            Some(b"\x1b[27;5;13~".to_vec())
+        );
+        assert_eq!(
+            named(NamedKey::Enter, ModifiersState::SUPER, mok),
+            Some(b"\x1b[27;9;13~".to_vec())
+        );
+    }
+}
+
+#[test]
+fn modified_keypad_keys_follow_ghosttys_table() {
+    let kp1 = |mods, app_keypad, mok| {
+        legacy_key(
+            Key::Character("1".into()),
+            Some(PhysicalKey::Code(KeyCode::Numpad1)),
+            Some("1"),
+            mods,
+            app_keypad,
+            mok,
+        )
+    };
+    let ctrl = ModifiersState::CONTROL;
+    // A modifier never makes a keypad key a C0 byte or a CSI 27 report.
+    assert_eq!(kp1(ctrl, false, true), Some(b"1".to_vec()));
+    assert_eq!(kp1(ModifiersState::ALT, false, false), Some(b"1".to_vec()));
+    assert_eq!(kp1(ctrl, true, true), Some(b"\x1bO5q".to_vec()));
+    assert_eq!(
+        kp1(ModifiersState::empty(), true, false),
+        Some(b"\x1bOq".to_vec())
+    );
+    let kp_enter = legacy_key(
+        Key::Named(NamedKey::Enter),
+        Some(PhysicalKey::Code(KeyCode::NumpadEnter)),
+        Some("\r"),
+        ctrl,
+        false,
+        true,
+    );
+    assert_eq!(kp_enter, Some(b"\r".to_vec()));
+    // Shift+Enter's ESC CR applies to the keypad Enter as well.
+    for app_keypad in [false, true] {
+        assert_eq!(
+            legacy_key(
+                Key::Named(NamedKey::Enter),
+                Some(PhysicalKey::Code(KeyCode::NumpadEnter)),
+                Some("\r"),
+                ModifiersState::SHIFT,
+                app_keypad,
+                false,
+            ),
+            Some(b"\x1b\r".to_vec())
+        );
+    }
+}
+
+#[test]
+fn alt_prefixes_the_whole_non_ascii_text() {
+    for text in ["é", "ő", "界", "😀", "ф"] {
+        let mut expected = vec![0x1b];
+        expected.extend_from_slice(text.as_bytes());
+        assert_eq!(
+            legacy_key(
+                Key::Character(text.into()),
+                None,
+                Some(text),
+                ModifiersState::ALT,
+                false,
+                false
+            ),
+            Some(expected),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn kitty_flags_turn_off_modify_other_keys() {
+    let shift_a = |kitty_flags| {
+        encode_key_with_modes(
+            &Key::Character("A".into()),
+            Some(&Key::Character("a".into())),
+            Some(PhysicalKey::Code(KeyCode::KeyA)),
+            Some("A"),
+            ModifiersState::SHIFT,
+            true,
+            false,
+            false,
+            kitty_flags,
+            true,
+            false,
+            true,
+            false,
+        )
+    };
+    assert_eq!(shift_a(0), Some(b"\x1b[27;2;65~".to_vec()));
+    assert_eq!(shift_a(KITTY_DISAMBIGUATE), Some(b"A".to_vec()));
 }

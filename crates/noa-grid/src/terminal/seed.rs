@@ -13,7 +13,7 @@ use crate::TerminalProgress;
 /// DEC private modes that affect client-mode input encoding or the replayed
 /// screen state. Alternate-screen selection is emitted separately because it
 /// must happen before repainting the visible grid.
-const REPLAYED_PRIVATE_MODES: [u16; 21] = [
+const REPLAYED_PRIVATE_MODES: [u16; 22] = [
     1,    // DECCKM
     6,    // DECOM
     7,    // DECAWM
@@ -30,6 +30,7 @@ const REPLAYED_PRIVATE_MODES: [u16; 21] = [
     1007, // alternate scroll
     1015, // urxvt mouse coordinates
     1016, // SGR-pixels mouse coordinates
+    1035, // keypad stays numeric under DECKPAM
     2004, // bracketed paste
     2026, // synchronized output
     2027, // grapheme clustering

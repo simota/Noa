@@ -1619,7 +1619,7 @@ fn modify_other_keys_full_reset_restores_legacy_ctrl_bytes() {
             ModifiersState::CONTROL,
             true,
             terminal.modes.app_cursor_keys(),
-            terminal.modes.app_keypad(),
+            terminal.modes.keypad_application_keys(),
             terminal.kitty_keyboard_flags(),
             terminal.modify_other_keys_2,
             false,
@@ -2073,4 +2073,24 @@ fn kitty_flags_turn_off_modify_other_keys() {
     };
     assert_eq!(shift_a(0), Some(b"\x1b[27;2;65~".to_vec()));
     assert_eq!(shift_a(KITTY_DISAMBIGUATE), Some(b"A".to_vec()));
+}
+
+#[test]
+fn deckpam_keypad_sends_digits_until_mode_1035_is_reset() {
+    let mut terminal = noa_grid::Terminal::new(noa_core::GridSize::new(80, 24));
+    let mut stream = noa_vt::Stream::new();
+    let kp1 = |terminal: &noa_grid::Terminal| {
+        legacy_key(
+            Key::Character("1".into()),
+            Some(PhysicalKey::Code(KeyCode::Numpad1)),
+            Some("1"),
+            ModifiersState::empty(),
+            terminal.modes.keypad_application_keys(),
+            false,
+        )
+    };
+    stream.feed(b"\x1b=", &mut terminal);
+    assert_eq!(kp1(&terminal), Some(b"1".to_vec()));
+    stream.feed(b"\x1b[?1035l", &mut terminal);
+    assert_eq!(kp1(&terminal), Some(b"\x1bOq".to_vec()));
 }

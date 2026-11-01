@@ -60,6 +60,7 @@ impl ModeState {
         m.set(7, false, true); // DECAWM
         m.set(25, false, true); // DECTCEM
         m.set(1007, false, true); // alternate scroll
+        m.set(1035, false, true); // ignore DECKPAM for the keypad's characters
         m.set(2027, false, true); // compose emoji in ordinary shell/agent output
         m
     }
@@ -96,6 +97,7 @@ impl ModeState {
                     | 1007
                     | 1015
                     | 1016
+                    | 1035
                     | 1047
                     | 1048
                     | 1049
@@ -148,6 +150,12 @@ impl ModeState {
     /// DECNKM / DECPAM — application keypad mode.
     pub fn app_keypad(&self) -> bool {
         self.get(66, false)
+    }
+    /// Whether keypad keys send application sequences: DECKPAM, unless
+    /// mode 1035 (xterm's `numLock` resource, on by default as in Ghostty)
+    /// keeps the keypad numeric.
+    pub fn keypad_application_keys(&self) -> bool {
+        self.app_keypad() && !self.get(1035, false)
     }
     /// DECLRMM — left/right margin mode.
     pub fn left_right_margin(&self) -> bool {

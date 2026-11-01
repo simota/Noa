@@ -30,7 +30,7 @@ A from-scratch DFA parser plus a `Handler` trait separating parsing from state.
 - **Kitty graphics protocol** — image command parsing + image-layer rendering
 - **Glyph Protocol** (APC `25a1`) — answers `s` / `q` / `r` / `c` like Ghostty 1.4.0: validates `glyf` registrations (simple glyphs only, no hinting, 64 KiB) into a per-terminal glossary of up to 1024 Private Use Area codepoints, cleared by RIS. Registered glyphs are not drawn (Ghostty 1.4.0 doesn't either)
 - **Sixel graphics** — parsing of `DCS Pa;Pb;Ph q ... ST`, Sixel rasterization, rendering through the existing image layer
-- **Legacy key encoding** — Ghostty 1.4.0's table: modified Backspace / Tab / Enter / Escape send `CSI 27 ; mods ; code ~` (except Alt alone, which ESC-prefixes, and Shift+Tab / Shift+Enter: `CSI Z` / `ESC CR`), xterm `modifyOtherKeys` level 2 (`CSI > 4 ; 2 m`), Alt ESC-prefixes the whole text, keypad keys keep their character (or `ESC O <mods> <final>` under DECKPAM) whatever the modifiers
+- **Legacy key encoding** — Ghostty 1.4.0's table: modified Backspace / Tab / Enter / Escape send `CSI 27 ; mods ; code ~` (except Alt alone, which ESC-prefixes, and Shift+Tab / Shift+Enter: `CSI Z` / `ESC CR`), xterm `modifyOtherKeys` level 2 (`CSI > 4 ; 2 m`), Alt ESC-prefixes the whole text, keypad keys keep their character (or `ESC O <mods> <final>` under DECKPAM once mode 1035, on by default as in Ghostty, is reset) whatever the modifiers
 - **Kitty keyboard protocol** — full support for all 5 flags (disambiguate / event-types / alternate-keys / all-keys / associated-text), push / pop / set stack
 - **Bracketed paste (2004) / full reset / DECSTR / DECALN**
 

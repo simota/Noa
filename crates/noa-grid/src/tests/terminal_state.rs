@@ -1663,3 +1663,21 @@ fn grapheme_outside_horizontal_margins_can_expand_to_screen_edge() {
     assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (9, 0));
     assert!(t.primary.cursor.pending_wrap);
 }
+
+#[test]
+fn mode_1035_keeps_the_keypad_numeric_under_deckpam_by_default() {
+    // Ghostty 1.4.0: mode 1035 is on by default, so DECKPAM alone doesn't
+    // make the keypad send application sequences.
+    let t = run(b"\x1b=\x1b[?1035$p");
+    assert!(t.modes.app_keypad());
+    assert!(!t.modes.keypad_application_keys());
+    assert_eq!(t.pending_writes, b"\x1b[?1035;1$y");
+
+    let t = run(b"\x1b=\x1b[?1035l\x1b[?1035$p");
+    assert!(t.modes.keypad_application_keys());
+    assert_eq!(t.pending_writes, b"\x1b[?1035;2$y");
+
+    // RIS restores the default.
+    let t = run(b"\x1b=\x1b[?1035l\x1bc\x1b=");
+    assert!(!t.modes.keypad_application_keys());
+}

@@ -508,8 +508,11 @@ impl Handler for Terminal {
         self.set_progress(None);
         self.invalidate_grid_coordinate_space();
         let scrollback_limit = self.primary.scrollback_limit_bytes();
+        let scrollback_limit_lines = self.primary.scrollback_limit_lines();
         self.primary = crate::screen::Screen::new(self.size.cols, self.size.rows);
         self.primary.set_scrollback_limit_bytes(scrollback_limit);
+        self.primary
+            .set_scrollback_limit_lines(scrollback_limit_lines);
         // The fresh screen starts from `Cursor::default()`; the user's
         // `cursor-style` (DECSCUSR 0's target) must survive RIS.
         self.primary.cursor.style = self.default_cursor_style;

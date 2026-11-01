@@ -662,6 +662,9 @@ impl App {
                 super::lifecycle::apply_xt_checksum_policy(&mut terminal, &self.config);
                 terminal.scrollback_compression = self.config.scrollback_compression;
                 terminal.set_scrollback_limit_bytes(self.config.scrollback_limit);
+                terminal.set_scrollback_limit_lines(
+                    self.config.scrollback_limit_lines.unwrap_or(usize::MAX),
+                );
                 terminal.set_kitty_image_limit(self.config.image_storage_limit);
             }
         }
@@ -808,6 +811,7 @@ fn terminal_policy_inputs_changed(previous: &AppConfig, next: &AppConfig) -> boo
         || previous.vt_xt_checksum_extension != next.vt_xt_checksum_extension
         || previous.scrollback_compression != next.scrollback_compression
         || previous.scrollback_limit != next.scrollback_limit
+        || previous.scrollback_limit_lines != next.scrollback_limit_lines
         || previous.image_storage_limit != next.image_storage_limit
 }
 

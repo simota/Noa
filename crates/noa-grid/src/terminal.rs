@@ -841,6 +841,12 @@ impl Terminal {
         self.primary.set_scrollback_limit_bytes(bytes);
     }
 
+    /// Set the scrollback row limit (`scrollback-limit-lines`; `usize::MAX`
+    /// for none), evicting immediately, like [`Self::set_scrollback_limit_bytes`].
+    pub fn set_scrollback_limit_lines(&mut self, lines: usize) {
+        self.primary.set_scrollback_limit_lines(lines);
+    }
+
     /// Set the Kitty/SIXEL image storage byte budget (`image-storage-limit`),
     /// evicting immediately if the new limit is smaller.
     pub fn set_kitty_image_limit(&mut self, bytes: usize) {

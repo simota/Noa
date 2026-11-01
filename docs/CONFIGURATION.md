@@ -149,6 +149,7 @@ or fails to decode, a diagnostic is shown and the background image is disabled.
 | Key | Accepted values | Default | Description |
 |---|---|---|---|
 | `scrollback-limit` | integer `>= 0` | `10000000` | Total byte count for scrollback. `0` disables it |
+| `scrollback-limit-lines` | integer `>= 0`, `unlimited` | `unlimited` | Most scrollback lines kept, not counting the screen; a soft-wrapped line counts once per row. With `scrollback-limit`, the first limit reached evicts. Eviction drops whole pages, so slightly more lines may be kept. `0` disables scrollback |
 | `clipboard-read` | `deny` / `false`, `ask`, `allow` / `true` | `ask` | Policy for programs reading the clipboard (OSC 52, OSC 5522) |
 | `clipboard-write` | `deny` / `false`, `ask`, `allow` / `true` | `allow` | Policy for programs writing the clipboard (OSC 52, OSC 5522) |
 | `clipboard-write-limit-bytes` | integer `>= 0`, `unlimited` | `67108864` (64 MiB) | Largest OSC 5522 clipboard write; over it the write fails with `EFBIG`. `0` rejects every non-empty write |

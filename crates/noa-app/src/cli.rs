@@ -409,6 +409,13 @@ fn show_config_output(config: &StartupConfig) -> String {
     );
     push_line(
         &mut out,
+        "scrollback-limit-lines",
+        &config
+            .scrollback_limit_lines
+            .map_or_else(|| "unlimited".to_string(), |limit| limit.to_string()),
+    );
+    push_line(
+        &mut out,
         "image-storage-limit",
         &config.image_storage_limit.to_string(),
     );

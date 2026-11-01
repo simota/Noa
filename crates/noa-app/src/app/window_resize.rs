@@ -51,6 +51,11 @@ impl App {
                 dw as f64 / scale,
                 dh as f64 / scale,
             );
+            // `Resized` arrives later through winit's queue, but the next
+            // request's delta is measured from `surface.rect`: relayout now
+            // from the frame AppKit already applied (`inner_size` reads it
+            // live) so back-to-back requests don't add the delta twice.
+            self.relayout_and_resize_window(window_id);
         }
         #[cfg(not(target_os = "macos"))]
         {

@@ -158,8 +158,8 @@ pub struct Terminal {
     pending_progress_cue: Option<ProgressCue>,
     /// Set by `BEL` (`0x07`); drained by [`Terminal::take_pending_bell`].
     pending_bell: bool,
-    /// The last `CSI 8 t` in the current feed; drained by
-    /// [`Terminal::take_pending_window_resize`].
+    /// The `CSI 8 t` requests in the current feed, merged per axis; drained
+    /// by [`Terminal::take_pending_window_resize`].
     pending_window_resize: Option<WindowResizeRequest>,
     /// Cell size in pixels, from the last `noa-app` pixel-metrics update.
     /// Zero until the first resize (`CSI 16 t`).

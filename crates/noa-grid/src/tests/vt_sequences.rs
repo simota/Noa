@@ -450,6 +450,18 @@ fn window_resize_request_keeps_omitted_dimensions_as_zero() {
 }
 
 #[test]
+fn window_resize_requests_in_one_feed_merge_per_axis() {
+    let mut t = run(b"\x1b[8;30;0t\x1b[8;0;100t\x1b[8;0;0t");
+    assert_eq!(
+        t.take_pending_window_resize(),
+        Some(crate::WindowResizeRequest {
+            rows: 30,
+            cols: 100
+        })
+    );
+}
+
+#[test]
 fn full_reset_drops_a_pending_window_resize() {
     let mut t = run(b"\x1b[8;30;100t\x1bc");
     assert_eq!(t.take_pending_window_resize(), None);

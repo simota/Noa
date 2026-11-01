@@ -673,9 +673,16 @@ impl Handler for Terminal {
 
     fn window_op(&mut self, ps: u16, p1: u16, p2: u16) {
         match ps {
+            // Requests in one feed merge per axis: a zero keeps that axis, so
+            // `8;30;0t` then `8;0;100t` must still reach the app as 30×100.
             8 => {
-                self.pending_window_resize =
-                    Some(crate::WindowResizeRequest { rows: p1, cols: p2 });
+                let prev = self
+                    .pending_window_resize
+                    .unwrap_or(crate::WindowResizeRequest { rows: 0, cols: 0 });
+                self.pending_window_resize = Some(crate::WindowResizeRequest {
+                    rows: if p1 == 0 { prev.rows } else { p1 },
+                    cols: if p2 == 0 { prev.cols } else { p2 },
+                });
             }
             14 => self.pending_writes.extend_from_slice(
                 format!(

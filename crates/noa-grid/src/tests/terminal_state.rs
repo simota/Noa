@@ -467,6 +467,39 @@ fn decrqm_reports_known_mode_state() {
 }
 
 #[test]
+fn decrqm_reports_kam_and_srm_like_ghostty() {
+    // KAM defaults reset, SRM set; both follow SM/RM.
+    let t = run(b"\x1b[2$p\x1b[12$p\x1b[2h\x1b[12l\x1b[2$p\x1b[12$p");
+    assert_eq!(
+        t.pending_writes,
+        b"\x1b[2;2$y\x1b[12;1$y\x1b[2;1$y\x1b[12;2$y"
+    );
+}
+
+#[test]
+fn soft_and_full_reset_restore_kam_and_srm() {
+    let t = run(b"\x1b[2h\x1b[!p\x1b[2$p");
+    assert_eq!(t.pending_writes, b"\x1b[2;2$y");
+    let t = run(b"\x1b[2h\x1b[12l\x1bc\x1b[2$p\x1b[12$p");
+    assert_eq!(t.pending_writes, b"\x1b[2;2$y\x1b[12;1$y");
+}
+
+#[test]
+fn decrqm_reports_unsupported_ansi_modes_and_dececm_as_permanently_reset() {
+    for value in [1, 5, 7, 10, 11, 13, 14, 15, 16, 17, 18, 19] {
+        let t = run(format!("\x1b[{value}$p").as_bytes());
+        assert_eq!(
+            t.pending_writes,
+            format!("\x1b[{value};4$y").as_bytes(),
+            "ANSI mode {value}"
+        );
+    }
+    let t = run(b"\x1b[?117$p\x1b[9$p");
+    // An unlisted ANSI mode is still not recognized.
+    assert_eq!(t.pending_writes, b"\x1b[?117;4$y\x1b[9;0$y");
+}
+
+#[test]
 fn decrqm_reports_alternate_scroll_mode_1007_state() {
     // 1007 defaults on (matches Ghostty), so an un-set query reports 1
     // (set); after `CSI ?1007l` it reports 2 (reset).

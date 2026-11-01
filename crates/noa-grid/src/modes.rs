@@ -50,11 +50,13 @@ pub struct ModeState {
 }
 
 impl ModeState {
-    /// The power-on defaults: autowrap (DECAWM 7), cursor-visible (DECTCEM 25)
-    /// alternate scroll (1007), and grapheme clustering (2027) on. Applications
-    /// can query/reset 2027 when they require scalar-based cursor accounting.
+    /// The power-on defaults: SRM (ANSI 12), autowrap (DECAWM 7),
+    /// cursor-visible (DECTCEM 25), alternate scroll (1007), and grapheme
+    /// clustering (2027) on. Applications can query/reset 2027 when they
+    /// require scalar-based cursor accounting.
     pub fn defaults() -> Self {
         let mut m = ModeState::default();
+        m.set(12, true, true); // SRM
         m.set(7, false, true); // DECAWM
         m.set(25, false, true); // DECTCEM
         m.set(1007, false, true); // alternate scroll
@@ -71,7 +73,9 @@ impl ModeState {
     /// `terminal/handler.rs`, and `seed.rs`'s `REPLAYED_PRIVATE_MODES`.
     pub fn is_tracked(value: u16, ansi: bool) -> bool {
         if ansi {
-            matches!(value, 4 | 20)
+            // KAM (2) and SRM (12) are only tracked for DECRQM, as in Ghostty
+            // without `vt-kam-allowed`: neither locks the keyboard nor echoes.
+            matches!(value, 2 | 4 | 12 | 20)
         } else {
             matches!(
                 value,

@@ -38,8 +38,10 @@ impl GraphemeId {
 }
 
 /// Hard cap on distinct interned tails. Each entry costs its string bytes
-/// (≤ [`crate::Cell::MAX_COMBINING_BYTES`], 256) plus map/vec overhead, so the
-/// worst case is a few hundred MB *if* a hostile stream mints the maximum —
+/// (≤ [`crate::Cell::MAX_COMBINING_BYTES`], 256 since the 64-codepoint cap)
+/// plus map/vec overhead, so the worst case is about 256 MiB of strings plus
+/// the table — leaked for the process, shared by every pane — *if* a hostile
+/// stream mints the maximum —
 /// legitimate content (even kitty placeholder grids, which encode row/column
 /// pairs as diacritics) stays orders of magnitude below this.
 const MAX_ENTRIES: usize = 1 << 20;

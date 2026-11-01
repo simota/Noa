@@ -34,14 +34,12 @@ pub const ATTACH_BACKPRESSURE_TIMEOUT: Duration = Duration::from_secs(2);
 /// seeds, pastes, and PTY bursts independent of tungstenite fragmentation.
 pub(crate) const ATTACH_BINARY_CHUNK_BYTES: usize = 64 * 1024;
 
-/// Aggregate client-side seed cap. The 512 MiB ceiling covers the maximum
-/// valid two-screen grid even when every cell carries full RGB/SGR state plus
-/// the bounded grapheme tail, while still bounding a peer that never sends
+/// Aggregate client-side seed cap. It covers the maximum valid two-screen
+/// grid (2 × `MAX_RESIZE_CELLS`) even when every cell carries full RGB/SGR
+/// state plus a full 64-codepoint combining tail — about 830 bytes of seed
+/// per cell, ~1.7 GiB in all — while still bounding a peer that never sends
 /// the seed terminator.
-// #TODO(agent): UNVERIFIED — recheck this ceiling against the worst case now
-// that a cell's combining tail can hold 64 codepoints (`Cell::
-// MAX_COMBINING_CODEPOINTS`); the seed writes ~11–14 bytes per mark.
-pub(crate) const MAX_ATTACH_SEED_BYTES: usize = 512 * 1024 * 1024;
+pub(crate) const MAX_ATTACH_SEED_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
 /// Generations must remain unique across `Server::start` cycles. A registry is
 /// server-owned and therefore short-lived during config reload, while stale

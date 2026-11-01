@@ -131,6 +131,14 @@ pub fn encode_key_with_modes(
         return None;
     }
 
+    // Shift+Enter's ESC CR (see the Enter arm below) covers the keypad Enter
+    // too, as it did before the keypad table.
+    if mods == ModifiersState::SHIFT
+        && physical_key == Some(PhysicalKey::Code(KeyCode::NumpadEnter))
+    {
+        return Some(b"\x1b\r".to_vec());
+    }
+
     // Keypad keys come first, as in Ghostty's PC-style function key table:
     // a modifier never turns them into a C0 byte or a modifyOtherKeys report.
     if let Some(bytes) = keypad_bytes(logical_key, physical_key, mods, app_keypad) {

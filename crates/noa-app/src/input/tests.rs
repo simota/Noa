@@ -2016,6 +2016,20 @@ fn modified_keypad_keys_follow_ghosttys_table() {
         true,
     );
     assert_eq!(kp_enter, Some(b"\r".to_vec()));
+    // Shift+Enter's ESC CR applies to the keypad Enter as well.
+    for app_keypad in [false, true] {
+        assert_eq!(
+            legacy_key(
+                Key::Named(NamedKey::Enter),
+                Some(PhysicalKey::Code(KeyCode::NumpadEnter)),
+                Some("\r"),
+                ModifiersState::SHIFT,
+                app_keypad,
+                false,
+            ),
+            Some(b"\x1b\r".to_vec())
+        );
+    }
 }
 
 #[test]

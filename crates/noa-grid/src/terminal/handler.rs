@@ -538,6 +538,7 @@ impl Handler for Terminal {
         self.pending_bell = false;
         self.pending_window_resize = None;
         self.xt_checksum = self.default_xt_checksum;
+        self.glyph_glossary.clear();
         self.kitty_keyboard.reset();
         self.modify_other_keys_2 = false;
         self.kitty_images.clear();
@@ -955,6 +956,12 @@ impl Handler for Terminal {
 
     fn set_modify_other_keys(&mut self, level: u16) {
         self.modify_other_keys_2 = level == 2;
+    }
+
+    fn glyph_protocol(&mut self, req: noa_vt::GlyphRequest) {
+        if let Some(reply) = self.glyph_glossary.execute(&req) {
+            self.pending_writes.extend_from_slice(reply.as_bytes());
+        }
     }
 
     fn kitty_graphics(&mut self, cmd: KittyGraphicsCommand) {

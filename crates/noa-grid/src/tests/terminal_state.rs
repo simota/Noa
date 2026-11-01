@@ -461,6 +461,41 @@ fn xtgettcap_reports_overline_and_cursor_style_reset_like_ghostty() {
 }
 
 #[test]
+fn glyph_protocol_answers_like_ghostty() {
+    // Support, then register Ghostty's test triangle and query it.
+    let t = run(concat!(
+        "\x1b_25a1;s\x1b\\",
+        "\x1b_25a1;r;cp=E0A0;AAEAZABkA4QDhAACAAABAQEB9P5wAyADhPzgAAA=\x1b\\",
+        "\x1b_25a1;q;cp=e0a0\x1b\\",
+        // Unknown verbs and a missing `;` after the identifier get no reply.
+        "\x1b_25a1;x\x1b\\\x1b_25a1s\x1b\\",
+    )
+    .as_bytes());
+
+    assert_eq!(
+        t.pending_writes,
+        concat!(
+            "\x1b_25a1;s;fmt=glyf\x1b\\",
+            "\x1b_25a1;r;cp=e0a0;status=0\x1b\\",
+            "\x1b_25a1;q;cp=e0a0;status=glossary\x1b\\",
+        )
+        .as_bytes()
+    );
+}
+
+#[test]
+fn full_reset_forgets_glyph_registrations() {
+    let t = run(concat!(
+        "\x1b_25a1;r;cp=e0a0;reply=0;AAEAZABkA4QDhAACAAABAQEB9P5wAyADhPzgAAA=\x1b\\",
+        "\x1bc",
+        "\x1b_25a1;q;cp=e0a0\x1b\\",
+    )
+    .as_bytes());
+
+    assert_eq!(t.pending_writes, b"\x1b_25a1;q;cp=e0a0;status=\x1b\\");
+}
+
+#[test]
 fn xtversion_query_reports_name_and_version() {
     // `CSI > 0 q` and the bare `CSI > q` are both valid XTVERSION queries.
     let t = run(b"\x1b[>0q\x1b[>q");

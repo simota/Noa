@@ -28,6 +28,7 @@ A from-scratch DFA parser plus a `Handler` trait separating parsing from state.
 - **Mouse tracking** — X10 / 1000 / 1002 / 1003, encodings Legacy / UTF-8 (1005) / Urxvt (1015) / SGR (1006)
 - **OSC** — 0/2 (title, stack via 22/23), 7 (cwd), 8 (hyperlinks), 9/777 (notifications), 9;4 (task progress), 52 (clipboard, with policy), 5522 (Kitty clipboard protocol: multi-type read/write, paste events via mode 5522), 4 / color family, 133 (shell integration marks; `click_events` prompt clicks)
 - **Kitty graphics protocol** — image command parsing + image-layer rendering
+- **Glyph Protocol** (APC `25a1`) — answers `s` / `q` / `r` / `c` like Ghostty 1.4.0: validates `glyf` registrations (simple glyphs only, no hinting, 64 KiB) into a per-terminal glossary of up to 1024 Private Use Area codepoints, cleared by RIS. Registered glyphs are not drawn (Ghostty 1.4.0 doesn't either)
 - **Sixel graphics** — parsing of `DCS Pa;Pb;Ph q ... ST`, Sixel rasterization, rendering through the existing image layer
 - **Kitty keyboard protocol** — full support for all 5 flags (disambiguate / event-types / alternate-keys / all-keys / associated-text), push / pop / set stack
 - **Bracketed paste (2004) / full reset / DECSTR / DECALN**

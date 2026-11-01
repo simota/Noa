@@ -10,6 +10,7 @@ pub mod cell;
 mod charset;
 pub mod copy_mode;
 pub mod cursor;
+mod glyph_protocol;
 mod grapheme;
 pub mod kitty;
 pub mod kitty_clipboard;

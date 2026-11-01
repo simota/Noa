@@ -666,6 +666,60 @@ fn a_non_kitty_apc_keeps_only_its_first_byte() {
 }
 
 #[test]
+fn a_glyph_protocol_apc_is_captured_whole() {
+    assert_eq!(only_apc(b"\x1b_25a1;q;cp=e0a0\x1b\\"), b"25a1;q;cp=e0a0");
+    // Another identifier keeps only the bytes that told it apart.
+    assert_eq!(only_apc(b"\x1b_25b1;q;cp=e0a0\x1b\\"), b"25b");
+    assert_eq!(only_apc(b"\x1b_25a1q\x1b\\"), b"25a1q");
+}
+
+#[test]
+fn a_glyph_protocol_apc_over_ghosttys_cap_is_dropped() {
+    // Ghostty 1.4.0 buffers up to 1 MiB after `25a1;`.
+    let apc = |len: usize| {
+        let mut bytes = b"\x1b_25a1;r;cp=e000;".to_vec();
+        bytes.extend(std::iter::repeat_n(b'A', len - "r;cp=e000;".len()));
+        bytes.extend_from_slice(b"\x1b\\");
+        bytes
+    };
+    let cap = crate::parser::MAX_GLYPH_APC_BYTES;
+    assert_eq!(only_apc(&apc(cap)).len(), "25a1;".len() + cap);
+    assert!(
+        actions(&apc(cap + 1))
+            .iter()
+            .all(|a| !matches!(a, Action::ApcDispatch { .. }))
+    );
+}
+
+#[test]
+fn a_glyph_protocol_apc_replays_mid_sequence() {
+    for split in 3..b"\x1b_25a1;q;cp=e0a0".len() {
+        let bytes = b"\x1b_25a1;q;cp=e0a0\x1b\\";
+        let (source, replay) = replayed_actions(&bytes[..split], &bytes[split..]);
+        assert_eq!(source, replay, "split at {split}");
+        assert_eq!(
+            source,
+            vec![Action::ApcDispatch {
+                data: b"25a1;q;cp=e0a0".to_vec()
+            }],
+            "split at {split}"
+        );
+    }
+}
+
+#[test]
+fn an_apc_that_leaves_the_glyph_prefix_replays_as_captured() {
+    let (source, replay) = replayed_actions(b"\x1b_25b", b"1;q\x1b\\");
+    assert_eq!(source, replay);
+    assert_eq!(
+        source,
+        vec![Action::ApcDispatch {
+            data: b"25b".to_vec()
+        }]
+    );
+}
+
+#[test]
 fn apc_survives_byte_at_a_time_feed() {
     // Feeding one byte per advance() call must not change capture (split resistance).
     let mut p = Parser::new();

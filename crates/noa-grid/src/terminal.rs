@@ -107,6 +107,8 @@ pub struct Terminal {
     default_xt_checksum: crate::XtChecksumFlags,
     /// The checksum variant DECRQCRA uses, as XTCHECKSUM last set it.
     xt_checksum: crate::XtChecksumFlags,
+    /// Glyph Protocol registrations (`ESC _ 25a1 ; r … ST`).
+    pub(crate) glyph_glossary: crate::glyph_protocol::Glossary,
     /// Whether `CSI 21 t` may report the window title (`title-report`).
     /// Off by default, matching Ghostty: the reply echoes program-settable
     /// text (OSC 0/2) back into the pty as input — an injection vector.
@@ -250,6 +252,7 @@ impl Terminal {
             xt_checksum_report: false,
             default_xt_checksum: crate::XtChecksumFlags::default(),
             xt_checksum: crate::XtChecksumFlags::default(),
+            glyph_glossary: crate::glyph_protocol::Glossary::default(),
             scrollback_compression: true,
             modify_other_keys_2: false,
             visible: true,

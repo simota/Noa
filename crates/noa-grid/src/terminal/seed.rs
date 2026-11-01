@@ -118,7 +118,9 @@ impl Terminal {
         } else {
             write_cursor(&mut seed, screen, screen.cursor, self.modes.autowrap());
         }
+        write_ansi_mode(&mut seed, 2, self.modes.get(2, true));
         write_ansi_mode(&mut seed, 4, self.modes.insert_mode());
+        write_ansi_mode(&mut seed, 12, self.modes.get(12, true));
         write_ansi_mode(&mut seed, 20, self.modes.linefeed_newline());
 
         // Restoring a screen without explicit horizontal margins disables
@@ -1066,7 +1068,7 @@ mod tests {
         let mut source = Terminal::new(size);
         let mut source_stream = Stream::new();
         source_stream.feed(
-            b"\x1b[20h\x1b[?69h\x1b[2;6s\x1b[2;6H\x1b[?47h\x1b[3;7s\x1b[2;7H",
+            b"\x1b[2h\x1b[12l\x1b[20h\x1b[?69h\x1b[2;6s\x1b[2;6H\x1b[?47h\x1b[3;7s\x1b[2;7H",
             &mut source,
         );
 
@@ -1076,6 +1078,8 @@ mod tests {
 
         assert!(replica.modes.linefeed_newline());
         assert!(replica.modes.left_right_margin());
+        assert!(replica.modes.get(2, true), "KAM");
+        assert!(!replica.modes.get(12, true), "SRM");
         assert_eq!(
             replica.primary.horizontal_margins,
             source.primary.horizontal_margins

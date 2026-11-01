@@ -348,7 +348,9 @@ impl Handler for Terminal {
 
     fn request_mode(&mut self, request: ModeRequest) {
         let state = match (request.value, request.ansi) {
-            (4, true)
+            (2, true)
+            | (4, true)
+            | (12, true)
             | (20, true)
             | (1, false)
             | (6, false)
@@ -382,6 +384,11 @@ impl Handler for Terminal {
                     2
                 }
             }
+            // Recognized but fixed reset (Ghostty parity): the unimplemented
+            // ANSI modes xterm also reports this way (GATM, SRTM, VEM, HEM,
+            // PUM, FEAM, FETM, MATM, TTM, SATM, TSM, EBM), and DECECM (117),
+            // since erasing always uses the current background.
+            (1 | 5 | 7 | 10 | 11 | 13..=19, true) | (117, false) => 4,
             _ => 0,
         };
         if request.ansi {
@@ -542,8 +549,10 @@ impl Handler for Terminal {
         // DECTCEM on, DECOM off — tracked bits only; screen content untouched.
         self.modes.set(25, false, true);
         self.modes.set(6, false, false);
-        // IRM (ANSI mode 4) off — DECSTR returns to replace mode.
+        // IRM (ANSI mode 4) off — DECSTR returns to replace mode — and KAM
+        // (ANSI mode 2) off, as in Ghostty.
         self.modes.set(4, true, false);
+        self.modes.set(2, true, false);
         self.charset = crate::charset::CharsetState::default();
         self.xt_checksum = self.default_xt_checksum;
         let last_row = self.size.rows.saturating_sub(1);

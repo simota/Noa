@@ -771,3 +771,69 @@ fn decbkm_is_tracked_and_reported_by_decrqm() {
     Stream::new().feed(b"\x1b[?67l", &mut t);
     assert!(!t.modes.backarrow_key_mode());
 }
+
+// ── DECRQCRA / XTCHECKSUM (Ghostty 1.4.0 `vt-xt-checksum-report`) ─────────
+
+fn run_checksum(setup: impl FnOnce(&mut Terminal), bytes: &[u8]) -> Terminal {
+    let mut t = Terminal::new(GridSize::new(10, 5));
+    t.xt_checksum_report = true;
+    setup(&mut t);
+    let mut s = Stream::new();
+    s.feed(bytes, &mut t);
+    t
+}
+
+#[test]
+fn decrqcra_dec_checksum_trims_blanks_and_skips_unwritten_cells() {
+    let t = run_checksum(|_| {}, b"a b\x1b[1;1;1;1;1;10*y");
+    // -('a' + 'b') mod 2^16.
+    assert_eq!(t.pending_writes, b"\x1bP1!~FF3D\x1b\\");
+}
+
+#[test]
+fn xtchecksum_selects_positive_untrimmed_sums() {
+    // Bits 1 (positive) | 4 (no trim): unwritten cells count as spaces.
+    let t = run_checksum(|_| {}, b"a b\x1b[5#y\x1b[7;1;1;1;1;10*y");
+    assert_eq!(t.pending_writes, b"\x1bP7!~01C3\x1b\\");
+}
+
+#[test]
+fn decrqcra_adds_video_attributes() {
+    // Bold adds 0x80: -('a' + 0x80).
+    let t = run_checksum(|_| {}, b"\x1b[1ma\x1b[m\x1b[1;1;1;1;1;1*y");
+    assert_eq!(t.pending_writes, b"\x1bP1!~FF1F\x1b\\");
+}
+
+#[test]
+fn decrqcra_and_xtchecksum_are_ignored_unless_enabled() {
+    let mut t = Terminal::new(GridSize::new(10, 5));
+    let mut s = Stream::new();
+    s.feed(b"a\x1b[1#y\x1b[1;1;1;1;1;1*y", &mut t);
+    assert!(t.pending_writes.is_empty());
+    // The ignored XTCHECKSUM left the DEC (negated) checksum in place.
+    t.xt_checksum_report = true;
+    s.feed(b"\x1b[1;1;1;1;1;1*y", &mut t);
+    assert_eq!(t.pending_writes, b"\x1bP1!~FF9F\x1b\\");
+}
+
+#[test]
+fn decrqcra_with_too_many_parameters_gets_no_reply() {
+    let t = run_checksum(|_| {}, b"a\x1b[1;1;1;1;1;1;1*y");
+    assert!(t.pending_writes.is_empty());
+}
+
+#[test]
+fn reset_restores_the_configured_checksum_variant() {
+    let positive = |t: &mut Terminal| {
+        t.set_default_xt_checksum(crate::XtChecksumFlags {
+            positive: true,
+            ..Default::default()
+        })
+    };
+    // XTCHECKSUM 0 selects the negated sum; RIS and DECSTR go back to the
+    // configured positive one.
+    let t = run_checksum(positive, b"\x1b[0#y\x1bca\x1b[1;1;1;1;1;1*y");
+    assert_eq!(t.pending_writes, b"\x1bP1!~0061\x1b\\");
+    let t = run_checksum(positive, b"\x1b[0#y\x1b[!pa\x1b[1;1;1;1;1;1*y");
+    assert_eq!(t.pending_writes, b"\x1bP1!~0061\x1b\\");
+}

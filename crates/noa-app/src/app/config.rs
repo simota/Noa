@@ -53,6 +53,12 @@ pub struct AppConfig {
     /// Let a program resize the window with `CSI 8 t`
     /// (`vt-window-resize-allowed`).
     pub vt_window_resize_allowed: bool,
+    /// Let a program read screen checksums with DECRQCRA
+    /// (`vt-xt-checksum-report`).
+    pub vt_xt_checksum_report: bool,
+    /// The DECRQCRA checksum variant after a reset
+    /// (`vt-xt-checksum-extension`).
+    pub vt_xt_checksum_extension: noa_config::XtChecksumExtension,
     /// `window-padding-x/y`: `None` keeps the built-in default for that axis.
     /// Resolved to a `GridPadding` once in [`App::new`].
     pub window_padding_x: Option<f32>,
@@ -308,6 +314,8 @@ impl AppConfig {
             scrollback_compression: config.scrollback_compression,
             cursor_click_to_move: config.cursor_click_to_move,
             vt_window_resize_allowed: config.vt_window_resize_allowed,
+            vt_xt_checksum_report: config.vt_xt_checksum_report,
+            vt_xt_checksum_extension: config.vt_xt_checksum_extension,
             window_padding_x: config.window_padding_x,
             window_padding_y: config.window_padding_y,
             background: config.background,

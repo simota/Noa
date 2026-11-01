@@ -608,6 +608,91 @@ pub enum ResizeOverlay {
     Never,
 }
 
+/// `vt-xt-checksum-extension` (Ghostty 1.4.0): how DECRQCRA computes its
+/// checksum after a reset, like xterm's `checksumExtension`. Written as a
+/// comma list of flag names, each optionally `no-`-prefixed, applied over
+/// the default; `true`/`false` set every flag. The default is the DEC
+/// checksum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct XtChecksumExtension {
+    /// Report the negated sum, as DEC terminals do.
+    pub negate: bool,
+    /// Add the bold/underline/blink/inverse/invisible attributes to each cell.
+    pub attributes: bool,
+    /// Omit plain spaces other than the first cell of the area.
+    pub trim: bool,
+    /// Count cells that were never written to as spaces.
+    pub undrawn: bool,
+    /// Use the full codepoint instead of the DEC 8-bit value.
+    pub full: bool,
+}
+
+impl Default for XtChecksumExtension {
+    fn default() -> Self {
+        Self {
+            negate: true,
+            attributes: true,
+            trim: true,
+            undrawn: false,
+            full: false,
+        }
+    }
+}
+
+impl XtChecksumExtension {
+    /// Parse the config value; `None` for an unknown flag name.
+    pub fn parse(value: &str) -> Option<Self> {
+        if let Ok(all) = value.parse::<bool>() {
+            return Some(Self {
+                negate: all,
+                attributes: all,
+                trim: all,
+                undrawn: all,
+                full: all,
+            });
+        }
+        let mut result = Self::default();
+        for part in value.split(',') {
+            let part = part.trim();
+            let (name, on) = match part.strip_prefix("no-") {
+                Some(name) => (name, false),
+                None => (part, true),
+            };
+            let flag = match name {
+                "negate" => &mut result.negate,
+                "attributes" => &mut result.attributes,
+                "trim" => &mut result.trim,
+                "undrawn" => &mut result.undrawn,
+                "full" => &mut result.full,
+                _ => return None,
+            };
+            *flag = on;
+        }
+        Some(result)
+    }
+
+    /// Every flag spelled out, e.g. `negate,attributes,trim,no-undrawn,no-full`.
+    pub fn to_config_string(self) -> String {
+        [
+            (self.negate, "negate"),
+            (self.attributes, "attributes"),
+            (self.trim, "trim"),
+            (self.undrawn, "undrawn"),
+            (self.full, "full"),
+        ]
+        .iter()
+        .map(|&(on, name)| {
+            if on {
+                name.to_owned()
+            } else {
+                format!("no-{name}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+    }
+}
+
 /// `alpha-blending` mode. `Native` is a real value; `Linear` /
 /// `LinearCorrected` are parsed-but-fallback (REQ-CFG-4) — `noa-config`
 /// emits a diagnostic and the renderer falls back to `Native` (WP3).
@@ -740,6 +825,12 @@ pub struct StartupConfig {
     /// `vt-window-resize-allowed`: whether a program may resize the window
     /// with `CSI 8 ; rows ; cols t` (Ghostty 1.4.0, default off).
     pub vt_window_resize_allowed: bool,
+    /// `vt-xt-checksum-report`: whether a program may ask for screen
+    /// checksums with DECRQCRA, and change how they are computed with
+    /// XTCHECKSUM (Ghostty 1.4.0, default off).
+    pub vt_xt_checksum_report: bool,
+    /// `vt-xt-checksum-extension`: the DECRQCRA checksum variant after a reset.
+    pub vt_xt_checksum_extension: XtChecksumExtension,
     /// `window-padding-x`: horizontal padding (left = right) in physical
     /// pixels. `None` keeps the built-in default for that axis; the concrete
     /// `GridPadding` is derived in `noa-app`.
@@ -1028,6 +1119,8 @@ impl Default for StartupConfig {
             scrollback_compression: true,
             cursor_click_to_move: true,
             vt_window_resize_allowed: false,
+            vt_xt_checksum_report: false,
+            vt_xt_checksum_extension: XtChecksumExtension::default(),
             window_padding_x: None,
             window_padding_y: None,
             background: None,
@@ -1156,6 +1249,8 @@ pub struct ConfigOverrides {
     pub scrollback_compression: Option<bool>,
     pub cursor_click_to_move: Option<bool>,
     pub vt_window_resize_allowed: Option<bool>,
+    pub vt_xt_checksum_report: Option<bool>,
+    pub vt_xt_checksum_extension: Option<XtChecksumExtension>,
     pub window_padding_x: Option<f32>,
     pub window_padding_y: Option<f32>,
     pub background: Option<Rgb>,
@@ -1251,6 +1346,8 @@ macro_rules! impl_redacted_config_debug {
                     .field("scrollback_compression", &self.scrollback_compression)
                     .field("cursor_click_to_move", &self.cursor_click_to_move)
                     .field("vt_window_resize_allowed", &self.vt_window_resize_allowed)
+                    .field("vt_xt_checksum_report", &self.vt_xt_checksum_report)
+                    .field("vt_xt_checksum_extension", &self.vt_xt_checksum_extension)
                     .field("window_padding_x", &self.window_padding_x)
                     .field("window_padding_y", &self.window_padding_y)
                     .field("background", &self.background)
@@ -1383,6 +1480,12 @@ impl ConfigOverrides {
             vt_window_resize_allowed: higher_priority
                 .vt_window_resize_allowed
                 .or(self.vt_window_resize_allowed),
+            vt_xt_checksum_report: higher_priority
+                .vt_xt_checksum_report
+                .or(self.vt_xt_checksum_report),
+            vt_xt_checksum_extension: higher_priority
+                .vt_xt_checksum_extension
+                .or(self.vt_xt_checksum_extension),
             window_padding_x: higher_priority.window_padding_x.or(self.window_padding_x),
             window_padding_y: higher_priority.window_padding_y.or(self.window_padding_y),
             background: higher_priority.background.or(self.background),
@@ -1563,6 +1666,12 @@ impl ConfigOverrides {
             vt_window_resize_allowed: self
                 .vt_window_resize_allowed
                 .unwrap_or(base.vt_window_resize_allowed),
+            vt_xt_checksum_report: self
+                .vt_xt_checksum_report
+                .unwrap_or(base.vt_xt_checksum_report),
+            vt_xt_checksum_extension: self
+                .vt_xt_checksum_extension
+                .unwrap_or(base.vt_xt_checksum_extension),
             window_padding_x: self.window_padding_x.or(base.window_padding_x),
             window_padding_y: self.window_padding_y.or(base.window_padding_y),
             background: self.background.or(base.background),
@@ -2068,6 +2177,8 @@ mod tests {
                 scrollback_compression: true,
                 cursor_click_to_move: true,
                 vt_window_resize_allowed: false,
+                vt_xt_checksum_report: false,
+                vt_xt_checksum_extension: XtChecksumExtension::default(),
                 window_padding_x: None,
                 window_padding_y: None,
                 background: None,

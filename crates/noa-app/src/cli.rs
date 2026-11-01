@@ -329,6 +329,16 @@ fn show_config_output(config: &StartupConfig) -> String {
         "vt-window-resize-allowed",
         &config.vt_window_resize_allowed.to_string(),
     );
+    push_line(
+        &mut out,
+        "vt-xt-checksum-report",
+        &config.vt_xt_checksum_report.to_string(),
+    );
+    push_line(
+        &mut out,
+        "vt-xt-checksum-extension",
+        &config.vt_xt_checksum_extension.to_config_string(),
+    );
     push_optional_line(&mut out, "window-padding-x", config.window_padding_x);
     push_optional_line(&mut out, "window-padding-y", config.window_padding_y);
     push_color_line(&mut out, "background", config.background);

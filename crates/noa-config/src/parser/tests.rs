@@ -460,6 +460,51 @@ fn vt_window_resize_allowed_defaults_off_and_parses_a_bool() {
 }
 
 #[test]
+fn vt_xt_checksum_report_defaults_off_and_parses_a_bool() {
+    assert!(!crate::StartupConfig::default().vt_xt_checksum_report);
+    let (overrides, diagnostics) = parse_overrides(path(), "vt-xt-checksum-report = true");
+    assert_eq!(overrides.vt_xt_checksum_report, Some(true));
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn vt_xt_checksum_extension_applies_flags_over_the_dec_default() {
+    let dec = crate::XtChecksumExtension::default();
+    assert_eq!(
+        crate::StartupConfig::default().vt_xt_checksum_extension,
+        dec
+    );
+    // esctest's `--xterm-checksum` setting (xterm's `checksumExtension: 23`).
+    let (overrides, diagnostics) = parse_overrides(
+        path(),
+        "vt-xt-checksum-extension = no-negate, no-attributes,no-trim,full",
+    );
+    assert_eq!(
+        overrides.vt_xt_checksum_extension,
+        Some(crate::XtChecksumExtension {
+            negate: false,
+            attributes: false,
+            trim: false,
+            undrawn: false,
+            full: true,
+        })
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(
+        dec.to_config_string(),
+        "negate,attributes,trim,no-undrawn,no-full"
+    );
+}
+
+#[test]
+fn vt_xt_checksum_extension_rejects_unknown_flags() {
+    let (overrides, diagnostics) =
+        parse_overrides(path(), "vt-xt-checksum-extension = negate,bogus");
+    assert_eq!(overrides.vt_xt_checksum_extension, None);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+}
+
+#[test]
 fn clipboard_write_parses_each_mode_and_defaults_to_allow() {
     assert_eq!(
         crate::StartupConfig::default().clipboard_write,

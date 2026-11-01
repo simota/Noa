@@ -37,6 +37,8 @@ pub(crate) fn build_overrides(
     let mut scrollback_compression = None;
     let mut cursor_click_to_move = None;
     let mut vt_window_resize_allowed = None;
+    let mut vt_xt_checksum_report = None;
+    let mut vt_xt_checksum_extension = None;
     let mut window_padding_x = None;
     let mut window_padding_y = None;
     let mut background = None;
@@ -231,6 +233,13 @@ pub(crate) fn build_overrides(
             }
             "vt-window-resize-allowed" => {
                 vt_window_resize_allowed = parse_bool_directive(path, directive, &mut diagnostics);
+            }
+            "vt-xt-checksum-report" => {
+                vt_xt_checksum_report = parse_bool_directive(path, directive, &mut diagnostics);
+            }
+            "vt-xt-checksum-extension" => {
+                vt_xt_checksum_extension =
+                    parse_xt_checksum_extension(path, directive, &mut diagnostics);
             }
             "window-padding-x" => {
                 window_padding_x = parse_non_negative_f32(path, directive, &mut diagnostics);
@@ -515,6 +524,8 @@ pub(crate) fn build_overrides(
             scrollback_compression,
             cursor_click_to_move,
             vt_window_resize_allowed,
+            vt_xt_checksum_report,
+            vt_xt_checksum_extension,
             window_padding_x,
             window_padding_y,
             background,
@@ -636,6 +647,8 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "scrollback-compression"
             | "cursor-click-to-move"
             | "vt-window-resize-allowed"
+            | "vt-xt-checksum-report"
+            | "vt-xt-checksum-extension"
             | "window-padding-x"
             | "window-padding-y"
             | "background"

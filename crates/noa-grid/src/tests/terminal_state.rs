@@ -445,6 +445,22 @@ fn xtgettcap_reports_selected_capabilities() {
 }
 
 #[test]
+fn xtgettcap_reports_overline_and_cursor_style_reset_like_ghostty() {
+    // Smol, Rmol, Se.
+    let t = run(b"\x1bP+q536d6f6c;526d6f6c;5365\x1b\\");
+
+    assert_eq!(
+        t.pending_writes,
+        concat!(
+            "\x1bP1+r536d6f6c=1b5b35336d\x1b\\",
+            "\x1bP1+r526d6f6c=1b5b35356d\x1b\\",
+            "\x1bP1+r5365=1b5b302071\x1b\\",
+        )
+        .as_bytes()
+    );
+}
+
+#[test]
 fn xtversion_query_reports_name_and_version() {
     // `CSI > 0 q` and the bare `CSI > q` are both valid XTVERSION queries.
     let t = run(b"\x1b[>0q\x1b[>q");

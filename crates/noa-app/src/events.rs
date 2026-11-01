@@ -80,6 +80,12 @@ pub enum UserEvent {
     },
     /// The pane's `OSC 22` pointer shape changed; re-pick the mouse cursor.
     MouseShapeChanged(WindowId, PaneId),
+    /// A program asked to resize its window to a grid size (`CSI 8 t`).
+    WindowResizeRequest {
+        window_id: WindowId,
+        pane_id: PaneId,
+        request: noa_grid::WindowResizeRequest,
+    },
     /// New terminal output is available; request a redraw.
     Redraw(WindowId, PaneId),
     SearchUpdated(WindowId, PaneId),

@@ -52,5 +52,7 @@ pub use search::{SearchAnchor, SearchMatch, SearchState};
 pub use selection::{Selection, SelectionPoint};
 pub use snapshot::{ScrollbackSnapshot, ScrollbackSnapshotInput};
 pub use tabstops::Tabstops;
-pub use terminal::{PromptJump, ShellIntegrationMark, ShellIntegrationMarkKind, Terminal};
+pub use terminal::{
+    PromptJump, ShellIntegrationMark, ShellIntegrationMarkKind, Terminal, WindowResizeRequest,
+};
 pub use url::{UrlMatch, detect_url_at_column};

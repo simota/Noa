@@ -737,6 +737,9 @@ pub struct StartupConfig {
     /// `click_events` is sent to the shell to move its cursor (Ghostty
     /// default on).
     pub cursor_click_to_move: bool,
+    /// `vt-window-resize-allowed`: whether a program may resize the window
+    /// with `CSI 8 ; rows ; cols t` (Ghostty 1.4.0, default off).
+    pub vt_window_resize_allowed: bool,
     /// `window-padding-x`: horizontal padding (left = right) in physical
     /// pixels. `None` keeps the built-in default for that axis; the concrete
     /// `GridPadding` is derived in `noa-app`.
@@ -1024,6 +1027,7 @@ impl Default for StartupConfig {
             title_report: false,
             scrollback_compression: true,
             cursor_click_to_move: true,
+            vt_window_resize_allowed: false,
             window_padding_x: None,
             window_padding_y: None,
             background: None,
@@ -1151,6 +1155,7 @@ pub struct ConfigOverrides {
     pub title_report: Option<bool>,
     pub scrollback_compression: Option<bool>,
     pub cursor_click_to_move: Option<bool>,
+    pub vt_window_resize_allowed: Option<bool>,
     pub window_padding_x: Option<f32>,
     pub window_padding_y: Option<f32>,
     pub background: Option<Rgb>,
@@ -1245,6 +1250,7 @@ macro_rules! impl_redacted_config_debug {
                     .field("title_report", &self.title_report)
                     .field("scrollback_compression", &self.scrollback_compression)
                     .field("cursor_click_to_move", &self.cursor_click_to_move)
+                    .field("vt_window_resize_allowed", &self.vt_window_resize_allowed)
                     .field("window_padding_x", &self.window_padding_x)
                     .field("window_padding_y", &self.window_padding_y)
                     .field("background", &self.background)
@@ -1374,6 +1380,9 @@ impl ConfigOverrides {
             cursor_click_to_move: higher_priority
                 .cursor_click_to_move
                 .or(self.cursor_click_to_move),
+            vt_window_resize_allowed: higher_priority
+                .vt_window_resize_allowed
+                .or(self.vt_window_resize_allowed),
             window_padding_x: higher_priority.window_padding_x.or(self.window_padding_x),
             window_padding_y: higher_priority.window_padding_y.or(self.window_padding_y),
             background: higher_priority.background.or(self.background),
@@ -1551,6 +1560,9 @@ impl ConfigOverrides {
             cursor_click_to_move: self
                 .cursor_click_to_move
                 .unwrap_or(base.cursor_click_to_move),
+            vt_window_resize_allowed: self
+                .vt_window_resize_allowed
+                .unwrap_or(base.vt_window_resize_allowed),
             window_padding_x: self.window_padding_x.or(base.window_padding_x),
             window_padding_y: self.window_padding_y.or(base.window_padding_y),
             background: self.background.or(base.background),
@@ -2055,6 +2067,7 @@ mod tests {
                 title_report: false,
                 scrollback_compression: true,
                 cursor_click_to_move: true,
+                vt_window_resize_allowed: false,
                 window_padding_x: None,
                 window_padding_y: None,
                 background: None,

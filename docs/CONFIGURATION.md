@@ -158,6 +158,7 @@ or fails to decode, a diagnostic is shown and the background image is disabled.
 | `scrollback-compression` | `true`, `false` | `true` | Compress scrollback pages while the terminal is idle (about 10–30% of their memory for text). History kept is unchanged; a page decompresses when it is next read |
 | `title-report` | `true`, `false` | `false` | Allow window title responses via `CSI 21 t` |
 | `cursor-click-to-move` | `true`, `false` | `true` | When the shell asks for click events at its prompt (OSC 133 `click_events=1` or `2`), a plain left click at or below the prompt is sent to the shell as an SGR mouse press so it can move its cursor there. The `cl=` arrow-key form is not supported |
+| `vt-window-resize-allowed` | `true`, `false` | `false` | Let a program resize the window with `CSI 8 ; rows ; cols t`. A zero or omitted dimension keeps that dimension; sizes below 40 columns × 10 rows are raised to that. Ignored for split panes, windows with more than one tab, fullscreen windows, the quick terminal and the scratch terminal. On macOS the window is clamped to the screen's visible area and keeps its top-left corner; elsewhere its inner size is only capped at the monitor size. Off by default because any program, including one on a remote host, could change your window size |
 | `visual-bell` | `true`, `false` | `false` | Flash the window on BEL |
 | `audible-bell` | `true`, `false` | `false` | Play a platform sound on BEL |
 | `audible-bell-when-unfocused` | `true`, `false` | `false` | Only sound the audible bell when unfocused |

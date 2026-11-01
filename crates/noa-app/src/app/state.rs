@@ -383,6 +383,11 @@ pub(super) struct WindowState {
     /// The focused pane's last laid-out grid size, for the resize-overlay
     /// change check (`resize-overlay = after-first` skips the first layout).
     pub(super) last_grid: Option<(u16, u16)>,
+    /// The inner sizes `CSI 8 t` requested that the window system has not
+    /// acknowledged with `Resized` yet, oldest first. Only filled off macOS,
+    /// where the resize is asynchronous (see `acknowledge_window_resize`).
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub(super) vt_resize_pending: Vec<PhysicalSize<u32>>,
     /// The single transient-toast slot (R-31/ADR-5): the `cols × rows`
     /// resize overlay and the theme-settings-v2 commit Undo toast share
     /// this one slot, tagged by [`ToastKind`] — a new toast of either kind

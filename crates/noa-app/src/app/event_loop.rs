@@ -302,6 +302,15 @@ impl ApplicationHandler<UserEvent> for App {
                 pane_id,
                 request,
             } => self.handle_kitty_clipboard(window_id, pane_id, request),
+            UserEvent::WindowResizeRequest {
+                window_id,
+                pane_id,
+                request,
+            } => {
+                if let Some(window_id) = self.resolve_pane_window(window_id, pane_id) {
+                    self.handle_window_resize_request(window_id, request);
+                }
+            }
             UserEvent::MouseShapeChanged(window_id, pane_id) => {
                 if let Some(window_id) = self.resolve_pane_window(window_id, pane_id) {
                     self.update_cursor_icon(window_id);
@@ -663,6 +672,9 @@ impl ApplicationHandler<UserEvent> for App {
             // too (FIX 1).
             WindowEvent::Moved(_) => self.refresh_redraw_floor(window_id),
             WindowEvent::Resized(size) => {
+                if let Some(state) = self.windows.get_mut(&window_id) {
+                    window_resize::acknowledge_window_resize(&mut state.vt_resize_pending, size);
+                }
                 self.end_copy_mode_for_window(window_id);
                 self.close_context_menu(window_id);
                 self.on_resize(window_id, size);

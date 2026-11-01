@@ -422,6 +422,52 @@ fn report_screen_size_in_chars_is_the_text_area() {
 }
 
 #[test]
+fn window_resize_request_is_queued_for_the_app_without_a_reply() {
+    let mut t = run(b"\x1b[8;30;100t");
+    assert!(t.pending_writes.is_empty());
+    assert_eq!(
+        t.take_pending_window_resize(),
+        Some(crate::WindowResizeRequest {
+            rows: 30,
+            cols: 100
+        })
+    );
+    assert_eq!(t.take_pending_window_resize(), None);
+}
+
+#[test]
+fn window_resize_request_keeps_omitted_dimensions_as_zero() {
+    let mut t = run(b"\x1b[8;;100t");
+    assert_eq!(
+        t.take_pending_window_resize(),
+        Some(crate::WindowResizeRequest { rows: 0, cols: 100 })
+    );
+    let mut t = run(b"\x1b[8t");
+    assert_eq!(
+        t.take_pending_window_resize(),
+        Some(crate::WindowResizeRequest { rows: 0, cols: 0 })
+    );
+}
+
+#[test]
+fn window_resize_requests_in_one_feed_merge_per_axis() {
+    let mut t = run(b"\x1b[8;30;0t\x1b[8;0;100t\x1b[8;0;0t");
+    assert_eq!(
+        t.take_pending_window_resize(),
+        Some(crate::WindowResizeRequest {
+            rows: 30,
+            cols: 100
+        })
+    );
+}
+
+#[test]
+fn full_reset_drops_a_pending_window_resize() {
+    let mut t = run(b"\x1b[8;30;100t\x1bc");
+    assert_eq!(t.take_pending_window_resize(), None);
+}
+
+#[test]
 fn ac_win_002_report_window_title() {
     let t = run_title_report(b"\x1b]2;foo\x1b\\\x1b[21t");
     assert_eq!(t.pending_writes, b"\x1b]lfoo\x1b\\");
@@ -486,7 +532,7 @@ fn ac_win_008_ps1_one_icon_only_is_a_noop() {
 
 #[test]
 fn ac_win_009_unsupported_ps_values_produce_no_reply() {
-    let t = run(b"\x1b[4t\x1b[8t\x1b[9t\x1b[10t\x1b[20t");
+    let t = run(b"\x1b[4t\x1b[9t\x1b[10t\x1b[20t");
     assert!(t.pending_writes.is_empty());
 }
 

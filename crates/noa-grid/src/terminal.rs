@@ -158,6 +158,9 @@ pub struct Terminal {
     pending_progress_cue: Option<ProgressCue>,
     /// Set by `BEL` (`0x07`); drained by [`Terminal::take_pending_bell`].
     pending_bell: bool,
+    /// The `CSI 8 t` requests in the current feed, merged per axis; drained
+    /// by [`Terminal::take_pending_window_resize`].
+    pending_window_resize: Option<WindowResizeRequest>,
     /// Cell size in pixels, from the last `noa-app` pixel-metrics update.
     /// Zero until the first resize (`CSI 16 t`).
     cell_width_px: u32,
@@ -188,6 +191,14 @@ pub enum ShellIntegrationMarkKind {
     InputStart,
     CommandStart,
     CommandEnd,
+}
+
+/// A program's `CSI 8 ; rows ; cols t` request to resize the window to a
+/// grid size. A zero dimension (omitted or `0`) keeps that dimension as is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowResizeRequest {
+    pub rows: u16,
+    pub cols: u16,
 }
 
 /// Direction for [`Terminal::scroll_to_prompt`].
@@ -250,6 +261,7 @@ impl Terminal {
             pending_progress_update: None,
             pending_progress_cue: None,
             pending_bell: false,
+            pending_window_resize: None,
             cell_width_px: 0,
             cell_height_px: 0,
             text_area_width_px: 0,
@@ -988,6 +1000,12 @@ impl Terminal {
     /// otherwise. Mirrors [`Terminal::take_pending_writes`]'s drain shape.
     pub fn take_pending_bell(&mut self) -> bool {
         std::mem::take(&mut self.pending_bell)
+    }
+
+    /// Drain the `CSI 8 t` window-resize request since the previous call.
+    /// The app decides whether to honor it (`vt-window-resize-allowed`).
+    pub fn take_pending_window_resize(&mut self) -> Option<WindowResizeRequest> {
+        self.pending_window_resize.take()
     }
 
     /// Whether shell integration currently reports a foreground command.

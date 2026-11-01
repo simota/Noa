@@ -610,6 +610,13 @@ pub fn spawn(
                             request,
                         });
                     }
+                    if let Some(request) = output.window_resize {
+                        let _ = proxy.send_event(UserEvent::WindowResizeRequest {
+                            window_id: current_card_target(&window_id, pane_id).0,
+                            pane_id,
+                            request,
+                        });
+                    }
                     if output.mouse_shape_changed {
                         let _ = proxy.send_event(UserEvent::MouseShapeChanged(
                             current_card_target(&window_id, pane_id).0,

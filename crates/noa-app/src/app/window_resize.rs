@@ -65,12 +65,20 @@ impl App {
                 target.width = target.width.min(monitor.size().width);
                 target.height = target.height.min(monitor.size().height);
             }
-            if target == state.vt_resize_pending.unwrap_or(live) {
+            // Compared with the live size only: a pending size the window
+            // manager silently refused must not swallow a repeat request.
+            if state.vt_resize_pending.is_none() && target == live {
                 return;
             }
-            let applied = state.window.request_inner_size(target).is_some();
+            let applied = state.window.request_inner_size(target);
             if let Some(state) = self.windows.get_mut(&window_id) {
-                state.vt_resize_pending = (!applied).then_some(target);
+                state.vt_resize_pending = applied.is_none().then_some(target);
+            }
+            // Applied immediately: no `Resized` is guaranteed, so fold the new
+            // size into the surface, layout and pty now (as the quick terminal
+            // does).
+            if let Some(size) = applied {
+                self.on_resize(window_id, size);
             }
         }
     }

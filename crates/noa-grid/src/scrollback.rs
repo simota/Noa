@@ -416,8 +416,8 @@ impl Page {
         }
     }
 
-    fn is_full(&self) -> bool {
-        self.cells.len() >= PAGE_CELL_CAPACITY || self.rows.len() >= PAGE_ROW_CAPACITY
+    fn is_full(&self, row_cap: usize) -> bool {
+        self.cells.len() >= PAGE_CELL_CAPACITY || self.rows.len() >= row_cap
     }
 
     fn unpack_cell(&self, packed: PackedCell, cell_index: usize) -> Cell {
@@ -1282,6 +1282,8 @@ impl CompressedPage {
 struct SealBatch {
     rows: Vec<DeferredRow>,
     span_bytes: Vec<u8>,
+    /// [`PagedScrollback::page_row_cap`] when the batch was published.
+    page_row_cap: usize,
 }
 
 /// Paged scrollback: a deque of byte-bounded [`Page`]s with a byte-quantity
@@ -1425,6 +1427,14 @@ impl PagedScrollback {
     /// Either limit at `0` keeps no history at all.
     fn disabled(&self) -> bool {
         self.limit_bytes == 0 || self.limit_lines == 0
+    }
+
+    /// Rows a page may hold. Eviction drops whole pages, so a small line
+    /// limit caps pages at a quarter of it: a page of blank lines would
+    /// otherwise hold [`PAGE_ROW_CAPACITY`] rows and keep thousands of lines
+    /// past the limit, where Ghostty overshoots by at most a couple hundred.
+    fn page_row_cap(&self) -> usize {
+        PAGE_ROW_CAPACITY.min(self.limit_lines.div_ceil(4))
     }
 
     pub(crate) fn clear(&mut self) {
@@ -1870,6 +1880,7 @@ impl PagedScrollback {
         let batch = Arc::new(SealBatch {
             rows: self.pending.drain(..).collect(),
             span_bytes: std::mem::take(&mut self.pending_span_bytes),
+            page_row_cap: self.page_row_cap(),
         });
         self.sealing_est_bytes = std::mem::take(&mut self.pending_est_bytes);
         self.pending_cell_rows = 0;
@@ -2127,9 +2138,10 @@ impl PagedScrollback {
     }
 
     fn ensure_page(&mut self, cols: u16) -> &mut Page {
+        let row_cap = self.page_row_cap();
         let need_new = match &self.open {
             None => true,
-            Some(page) => page.cols != cols || page.is_full(),
+            Some(page) => page.cols != cols || page.is_full(row_cap),
         };
         if need_new {
             // Reuse a spare evicted page when its arena is big enough for
@@ -2280,7 +2292,7 @@ fn pack_chunk(
         let cols = row.cols() as u16;
         let need_new = match pages.last() {
             None => true,
-            Some(page) => page.cols != cols || page.is_full(),
+            Some(page) => page.cols != cols || page.is_full(batch.page_row_cap),
         };
         if need_new {
             pages.push(Page::new(cols));
@@ -2768,6 +2780,23 @@ mod tests {
         // At most one page past the limit is kept.
         let largest_page = sb.pages.iter().map(|slot| slot.rows).max().unwrap();
         assert!(sb.len() < 1000 + largest_page + sb.open.as_ref().map_or(0, |p| p.rows.len()));
+    }
+
+    #[test]
+    fn small_line_limit_keeps_blank_floods_near_it() {
+        // A blank row packs to no cells, so only the row cap ends a page.
+        let mut immediate = PagedScrollback::new(usize::MAX);
+        immediate.set_limit_lines(100);
+        let mut deferred = PagedScrollback::new(usize::MAX);
+        deferred.set_limit_lines(100);
+        for _ in 0..20_000 {
+            immediate.push_row(&text_row("", 80));
+            deferred.push_row_deferred(text_row("", 80));
+        }
+        deferred.flush_all();
+        for sb in [&immediate, &deferred] {
+            assert!((100..=125).contains(&sb.len()), "{}", sb.len());
+        }
     }
 
     #[test]
@@ -3507,6 +3536,7 @@ mod tests {
                 .map(|_| DeferredRow::Cells(row.clone()))
                 .collect(),
             span_bytes: Vec::new(),
+            page_row_cap: PAGE_ROW_CAPACITY,
         };
         let carcasses: Vec<(Row, usize)> = (0..batch_rows).map(|_| (row.clone(), TEXT)).collect();
         let iters = n / batch_rows;

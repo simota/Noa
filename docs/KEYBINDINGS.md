@@ -50,7 +50,7 @@ names — such as `new_tab`, `prompt_surface_title`,
 | Font | `font-size.increase`, `font-size.decrease`, `font-size.reset` |
 | Search | `search.find`, `search.next`, `search.previous`, `search.clear` |
 | Scroll | `scroll.line-up`, `scroll.line-down`, `scroll.page-up`, `scroll.page-down`, `scroll.top`, `scroll.bottom`, `scroll.prev-prompt`, `scroll.next-prompt` |
-| Tab | `tab.new`, `tab.close`, `tab.next`, `tab.previous`, `tab.set-title`, `tab.select-1` … `tab.select-9` |
+| Tab | `tab.new`, `tab.close`, `tab.next`, `tab.previous`, `tab.set-title`, `tab.move-to-new-window` (macOS; Ghostty's `move_tab_to_new_window` also works), `tab.select-1` … `tab.select-9` |
 | Window | `window.new`, `window.close`, `fullscreen.toggle` |
 | Split | `split.new-left`, `split.new-right`, `split.new-up`, `split.new-down`, `split.focus-left`, `split.focus-right`, `split.focus-up`, `split.focus-down`, `split.resize-left`, `split.resize-right`, `split.resize-up`, `split.resize-down`, `split.equalize`, `split.toggle-zoom` |
 | UI | `session-overview.toggle`, `command-palette.toggle`, `quick-terminal.toggle`, `secure-keyboard-entry.toggle`, `sidebar.toggle`, `auto-approve.toggle`, `ember.toggle`, `theme-settings.open` |
@@ -162,7 +162,7 @@ Actions with no default keybinding can also be run from the command
 palette / menu. Notable ones include Reload Configuration, Clear
 Scrollback, Toggle Quick Terminal, Secure Keyboard Entry, About, Open
 Preferences, Open Theme & Settings, Export Scrollback, Pipe Scrollback
-to Pager, Toggle Auto Approve, Set Tab Title.
+to Pager, Toggle Auto Approve, Set Tab Title, Move Tab to New Window.
 
 > Unbound ⌘-combination keys are swallowed and never leak to the pty.
 

@@ -53,6 +53,10 @@ pub enum AppCommand {
     SelectTab(usize),
     NextTab,
     PrevTab,
+    /// Ghostty 1.4.0's `move_tab_to_new_window`: move the focused tab out of
+    /// its window into a new one of its own. A lone tab already is its own
+    /// window, so it does nothing then. macOS only (native AppKit tabs).
+    MoveTabToNewWindow,
     /// Open the "Set Tab Title" prompt for the focused tab (tab-title
     /// REQ-TTL-1). No default chord — Ghostty ships `prompt_surface_title`
     /// unbound too — so it is reached via the palette and the Window menu.
@@ -281,6 +285,7 @@ impl AppCommand {
             AppCommand::ComposePrompt | AppCommand::ReadOutput => "",
             AppCommand::NextTab => Self::NEXT_TAB_MENU_ID,
             AppCommand::PrevTab => Self::PREV_TAB_MENU_ID,
+            AppCommand::MoveTabToNewWindow => "",
             AppCommand::SetTabTitle => Self::SET_TAB_TITLE_MENU_ID,
             AppCommand::CloseWindow => Self::CLOSE_WINDOW_MENU_ID,
             AppCommand::Quit => Self::QUIT_MENU_ID,
@@ -450,6 +455,7 @@ impl AppCommand {
             },
             Self::NextTab => "tab.next",
             Self::PrevTab => "tab.previous",
+            Self::MoveTabToNewWindow => "tab.move-to-new-window",
             Self::SetTabTitle => "tab.set-title",
             Self::CloseWindow => "window.close",
             Self::Quit => "app.quit",
@@ -536,6 +542,7 @@ impl AppCommand {
             "tab.select-9" => Some(Self::SelectTab(9)),
             "tab.next" => Some(Self::NextTab),
             "tab.previous" => Some(Self::PrevTab),
+            "tab.move-to-new-window" => Some(Self::MoveTabToNewWindow),
             "tab.set-title" => Some(Self::SetTabTitle),
             "window.close" => Some(Self::CloseWindow),
             "app.quit" => Some(Self::Quit),

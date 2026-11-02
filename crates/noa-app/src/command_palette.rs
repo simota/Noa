@@ -103,6 +103,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         },
         AppCommand::NextTab => "Next Tab",
         AppCommand::PrevTab => "Previous Tab",
+        AppCommand::MoveTabToNewWindow => "Move Tab to New Window",
         AppCommand::SetTabTitle => "Set Tab Title\u{2026}",
         AppCommand::CloseWindow => "Close Window",
         AppCommand::Quit => "Quit Noa",
@@ -206,6 +207,9 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::CloseTab,
         AppCommand::NextTab,
         AppCommand::PrevTab,
+        // Moving a tab out is macOS-only for now (native AppKit tabs).
+        #[cfg(target_os = "macos")]
+        AppCommand::MoveTabToNewWindow,
         AppCommand::CloseWindow,
         AppCommand::Quit,
     ];
@@ -389,6 +393,7 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         | AppCommand::CloseTab
         | AppCommand::NextTab
         | AppCommand::PrevTab
+        | AppCommand::MoveTabToNewWindow
         | AppCommand::SelectTab(_)
         | AppCommand::ToggleTabOverview
         | AppCommand::NextNotification => CommandCategory::Tabs,
@@ -714,6 +719,7 @@ mod tests {
             AppCommand::CloseTab,
             AppCommand::NextTab,
             AppCommand::PrevTab,
+            AppCommand::MoveTabToNewWindow,
             AppCommand::SetTabTitle,
             AppCommand::CloseWindow,
             AppCommand::Quit,
@@ -771,7 +777,8 @@ mod tests {
                 AppCommand::ToggleCommandPalette
                     | AppCommand::SelectTab(_)
                     | AppCommand::Preferences
-            );
+            ) || (!cfg!(target_os = "macos")
+                && command == AppCommand::MoveTabToNewWindow);
             assert_eq!(
                 entries.contains(&command),
                 !excluded,

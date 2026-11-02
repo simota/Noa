@@ -356,6 +356,7 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::ToggleSplitZoom
         | AppCommand::ToggleAutoApprove
         | AppCommand::SetTabTitle
+        | AppCommand::MoveTabToNewWindow
         | AppCommand::CloseTab => CommandScope::FocusedTab,
         AppCommand::ToggleTabOverview
         | AppCommand::NextNotification
@@ -467,6 +468,7 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::ToggleSplitZoom
         | AppCommand::ToggleAutoApprove
         | AppCommand::SetTabTitle
+        | AppCommand::MoveTabToNewWindow
         | AppCommand::CloseTab
         | AppCommand::SelectTab(_)
         | AppCommand::NextTab

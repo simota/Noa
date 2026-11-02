@@ -581,6 +581,7 @@ fn ghostty_action_alias(action: &str) -> Option<AppCommand> {
         "new_tab" => Some(AppCommand::NewTab),
         "new_window" => Some(AppCommand::NewWindow),
         "close_tab" | "close_surface" => Some(AppCommand::CloseTab),
+        "move_tab_to_new_window" => Some(AppCommand::MoveTabToNewWindow),
         "close_window" => Some(AppCommand::CloseWindow),
         "quit" => Some(AppCommand::Quit),
         "copy_to_clipboard" => Some(AppCommand::Copy),

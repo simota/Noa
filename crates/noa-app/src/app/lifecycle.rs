@@ -801,6 +801,78 @@ impl App {
         )
     }
 
+    /// Ghostty 1.4.0's `move_tab_to_new_window` for the focused tab: it moves
+    /// into a new logical window (fresh group, native window of its own). A
+    /// lone tab already is its own window, so it stays put, as in Ghostty.
+    /// The new window keeps the sidebar state the tab was laid out with.
+    #[cfg(target_os = "macos")]
+    pub(super) fn move_tab_to_new_window(&mut self) {
+        let Some(window_id) = self.focused else {
+            return;
+        };
+        let Some(group) = self.windows.get(&window_id).map(|state| state.group) else {
+            return;
+        };
+        let siblings: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|(other, state)| **other != window_id && state.group == group)
+            .map(|(other, _)| *other)
+            .collect();
+        if siblings.is_empty() {
+            return;
+        }
+        let new_group = self.allocate_group_id();
+        let identifier = self.tabbing_identifier(new_group);
+        let Some(state) = self.windows.get_mut(&window_id) else {
+            return;
+        };
+        if !crate::macos_window::move_tab_to_new_window(&state.window, &identifier) {
+            return;
+        }
+        state.group = new_group;
+        if self.sidebar_visible_groups.contains(&group) {
+            self.sidebar_visible_groups.insert(new_group);
+        }
+        // The moved tab's card leaves the old window's sidebar and the old
+        // cards leave the moved tab's: drop sidebar interactions bound to
+        // either, as closing a tab does.
+        let affected: Vec<WindowId> = std::iter::once(window_id).chain(siblings).collect();
+        for id in &affected {
+            if let Some(state) = self.windows.get_mut(id) {
+                state.sidebar_menu = None;
+                state.sidebar_card_hover = None;
+                state.sidebar_drag = None;
+            }
+        }
+        if self
+            .sidebar_rename
+            .as_ref()
+            .is_some_and(|session| affected.contains(&session.window_id))
+        {
+            self.cancel_sidebar_rename();
+        }
+        // The native tab bar leaves both windows (a lone tab has none) with no
+        // `Resized` event, as when a tab closes: re-derive the top inset.
+        // Neither window gets a `Focused`/`Resized` event to redraw on (the
+        // moved tab already was key), so redraw and re-anchor the IME here,
+        // as an in-tab pane move does.
+        for id in affected {
+            self.relayout_and_resize_window(id);
+            self.update_focused_ime_cursor_area(id);
+            self.request_window_redraw(id);
+        }
+        self.request_sidebar_redraw();
+        self.persist_session();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn move_tab_to_new_window(&mut self) {
+        // #TODO(agent): off macOS tabs share one OS window and surface, so
+        // moving one out needs a new OS window + surface for it first.
+        log::warn!("move_tab_to_new_window is not supported on this platform yet");
+    }
+
     /// The macOS `tabbingIdentifier` for a logical window. Per-process
     /// (`std::process::id()`) so two noa instances never merge their tabs, and
     /// per-group so each window keeps a separate tab bar.

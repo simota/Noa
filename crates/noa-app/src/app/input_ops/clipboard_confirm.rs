@@ -64,9 +64,14 @@ impl App {
     }
 
     /// Ghostty's `right-click-action` for a right press with mouse reporting
-    /// off. Returns whether the context menu should open.
+    /// off. Returns whether the context menu should open. While a modal
+    /// owns input the click neither selects, copies nor pastes into the pane
+    /// underneath (the menu path keeps its own modal handling).
     pub(in crate::app) fn right_click(&mut self, window_id: WindowId, pane_id: PaneId) -> bool {
         use noa_config::RightClickAction;
+        if self.modal_owns_input(window_id) {
+            return self.config.right_click_action == RightClickAction::ContextMenu;
+        }
         match self.config.right_click_action {
             RightClickAction::Ignore => false,
             RightClickAction::ContextMenu => {

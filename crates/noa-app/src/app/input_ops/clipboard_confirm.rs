@@ -33,15 +33,15 @@ impl App {
     }
 
     /// Ghostty's `copy-on-select`: a mouse selection finished with a button
-    /// release is copied to the PRIMARY selection (and, for `clipboard`, the
-    /// system clipboard too) without an explicit copy command.
+    /// release is copied to the PRIMARY selection and/or the system
+    /// clipboard without an explicit copy command.
     pub(in crate::app) fn copy_selection_on_select(
         &mut self,
         window_id: WindowId,
         pane_id: PaneId,
     ) {
         let copy_on_select = self.config.copy_on_select;
-        if copy_on_select == noa_config::CopyOnSelect::False {
+        if copy_on_select == noa_config::CopyOnSelect::None {
             return;
         }
         let Some(text) = self
@@ -53,10 +53,12 @@ impl App {
         else {
             return;
         };
-        if let Err(err) = self.clipboard.set_primary_text(&text) {
+        if copy_on_select.writes_primary()
+            && let Err(err) = self.clipboard.set_primary_text(&text)
+        {
             log::warn!("failed to copy selection to the primary selection: {err}");
         }
-        if copy_on_select == noa_config::CopyOnSelect::Clipboard {
+        if copy_on_select.writes_clipboard() {
             self.write_text_to_clipboard(&text);
         }
     }

@@ -63,6 +63,99 @@ impl App {
         }
     }
 
+    /// Ghostty's `right-click-action` for a right press with mouse reporting
+    /// off. Returns whether the context menu should open.
+    pub(in crate::app) fn right_click(&mut self, window_id: WindowId, pane_id: PaneId) -> bool {
+        use noa_config::RightClickAction;
+        match self.config.right_click_action {
+            RightClickAction::Ignore => false,
+            RightClickAction::ContextMenu => {
+                if self.select_under_right_click(window_id, pane_id) {
+                    self.copy_selection_on_select(window_id, pane_id);
+                    self.request_window_redraw(window_id);
+                }
+                true
+            }
+            RightClickAction::Copy => {
+                self.copy_selection_and_clear(window_id, pane_id);
+                false
+            }
+            RightClickAction::CopyOrPaste => {
+                if !self.copy_selection_and_clear(window_id, pane_id) {
+                    self.paste_clipboard_to_pty();
+                }
+                false
+            }
+            RightClickAction::Paste => {
+                if let Some(surface) = self
+                    .windows
+                    .get(&window_id)
+                    .and_then(|state| state.surfaces.get(&pane_id))
+                {
+                    surface.terminal.lock().clear_selection();
+                }
+                self.request_window_redraw(window_id);
+                self.paste_clipboard_to_pty();
+                false
+            }
+        }
+    }
+
+    /// `context-menu`'s selection: a right click outside the selection
+    /// selects the Cmd-hovered link under it (a single cell for an OSC 8
+    /// link, as Ghostty does), else the word. Returns whether it selected.
+    fn select_under_right_click(&mut self, window_id: WindowId, pane_id: PaneId) -> bool {
+        let Some(surface) = self
+            .windows
+            .get_mut(&window_id)
+            .and_then(|state| state.surfaces.get_mut(&pane_id))
+        else {
+            return false;
+        };
+        let Some(cell) = surface.last_mouse_cell else {
+            return false;
+        };
+        let mut terminal = surface.terminal.lock();
+        let point = terminal.viewport_point_to_selection_point(cell);
+        if terminal
+            .active()
+            .selection
+            .is_some_and(|selection| selection.contains(point))
+        {
+            return false;
+        }
+        surface.selection_anchor = None;
+        match surface.hover_link {
+            Some(HoverLink::Range { y, x_start, x_end }) => {
+                terminal.set_viewport_selection(Point { x: x_start, y }, Point { x: x_end, y });
+            }
+            Some(HoverLink::Registry(_)) => terminal.set_viewport_selection(cell, cell),
+            None => terminal.select_word_at_viewport_point(cell),
+        }
+        true
+    }
+
+    /// Copy the selection to the system clipboard and clear it, as
+    /// `right-click-action = copy` does. Returns whether there was one.
+    fn copy_selection_and_clear(&mut self, window_id: WindowId, pane_id: PaneId) -> bool {
+        let Some(text) = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&pane_id))
+            .and_then(|surface| {
+                let mut terminal = surface.terminal.lock();
+                let text = terminal.selected_text();
+                terminal.clear_selection();
+                text
+            })
+        else {
+            return false;
+        };
+        self.write_text_to_clipboard(&text);
+        self.request_window_redraw(window_id);
+        true
+    }
+
     /// A middle click (with mouse reporting off) pastes the PRIMARY
     /// selection, the X11/Wayland convention Ghostty follows.
     pub(in crate::app) fn paste_primary_selection_to_pane(

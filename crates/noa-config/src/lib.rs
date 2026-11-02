@@ -329,6 +329,32 @@ impl CopyOnSelect {
     }
 }
 
+/// Ghostty's `right-click-action`: what a right click (with mouse reporting
+/// off) does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RightClickAction {
+    /// Select the link or word under the click (unless it lands inside the
+    /// selection), copy it per `copy-on-select`, and show the context menu.
+    #[default]
+    ContextMenu,
+    Paste,
+    Copy,
+    CopyOrPaste,
+    Ignore,
+}
+
+impl RightClickAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ContextMenu => "context-menu",
+            Self::Paste => "paste",
+            Self::Copy => "copy",
+            Self::CopyOrPaste => "copy-or-paste",
+            Self::Ignore => "ignore",
+        }
+    }
+}
+
 /// A single OpenType feature toggle, e.g. `calt` (enabled) or `-liga`
 /// (`enabled: false`, explicitly disabled). Consumed for real in WP2; WP0
 /// only parses and stores it.
@@ -829,6 +855,8 @@ pub struct StartupConfig {
     pub clipboard_paste_protection: bool,
     /// Where a finished mouse selection is copied (`copy-on-select`).
     pub copy_on_select: CopyOnSelect,
+    /// What a right click does (`right-click-action`).
+    pub right_click_action: RightClickAction,
     pub mouse_shift_capture: MouseShiftCapture,
     /// Editor command for Cmd-clicking local paths, including line/column.
     pub file_link_editor: FileLinkEditor,
@@ -1141,6 +1169,7 @@ impl Default for StartupConfig {
             clipboard_write_limit_bytes: Some(DEFAULT_CLIPBOARD_WRITE_LIMIT_BYTES),
             clipboard_paste_protection: true,
             copy_on_select: CopyOnSelect::default(),
+            right_click_action: RightClickAction::default(),
             mouse_shift_capture: MouseShiftCapture::default(),
             file_link_editor: FileLinkEditor::Default,
             confirm_quit: true,
@@ -1272,6 +1301,7 @@ pub struct ConfigOverrides {
     pub clipboard_write_limit_bytes: Option<Option<usize>>,
     pub clipboard_paste_protection: Option<bool>,
     pub copy_on_select: Option<CopyOnSelect>,
+    pub right_click_action: Option<RightClickAction>,
     pub mouse_shift_capture: Option<MouseShiftCapture>,
     pub file_link_editor: Option<FileLinkEditor>,
     pub confirm_quit: Option<bool>,
@@ -1367,6 +1397,7 @@ macro_rules! impl_redacted_config_debug {
                     .field("clipboard_write", &self.clipboard_write)
                     .field("clipboard_write_limit_bytes", &self.clipboard_write_limit_bytes)
                     .field("copy_on_select", &self.copy_on_select)
+                    .field("right_click_action", &self.right_click_action)
                     .field("mouse_shift_capture", &self.mouse_shift_capture)
                     .field(
                         "clipboard_paste_protection",
@@ -1495,6 +1526,9 @@ impl ConfigOverrides {
                 .clipboard_write_limit_bytes
                 .or(self.clipboard_write_limit_bytes),
             copy_on_select: higher_priority.copy_on_select.or(self.copy_on_select),
+            right_click_action: higher_priority
+                .right_click_action
+                .or(self.right_click_action),
             mouse_shift_capture: higher_priority
                 .mouse_shift_capture
                 .or(self.mouse_shift_capture),
@@ -1687,6 +1721,7 @@ impl ConfigOverrides {
                 .unwrap_or(base.clipboard_write_limit_bytes),
             mouse_shift_capture: self.mouse_shift_capture.unwrap_or(base.mouse_shift_capture),
             copy_on_select: self.copy_on_select.unwrap_or(base.copy_on_select),
+            right_click_action: self.right_click_action.unwrap_or(base.right_click_action),
             clipboard_paste_protection: self
                 .clipboard_paste_protection
                 .unwrap_or(base.clipboard_paste_protection),
@@ -2209,6 +2244,7 @@ mod tests {
                 clipboard_write_limit_bytes: Some(DEFAULT_CLIPBOARD_WRITE_LIMIT_BYTES),
                 clipboard_paste_protection: true,
                 copy_on_select: CopyOnSelect::default(),
+                right_click_action: RightClickAction::default(),
                 mouse_shift_capture: MouseShiftCapture::default(),
                 file_link_editor: FileLinkEditor::Default,
                 confirm_quit: true,

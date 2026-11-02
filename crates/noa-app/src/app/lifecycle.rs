@@ -813,11 +813,13 @@ impl App {
         let Some(group) = self.windows.get(&window_id).map(|state| state.group) else {
             return;
         };
-        let has_siblings = self
+        let siblings: Vec<WindowId> = self
             .windows
             .iter()
-            .any(|(other, state)| *other != window_id && state.group == group);
-        if !has_siblings {
+            .filter(|(other, state)| **other != window_id && state.group == group)
+            .map(|(other, _)| *other)
+            .collect();
+        if siblings.is_empty() {
             return;
         }
         let new_group = self.allocate_group_id();
@@ -832,7 +834,31 @@ impl App {
         if self.sidebar_visible_groups.contains(&group) {
             self.sidebar_visible_groups.insert(new_group);
         }
+        // The moved tab's card leaves the old window's sidebar and the old
+        // cards leave the moved tab's: drop sidebar interactions bound to
+        // either, as closing a tab does.
+        let affected: Vec<WindowId> = std::iter::once(window_id).chain(siblings).collect();
+        for id in &affected {
+            if let Some(state) = self.windows.get_mut(id) {
+                state.sidebar_menu = None;
+                state.sidebar_card_hover = None;
+                state.sidebar_drag = None;
+            }
+        }
+        if self
+            .sidebar_rename
+            .as_ref()
+            .is_some_and(|session| affected.contains(&session.window_id))
+        {
+            self.cancel_sidebar_rename();
+        }
+        // The native tab bar leaves both windows (a lone tab has none) with no
+        // `Resized` event, as when a tab closes: re-derive the top inset.
+        for id in affected {
+            self.relayout_and_resize_window(id);
+        }
         self.request_sidebar_redraw();
+        self.persist_session();
     }
 
     #[cfg(not(target_os = "macos"))]

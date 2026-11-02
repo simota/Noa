@@ -207,6 +207,8 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::CloseTab,
         AppCommand::NextTab,
         AppCommand::PrevTab,
+        // Moving a tab out is macOS-only for now (native AppKit tabs).
+        #[cfg(target_os = "macos")]
         AppCommand::MoveTabToNewWindow,
         AppCommand::CloseWindow,
         AppCommand::Quit,
@@ -717,6 +719,7 @@ mod tests {
             AppCommand::CloseTab,
             AppCommand::NextTab,
             AppCommand::PrevTab,
+            AppCommand::MoveTabToNewWindow,
             AppCommand::SetTabTitle,
             AppCommand::CloseWindow,
             AppCommand::Quit,
@@ -774,7 +777,8 @@ mod tests {
                 AppCommand::ToggleCommandPalette
                     | AppCommand::SelectTab(_)
                     | AppCommand::Preferences
-            );
+            ) || (!cfg!(target_os = "macos")
+                && command == AppCommand::MoveTabToNewWindow);
             assert_eq!(
                 entries.contains(&command),
                 !excluded,

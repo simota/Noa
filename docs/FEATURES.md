@@ -84,7 +84,7 @@ For the type, allowed values, defaults, and clamp/fallback rules of every key, s
 | Background image | `background-image`, `background-image-opacity/-position/-fit/-repeat/-interval` |
 | Cursor | `cursor-style`, `cursor-style-blink`, `cursor-stop-blinking-after` |
 | Bell | `visual-bell`, `audible-bell`, `audible-bell-dock-bounce`, `audible-bell-when-unfocused` |
-| Behavior | `scrollback-limit`, `scrollback-compression`, `cursor-click-to-move`, `vt-window-resize-allowed`, `vt-xt-checksum-report`, `vt-xt-checksum-extension`, `clipboard-read`, `clipboard-write`, `clipboard-write-limit-bytes`, `clipboard-paste-protection`, `confirm-quit`, `alpha-blending`, `title-report`, `resize-overlay`, `auto-approve`, `send-selection-send-enter`, `ember` |
+| Behavior | `scrollback-limit`, `scrollback-limit-lines`, `scrollback-compression`, `cursor-click-to-move`, `vt-window-resize-allowed`, `vt-xt-checksum-report`, `vt-xt-checksum-extension`, `clipboard-read`, `clipboard-write`, `clipboard-write-limit-bytes`, `clipboard-paste-protection`, `confirm-quit`, `alpha-blending`, `title-report`, `resize-overlay`, `auto-approve`, `send-selection-send-enter`, `ember` |
 | macOS | `macos-option-as-alt`, `macos-titlebar-style`, `macos-non-native-fullscreen`, `macos-titlebar-proxy-icon` |
 | Quick Terminal | `quick-terminal-hotkey/-size/-autohide` |
 | Scratch Terminal | `scratch-terminal-key/-size` |

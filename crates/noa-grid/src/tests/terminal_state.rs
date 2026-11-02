@@ -1168,6 +1168,17 @@ fn pinned_viewport_clamps_when_scrollback_evicts() {
 }
 
 #[test]
+fn column_resize_reflow_keeps_the_scrollback_line_limit() {
+    let mut t = Terminal::new(GridSize::new(10, 3));
+    t.set_scrollback_limit_lines(0);
+    t.resize(GridSize::new(12, 3));
+
+    let mut s = Stream::new();
+    s.feed(b"A\r\nB\r\nC\r\nD\r\nE", &mut t);
+    assert_eq!(t.scrollback_len(), 0);
+}
+
+#[test]
 fn erase_display_scrollback_clears_history_only() {
     let mut t = run_size(5, 3, b"A\r\nB\r\nC\r\nD");
     t.scroll_viewport_up(1);

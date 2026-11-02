@@ -987,6 +987,8 @@ impl App {
         apply_xt_checksum_policy(&mut terminal, &self.config);
         terminal.scrollback_compression = self.config.scrollback_compression;
         terminal.set_scrollback_limit_bytes(self.config.scrollback_limit);
+        terminal
+            .set_scrollback_limit_lines(self.config.scrollback_limit_lines.unwrap_or(usize::MAX));
         terminal.set_kitty_image_limit(self.config.image_storage_limit);
         if let Some(gpu) = self.gpu.as_ref() {
             // Deliberately `gpu.theme` directly, not the `active_theme()`

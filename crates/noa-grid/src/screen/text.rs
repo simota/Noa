@@ -12,6 +12,10 @@ impl Screen {
         self.scrollback.limit_bytes()
     }
 
+    pub(crate) fn scrollback_limit_lines(&self) -> usize {
+        self.scrollback.limit_lines()
+    }
+
     /// Prepend a plain-text snapshot as older scrollback while preserving the
     /// current live grid. This is a cold path used by remote attach backfill;
     /// the text is rewrapped to the current width and stored with default
@@ -159,6 +163,21 @@ impl Screen {
             return;
         }
         let evicted = self.scrollback.set_limit_bytes(bytes);
+        self.after_scrollback_limit_change(evicted);
+    }
+
+    /// Set the scrollback row limit (`scrollback-limit-lines`; `usize::MAX`
+    /// for none), like [`Self::set_scrollback_limit_bytes`]. The first of the
+    /// two limits reached evicts.
+    pub fn set_scrollback_limit_lines(&mut self, lines: usize) {
+        if !self.scrollback_enabled {
+            return;
+        }
+        let evicted = self.scrollback.set_limit_lines(lines);
+        self.after_scrollback_limit_change(evicted);
+    }
+
+    fn after_scrollback_limit_change(&mut self, evicted: usize) {
         if evicted > 0 {
             self.rows_evicted += evicted;
             self.selection = self

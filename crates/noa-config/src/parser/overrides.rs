@@ -61,6 +61,7 @@ pub(crate) fn build_overrides(
     let mut background_image_repeat = None;
     let mut background_image_interval_secs = None;
     let mut scrollback_limit = None;
+    let mut scrollback_limit_lines = None;
     let mut image_storage_limit = None;
     let mut window_save_state = None;
     let mut scrollback_persist = None;
@@ -311,6 +312,9 @@ pub(crate) fn build_overrides(
             "scrollback-limit" => {
                 scrollback_limit = parse_usize(path, directive, &mut diagnostics);
             }
+            "scrollback-limit-lines" => {
+                scrollback_limit_lines = parse_byte_limit(path, directive, &mut diagnostics);
+            }
             "image-storage-limit" => {
                 image_storage_limit = parse_usize(path, directive, &mut diagnostics);
             }
@@ -548,6 +552,7 @@ pub(crate) fn build_overrides(
             background_image_repeat,
             background_image_interval_secs,
             scrollback_limit,
+            scrollback_limit_lines,
             image_storage_limit,
             window_save_state,
             scrollback_persist,
@@ -672,6 +677,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "background-image-repeat"
             | "background-image-interval"
             | "scrollback-limit"
+            | "scrollback-limit-lines"
             | "image-storage-limit"
             | "window-save-state"
             | "scrollback-persist"

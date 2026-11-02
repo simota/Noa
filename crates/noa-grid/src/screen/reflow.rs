@@ -102,6 +102,7 @@ impl Screen {
         let target_rows = rows as usize;
         let enabled = self.scrollback_enabled;
         let limit = self.scrollback.limit_bytes();
+        let limit_lines = self.scrollback.limit_lines();
 
         // Streaming reflow (two passes over logical lines), so neither the
         // materialized history nor the reflowed output is ever fully resident:
@@ -154,6 +155,7 @@ impl Screen {
         // reflow already renumbers rows, so shell-integration marks shift with a
         // column-count resize). The byte limit is enforced during push.
         let mut scrollback = PagedScrollback::new(if enabled { limit } else { 0 });
+        scrollback.set_limit_lines(limit_lines);
         let mut grid: Vec<Row> = Vec::with_capacity(target_rows);
         self.stream_reflow_lines(
             cols,

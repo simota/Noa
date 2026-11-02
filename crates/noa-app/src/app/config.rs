@@ -123,6 +123,8 @@ pub struct AppConfig {
     /// before page-granular eviction (`0` disables scrollback). Applied to each
     /// new terminal at surface creation.
     pub scrollback_limit: usize,
+    /// `scrollback-limit-lines`; `None` is `unlimited`.
+    pub scrollback_limit_lines: Option<usize>,
     /// `image-storage-limit`: total bytes of decoded Kitty/SIXEL image data
     /// retained per pane before oldest-first eviction. Applied to each new
     /// terminal at surface creation.
@@ -340,6 +342,7 @@ impl AppConfig {
             background_image_repeat: config.background_image_repeat,
             background_image_interval_secs: config.background_image_interval_secs,
             scrollback_limit: config.scrollback_limit,
+            scrollback_limit_lines: config.scrollback_limit_lines,
             image_storage_limit: config.image_storage_limit,
             window_save_state: config.window_save_state,
             scrollback_persist: config.scrollback_persist,

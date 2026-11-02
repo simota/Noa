@@ -523,6 +523,19 @@ fn clipboard_write_parses_each_mode_and_defaults_to_allow() {
 }
 
 #[test]
+fn scrollback_limit_lines_takes_a_count_or_unlimited() {
+    // Ghostty 1.4.0's default is `unlimited`.
+    assert_eq!(crate::StartupConfig::default().scrollback_limit_lines, None);
+    let (overrides, _) = parse_overrides(path(), "scrollback-limit-lines = 567");
+    assert_eq!(overrides.scrollback_limit_lines, Some(Some(567)));
+    let (overrides, _) = parse_overrides(path(), "scrollback-limit-lines = unlimited");
+    assert_eq!(overrides.scrollback_limit_lines, Some(None));
+    let (overrides, diagnostics) = parse_overrides(path(), "scrollback-limit-lines = lots");
+    assert_eq!(overrides.scrollback_limit_lines, None);
+    assert_eq!(diagnostics.len(), 1);
+}
+
+#[test]
 fn clipboard_write_limit_bytes_takes_a_count_or_unlimited() {
     assert_eq!(
         crate::StartupConfig::default().clipboard_write_limit_bytes,

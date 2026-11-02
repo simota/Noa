@@ -929,6 +929,10 @@ pub struct StartupConfig {
     /// `scrollback-limit`: total bytes of scrollback storage retained before
     /// page-granular eviction (`0` disables scrollback). Ghostty default 10 MB.
     pub scrollback_limit: usize,
+    /// `scrollback-limit-lines`: most scrollback rows retained (soft-wrapped
+    /// rows count separately); `None` is `unlimited`, the Ghostty 1.4.0
+    /// default. With `scrollback-limit`, the first limit reached evicts.
+    pub scrollback_limit_lines: Option<usize>,
     /// `image-storage-limit`: total bytes of decoded Kitty/SIXEL image data
     /// retained before oldest-first eviction. Ghostty default 320 MB.
     pub image_storage_limit: usize,
@@ -1145,6 +1149,7 @@ impl Default for StartupConfig {
             background_image_repeat: false,
             background_image_interval_secs: DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
             scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
+            scrollback_limit_lines: None,
             image_storage_limit: DEFAULT_IMAGE_STORAGE_LIMIT,
             window_save_state: WindowSaveState::default(),
             scrollback_persist: ScrollbackPersist::default(),
@@ -1273,6 +1278,8 @@ pub struct ConfigOverrides {
     pub background_image_repeat: Option<bool>,
     pub background_image_interval_secs: Option<u64>,
     pub scrollback_limit: Option<usize>,
+    /// `Some(None)` is an explicit `unlimited`.
+    pub scrollback_limit_lines: Option<Option<usize>>,
     pub image_storage_limit: Option<usize>,
     pub window_save_state: Option<WindowSaveState>,
     pub scrollback_persist: Option<ScrollbackPersist>,
@@ -1376,6 +1383,7 @@ macro_rules! impl_redacted_config_debug {
                         &self.background_image_interval_secs,
                     )
                     .field("scrollback_limit", &self.scrollback_limit)
+                    .field("scrollback_limit_lines", &self.scrollback_limit_lines)
                     .field("image_storage_limit", &self.image_storage_limit)
                     .field("window_save_state", &self.window_save_state)
                     .field("scrollback_persist", &self.scrollback_persist)
@@ -1532,6 +1540,9 @@ impl ConfigOverrides {
                 .background_image_interval_secs
                 .or(self.background_image_interval_secs),
             scrollback_limit: higher_priority.scrollback_limit.or(self.scrollback_limit),
+            scrollback_limit_lines: higher_priority
+                .scrollback_limit_lines
+                .or(self.scrollback_limit_lines),
             image_storage_limit: higher_priority
                 .image_storage_limit
                 .or(self.image_storage_limit),
@@ -1715,6 +1726,9 @@ impl ConfigOverrides {
                 .background_image_interval_secs
                 .unwrap_or(base.background_image_interval_secs),
             scrollback_limit: self.scrollback_limit.unwrap_or(base.scrollback_limit),
+            scrollback_limit_lines: self
+                .scrollback_limit_lines
+                .unwrap_or(base.scrollback_limit_lines),
             image_storage_limit: self.image_storage_limit.unwrap_or(base.image_storage_limit),
             window_save_state: self.window_save_state.unwrap_or(base.window_save_state),
             scrollback_persist: self.scrollback_persist.unwrap_or(base.scrollback_persist),
@@ -2203,6 +2217,7 @@ mod tests {
                 background_image_repeat: false,
                 background_image_interval_secs: DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
                 scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
+                scrollback_limit_lines: None,
                 image_storage_limit: DEFAULT_IMAGE_STORAGE_LIMIT,
                 window_save_state: WindowSaveState::default(),
                 scrollback_persist: ScrollbackPersist::Never,

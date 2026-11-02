@@ -416,8 +416,8 @@ impl Page {
         }
     }
 
-    fn is_full(&self) -> bool {
-        self.cells.len() >= PAGE_CELL_CAPACITY || self.rows.len() >= PAGE_ROW_CAPACITY
+    fn is_full(&self, row_cap: usize) -> bool {
+        self.cells.len() >= PAGE_CELL_CAPACITY || self.rows.len() >= row_cap
     }
 
     fn unpack_cell(&self, packed: PackedCell, cell_index: usize) -> Cell {
@@ -1282,10 +1282,13 @@ impl CompressedPage {
 struct SealBatch {
     rows: Vec<DeferredRow>,
     span_bytes: Vec<u8>,
+    /// [`PagedScrollback::page_row_cap`] when the batch was published.
+    page_row_cap: usize,
 }
 
 /// Paged scrollback: a deque of byte-bounded [`Page`]s with a byte-quantity
-/// retention limit. `limit_bytes == 0` disables scrollback entirely.
+/// retention limit and a row-count one (`scrollback-limit-lines`); whichever
+/// is reached first evicts. Either limit at `0` disables scrollback entirely.
 pub(crate) struct PagedScrollback {
     /// Filled pages, oldest first; idle compression works on these.
     pages: VecDeque<Arc<PageSlot>>,
@@ -1302,6 +1305,10 @@ pub(crate) struct PagedScrollback {
     total_rows: usize,
     total_bytes: usize,
     limit_bytes: usize,
+    /// Most rows to retain (`usize::MAX` for no limit). Eviction is page
+    /// granular and never drops below it, so slightly more may be kept, as
+    /// Ghostty documents for `scrollback-limit-lines`.
+    limit_lines: usize,
     /// Lazy worker pool for off-thread batch packing. Declared before
     /// `sealing` so a drop joins the workers first (they hold `Arc` clones
     /// of the sealing batch; `Arc` makes any order safe, this just keeps the
@@ -1324,9 +1331,9 @@ pub(crate) struct PagedScrollback {
     /// batch boundary between the inline span flush and the worker pool
     /// (see `deferred_boundary`).
     pending_cell_rows: usize,
-    /// `(cols, limit_bytes)` the current `batch_rows` was derived for
-    /// (see `account_deferred`).
-    batch_rows_key: (usize, usize),
+    /// `(cols, limit_bytes, limit_lines)` the current `batch_rows` was
+    /// derived for (see `account_deferred`).
+    batch_rows_key: (usize, usize, usize),
     /// Upper-bound packed sizes of the `sealing` batch and the `pending`
     /// ring (untrimmed cells × packed cell size). Drive the early-sync
     /// trigger that keeps eviction timing faithful under small retention
@@ -1370,12 +1377,13 @@ impl PagedScrollback {
             total_rows: 0,
             total_bytes: 0,
             limit_bytes,
+            limit_lines: usize::MAX,
             packer: None,
             sealing: None,
             pending: VecDeque::new(),
             pending_span_bytes: Vec::new(),
             pending_cell_rows: 0,
-            batch_rows_key: (0, 0),
+            batch_rows_key: (0, 0, 0),
             sealing_est_bytes: 0,
             pending_est_bytes: 0,
             batch_rows: SEAL_BATCH_MAX_ROWS,
@@ -1410,6 +1418,23 @@ impl PagedScrollback {
 
     pub(crate) fn limit_bytes(&self) -> usize {
         self.limit_bytes
+    }
+
+    pub(crate) fn limit_lines(&self) -> usize {
+        self.limit_lines
+    }
+
+    /// Either limit at `0` keeps no history at all.
+    fn disabled(&self) -> bool {
+        self.limit_bytes == 0 || self.limit_lines == 0
+    }
+
+    /// Rows a page may hold. Eviction drops whole pages, so a small line
+    /// limit caps pages at a quarter of it: a page of blank lines would
+    /// otherwise hold [`PAGE_ROW_CAPACITY`] rows and keep thousands of lines
+    /// past the limit, where Ghostty overshoots by at most a couple hundred.
+    fn page_row_cap(&self) -> usize {
+        PAGE_ROW_CAPACITY.min(self.limit_lines.div_ceil(4))
     }
 
     pub(crate) fn clear(&mut self) {
@@ -1466,7 +1491,7 @@ impl PagedScrollback {
     /// intentional: pages are append-only on the hot path, while remote
     /// attach backfill is a one-time cold-path operation.
     pub(crate) fn prepend_rows(&mut self, rows: &[Row]) -> usize {
-        if rows.is_empty() || self.limit_bytes == 0 {
+        if rows.is_empty() || self.disabled() {
             return 0;
         }
         let mut retained = Vec::with_capacity(self.total_rows);
@@ -1487,7 +1512,7 @@ impl PagedScrollback {
     /// Cold-path variant (reflow, remote-attach backfill, tests): packs
     /// immediately, flushing every deferred row first so ordering holds.
     pub(crate) fn push_row(&mut self, row: &Row) -> usize {
-        if self.limit_bytes == 0 {
+        if self.disabled() {
             return 1;
         }
         let mut evicted = self.flush_all();
@@ -1508,7 +1533,7 @@ impl PagedScrollback {
     /// when scrollback is disabled, otherwise whatever a triggered collection
     /// evicted.
     pub(crate) fn push_row_deferred(&mut self, mut row: Row) -> usize {
-        if self.limit_bytes == 0 {
+        if self.disabled() {
             return 1;
         }
         // History rows always report clean (see `take_visible_rows_with_damage`).
@@ -1552,7 +1577,7 @@ impl PagedScrollback {
         blank: &Cell,
         wrapped: bool,
     ) -> usize {
-        if self.limit_bytes == 0 {
+        if self.disabled() {
             return 1;
         }
         if !self.pending.is_empty() || self.sealing.is_some() {
@@ -1580,7 +1605,7 @@ impl PagedScrollback {
     /// first; in the ascii flood that is at most the one scalar-prefix row
     /// per fed chunk (no worker batch forms), so the settle never stalls.
     pub(crate) fn push_row_immediate(&mut self, row: Row) -> usize {
-        if self.limit_bytes == 0 {
+        if self.disabled() {
             return 1;
         }
         let mut evicted = if self.pending.is_empty() && self.sealing.is_none() {
@@ -1612,7 +1637,7 @@ impl PagedScrollback {
         blank: &Cell,
         wrapped: bool,
     ) -> usize {
-        if self.limit_bytes == 0 {
+        if self.disabled() {
             return 1;
         }
         self.account_deferred(cols as usize);
@@ -1637,8 +1662,8 @@ impl PagedScrollback {
         // The derivation runs a handful of divisions; on the flood hot path
         // (a call per sealed row, millions/s) it only ever changes when the
         // width or the retention limit does, so memoize on that pair.
-        if self.batch_rows_key != (cols, self.limit_bytes) {
-            self.batch_rows_key = (cols, self.limit_bytes);
+        if self.batch_rows_key != (cols, self.limit_bytes, self.limit_lines) {
+            self.batch_rows_key = (cols, self.limit_bytes, self.limit_lines);
             // Width-scaled batch, additionally capped to half the
             // quarter-limit estimate allowance (the other half is
             // pending-refill headroom): a batch boundary past the
@@ -1646,7 +1671,9 @@ impl PagedScrollback {
             // publishes under a small retention limit — every cycle would
             // degrade to the inline `flush_all` below, packing one
             // ever-open page that page-granular eviction cannot evict.
-            let allowance_rows = (self.limit_bytes / 4) / est_row.max(1) / 2;
+            // The row limit gets the same quarter-limit allowance.
+            let allowance_rows =
+                ((self.limit_bytes / 4) / est_row.max(1)).min(self.limit_lines / 4) / 2;
             self.batch_rows = seal_batch_rows_for(cols).min(allowance_rows).max(1);
         }
         self.pending_est_bytes += est_row;
@@ -1679,7 +1706,8 @@ impl PagedScrollback {
         let over_limit = self
             .sealing_est_bytes
             .saturating_add(self.pending_est_bytes)
-            > self.limit_bytes / 4;
+            > self.limit_bytes / 4
+            || self.sealing_rows() + self.pending.len() > self.limit_lines / 4;
         if over_limit {
             return self.flush_all();
         }
@@ -1852,6 +1880,7 @@ impl PagedScrollback {
         let batch = Arc::new(SealBatch {
             rows: self.pending.drain(..).collect(),
             span_bytes: std::mem::take(&mut self.pending_span_bytes),
+            page_row_cap: self.page_row_cap(),
         });
         self.sealing_est_bytes = std::mem::take(&mut self.pending_est_bytes);
         self.pending_cell_rows = 0;
@@ -2019,14 +2048,41 @@ impl PagedScrollback {
     /// number of rows evicted. `0` disables scrollback and drops all history.
     pub(crate) fn set_limit_bytes(&mut self, bytes: usize) -> usize {
         self.limit_bytes = bytes;
-        if bytes == 0 {
+        self.apply_limits()
+    }
+
+    /// Change the row limit at runtime, like [`Self::set_limit_bytes`].
+    pub(crate) fn set_limit_lines(&mut self, lines: usize) -> usize {
+        self.limit_lines = lines;
+        self.apply_limits()
+    }
+
+    fn apply_limits(&mut self) -> usize {
+        if self.disabled() {
             let evicted = self.total_rows;
             self.clear();
             return evicted;
         }
         // Settle deferred rows so the new limit applies to everything
         // retained (`flush_all` ends with its own `evict_to_limit`).
-        self.flush_all()
+        let mut evicted = self.flush_all();
+        // Pages packed under a larger line limit can hold far more rows than
+        // the new page cap, and eviction never splits a page: repack just the
+        // newest `limit_lines` rows (cold path, like `prepend_rows`).
+        let cap = self.page_row_cap();
+        let oversized = self.pages.iter().any(|slot| slot.rows > cap)
+            || self.open.as_ref().is_some_and(|page| page.rows.len() > cap);
+        if oversized {
+            let start = self.total_rows.saturating_sub(self.limit_lines);
+            let mut retained = Vec::with_capacity(self.total_rows - start);
+            self.for_each_row(start..self.total_rows, |_, row| retained.push(row.clone()));
+            self.clear();
+            evicted += start;
+            for row in &retained {
+                evicted += self.push_row(row);
+            }
+        }
+        evicted
     }
 
     /// Compress every filled page except those holding rows `keep` (the viewport, which would just decompress again
@@ -2099,9 +2155,10 @@ impl PagedScrollback {
     }
 
     fn ensure_page(&mut self, cols: u16) -> &mut Page {
+        let row_cap = self.page_row_cap();
         let need_new = match &self.open {
             None => true,
-            Some(page) => page.cols != cols || page.is_full(),
+            Some(page) => page.cols != cols || page.is_full(row_cap),
         };
         if need_new {
             // Reuse a spare evicted page when its arena is big enough for
@@ -2121,12 +2178,16 @@ impl PagedScrollback {
     }
 
     fn evict_to_limit(&mut self) -> usize {
-        if self.limit_bytes == 0 {
+        if self.disabled() {
             return 0;
         }
         let mut evicted = 0;
-        // The open page is the newest and always stays.
-        while self.total_bytes > self.limit_bytes && !self.pages.is_empty() {
+        // The open page is the newest and always stays. A page goes over the
+        // row limit only while the rest still holds at least `limit_lines`.
+        while let Some(front) = self.pages.front()
+            && (self.total_bytes > self.limit_bytes
+                || self.total_rows - front.rows >= self.limit_lines)
+        {
             let slot = self.pages.pop_front().unwrap();
             self.total_bytes -= slot.bytes;
             self.total_rows -= slot.rows;
@@ -2248,7 +2309,7 @@ fn pack_chunk(
         let cols = row.cols() as u16;
         let need_new = match pages.last() {
             None => true,
-            Some(page) => page.cols != cols || page.is_full(),
+            Some(page) => page.cols != cols || page.is_full(batch.page_row_cap),
         };
         if need_new {
             pages.push(Page::new(cols));
@@ -2723,6 +2784,95 @@ mod tests {
             mib(accounted as u64),
             mib(full.saturating_sub(start)),
         );
+    }
+
+    #[test]
+    fn line_limit_evicts_whole_pages_but_never_below_it() {
+        let mut sb = PagedScrollback::new(usize::MAX);
+        sb.set_limit_lines(1000);
+        for row in varied_rows(20_000, 120) {
+            sb.push_row(&row);
+        }
+        assert!(sb.len() >= 1000);
+        // At most one page past the limit is kept.
+        let largest_page = sb.pages.iter().map(|slot| slot.rows).max().unwrap();
+        assert!(sb.len() < 1000 + largest_page + sb.open.as_ref().map_or(0, |p| p.rows.len()));
+    }
+
+    #[test]
+    fn small_line_limit_keeps_blank_floods_near_it() {
+        // A blank row packs to no cells, so only the row cap ends a page.
+        let mut immediate = PagedScrollback::new(usize::MAX);
+        immediate.set_limit_lines(100);
+        let mut deferred = PagedScrollback::new(usize::MAX);
+        deferred.set_limit_lines(100);
+        for _ in 0..20_000 {
+            immediate.push_row(&text_row("", 80));
+            deferred.push_row_deferred(text_row("", 80));
+        }
+        deferred.flush_all();
+        for sb in [&immediate, &deferred] {
+            assert!((100..=125).contains(&sb.len()), "{}", sb.len());
+        }
+    }
+
+    #[test]
+    fn lowering_the_line_limit_splits_pages_packed_under_the_old_one() {
+        // Short rows fit 1000 to a page, which a 100-line limit cannot evict.
+        let mut sb = PagedScrollback::new(usize::MAX);
+        for i in 0..1000 {
+            sb.push_row(&text_row(&i.to_string(), 80));
+        }
+        assert_eq!(sb.set_limit_lines(100), 900);
+        assert_eq!(sb.len(), 100);
+        assert_eq!(
+            sb.row(0).unwrap().cells[..3]
+                .iter()
+                .map(|c| c.ch)
+                .collect::<String>(),
+            "900"
+        );
+    }
+
+    #[test]
+    fn lowering_the_line_limit_to_the_retained_count_still_splits_pages() {
+        let mut sb = PagedScrollback::new(usize::MAX);
+        for _ in 0..100 {
+            sb.push_row(&text_row("", 80));
+        }
+        assert_eq!(sb.set_limit_lines(100), 0);
+        for _ in 0..99 {
+            sb.push_row(&text_row("", 80));
+        }
+        assert!((100..=125).contains(&sb.len()), "{}", sb.len());
+    }
+
+    #[test]
+    fn line_limit_applies_to_deferred_rows() {
+        let mut sb = PagedScrollback::new(usize::MAX);
+        sb.set_limit_lines(1000);
+        for row in varied_rows(20_000, 120) {
+            sb.push_row_deferred(row);
+        }
+        sb.flush_all();
+        assert!((1000..20_000).contains(&sb.len()), "{}", sb.len());
+    }
+
+    #[test]
+    fn lowering_the_line_limit_evicts_now_and_zero_disables() {
+        let mut sb = PagedScrollback::new(usize::MAX);
+        for row in varied_rows(5000, 120) {
+            sb.push_row(&row);
+        }
+        assert_eq!(sb.len(), 5000);
+        assert!(sb.set_limit_lines(500) > 0);
+        assert!((500..5000).contains(&sb.len()));
+        let retained = sb.len();
+        assert_eq!(sb.set_limit_lines(0), retained);
+        assert_eq!(sb.len(), 0);
+        // A disabled scrollback evicts every new row at once.
+        assert_eq!(sb.push_row(&varied_row(0, 120)), 1);
+        assert_eq!(sb.len(), 0);
     }
 
     /// Prints the deflate ratio on code-like text (`--nocapture`); asserts
@@ -3434,6 +3584,7 @@ mod tests {
                 .map(|_| DeferredRow::Cells(row.clone()))
                 .collect(),
             span_bytes: Vec::new(),
+            page_row_cap: PAGE_ROW_CAPACITY,
         };
         let carcasses: Vec<(Row, usize)> = (0..batch_rows).map(|_| (row.clone(), TEXT)).collect();
         let iters = n / batch_rows;

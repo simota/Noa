@@ -2069,9 +2069,12 @@ impl PagedScrollback {
         // Pages packed under a larger line limit can hold far more rows than
         // the new page cap, and eviction never splits a page: repack just the
         // newest `limit_lines` rows (cold path, like `prepend_rows`).
-        if self.total_rows > self.limit_lines.saturating_add(self.page_row_cap()) {
-            let start = self.total_rows - self.limit_lines;
-            let mut retained = Vec::with_capacity(self.limit_lines);
+        let cap = self.page_row_cap();
+        let oversized = self.pages.iter().any(|slot| slot.rows > cap)
+            || self.open.as_ref().is_some_and(|page| page.rows.len() > cap);
+        if oversized {
+            let start = self.total_rows.saturating_sub(self.limit_lines);
+            let mut retained = Vec::with_capacity(self.total_rows - start);
             self.for_each_row(start..self.total_rows, |_, row| retained.push(row.clone()));
             self.clear();
             evicted += start;
@@ -2829,6 +2832,19 @@ mod tests {
                 .collect::<String>(),
             "900"
         );
+    }
+
+    #[test]
+    fn lowering_the_line_limit_to_the_retained_count_still_splits_pages() {
+        let mut sb = PagedScrollback::new(usize::MAX);
+        for _ in 0..100 {
+            sb.push_row(&text_row("", 80));
+        }
+        assert_eq!(sb.set_limit_lines(100), 0);
+        for _ in 0..99 {
+            sb.push_row(&text_row("", 80));
+        }
+        assert!((100..=125).contains(&sb.len()), "{}", sb.len());
     }
 
     #[test]

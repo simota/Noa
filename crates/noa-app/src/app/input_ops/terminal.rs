@@ -41,6 +41,11 @@ impl App {
         if send_form_feed {
             self.write_pane_pty_bytes(window_id, pane_id, &b"\x0c"[..]);
         }
+        // Ghostty's `select_all` commits its selection like a mouse release,
+        // so it copies per `copy-on-select` too.
+        if action == TerminalAction::SelectAll {
+            self.copy_selection_on_select(window_id, pane_id);
+        }
 
         if let Some(state) = self.windows.get(&window_id) {
             state.window.request_redraw();

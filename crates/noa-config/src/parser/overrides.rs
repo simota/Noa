@@ -32,6 +32,7 @@ pub(crate) fn build_overrides(
     let mut mouse_shift_capture = None;
     let mut copy_on_select = None;
     let mut right_click_action = None;
+    let mut middle_click_action = None;
     let mut file_link_editor = None;
     let mut confirm_quit = None;
     let mut title_report = None;
@@ -220,6 +221,19 @@ pub(crate) fn build_overrides(
                     "copy" => Some(RightClickAction::Copy),
                     "copy-or-paste" => Some(RightClickAction::CopyOrPaste),
                     "ignore" => Some(RightClickAction::Ignore),
+                    _ => {
+                        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+                        None
+                    }
+                };
+            }
+            "middle-click-action" => {
+                use crate::MiddleClickAction;
+                let value = directive.value.as_deref().unwrap_or("");
+                middle_click_action = match value {
+                    "primary-paste" => Some(MiddleClickAction::PrimaryPaste),
+                    "clipboard-paste" => Some(MiddleClickAction::ClipboardPaste),
+                    "ignore" => Some(MiddleClickAction::Ignore),
                     _ => {
                         diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
                         None
@@ -550,6 +564,7 @@ pub(crate) fn build_overrides(
             mouse_shift_capture,
             copy_on_select,
             right_click_action,
+            middle_click_action,
             file_link_editor,
             confirm_quit,
             title_report,
@@ -675,6 +690,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "clipboard-paste-protection"
             | "copy-on-select"
             | "right-click-action"
+            | "middle-click-action"
             | "file-link-editor"
             | "confirm-quit"
             | "title-report"

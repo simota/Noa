@@ -87,7 +87,7 @@ impl App {
             }
             RightClickAction::CopyOrPaste => {
                 if !self.copy_selection_and_clear(window_id, pane_id) {
-                    self.paste_clipboard_to_pty();
+                    self.paste_clipboard_to_pane(window_id, pane_id);
                 }
                 false
             }
@@ -100,7 +100,7 @@ impl App {
                     surface.terminal.lock().clear_selection();
                 }
                 self.request_window_redraw(window_id);
-                self.paste_clipboard_to_pty();
+                self.paste_clipboard_to_pane(window_id, pane_id);
                 false
             }
         }
@@ -172,6 +172,25 @@ impl App {
         true
     }
 
+    /// Ghostty's `middle-click-action` for a middle press with mouse
+    /// reporting off. Nothing reaches the pane while a modal owns input.
+    pub(in crate::app) fn middle_click(&mut self, window_id: WindowId, pane_id: PaneId) {
+        use noa_config::MiddleClickAction;
+        if self.modal_owns_input(window_id) {
+            return;
+        }
+        match self.config.middle_click_action {
+            // Ghostty only asks for the selection clipboard where the
+            // platform has one; macOS has none.
+            MiddleClickAction::PrimaryPaste if cfg!(target_os = "macos") => {}
+            MiddleClickAction::PrimaryPaste => {
+                self.paste_primary_selection_to_pane(window_id, pane_id);
+            }
+            MiddleClickAction::ClipboardPaste => self.paste_clipboard_to_pane(window_id, pane_id),
+            MiddleClickAction::Ignore => {}
+        }
+    }
+
     /// A middle click (with mouse reporting off) pastes the PRIMARY
     /// selection, the X11/Wayland convention Ghostty follows.
     pub(in crate::app) fn paste_primary_selection_to_pane(
@@ -197,6 +216,12 @@ impl App {
         let Some((window_id, pane_id)) = self.resolve_pane_command_target(AppCommand::Paste) else {
             return;
         };
+        self.paste_clipboard_to_pane(window_id, pane_id);
+    }
+
+    /// Paste the system clipboard into a specific pane (a mouse paste
+    /// targets the clicked pane, not whichever window holds focus).
+    pub(in crate::app) fn paste_clipboard_to_pane(&mut self, window_id: WindowId, pane_id: PaneId) {
         if self.send_kitty_paste_event(
             window_id,
             pane_id,

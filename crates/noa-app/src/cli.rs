@@ -310,6 +310,11 @@ fn show_config_output(config: &StartupConfig) -> String {
     );
     push_line(
         &mut out,
+        "middle-click-action",
+        config.middle_click_action.as_str(),
+    );
+    push_line(
+        &mut out,
         "mouse-shift-capture",
         config.mouse_shift_capture.as_str(),
     );

@@ -1991,7 +1991,7 @@ impl App {
         if button == MouseButton::Middle {
             if state == ElementState::Pressed {
                 self.focus_pane(window_id, pane_id);
-                self.paste_primary_selection_to_pane(window_id, pane_id);
+                self.middle_click(window_id, pane_id);
             }
             return;
         }

@@ -147,6 +147,11 @@ const PACK_WORKERS: usize = 3;
 /// cadence just amortizes the flush call further, while the quarter-limit
 /// `over_limit` guard still bounds the transient exactly as before.
 const SPAN_FLUSH_MULTIPLE: usize = 4;
+/// Byte limit the deferred tiers' quarter-limit backpressure assumes at most:
+/// with `scrollback-limit-bytes = unlimited` (and no finite line limit) the
+/// pending tier would otherwise grow without bound while the workers lag.
+/// The settings panel's own ceiling (1 GB).
+const BACKPRESSURE_LIMIT_BYTES: usize = 1_000_000_000;
 /// Evicted-page reuse pool cap (see `PagedScrollback::spares`): covers one
 /// inline flush's worth of page turnover (~a quarter-limit of 64KiB pages)
 /// so a sustained flood recycles arenas instead of round-tripping the
@@ -1706,7 +1711,7 @@ impl PagedScrollback {
         let over_limit = self
             .sealing_est_bytes
             .saturating_add(self.pending_est_bytes)
-            > self.limit_bytes / 4
+            > self.limit_bytes.min(BACKPRESSURE_LIMIT_BYTES) / 4
             || self.sealing_rows() + self.pending.len() > self.limit_lines / 4;
         if over_limit {
             return self.flush_all();

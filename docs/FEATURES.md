@@ -5,7 +5,7 @@ Noa is a terminal emulator that faithfully reproduces the observable behavior of
 ## Terminal core (noa-grid)
 
 - **Screen grid / cursor / modes** — active region with DEC-compliant cursor clamping
-- **Paged scrollback** — style-interned, byte-capped (`scrollback-limit`) page storage, compressed while idle (`scrollback-compression`)
+- **Paged scrollback** — style-interned, byte-capped (`scrollback-limit-bytes`) page storage, compressed while idle (`scrollback-compression`)
 - **Alt screen / DECSC・DECRC** — alternate screen switching, cursor save/restore
 - **Scroll region / left-right margins** — DECSTBM + DECLRMM
 - **Tab stops** — set / clear / clear all
@@ -84,7 +84,7 @@ For the type, allowed values, defaults, and clamp/fallback rules of every key, s
 | Background image | `background-image`, `background-image-opacity/-position/-fit/-repeat/-interval` |
 | Cursor | `cursor-style`, `cursor-style-blink`, `cursor-stop-blinking-after` |
 | Bell | `visual-bell`, `audible-bell`, `audible-bell-dock-bounce`, `audible-bell-when-unfocused` |
-| Behavior | `scrollback-limit`, `scrollback-limit-lines`, `scrollback-compression`, `cursor-click-to-move`, `vt-window-resize-allowed`, `vt-xt-checksum-report`, `vt-xt-checksum-extension`, `clipboard-read`, `clipboard-write`, `clipboard-write-limit-bytes`, `clipboard-paste-protection`, `confirm-quit`, `alpha-blending`, `title-report`, `resize-overlay`, `auto-approve`, `send-selection-send-enter`, `ember` |
+| Behavior | `scrollback-limit-bytes` (`scrollback-limit`), `scrollback-limit-lines`, `scrollback-compression`, `cursor-click-to-move`, `vt-window-resize-allowed`, `vt-xt-checksum-report`, `vt-xt-checksum-extension`, `clipboard-read`, `clipboard-write`, `clipboard-write-limit-bytes`, `clipboard-paste-protection`, `confirm-quit`, `alpha-blending`, `title-report`, `resize-overlay`, `auto-approve`, `send-selection-send-enter`, `ember` |
 | macOS | `macos-option-as-alt`, `macos-titlebar-style`, `macos-non-native-fullscreen`, `macos-titlebar-proxy-icon` |
 | Quick Terminal | `quick-terminal-hotkey/-size/-autohide` |
 | Scratch Terminal | `scratch-terminal-key/-size` |

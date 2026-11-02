@@ -1494,7 +1494,10 @@ impl ThemeSettings {
                     return RowEffect::None;
                 };
                 let step = delta.unsigned_abs() as usize * SCROLLBACK_LIMIT_STEP;
-                let new = if delta.is_negative() {
+                let new = if delta.is_negative() && current == usize::MAX {
+                    // `unlimited` steps down to the UI ceiling.
+                    SCROLLBACK_LIMIT_MAX
+                } else if delta.is_negative() {
                     current.saturating_sub(step)
                 } else if current >= SCROLLBACK_LIMIT_MAX {
                     // G2: a config-set value can start above the UI ceiling
@@ -2288,7 +2291,10 @@ impl ThemeSettings {
                     ));
                 }
                 RowDraft::ScrollbackLimit(bytes) => {
-                    updates.push(("scrollback-limit".to_string(), bytes.to_string()));
+                    updates.push((
+                        "scrollback-limit-bytes".to_string(),
+                        crate::cli::scrollback_limit_value(*bytes),
+                    ));
                 }
                 RowDraft::CursorStyleBlink(blink) => {
                     updates.push(("cursor-style-blink".to_string(), blink.to_string()));

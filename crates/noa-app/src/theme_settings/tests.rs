@@ -2983,8 +2983,25 @@ fn scrollback_limit_row_is_persist_only_and_adjusts_in_one_mb_steps() {
     );
     let updates = settings.commit_updates();
     assert!(
-        updates.contains(&("scrollback-limit".to_string(), after.to_string())),
+        updates.contains(&("scrollback-limit-bytes".to_string(), after.to_string())),
         "{updates:?}"
+    );
+}
+
+#[test]
+fn unlimited_scrollback_limit_shows_unlimited_and_steps_down_to_the_ceiling() {
+    let mut settings = ThemeSettings::open(ThemeSettingsInit {
+        scrollback_limit: usize::MAX,
+        ..settings_init()
+    });
+    move_to_row(&mut settings, SettingsRowKind::ScrollbackLimit);
+    let idx = row_index(SettingsRowKind::ScrollbackLimit);
+    assert_eq!(settings.rows()[idx].draft.display_value(), "Unlimited");
+
+    settings.adjust(-1, Instant::now());
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ScrollbackLimit(1_000_000_000)
     );
 }
 

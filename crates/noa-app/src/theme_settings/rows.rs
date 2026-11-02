@@ -1025,14 +1025,16 @@ pub(crate) fn format_server_status(
     }
 }
 
-/// `scrollback-limit`'s display value (E): the raw byte count is unwieldy
-/// UI text, so this shows whole megabytes (`0` displays as `Off`, matching
-/// `noa_config`'s own "`0` disables scrollback" documentation). The
+/// `scrollback-limit-bytes`'s display value (E): the raw byte count is
+/// unwieldy UI text, so this shows whole megabytes (`0` displays as `Off`,
+/// matching `noa_config`'s own "`0` disables scrollback" documentation). The
 /// *written* config value (`commit_updates()`) is always the raw byte count
-/// — this formatting is display-only.
+/// or `unlimited` — this formatting is display-only.
 fn scrollback_limit_display_value(bytes: usize) -> String {
     if bytes == 0 {
         "Off".to_string()
+    } else if bytes == usize::MAX {
+        "Unlimited".to_string()
     } else {
         format!("{:.1} MB", bytes as f64 / 1_000_000.0)
     }

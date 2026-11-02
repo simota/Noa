@@ -24,8 +24,9 @@ pub use writer::{
 pub const DEFAULT_COLS: u16 = 80;
 pub const DEFAULT_ROWS: u16 = 24;
 pub const DEFAULT_FONT_SIZE: f32 = 14.0;
-/// `scrollback-limit` default: 10 MB of scrollback storage, matching Ghostty.
-pub const DEFAULT_SCROLLBACK_LIMIT: usize = 10_000_000;
+/// `scrollback-limit-bytes` default: 50 MB of scrollback storage, matching
+/// Ghostty 1.4.0.
+pub const DEFAULT_SCROLLBACK_LIMIT: usize = 50_000_000;
 /// `image-storage-limit` default: 320 MB of decoded image data, matching
 /// Ghostty/Kitty's per-terminal graphics storage budget.
 pub const DEFAULT_IMAGE_STORAGE_LIMIT: usize = 320_000_000;
@@ -926,12 +927,13 @@ pub struct StartupConfig {
     /// `background-image-interval`: seconds between rotations when
     /// `background-image` resolves to a directory. Noa-specific extension.
     pub background_image_interval_secs: u64,
-    /// `scrollback-limit`: total bytes of scrollback storage retained before
-    /// page-granular eviction (`0` disables scrollback). Ghostty default 10 MB.
+    /// `scrollback-limit-bytes` (formerly `scrollback-limit`, still accepted):
+    /// total bytes of scrollback storage retained before page-granular
+    /// eviction (`0` disables scrollback, `usize::MAX` is `unlimited`).
     pub scrollback_limit: usize,
     /// `scrollback-limit-lines`: most scrollback rows retained (soft-wrapped
     /// rows count separately); `None` is `unlimited`, the Ghostty 1.4.0
-    /// default. With `scrollback-limit`, the first limit reached evicts.
+    /// default. With `scrollback-limit-bytes`, the first limit reached evicts.
     pub scrollback_limit_lines: Option<usize>,
     /// `image-storage-limit`: total bytes of decoded Kitty/SIXEL image data
     /// retained before oldest-first eviction. Ghostty default 320 MB.
@@ -2478,9 +2480,18 @@ font-size = 15.5
 
     #[test]
     fn scrollback_limit_flows_through_parse_apply_and_precedence() {
-        let (overrides, diagnostics) = parse_overrides(test_path(), "scrollback-limit = 2000000");
+        let (overrides, diagnostics) =
+            parse_overrides(test_path(), "scrollback-limit-bytes = 2000000");
         assert!(diagnostics.is_empty());
         assert_eq!(overrides.scrollback_limit, Some(2_000_000));
+        // The pre-1.4 name sets the same value; `unlimited` lifts the limit.
+        let (overrides, diagnostics) = parse_overrides(test_path(), "scrollback-limit = 3000000");
+        assert!(diagnostics.is_empty());
+        assert_eq!(overrides.scrollback_limit, Some(3_000_000));
+        let (overrides, diagnostics) =
+            parse_overrides(test_path(), "scrollback-limit-bytes = unlimited");
+        assert!(diagnostics.is_empty());
+        assert_eq!(overrides.scrollback_limit, Some(usize::MAX));
 
         // Absent key keeps the default; a CLI override wins over the file.
         assert_eq!(

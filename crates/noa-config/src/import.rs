@@ -162,11 +162,14 @@ mod tests {
 
     #[test]
     fn scrollback_limit_is_preserved_uncommented_on_import() {
-        let (output, stats) = build_import_output(&[String::from("scrollback-limit = 5000000\n")]);
+        let (output, stats) = build_import_output(&[String::from(
+            "scrollback-limit = 5000000\nscrollback-limit-bytes = 6000000\n",
+        )]);
 
         assert!(output.contains("scrollback-limit = 5000000\n"));
+        assert!(output.contains("scrollback-limit-bytes = 6000000\n"));
         assert!(!output.contains("# scrollback-limit"));
-        assert_eq!(stats.supported, 1);
+        assert_eq!(stats.supported, 2);
         assert_eq!(stats.commented_out, 0);
     }
 

@@ -553,7 +553,7 @@ fn clipboard_write_limit_bytes_takes_a_count_or_unlimited() {
 #[test]
 fn copy_on_select_parses_ghostty_values() {
     use crate::CopyOnSelect;
-    let legacy_true = if cfg!(target_os = "linux") {
+    let legacy_true = if cfg!(any(target_os = "linux", target_os = "freebsd")) {
         CopyOnSelect::Primary
     } else {
         CopyOnSelect::Clipboard

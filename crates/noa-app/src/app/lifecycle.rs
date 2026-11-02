@@ -854,8 +854,13 @@ impl App {
         }
         // The native tab bar leaves both windows (a lone tab has none) with no
         // `Resized` event, as when a tab closes: re-derive the top inset.
+        // Neither window gets a `Focused`/`Resized` event to redraw on (the
+        // moved tab already was key), so redraw and re-anchor the IME here,
+        // as an in-tab pane move does.
         for id in affected {
             self.relayout_and_resize_window(id);
+            self.update_focused_ime_cursor_area(id);
+            self.request_window_redraw(id);
         }
         self.request_sidebar_redraw();
         self.persist_session();

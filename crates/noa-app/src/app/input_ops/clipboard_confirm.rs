@@ -105,6 +105,13 @@ impl App {
     /// selects the Cmd-hovered link under it (a single cell for an OSC 8
     /// link, as Ghostty does), else the word. Returns whether it selected.
     fn select_under_right_click(&mut self, window_id: WindowId, pane_id: PaneId) -> bool {
+        // Re-derive the link from the live grid: `Surface::hover_link` only
+        // re-syncs on pointer/modifier events, so output may have rewritten
+        // the row under it since.
+        let link = self
+            .hover_link_target(window_id)
+            .filter(|(link_pane, _)| *link_pane == pane_id)
+            .map(|(_, link)| link);
         let Some(surface) = self
             .windows
             .get_mut(&window_id)
@@ -125,7 +132,7 @@ impl App {
             return false;
         }
         surface.selection_anchor = None;
-        match surface.hover_link {
+        match link {
             Some(HoverLink::Range { y, x_start, x_end }) => {
                 terminal.set_viewport_selection(Point { x: x_start, y }, Point { x: x_end, y });
             }
@@ -136,7 +143,8 @@ impl App {
     }
 
     /// Copy the selection to the system clipboard and clear it, as
-    /// `right-click-action = copy` does. Returns whether there was one.
+    /// `right-click-action = copy` does. Returns whether there was one — a
+    /// selection of only blanks counts, though it has no text to copy.
     fn copy_selection_and_clear(&mut self, window_id: WindowId, pane_id: PaneId) -> bool {
         let Some(text) = self
             .windows
@@ -144,14 +152,17 @@ impl App {
             .and_then(|state| state.surfaces.get(&pane_id))
             .and_then(|surface| {
                 let mut terminal = surface.terminal.lock();
+                terminal.active().selection?;
                 let text = terminal.selected_text();
                 terminal.clear_selection();
-                text
+                Some(text)
             })
         else {
             return false;
         };
-        self.write_text_to_clipboard(&text);
+        if let Some(text) = text {
+            self.write_text_to_clipboard(&text);
+        }
         self.request_window_redraw(window_id);
         true
     }

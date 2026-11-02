@@ -193,9 +193,17 @@ pub(crate) fn build_overrides(
                 use crate::CopyOnSelect;
                 let value = directive.value.as_deref().unwrap_or("");
                 copy_on_select = match value {
-                    "false" => Some(CopyOnSelect::False),
-                    "true" => Some(CopyOnSelect::True),
+                    "none" => Some(CopyOnSelect::None),
+                    "primary" => Some(CopyOnSelect::Primary),
                     "clipboard" => Some(CopyOnSelect::Clipboard),
+                    "both" => Some(CopyOnSelect::Both),
+                    // Ghostty's pre-1.4 booleans: `true` is the selection
+                    // clipboard where one exists, else the system clipboard.
+                    "true" if cfg!(any(target_os = "linux", target_os = "freebsd")) => {
+                        Some(CopyOnSelect::Primary)
+                    }
+                    "true" => Some(CopyOnSelect::Clipboard),
+                    "false" => Some(CopyOnSelect::None),
                     _ => {
                         diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
                         None

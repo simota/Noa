@@ -285,24 +285,47 @@ impl MouseShiftCapture {
     }
 }
 
-/// Ghostty's `copy-on-select`: where a finished mouse selection is copied.
-/// `true` writes the selection clipboard (X11/Wayland PRIMARY, pasted with a
-/// middle click); `clipboard` writes both PRIMARY and the system clipboard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Ghostty 1.4.0's `copy-on-select`: where a finished mouse selection is
+/// copied. `primary` is the selection clipboard (X11/Wayland PRIMARY, pasted
+/// with a middle click), which macOS lacks; `clipboard` is the system
+/// clipboard; `both` writes each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CopyOnSelect {
-    False,
-    #[default]
-    True,
+    None,
+    Primary,
     Clipboard,
+    Both,
+}
+
+impl Default for CopyOnSelect {
+    /// `primary` on Linux, `none` elsewhere, like Ghostty.
+    fn default() -> Self {
+        if cfg!(target_os = "linux") {
+            Self::Primary
+        } else {
+            Self::None
+        }
+    }
 }
 
 impl CopyOnSelect {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::False => "false",
-            Self::True => "true",
+            Self::None => "none",
+            Self::Primary => "primary",
             Self::Clipboard => "clipboard",
+            Self::Both => "both",
         }
+    }
+
+    /// Whether the selection goes to the PRIMARY selection.
+    pub fn writes_primary(self) -> bool {
+        matches!(self, Self::Primary | Self::Both)
+    }
+
+    /// Whether the selection goes to the system clipboard.
+    pub fn writes_clipboard(self) -> bool {
+        matches!(self, Self::Clipboard | Self::Both)
     }
 }
 
@@ -2185,7 +2208,7 @@ mod tests {
                 clipboard_write: ClipboardAccess::Allow,
                 clipboard_write_limit_bytes: Some(DEFAULT_CLIPBOARD_WRITE_LIMIT_BYTES),
                 clipboard_paste_protection: true,
-                copy_on_select: CopyOnSelect::True,
+                copy_on_select: CopyOnSelect::default(),
                 mouse_shift_capture: MouseShiftCapture::default(),
                 file_link_editor: FileLinkEditor::Default,
                 confirm_quit: true,

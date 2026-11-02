@@ -78,7 +78,8 @@ The packaging assets live in `dist/linux/`.
   the shell. The desktop entry declares `X-TerminalArgExec=-e` for launchers
   that open programs in a terminal.
 - **Clipboard**: `ctrl+shift+c` / `ctrl+shift+v` use the CLIPBOARD selection.
-  The PRIMARY selection is supported: `copy-on-select` fills it, and
+  The PRIMARY selection is supported: `copy-on-select` (`primary` by
+  default) fills it, and
   middle-click pastes it.
 - **Links and files**: Ctrl-click a URL, an OSC 8 hyperlink, or a file path to
   open it (with `xdg-open`, or the configured editor for files), as in

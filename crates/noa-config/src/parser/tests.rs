@@ -552,17 +552,26 @@ fn clipboard_write_limit_bytes_takes_a_count_or_unlimited() {
 
 #[test]
 fn copy_on_select_parses_ghostty_values() {
+    use crate::CopyOnSelect;
+    let legacy_true = if cfg!(target_os = "linux") {
+        CopyOnSelect::Primary
+    } else {
+        CopyOnSelect::Clipboard
+    };
     for (value, expected) in [
-        ("true", crate::CopyOnSelect::True),
-        ("false", crate::CopyOnSelect::False),
-        ("clipboard", crate::CopyOnSelect::Clipboard),
+        ("none", CopyOnSelect::None),
+        ("primary", CopyOnSelect::Primary),
+        ("clipboard", CopyOnSelect::Clipboard),
+        ("both", CopyOnSelect::Both),
+        ("true", legacy_true),
+        ("false", CopyOnSelect::None),
     ] {
         let (overrides, diagnostics) =
             parse_overrides(path(), &format!("copy-on-select = {value}"));
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(overrides.copy_on_select, Some(expected));
     }
-    let (overrides, diagnostics) = parse_overrides(path(), "copy-on-select = primary");
+    let (overrides, diagnostics) = parse_overrides(path(), "copy-on-select = selection");
     assert_eq!(overrides.copy_on_select, None);
     assert_eq!(diagnostics.len(), 1);
 }

@@ -255,6 +255,8 @@ impl App {
         #[cfg(target_os = "macos")]
         let ember_changed = previous.ember != applied.ember;
 
+        let link_osc8_changed = previous.link_osc8 != applied.link_osc8;
+
         let scrollback_persist_disabled = previous.scrollback_persist.persists()
             && !(applied.scrollback_persist.persists() && applied.window_save_state.restores());
 
@@ -299,6 +301,17 @@ impl App {
         }
         if terminal_policy_changed {
             self.apply_reloaded_terminal_policies();
+        }
+        // The Cmd-hover link is otherwise only re-derived on pointer and
+        // modifier events, so an OSC 8 link would keep (or not gain) its
+        // underline until the mouse moves.
+        if link_osc8_changed
+            && let Some(window_id) = self
+                .hovered_link
+                .map(|(window_id, _)| window_id)
+                .or(self.focused)
+        {
+            self.sync_hover_link(window_id);
         }
         if sidebar_preview_changed {
             self.sidebar_preview_lines_gate

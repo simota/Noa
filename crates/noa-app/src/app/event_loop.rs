@@ -1975,13 +1975,15 @@ impl App {
             if state == ElementState::Pressed {
                 self.focused = Some(window_id);
                 self.focus_pane(window_id, pane_id);
-                #[cfg(target_os = "macos")]
-                {
-                    self.install_macos_menu_if_needed();
-                    self.show_macos_split_context_menu(window_id);
+                if self.right_click(window_id, pane_id) {
+                    #[cfg(target_os = "macos")]
+                    {
+                        self.install_macos_menu_if_needed();
+                        self.show_macos_split_context_menu(window_id);
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    self.open_context_menu(window_id);
                 }
-                #[cfg(not(target_os = "macos"))]
-                self.open_context_menu(window_id);
             }
             return;
         }

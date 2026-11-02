@@ -551,6 +551,26 @@ fn clipboard_write_limit_bytes_takes_a_count_or_unlimited() {
 }
 
 #[test]
+fn right_click_action_parses_ghostty_values() {
+    use crate::RightClickAction;
+    for (value, expected) in [
+        ("context-menu", RightClickAction::ContextMenu),
+        ("paste", RightClickAction::Paste),
+        ("copy", RightClickAction::Copy),
+        ("copy-or-paste", RightClickAction::CopyOrPaste),
+        ("ignore", RightClickAction::Ignore),
+    ] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("right-click-action = {value}"));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(overrides.right_click_action, Some(expected));
+    }
+    let (overrides, diagnostics) = parse_overrides(path(), "right-click-action = menu");
+    assert_eq!(overrides.right_click_action, None);
+    assert_eq!(diagnostics.len(), 1);
+}
+
+#[test]
 fn copy_on_select_parses_ghostty_values() {
     use crate::CopyOnSelect;
     let legacy_true = if cfg!(any(target_os = "linux", target_os = "freebsd")) {

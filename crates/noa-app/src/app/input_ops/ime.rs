@@ -10,6 +10,20 @@ fn search_prompt_ime_caret_col(
 }
 
 impl App {
+    /// Whether a modal (prompt, dialog, picker, panel) in `window_id` owns
+    /// input, so a pointer gesture must not act on the pane underneath.
+    pub(in crate::app) fn modal_owns_input(&self, window_id: WindowId) -> bool {
+        self.modal_ime_target(window_id).is_some()
+            || self
+                .send_selection_picker
+                .as_ref()
+                .is_some_and(|session| session.window_id == window_id)
+            || self
+                .process_monitor
+                .as_ref()
+                .is_some_and(|session| session.window_id == window_id)
+    }
+
     pub(in crate::app) fn modal_ime_target(&self, window_id: WindowId) -> Option<ModalImeTarget> {
         if self
             .confirm_dialog

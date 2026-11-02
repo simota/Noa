@@ -193,16 +193,7 @@ impl App {
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
-        if self.modal_ime_target(window_id).is_some()
-            || self
-                .send_selection_picker
-                .as_ref()
-                .is_some_and(|session| session.window_id == window_id)
-            || self
-                .process_monitor
-                .as_ref()
-                .is_some_and(|session| session.window_id == window_id)
-        {
+        if self.modal_owns_input(window_id) {
             return;
         }
         let Some(state) = self.windows.get(&window_id) else {

@@ -51,6 +51,7 @@ pub(super) fn scratch_terminal_command_blocked(command: AppCommand) -> bool {
             | AppCommand::NextTab
             | AppCommand::PrevTab
             | AppCommand::SetTabTitle
+            | AppCommand::MoveTabToNewWindow
             | AppCommand::CloseWindow
             | AppCommand::ToggleSidebar
             // Fix 3: `ToggleFullscreen` acts on the focused *window* (its

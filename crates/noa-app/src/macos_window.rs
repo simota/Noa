@@ -108,6 +108,40 @@ pub(crate) fn set_native_tab_title(window: &Window, title: &str) {
     }
 }
 
+/// Move `window` out of its native tab group into a window of its own
+/// (AppKit's `moveTabToNewWindow:`, what Ghostty's macOS app calls), retagged
+/// with `tabbing_identifier` first so tabs opened from it later join the new
+/// window, not the old one. Returns `false` when the NSWindow can't be
+/// reached.
+#[cfg(target_os = "macos")]
+pub(crate) fn move_tab_to_new_window(window: &Window, tabbing_identifier: &str) -> bool {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::NSString;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    // SAFETY: main (window-owning) thread, from command dispatch; the
+    // NSWindow is live and owned by winit; every pointer is nil-checked. The
+    // `NSString` is autoreleased by objc2.
+    unsafe {
+        let Ok(handle) = window.window_handle() else {
+            return false;
+        };
+        let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+            return false;
+        };
+        let ns_view = appkit.ns_view.as_ptr().cast::<AnyObject>();
+        let ns_window: *mut AnyObject = msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return false;
+        }
+        let identifier = NSString::from_str(tabbing_identifier);
+        let _: () = msg_send![ns_window, setTabbingIdentifier: &*identifier];
+        let _: () = msg_send![ns_window, moveTabToNewWindow: std::ptr::null::<AnyObject>()];
+        true
+    }
+}
+
 /// Make `window` key and order it front *within* the app, without activating
 /// the app (agent-automation ASSUME-6: a scripted `new window`/`new tab` must
 /// not steal focus from the scripting app). winit's `focus_window` always

@@ -801,6 +801,47 @@ impl App {
         )
     }
 
+    /// Ghostty 1.4.0's `move_tab_to_new_window` for the focused tab: it moves
+    /// into a new logical window (fresh group, native window of its own). A
+    /// lone tab already is its own window, so it stays put, as in Ghostty.
+    /// The new window keeps the sidebar state the tab was laid out with.
+    #[cfg(target_os = "macos")]
+    pub(super) fn move_tab_to_new_window(&mut self) {
+        let Some(window_id) = self.focused else {
+            return;
+        };
+        let Some(group) = self.windows.get(&window_id).map(|state| state.group) else {
+            return;
+        };
+        let has_siblings = self
+            .windows
+            .iter()
+            .any(|(other, state)| *other != window_id && state.group == group);
+        if !has_siblings {
+            return;
+        }
+        let new_group = self.allocate_group_id();
+        let identifier = self.tabbing_identifier(new_group);
+        let Some(state) = self.windows.get_mut(&window_id) else {
+            return;
+        };
+        if !crate::macos_window::move_tab_to_new_window(&state.window, &identifier) {
+            return;
+        }
+        state.group = new_group;
+        if self.sidebar_visible_groups.contains(&group) {
+            self.sidebar_visible_groups.insert(new_group);
+        }
+        self.request_sidebar_redraw();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn move_tab_to_new_window(&mut self) {
+        // #TODO(agent): off macOS tabs share one OS window and surface, so
+        // moving one out needs a new OS window + surface for it first.
+        log::warn!("move_tab_to_new_window is not supported on this platform yet");
+    }
+
     /// The macOS `tabbingIdentifier` for a logical window. Per-process
     /// (`std::process::id()`) so two noa instances never merge their tabs, and
     /// per-group so each window keeps a separate tab bar.

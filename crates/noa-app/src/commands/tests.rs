@@ -223,6 +223,33 @@ fn shift_arrows_map_to_directional_copy_mode_gestures() {
 }
 
 #[test]
+fn move_tab_to_new_window_binds_by_its_ghostty_and_noa_names() {
+    let (engine, diagnostics) = KeybindEngine::from_config(
+        &[
+            noa_config::KeybindConfig::Bind {
+                trigger: "cmd+y".to_string(),
+                action: "move_tab_to_new_window".to_string(),
+            },
+            noa_config::KeybindConfig::Bind {
+                trigger: "cmd+shift+y".to_string(),
+                action: "tab.move-to-new-window".to_string(),
+            },
+        ],
+        None,
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    for mods in [
+        ModifiersState::SUPER,
+        ModifiersState::SUPER | ModifiersState::SHIFT,
+    ] {
+        assert_eq!(
+            engine.resolve(&Key::Character("y".into()), mods),
+            Some(AppCommand::MoveTabToNewWindow)
+        );
+    }
+}
+
+#[test]
 fn copy_mode_actions_are_configurable_and_directional_defaults_are_rebindable() {
     let (engine, diagnostics) = KeybindEngine::from_config(
         &[

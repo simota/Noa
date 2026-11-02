@@ -14,11 +14,11 @@ use std::borrow::Cow;
 use std::ops::Range;
 use unicode_width::UnicodeWidthChar;
 
-/// Default `scrollback-limit`: total bytes of *scrollback* storage kept before
-/// page-granular eviction. Matches Ghostty's 10 MB default (`0` disables
+/// Default `scrollback-limit-bytes`: total bytes of *scrollback* storage kept
+/// before page-granular eviction. Matches Ghostty 1.4.0's 50 MB default (`0` disables
 /// scrollback). Unlike Ghostty this bounds only the paged history, not the
 /// active grid (which is unbounded-small at rows×cols).
-const DEFAULT_SCROLLBACK_LIMIT_BYTES: usize = 10_000_000;
+const DEFAULT_SCROLLBACK_LIMIT_BYTES: usize = 50_000_000;
 
 /// Hard cap on live kitty placements per screen. Image *data* is bounded by
 /// [`crate::kitty::ImageStore`]'s byte quota, but placements (~100 B each) had

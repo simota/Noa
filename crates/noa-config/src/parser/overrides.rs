@@ -309,8 +309,11 @@ pub(crate) fn build_overrides(
                 background_image_interval_secs =
                     parse_background_image_interval(path, directive, &mut diagnostics);
             }
-            "scrollback-limit" => {
-                scrollback_limit = parse_usize(path, directive, &mut diagnostics);
+            // Ghostty 1.4.0 renamed `scrollback-limit`; the old name still
+            // sets the same value.
+            "scrollback-limit-bytes" | "scrollback-limit" => {
+                scrollback_limit = parse_byte_limit(path, directive, &mut diagnostics)
+                    .map(|limit| limit.unwrap_or(usize::MAX));
             }
             "scrollback-limit-lines" => {
                 scrollback_limit_lines = parse_byte_limit(path, directive, &mut diagnostics);
@@ -676,6 +679,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "background-image-fit"
             | "background-image-repeat"
             | "background-image-interval"
+            | "scrollback-limit-bytes"
             | "scrollback-limit"
             | "scrollback-limit-lines"
             | "image-storage-limit"

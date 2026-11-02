@@ -404,8 +404,8 @@ fn show_config_output(config: &StartupConfig) -> String {
     push_line(&mut out, "glassmorphism", &config.glassmorphism.to_string());
     push_line(
         &mut out,
-        "scrollback-limit",
-        &config.scrollback_limit.to_string(),
+        "scrollback-limit-bytes",
+        &scrollback_limit_value(config.scrollback_limit),
     );
     push_line(
         &mut out,
@@ -607,6 +607,16 @@ fn push_line(out: &mut String, key: &str, value: &str) {
 
 /// Render one `quick-terminal-size` side back to Ghostty's `<n>%`/`<n>px`
 /// syntax.
+/// `scrollback-limit-bytes` as written to a config: `usize::MAX` is
+/// `unlimited`.
+pub(crate) fn scrollback_limit_value(bytes: usize) -> String {
+    if bytes == usize::MAX {
+        "unlimited".to_string()
+    } else {
+        bytes.to_string()
+    }
+}
+
 fn quick_terminal_size_dim_value(dim: noa_config::QuickTerminalSizeDim) -> String {
     match dim {
         noa_config::QuickTerminalSizeDim::Percent(pct) => format!("{pct}%"),

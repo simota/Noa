@@ -64,7 +64,7 @@ pub fn apply_updates(original: &str, updates: &[(String, String)]) -> String {
             directives
                 .iter()
                 .rev()
-                .find(|directive| &directive.key == key)
+                .find(|directive| sets_key(&directive.key, key))
         };
         match target {
             Some(directive) => {
@@ -108,6 +108,14 @@ pub fn apply_updates(original: &str, updates: &[(String, String)]) -> String {
     }
 
     output
+}
+
+/// Whether a line named `name` sets `key`'s value: a renamed key's old name
+/// still parses into the same setting, so the last line under *either* name
+/// is the one in effect, and rewriting it (under the new name) is what makes
+/// a save stick.
+fn sets_key(name: &str, key: &str) -> bool {
+    name == key || (key == "scrollback-limit-bytes" && name == "scrollback-limit")
 }
 
 fn is_font_family_key(key: &str) -> bool {
@@ -392,6 +400,22 @@ mod tests {
 
     fn unique_temp_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("noa-config-writer-{name}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn a_renamed_key_rewrites_the_last_line_under_either_name() {
+        let update = [("scrollback-limit-bytes".to_string(), "7".to_string())];
+        assert_eq!(
+            apply_updates(
+                "scrollback-limit-bytes = 5\nscrollback-limit = 6\n",
+                &update
+            ),
+            "scrollback-limit-bytes = 5\nscrollback-limit-bytes = 7\n"
+        );
+        assert_eq!(
+            apply_updates("scrollback-limit = 6\nfont-size = 14\n", &update),
+            "scrollback-limit-bytes = 7\nfont-size = 14\n"
+        );
     }
 
     #[test]

@@ -324,6 +324,7 @@ fn show_config_output(config: &StartupConfig) -> String {
         config.file_link_editor.as_str(),
     );
     push_line(&mut out, "title-report", &config.title_report.to_string());
+    push_line(&mut out, "link-osc8", &config.link_osc8.to_string());
     push_line(
         &mut out,
         "scrollback-compression",

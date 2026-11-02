@@ -49,6 +49,8 @@ pub struct AppConfig {
     /// Whether `CSI 21 t` may report the window title back to the program
     /// (`title-report`, default off — see `Terminal::title_report`).
     pub title_report: bool,
+    /// Whether OSC 8 hyperlinks act as links (`link-osc8`).
+    pub link_osc8: bool,
     /// Compress idle scrollback pages (`scrollback-compression`).
     pub scrollback_compression: bool,
     /// Send prompt clicks to a shell that asked for OSC 133 `click_events`
@@ -319,6 +321,7 @@ impl AppConfig {
             file_link_editor: config.file_link_editor,
             confirm_quit: config.confirm_quit,
             title_report: config.title_report,
+            link_osc8: config.link_osc8,
             scrollback_compression: config.scrollback_compression,
             cursor_click_to_move: config.cursor_click_to_move,
             vt_window_resize_allowed: config.vt_window_resize_allowed,

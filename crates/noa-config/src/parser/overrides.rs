@@ -36,6 +36,7 @@ pub(crate) fn build_overrides(
     let mut file_link_editor = None;
     let mut confirm_quit = None;
     let mut title_report = None;
+    let mut link_osc8 = None;
     let mut scrollback_compression = None;
     let mut cursor_click_to_move = None;
     let mut vt_window_resize_allowed = None;
@@ -263,6 +264,9 @@ pub(crate) fn build_overrides(
             }
             "title-report" => {
                 title_report = parse_bool_directive(path, directive, &mut diagnostics);
+            }
+            "link-osc8" => {
+                link_osc8 = parse_bool_directive(path, directive, &mut diagnostics);
             }
             "scrollback-compression" => {
                 scrollback_compression = parse_bool_directive(path, directive, &mut diagnostics);
@@ -568,6 +572,7 @@ pub(crate) fn build_overrides(
             file_link_editor,
             confirm_quit,
             title_report,
+            link_osc8,
             scrollback_compression,
             cursor_click_to_move,
             vt_window_resize_allowed,
@@ -694,6 +699,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "file-link-editor"
             | "confirm-quit"
             | "title-report"
+            | "link-osc8"
             | "scrollback-compression"
             | "cursor-click-to-move"
             | "vt-window-resize-allowed"

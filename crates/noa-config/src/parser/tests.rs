@@ -589,6 +589,14 @@ fn middle_click_action_parses_ghostty_values() {
 }
 
 #[test]
+fn link_osc8_is_a_bool_defaulting_on() {
+    assert!(crate::StartupConfig::default().link_osc8);
+    let (overrides, diagnostics) = parse_overrides(path(), "link-osc8 = false");
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(overrides.link_osc8, Some(false));
+}
+
+#[test]
 fn copy_on_select_parses_ghostty_values() {
     use crate::CopyOnSelect;
     let legacy_true = if cfg!(any(target_os = "linux", target_os = "freebsd")) {

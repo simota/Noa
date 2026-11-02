@@ -328,7 +328,9 @@ impl App {
 
         let terminal = surface.terminal.lock();
         let row = terminal.active().visible_row(cell.y)?;
-        if let Some(link_id) = row.cells.get(cell.x as usize).and_then(|c| c.hyperlink) {
+        if self.config.link_osc8
+            && let Some(link_id) = row.cells.get(cell.x as usize).and_then(|c| c.hyperlink)
+        {
             return Some((pane_id, HoverLink::Registry(link_id.get())));
         }
         if let Some(url) = noa_grid::detect_url_at_column(&row, cell.x) {
@@ -541,7 +543,9 @@ impl App {
 
         let terminal = surface.terminal.lock();
         let row = terminal.active().visible_row(cell.y)?;
-        if let Some(link_id) = row.cells.get(cell.x as usize).and_then(|c| c.hyperlink) {
+        if self.config.link_osc8
+            && let Some(link_id) = row.cells.get(cell.x as usize).and_then(|c| c.hyperlink)
+        {
             let uri = &terminal.hyperlinks.get(link_id.get())?.uri;
             // Same remote gate as below: a remote pane's `file://` names
             // another host's file even when its host part looks local.

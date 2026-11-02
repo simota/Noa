@@ -34,6 +34,10 @@ noa +show-config
 At present, `+show-config` does not print `background-image*` or `resize-overlay`, so check those
 values directly in the config file.
 
+`noa +explain-config <name>` prints one option's row from the tables below (values, default,
+description), or the command a keybind action runs. `--option=<name>` and `--keybind=<name>`
+pin the lookup to one kind; a bare name tries options first.
+
 ## Live reload
 
 Noa watches the config file and applies edits at runtime. The idle poll is deliberately slow

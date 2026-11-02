@@ -109,7 +109,7 @@ For the type, allowed values, defaults, and clamp/fallback rules of every key, s
 - **Desktop notifications** — OSC 9 / 777, Dock attention
 - **Clipboard** — OSC 52 and Kitty OSC 5522 (read/write policy, `clipboard-write-limit-bytes`), paste protection
 - **`.app` bundle** — `scripts/bundle-macos.sh` produces an ad-hoc signed bundle
-- **CLI actions** — `+version`, `+list-themes`, `+list-keybinds`, `+list-fonts`, `+show-config`, `+list-actions`, `+help`
+- **CLI actions** — `+version`, `+list-themes`, `+list-keybinds`, `+list-fonts`, `+show-config`, `+explain-config`, `+list-actions`, `+help`
 
 ## Session and shell integration
 

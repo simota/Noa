@@ -16,4 +16,5 @@ pub(crate) use key_token::KeybindParseError;
 pub(crate) use keybind::KeyBinding;
 pub(crate) use keybind::KeybindEngine;
 pub(crate) use keybind::command_from_applescript_action;
+pub(crate) use keybind::command_from_keybind_action;
 pub(crate) use keybind::is_valid_keybind_chord;

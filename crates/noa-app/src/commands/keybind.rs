@@ -569,7 +569,7 @@ pub(crate) fn command_from_applescript_action(action: &str) -> Option<AppCommand
     }
 }
 
-fn command_from_keybind_action(action: &str) -> Option<AppCommand> {
+pub(crate) fn command_from_keybind_action(action: &str) -> Option<AppCommand> {
     let action = action.trim();
     AppCommand::from_action_name(action)
         .or_else(|| AppCommand::from_action_name(&action.replace('_', "-")))

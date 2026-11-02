@@ -23,18 +23,20 @@ pub enum CliAction {
     ListKeybinds,
     ListFonts,
     ShowConfig,
+    ExplainConfig,
     ListActions,
     Help,
 }
 
 impl CliAction {
     /// Every action, in the order `+list-actions` presents them.
-    pub const ALL: [CliAction; 7] = [
+    pub const ALL: [CliAction; 8] = [
         CliAction::Version,
         CliAction::ListThemes,
         CliAction::ListKeybinds,
         CliAction::ListFonts,
         CliAction::ShowConfig,
+        CliAction::ExplainConfig,
         CliAction::ListActions,
         CliAction::Help,
     ];
@@ -47,6 +49,7 @@ impl CliAction {
             Self::ListKeybinds => "list-keybinds",
             Self::ListFonts => "list-fonts",
             Self::ShowConfig => "show-config",
+            Self::ExplainConfig => "explain-config",
             Self::ListActions => "list-actions",
             Self::Help => "help",
         }
@@ -63,6 +66,7 @@ impl CliAction {
             Self::ListKeybinds => "List the effective keybindings (chord = action).",
             Self::ListFonts => "List system font families.",
             Self::ShowConfig => "Show the resolved effective configuration.",
+            Self::ExplainConfig => "Explain one config option or keybind action.",
             Self::ListActions => "List available +actions.",
             Self::Help => "Alias for +list-actions.",
         }
@@ -97,9 +101,11 @@ pub fn parse_invocation<S: AsRef<str>>(args: &[S]) -> Invocation {
     }
 }
 
-/// Execute `action`, writing its report to stdout (and config diagnostics to
-/// stderr). Returns once the output is printed; the caller exits.
-pub fn run_action(action: CliAction) -> anyhow::Result<()> {
+/// Execute `action` with the arguments after it, writing its report to
+/// stdout (and config diagnostics to stderr). Returns once the output is
+/// printed; the caller exits. `+explain-config` exits with status 1 itself
+/// when it has nothing to explain, as Ghostty does.
+pub fn run_action<S: AsRef<str>>(action: CliAction, args: &[S]) -> anyhow::Result<()> {
     match action {
         CliAction::Version => print!("{}", version_output()),
         CliAction::ListThemes => print!("{}", list_themes_output()),
@@ -133,9 +139,94 @@ pub fn run_action(action: CliAction) -> anyhow::Result<()> {
             }
             print!("{}", show_config_output(&config));
         }
+        CliAction::ExplainConfig => match explain_config_output(args) {
+            Ok(text) => print!("{text}"),
+            Err(ExplainError::Usage) => {
+                eprint!("{EXPLAIN_CONFIG_USAGE}");
+                std::process::exit(1);
+            }
+            Err(ExplainError::Unknown(name)) => {
+                println!("Unknown: '{name}'.");
+                std::process::exit(1);
+            }
+        },
         CliAction::ListActions | CliAction::Help => print!("{}", list_actions_output()),
     }
     Ok(())
+}
+
+const EXPLAIN_CONFIG_USAGE: &str = "Usage: Noa +explain-config <option>
+       Noa +explain-config --option=<option>
+       Noa +explain-config --keybind=<action>
+";
+
+/// The option reference `+explain-config` reads: `docs/CONFIGURATION.md`,
+/// whose `| key | values | default | description |` rows are the one place
+/// each option is documented (Ghostty generates the same text from its
+/// `Config.zig` doc comments).
+const CONFIGURATION_DOC: &str = include_str!("../../../docs/CONFIGURATION.md");
+
+#[derive(Debug, PartialEq, Eq)]
+enum ExplainError {
+    Usage,
+    Unknown(String),
+}
+
+/// Ghostty 1.4.0's `+explain-config`: `--option=NAME` explains a config
+/// option, `--keybind=NAME` a keybind action, and a bare name tries the
+/// option first, then the action. `--no-pager` is accepted (Noa does not page
+/// yet).
+fn explain_config_output<S: AsRef<str>>(args: &[S]) -> Result<String, ExplainError> {
+    let mut option = None;
+    let mut keybind = None;
+    let mut positional = None;
+    for arg in args.iter().map(AsRef::as_ref) {
+        if let Some(name) = arg.strip_prefix("--option=") {
+            option = Some(name);
+        } else if let Some(name) = arg.strip_prefix("--keybind=") {
+            keybind = Some(name);
+        } else if !arg.starts_with('-') {
+            positional = Some(arg);
+        }
+    }
+    let name = keybind
+        .or(option)
+        .or(positional)
+        .ok_or(ExplainError::Usage)?;
+    let text = if keybind.is_some() {
+        explain_keybind(name)
+    } else if option.is_some() {
+        explain_option(name)
+    } else {
+        explain_option(name).or_else(|| explain_keybind(name))
+    };
+    text.ok_or_else(|| ExplainError::Unknown(name.to_string()))
+}
+
+fn explain_option(name: &str) -> Option<String> {
+    let key = format!("`{name}`");
+    CONFIGURATION_DOC.lines().find_map(|line| {
+        let cells: Vec<&str> = line
+            .strip_prefix("| ")?
+            .strip_suffix(" |")?
+            .split(" | ")
+            .collect();
+        let [row_key, values, default, description] = cells[..] else {
+            return None;
+        };
+        (row_key == key).then(|| {
+            format!("{name}\n\n  Values:  {values}\n  Default: {default}\n\n{description}\n")
+        })
+    })
+}
+
+fn explain_keybind(name: &str) -> Option<String> {
+    let command = crate::commands::command_from_keybind_action(name)?;
+    Some(format!(
+        "{name}\n\n  Action:  {}\n\n{}\n",
+        command.action_name(),
+        crate::command_palette::command_palette_title(command)
+    ))
 }
 
 /// The stderr report for an unrecognized `+action` (ends with a newline; the
@@ -994,6 +1085,42 @@ mod tests {
         assert!(output.contains("font-family = Menlo\n"));
         assert!(output.contains("font-feature = -liga\n"));
         assert!(output.contains("font-variation = wght=700\n"));
+    }
+
+    #[test]
+    fn explain_config_finds_options_then_keybind_actions() {
+        let option = explain_config_output(&["font-size"]).unwrap();
+        assert!(option.starts_with("font-size\n"), "{option}");
+        assert!(option.contains("Default: `14`"), "{option}");
+
+        let action = explain_config_output(&["copy_to_clipboard"]).unwrap();
+        assert!(action.contains("Copy to Clipboard"), "{action}");
+
+        // The flags pin the lookup to one kind, so a name of the other kind
+        // is unknown.
+        assert_eq!(
+            explain_config_output(&["--keybind=font-size"]),
+            Err(ExplainError::Unknown("font-size".to_string()))
+        );
+        assert_eq!(
+            explain_config_output(&["--option=copy_to_clipboard", "--no-pager"]),
+            Err(ExplainError::Unknown("copy_to_clipboard".to_string()))
+        );
+        assert_eq!(explain_config_output::<&str>(&[]), Err(ExplainError::Usage));
+    }
+
+    #[test]
+    fn explain_config_documents_every_ghostty_1_4_option_noa_added() {
+        for key in [
+            "scrollback-limit-bytes",
+            "scrollback-limit-lines",
+            "copy-on-select",
+            "right-click-action",
+            "middle-click-action",
+            "link-osc8",
+        ] {
+            assert!(explain_option(key).is_some(), "{key}");
+        }
     }
 
     #[test]

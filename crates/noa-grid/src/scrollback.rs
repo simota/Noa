@@ -2065,7 +2065,21 @@ impl PagedScrollback {
         }
         // Settle deferred rows so the new limit applies to everything
         // retained (`flush_all` ends with its own `evict_to_limit`).
-        self.flush_all()
+        let mut evicted = self.flush_all();
+        // Pages packed under a larger line limit can hold far more rows than
+        // the new page cap, and eviction never splits a page: repack just the
+        // newest `limit_lines` rows (cold path, like `prepend_rows`).
+        if self.total_rows > self.limit_lines.saturating_add(self.page_row_cap()) {
+            let start = self.total_rows - self.limit_lines;
+            let mut retained = Vec::with_capacity(self.limit_lines);
+            self.for_each_row(start..self.total_rows, |_, row| retained.push(row.clone()));
+            self.clear();
+            evicted += start;
+            for row in &retained {
+                evicted += self.push_row(row);
+            }
+        }
+        evicted
     }
 
     /// Compress every filled page except those holding rows `keep` (the viewport, which would just decompress again
@@ -2797,6 +2811,24 @@ mod tests {
         for sb in [&immediate, &deferred] {
             assert!((100..=125).contains(&sb.len()), "{}", sb.len());
         }
+    }
+
+    #[test]
+    fn lowering_the_line_limit_splits_pages_packed_under_the_old_one() {
+        // Short rows fit 1000 to a page, which a 100-line limit cannot evict.
+        let mut sb = PagedScrollback::new(usize::MAX);
+        for i in 0..1000 {
+            sb.push_row(&text_row(&i.to_string(), 80));
+        }
+        assert_eq!(sb.set_limit_lines(100), 900);
+        assert_eq!(sb.len(), 100);
+        assert_eq!(
+            sb.row(0).unwrap().cells[..3]
+                .iter()
+                .map(|c| c.ch)
+                .collect::<String>(),
+            "900"
+        );
     }
 
     #[test]

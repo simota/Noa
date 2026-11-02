@@ -355,6 +355,27 @@ impl RightClickAction {
     }
 }
 
+/// Ghostty's `middle-click-action`: what a middle click (with mouse
+/// reporting off) does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MiddleClickAction {
+    /// Paste the selection clipboard (X11/Wayland PRIMARY); nothing on macOS.
+    #[default]
+    PrimaryPaste,
+    ClipboardPaste,
+    Ignore,
+}
+
+impl MiddleClickAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PrimaryPaste => "primary-paste",
+            Self::ClipboardPaste => "clipboard-paste",
+            Self::Ignore => "ignore",
+        }
+    }
+}
+
 /// A single OpenType feature toggle, e.g. `calt` (enabled) or `-liga`
 /// (`enabled: false`, explicitly disabled). Consumed for real in WP2; WP0
 /// only parses and stores it.
@@ -857,6 +878,8 @@ pub struct StartupConfig {
     pub copy_on_select: CopyOnSelect,
     /// What a right click does (`right-click-action`).
     pub right_click_action: RightClickAction,
+    /// What a middle click does (`middle-click-action`).
+    pub middle_click_action: MiddleClickAction,
     pub mouse_shift_capture: MouseShiftCapture,
     /// Editor command for Cmd-clicking local paths, including line/column.
     pub file_link_editor: FileLinkEditor,
@@ -1170,6 +1193,7 @@ impl Default for StartupConfig {
             clipboard_paste_protection: true,
             copy_on_select: CopyOnSelect::default(),
             right_click_action: RightClickAction::default(),
+            middle_click_action: MiddleClickAction::default(),
             mouse_shift_capture: MouseShiftCapture::default(),
             file_link_editor: FileLinkEditor::Default,
             confirm_quit: true,
@@ -1302,6 +1326,7 @@ pub struct ConfigOverrides {
     pub clipboard_paste_protection: Option<bool>,
     pub copy_on_select: Option<CopyOnSelect>,
     pub right_click_action: Option<RightClickAction>,
+    pub middle_click_action: Option<MiddleClickAction>,
     pub mouse_shift_capture: Option<MouseShiftCapture>,
     pub file_link_editor: Option<FileLinkEditor>,
     pub confirm_quit: Option<bool>,
@@ -1398,6 +1423,7 @@ macro_rules! impl_redacted_config_debug {
                     .field("clipboard_write_limit_bytes", &self.clipboard_write_limit_bytes)
                     .field("copy_on_select", &self.copy_on_select)
                     .field("right_click_action", &self.right_click_action)
+                    .field("middle_click_action", &self.middle_click_action)
                     .field("mouse_shift_capture", &self.mouse_shift_capture)
                     .field(
                         "clipboard_paste_protection",
@@ -1529,6 +1555,9 @@ impl ConfigOverrides {
             right_click_action: higher_priority
                 .right_click_action
                 .or(self.right_click_action),
+            middle_click_action: higher_priority
+                .middle_click_action
+                .or(self.middle_click_action),
             mouse_shift_capture: higher_priority
                 .mouse_shift_capture
                 .or(self.mouse_shift_capture),
@@ -1722,6 +1751,7 @@ impl ConfigOverrides {
             mouse_shift_capture: self.mouse_shift_capture.unwrap_or(base.mouse_shift_capture),
             copy_on_select: self.copy_on_select.unwrap_or(base.copy_on_select),
             right_click_action: self.right_click_action.unwrap_or(base.right_click_action),
+            middle_click_action: self.middle_click_action.unwrap_or(base.middle_click_action),
             clipboard_paste_protection: self
                 .clipboard_paste_protection
                 .unwrap_or(base.clipboard_paste_protection),
@@ -2245,6 +2275,7 @@ mod tests {
                 clipboard_paste_protection: true,
                 copy_on_select: CopyOnSelect::default(),
                 right_click_action: RightClickAction::default(),
+                middle_click_action: MiddleClickAction::default(),
                 mouse_shift_capture: MouseShiftCapture::default(),
                 file_link_editor: FileLinkEditor::Default,
                 confirm_quit: true,

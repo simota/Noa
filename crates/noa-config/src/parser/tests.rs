@@ -571,6 +571,24 @@ fn right_click_action_parses_ghostty_values() {
 }
 
 #[test]
+fn middle_click_action_parses_ghostty_values() {
+    use crate::MiddleClickAction;
+    for (value, expected) in [
+        ("primary-paste", MiddleClickAction::PrimaryPaste),
+        ("clipboard-paste", MiddleClickAction::ClipboardPaste),
+        ("ignore", MiddleClickAction::Ignore),
+    ] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("middle-click-action = {value}"));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(overrides.middle_click_action, Some(expected));
+    }
+    let (overrides, diagnostics) = parse_overrides(path(), "middle-click-action = paste");
+    assert_eq!(overrides.middle_click_action, None);
+    assert_eq!(diagnostics.len(), 1);
+}
+
+#[test]
 fn copy_on_select_parses_ghostty_values() {
     use crate::CopyOnSelect;
     let legacy_true = if cfg!(any(target_os = "linux", target_os = "freebsd")) {

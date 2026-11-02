@@ -172,6 +172,25 @@ impl App {
         true
     }
 
+    /// Ghostty's `middle-click-action` for a middle press with mouse
+    /// reporting off. Nothing reaches the pane while a modal owns input.
+    pub(in crate::app) fn middle_click(&mut self, window_id: WindowId, pane_id: PaneId) {
+        use noa_config::MiddleClickAction;
+        if self.modal_owns_input(window_id) {
+            return;
+        }
+        match self.config.middle_click_action {
+            // Ghostty only asks for the selection clipboard where the
+            // platform has one; macOS has none.
+            MiddleClickAction::PrimaryPaste if cfg!(target_os = "macos") => {}
+            MiddleClickAction::PrimaryPaste => {
+                self.paste_primary_selection_to_pane(window_id, pane_id);
+            }
+            MiddleClickAction::ClipboardPaste => self.paste_clipboard_to_pty(),
+            MiddleClickAction::Ignore => {}
+        }
+    }
+
     /// A middle click (with mouse reporting off) pastes the PRIMARY
     /// selection, the X11/Wayland convention Ghostty follows.
     pub(in crate::app) fn paste_primary_selection_to_pane(

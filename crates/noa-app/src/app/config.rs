@@ -39,6 +39,8 @@ pub struct AppConfig {
     pub copy_on_select: noa_config::CopyOnSelect,
     /// What a right click does (`right-click-action`).
     pub right_click_action: noa_config::RightClickAction,
+    /// What a middle click does (`middle-click-action`).
+    pub middle_click_action: noa_config::MiddleClickAction,
     /// Whether to confirm before pasting content that could run commands.
     pub clipboard_paste_protection: bool,
     pub file_link_editor: noa_config::FileLinkEditor,
@@ -312,6 +314,7 @@ impl AppConfig {
             mouse_shift_capture: config.mouse_shift_capture,
             copy_on_select: config.copy_on_select,
             right_click_action: config.right_click_action,
+            middle_click_action: config.middle_click_action,
             clipboard_paste_protection: config.clipboard_paste_protection,
             file_link_editor: config.file_link_editor,
             confirm_quit: config.confirm_quit,

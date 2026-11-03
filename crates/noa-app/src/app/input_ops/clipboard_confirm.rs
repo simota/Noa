@@ -578,12 +578,10 @@ impl App {
             ConfirmAction::CloseWindow { group } => self.close_group(event_loop, group),
             ConfirmAction::Quit => event_loop.exit(),
             ConfirmAction::ReviewWindows { review, tabs } => {
-                self.review_next_tab(event_loop, review, tabs)
+                self.start_review(event_loop, review, tabs)
             }
             ConfirmAction::ReviewTab { review, tab, rest } => {
-                if matches!(review, Review::CloseWindow { .. }) {
-                    self.close_tab(event_loop, tab);
-                }
+                self.accept_reviewed_tab(event_loop, review, tab);
                 self.review_next_tab(event_loop, review, rest);
             }
         }

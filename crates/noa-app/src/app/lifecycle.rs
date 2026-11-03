@@ -1477,7 +1477,7 @@ impl App {
         self.refresh_sidebar_visible_gate();
         self.persist_session();
         if let Some(action) = interrupted_review {
-            self.resume_review(event_loop, action);
+            self.resume_review(event_loop, window_id, action);
         }
     }
 
@@ -1795,7 +1795,7 @@ impl App {
             event_loop.exit();
             return;
         };
-        let running = self.tabs_with_running_programs(&self.window_order.clone());
+        let running = self.quit_review_tabs();
         if running.len() > 1 {
             self.open_review_windows(window_id, Review::Quit, running);
             return;

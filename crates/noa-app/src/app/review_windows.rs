@@ -24,9 +24,14 @@ pub(super) fn review_windows_prompt(review: Review, tabs: usize) -> (String, Str
     )
 }
 
-/// The prompt for one reviewed tab.
-pub(super) fn review_tab_prompt(review: Review) -> (String, String) {
+/// The prompt for one reviewed tab; `quick_terminal` when it is the quick
+/// terminal, which the prompt can't be shown over.
+pub(super) fn review_tab_prompt(review: Review, quick_terminal: bool) -> (String, String) {
     match review {
+        Review::Quit if quick_terminal => (
+            "The Quick Terminal runs a process. Quit Noa and kill it?".to_string(),
+            "Enter: terminate    Esc: cancel".to_string(),
+        ),
         Review::Quit => (
             "This window runs a process. Quit Noa and kill it?".to_string(),
             "Enter: terminate    Esc: cancel".to_string(),
@@ -47,22 +52,55 @@ impl App {
             .collect()
     }
 
-    /// Ask whether to review `tabs` before `review` goes ahead. The prompt
-    /// opens over `window_id` when it is a tab, else over the first of
-    /// `tabs` (the quick terminal is none), brought forward either way so
-    /// it is drawn and gets the keys.
+    /// The tabs a quit reviews: every tab running a program, then the quick
+    /// terminal when it runs one (Ghostty reviews it like any window).
+    pub(super) fn quit_review_tabs(&self) -> Vec<WindowId> {
+        let mut tabs = self.tabs_with_running_programs(&self.window_order);
+        if let Some(quick) = self.quick_terminal.as_ref().map(|qt| qt.window_id)
+            && self.tab_running_program_count(quick) > 0
+        {
+            tabs.push(quick);
+        }
+        tabs
+    }
+
+    /// Bring `tab` forward for a review prompt. A tab just closed on macOS
+    /// restores focus on the next turn to the tab AppKit picked, skipped
+    /// once `tab` is focused instead; restore `tab` the same way, so its
+    /// content view takes the keys again.
+    fn present_review_tab(&mut self, tab: WindowId) {
+        self.focus_tab(tab);
+        #[cfg(target_os = "macos")]
+        let _ = self
+            .proxy
+            .send_event(crate::events::UserEvent::RestoreFocus { window_id: tab });
+    }
+
+    /// A regular tab to show a prompt over: `preferred` when it is one, else
+    /// the first such tab of `tabs`, else the frontmost tab.
+    fn review_anchor(&self, preferred: WindowId, tabs: &[WindowId]) -> Option<WindowId> {
+        let regular = |tab: &WindowId| self.window_order.contains(tab);
+        Some(preferred)
+            .filter(regular)
+            .or_else(|| tabs.iter().copied().find(regular))
+            .or_else(|| self.focused.filter(regular))
+            .or_else(|| self.window_order.last().copied())
+    }
+
+    /// Ask whether to review `tabs` before `review` goes ahead, over
+    /// `window_id` when it is a regular tab (not the quick terminal), else
+    /// over the first such tab of `tabs`, brought forward either way so it
+    /// is drawn and gets the keys.
     pub(super) fn open_review_windows(
         &mut self,
         window_id: WindowId,
         review: Review,
         tabs: Vec<WindowId>,
     ) {
-        let target = if self.window_order.contains(&window_id) {
-            window_id
-        } else {
-            tabs[0]
+        let Some(target) = self.review_anchor(window_id, &tabs) else {
+            return;
         };
-        self.focus_tab(target);
+        self.present_review_tab(target);
         let (message, hint) = review_windows_prompt(review, tabs.len());
         self.open_confirm_dialog_with_hint(
             target,
@@ -104,17 +142,15 @@ impl App {
             return;
         };
         let rest = tabs.collect();
-        self.focus_tab(tab);
-        // A tab just closed on macOS restores focus on the next turn to the
-        // tab AppKit picked, skipped once `tab` is focused instead; restore
-        // `tab` the same way, so its content view takes the keys again.
-        #[cfg(target_os = "macos")]
-        let _ = self
-            .proxy
-            .send_event(crate::events::UserEvent::RestoreFocus { window_id: tab });
-        let (message, hint) = review_tab_prompt(review);
+        // The quick terminal's prompt shows over a regular tab instead.
+        let quick_terminal = self.is_quick_terminal_window(tab);
+        let Some(anchor) = self.review_anchor(tab, &[]) else {
+            return;
+        };
+        self.present_review_tab(anchor);
+        let (message, hint) = review_tab_prompt(review, quick_terminal);
         self.open_confirm_dialog_with_hint(
-            tab,
+            anchor,
             message,
             hint,
             ConfirmAction::ReviewTab { review, tab, rest },
@@ -122,23 +158,85 @@ impl App {
         );
     }
 
-    /// Carry on with a review whose prompt was over a tab that closed on its
-    /// own (its process exited): the prompt moves to the tabs left.
-    pub(super) fn resume_review(&mut self, event_loop: &ActiveEventLoop, action: ConfirmAction) {
-        match action {
-            ConfirmAction::ReviewTab { review, rest, .. } => {
-                self.review_next_tab(event_loop, review, rest)
-            }
-            ConfirmAction::ReviewWindows { review, tabs } => {
-                let tabs: Vec<WindowId> = tabs
-                    .into_iter()
-                    .filter(|tab| self.still_under_review(review, *tab))
-                    .collect();
-                if let Some(&first) = tabs.first() {
-                    self.open_review_windows(first, review, tabs);
+    /// Start reviewing `tabs` (the first prompt's Enter). With fewer than
+    /// two left to review, the request starts over instead, as it would
+    /// now: a single confirmation, or none.
+    pub(super) fn start_review(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        review: Review,
+        tabs: Vec<WindowId>,
+    ) {
+        let left = tabs
+            .iter()
+            .filter(|tab| self.still_under_review(review, **tab))
+            .count();
+        if left < 2 {
+            self.restart_review_request(event_loop, review);
+        } else {
+            self.review_next_tab(event_loop, review, tabs);
+        }
+    }
+
+    /// Ask again for the quit or window close `review` was for, from the
+    /// current state of the tabs.
+    fn restart_review_request(&mut self, event_loop: &ActiveEventLoop, review: Review) {
+        match review {
+            Review::Quit => self.request_quit(event_loop),
+            Review::CloseWindow { group } => {
+                let tab = self.window_order.iter().copied().find(|tab| {
+                    self.windows
+                        .get(tab)
+                        .is_some_and(|state| state.group == group)
+                });
+                if let Some(tab) = tab {
+                    self.request_close_window_of(event_loop, tab);
                 }
             }
+        }
+    }
+
+    /// Carry on with a review whose prompt was over `closed`, a tab that
+    /// closed on its own (its process exited): the review goes on with the
+    /// tabs left, the prompt's own tab included when that was another one
+    /// (the quick terminal's prompt shows over a regular tab), or, before
+    /// the review began, the request starts over.
+    pub(super) fn resume_review(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        closed: WindowId,
+        action: ConfirmAction,
+    ) {
+        match action {
+            ConfirmAction::ReviewTab { review, tab, rest } => {
+                let tabs = std::iter::once(tab)
+                    .filter(|tab| *tab != closed)
+                    .chain(rest)
+                    .collect();
+                self.review_next_tab(event_loop, review, tabs)
+            }
+            ConfirmAction::ReviewWindows { review, .. } => {
+                self.restart_review_request(event_loop, review)
+            }
             _ => {}
+        }
+    }
+
+    /// The review accepted `tab`. Closing a window closes it, unless it has
+    /// meanwhile been moved to another window; quitting keeps it.
+    pub(super) fn accept_reviewed_tab(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        review: Review,
+        tab: WindowId,
+    ) {
+        if let Review::CloseWindow { group } = review
+            && self
+                .windows
+                .get(&tab)
+                .is_some_and(|state| state.group == group)
+        {
+            self.close_tab(event_loop, tab);
         }
     }
 
@@ -173,16 +271,22 @@ mod tests {
         assert!(message.ends_with("before closing?"));
         assert!(hint.contains("T: close all"));
         assert!(
-            review_tab_prompt(Review::Quit)
+            review_tab_prompt(Review::Quit, false)
                 .0
-                .starts_with("This window runs a process.")
+                .starts_with("This window runs")
         );
         assert!(
-            review_tab_prompt(Review::CloseWindow {
-                group: WindowGroupId(1)
-            })
-            .0
-            .starts_with("Close this window?")
+            review_tab_prompt(Review::Quit, true)
+                .0
+                .starts_with("The Quick Terminal")
+        );
+        let close = Review::CloseWindow {
+            group: WindowGroupId(1),
+        };
+        assert!(
+            review_tab_prompt(close, false)
+                .0
+                .starts_with("Close this window?")
         );
     }
 }

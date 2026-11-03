@@ -38,6 +38,11 @@ values directly in the config file.
 description), or the command a keybind action runs. `--option=<name>` and `--keybind=<name>`
 pin the lookup to one kind; a bare name tries options first.
 
+When stdout is a terminal, both `+show-config` and `+explain-config` page their output through
+`$NOA_PAGER`, else `$PAGER`, else `less` (Ghostty reads `$GHOSTTY_PAGER` instead of `$NOA_PAGER`).
+The value is run as a single program name, without arguments. An empty value turns paging off,
+as does `--no-pager`.
+
 ## Live reload
 
 Noa watches the config file and applies edits at runtime. The idle poll is deliberately slow

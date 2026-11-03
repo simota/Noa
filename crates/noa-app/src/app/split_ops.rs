@@ -39,7 +39,9 @@ fn confirm_action_references_pane(action: &ConfirmAction, pane_id: PaneId) -> bo
         | ConfirmAction::ClipboardWrite { .. }
         | ConfirmAction::CloseTab { .. }
         | ConfirmAction::CloseWindow { .. }
-        | ConfirmAction::Quit => false,
+        | ConfirmAction::Quit
+        | ConfirmAction::ReviewWindows { .. }
+        | ConfirmAction::ReviewTab { .. } => false,
     }
 }
 

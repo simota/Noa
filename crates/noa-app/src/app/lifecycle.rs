@@ -1584,6 +1584,16 @@ impl App {
         let Some(group) = self.windows.get(&window_id).map(|state| state.group) else {
             return;
         };
+        let tabs = ids_in_group(
+            &self.window_order,
+            |id| self.windows.get(&id).map(|state| state.group),
+            group,
+        );
+        let running = self.tabs_with_running_programs(&tabs);
+        if running.len() > 1 {
+            self.open_review_windows(window_id, Review::CloseWindow, running);
+            return;
+        }
         let count = self.group_running_program_count(group);
         if count > 0 {
             self.open_confirm_dialog(
@@ -1770,6 +1780,11 @@ impl App {
             event_loop.exit();
             return;
         };
+        let running = self.tabs_with_running_programs(&self.window_order.clone());
+        if running.len() > 1 {
+            self.open_review_windows(window_id, Review::Quit, running);
+            return;
+        }
         self.open_confirm_dialog(
             window_id,
             close_confirm_message(CloseConfirmTarget::App, count),

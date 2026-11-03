@@ -483,6 +483,19 @@ impl App {
             .confirm_dialog
             .as_ref()
             .is_some_and(|session| confirm_action_can_remember(&session.action));
+        // "Review Windows": `T` skips the review and ends every tab now.
+        if let Key::Character(s) = &event.logical_key
+            && s.eq_ignore_ascii_case("t")
+            && let Some(session) = self
+                .confirm_dialog
+                .take_if(|session| matches!(session.action, ConfirmAction::ReviewWindows { .. }))
+        {
+            if let ConfirmAction::ReviewWindows { review, tabs } = session.action {
+                self.end_reviewed_tabs(event_loop, review, &tabs);
+            }
+            self.request_window_redraw(window_id);
+            return;
+        }
         let (confirm, remember) = match &event.logical_key {
             Key::Named(NamedKey::Enter) => (true, false),
             Key::Named(NamedKey::Escape) => (false, false),
@@ -547,6 +560,13 @@ impl App {
             ConfirmAction::CloseTab { window_id } => self.close_tab(event_loop, window_id),
             ConfirmAction::CloseWindow { group } => self.close_group(event_loop, group),
             ConfirmAction::Quit => event_loop.exit(),
+            ConfirmAction::ReviewWindows { review, tabs } => {
+                self.review_next_tab(event_loop, review, tabs)
+            }
+            ConfirmAction::ReviewTab { review, tab, rest } => {
+                self.close_tab(event_loop, tab);
+                self.review_next_tab(event_loop, review, rest);
+            }
         }
     }
 }

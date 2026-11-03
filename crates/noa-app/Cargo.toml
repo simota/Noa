@@ -33,6 +33,7 @@ image-webp.workspace = true
 dirs.workspace = true
 unicode-width.workspace = true
 libc.workspace = true
+rand.workspace = true
 aes-gcm.workspace = true
 security-framework.workspace = true
 

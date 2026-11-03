@@ -1299,7 +1299,7 @@ impl App {
             .unwrap_or(0)
     }
 
-    fn group_running_program_count(&self, group: WindowGroupId) -> usize {
+    pub(super) fn group_running_program_count(&self, group: WindowGroupId) -> usize {
         self.window_order
             .iter()
             .filter_map(|window_id| self.windows.get(window_id))
@@ -1339,18 +1339,6 @@ impl App {
     }
 
     pub(super) fn close_tab(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId) {
-        // A "Review Windows" prompt over this tab moves on to the tabs left
-        // once it is gone, instead of being cancelled with it.
-        let interrupted_review = self
-            .confirm_dialog
-            .take_if(|session| {
-                session.window_id == window_id
-                    && matches!(
-                        session.action,
-                        ConfirmAction::ReviewWindows { .. } | ConfirmAction::ReviewTab { .. }
-                    )
-            })
-            .map(|session| session.action);
         // Before the surfaces are torn down and their keys are gone: a closed
         // tab's record must not outlive the tab.
         self.discard_window_records(window_id);
@@ -1399,6 +1387,18 @@ impl App {
         if outcome == TabCloseOutcome::Stale {
             return;
         }
+        // A "Review Windows" prompt over this tab asks again once the tab is
+        // gone, instead of being cancelled with it.
+        let interrupted_review = self
+            .confirm_dialog
+            .take_if(|session| {
+                session.window_id == window_id
+                    && matches!(
+                        session.action,
+                        ConfirmAction::ReviewWindows { .. } | ConfirmAction::ReviewTab { .. }
+                    )
+            })
+            .map(|session| session.action);
 
         let closing_panes: Vec<_> = self
             .windows

@@ -64,18 +64,37 @@ impl App {
         tabs
     }
 
-    /// Bring `tab` forward for a review prompt. A tab just closed on macOS
-    /// restores focus on the next turn to the tab AppKit picked, skipped
-    /// once `tab` is focused instead; restore `tab` the same way, so its
-    /// content view takes the keys again. Only when focus moves: the restore
-    /// also clears the held modifiers, which an unchanged window would not
-    /// report again (a held Ctrl would make Ctrl+T a bare `T`).
-    fn present_review_tab(&mut self, tab: WindowId) {
+    /// The tabs `review` covers now: for a quit, every tab and the quick
+    /// terminal running a program; for a window close, the window's tabs
+    /// running one.
+    fn review_candidates(&self, review: Review) -> Vec<WindowId> {
+        match review {
+            Review::Quit => self.quit_review_tabs(),
+            Review::CloseWindow { group } => {
+                let tabs = ids_in_group(
+                    &self.window_order,
+                    |id| self.windows.get(&id).map(|state| state.group),
+                    group,
+                );
+                self.tabs_with_running_programs(&tabs)
+            }
+        }
+    }
+
+    /// Bring `tab` forward for a review prompt. Right after a tab closed
+    /// (`after_close`), macOS restores focus on the next turn to the tab
+    /// AppKit picked, skipped once `tab` is focused instead; restore `tab`
+    /// the same way, so its content view takes the keys again. Not
+    /// otherwise: the restore also clears the held modifiers, which macOS
+    /// does not report again, so a held Ctrl or Cmd would make `T` bare.
+    fn present_review_tab(&mut self, tab: WindowId, after_close: bool) {
         #[cfg(target_os = "macos")]
-        let moves = self.focused != Some(tab);
+        let restore = after_close && self.focused != Some(tab);
+        #[cfg(not(target_os = "macos"))]
+        let _ = after_close;
         self.focus_tab(tab);
         #[cfg(target_os = "macos")]
-        if moves {
+        if restore {
             let _ = self
                 .proxy
                 .send_event(crate::events::UserEvent::RestoreFocus { window_id: tab });
@@ -103,10 +122,20 @@ impl App {
         review: Review,
         tabs: Vec<WindowId>,
     ) {
+        self.open_review_windows_after(window_id, review, tabs, false);
+    }
+
+    fn open_review_windows_after(
+        &mut self,
+        window_id: WindowId,
+        review: Review,
+        tabs: Vec<WindowId>,
+        after_close: bool,
+    ) {
         let Some(target) = self.review_anchor(window_id, &tabs) else {
             return;
         };
-        self.present_review_tab(target);
+        self.present_review_tab(target, after_close);
         let (message, hint) = review_windows_prompt(review, tabs.len());
         self.open_confirm_dialog_with_hint(
             target,
@@ -130,43 +159,60 @@ impl App {
         in_scope && self.tab_running_program_count(tab) > 0
     }
 
-    /// Bring the next tab of `tabs` that still needs `review` forward and
-    /// confirm it; once none is left, a quit goes ahead.
+    /// Confirm the next tab still needing `review`: the first of `tabs`, or,
+    /// once those are done, any tab covered now that is not yet `accepted`
+    /// (a program may have started, or moved in from another tab, since the
+    /// review began). With none left, a quit goes ahead.
     pub(super) fn review_next_tab(
         &mut self,
         event_loop: &ActiveEventLoop,
         review: Review,
         tabs: Vec<WindowId>,
+        accepted: Vec<WindowId>,
+        after_close: bool,
     ) {
-        let mut tabs = tabs
-            .into_iter()
-            .filter(|tab| self.still_under_review(review, *tab));
-        let Some(tab) = tabs.next() else {
+        let pending = |app: &Self, tab: &WindowId| {
+            !accepted.contains(tab) && app.still_under_review(review, *tab)
+        };
+        let mut tabs: Vec<WindowId> = tabs.into_iter().filter(|tab| pending(self, tab)).collect();
+        if tabs.is_empty() {
+            tabs = self
+                .review_candidates(review)
+                .into_iter()
+                .filter(|tab| pending(self, tab))
+                .collect();
+        }
+        if tabs.is_empty() {
             if review == Review::Quit {
                 event_loop.exit();
             }
             return;
-        };
-        let rest = tabs.collect();
+        }
+        let tab = tabs.remove(0);
         // The quick terminal's prompt shows over a regular tab instead.
         let quick_terminal = self.is_quick_terminal_window(tab);
         let Some(anchor) = self.review_anchor(tab, &[]) else {
             return;
         };
-        self.present_review_tab(anchor);
+        self.present_review_tab(anchor, after_close);
         let (message, hint) = review_tab_prompt(review, quick_terminal);
         self.open_confirm_dialog_with_hint(
             anchor,
             message,
             hint,
-            ConfirmAction::ReviewTab { review, tab, rest },
+            ConfirmAction::ReviewTab {
+                review,
+                tab,
+                rest: tabs,
+                accepted,
+            },
             None,
         );
     }
 
     /// Start reviewing `tabs` (the first prompt's Enter). With fewer than
     /// two left to review, the request starts over instead, as it would
-    /// now: a single confirmation, or none.
+    /// now: a single confirmation.
     pub(super) fn start_review(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -178,15 +224,21 @@ impl App {
             .filter(|tab| self.still_under_review(review, **tab))
             .count();
         if left < 2 {
-            self.restart_review_request(event_loop, review);
+            self.restart_review_request(event_loop, review, false);
         } else {
-            self.review_next_tab(event_loop, review, tabs);
+            self.review_next_tab(event_loop, review, tabs, Vec::new(), false);
         }
     }
 
     /// Ask again for the quit or window close `review` was for, from the
-    /// current state of the tabs.
-    fn restart_review_request(&mut self, event_loop: &ActiveEventLoop, review: Review) {
+    /// current state of the tabs. Always asks: a window close whose tabs
+    /// now run nothing still gets its plain confirmation.
+    fn restart_review_request(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        review: Review,
+        after_close: bool,
+    ) {
         match review {
             Review::Quit => self.request_quit(event_loop),
             Review::CloseWindow { group } => {
@@ -198,47 +250,62 @@ impl App {
                         .get(tab)
                         .is_some_and(|state| state.group == group)
                 };
-                let tab = self
+                let Some(anchor) = self
                     .focused
                     .filter(in_group)
-                    .or_else(|| self.window_order.iter().copied().find(in_group));
-                if let Some(tab) = tab {
-                    self.present_review_tab(tab);
-                    self.request_close_window_of(event_loop, tab);
+                    .or_else(|| self.window_order.iter().copied().find(in_group))
+                else {
+                    return;
+                };
+                let running = self.review_candidates(review);
+                if running.len() > 1 {
+                    self.open_review_windows_after(anchor, review, running, after_close);
+                    return;
                 }
+                self.present_review_tab(anchor, after_close);
+                let count = self.group_running_program_count(group);
+                self.open_confirm_dialog(
+                    anchor,
+                    close_confirm_message(CloseConfirmTarget::Window, count),
+                    ConfirmAction::CloseWindow { group },
+                );
             }
         }
     }
 
-    /// A review's prompt, or the tab it asks about, went away without an
-    /// answer (the tab closed on its own, or its last pane moved to another
-    /// tab): ask again for the quit or window close from the current state.
-    /// Never goes ahead unasked, and a program that moved elsewhere is
-    /// counted again.
+    /// A review's prompt went away without an answer (its tab closed on its
+    /// own, its last pane moved to another tab, or the quick terminal it
+    /// asked about exited): ask again for the quit or window close from the
+    /// current state, never going ahead unasked.
     pub(super) fn resume_review(&mut self, event_loop: &ActiveEventLoop, action: ConfirmAction) {
         if let ConfirmAction::ReviewWindows { review, .. }
         | ConfirmAction::ReviewTab { review, .. } = action
         {
-            self.restart_review_request(event_loop, review);
+            self.restart_review_request(event_loop, review, true);
         }
     }
 
-    /// The review accepted `tab`. Closing a window closes it, unless it has
-    /// meanwhile been moved to another window; quitting keeps it.
+    /// The review accepted `tab`, then moves on. A tab that meanwhile stopped
+    /// needing the review (its program ended, or it moved to another window)
+    /// is skipped. Closing a window closes an accepted tab; quitting keeps
+    /// it.
     pub(super) fn accept_reviewed_tab(
         &mut self,
         event_loop: &ActiveEventLoop,
         review: Review,
         tab: WindowId,
+        rest: Vec<WindowId>,
+        mut accepted: Vec<WindowId>,
     ) {
-        if let Review::CloseWindow { group } = review
-            && self
-                .windows
-                .get(&tab)
-                .is_some_and(|state| state.group == group)
-        {
-            self.close_tab(event_loop, tab);
+        let mut closed = false;
+        if self.still_under_review(review, tab) {
+            accepted.push(tab);
+            if matches!(review, Review::CloseWindow { .. }) {
+                self.close_tab(event_loop, tab);
+                closed = true;
+            }
         }
+        self.review_next_tab(event_loop, review, rest, accepted, closed);
     }
 
     /// Skip the review: quit, or close the whole window (Ghostty's

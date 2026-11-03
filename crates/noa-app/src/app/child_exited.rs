@@ -170,17 +170,19 @@ impl App {
         pane_id: PaneId,
     ) {
         if self.is_quick_terminal_window(window_id) {
-            // A quit review asking about the quick terminal (its prompt is
-            // over a regular tab) asks again once it is gone.
+            // A quit review counting the quick terminal (its prompt is over
+            // a regular tab) asks again once it is gone.
             let interrupted_review = self
                 .confirm_dialog
-                .take_if(|session| {
-                    matches!(
-                        session.action,
-                        ConfirmAction::ReviewTab { tab, .. } if tab == window_id
-                    )
+                .take_if(|session| match &session.action {
+                    ConfirmAction::ReviewTab { tab, .. } => *tab == window_id,
+                    ConfirmAction::ReviewWindows { tabs, .. } => tabs.contains(&window_id),
+                    _ => false,
                 })
-                .map(|session| session.action);
+                .map(|session| {
+                    self.request_window_redraw(session.window_id);
+                    session.action
+                });
             self.end_copy_mode_for_window(window_id);
             self.destroy_quick_terminal();
             if let Some(action) = interrupted_review {

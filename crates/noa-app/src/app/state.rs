@@ -1116,6 +1116,8 @@ pub(super) enum ConfirmAction {
         review: Review,
         tab: WindowId,
         rest: Vec<WindowId>,
+        /// Tabs this review already accepted (kept open while quitting).
+        accepted: Vec<WindowId>,
     },
 }
 

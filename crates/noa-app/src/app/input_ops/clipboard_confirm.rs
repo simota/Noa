@@ -435,8 +435,10 @@ impl App {
         armed_at: Option<Instant>,
     ) {
         self.end_copy_mode_for_window(window_id);
-        // A replaced dialog's request still gets its answer.
+        // A replaced dialog's request still gets its answer, and its window
+        // drops the card (it may be another window).
         if let Some(replaced) = self.confirm_dialog.take() {
+            self.request_window_redraw(replaced.window_id);
             self.cancel_confirm_action(replaced.action);
         }
         self.confirm_dialog = Some(ConfirmDialogSession {
@@ -587,10 +589,12 @@ impl App {
             ConfirmAction::ReviewWindows { review, tabs } => {
                 self.start_review(event_loop, review, tabs)
             }
-            ConfirmAction::ReviewTab { review, tab, rest } => {
-                self.accept_reviewed_tab(event_loop, review, tab);
-                self.review_next_tab(event_loop, review, rest);
-            }
+            ConfirmAction::ReviewTab {
+                review,
+                tab,
+                rest,
+                accepted,
+            } => self.accept_reviewed_tab(event_loop, review, tab, rest, accepted),
         }
     }
 }

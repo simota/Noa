@@ -154,6 +154,7 @@ or fails to decode, a diagnostic is shown and the background image is disabled.
 |---|---|---|---|
 | `scrollback-limit-bytes` | integer `>= 0`, `unlimited` | `50000000` | Total byte count for scrollback. `0` disables it. The pre-1.4 name `scrollback-limit` is still accepted |
 | `scrollback-limit-lines` | integer `>= 0`, `unlimited` | `unlimited` | Most scrollback lines kept, not counting the screen; a soft-wrapped line counts once per row. With `scrollback-limit-bytes`, the first limit reached evicts. Eviction drops whole pages, so up to about a quarter more lines may be kept. `0` disables scrollback |
+| `image-storage-limit` | integer bytes `>= 0` | `320000000` | Total bytes of decoded Kitty graphics image data kept per terminal. Past the limit the oldest images are evicted first. Same default as Ghostty (320 MB) |
 | `clipboard-read` | `deny` / `false`, `ask`, `allow` / `true` | `ask` | Policy for programs reading the clipboard (OSC 52, OSC 5522) |
 | `clipboard-write` | `deny` / `false`, `ask`, `allow` / `true` | `allow` | Policy for programs writing the clipboard (OSC 52, OSC 5522) |
 | `clipboard-write-limit-bytes` | integer `>= 0`, `unlimited` | `67108864` (64 MiB) | Largest OSC 5522 clipboard write; over it the write fails with `EFBIG`. `0` rejects every non-empty write |
@@ -221,6 +222,8 @@ See [noa-server-protocol.md](api/noa-server-protocol.md) for scope and attach-ch
 | `quick-terminal-size` | positive finite decimal, or percentage | `0.4` | Ratio relative to screen height. Clamped to `0.1..=1.0`. e.g. `40%` |
 | `quick-terminal-autohide` | `true`, `false` | `true` | Automatically hide when focus is lost |
 | `quick-terminal-screen` | `main`, `mouse`, `macos-menu-bar` | `mouse` | Which display the quick terminal appears on, resolved fresh on every show. **Default deviates from Ghostty (`main`)** — see [Deviations from Ghostty defaults](#deviations-from-ghostty-defaults) |
+| `quick-terminal-position` | `top`, `bottom`, `left`, `right`, `center` | `top` | Screen edge the quick terminal slides in from. `center` neither slides nor fades: it appears and disappears in place |
+| `quick-terminal-animation-duration` | finite decimal seconds `>= 0` | `0.2` | How long the quick terminal takes to slide in or out. `0` shows and hides it instantly |
 | `sidebar-enabled` | `true`, `false` | `false` | Initial sidebar visibility for new windows |
 | `sidebar-width` | finite decimal `200..=600` | `360` | Sidebar width (points) |
 | `sidebar-font-size` | finite decimal `8..=20` | `11.5` | Session sidebar font size (points) |
@@ -247,12 +250,17 @@ A disposable popup terminal, centered on the focused window and spawned in the f
 | `macos-titlebar-style` | `native` / `tabs`, `transparent` | `native` | Titlebar style for regular terminal windows |
 | `macos-non-native-fullscreen` | `true`, `false` | `false` | Use borderless fullscreen instead of a native fullscreen Space |
 | `macos-titlebar-proxy-icon` | `visible` / `true`, `hidden` / `false` | `visible` | Whether to show the focused pane's OSC 7 pwd as a proxy icon in the titlebar |
+| `macos-applescript` | `true`, `false` | `true` | Install the AppleScript / Apple Event bridge at launch. When `false` the handlers are never registered, so scripting the app does nothing |
 
 On non-macOS platforms, macOS-specific display and window behaviors are no-ops.
 
 ## Keybindings
 
 `keybind` is repeatable, and entries are applied to the default bindings in order from top to bottom.
+
+| Key | Accepted values | Default | Description |
+|---|---|---|---|
+| `keybind` | `<chord>=<action>`, `<chord>=unbind`, `clear` | Noa's default bindings | Repeatable. Adds or overrides a chord, unbinds one, or clears every binding so far. See [KEYBINDINGS.md](KEYBINDINGS.md) |
 
 ```conf
 keybind = cmd+i=tab.set-title

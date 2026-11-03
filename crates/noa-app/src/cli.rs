@@ -211,12 +211,14 @@ fn explain_option(name: &str) -> Option<String> {
             .strip_suffix(" |")?
             .split(" | ")
             .collect();
-        let [row_key, values, default, description] = cells[..] else {
-            return None;
-        };
-        (row_key == key).then(|| {
-            format!("{name}\n\n  Values:  {values}\n  Default: {default}\n\n{description}\n")
-        })
+        match cells[..] {
+            [row_key, values, default, description] if row_key == key => Some(format!(
+                "{name}\n\n  Values:  {values}\n  Default: {default}\n\n{description}\n"
+            )),
+            // The "Recognized but unsupported keys" table.
+            [row_key, behavior] if row_key == key => Some(format!("{name}\n\n{behavior}\n")),
+            _ => None,
+        }
     })
 }
 
@@ -1110,15 +1112,21 @@ mod tests {
     }
 
     #[test]
-    fn explain_config_documents_every_ghostty_1_4_option_noa_added() {
-        for key in [
-            "scrollback-limit-bytes",
-            "scrollback-limit-lines",
-            "copy-on-select",
-            "right-click-action",
-            "middle-click-action",
-            "link-osc8",
-        ] {
+    fn explain_config_documents_every_key_noa_accepts() {
+        let shown = show_config_output(&StartupConfig::default());
+        let shown_keys = shown
+            .lines()
+            .filter_map(|line| line.split_once(" = "))
+            .map(|(key, _)| key);
+        // Keys `+show-config` leaves out, plus the unsupported ones.
+        let other_keys = [
+            "keybind",
+            "background-image",
+            "resize-overlay",
+            "palette",
+            "config-file",
+        ];
+        for key in shown_keys.chain(other_keys) {
             assert!(explain_option(key).is_some(), "{key}");
         }
     }

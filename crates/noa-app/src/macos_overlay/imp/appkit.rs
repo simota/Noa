@@ -34,12 +34,13 @@ const ID_CONFIRM: &str = "noa.native-overlay.confirm";
 const ID_TITLE_PROMPT: &str = "noa.native-overlay.title-prompt";
 const ID_TOAST: &str = "noa.native-overlay.toast";
 const ID_SCRATCH_BADGE: &str = "noa.native-overlay.scratch-badge";
+const ID_CHILD_EXITED: &str = "noa.native-overlay.child-exited";
 
 /// Palette metrics (points). The widths/row heights the IME caret anchor
 /// also needs live in `model.rs` so the two can't drift.
 use crate::macos_overlay::model::{
-    CARD_PAD_H, ENTRY_ROW_H, HEADER_ROW_H, LIST_PAD_V, PaletteCardLayout, QUERY_ROW_H,
-    THEME_SETTINGS_WIDTH, TITLE_PROMPT_H, TITLE_PROMPT_WIDTH,
+    CARD_PAD_H, ChildExitedBar, ENTRY_ROW_H, HEADER_ROW_H, LIST_PAD_V, PaletteCardLayout,
+    QUERY_ROW_H, THEME_SETTINGS_WIDTH, TITLE_PROMPT_H, TITLE_PROMPT_WIDTH,
 };
 const CARD_RADIUS: f64 = 12.0;
 const SCRIM_ALPHA: f64 = 0.25;
@@ -2030,3 +2031,89 @@ pub(in crate::macos_overlay) fn rebuild_scratch_badge(
         }
     }
 }
+
+// -----------------------------------------------------------------------
+// child-exited bars (Ghostty 1.4.0's `ChildExitedMessageBar`)
+// -----------------------------------------------------------------------
+
+/// The system colors Ghostty's bar uses, which follow the appearance.
+#[derive(Clone, Copy)]
+enum SystemColor {
+    Red,
+    Label,
+}
+
+unsafe fn system_color(color: SystemColor) -> *mut AnyObject {
+    let Some(class) = AnyClass::get(c"NSColor") else {
+        return std::ptr::null_mut();
+    };
+    unsafe {
+        match color {
+            SystemColor::Red => msg_send![class, systemRedColor],
+            SystemColor::Label => msg_send![class, labelColor],
+        }
+    }
+}
+
+/// Replace every pane's child-exited bar with `bars`. Like Ghostty's error
+/// level, the bar is half-opaque system red and the text the primary label
+/// color. Display-only, and kept beneath the modal overlays: each bar is
+/// added below every other subview.
+pub(in crate::macos_overlay) fn rebuild_child_exited_bars(
+    window: &Window,
+    bars: &[ChildExitedBar],
+) {
+    let view = content_view(window);
+    if view.is_null() {
+        return;
+    }
+    unsafe {
+        loop {
+            let old = find_subview(view, ID_CHILD_EXITED);
+            if old.is_null() {
+                break;
+            }
+            let _: () = msg_send![old, removeFromSuperview];
+        }
+        let ident = NSString::from_str(ID_CHILD_EXITED);
+        for bar in bars {
+            let frame = frame_in_view(view, bar.rect);
+            let root = make_view(frame);
+            if root.is_null() {
+                continue;
+            }
+            let _: () = msg_send![root, setIdentifier: &*ident];
+            let red = system_color(SystemColor::Red);
+            let background = if red.is_null() {
+                red
+            } else {
+                msg_send![red, colorWithAlphaComponent: 0.5f64]
+            };
+            tint_layer(root, background, 0.0);
+            let text_color = system_color(SystemColor::Label);
+            let line_h = ChildExitedBar::line_h(bar.font_size);
+            let label = make_match_label(
+                &bar.text,
+                &bar.bold.clone().collect::<Vec<_>>(),
+                bar.font_size,
+                text_color,
+                text_color,
+                NSRect::new(
+                    NSPoint::new(ChildExitedBar::PAD_H, ChildExitedBar::PAD_V),
+                    NSSize::new((bar.rect.w - 2.0 * ChildExitedBar::PAD_H).max(0.0), line_h),
+                ),
+            );
+            if !label.is_null() {
+                set_alignment(label, ALIGN_CENTER);
+                let _: () = msg_send![root, addSubview: label];
+            }
+            let null: *mut AnyObject = std::ptr::null_mut();
+            let _: () =
+                msg_send![view, addSubview: root, positioned: NS_WINDOW_BELOW, relativeTo: null];
+            release_owned(root);
+        }
+    }
+}
+
+/// `NSWindowOrderingMode.below`.
+const NS_WINDOW_BELOW: isize = -1;

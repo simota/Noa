@@ -458,12 +458,14 @@ fn drain_blocking(
     }
 }
 
-/// Spawn a thread that blocks on the child, then emits [`PtyEvent::Exit`]
-/// with its exit code (signal terminations report code 1).
+/// Spawn a thread that blocks on the child, records when it exited in
+/// `exited_at`, then emits [`PtyEvent::Exit`] with its exit code (signal
+/// terminations report code 1).
 pub(crate) fn spawn_waiter(
     mut child: Box<dyn Child + Send + Sync>,
     tx: Sender<PtyEvent>,
     mut reader: ReaderHandle,
+    exited_at: Arc<std::sync::OnceLock<std::time::Instant>>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("noa-pty-waiter".into())
@@ -472,6 +474,7 @@ pub(crate) fn spawn_waiter(
                 Ok(status) => status.exit_code() as i32,
                 Err(_) => -1,
             };
+            let _ = exited_at.set(std::time::Instant::now());
             reader.finish(EXIT_DRAIN_TIMEOUT);
             let _ = tx.send(PtyEvent::Exit(code));
         })
@@ -514,7 +517,7 @@ mod tests {
             tx.clone(),
         )
         .unwrap();
-        let waiter = spawn_waiter(Box::new(ExitedChild), tx, reader).unwrap();
+        let waiter = spawn_waiter(Box::new(ExitedChild), tx, reader, Arc::default()).unwrap();
         assert!(rx.recv_timeout(Duration::from_millis(20)).is_err());
         step_tx.send(ReadStep::Data(b"tail")).unwrap();
         assert!(

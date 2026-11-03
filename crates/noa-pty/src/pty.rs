@@ -71,6 +71,9 @@ pub struct Pty {
     event_rx: Receiver<PtyEvent>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     child_pid: Option<u32>,
+    started_at: std::time::Instant,
+    exited_at: std::sync::Arc<std::sync::OnceLock<std::time::Instant>>,
+    command_line: String,
 }
 
 impl Pty {
@@ -161,7 +164,15 @@ impl Pty {
             cmd.cwd(cwd);
         }
 
+        let command_line = cmd
+            .get_argv()
+            .iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+
         // Spawn the child FIRST (macOS quirk), then we may resize.
+        let started_at = std::time::Instant::now();
         let child = pair
             .slave
             .spawn_command(cmd)
@@ -223,7 +234,9 @@ impl Pty {
         let (tx, event_rx) = pty_event_channel();
         let reader = spawn_reader(reader, poll_fd, nonblocking, tx.clone())
             .map_err(|e| PtyError::SpawnThread(e.to_string()))?;
-        spawn_waiter(child, tx, reader).map_err(|e| PtyError::SpawnThread(e.to_string()))?;
+        let exited_at = std::sync::Arc::default();
+        spawn_waiter(child, tx, reader, std::sync::Arc::clone(&exited_at))
+            .map_err(|e| PtyError::SpawnThread(e.to_string()))?;
 
         let writer = PtyWriter::spawn(writer, writer_poll_fd)
             .map_err(|e| PtyError::SpawnThread(e.to_string()))?;
@@ -234,7 +247,26 @@ impl Pty {
             event_rx,
             killer,
             child_pid,
+            started_at,
+            exited_at,
+            command_line,
         })
+    }
+
+    /// How long the child ran: from spawn to when the waiter saw it exit,
+    /// or to now while that is not known yet.
+    pub fn runtime(&self) -> std::time::Duration {
+        let end = self
+            .exited_at
+            .get()
+            .copied()
+            .unwrap_or_else(std::time::Instant::now);
+        end.saturating_duration_since(self.started_at)
+    }
+
+    /// The child's argv joined by spaces, for messages about it.
+    pub fn command_line(&self) -> &str {
+        &self.command_line
     }
 
     /// Receiver for the PTY's output/lifecycle events.
@@ -798,6 +830,35 @@ mod tests {
             "expected 'hello' in output: {text:?}"
         );
         assert!(saw_exit, "expected an Exit event");
+    }
+
+    // The command line and start time describe the spawned child, and its
+    // exit code arrives with the exit (the child-exited notice reads both).
+    #[test]
+    fn exit_reports_the_code_and_the_command_line_is_kept() {
+        let pty = Pty::spawn(PtyConfig {
+            command: Some(vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "exit 3".to_string(),
+            ]),
+            ..PtyConfig::default()
+        })
+        .expect("spawn pty");
+        assert_eq!(pty.command_line(), "/bin/sh -c exit 3");
+
+        let mut code = None;
+        while let Ok(event) = pty.event_rx().recv_timeout(Duration::from_secs(5)) {
+            if let PtyEvent::Exit(exit) = event {
+                code = Some(exit);
+                break;
+            }
+        }
+        assert_eq!(code, Some(3));
+        // Fixed at the exit, not still growing.
+        let runtime = pty.runtime();
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(pty.runtime(), runtime);
     }
 
     // `-e` path: an explicit command argv is spawned verbatim as the pty

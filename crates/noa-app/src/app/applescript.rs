@@ -18,11 +18,6 @@ use crate::macos_applescript::{
 /// structural change.
 const APPLESCRIPT_SNAPSHOT_REFRESH: Duration = Duration::from_millis(500);
 
-/// What `wait after command` prints when the process exits (agent-automation
-/// REQ-005).
-const PROCESS_EXITED_MESSAGE: &[u8] =
-    b"\r\n\x1b[0m[Process exited. Press any key to close the terminal.]";
-
 /// Overrides for the spawn a scripted action is running (agent-automation
 /// L2.1): the ids the AE handler already handed out, and the parts of a
 /// `surface configuration` the pty spawn consumes. Set by the executor around
@@ -657,40 +652,6 @@ impl App {
         }
         self.relayout_and_resize_window(window_id);
         self.request_window_redraw(window_id);
-    }
-
-    /// `wait after command` (REQ-005): when `pane_id`'s process exits, keep
-    /// the pane and print the exit notice instead of closing it. `true` when
-    /// the pane was kept.
-    pub(super) fn hold_pane_after_exit(&mut self, window_id: WindowId, pane_id: PaneId) -> bool {
-        let Some(surface) = self
-            .windows
-            .get_mut(&window_id)
-            .and_then(|state| state.surfaces.get_mut(&pane_id))
-        else {
-            return false;
-        };
-        if !surface.wait_after_command || surface.exited {
-            return false;
-        }
-        surface.exited = true;
-        {
-            let mut terminal = surface.terminal.lock();
-            noa_vt::Stream::new().feed(PROCESS_EXITED_MESSAGE, &mut *terminal);
-        }
-        self.request_window_redraw(window_id);
-        true
-    }
-
-    /// The exited pane a key press in `window_id` should close, if the
-    /// focused pane is being held open after its process exited.
-    pub(super) fn exited_focused_pane(&self, window_id: WindowId) -> Option<PaneId> {
-        let state = self.windows.get(&window_id)?;
-        state
-            .surfaces
-            .get(&state.focused_pane)
-            .is_some_and(|surface| surface.exited)
-            .then_some(state.focused_pane)
     }
 
     /// `send key` (REQ-010): translate once through the current layout and

@@ -824,6 +824,21 @@ pub(super) fn parse_u64(
     }
 }
 
+pub(super) fn parse_u32(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<u32> {
+    let value = directive.value.as_deref()?;
+    match value.parse::<u32>() {
+        Ok(parsed) => Some(parsed),
+        Err(_) => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+            None
+        }
+    }
+}
+
 pub(super) fn parse_resize_overlay(
     path: &Path,
     directive: &Directive,

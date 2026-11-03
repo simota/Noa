@@ -66,6 +66,7 @@ pub(crate) fn build_overrides(
     let mut scrollback_limit = None;
     let mut scrollback_limit_lines = None;
     let mut image_storage_limit = None;
+    let mut abnormal_command_exit_runtime_ms = None;
     let mut window_save_state = None;
     let mut scrollback_persist = None;
     let mut scrollback_persist_limit = None;
@@ -363,6 +364,9 @@ pub(crate) fn build_overrides(
             "image-storage-limit" => {
                 image_storage_limit = parse_usize(path, directive, &mut diagnostics);
             }
+            "abnormal-command-exit-runtime" => {
+                abnormal_command_exit_runtime_ms = parse_u32(path, directive, &mut diagnostics);
+            }
             "window-save-state" => {
                 window_save_state = parse_window_save_state(path, directive, &mut diagnostics);
             }
@@ -602,6 +606,7 @@ pub(crate) fn build_overrides(
             scrollback_limit,
             scrollback_limit_lines,
             image_storage_limit,
+            abnormal_command_exit_runtime_ms,
             window_save_state,
             scrollback_persist,
             scrollback_persist_limit,
@@ -731,6 +736,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "scrollback-limit"
             | "scrollback-limit-lines"
             | "image-storage-limit"
+            | "abnormal-command-exit-runtime"
             | "window-save-state"
             | "scrollback-persist"
             | "scrollback-persist-limit"

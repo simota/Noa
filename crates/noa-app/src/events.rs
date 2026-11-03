@@ -102,8 +102,8 @@ pub enum UserEvent {
         path: std::path::PathBuf,
         exists: bool,
     },
-    /// The pty's child process exited (or errored) — the app should close.
-    PtyExit(WindowId, PaneId),
+    /// The pty's child process exited (or its pty read failed).
+    PtyExit(WindowId, PaneId, ChildExit),
     /// The AppleScript bridge queued one or more `ScriptAction`s in
     /// `ScriptShared::actions` (applescript R-11, agent-automation L2.1).
     /// Carries no payload — like `IpcAction`, the work lives in a shared
@@ -135,4 +135,13 @@ pub enum UserEvent {
     },
     /// A pane was picked in Ember's menu bar list.
     EmberJump(SessionCardId),
+}
+
+/// How a pane's child exited: how long it ran and, when it reported one, its
+/// exit code. The runtime ends when the pty's waiter saw the exit, not when
+/// the event loop got around to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChildExit {
+    pub runtime_ms: u64,
+    pub exit_code: Option<i32>,
 }

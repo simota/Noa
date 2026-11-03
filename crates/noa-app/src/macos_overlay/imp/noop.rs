@@ -1,5 +1,5 @@
 use crate::macos_overlay::model::{
-    OverlayColors, PaneRectPt, ProcessMonitorViewModel, ThemeSettingsViewModel,
+    ChildExitedBar, OverlayColors, PaneRectPt, ProcessMonitorViewModel, ThemeSettingsViewModel,
 };
 use noa_render::{CommandPaletteSnapshot, ConfirmDialogSnapshot};
 use winit::window::Window;
@@ -41,3 +41,4 @@ pub(in crate::macos_overlay) fn rebuild_scratch_badge(
     _: &OverlayColors,
 ) {
 }
+pub(in crate::macos_overlay) fn rebuild_child_exited_bars(_: &Window, _: &[ChildExitedBar]) {}

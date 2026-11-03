@@ -30,6 +30,8 @@ pub const DEFAULT_SCROLLBACK_LIMIT: usize = 50_000_000;
 /// `image-storage-limit` default: 320 MB of decoded image data, matching
 /// Ghostty/Kitty's per-terminal graphics storage budget.
 pub const DEFAULT_IMAGE_STORAGE_LIMIT: usize = 320_000_000;
+/// `abnormal-command-exit-runtime` default (milliseconds), Ghostty's.
+pub const DEFAULT_ABNORMAL_COMMAND_EXIT_RUNTIME_MS: u32 = 250;
 /// `scrollback-persist-limit` default: 1 MiB of *encoded* scrollback per pane.
 /// The budget is measured before deflate, so the file on disk is smaller.
 pub const DEFAULT_SCROLLBACK_PERSIST_LIMIT: usize = 1 << 20;
@@ -1016,6 +1018,10 @@ pub struct StartupConfig {
     /// `image-storage-limit`: total bytes of decoded Kitty/SIXEL image data
     /// retained before oldest-first eviction. Ghostty default 320 MB.
     pub image_storage_limit: usize,
+    /// `abnormal-command-exit-runtime`: a child that exits within this many
+    /// milliseconds of starting counts as failed to launch, so its pane stays
+    /// open with an error instead of closing (Ghostty 1.4.0 parity).
+    pub abnormal_command_exit_runtime_ms: u32,
     /// `window-save-state`: whether the window/tab/split session is persisted
     /// and restored across launches. Default restores.
     pub window_save_state: WindowSaveState,
@@ -1234,6 +1240,7 @@ impl Default for StartupConfig {
             scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
             scrollback_limit_lines: None,
             image_storage_limit: DEFAULT_IMAGE_STORAGE_LIMIT,
+            abnormal_command_exit_runtime_ms: DEFAULT_ABNORMAL_COMMAND_EXIT_RUNTIME_MS,
             window_save_state: WindowSaveState::default(),
             scrollback_persist: ScrollbackPersist::default(),
             scrollback_persist_limit: DEFAULT_SCROLLBACK_PERSIST_LIMIT,
@@ -1367,6 +1374,7 @@ pub struct ConfigOverrides {
     /// `Some(None)` is an explicit `unlimited`.
     pub scrollback_limit_lines: Option<Option<usize>>,
     pub image_storage_limit: Option<usize>,
+    pub abnormal_command_exit_runtime_ms: Option<u32>,
     pub window_save_state: Option<WindowSaveState>,
     pub scrollback_persist: Option<ScrollbackPersist>,
     pub scrollback_persist_limit: Option<usize>,
@@ -1474,6 +1482,10 @@ macro_rules! impl_redacted_config_debug {
                     .field("scrollback_limit", &self.scrollback_limit)
                     .field("scrollback_limit_lines", &self.scrollback_limit_lines)
                     .field("image_storage_limit", &self.image_storage_limit)
+                    .field(
+                        "abnormal_command_exit_runtime_ms",
+                        &self.abnormal_command_exit_runtime_ms,
+                    )
                     .field("window_save_state", &self.window_save_state)
                     .field("scrollback_persist", &self.scrollback_persist)
                     .field("scrollback_persist_limit", &self.scrollback_persist_limit)
@@ -1642,6 +1654,9 @@ impl ConfigOverrides {
             image_storage_limit: higher_priority
                 .image_storage_limit
                 .or(self.image_storage_limit),
+            abnormal_command_exit_runtime_ms: higher_priority
+                .abnormal_command_exit_runtime_ms
+                .or(self.abnormal_command_exit_runtime_ms),
             window_save_state: higher_priority.window_save_state.or(self.window_save_state),
             scrollback_persist: higher_priority
                 .scrollback_persist
@@ -1829,6 +1844,9 @@ impl ConfigOverrides {
                 .scrollback_limit_lines
                 .unwrap_or(base.scrollback_limit_lines),
             image_storage_limit: self.image_storage_limit.unwrap_or(base.image_storage_limit),
+            abnormal_command_exit_runtime_ms: self
+                .abnormal_command_exit_runtime_ms
+                .unwrap_or(base.abnormal_command_exit_runtime_ms),
             window_save_state: self.window_save_state.unwrap_or(base.window_save_state),
             scrollback_persist: self.scrollback_persist.unwrap_or(base.scrollback_persist),
             scrollback_persist_limit: self
@@ -2321,6 +2339,7 @@ mod tests {
                 scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
                 scrollback_limit_lines: None,
                 image_storage_limit: DEFAULT_IMAGE_STORAGE_LIMIT,
+                abnormal_command_exit_runtime_ms: DEFAULT_ABNORMAL_COMMAND_EXIT_RUNTIME_MS,
                 window_save_state: WindowSaveState::default(),
                 scrollback_persist: ScrollbackPersist::Never,
                 scrollback_persist_limit: DEFAULT_SCROLLBACK_PERSIST_LIMIT,

@@ -28,8 +28,8 @@ use super::auto_approve::{
     detect_auto_approve_candidate,
 };
 use super::feed::{
-    PtyDrainTerminalEvent, capture_pty_bytes, drain_queued_pty_data, feed_terminal_batch,
-    open_pty_capture,
+    PtyDrainTerminalEvent, capture_pty_bytes, drain_queued_pty_data, exit_code_after_read_error,
+    feed_terminal_batch, open_pty_capture,
 };
 use super::input_queue::{EchoStampedInput, QueuedPtyInput};
 use super::ipc_tap::{IpcOutputTap, flush_pending_ipc_output, force_ipc_output_refresh};
@@ -43,6 +43,14 @@ use super::sidebar::SidebarPublish;
 /// Serialized query/reply traffic (DSR probes, TUI status queries, echo
 /// during bursts) arrives well inside this window; human typing does not,
 /// so an interactive-but-quiet pane never spins.
+/// `pty`'s child exit, as the event loop gets it.
+fn child_exit(pty: &Pty, exit_code: Option<i32>) -> crate::events::ChildExit {
+    crate::events::ChildExit {
+        runtime_ms: u64::try_from(pty.runtime().as_millis()).unwrap_or(u64::MAX),
+        exit_code,
+    }
+}
+
 pub(super) const HOT_SPIN_WINDOW: Duration = Duration::from_millis(2);
 /// Upper bound on one pre-park spin. The next request of a serialized
 /// round-trip loop lands 10–30µs after this thread goes idle, so this
@@ -654,10 +662,20 @@ pub fn spawn(
                         None => {}
                     }
                     match terminal_event {
-                        Some(PtyDrainTerminalEvent::ExitOrError) => {
+                        Some(PtyDrainTerminalEvent::Exit(code)) => {
                             let _ = proxy.send_event(UserEvent::PtyExit(
                                 current_card_target(&window_id, pane_id).0,
                                 pane_id,
+                                child_exit(&pty, Some(code)),
+                            ));
+                            break;
+                        }
+                        Some(PtyDrainTerminalEvent::Error) => {
+                            let code = exit_code_after_read_error(pty.event_rx());
+                            let _ = proxy.send_event(UserEvent::PtyExit(
+                                current_card_target(&window_id, pane_id).0,
+                                pane_id,
+                                child_exit(&pty, code),
                             ));
                             break;
                         }
@@ -665,10 +683,15 @@ pub fn spawn(
                         None => {}
                     }
                 }
-                Ok(noa_pty::PtyEvent::Exit(_)) | Ok(noa_pty::PtyEvent::Error(_)) => {
+                Ok(event @ (noa_pty::PtyEvent::Exit(_) | noa_pty::PtyEvent::Error(_))) => {
+                    let code = match event {
+                        noa_pty::PtyEvent::Exit(code) => Some(code),
+                        _ => exit_code_after_read_error(pty.event_rx()),
+                    };
                     let _ = proxy.send_event(UserEvent::PtyExit(
                         current_card_target(&window_id, pane_id).0,
                         pane_id,
+                        child_exit(&pty, code),
                     ));
                     break;
                 }

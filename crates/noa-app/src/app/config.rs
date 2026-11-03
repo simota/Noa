@@ -135,6 +135,8 @@ pub struct AppConfig {
     /// retained per pane before oldest-first eviction. Applied to each new
     /// terminal at surface creation.
     pub image_storage_limit: usize,
+    /// `abnormal-command-exit-runtime`: read when a pane's child exits.
+    pub abnormal_command_exit_runtime_ms: u32,
     /// `window-save-state`: whether the window/tab/split session is saved on
     /// exit and restored on launch. `never` disables both.
     pub window_save_state: noa_config::WindowSaveState,
@@ -353,6 +355,7 @@ impl AppConfig {
             scrollback_limit: config.scrollback_limit,
             scrollback_limit_lines: config.scrollback_limit_lines,
             image_storage_limit: config.image_storage_limit,
+            abnormal_command_exit_runtime_ms: config.abnormal_command_exit_runtime_ms,
             window_save_state: config.window_save_state,
             scrollback_persist: config.scrollback_persist,
             scrollback_persist_limit: config.scrollback_persist_limit,

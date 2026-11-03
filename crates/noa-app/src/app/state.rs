@@ -1218,9 +1218,15 @@ pub(super) struct Surface {
     /// AppleScript `wait after command` (agent-automation REQ-005): keep the
     /// pane open after its process exits, until the next key press.
     pub(super) wait_after_command: bool,
-    /// The process exited while `wait_after_command` held the pane open; the
-    /// next key press closes it.
+    /// The process exited and the pane was held open (`wait_after_command`
+    /// or an abnormal exit); the next key press closes it.
     pub(super) exited: bool,
+    /// The pty child's argv, for the child-exited notice. `None` for remote
+    /// panes.
+    pub(super) child_command: Option<String>,
+    /// The bar along the pane's bottom edge after its child exited (macOS).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(super) child_exited: Option<super::child_exited::ChildExitedMessage>,
     /// Where the last scripted `send mouse position` put this pane's pointer,
     /// in points relative to the pane's top-left — so it survives the pane
     /// moving or resizing — restored before a scripted button or wheel event
@@ -1377,6 +1383,8 @@ impl Surface {
             tty_name: None,
             wait_after_command: false,
             exited: false,
+            child_command: None,
+            child_exited: None,
             script_pointer: None,
             script_pointer_live: false,
             reported_cell: None,

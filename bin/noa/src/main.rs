@@ -43,7 +43,7 @@ fn main() -> anyhow::Result<()> {
     // must be dispatched before clap sees (and rejects) the `+` argument.
     let argv: Vec<String> = std::env::args().collect();
     match noa_app::parse_invocation(&argv) {
-        noa_app::Invocation::Action(action) => return noa_app::run_action(action),
+        noa_app::Invocation::Action(action) => return noa_app::run_action(action, &argv[2..]),
         noa_app::Invocation::Unknown(name) => {
             eprint!("{}", noa_app::unknown_action_message(&name));
             std::process::exit(1);

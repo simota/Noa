@@ -165,7 +165,7 @@ theme = "Catppuccin Mocha"
 ```
 
 Useful one-shot queries include `+version`, `+list-themes`, `+list-keybinds`,
-`+list-fonts`, `+show-config`, `+list-actions`, and `+help`.
+`+list-fonts`, `+show-config`, `+explain-config`, `+list-actions`, and `+help`.
 
 ### Importing a Ghostty configuration
 

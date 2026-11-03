@@ -743,6 +743,25 @@ fn prespawn_matches(
         && config.shell_integration
 }
 
+/// Ghostty 1.4.0's `GHOSTTY_SURFACE_ID` (`Surface.zig`), named for Noa: a
+/// random nonzero 64-bit id, as 16 hex digits, unique to each pane's child.
+const SURFACE_ID_ENV: &str = "NOA_SURFACE_ID";
+
+/// `config` with a fresh [`SURFACE_ID_ENV`] in front of its own env, so an
+/// env the spawn asked for still wins (Ghostty applies `env` after it too).
+fn with_surface_id(mut config: PtyConfig) -> PtyConfig {
+    let id = loop {
+        let candidate: u64 = rand::random();
+        if candidate != 0 {
+            break candidate;
+        }
+    };
+    config
+        .env
+        .insert(0, (SURFACE_ID_ENV.to_string(), format!("0x{id:016x}")));
+    config
+}
+
 impl App {
     pub fn new(
         config: AppConfig,
@@ -784,11 +803,11 @@ impl App {
                 size,
                 command: command.clone(),
                 handle: std::thread::spawn(move || {
-                    let pty = Pty::spawn(PtyConfig {
+                    let pty = Pty::spawn(with_surface_id(PtyConfig {
                         size,
                         command,
                         ..Default::default()
-                    });
+                    }));
                     crate::startup_trace::mark("pty-prespawned");
                     pty
                 }),
@@ -1105,6 +1124,23 @@ mod tests {
             initial_size(),
             Some(dash_e_argv()).as_deref()
         ));
+    }
+
+    #[test]
+    fn surface_id_is_a_fresh_hex_id_ahead_of_the_requested_env() {
+        let request = || PtyConfig {
+            env: vec![("FOO".into(), "bar".into())],
+            ..Default::default()
+        };
+        let first = with_surface_id(request()).env;
+        let second = with_surface_id(request()).env;
+
+        assert_eq!(first[0].0, SURFACE_ID_ENV);
+        assert_eq!(first[1], ("FOO".to_string(), "bar".to_string()));
+        let hex = first[0].1.strip_prefix("0x").expect("0x prefix");
+        assert_eq!(hex.len(), 16);
+        assert_ne!(u64::from_str_radix(hex, 16).expect("hex"), 0);
+        assert_ne!(first[0].1, second[0].1);
     }
 
     // The default first spawn (no -e, no cwd override, initial size) is

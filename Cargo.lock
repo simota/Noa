@@ -1692,6 +1692,7 @@ dependencies = [
  "png",
  "pollster",
  "qrcode",
+ "rand",
  "raw-window-handle",
  "security-framework",
  "serde",

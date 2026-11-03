@@ -937,7 +937,7 @@ impl App {
         // command when one was given, the default shell otherwise.
         let pty = match self.take_prespawned_pty(&pty_config) {
             Some(pty) => pty,
-            None => Pty::spawn(pty_config)?,
+            None => Pty::spawn(with_surface_id(pty_config))?,
         };
         crate::startup_trace::mark("pty-spawned");
         let (child_pid, tty_name) = (pty.child_pid(), pty.tty_name());

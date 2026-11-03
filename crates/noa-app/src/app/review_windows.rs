@@ -184,12 +184,20 @@ impl App {
         match review {
             Review::Quit => self.request_quit(event_loop),
             Review::CloseWindow { group } => {
-                let tab = self.window_order.iter().copied().find(|tab| {
+                // The focused tab when it is one of the window's, else its
+                // first, brought forward: its prompt must be drawn and get
+                // the keys.
+                let in_group = |tab: &WindowId| {
                     self.windows
                         .get(tab)
                         .is_some_and(|state| state.group == group)
-                });
+                };
+                let tab = self
+                    .focused
+                    .filter(in_group)
+                    .or_else(|| self.window_order.iter().copied().find(in_group));
                 if let Some(tab) = tab {
+                    self.present_review_tab(tab);
                     self.request_close_window_of(event_loop, tab);
                 }
             }

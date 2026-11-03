@@ -483,13 +483,20 @@ impl App {
             .confirm_dialog
             .as_ref()
             .is_some_and(|session| confirm_action_can_remember(&session.action));
-        // "Review Windows" ends tabs: a held key's repeat must not answer the
-        // next prompt the previous press just opened.
+        // Prompts that end sessions: a held key's repeat must not answer the
+        // next prompt the previous press just opened ("Review Windows" opens
+        // one prompt from another, and falls back to the plain quit or
+        // close prompt).
         if event.repeat
             && self.confirm_dialog.as_ref().is_some_and(|session| {
                 matches!(
                     session.action,
-                    ConfirmAction::ReviewWindows { .. } | ConfirmAction::ReviewTab { .. }
+                    ConfirmAction::ReviewWindows { .. }
+                        | ConfirmAction::ReviewTab { .. }
+                        | ConfirmAction::Quit
+                        | ConfirmAction::CloseWindow { .. }
+                        | ConfirmAction::CloseTab { .. }
+                        | ConfirmAction::ClosePane { .. }
                 )
             })
         {

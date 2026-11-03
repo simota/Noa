@@ -521,14 +521,14 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
             }
-            UserEvent::PtyExit(window_id, pane_id, exit_code) => {
+            UserEvent::PtyExit(window_id, pane_id, exit) => {
                 // P1-1: resolve to the pane's current window so a pty exit
                 // racing a cross-tab move closes the right tab's pane instead
                 // of silently no-oping against the old (still-live) window.
                 let Some(window_id) = self.resolve_pane_window(window_id, pane_id) else {
                     return;
                 };
-                self.on_child_exit(event_loop, window_id, pane_id, exit_code);
+                self.on_child_exit(event_loop, window_id, pane_id, exit);
             }
         }
     }

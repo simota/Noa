@@ -116,7 +116,7 @@ For the type, allowed values, defaults, and clamp/fallback rules of every key, s
 - **Session restore** — saves/restores window / tab / split layout
 - **Shell integration** — OSC 133 (prompt/command boundaries) + OSC 7 (cwd). Bundles bash / zsh / fish scripts under `shell-integration/`
 - **Jump between prompts** — ⌘↑ / ⌘↓ to scroll to the previous/next prompt
-- **Child exit notice** — a process that exits within `abnormal-command-exit-runtime` (250 ms) keeps its pane open with an error, like Ghostty 1.4.0: a red bar along the pane's bottom edge on macOS, a message in the terminal elsewhere. A pane held by AppleScript `wait after command` gets the same bar on macOS. Any key closes the pane
+- **Child exit notice** — a process that fails within `abnormal-command-exit-runtime` (250 ms) keeps its pane open with an error, like Ghostty 1.4.0: a red bar along the pane's bottom edge on macOS, a message in the terminal elsewhere. Any key closes the pane
 - **`NOA_SURFACE_ID`** — every pane's child gets a random nonzero 64-bit id as `0x` plus 16 hex digits, like Ghostty's `GHOSTTY_SURFACE_ID`
 - **`NOA_QUICK_TERMINAL`** — set to `1` for every pane in the Quick Terminal, its first pane and its splits, like Ghostty's `GHOSTTY_QUICK_TERMINAL`
 

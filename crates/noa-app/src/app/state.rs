@@ -1221,9 +1221,9 @@ pub(super) struct Surface {
     /// The process exited and the pane was held open (`wait_after_command`
     /// or an abnormal exit); the next key press closes it.
     pub(super) exited: bool,
-    /// When the pty child was spawned and its argv, for the child-exited
-    /// notice. `None` for remote panes.
-    pub(super) child_started: Option<(Instant, String)>,
+    /// The pty child's argv, for the child-exited notice. `None` for remote
+    /// panes.
+    pub(super) child_command: Option<String>,
     /// The bar along the pane's bottom edge after its child exited (macOS).
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(super) child_exited: Option<super::child_exited::ChildExitedMessage>,
@@ -1383,7 +1383,7 @@ impl Surface {
             tty_name: None,
             wait_after_command: false,
             exited: false,
-            child_started: None,
+            child_command: None,
             child_exited: None,
             script_pointer: None,
             script_pointer_live: false,

@@ -399,13 +399,7 @@ impl App {
         // `draw_rebuilt_panes` call site.
         let scratch_terminal_ring = self.is_scratch_terminal_window(window_id);
         #[cfg(target_os = "macos")]
-        let child_exited_bars = match self.windows.get(&window_id) {
-            Some(state) => {
-                let visible = visible_pane_ids(&state.split_tree, state.zoomed);
-                self.visible_child_exited_bars(window_id, visible.into_iter())
-            }
-            None => Vec::new(),
-        };
+        let (child_exited_bars, child_exited_hovered) = self.visible_child_exited_bars(window_id);
         // Resolve the open palette's render payload up front (like the sidebar
         // model) so the rounded card can be composited after the panes without
         // re-borrowing `self` — the palette is drawn as its own card (H), not
@@ -1002,6 +996,7 @@ impl App {
                 scratch_badge_text.as_deref(),
                 &colors,
             );
+            state.native_overlays.child_exited_hovered = child_exited_hovered;
             crate::macos_overlay::sync_child_exited_bars(
                 &state.window,
                 &mut state.native_overlays,

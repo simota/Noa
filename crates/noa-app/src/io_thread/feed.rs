@@ -360,9 +360,8 @@ pub(super) enum PtyDrainTerminalEvent {
     Disconnected,
 }
 
-/// How long a read error waits for the child's exit status: the master read
-/// can fail (Linux reports `EIO` once the slave side closes) before the
-/// waiter thread reports how the child exited.
+/// How long a read error waits for the child's exit status, in case the
+/// master read fails before the waiter thread reports how the child exited.
 const EXIT_CODE_AFTER_ERROR_WAIT: Duration = Duration::from_millis(500);
 
 /// The child's exit code once its pty read failed, if the waiter reports it

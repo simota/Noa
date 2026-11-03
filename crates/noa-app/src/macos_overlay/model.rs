@@ -239,8 +239,9 @@ impl PaneRectPt {
     }
 }
 
-/// One pane's child-exited bar (Ghostty 1.4.0's `ChildExitedMessageBar`):
-/// full pane width along its bottom edge, the text centered on one line.
+/// One pane's failed-launch bar (Ghostty 1.4.0's `ChildExitedMessageBar` at
+/// its error level): full pane width along its bottom edge, the text centered
+/// on one line.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ChildExitedBar {
     pub(crate) rect: PaneRectPt,
@@ -248,7 +249,6 @@ pub(crate) struct ChildExitedBar {
     pub(crate) text: String,
     /// Char indices drawn bold.
     pub(crate) bold: std::ops::Range<usize>,
-    pub(crate) error: bool,
 }
 
 impl ChildExitedBar {
@@ -263,7 +263,6 @@ impl ChildExitedBar {
         cell_h: f64,
         text: String,
         bold: std::ops::Range<usize>,
-        error: bool,
     ) -> Self {
         let font_size = (cell_h * 0.8).min(30.0);
         let h = Self::line_h(font_size) + 2.0 * Self::PAD_V;
@@ -277,7 +276,6 @@ impl ChildExitedBar {
             font_size,
             text,
             bold,
-            error,
         }
     }
 
@@ -299,7 +297,6 @@ impl ChildExitedBar {
         self.font_size.to_bits().hash(hasher);
         self.text.hash(hasher);
         self.bold.hash(hasher);
-        self.error.hash(hasher);
     }
 }
 

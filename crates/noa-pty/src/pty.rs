@@ -72,6 +72,7 @@ pub struct Pty {
     killer: Box<dyn ChildKiller + Send + Sync>,
     child_pid: Option<u32>,
     started_at: std::time::Instant,
+    exited_at: std::sync::Arc<std::sync::OnceLock<std::time::Instant>>,
     command_line: String,
 }
 
@@ -233,7 +234,9 @@ impl Pty {
         let (tx, event_rx) = pty_event_channel();
         let reader = spawn_reader(reader, poll_fd, nonblocking, tx.clone())
             .map_err(|e| PtyError::SpawnThread(e.to_string()))?;
-        spawn_waiter(child, tx, reader).map_err(|e| PtyError::SpawnThread(e.to_string()))?;
+        let exited_at = std::sync::Arc::default();
+        spawn_waiter(child, tx, reader, std::sync::Arc::clone(&exited_at))
+            .map_err(|e| PtyError::SpawnThread(e.to_string()))?;
 
         let writer = PtyWriter::spawn(writer, writer_poll_fd)
             .map_err(|e| PtyError::SpawnThread(e.to_string()))?;
@@ -245,13 +248,20 @@ impl Pty {
             killer,
             child_pid,
             started_at,
+            exited_at,
             command_line,
         })
     }
 
-    /// When the child was spawned, for how long it ran once it exits.
-    pub fn started_at(&self) -> std::time::Instant {
-        self.started_at
+    /// How long the child ran: from spawn to when the waiter saw it exit,
+    /// or to now while that is not known yet.
+    pub fn runtime(&self) -> std::time::Duration {
+        let end = self
+            .exited_at
+            .get()
+            .copied()
+            .unwrap_or_else(std::time::Instant::now);
+        end.saturating_duration_since(self.started_at)
     }
 
     /// The child's argv joined by spaces, for messages about it.
@@ -836,7 +846,6 @@ mod tests {
         })
         .expect("spawn pty");
         assert_eq!(pty.command_line(), "/bin/sh -c exit 3");
-        assert!(pty.started_at() <= std::time::Instant::now());
 
         let mut code = None;
         while let Ok(event) = pty.event_rx().recv_timeout(Duration::from_secs(5)) {
@@ -846,6 +855,10 @@ mod tests {
             }
         }
         assert_eq!(code, Some(3));
+        // Fixed at the exit, not still growing.
+        let runtime = pty.runtime();
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(pty.runtime(), runtime);
     }
 
     // `-e` path: an explicit command argv is spawned verbatim as the pty

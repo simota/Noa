@@ -43,6 +43,14 @@ use super::sidebar::SidebarPublish;
 /// Serialized query/reply traffic (DSR probes, TUI status queries, echo
 /// during bursts) arrives well inside this window; human typing does not,
 /// so an interactive-but-quiet pane never spins.
+/// `pty`'s child exit, as the event loop gets it.
+fn child_exit(pty: &Pty, exit_code: Option<i32>) -> crate::events::ChildExit {
+    crate::events::ChildExit {
+        runtime_ms: u64::try_from(pty.runtime().as_millis()).unwrap_or(u64::MAX),
+        exit_code,
+    }
+}
+
 pub(super) const HOT_SPIN_WINDOW: Duration = Duration::from_millis(2);
 /// Upper bound on one pre-park spin. The next request of a serialized
 /// round-trip loop lands 10–30µs after this thread goes idle, so this
@@ -658,7 +666,7 @@ pub fn spawn(
                             let _ = proxy.send_event(UserEvent::PtyExit(
                                 current_card_target(&window_id, pane_id).0,
                                 pane_id,
-                                Some(code),
+                                child_exit(&pty, Some(code)),
                             ));
                             break;
                         }
@@ -667,7 +675,7 @@ pub fn spawn(
                             let _ = proxy.send_event(UserEvent::PtyExit(
                                 current_card_target(&window_id, pane_id).0,
                                 pane_id,
-                                code,
+                                child_exit(&pty, code),
                             ));
                             break;
                         }
@@ -683,7 +691,7 @@ pub fn spawn(
                     let _ = proxy.send_event(UserEvent::PtyExit(
                         current_card_target(&window_id, pane_id).0,
                         pane_id,
-                        code,
+                        child_exit(&pty, code),
                     ));
                     break;
                 }

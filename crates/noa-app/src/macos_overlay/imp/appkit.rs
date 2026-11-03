@@ -2040,7 +2040,6 @@ pub(in crate::macos_overlay) fn rebuild_scratch_badge(
 #[derive(Clone, Copy)]
 enum SystemColor {
     Red,
-    WindowBackground,
     Label,
 }
 
@@ -2051,15 +2050,15 @@ unsafe fn system_color(color: SystemColor) -> *mut AnyObject {
     unsafe {
         match color {
             SystemColor::Red => msg_send![class, systemRedColor],
-            SystemColor::WindowBackground => msg_send![class, windowBackgroundColor],
             SystemColor::Label => msg_send![class, labelColor],
         }
     }
 }
 
-/// Replace every pane's child-exited bar with `bars`. Like Ghostty's, a
-/// success bar takes the window background, an error bar half-opaque system
-/// red, and the text the primary label color. Display-only.
+/// Replace every pane's child-exited bar with `bars`. Like Ghostty's error
+/// level, the bar is half-opaque system red and the text the primary label
+/// color. Display-only, and kept beneath the modal overlays: each bar is
+/// added below every other subview.
 pub(in crate::macos_overlay) fn rebuild_child_exited_bars(
     window: &Window,
     bars: &[ChildExitedBar],
@@ -2084,15 +2083,11 @@ pub(in crate::macos_overlay) fn rebuild_child_exited_bars(
                 continue;
             }
             let _: () = msg_send![root, setIdentifier: &*ident];
-            let background = if bar.error {
-                let red = system_color(SystemColor::Red);
-                if red.is_null() {
-                    red
-                } else {
-                    msg_send![red, colorWithAlphaComponent: 0.5f64]
-                }
+            let red = system_color(SystemColor::Red);
+            let background = if red.is_null() {
+                red
             } else {
-                system_color(SystemColor::WindowBackground)
+                msg_send![red, colorWithAlphaComponent: 0.5f64]
             };
             tint_layer(root, background, 0.0);
             let text_color = system_color(SystemColor::Label);
@@ -2112,8 +2107,13 @@ pub(in crate::macos_overlay) fn rebuild_child_exited_bars(
                 set_alignment(label, ALIGN_CENTER);
                 let _: () = msg_send![root, addSubview: label];
             }
-            let _: () = msg_send![view, addSubview: root];
+            let null: *mut AnyObject = std::ptr::null_mut();
+            let _: () =
+                msg_send![view, addSubview: root, positioned: NS_WINDOW_BELOW, relativeTo: null];
             release_owned(root);
         }
     }
 }
+
+/// `NSWindowOrderingMode.below`.
+const NS_WINDOW_BELOW: isize = -1;

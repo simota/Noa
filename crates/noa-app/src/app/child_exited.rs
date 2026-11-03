@@ -1,57 +1,42 @@
 //! What a pane shows when its child process exits (Ghostty 1.4.0's
 //! `Surface.childExited` and the macOS `ChildExitedMessageBar`): a child that
-//! exits within `abnormal-command-exit-runtime` failed to launch, so its pane
-//! stays open with an error; otherwise the pane closes, unless `wait after
-//! command` holds it open. On macOS the notice is a bar along the pane's
-//! bottom edge; elsewhere it is printed into the terminal, as Ghostty does
-//! when it has no native notice to show.
+//! exits with a failure within `abnormal-command-exit-runtime` failed to
+//! launch, so its pane stays open with an error; otherwise the pane closes,
+//! unless `wait after command` holds it open. On macOS the error is a red bar
+//! along the pane's bottom edge; elsewhere it is printed into the terminal, as
+//! Ghostty does when it has no native notice to show.
+//!
+//! Unlike Ghostty on macOS, the exit code counts there too: Ghostty ignores
+//! it because its `login` wrapper hides it, but Noa spawns the child
+//! directly and gets the real one.
 
 use super::*;
+use crate::events::ChildExit;
 
-/// How the child exited: its runtime and, when it reported one, its code.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct ChildExit {
-    pub(super) runtime_ms: u64,
-    pub(super) exit_code: Option<i32>,
+/// Exited with a failure too fast to have launched. A missing exit code
+/// (the pty read failed and the waiter never reported) counts as a failure.
+pub(super) fn abnormal(exit: ChildExit, threshold_ms: u32) -> bool {
+    exit.runtime_ms <= u64::from(threshold_ms) && exit.exit_code != Some(0)
 }
 
-impl ChildExit {
-    /// Exited too fast to have launched. On macOS any exit code counts, as
-    /// in Ghostty (whose login wrapper hides the real one there).
-    pub(super) fn abnormal(self, threshold_ms: u32) -> bool {
-        self.runtime_ms <= u64::from(threshold_ms)
-            && (cfg!(target_os = "macos") || self.exit_code != Some(0))
-    }
-}
-
-/// The macOS bar's content (`Ghostty.ChildExitedMessage`).
+/// The macOS bar's content (`Ghostty.ChildExitedMessage` for a failed
+/// launch).
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) struct ChildExitedMessage {
     pub(crate) text: String,
     /// Char indices drawn bold (the runtime).
     pub(crate) bold: std::ops::Range<usize>,
-    pub(crate) error: bool,
 }
 
 impl ChildExitedMessage {
-    pub(super) fn new(exit: ChildExit, threshold_ms: u32) -> Self {
-        let failed = exit.exit_code != Some(0);
-        if exit.runtime_ms <= u64::from(threshold_ms) {
-            let prefix = "Process exited after ";
-            let runtime = bar_runtime(exit.runtime_ms);
-            let start = prefix.chars().count();
-            Self {
-                bold: start..start + runtime.chars().count(),
-                text: format!("{prefix}{runtime}. Press any key to close the terminal."),
-                error: true,
-            }
-        } else {
-            Self {
-                text: "Process exited. Press any key to close the terminal.".to_string(),
-                bold: 0..0,
-                error: failed,
-            }
+    pub(super) fn new(exit: ChildExit) -> Self {
+        let prefix = "Process exited after ";
+        let runtime = bar_runtime(exit.runtime_ms);
+        let start = prefix.chars().count();
+        Self {
+            bold: start..start + runtime.chars().count(),
+            text: format!("{prefix}{runtime}. Press any key to close the terminal."),
         }
     }
 }
@@ -81,15 +66,17 @@ pub(super) fn abnormal_exit_text(
         text.push_str("\r\n\n");
     }
     text.push_str("\x1b[91;1mNoa failed to launch the requested command:\x1b[0m");
+    // Printed, never interpreted: an argv may carry escape sequences.
+    let command: String = command
+        .chars()
+        .map(|c| if c.is_control() { '\u{fffd}' } else { c })
+        .collect();
     text.push_str(&format!("\r\n\n{command}\x1b[0m"));
     text.push_str(&format!(
         "\r\n\nRuntime: \x1b[31m{} ms\x1b[0m",
         exit.runtime_ms
     ));
-    // Not on macOS, matching Ghostty, whose exit code is unreliable there.
-    if !cfg!(target_os = "macos")
-        && let Some(code) = exit.exit_code
-    {
+    if let Some(code) = exit.exit_code {
         text.push_str(&format!("\r\nExit Code: \x1b[31m{code}\x1b[0m"));
     }
     text.push_str("\r\n\nPress any key to close the window.");
@@ -102,17 +89,17 @@ const PROCESS_EXITED_MESSAGE: &[u8] =
     b"\r\n\x1b[0m[Process exited. Press any key to close the terminal.]";
 
 impl App {
-    /// Handle `pane_id`'s child exiting with `exit_code`: keep the pane open
-    /// with a notice when it failed to launch or `wait after command` holds
-    /// it, else close it.
+    /// Handle `pane_id`'s child exiting: keep the pane open with a notice
+    /// when it failed to launch or `wait after command` holds it, else close
+    /// it.
     pub(super) fn on_child_exit(
         &mut self,
         event_loop: &ActiveEventLoop,
         window_id: WindowId,
         pane_id: PaneId,
-        exit_code: Option<i32>,
+        exit: ChildExit,
     ) {
-        if !self.hold_pane_after_exit(window_id, pane_id, exit_code) {
+        if !self.hold_pane_after_exit(window_id, pane_id, exit) {
             self.close_exited_pane(event_loop, window_id, pane_id);
         }
     }
@@ -123,7 +110,7 @@ impl App {
         &mut self,
         window_id: WindowId,
         pane_id: PaneId,
-        exit_code: Option<i32>,
+        exit: ChildExit,
     ) -> bool {
         let threshold_ms = self.config.abnormal_command_exit_runtime_ms;
         let Some(surface) = self
@@ -136,22 +123,18 @@ impl App {
         if surface.exited {
             return false;
         }
-        let Some((started_at, command)) = surface.child_started.as_ref() else {
+        let Some(command) = surface.child_command.as_deref() else {
             return false;
         };
-        let exit = ChildExit {
-            runtime_ms: u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
-            exit_code,
-        };
-        let abnormal = exit.abnormal(threshold_ms);
+        let abnormal = abnormal(exit, threshold_ms);
         if !abnormal && !surface.wait_after_command {
             return false;
         }
         surface.exited = true;
         // Ghostty skips the native notice for a zero runtime (an exit code
         // from launch) and prints into the terminal instead.
-        if cfg!(target_os = "macos") && exit.runtime_ms > 0 {
-            surface.child_exited = Some(ChildExitedMessage::new(exit, threshold_ms));
+        if abnormal && cfg!(target_os = "macos") && exit.runtime_ms > 0 {
+            surface.child_exited = Some(ChildExitedMessage::new(exit));
         } else {
             let mut terminal = surface.terminal.lock();
             let bytes = if abnormal {
@@ -162,6 +145,8 @@ impl App {
                     .any(|row| row.cells.iter().any(|cell| cell.ch != ' '));
                 abnormal_exit_text(command, exit, shows_output.then_some(screen.cols))
             } else {
+                // `wait after command` keeps its notice in the terminal, where
+                // a script reads it back (agent-automation REQ-005).
                 PROCESS_EXITED_MESSAGE.to_vec()
             };
             noa_vt::Stream::new().feed(&bytes, &mut *terminal);
@@ -205,19 +190,20 @@ impl App {
 
 #[cfg(target_os = "macos")]
 impl App {
-    /// The bars of `window_id`'s exited panes in `panes`, in window points,
-    /// each with its pane.
-    fn child_exited_bars_in(
+    /// The bars of `window_id`'s visible exited panes, in window points,
+    /// with the pane whose bar is under the pointer. That bar is left out,
+    /// as Ghostty hides it on hover so the text under it shows.
+    pub(super) fn visible_child_exited_bars(
         &self,
         window_id: WindowId,
-        panes: impl Iterator<Item = PaneId>,
-    ) -> Vec<(PaneId, crate::macos_overlay::ChildExitedBar)> {
+    ) -> (Vec<crate::macos_overlay::ChildExitedBar>, Option<PaneId>) {
         let (Some(gpu), Some(state)) = (self.gpu.as_ref(), self.windows.get(&window_id)) else {
-            return Vec::new();
+            return (Vec::new(), None);
         };
         let scale = state.window.scale_factor();
         let cell_h = f64::from(gpu.fonts.get(state.font_px).metrics().cell_h) / scale;
-        panes
+        let bars = visible_pane_ids(&state.split_tree, state.zoomed)
+            .into_iter()
             .filter_map(|pane_id| {
                 let surface = state.surfaces.get(&pane_id)?;
                 let message = surface.child_exited.as_ref()?;
@@ -232,53 +218,32 @@ impl App {
                         cell_h,
                         message.text.clone(),
                         message.bold.clone(),
-                        message.error,
                     ),
                 ))
             })
-            .collect()
-    }
-
-    /// The pane whose bar is under the pointer in `window_id`.
-    fn child_exited_bar_under_pointer(
-        &self,
-        window_id: WindowId,
-        bars: &[(PaneId, crate::macos_overlay::ChildExitedBar)],
-    ) -> Option<PaneId> {
-        let state = self.windows.get(&window_id)?;
-        let position = state.last_mouse_physical_position?;
-        let scale = state.window.scale_factor();
-        bars.iter()
-            .find(|(_, bar)| bar.contains(position.x / scale, position.y / scale))
-            .map(|(pane_id, _)| *pane_id)
-    }
-
-    /// The bars to draw over `visible` panes: all but the hovered one.
-    pub(super) fn visible_child_exited_bars(
-        &self,
-        window_id: WindowId,
-        visible: impl Iterator<Item = PaneId>,
-    ) -> Vec<crate::macos_overlay::ChildExitedBar> {
-        let bars = self.child_exited_bars_in(window_id, visible);
-        let hovered = self.child_exited_bar_under_pointer(window_id, &bars);
-        bars.into_iter()
+            .collect::<Vec<_>>();
+        let hovered = state.last_mouse_physical_position.and_then(|position| {
+            bars.iter()
+                .find(|(_, bar)| bar.contains(position.x / scale, position.y / scale))
+                .map(|(pane_id, _)| *pane_id)
+        });
+        let bars = bars
+            .into_iter()
             .filter(|(pane_id, _)| Some(*pane_id) != hovered)
             .map(|(_, bar)| bar)
-            .collect()
+            .collect();
+        (bars, hovered)
     }
 
-    /// Redraw `window_id` when the pointer moves onto or off a bar.
+    /// Redraw `window_id` when the pointer moves onto or off a bar. The
+    /// redraw records the hovered pane it drew with.
     pub(super) fn sync_child_exited_hover(&mut self, window_id: WindowId) {
-        let hovered = self.windows.get(&window_id).and_then(|state| {
-            let panes: Vec<PaneId> = state.surfaces.keys().copied().collect();
-            let bars = self.child_exited_bars_in(window_id, panes.into_iter());
-            self.child_exited_bar_under_pointer(window_id, &bars)
-        });
-        let Some(state) = self.windows.get_mut(&window_id) else {
-            return;
-        };
-        if state.native_overlays.child_exited_hovered != hovered {
-            state.native_overlays.child_exited_hovered = hovered;
+        let (_, hovered) = self.visible_child_exited_bars(window_id);
+        let changed = self
+            .windows
+            .get(&window_id)
+            .is_some_and(|state| state.native_overlays.child_exited_hovered != hovered);
+        if changed {
             self.request_window_redraw(window_id);
         }
     }
@@ -296,17 +261,17 @@ mod tests {
     }
 
     #[test]
-    fn a_fast_exit_is_abnormal_and_a_slow_one_is_not() {
-        assert!(exit(250, Some(1)).abnormal(250));
-        assert!(!exit(251, Some(1)).abnormal(250));
-        assert!(exit(0, None).abnormal(0));
-        // A clean fast exit is abnormal only on macOS, as in Ghostty.
-        assert_eq!(exit(10, Some(0)).abnormal(250), cfg!(target_os = "macos"));
+    fn a_fast_failure_is_abnormal_and_anything_else_is_not() {
+        assert!(abnormal(exit(250, Some(1)), 250));
+        assert!(abnormal(exit(0, None), 0));
+        assert!(!abnormal(exit(251, Some(1)), 250));
+        // A clean fast exit launched fine (`/bin/echo done`).
+        assert!(!abnormal(exit(10, Some(0)), 250));
     }
 
     #[test]
-    fn the_bar_names_the_runtime_of_a_fast_exit() {
-        let message = ChildExitedMessage::new(exit(42, Some(0)), 250);
+    fn the_bar_names_the_runtime() {
+        let message = ChildExitedMessage::new(exit(42, Some(1)));
         assert_eq!(
             message.text,
             "Process exited after 42 ms. Press any key to close the terminal."
@@ -318,19 +283,6 @@ mod tests {
             .take(message.bold.len())
             .collect();
         assert_eq!(bold, "42 ms");
-        assert!(message.error);
-    }
-
-    #[test]
-    fn the_bar_after_a_normal_exit_follows_the_exit_code() {
-        let success = ChildExitedMessage::new(exit(5000, Some(0)), 250);
-        assert_eq!(
-            success.text,
-            "Process exited. Press any key to close the terminal."
-        );
-        assert!(!success.error);
-        assert!(ChildExitedMessage::new(exit(5000, Some(2)), 250).error);
-        assert!(ChildExitedMessage::new(exit(5000, None), 250).error);
     }
 
     #[test]
@@ -340,32 +292,40 @@ mod tests {
         assert_eq!(bar_runtime(2000), "2 sec");
     }
 
-    #[test]
-    fn abnormal_exit_text_reports_the_command_and_runtime() {
-        let mut terminal = Terminal::new(GridSize::new(60, 10));
-        noa_vt::Stream::new().feed(
-            &abnormal_exit_text("/bin/false -x", exit(12, Some(1)), None),
-            &mut terminal,
-        );
-        let text: Vec<String> = terminal
+    fn screen_text(terminal: &Terminal) -> Vec<String> {
+        terminal
             .active()
             .visible_rows()
             .iter()
             .map(|row| row.cells.iter().map(|cell| cell.ch).collect::<String>())
             .map(|row| row.trim_end().to_string())
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn abnormal_exit_text_reports_the_command_runtime_and_code() {
+        let mut terminal = Terminal::new(GridSize::new(60, 10));
+        noa_vt::Stream::new().feed(
+            &abnormal_exit_text("/bin/false -x", exit(12, Some(1)), None),
+            &mut terminal,
+        );
+        let text = screen_text(&terminal);
         assert_eq!(text[0], "Noa failed to launch the requested command:");
         assert_eq!(text[2], "/bin/false -x");
         assert_eq!(text[4], "Runtime: 12 ms");
-        let (code_row, close_row) = if cfg!(target_os = "macos") {
-            (None, 6)
-        } else {
-            (Some(5), 7)
-        };
-        if let Some(row) = code_row {
-            assert_eq!(text[row], "Exit Code: 1");
-        }
-        assert_eq!(text[close_row], "Press any key to close the window.");
+        assert_eq!(text[5], "Exit Code: 1");
+        assert_eq!(text[7], "Press any key to close the window.");
+    }
+
+    #[test]
+    fn abnormal_exit_text_prints_control_characters_instead_of_running_them() {
+        let mut terminal = Terminal::new(GridSize::new(60, 10));
+        noa_vt::Stream::new().feed(
+            &abnormal_exit_text("a\x1b]0;pwned\x07b", exit(1, Some(1)), None),
+            &mut terminal,
+        );
+        assert_eq!(screen_text(&terminal)[2], "a\u{fffd}]0;pwned\u{fffd}b");
+        assert_ne!(terminal.title, "pwned");
     }
 
     #[test]
@@ -376,12 +336,7 @@ mod tests {
             &abnormal_exit_text("x", exit(1, Some(1)), Some(50)),
             &mut terminal,
         );
-        let rows = terminal.active().visible_rows();
-        let text: Vec<String> = rows
-            .iter()
-            .map(|row| row.cells.iter().map(|cell| cell.ch).collect::<String>())
-            .map(|row| row.trim_end().to_string())
-            .collect();
+        let text = screen_text(&terminal);
         assert_eq!(text[0], "oops");
         assert_eq!(text[1], "\u{2501}".repeat(50), "{text:?}");
         assert_eq!(text[2], "");

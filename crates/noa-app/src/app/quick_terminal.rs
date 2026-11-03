@@ -796,7 +796,7 @@ impl App {
             ),
         );
         let initial_surface = self
-            .spawn_pane_surface(
+            .spawn_pane_surface_in(
                 window_id,
                 initial_pane,
                 grid,
@@ -804,6 +804,7 @@ impl App {
                 None,
                 auto_approve_enabled.clone(),
                 redraw_floor.clone(),
+                true,
             )
             .ok()?;
         let mut surfaces = HashMap::new();

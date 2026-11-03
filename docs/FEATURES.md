@@ -117,6 +117,7 @@ For the type, allowed values, defaults, and clamp/fallback rules of every key, s
 - **Shell integration** — OSC 133 (prompt/command boundaries) + OSC 7 (cwd). Bundles bash / zsh / fish scripts under `shell-integration/`
 - **Jump between prompts** — ⌘↑ / ⌘↓ to scroll to the previous/next prompt
 - **`NOA_SURFACE_ID`** — every pane's child gets a random nonzero 64-bit id as `0x` plus 16 hex digits, like Ghostty's `GHOSTTY_SURFACE_ID`
+- **`NOA_QUICK_TERMINAL`** — set to `1` for every pane in the Quick Terminal, its first pane and its splits, like Ghostty's `GHOSTTY_QUICK_TERMINAL`
 
 ## Related documentation
 

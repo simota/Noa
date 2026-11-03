@@ -1477,7 +1477,7 @@ impl App {
         self.refresh_sidebar_visible_gate();
         self.persist_session();
         if let Some(action) = interrupted_review {
-            self.resume_review(event_loop, window_id, action);
+            self.resume_review(event_loop, action);
         }
     }
 

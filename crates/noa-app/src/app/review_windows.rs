@@ -67,13 +67,19 @@ impl App {
     /// Bring `tab` forward for a review prompt. A tab just closed on macOS
     /// restores focus on the next turn to the tab AppKit picked, skipped
     /// once `tab` is focused instead; restore `tab` the same way, so its
-    /// content view takes the keys again.
+    /// content view takes the keys again. Only when focus moves: the restore
+    /// also clears the held modifiers, which an unchanged window would not
+    /// report again (a held Ctrl would make Ctrl+T a bare `T`).
     fn present_review_tab(&mut self, tab: WindowId) {
+        #[cfg(target_os = "macos")]
+        let moves = self.focused != Some(tab);
         self.focus_tab(tab);
         #[cfg(target_os = "macos")]
-        let _ = self
-            .proxy
-            .send_event(crate::events::UserEvent::RestoreFocus { window_id: tab });
+        if moves {
+            let _ = self
+                .proxy
+                .send_event(crate::events::UserEvent::RestoreFocus { window_id: tab });
+        }
     }
 
     /// A regular tab to show a prompt over: `preferred` when it is one, else
@@ -204,29 +210,16 @@ impl App {
         }
     }
 
-    /// Carry on with a review whose prompt was over `closed`, a tab that
-    /// closed on its own (its process exited): the review goes on with the
-    /// tabs left, the prompt's own tab included when that was another one
-    /// (the quick terminal's prompt shows over a regular tab), or, before
-    /// the review began, the request starts over.
-    pub(super) fn resume_review(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        closed: WindowId,
-        action: ConfirmAction,
-    ) {
-        match action {
-            ConfirmAction::ReviewTab { review, tab, rest } => {
-                let tabs = std::iter::once(tab)
-                    .filter(|tab| *tab != closed)
-                    .chain(rest)
-                    .collect();
-                self.review_next_tab(event_loop, review, tabs)
-            }
-            ConfirmAction::ReviewWindows { review, .. } => {
-                self.restart_review_request(event_loop, review)
-            }
-            _ => {}
+    /// A review's prompt, or the tab it asks about, went away without an
+    /// answer (the tab closed on its own, or its last pane moved to another
+    /// tab): ask again for the quit or window close from the current state.
+    /// Never goes ahead unasked, and a program that moved elsewhere is
+    /// counted again.
+    pub(super) fn resume_review(&mut self, event_loop: &ActiveEventLoop, action: ConfirmAction) {
+        if let ConfirmAction::ReviewWindows { review, .. }
+        | ConfirmAction::ReviewTab { review, .. } = action
+        {
+            self.restart_review_request(event_loop, review);
         }
     }
 

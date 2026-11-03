@@ -12,6 +12,8 @@ use noa_config::{
     MacosTitlebarStyle, StartupConfig, SyntheticStyleMode,
 };
 use noa_core::Rgb;
+use std::ffi::OsString;
+use std::io::{IsTerminal, Write};
 
 use crate::commands::KeybindEngine;
 
@@ -106,6 +108,7 @@ pub fn parse_invocation<S: AsRef<str>>(args: &[S]) -> Invocation {
 /// printed; the caller exits. `+explain-config` exits with status 1 itself
 /// when it has nothing to explain, as Ghostty does.
 pub fn run_action<S: AsRef<str>>(action: CliAction, args: &[S]) -> anyhow::Result<()> {
+    let no_pager = args.iter().any(|arg| arg.as_ref() == "--no-pager");
     match action {
         CliAction::Version => print!("{}", version_output()),
         CliAction::ListThemes => print!("{}", list_themes_output()),
@@ -137,22 +140,59 @@ pub fn run_action<S: AsRef<str>>(action: CliAction, args: &[S]) -> anyhow::Resul
             for diagnostic in diagnostics {
                 eprintln!("{}", diagnostic.message);
             }
-            print!("{}", show_config_output(&config));
+            page(&show_config_output(&config), no_pager);
         }
         CliAction::ExplainConfig => match explain_config_output(args) {
-            Ok(text) => print!("{text}"),
+            Ok(text) => page(&text, no_pager),
             Err(ExplainError::Usage) => {
                 eprint!("{EXPLAIN_CONFIG_USAGE}");
                 std::process::exit(1);
             }
             Err(ExplainError::Unknown(name)) => {
-                println!("Unknown: '{name}'.");
+                page(&format!("Unknown: '{name}'.\n"), no_pager);
                 std::process::exit(1);
             }
         },
         CliAction::ListActions | CliAction::Help => print!("{}", list_actions_output()),
     }
     Ok(())
+}
+
+/// Ghostty 1.4.0's CLI pager (`cli/Pager.zig`): when stdout is a terminal and
+/// paging is not turned off, `text` goes to the pager's stdin instead.
+fn page(text: &str, no_pager: bool) {
+    let command = if no_pager || !std::io::stdout().is_terminal() {
+        None
+    } else {
+        pager_command(std::env::var_os("NOA_PAGER"), std::env::var_os("PAGER"))
+    };
+    // Like Ghostty, the value is one program name (no shell word splitting),
+    // and a pager that cannot be started falls back to stdout.
+    let child = command.and_then(|command| {
+        std::process::Command::new(command)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .ok()
+    });
+    let Some(mut child) = child else {
+        print!("{text}");
+        return;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        // Quitting the pager early closes the pipe; the rest is dropped.
+        let _ = stdin.write_all(text.as_bytes());
+    }
+    let _ = child.wait();
+}
+
+/// `$NOA_PAGER` (Ghostty's `$GHOSTTY_PAGER`) > `$PAGER` > `less`. The first
+/// variable that is set decides, and an empty value turns paging off.
+fn pager_command(noa_pager: Option<OsString>, pager: Option<OsString>) -> Option<OsString> {
+    match noa_pager.or(pager) {
+        Some(command) if command.is_empty() => None,
+        Some(command) => Some(command),
+        None => Some(OsString::from("less")),
+    }
 }
 
 const EXPLAIN_CONFIG_USAGE: &str = "Usage: Noa +explain-config <option>
@@ -174,8 +214,7 @@ enum ExplainError {
 
 /// Ghostty 1.4.0's `+explain-config`: `--option=NAME` explains a config
 /// option, `--keybind=NAME` a keybind action, and a bare name tries the
-/// option first, then the action. `--no-pager` is accepted (Noa does not page
-/// yet).
+/// option first, then the action. `--no-pager` is read by [`run_action`].
 fn explain_config_output<S: AsRef<str>>(args: &[S]) -> Result<String, ExplainError> {
     let mut option = None;
     let mut keybind = None;
@@ -1109,6 +1148,17 @@ mod tests {
             Err(ExplainError::Unknown("copy_to_clipboard".to_string()))
         );
         assert_eq!(explain_config_output::<&str>(&[]), Err(ExplainError::Usage));
+    }
+
+    #[test]
+    fn pager_command_prefers_noa_pager_then_pager_then_less() {
+        let some = |value: &str| Some(OsString::from(value));
+        assert_eq!(pager_command(some("most"), some("more")), some("most"));
+        assert_eq!(pager_command(None, some("more")), some("more"));
+        assert_eq!(pager_command(None, None), some("less"));
+        // An empty value disables paging, even with `$PAGER` set.
+        assert_eq!(pager_command(some(""), some("more")), None);
+        assert_eq!(pager_command(None, some("")), None);
     }
 
     #[test]

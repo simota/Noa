@@ -57,11 +57,23 @@ impl App {
                 }
                 let query = terminal.active().search.query().to_string();
                 drop(terminal);
+                // Ghostty 1.4.0 shares the needle through the macOS find
+                // pasteboard: a search already under way publishes its
+                // query, a fresh prompt starts from the pasteboard's text.
+                let from_pasteboard = if query.is_empty() {
+                    crate::clipboard::find_text()
+                } else {
+                    crate::clipboard::set_find_text(&query);
+                    None
+                };
                 self.search_prompt = Some(SearchPromptSession {
                     window_id,
                     pane_id,
                     prompt: SearchPrompt::open(query),
                 });
+                if let Some(text) = from_pasteboard {
+                    self.sync_search_prompt_from_find_pasteboard(window_id, &text);
+                }
                 if let Some(state) = self.windows.get(&window_id) {
                     state.window.request_redraw();
                 }
@@ -191,6 +203,10 @@ impl App {
         else {
             return;
         };
+        crate::clipboard::set_find_text(match &effect {
+            SearchPromptEffect::UpdateQuery(query) => query,
+            SearchPromptEffect::ClearQuery => "",
+        });
         match effect {
             SearchPromptEffect::UpdateQuery(query) => {
                 if self.search_worker.is_none() {
@@ -222,6 +238,24 @@ impl App {
         }
         if let Some(state) = self.windows.get(&window_id) {
             state.window.request_redraw();
+        }
+    }
+
+    /// Replace the open prompt's text in `window_id` with the find
+    /// pasteboard's `text`, selected, and search for it. A no-op when the
+    /// prompt already holds it.
+    pub(in crate::app) fn sync_search_prompt_from_find_pasteboard(
+        &mut self,
+        window_id: WindowId,
+        text: &str,
+    ) {
+        let effect = self
+            .search_prompt
+            .as_mut()
+            .filter(|session| session.window_id == window_id)
+            .and_then(|session| session.prompt.replace_selected(text));
+        if let Some(effect) = effect {
+            self.apply_search_prompt_effect(window_id, effect);
         }
     }
 

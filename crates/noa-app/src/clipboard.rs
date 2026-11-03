@@ -5,6 +5,18 @@ use std::sync::Arc;
 
 use noa_grid::kitty_clipboard::ClipboardLocation;
 
+/// The text on the macOS find pasteboard (`NSPasteboardNameFind`), which
+/// every app's find bar shares; `None` when it holds no text, and always off
+/// macOS.
+pub(crate) fn find_text() -> Option<String> {
+    platform::find_text()
+}
+
+/// Put `text` on the find pasteboard (a no-op off macOS).
+pub(crate) fn set_find_text(text: &str) {
+    platform::set_find_text(text)
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct SystemClipboard;
 
@@ -469,6 +481,22 @@ mod platform {
         Ok(String::new())
     }
 
+    fn find_pasteboard() -> Retained<NSPasteboard> {
+        NSPasteboard::pasteboardWithName(unsafe { objc2_app_kit::NSPasteboardNameFind })
+    }
+
+    pub(super) fn find_text() -> Option<String> {
+        find_pasteboard()
+            .stringForType(unsafe { NSPasteboardTypeString })
+            .map(|text| text.to_string())
+    }
+
+    pub(super) fn set_find_text(text: &str) {
+        let pasteboard = find_pasteboard();
+        pasteboard.clearContents();
+        pasteboard.setString_forType(&NSString::from_str(text), unsafe { NSPasteboardTypeString });
+    }
+
     pub(super) fn set_primary_text(_text: &str) -> anyhow::Result<()> {
         Ok(())
     }
@@ -565,6 +593,12 @@ mod platform {
 /// and arboard does that from a thread tied to the handle's lifetime.
 #[cfg(all(unix, not(target_os = "macos")))]
 mod platform {
+    pub(super) fn find_text() -> Option<String> {
+        None
+    }
+
+    pub(super) fn set_find_text(_: &str) {}
+
     use std::path::PathBuf;
     use std::sync::{Mutex, MutexGuard};
 
@@ -734,6 +768,12 @@ mod platform {
 
 #[cfg(not(unix))]
 mod platform {
+    pub(super) fn find_text() -> Option<String> {
+        None
+    }
+
+    pub(super) fn set_find_text(_: &str) {}
+
     pub(super) fn get_text() -> anyhow::Result<String> {
         anyhow::bail!("clipboard is not implemented on this platform")
     }

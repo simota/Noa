@@ -677,6 +677,16 @@ impl ApplicationHandler<UserEvent> for App {
                     self.mark_scratch_terminal_focused(window_id);
                 }
                 self.reset_cursor_blink_phase();
+                // Another app's find bar may have changed the shared needle
+                // (Ghostty rereads it when the app becomes active).
+                if self
+                    .search_prompt
+                    .as_ref()
+                    .is_some_and(|session| session.window_id == window_id)
+                    && let Some(text) = crate::clipboard::find_text()
+                {
+                    self.sync_search_prompt_from_find_pasteboard(window_id, &text);
+                }
                 // Focus gain is the moment an externally edited config should
                 // apply: expedite the (slow) watcher so the `about_to_wait`
                 // pass right after this event stats the file immediately.

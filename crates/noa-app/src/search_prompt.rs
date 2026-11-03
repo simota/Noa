@@ -16,12 +16,16 @@ pub enum SearchPromptEffect {
     ClearQuery,
 }
 
-/// The open search prompt's text buffer. Holds no cursor/selection state of
-/// its own — editing always happens at the end of the buffer, matching a
-/// single-line "type to search" field.
+/// The open search prompt's text buffer. Editing always happens at the end
+/// of the buffer, matching a single-line "type to search" field; the only
+/// selection is all of it (`replace_pending`), as a field shows text it was
+/// handed from elsewhere.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchPrompt {
     buffer: String,
+    /// The buffer came from the find pasteboard and is wholly selected: the
+    /// next typed text replaces it, and Backspace clears it.
+    replace_pending: bool,
 }
 
 impl SearchPrompt {
@@ -31,11 +35,33 @@ impl SearchPrompt {
     pub fn open(initial_query: String) -> Self {
         SearchPrompt {
             buffer: initial_query,
+            replace_pending: false,
         }
     }
 
     pub fn buffer(&self) -> &str {
         &self.buffer
+    }
+
+    /// Replace the buffer with `text` from the find pasteboard, wholly
+    /// selected (Ghostty's `setNeedle(_, selectAll: true)`). `None` when it
+    /// already holds `text`.
+    pub fn replace_selected(&mut self, text: &str) -> Option<SearchPromptEffect> {
+        let filtered: String = text.chars().filter(|c| !c.is_control()).collect();
+        if filtered == self.buffer {
+            return None;
+        }
+        self.buffer = filtered;
+        self.replace_pending = !self.buffer.is_empty();
+        Some(self.query_effect())
+    }
+
+    fn query_effect(&self) -> SearchPromptEffect {
+        if self.buffer.is_empty() {
+            SearchPromptEffect::ClearQuery
+        } else {
+            SearchPromptEffect::UpdateQuery(self.buffer.clone())
+        }
     }
 
     /// Append `text` (a keypress's resolved text, or a committed IME
@@ -48,6 +74,9 @@ impl SearchPrompt {
         if filtered.is_empty() {
             return None;
         }
+        if std::mem::take(&mut self.replace_pending) {
+            self.buffer.clear();
+        }
         self.buffer.push_str(&filtered);
         Some(SearchPromptEffect::UpdateQuery(self.buffer.clone()))
     }
@@ -56,18 +85,42 @@ impl SearchPrompt {
     /// still yields `ClearQuery` — harmless since the terminal search is
     /// already clear, and it keeps the caller's dispatch unconditional.
     pub fn backspace(&mut self) -> SearchPromptEffect {
-        self.buffer.pop();
-        if self.buffer.is_empty() {
-            SearchPromptEffect::ClearQuery
+        if std::mem::take(&mut self.replace_pending) {
+            self.buffer.clear();
         } else {
-            SearchPromptEffect::UpdateQuery(self.buffer.clone())
+            self.buffer.pop();
         }
+        self.query_effect()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_replaced_buffer_is_selected_until_the_next_edit() {
+        let mut prompt = SearchPrompt::open(String::new());
+        assert_eq!(
+            prompt.replace_selected("needle"),
+            Some(SearchPromptEffect::UpdateQuery("needle".to_string()))
+        );
+        assert_eq!(prompt.replace_selected("needle"), None);
+        // Typing replaces the selected text, then appends as usual.
+        assert_eq!(
+            prompt.push_text("a"),
+            Some(SearchPromptEffect::UpdateQuery("a".to_string()))
+        );
+        assert_eq!(
+            prompt.push_text("b"),
+            Some(SearchPromptEffect::UpdateQuery("ab".to_string()))
+        );
+
+        // Backspace clears the selected text outright.
+        prompt.replace_selected("haystack");
+        assert_eq!(prompt.backspace(), SearchPromptEffect::ClearQuery);
+        assert_eq!(prompt.buffer(), "");
+    }
 
     #[test]
     fn open_prefills_the_buffer_with_the_current_query() {

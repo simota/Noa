@@ -1339,6 +1339,18 @@ impl App {
     }
 
     pub(super) fn close_tab(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId) {
+        // A "Review Windows" prompt over this tab moves on to the tabs left
+        // once it is gone, instead of being cancelled with it.
+        let interrupted_review = self
+            .confirm_dialog
+            .take_if(|session| {
+                session.window_id == window_id
+                    && matches!(
+                        session.action,
+                        ConfirmAction::ReviewWindows { .. } | ConfirmAction::ReviewTab { .. }
+                    )
+            })
+            .map(|session| session.action);
         // Before the surfaces are torn down and their keys are gone: a closed
         // tab's record must not outlive the tab.
         self.discard_window_records(window_id);
@@ -1464,6 +1476,9 @@ impl App {
         // A closed window may have been the only one showing a sidebar.
         self.refresh_sidebar_visible_gate();
         self.persist_session();
+        if let Some(action) = interrupted_review {
+            self.resume_review(event_loop, action);
+        }
     }
 
     /// Clear every window-bound overlay/modal session pinned to `window_id`

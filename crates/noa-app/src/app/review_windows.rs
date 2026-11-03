@@ -73,8 +73,21 @@ impl App {
         );
     }
 
-    /// Bring the next still-open tab of `tabs` forward and confirm it; once
-    /// none is left, a quit goes ahead.
+    /// Whether `tab` still needs `review`: open, running a program, and for
+    /// a closing window still one of its tabs (it may have been dragged out).
+    fn still_under_review(&self, review: Review, tab: WindowId) -> bool {
+        let Some(state) = self.windows.get(&tab) else {
+            return false;
+        };
+        let in_scope = match review {
+            Review::Quit => true,
+            Review::CloseWindow { group } => state.group == group,
+        };
+        in_scope && self.tab_running_program_count(tab) > 0
+    }
+
+    /// Bring the next tab of `tabs` that still needs `review` forward and
+    /// confirm it; once none is left, a quit goes ahead.
     pub(super) fn review_next_tab(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -83,7 +96,7 @@ impl App {
     ) {
         let mut tabs = tabs
             .into_iter()
-            .filter(|tab| self.windows.contains_key(tab));
+            .filter(|tab| self.still_under_review(review, *tab));
         let Some(tab) = tabs.next() else {
             if review == Review::Quit {
                 event_loop.exit();
@@ -107,6 +120,26 @@ impl App {
             ConfirmAction::ReviewTab { review, tab, rest },
             None,
         );
+    }
+
+    /// Carry on with a review whose prompt was over a tab that closed on its
+    /// own (its process exited): the prompt moves to the tabs left.
+    pub(super) fn resume_review(&mut self, event_loop: &ActiveEventLoop, action: ConfirmAction) {
+        match action {
+            ConfirmAction::ReviewTab { review, rest, .. } => {
+                self.review_next_tab(event_loop, review, rest)
+            }
+            ConfirmAction::ReviewWindows { review, tabs } => {
+                let tabs: Vec<WindowId> = tabs
+                    .into_iter()
+                    .filter(|tab| self.still_under_review(review, *tab))
+                    .collect();
+                if let Some(&first) = tabs.first() {
+                    self.open_review_windows(first, review, tabs);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Skip the review: quit, or close the whole window (Ghostty's

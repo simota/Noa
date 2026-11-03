@@ -483,9 +483,26 @@ impl App {
             .confirm_dialog
             .as_ref()
             .is_some_and(|session| confirm_action_can_remember(&session.action));
-        // "Review Windows": `T` skips the review and ends every tab now.
+        // "Review Windows" ends tabs: a held key's repeat must not answer the
+        // next prompt the previous press just opened.
+        if event.repeat
+            && self.confirm_dialog.as_ref().is_some_and(|session| {
+                matches!(
+                    session.action,
+                    ConfirmAction::ReviewWindows { .. } | ConfirmAction::ReviewTab { .. }
+                )
+            })
+        {
+            return;
+        }
+        // "Review Windows": a bare `T` skips the review and ends every tab
+        // now. Not with Ctrl/Alt/Cmd, so a shortcut like `ctrl+shift+t`
+        // pressed into the prompt does not.
         if let Key::Character(s) = &event.logical_key
             && s.eq_ignore_ascii_case("t")
+            && !(self.modifiers.control_key()
+                || self.modifiers.alt_key()
+                || self.modifiers.super_key())
             && let Some(session) = self
                 .confirm_dialog
                 .take_if(|session| matches!(session.action, ConfirmAction::ReviewWindows { .. }))

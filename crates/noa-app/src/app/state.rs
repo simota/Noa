@@ -1106,6 +1106,26 @@ pub(super) enum ConfirmAction {
     CloseWindow { group: WindowGroupId },
     /// Quit the app, discarding every live session.
     Quit,
+    /// Several tabs run programs: review them one by one (confirm), end
+    /// them all now (`T`), or cancel. Ghostty 1.4.0's "Review Windows".
+    ReviewWindows { review: Review, tabs: Vec<WindowId> },
+    /// One step of the review: accept `tab` (confirm) and go on to `rest`,
+    /// or cancel the rest. Closing a window closes an accepted tab at once;
+    /// quitting keeps it, so the session saved at exit still has it.
+    ReviewTab {
+        review: Review,
+        tab: WindowId,
+        rest: Vec<WindowId>,
+        /// Tabs this review already accepted (kept open while quitting).
+        accepted: Vec<WindowId>,
+    },
+}
+
+/// What a "Review Windows" pass is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Review {
+    Quit,
+    CloseWindow { group: WindowGroupId },
 }
 
 /// Terminal-owned state for one split leaf. `split_tree` leaves store the

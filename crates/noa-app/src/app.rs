@@ -93,6 +93,7 @@ mod pane_drag_render;
 mod quick_terminal;
 mod remote_ui;
 mod render;
+mod review_windows;
 mod scratch_terminal;
 mod scrollback_record;
 mod session_restore;

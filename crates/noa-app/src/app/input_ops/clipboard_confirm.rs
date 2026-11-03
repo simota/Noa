@@ -435,8 +435,10 @@ impl App {
         armed_at: Option<Instant>,
     ) {
         self.end_copy_mode_for_window(window_id);
-        // A replaced dialog's request still gets its answer.
+        // A replaced dialog's request still gets its answer, and its window
+        // drops the card (it may be another window).
         if let Some(replaced) = self.confirm_dialog.take() {
+            self.request_window_redraw(replaced.window_id);
             self.cancel_confirm_action(replaced.action);
         }
         self.confirm_dialog = Some(ConfirmDialogSession {
@@ -483,6 +485,43 @@ impl App {
             .confirm_dialog
             .as_ref()
             .is_some_and(|session| confirm_action_can_remember(&session.action));
+        // Prompts that end sessions: a held key's repeat must not answer the
+        // next prompt the previous press just opened ("Review Windows" opens
+        // one prompt from another, and falls back to the plain quit or
+        // close prompt).
+        if event.repeat
+            && self.confirm_dialog.as_ref().is_some_and(|session| {
+                matches!(
+                    session.action,
+                    ConfirmAction::ReviewWindows { .. }
+                        | ConfirmAction::ReviewTab { .. }
+                        | ConfirmAction::Quit
+                        | ConfirmAction::CloseWindow { .. }
+                        | ConfirmAction::CloseTab { .. }
+                        | ConfirmAction::ClosePane { .. }
+                )
+            })
+        {
+            return;
+        }
+        // "Review Windows": a bare `T` skips the review and ends every tab
+        // now. Not with Ctrl/Alt/Cmd, so a shortcut like `ctrl+shift+t`
+        // pressed into the prompt does not.
+        if let Key::Character(s) = &event.logical_key
+            && s.eq_ignore_ascii_case("t")
+            && !(self.modifiers.control_key()
+                || self.modifiers.alt_key()
+                || self.modifiers.super_key())
+            && let Some(session) = self
+                .confirm_dialog
+                .take_if(|session| matches!(session.action, ConfirmAction::ReviewWindows { .. }))
+        {
+            if let ConfirmAction::ReviewWindows { review, .. } = session.action {
+                self.end_reviewed_tabs(event_loop, review);
+            }
+            self.request_window_redraw(window_id);
+            return;
+        }
         let (confirm, remember) = match &event.logical_key {
             Key::Named(NamedKey::Enter) => (true, false),
             Key::Named(NamedKey::Escape) => (false, false),
@@ -547,6 +586,15 @@ impl App {
             ConfirmAction::CloseTab { window_id } => self.close_tab(event_loop, window_id),
             ConfirmAction::CloseWindow { group } => self.close_group(event_loop, group),
             ConfirmAction::Quit => event_loop.exit(),
+            ConfirmAction::ReviewWindows { review, tabs } => {
+                self.start_review(event_loop, review, tabs)
+            }
+            ConfirmAction::ReviewTab {
+                review,
+                tab,
+                rest,
+                accepted,
+            } => self.accept_reviewed_tab(event_loop, review, tab, rest, accepted),
         }
     }
 }

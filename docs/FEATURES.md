@@ -52,7 +52,7 @@ A from-scratch DFA parser plus a `Handler` trait separating parsing from state.
 - **Agent workflows** — pane-scoped notifications, next-unread navigation (⌘⇧J), explicit agent state and a Claude Code hook adapter, native multiline prompt drafts, and read-only output snapshots with search/code copying; see [Agent workflows](AGENT_WORKFLOW.md)
 - **Local file navigation** — configurable editor line/column navigation on ⌘-click; UTF-8 file preview on ⌘⌥-click
 - **About panel** — version + git hash + build date, bundled-icon resolution
-- **Confirmation dialogs** — paste protection / clipboard read and write (OSC 52, OSC 5522, with "allow and remember") / close confirmation
+- **Confirmation dialogs** — paste protection / clipboard read and write (OSC 52, OSC 5522, with "allow and remember") / close confirmation, with "Review Windows" when quitting or closing a window leaves several tabs' programs running
 - **IME preedit** — underlined display of in-progress composition text
 
 ## Rendering and appearance (noa-render + noa-font)

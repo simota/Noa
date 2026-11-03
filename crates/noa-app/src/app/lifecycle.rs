@@ -1299,7 +1299,7 @@ impl App {
             .unwrap_or(0)
     }
 
-    fn group_running_program_count(&self, group: WindowGroupId) -> usize {
+    pub(super) fn group_running_program_count(&self, group: WindowGroupId) -> usize {
         self.window_order
             .iter()
             .filter_map(|window_id| self.windows.get(window_id))
@@ -1387,6 +1387,18 @@ impl App {
         if outcome == TabCloseOutcome::Stale {
             return;
         }
+        // A "Review Windows" prompt over this tab asks again once the tab is
+        // gone, instead of being cancelled with it.
+        let interrupted_review = self
+            .confirm_dialog
+            .take_if(|session| {
+                session.window_id == window_id
+                    && matches!(
+                        session.action,
+                        ConfirmAction::ReviewWindows { .. } | ConfirmAction::ReviewTab { .. }
+                    )
+            })
+            .map(|session| session.action);
 
         let closing_panes: Vec<_> = self
             .windows
@@ -1464,6 +1476,9 @@ impl App {
         // A closed window may have been the only one showing a sidebar.
         self.refresh_sidebar_visible_gate();
         self.persist_session();
+        if let Some(action) = interrupted_review {
+            self.resume_review(event_loop, action);
+        }
     }
 
     /// Clear every window-bound overlay/modal session pinned to `window_id`
@@ -1584,6 +1599,16 @@ impl App {
         let Some(group) = self.windows.get(&window_id).map(|state| state.group) else {
             return;
         };
+        let tabs = ids_in_group(
+            &self.window_order,
+            |id| self.windows.get(&id).map(|state| state.group),
+            group,
+        );
+        let running = self.tabs_with_running_programs(&tabs);
+        if running.len() > 1 {
+            self.open_review_windows(window_id, Review::CloseWindow { group }, running);
+            return;
+        }
         let count = self.group_running_program_count(group);
         if count > 0 {
             self.open_confirm_dialog(
@@ -1770,6 +1795,11 @@ impl App {
             event_loop.exit();
             return;
         };
+        let running = self.quit_review_tabs();
+        if running.len() > 1 {
+            self.open_review_windows(window_id, Review::Quit, running);
+            return;
+        }
         self.open_confirm_dialog(
             window_id,
             close_confirm_message(CloseConfirmTarget::App, count),

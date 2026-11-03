@@ -1591,7 +1591,7 @@ impl App {
         );
         let running = self.tabs_with_running_programs(&tabs);
         if running.len() > 1 {
-            self.open_review_windows(window_id, Review::CloseWindow, running);
+            self.open_review_windows(window_id, Review::CloseWindow { group }, running);
             return;
         }
         let count = self.group_running_program_count(group);

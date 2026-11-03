@@ -490,8 +490,8 @@ impl App {
                 .confirm_dialog
                 .take_if(|session| matches!(session.action, ConfirmAction::ReviewWindows { .. }))
         {
-            if let ConfirmAction::ReviewWindows { review, tabs } = session.action {
-                self.end_reviewed_tabs(event_loop, review, &tabs);
+            if let ConfirmAction::ReviewWindows { review, .. } = session.action {
+                self.end_reviewed_tabs(event_loop, review);
             }
             self.request_window_redraw(window_id);
             return;
@@ -564,7 +564,9 @@ impl App {
                 self.review_next_tab(event_loop, review, tabs)
             }
             ConfirmAction::ReviewTab { review, tab, rest } => {
-                self.close_tab(event_loop, tab);
+                if matches!(review, Review::CloseWindow { .. }) {
+                    self.close_tab(event_loop, tab);
+                }
                 self.review_next_tab(event_loop, review, rest);
             }
         }

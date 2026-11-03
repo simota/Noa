@@ -5,8 +5,9 @@ use winit::window::Window;
 
 use super::imp;
 use super::model::{
-    NativeOverlayCache, OverlayColors, PaneRectPt, ProcessMonitorViewModel, ThemeSettingsViewModel,
-    process_monitor_view_model, theme_settings_view_model,
+    ChildExitedBar, NativeOverlayCache, OverlayColors, PaneRectPt, ProcessMonitorViewModel,
+    ThemeSettingsViewModel, child_exited_bars_hash, process_monitor_view_model,
+    theme_settings_view_model,
 };
 
 fn hash_u64(f: impl FnOnce(&mut std::collections::hash_map::DefaultHasher)) -> u64 {
@@ -221,4 +222,19 @@ pub(crate) fn sync_scratch_badge(
     }
     cache.scratch_badge = hash;
     imp::rebuild_scratch_badge(window, text, colors);
+}
+
+/// Sync the child-exited bars of a window's panes: all of them are rebuilt
+/// when any changes, and an empty slice removes them.
+pub(crate) fn sync_child_exited_bars(
+    window: &Window,
+    cache: &mut NativeOverlayCache,
+    bars: &[ChildExitedBar],
+) {
+    let hash = child_exited_bars_hash(bars);
+    if cache.child_exited == hash {
+        return;
+    }
+    cache.child_exited = hash;
+    imp::rebuild_child_exited_bars(window, bars);
 }

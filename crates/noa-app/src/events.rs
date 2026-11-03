@@ -102,8 +102,9 @@ pub enum UserEvent {
         path: std::path::PathBuf,
         exists: bool,
     },
-    /// The pty's child process exited (or errored) — the app should close.
-    PtyExit(WindowId, PaneId),
+    /// The pty's child process exited (or its pty read failed), with the
+    /// exit code when the child reported one.
+    PtyExit(WindowId, PaneId, Option<i32>),
     /// The AppleScript bridge queued one or more `ScriptAction`s in
     /// `ScriptShared::actions` (applescript R-11, agent-automation L2.1).
     /// Carries no payload — like `IpcAction`, the work lives in a shared

@@ -564,6 +564,11 @@ fn show_config_output(config: &StartupConfig) -> String {
     );
     push_line(
         &mut out,
+        "abnormal-command-exit-runtime",
+        &config.abnormal_command_exit_runtime_ms.to_string(),
+    );
+    push_line(
+        &mut out,
         "window-save-state",
         match config.window_save_state {
             noa_config::WindowSaveState::Default => "default",

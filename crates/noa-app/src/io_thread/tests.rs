@@ -1947,7 +1947,7 @@ fn drain_queued_pty_data_preserves_data_before_terminal_event() {
 
     assert_eq!(chunks.len(), 1);
     assert_eq!(chunks[0].as_ref(), b"queued");
-    assert_eq!(terminal_event, Some(PtyDrainTerminalEvent::ExitOrError));
+    assert_eq!(terminal_event, Some(PtyDrainTerminalEvent::Exit(0)));
 }
 
 #[test]

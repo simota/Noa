@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, TryRecvError};
 use parking_lot::Mutex;
@@ -355,8 +355,27 @@ pub(super) fn feed_terminal_batch<T: AsRef<[u8]>>(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PtyDrainTerminalEvent {
-    ExitOrError,
+    Exit(i32),
+    Error,
     Disconnected,
+}
+
+/// How long a read error waits for the child's exit status: the master read
+/// can fail (Linux reports `EIO` once the slave side closes) before the
+/// waiter thread reports how the child exited.
+const EXIT_CODE_AFTER_ERROR_WAIT: Duration = Duration::from_millis(500);
+
+/// The child's exit code once its pty read failed, if the waiter reports it
+/// in time (`None` when the child outlives the wait or the channel closes).
+pub(super) fn exit_code_after_read_error(rx: &Receiver<noa_pty::PtyEvent>) -> Option<i32> {
+    let deadline = Instant::now() + EXIT_CODE_AFTER_ERROR_WAIT;
+    loop {
+        match rx.recv_deadline(deadline) {
+            Ok(noa_pty::PtyEvent::Exit(code)) => return Some(code),
+            Ok(_) => {}
+            Err(_) => return None,
+        }
+    }
 }
 
 /// Debug pty capture (`NOA_PTY_CAPTURE=<prefix>`): open this pane's capture
@@ -419,9 +438,8 @@ pub(super) fn drain_queued_pty_data(
                 buffered_bytes = buffered_bytes.saturating_add(bytes.len());
                 chunks.push(bytes);
             }
-            Ok(noa_pty::PtyEvent::Exit(_)) | Ok(noa_pty::PtyEvent::Error(_)) => {
-                return Some(PtyDrainTerminalEvent::ExitOrError);
-            }
+            Ok(noa_pty::PtyEvent::Exit(code)) => return Some(PtyDrainTerminalEvent::Exit(code)),
+            Ok(noa_pty::PtyEvent::Error(_)) => return Some(PtyDrainTerminalEvent::Error),
             Err(TryRecvError::Empty) => return None,
             Err(TryRecvError::Disconnected) => return Some(PtyDrainTerminalEvent::Disconnected),
         }

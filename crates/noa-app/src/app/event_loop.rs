@@ -521,32 +521,14 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
             }
-            UserEvent::PtyExit(window_id, pane_id) => {
+            UserEvent::PtyExit(window_id, pane_id, exit_code) => {
                 // P1-1: resolve to the pane's current window so a pty exit
                 // racing a cross-tab move closes the right tab's pane instead
                 // of silently no-oping against the old (still-live) window.
                 let Some(window_id) = self.resolve_pane_window(window_id, pane_id) else {
                     return;
                 };
-                // `wait after command` keeps a scripted pane open after its
-                // process exits (agent-automation REQ-005).
-                if self.hold_pane_after_exit(window_id, pane_id) {
-                    return;
-                }
-                // The quick terminal isn't a saved/tabbed window, so its shell
-                // exiting tears the whole drop-down down rather than routing
-                // through the tab-close path (which walks `window_order`).
-                if self.is_quick_terminal_window(window_id) {
-                    self.end_copy_mode_for_window(window_id);
-                    self.destroy_quick_terminal();
-                } else if self.is_scratch_terminal_window(window_id) {
-                    // scratch-terminal R4-c: the popup's own shell exiting
-                    // (e.g. `exit`) tears the whole popup down, same as the
-                    // quick terminal.
-                    self.destroy_scratch_terminal();
-                } else {
-                    self.close_pane_after_pty_exit(event_loop, window_id, pane_id)
-                }
+                self.on_child_exit(event_loop, window_id, pane_id, exit_code);
             }
         }
     }
@@ -1134,7 +1116,7 @@ impl ApplicationHandler<UserEvent> for App {
                     && let Some(pane_id) = self.exited_focused_pane(window_id)
                 {
                     self.held_pane_close_keys.insert(event.physical_key);
-                    self.close_pane_after_pty_exit(event_loop, window_id, pane_id);
+                    self.close_exited_pane(event_loop, window_id, pane_id);
                     return;
                 }
                 let resolved_command = self.keybinds.resolve(&event.logical_key, self.modifiers);
@@ -1538,6 +1520,8 @@ impl App {
             // force-click, `TouchpadPressure`).
             state.last_mouse_physical_position = Some(position);
         }
+        #[cfg(target_os = "macos")]
+        self.sync_child_exited_hover(window_id);
         // Keep the toolbar `+` hover state (style + cursor) in sync with the
         // pointer before any early return below; a no-op when the sidebar is
         // hidden (inset 0).
@@ -1677,6 +1661,8 @@ impl App {
         self.update_sidebar_button_hover(window_id, None);
         self.context_menu_pointer_left(window_id);
         self.sync_hover_link(window_id);
+        #[cfg(target_os = "macos")]
+        self.sync_child_exited_hover(window_id);
 
         let overview_changed = self
             .overview_window
@@ -2182,7 +2168,7 @@ impl App {
         if ime_event_types_text(&event)
             && let Some(pane_id) = self.exited_focused_pane(window_id)
         {
-            self.close_pane_after_pty_exit(event_loop, window_id, pane_id);
+            self.close_exited_pane(event_loop, window_id, pane_id);
             if let Some(window) = self.windows.get(&window_id).map(|s| s.window.clone()) {
                 window.set_ime_allowed(false);
                 window.set_ime_allowed(true);

@@ -72,6 +72,7 @@ use crate::{AppCommand, ViewportScroll};
 
 mod applescript;
 mod auto_approve;
+mod child_exited;
 mod commands;
 mod config;
 mod config_reload;

@@ -71,6 +71,8 @@ pub struct Pty {
     event_rx: Receiver<PtyEvent>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     child_pid: Option<u32>,
+    started_at: std::time::Instant,
+    command_line: String,
 }
 
 impl Pty {
@@ -161,7 +163,15 @@ impl Pty {
             cmd.cwd(cwd);
         }
 
+        let command_line = cmd
+            .get_argv()
+            .iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+
         // Spawn the child FIRST (macOS quirk), then we may resize.
+        let started_at = std::time::Instant::now();
         let child = pair
             .slave
             .spawn_command(cmd)
@@ -234,7 +244,19 @@ impl Pty {
             event_rx,
             killer,
             child_pid,
+            started_at,
+            command_line,
         })
+    }
+
+    /// When the child was spawned, for how long it ran once it exits.
+    pub fn started_at(&self) -> std::time::Instant {
+        self.started_at
+    }
+
+    /// The child's argv joined by spaces, for messages about it.
+    pub fn command_line(&self) -> &str {
+        &self.command_line
     }
 
     /// Receiver for the PTY's output/lifecycle events.
@@ -798,6 +820,32 @@ mod tests {
             "expected 'hello' in output: {text:?}"
         );
         assert!(saw_exit, "expected an Exit event");
+    }
+
+    // The command line and start time describe the spawned child, and its
+    // exit code arrives with the exit (the child-exited notice reads both).
+    #[test]
+    fn exit_reports_the_code_and_the_command_line_is_kept() {
+        let pty = Pty::spawn(PtyConfig {
+            command: Some(vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "exit 3".to_string(),
+            ]),
+            ..PtyConfig::default()
+        })
+        .expect("spawn pty");
+        assert_eq!(pty.command_line(), "/bin/sh -c exit 3");
+        assert!(pty.started_at() <= std::time::Instant::now());
+
+        let mut code = None;
+        while let Ok(event) = pty.event_rx().recv_timeout(Duration::from_secs(5)) {
+            if let PtyEvent::Exit(exit) = event {
+                code = Some(exit);
+                break;
+            }
+        }
+        assert_eq!(code, Some(3));
     }
 
     // `-e` path: an explicit command argv is spawned verbatim as the pty

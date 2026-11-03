@@ -2236,3 +2236,14 @@ fn acceptance_ac01_ember_idle_after_range_default_and_diagnostic_class() {
         assert_eq!(diagnostics[0].message, expected, "{value:?}");
     }
 }
+
+#[test]
+fn abnormal_command_exit_runtime_parses_milliseconds() {
+    let (overrides, diagnostics) = parse_overrides(path(), "abnormal-command-exit-runtime = 500");
+    assert_eq!(overrides.abnormal_command_exit_runtime_ms, Some(500));
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+    let (overrides, diagnostics) = parse_overrides(path(), "abnormal-command-exit-runtime = -1");
+    assert_eq!(overrides.abnormal_command_exit_runtime_ms, None);
+    assert_eq!(diagnostics.len(), 1);
+}

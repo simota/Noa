@@ -36,6 +36,11 @@ pub(crate) struct NativeOverlayCache {
     /// (if it were ever resizable) can never collide with this persistent
     /// badge's cache slot.
     pub(crate) scratch_badge: Option<u64>,
+    /// Every pane's child-exited bar, as one set.
+    pub(crate) child_exited: Option<u64>,
+    /// The pane whose child-exited bar the pointer is over; that bar is
+    /// hidden so the text under it shows, as in Ghostty.
+    pub(crate) child_exited_hovered: Option<crate::split_tree::PaneId>,
     /// Debug-only instrumentation (NFR-7/AC-58, mirrors the app-wide
     /// `ChromeTextures::record_rebuild`/`rebuild_count` pattern):
     /// incremented once per real `sync_theme_settings` dispatch to
@@ -232,6 +237,82 @@ impl PaneRectPt {
         self.w.to_bits().hash(hasher);
         self.h.to_bits().hash(hasher);
     }
+}
+
+/// One pane's child-exited bar (Ghostty 1.4.0's `ChildExitedMessageBar`):
+/// full pane width along its bottom edge, the text centered on one line.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ChildExitedBar {
+    pub(crate) rect: PaneRectPt,
+    pub(crate) font_size: f64,
+    pub(crate) text: String,
+    /// Char indices drawn bold.
+    pub(crate) bold: std::ops::Range<usize>,
+    pub(crate) error: bool,
+}
+
+impl ChildExitedBar {
+    /// Ghostty's padding: 8 points across, 4 above and below the text.
+    pub(crate) const PAD_H: f64 = 8.0;
+    pub(crate) const PAD_V: f64 = 4.0;
+
+    /// The bar for a pane at `pane` (points) whose cells are `cell_h`
+    /// points tall. Ghostty sizes the font at 80% of a cell, at most 30.
+    pub(crate) fn new(
+        pane: PaneRectPt,
+        cell_h: f64,
+        text: String,
+        bold: std::ops::Range<usize>,
+        error: bool,
+    ) -> Self {
+        let font_size = (cell_h * 0.8).min(30.0);
+        let h = Self::line_h(font_size) + 2.0 * Self::PAD_V;
+        Self {
+            rect: PaneRectPt {
+                x: pane.x,
+                y: pane.y + pane.h - h,
+                w: pane.w,
+                h,
+            },
+            font_size,
+            text,
+            bold,
+            error,
+        }
+    }
+
+    /// One line of the system font at `font_size`.
+    pub(crate) fn line_h(font_size: f64) -> f64 {
+        (font_size * 1.25).ceil()
+    }
+
+    /// Whether the point (`x`, `y`) in window points falls on the bar.
+    pub(crate) fn contains(&self, x: f64, y: f64) -> bool {
+        x >= self.rect.x
+            && x < self.rect.x + self.rect.w
+            && y >= self.rect.y
+            && y < self.rect.y + self.rect.h
+    }
+
+    fn hash_into(&self, hasher: &mut impl Hasher) {
+        self.rect.hash_into(hasher);
+        self.font_size.to_bits().hash(hasher);
+        self.text.hash(hasher);
+        self.bold.hash(hasher);
+        self.error.hash(hasher);
+    }
+}
+
+/// The fingerprint `sync_child_exited_bars` compares; `None` for no bars.
+pub(crate) fn child_exited_bars_hash(bars: &[ChildExitedBar]) -> Option<u64> {
+    if bars.is_empty() {
+        return None;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for bar in bars {
+        bar.hash_into(&mut hasher);
+    }
+    Some(hasher.finish())
 }
 
 /// Theme-derived colors for the native overlays, resolved from the same

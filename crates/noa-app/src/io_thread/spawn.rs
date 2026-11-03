@@ -28,8 +28,8 @@ use super::auto_approve::{
     detect_auto_approve_candidate,
 };
 use super::feed::{
-    PtyDrainTerminalEvent, capture_pty_bytes, drain_queued_pty_data, feed_terminal_batch,
-    open_pty_capture,
+    PtyDrainTerminalEvent, capture_pty_bytes, drain_queued_pty_data, exit_code_after_read_error,
+    feed_terminal_batch, open_pty_capture,
 };
 use super::input_queue::{EchoStampedInput, QueuedPtyInput};
 use super::ipc_tap::{IpcOutputTap, flush_pending_ipc_output, force_ipc_output_refresh};
@@ -654,10 +654,20 @@ pub fn spawn(
                         None => {}
                     }
                     match terminal_event {
-                        Some(PtyDrainTerminalEvent::ExitOrError) => {
+                        Some(PtyDrainTerminalEvent::Exit(code)) => {
                             let _ = proxy.send_event(UserEvent::PtyExit(
                                 current_card_target(&window_id, pane_id).0,
                                 pane_id,
+                                Some(code),
+                            ));
+                            break;
+                        }
+                        Some(PtyDrainTerminalEvent::Error) => {
+                            let code = exit_code_after_read_error(pty.event_rx());
+                            let _ = proxy.send_event(UserEvent::PtyExit(
+                                current_card_target(&window_id, pane_id).0,
+                                pane_id,
+                                code,
                             ));
                             break;
                         }
@@ -665,10 +675,15 @@ pub fn spawn(
                         None => {}
                     }
                 }
-                Ok(noa_pty::PtyEvent::Exit(_)) | Ok(noa_pty::PtyEvent::Error(_)) => {
+                Ok(event @ (noa_pty::PtyEvent::Exit(_) | noa_pty::PtyEvent::Error(_))) => {
+                    let code = match event {
+                        noa_pty::PtyEvent::Exit(code) => Some(code),
+                        _ => exit_code_after_read_error(pty.event_rx()),
+                    };
                     let _ = proxy.send_event(UserEvent::PtyExit(
                         current_card_target(&window_id, pane_id).0,
                         pane_id,
+                        code,
                     ));
                     break;
                 }

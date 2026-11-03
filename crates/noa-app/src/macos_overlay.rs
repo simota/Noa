@@ -26,10 +26,10 @@ mod tests;
 #[cfg(target_os = "macos")]
 pub(crate) use model::cg;
 pub(crate) use model::{
-    CaretPt, NativeOverlayCache, OverlayColors, PaneRectPt, TITLE_PROMPT_HINT, palette_query_caret,
-    theme_settings_caret, title_prompt_caret,
+    CaretPt, ChildExitedBar, NativeOverlayCache, OverlayColors, PaneRectPt, TITLE_PROMPT_HINT,
+    palette_query_caret, theme_settings_caret, title_prompt_caret,
 };
 pub(crate) use sync::{
-    sync_command_palette, sync_confirm_dialog, sync_process_monitor, sync_scratch_badge,
-    sync_theme_settings, sync_title_prompt, sync_toast,
+    sync_child_exited_bars, sync_command_palette, sync_confirm_dialog, sync_process_monitor,
+    sync_scratch_badge, sync_theme_settings, sync_title_prompt, sync_toast,
 };

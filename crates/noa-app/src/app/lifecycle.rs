@@ -916,8 +916,36 @@ impl App {
         auto_approve_enabled: Arc<AtomicBool>,
         redraw_floor: crate::io_thread::RedrawFloor,
     ) -> anyhow::Result<Surface> {
+        self.spawn_pane_surface_in(
+            window_id,
+            pane_id,
+            grid_size,
+            rect,
+            cwd,
+            auto_approve_enabled,
+            redraw_floor,
+            self.is_quick_terminal_window(window_id),
+        )
+    }
+
+    /// [`Self::spawn_pane_surface`] with the quick terminal stated outright,
+    /// for its first pane, spawned before `self.quick_terminal` names the
+    /// window. Like Ghostty 1.4.0, every quick terminal pane's child gets
+    /// `NOA_QUICK_TERMINAL=1` (Ghostty's `GHOSTTY_QUICK_TERMINAL`).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn spawn_pane_surface_in(
+        &self,
+        window_id: WindowId,
+        pane_id: PaneId,
+        grid_size: GridSize,
+        rect: PaneRectApp,
+        cwd: Option<String>,
+        auto_approve_enabled: Arc<AtomicBool>,
+        redraw_floor: crate::io_thread::RedrawFloor,
+        quick_terminal: bool,
+    ) -> anyhow::Result<Surface> {
         let script = self.script_spawn.as_ref();
-        let pty_config = PtyConfig {
+        let mut pty_config = PtyConfig {
             size: grid_size,
             cwd: script.and_then(|spawn| spawn.cwd.clone()).or(cwd),
             // A scripted spawn's `command` runs instead of the shell
@@ -932,6 +960,13 @@ impl App {
             env: script.map(|spawn| spawn.env.clone()).unwrap_or_default(),
             ..Default::default()
         };
+        if quick_terminal {
+            // Ahead of the requested env, which still wins, and making the
+            // request differ from the prespawned default shell.
+            pty_config
+                .env
+                .insert(0, ("NOA_QUICK_TERMINAL".to_string(), "1".to_string()));
+        }
         // The first spawn normally consumes the child already booted in
         // parallel by `App::new` (see `App::prespawned_pty`) — the `-e`
         // command when one was given, the default shell otherwise.

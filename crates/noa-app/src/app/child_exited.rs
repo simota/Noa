@@ -131,25 +131,30 @@ impl App {
             return false;
         }
         surface.exited = true;
-        // Ghostty skips the native notice for a zero runtime (an exit code
-        // from launch) and prints into the terminal instead.
-        if abnormal && cfg!(target_os = "macos") && exit.runtime_ms > 0 {
-            surface.child_exited = Some(ChildExitedMessage::new(exit));
-        } else {
-            let mut terminal = surface.terminal.lock();
-            let bytes = if abnormal {
+        let mut bytes = Vec::new();
+        if abnormal {
+            // Ghostty skips the native notice for a zero runtime (an exit
+            // code from launch) and prints into the terminal instead.
+            if cfg!(target_os = "macos") && exit.runtime_ms > 0 {
+                surface.child_exited = Some(ChildExitedMessage::new(exit));
+            } else {
+                let terminal = surface.terminal.lock();
                 let screen = terminal.active();
                 let shows_output = screen
                     .visible_rows()
                     .iter()
                     .any(|row| row.cells.iter().any(|cell| cell.ch != ' '));
-                abnormal_exit_text(command, exit, shows_output.then_some(screen.cols))
-            } else {
-                // `wait after command` keeps its notice in the terminal, where
-                // a script reads it back (agent-automation REQ-005).
-                PROCESS_EXITED_MESSAGE.to_vec()
-            };
-            noa_vt::Stream::new().feed(&bytes, &mut *terminal);
+                bytes = abnormal_exit_text(command, exit, shows_output.then_some(screen.cols));
+            }
+        }
+        // `wait after command` always leaves its notice in the terminal, a
+        // failed launch included, where a script reads it back
+        // (agent-automation REQ-005).
+        if surface.wait_after_command {
+            bytes.extend_from_slice(PROCESS_EXITED_MESSAGE);
+        }
+        if !bytes.is_empty() {
+            noa_vt::Stream::new().feed(&bytes, &mut *surface.terminal.lock());
         }
         self.request_window_redraw(window_id);
         true

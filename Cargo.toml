@@ -91,3 +91,11 @@ rand        = "0.8"
 #TODO(agent): drop this patch once winit ships an sctk-adwaita with fallback.
 [patch.crates-io]
 sctk-adwaita = { path = "vendor/sctk-adwaita" }
+# winit 0.30.13 converts every `insertText:` string to UTF-8 before looking
+# at it, and Unicode Hex Input sends a character outside the BMP as two lone
+# UTF-16 surrogates, which have no UTF-8 form (undefined behavior; a debug
+# build aborts). The vendored copy pairs them first (Ghostty 1.4.0, #13737);
+# every change is marked "Noa patch" in
+# vendor/winit/src/platform_impl/macos/view.rs.
+#TODO(agent): drop this patch once winit handles lone surrogates in insertText.
+winit = { path = "vendor/winit" }

@@ -187,6 +187,8 @@ impl PendingRegistry {
 /// entries changes nothing. Inside a pending container the last pending child
 /// is its `selected tab`/`focused terminal`; a live container's selection
 /// never moves to a pending child.
+/// The derived names are filled in last, since a selection that moved
+/// changes them.
 pub(crate) fn merge_pending(snapshot: &mut AppStateSnapshot, pending: &mut PendingRegistry) {
     let live_windows: Vec<u64> = snapshot
         .windows
@@ -286,6 +288,7 @@ pub(crate) fn merge_pending(snapshot: &mut AppStateSnapshot, pending: &mut Pendi
             pending: true,
         });
     }
+    snapshot.windows.iter_mut().for_each(derive_names);
 }
 
 /// The six `surface configuration` fields (agent-automation L2.4), already
@@ -3351,5 +3354,21 @@ mod tests {
             set_name_override(&mut snapshot, &Resolved::Window(0), "x"),
             None
         );
+    }
+
+    #[test]
+    fn a_pending_tab_taking_the_selection_takes_the_window_name() {
+        let mut snapshot = fixture();
+        let mut pending = PendingRegistry::default();
+        pending.add_window(9);
+        pending.add_tab(90, 9);
+        merge_pending(&mut snapshot, &mut pending);
+        let w = snapshot.windows.iter().position(|w| w.id == 9).unwrap();
+        set_name_override(&mut snapshot, &Resolved::Tab(w, 0), "first");
+        assert_eq!(snapshot.windows[w].name, "first");
+
+        pending.add_tab(91, 9);
+        merge_pending(&mut snapshot, &mut pending);
+        assert_eq!(snapshot.windows[w].name, "");
     }
 }

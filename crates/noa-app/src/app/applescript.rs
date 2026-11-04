@@ -9,8 +9,7 @@ use std::hash::{Hash, Hasher};
 use super::*;
 use crate::macos_applescript::{
     AppStateSnapshot, NameOverrideTarget, Registration, ScriptAction, ScriptMouse, ScriptSplit,
-    SurfaceConfig, TabSnapshot, TerminalSnapshot, WindowSnapshot, derive_names, merge_pending,
-    terminal_name,
+    SurfaceConfig, TabSnapshot, TerminalSnapshot, WindowSnapshot, merge_pending, terminal_name,
 };
 
 /// Coarse refresh interval for the AppleScript snapshot's lock-bearing fields
@@ -274,12 +273,7 @@ impl App {
                 })
                 .collect();
 
-            // The scratch terminal keeps its spawn-time title.
-            let base_name = if self.is_scratch_terminal_window(*window_id) {
-                None
-            } else {
-                self.resolved_window_title(*window_id, None)
-            };
+            let base_name = self.resolved_window_title(*window_id, None);
             // A tab is `selected` when it is its window's front native tab.
             let selected = crate::macos_window::native_tab_is_selected(&state.window)
                 .unwrap_or(self.focused == Some(*window_id));
@@ -293,8 +287,6 @@ impl App {
                 pending: false,
             });
         }
-
-        windows.iter_mut().for_each(derive_names);
 
         let mut snapshot = AppStateSnapshot {
             frontmost: self.os_focused.is_some(),
@@ -390,11 +382,15 @@ impl App {
             }
         }
         state.window.request_redraw();
+        let focused_pane = state.focused_pane;
         // A hidden tab never redraws, which is what otherwise applies a
         // title change.
         if let Some(window_id) = window_id {
             self.refresh_window_title(window_id);
+            self.mark_overview_label_dirty(OverviewTileId::new(window_id, focused_pane));
         }
+        // The front tab's sidebar lists this tab's title too.
+        self.request_sidebar_redraw();
         if matches!(target, NameOverrideTarget::Tab(_)) {
             self.persist_session();
         }

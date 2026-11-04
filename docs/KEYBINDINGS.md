@@ -30,15 +30,18 @@ keybind = cmd+shift+n=tab.new
 
 `<chord>` is `+`-separated. Modifier aliases are `cmd`/`command`/`super`/`meta`,
 `ctrl`/`control`, `alt`/`option`, `shift`. Keys accept a single character,
-`plus`, arrow keys such as `arrowup`/`up` (short aliases allowed),
-`pageup`, `pagedown`, `home`, `end`, `enter`/`return`, and
+`plus`, arrow keys such as `arrowup`/`arrow_up`/`up` (short aliases allowed),
+`pageup`/`page_up`, `pagedown`/`page_down`, `home`, `end`, `enter`/`return`, and
 `grave`/`backtick` (`` ` ``).
 
 `<action>` uses a name from the "canonical action list" below.
 `noa +list-keybinds` only shows currently active bindings, so actions
 that are unbound by default aren't printed. Some Ghostty-style action
 names — such as `new_tab`, `prompt_surface_title`,
-`toggle_quick_terminal` — are also accepted as compatible input.
+`toggle_quick_terminal`, `jump_to_prompt:-1` / `jump_to_prompt:1`,
+`scroll_to_top` / `scroll_to_bottom` — are also accepted as compatible input.
+To make ⌘↑ / ⌘↓ scroll to the top / bottom as in Ghostty 1.3, set
+`keybind = cmd+arrow_up=scroll_to_top` and `keybind = cmd+arrow_down=scroll_to_bottom`.
 
 ### Canonical Action List
 
@@ -146,7 +149,7 @@ bottom.
 |---|---|
 | ⇧PageUp / ⇧PageDown | Scroll 1 page |
 | ⇧Home / ⇧End | Jump to top / bottom |
-| ⌘↑ / ⌘↓ | Jump to previous / next prompt (requires shell integration OSC 133) |
+| ⌘↑ / ⌘↓, ⌘⇧↑ / ⌘⇧↓ | Jump to previous / next prompt (requires shell integration OSC 133) |
 
 The one-line scroll actions remain configurable but have no default binding.
 

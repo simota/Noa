@@ -141,7 +141,7 @@ Every binding can be changed with `keybind = …` (see
 | `ctrl+enter` | Toggle fullscreen |
 | `ctrl+shift+f` / `ctrl+shift+g` / `ctrl+shift+h` | Find / find next / find previous |
 | `shift+pageup` / `shift+pagedown`, `shift+home` / `shift+end` | Scroll by page / to top or bottom |
-| `ctrl+shift+pageup` / `ctrl+shift+pagedown` | Jump to previous / next prompt |
+| `ctrl+shift+arrowup` / `ctrl+shift+arrowdown` | Jump to previous / next prompt |
 | `ctrl+=` / `ctrl+-` / `ctrl+0` | Font size up / down / reset |
 | `ctrl+shift+p` | Command palette |
 | `ctrl+shift+s` | Sidebar |

@@ -841,3 +841,86 @@ fn function_and_editing_keys_parse_and_round_trip() {
         Some("f11")
     );
 }
+
+/// Ghostty 1.4.0's macOS defaults: cmd+arrow_up/down and
+/// cmd+shift+arrow_up/down run `jump_to_prompt`, through the keybinds.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_cmd_arrows_jump_to_prompts() {
+    let engine = KeybindEngine::default();
+    for mods in [
+        ModifiersState::SUPER,
+        ModifiersState::SUPER | ModifiersState::SHIFT,
+    ] {
+        assert_eq!(
+            engine.resolve(&Key::Named(NamedKey::ArrowUp), mods),
+            Some(AppCommand::ScrollViewport(ViewportScroll::PrevPrompt))
+        );
+        assert_eq!(
+            engine.resolve(&Key::Named(NamedKey::ArrowDown), mods),
+            Some(AppCommand::ScrollViewport(ViewportScroll::NextPrompt))
+        );
+    }
+}
+
+/// Ghostty 1.4.0's GTK defaults moved `jump_to_prompt` from
+/// ctrl+shift+page_up/page_down to ctrl+shift+arrow_up/arrow_down.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn linux_ctrl_shift_arrows_jump_to_prompts() {
+    let engine = KeybindEngine::default();
+    let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+    assert_eq!(
+        engine.resolve(&Key::Named(NamedKey::ArrowUp), ctrl_shift),
+        Some(AppCommand::ScrollViewport(ViewportScroll::PrevPrompt))
+    );
+    assert_eq!(
+        engine.resolve(&Key::Named(NamedKey::ArrowDown), ctrl_shift),
+        Some(AppCommand::ScrollViewport(ViewportScroll::NextPrompt))
+    );
+    assert_eq!(
+        engine.resolve(&Key::Named(NamedKey::PageUp), ctrl_shift),
+        None
+    );
+}
+
+/// The Ghostty action names for prompt jumps and scrolling, including the
+/// ones Ghostty 1.4.0's release notes give to restore 1.3's cmd+arrow.
+#[test]
+fn ghostty_prompt_and_scroll_action_names_are_accepted() {
+    for (action, scroll) in [
+        ("jump_to_prompt:-1", ViewportScroll::PrevPrompt),
+        ("jump_to_prompt:1", ViewportScroll::NextPrompt),
+        ("scroll_to_top", ViewportScroll::Top),
+        ("scroll_to_bottom", ViewportScroll::Bottom),
+        ("scroll_page_up", ViewportScroll::PageUp),
+        ("scroll_page_down", ViewportScroll::PageDown),
+    ] {
+        assert_eq!(
+            super::command_from_keybind_action(action),
+            Some(AppCommand::ScrollViewport(scroll)),
+            "{action}"
+        );
+    }
+    assert_eq!(super::command_from_keybind_action("jump_to_prompt:2"), None);
+}
+
+/// The config line Ghostty 1.4.0's release notes give to keep 1.3's
+/// cmd+arrow_up, in Ghostty's spelling.
+#[test]
+fn ghostty_key_names_with_underscores_parse() {
+    let binding = KeyBinding::parse(
+        "cmd+arrow_up",
+        AppCommand::ScrollViewport(ViewportScroll::Top),
+    )
+    .unwrap();
+    assert_eq!(
+        binding,
+        KeyBinding::parse(
+            "cmd+arrowup",
+            AppCommand::ScrollViewport(ViewportScroll::Top)
+        )
+        .unwrap()
+    );
+    assert!(KeyBinding::parse("ctrl+shift+page_down", AppCommand::NextTab).is_ok());
+}

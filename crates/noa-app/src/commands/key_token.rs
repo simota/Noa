@@ -130,12 +130,13 @@ impl KeyToken {
             return Ok(Self::Character(ch));
         }
         Ok(Self::Named(match token {
-            "arrowup" | "up" => NamedKeyToken::ArrowUp,
-            "arrowdown" | "down" => NamedKeyToken::ArrowDown,
-            "arrowleft" | "left" => NamedKeyToken::ArrowLeft,
-            "arrowright" | "right" => NamedKeyToken::ArrowRight,
-            "pageup" => NamedKeyToken::PageUp,
-            "pagedown" => NamedKeyToken::PageDown,
+            // `arrow_up`, `page_up`, …: Ghostty's spellings.
+            "arrowup" | "arrow_up" | "up" => NamedKeyToken::ArrowUp,
+            "arrowdown" | "arrow_down" | "down" => NamedKeyToken::ArrowDown,
+            "arrowleft" | "arrow_left" | "left" => NamedKeyToken::ArrowLeft,
+            "arrowright" | "arrow_right" | "right" => NamedKeyToken::ArrowRight,
+            "pageup" | "page_up" => NamedKeyToken::PageUp,
+            "pagedown" | "page_down" => NamedKeyToken::PageDown,
             "home" => NamedKeyToken::Home,
             "end" => NamedKeyToken::End,
             "enter" | "return" => NamedKeyToken::Enter,

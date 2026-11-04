@@ -122,6 +122,14 @@ fn default_specs() -> Vec<(&'static str, AppCommand)> {
             AppCommand::ScrollViewport(ViewportScroll::NextPrompt),
         ),
         (
+            "cmd+shift+arrowup",
+            AppCommand::ScrollViewport(ViewportScroll::PrevPrompt),
+        ),
+        (
+            "cmd+shift+arrowdown",
+            AppCommand::ScrollViewport(ViewportScroll::NextPrompt),
+        ),
+        (
             "cmd+ctrl+arrowleft",
             AppCommand::FocusDirection(Direction::Left),
         ),
@@ -267,12 +275,14 @@ fn default_specs() -> Vec<(&'static str, AppCommand)> {
             "shift+end",
             AppCommand::ScrollViewport(ViewportScroll::Bottom),
         ),
+        // Ghostty 1.4.0 moved `jump_to_prompt` here from ctrl+shift+page_up/
+        // page_down, which now move the tab.
         (
-            "ctrl+shift+pageup",
+            "ctrl+shift+arrowup",
             AppCommand::ScrollViewport(ViewportScroll::PrevPrompt),
         ),
         (
-            "ctrl+shift+pagedown",
+            "ctrl+shift+arrowdown",
             AppCommand::ScrollViewport(ViewportScroll::NextPrompt),
         ),
         (
@@ -595,6 +605,12 @@ fn ghostty_action_alias(action: &str) -> Option<AppCommand> {
         "find" => Some(AppCommand::Search(SearchAction::Find)),
         "find_next" => Some(AppCommand::Search(SearchAction::FindNext)),
         "find_previous" => Some(AppCommand::Search(SearchAction::FindPrevious)),
+        "jump_to_prompt:-1" => Some(AppCommand::ScrollViewport(ViewportScroll::PrevPrompt)),
+        "jump_to_prompt:1" => Some(AppCommand::ScrollViewport(ViewportScroll::NextPrompt)),
+        "scroll_to_top" => Some(AppCommand::ScrollViewport(ViewportScroll::Top)),
+        "scroll_to_bottom" => Some(AppCommand::ScrollViewport(ViewportScroll::Bottom)),
+        "scroll_page_up" => Some(AppCommand::ScrollViewport(ViewportScroll::PageUp)),
+        "scroll_page_down" => Some(AppCommand::ScrollViewport(ViewportScroll::PageDown)),
         "copy_mode" => Some(AppCommand::CopyMode(CopyModeAction::CursorOnly)),
         "copy_mode:left" | "copy_mode_extend_left" => Some(AppCommand::CopyMode(
             CopyModeAction::Extend(CopyDirection::Left),

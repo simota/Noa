@@ -850,8 +850,11 @@ impl App {
             // The OS-level composition session survives our local clear —
             // without this, the IME keeps composing and its next Preedit
             // lands on the newly focused pane. Toggling IME off/on discards
-            // the marked text so the new pane starts clean.
-            if losing_preedit {
+            // the marked text so the new pane starts clean. On macOS it also
+            // drops a Unicode Hex Input lead surrogate waiting for its trail
+            // (vendored winit), which has no preedit to show it is pending,
+            // so it runs on every switch there.
+            if losing_preedit || cfg!(target_os = "macos") {
                 state.window.set_ime_allowed(false);
                 state.window.set_ime_allowed(true);
             }

@@ -143,6 +143,9 @@ pub struct ViewState {
     /// Noa patch: a lead surrogate `insertText:` delivered alone, waiting
     /// for its trail (see `insert_text`).
     lead_surrogate: Cell<Option<u16>>,
+    /// Noa patch: inside `keyDown:`'s `interpretKeyEvents:`, so a surrogate
+    /// commit can mark that key handled; outside it nothing resets the state.
+    in_key_down: Cell<bool>,
 }
 
 declare_class!(
@@ -441,7 +444,12 @@ declare_class!(
                 if !string.is_empty() {
                     self.queue_event(WindowEvent::Ime(Ime::Commit(string)));
                 }
-                self.ivars().ime_state.set(ImeState::Committed);
+                let state = if self.ivars().in_key_down.get() {
+                    ImeState::Committed
+                } else {
+                    ImeState::Ground
+                };
+                self.ivars().ime_state.set(state);
                 return;
             }
 
@@ -508,7 +516,9 @@ declare_class!(
             // is not handled by IME and should be handled by the application)
             if self.ivars().ime_allowed.get() {
                 let events_for_nsview = NSArray::from_slice(&[&*event]);
+                self.ivars().in_key_down.set(true);
                 unsafe { self.interpretKeyEvents(&events_for_nsview) };
+                self.ivars().in_key_down.set(false);
 
                 // If the text was committed we must treat the next keyboard event as IME related.
                 if self.ivars().ime_state.get() == ImeState::Committed {
@@ -847,6 +857,7 @@ impl WinitView {
             ime_allowed: Default::default(),
             forward_key_to_app: Default::default(),
             lead_surrogate: Default::default(),
+            in_key_down: Default::default(),
             marked_text: Default::default(),
             accepts_first_mouse,
             _ns_window: WeakId::new(&window.retain()),
@@ -932,6 +943,9 @@ impl WinitView {
 
         // Clear markedText
         *self.ivars().marked_text.borrow_mut() = NSMutableAttributedString::new();
+        // Noa patch: and a lead surrogate waiting for its trail, which would
+        // otherwise pair with a trail typed after the input moved on.
+        self.ivars().lead_surrogate.set(None);
 
         if self.ivars().ime_state.get() != ImeState::Disabled {
             self.ivars().ime_state.set(ImeState::Disabled);

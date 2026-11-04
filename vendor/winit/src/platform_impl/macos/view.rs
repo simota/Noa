@@ -417,6 +417,7 @@ declare_class!(
             // no lead, like Terminal.app (as Ghostty 1.4.0 does).
             let lead = self.ivars().lead_surrogate.take();
             let unit = (string.length() == 1).then(|| unsafe { string.characterAtIndex(0) });
+            let surrogate = matches!(unit, Some(0xD800..=0xDFFF));
             let string = match unit {
                 Some(unit @ 0xD800..=0xDBFF) => {
                     self.ivars().lead_surrogate.set(Some(unit));
@@ -427,6 +428,22 @@ declare_class!(
                     .unwrap_or_default(),
                 _ => string.to_string(),
             };
+
+            // Noa patch: without marked text, winit drops `insertText:` and
+            // sends the key's own `NSEvent` text instead, which never holds
+            // the paired character. Commit it here regardless, and mark the
+            // key as handled so it isn't also sent.
+            if surrogate && !unsafe { self.hasMarkedText() } {
+                if self.ivars().ime_state.get() == ImeState::Disabled {
+                    *self.ivars().input_source.borrow_mut() = self.current_input_source();
+                    self.queue_event(WindowEvent::Ime(Ime::Enabled));
+                }
+                if !string.is_empty() {
+                    self.queue_event(WindowEvent::Ime(Ime::Commit(string)));
+                }
+                self.ivars().ime_state.set(ImeState::Committed);
+                return;
+            }
 
             let is_control = string.chars().next().is_some_and(|c| c.is_control());
 

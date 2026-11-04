@@ -128,6 +128,106 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
     }
 }
 
+/// The description `command` is also searched by (Ghostty 1.4.0 searches
+/// each entry's description after its title). Where Ghostty has the same
+/// command, this is its description (`src/input/command.zig`).
+pub(crate) fn command_palette_description(command: AppCommand) -> &'static str {
+    match command {
+        AppCommand::About => "Show the version of Noa.",
+        AppCommand::Preferences | AppCommand::OpenSettings => "Open the settings.",
+        AppCommand::EditConfigFile => "Open the config file with the OS's default editor.",
+        AppCommand::ReloadConfig => "Reload the config file.",
+        AppCommand::Copy => "Copy the selected text to the clipboard.",
+        AppCommand::Paste => "Paste the contents of the main clipboard.",
+        AppCommand::AttachRemote => "Attach a pane to a session on a remote host.",
+        AppCommand::SendSelectionToPane => "Send the selected text to another pane.",
+        AppCommand::ExportScrollback => "Write the scrollback to a temporary file.",
+        AppCommand::DiscardRestoredHistory => {
+            "Drop the history restored from the last session, keeping the live terminal."
+        }
+        AppCommand::CheckpointScrollback => {
+            "Save the scrollback now instead of waiting for the next checkpoint."
+        }
+        AppCommand::PipeScrollbackToPager => "Open the scrollback in a pager.",
+        AppCommand::Terminal(TerminalAction::Clear) => "Clear the screen and scrollback.",
+        AppCommand::Terminal(TerminalAction::ClearScrollback) => {
+            "Clear the scrollback, keeping the screen."
+        }
+        AppCommand::Terminal(TerminalAction::SelectAll) => "Select all text on the screen.",
+        AppCommand::FontSize(FontSizeAction::Increase) => "Increase the font size by 1 point.",
+        AppCommand::FontSize(FontSizeAction::Decrease) => "Decrease the font size by 1 point.",
+        AppCommand::FontSize(FontSizeAction::Reset) => "Reset the font size to the default.",
+        AppCommand::Search(SearchAction::Find) => "Start a search if one isn't already active.",
+        AppCommand::Search(SearchAction::FindNext) => "Navigate to the next search result, if any.",
+        AppCommand::Search(SearchAction::FindPrevious) => {
+            "Navigate to the previous search result, if any."
+        }
+        AppCommand::Search(SearchAction::Clear) => {
+            "End the current search if any and hide any GUI elements."
+        }
+        AppCommand::ScrollViewport(ViewportScroll::LineUp) => "Scroll the screen up by a line.",
+        AppCommand::ScrollViewport(ViewportScroll::LineDown) => "Scroll the screen down by a line.",
+        AppCommand::ScrollViewport(ViewportScroll::PageUp) => "Scroll the screen up by a page.",
+        AppCommand::ScrollViewport(ViewportScroll::PageDown) => "Scroll the screen down by a page.",
+        AppCommand::ScrollViewport(ViewportScroll::Top) => "Scroll to the top of the screen.",
+        AppCommand::ScrollViewport(ViewportScroll::Bottom) => "Scroll to the bottom of the screen.",
+        AppCommand::ScrollViewport(ViewportScroll::PrevPrompt) => {
+            "Scroll to the previous shell prompt."
+        }
+        AppCommand::ScrollViewport(ViewportScroll::NextPrompt) => {
+            "Scroll to the next shell prompt."
+        }
+        AppCommand::CopyMode(CopyModeAction::CursorOnly) => {
+            "Move a cursor over the terminal's text with the keyboard to select and copy."
+        }
+        AppCommand::CopyMode(CopyModeAction::Extend(_)) => {
+            "Enter copy mode and extend the selection by one cell."
+        }
+        AppCommand::NewTab => "Open a new tab.",
+        AppCommand::NewWindow => "Open a new window.",
+        AppCommand::NewSplitLeft => "Split the terminal to the left.",
+        AppCommand::NewSplitRight => "Split the terminal to the right.",
+        AppCommand::NewSplitUp => "Split the terminal up.",
+        AppCommand::NewSplitDown => "Split the terminal down.",
+        AppCommand::FocusDirection(Direction::Left) => "Focus the split to the left, if it exists.",
+        AppCommand::FocusDirection(Direction::Right) => {
+            "Focus the split to the right, if it exists."
+        }
+        AppCommand::FocusDirection(Direction::Up) => "Focus the split above, if it exists.",
+        AppCommand::FocusDirection(Direction::Down) => "Focus the split below, if it exists.",
+        AppCommand::ResizeSplit(Direction::Left) => "Move the split's divider to the left.",
+        AppCommand::ResizeSplit(Direction::Right) => "Move the split's divider to the right.",
+        AppCommand::ResizeSplit(Direction::Up) => "Move the split's divider up.",
+        AppCommand::ResizeSplit(Direction::Down) => "Move the split's divider down.",
+        AppCommand::EqualizeSplits => "Equalize the size of all splits.",
+        AppCommand::ToggleSplitZoom => "Toggle the zoom state of the current split.",
+        AppCommand::ToggleTabOverview => "Toggle the session overview.",
+        AppCommand::ToggleFullscreen => "Toggle the fullscreen state of the current window.",
+        AppCommand::CloseTab => "Close the current split, or the tab when it has no splits.",
+        AppCommand::SelectTab(_) => "Go to the tab at this position.",
+        AppCommand::NextTab => "Go to the next tab.",
+        AppCommand::PrevTab => "Go to the previous tab.",
+        AppCommand::MoveTabToNewWindow => "Move the current tab to a new window.",
+        AppCommand::SetTabTitle => "Prompt for a new title for the current tab.",
+        AppCommand::CloseWindow => "Close the current window.",
+        AppCommand::Quit => "Quit the application.",
+        AppCommand::ToggleCommandPalette => "Toggle the command palette.",
+        AppCommand::ToggleQuickTerminal => "Show or hide the quick terminal.",
+        AppCommand::ToggleScratchTerminal => {
+            "Show or hide a disposable terminal over the current window."
+        }
+        AppCommand::ToggleSecureKeyboardEntry => "Toggle secure input mode.",
+        AppCommand::ToggleSidebar => "Show or hide the session list beside the terminal.",
+        AppCommand::ToggleAutoApprove => "Toggle agent CLI auto approval for the current tab.",
+        AppCommand::ToggleEmber => "Show or hide Ember, the pane list in the menu bar.",
+        AppCommand::OpenThemePicker => "Choose a color theme.",
+        AppCommand::ToggleProcessMonitor => "Show the processes running in each terminal.",
+        AppCommand::NextNotification => "Go to the next session with an unread notification.",
+        AppCommand::ComposePrompt => "Write a prompt for the current pane in an editor.",
+        AppCommand::ReadOutput => "Read the selection or the latest output in a separate view.",
+    }
+}
+
 /// The commands the palette lists, in registry declaration order (also the
 /// tie-break order for subsequence matches — v1 has no scoring).
 ///
@@ -227,28 +327,68 @@ pub(crate) struct PaletteMatch {
 }
 
 /// Rank every entry whose title matches `query` as a case-insensitive
-/// subsequence, best-first (B). An empty query keeps every entry in
-/// declaration order (score 0, no highlight). Ties keep declaration order via
-/// a *stable* sort (R-7), so e.g. `Find\u{2026}` stays above `Find Next`.
-/// O(N) over the registry — one pass, hand-written scoring (NFR-1).
+/// subsequence, best-first (B), then, below them, every other entry whose
+/// description matches as Ghostty 1.4.0 matches it ([`description_matches`]).
+/// An empty query keeps every entry in declaration order (score 0, no
+/// highlight). Ties keep declaration order via a *stable* sort (R-7), so
+/// e.g. `Find\u{2026}` stays above `Find Next`. O(N) over the registry — one
+/// pass, hand-written scoring (NFR-1).
 pub(crate) fn command_palette_matches(query: &str) -> Vec<PaletteMatch> {
-    let mut matches: Vec<PaletteMatch> = command_palette_entries()
+    let mut matches: Vec<(bool, PaletteMatch)> = command_palette_entries()
         .iter()
         .copied()
         .filter_map(|command| {
-            fuzzy_match(query, command_palette_title(command)).map(|(score, positions)| {
-                PaletteMatch {
+            if let Some((score, positions)) = fuzzy_match(query, command_palette_title(command)) {
+                let found = PaletteMatch {
                     command,
                     score,
                     positions,
-                }
+                };
+                return Some((true, found));
+            }
+            description_matches(query, command_palette_description(command)).then(|| {
+                let found = PaletteMatch {
+                    command,
+                    score: 0,
+                    positions: Vec::new(),
+                };
+                (false, found)
             })
         })
         .collect();
     // Stable: equal scores preserve the registry declaration order they were
     // collected in.
-    matches.sort_by_key(|b| std::cmp::Reverse(b.score));
-    matches
+    matches.sort_by_key(|(by_title, found)| std::cmp::Reverse((*by_title, found.score)));
+    matches.into_iter().map(|(_, found)| found).collect()
+}
+
+/// Whether `description` matches `query` the way Ghostty 1.4.0 matches it
+/// (`String.matchedIndices(for:)`): as a case-insensitive substring, or by
+/// the initials of its words.
+fn description_matches(query: &str, description: &str) -> bool {
+    !query.is_empty()
+        && (description.to_lowercase().contains(&query.to_lowercase())
+            || initials_match(query, &description.chars().collect::<Vec<_>>()).is_some())
+}
+
+/// The positions of the words in `text` whose first letters spell `query`
+/// in order, skipping words that don't (Ghostty 1.4.0's initials match:
+/// "nt" finds "New Tab"). `None` when the words run out first.
+fn initials_match(query: &str, text: &[char]) -> Option<Vec<usize>> {
+    let mut query = query.chars().peekable();
+    let mut positions = Vec::new();
+    let word_starts = (0..text.len())
+        .filter(|&i| !text[i].is_whitespace() && (i == 0 || text[i - 1].is_whitespace()));
+    for start in word_starts {
+        let Some(q) = query.peek() else {
+            break;
+        };
+        if q.to_lowercase().eq(text[start].to_lowercase()) {
+            positions.push(start);
+            query.next();
+        }
+    }
+    query.peek().is_none().then_some(positions)
 }
 
 /// Score `query` against `title` as a case-insensitive subsequence, returning
@@ -256,7 +396,10 @@ pub(crate) fn command_palette_matches(query: &str) -> Vec<PaletteMatch> {
 /// subsequence of `title`. An empty query yields `(0, [])`. Ranking favors, in
 /// descending weight: a prefix match, matches at word starts (after a space),
 /// and contiguous runs — hand-rolled to avoid a `fuzzy-matcher`/`nucleo`
-/// dependency (NFR-1). Greedy leftmost matching keeps it a single O(len) pass.
+/// dependency (NFR-1). Greedy leftmost matching keeps it a single O(len) pass;
+/// the initials of the title's words (Ghostty 1.4.0), when they spell
+/// `query` and score higher, win over it — greedy matching can land inside a
+/// word ("st" in "Select Tab").
 pub(crate) fn fuzzy_match(query: &str, title: &str) -> Option<(i32, Vec<usize>)> {
     let title_chars: Vec<char> = title.chars().collect();
     let mut positions = Vec::new();
@@ -275,7 +418,22 @@ pub(crate) fn fuzzy_match(query: &str, title: &str) -> Option<(i32, Vec<usize>)>
         // Empty query: every entry matches with no highlight, no ranking.
         return Some((0, positions));
     }
+    let greedy = (score_positions(&title_chars, &positions), positions);
+    Some(match initials_match(query, &title_chars) {
+        Some(initials) => {
+            let initials = (score_positions(&title_chars, &initials), initials);
+            if initials.0 > greedy.0 {
+                initials
+            } else {
+                greedy
+            }
+        }
+        None => greedy,
+    })
+}
 
+/// The rank of a match at `positions` in `title_chars`.
+fn score_positions(title_chars: &[char], positions: &[usize]) -> i32 {
     let mut score = 0i32;
     for (k, &pos) in positions.iter().enumerate() {
         score += 1; // base weight per matched char
@@ -291,7 +449,7 @@ pub(crate) fn fuzzy_match(query: &str, title: &str) -> Option<(i32, Vec<usize>)>
         score += 16; // whole query anchored at the title's front
     }
     score -= positions[0] as i32; // prefer an earlier first match
-    Some((score, positions))
+    score
 }
 
 /// The keybind hint shown for `command`, reverse-looked-up from the current
@@ -1072,5 +1230,51 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn initials_win_over_a_greedy_match_inside_a_word() {
+        // Greedy matching takes the `t` of "Select"; the initials take "Tab".
+        let (_, positions) = fuzzy_match("st", "Select Tab").unwrap();
+        assert_eq!(positions, vec![0, 7]);
+        assert_eq!(
+            initials_match("nt", &"New Tab".chars().collect::<Vec<_>>()),
+            Some(vec![0, 4])
+        );
+        assert_eq!(
+            initials_match("nx", &"New Tab".chars().collect::<Vec<_>>()),
+            None
+        );
+    }
+
+    #[test]
+    fn descriptions_match_below_every_title_match_without_highlight() {
+        let matches = command_palette_matches("prompt");
+        let at = |command| matches.iter().position(|m| m.command == command).unwrap();
+        let by_description = at(AppCommand::SetTabTitle);
+        assert!(at(AppCommand::ComposePrompt) < by_description);
+        assert!(at(AppCommand::ScrollViewport(ViewportScroll::NextPrompt)) < by_description);
+        assert!(matches[by_description].positions.is_empty());
+
+        // A description matches by substring or initials, never as a scattered subsequence.
+        assert!(description_matches(
+            "divider",
+            "Move the split's divider up."
+        ));
+        assert!(description_matches("mtsd", "Move the split's divider up."));
+        assert!(!description_matches("mvdr", "Move the split's divider up."));
+        let divider = command_palette_matches("divider");
+        assert_eq!(divider.len(), 4);
+        assert_eq!(divider[0].command, AppCommand::ResizeSplit(Direction::Left));
+    }
+
+    #[test]
+    fn every_command_has_a_description() {
+        for command in all_commands() {
+            assert!(
+                !command_palette_description(command).is_empty(),
+                "{command:?}"
+            );
+        }
     }
 }

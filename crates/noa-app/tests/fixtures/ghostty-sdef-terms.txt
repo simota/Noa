@@ -14,6 +14,8 @@ id=ID
 name=pnam
 index=pidx
 selected=GTsl
+# name override: added in Ghostty 1.4.0 (tab and terminal).
+name override=GTno
 focused terminal=GTfT
 terminal=Gtrm
 id=ID  

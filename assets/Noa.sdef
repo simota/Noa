@@ -94,6 +94,7 @@
         <class name="tab" code="cTab" plural="tabs" description="A native tab within a window.">
             <property name="id" code="ID  " type="integer" access="r" description="A stable tab id."/>
             <property name="name" code="pnam" type="text" access="r" description="The tab's name."/>
+            <property name="name override" code="GTno" type="text" access="rw" description="The tab's manual title. Set to an empty string to clear."/>
             <property name="index" code="pidx" type="integer" access="r" description="The tab's position."/>
             <property name="selected" code="selc" type="boolean" access="r" description="Is this the selected tab of its window?"/>
             <property name="focused terminal" code="GTfT" type="terminal" access="r" description="The tab's focused terminal."/>
@@ -103,6 +104,7 @@
         <class name="terminal" code="cTrm" plural="terminals" description="A terminal split pane within a tab.">
             <property name="id" code="ID  " type="integer" access="r" description="A stable terminal id."/>
             <property name="name" code="pnam" type="text" access="r" description="The terminal's name."/>
+            <property name="name override" code="GTno" type="text" access="rw" description="A title replacing the terminal's own. Set to an empty string to clear."/>
             <property name="working directory" code="pwd " type="text" access="r" description="The shell's working directory."/>
             <property name="pid" code="Gpid" type="integer" access="r" description="The process id of the terminal's direct child (usually the shell)."/>
             <property name="tty" code="Gtty" type="text" access="r" description="The terminal's tty device path."/>

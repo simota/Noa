@@ -1235,6 +1235,10 @@ pub(super) struct Surface {
     /// for remote panes or when the platform reports nothing.
     pub(super) child_pid: Option<u32>,
     pub(super) tty_name: Option<String>,
+    /// AppleScript `name override` of this terminal: replaces its title,
+    /// and so its tab's while it is focused and the tab has no title of its
+    /// own (Ghostty's surface title override).
+    pub(super) title_override: Option<String>,
     /// AppleScript `wait after command` (agent-automation REQ-005): keep the
     /// pane open after its process exits, until the next key press.
     pub(super) wait_after_command: bool,
@@ -1401,6 +1405,7 @@ impl Surface {
             pending_reveal_snapshot: None,
             child_pid: None,
             tty_name: None,
+            title_override: None,
             wait_after_command: false,
             exited: false,
             child_command: None,

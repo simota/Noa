@@ -8,8 +8,8 @@ use std::hash::{Hash, Hasher};
 
 use super::*;
 use crate::macos_applescript::{
-    AppStateSnapshot, Registration, ScriptAction, ScriptMouse, ScriptSplit, SurfaceConfig,
-    TabSnapshot, TerminalSnapshot, WindowSnapshot, merge_pending, terminal_name,
+    AppStateSnapshot, NameOverrideTarget, Registration, ScriptAction, ScriptMouse, ScriptSplit,
+    SurfaceConfig, TabSnapshot, TerminalSnapshot, WindowSnapshot, merge_pending, terminal_name,
 };
 
 /// Coarse refresh interval for the AppleScript snapshot's lock-bearing fields
@@ -258,10 +258,11 @@ impl App {
                         let terminal = surface.terminal.lock();
                         (terminal.title.clone(), terminal.cwd.clone())
                     };
-                    let name = terminal_name(&title, cwd.as_deref());
                     Some(TerminalSnapshot {
                         id: pane.get(),
-                        name,
+                        name: String::new(),
+                        name_override: surface.title_override.clone(),
+                        base_name: terminal_name(&title, cwd.as_deref()),
                         selected: state.focused_pane == *pane,
                         cwd,
                         pid: surface.child_pid,
@@ -272,33 +273,19 @@ impl App {
                 })
                 .collect();
 
-            let tab_name = state
-                .title_override
-                .clone()
-                .unwrap_or_else(|| state.title.clone());
+            let base_name = self.resolved_window_title(*window_id, None);
             // A tab is `selected` when it is its window's front native tab.
             let selected = crate::macos_window::native_tab_is_selected(&state.window)
                 .unwrap_or(self.focused == Some(*window_id));
             windows[win_pos].tabs.push(TabSnapshot {
                 id: state.tab_id,
-                name: tab_name,
+                name: String::new(),
+                name_override: state.title_override.clone(),
+                base_name: base_name.unwrap_or_else(|| state.title.clone()),
                 selected,
                 terminals,
                 pending: false,
             });
-        }
-
-        // A window's name mirrors its selected tab's name (Ghostty shows the
-        // active tab's title in the window's AppleScript name).
-        for window in &mut windows {
-            if let Some(tab) = window
-                .tabs
-                .iter()
-                .find(|tab| tab.selected)
-                .or_else(|| window.tabs.first())
-            {
-                window.name = tab.name.clone();
-            }
         }
 
         let mut snapshot = AppStateSnapshot {
@@ -337,7 +324,11 @@ impl App {
             state.focused_pane.get().hash(&mut hasher);
             state.title_override.hash(&mut hasher);
             state.title.hash(&mut hasher);
-            let mut panes: Vec<u64> = state.surfaces.keys().map(|pane| pane.get()).collect();
+            let mut panes: Vec<(u64, Option<&String>)> = state
+                .surfaces
+                .iter()
+                .map(|(pane, surface)| (pane.get(), surface.title_override.as_ref()))
+                .collect();
             panes.sort_unstable();
             panes.hash(&mut hasher);
         }
@@ -367,6 +358,45 @@ impl App {
     }
 
     /// The live window holding `pane`.
+    /// `set name override`: a tab's manual title (as the Set Tab Title
+    /// prompt sets it, persisted the same way), or a terminal's own title.
+    fn script_set_name_override(&mut self, target: NameOverrideTarget, title: Option<String>) {
+        let window_id = match target {
+            NameOverrideTarget::Tab(tab) => self
+                .windows
+                .iter()
+                .find(|(_, state)| state.tab_id == tab)
+                .map(|(id, _)| *id),
+            NameOverrideTarget::Terminal(pane) => self.script_pane_window(PaneId::new(pane)),
+        };
+        let Some(state) = window_id.and_then(|id| self.windows.get_mut(&id)) else {
+            return;
+        };
+        match target {
+            NameOverrideTarget::Tab(_) => state.title_override = title,
+            NameOverrideTarget::Terminal(pane) => {
+                let Some(surface) = state.surfaces.get_mut(&PaneId::new(pane)) else {
+                    return;
+                };
+                surface.title_override = title;
+            }
+        }
+        state.window.request_redraw();
+        let focused_pane = state.focused_pane;
+        // A hidden tab never redraws, which is what otherwise applies a
+        // title change.
+        if let Some(window_id) = window_id {
+            self.refresh_window_title(window_id);
+            self.mark_overview_label_dirty(OverviewTileId::new(window_id, focused_pane));
+        }
+        // The front tab's sidebar lists this tab's title too.
+        self.request_sidebar_redraw();
+        if matches!(target, NameOverrideTarget::Tab(_)) {
+            self.persist_session();
+        }
+        self.request_overview_redraw();
+    }
+
     fn script_pane_window(&self, pane: PaneId) -> Option<WindowId> {
         self.windows
             .iter()
@@ -466,6 +496,9 @@ impl App {
             } => self.script_send_key(event_loop, PaneId::new(pane), key, mods, pressed),
             ScriptAction::SendMouse { pane, mods, event } => {
                 self.script_send_mouse(event_loop, PaneId::new(pane), mods, event)
+            }
+            ScriptAction::SetNameOverride { target, title } => {
+                self.script_set_name_override(target, title)
             }
         }
     }

@@ -317,42 +317,21 @@ impl App {
         if self.is_scratch_terminal_window(window_id) {
             return;
         }
-        let focused_process = self.focused_pane_process(window_id);
-        let Some(state) = self.windows.get_mut(&window_id) else {
-            return;
-        };
         // A user-set override wins over the focused pane's shell title
         // (tab-title REQ-TTL-2/5); the shell/dynamic path only applies while
         // there is no override.
-        let title_override = state.title_override.clone();
-        let Some(surface) = state.surfaces.get(&state.focused_pane) else {
+        let Some(title) = self.windows.get(&window_id).and_then(|state| {
+            let surface = state.surfaces.get(&state.focused_pane)?;
+            let title_override = state
+                .title_override
+                .clone()
+                .or_else(|| surface.title_override.clone());
+            self.resolved_window_title(window_id, title_override.as_deref())
+        }) else {
             return;
         };
-        let title = match &surface.transport {
-            SurfaceTransport::Remote(remote) => {
-                // A remote pane's cwd/process aren't tracked locally; the
-                // remote `tab_title` helper carries its own fallback, so the
-                // dynamic path stays out of it (pass `None`).
-                let remote_state = remote.state.lock().clone();
-                let term = surface.terminal.lock();
-                let remote_title =
-                    crate::remote_attach::tab_title(&remote.identity, &remote_state, &term.title);
-                resolved_tab_title(title_override.as_deref(), &remote_title, None, None, None)
-            }
-            SurfaceTransport::Local(_) => {
-                let term = surface.terminal.lock();
-                // Drop a local `user@host:` prefix from the shell OSC title
-                // (noise for a local session); a remote host keeps its identity
-                // because its host won't match the local machine. Applied to the
-                // shell title only — not the override or dynamic fallback.
-                resolved_tab_title(
-                    title_override.as_deref(),
-                    strip_local_shell_title(&term.title),
-                    term.title_cwd.as_deref(),
-                    term.cwd.as_deref(),
-                    focused_process.as_deref(),
-                )
-            }
+        let Some(state) = self.windows.get_mut(&window_id) else {
+            return;
         };
         if let Some(title) = tab_title_update(&state.title, &title) {
             // A tab behind another in a shared OS window (`linux_tabs`) owns
@@ -371,6 +350,44 @@ impl App {
             crate::macos_window::set_native_tab_title(&state.window, &title);
             state.title = title;
         }
+    }
+
+    /// The title `window_id`'s tab shows with `title_override`, or, with
+    /// none, the focused pane's shell title or its dynamic fallback.
+    pub(super) fn resolved_window_title(
+        &self,
+        window_id: WindowId,
+        title_override: Option<&str>,
+    ) -> Option<String> {
+        let focused_process = self.focused_pane_process(window_id);
+        let state = self.windows.get(&window_id)?;
+        let surface = state.surfaces.get(&state.focused_pane)?;
+        Some(match &surface.transport {
+            SurfaceTransport::Remote(remote) => {
+                // A remote pane's cwd/process aren't tracked locally; the
+                // remote `tab_title` helper carries its own fallback, so the
+                // dynamic path stays out of it (pass `None`).
+                let remote_state = remote.state.lock().clone();
+                let term = surface.terminal.lock();
+                let remote_title =
+                    crate::remote_attach::tab_title(&remote.identity, &remote_state, &term.title);
+                resolved_tab_title(title_override, &remote_title, None, None, None)
+            }
+            SurfaceTransport::Local(_) => {
+                let term = surface.terminal.lock();
+                // Drop a local `user@host:` prefix from the shell OSC title
+                // (noise for a local session); a remote host keeps its identity
+                // because its host won't match the local machine. Applied to the
+                // shell title only — not the override or dynamic fallback.
+                resolved_tab_title(
+                    title_override,
+                    strip_local_shell_title(&term.title),
+                    term.title_cwd.as_deref(),
+                    term.cwd.as_deref(),
+                    focused_process.as_deref(),
+                )
+            }
+        })
     }
 
     pub(super) fn redraw(&mut self, window_id: WindowId) {

@@ -45,7 +45,7 @@ A from-scratch DFA parser plus a `Handler` trait separating parsing from state.
 
 - **Idle Ember** — opt in with `ember-idle-after` (default off): a silent, display-only companion in the focused main pane, with fade-in/out, a 4.8-second play, and a question emote. Gentle gestures run every 20 seconds for up to 10 minutes of resting; macOS Reduce Motion uses a still pose without gestures.
 - **Command palette** — fuzzy (subsequence) search to run actions
-- **Search prompt** — incremental search UI
+- **Search prompt** — incremental search UI. On macOS the query is shared through the system find pasteboard, like Ghostty 1.4.0: a new prompt starts from the text another app's find bar left there, and each edit publishes the query
 - **Theme & settings overlay** — a theme/settings editor with live preview opened from `Settings…` (⌘,), writes back to config
 - **Sidebar (session list)** — per-window session cards, process badges, inline rename, OSC 9;4 determinate/indeterminate progress
 - **Agent attention** — agent-process classification, bell-to-attention escalation, categorical status rails, one-shot arrival emphasis, Dock attention

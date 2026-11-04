@@ -71,6 +71,10 @@ pub struct TabSnapshot {
     /// Stable id: the native tab's `TabId`.
     pub id: u64,
     pub name: String,
+    /// The tab's `name override`: its manual title, if any.
+    pub name_override: Option<String>,
+    /// The tab's name with no override: its focused pane's shell title.
+    pub base_name: String,
     /// Whether this is the selected tab of its window.
     pub selected: bool,
     pub terminals: Vec<TerminalSnapshot>,
@@ -82,6 +86,10 @@ pub struct TerminalSnapshot {
     /// Stable id: the split leaf's `PaneId`.
     pub id: u64,
     pub name: String,
+    /// The terminal's `name override`: a title set by a script, if any.
+    pub name_override: Option<String>,
+    /// The terminal's name with no override ([`terminal_name`]).
+    pub base_name: String,
     /// Whether this is the focused pane within its tab.
     pub selected: bool,
     /// The shell's OSC-7-reported working directory, if any.
@@ -235,6 +243,8 @@ pub(crate) fn merge_pending(snapshot: &mut AppStateSnapshot, pending: &mut Pendi
         win.tabs.push(TabSnapshot {
             id: tab,
             name: String::new(),
+            name_override: None,
+            base_name: String::new(),
             selected,
             terminals: Vec::new(),
             pending: true,
@@ -266,6 +276,8 @@ pub(crate) fn merge_pending(snapshot: &mut AppStateSnapshot, pending: &mut Pendi
         owner.terminals.push(TerminalSnapshot {
             id: pane,
             name: String::new(),
+            name_override: None,
+            base_name: String::new(),
             selected,
             cwd: None,
             pid: None,
@@ -378,6 +390,85 @@ pub(crate) enum ScriptAction {
         mods: ModifiersState,
         event: ScriptMouse,
     },
+    /// `set name override`; `None` clears it.
+    SetNameOverride {
+        target: NameOverrideTarget,
+        title: Option<String>,
+    },
+}
+
+/// What a `set name override` renames: a tab (its manual title) or a
+/// terminal (its own title, which its tab shows while it is focused).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NameOverrideTarget {
+    Tab(u64),
+    Terminal(u64),
+}
+
+/// Apply `set name override of <target> to <title>` to `snapshot` at once,
+/// so a read in the same script sees it before the main thread runs the
+/// returned actions; an empty title clears the override, as in Ghostty.
+/// `None` when `target` (or an item of a list) is not a tab or terminal.
+pub(crate) fn set_name_override(
+    snapshot: &mut AppStateSnapshot,
+    target: &Resolved,
+    title: &str,
+) -> Option<Vec<NameOverrideTarget>> {
+    let name_override = (!title.is_empty()).then(|| title.to_string());
+    let (w, target) = match *target {
+        Resolved::List(ref items) => {
+            let mut targets = Vec::new();
+            for item in items {
+                targets.extend(set_name_override(snapshot, item, title)?);
+            }
+            return Some(targets);
+        }
+        Resolved::Tab(w, t) => {
+            let tab = &mut snapshot.windows[w].tabs[t];
+            tab.name_override = name_override;
+            (w, NameOverrideTarget::Tab(tab.id))
+        }
+        Resolved::Terminal(w, t, k) => {
+            let term = &mut snapshot.windows[w].tabs[t].terminals[k];
+            term.name_override = name_override;
+            (w, NameOverrideTarget::Terminal(term.id))
+        }
+        Resolved::App | Resolved::Window(_) => return None,
+    };
+    derive_names(&mut snapshot.windows[w]);
+    Some(vec![target])
+}
+
+/// Fill in the names `window` derives from its overrides: a terminal's
+/// override or its own name; a tab's override, else its focused terminal's
+/// override, else its own name (as Ghostty's tab shows its focused
+/// surface's title); the window's from its selected tab.
+pub(crate) fn derive_names(window: &mut WindowSnapshot) {
+    for tab in &mut window.tabs {
+        for term in &mut tab.terminals {
+            term.name = term.name_override.clone().unwrap_or(term.base_name.clone());
+        }
+        let focused = tab
+            .terminals
+            .iter()
+            .find(|term| term.selected)
+            .and_then(|term| term.name_override.clone());
+        tab.name = tab
+            .name_override
+            .clone()
+            .or(focused)
+            .unwrap_or(tab.base_name.clone());
+    }
+    // A window's name mirrors its selected tab's name (Ghostty shows the
+    // active tab's title in the window's AppleScript name).
+    if let Some(tab) = window
+        .tabs
+        .iter()
+        .find(|tab| tab.selected)
+        .or_else(|| window.tabs.first())
+    {
+        window.name = tab.name.clone();
+    }
 }
 
 /// Everything the AE handler shares with the main thread.
@@ -470,6 +561,7 @@ pub(crate) mod codes {
 
     // Standard event ids (handled by us).
     pub const EVT_GET_DATA: &str = "getd";
+    pub const EVT_SET_DATA: &str = "setd";
     pub const EVT_ACTIVATE: &str = "actv";
     pub const EVT_CLOSE: &str = "clos";
     pub const EVT_COUNT: &str = "cnte";
@@ -498,6 +590,7 @@ pub(crate) mod codes {
     pub const PROP_FOCUSED_TERMINAL: &str = "GTfT";
     pub const PROP_PID: &str = "Gpid";
     pub const PROP_TTY: &str = "Gtty";
+    pub const PROP_NAME_OVERRIDE: &str = "GTno";
     pub const PROP_CONTENTS: &str = "NEct";
     pub const PROP_SELECTION: &str = "NEsl";
     pub const PROP_SCROLLBACK: &str = "NEsb";
@@ -589,6 +682,7 @@ pub(crate) mod codes {
         CMD_SEND_MOUSE_POSITION,
         CMD_SEND_MOUSE_SCROLL,
         EVT_GET_DATA,
+        EVT_SET_DATA,
         EVT_ACTIVATE,
         EVT_CLOSE,
         EVT_COUNT,
@@ -611,6 +705,7 @@ pub(crate) mod codes {
         PROP_FOCUSED_TERMINAL,
         PROP_PID,
         PROP_TTY,
+        PROP_NAME_OVERRIDE,
         PROP_CONTENTS,
         PROP_SELECTION,
         PROP_SCROLLBACK,
@@ -680,6 +775,8 @@ pub(crate) mod errors {
     pub const NO_SUCH_OBJECT: i32 = -1728;
     /// `errAEParamMissed` — a required parameter was missing/malformed.
     pub const PARAM_MISSED: i32 = -1715;
+    /// `errAEWriteDenied` — `set` of a read-only property.
+    pub const WRITE_DENIED: i32 = -10003;
 }
 
 /// The closed set of `perform action` names (spec L2 table): each maps to an
@@ -970,8 +1067,8 @@ mod imp {
         AppStateSnapshot, Reference, Resolved, ScriptAction, ScriptMouse, ScriptShared,
         ScriptSplit, Selector, SurfaceConfig, UserEvent, codes, command_for_perform_action, errors,
         focused_pane, fourcc, is_object_property, merge_pending, object_id, one_based_index,
-        parse_env_assignments, resolve, tab_focus_pane, tab_of_pane, terminal_contents,
-        terminal_scrollback, terminal_selection,
+        parse_env_assignments, resolve, set_name_override, tab_focus_pane, tab_of_pane,
+        terminal_contents, terminal_scrollback, terminal_selection,
     };
 
     /// `keyDirectObject` — the Apple Event parameter carrying a command's direct
@@ -980,6 +1077,8 @@ mod imp {
     /// `keyErrorNumber` — the reply parameter an AE handler sets to report an
     /// error (`errn`).
     const KEY_ERROR_NUMBER: u32 = fourcc(b"errn");
+    /// `keyAEData` — the value parameter of a `set` (`data`).
+    const KEY_AE_DATA: u32 = fourcc(b"data");
 
     // Object-specifier record keywords (`AEDataModel.h`).
     const KEY_AE_DESIRED_CLASS: u32 = fourcc(b"want");
@@ -1071,6 +1170,8 @@ mod imp {
             if class == fourcc(codes::CLASS_CORE.as_bytes()) {
                 return if is(codes::EVT_GET_DATA) {
                     self.handle_get(event).map(Some)
+                } else if is(codes::EVT_SET_DATA) {
+                    self.handle_set(event).map(|()| None)
                 } else if is(codes::EVT_CLOSE) {
                     self.close(event).map(|()| None)
                 } else if is(codes::EVT_COUNT) {
@@ -1184,6 +1285,35 @@ mod imp {
                     Ok(object_desc(&resolved, &snapshot))
                 }
             }
+        }
+
+        /// Answer a `set`. Only `name override` (of a tab or terminal, or a
+        /// list of them) is writable.
+        fn handle_set(&self, event: &NSAppleEventDescriptor) -> Result<(), i32> {
+            let spec = direct_object(event).ok_or(errors::PARAM_MISSED)?;
+            let Reference::Property { code, container } =
+                parse_specifier(&spec).ok_or(errors::NO_SUCH_OBJECT)?
+            else {
+                return Err(errors::WRITE_DENIED);
+            };
+            if code != fourcc(codes::PROP_NAME_OVERRIDE.as_bytes()) {
+                return Err(errors::WRITE_DENIED);
+            }
+            let value = param(event, KEY_AE_DATA).ok_or(errors::PARAM_MISSED)?;
+            let title = text_value(&value).ok_or(errors::COERCION_FAIL)?;
+            let targets = {
+                let mut snapshot = self.shared().snapshot.lock();
+                let container = resolve(&container, &snapshot).ok_or(errors::NO_SUCH_OBJECT)?;
+                set_name_override(&mut snapshot, &container, &title)
+                    .ok_or(errors::NO_SUCH_OBJECT)?
+            };
+            for target in targets {
+                self.queue(ScriptAction::SetNameOverride {
+                    target,
+                    title: (!title.is_empty()).then(|| title.clone()),
+                });
+            }
+            Ok(())
         }
 
         fn count(
@@ -1662,6 +1792,7 @@ mod imp {
         let ghostty = code(codes::CLASS_GHOSTTY);
         let mut events = vec![
             (core, code(codes::EVT_GET_DATA)),
+            (core, code(codes::EVT_SET_DATA)),
             (core, code(codes::EVT_CLOSE)),
             (core, code(codes::EVT_COUNT)),
             (core, code(codes::EVT_EXISTS)),
@@ -1944,6 +2075,8 @@ mod imp {
                     Ok(int_desc(t as u64 + 1))
                 } else if is(codes::PROP_SELECTED) {
                     Ok(bool_desc(tab.selected))
+                } else if is(codes::PROP_NAME_OVERRIDE) {
+                    Ok(string_desc(tab.name_override.as_deref().unwrap_or("")))
                 } else {
                     Err(errors::NO_SUCH_OBJECT)
                 }
@@ -1954,6 +2087,8 @@ mod imp {
                     Ok(string_desc(&term.name))
                 } else if is(codes::PROP_ID) {
                     Ok(int64_desc(term.id))
+                } else if is(codes::PROP_NAME_OVERRIDE) {
+                    Ok(string_desc(term.name_override.as_deref().unwrap_or("")))
                 } else if is(codes::PROP_WORKING_DIRECTORY) {
                     Ok(string_desc(term.cwd.as_deref().unwrap_or("")))
                 } else if is(codes::PROP_PID) {
@@ -2587,6 +2722,8 @@ mod tests {
         TerminalSnapshot {
             id,
             name: String::new(),
+            name_override: None,
+            base_name: String::new(),
             selected,
             cwd: None,
             pid: None,
@@ -2600,6 +2737,8 @@ mod tests {
         TabSnapshot {
             id,
             name: String::new(),
+            name_override: None,
+            base_name: String::new(),
             selected,
             terminals,
             pending: false,
@@ -3159,5 +3298,58 @@ mod tests {
         );
         assert_eq!(parse_env_assignments(&["NOEQ".into()]), None);
         assert_eq!(parse_env_assignments(&["=v".into()]), None);
+    }
+
+    #[test]
+    fn setting_a_name_override_shows_at_once_and_an_empty_one_clears_it() {
+        let mut snapshot = fixture();
+        snapshot.windows[0].tabs[1].base_name = "zsh".into();
+        snapshot.windows[0].tabs[1].terminals[1].base_name = "vim".into();
+        derive_names(&mut snapshot.windows[0]);
+        let names = |snapshot: &AppStateSnapshot| {
+            let window = &snapshot.windows[0];
+            let tab = &window.tabs[1];
+            (
+                window.name.clone(),
+                tab.name.clone(),
+                tab.terminals[1].name.clone(),
+            )
+        };
+        let owned = |a: &str, b: &str, c: &str| (a.to_string(), b.to_string(), c.to_string());
+        assert_eq!(names(&snapshot), owned("zsh", "zsh", "vim"));
+
+        // The focused terminal's override shows in its tab and window too.
+        let all = Resolved::List(vec![
+            Resolved::Terminal(0, 1, 0),
+            Resolved::Terminal(0, 1, 1),
+        ]);
+        assert_eq!(
+            set_name_override(&mut snapshot, &all, "logs"),
+            Some(vec![
+                NameOverrideTarget::Terminal(100),
+                NameOverrideTarget::Terminal(101),
+            ])
+        );
+        assert_eq!(names(&snapshot), owned("logs", "logs", "logs"));
+
+        let targets = set_name_override(&mut snapshot, &Resolved::Tab(0, 1), "build");
+        assert_eq!(targets, Some(vec![NameOverrideTarget::Tab(11)]));
+        assert_eq!(
+            snapshot.windows[0].tabs[1].name_override.as_deref(),
+            Some("build")
+        );
+        assert_eq!(names(&snapshot), owned("build", "build", "logs"));
+
+        // Clearing goes back to the names without the override.
+        set_name_override(&mut snapshot, &Resolved::Tab(0, 1), "");
+        assert_eq!(snapshot.windows[0].tabs[1].name_override, None);
+        assert_eq!(names(&snapshot), owned("logs", "logs", "logs"));
+        set_name_override(&mut snapshot, &Resolved::Terminal(0, 1, 1), "");
+        assert_eq!(names(&snapshot), owned("zsh", "zsh", "vim"));
+
+        assert_eq!(
+            set_name_override(&mut snapshot, &Resolved::Window(0), "x"),
+            None
+        );
     }
 }

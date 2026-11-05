@@ -924,7 +924,7 @@ fn move_tab_action_names_are_accepted() {
     assert_eq!(AppCommand::MoveTab(1).action_name(), "tab.move-right");
     // Any other amount keeps its amount in the name `+list-keybinds` prints,
     // so the line can be written back into a config.
-    for amount in [-2, 0, 3] {
+    for amount in [-2, 0, 3, isize::MIN] {
         let command = AppCommand::MoveTab(amount);
         assert_eq!(command.action_name(), format!("tab.move:{amount}"));
         assert_eq!(

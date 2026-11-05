@@ -395,7 +395,7 @@ impl AppCommand {
     /// it back.
     pub fn action_name(self) -> std::borrow::Cow<'static, str> {
         if let Self::MoveTab(amount) = self
-            && amount.abs() != 1
+            && !matches!(amount, -1 | 1)
         {
             return format!("tab.move:{amount}").into();
         }

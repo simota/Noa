@@ -104,6 +104,8 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::NextTab => "Next Tab",
         AppCommand::PrevTab => "Previous Tab",
         AppCommand::MoveTabToNewWindow => "Move Tab to New Window",
+        AppCommand::MoveTab(amount) if amount < 0 => "Move Tab Left",
+        AppCommand::MoveTab(_) => "Move Tab Right",
         AppCommand::SetTabTitle => "Set Tab Title\u{2026}",
         AppCommand::CloseWindow => "Close Window",
         AppCommand::Quit => "Quit Noa",
@@ -208,6 +210,8 @@ pub(crate) fn command_palette_description(command: AppCommand) -> &'static str {
         AppCommand::NextTab => "Go to the next tab.",
         AppCommand::PrevTab => "Go to the previous tab.",
         AppCommand::MoveTabToNewWindow => "Move the current tab to a new window.",
+        AppCommand::MoveTab(amount) if amount < 0 => "Move the current tab to the left.",
+        AppCommand::MoveTab(_) => "Move the current tab to the right.",
         AppCommand::SetTabTitle => "Prompt for a new title for the current tab.",
         AppCommand::CloseWindow => "Close the current window.",
         AppCommand::Quit => "Quit the application.",
@@ -307,6 +311,8 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::CloseTab,
         AppCommand::NextTab,
         AppCommand::PrevTab,
+        AppCommand::MoveTab(-1),
+        AppCommand::MoveTab(1),
         // Moving a tab out is macOS-only for now (native AppKit tabs).
         #[cfg(target_os = "macos")]
         AppCommand::MoveTabToNewWindow,
@@ -552,6 +558,7 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         | AppCommand::NextTab
         | AppCommand::PrevTab
         | AppCommand::MoveTabToNewWindow
+        | AppCommand::MoveTab(_)
         | AppCommand::SelectTab(_)
         | AppCommand::ToggleTabOverview
         | AppCommand::NextNotification => CommandCategory::Tabs,
@@ -878,6 +885,8 @@ mod tests {
             AppCommand::NextTab,
             AppCommand::PrevTab,
             AppCommand::MoveTabToNewWindow,
+            AppCommand::MoveTab(-1),
+            AppCommand::MoveTab(1),
             AppCommand::SetTabTitle,
             AppCommand::CloseWindow,
             AppCommand::Quit,

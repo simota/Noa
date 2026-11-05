@@ -131,6 +131,7 @@ Every binding can be changed with `keybind = …` (see
 | `ctrl+shift+q` | Quit |
 | `alt+1` … `alt+9` | Select tab 1–9 |
 | `ctrl+tab` / `ctrl+shift+tab`, `ctrl+pagedown` / `ctrl+pageup` | Next / previous tab |
+| `ctrl+shift+pageup` / `ctrl+shift+pagedown` | Move the tab left / right |
 | `ctrl+shift+c` / `ctrl+shift+v` (also `ctrl+insert` / `shift+insert`) | Copy / paste |
 | `ctrl+shift+a` | Select all |
 | `ctrl+shift+k` | Clear |

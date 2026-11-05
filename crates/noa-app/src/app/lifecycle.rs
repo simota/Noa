@@ -875,6 +875,65 @@ impl App {
         log::warn!("move_tab_to_new_window is not supported on this platform yet");
     }
 
+    /// Ghostty 1.4.0's `move_tab:amount`: move the focused tab `amount`
+    /// places along its window's tab bar. macOS moves the native tab and
+    /// stops at the ends; elsewhere the tab bar follows `window_order`, and a
+    /// move past an end wraps around.
+    pub(super) fn move_tab(&mut self, amount: isize) {
+        let Some(window_id) = self.focused else {
+            return;
+        };
+        let Some(group) = self.windows.get(&window_id).map(|state| state.group) else {
+            return;
+        };
+        let mut tabs = ids_in_group(
+            &self.window_order,
+            |id| self.windows.get(&id).map(|state| state.group),
+            group,
+        );
+        #[cfg(target_os = "macos")]
+        {
+            // The native order is the one on screen: a tab dragged in the
+            // tab bar moves there without telling Noa.
+            let Some(state) = self.windows.get(&window_id) else {
+                return;
+            };
+            let Some((from, count)) = crate::macos_window::native_tab_position(&state.window)
+            else {
+                return;
+            };
+            let to = moved_tab_index(from, count, amount, false);
+            if !crate::macos_window::move_native_tab(&state.window, to) {
+                return;
+            }
+            tabs.sort_by_key(|id| {
+                self.windows
+                    .get(id)
+                    .and_then(|state| crate::macos_window::native_tab_position(&state.window))
+                    .map_or(usize::MAX, |(index, _)| index)
+            });
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let Some(from) = tabs.iter().position(|id| *id == window_id) else {
+                return;
+            };
+            let to = moved_tab_index(from, tabs.len(), amount, true);
+            if to == from {
+                return;
+            }
+            let moved = tabs.remove(from);
+            tabs.insert(to, moved);
+        }
+        reorder_group(&mut self.window_order, &tabs);
+        // Tab order shows in the tab bar, the sidebar's cards and the
+        // overview, and is what the session restores.
+        self.request_window_redraw(window_id);
+        self.request_sidebar_redraw();
+        self.request_overview_redraw();
+        self.persist_session();
+    }
+
     /// The macOS `tabbingIdentifier` for a logical window. Per-process
     /// (`std::process::id()`) so two noa instances never merge their tabs, and
     /// per-group so each window keeps a separate tab bar.

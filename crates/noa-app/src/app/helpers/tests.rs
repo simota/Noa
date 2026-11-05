@@ -1196,6 +1196,38 @@ fn tab_insert_index_falls_back_to_end_without_anchor() {
 }
 
 #[test]
+fn move_tab_stops_at_the_ends_without_wrap() {
+    // Ghostty's macOS `move_tab`: clamp to the first/last tab.
+    assert_eq!(moved_tab_index(2, 5, -1, false), 1);
+    assert_eq!(moved_tab_index(2, 5, 1, false), 3);
+    assert_eq!(moved_tab_index(1, 5, -3, false), 0);
+    assert_eq!(moved_tab_index(3, 5, 9, false), 4);
+    assert_eq!(moved_tab_index(0, 5, isize::MIN, false), 0);
+    assert_eq!(moved_tab_index(4, 5, isize::MAX, false), 4);
+}
+
+#[test]
+fn move_tab_wraps_past_the_ends_with_wrap() {
+    // Ghostty's GTK `move_tab`: past an end, continue from the other.
+    assert_eq!(moved_tab_index(0, 5, -1, true), 4);
+    assert_eq!(moved_tab_index(4, 5, 1, true), 0);
+    assert_eq!(moved_tab_index(1, 5, 2, true), 3);
+    assert_eq!(moved_tab_index(3, 5, 7, true), 0);
+    assert_eq!(moved_tab_index(0, 1, 1, true), 0);
+    // isize::MIN = -(5 * 1844674407370955161 + 3): three places back.
+    assert_eq!(moved_tab_index(2, 5, isize::MIN, true), 4);
+}
+
+#[test]
+fn reorder_group_rewrites_only_the_groups_slots() {
+    // Tabs 1,3,5 belong to one window, 2,4 to another; moving 5 first in
+    // its window leaves the other window's tabs where they were.
+    let mut order = [1_u8, 2, 3, 4, 5];
+    reorder_group(&mut order, &[5, 1, 3]);
+    assert_eq!(order, [5, 2, 1, 4, 3]);
+}
+
+#[test]
 fn ids_in_group_filters_focused_windows_tabs() {
     // Two windows: tabs 1,3 in group 0; tabs 2,4 in group 1. Close Window
     // for the group-0 window must target exactly its tabs, in order.

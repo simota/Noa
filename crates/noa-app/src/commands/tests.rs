@@ -878,10 +878,50 @@ fn linux_ctrl_shift_arrows_jump_to_prompts() {
         engine.resolve(&Key::Named(NamedKey::ArrowDown), ctrl_shift),
         Some(AppCommand::ScrollViewport(ViewportScroll::NextPrompt))
     );
+}
+
+/// Ghostty 1.4.0's GTK defaults: ctrl+shift+page_up/page_down move the tab.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn linux_ctrl_shift_page_keys_move_the_tab() {
+    let engine = KeybindEngine::default();
+    let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
     assert_eq!(
         engine.resolve(&Key::Named(NamedKey::PageUp), ctrl_shift),
-        None
+        Some(AppCommand::MoveTab(-1))
     );
+    assert_eq!(
+        engine.resolve(&Key::Named(NamedKey::PageDown), ctrl_shift),
+        Some(AppCommand::MoveTab(1))
+    );
+}
+
+/// Ghostty 1.4.0's macOS app binds no key to `move_tab`.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_binds_no_key_to_move_tab() {
+    let engine = KeybindEngine::default();
+    assert_eq!(engine.chord_for(AppCommand::MoveTab(-1)), None);
+    assert_eq!(engine.chord_for(AppCommand::MoveTab(1)), None);
+}
+
+/// `move_tab:N` takes any offset, as Ghostty's `move_tab: isize` does, and
+/// Noa's own names cover the palette's two moves.
+#[test]
+fn move_tab_action_names_are_accepted() {
+    for (action, amount) in [("move_tab:-1", -1), ("move_tab:1", 1), ("move_tab:3", 3)] {
+        assert_eq!(
+            super::command_from_keybind_action(action),
+            Some(AppCommand::MoveTab(amount)),
+            "{action}"
+        );
+    }
+    assert_eq!(super::command_from_keybind_action("move_tab:left"), None);
+    assert_eq!(
+        AppCommand::from_action_name("tab.move-left"),
+        Some(AppCommand::MoveTab(-1))
+    );
+    assert_eq!(AppCommand::MoveTab(1).action_name(), "tab.move-right");
 }
 
 /// The Ghostty action names for prompt jumps and scrolling, including the

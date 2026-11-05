@@ -95,6 +95,40 @@ pub(crate) fn ids_in_group<Id: Copy, G: Copy + Eq>(
         .collect()
 }
 
+/// Where `move_tab:amount` takes the tab at `from` among `count` tabs.
+/// With `wrap` (Ghostty's GTK app) a move past an end continues from the
+/// other end; without it (Ghostty's macOS app) the tab stops at the end.
+pub(crate) fn moved_tab_index(from: usize, count: usize, amount: isize, wrap: bool) -> usize {
+    if count == 0 {
+        return from;
+    }
+    if wrap {
+        let count = count as isize;
+        return (from as isize)
+            .wrapping_add(amount % count)
+            .rem_euclid(count) as usize;
+    }
+    if amount < 0 {
+        from - from.min(amount.unsigned_abs())
+    } else {
+        from + (count - 1 - from).min(amount.unsigned_abs())
+    }
+}
+
+/// Rewrite the slots `order` gives `group` (the group's ids, in their old
+/// order) to hold `group` in its new order `reordered`, leaving every other
+/// id where it is.
+pub(crate) fn reorder_group<Id: Copy + Eq>(order: &mut [Id], reordered: &[Id]) {
+    let mut next = reordered.iter();
+    for slot in order.iter_mut() {
+        if reordered.contains(slot)
+            && let Some(id) = next.next()
+        {
+            *slot = *id;
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct InterPaneTarget<Window, Pane> {
     pub(crate) window_id: Window,
@@ -357,6 +391,7 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::ToggleAutoApprove
         | AppCommand::SetTabTitle
         | AppCommand::MoveTabToNewWindow
+        | AppCommand::MoveTab(_)
         | AppCommand::CloseTab => CommandScope::FocusedTab,
         AppCommand::ToggleTabOverview
         | AppCommand::NextNotification
@@ -469,6 +504,7 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::ToggleAutoApprove
         | AppCommand::SetTabTitle
         | AppCommand::MoveTabToNewWindow
+        | AppCommand::MoveTab(_)
         | AppCommand::CloseTab
         | AppCommand::SelectTab(_)
         | AppCommand::NextTab

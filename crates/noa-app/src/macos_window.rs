@@ -142,6 +142,102 @@ pub(crate) fn move_tab_to_new_window(window: &Window, tabbing_identifier: &str) 
     }
 }
 
+/// `window`'s place in its native tab group: its index and the group's tab
+/// count. A window with no tab group is the only tab of its window.
+#[cfg(target_os = "macos")]
+pub(crate) fn native_tab_position(window: &Window) -> Option<(usize, usize)> {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+
+    let ns_window = ns_window_of(window)?;
+    // SAFETY: main (window-owning) thread; the NSWindow is live and owned by
+    // winit; every returned object is nil-checked and only compared.
+    unsafe {
+        let tab_group: *mut AnyObject = msg_send![ns_window, tabGroup];
+        if tab_group.is_null() {
+            return Some((0, 1));
+        }
+        let windows: *mut AnyObject = msg_send![tab_group, windows];
+        if windows.is_null() {
+            return None;
+        }
+        let count: usize = msg_send![windows, count];
+        (0..count)
+            .find(|&index| {
+                let candidate: *mut AnyObject = msg_send![windows, objectAtIndex: index];
+                candidate == ns_window
+            })
+            .map(|index| (index, count))
+    }
+}
+
+/// Move `window` to `index` in its native tab group, as Ghostty's macOS
+/// `move_tab` does: take the tab out of the group, add it back beside the
+/// tab now at `index` (after it when moving right, before it when moving
+/// left), and keep it key. Returns `false` when nothing moved.
+#[cfg(target_os = "macos")]
+pub(crate) fn move_native_tab(window: &Window, index: usize) -> bool {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+
+    let Some(ns_window) = ns_window_of(window) else {
+        return false;
+    };
+    let Some((from, count)) = native_tab_position(window) else {
+        return false;
+    };
+    if index == from || index >= count {
+        return false;
+    }
+    // SAFETY: main thread, from command dispatch; the NSWindow is live and
+    // owned by winit; the tab group and the target are nil-checked.
+    unsafe {
+        let tab_group: *mut AnyObject = msg_send![ns_window, tabGroup];
+        if tab_group.is_null() {
+            return false;
+        }
+        let windows: *mut AnyObject = msg_send![tab_group, windows];
+        if windows.is_null() {
+            return false;
+        }
+        let target: *mut AnyObject = msg_send![windows, objectAtIndex: index];
+        if target.is_null() {
+            return false;
+        }
+        // NSWindowOrderingMode: NSWindowAbove (1) puts the tab after the
+        // target, NSWindowBelow (-1) before it.
+        let ordered: isize = if index > from { 1 } else { -1 };
+        let _: () = msg_send![objc2::class!(NSAnimationContext), beginGrouping];
+        let context: *mut AnyObject = msg_send![objc2::class!(NSAnimationContext), currentContext];
+        if !context.is_null() {
+            let _: () = msg_send![context, setDuration: 0.0f64];
+        }
+        let _: () = msg_send![tab_group, removeWindow: ns_window];
+        let _: () = msg_send![target, addTabbedWindow: ns_window, ordered: ordered];
+        let _: () = msg_send![ns_window, makeKeyWindow];
+        let _: () = msg_send![objc2::class!(NSAnimationContext), endGrouping];
+    }
+    true
+}
+
+/// The live NSWindow behind `window`, if it can be reached.
+#[cfg(target_os = "macos")]
+fn ns_window_of(window: &Window) -> Option<*mut objc2::runtime::AnyObject> {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let handle = window.window_handle().ok()?;
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return None;
+    };
+    let ns_view = appkit.ns_view.as_ptr().cast::<AnyObject>();
+    // SAFETY: main (window-owning) thread; the NSView is live and owned by
+    // winit.
+    let ns_window: *mut AnyObject = unsafe { msg_send![ns_view, window] };
+    (!ns_window.is_null()).then_some(ns_window)
+}
+
 /// Make `window` key and order it front *within* the app, without activating
 /// the app (agent-automation ASSUME-6: a scripted `new window`/`new tab` must
 /// not steal focus from the scripting app). winit's `focus_window` always

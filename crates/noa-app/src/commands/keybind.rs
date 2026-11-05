@@ -277,6 +277,8 @@ fn default_specs() -> Vec<(&'static str, AppCommand)> {
         ),
         // Ghostty 1.4.0 moved `jump_to_prompt` here from ctrl+shift+page_up/
         // page_down, which now move the tab.
+        ("ctrl+shift+pageup", AppCommand::MoveTab(-1)),
+        ("ctrl+shift+pagedown", AppCommand::MoveTab(1)),
         (
             "ctrl+shift+arrowup",
             AppCommand::ScrollViewport(ViewportScroll::PrevPrompt),
@@ -661,7 +663,13 @@ fn ghostty_action_alias(action: &str) -> Option<AppCommand> {
             .strip_prefix("goto_tab:")
             .and_then(|index| index.parse::<usize>().ok())
             .filter(|index| (1..=9).contains(index))
-            .map(AppCommand::SelectTab),
+            .map(AppCommand::SelectTab)
+            .or_else(|| {
+                action
+                    .strip_prefix("move_tab:")
+                    .and_then(|amount| amount.parse::<isize>().ok())
+                    .map(AppCommand::MoveTab)
+            }),
     }
 }
 

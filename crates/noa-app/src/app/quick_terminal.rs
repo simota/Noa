@@ -718,7 +718,7 @@ impl App {
         crate::macos_blur::apply_background_blur(
             &window,
             self.config.background_blur_radius,
-            self.config.background_opacity,
+            self.shown_background_opacity(),
         );
         crate::macos_window::configure_quick_terminal_window(&window);
 
@@ -726,6 +726,7 @@ impl App {
             let gpu = self.gpu.as_ref()?;
             gpu.instance.create_surface(window.clone()).ok()?
         };
+        let background_opacity = self.shown_background_opacity();
         let (surface_config, renderer) = {
             let gpu = self.gpu.as_mut()?;
             let caps = surface.get_capabilities(&gpu.adapter);
@@ -742,10 +743,7 @@ impl App {
                 // `lifecycle.rs`): a single frame in flight keeps a keypress
                 // echo from queueing behind an already-submitted frame.
                 desired_maximum_frame_latency: 1,
-                alpha_mode: preferred_surface_alpha_mode(
-                    &caps,
-                    self.config.background_opacity < 1.0,
-                ),
+                alpha_mode: preferred_surface_alpha_mode(&caps, background_opacity < 1.0),
                 view_formats: vec![],
             };
             surface.configure(&gpu.device, &surface_config);
@@ -767,7 +765,7 @@ impl App {
                 self.padding,
             )
             .ok()?;
-            renderer.set_background_opacity(self.config.background_opacity);
+            renderer.set_background_opacity(background_opacity);
             renderer.set_alpha_blending(alpha_blending);
             renderer.set_background_image(
                 &gpu.device,

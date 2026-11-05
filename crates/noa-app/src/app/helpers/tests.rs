@@ -1953,6 +1953,20 @@ fn command_palette_toggle_is_app_scoped_and_overview_no_op() {
     );
 }
 
+/// Ghostty flips every terminal window's opacity at once, so the toggle
+/// is not bound to the focused tab or pane.
+#[test]
+fn background_opacity_toggle_is_app_scoped() {
+    assert_eq!(
+        command_scope(AppCommand::ToggleBackgroundOpacity),
+        CommandScope::App
+    );
+    assert_eq!(
+        overview_command_scope(AppCommand::ToggleBackgroundOpacity),
+        CommandScope::App
+    );
+}
+
 #[test]
 fn fullscreen_toggle_is_app_scoped() {
     assert_eq!(

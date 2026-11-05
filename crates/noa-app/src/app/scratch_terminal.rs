@@ -301,7 +301,7 @@ impl App {
         crate::macos_blur::apply_background_blur(
             &window,
             self.config.background_blur_radius,
-            self.config.background_opacity,
+            self.shown_background_opacity(),
         );
         // Same borderless/floating/all-Spaces AppKit configuration as the
         // quick terminal — generic window dressing, not QT-specific despite
@@ -314,6 +314,7 @@ impl App {
         let Ok(surface) = gpu.instance.create_surface(window.clone()) else {
             return;
         };
+        let background_opacity = self.shown_background_opacity();
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
@@ -328,7 +329,7 @@ impl App {
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::Fifo,
             desired_maximum_frame_latency: 1,
-            alpha_mode: preferred_surface_alpha_mode(&caps, self.config.background_opacity < 1.0),
+            alpha_mode: preferred_surface_alpha_mode(&caps, background_opacity < 1.0),
             view_formats: vec![],
         };
         surface.configure(&gpu.device, &surface_config);
@@ -351,7 +352,7 @@ impl App {
         ) else {
             return;
         };
-        renderer.set_background_opacity(self.config.background_opacity);
+        renderer.set_background_opacity(background_opacity);
         renderer.set_alpha_blending(alpha_blending);
         renderer.set_background_image(
             &gpu.device,

@@ -60,11 +60,11 @@ impl App {
             crate::macos_window::set_window_background_color(
                 &state.window,
                 gpu.theme.default_bg,
-                self.config.background_opacity,
+                self.shown_background_opacity(),
             );
             if needs_macos_titlebar_backdrop(
                 self.config.macos_titlebar_style,
-                self.config.background_opacity,
+                self.shown_background_opacity(),
                 has_visible_background_image,
                 self.config.glassmorphism.is_on(),
             ) {

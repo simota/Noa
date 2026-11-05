@@ -974,3 +974,20 @@ fn ghostty_key_names_with_underscores_parse() {
     );
     assert!(KeyBinding::parse("ctrl+shift+page_down", AppCommand::NextTab).is_ok());
 }
+
+/// Ghostty's `toggle_background_opacity` binds by its own name and by Noa's.
+#[test]
+fn toggle_background_opacity_action_names_are_accepted() {
+    assert_eq!(
+        super::command_from_keybind_action("toggle_background_opacity"),
+        Some(AppCommand::ToggleBackgroundOpacity)
+    );
+    assert_eq!(
+        AppCommand::ToggleBackgroundOpacity.action_name(),
+        "background-opacity.toggle"
+    );
+    assert_eq!(
+        AppCommand::from_action_name("background-opacity.toggle"),
+        Some(AppCommand::ToggleBackgroundOpacity)
+    );
+}

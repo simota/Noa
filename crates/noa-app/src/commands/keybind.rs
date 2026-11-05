@@ -651,6 +651,7 @@ fn ghostty_action_alias(action: &str) -> Option<AppCommand> {
         "toggle_quick_terminal" => Some(AppCommand::ToggleQuickTerminal),
         "toggle_scratch_terminal" => Some(AppCommand::ToggleScratchTerminal),
         "toggle_secure_keyboard_entry" => Some(AppCommand::ToggleSecureKeyboardEntry),
+        "toggle_background_opacity" => Some(AppCommand::ToggleBackgroundOpacity),
         "toggle_sidebar" => Some(AppCommand::ToggleSidebar),
         "toggle_auto_approve" => Some(AppCommand::ToggleAutoApprove),
         "toggle_ember" => Some(AppCommand::ToggleEmber),

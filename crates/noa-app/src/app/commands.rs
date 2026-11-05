@@ -207,6 +207,7 @@ impl App {
             AppCommand::ToggleQuickTerminal => self.toggle_quick_terminal(event_loop),
             AppCommand::ToggleScratchTerminal => self.toggle_scratch_terminal(event_loop),
             AppCommand::ToggleSecureKeyboardEntry => self.toggle_secure_keyboard_entry(),
+            AppCommand::ToggleBackgroundOpacity => self.toggle_background_opacity(),
             AppCommand::ToggleSidebar => self.toggle_sidebar(),
             AppCommand::ToggleAutoApprove => self.toggle_auto_approve(),
             AppCommand::ToggleEmber => {
@@ -272,6 +273,32 @@ impl App {
             menu.set_secure_keyboard_entry_checked(desired);
         }
         let _ = desired;
+    }
+
+    /// Ghostty's `toggle_background_opacity`: hold every terminal window's
+    /// background opaque, or let `background-opacity` show again. Like
+    /// Ghostty, it does nothing when the configuration is already opaque or
+    /// the focused window is fullscreen, and it is implemented only on macOS.
+    fn toggle_background_opacity(&mut self) {
+        if !cfg!(target_os = "macos") {
+            log::warn!("toggle_background_opacity is only implemented on macOS");
+            return;
+        }
+        if self.config.background_opacity >= 1.0 {
+            return;
+        }
+        let Some(state) = self.focused.and_then(|id| self.windows.get(&id)) else {
+            return;
+        };
+        if state.window.fullscreen().is_some() {
+            return;
+        }
+        self.background_opaque = !self.background_opaque;
+        self.apply_reloaded_background_opacity();
+        for state in self.windows.values() {
+            state.window.request_redraw();
+        }
+        self.request_sidebar_redraw();
     }
 }
 

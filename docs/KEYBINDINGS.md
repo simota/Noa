@@ -56,7 +56,7 @@ To make ⌘↑ / ⌘↓ scroll to the top / bottom as in Ghostty 1.3, set
 | Tab | `tab.new`, `tab.close`, `tab.next`, `tab.previous`, `tab.set-title`, `tab.move-to-new-window` (macOS; Ghostty's `move_tab_to_new_window` also works), `tab.move-left`, `tab.move-right`, `tab.move:N` (Ghostty's `move_tab:N` also works; moves N places; macOS stops at the ends, elsewhere it wraps around), `tab.select-1` … `tab.select-9` |
 | Window | `window.new`, `window.close`, `fullscreen.toggle` |
 | Split | `split.new-left`, `split.new-right`, `split.new-up`, `split.new-down`, `split.focus-left`, `split.focus-right`, `split.focus-up`, `split.focus-down`, `split.resize-left`, `split.resize-right`, `split.resize-up`, `split.resize-down`, `split.equalize`, `split.toggle-zoom` |
-| UI | `session-overview.toggle`, `command-palette.toggle`, `quick-terminal.toggle`, `secure-keyboard-entry.toggle`, `sidebar.toggle`, `auto-approve.toggle`, `ember.toggle`, `theme-settings.open` |
+| UI | `session-overview.toggle`, `command-palette.toggle`, `quick-terminal.toggle`, `secure-keyboard-entry.toggle`, `background-opacity.toggle` (macOS; Ghostty's `toggle_background_opacity` also works; holds every window opaque until toggled again, and does nothing when `background-opacity` is 1 or the focused window is fullscreen), `sidebar.toggle`, `auto-approve.toggle`, `ember.toggle`, `theme-settings.open` |
 | Agent workflows | `session.next-notification`, `agent.compose-prompt`, `terminal.read-output` |
 
 `tab-overview.toggle` is also accepted as a compatible name for

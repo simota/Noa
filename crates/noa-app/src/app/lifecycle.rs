@@ -214,7 +214,7 @@ impl App {
                 crate::macos_blur::apply_background_blur(
                     &window,
                     self.config.background_blur_radius,
-                    self.config.background_opacity,
+                    self.shown_background_opacity(),
                 );
                 update_ime_cursor_area(
                     &window,
@@ -362,7 +362,7 @@ impl App {
                 &caps,
                 alpha_blending,
                 configure_size.unwrap_or_else(|| window.inner_size()),
-                self.config.background_opacity < 1.0,
+                self.shown_background_opacity() < 1.0,
             );
             surface.configure(&device, &surface_config);
 
@@ -382,11 +382,11 @@ impl App {
                     crate::macos_window::set_window_background_color(
                         &window,
                         theme.default_bg,
-                        self.config.background_opacity,
+                        self.shown_background_opacity(),
                     );
                     if needs_macos_titlebar_backdrop(
                         self.config.macos_titlebar_style,
-                        self.config.background_opacity,
+                        self.shown_background_opacity(),
                         self.background_image.has_visible_image(),
                         self.config.glassmorphism.is_on(),
                     ) {
@@ -412,7 +412,7 @@ impl App {
                                 h: surface_config.height,
                             },
                             &theme,
-                            self.config.background_opacity,
+                            self.shown_background_opacity(),
                             self.background_image.current_image(),
                         );
                         frame.present();
@@ -502,6 +502,7 @@ impl App {
             (Arc::new(surface), Some(surface_config))
         };
 
+        let background_opacity = self.shown_background_opacity();
         let (surface_config, renderer) = {
             let gpu = self.gpu.as_mut().expect("gpu initialized");
             let alpha_blending = alpha_blending_mode(&self.config.font);
@@ -518,7 +519,7 @@ impl App {
                         &caps,
                         alpha_blending,
                         window.inner_size(),
-                        self.config.background_opacity < 1.0,
+                        background_opacity < 1.0,
                     );
                     surface.configure(&gpu.device, &config);
                     config
@@ -560,7 +561,7 @@ impl App {
                     e,
                 )
             });
-            renderer.set_background_opacity(self.config.background_opacity);
+            renderer.set_background_opacity(background_opacity);
             renderer.set_alpha_blending(alpha_blending);
             renderer.set_background_image(
                 &gpu.device,
@@ -582,14 +583,10 @@ impl App {
         #[cfg(target_os = "macos")]
         if !early_show {
             let bg = self.gpu.as_ref().expect("gpu initialized").theme.default_bg;
-            crate::macos_window::set_window_background_color(
-                &window,
-                bg,
-                self.config.background_opacity,
-            );
+            crate::macos_window::set_window_background_color(&window, bg, background_opacity);
             if needs_macos_titlebar_backdrop(
                 self.config.macos_titlebar_style,
-                self.config.background_opacity,
+                background_opacity,
                 self.background_image.has_visible_image(),
                 self.config.glassmorphism.is_on(),
             ) {

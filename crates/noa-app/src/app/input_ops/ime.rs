@@ -10,6 +10,24 @@ fn search_prompt_ime_caret_col(
 }
 
 impl App {
+    /// macOS: hand the window's typing to the modal that now owns it, or
+    /// back to the pane. Ghostty's modals are input fields of their own (the
+    /// command palette is a SwiftUI `TextField`), so a Unicode Hex Input lead
+    /// surrogate the terminal holds never pairs with a trail typed into one.
+    /// Noa's modals share the window's view with its panes, where the
+    /// vendored winit holds the lead: reset it, as a pane switch does.
+    #[cfg(target_os = "macos")]
+    pub(in crate::app) fn sync_ime_input_target(&mut self, window_id: WindowId) {
+        let target = self.modal_ime_target(window_id);
+        let Some(state) = self.windows.get_mut(&window_id) else {
+            return;
+        };
+        if state.ime_target != target {
+            state.ime_target = target;
+            split_ops::reset_ime_for_focus_switch(&state.window, false);
+        }
+    }
+
     /// Whether a modal (prompt, dialog, picker, panel) in `window_id` owns
     /// input, so a pointer gesture must not act on the pane underneath.
     pub(in crate::app) fn modal_owns_input(&self, window_id: WindowId) -> bool {

@@ -293,6 +293,9 @@ pub(super) struct WindowState {
     pub(super) focused_pane: PaneId,
     pub(super) surfaces: HashMap<PaneId, Surface>,
     pub(super) last_mouse_pane: Option<PaneId>,
+    /// The modal last seen owning this window's typing (`None`: the
+    /// focused pane); see `App::sync_ime_input_target`.
+    pub(super) ime_target: Option<ModalImeTarget>,
     /// The pane that received the live left-button press. Motion and the
     /// matching release route to it even when the pointer has crossed into a
     /// sibling split (xterm/Ghostty grab semantics); `None` outside a press.

@@ -236,9 +236,19 @@ impl App {
                 surface.shutdown();
                 return;
             }
+            // The new pane takes the focus: end the old one's composition
+            // as a pane drag does, so its preedit isn't left drawn there.
+            let mut losing_preedit = false;
+            if let Some(surface) = state.surfaces.get_mut(&focused_pane)
+                && surface.ime_state.preedit_active()
+            {
+                surface.ime_state.commit_preedit();
+                surface.auto_approve_guards.lock().ime_preedit_active = false;
+                losing_preedit = true;
+            }
             state.surfaces.insert(new_pane, new_surface);
             state.focused_pane = new_pane;
-            reset_ime_for_focus_switch(&state.window, false);
+            reset_ime_for_focus_switch(&state.window, losing_preedit);
             state.zoomed = None;
             state.last_mouse_pane = Some(new_pane);
             state.window.clone()

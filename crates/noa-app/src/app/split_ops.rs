@@ -238,14 +238,7 @@ impl App {
             }
             // The new pane takes the focus: end the old one's composition
             // as a pane drag does, so its preedit isn't left drawn there.
-            let mut losing_preedit = false;
-            if let Some(surface) = state.surfaces.get_mut(&focused_pane)
-                && surface.ime_state.preedit_active()
-            {
-                surface.ime_state.commit_preedit();
-                surface.auto_approve_guards.lock().ime_preedit_active = false;
-                losing_preedit = true;
-            }
+            let losing_preedit = state.end_pane_preedit(focused_pane);
             state.surfaces.insert(new_pane, new_surface);
             state.focused_pane = new_pane;
             reset_ime_for_focus_switch(&state.window, losing_preedit);
@@ -539,16 +532,8 @@ impl App {
         // that sibling instead of the (correctly) discarded moved pane.
         // Mirrors `focus_pane`'s identical local-clear + OS toggle, which
         // exists for the same reason on an ordinary in-window focus switch.
-        let mut losing_preedit = false;
-        if source_state.focused_pane == pane
-            && let Some(surface) = source_state.surfaces.get_mut(&pane)
-            && surface.ime_state.preedit_active()
-        {
-            surface.ime_state.commit_preedit();
-            surface.auto_approve_guards.lock().ime_preedit_active = false;
-            losing_preedit = true;
-        }
         if source_state.focused_pane == pane {
+            let losing_preedit = source_state.end_pane_preedit(pane);
             reset_ime_for_focus_switch(&source_state.window, losing_preedit);
         }
         // Atomicity (mirrors `move_pane`'s own clone-then-commit contract,
@@ -680,6 +665,11 @@ impl App {
         dest_state.renderer.invalidate_pane(render_pane_id(pane));
         let dest_previous_focus = std::mem::replace(&mut dest_state.focused_pane, pane);
         dest_state.last_mouse_pane = None;
+        // `dest`'s focus moves to the arriving pane as well.
+        if dest_previous_focus != pane {
+            let losing_preedit = dest_state.end_pane_preedit(dest_previous_focus);
+            reset_ime_for_focus_switch(&dest_state.window, losing_preedit);
+        }
         let dest_window_handle = dest_state.window.clone();
 
         // FR-12: the moved pane's sidebar card follows to its new window.

@@ -23,8 +23,12 @@ impl App {
             return;
         };
         if state.ime_target != target {
+            // A pane composing when a modal takes the typing would keep its
+            // preedit, and keep swallowing keys, after the reset.
+            let losing_preedit =
+                state.ime_target.is_none() && state.end_pane_preedit(state.focused_pane);
             state.ime_target = target;
-            split_ops::reset_ime_for_focus_switch(&state.window, false);
+            split_ops::reset_ime_for_focus_switch(&state.window, losing_preedit);
         }
     }
 

@@ -1361,6 +1361,22 @@ impl WindowState {
         self.surfaces.get_mut(&self.focused_pane)
     }
 
+    /// End `pane`'s IME composition on our side as it loses the typing: its
+    /// preedit stops drawing and stops swallowing keys. The `Ime::Disabled`
+    /// an IME reset sends goes to the new input target, not to `pane`.
+    /// Returns whether `pane` was composing.
+    pub(super) fn end_pane_preedit(&mut self, pane: PaneId) -> bool {
+        let Some(surface) = self.surfaces.get_mut(&pane) else {
+            return false;
+        };
+        if !surface.ime_state.preedit_active() {
+            return false;
+        }
+        surface.ime_state.commit_preedit();
+        surface.auto_approve_guards.lock().ime_preedit_active = false;
+        true
+    }
+
     pub(super) fn pane_count(&self) -> usize {
         self.surfaces.len()
     }

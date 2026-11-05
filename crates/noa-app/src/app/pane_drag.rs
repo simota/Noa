@@ -52,16 +52,8 @@ impl App {
             // as `App::move_pane_to_tab_at`'s cross-tab P1 fix, just within one
             // tab instead of across two.
             let losing_focus = state.focused_pane;
-            let mut losing_preedit = false;
-            if losing_focus != source
-                && let Some(surface) = state.surfaces.get_mut(&losing_focus)
-                && surface.ime_state.preedit_active()
-            {
-                surface.ime_state.commit_preedit();
-                surface.auto_approve_guards.lock().ime_preedit_active = false;
-                losing_preedit = true;
-            }
             if losing_focus != source {
+                let losing_preedit = state.end_pane_preedit(losing_focus);
                 split_ops::reset_ime_for_focus_switch(&state.window, losing_preedit);
             }
             state.focused_pane = source;
@@ -123,16 +115,8 @@ impl App {
             // composing pane without going through `focus_pane`'s IME-safe
             // discard.
             let losing_focus = state.focused_pane;
-            let mut losing_preedit = false;
-            if losing_focus != source
-                && let Some(surface) = state.surfaces.get_mut(&losing_focus)
-                && surface.ime_state.preedit_active()
-            {
-                surface.ime_state.commit_preedit();
-                surface.auto_approve_guards.lock().ime_preedit_active = false;
-                losing_preedit = true;
-            }
             if losing_focus != source {
+                let losing_preedit = state.end_pane_preedit(losing_focus);
                 split_ops::reset_ime_for_focus_switch(&state.window, losing_preedit);
             }
             state.focused_pane = source;

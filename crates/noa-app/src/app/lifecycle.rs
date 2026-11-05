@@ -1756,7 +1756,8 @@ impl App {
                         .unwrap_or(state.focused_pane);
                     state.last_mouse_pane = Some(state.focused_pane);
                     if state.focused_pane != losing {
-                        split_ops::reset_ime_for_focus_switch(&state.window, false);
+                        let losing_preedit = state.end_pane_preedit(losing);
+                        split_ops::reset_ime_for_focus_switch(&state.window, losing_preedit);
                     }
                 }
                 state.window.clone()

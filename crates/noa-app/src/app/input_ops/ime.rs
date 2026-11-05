@@ -23,6 +23,17 @@ impl App {
             return;
         };
         if state.ime_target != target {
+            // Clear here rather than wait for the reset's `Ime::Disabled`:
+            // until it arrives, the old modal's composition would draw in,
+            // and swallow keys for, the next input target.
+            if state.ime_target.is_some()
+                && self
+                    .modal_preedit
+                    .as_ref()
+                    .is_some_and(|preedit| preedit.window_id == window_id)
+            {
+                self.modal_preedit = None;
+            }
             // A pane composing when a modal takes the typing would keep its
             // preedit, and keep swallowing keys, after the reset.
             let losing_preedit =

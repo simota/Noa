@@ -46,6 +46,7 @@ pub fn resolve_pane_command_target(
         AppCommand::About
         | AppCommand::Preferences
         | AppCommand::EditConfigFile
+        | AppCommand::EditConfigFileInNewWindow
         | AppCommand::ReloadConfig
         | AppCommand::NewTab
         | AppCommand::NewWindow

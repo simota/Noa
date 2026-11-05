@@ -401,6 +401,7 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
         AppCommand::About
         | AppCommand::Preferences
         | AppCommand::EditConfigFile
+        | AppCommand::EditConfigFileInNewWindow
         | AppCommand::ReloadConfig
         | AppCommand::NewTab
         | AppCommand::NewWindow
@@ -463,6 +464,7 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         AppCommand::About
         | AppCommand::Preferences
         | AppCommand::EditConfigFile
+        | AppCommand::EditConfigFileInNewWindow
         | AppCommand::ReloadConfig
         | AppCommand::Quit
         | AppCommand::ToggleFullscreen

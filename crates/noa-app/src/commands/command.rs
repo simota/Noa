@@ -16,6 +16,10 @@ pub enum AppCommand {
     /// overlay (`open_config_file()`, same as before — no behavior change,
     /// just a new command identity so both are independently reachable).
     EditConfigFile,
+    /// Ghostty's `open_config:new_window`: edit the config file with
+    /// `$VISUAL` or `$EDITOR` in a new window (GTK only in Ghostty, so off
+    /// macOS here; on macOS it opens the file like [`Self::EditConfigFile`]).
+    EditConfigFileInNewWindow,
     ReloadConfig,
     Copy,
     Paste,
@@ -295,7 +299,8 @@ impl AppCommand {
             AppCommand::PrevTab => Self::PREV_TAB_MENU_ID,
             AppCommand::MoveTabToNewWindow
             | AppCommand::MoveTab(_)
-            | AppCommand::ToggleBackgroundOpacity => "",
+            | AppCommand::ToggleBackgroundOpacity
+            | AppCommand::EditConfigFileInNewWindow => "",
             AppCommand::SetTabTitle => Self::SET_TAB_TITLE_MENU_ID,
             AppCommand::CloseWindow => Self::CLOSE_WINDOW_MENU_ID,
             AppCommand::Quit => Self::QUIT_MENU_ID,
@@ -412,6 +417,7 @@ impl AppCommand {
             Self::About => "about",
             Self::Preferences => "preferences",
             Self::EditConfigFile => "preferences.edit-config-file",
+            Self::EditConfigFileInNewWindow => "preferences.edit-config-file-in-new-window",
             Self::ReloadConfig => "config.reload",
             Self::Copy => "copy",
             Self::Paste => "paste",
@@ -507,6 +513,7 @@ impl AppCommand {
             "about" => Some(Self::About),
             "preferences" => Some(Self::Preferences),
             "preferences.edit-config-file" => Some(Self::EditConfigFile),
+            "preferences.edit-config-file-in-new-window" => Some(Self::EditConfigFileInNewWindow),
             "config.reload" => Some(Self::ReloadConfig),
             "copy" => Some(Self::Copy),
             "paste" => Some(Self::Paste),

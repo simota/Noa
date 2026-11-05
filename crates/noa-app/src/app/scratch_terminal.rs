@@ -38,6 +38,7 @@ pub(super) fn scratch_terminal_command_blocked(command: AppCommand) -> bool {
         command,
         AppCommand::NewTab
             | AppCommand::NewWindow
+            | AppCommand::EditConfigFileInNewWindow
             | AppCommand::NewSplitLeft
             | AppCommand::NewSplitRight
             | AppCommand::NewSplitUp

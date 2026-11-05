@@ -169,17 +169,47 @@ fn show_about_macos() {
 /// from [`CONFIG_TEMPLATE`] first if it does not yet exist so the editor has
 /// content to show. Best-effort: every failure is logged, none panics.
 pub(crate) fn open_config_file() {
-    let Some(path) = noa_config::default_config_path() else {
-        log::warn!("could not resolve the noa config path");
+    let Some(path) = config_file_for_editing() else {
         return;
     };
-    ensure_config_file(&path);
     // Reap on a detached thread: a dropped `Child` is never waited on.
     std::thread::spawn(move || {
         if let Err(err) = config_open_command(&path).status() {
             log::warn!("failed to open config file {}: {err}", path.display());
         }
     });
+}
+
+/// The noa config file's path, created from [`CONFIG_TEMPLATE`] first when
+/// it does not yet exist so an editor has content to show.
+pub(crate) fn config_file_for_editing() -> Option<PathBuf> {
+    let Some(path) = noa_config::default_config_path() else {
+        log::warn!("could not resolve the noa config path");
+        return None;
+    };
+    ensure_config_file(&path);
+    Some(path)
+}
+
+/// The shell command line that edits `path` in a terminal, as Ghostty's
+/// `open_config:new_window` builds it: `$VISUAL`, else `$EDITOR`, else `vi`
+/// (an empty variable counts as unset), then the shell-escaped path.
+pub(crate) fn config_edit_command(
+    path: &Path,
+    visual: Option<String>,
+    editor: Option<String>,
+) -> String {
+    let editor = visual
+        .filter(|value| !value.is_empty())
+        .or_else(|| editor.filter(|value| !value.is_empty()))
+        .unwrap_or_else(|| {
+            log::warn!("$EDITOR or $VISUAL not set, falling back to vi");
+            "vi".to_string()
+        });
+    format!(
+        "{editor} {}",
+        crate::clipboard::shell_escape(&path.to_string_lossy())
+    )
 }
 
 /// `open -t` forces the default *text* editor; the config file is
@@ -551,5 +581,29 @@ mod tests {
         );
 
         assert_eq!(command, "less -R < '/tmp/noa scrollback'\\''s.txt'\n");
+    }
+
+    /// Ghostty's `getConfigEditCommand`: `$VISUAL`, then `$EDITOR`, then
+    /// `vi`, an empty variable counting as unset.
+    #[test]
+    fn config_edit_command_picks_the_editor_like_ghostty() {
+        let path = Path::new("/home/me/.config/noa/config");
+        let some = |value: &str| Some(value.to_string());
+        assert_eq!(
+            config_edit_command(path, some("code -w"), some("nano")),
+            "code -w /home/me/.config/noa/config"
+        );
+        assert_eq!(
+            config_edit_command(path, some(""), some("nano")),
+            "nano /home/me/.config/noa/config"
+        );
+        assert_eq!(
+            config_edit_command(path, None, some("")),
+            "vi /home/me/.config/noa/config"
+        );
+        assert_eq!(
+            config_edit_command(Path::new("/tmp/my config"), None, some("nvim")),
+            "nvim '/tmp/my config'"
+        );
     }
 }

@@ -167,6 +167,7 @@ impl App {
             AppCommand::NextTab => self.select_next_tab(),
             AppCommand::PrevTab => self.select_previous_tab(),
             AppCommand::MoveTabToNewWindow => self.move_tab_to_new_window(),
+            AppCommand::MoveTab(amount) => self.move_tab(amount),
             AppCommand::Copy => {
                 if !self.copy_theme_settings_background_image_to_clipboard() {
                     self.copy_selection_to_clipboard();

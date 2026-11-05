@@ -277,6 +277,8 @@ fn default_specs() -> Vec<(&'static str, AppCommand)> {
         ),
         // Ghostty 1.4.0 moved `jump_to_prompt` here from ctrl+shift+page_up/
         // page_down, which now move the tab.
+        ("ctrl+shift+pageup", AppCommand::MoveTab(-1)),
+        ("ctrl+shift+pagedown", AppCommand::MoveTab(1)),
         (
             "ctrl+shift+arrowup",
             AppCommand::ScrollViewport(ViewportScroll::PrevPrompt),
@@ -373,7 +375,7 @@ impl KeybindEngine {
                                 KeyTrigger::parse("cmd+,").expect("reserved chord should parse");
                             trigger
                                 .overlaps(&preferences)
-                                .then_some("preferences (app menu)")
+                                .then_some("preferences (app menu)".into())
                         });
                     if let Some(taken_by) = conflict {
                         diagnostics.push(format!(
@@ -462,7 +464,7 @@ impl KeybindEngine {
     /// Backs the `+list-keybinds` CLI action (cli.rs); like
     /// [`Self::chord_for`], the engine stays the single source of truth for
     /// the effective binding set.
-    pub(crate) fn list(&self) -> Vec<(String, &'static str)> {
+    pub(crate) fn list(&self) -> Vec<(String, std::borrow::Cow<'static, str>)> {
         self.bindings
             .iter()
             .map(|binding| (binding.trigger.to_string(), binding.command.action_name()))
@@ -661,7 +663,13 @@ fn ghostty_action_alias(action: &str) -> Option<AppCommand> {
             .strip_prefix("goto_tab:")
             .and_then(|index| index.parse::<usize>().ok())
             .filter(|index| (1..=9).contains(index))
-            .map(AppCommand::SelectTab),
+            .map(AppCommand::SelectTab)
+            .or_else(|| {
+                action
+                    .strip_prefix("move_tab:")
+                    .and_then(|amount| amount.parse::<isize>().ok())
+                    .map(AppCommand::MoveTab)
+            }),
     }
 }
 

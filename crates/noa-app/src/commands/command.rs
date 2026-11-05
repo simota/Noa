@@ -57,6 +57,11 @@ pub enum AppCommand {
     /// its window into a new one of its own. A lone tab already is its own
     /// window, so it does nothing then. macOS only (native AppKit tabs).
     MoveTabToNewWindow,
+    /// Ghostty 1.4.0's `move_tab:N`: move the focused tab N places along its
+    /// window's tab bar (negative: towards the start). macOS stops at the
+    /// ends, as Ghostty's macOS app does; elsewhere it wraps around, as
+    /// Ghostty's GTK app does.
+    MoveTab(isize),
     /// Open the "Set Tab Title" prompt for the focused tab (tab-title
     /// REQ-TTL-1). No default chord — Ghostty ships `prompt_surface_title`
     /// unbound too — so it is reached via the palette and the Window menu.
@@ -285,7 +290,7 @@ impl AppCommand {
             AppCommand::ComposePrompt | AppCommand::ReadOutput => "",
             AppCommand::NextTab => Self::NEXT_TAB_MENU_ID,
             AppCommand::PrevTab => Self::PREV_TAB_MENU_ID,
-            AppCommand::MoveTabToNewWindow => "",
+            AppCommand::MoveTabToNewWindow | AppCommand::MoveTab(_) => "",
             AppCommand::SetTabTitle => Self::SET_TAB_TITLE_MENU_ID,
             AppCommand::CloseWindow => Self::CLOSE_WINDOW_MENU_ID,
             AppCommand::Quit => Self::QUIT_MENU_ID,
@@ -385,7 +390,19 @@ impl AppCommand {
         KeybindEngine::default().resolve(logical_key, mods)
     }
 
-    pub fn action_name(self) -> &'static str {
+    /// The action's name in Noa's own vocabulary, as `+list-keybinds` and
+    /// the keybind diagnostics print it; [`Self::from_action_name`] reads
+    /// it back.
+    pub fn action_name(self) -> std::borrow::Cow<'static, str> {
+        if let Self::MoveTab(amount) = self
+            && !matches!(amount, -1 | 1)
+        {
+            return format!("tab.move:{amount}").into();
+        }
+        self.fixed_action_name().into()
+    }
+
+    fn fixed_action_name(self) -> &'static str {
         match self {
             Self::About => "about",
             Self::Preferences => "preferences",
@@ -456,6 +473,10 @@ impl AppCommand {
             Self::NextTab => "tab.next",
             Self::PrevTab => "tab.previous",
             Self::MoveTabToNewWindow => "tab.move-to-new-window",
+            Self::MoveTab(-1) => "tab.move-left",
+            Self::MoveTab(1) => "tab.move-right",
+            // Any other amount is named in `action_name`.
+            Self::MoveTab(_) => "tab.move",
             Self::SetTabTitle => "tab.set-title",
             Self::CloseWindow => "window.close",
             Self::Quit => "app.quit",
@@ -543,6 +564,8 @@ impl AppCommand {
             "tab.next" => Some(Self::NextTab),
             "tab.previous" => Some(Self::PrevTab),
             "tab.move-to-new-window" => Some(Self::MoveTabToNewWindow),
+            "tab.move-left" => Some(Self::MoveTab(-1)),
+            "tab.move-right" => Some(Self::MoveTab(1)),
             "tab.set-title" => Some(Self::SetTabTitle),
             "window.close" => Some(Self::CloseWindow),
             "app.quit" => Some(Self::Quit),
@@ -559,7 +582,10 @@ impl AppCommand {
             "session.next-notification" => Some(Self::NextNotification),
             "agent.compose-prompt" => Some(Self::ComposePrompt),
             "terminal.read-output" => Some(Self::ReadOutput),
-            _ => None,
+            _ => name
+                .strip_prefix("tab.move:")
+                .and_then(|amount| amount.parse::<isize>().ok())
+                .map(Self::MoveTab),
         }
     }
 }

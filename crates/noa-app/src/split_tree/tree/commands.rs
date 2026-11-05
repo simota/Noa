@@ -67,6 +67,7 @@ pub fn resolve_pane_command_target(
         | AppCommand::NextTab
         | AppCommand::PrevTab
         | AppCommand::MoveTabToNewWindow
+        | AppCommand::MoveTab(_)
         // Tab-scoped, not pane-scoped: the prompt names the native tab.
         | AppCommand::SetTabTitle
         | AppCommand::CloseWindow

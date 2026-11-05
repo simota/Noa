@@ -293,6 +293,10 @@ pub(super) struct WindowState {
     pub(super) focused_pane: PaneId,
     pub(super) surfaces: HashMap<PaneId, Surface>,
     pub(super) last_mouse_pane: Option<PaneId>,
+    /// The modal last seen owning this window's typing (`None`: the
+    /// focused pane); see `App::sync_ime_input_target`.
+    #[cfg(target_os = "macos")]
+    pub(super) ime_target: Option<ModalImeTarget>,
     /// The pane that received the live left-button press. Motion and the
     /// matching release route to it even when the pointer has crossed into a
     /// sibling split (xterm/Ghostty grab semantics); `None` outside a press.
@@ -1356,6 +1360,22 @@ impl WindowState {
 
     pub(super) fn focused_surface_mut(&mut self) -> Option<&mut Surface> {
         self.surfaces.get_mut(&self.focused_pane)
+    }
+
+    /// End `pane`'s IME composition on our side as it loses the typing: its
+    /// preedit stops drawing and stops swallowing keys. The `Ime::Disabled`
+    /// an IME reset sends goes to the new input target, not to `pane`.
+    /// Returns whether `pane` was composing.
+    pub(super) fn end_pane_preedit(&mut self, pane: PaneId) -> bool {
+        let Some(surface) = self.surfaces.get_mut(&pane) else {
+            return false;
+        };
+        if !surface.ime_state.preedit_active() {
+            return false;
+        }
+        surface.ime_state.commit_preedit();
+        surface.auto_approve_guards.lock().ime_preedit_active = false;
+        true
     }
 
     pub(super) fn pane_count(&self) -> usize {

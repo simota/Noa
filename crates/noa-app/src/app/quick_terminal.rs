@@ -827,6 +827,8 @@ impl App {
                 focused_pane: initial_pane,
                 surfaces,
                 last_mouse_pane: Some(initial_pane),
+                #[cfg(target_os = "macos")]
+                ime_target: None,
                 mouse_capture_pane: None,
                 last_mouse_point: None,
                 last_mouse_physical_position: None,

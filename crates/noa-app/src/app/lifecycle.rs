@@ -684,6 +684,8 @@ impl App {
                 focused_pane: initial_pane,
                 surfaces,
                 last_mouse_pane: Some(initial_pane),
+                #[cfg(target_os = "macos")]
+                ime_target: None,
                 mouse_capture_pane: None,
                 last_mouse_point: None,
                 last_mouse_physical_position: None,
@@ -1724,6 +1726,13 @@ impl App {
                 if state.mouse_capture_pane == Some(pane_id) {
                     state.mouse_capture_pane = None;
                 }
+                // Read before the Surface goes: closing the composing pane
+                // still needs the IME reset below.
+                let closing_preedit = state.focused_pane == pane_id
+                    && state
+                        .surfaces
+                        .get(&pane_id)
+                        .is_some_and(|surface| surface.ime_state.preedit_active());
                 if let Some(mut surface) = state.surfaces.remove(&pane_id) {
                     surface.shutdown();
                 }
@@ -1746,6 +1755,7 @@ impl App {
                 if outcome.close_outcome.tab_should_close {
                     tab_should_close = true;
                 } else {
+                    let losing = state.focused_pane;
                     state.focused_pane = outcome
                         .close_outcome
                         .next_focus
@@ -1753,6 +1763,10 @@ impl App {
                         .or_else(|| state.surfaces.keys().copied().next())
                         .unwrap_or(state.focused_pane);
                     state.last_mouse_pane = Some(state.focused_pane);
+                    if state.focused_pane != losing {
+                        let losing_preedit = state.end_pane_preedit(losing) || closing_preedit;
+                        split_ops::reset_ime_for_focus_switch(&state.window, losing_preedit);
+                    }
                 }
                 state.window.clone()
             };

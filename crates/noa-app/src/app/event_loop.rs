@@ -539,6 +539,95 @@ impl ApplicationHandler<UserEvent> for App {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        self.on_window_event(event_loop, window_id, event);
+        // Before the next key reaches winit: a modal this event opened or
+        // closed must not inherit a held lead surrogate.
+        #[cfg(target_os = "macos")]
+        self.sync_ime_input_target(window_id);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "macos")]
+        self.install_macos_menu_if_needed();
+        self.install_global_hotkey_if_needed();
+        // Keep the AppleScript snapshot fresh for synchronous property reads
+        // (a no-op when the bridge was never installed).
+        self.sync_applescript_snapshot();
+        // Menus, IPC and scripts open modals outside a window event.
+        #[cfg(target_os = "macos")]
+        for window_id in self.windows.keys().copied().collect::<Vec<_>>() {
+            self.sync_ime_input_target(window_id);
+        }
+        // Keep each tab's accessibility elements on its pane layout (a
+        // lock-free no-op unless a split, close, focus or resize moved it).
+        self.sync_accessibility();
+        // Keep the noa-ipc read snapshot fresh (a no-op when the server was
+        // never started).
+        self.sync_ipc_snapshot();
+        #[cfg(target_os = "macos")]
+        self.sync_ember();
+        // Each tick reports its own next wake-up instead of setting
+        // `ControlFlow` directly, so a `WaitUntil` from one can't clobber a
+        // more urgent one from the others — this pass sets it exactly once,
+        // at the earliest across them.
+        let blink_deadline = self.tick_cursor_blink();
+        let resize_throttle_deadline = self.tick_resize_throttle();
+        #[cfg(target_os = "macos")]
+        let native_tab_title_deadline = self.tick_native_tab_titles();
+        // Off-macOS `native_tab_title_flush_deadline` doesn't exist (the
+        // native-tab-title quirk is macOS-only), so this tick never has
+        // anything to report there — keep the aggregation array below
+        // cross-platform rather than cfg-splitting it too.
+        #[cfg(not(target_os = "macos"))]
+        let native_tab_title_deadline: Option<Instant> = None;
+        let overview_deadline = self.tick_overview_backlog();
+        let quick_terminal_deadline = self.tick_quick_terminal();
+        let sidebar_clock_deadline = self.tick_sidebar_clock();
+        let sidebar_autosort_deadline = self.tick_sidebar_autosort();
+        let transient_overlay_deadline = self.tick_transient_overlays();
+        let theme_settings_deadline = self.tick_theme_settings_debounce();
+        let config_watch_deadline = self.tick_config_watch();
+        let idle_ember_deadline = self.tick_idle_ember();
+        let live_wallpaper_deadline = self.tick_live_wallpaper();
+        let kitty_anim_deadline = self.tick_kitty_animations();
+        let memory_trim_deadline = self.tick_memory_trim();
+        let bg_refresh_wake_deadline = self.tick_bg_refresh_wake();
+        let scrollback_checkpoint_deadline = self.tick_scrollback_checkpoint();
+        let deadline = [
+            blink_deadline,
+            resize_throttle_deadline,
+            native_tab_title_deadline,
+            overview_deadline,
+            quick_terminal_deadline,
+            sidebar_clock_deadline,
+            sidebar_autosort_deadline,
+            transient_overlay_deadline,
+            theme_settings_deadline,
+            config_watch_deadline,
+            idle_ember_deadline,
+            live_wallpaper_deadline,
+            kitty_anim_deadline,
+            memory_trim_deadline,
+            bg_refresh_wake_deadline,
+            scrollback_checkpoint_deadline,
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        event_loop.set_control_flow(match deadline {
+            Some(deadline) => ControlFlow::WaitUntil(deadline),
+            None => ControlFlow::Wait,
+        });
+    }
+}
+
+impl App {
+    fn on_window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
         // Off macOS an OS window may host several tabs (`linux_tabs`): its
         // events belong to the tab in front, and geometry changes reach the
         // tabs behind it too.
@@ -1242,75 +1331,6 @@ impl ApplicationHandler<UserEvent> for App {
             }
             _ => {}
         }
-    }
-
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        #[cfg(target_os = "macos")]
-        self.install_macos_menu_if_needed();
-        self.install_global_hotkey_if_needed();
-        // Keep the AppleScript snapshot fresh for synchronous property reads
-        // (a no-op when the bridge was never installed).
-        self.sync_applescript_snapshot();
-        // Keep each tab's accessibility elements on its pane layout (a
-        // lock-free no-op unless a split, close, focus or resize moved it).
-        self.sync_accessibility();
-        // Keep the noa-ipc read snapshot fresh (a no-op when the server was
-        // never started).
-        self.sync_ipc_snapshot();
-        #[cfg(target_os = "macos")]
-        self.sync_ember();
-        // Each tick reports its own next wake-up instead of setting
-        // `ControlFlow` directly, so a `WaitUntil` from one can't clobber a
-        // more urgent one from the others — this pass sets it exactly once,
-        // at the earliest across them.
-        let blink_deadline = self.tick_cursor_blink();
-        let resize_throttle_deadline = self.tick_resize_throttle();
-        #[cfg(target_os = "macos")]
-        let native_tab_title_deadline = self.tick_native_tab_titles();
-        // Off-macOS `native_tab_title_flush_deadline` doesn't exist (the
-        // native-tab-title quirk is macOS-only), so this tick never has
-        // anything to report there — keep the aggregation array below
-        // cross-platform rather than cfg-splitting it too.
-        #[cfg(not(target_os = "macos"))]
-        let native_tab_title_deadline: Option<Instant> = None;
-        let overview_deadline = self.tick_overview_backlog();
-        let quick_terminal_deadline = self.tick_quick_terminal();
-        let sidebar_clock_deadline = self.tick_sidebar_clock();
-        let sidebar_autosort_deadline = self.tick_sidebar_autosort();
-        let transient_overlay_deadline = self.tick_transient_overlays();
-        let theme_settings_deadline = self.tick_theme_settings_debounce();
-        let config_watch_deadline = self.tick_config_watch();
-        let idle_ember_deadline = self.tick_idle_ember();
-        let live_wallpaper_deadline = self.tick_live_wallpaper();
-        let kitty_anim_deadline = self.tick_kitty_animations();
-        let memory_trim_deadline = self.tick_memory_trim();
-        let bg_refresh_wake_deadline = self.tick_bg_refresh_wake();
-        let scrollback_checkpoint_deadline = self.tick_scrollback_checkpoint();
-        let deadline = [
-            blink_deadline,
-            resize_throttle_deadline,
-            native_tab_title_deadline,
-            overview_deadline,
-            quick_terminal_deadline,
-            sidebar_clock_deadline,
-            sidebar_autosort_deadline,
-            transient_overlay_deadline,
-            theme_settings_deadline,
-            config_watch_deadline,
-            idle_ember_deadline,
-            live_wallpaper_deadline,
-            kitty_anim_deadline,
-            memory_trim_deadline,
-            bg_refresh_wake_deadline,
-            scrollback_checkpoint_deadline,
-        ]
-        .into_iter()
-        .flatten()
-        .min();
-        event_loop.set_control_flow(match deadline {
-            Some(deadline) => ControlFlow::WaitUntil(deadline),
-            None => ControlFlow::Wait,
-        });
     }
 }
 

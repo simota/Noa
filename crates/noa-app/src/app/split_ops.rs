@@ -3,6 +3,22 @@
 
 use super::*;
 
+/// Hand the window's IME to a newly focused pane. The OS-level composition
+/// session survives our local preedit clear — without a reset, the IME
+/// keeps composing and its next Preedit lands on the new pane. Toggling IME
+/// off/on discards the marked text so the new pane starts clean. On macOS
+/// it also drops a Unicode Hex Input lead surrogate waiting for its trail
+/// (vendored winit): each Ghostty pane is its own view holding its own lead,
+/// while Noa's panes share the window's view, so the lead would pair with a
+/// trail typed into the new pane. Nothing shows the lead is pending, so the
+/// reset runs on every switch there.
+pub(super) fn reset_ime_for_focus_switch(window: &Window, losing_preedit: bool) {
+    if losing_preedit || cfg!(target_os = "macos") {
+        window.set_ime_allowed(false);
+        window.set_ime_allowed(true);
+    }
+}
+
 /// Pane-dnd P3 (review round 6): move a single entry from `old` to `new` in
 /// a `SessionCardId`-keyed side table, alongside the session-store's own
 /// card rekey (`SessionStore::rekey`) — shared by `move_pane_to_tab_at` for
@@ -220,8 +236,12 @@ impl App {
                 surface.shutdown();
                 return;
             }
+            // The new pane takes the focus: end the old one's composition
+            // as a pane drag does, so its preedit isn't left drawn there.
+            let losing_preedit = state.end_pane_preedit(focused_pane);
             state.surfaces.insert(new_pane, new_surface);
             state.focused_pane = new_pane;
+            reset_ime_for_focus_switch(&state.window, losing_preedit);
             state.zoomed = None;
             state.last_mouse_pane = Some(new_pane);
             state.window.clone()
@@ -512,14 +532,9 @@ impl App {
         // that sibling instead of the (correctly) discarded moved pane.
         // Mirrors `focus_pane`'s identical local-clear + OS toggle, which
         // exists for the same reason on an ordinary in-window focus switch.
-        if source_state.focused_pane == pane
-            && let Some(surface) = source_state.surfaces.get_mut(&pane)
-            && surface.ime_state.preedit_active()
-        {
-            surface.ime_state.commit_preedit();
-            surface.auto_approve_guards.lock().ime_preedit_active = false;
-            source_state.window.set_ime_allowed(false);
-            source_state.window.set_ime_allowed(true);
+        if source_state.focused_pane == pane {
+            let losing_preedit = source_state.end_pane_preedit(pane);
+            reset_ime_for_focus_switch(&source_state.window, losing_preedit);
         }
         // Atomicity (mirrors `move_pane`'s own clone-then-commit contract,
         // L2(e)): verify/remove the Surface *before* committing the
@@ -650,6 +665,11 @@ impl App {
         dest_state.renderer.invalidate_pane(render_pane_id(pane));
         let dest_previous_focus = std::mem::replace(&mut dest_state.focused_pane, pane);
         dest_state.last_mouse_pane = None;
+        // `dest`'s focus moves to the arriving pane as well.
+        if dest_previous_focus != pane {
+            let losing_preedit = dest_state.end_pane_preedit(dest_previous_focus);
+            reset_ime_for_focus_switch(&dest_state.window, losing_preedit);
+        }
         let dest_window_handle = dest_state.window.clone();
 
         // FR-12: the moved pane's sidebar card follows to its new window.
@@ -847,14 +867,7 @@ impl App {
                     }
                 }
             }
-            // The OS-level composition session survives our local clear —
-            // without this, the IME keeps composing and its next Preedit
-            // lands on the newly focused pane. Toggling IME off/on discards
-            // the marked text so the new pane starts clean.
-            if losing_preedit {
-                state.window.set_ime_allowed(false);
-                state.window.set_ime_allowed(true);
-            }
+            reset_ime_for_focus_switch(&state.window, losing_preedit);
         }
         self.update_focused_ime_cursor_area(window_id);
         self.clear_focused_session_bell(window_id);

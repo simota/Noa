@@ -1746,6 +1746,7 @@ impl App {
                 if outcome.close_outcome.tab_should_close {
                     tab_should_close = true;
                 } else {
+                    let losing = state.focused_pane;
                     state.focused_pane = outcome
                         .close_outcome
                         .next_focus
@@ -1753,6 +1754,9 @@ impl App {
                         .or_else(|| state.surfaces.keys().copied().next())
                         .unwrap_or(state.focused_pane);
                     state.last_mouse_pane = Some(state.focused_pane);
+                    if state.focused_pane != losing {
+                        split_ops::reset_ime_for_focus_switch(&state.window, false);
+                    }
                 }
                 state.window.clone()
             };

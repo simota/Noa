@@ -3,6 +3,22 @@
 
 use super::*;
 
+/// Hand the window's IME to a newly focused pane. The OS-level composition
+/// session survives our local preedit clear — without a reset, the IME
+/// keeps composing and its next Preedit lands on the new pane. Toggling IME
+/// off/on discards the marked text so the new pane starts clean. On macOS
+/// it also drops a Unicode Hex Input lead surrogate waiting for its trail
+/// (vendored winit): each Ghostty pane is its own view holding its own lead,
+/// while Noa's panes share the window's view, so the lead would pair with a
+/// trail typed into the new pane. Nothing shows the lead is pending, so the
+/// reset runs on every switch there.
+pub(super) fn reset_ime_for_focus_switch(window: &Window, losing_preedit: bool) {
+    if losing_preedit || cfg!(target_os = "macos") {
+        window.set_ime_allowed(false);
+        window.set_ime_allowed(true);
+    }
+}
+
 /// Pane-dnd P3 (review round 6): move a single entry from `old` to `new` in
 /// a `SessionCardId`-keyed side table, alongside the session-store's own
 /// card rekey (`SessionStore::rekey`) — shared by `move_pane_to_tab_at` for
@@ -222,6 +238,7 @@ impl App {
             }
             state.surfaces.insert(new_pane, new_surface);
             state.focused_pane = new_pane;
+            reset_ime_for_focus_switch(&state.window, false);
             state.zoomed = None;
             state.last_mouse_pane = Some(new_pane);
             state.window.clone()
@@ -512,14 +529,17 @@ impl App {
         // that sibling instead of the (correctly) discarded moved pane.
         // Mirrors `focus_pane`'s identical local-clear + OS toggle, which
         // exists for the same reason on an ordinary in-window focus switch.
+        let mut losing_preedit = false;
         if source_state.focused_pane == pane
             && let Some(surface) = source_state.surfaces.get_mut(&pane)
             && surface.ime_state.preedit_active()
         {
             surface.ime_state.commit_preedit();
             surface.auto_approve_guards.lock().ime_preedit_active = false;
-            source_state.window.set_ime_allowed(false);
-            source_state.window.set_ime_allowed(true);
+            losing_preedit = true;
+        }
+        if source_state.focused_pane == pane {
+            reset_ime_for_focus_switch(&source_state.window, losing_preedit);
         }
         // Atomicity (mirrors `move_pane`'s own clone-then-commit contract,
         // L2(e)): verify/remove the Surface *before* committing the
@@ -847,17 +867,7 @@ impl App {
                     }
                 }
             }
-            // The OS-level composition session survives our local clear —
-            // without this, the IME keeps composing and its next Preedit
-            // lands on the newly focused pane. Toggling IME off/on discards
-            // the marked text so the new pane starts clean. On macOS it also
-            // drops a Unicode Hex Input lead surrogate waiting for its trail
-            // (vendored winit), which has no preedit to show it is pending,
-            // so it runs on every switch there.
-            if losing_preedit || cfg!(target_os = "macos") {
-                state.window.set_ime_allowed(false);
-                state.window.set_ime_allowed(true);
-            }
+            reset_ime_for_focus_switch(&state.window, losing_preedit);
         }
         self.update_focused_ime_cursor_area(window_id);
         self.clear_focused_session_bell(window_id);

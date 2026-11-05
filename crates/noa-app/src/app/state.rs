@@ -295,6 +295,7 @@ pub(super) struct WindowState {
     pub(super) last_mouse_pane: Option<PaneId>,
     /// The modal last seen owning this window's typing (`None`: the
     /// focused pane); see `App::sync_ime_input_target`.
+    #[cfg(target_os = "macos")]
     pub(super) ime_target: Option<ModalImeTarget>,
     /// The pane that received the live left-button press. Motion and the
     /// matching release route to it even when the pointer has crossed into a

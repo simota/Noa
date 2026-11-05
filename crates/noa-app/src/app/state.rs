@@ -785,6 +785,9 @@ pub(super) struct ThemeSettingsSession {
     /// When the overlay opened, driving the same brief fade-in the command
     /// palette uses ([`crate::anim::DUR_FAST`]).
     pub(super) opened_at: Instant,
+    /// `App::background_opaque` when the overlay opened: editing the
+    /// opacity row lets go of the hold, and a cancel puts it back.
+    pub(super) background_opaque_at_open: bool,
 }
 
 /// An open process-monitor overlay (panel-metrics-view FR-1), bound to the
@@ -861,6 +864,7 @@ mod theme_settings_session_tests {
             window_id: WindowId::from(1u64),
             state: std::sync::Arc::new(ThemeSettings::open(init())),
             opened_at: Instant::now(),
+            background_opaque_at_open: false,
         }
     }
 

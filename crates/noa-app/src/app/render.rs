@@ -502,6 +502,7 @@ impl App {
         let tab_bar = self
             .tab_bar_model(window_id)
             .map(|model| (model, self.window_sidebar_inset_px(window_id)));
+        #[cfg(target_os = "macos")]
         let background_opacity = self.shown_background_opacity();
         let (Some(gpu), Some(state)) = (self.gpu.as_mut(), self.windows.get_mut(&window_id)) else {
             return;

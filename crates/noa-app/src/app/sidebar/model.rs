@@ -338,7 +338,7 @@ impl App {
             menu,
             dragging,
             drop_indicator,
-            background_opacity: self.config.background_opacity,
+            background_opacity: self.shown_background_opacity(),
         })
     }
 }

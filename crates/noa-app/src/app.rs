@@ -399,6 +399,11 @@ pub struct App {
     /// Secure Keyboard Entry state. Enabled only while both the user has
     /// toggled it on and the app is frontmost, and always released on exit.
     secure_input: crate::secure_input::SecureInput,
+    /// Set by `toggle_background_opacity`: every window shows an opaque
+    /// background while `background-opacity` stays as configured, so new
+    /// windows inherit the state and toggling back restores it (Ghostty's
+    /// `isBackgroundOpaque`, flipped for every terminal window at once).
+    background_opaque: bool,
     /// The central session registry (FR-1), the single source of truth for the
     /// session sidebar. Owned here on the main thread; mutated only by applying
     /// [`crate::session_store::SessionDelta`]s posted by io threads and by
@@ -899,6 +904,7 @@ impl App {
             quick_terminal_hotkey: None,
             hotkey_install_attempted: false,
             secure_input: crate::secure_input::SecureInput::new(),
+            background_opaque: false,
             session_store: SessionStore::new(),
             branch_poll: Some(crate::branch_poll::spawn(proxy_for_branch_poll)),
             session_persister: crate::session_persist::SessionPersister::spawn(),

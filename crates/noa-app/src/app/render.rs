@@ -502,6 +502,7 @@ impl App {
         let tab_bar = self
             .tab_bar_model(window_id)
             .map(|model| (model, self.window_sidebar_inset_px(window_id)));
+        let background_opacity = self.shown_background_opacity();
         let (Some(gpu), Some(state)) = (self.gpu.as_mut(), self.windows.get_mut(&window_id)) else {
             return;
         };
@@ -512,21 +513,18 @@ impl App {
             // dirties the window's backdrop layer, and doing it every frame
             // dragged a full AppKit layout pass + CA commit into every
             // cursor-blink redraw.
-            let window_bg = (
-                gpu.theme.default_bg,
-                self.config.background_opacity.to_bits(),
-            );
+            let window_bg = (gpu.theme.default_bg, background_opacity.to_bits());
             if state.applied_window_bg != Some(window_bg) {
                 crate::macos_window::set_window_background_color(
                     &state.window,
                     gpu.theme.default_bg,
-                    self.config.background_opacity,
+                    background_opacity,
                 );
                 state.applied_window_bg = Some(window_bg);
             }
             if needs_macos_titlebar_backdrop(
                 self.config.macos_titlebar_style,
-                self.config.background_opacity,
+                background_opacity,
                 has_visible_background_image,
                 self.config.glassmorphism.is_on(),
             ) {

@@ -79,6 +79,9 @@ pub enum AppCommand {
     /// [`Self::ToggleSidebar`]'s does.
     ToggleScratchTerminal,
     ToggleSecureKeyboardEntry,
+    /// Hold every window's background opaque, or let `background-opacity`
+    /// show again (Ghostty's `toggle_background_opacity`, macOS only).
+    ToggleBackgroundOpacity,
     ToggleSidebar,
     ToggleAutoApprove,
     /// Show or hide Ember, the pane list in the macOS menu bar, for this
@@ -290,7 +293,9 @@ impl AppCommand {
             AppCommand::ComposePrompt | AppCommand::ReadOutput => "",
             AppCommand::NextTab => Self::NEXT_TAB_MENU_ID,
             AppCommand::PrevTab => Self::PREV_TAB_MENU_ID,
-            AppCommand::MoveTabToNewWindow | AppCommand::MoveTab(_) => "",
+            AppCommand::MoveTabToNewWindow
+            | AppCommand::MoveTab(_)
+            | AppCommand::ToggleBackgroundOpacity => "",
             AppCommand::SetTabTitle => Self::SET_TAB_TITLE_MENU_ID,
             AppCommand::CloseWindow => Self::CLOSE_WINDOW_MENU_ID,
             AppCommand::Quit => Self::QUIT_MENU_ID,
@@ -484,6 +489,7 @@ impl AppCommand {
             Self::ToggleQuickTerminal => "quick-terminal.toggle",
             Self::ToggleScratchTerminal => "scratch-terminal.toggle",
             Self::ToggleSecureKeyboardEntry => "secure-keyboard-entry.toggle",
+            Self::ToggleBackgroundOpacity => "background-opacity.toggle",
             Self::ToggleSidebar => "sidebar.toggle",
             Self::ToggleAutoApprove => "auto-approve.toggle",
             Self::ToggleEmber => "ember.toggle",
@@ -573,6 +579,7 @@ impl AppCommand {
             "quick-terminal.toggle" => Some(Self::ToggleQuickTerminal),
             "scratch-terminal.toggle" => Some(Self::ToggleScratchTerminal),
             "secure-keyboard-entry.toggle" => Some(Self::ToggleSecureKeyboardEntry),
+            "background-opacity.toggle" => Some(Self::ToggleBackgroundOpacity),
             "sidebar.toggle" => Some(Self::ToggleSidebar),
             "auto-approve.toggle" => Some(Self::ToggleAutoApprove),
             "ember.toggle" => Some(Self::ToggleEmber),

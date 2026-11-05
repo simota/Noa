@@ -113,6 +113,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::ToggleQuickTerminal => "Toggle Quick Terminal",
         AppCommand::ToggleScratchTerminal => "Toggle Scratch Terminal",
         AppCommand::ToggleSecureKeyboardEntry => "Toggle Secure Keyboard Entry",
+        AppCommand::ToggleBackgroundOpacity => "Toggle Background Opacity",
         AppCommand::ToggleSidebar => "Toggle Sidebar",
         AppCommand::ToggleAutoApprove => "Toggle Auto Approve",
         AppCommand::ToggleEmber => "Toggle Ember in Menu Bar",
@@ -221,6 +222,9 @@ pub(crate) fn command_palette_description(command: AppCommand) -> &'static str {
             "Show or hide a disposable terminal over the current window."
         }
         AppCommand::ToggleSecureKeyboardEntry => "Toggle secure input mode.",
+        AppCommand::ToggleBackgroundOpacity => {
+            "Toggle the background opacity of a window that started transparent."
+        }
         AppCommand::ToggleSidebar => "Show or hide the session list beside the terminal.",
         AppCommand::ToggleAutoApprove => "Toggle agent CLI auto approval for the current tab.",
         AppCommand::ToggleEmber => "Show or hide Ember, the pane list in the menu bar.",
@@ -304,6 +308,9 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::ToggleQuickTerminal,
         AppCommand::ToggleScratchTerminal,
         AppCommand::ToggleSecureKeyboardEntry,
+        // Like Ghostty, which implements it only on macOS.
+        #[cfg(target_os = "macos")]
+        AppCommand::ToggleBackgroundOpacity,
         AppCommand::ToggleSidebar,
         AppCommand::ToggleAutoApprove,
         AppCommand::ToggleEmber,
@@ -567,6 +574,7 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         | AppCommand::ToggleQuickTerminal
         | AppCommand::ToggleScratchTerminal
         | AppCommand::ToggleSecureKeyboardEntry
+        | AppCommand::ToggleBackgroundOpacity
         | AppCommand::ToggleSidebar
         | AppCommand::ToggleAutoApprove
         | AppCommand::ToggleEmber => CommandCategory::Toggles,
@@ -893,6 +901,7 @@ mod tests {
             AppCommand::ToggleCommandPalette,
             AppCommand::ToggleQuickTerminal,
             AppCommand::ToggleSecureKeyboardEntry,
+            AppCommand::ToggleBackgroundOpacity,
             AppCommand::ToggleSidebar,
             AppCommand::ToggleAutoApprove,
             AppCommand::ToggleEmber,
@@ -945,7 +954,10 @@ mod tests {
                     | AppCommand::SelectTab(_)
                     | AppCommand::Preferences
             ) || (!cfg!(target_os = "macos")
-                && command == AppCommand::MoveTabToNewWindow);
+                && matches!(
+                    command,
+                    AppCommand::MoveTabToNewWindow | AppCommand::ToggleBackgroundOpacity
+                ));
             assert_eq!(
                 entries.contains(&command),
                 !excluded,

@@ -606,6 +606,16 @@ impl App {
         self.apply_background_opacity_to_windows(self.config.background_opacity);
     }
 
+    /// The `background-opacity` windows show: as configured, or `1.0` while
+    /// `toggle_background_opacity` holds them opaque.
+    pub(in crate::app) fn shown_background_opacity(&self) -> f32 {
+        self.shown_opacity(self.config.background_opacity)
+    }
+
+    fn shown_opacity(&self, opacity: f32) -> f32 {
+        if self.background_opaque { 1.0 } else { opacity }
+    }
+
     /// Apply `opacity` to every window completely — swapchain alpha mode,
     /// renderer uniform, macOS window background — for an explicit value
     /// that may not be in `self.config` yet (the Settings panel's live
@@ -619,6 +629,7 @@ impl App {
     /// correct it: the commit mirrors the same value into `self.config`, so
     /// the watcher's reload-diff then sees no change at all.
     pub(in crate::app) fn apply_background_opacity_to_windows(&mut self, opacity: f32) {
+        let opacity = self.shown_opacity(opacity);
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
@@ -649,7 +660,7 @@ impl App {
             crate::macos_blur::apply_background_blur(
                 &state.window,
                 self.config.background_blur_radius,
-                self.config.background_opacity,
+                self.shown_background_opacity(),
             );
         }
     }
@@ -727,6 +738,7 @@ impl App {
     /// converge on instead of flashing through the stale one.
     #[cfg(target_os = "macos")]
     pub(in crate::app) fn refresh_macos_window_backgrounds_at(&self, opacity: f32) {
+        let opacity = self.shown_opacity(opacity);
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };

@@ -253,7 +253,6 @@ impl App {
             window_id,
             state: std::sync::Arc::new(ThemeSettings::open(init)),
             opened_at,
-            background_opaque_at_open: self.background_opaque,
         });
         self.request_window_redraw(window_id);
     }
@@ -587,14 +586,7 @@ impl App {
             RowEffect::EmberIdleAfter(secs) => self.apply_ember_idle_after(secs),
             RowEffect::None => {}
             RowEffect::CursorStyle(shape) => self.apply_live_cursor_style(shape),
-            RowEffect::Opacity(opacity) => {
-                // Editing the opacity asks to see it, so let go of
-                // `toggle_background_opacity`'s opaque hold, which would
-                // otherwise swallow the preview with nothing on the panel
-                // saying why. A cancel puts the hold back.
-                self.background_opaque = false;
-                self.apply_live_background_opacity(opacity);
-            }
+            RowEffect::Opacity(opacity) => self.apply_live_background_opacity(opacity),
             RowEffect::Blur(radius) => {
                 let opacity = self
                     .theme_settings
@@ -758,7 +750,6 @@ impl App {
                 gpu.preview_theme = None;
             }
             self.apply_live_cursor_style(values.cursor_style);
-            self.background_opaque = session.background_opaque_at_open;
             self.apply_live_background_opacity(values.background_opacity);
             self.apply_live_background_blur(
                 values.background_blur_radius,

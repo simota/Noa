@@ -160,7 +160,7 @@ fn find_action_is_addressable_and_bound_to_cmd_f() {
 
     assert_eq!(AppCommand::from_menu_id(command.menu_id()), Some(command));
     assert_eq!(
-        AppCommand::from_action_name(command.action_name()),
+        AppCommand::from_action_name(&command.action_name()),
         Some(command)
     );
     assert_eq!(
@@ -357,7 +357,7 @@ fn new_window_binds_to_cmd_n_and_round_trips() {
     let command = AppCommand::NewWindow;
     assert_eq!(AppCommand::from_menu_id(command.menu_id()), Some(command));
     assert_eq!(
-        AppCommand::from_action_name(command.action_name()),
+        AppCommand::from_action_name(&command.action_name()),
         Some(command)
     );
     assert_eq!(command.action_name(), "window.new");
@@ -433,7 +433,7 @@ fn command_palette_toggle_round_trips_and_binds_to_cmd_shift_p() {
     // AC-1: menu-id / action-name / keybind all round-trip.
     assert_eq!(AppCommand::from_menu_id(command.menu_id()), Some(command));
     assert_eq!(
-        AppCommand::from_action_name(command.action_name()),
+        AppCommand::from_action_name(&command.action_name()),
         Some(command)
     );
     assert_eq!(command.action_name(), "command-palette.toggle");
@@ -608,7 +608,7 @@ fn action_names_map_to_commands() {
         AppCommand::ReloadConfig,
     ] {
         assert_eq!(
-            AppCommand::from_action_name(command.action_name()),
+            AppCommand::from_action_name(&command.action_name()),
             Some(command)
         );
     }
@@ -922,6 +922,16 @@ fn move_tab_action_names_are_accepted() {
         Some(AppCommand::MoveTab(-1))
     );
     assert_eq!(AppCommand::MoveTab(1).action_name(), "tab.move-right");
+    // Any other amount keeps its amount in the name `+list-keybinds` prints,
+    // so the line can be written back into a config.
+    for amount in [-2, 0, 3] {
+        let command = AppCommand::MoveTab(amount);
+        assert_eq!(command.action_name(), format!("tab.move:{amount}"));
+        assert_eq!(
+            AppCommand::from_action_name(&command.action_name()),
+            Some(command)
+        );
+    }
 }
 
 /// The Ghostty action names for prompt jumps and scrolling, including the

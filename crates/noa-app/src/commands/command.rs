@@ -390,7 +390,19 @@ impl AppCommand {
         KeybindEngine::default().resolve(logical_key, mods)
     }
 
-    pub fn action_name(self) -> &'static str {
+    /// The action's name in Noa's own vocabulary, as `+list-keybinds` and
+    /// the keybind diagnostics print it; [`Self::from_action_name`] reads
+    /// it back.
+    pub fn action_name(self) -> std::borrow::Cow<'static, str> {
+        if let Self::MoveTab(amount) = self
+            && amount.abs() != 1
+        {
+            return format!("tab.move:{amount}").into();
+        }
+        self.fixed_action_name().into()
+    }
+
+    fn fixed_action_name(self) -> &'static str {
         match self {
             Self::About => "about",
             Self::Preferences => "preferences",
@@ -463,6 +475,7 @@ impl AppCommand {
             Self::MoveTabToNewWindow => "tab.move-to-new-window",
             Self::MoveTab(-1) => "tab.move-left",
             Self::MoveTab(1) => "tab.move-right",
+            // Any other amount is named in `action_name`.
             Self::MoveTab(_) => "tab.move",
             Self::SetTabTitle => "tab.set-title",
             Self::CloseWindow => "window.close",
@@ -569,7 +582,10 @@ impl AppCommand {
             "session.next-notification" => Some(Self::NextNotification),
             "agent.compose-prompt" => Some(Self::ComposePrompt),
             "terminal.read-output" => Some(Self::ReadOutput),
-            _ => None,
+            _ => name
+                .strip_prefix("tab.move:")
+                .and_then(|amount| amount.parse::<isize>().ok())
+                .map(Self::MoveTab),
         }
     }
 }

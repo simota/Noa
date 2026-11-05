@@ -375,7 +375,7 @@ impl KeybindEngine {
                                 KeyTrigger::parse("cmd+,").expect("reserved chord should parse");
                             trigger
                                 .overlaps(&preferences)
-                                .then_some("preferences (app menu)")
+                                .then_some("preferences (app menu)".into())
                         });
                     if let Some(taken_by) = conflict {
                         diagnostics.push(format!(
@@ -464,7 +464,7 @@ impl KeybindEngine {
     /// Backs the `+list-keybinds` CLI action (cli.rs); like
     /// [`Self::chord_for`], the engine stays the single source of truth for
     /// the effective binding set.
-    pub(crate) fn list(&self) -> Vec<(String, &'static str)> {
+    pub(crate) fn list(&self) -> Vec<(String, std::borrow::Cow<'static, str>)> {
         self.bindings
             .iter()
             .map(|binding| (binding.trigger.to_string(), binding.command.action_name()))

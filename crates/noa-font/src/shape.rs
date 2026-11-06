@@ -154,10 +154,22 @@ impl ShapePlans {
 /// [`run_matches`] plus the entry's `style`/`cfg_digest` fields.
 pub(crate) fn shape_run_hash(cells: &[ShapeCell], style: StyleKey, cfg_digest: u64) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    // Whole buffers rather than a `write` per scalar: this runs on every dirty
+    // row, and per-call buffering is most of SipHash's cost on 4-byte inputs.
+    let mut buffer = [0u8; 256];
+    let mut filled = 0;
     for cell in cells {
-        cell.ch.hash(&mut hasher);
-        cell.combining.hash(&mut hasher);
+        buffer[filled..filled + 4].copy_from_slice(&u32::from(cell.ch).to_ne_bytes());
+        filled += 4;
+        if filled == buffer.len() || !cell.combining.is_empty() {
+            hasher.write(&buffer[..filled]);
+            filled = 0;
+        }
+        if !cell.combining.is_empty() {
+            cell.combining.hash(&mut hasher);
+        }
     }
+    hasher.write(&buffer[..filled]);
     style.hash(&mut hasher);
     cfg_digest.hash(&mut hasher);
     hasher.finish()

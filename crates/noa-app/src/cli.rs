@@ -729,6 +729,14 @@ fn show_config_output(config: &StartupConfig) -> String {
         "keybind",
         config.keybinds.iter().map(|keybind| keybind.config_value()),
     );
+    push_repeatable_lines(
+        &mut out,
+        "command-palette-entry",
+        config
+            .command_palette_entries
+            .iter()
+            .map(|entry| entry.config_value()),
+    );
     push_line(
         &mut out,
         "client-remote",

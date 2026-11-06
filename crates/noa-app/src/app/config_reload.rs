@@ -244,6 +244,8 @@ impl App {
         let sidebar_hotkey_changed = previous.sidebar_hotkey != applied.sidebar_hotkey;
         let scratch_terminal_key_changed =
             previous.scratch_terminal_key != applied.scratch_terminal_key;
+        let palette_entries_changed =
+            previous.command_palette_entries != applied.command_palette_entries;
         // `sidebar-hotkey`/`scratch-terminal-key` feed the keybind engine
         // (in-app chords), so a change to any of these rebuilds it.
         let keybinds_changed = previous.keybinds != applied.keybinds
@@ -333,6 +335,15 @@ impl App {
         }
         if server_restart == ServerRestartAction::Restart {
             self.restart_ipc_server();
+        }
+        if palette_entries_changed {
+            let (entries, diagnostics) = crate::command_palette::resolve_palette_entries(
+                &self.config.command_palette_entries,
+            );
+            for diagnostic in diagnostics {
+                log::warn!("config reload {diagnostic}");
+            }
+            self.palette_entries = entries;
         }
         if keybinds_changed {
             let (mut keybinds, diagnostics) = KeybindEngine::from_config(

@@ -282,6 +282,20 @@ keybind = cmd+shift+n=tab.new
 
 See [KEYBINDINGS.md](KEYBINDINGS.md) for chord syntax, the full list of canonical actions, and the default bindings.
 
+## Command palette
+
+`command-palette-entry` is repeatable, and entries are applied to the default palette entries in order from top to bottom.
+
+| Key | Accepted values | Default | Description |
+|---|---|---|---|
+| `command-palette-entry` | `title:<text>,description:<text>,action:<action>`, `clear`, empty | Noa's default entries | Repeatable. Adds an entry after the ones so far, `clear` removes every entry so far (the defaults too), and an empty value restores the defaults. `title` and `action` are required; a value in double quotes is read as a Zig string literal, so it can hold commas and escapes such as `\n` or `\xNN`. The action takes the same names as `keybind`; an action Noa has no command for (for example Ghostty's `text:` or `csi:`) logs a warning and the entry is left out |
+
+```conf
+command-palette-entry = clear
+command-palette-entry = title:Split Right,action:new_split:right
+command-palette-entry = title:"Focus Left",description:"Focus the split to the left, if any.",action:goto_split:left
+```
+
 ## Recognized but unsupported keys
 
 | Key | Current behavior |

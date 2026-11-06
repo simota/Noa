@@ -11,6 +11,8 @@
 //! [`command_palette_entries`] is a filtered projection of the same enum the
 //! menu bar and keybinds already dispatch.
 
+use std::borrow::Cow;
+
 use crate::commands::{
     AppCommand, CopyModeAction, FontSizeAction, KeybindEngine, SearchAction, TerminalAction,
     ViewportScroll,
@@ -336,12 +338,74 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
     ENTRIES
 }
 
+/// A palette entry: the command it runs and the title and description it is
+/// listed and searched by — the registry's for a default entry, or a
+/// `command-palette-entry`'s own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PaletteEntry {
+    pub command: AppCommand,
+    pub title: Cow<'static, str>,
+    pub description: Cow<'static, str>,
+}
+
+impl PaletteEntry {
+    fn default_for(command: AppCommand) -> Self {
+        Self {
+            command,
+            title: Cow::Borrowed(command_palette_title(command)),
+            description: Cow::Borrowed(command_palette_description(command)),
+        }
+    }
+}
+
+/// The palette's entries when the config has no `command-palette-entry`.
+pub(crate) fn default_palette_entries() -> Vec<PaletteEntry> {
+    command_palette_entries()
+        .iter()
+        .map(|&command| PaletteEntry::default_for(command))
+        .collect()
+}
+
+/// Apply the `command-palette-entry` directives in order over the defaults,
+/// as Ghostty 1.4.0 does: an entry is appended, `clear` drops every entry so
+/// far, and an empty value restores the defaults. An entry whose action Noa
+/// has no command for is left out, with a diagnostic.
+pub(crate) fn resolve_palette_entries(
+    config: &[noa_config::CommandPaletteEntryConfig],
+) -> (Vec<PaletteEntry>, Vec<String>) {
+    let mut entries = default_palette_entries();
+    let mut diagnostics = Vec::new();
+    for directive in config {
+        match directive {
+            noa_config::CommandPaletteEntryConfig::Reset => entries = default_palette_entries(),
+            noa_config::CommandPaletteEntryConfig::Clear => entries.clear(),
+            noa_config::CommandPaletteEntryConfig::Entry {
+                title,
+                description,
+                action,
+            } => match crate::commands::command_from_keybind_action(action) {
+                Some(command) => entries.push(PaletteEntry {
+                    command,
+                    title: Cow::Owned(title.clone()),
+                    description: Cow::Owned(description.clone()),
+                }),
+                None => diagnostics.push(format!(
+                    "command-palette-entry `{title}`: unsupported action `{action}`; entry ignored"
+                )),
+            },
+        }
+    }
+    (entries, diagnostics)
+}
+
 /// One scored fuzzy match of the query against an entry's title: the matched
-/// command, its rank `score` (higher sorts first), and the char indices in the
-/// title that the query matched (`positions`, used to highlight them, C).
+/// entry's command and title, its rank `score` (higher sorts first), and the
+/// char indices in the title that the query matched (`positions`, used to
+/// highlight them, C).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PaletteMatch {
     pub command: AppCommand,
+    pub title: Cow<'static, str>,
     pub score: i32,
     pub positions: Vec<usize>,
 }
@@ -353,22 +417,23 @@ pub(crate) struct PaletteMatch {
 /// highlight). Ties keep declaration order via a *stable* sort (R-7), so
 /// e.g. `Find\u{2026}` stays above `Find Next`. O(N) over the registry — one
 /// pass, hand-written scoring (NFR-1).
-pub(crate) fn command_palette_matches(query: &str) -> Vec<PaletteMatch> {
-    let mut matches: Vec<(bool, PaletteMatch)> = command_palette_entries()
+pub(crate) fn command_palette_matches(entries: &[PaletteEntry], query: &str) -> Vec<PaletteMatch> {
+    let mut matches: Vec<(bool, PaletteMatch)> = entries
         .iter()
-        .copied()
-        .filter_map(|command| {
-            if let Some((score, positions)) = fuzzy_match(query, command_palette_title(command)) {
+        .filter_map(|entry| {
+            if let Some((score, positions)) = fuzzy_match(query, &entry.title) {
                 let found = PaletteMatch {
-                    command,
+                    command: entry.command,
+                    title: entry.title.clone(),
                     score,
                     positions,
                 };
                 return Some((true, found));
             }
-            description_matches(query, command_palette_description(command)).then(|| {
+            description_matches(query, &entry.description).then(|| {
                 let found = PaletteMatch {
-                    command,
+                    command: entry.command,
+                    title: entry.title.clone(),
                     score: 0,
                     positions: Vec::new(),
                 };
@@ -679,6 +744,7 @@ pub(crate) enum PaletteItem {
     Header(CommandCategory),
     Entry {
         command: AppCommand,
+        title: Cow<'static, str>,
         positions: Vec<usize>,
     },
 }
@@ -695,6 +761,7 @@ impl PaletteItem {
 /// `App`-side session), so its editing/navigation logic is unit-testable
 /// without a display — mirroring [`crate::search_prompt::SearchPrompt`].
 pub(crate) struct CommandPalette {
+    entries: Vec<PaletteEntry>,
     query: String,
     items: Vec<PaletteItem>,
     /// Index into `items`, always pointing at an [`PaletteItem::Entry`] (never
@@ -703,10 +770,11 @@ pub(crate) struct CommandPalette {
 }
 
 impl CommandPalette {
-    /// Open with an empty query, every entry shown grouped by category, and the
-    /// first entry highlighted.
-    pub(crate) fn open() -> Self {
+    /// Open over `entries` with an empty query, every entry shown grouped by
+    /// category, and the first entry highlighted.
+    pub(crate) fn open(entries: Vec<PaletteEntry>) -> Self {
         let mut palette = CommandPalette {
+            entries,
             query: String::new(),
             items: Vec::new(),
             selected: 0,
@@ -791,12 +859,13 @@ impl CommandPalette {
     /// non-empty query renders a flat, ranked, header-less list (B).
     fn refilter(&mut self) {
         self.items = if self.query.is_empty() {
-            build_grouped_items()
+            build_grouped_items(&self.entries)
         } else {
-            command_palette_matches(&self.query)
+            command_palette_matches(&self.entries, &self.query)
                 .into_iter()
                 .map(|m| PaletteItem::Entry {
                     command: m.command,
+                    title: m.title,
                     positions: m.positions,
                 })
                 .collect()
@@ -812,13 +881,12 @@ impl CommandPalette {
 /// Build the grouped empty-query display list: each non-empty category's
 /// heading (in [`CommandCategory::ORDER`]) followed by its entries in registry
 /// declaration order (F).
-fn build_grouped_items() -> Vec<PaletteItem> {
-    let entries = command_palette_entries();
+fn build_grouped_items(entries: &[PaletteEntry]) -> Vec<PaletteItem> {
     let mut items = Vec::new();
     for category in CommandCategory::ORDER {
         let mut pushed_header = false;
-        for &command in entries {
-            if command_category(command) != category {
+        for entry in entries {
+            if command_category(entry.command) != category {
                 continue;
             }
             if !pushed_header {
@@ -826,7 +894,8 @@ fn build_grouped_items() -> Vec<PaletteItem> {
                 pushed_header = true;
             }
             items.push(PaletteItem::Entry {
-                command,
+                command: entry.command,
+                title: entry.title.clone(),
                 positions: Vec::new(),
             });
         }
@@ -1005,7 +1074,7 @@ mod tests {
             assert!(command_palette_entries().contains(&command));
         }
 
-        let mut palette = CommandPalette::open();
+        let mut palette = CommandPalette::open(default_palette_entries());
         palette.push_text("enter copy mode");
         assert_eq!(
             palette.selected_command(),
@@ -1015,7 +1084,7 @@ mod tests {
 
     #[test]
     fn matches_are_case_insensitive_non_contiguous_subsequences() {
-        let commands: Vec<AppCommand> = command_palette_matches("add")
+        let commands: Vec<AppCommand> = command_palette_matches(&default_palette_entries(), "add")
             .into_iter()
             .map(|m| m.command)
             .collect();
@@ -1038,7 +1107,7 @@ mod tests {
         assert!(up < down);
 
         // Case-insensitive: "QUIT" matches "Quit Noa".
-        let quit: Vec<AppCommand> = command_palette_matches("QUIT")
+        let quit: Vec<AppCommand> = command_palette_matches(&default_palette_entries(), "QUIT")
             .into_iter()
             .map(|m| m.command)
             .collect();
@@ -1049,7 +1118,7 @@ mod tests {
     #[test]
     fn typing_refilters_and_resets_the_highlight() {
         // AC-8 / AC-9.
-        let mut palette = CommandPalette::open();
+        let mut palette = CommandPalette::open(default_palette_entries());
         // Empty query is the grouped view: every entry is shown plus one
         // heading per non-empty category.
         assert_eq!(palette.entry_count(), command_palette_entries().len());
@@ -1078,19 +1147,22 @@ mod tests {
     #[test]
     fn navigation_clamps_without_wrapping() {
         // AC-10: drive a small, known three-entry list.
-        let mut palette = CommandPalette::open();
+        let mut palette = CommandPalette::open(default_palette_entries());
         palette.query = "x".to_string();
         palette.items = vec![
             PaletteItem::Entry {
                 command: AppCommand::NewTab,
+                title: command_palette_title(AppCommand::NewTab).into(),
                 positions: Vec::new(),
             },
             PaletteItem::Entry {
                 command: AppCommand::NewSplitRight,
+                title: command_palette_title(AppCommand::NewSplitRight).into(),
                 positions: Vec::new(),
             },
             PaletteItem::Entry {
                 command: AppCommand::NewSplitDown,
+                title: command_palette_title(AppCommand::NewSplitDown).into(),
                 positions: Vec::new(),
             },
         ];
@@ -1108,7 +1180,7 @@ mod tests {
     #[test]
     fn navigation_skips_category_headers() {
         // F: up/down land only on entries, never on the muted headings.
-        let mut palette = CommandPalette::open();
+        let mut palette = CommandPalette::open(default_palette_entries());
         assert!(palette.query().is_empty(), "grouped view under test");
         // Walk the whole list top-to-bottom; the highlight must always sit on
         // an entry after each move.
@@ -1135,7 +1207,7 @@ mod tests {
     #[test]
     fn find_ranks_the_exact_command_above_its_neighbors() {
         // B: typing "find" puts `Find…` above `Find Next`.
-        let matches = command_palette_matches("find");
+        let matches = command_palette_matches(&default_palette_entries(), "find");
         let find = matches
             .iter()
             .position(|m| m.command == AppCommand::Search(SearchAction::Find));
@@ -1187,7 +1259,7 @@ mod tests {
             CommandCategory::Window
         );
         // Grouped view: headers appear in ORDER and precede their entries.
-        let items = build_grouped_items();
+        let items = build_grouped_items(&default_palette_entries());
         assert!(matches!(
             items.first(),
             Some(PaletteItem::Header(CommandCategory::Application))
@@ -1226,7 +1298,7 @@ mod tests {
     #[test]
     fn enter_on_an_empty_result_set_has_no_command() {
         // AC-13: no valid index, so no dispatch and no panic.
-        let mut palette = CommandPalette::open();
+        let mut palette = CommandPalette::open(default_palette_entries());
         palette.push_text("zzzzzz");
         assert_eq!(palette.entry_count(), 0);
         assert_eq!(palette.selected_command(), None);
@@ -1280,7 +1352,7 @@ mod tests {
 
     #[test]
     fn descriptions_match_below_every_title_match_without_highlight() {
-        let matches = command_palette_matches("prompt");
+        let matches = command_palette_matches(&default_palette_entries(), "prompt");
         let at = |command| matches.iter().position(|m| m.command == command).unwrap();
         let by_description = at(AppCommand::SetTabTitle);
         assert!(at(AppCommand::ComposePrompt) < by_description);
@@ -1294,7 +1366,7 @@ mod tests {
         ));
         assert!(description_matches("mtsd", "Move the split's divider up."));
         assert!(!description_matches("mvdr", "Move the split's divider up."));
-        let divider = command_palette_matches("divider");
+        let divider = command_palette_matches(&default_palette_entries(), "divider");
         assert_eq!(divider.len(), 4);
         assert_eq!(divider[0].command, AppCommand::ResizeSplit(Direction::Left));
     }
@@ -1307,5 +1379,79 @@ mod tests {
                 "{command:?}"
             );
         }
+    }
+
+    fn custom(
+        title: &str,
+        description: &str,
+        action: &str,
+    ) -> noa_config::CommandPaletteEntryConfig {
+        noa_config::CommandPaletteEntryConfig::Entry {
+            title: title.to_string(),
+            description: description.to_string(),
+            action: action.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_custom_entry_is_appended_to_the_defaults_under_its_own_title() {
+        let (entries, diagnostics) =
+            resolve_palette_entries(&[custom("Split Right", "Side by side.", "new_split:right")]);
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(entries.len(), command_palette_entries().len() + 1);
+        assert_eq!(
+            entries.last(),
+            Some(&PaletteEntry {
+                command: AppCommand::NewSplitRight,
+                title: "Split Right".into(),
+                description: "Side by side.".into(),
+            })
+        );
+
+        let mut palette = CommandPalette::open(entries);
+        palette.push_text("side by");
+        assert_eq!(palette.selected_command(), Some(AppCommand::NewSplitRight));
+        assert!(matches!(
+            palette.items().first(),
+            Some(PaletteItem::Entry { title, .. }) if title == "Split Right"
+        ));
+    }
+
+    /// Ghostty 1.4.0: `clear` drops the defaults too, and an empty value
+    /// brings them back.
+    #[test]
+    fn clear_drops_every_entry_so_far_and_reset_restores_the_defaults() {
+        let (entries, _) = resolve_palette_entries(&[
+            noa_config::CommandPaletteEntryConfig::Clear,
+            custom("New Tab", "", "new_tab"),
+        ]);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.command)
+                .collect::<Vec<_>>(),
+            vec![AppCommand::NewTab]
+        );
+
+        let (entries, _) = resolve_palette_entries(&[
+            noa_config::CommandPaletteEntryConfig::Clear,
+            noa_config::CommandPaletteEntryConfig::Reset,
+        ]);
+        assert_eq!(entries, default_palette_entries());
+
+        let palette = CommandPalette::open(Vec::new());
+        assert_eq!(palette.entry_count(), 0);
+        assert_eq!(palette.selected_command(), None);
+    }
+
+    #[test]
+    fn an_entry_noa_has_no_command_for_is_left_out_with_a_diagnostic() {
+        let (entries, diagnostics) =
+            resolve_palette_entries(&[custom("Reset Font Style", "", "csi:0m")]);
+
+        assert_eq!(entries, default_palette_entries());
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].contains("csi:0m"), "{diagnostics:?}");
     }
 }

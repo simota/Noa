@@ -1,3 +1,4 @@
+mod command_palette_entry;
 mod diagnostics;
 mod directives;
 mod includes;

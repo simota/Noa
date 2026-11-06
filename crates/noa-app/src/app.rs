@@ -229,6 +229,9 @@ pub struct App {
     modifiers: ModifiersState,
     clipboard: SystemClipboard,
     keybinds: KeybindEngine,
+    /// The command palette's entries: the defaults with the config's
+    /// `command-palette-entry` lines applied.
+    palette_entries: Vec<crate::command_palette::PaletteEntry>,
     overview_visible: bool,
     /// Shared with every pane's io thread (`io_thread::OverviewPublish`) so
     /// it can gate its opportunistic `FrameSnapshot::peek` publish behind a
@@ -789,6 +792,11 @@ impl App {
         {
             log::warn!("config keybind: {diagnostic}");
         }
+        let (palette_entries, palette_diagnostics) =
+            crate::command_palette::resolve_palette_entries(&config.command_palette_entries);
+        for diagnostic in palette_diagnostics {
+            log::warn!("config {diagnostic}");
+        }
         // Clone the proxy for the session-metadata worker before `proxy` is
         // moved into the struct — it posts `SessionDelta::Branch`/`Process` back
         // over it. The worker also shares the sidebar-visible gate so its
@@ -851,6 +859,7 @@ impl App {
             modifiers: ModifiersState::empty(),
             clipboard: SystemClipboard::new(),
             keybinds,
+            palette_entries,
             overview_visible: false,
             overview_visible_gate: Arc::new(AtomicBool::new(false)),
             overview_wake_deadline: None,

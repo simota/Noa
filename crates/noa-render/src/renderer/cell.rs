@@ -168,7 +168,21 @@ pub(super) fn rebuild_row_instances(
         .as_ref()
         .is_some_and(|range| range.contains(&(snap.abs_row_base + usize::from(y))));
 
-    for (col_idx, cell) in row.cells.iter().enumerate() {
+    // Cells past the watermark are default blanks. Without a highlight, cursor,
+    // gutter or link range on this row, each one draws nothing and feeds the same
+    // cell to segmentation, so the first of them stands for the rest.
+    let blank_tail = row_highlights.cells.is_none()
+        && snap.cursor.y != y
+        && copy_cursor.is_none_or(|(_, cursor_y)| cursor_y != y)
+        && !record_row_hit
+        && !matches!(snap.hover_link, Some(HoverLink::Range { y: link_y, .. }) if link_y == y);
+    let walked = if blank_tail {
+        (row.occupied() + 1).min(row.cells.len())
+    } else {
+        row.cells.len()
+    };
+
+    for (col_idx, cell) in row.cells[..walked].iter().enumerate() {
         let x = col_idx as u16;
         let highlight = row_highlights.get(col_idx);
         let selected = highlight.selected;
@@ -372,6 +386,10 @@ pub(super) fn rebuild_row_instances(
             cursor: cursor_block_fill,
             color: to_u8_color(text_color),
         });
+    }
+    if let Some(blank) = segment_cells.last().filter(|_| walked < row.cells.len()) {
+        let blank = blank.clone();
+        segment_cells.resize(row.cells.len(), blank);
     }
 
     // REQ-SHAPE-1/6: shape this row's runs and emit glyph instances from
@@ -847,6 +865,8 @@ pub(super) fn emit_run_glyph_instances(
     row: u16,
     metrics: Metrics,
 ) {
+    // A blank stretch asks for one empty glyph over and over.
+    let mut last_empty = None;
     let mut remaining = shaped;
     while let Some(first) = remaining.first() {
         let cluster = first.cluster as usize;
@@ -890,9 +910,20 @@ pub(super) fn emit_run_glyph_instances(
         for glyph in glyphs {
             let x = ((pen + i64::from(glyph.x_offset)) as f32 * scale).round() as i32;
             pen += i64::from(glyph.x_advance);
+            let key = (
+                glyph.face_id,
+                glyph.glyph_id,
+                cell.style,
+                span,
+                scale.to_bits(),
+            );
+            if last_empty == Some(key) {
+                continue;
+            }
             let raster =
                 font.raster_shaped_scaled(glyph.face_id, glyph.glyph_id, cell.style, span, scale);
             if raster.atlas_size[0] == 0 || raster.atlas_size[1] == 0 {
+                last_empty = Some(key);
                 continue;
             }
 

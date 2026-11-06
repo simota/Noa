@@ -531,3 +531,27 @@ fn resize_reflow_grow_pulls_history_when_cursor_is_on_last_row() {
     assert_eq!(row_text(&t, 7, 2), "L8");
     assert_eq!(t.primary.cursor.y, 7);
 }
+
+#[test]
+fn reflow_routes_rows_around_a_cursor_line_longer_than_the_window() {
+    let mut term = Terminal::new(GridSize::new(10, 3));
+    let mut stream = Stream::new();
+    let text: String = (0..95).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
+    stream.feed(format!("first\r\n{text}").as_bytes(), &mut term);
+
+    term.resize(GridSize::new(5, 3));
+
+    // 1 row for "first" and 19 for the wrapped line: the cursor line keeps its
+    // last rows in the window and everything above reaches scrollback in order.
+    assert_eq!(term.scrollback_len(), 17);
+    assert_eq!(term.active().cursor.y, 2);
+    term.scroll_viewport_to_top();
+    let top = term.active().visible_rows();
+    assert_eq!(top[0].cells[0].ch, 'f');
+    assert_eq!(top[1].cells[0].ch, 'a');
+    assert_eq!(top[2].cells[0].ch, 'f');
+    term.scroll_viewport_to_bottom();
+    let bottom = term.active().visible_rows();
+    let last: String = bottom[2].cells.iter().map(|cell| cell.ch).collect();
+    assert_eq!(last, text[90..].to_string());
+}

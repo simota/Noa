@@ -2,6 +2,7 @@
 //! packing together behind a per-`char` cache.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -111,6 +112,43 @@ struct ShapedGlyphKey {
     scale_bits: u32,
 }
 
+/// Multiply-rotate hasher for [`ShapedGlyphKey`], looked up per glyph of every
+/// dirty row. Keys come from the fonts' own bounded glyph sets rather than
+/// directly from terminal output, so this cache doesn't need SipHash's keying.
+#[derive(Default)]
+struct GlyphKeyHasher(u64);
+
+impl GlyphKeyHasher {
+    fn add(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+impl Hasher for GlyphKeyHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.add(u64::from(byte));
+        }
+    }
+
+    fn write_u8(&mut self, word: u8) {
+        self.add(u64::from(word));
+    }
+
+    fn write_u16(&mut self, word: u16) {
+        self.add(u64::from(word));
+    }
+
+    fn write_u32(&mut self, word: u32) {
+        self.add(u64::from(word));
+    }
+
+    fn finish(&self) -> u64 {
+        // The multiply leaves the low bits weak, and the table indexes by them.
+        self.0.rotate_left(26)
+    }
+}
+
 /// Owns the font bytes, a swash scale context, cell metrics, the two glyph
 /// atlases (R8 mask + RGBA8 color) and the per-`char` glyph cache.
 ///
@@ -150,12 +188,13 @@ pub struct FontGrid {
     /// Cache for the shaped-glyph raster path, keyed by (face, glyph id,
     /// style) rather than by `char` (`cache` above stays the char-keyed path
     /// for `get_or_raster`).
-    raster_shaped_cache: HashMap<ShapedGlyphKey, Cached>,
-    /// Live atlas allocations for LRU eviction, keyed by slot id. When an
+    raster_shaped_cache: HashMap<ShapedGlyphKey, Cached, BuildHasherDefault<GlyphKeyHasher>>,
+    /// Live atlas allocations for LRU eviction, indexed by slot id. When an
     /// atlas is full and cannot grow, the least-recently-used slot of the
     /// same [`AtlasKind`] is freed and its owning cache entry dropped.
-    slots: HashMap<u32, AtlasSlot>,
-    next_slot_id: u32,
+    slots: Vec<Option<AtlasSlot>>,
+    /// Vacant entries of `slots`, reused before it grows.
+    free_slot_ids: Vec<u32>,
     /// Monotonic access clock; every cache read/insert stamps `last_used`.
     clock: u64,
     /// Monotonic counter bumped whenever an atlas slot is evicted. Renderer
@@ -185,6 +224,15 @@ pub struct FontGrid {
     resolved_glyph_cache: HashMap<(char, StyleKey), (usize, u16)>,
     /// Presentation resolution is also on the per-cell segmentation path.
     resolved_presentation_cache: HashMap<(ShapeCell, bool), FaceId>,
+    /// Direct table in front of `resolve_face_for_cluster` for lone ASCII, per
+    /// [`style_index`]: most cells of most rows, and this path runs per cell. As
+    /// with `resolved_glyph_cache`, only successful resolutions land here and
+    /// they never go stale.
+    ascii_faces: Box<[[Option<FaceId>; 128]; 4]>,
+}
+
+fn style_index(style: StyleKey) -> usize {
+    style.bold as usize | (style.italic as usize) << 1
 }
 
 impl FontGrid {
@@ -233,14 +281,15 @@ impl FontGrid {
             shape_cache_len: 0,
             shape_cache_hits: 0,
             cfg_digests: style_cfg_digests,
-            raster_shaped_cache: HashMap::new(),
-            slots: HashMap::new(),
-            next_slot_id: 0,
+            raster_shaped_cache: HashMap::default(),
+            slots: Vec::new(),
+            free_slot_ids: Vec::new(),
             clock: 0,
             atlas_eviction_generation: 0,
             cascade_misses: HashSet::new(),
             resolved_glyph_cache: HashMap::new(),
             resolved_presentation_cache: HashMap::new(),
+            ascii_faces: Box::new([[None; 128]; 4]),
         })
     }
 
@@ -274,14 +323,15 @@ impl FontGrid {
             shape_cache_len: 0,
             shape_cache_hits: 0,
             cfg_digests: style_cfg_digests,
-            raster_shaped_cache: HashMap::new(),
-            slots: HashMap::new(),
-            next_slot_id: 0,
+            raster_shaped_cache: HashMap::default(),
+            slots: Vec::new(),
+            free_slot_ids: Vec::new(),
             clock: 0,
             atlas_eviction_generation: 0,
             cascade_misses: HashSet::new(),
             resolved_glyph_cache: HashMap::new(),
             resolved_presentation_cache: HashMap::new(),
+            ascii_faces: Box::new([[None; 128]; 4]),
         })
     }
 
@@ -377,6 +427,21 @@ impl FontGrid {
         combining: &[char],
         style: StyleKey,
     ) -> FaceId {
+        if ch.is_ascii() && combining.is_empty() {
+            let (styles, code) = (style_index(style), ch as usize);
+            if let Some(face) = self.ascii_faces[styles][code] {
+                return face;
+            }
+            let face = self.resolve_face_uncached(ch, combining, style);
+            if self.resolved_glyph_cache.contains_key(&(ch, style)) {
+                self.ascii_faces[styles][code] = Some(face);
+            }
+            return face;
+        }
+        self.resolve_face_uncached(ch, combining, style)
+    }
+
+    fn resolve_face_uncached(&mut self, ch: char, combining: &[char], style: StyleKey) -> FaceId {
         if is_builtin_glyph(ch) {
             return FaceId::BUILTIN;
         }
@@ -652,7 +717,7 @@ impl FontGrid {
     }
 
     fn cfg_digest_for(&self, style: StyleKey) -> u64 {
-        self.cfg_digests[style.bold as usize | (style.italic as usize) << 1]
+        self.cfg_digests[style_index(style)]
     }
 
     /// Insert a shaped run into the memo cache (owned key text is built here,
@@ -916,7 +981,7 @@ impl FontGrid {
     fn touch(&mut self, slot: Option<u32>) {
         let now = self.tick();
         if let Some(id) = slot
-            && let Some(s) = self.slots.get_mut(&id)
+            && let Some(Some(s)) = self.slots.get_mut(id as usize)
         {
             s.last_used = now;
         }
@@ -948,13 +1013,16 @@ impl FontGrid {
         let victim = self
             .slots
             .iter()
+            .enumerate()
+            .filter_map(|(id, slot)| Some((id, slot.as_ref()?)))
             .filter(|(_, s)| s.kind == kind)
             .min_by_key(|(_, s)| s.last_used)
-            .map(|(id, _)| *id);
+            .map(|(id, _)| id);
         let Some(id) = victim else {
             return false;
         };
-        let slot = self.slots.remove(&id).expect("victim id came from slots");
+        let slot = self.slots[id].take().expect("victim id came from slots");
+        self.free_slot_ids.push(id as u32);
         self.atlas_mut(kind).deallocate(slot.alloc);
         match slot.owner {
             SlotOwner::Char(key) => {
@@ -1022,17 +1090,22 @@ impl FontGrid {
         match reservation {
             Some(r) => {
                 let last_used = self.tick();
-                let slot_id = self.next_slot_id;
-                self.next_slot_id = self.next_slot_id.wrapping_add(1);
-                self.slots.insert(
-                    slot_id,
-                    AtlasSlot {
-                        kind,
-                        alloc: r.alloc,
-                        owner,
-                        last_used,
-                    },
-                );
+                let slot = Some(AtlasSlot {
+                    kind,
+                    alloc: r.alloc,
+                    owner,
+                    last_used,
+                });
+                let slot_id = match self.free_slot_ids.pop() {
+                    Some(id) => {
+                        self.slots[id as usize] = slot;
+                        id
+                    }
+                    None => {
+                        self.slots.push(slot);
+                        (self.slots.len() - 1) as u32
+                    }
+                };
                 let info = glyph_info(glyph, [r.x, r.y], [glyph.width as u16, glyph.height as u16]);
                 self.insert_cached(
                     owner,
@@ -1065,7 +1138,11 @@ impl FontGrid {
     }
 
     fn slot_count(&self) -> usize {
-        self.slots.len()
+        self.slots.iter().flatten().count()
+    }
+
+    fn slot_is_live(&self, id: u32) -> bool {
+        matches!(self.slots.get(id as usize), Some(Some(_)))
     }
 
     fn is_char_cached(&self, ch: char) -> bool {
@@ -1083,32 +1160,33 @@ impl FontGrid {
     /// owner must still point back at it, and every cached glyph holding a
     /// slot id must reference a live slot.
     fn assert_slot_cache_consistent(&self) {
-        for (id, slot) in &self.slots {
+        for (id, slot) in self.slots.iter().enumerate() {
+            let Some(slot) = slot else {
+                continue;
+            };
+            let id = id as u32;
             match slot.owner {
                 SlotOwner::Char(key) => assert_eq!(
                     self.cache.get(&key).and_then(|c| c.slot),
-                    Some(*id),
+                    Some(id),
                     "slot {id} owner char {key:?} does not point back at it"
                 ),
                 SlotOwner::Shaped(key) => assert_eq!(
                     self.raster_shaped_cache.get(&key).and_then(|c| c.slot),
-                    Some(*id),
+                    Some(id),
                     "slot {id} owner shaped {key:?} does not point back at it"
                 ),
             }
         }
         for cached in self.cache.values() {
             if let Some(id) = cached.slot {
-                assert!(
-                    self.slots.contains_key(&id),
-                    "cache references dead slot {id}"
-                );
+                assert!(self.slot_is_live(id), "cache references dead slot {id}");
             }
         }
         for cached in self.raster_shaped_cache.values() {
             if let Some(id) = cached.slot {
                 assert!(
-                    self.slots.contains_key(&id),
+                    self.slot_is_live(id),
                     "raster_shaped cache references dead slot {id}"
                 );
             }
@@ -1181,6 +1259,22 @@ mod tests {
 
     /// Eviction takes runs oldest-first in a batch: what was used recently
     /// survives crossing the cap, and the cache never exceeds it.
+    #[test]
+    fn ascii_face_table_agrees_with_the_full_resolution() {
+        let mut grid = FontGrid::new(14.0, FontConfig::default()).expect("system font");
+        for bold in [false, true] {
+            for italic in [false, true] {
+                let style = StyleKey { bold, italic };
+                for code in 0u8..128 {
+                    let ch = char::from(code);
+                    let uncached = grid.resolve_face_uncached(ch, &[], style);
+                    assert_eq!(grid.resolve_face_for_cluster(ch, &[], style), uncached);
+                    assert_eq!(grid.resolve_face_for_cluster(ch, &[], style), uncached);
+                }
+            }
+        }
+    }
+
     #[test]
     fn shape_cache_evicts_least_recently_used_runs_at_the_cap() {
         let mut grid = FontGrid::new(14.0, FontConfig::default()).expect("system font");

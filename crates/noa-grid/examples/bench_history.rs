@@ -185,6 +185,79 @@ fn bench_kitty() {
     report("kitty_6MiB_rgba_transmit", samples, digest);
 }
 
+/// Base64 of `len` bytes of a fixed fill, in whole groups.
+fn base64_fill(len: usize) -> Vec<u8> {
+    b"AQID".repeat(len.div_ceil(3))
+}
+
+/// Commands that pay per image held or per payload byte rather than per row.
+fn bench_kitty_ops() {
+    let single = {
+        let mut out = b"\x1b_Ga=t,f=32,i=7,q=2,s=3000,v=2000;".to_vec();
+        out.extend_from_slice(&base64_fill(3000 * 2000 * 4));
+        out.extend_from_slice(b"\x1b\\");
+        out
+    };
+    let mut samples = Vec::new();
+    let mut digest = FNV_BASIS;
+    for _ in 0..7 {
+        let mut term = Terminal::new(GridSize::new(120, 40));
+        let mut stream = Stream::new();
+        let start = Instant::now();
+        stream.feed(&single, &mut term);
+        samples.push(start.elapsed().as_secs_f64() * 1e6);
+        digest = FNV_BASIS;
+        fnv(&mut digest, &term.kitty_images.get(7).expect("stored").rgba);
+    }
+    report("kitty_24MiB_single_shot", samples, digest);
+
+    let mut frame = b"\x1b_Ga=f,i=7,q=2,f=32,X=1,s=1920,v=1080;".to_vec();
+    frame.extend_from_slice(&base64_fill(1920 * 1080 * 4));
+    frame.extend_from_slice(b"\x1b\\");
+    let mut base = b"\x1b_Ga=t,f=32,i=7,q=2,s=1920,v=1080;".to_vec();
+    base.extend_from_slice(&b"AAAA".repeat((1920 * 1080 * 4usize).div_ceil(3)));
+    base.extend_from_slice(b"\x1b\\");
+    let mut samples = Vec::new();
+    let mut digest = FNV_BASIS;
+    for _ in 0..7 {
+        let mut term = Terminal::new(GridSize::new(120, 40));
+        let mut stream = Stream::new();
+        stream.feed(&base, &mut term);
+        let start = Instant::now();
+        stream.feed(&frame, &mut term);
+        samples.push(start.elapsed().as_secs_f64() * 1e6);
+        digest = FNV_BASIS;
+        fnv(&mut digest, &term.kitty_images.get(7).expect("stored").rgba);
+    }
+    report("kitty_1080p_frame_overwrite", samples, digest);
+
+    let mut place = Vec::new();
+    for id in 1..=2048u32 {
+        place.extend_from_slice(
+            format!("\x1b_Ga=T,f=24,i={id},q=2,s=1,v=1,c=1,r=1;AAAA\x1b\\").as_bytes(),
+        );
+    }
+    let mut samples = Vec::new();
+    let mut digest = FNV_BASIS;
+    for _ in 0..7 {
+        let mut term = Terminal::new(GridSize::new(120, 40));
+        let mut stream = Stream::new();
+        let start = Instant::now();
+        stream.feed(&place, &mut term);
+        stream.feed(
+            b"\x1b_Ga=d,d=I,i=9,q=2\x1b\\\x1b_Ga=d,d=A,q=2\x1b\\",
+            &mut term,
+        );
+        samples.push(start.elapsed().as_secs_f64() * 1e6);
+        digest = FNV_BASIS;
+        fnv(
+            &mut digest,
+            &(term.kitty_images.ids().count() as u64).to_le_bytes(),
+        );
+    }
+    report("kitty_place_2048_then_delete", samples, digest);
+}
+
 fn bench_flood_with_placement() {
     let flood = history_payload(400_000);
     let setup = b"\x1b_Ga=T,f=24,i=9,q=2,s=1,v=1;AAAA\x1b\\\r\n";
@@ -241,6 +314,9 @@ fn main() {
     }
     if on("kitty") {
         bench_kitty();
+    }
+    if on("kitty") {
+        bench_kitty_ops();
     }
     if on("flood") {
         bench_flood_with_placement();

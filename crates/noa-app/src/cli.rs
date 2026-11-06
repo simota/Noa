@@ -17,6 +17,10 @@ use std::io::{IsTerminal, Write};
 
 use crate::commands::KeybindEngine;
 
+// The preview drives the terminal through Unix termios.
+#[cfg(unix)]
+mod theme_preview;
+
 /// One-shot CLI actions (`Noa +<action>`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CliAction {
@@ -64,7 +68,7 @@ impl CliAction {
     fn summary(self) -> &'static str {
         match self {
             Self::Version => "Show version and build information.",
-            Self::ListThemes => "List bundled themes (annotated light/dark).",
+            Self::ListThemes => "Preview bundled themes, or list them (annotated light/dark).",
             Self::ListKeybinds => "List the effective keybindings (chord = action).",
             Self::ListFonts => "List system font families.",
             Self::ShowConfig => "Show the resolved effective configuration.",
@@ -111,7 +115,21 @@ pub fn run_action<S: AsRef<str>>(action: CliAction, args: &[S]) -> anyhow::Resul
     let no_pager = args.iter().any(|arg| arg.as_ref() == "--no-pager");
     match action {
         CliAction::Version => print!("{}", version_output()),
-        CliAction::ListThemes => print!("{}", list_themes_output()),
+        CliAction::ListThemes => {
+            // Ghostty: the preview needs a terminal; piped output, or
+            // `--plain`, gets the plain list.
+            let plain = args.iter().any(|arg| arg.as_ref() == "--plain");
+            let interactive =
+                !plain && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+            #[cfg(unix)]
+            if interactive {
+                theme_preview::run()?;
+                return Ok(());
+            }
+            #[cfg(not(unix))]
+            let _ = interactive;
+            print!("{}", list_themes_output());
+        }
         CliAction::ListKeybinds => {
             let (config, diagnostics) =
                 noa_config::load_startup_config(noa_config::ConfigOverrides::default())?;

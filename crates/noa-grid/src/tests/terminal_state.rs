@@ -443,9 +443,9 @@ fn xtgettcap_reports_selected_capabilities() {
     );
 }
 
-/// The encodings Ghostty 1.4.0's `xtgettcap map` test checks, on the
-/// entries of its real terminfo: a boolean has no value, `\E` and `^?` are
-/// decoded, and a value with `%` parameters is sent as written.
+/// Ghostty 1.4.0's replies to these queries: a boolean has no value, `\E`
+/// and `^?` come back decoded, and a value with `%` parameters comes back as
+/// written.
 #[test]
 fn xtgettcap_encodes_capabilities_like_ghostty() {
     // am, kbs, kf1, Smulx.

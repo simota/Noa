@@ -1291,3 +1291,102 @@ fn prompt_click_mode_persists_across_prompts_and_ris_clears_it() {
     Stream::new().feed(b"\x1bc\x1b]133;A\x07$ \x1b]133;B\x07", &mut t);
     assert_eq!(t.prompt_click_report(Point { x: 2, y: 0 }), None);
 }
+
+/// The one-symbol-at-a-time decoder the whole-group path must agree with.
+fn decode_base64_per_symbol(input: &[u8], max: usize) -> Option<Vec<u8>> {
+    fn push(q: [u8; 4], out: &mut Vec<u8>) -> Option<()> {
+        if q[0] == 64 || q[1] == 64 {
+            return None;
+        }
+        out.push((q[0] << 2) | (q[1] >> 4));
+        match (q[2], q[3]) {
+            (64, 64) => {}
+            (64, _) => return None,
+            (c, 64) => out.push((q[1] << 4) | (c >> 2)),
+            (c, d) => out.extend_from_slice(&[(q[1] << 4) | (c >> 2), (c << 6) | d]),
+        }
+        Some(())
+    }
+    let mut out = Vec::new();
+    let mut q = [0u8; 4];
+    let mut n = 0;
+    let mut padded = false;
+    for &b in input {
+        if b.is_ascii_whitespace() {
+            continue;
+        }
+        let value = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => {
+                padded = true;
+                64
+            }
+            _ => return None,
+        };
+        if padded && value != 64 {
+            return None;
+        }
+        q[n] = value;
+        n += 1;
+        if n == 4 {
+            push(q, &mut out)?;
+            if out.len() > max {
+                return None;
+            }
+            n = 0;
+        }
+    }
+    match n {
+        0 => {}
+        1 => return None,
+        _ => {
+            q[n..].fill(64);
+            push(q, &mut out)?;
+            if out.len() > max {
+                return None;
+            }
+        }
+    }
+    Some(out)
+}
+
+#[test]
+fn base64_group_decoding_matches_symbol_decoding() {
+    let alphabet = b"ABCDwxyz0189+/ABCDwxyz0189+/ABCDwxyz0189+/== \n\r!";
+    let mut seed = 0x9e37_79b9_u32;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed as usize
+    };
+    let mut decoded = 0;
+    for _ in 0..20000 {
+        let len = next() % 40;
+        let input: Vec<u8> = (0..len)
+            .map(|_| {
+                // Mostly symbols, so plenty of inputs decode to the end.
+                let range = if next() % 8 == 0 { alphabet.len() } else { 42 };
+                alphabet[next() % range]
+            })
+            .collect();
+        let max = if next() % 4 == 0 {
+            next() % 24
+        } else {
+            usize::MAX
+        };
+        let expected = decode_base64_per_symbol(&input, max);
+        decoded += usize::from(expected.is_some());
+        assert_eq!(
+            crate::osc::decode_base64_limited(&input, max),
+            expected,
+            "{:?} max {max}",
+            String::from_utf8_lossy(&input)
+        );
+    }
+    assert!(decoded > 1000, "only {decoded} inputs decoded");
+}

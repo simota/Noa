@@ -18,7 +18,7 @@ use crate::state::State;
 /// 8 MiB for those that carry bulk data ([`ALLOCATING_OSCS`]). An OSC over
 /// its limit is discarded whole. The buffer grows on demand.
 const MAX_OSC_BYTES: usize = 2048;
-const MAX_ALLOCATING_OSC_BYTES: usize = 8 * (1 << 20);
+pub(crate) const MAX_ALLOCATING_OSC_BYTES: usize = 8 * (1 << 20);
 /// The OSCs Ghostty gives the larger limit: clipboard (52), Kitty text
 /// sizing (66), drag and drop (72), notifications (99), Kitty clipboard
 /// (5522) and program status (7501).
@@ -658,6 +658,70 @@ impl Parser {
         i
     }
 
+    /// Consume the leading run of printable ASCII in a string payload (APC
+    /// data, DCS, OSC) in one step, returning its length; `0` leaves the next
+    /// byte to [`Self::advance`]. Printable ASCII has no special meaning in
+    /// these states, so this is the per-byte handlers' effect in bulk. It
+    /// stops short of each cap and declines anything still decided byte by
+    /// byte (an APC's control section, an OSC before its first `;`), so the
+    /// byte that overflows or classifies a string still goes through the DFA.
+    pub(crate) fn scan_string_payload(&mut self, bytes: &[u8]) -> usize {
+        if self.utf8_rem != 0 || self.string_utf8_rem != 0 {
+            return 0;
+        }
+        match self.state {
+            State::ApcString => {
+                if self.apc_overflow || !captures_apc(&self.apc) {
+                    return printable_ascii_run(bytes);
+                }
+                let Some(start) = self.apc_data_start else {
+                    return 0;
+                };
+                let max = if self.apc.first() == Some(&b'G') {
+                    MAX_APC_BYTES
+                } else {
+                    MAX_GLYPH_APC_BYTES
+                };
+                let room = max - (self.apc.len() - start);
+                let run = printable_ascii_run(bytes).min(room);
+                let mut rest = &bytes[..run];
+                while !rest.is_empty() {
+                    // The same growth steps as `st_apc`, so a payload ends at
+                    // the capacity the per-byte path would give it.
+                    if self.apc.len() == self.apc.capacity() {
+                        let room = max - (self.apc.len() - start);
+                        self.apc.reserve_exact(self.apc.len().max(64).min(room));
+                    }
+                    let free = self.apc.capacity() - self.apc.len();
+                    let (now, later) = rest.split_at(free.min(rest.len()));
+                    self.apc.extend_from_slice(now);
+                    rest = later;
+                }
+                run
+            }
+            State::DcsPassthrough => {
+                if self.dcs_overflow {
+                    return printable_ascii_run(bytes);
+                }
+                let run = printable_ascii_run(bytes).min(MAX_DCS_BYTES - self.dcs.len());
+                self.dcs.extend_from_slice(&bytes[..run]);
+                run
+            }
+            State::OscString => {
+                if self.osc_overflow {
+                    return printable_ascii_run(bytes);
+                }
+                let Some(limit) = self.osc_limit else {
+                    return 0;
+                };
+                let run = printable_ascii_run(bytes).min(limit.saturating_sub(self.osc.len()));
+                self.osc.extend_from_slice(&bytes[..run]);
+                run
+            }
+            _ => 0,
+        }
+    }
+
     fn param_sep(&mut self, colon: bool) {
         if self.params.is_empty() {
             self.params.push(0);
@@ -791,6 +855,31 @@ fn append_pending_utf8(bytes: &mut Vec<u8>, accumulator: u32, remaining: u8, min
 /// Whether an APC that has buffered `apc` so far is still one the parser
 /// keeps: Kitty graphics (`G`), or the Glyph Protocol while `apc` is a
 /// prefix of `25a1;` or starts with it.
+/// The length of the leading run of bytes in `0x20..=0x7e`.
+fn printable_ascii_run(bytes: &[u8]) -> usize {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = ONES * 0x80;
+    let (words, rest) = bytes.as_chunks::<8>();
+    let mut run = 0;
+    for &word in words {
+        let chunk = u64::from_le_bytes(word);
+        // A lane's high bit is set if that byte is below 0x20, is DEL, or is
+        // non-ASCII; the lowest set lane is the first byte to stop at.
+        let below_space = chunk.wrapping_sub(ONES * 0x20) & !chunk;
+        let del = chunk ^ (ONES * 0x7f);
+        let is_del = del.wrapping_sub(ONES) & !del;
+        let stop = (below_space | is_del | chunk) & HIGH;
+        if stop != 0 {
+            return run + (stop.trailing_zeros() / 8) as usize;
+        }
+        run += 8;
+    }
+    run + rest
+        .iter()
+        .position(|b| !(0x20..=0x7e).contains(b))
+        .unwrap_or(rest.len())
+}
+
 fn captures_apc(apc: &[u8]) -> bool {
     let glyph = crate::glyph_protocol::APC_PREFIX;
     match apc.first() {

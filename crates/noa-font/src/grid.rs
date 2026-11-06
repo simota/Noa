@@ -441,12 +441,7 @@ impl FontGrid {
         self.resolve_face_uncached(ch, combining, style)
     }
 
-    fn resolve_face_uncached(
-        &mut self,
-        ch: char,
-        combining: &[char],
-        style: StyleKey,
-    ) -> FaceId {
+    fn resolve_face_uncached(&mut self, ch: char, combining: &[char], style: StyleKey) -> FaceId {
         if is_builtin_glyph(ch) {
             return FaceId::BUILTIN;
         }
@@ -1185,10 +1180,7 @@ impl FontGrid {
         }
         for cached in self.cache.values() {
             if let Some(id) = cached.slot {
-                assert!(
-                    self.slot_is_live(id),
-                    "cache references dead slot {id}"
-                );
+                assert!(self.slot_is_live(id), "cache references dead slot {id}");
             }
         }
         for cached in self.raster_shaped_cache.values() {

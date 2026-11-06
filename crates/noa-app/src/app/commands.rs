@@ -290,6 +290,12 @@ impl App {
         let Some(path) = crate::app_actions::config_file_for_editing() else {
             return;
         };
+        // The command line is UTF-8 text; a lossy path would edit some
+        // other file.
+        if path.to_str().is_none() {
+            log::warn!("cannot edit the config in a new window: its path is not UTF-8");
+            return;
+        }
         let command = crate::app_actions::config_edit_command(
             &path,
             std::env::var("VISUAL").ok(),

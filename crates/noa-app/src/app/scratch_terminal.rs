@@ -38,7 +38,6 @@ pub(super) fn scratch_terminal_command_blocked(command: AppCommand) -> bool {
         command,
         AppCommand::NewTab
             | AppCommand::NewWindow
-            | AppCommand::EditConfigFileInNewWindow
             | AppCommand::NewSplitLeft
             | AppCommand::NewSplitRight
             | AppCommand::NewSplitUp
@@ -63,7 +62,7 @@ pub(super) fn scratch_terminal_command_blocked(command: AppCommand) -> bool {
             // real chrome nor a tab of its own.
             | AppCommand::ToggleFullscreen
             | AppCommand::PipeScrollbackToPager
-    )
+    ) || (!cfg!(target_os = "macos") && command == AppCommand::EditConfigFileInNewWindow)
 }
 
 /// The scratch popup's target grid size in physical px for `cols`x`rows`

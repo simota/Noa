@@ -1967,17 +1967,19 @@ fn background_opacity_toggle_is_app_scoped() {
     );
 }
 
-/// It opens a window of its own, like New Window.
+/// Off macOS it opens a window of its own, like New Window; on macOS it
+/// opens the file like Edit Config File, which the scratch popup allows.
 #[test]
-fn config_edit_in_new_window_is_app_scoped_and_blocked_in_the_scratch_popup() {
+fn config_edit_in_new_window_is_app_scoped_and_blocked_in_the_scratch_popup_off_macos() {
     assert_eq!(
         command_scope(AppCommand::EditConfigFileInNewWindow),
         CommandScope::App
     );
-    assert!(
+    assert_eq!(
         crate::app::scratch_terminal::scratch_terminal_command_blocked(
             AppCommand::EditConfigFileInNewWindow
-        )
+        ),
+        !cfg!(target_os = "macos")
     );
 }
 

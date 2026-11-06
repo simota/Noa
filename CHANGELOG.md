@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-06
+
+Brings Noa in line with Ghostty 1.4.0.
+
+### Added
+
+- Kitty clipboard protocol (OSC 5522 and paste events, mode 5522), with
+  `clipboard-write` and `clipboard-write-limit-bytes`. OSC 52 writes now honor
+  `clipboard-write` too.
+- Idle scrollback compression (`scrollback-compression`, default on) and a line
+  cap, `scrollback-limit-lines`.
+- Kitty graphics relative placements (`P=`/`Q=`/`H=`/`V=`) and the transient
+  usage hint (`N=1`).
+- Terminal reports and modes: window visibility (mode 2033, `CSI ? 998 n`),
+  DECXCPR, `CSI 19 t`, ANSI modes in DECRQM, DECBKM, keypad mode 1035, the Glyph
+  Protocol, and XTGETTCAP answers from Ghostty's full terminfo entry.
+- DECRQCRA and XTCHECKSUM (`vt-xt-checksum-report`, `vt-xt-checksum-extension`,
+  default off) and program window resizing with `CSI 8 t`
+  (`vt-window-resize-allowed`, default off).
+- OSC 133 `click_events`: a click at the prompt moves the shell's cursor
+  (`cursor-click-to-move`, default on).
+- New config keys: `right-click-action`, `middle-click-action`, `link-osc8`,
+  `window-padding-balance`, `command-palette-entry` and
+  `abnormal-command-exit-runtime`.
+- New actions: `move_tab`, `move_tab_to_new_window`,
+  `toggle_background_opacity` (macOS) and `open_config:new_window`. Ghostty's
+  `open_config`, `jump_to_prompt:-1/1`, `scroll_to_top`, `scroll_to_bottom`,
+  `scroll_page_up` and `scroll_page_down` names and its key names such as
+  `arrow_up` are accepted.
+- Review Windows: when quitting or closing a window leaves two or more tabs
+  running programs, step through them or end them all.
+- A notice for a child that fails to launch: its pane stays open with an error
+  instead of closing. On macOS it is a bar along the pane's bottom edge.
+- `+explain-config`, paged output for it and `+show-config` (`$NOA_PAGER`,
+  `$PAGER`, `less`, or `--no-pager`), and an interactive theme preview in
+  `+list-themes` (`--plain` keeps the list).
+- `NOA_SURFACE_ID` in every pane and `NOA_QUICK_TERMINAL=1` in quick terminal
+  panes.
+- AppleScript: a writable `name override` on tabs and terminals.
+- The search query is shared through the macOS find pasteboard.
+- The Tab Overview moves panes across window groups and detaches them into a
+  new tab, or with Option into a new window.
+- `cmd+shift+arrowup/down` jump between prompts on macOS.
+- The command palette also matches title initials and command descriptions.
+
+### Changed
+
+- `scrollback-limit` is now `scrollback-limit-bytes` and its default rises from
+  10 MB to 50 MB. The old name is still accepted.
+- `copy-on-select` takes `none`, `primary`, `clipboard` and `both`, defaulting
+  to `primary` on Linux and `none` elsewhere. The old `true` still works.
+- On Linux `jump_to_prompt` moves from `ctrl+shift+pageup/pagedown` to
+  `ctrl+shift+arrowup/arrowdown`.
+- Kitty images are sized like Ghostty's: without `c=`/`r=` they keep their own
+  pixel size, with one the other follows the aspect ratio. SIXEL images also
+  draw at their own pixel size.
+- Kitty APC payloads are capped at 65 MiB and an APC over the cap is dropped
+  silently; it used to be cut at 1 MiB and answered with EFBIG.
+- Kitty graphics commands, transmit, delete, region scroll and `a=c` compose
+  handling follow Ghostty 1.4.0, as do OSC and combining-mark limits.
+- Backspace, Tab, Enter, Escape and keypad keys encode like Ghostty 1.4.0.
+
+### Fixed
+
+- The search prompt is a working text field: copy and paste, a movable caret
+  and the usual editing keys.
+- Unicode Hex Input surrogate pairs commit as one character instead of crashing
+  or misbehaving, through a patched winit in `vendor/winit`.
+
 ## [0.6.1] - 2026-10-29
 
 ### Changed

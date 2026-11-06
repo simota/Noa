@@ -6,6 +6,7 @@ mod handler;
 mod kitty_graphics;
 mod reports;
 mod seed;
+mod terminfo;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;

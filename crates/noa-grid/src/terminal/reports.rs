@@ -1,6 +1,6 @@
 use noa_core::{CellAttrs, Color};
 
-use super::Terminal;
+use super::{Terminal, terminfo};
 use crate::osc::ProgramStatusOsc;
 use crate::{AgentState, AgentStatus};
 
@@ -147,46 +147,25 @@ impl Terminal {
         format!("{}m", params.join(";"))
     }
 
+    /// XTGETTCAP, answered like Ghostty 1.4.0: every name its terminfo
+    /// entry has gets `DCS 1 + r <name>[=<value>] ST`, both in upper-case
+    /// hex. A name it does not know, or one that is not hex, gets no reply.
     pub(super) fn handle_xtgettcap(&mut self, payload: &[u8]) {
-        for encoded_name in payload
-            .split(|&b| b == b';')
-            .filter(|name| !name.is_empty())
-        {
-            // Only a well-formed hex name is echoed back: the reply is pty
-            // input, and a name that is not hex is arbitrary output text.
+        for encoded_name in payload.split(|&b| b == b';') {
             let Some(name) = decode_xtgettcap_name(encoded_name) else {
-                self.push_xtgettcap_response(false, &[], &[]);
                 continue;
             };
-            let value = match name.as_slice() {
-                b"TN" => Some(b"noa".as_slice()),
-                b"RGB" => Some(b"8:8:8".as_slice()),
-                b"Co" => Some(b"256".as_slice()),
-                // Ghostty 1.4.0's terminfo entries, in xterm's encoded form.
-                b"Smol" => Some(b"\x1b[53m".as_slice()),
-                b"Rmol" => Some(b"\x1b[55m".as_slice()),
-                // `CSI 0 q` restores the configured `cursor-style`.
-                b"Se" => Some(b"\x1b[0 q".as_slice()),
-                _ => None,
+            let Some(value) = xtgettcap_value(&name) else {
+                continue;
             };
+            self.pending_writes.extend_from_slice(b"\x1bP1+r");
+            push_hex_bytes(&mut self.pending_writes, &name);
             if let Some(value) = value {
-                self.push_xtgettcap_response(true, encoded_name, value);
-            } else {
-                self.push_xtgettcap_response(false, encoded_name, &[]);
+                self.pending_writes.push(b'=');
+                push_hex_bytes(&mut self.pending_writes, value);
             }
+            self.pending_writes.extend_from_slice(b"\x1b\\");
         }
-    }
-
-    fn push_xtgettcap_response(&mut self, valid: bool, encoded_name: &[u8], value: &[u8]) {
-        self.pending_writes.extend_from_slice(b"\x1bP");
-        self.pending_writes
-            .extend_from_slice(if valid { b"1+r" } else { b"0+r" });
-        self.pending_writes.extend_from_slice(encoded_name);
-        if valid {
-            self.pending_writes.push(b'=');
-            push_hex_bytes(&mut self.pending_writes, value);
-        }
-        self.pending_writes.extend_from_slice(b"\x1b\\");
     }
 }
 
@@ -207,6 +186,22 @@ fn push_color_params(
         }
         Color::Palette(index) => params.push(format!("{extended};5;{index}")),
         Color::Rgb(rgb) => params.push(format!("{extended};2;{};{};{}", rgb.r, rgb.g, rgb.b)),
+    }
+}
+
+/// The value XTGETTCAP reports for `name`: `Some(None)` for a boolean
+/// capability, `None` for one it does not know. `TN`, `Co` and `RGB` are
+/// queryable without being terminfo capabilities, as in Ghostty; `TN` names
+/// Noa rather than Ghostty's `xterm-ghostty` entry.
+fn xtgettcap_value(name: &[u8]) -> Option<Option<&'static [u8]>> {
+    match name {
+        b"TN" => Some(Some(b"noa")),
+        b"Co" => Some(Some(b"256")),
+        b"RGB" => Some(Some(b"8")),
+        _ => terminfo::CAPABILITIES
+            .iter()
+            .find(|(capability, _)| capability.as_bytes() == name)
+            .map(|&(_, value)| value),
     }
 }
 
@@ -233,7 +228,7 @@ fn hex_value(b: u8) -> Option<u8> {
 }
 
 fn push_hex_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     for &b in bytes {
         out.push(HEX[(b >> 4) as usize]);
         out.push(HEX[(b & 0x0f) as usize]);

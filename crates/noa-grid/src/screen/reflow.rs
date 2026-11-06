@@ -1,6 +1,22 @@
 //! `Screen` resize + soft-wrap reflow.
 
+use std::collections::VecDeque;
+
 use super::*;
+
+/// Most rows a reflow keeps around for reuse, per pool.
+const REFLOW_SPARE_ROWS: usize = 64;
+
+/// Buffers one reflow reuses from line to line, so a line that needs no growth
+/// allocates nothing.
+#[derive(Default)]
+pub(super) struct ReflowScratch {
+    cells: Vec<Cell>,
+    row_starts: Vec<usize>,
+    row_lens: Vec<usize>,
+    line_out: Vec<Row>,
+    row_pool: Vec<Row>,
+}
 
 impl Screen {
     /// Resize the grid to `cols`×`rows`, reflowing soft-wrapped logical lines,
@@ -104,13 +120,18 @@ impl Screen {
         let limit = self.scrollback.limit_bytes();
         let limit_lines = self.scrollback.limit_lines();
 
-        // Streaming reflow (two passes over logical lines), so neither the
-        // materialized history nor the reflowed output is ever fully resident:
-        // pass 1 measures the reflowed length and resolves the cursor/saved
-        // anchors; pass 2 re-reflows and routes each row straight into the new
-        // byte-bounded paged scrollback or the grid window, dropping the rest.
-        // Records where each old logical line landed, so placements can be
-        // re-anchored onto the new row numbering after reflow re-packs history.
+        // Streaming reflow over logical lines, so neither the materialized
+        // history nor the reflowed output is ever fully resident. Where the
+        // window lands depends on the total length, known only at the end, but
+        // the cursor bounds it from below (`grid_start > cursor_row - rows`), so
+        // rows that far above the cursor go straight to the new byte-bounded
+        // scrollback. The rest wait in `pending` until the window is resolved.
+        // `line_remaps` records where each old logical line landed, so placements
+        // can be re-anchored onto the new row numbering after history is re-packed.
+        let mut scrollback = PagedScrollback::new(if enabled { limit } else { 0 });
+        scrollback.set_limit_lines(limit_lines);
+        let mut pending: VecDeque<Row> = VecDeque::with_capacity(target_rows);
+        let mut pending_base = 0usize;
         let mut line_remaps: Vec<LineRemap> = Vec::new();
         let mut content_end = 0;
         let (reflowed_len, cursor_position, saved_position) = self.stream_reflow_lines(
@@ -118,9 +139,20 @@ impl Screen {
             &blank,
             cursor_point,
             saved_point,
-            |r, row| {
+            |r, cursor_row_floor, row, row_pool| {
                 if !row.is_blank() || row.wrapped {
                     content_end = r + 1;
+                }
+                pending.push_back(row);
+                while pending_base + target_rows <= cursor_row_floor {
+                    let row = pending.pop_front().expect("floor is at most the next row");
+                    if enabled {
+                        scrollback.push_row(&row);
+                    }
+                    pending_base += 1;
+                    if row_pool.len() < REFLOW_SPARE_ROWS {
+                        row_pool.push(row);
+                    }
                 }
             },
             |remap| line_remaps.push(remap),
@@ -154,25 +186,18 @@ impl Screen {
         // Reflow trimming does not bump `rows_evicted` (pre-existing quirk:
         // reflow already renumbers rows, so shell-integration marks shift with a
         // column-count resize). The byte limit is enforced during push.
-        let mut scrollback = PagedScrollback::new(if enabled { limit } else { 0 });
-        scrollback.set_limit_lines(limit_lines);
+        debug_assert!(pending_base <= grid_start);
         let mut grid: Vec<Row> = Vec::with_capacity(target_rows);
-        self.stream_reflow_lines(
-            cols,
-            &blank,
-            cursor_point,
-            saved_point,
-            |r, row| {
-                if r < grid_start {
-                    if enabled {
-                        scrollback.push_row(&row);
-                    }
-                } else if r < grid_end {
-                    grid.push(row);
+        for (i, row) in pending.into_iter().enumerate() {
+            let r = pending_base + i;
+            if r < grid_start {
+                if enabled {
+                    scrollback.push_row(&row);
                 }
-            },
-            |_| {},
-        );
+            } else if r < grid_end {
+                grid.push(row);
+            }
+        }
         self.scrollback = scrollback;
 
         self.grid = grid.into();
@@ -246,15 +271,15 @@ impl Screen {
     ///
     /// History rows are materialized on demand and each logical line is reflowed
     /// in isolation, so peak memory is one logical line plus whatever `on_row`
-    /// retains — never the whole history. `resize_with_reflow` calls this twice:
-    /// once to measure and locate the cursor, once to route rows into storage.
+    /// retains — never the whole history. `on_row` also receives a lower bound on
+    /// the cursor's reflowed row and the pool of output rows to recycle into.
     pub(super) fn stream_reflow_lines(
         &self,
         cols: u16,
         blank: &Cell,
         cursor_point: ReflowPoint,
         saved_point: Option<ReflowPoint>,
-        mut on_row: impl FnMut(usize, Row),
+        mut on_row: impl FnMut(usize, usize, Row, &mut Vec<Row>),
         mut on_line: impl FnMut(LineRemap),
     ) -> (usize, ReflowPosition, Option<ReflowPosition>) {
         let scrollback_len = self.scrollback.len();
@@ -266,13 +291,14 @@ impl Screen {
         // Read rows go back here between lines, so walking the history doesn't
         // allocate one per row. A wrapped line's worth at most: the rest of a
         // long one is dropped rather than held.
-        const SPARE_ROWS: usize = 64;
         let mut spare_rows: Vec<Row> = Vec::new();
+        let mut scratch = ReflowScratch::default();
+        let mut cursor_row_floor = 0usize;
         let mut line_start = 0usize;
 
         {
             let mut flush = |line_rows: &[Row], line_start: usize| {
-                let (rows_out, cursor_pos, saved_pos) = Self::reflow_logical_line(
+                let (cursor_pos, saved_pos) = Self::reflow_logical_line(
                     line_rows,
                     line_start,
                     reflowed_len,
@@ -280,6 +306,7 @@ impl Screen {
                     blank,
                     cursor_point,
                     saved_point,
+                    &mut scratch,
                 );
                 if let Some(position) = cursor_pos {
                     cursor_position = position;
@@ -288,14 +315,18 @@ impl Screen {
                     saved_position = Some(position);
                 }
                 let base = reflowed_len;
-                let count = rows_out.len();
+                // The cursor is in this line or a later one.
+                if line_start <= cursor_point.y {
+                    cursor_row_floor = base;
+                }
+                let count = scratch.line_out.len();
                 on_line(LineRemap {
                     old_start: line_start,
                     old_len: line_rows.len(),
                     new_base: base,
                 });
-                for (i, row) in rows_out.into_iter().enumerate() {
-                    on_row(base + i, row);
+                for (i, row) in scratch.line_out.drain(..).enumerate() {
+                    on_row(base + i, cursor_row_floor, row, &mut scratch.row_pool);
                 }
                 reflowed_len = base + count;
             };
@@ -315,7 +346,7 @@ impl Screen {
                 // A logical line ends at the first non-wrapped row (inclusive).
                 if !wrapped {
                     flush(&buf, line_start);
-                    let room = SPARE_ROWS.saturating_sub(spare_rows.len());
+                    let room = REFLOW_SPARE_ROWS.saturating_sub(spare_rows.len());
                     spare_rows.extend(buf.drain(..).take(room));
                 }
             }
@@ -328,9 +359,10 @@ impl Screen {
         (reflowed_len, cursor_position, saved_position)
     }
 
-    /// Reflow one logical line's rows into `cols`-wide rows and resolve the
-    /// cursor / saved anchors that fall inside it (relative to `base_row`, the
-    /// index of the line's first output row).
+    /// Reflow one logical line's rows into `cols`-wide rows, left in
+    /// `scratch.line_out`, and resolve the cursor / saved anchors that fall inside
+    /// it (relative to `base_row`, the index of the line's first output row).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn reflow_logical_line(
         line_rows: &[Row],
         line_start: usize,
@@ -339,28 +371,45 @@ impl Screen {
         blank: &Cell,
         cursor: ReflowPoint,
         saved: Option<ReflowPoint>,
-    ) -> (Vec<Row>, Option<ReflowPosition>, Option<ReflowPosition>) {
-        let (cells, cursor_anchor, saved_anchor) =
-            Self::collect_reflow_cells(line_rows, line_start, cursor, saved);
+        scratch: &mut ReflowScratch,
+    ) -> (Option<ReflowPosition>, Option<ReflowPosition>) {
+        let (cursor_anchor, saved_anchor) =
+            Self::collect_reflow_cells(line_rows, line_start, cursor, saved, scratch);
         // Only a line holding the cursor or the saved cursor reads positions.
         let track_positions = cursor_anchor.is_some() || saved_anchor.is_some();
-        let line = Self::reflow_cells(&cells, cols, blank, track_positions);
+        let line = Self::reflow_cells(
+            &scratch.cells,
+            cols,
+            blank,
+            track_positions,
+            std::mem::take(&mut scratch.line_out),
+            &mut scratch.row_pool,
+        );
         let cursor_pos =
             cursor_anchor.map(|anchor| Self::resolve_reflow_anchor(&line, anchor, base_row));
         let saved_pos =
             saved_anchor.map(|anchor| Self::resolve_reflow_anchor(&line, anchor, base_row));
-        (line.rows, cursor_pos, saved_pos)
+        scratch.line_out = line.rows;
+        (cursor_pos, saved_pos)
     }
 
+    /// Flatten a logical line into `scratch.cells` and locate the anchors in it.
     pub(super) fn collect_reflow_cells(
         rows: &[Row],
         start_y: usize,
         cursor: ReflowPoint,
         saved: Option<ReflowPoint>,
-    ) -> (Vec<Cell>, Option<ReflowAnchor>, Option<ReflowAnchor>) {
-        let mut cells = Vec::new();
-        let mut row_starts = Vec::with_capacity(rows.len());
-        let mut row_lens = Vec::with_capacity(rows.len());
+        scratch: &mut ReflowScratch,
+    ) -> (Option<ReflowAnchor>, Option<ReflowAnchor>) {
+        let ReflowScratch {
+            cells,
+            row_starts,
+            row_lens,
+            ..
+        } = scratch;
+        cells.clear();
+        row_starts.clear();
+        row_lens.clear();
 
         for (idx, row) in rows.iter().enumerate() {
             let mut len = row.cells.len();
@@ -394,12 +443,12 @@ impl Screen {
         }
 
         let cursor_anchor =
-            Self::reflow_anchor_for_point(cursor, rows, start_y, &row_starts, &row_lens);
+            Self::reflow_anchor_for_point(cursor, rows, start_y, row_starts, row_lens);
         let saved_anchor = saved.and_then(|point| {
-            Self::reflow_anchor_for_point(point, rows, start_y, &row_starts, &row_lens)
+            Self::reflow_anchor_for_point(point, rows, start_y, row_starts, row_lens)
         });
 
-        (cells, cursor_anchor, saved_anchor)
+        (cursor_anchor, saved_anchor)
     }
 
     pub(super) fn reflow_anchor_for_point(
@@ -432,22 +481,38 @@ impl Screen {
     /// `track_positions` off leaves the result's position tables empty, for
     /// the lines nothing is anchored on (nearly all of them): they are as long
     /// as the line and cost more to fill than the rows themselves.
+    ///
+    /// Output goes into `rows` (empty on entry, kept for its capacity), whose
+    /// rows come from `row_pool` where it has any: every row in it is `cols` wide.
     pub(super) fn reflow_cells(
         cells: &[Cell],
         cols: u16,
         blank: &Cell,
         track_positions: bool,
+        mut rows: Vec<Row>,
+        row_pool: &mut Vec<Row>,
     ) -> ReflowedLine {
+        let mut new_row = || match row_pool.pop() {
+            Some(mut row) => {
+                row.clear(blank);
+                row
+            }
+            None => Self::row_with_blank(cols, blank),
+        };
+        rows.push(new_row());
         if cells.is_empty() {
             return ReflowedLine {
-                rows: vec![Self::row_with_blank(cols, blank)],
+                rows,
                 cell_positions: Vec::new(),
-                boundary_positions: vec![ReflowPosition { row: 0, x: 0 }],
+                boundary_positions: if track_positions {
+                    vec![ReflowPosition { row: 0, x: 0 }]
+                } else {
+                    Vec::new()
+                },
             };
         }
 
         let cols_usize = cols as usize;
-        let mut rows = vec![Self::row_with_blank(cols, blank)];
         let (mut cell_positions, mut boundary_positions) = if track_positions {
             (
                 vec![None; cells.len()],
@@ -481,7 +546,7 @@ impl Screen {
                     }
                     row.wrapped = true;
                 }
-                rows.push(Self::row_with_blank(cols, blank));
+                rows.push(new_row());
                 x = 0;
             }
 

@@ -455,16 +455,26 @@ impl Page {
     /// to `cols` with default blanks. Reuses `out`'s allocation.
     fn materialize_row_into(&self, local: usize, out: &mut Row) {
         let meta = &self.rows[local];
-        out.cells.clear();
         let start = meta.offset as usize;
-        let cols = self.cols as usize;
-        out.cells.reserve(cols.max(meta.len as usize));
-        out.cells.extend(
-            (start..start + meta.len as usize)
-                .map(|index| self.unpack_cell(self.cells[index], index)),
-        );
-        if out.cells.len() < cols {
-            out.cells.resize(cols, Cell::default());
+        let len = meta.len as usize;
+        let width = (self.cols as usize).max(len);
+        if out.cells.len() == width {
+            // Already the right width, and blank past its watermark: only the
+            // stored prefix and whatever `out` held beyond it need writing.
+            let stale_end = out.occupied();
+            for (offset, cell) in out.cells[..len].iter_mut().enumerate() {
+                *cell = self.unpack_cell(self.cells[start + offset], start + offset);
+            }
+            if stale_end > len {
+                out.cells[len..stale_end].fill(Cell::default());
+            }
+        } else {
+            out.cells.clear();
+            out.cells.reserve(width);
+            out.cells.extend(
+                (start..start + len).map(|index| self.unpack_cell(self.cells[index], index)),
+            );
+            out.cells.resize(width, Cell::default());
         }
         out.wrapped = meta.wrapped;
         out.dirty = false;
@@ -3205,6 +3215,33 @@ mod tests {
         // bandwidth paths (scroll rotate, row clear, pack input, snapshot
         // clone) are sized by this. See `cell::tests::cell_is_24_bytes`.
         assert_eq!(std::mem::size_of::<Cell>(), 24);
+    }
+
+    #[test]
+    fn materialize_into_a_used_row_matches_a_fresh_one() {
+        let mut page = Page::new(8);
+        let mut row = Row::new(8);
+        row.cells[0].ch = 'a';
+        row.mark_occupied(1);
+        let (_, _) = page.pack_row(&row);
+        let mut wide = Row::new(8);
+        for cell in &mut wide.cells {
+            cell.ch = 'z';
+        }
+        wide.mark_all();
+        wide.wrapped = true;
+        page.pack_row(&wide);
+
+        let mut reused = Row::new(8);
+        page.materialize_row_into(1, &mut reused);
+        assert!(reused.wrapped);
+        page.materialize_row_into(0, &mut reused);
+
+        let fresh = page.materialize_row(0);
+        assert_eq!(reused.cells, fresh.cells);
+        assert_eq!(reused.wrapped, fresh.wrapped);
+        assert_eq!(reused.occ, fresh.occ);
+        reused.debug_assert_tail_default();
     }
 
     #[test]

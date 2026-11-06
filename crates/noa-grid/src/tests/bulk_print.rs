@@ -352,3 +352,107 @@ fn bulk_narrow_run_matches_per_scalar_extending_a_cluster_under_mode_2027() {
     let setup = "\x1b[?2027hé".as_bytes();
     assert_bulk_print_matches_per_scalar(80, 24, setup, "\u{0301}жз");
 }
+
+#[test]
+fn bulk_mixed_text_matches_per_scalar_across_row_boundaries() {
+    // Scripts alternating every few scalars, the shape `print_plain_text`
+    // exists for, with wrap landing on every kind of scalar.
+    let text = "漢字 and かな ж€ 𐎪🚀x";
+    for cols in 5..=23 {
+        assert_bulk_print_matches_per_scalar(cols, 4, b"", &text.repeat(4));
+        assert_bulk_print_matches_per_scalar(cols, 4, b"\x1b[33;41m", &text.repeat(4));
+    }
+}
+
+#[test]
+fn bulk_mixed_text_matches_per_scalar_for_scrambled_input() {
+    // Plain scalars of each width next to every cluster-forming kind, over
+    // rows that already hold wide pairs, marks and a background-erase blank.
+    const SCALARS: &[char] = &[
+        'a',
+        ' ',
+        '#',
+        '1',
+        'ж',
+        'é',
+        '€',
+        '𐎪',
+        '日',
+        'あ',
+        '가',
+        '🚀',
+        '👍',
+        '\u{1F3FD}',
+        '\u{0301}',
+        '\u{200D}',
+        '\u{FE0F}',
+        '\u{FE0E}',
+        '\u{20E3}',
+        '\u{1100}',
+        '\u{1161}',
+        '\u{11A8}',
+        '\u{1F1E6}',
+        '\u{0903}',
+        '\u{0600}',
+        '❤',
+        '\u{00AD}',
+        '\u{200B}',
+    ];
+    const SETUPS: &[&str] = &[
+        "",
+        "\x1b[?2027l",
+        "日本語あいう\r",
+        "a\u{0301}日\u{0301}b\x1b[1;2H",
+        "\x1b[41m\x1b[2J\x1b[H",
+        "\x1b[?69h\x1b[2;6s\x1b[1;2H",
+        "\x1b[?69h\x1b[2;6s\x1b[1;8H",
+        "\x1b[2;3r\x1b[3;1H",
+    ];
+    // xorshift: deterministic, so a failure reproduces.
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut random = move |below: usize| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % below as u64) as usize
+    };
+    for _ in 0..3000 {
+        let len = random(40);
+        let text: String = (0..len).map(|_| SCALARS[random(SCALARS.len())]).collect();
+        let setup = SETUPS[random(SETUPS.len())];
+        let cols = 4 + random(12) as u16;
+        assert_bulk_print_matches_per_scalar(cols, 4, setup.as_bytes(), &text);
+    }
+}
+
+#[test]
+fn bulk_mixed_text_updates_last_printed_for_rep() {
+    let t = run("日a本\x1b[2b".as_bytes());
+    assert_eq!(cell(&t, 3, 0).ch, '本');
+    assert_eq!(cell(&t, 5, 0).ch, '本');
+    assert_eq!(cell(&t, 7, 0).ch, '本');
+}
+
+#[test]
+fn plain_scalars_never_join_each_other() {
+    use crate::screen::Screen;
+    use unicode_segmentation::UnicodeSegmentation as _;
+    let plain = |c: char| {
+        c.is_ascii() && !c.is_control() || Screen::is_plain_narrow(c) || Screen::is_plain_wide(c)
+    };
+    const REPRESENTATIVES: &[char] = &['a', '#', 'ж', '𐎪', '日', '가', '🚀', '❤'];
+    for &rep in REPRESENTATIVES {
+        assert!(plain(rep), "{rep:?} should be plain");
+    }
+    for c in (0..=0x10ffff)
+        .filter_map(char::from_u32)
+        .filter(|&c| plain(c))
+    {
+        for &rep in REPRESENTATIVES {
+            for pair in [[c, rep], [rep, c]] {
+                let text: String = pair.iter().collect();
+                assert_eq!(text.graphemes(true).count(), 2, "{pair:?} joined");
+            }
+        }
+    }
+}

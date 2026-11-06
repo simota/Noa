@@ -330,6 +330,165 @@ impl Screen {
         }
     }
 
+    /// The column count of a scalar [`Self::print_plain_text`] can write
+    /// without cluster handling, or `0` if it must take the per-scalar path.
+    /// Memoized per scalar for planes 0-1: deriving it probes the segmenter
+    /// (see [`Self::join_props`]), far too slow to repeat, or to run for the
+    /// whole table up front on the first non-ASCII byte.
+    #[inline]
+    fn plain_width(c: char) -> usize {
+        // Stored as `width + 1`: zero marks a slot not computed yet.
+        static CACHE: [std::sync::atomic::AtomicU8; 0x20000] =
+            [const { std::sync::atomic::AtomicU8::new(0) }; 0x20000];
+        let compute = || {
+            if c.is_ascii() || Self::is_plain_narrow(c) {
+                1
+            } else if Self::is_plain_wide(c) {
+                2
+            } else {
+                0
+            }
+        };
+        let Some(slot) = CACHE.get(c as usize) else {
+            return compute();
+        };
+        let cached = slot.load(std::sync::atomic::Ordering::Relaxed);
+        if cached != 0 {
+            return usize::from(cached - 1);
+        }
+        let width = compute();
+        slot.store(width as u8 + 1, std::sync::atomic::Ordering::Relaxed);
+        width
+    }
+
+    /// Bulk print the longest prefix of `text` made of scalars with a non-zero
+    /// [`Self::plain_width`], with autowrap on, and return its length in
+    /// bytes. Semantically identical to calling [`Self::print`] once per
+    /// scalar; the caller prints whatever follows some other way.
+    ///
+    /// Real text alternates scripts every few scalars (`漢字 and かな`), so
+    /// the per-run setup of [`Self::print_ascii_run`] and
+    /// [`Self::print_wide_scalars`] would otherwise dominate. Here the pen and
+    /// margins are hoisted once and only a row boundary leaves the write loop.
+    ///
+    /// Only the prefix can extend a pre-existing cluster: plain scalars never
+    /// join each other (pinned by `plain_scalars_never_join_each_other`).
+    pub(crate) fn print_plain_text(&mut self, text: &str, grapheme_clustering: bool) -> usize {
+        let (left, right) = (self.left_margin(), self.right_margin());
+        if self.cursor.x < left || self.cursor.x > right || right <= left {
+            return 0;
+        }
+        let mut chars = text.chars();
+        if grapheme_clustering {
+            while let Some(c) = chars.as_str().chars().next() {
+                if !self.extend_cluster_at_cursor(c) {
+                    break;
+                }
+                chars.next();
+            }
+        }
+        let consumed = |chars: &std::str::Chars<'_>| text.len() - chars.as_str().len();
+        let mut next = match chars.as_str().chars().next() {
+            Some(c) if Self::plain_width(c) != 0 => {
+                chars.next();
+                c
+            }
+            _ => return consumed(&chars),
+        };
+        let blank = self.blank();
+        let narrow = Cell {
+            ch: ' ',
+            fg: self.cursor.fg,
+            bg: self.cursor.bg,
+            underline_color: self.cursor.underline_color,
+            hyperlink: self.cursor.hyperlink,
+            attrs: self.pen_attrs(),
+            grapheme: None,
+        };
+        let mut lead = narrow;
+        lead.attrs.insert(CellAttrs::WIDE);
+        let mut spacer = narrow;
+        spacer.attrs.insert(CellAttrs::WIDE_SPACER);
+        let layout = CellAttrs::WIDE | CellAttrs::WIDE_SPACER;
+        let seg_end = right as usize + 1;
+        loop {
+            let mut width = Self::plain_width(next);
+            if self.cursor.pending_wrap {
+                if let Some(row) = self.grid.get_mut(self.cursor.y as usize) {
+                    row.wrapped = true;
+                }
+                self.index();
+                self.cursor.x = left;
+                self.cursor.pending_wrap = false;
+            }
+            if width == 2 && self.cursor.x >= right {
+                let x = self.cursor.x as usize;
+                if let Some(row) = self.grid.get_mut(self.cursor.y as usize) {
+                    Self::mark_wide_pad(row, x, &blank);
+                    row.wrapped = true;
+                    row.dirty = true;
+                }
+                self.index();
+                self.cursor.x = left;
+            }
+            let x = self.cursor.x as usize;
+            let row = match self.grid.get_mut(self.cursor.y as usize) {
+                Some(row) if seg_end <= row.cells.len() => row,
+                _ => return consumed(&chars) - next.len_utf8(),
+            };
+            // Past the watermark every cell is default, so no wide pair can
+            // need clearing: a row fresh from a scroll skips the check.
+            let occupied = row.occupied();
+            let mut k = x;
+            let mut last = next;
+            let unwritten = loop {
+                if k + width > seg_end {
+                    break Some(next);
+                }
+                if width == 1 {
+                    if k < occupied && row.cells[k].attrs.intersects(layout) {
+                        Self::clear_wide_at(row, k, &blank);
+                    }
+                    row.cells[k] = Cell { ch: next, ..narrow };
+                } else {
+                    if k < occupied {
+                        for cell_x in [k, k + 1] {
+                            if row.cells[cell_x].attrs.intersects(layout) {
+                                Self::clear_wide_at(row, cell_x, &blank);
+                            }
+                        }
+                    }
+                    row.cells[k] = Cell { ch: next, ..lead };
+                    row.cells[k + 1] = spacer;
+                }
+                k += width;
+                last = next;
+                let before = chars.clone();
+                let Some(c) = chars.next() else {
+                    break None;
+                };
+                width = Self::plain_width(c);
+                if width == 0 {
+                    chars = before;
+                    break None;
+                }
+                next = c;
+            };
+            row.dirty = true;
+            row.mark_occupied(k);
+            self.last_printed = Some(last);
+            if k > right as usize {
+                self.cursor.x = right;
+                self.cursor.pending_wrap = true; // latch; stay in the last column
+            } else {
+                self.cursor.x = k as u16;
+            }
+            if unwritten.is_none() {
+                return consumed(&chars);
+            }
+        }
+    }
+
     /// Whether `c` qualifies for [`Self::print_wide_run`]: a width-2 scalar
     /// that cannot extend another scalar inside the run. Hangul L (GB6) and
     /// skin-tone modifiers can join their predecessors, so both must take

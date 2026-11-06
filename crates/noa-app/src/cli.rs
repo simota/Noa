@@ -17,6 +17,8 @@ use std::io::{IsTerminal, Write};
 
 use crate::commands::KeybindEngine;
 
+// The preview drives the terminal through Unix termios.
+#[cfg(unix)]
 mod theme_preview;
 
 /// One-shot CLI actions (`Noa +<action>`).
@@ -117,11 +119,16 @@ pub fn run_action<S: AsRef<str>>(action: CliAction, args: &[S]) -> anyhow::Resul
             // Ghostty: the preview needs a terminal; piped output, or
             // `--plain`, gets the plain list.
             let plain = args.iter().any(|arg| arg.as_ref() == "--plain");
-            if !plain && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+            let interactive =
+                !plain && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+            #[cfg(unix)]
+            if interactive {
                 theme_preview::run()?;
-            } else {
-                print!("{}", list_themes_output());
+                return Ok(());
             }
+            #[cfg(not(unix))]
+            let _ = interactive;
+            print!("{}", list_themes_output());
         }
         CliAction::ListKeybinds => {
             let (config, diagnostics) =

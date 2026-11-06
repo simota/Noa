@@ -658,7 +658,14 @@ impl Canvas {
 #[derive(Default)]
 pub(super) struct KeyReader {
     pending: Vec<u8>,
+    /// Pauses `pending` has waited through.
+    pauses: usize,
 }
+
+/// Pauses (of [`run`]'s 100 ms poll) an unfinished sequence other than a
+/// lone ESC may wait for its rest before it is dropped: long enough for
+/// bytes that arrive late, short enough that it does not eat later keys.
+const STALE_PAUSES: usize = 10;
 
 impl KeyReader {
     pub(super) fn feed(&mut self, bytes: &[u8]) -> Vec<Key> {
@@ -670,18 +677,23 @@ impl KeyReader {
             i += len;
         }
         self.pending.drain(..i);
+        self.pauses = 0;
         keys
     }
 
     /// No input followed: a held lone ESC was the Esc key. Any other
-    /// unfinished sequence keeps waiting, since its rest can arrive late
-    /// (over ssh, say).
+    /// unfinished sequence waits a little longer, since its rest can arrive
+    /// late (over ssh, say), then is dropped.
     pub(super) fn flush(&mut self) -> Option<Key> {
-        if self.pending != [0x1b] {
-            return None;
+        if self.pending == [0x1b] {
+            self.pending.clear();
+            return Some(Key::Esc);
         }
-        self.pending.clear();
-        Some(Key::Esc)
+        self.pauses += 1;
+        if self.pauses >= STALE_PAUSES {
+            self.pending.clear();
+        }
+        None
     }
 }
 
@@ -703,9 +715,14 @@ fn next_key(bytes: &[u8]) -> Option<(Option<Key>, usize)> {
                 return Some((key, 6));
             }
             b'[' => {
-                let len = bytes[2..].iter().position(|b| (0x40..=0x7e).contains(b))?;
-                let key = csi_key(&bytes[2..2 + len], bytes[2 + len]);
-                return Some((key, len + 3));
+                let len = bytes[2..].iter().position(|b| !(0x20..=0x3f).contains(b))?;
+                let fin = bytes[2 + len];
+                if !(0x40..=0x7e).contains(&fin) {
+                    // Not a CSI after all (an ESC, say): drop what came
+                    // before that byte and decode it afresh.
+                    return Some((None, len + 2));
+                }
+                return Some((csi_key(&bytes[2..2 + len], fin), len + 3));
             }
             b'O' => {
                 let key = match *bytes.get(2)? {
@@ -718,7 +735,10 @@ fn next_key(bytes: &[u8]) -> Option<(Option<Key>, usize)> {
                 };
                 return Some((key, 3));
             }
-            _ => Some(Key::Esc),
+            0x1b => Some(Key::Esc),
+            // Alt (meta) + a key: not one of the preview's keys, and not Esc
+            // followed by that key.
+            _ => return Some((None, 2)),
         },
         b'\r' | b'\n' => Some(Key::Enter),
         0x7f => Some(Key::Backspace),
@@ -732,8 +752,20 @@ fn next_key(bytes: &[u8]) -> Option<(Option<Key>, usize)> {
                 0xf0..=0xf7 => 4,
                 _ => 1,
             };
-            let encoded = bytes.get(..len)?;
-            let key = std::str::from_utf8(encoded)
+            // A lead byte without its continuation bytes is dropped alone,
+            // so the key after it survives.
+            let continued = bytes[1..]
+                .iter()
+                .take(len - 1)
+                .take_while(|b| (0x80..=0xbf).contains(*b))
+                .count();
+            if continued < len - 1 {
+                if continued + 1 == bytes.len() {
+                    return None;
+                }
+                return Some((None, 1));
+            }
+            let key = std::str::from_utf8(&bytes[..len])
                 .ok()
                 .and_then(|text| text.chars().next())
                 .map(Key::Char);
@@ -863,9 +895,42 @@ fn terminal_size() -> (usize, usize) {
     (usize::from(size.ws_col), usize::from(size.ws_row))
 }
 
+/// The terminating signal [`run`] caught, or 0.
+static SIGNALED: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+extern "C" fn on_signal(signal: libc::c_int) {
+    SIGNALED.store(signal, std::sync::atomic::Ordering::Relaxed);
+}
+
+const TERMINATING_SIGNALS: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGHUP, libc::SIGINT];
+
 /// Run the preview until the user quits. The caller has checked that stdin
-/// and stdout are terminals.
+/// and stdout are terminals. A terminating signal restores the terminal
+/// first, then ends the process as that signal would.
 pub(super) fn run() -> io::Result<()> {
+    for signal in TERMINATING_SIGNALS {
+        // SAFETY: the handler only stores to an atomic.
+        unsafe {
+            libc::signal(
+                signal,
+                on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t,
+            )
+        };
+    }
+    let result = run_until_quit();
+    let signal = SIGNALED.load(std::sync::atomic::Ordering::Relaxed);
+    for signal in TERMINATING_SIGNALS {
+        // SAFETY: back to the default disposition.
+        unsafe { libc::signal(signal, libc::SIG_DFL) };
+    }
+    if signal != 0 {
+        // SAFETY: re-raises the caught signal with its default action.
+        unsafe { libc::raise(signal) };
+    }
+    result
+}
+
+fn run_until_quit() -> io::Result<()> {
     let _terminal = RawTerminal::enter()?;
     let mut preview = Preview::new(noa_theme::THEMES);
     let mut stdout = io::stdout();
@@ -883,6 +948,9 @@ pub(super) fn run() -> io::Result<()> {
         // A short timeout so a resize redraws without a SIGWINCH handler.
         // SAFETY: one valid pollfd.
         let ready = unsafe { libc::poll(&mut poll, 1, 100) };
+        if SIGNALED.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+            return Ok(());
+        }
         let mut dirty = false;
         let keys = if ready > 0 {
             // SAFETY: reads into `buf`, at most its length.
@@ -1004,6 +1072,46 @@ mod tests {
         assert_eq!(reader.feed(b"\xc3"), []);
         assert_eq!(reader.flush(), None);
         assert_eq!(reader.feed(b"\xa9"), [Key::Char('é')]);
+    }
+
+    #[test]
+    fn an_unfinished_sequence_is_dropped_after_a_long_pause() {
+        let mut reader = KeyReader::default();
+        assert_eq!(reader.feed(b"\x1b[1"), []);
+        for _ in 1..STALE_PAUSES {
+            assert_eq!(reader.flush(), None);
+        }
+        assert_eq!(reader.feed(b";"), []);
+        for _ in 0..STALE_PAUSES {
+            assert_eq!(reader.flush(), None);
+        }
+        assert_eq!(reader.feed(b"q"), [Key::Char('q')]);
+    }
+
+    #[test]
+    fn an_esc_inside_a_csi_ends_it() {
+        let mut reader = KeyReader::default();
+        assert_eq!(reader.feed(b"\x1b[1\x1b[A"), [Key::Up]);
+        assert_eq!(reader.feed(b"\x1b[\rj"), [Key::Enter, Key::Char('j')]);
+    }
+
+    #[test]
+    fn alt_and_a_key_is_neither_esc_nor_the_key() {
+        let mut reader = KeyReader::default();
+        assert_eq!(reader.feed(b"\x1bj\x1bqk"), [Key::Char('k')]);
+        assert_eq!(reader.feed(b"\x1b\x1b"), [Key::Esc]);
+        assert_eq!(reader.flush(), Some(Key::Esc));
+    }
+
+    #[test]
+    fn a_stray_utf8_lead_byte_does_not_eat_the_next_key() {
+        let mut reader = KeyReader::default();
+        assert_eq!(
+            reader.feed(b"\xeaj\xe2\x86k"),
+            [Key::Char('j'), Key::Char('k')]
+        );
+        assert_eq!(reader.feed(b"\xe2\x86"), []);
+        assert_eq!(reader.feed(b"\x91"), [Key::Char('↑')]);
     }
 
     #[test]

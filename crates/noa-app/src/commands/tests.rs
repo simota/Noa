@@ -991,3 +991,28 @@ fn toggle_background_opacity_action_names_are_accepted() {
         Some(AppCommand::ToggleBackgroundOpacity)
     );
 }
+
+/// Ghostty 1.4.0's `open_config` takes `os_open` (the default) or
+/// `new_window`.
+#[test]
+fn open_config_action_names_are_accepted() {
+    for (action, command) in [
+        ("open_config", AppCommand::EditConfigFile),
+        ("open_config:os_open", AppCommand::EditConfigFile),
+        (
+            "open_config:new_window",
+            AppCommand::EditConfigFileInNewWindow,
+        ),
+    ] {
+        assert_eq!(
+            super::command_from_keybind_action(action),
+            Some(command),
+            "{action}"
+        );
+    }
+    assert_eq!(super::command_from_keybind_action("open_config:tab"), None);
+    assert_eq!(
+        AppCommand::from_action_name(&AppCommand::EditConfigFileInNewWindow.action_name()),
+        Some(AppCommand::EditConfigFileInNewWindow)
+    );
+}

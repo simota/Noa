@@ -30,6 +30,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::About => "About Noa",
         AppCommand::Preferences => "Open Preferences",
         AppCommand::EditConfigFile => "Edit Config File\u{2026}",
+        AppCommand::EditConfigFileInNewWindow => "Open Config in New Terminal Window",
         AppCommand::ReloadConfig => "Reload Configuration",
         AppCommand::Copy => "Copy to Clipboard",
         AppCommand::Paste => "Paste from Clipboard",
@@ -139,6 +140,9 @@ pub(crate) fn command_palette_description(command: AppCommand) -> &'static str {
         AppCommand::About => "Show the version of Noa.",
         AppCommand::Preferences | AppCommand::OpenSettings => "Open the settings.",
         AppCommand::EditConfigFile => "Open the config file with the OS's default editor.",
+        AppCommand::EditConfigFileInNewWindow => {
+            "Open the config file in a new window using $EDITOR or $VISUAL."
+        }
         AppCommand::ReloadConfig => "Reload the config file.",
         AppCommand::Copy => "Copy the selected text to the clipboard.",
         AppCommand::Paste => "Paste the contents of the main clipboard.",
@@ -249,6 +253,9 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
     const ENTRIES: &[AppCommand] = &[
         AppCommand::About,
         AppCommand::EditConfigFile,
+        // On macOS it would open the file the same way as the entry above.
+        #[cfg(not(target_os = "macos"))]
+        AppCommand::EditConfigFileInNewWindow,
         AppCommand::OpenThemePicker,
         AppCommand::OpenSettings,
         AppCommand::ToggleProcessMonitor,
@@ -528,6 +535,7 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         AppCommand::About
         | AppCommand::Preferences
         | AppCommand::EditConfigFile
+        | AppCommand::EditConfigFileInNewWindow
         | AppCommand::AttachRemote
         | AppCommand::OpenThemePicker
         | AppCommand::OpenSettings
@@ -838,6 +846,7 @@ mod tests {
             AppCommand::About,
             AppCommand::Preferences,
             AppCommand::EditConfigFile,
+            AppCommand::EditConfigFileInNewWindow,
             AppCommand::OpenThemePicker,
             AppCommand::OpenSettings,
             AppCommand::ToggleProcessMonitor,
@@ -957,7 +966,8 @@ mod tests {
                 && matches!(
                     command,
                     AppCommand::MoveTabToNewWindow | AppCommand::ToggleBackgroundOpacity
-                ));
+                ))
+                || (cfg!(target_os = "macos") && command == AppCommand::EditConfigFileInNewWindow);
             assert_eq!(
                 entries.contains(&command),
                 !excluded,

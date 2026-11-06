@@ -47,7 +47,7 @@ To make ⌘↑ / ⌘↓ scroll to the top / bottom as in Ghostty 1.3, set
 
 | Category | Action |
 |---|---|
-| App | `about`, `preferences`, `config.reload`, `app.quit` |
+| App | `about`, `preferences`, `preferences.edit-config-file` (Ghostty's `open_config` / `open_config:os_open` also works), `preferences.edit-config-file-in-new-window` (Ghostty's `open_config:new_window` also works; off macOS, edits the config with `$VISUAL`, else `$EDITOR`, else `vi` in a new window; on macOS it opens the file like `preferences.edit-config-file`, as Ghostty's macOS app does), `config.reload`, `app.quit` |
 | Edit | `copy`, `paste`, `pane.send-selection`, `copy-mode`, `copy-mode.left`, `copy-mode.right`, `copy-mode.up`, `copy-mode.down` |
 | Terminal | `terminal.clear`, `terminal.clear-scrollback`, `terminal.select-all`, `terminal.export-scrollback`, `terminal.pipe-scrollback-to-pager` |
 | Font | `font-size.increase`, `font-size.decrease`, `font-size.reset` |

@@ -105,6 +105,9 @@ impl App {
             // R-23: the pre-R-22 behavior, kept reachable under its own
             // command identity.
             AppCommand::EditConfigFile => crate::app_actions::open_config_file(),
+            AppCommand::EditConfigFileInNewWindow => {
+                self.edit_config_file_in_new_window(event_loop)
+            }
             AppCommand::ReloadConfig => self.reload_config_from_disk(),
             AppCommand::NewTab => {
                 if let Err(err) = self.spawn_tab(event_loop, SpawnTarget::CurrentWindow) {
@@ -273,6 +276,52 @@ impl App {
             menu.set_secure_keyboard_entry_checked(desired);
         }
         let _ = desired;
+    }
+
+    /// Ghostty's `open_config:new_window`: run `$VISUAL` / `$EDITOR` (else
+    /// `vi`) on the config file in a new window titled after it. Ghostty
+    /// does this only on GTK; its macOS app opens the file the OS way
+    /// whichever target is asked for, and so does this on macOS.
+    fn edit_config_file_in_new_window(&mut self, event_loop: &ActiveEventLoop) {
+        if cfg!(target_os = "macos") {
+            crate::app_actions::open_config_file();
+            return;
+        }
+        let Some(path) = crate::app_actions::config_file_for_editing() else {
+            return;
+        };
+        // The command line is UTF-8 text; a lossy path would edit some
+        // other file.
+        if path.to_str().is_none() {
+            log::warn!("cannot edit the config in a new window: its path is not UTF-8");
+            return;
+        }
+        let command = crate::app_actions::config_edit_command(
+            &path,
+            std::env::var("VISUAL").ok(),
+            std::env::var("EDITOR").ok(),
+        );
+        // The next spawned surface runs this instead of the shell, the way
+        // the CLI's `-e` command does.
+        *self.initial_command.lock() = Some(vec!["/bin/sh".to_string(), "-c".to_string(), command]);
+        let spawned = self.spawn_tab(event_loop, SpawnTarget::NewWindow);
+        // A spawn that failed before the surface leaves it for the next tab.
+        self.initial_command.lock().take();
+        let window_id = match spawned {
+            Ok(window_id) => window_id,
+            Err(err) => {
+                log::warn!("failed to open a window to edit the config: {err:#}");
+                return;
+            }
+        };
+        if let Some(state) = self.windows.get_mut(&window_id) {
+            let pane = state.focused_pane;
+            if let Some(surface) = state.surfaces.get_mut(&pane) {
+                surface.title_override =
+                    Some(format!("Editing configuration file {}", path.display()));
+            }
+        }
+        self.refresh_window_title(window_id);
     }
 
     /// Ghostty's `toggle_background_opacity`: hold every terminal window's

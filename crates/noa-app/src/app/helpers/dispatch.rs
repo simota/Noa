@@ -401,6 +401,7 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
         AppCommand::About
         | AppCommand::Preferences
         | AppCommand::EditConfigFile
+        | AppCommand::EditConfigFileInNewWindow
         | AppCommand::ReloadConfig
         | AppCommand::NewTab
         | AppCommand::NewWindow
@@ -472,6 +473,15 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::ToggleBackgroundOpacity
         | AppCommand::ToggleEmber
         | AppCommand::ToggleSidebar => CommandScope::App,
+        // Off macOS it opens a window of its own, so it is held back like
+        // New Window; on macOS it only opens the file like Edit Config File.
+        AppCommand::EditConfigFileInNewWindow => {
+            if cfg!(target_os = "macos") {
+                CommandScope::App
+            } else {
+                CommandScope::Overview
+            }
+        }
         // The palette does not open while the overview is focused (v1, R-10):
         // Overview scope makes `ToggleCommandPalette` a no-op there (AC-15).
         AppCommand::ToggleCommandPalette

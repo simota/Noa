@@ -55,6 +55,16 @@ fn search_prompt_acts_on_command(command: AppCommand) -> bool {
     )
 }
 
+/// Whether the focused pane's selection appeared after the prompt opened: any
+/// selection in a pane other than the prompt's took a click there, and in the
+/// prompt's own pane it differs from the one the prompt opened over.
+fn selection_is_newer_than_prompt(
+    (prompt_pane, at_open): (PaneId, Option<noa_grid::Selection>),
+    (pane, current): (PaneId, Option<noa_grid::Selection>),
+) -> bool {
+    current.is_some() && (pane != prompt_pane || current != at_open)
+}
+
 fn navigate_search(
     worker: Option<&crate::search_worker::SearchWorker>,
     target: &Arc<parking_lot::Mutex<noa_grid::Terminal>>,
@@ -110,6 +120,7 @@ impl App {
                     return;
                 }
                 let query = terminal.active().search.query().to_string();
+                let selection_at_open = terminal.active().selection;
                 drop(terminal);
                 // Ghostty 1.4.0 shares the needle through the macOS find
                 // pasteboard: a search already under way publishes its
@@ -124,6 +135,7 @@ impl App {
                     window_id,
                     pane_id,
                     prompt: SearchPrompt::open(query),
+                    selection_at_open,
                 });
                 if let Some(text) = from_pasteboard {
                     self.sync_search_prompt_from_find_pasteboard(window_id, &text);
@@ -286,12 +298,7 @@ impl App {
         if self.focused_search_prompt_window().is_none() {
             return false;
         }
-        let pane_has_selection = self
-            .resolve_pane_command_target(AppCommand::Copy)
-            .and_then(|(window_id, pane_id)| self.windows.get(&window_id)?.surfaces.get(&pane_id))
-            .and_then(|surface| surface.terminal.lock().selected_text())
-            .is_some_and(|text| !text.is_empty());
-        if pane_has_selection {
+        if self.selection_made_during_search_prompt() {
             return false;
         }
         let query = self
@@ -303,6 +310,29 @@ impl App {
             self.write_text_to_clipboard(&query);
         }
         true
+    }
+
+    fn selection_made_during_search_prompt(&self) -> bool {
+        let Some(session) = self.search_prompt.as_ref() else {
+            return false;
+        };
+        let Some((window_id, pane_id)) = self.resolve_pane_command_target(AppCommand::Copy) else {
+            return false;
+        };
+        let Some(surface) = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&pane_id))
+        else {
+            return false;
+        };
+        let terminal = surface.terminal.lock();
+        selection_is_newer_than_prompt(
+            (session.pane_id, session.selection_at_open),
+            (pane_id, terminal.active().selection),
+        ) && terminal
+            .selected_text()
+            .is_some_and(|text| !text.is_empty())
     }
 
     /// Paste the clipboard's text into the focused prompt. Returns whether a
@@ -442,6 +472,31 @@ mod tests {
     use noa_grid::Terminal;
     use parking_lot::Mutex;
     use std::time::Duration;
+
+    #[test]
+    fn only_a_selection_made_after_the_prompt_opened_counts_as_newer() {
+        let prompt_pane = PaneId::new(1);
+        let other_pane = PaneId::new(2);
+        let point = |x| noa_grid::SelectionPoint::new(x, 0);
+        let old = Some(noa_grid::Selection::new(point(0), point(3)));
+        let new = Some(noa_grid::Selection::new(point(5), point(8)));
+
+        for (at_open, pane, current, expected) in [
+            (old, prompt_pane, old, false),
+            (None, prompt_pane, None, false),
+            (old, prompt_pane, None, false),
+            (None, prompt_pane, new, true),
+            (old, prompt_pane, new, true),
+            (old, other_pane, old, true),
+            (old, other_pane, None, false),
+        ] {
+            assert_eq!(
+                selection_is_newer_than_prompt((prompt_pane, at_open), (pane, current)),
+                expected,
+                "at_open {at_open:?}, pane {pane:?}, current {current:?}"
+            );
+        }
+    }
 
     #[test]
     fn only_commands_the_prompt_acts_on_outrank_its_editing_keys() {

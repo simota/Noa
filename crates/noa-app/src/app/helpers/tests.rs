@@ -1968,12 +1968,21 @@ fn background_opacity_toggle_is_app_scoped() {
 }
 
 /// Off macOS it opens a window of its own, like New Window; on macOS it
-/// opens the file like Edit Config File, which the scratch popup allows.
+/// opens the file like Edit Config File, which the scratch popup and the
+/// overview allow.
 #[test]
-fn config_edit_in_new_window_is_app_scoped_and_blocked_in_the_scratch_popup_off_macos() {
+fn config_edit_in_new_window_is_app_scoped_and_blocked_in_popups_off_macos() {
     assert_eq!(
         command_scope(AppCommand::EditConfigFileInNewWindow),
         CommandScope::App
+    );
+    assert_eq!(
+        overview_should_intercept_command(
+            AppCommand::EditConfigFileInNewWindow,
+            true,
+            CommandOrigin::OverviewWindow
+        ),
+        !cfg!(target_os = "macos")
     );
     assert_eq!(
         crate::app::scratch_terminal::scratch_terminal_command_blocked(

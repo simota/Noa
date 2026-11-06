@@ -59,7 +59,7 @@ pub enum AppCommand {
     PrevTab,
     /// Ghostty 1.4.0's `move_tab_to_new_window`: move the focused tab out of
     /// its window into a new one of its own. A lone tab already is its own
-    /// window, so it does nothing then. macOS only (native AppKit tabs).
+    /// window, so it does nothing then.
     MoveTabToNewWindow,
     /// Ghostty 1.4.0's `move_tab:N`: move the focused tab N places along its
     /// window's tab bar (negative: towards the start). macOS stops at the

@@ -18,7 +18,8 @@ use std::rc::Rc;
 
 use rustybuzz::ttf_parser::Tag as HbTag;
 use rustybuzz::{
-    Direction, Face as HbFace, Feature as HbFeature, UnicodeBuffer, Variation as HbVariation,
+    Direction, Face as HbFace, Feature as HbFeature, Language, Script, ShapePlan, UnicodeBuffer,
+    Variation as HbVariation, script,
 };
 
 use crate::config::{FontConfig, FontVariation};
@@ -99,6 +100,52 @@ pub(crate) struct ShapeRunEntry {
     /// is correct.
     pub(crate) glyphs: Rc<[ShapedGlyph]>,
     pub(crate) last_used: u64,
+}
+
+/// Compiled shape plans. A plan is fixed by what it is keyed on here (the
+/// face, the features and variations `cfg_digest` folds in, and the buffer's
+/// script and language; the direction is always LTR) and never by the text,
+/// while compiling one walks the font's GSUB/GPOS on every shaped run.
+#[derive(Default)]
+pub(crate) struct ShapePlans {
+    plans: HashMap<PlanKey, ShapePlan>,
+}
+
+type PlanKey = (FaceId, u64, Script, Option<Language>);
+
+/// Far above the face x style x script combinations real text produces; only
+/// here so pathological input can't grow the map without bound.
+const SHAPE_PLANS_CAP: usize = 256;
+
+impl ShapePlans {
+    fn get_or_build(
+        &mut self,
+        face: &HbFace<'_>,
+        face_id: FaceId,
+        cfg: &FontConfig,
+        cfg_digest: u64,
+        buffer: &UnicodeBuffer,
+    ) -> &ShapePlan {
+        let run_script = buffer.script();
+        let language = buffer.language();
+        if self.plans.len() >= SHAPE_PLANS_CAP {
+            self.plans.clear();
+        }
+        self.plans
+            .entry((face_id, cfg_digest, run_script, language.clone()))
+            .or_insert_with(|| {
+                // A run with no script of its own (digits, punctuation) stays
+                // unset, as `rustybuzz::shape` leaves it after guessing.
+                let plan_script = (run_script != script::UNKNOWN).then_some(run_script);
+                ShapePlan::new(
+                    face,
+                    Direction::LeftToRight,
+                    plan_script,
+                    language.as_ref(),
+                    &feature_list(cfg),
+                )
+            })
+    }
 }
 
 /// Hash a run for shape-cache lookup without building an owned key: the
@@ -202,7 +249,8 @@ pub(crate) fn shape_with_rustybuzz(
     px: f32,
     cells: &[ShapeCell],
     variation_coords: &[(u32, f32)],
-    cfg: &FontConfig,
+    (cfg, cfg_digest): (&FontConfig, u64),
+    plans: &mut ShapePlans,
 ) -> Vec<ShapedGlyph> {
     let Some(mut face) = HbFace::from_slice(&font_data.bytes, font_data.index as u32) else {
         return Vec::new();
@@ -239,8 +287,8 @@ pub(crate) fn shape_with_rustybuzz(
     // run is shaped left-to-right regardless of the guessed script.
     buffer.set_direction(Direction::LeftToRight);
 
-    let features = feature_list(cfg);
-    let output = rustybuzz::shape(&face, &features, buffer);
+    let plan = plans.get_or_build(&face, face_id, cfg, cfg_digest, &buffer);
+    let output = rustybuzz::shape_with_plan(&face, plan, buffer);
 
     output
         .glyph_infos()
@@ -267,6 +315,65 @@ mod tests {
             ch,
             combining: Vec::new(),
             style: StyleKey::default(),
+        }
+    }
+
+    /// A reused plan must shape as `rustybuzz::shape` does, whatever script,
+    /// mix of marks and order the runs arrive in.
+    #[test]
+    fn cached_plans_shape_like_a_plan_built_per_run() {
+        let stack = crate::load_font_stack(&FontConfig::default()).expect("font stack");
+        let font_data = &stack.faces()[0];
+        let cfg = FontConfig::default();
+        let digest = config_digest(&cfg, StyleKey::default());
+        let mut plans = ShapePlans::default();
+        let runs = [
+            "plain latin -> != fi fl",
+            "0123 456",
+            "...",
+            "\u{5d0}\u{5d1}\u{5d2} hebrew",
+            "\u{627}\u{644}\u{639}\u{631}\u{628}\u{64a}\u{629}",
+            "日本語のテキスト",
+            "\u{915}\u{93f}\u{924}\u{93e}\u{92c}",
+            "plain latin again",
+            "0123 456",
+        ];
+        for text in runs {
+            let cells: Vec<ShapeCell> = text.chars().map(cell).collect();
+            let shaped = shape_with_rustybuzz(
+                font_data,
+                FaceId(0),
+                14.0,
+                &cells,
+                &[],
+                (&cfg, digest),
+                &mut plans,
+            );
+
+            let face = HbFace::from_slice(&font_data.bytes, font_data.index as u32).unwrap();
+            let mut buffer = UnicodeBuffer::new();
+            for (idx, ch) in text.chars().enumerate() {
+                buffer.add(ch, idx as u32);
+            }
+            buffer.guess_segment_properties();
+            buffer.set_direction(Direction::LeftToRight);
+            let output = rustybuzz::shape(&face, &feature_list(&cfg), buffer);
+            let expected: Vec<(u32, i32, u32)> = output
+                .glyph_infos()
+                .iter()
+                .zip(output.glyph_positions())
+                .map(|(info, pos)| (info.glyph_id, pos.x_advance, info.cluster))
+                .collect();
+            let scale = 14.0 / face.units_per_em().max(1) as f32;
+            let actual: Vec<(u32, i32, u32)> = shaped
+                .iter()
+                .map(|g| (u32::from(g.glyph_id), g.x_advance, g.cluster))
+                .collect();
+            let expected: Vec<(u32, i32, u32)> = expected
+                .into_iter()
+                .map(|(id, adv, cluster)| (id, (adv as f32 * scale).round() as i32, cluster))
+                .collect();
+            assert_eq!(actual, expected, "{text}");
         }
     }
 

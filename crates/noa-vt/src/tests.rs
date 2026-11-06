@@ -3,8 +3,9 @@
 
 use crate::action::{Action, OscTerminator};
 use crate::csi::{Csi, Esc};
-use crate::parser::Parser;
+use crate::parser::{MAX_APC_BYTES, Parser};
 use crate::sgr::{SgrAttr, parse_sgr, parse_sgr_into};
+use crate::state::State;
 use noa_core::{Color, Rgb};
 
 /// Run the parser over `bytes` and collect every emitted action.
@@ -2079,4 +2080,107 @@ fn ascii_lines_iterates_complete_lines_and_exposes_the_remainder() {
     );
     assert_eq!(lines.next(), None);
     assert_eq!(lines.remainder(), b"rest");
+}
+
+/// Bulk-consuming string payloads must leave every action, state and cap
+/// decision exactly as the per-byte DFA makes them.
+#[test]
+fn string_payload_bulk_scan_matches_the_per_byte_dfa() {
+    fn per_byte(bytes: &[u8]) -> (Vec<Action>, State) {
+        let mut parser = Parser::new();
+        let mut out = Vec::new();
+        for &b in bytes {
+            parser.advance(b, &mut |action| out.push(action));
+        }
+        (out, parser.state())
+    }
+    fn with_bulk(bytes: &[u8], split: usize) -> (Vec<Action>, State) {
+        let mut parser = Parser::new();
+        let mut out = Vec::new();
+        for piece in bytes.chunks(split) {
+            let mut i = 0;
+            while i < piece.len() {
+                let n = parser.scan_string_payload(&piece[i..]);
+                if n > 0 {
+                    i += n;
+                } else {
+                    parser.advance(piece[i], &mut |action| out.push(action));
+                    i += 1;
+                }
+            }
+        }
+        (out, parser.state())
+    }
+
+    let fragments: &[&[u8]] = &[
+        b"\x1b_G",
+        b"\x1b_Ga=t,f=32;",
+        b"\x1b_25a1;",
+        b"\x1b_X",
+        b"\x1bP1;2q",
+        b"\x1b]0;",
+        b"\x1b]52;c;",
+        b"\x1b]12345",
+        b"\x1bX",
+        b"\x1b^",
+        b"\x1b\\",
+        b"\x07",
+        b"\x9c",
+        b"\x18",
+        b"\x7f",
+        b"\n",
+        b";",
+        b"AbC012+/=",
+        "作検".as_bytes(),
+        b"\xe4",
+        b"\xc2",
+        b"\x1b[1;2m",
+    ];
+    let mut seed = 0x2545_f491_u32;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed as usize
+    };
+    for _ in 0..3000 {
+        let mut input = Vec::new();
+        for _ in 0..next() % 12 {
+            if next() % 3 == 0 {
+                input.resize(input.len() + next() % 70, b'x');
+            } else {
+                input.extend_from_slice(fragments[next() % fragments.len()]);
+            }
+        }
+        let split = 1 + next() % 40;
+        assert_eq!(per_byte(&input), with_bulk(&input, split), "{input:?}");
+    }
+
+    // Each cap, from either side of its boundary.
+    for (open, cap) in [
+        (&b"\x1b]0;"[..], 2048),
+        (&b"\x1b]52;c;"[..], crate::parser::MAX_ALLOCATING_OSC_BYTES),
+        (&b"\x1bPq"[..], crate::parser::MAX_DCS_BYTES),
+        (&b"\x1b_25a1;"[..], crate::parser::MAX_GLYPH_APC_BYTES),
+    ] {
+        for len in [cap - 1, cap, cap + 1] {
+            let mut input = open.to_vec();
+            input.resize(open.len() + len, b'x');
+            input.extend_from_slice(b"\x1b\\tail");
+            assert_eq!(
+                per_byte(&input),
+                with_bulk(&input, 64 * 1024),
+                "cap {cap} len {len}"
+            );
+        }
+    }
+    // The 65 MiB cap, too large to run per byte in a debug build.
+    for (len, dispatches) in [(MAX_APC_BYTES, true), (MAX_APC_BYTES + 1, false)] {
+        let mut input = b"\x1b_G;".to_vec();
+        input.resize(input.len() + len, b'x');
+        input.extend_from_slice(b"\x1b\\");
+        let (out, state) = with_bulk(&input, 64 * 1024);
+        assert_eq!(state, State::Ground);
+        assert_eq!(!out.is_empty(), dispatches, "len {len}");
+    }
 }

@@ -948,13 +948,52 @@ pub(crate) fn encode_base64(input: &[u8], out: &mut Vec<u8>) {
     }
 }
 
+/// Each base64 symbol's value; `0xff` for every other byte.
+const BASE64_VALUES: [u8; 256] = {
+    let mut values = [0xff; 256];
+    let mut i = 0;
+    while i < BASE64_ALPHABET.len() {
+        values[BASE64_ALPHABET[i] as usize] = i as u8;
+        i += 1;
+    }
+    values
+};
+
 pub(crate) fn decode_base64_limited(input: &[u8], max_decoded_bytes: usize) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity((input.len() / 4) * 3);
     let mut quartet = [0u8; 4];
     let mut quartet_len = 0;
     let mut saw_padding = false;
 
-    for &b in input {
+    let mut rest = input;
+    while let Some((&b, tail)) = rest.split_first() {
+        // Whole groups of plain symbols decode in one step; whitespace,
+        // padding and a group split across those take the byte path below.
+        if quartet_len == 0 && !saw_padding {
+            let (groups, _) = rest.as_chunks::<4>();
+            let plain = groups
+                .iter()
+                .take_while(|group| group.iter().all(|&b| BASE64_VALUES[b as usize] < 64))
+                .count();
+            if plain > 0 {
+                let decoded = out.len() + plain * 3;
+                if decoded > max_decoded_bytes {
+                    return None;
+                }
+                out.reserve(plain * 3);
+                for group in &groups[..plain] {
+                    let [a, b, c, d] = group.map(|b| BASE64_VALUES[b as usize]);
+                    out.extend_from_slice(&[
+                        (a << 2) | (b >> 4),
+                        (b << 4) | (c >> 2),
+                        (c << 6) | d,
+                    ]);
+                }
+                rest = &rest[plain * 4..];
+                continue;
+            }
+        }
+        rest = tail;
         if b.is_ascii_whitespace() {
             continue;
         }

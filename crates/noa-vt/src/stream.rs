@@ -282,6 +282,12 @@ fn feed_parser<H: Handler>(
                 i += n;
                 continue;
             }
+        } else {
+            let n = parser.scan_string_payload(&bytes[i..]);
+            if n > 0 {
+                i += n;
+                continue;
+            }
         }
         parser.advance(bytes[i], &mut |action| {
             *display_dirty |= !is_pure_query(&action);

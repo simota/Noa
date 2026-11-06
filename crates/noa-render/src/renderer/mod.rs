@@ -14,7 +14,9 @@ use unicode_width::UnicodeWidthChar;
 use crate::background_image::{BackgroundImage, BackgroundImageLayer};
 use crate::draw_plan::{DrawOp, PaneId, PaneRect, build_draw_plan};
 use crate::image_layer::{ImageDraw, ImageLayer};
-use crate::instance::{BlendMode, CellInstance, PaneUniformParams, populate_pane_uniform};
+use crate::instance::{
+    BlendMode, CellInstance, PaneUniformParams, Uniforms, populate_pane_uniform,
+};
 use crate::pipeline::CellPipeline;
 use crate::segment::{RunPool, SegmentCell, ShapeRun, segment_row, segment_row_into};
 use crate::snapshot::{
@@ -114,6 +116,9 @@ pub struct PaneFrame<'a> {
 
 struct PaneGpuState {
     uniform_buffer: wgpu::Buffer,
+    /// What `uniform_buffer` holds, so a frame that doesn't change it (nearly
+    /// all of them) skips the staging allocation `write_buffer` makes.
+    uploaded_uniforms: Option<Uniforms>,
     bind_group: wgpu::BindGroup,
     /// Which atlas SET the bind group's texture views came from, alongside
     /// that set's texture generation. Both are needed: the generation catches
@@ -1211,6 +1216,7 @@ impl Renderer {
             );
             self.pane_gpu.push(PaneGpuState {
                 uniform_buffer,
+                uploaded_uniforms: None,
                 bind_group,
                 atlas_set_id: atlas_views.atlas_id,
                 atlas_texture_generation: atlas_views.texture_generation,
@@ -1286,12 +1292,12 @@ impl Renderer {
         }
     }
 
-    fn upload_uniforms(&self, queue: &wgpu::Queue, layout: &[(PaneId, PaneRect)]) {
+    fn upload_uniforms(&mut self, queue: &wgpu::Queue, layout: &[(PaneId, PaneRect)]) {
         let (cell_w, cell_h) = self.cell_size;
         for (index, (_, rect)) in layout.iter().enumerate() {
-            let Some(gpu) = self.pane_gpu.get(index) else {
+            if index >= self.pane_gpu.len() {
                 continue;
-            };
+            }
             let uniforms = populate_pane_uniform(PaneUniformParams {
                 pane_rect: *rect,
                 window_size: self.viewport,
@@ -1303,7 +1309,14 @@ impl Renderer {
                 bg_color: self.clear_color,
                 blend_mode: self.blend_mode,
             });
-            queue.write_buffer(&gpu.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+            let gpu = &mut self.pane_gpu[index];
+            let unchanged = gpu.uploaded_uniforms.as_ref().is_some_and(|uploaded| {
+                bytemuck::bytes_of(uploaded) == bytemuck::bytes_of(&uniforms)
+            });
+            if !unchanged {
+                queue.write_buffer(&gpu.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+                gpu.uploaded_uniforms = Some(uniforms);
+            }
         }
     }
 

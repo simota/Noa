@@ -457,12 +457,14 @@ impl Page {
         let meta = &self.rows[local];
         out.cells.clear();
         let start = meta.offset as usize;
-        for i in 0..meta.len as usize {
-            let index = start + i;
-            out.cells.push(self.unpack_cell(self.cells[index], index));
-        }
-        while out.cells.len() < self.cols as usize {
-            out.cells.push(Cell::default());
+        let cols = self.cols as usize;
+        out.cells.reserve(cols.max(meta.len as usize));
+        out.cells.extend(
+            (start..start + meta.len as usize)
+                .map(|index| self.unpack_cell(self.cells[index], index)),
+        );
+        if out.cells.len() < cols {
+            out.cells.resize(cols, Cell::default());
         }
         out.wrapped = meta.wrapped;
         out.dirty = false;
@@ -482,6 +484,7 @@ impl Page {
         self.bytes = PAGE_HEADER_COST + self.styles.len() * std::mem::size_of::<Style>();
     }
 
+    #[cfg(test)]
     fn materialize_row(&self, local: usize) -> Row {
         let mut row = Row::from_cells(Vec::with_capacity(self.cols as usize), false, false);
         self.materialize_row_into(local, &mut row);
@@ -794,17 +797,13 @@ impl SpanRow {
         let text = self.text(arena);
         out.cells.clear();
         out.cells.reserve(cols);
-        for _ in 0..col {
-            out.cells.push(self.blank);
-        }
-        for &b in text {
-            out.cells.push(Cell {
-                ch: b as char,
-                ..self.template
-            });
-        }
-        while out.cells.len() < cols {
-            out.cells.push(self.blank);
+        out.cells.resize(col, self.blank);
+        out.cells.extend(text.iter().map(|&b| Cell {
+            ch: b as char,
+            ..self.template
+        }));
+        if out.cells.len() < cols {
+            out.cells.resize(cols, self.blank);
         }
         out.wrapped = self.wrapped;
         out.dirty = false;
@@ -816,6 +815,7 @@ impl SpanRow {
         out.debug_assert_tail_default();
     }
 
+    #[cfg(test)]
     fn materialize(&self, arena: &[u8]) -> Row {
         let mut row = Row::from_cells(Vec::new(), false, false);
         self.materialize_into(arena, &mut row);
@@ -1297,6 +1297,12 @@ struct SealBatch {
 pub(crate) struct PagedScrollback {
     /// Filled pages, oldest first; idle compression works on these.
     pages: VecDeque<Arc<PageSlot>>,
+    /// For each slot in `pages`, the running row count just past it, on a
+    /// numbering that survives eviction: `row` finds a page by bisecting this
+    /// rather than walking `pages` (it runs per row in reflow and copy).
+    page_row_ends: VecDeque<usize>,
+    /// Where `pages.front()` starts on the `page_row_ends` numbering.
+    first_page_start: usize,
     /// The newest page, still being filled: a plain `Page` so the per-row
     /// pack path pays nothing for compression. It joins `pages` when the next
     /// page starts.
@@ -1376,6 +1382,8 @@ impl PagedScrollback {
     pub(crate) fn new(limit_bytes: usize) -> Self {
         PagedScrollback {
             pages: VecDeque::new(),
+            page_row_ends: VecDeque::new(),
+            first_page_start: 0,
             open: None,
             compressing: Arc::new(AtomicBool::new(false)),
             decompressed: Arc::new(AtomicBool::new(false)),
@@ -1452,6 +1460,8 @@ impl PagedScrollback {
         }
         self.sealing = None;
         self.pages.clear();
+        self.page_row_ends.clear();
+        self.first_page_start = 0;
         self.open = None;
         self.pending.clear();
         self.pending_span_bytes = Vec::new();
@@ -1920,6 +1930,13 @@ impl PagedScrollback {
     /// Materialize row `y` (`0` = oldest retained row), or `None` if out of
     /// range. Trimmed trailing cells are padded back to `cols`.
     pub(crate) fn row(&self, y: usize) -> Option<Row> {
+        let mut row = empty_row();
+        self.row_into(y, &mut row).then_some(row)
+    }
+
+    /// [`Self::row`] into `out`, reusing its allocation. Returns whether `y`
+    /// was in range; `out` is unspecified when it was not.
+    pub(crate) fn row_into(&self, y: usize, out: &mut Row) -> bool {
         let packed = self.packed_rows();
         if y >= packed {
             let sealing = self.sealing_rows();
@@ -1931,24 +1948,34 @@ impl PagedScrollback {
             } else {
                 match self.pending.get(y - packed - sealing) {
                     Some(row) => (row, self.pending_span_bytes.as_slice()),
-                    None => return None,
+                    None => return false,
                 }
             };
-            return Some(match row {
-                DeferredRow::Cells(row) => row.clone(),
-                DeferredRow::Span(span) => span.materialize(arena),
-            });
-        }
-        let mut base = 0;
-        for slot in &self.pages {
-            let n = slot.rows;
-            if y < base + n {
-                return Some(slot.with_page(|page| page.materialize_row(y - base)));
+            match row {
+                DeferredRow::Cells(row) => out.copy_from(row),
+                DeferredRow::Span(span) => span.materialize_into(arena, out),
             }
-            base += n;
+            return true;
         }
-        let page = self.open.as_ref()?;
-        (y < base + page.rows.len()).then(|| page.materialize_row(y - base))
+        let target = self.first_page_start + y;
+        let index = self.page_row_ends.partition_point(|&end| end <= target);
+        let start = match index.checked_sub(1) {
+            Some(previous) => self.page_row_ends[previous],
+            None => self.first_page_start,
+        };
+        match self.pages.get(index) {
+            Some(slot) => slot.with_page(|page| page.materialize_row_into(target - start, out)),
+            None => {
+                let Some(page) = self.open.as_ref() else {
+                    return false;
+                };
+                if target - start >= page.rows.len() {
+                    return false;
+                }
+                page.materialize_row_into(target - start, out);
+            }
+        }
+        true
     }
 
     /// Visit rows `range` in order without allocating per row (a reused scratch
@@ -2146,6 +2173,12 @@ impl PagedScrollback {
     fn push_page(&mut self, page: Page) {
         if let Some(open) = self.open.take() {
             let filled = Arc::try_unwrap(open).unwrap_or_else(|shared| Page::clone(&shared));
+            let start = self
+                .page_row_ends
+                .back()
+                .copied()
+                .unwrap_or(self.first_page_start);
+            self.page_row_ends.push_back(start + filled.rows.len());
             self.pages
                 .push_back(Arc::new(PageSlot::new(filled, self.decompressed.clone())));
         }
@@ -2194,6 +2227,7 @@ impl PagedScrollback {
                 || self.total_rows - front.rows >= self.limit_lines)
         {
             let slot = self.pages.pop_front().unwrap();
+            self.first_page_start = self.page_row_ends.pop_front().unwrap();
             self.total_bytes -= slot.bytes;
             self.total_rows -= slot.rows;
             evicted += slot.rows;
@@ -2579,6 +2613,53 @@ mod tests {
             cells.push(Cell::default());
         }
         row_from(cells)
+    }
+
+    /// `row` bisects `page_row_ends`; it must find what an in-order walk finds
+    /// in every tier, as whole pages evict from the front and after a clear.
+    #[test]
+    fn row_lookup_agrees_with_a_walk_through_eviction_and_clear() {
+        fn assert_agrees(scrollback: &mut PagedScrollback) {
+            let len = scrollback.len();
+            let mut walked = Vec::with_capacity(len);
+            scrollback.for_each_row(0..len, |_, row| walked.push(row.clone()));
+            assert_eq!(walked.len(), len);
+            for (y, expected) in walked.iter().enumerate() {
+                let row = scrollback.row(y).expect("row in range");
+                assert_eq!(row.cells, expected.cells, "row {y}");
+                assert_eq!(row.wrapped, expected.wrapped, "row {y}");
+                assert_eq!(row.occupied(), expected.occupied(), "row {y}");
+            }
+            assert!(scrollback.row(len).is_none());
+        }
+
+        let mut scrollback = PagedScrollback::new(4 * PAGE_TARGET_BYTES);
+        assert_agrees(&mut scrollback);
+        let mut pushed = 0;
+        for round in 0..3 {
+            for i in 0..5000 {
+                pushed += 1;
+                let row = text_row(&format!("row {round} {i} {pushed}"), 80);
+                if i % 3 == 0 {
+                    scrollback.push_row_deferred(row);
+                } else {
+                    scrollback.push_row(&row);
+                }
+            }
+            assert_agrees(&mut scrollback);
+            scrollback.flush_all();
+            assert_agrees(&mut scrollback);
+        }
+        assert!(
+            scrollback.len() < pushed,
+            "the limit must have evicted pages"
+        );
+        scrollback.clear();
+        assert_agrees(&mut scrollback);
+        for i in 0..5000 {
+            scrollback.push_row(&text_row(&format!("again {i}"), 80));
+        }
+        assert_agrees(&mut scrollback);
     }
 
     #[test]

@@ -517,11 +517,21 @@ impl Screen {
         let mut text = String::new();
 
         let mut previous_wrapped = false;
+        let scrollback_len = self.scrollback.len();
+        let mut history_row = Row::new(0);
         for y in start.y..=end.y {
             // A row that fell out of storage (stale selection edge) skips,
             // rather than discarding the rest of the copy.
-            let Some(row) = self.storage_row(y) else {
-                continue;
+            let row = if y < scrollback_len {
+                if !self.scrollback.row_into(y, &mut history_row) {
+                    continue;
+                }
+                &history_row
+            } else {
+                match self.grid.get(y - scrollback_len) {
+                    Some(row) => row,
+                    None => continue,
+                }
             };
             let Some(row_end) = row.cells.len().checked_sub(1) else {
                 continue;
@@ -532,7 +542,7 @@ impl Screen {
             if y > start.y && !previous_wrapped {
                 text.push('\n');
             }
-            Self::push_selected_row_text(&row, start_x, end_x, &mut text);
+            Self::push_selected_row_text(row, start_x, end_x, &mut text);
             previous_wrapped = row.wrapped;
         }
 
@@ -681,7 +691,15 @@ impl Screen {
     ) {
         let before_len = text.len();
         let pad_x = row.ends_with_wide_pad().then(|| row.cells.len() - 1);
-        for (x, cell) in row.cells[start_x..=end_x].iter().enumerate() {
+        let trims_tail = end_x + 1 == row.cells.len() && !row.wrapped;
+        // Cells past the occupancy watermark are default blanks, which the
+        // tail trim below would only pop again: don't push them.
+        let copy_end = if trims_tail {
+            (end_x + 1).min(row.occupied()).max(start_x)
+        } else {
+            end_x + 1
+        };
+        for (x, cell) in row.cells[start_x..copy_end].iter().enumerate() {
             if cell.attrs.contains(CellAttrs::WIDE_SPACER) || pad_x == Some(start_x + x) {
                 continue;
             }
@@ -691,7 +709,7 @@ impl Screen {
         // Trim the blank tail of an unwrapped row; a soft-wrapped row is full
         // width, so its trailing spaces are real content continued on the
         // next row and must survive the join.
-        if end_x + 1 == row.cells.len() && !row.wrapped {
+        if trims_tail {
             while text.len() > before_len && text.ends_with(' ') {
                 text.pop();
             }
@@ -830,18 +848,16 @@ impl Screen {
 
         for (slot_idx, idx) in (start..start + rows).enumerate() {
             if idx < scrollback_len {
-                let row = self
-                    .scrollback
-                    .row(idx)
-                    .unwrap_or_else(|| Row::new(self.cols));
-                match out_rows.get_mut(slot_idx) {
-                    Some(slot) => clone_row_into(slot, &row),
-                    None => out_rows.push(row),
+                if slot_idx == out_rows.len() {
+                    out_rows.push(Row::new(self.cols));
+                }
+                if !self.scrollback.row_into(idx, &mut out_rows[slot_idx]) {
+                    out_rows[slot_idx] = Row::new(self.cols);
                 }
             } else {
                 let row = &self.grid[idx - scrollback_len];
                 match out_rows.get_mut(slot_idx) {
-                    Some(slot) => clone_row_into(slot, row),
+                    Some(slot) => slot.copy_from(row),
                     None => out_rows.push(row.clone()),
                 }
             }
@@ -907,13 +923,11 @@ impl Screen {
                     slot.dirty = false;
                     continue;
                 }
-                let row = self
-                    .scrollback
-                    .row(idx)
-                    .unwrap_or_else(|| Row::new(self.cols));
-                match out_rows.get_mut(slot_idx) {
-                    Some(slot) => clone_row_into(slot, &row),
-                    None => out_rows.push(row),
+                if slot_idx == out_rows.len() {
+                    out_rows.push(Row::new(self.cols));
+                }
+                if !self.scrollback.row_into(idx, &mut out_rows[slot_idx]) {
+                    out_rows[slot_idx] = Row::new(self.cols);
                 }
             } else {
                 let row = &mut self.grid[idx - scrollback_len];
@@ -927,7 +941,7 @@ impl Screen {
                     continue;
                 }
                 match out_rows.get_mut(slot_idx) {
-                    Some(slot) => clone_row_into(slot, row),
+                    Some(slot) => slot.copy_from(row),
                     None => out_rows.push(row.clone()),
                 }
                 row.dirty = false;
@@ -954,13 +968,4 @@ impl Screen {
     pub fn peek_scroll_shift(&self) -> usize {
         self.scroll_shift
     }
-}
-
-fn clone_row_into(slot: &mut Row, row: &Row) {
-    // Field-wise so the cell vec's allocation is reused; POD cells make
-    // this a plain memcpy.
-    slot.cells.clone_from(&row.cells);
-    slot.wrapped = row.wrapped;
-    slot.dirty = row.dirty;
-    slot.occ = row.occ;
 }

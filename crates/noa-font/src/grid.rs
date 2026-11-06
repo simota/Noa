@@ -140,6 +140,7 @@ pub struct FontGrid {
     /// unchanged run doesn't re-invoke `rustybuzz` every frame. LRU-evicted
     /// at `SHAPE_CACHE_CAP` (`last_used` = access clock stamp).
     shape_cache: HashMap<u64, Vec<ShapeRunEntry>>,
+    shape_plans: shape::ShapePlans,
     shape_cache_len: usize,
     shape_cache_hits: u64,
     /// [`shape::config_digest`] per style, precomputed once (the config is
@@ -228,6 +229,7 @@ impl FontGrid {
             px_size,
             font_cfg,
             shape_cache: HashMap::new(),
+            shape_plans: shape::ShapePlans::default(),
             shape_cache_len: 0,
             shape_cache_hits: 0,
             cfg_digests: style_cfg_digests,
@@ -268,6 +270,7 @@ impl FontGrid {
             px_size,
             font_cfg,
             shape_cache: HashMap::new(),
+            shape_plans: shape::ShapePlans::default(),
             shape_cache_len: 0,
             shape_cache_hits: 0,
             cfg_digests: style_cfg_digests,
@@ -448,13 +451,15 @@ impl FontGrid {
             return !color;
         }
         let coords = shape::variation_coords_for(&self.font_cfg, cell.style);
+        let cfg_digest = self.cfg_digest_for(cell.style);
         let glyphs = shape::shape_with_rustybuzz(
             data,
             FaceId(index as u16),
             self.px_size,
             std::slice::from_ref(cell),
             &coords,
-            &self.font_cfg,
+            (&self.font_cfg, cfg_digest),
+            &mut self.shape_plans,
         );
         let style = FontStyle::from_bold_italic(cell.style.bold, cell.style.italic);
         let synthesis = synthesis_for(
@@ -639,7 +644,8 @@ impl FontGrid {
             self.px_size,
             cells,
             &variation_coords,
-            &self.font_cfg,
+            (&self.font_cfg, cfg_digest),
+            &mut self.shape_plans,
         );
 
         self.insert_shape_run(hash, cells, style, cfg_digest, glyphs, now)
@@ -664,7 +670,7 @@ impl FontGrid {
         now: u64,
     ) -> Rc<[ShapedGlyph]> {
         if self.shape_cache_len >= SHAPE_CACHE_CAP {
-            self.evict_lru_shape_run();
+            self.evict_lru_shape_runs();
         }
         let text = cells
             .iter()
@@ -962,27 +968,24 @@ impl FontGrid {
         true
     }
 
-    /// Evict the least-recently-used memoized shape run (LRU cap enforcement).
-    fn evict_lru_shape_run(&mut self) {
-        let mut oldest: Option<(u64, usize, u64)> = None;
-        for (hash, bucket) in &self.shape_cache {
-            for (idx, entry) in bucket.iter().enumerate() {
-                if oldest.is_none_or(|(_, _, last_used)| entry.last_used < last_used) {
-                    oldest = Some((*hash, idx, entry.last_used));
-                }
-            }
-        }
-        if let Some((hash, idx, _)) = oldest {
-            let bucket = self
-                .shape_cache
-                .get_mut(&hash)
-                .expect("bucket found during scan");
-            bucket.swap_remove(idx);
-            if bucket.is_empty() {
-                self.shape_cache.remove(&hash);
-            }
-            self.shape_cache_len -= 1;
-        }
+    /// Evict the least-recently-used eighth of the memoized shape runs (LRU
+    /// cap enforcement). Finding the oldest walks every entry, which on a text
+    /// flood (a miss per new row) cost half of each miss when it ran one entry
+    /// at a time.
+    fn evict_lru_shape_runs(&mut self) {
+        let mut stamps: Vec<u64> = self
+            .shape_cache
+            .values()
+            .flatten()
+            .map(|entry| entry.last_used)
+            .collect();
+        let evict = (stamps.len() / 8).max(1);
+        let (_, &mut newest_evicted, _) = stamps.select_nth_unstable(evict - 1);
+        self.shape_cache.retain(|_, bucket| {
+            bucket.retain(|entry| entry.last_used > newest_evicted);
+            !bucket.is_empty()
+        });
+        self.shape_cache_len = self.shape_cache.values().map(Vec::len).sum();
     }
 
     /// Pack a rasterized glyph into the appropriate atlas and cache the result
@@ -1175,6 +1178,43 @@ mod tests {
     use super::*;
     use crate::face::nerd_font_fallback_candidate_has_glyph;
     use crate::{FontFeature, FontVariation, SyntheticStyle};
+
+    /// Eviction takes runs oldest-first in a batch: what was used recently
+    /// survives crossing the cap, and the cache never exceeds it.
+    #[test]
+    fn shape_cache_evicts_least_recently_used_runs_at_the_cap() {
+        let mut grid = FontGrid::new(14.0, FontConfig::default()).expect("system font");
+        let run = |i: usize| -> Vec<ShapeCell> {
+            format!("{i:06}")
+                .chars()
+                .map(|ch| ShapeCell {
+                    ch,
+                    combining: Vec::new(),
+                    style: StyleKey::default(),
+                })
+                .collect()
+        };
+        for i in 0..SHAPE_CACHE_CAP {
+            grid.shape_run(&run(i));
+        }
+        assert_eq!(grid.shape_cache_len, SHAPE_CACHE_CAP);
+
+        let touched = run(0);
+        let hits = grid.shape_cache_hits();
+        grid.shape_run(&touched);
+        assert_eq!(grid.shape_cache_hits(), hits + 1);
+
+        grid.shape_run(&run(SHAPE_CACHE_CAP));
+        assert!(grid.shape_cache_len <= SHAPE_CACHE_CAP);
+        assert!(grid.shape_cache_len > SHAPE_CACHE_CAP / 2);
+
+        let hits = grid.shape_cache_hits();
+        grid.shape_run(&touched);
+        grid.shape_run(&run(SHAPE_CACHE_CAP - 1));
+        assert_eq!(grid.shape_cache_hits(), hits + 2, "recent runs survive");
+        grid.shape_run(&run(1));
+        assert_eq!(grid.shape_cache_hits(), hits + 2, "the oldest run went");
+    }
 
     #[test]
     fn mixed_color_faces_resolve_the_requested_glyph_presentation() {

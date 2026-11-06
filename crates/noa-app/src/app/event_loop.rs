@@ -720,7 +720,7 @@ impl App {
             return;
         }
 
-        if std::env::var_os("NOA_IME_TRACE").is_some() {
+        if super::ime_trace_enabled() {
             match &event {
                 WindowEvent::Ime(ime) => eprintln!("[ime-trace] Ime: {ime:?}"),
                 WindowEvent::KeyboardInput { event, .. } => eprintln!(

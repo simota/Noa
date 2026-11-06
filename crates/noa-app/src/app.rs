@@ -84,6 +84,7 @@ mod font_cache;
 mod helpers;
 mod idle_ember;
 mod input_ops;
+pub(crate) use input_ops::ime_trace_enabled;
 mod ipc;
 mod lifecycle;
 mod linux_tabs;

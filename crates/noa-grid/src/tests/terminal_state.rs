@@ -423,22 +423,41 @@ fn decrqss_reports_sgr_cursor_and_margins() {
 fn decrqss_and_xtgettcap_never_echo_invalid_requests_into_pty_input() {
     let t = run(b"\x1bP$qecho pwned\x1b\\\x1bP+qnot hex;7878\x1b\\");
 
-    assert_eq!(
-        t.pending_writes,
-        concat!("\x1bP0$r\x1b\\", "\x1bP0+r\x1b\\", "\x1bP0+r7878\x1b\\").as_bytes()
-    );
+    // Ghostty 1.4.0 leaves a name it does not know unanswered.
+    assert_eq!(t.pending_writes, b"\x1bP0$r\x1b\\");
 }
 
 #[test]
 fn xtgettcap_reports_selected_capabilities() {
-    let t = run(b"\x1bP+q544e;524742;7878\x1b\\");
+    // TN, RGB, an unknown `xx`, Co.
+    let t = run(b"\x1bP+q544e;524742;7878;436f\x1b\\");
 
     assert_eq!(
         t.pending_writes,
         concat!(
-            "\x1bP1+r544e=6e6f61\x1b\\",
-            "\x1bP1+r524742=383a383a38\x1b\\",
-            "\x1bP0+r7878\x1b\\",
+            "\x1bP1+r544E=6E6F61\x1b\\",
+            "\x1bP1+r524742=38\x1b\\",
+            "\x1bP1+r436F=323536\x1b\\",
+        )
+        .as_bytes()
+    );
+}
+
+/// The encodings Ghostty 1.4.0's `xtgettcap map` test checks, on the
+/// entries of its real terminfo: a boolean has no value, `\E` and `^?` are
+/// decoded, and a value with `%` parameters is sent as written.
+#[test]
+fn xtgettcap_encodes_capabilities_like_ghostty() {
+    // am, kbs, kf1, Smulx.
+    let t = run(b"\x1bP+q616d;6b6273;6b6631;536d756c78\x1b\\");
+
+    assert_eq!(
+        t.pending_writes,
+        concat!(
+            "\x1bP1+r616D\x1b\\",
+            "\x1bP1+r6B6273=7F\x1b\\",
+            "\x1bP1+r6B6631=1B4F50\x1b\\",
+            "\x1bP1+r536D756C78=5C455B343A25703125646D\x1b\\",
         )
         .as_bytes()
     );
@@ -452,9 +471,9 @@ fn xtgettcap_reports_overline_and_cursor_style_reset_like_ghostty() {
     assert_eq!(
         t.pending_writes,
         concat!(
-            "\x1bP1+r536d6f6c=1b5b35336d\x1b\\",
-            "\x1bP1+r526d6f6c=1b5b35356d\x1b\\",
-            "\x1bP1+r5365=1b5b302071\x1b\\",
+            "\x1bP1+r536D6F6C=1B5B35336D\x1b\\",
+            "\x1bP1+r526D6F6C=1B5B35356D\x1b\\",
+            "\x1bP1+r5365=1B5B302071\x1b\\",
         )
         .as_bytes()
     );

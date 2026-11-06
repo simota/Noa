@@ -806,7 +806,7 @@ impl App {
     /// lone tab already is its own window, so it stays put, as in Ghostty.
     /// The new window keeps the sidebar state the tab was laid out with.
     #[cfg(target_os = "macos")]
-    pub(super) fn move_tab_to_new_window(&mut self) {
+    pub(super) fn move_tab_to_new_window(&mut self, _event_loop: &ActiveEventLoop) {
         let Some(window_id) = self.focused else {
             return;
         };
@@ -831,6 +831,108 @@ impl App {
             return;
         }
         state.group = new_group;
+        self.finish_moving_tab_to_new_window(window_id, group, new_group, siblings);
+    }
+
+    /// Off macOS a tab shares its OS window and surface with its siblings
+    /// (`linux_tabs`), so moving it out gives it an OS window and surface of
+    /// its own, sized like the one it leaves, and hands the old window to
+    /// its neighbour if it was in front. A tab alone in its window stays put.
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn move_tab_to_new_window(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(tab) = self.focused else {
+            return;
+        };
+        let order = self.tab_siblings(tab);
+        let siblings: Vec<WindowId> = order.iter().copied().filter(|id| *id != tab).collect();
+        if siblings.is_empty() {
+            return;
+        }
+        let Some(state) = self.windows.get(&tab) else {
+            return;
+        };
+        let group = state.group;
+        let old_window = state.window.clone();
+        let renderer_format = state.renderer.target_format();
+        let new_group = self.allocate_group_id();
+        // The window and surface come first, so a failure leaves the tab
+        // where it was.
+        let size = old_window
+            .inner_size()
+            .to_logical::<f64>(old_window.scale_factor());
+        let window = match event_loop.create_window(self.tab_window_attributes(size, new_group)) {
+            Ok(window) => Arc::new(window),
+            Err(err) => {
+                log::warn!("move_tab_to_new_window: could not create a window: {err}");
+                return;
+            }
+        };
+        window.set_ime_allowed(true);
+        crate::macos_blur::apply_background_blur(
+            &window,
+            self.config.background_blur_radius,
+            self.shown_background_opacity(),
+        );
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        let surface = match gpu.instance.create_surface(window.clone()) {
+            Ok(surface) => surface,
+            Err(err) => {
+                log::warn!("move_tab_to_new_window: could not create a surface: {err}");
+                return;
+            }
+        };
+        let config = build_surface_config(
+            &surface.get_capabilities(&gpu.adapter),
+            alpha_blending_mode(&self.config.font),
+            window.inner_size(),
+            self.shown_background_opacity() < 1.0,
+        );
+        // The tab keeps its renderer, which draws in the old surface's format.
+        if config.format != renderer_format {
+            log::warn!(
+                "move_tab_to_new_window: the new window's format {:?} differs from {:?}",
+                config.format,
+                renderer_format
+            );
+            return;
+        }
+        surface.configure(&gpu.device, &config);
+
+        // Hand the shared window to the next tab (else the previous), as
+        // closing the front tab does.
+        if self.tab_hosts.get(&old_window.id()) == Some(&tab) {
+            let index = order.iter().position(|id| *id == tab).unwrap_or(0);
+            if let Some(successor) = siblings.get(index).or(siblings.last()).copied() {
+                self.activate_tab(successor);
+            }
+        }
+        let Some(state) = self.windows.get_mut(&tab) else {
+            return;
+        };
+        state.window = window.clone();
+        state.surface = Arc::new(surface);
+        state.surface_config = config;
+        state.group = new_group;
+        state.occluded = false;
+        // Front (and only) tab of the new window: takes `tab_hosts`, focus,
+        // a relayout without the tab bar, and a redraw.
+        self.activate_tab(tab);
+        self.focused = Some(tab);
+        window.focus_window();
+        self.finish_moving_tab_to_new_window(tab, group, new_group, siblings);
+    }
+
+    /// What both platforms do once `tab` has left `group` for `new_group`.
+    fn finish_moving_tab_to_new_window(
+        &mut self,
+        tab: WindowId,
+        group: WindowGroupId,
+        new_group: WindowGroupId,
+        siblings: Vec<WindowId>,
+    ) {
+        let window_id = tab;
         if self.sidebar_visible_groups.contains(&group) {
             self.sidebar_visible_groups.insert(new_group);
         }
@@ -852,7 +954,7 @@ impl App {
         {
             self.cancel_sidebar_rename();
         }
-        // The native tab bar leaves both windows (a lone tab has none) with no
+        // The tab bar leaves both windows (a lone tab has none) with no
         // `Resized` event, as when a tab closes: re-derive the top inset.
         // Neither window gets a `Focused`/`Resized` event to redraw on (the
         // moved tab already was key), so redraw and re-anchor the IME here,
@@ -864,13 +966,6 @@ impl App {
         }
         self.request_sidebar_redraw();
         self.persist_session();
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    pub(super) fn move_tab_to_new_window(&mut self) {
-        // #TODO(agent): off macOS tabs share one OS window and surface, so
-        // moving one out needs a new OS window + surface for it first.
-        log::warn!("move_tab_to_new_window is not supported on this platform yet");
     }
 
     /// Ghostty 1.4.0's `move_tab:amount`: move the focused tab `amount`

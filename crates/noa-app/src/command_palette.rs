@@ -329,8 +329,6 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::PrevTab,
         AppCommand::MoveTab(-1),
         AppCommand::MoveTab(1),
-        // Moving a tab out is macOS-only for now (native AppKit tabs).
-        #[cfg(target_os = "macos")]
         AppCommand::MoveTabToNewWindow,
         AppCommand::CloseWindow,
         AppCommand::Quit,
@@ -1032,10 +1030,7 @@ mod tests {
                     | AppCommand::SelectTab(_)
                     | AppCommand::Preferences
             ) || (!cfg!(target_os = "macos")
-                && matches!(
-                    command,
-                    AppCommand::MoveTabToNewWindow | AppCommand::ToggleBackgroundOpacity
-                ))
+                && command == AppCommand::ToggleBackgroundOpacity)
                 || (cfg!(target_os = "macos") && command == AppCommand::EditConfigFileInNewWindow);
             assert_eq!(
                 entries.contains(&command),

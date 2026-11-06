@@ -365,7 +365,7 @@ impl App {
 /// takes an internal lock and scans the process environment, which measures
 /// at ~150ns — non-trivial when `queue_pane_pty_bytes` runs on every single
 /// keystroke, paste chunk, and program write.
-fn ime_trace_enabled() -> bool {
+pub(crate) fn ime_trace_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("NOA_IME_TRACE").is_some())
 }

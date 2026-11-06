@@ -231,7 +231,7 @@ impl IoThreadHandle {
 }
 
 fn write_pty_bytes(writer: &PtyWriter, bytes: &[u8]) {
-    if std::env::var_os("NOA_IME_TRACE").is_some() {
+    if crate::app::ime_trace_enabled() {
         eprintln!("[ime-trace] io write: {:?}", String::from_utf8_lossy(bytes));
     }
     if let Err(err) = writer.write(bytes).and_then(|_| writer.flush()) {
@@ -393,7 +393,7 @@ pub fn spawn(
             }
             match input_rx.try_recv() {
                 Ok(bytes) => {
-                    if std::env::var_os("NOA_IME_TRACE").is_some() {
+                    if crate::app::ime_trace_enabled() {
                         eprintln!(
                             "[ime-trace] io write: {:?}",
                             String::from_utf8_lossy(bytes.as_ref())

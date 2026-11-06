@@ -413,7 +413,7 @@ pub(crate) fn viewport_rows_from_terminal(terminal: &Terminal) -> Vec<RowText> {
         .active()
         .visible_rows()
         .into_iter()
-        .map(|row| row_text(&row.cells))
+        .map(|row| row_text(&row.cells[..row.occupied()]))
         .collect()
 }
 
@@ -433,7 +433,7 @@ pub(crate) fn live_rows_from_terminal(terminal: &Terminal) -> Vec<RowText> {
         .map(|idx| {
             screen
                 .absolute_row(idx)
-                .map(|row| row_text(&row.cells))
+                .map(|row| row_text(&row.cells[..row.occupied()]))
                 .unwrap_or_default()
         })
         .collect()

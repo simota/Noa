@@ -345,31 +345,50 @@ pub(in crate::app) struct SidebarRasterCacheKey {
     model: SidebarDrawModel,
 }
 
+/// A [`SidebarRasterCacheKey`] over the current frame's inputs. Comparing this
+/// costs nothing per hit; the model only gets cloned on the redraw that stores
+/// it (sidebar redraws run per frame, nearly all of them hits).
+#[derive(Clone, Copy, PartialEq)]
+struct SidebarRasterInputs<'a> {
+    surface_format: wgpu::TextureFormat,
+    padding: GridPadding,
+    theme: &'a Theme,
+    chrome: crate::chrome::ChromePalette,
+    font: SidebarFontCacheKey,
+    model: &'a SidebarDrawModel,
+}
+
+impl SidebarRasterInputs<'_> {
+    fn to_key(self) -> SidebarRasterCacheKey {
+        SidebarRasterCacheKey {
+            surface_format: self.surface_format,
+            padding: self.padding,
+            theme: self.theme.clone(),
+            chrome: self.chrome,
+            font: self.font,
+            model: self.model.clone(),
+        }
+    }
+}
+
 impl SidebarRasterCacheKey {
-    fn new(
-        surface_format: wgpu::TextureFormat,
-        padding: GridPadding,
-        theme: &Theme,
-        chrome: crate::chrome::ChromePalette,
-        font: &FontGrid,
-        model: &SidebarDrawModel,
-    ) -> Self {
-        Self {
-            surface_format,
-            padding,
-            theme: theme.clone(),
-            chrome,
-            font: SidebarFontCacheKey::from_font(font),
-            model: model.clone(),
+    fn inputs(&self) -> SidebarRasterInputs<'_> {
+        SidebarRasterInputs {
+            surface_format: self.surface_format,
+            padding: self.padding,
+            theme: &self.theme,
+            chrome: self.chrome,
+            font: self.font,
+            model: &self.model,
         }
     }
 }
 
 fn sidebar_cache_hit(
     previous: Option<&SidebarRasterCacheKey>,
-    next: &SidebarRasterCacheKey,
+    next: SidebarRasterInputs<'_>,
 ) -> bool {
-    previous.is_some_and(|previous| previous == next)
+    previous.is_some_and(|previous| previous.inputs() == next)
 }
 
 fn composite_sidebar_band_cache(
@@ -458,21 +477,24 @@ pub(in crate::app) fn draw_sidebar_band(
         return;
     }
 
-    let next_cache_key = SidebarRasterCacheKey::new(
+    let inputs = SidebarRasterInputs {
         surface_format,
         padding,
-        active_theme(&gpu.theme, &gpu.preview_theme),
-        chrome(),
-        gpu.sidebar_fonts.get(sidebar_font_px),
+        theme: active_theme(&gpu.theme, &gpu.preview_theme),
+        chrome: chrome(),
+        font: SidebarFontCacheKey::from_font(gpu.sidebar_fonts.get(sidebar_font_px)),
         model,
-    );
+    };
     if sidebar_cache_hit(
         gpu.chrome_textures.sidebar_raster_cache_key.as_ref(),
-        &next_cache_key,
+        inputs,
     ) {
         composite_sidebar_band_cache(gpu, view, surface_size, model);
         return;
     }
+    // Before the draws below, which can grow the atlas: the stored generation
+    // must be the one this frame started from.
+    let next_cache_key = inputs.to_key();
 
     ensure_card_menu_scratch(gpu, model, surface_format);
 
@@ -1710,8 +1732,8 @@ mod tests {
         let key = cache_key(cache_model());
         let next = key.clone();
 
-        assert!(sidebar_cache_hit(Some(&key), &next));
-        assert!(!sidebar_cache_hit(None, &next));
+        assert!(sidebar_cache_hit(Some(&key), next.inputs()));
+        assert!(!sidebar_cache_hit(None, next.inputs()));
     }
 
     #[test]
@@ -1727,15 +1749,15 @@ mod tests {
 
         assert!(!sidebar_cache_hit(
             Some(&previous),
-            &cache_key(changed_hover)
+            cache_key(changed_hover).inputs()
         ));
         assert!(!sidebar_cache_hit(
             Some(&previous),
-            &cache_key(changed_flash)
+            cache_key(changed_flash).inputs()
         ));
         assert!(!sidebar_cache_hit(
             Some(&previous),
-            &cache_key(changed_text)
+            cache_key(changed_text).inputs()
         ));
     }
 
@@ -1747,7 +1769,7 @@ mod tests {
         let mut changed_font = previous.clone();
         changed_font.font.mask_atlas_generation += 1;
 
-        assert!(!sidebar_cache_hit(Some(&previous), &changed_theme));
-        assert!(!sidebar_cache_hit(Some(&previous), &changed_font));
+        assert!(!sidebar_cache_hit(Some(&previous), changed_theme.inputs()));
+        assert!(!sidebar_cache_hit(Some(&previous), changed_font.inputs()));
     }
 }

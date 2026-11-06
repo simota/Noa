@@ -102,7 +102,7 @@ impl App {
     /// navigate to the next/previous match without closing it; a repeated
     /// `cmd+f` toggles the prompt closed keeping highlights + the active
     /// match; every other keystroke is either consumed by the prompt
-    /// (Escape/Backspace/printable text) or swallowed outright — nothing
+    /// (Escape/Backspace/copy/paste/printable text) or swallowed outright — nothing
     /// falls through to the pty while the prompt is open. Only called when
     /// `self.search_prompt` targets `window_id` (checked by the caller).
     pub(in crate::app) fn handle_search_prompt_key(
@@ -144,7 +144,9 @@ impl App {
 
         if let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers) {
             match command {
-                AppCommand::Search(SearchAction::FindNext | SearchAction::FindPrevious) => {
+                AppCommand::Search(SearchAction::FindNext | SearchAction::FindPrevious)
+                | AppCommand::Copy
+                | AppCommand::Paste => {
                     self.handle_app_command(event_loop, command, CommandOrigin::TerminalWindow);
                 }
                 // A repeated Find toggles the prompt closed, keeping the
@@ -177,6 +179,57 @@ impl App {
         if let Some(effect) = effect {
             self.apply_search_prompt_effect(window_id, effect);
         }
+    }
+
+    /// The open prompt's window when it is the focused one: Copy/Paste then
+    /// act on the field rather than the pane underneath it.
+    fn focused_search_prompt_window(&self) -> Option<WindowId> {
+        self.focused.filter(|window_id| {
+            self.search_prompt
+                .as_ref()
+                .is_some_and(|session| session.window_id == *window_id)
+        })
+    }
+
+    /// Copy the focused prompt's query. Returns whether a prompt took the
+    /// command. The field has no partial selection, so this is the whole
+    /// buffer, and an empty one leaves the clipboard alone.
+    pub(in crate::app) fn copy_search_prompt_query(&mut self) -> bool {
+        if self.focused_search_prompt_window().is_none() {
+            return false;
+        }
+        let query = self
+            .search_prompt
+            .as_ref()
+            .map(|session| session.prompt.buffer().to_string())
+            .filter(|query| !query.is_empty());
+        if let Some(query) = query {
+            self.write_text_to_clipboard(&query);
+        }
+        true
+    }
+
+    /// Paste the clipboard's text into the focused prompt. Returns whether a
+    /// prompt took the command.
+    pub(in crate::app) fn paste_clipboard_to_search_prompt(&mut self) -> bool {
+        let Some(window_id) = self.focused_search_prompt_window() else {
+            return false;
+        };
+        let text = match self.clipboard.get_text() {
+            Ok(text) => text,
+            Err(err) => {
+                log::warn!("failed to read clipboard for the search prompt: {err}");
+                return true;
+            }
+        };
+        let effect = self
+            .search_prompt
+            .as_mut()
+            .and_then(|session| session.prompt.push_text(&text));
+        if let Some(effect) = effect {
+            self.apply_search_prompt_effect(window_id, effect);
+        }
+        true
     }
 
     /// Apply a [`SearchPromptEffect`] to the prompt's target terminal and

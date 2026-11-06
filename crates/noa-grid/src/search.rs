@@ -196,6 +196,9 @@ impl SearchState {
 /// prefix for every hit and preserves wide/combining-cell coordinates.
 pub(crate) struct RowSearch<'a> {
     query: &'a str,
+    /// Whether every match must hold a non-space byte, so it starts before a
+    /// row's blank tail and ends at most one query length into it.
+    query_has_non_space: bool,
     text: String,
     byte_columns: Vec<u16>,
     prefix: Vec<usize>,
@@ -222,6 +225,7 @@ impl<'a> RowSearch<'a> {
         }
         Some(Self {
             query,
+            query_has_non_space: query.bytes().any(|byte| byte != b' '),
             text: String::new(),
             byte_columns: Vec::new(),
             prefix,
@@ -246,7 +250,15 @@ impl<'a> RowSearch<'a> {
         }
         self.continuation = row.wrapped.then(|| storage_y.saturating_add(1));
         let pad_x = row.ends_with_wide_pad().then(|| row.cells.len() - 1);
-        for (x, cell) in row.cells.iter().enumerate() {
+        // A soft-wrapped row's tail continues onto the next row, so it stays.
+        let searched = if self.query_has_non_space && !row.wrapped {
+            row.occupied()
+                .saturating_add(self.query.len())
+                .min(row.cells.len())
+        } else {
+            row.cells.len()
+        };
+        for (x, cell) in row.cells[..searched].iter().enumerate() {
             if cell.attrs.contains(CellAttrs::WIDE_SPACER) || pad_x == Some(x) {
                 continue;
             }
@@ -296,6 +308,88 @@ impl<'a> RowSearch<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Skipping a row's blank tail must find exactly what scanning every cell
+    /// finds, including matches that run into the tail.
+    #[test]
+    fn searching_past_the_occupied_cells_finds_what_a_full_scan_finds() {
+        fn full_scan(query: &str, row: &Row) -> Vec<SearchMatch> {
+            let mut text = String::new();
+            let mut columns = Vec::new();
+            let pad_x = row.ends_with_wide_pad().then(|| row.cells.len() - 1);
+            for (x, cell) in row.cells.iter().enumerate() {
+                if cell.attrs.contains(CellAttrs::WIDE_SPACER) || pad_x == Some(x) {
+                    continue;
+                }
+                cell.push_text_to(&mut text);
+                columns.resize(text.len(), x as u16);
+            }
+            text.match_indices(query)
+                .map(|(start, _)| SearchMatch {
+                    start: SelectionPoint::new(columns[start], 0),
+                    end: SelectionPoint::new(columns[start + query.len() - 1], 0),
+                })
+                .collect()
+        }
+
+        let lines = [
+            "foo",
+            "foo bar  foo",
+            "  leading",
+            "wide 日本語",
+            "\x1b[41mred\x1b[K",
+            "\x1b[41mred\x1b[K\x1b[0m\x1b[5Gmore",
+            "",
+        ];
+        let queries = [
+            "foo",
+            "foo ",
+            "foo  ",
+            "bar  foo   ",
+            "  l",
+            " ",
+            "  ",
+            "                ",
+            "本語",
+            "語 ",
+            "d ",
+            "x",
+            "e        ",
+        ];
+        for line in lines {
+            let mut terminal = crate::Terminal::new(noa_core::GridSize::new(24, 2));
+            noa_vt::Stream::new().feed(line.as_bytes(), &mut terminal);
+            let rows = terminal.active().visible_rows();
+            for query in queries {
+                let mut matches = Vec::new();
+                RowSearch::new(query)
+                    .unwrap()
+                    .append_matches(0, &rows[0], &mut matches);
+                assert_eq!(matches, full_scan(query, &rows[0]), "{line:?} / {query:?}");
+            }
+        }
+    }
+
+    /// The last row of a soft-wrapped line also skips its blank tail: a match
+    /// that crosses the wrap and runs into that tail still has to be found.
+    #[test]
+    fn a_match_crossing_a_wrap_can_end_in_the_last_rows_blank_tail() {
+        let mut terminal = crate::Terminal::new(noa_core::GridSize::new(4, 3));
+        noa_vt::Stream::new().feed(b"abcdef", &mut terminal);
+        let rows = terminal.active().visible_rows();
+        let mut search = RowSearch::new("def ").unwrap();
+        let mut matches = Vec::new();
+        for (y, row) in rows.iter().take(2).enumerate() {
+            search.append_matches(y, row, &mut matches);
+        }
+        assert_eq!(
+            matches,
+            [SearchMatch {
+                start: SelectionPoint::new(3, 0),
+                end: SelectionPoint::new(2, 1),
+            }]
+        );
+    }
 
     #[test]
     fn snapshots_survive_history_packing_eviction_and_live_edits() {

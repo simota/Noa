@@ -354,6 +354,7 @@ impl App {
         };
         renderer.set_background_opacity(background_opacity);
         renderer.set_alpha_blending(alpha_blending);
+        renderer.set_padding_balance(self.config.window_padding_balance);
         renderer.set_background_image(
             &gpu.device,
             &gpu.queue,

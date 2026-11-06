@@ -69,6 +69,9 @@ pub struct AppConfig {
     /// Resolved to a `GridPadding` once in [`App::new`].
     pub window_padding_x: Option<f32>,
     pub window_padding_y: Option<f32>,
+    /// Where each pane puts the space its whole cells leave over
+    /// (`window-padding-balance`).
+    pub window_padding_balance: noa_core::PaddingBalance,
     /// Theme color overrides (`background`, `foreground`, `cursor-color`,
     /// `selection-foreground`, `selection-background`).
     pub background: Option<noa_core::Rgb>,
@@ -331,6 +334,7 @@ impl AppConfig {
             vt_xt_checksum_extension: config.vt_xt_checksum_extension,
             window_padding_x: config.window_padding_x,
             window_padding_y: config.window_padding_y,
+            window_padding_balance: config.window_padding_balance,
             background: config.background,
             foreground: config.foreground,
             cursor_color: config.cursor_color,

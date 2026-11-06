@@ -484,6 +484,15 @@ fn show_config_output(config: &StartupConfig) -> String {
     );
     push_optional_line(&mut out, "window-padding-x", config.window_padding_x);
     push_optional_line(&mut out, "window-padding-y", config.window_padding_y);
+    push_line(
+        &mut out,
+        "window-padding-balance",
+        match config.window_padding_balance {
+            noa_core::PaddingBalance::Off => "false",
+            noa_core::PaddingBalance::Capped => "true",
+            noa_core::PaddingBalance::Equal => "equal",
+        },
+    );
     push_color_line(&mut out, "background", config.background);
     push_color_line(&mut out, "foreground", config.foreground);
     push_color_line(&mut out, "cursor-color", config.cursor_color);

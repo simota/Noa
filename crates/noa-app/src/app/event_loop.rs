@@ -1605,7 +1605,7 @@ impl App {
             return;
         };
 
-        let pixel = self.pane_pixel_in(window_id, pane_id, position);
+        let pixel = self.pane_pixel_in(window_id, pane_id, position, metrics);
         let (mut prev_cell, mut prev_pixel) = (None, None);
         if let Some(state) = self.windows.get_mut(&window_id) {
             state.last_mouse_pane = Some(pane_id);
@@ -1764,8 +1764,12 @@ impl App {
 
         // Word start cell → window-relative physical px (inverse of the
         // pointer→cell mapping) → AppKit view point (scale + y-flip).
-        let (local_x, local_y) =
-            mouse::grid_point_to_physical(start, metrics.cell_w, metrics.cell_h, self.padding);
+        let (local_x, local_y) = mouse::grid_point_to_physical(
+            start,
+            metrics.cell_w,
+            metrics.cell_h,
+            self.pane_grid_padding(surface.rect, metrics),
+        );
         let physical_x = f64::from(surface.rect.x) + local_x;
         let physical_y = f64::from(surface.rect.y) + local_y;
         let scale_factor = state.window.scale_factor();

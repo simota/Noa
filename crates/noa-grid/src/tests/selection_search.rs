@@ -795,3 +795,50 @@ fn word_at_viewport_point_over_blank_cells_returns_none() {
 
     assert_eq!(t.word_at_viewport_point(Point { x: 10, y: 0 }), None);
 }
+
+/// Copy skips cells past the occupancy watermark; the text must be what
+/// pushing every cell and trimming the tail gives, for history and live rows.
+#[test]
+fn copy_past_the_occupied_cells_matches_a_full_cell_walk() {
+    let mut t = crate::Terminal::new(noa_core::GridSize::new(12, 3));
+    let mut stream = noa_vt::Stream::new();
+    stream.feed(
+        "plain\r\n  spaced  \r\n\x1b[41mred\x1b[K\x1b[0m\r\n日本語日本語日本\r\nwrapped across rows here\r\nabcdefghijk next\r\n\r\nend"
+            .as_bytes(),
+        &mut t,
+    );
+    let mut expected = String::new();
+    let mut previous_wrapped = false;
+    let mut rows = Vec::new();
+    t.scroll_viewport_to_top();
+    for _ in 0..=t.scrollback_len() {
+        rows.push(t.active().visible_rows()[0].clone());
+        t.scroll_viewport_down(1);
+    }
+    let live = t.active().visible_rows();
+    rows.extend_from_slice(&live[1..]);
+    for (y, row) in rows.iter().enumerate() {
+        if y > 0 && !previous_wrapped {
+            expected.push('\n');
+        }
+        let before = expected.len();
+        let pad_x = row.ends_with_wide_pad().then(|| row.cells.len() - 1);
+        for (x, cell) in row.cells.iter().enumerate() {
+            if !cell.attrs.contains(noa_core::CellAttrs::WIDE_SPACER) && pad_x != Some(x) {
+                cell.push_text_to(&mut expected);
+            }
+        }
+        if !row.wrapped {
+            while expected.len() > before && expected.ends_with(' ') {
+                expected.pop();
+            }
+        }
+        previous_wrapped = row.wrapped;
+    }
+    assert!(expected.contains("abcdefghijk next"), "{expected:?}");
+    t.select_all();
+    assert_eq!(
+        t.selected_text().as_deref(),
+        Some(expected.trim_end_matches('\n'))
+    );
+}

@@ -198,6 +198,15 @@ impl Row {
         }
     }
 
+    /// Become a copy of `row`, reusing this row's allocation (a plain memcpy:
+    /// cells are POD).
+    pub(crate) fn copy_from(&mut self, row: &Row) {
+        self.cells.clone_from(&row.cells);
+        self.wrapped = row.wrapped;
+        self.dirty = row.dirty;
+        self.occ = row.occ;
+    }
+
     /// The occupancy watermark clamped to the row length: cells at
     /// `cells[occupied()..]` are guaranteed `Cell::default()`.
     #[inline]

@@ -81,14 +81,16 @@
 //!   (owner-side sys-time growth from shifted worker/pool timing; a
 //!   page-residency probe of the skipped tail did not recover it) — the
 //!   decisive fullscreen widths (~198-213 cols) win on every workload.
-//! - **[`SEAL_BATCH_TARGET_BYTES`]** / [`PACK_WORKERS`]: ~1MiB of raw rows
-//!   × 3 workers is the locality sweet spot — the circulating raw-row set
-//!   must stay near the shared L2, so the optimum tracks the batch's *byte*
-//!   footprint, not a fixed row count ([`seal_batch_rows_for`] derives rows
-//!   from width; see its doc for the wish #3 cycle-2 sweep on the 24-byte
-//!   POD `Cell`). Doubling workers measured *slower* at every batch size
-//!   tried (owner + 3 packers + carcass traffic already saturate the
-//!   P-cluster, extra workers spill to E-cores and drag the whole batch).
+//! - **[`SEAL_BATCH_TARGET_BYTES`]**: ~1MiB of raw rows is the locality sweet
+//!   spot: the circulating raw-row set must stay near the shared L2, so the
+//!   optimum tracks the batch's *byte* footprint, not a fixed row count
+//!   ([`seal_batch_rows_for`] derives rows from width; see its doc for the
+//!   wish #3 cycle-2 sweep on the 24-byte POD `Cell`).
+//! - **[`PACK_WORKERS`]**: one. Feeding a file in-process favours three, but a
+//!   real flood also runs the writer and the pty reader, and more busy threads
+//!   slow the pty transport itself (bare pty drain of the unicode file on an
+//!   M4: 366 ms alone, 490 ms beside a separate process feeding with three
+//!   workers, 395 ms with one).
 
 use crate::cell::{Cell, HyperlinkId, Row};
 use crate::grapheme::GraphemeId;
@@ -141,7 +143,7 @@ fn seal_batch_rows_for(cols: usize) -> usize {
 }
 /// Worker threads in the lazy per-scrollback pack pool; a published batch
 /// splits into this many contiguous chunks.
-const PACK_WORKERS: usize = 3;
+const PACK_WORKERS: usize = 1;
 /// Span-only pending flushes inline every `SPAN_FLUSH_MULTIPLE x batch_rows`
 /// rows (see `deferred_boundary`): span packing is cheap enough that a wider
 /// cadence just amortizes the flush call further, while the quarter-limit
@@ -2465,15 +2467,14 @@ impl Packer {
     }
 
     fn worker_loop(shared: &PackerShared) {
-        // Background-tier QoS (macOS): packing is deadline-free batch work
-        // that must never displace the latency-critical pty reader / io
-        // threads from performance cores — under a sustained flood the
-        // scheduler otherwise interleaves three pack workers with the
-        // reader's ~1KiB-quantum wake cycle and stretches the whole drain.
+        // Default QoS (macOS), not a background tier: one worker at UTILITY falls
+        // behind on a unicode flood (measured 88% busy, the blank-row pool runs
+        // dry and the owner saturates allocating rows: 500 ms against 407 ms
+        // for 150 MiB in the app).
         #[cfg(target_os = "macos")]
         // SAFETY: plain FFI call configuring the calling thread's own QoS.
         unsafe {
-            libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
+            libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_DEFAULT, 0);
         }
         loop {
             let job = {

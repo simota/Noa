@@ -111,7 +111,7 @@ fn decode_value(value: &str) -> Option<String> {
                 if hex.len() != 2 {
                     return None;
                 }
-                bytes.push(u8::from_str_radix(&hex, 16).ok()?);
+                bytes.push(u8::try_from(parse_hex(&hex)?).ok()?);
             }
             'u' => {
                 if chars.next()? != '{' {
@@ -124,7 +124,7 @@ fn decode_value(value: &str) -> Option<String> {
                         c => hex.push(c),
                     }
                 }
-                let scalar = char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?;
+                let scalar = char::from_u32(parse_hex(&hex)?)?;
                 let mut buf = [0; 4];
                 bytes.extend_from_slice(scalar.encode_utf8(&mut buf).as_bytes());
             }
@@ -132,4 +132,13 @@ fn decode_value(value: &str) -> Option<String> {
         }
     }
     String::from_utf8(bytes).ok()
+}
+
+/// Hex digits only: `from_str_radix` would also take a leading `+`, which a
+/// Zig escape does not.
+fn parse_hex(digits: &str) -> Option<u32> {
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    u32::from_str_radix(digits, 16).ok()
 }

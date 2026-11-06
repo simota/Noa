@@ -2337,6 +2337,8 @@ fn command_palette_entry_rejects_what_ghostty_rejects() {
         "title:\"New Tab,action:new_tab",
         "title:\"bad \\q escape\",action:new_tab",
         "title:\"open \\u{41\",action:new_tab",
+        "title:\"signed \\u{+41}\",action:new_tab",
+        "title:\"signed \\x+f\",action:new_tab",
     ] {
         let (overrides, diagnostics) =
             parse_overrides(path(), &format!("command-palette-entry = {value}"));

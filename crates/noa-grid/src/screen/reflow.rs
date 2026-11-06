@@ -263,6 +263,11 @@ impl Screen {
         let mut cursor_position = ReflowPosition { row: 0, x: 0 };
         let mut saved_position = None;
         let mut buf: Vec<Row> = Vec::new();
+        // Read rows go back here between lines, so walking the history doesn't
+        // allocate one per row. A wrapped line's worth at most: the rest of a
+        // long one is dropped rather than held.
+        const SPARE_ROWS: usize = 64;
+        let mut spare_rows: Vec<Row> = Vec::new();
         let mut line_start = 0usize;
 
         {
@@ -296,13 +301,12 @@ impl Screen {
             };
 
             for idx in 0..total {
-                let row = if idx < scrollback_len {
-                    self.scrollback
-                        .row(idx)
-                        .unwrap_or_else(|| Row::new(self.cols))
-                } else {
-                    self.grid[idx - scrollback_len].clone()
-                };
+                let mut row = spare_rows.pop().unwrap_or_else(|| Row::new(0));
+                if idx >= scrollback_len {
+                    row.copy_from(&self.grid[idx - scrollback_len]);
+                } else if !self.scrollback.row_into(idx, &mut row) {
+                    row = Row::new(self.cols);
+                }
                 if buf.is_empty() {
                     line_start = idx;
                 }
@@ -311,7 +315,8 @@ impl Screen {
                 // A logical line ends at the first non-wrapped row (inclusive).
                 if !wrapped {
                     flush(&buf, line_start);
-                    buf.clear();
+                    let room = SPARE_ROWS.saturating_sub(spare_rows.len());
+                    spare_rows.extend(buf.drain(..).take(room));
                 }
             }
             // A trailing wrapped run with no hard boundary is its own line.
@@ -337,7 +342,9 @@ impl Screen {
     ) -> (Vec<Row>, Option<ReflowPosition>, Option<ReflowPosition>) {
         let (cells, cursor_anchor, saved_anchor) =
             Self::collect_reflow_cells(line_rows, line_start, cursor, saved);
-        let line = Self::reflow_cells(&cells, cols, blank);
+        // Only a line holding the cursor or the saved cursor reads positions.
+        let track_positions = cursor_anchor.is_some() || saved_anchor.is_some();
+        let line = Self::reflow_cells(&cells, cols, blank, track_positions);
         let cursor_pos =
             cursor_anchor.map(|anchor| Self::resolve_reflow_anchor(&line, anchor, base_row));
         let saved_pos =
@@ -422,7 +429,15 @@ impl Screen {
         })
     }
 
-    pub(super) fn reflow_cells(cells: &[Cell], cols: u16, blank: &Cell) -> ReflowedLine {
+    /// `track_positions` off leaves the result's position tables empty, for
+    /// the lines nothing is anchored on (nearly all of them): they are as long
+    /// as the line and cost more to fill than the rows themselves.
+    pub(super) fn reflow_cells(
+        cells: &[Cell],
+        cols: u16,
+        blank: &Cell,
+        track_positions: bool,
+    ) -> ReflowedLine {
         if cells.is_empty() {
             return ReflowedLine {
                 rows: vec![Self::row_with_blank(cols, blank)],
@@ -433,8 +448,14 @@ impl Screen {
 
         let cols_usize = cols as usize;
         let mut rows = vec![Self::row_with_blank(cols, blank)];
-        let mut cell_positions = vec![None; cells.len()];
-        let mut boundary_positions = vec![ReflowPosition { row: 0, x: 0 }; cells.len() + 1];
+        let (mut cell_positions, mut boundary_positions) = if track_positions {
+            (
+                vec![None; cells.len()],
+                vec![ReflowPosition { row: 0, x: 0 }; cells.len() + 1],
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let mut src = 0;
         let mut x = 0;
 
@@ -469,39 +490,45 @@ impl Screen {
             if source_width == 2 && cols_usize < 2 {
                 rows[row_idx].cells[start_x] = *blank;
                 rows[row_idx].mark_occupied(start_x + 1);
-                cell_positions[src] = Some(ReflowPosition {
-                    row: row_idx,
-                    x: start_x as u16,
-                });
-                cell_positions[src + 1] = Some(ReflowPosition {
-                    row: row_idx,
-                    x: start_x as u16,
-                });
-                boundary_positions[src + 1] =
-                    Self::cursor_position_after(row_idx, start_x + 1, cols);
-                boundary_positions[src + 2] =
-                    Self::cursor_position_after(row_idx, start_x + 1, cols);
+                if track_positions {
+                    cell_positions[src] = Some(ReflowPosition {
+                        row: row_idx,
+                        x: start_x as u16,
+                    });
+                    cell_positions[src + 1] = Some(ReflowPosition {
+                        row: row_idx,
+                        x: start_x as u16,
+                    });
+                    boundary_positions[src + 1] =
+                        Self::cursor_position_after(row_idx, start_x + 1, cols);
+                    boundary_positions[src + 2] =
+                        Self::cursor_position_after(row_idx, start_x + 1, cols);
+                }
                 x += 1;
             } else if cells[src].attrs.contains(CellAttrs::WIDE_SPACER) {
                 rows[row_idx].cells[start_x] = *blank;
                 rows[row_idx].mark_occupied(start_x + 1);
-                cell_positions[src] = Some(ReflowPosition {
-                    row: row_idx,
-                    x: start_x as u16,
-                });
-                boundary_positions[src + 1] =
-                    Self::cursor_position_after(row_idx, start_x + 1, cols);
+                if track_positions {
+                    cell_positions[src] = Some(ReflowPosition {
+                        row: row_idx,
+                        x: start_x as u16,
+                    });
+                    boundary_positions[src + 1] =
+                        Self::cursor_position_after(row_idx, start_x + 1, cols);
+                }
                 x += 1;
             } else {
                 rows[row_idx].mark_occupied(start_x + source_width);
                 for i in 0..source_width {
                     rows[row_idx].cells[start_x + i] = cells[src + i];
-                    cell_positions[src + i] = Some(ReflowPosition {
-                        row: row_idx,
-                        x: (start_x + i) as u16,
-                    });
-                    boundary_positions[src + i + 1] =
-                        Self::cursor_position_after(row_idx, start_x + i + 1, cols);
+                    if track_positions {
+                        cell_positions[src + i] = Some(ReflowPosition {
+                            row: row_idx,
+                            x: (start_x + i) as u16,
+                        });
+                        boundary_positions[src + i + 1] =
+                            Self::cursor_position_after(row_idx, start_x + i + 1, cols);
+                    }
                 }
                 x += source_width;
             }

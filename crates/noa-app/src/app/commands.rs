@@ -172,15 +172,18 @@ impl App {
             AppCommand::MoveTabToNewWindow => self.move_tab_to_new_window(event_loop),
             AppCommand::MoveTab(amount) => self.move_tab(amount),
             AppCommand::Copy => {
-                if !self.copy_theme_settings_background_image_to_clipboard() {
+                if !self.copy_search_prompt_query()
+                    && !self.copy_theme_settings_background_image_to_clipboard()
+                {
                     self.copy_selection_to_clipboard();
                 }
             }
             AppCommand::Paste => {
-                let pasted_to_theme_settings = self.focused.is_some_and(|window_id| {
-                    self.paste_clipboard_to_theme_settings_background_image(window_id)
-                });
-                if !pasted_to_theme_settings {
+                let pasted_to_overlay = self.paste_clipboard_to_search_prompt()
+                    || self.focused.is_some_and(|window_id| {
+                        self.paste_clipboard_to_theme_settings_background_image(window_id)
+                    });
+                if !pasted_to_overlay {
                     self.paste_clipboard_to_pty();
                 }
             }

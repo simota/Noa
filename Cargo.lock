@@ -1697,6 +1697,7 @@ dependencies = [
  "security-framework",
  "serde",
  "serde_json",
+ "unicode-segmentation",
  "unicode-width",
  "wgpu",
  "winit",

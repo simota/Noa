@@ -750,6 +750,9 @@ pub(super) struct SearchPromptSession {
     pub(super) window_id: WindowId,
     pub(super) pane_id: PaneId,
     pub(super) prompt: SearchPrompt,
+    /// `pane_id`'s selection when the prompt opened. Copy takes only a
+    /// selection made since then over the query.
+    pub(super) selection_at_open: Option<noa_grid::Selection>,
 }
 
 /// A keyboard copy-mode session bound to the focused surface at activation.

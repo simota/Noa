@@ -259,6 +259,9 @@ pub struct FrameSnapshot {
     /// its own prompt state); `from_terminal` defaults to `None`. The
     /// overlay's `i/n` counter is derived from `search` alongside this.
     pub search_prompt: Option<String>,
+    /// How many of `search_prompt`'s chars sit after its caret (`0` = at the
+    /// end).
+    pub search_prompt_caret_tail: usize,
     /// The open command-palette overlay (`cmd+shift+p`) for this pane, if
     /// any. `None` draws no palette. Set by the caller only on the palette's
     /// focused pane so it draws once, not once per split; `from_terminal`
@@ -565,6 +568,7 @@ impl FrameSnapshot {
             cursor_blink_visible: true,
             hover_link: None,
             search_prompt: None,
+            search_prompt_caret_tail: 0,
             command_palette: None,
             confirm_dialog: None,
             preedit: None,
@@ -644,6 +648,7 @@ impl FrameSnapshot {
             cursor_blink_visible: true,
             hover_link: None,
             search_prompt: None,
+            search_prompt_caret_tail: 0,
             command_palette: None,
             confirm_dialog: None,
             preedit: None,

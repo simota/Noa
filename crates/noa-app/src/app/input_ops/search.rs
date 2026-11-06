@@ -1,5 +1,69 @@
 use super::super::*;
 use super::ActiveOverlay;
+use crate::search_prompt::{CaretMotion, Deletion};
+
+/// A field-editing key of the open search prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchPromptEdit {
+    Move(CaretMotion),
+    Delete(Deletion),
+}
+
+/// The macOS text-field keys the prompt handles: arrows, Home/End and Delete
+/// unmodified, and the Emacs-style Ctrl chords. Anything with other modifiers
+/// stays with the keybind path.
+fn search_prompt_edit(key: &Key, modifiers: ModifiersState) -> Option<SearchPromptEdit> {
+    use SearchPromptEdit::{Delete, Move};
+    if modifiers.is_empty() {
+        return match key {
+            Key::Named(NamedKey::ArrowLeft) => Some(Move(CaretMotion::Left)),
+            Key::Named(NamedKey::ArrowRight) => Some(Move(CaretMotion::Right)),
+            Key::Named(NamedKey::Home) => Some(Move(CaretMotion::Start)),
+            Key::Named(NamedKey::End) => Some(Move(CaretMotion::End)),
+            Key::Named(NamedKey::Delete) => Some(Delete(Deletion::Forward)),
+            _ => None,
+        };
+    }
+    if modifiers != ModifiersState::CONTROL {
+        return None;
+    }
+    let Key::Character(text) = key else {
+        return None;
+    };
+    match text.to_ascii_lowercase().as_str() {
+        "a" => Some(Move(CaretMotion::Start)),
+        "e" => Some(Move(CaretMotion::End)),
+        "b" => Some(Move(CaretMotion::Left)),
+        "f" => Some(Move(CaretMotion::Right)),
+        "h" => Some(Delete(Deletion::Backward)),
+        "d" => Some(Delete(Deletion::Forward)),
+        "k" => Some(Delete(Deletion::ToEnd)),
+        "u" => Some(Delete(Deletion::ToStart)),
+        "w" => Some(Delete(Deletion::WordBackward)),
+        _ => None,
+    }
+}
+
+/// The keybound commands that do something while the prompt is open.
+fn search_prompt_acts_on_command(command: AppCommand) -> bool {
+    matches!(
+        command,
+        AppCommand::Search(
+            SearchAction::Find | SearchAction::FindNext | SearchAction::FindPrevious
+        ) | AppCommand::Copy
+            | AppCommand::Paste
+    )
+}
+
+/// Whether the focused pane's selection appeared after the prompt opened: any
+/// selection in a pane other than the prompt's took a click there, and in the
+/// prompt's own pane it differs from the one the prompt opened over.
+fn selection_is_newer_than_prompt(
+    (prompt_pane, at_open): (PaneId, Option<noa_grid::Selection>),
+    (pane, current): (PaneId, Option<noa_grid::Selection>),
+) -> bool {
+    current.is_some() && (pane != prompt_pane || current != at_open)
+}
 
 fn navigate_search(
     worker: Option<&crate::search_worker::SearchWorker>,
@@ -56,6 +120,7 @@ impl App {
                     return;
                 }
                 let query = terminal.active().search.query().to_string();
+                let selection_at_open = terminal.active().selection;
                 drop(terminal);
                 // Ghostty 1.4.0 shares the needle through the macOS find
                 // pasteboard: a search already under way publishes its
@@ -70,6 +135,7 @@ impl App {
                     window_id,
                     pane_id,
                     prompt: SearchPrompt::open(query),
+                    selection_at_open,
                 });
                 if let Some(text) = from_pasteboard {
                     self.sync_search_prompt_from_find_pasteboard(window_id, &text);
@@ -102,7 +168,8 @@ impl App {
     /// navigate to the next/previous match without closing it; a repeated
     /// `cmd+f` toggles the prompt closed keeping highlights + the active
     /// match; every other keystroke is either consumed by the prompt
-    /// (Escape/Backspace/printable text) or swallowed outright — nothing
+    /// (Escape/Backspace/caret and deletion keys/copy/paste/printable text) or
+    /// swallowed outright — nothing
     /// falls through to the pty while the prompt is open. Only called when
     /// `self.search_prompt` targets `window_id` (checked by the caller).
     pub(in crate::app) fn handle_search_prompt_key(
@@ -133,7 +200,7 @@ impl App {
                 let effect = self
                     .search_prompt
                     .as_mut()
-                    .map(|session| session.prompt.backspace());
+                    .and_then(|session| session.prompt.backspace());
                 if let Some(effect) = effect {
                     self.apply_search_prompt_effect(window_id, effect);
                 }
@@ -142,9 +209,22 @@ impl App {
             _ => {}
         }
 
-        if let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers) {
+        // A command the prompt acts on keeps its key even when it is one of
+        // the field's editing keys; every other command is swallowed below
+        // anyway, so the field gets those keys.
+        let command = self.keybinds.resolve(&event.logical_key, self.modifiers);
+        if !command.is_some_and(search_prompt_acts_on_command)
+            && let Some(edit) = search_prompt_edit(&event.logical_key, self.modifiers)
+        {
+            self.apply_search_prompt_edit(window_id, edit);
+            return;
+        }
+
+        if let Some(command) = command {
             match command {
-                AppCommand::Search(SearchAction::FindNext | SearchAction::FindPrevious) => {
+                AppCommand::Search(SearchAction::FindNext | SearchAction::FindPrevious)
+                | AppCommand::Copy
+                | AppCommand::Paste => {
                     self.handle_app_command(event_loop, command, CommandOrigin::TerminalWindow);
                 }
                 // A repeated Find toggles the prompt closed, keeping the
@@ -177,6 +257,105 @@ impl App {
         if let Some(effect) = effect {
             self.apply_search_prompt_effect(window_id, effect);
         }
+    }
+
+    fn apply_search_prompt_edit(&mut self, window_id: WindowId, edit: SearchPromptEdit) {
+        let Some(session) = self.search_prompt.as_mut() else {
+            return;
+        };
+        match edit {
+            SearchPromptEdit::Move(motion) => {
+                if session.prompt.move_caret(motion)
+                    && let Some(state) = self.windows.get(&window_id)
+                {
+                    state.window.request_redraw();
+                }
+            }
+            SearchPromptEdit::Delete(deletion) => {
+                if let Some(effect) = session.prompt.delete(deletion) {
+                    self.apply_search_prompt_effect(window_id, effect);
+                }
+            }
+        }
+    }
+
+    /// The open prompt's window when it is the focused one: Copy/Paste then
+    /// act on the field rather than the pane underneath it.
+    fn focused_search_prompt_window(&self) -> Option<WindowId> {
+        self.focused.filter(|window_id| {
+            self.search_prompt
+                .as_ref()
+                .is_some_and(|session| session.window_id == *window_id)
+        })
+    }
+
+    /// Copy the focused prompt's query. Returns whether a prompt took the
+    /// command. The field has no partial selection, so this is the whole
+    /// buffer, and an empty one leaves the clipboard alone. The pointer still
+    /// selects in the panes while the prompt is open, and a selection made
+    /// there is what the command copies instead.
+    pub(in crate::app) fn copy_search_prompt_query(&mut self) -> bool {
+        if self.focused_search_prompt_window().is_none() {
+            return false;
+        }
+        if self.selection_made_during_search_prompt() {
+            return false;
+        }
+        let query = self
+            .search_prompt
+            .as_ref()
+            .map(|session| session.prompt.buffer().to_string())
+            .filter(|query| !query.is_empty());
+        if let Some(query) = query {
+            self.write_text_to_clipboard(&query);
+        }
+        true
+    }
+
+    fn selection_made_during_search_prompt(&self) -> bool {
+        let Some(session) = self.search_prompt.as_ref() else {
+            return false;
+        };
+        let Some((window_id, pane_id)) = self.resolve_pane_command_target(AppCommand::Copy) else {
+            return false;
+        };
+        let Some(surface) = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&pane_id))
+        else {
+            return false;
+        };
+        let terminal = surface.terminal.lock();
+        selection_is_newer_than_prompt(
+            (session.pane_id, session.selection_at_open),
+            (pane_id, terminal.active().selection),
+        ) && terminal
+            .selected_text()
+            .is_some_and(|text| !text.is_empty())
+    }
+
+    /// Paste the clipboard's text into the focused prompt. Returns whether a
+    /// prompt took the command.
+    pub(in crate::app) fn paste_clipboard_to_search_prompt(&mut self) -> bool {
+        let Some(window_id) = self.focused_search_prompt_window() else {
+            return false;
+        };
+        let text = match self.clipboard.get_text() {
+            Ok(text) => text,
+            Err(err) => {
+                log::warn!("failed to read clipboard for the search prompt: {err}");
+                return true;
+            }
+        };
+        let effect = self
+            .search_prompt
+            .as_mut()
+            .and_then(|session| session.prompt.push_text(&text));
+        if let Some(effect) = effect {
+            self.apply_search_prompt_effect(window_id, effect);
+        }
+        true
     }
 
     /// Apply a [`SearchPromptEffect`] to the prompt's target terminal and
@@ -293,6 +472,103 @@ mod tests {
     use noa_grid::Terminal;
     use parking_lot::Mutex;
     use std::time::Duration;
+
+    #[test]
+    fn only_a_selection_made_after_the_prompt_opened_counts_as_newer() {
+        let prompt_pane = PaneId::new(1);
+        let other_pane = PaneId::new(2);
+        let point = |x| noa_grid::SelectionPoint::new(x, 0);
+        let old = Some(noa_grid::Selection::new(point(0), point(3)));
+        let new = Some(noa_grid::Selection::new(point(5), point(8)));
+
+        for (at_open, pane, current, expected) in [
+            (old, prompt_pane, old, false),
+            (None, prompt_pane, None, false),
+            (old, prompt_pane, None, false),
+            (None, prompt_pane, new, true),
+            (old, prompt_pane, new, true),
+            (old, other_pane, old, true),
+            (old, other_pane, None, false),
+        ] {
+            assert_eq!(
+                selection_is_newer_than_prompt((prompt_pane, at_open), (pane, current)),
+                expected,
+                "at_open {at_open:?}, pane {pane:?}, current {current:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_commands_the_prompt_acts_on_outrank_its_editing_keys() {
+        for command in [
+            AppCommand::Search(SearchAction::Find),
+            AppCommand::Search(SearchAction::FindNext),
+            AppCommand::Search(SearchAction::FindPrevious),
+            AppCommand::Copy,
+            AppCommand::Paste,
+        ] {
+            assert!(search_prompt_acts_on_command(command), "{command:?}");
+        }
+        for command in [
+            AppCommand::Search(SearchAction::Clear),
+            AppCommand::NewTab,
+            AppCommand::ToggleCommandPalette,
+        ] {
+            assert!(!search_prompt_acts_on_command(command), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn prompt_edit_keys_require_their_exact_modifiers() {
+        use SearchPromptEdit::{Delete, Move};
+        let ctrl = ModifiersState::CONTROL;
+        let none = ModifiersState::empty();
+        let char_key = |text: &str| Key::Character(text.into());
+
+        for (text, edit) in [
+            ("a", Move(CaretMotion::Start)),
+            ("A", Move(CaretMotion::Start)),
+            ("e", Move(CaretMotion::End)),
+            ("b", Move(CaretMotion::Left)),
+            ("f", Move(CaretMotion::Right)),
+            ("h", Delete(Deletion::Backward)),
+            ("d", Delete(Deletion::Forward)),
+            ("k", Delete(Deletion::ToEnd)),
+            ("u", Delete(Deletion::ToStart)),
+            ("w", Delete(Deletion::WordBackward)),
+        ] {
+            assert_eq!(
+                search_prompt_edit(&char_key(text), ctrl),
+                Some(edit),
+                "{text}"
+            );
+        }
+        for (key, edit) in [
+            (NamedKey::ArrowLeft, Move(CaretMotion::Left)),
+            (NamedKey::ArrowRight, Move(CaretMotion::Right)),
+            (NamedKey::Home, Move(CaretMotion::Start)),
+            (NamedKey::End, Move(CaretMotion::End)),
+            (NamedKey::Delete, Delete(Deletion::Forward)),
+        ] {
+            assert_eq!(search_prompt_edit(&Key::Named(key), none), Some(edit));
+        }
+
+        // Plain letters stay text; other chords stay with the keybind path.
+        assert_eq!(search_prompt_edit(&char_key("a"), none), None);
+        assert_eq!(search_prompt_edit(&char_key("x"), ctrl), None);
+        assert_eq!(
+            search_prompt_edit(&char_key("a"), ctrl | ModifiersState::SHIFT),
+            None
+        );
+        assert_eq!(
+            search_prompt_edit(&char_key("c"), ModifiersState::SUPER),
+            None
+        );
+        assert_eq!(
+            search_prompt_edit(&Key::Named(NamedKey::ArrowLeft), ModifiersState::SHIFT),
+            None
+        );
+    }
 
     #[test]
     fn navigation_during_search_matches_synchronous_navigation() {

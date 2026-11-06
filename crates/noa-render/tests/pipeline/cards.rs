@@ -630,6 +630,7 @@ fn command_palette_card_composites_without_validation_error() {
         cursor_blink_visible: false,
         hover_link: None,
         search_prompt: None,
+        search_prompt_caret_tail: 0,
         command_palette: Some(palette.clone()),
         confirm_dialog: None,
         preedit: None,

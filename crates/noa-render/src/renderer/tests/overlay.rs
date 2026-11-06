@@ -6,14 +6,45 @@ fn search_prompt_display_text_keeps_the_tail_of_a_buffer_too_long_to_fit() {
 
     // cols=20, fixed chars ("Find: " + "▏" + " 0/0") = 11, so 9 chars of
     // buffer fit; the last 9 of "0123456789" is "123456789".
-    let text = search_prompt_display_text("0123456789", &search, 20);
+    let text = search_prompt_display_text("0123456789", 0, &search, 20);
     assert_eq!(text, "Find: 123456789\u{258F} 0/0");
     assert_eq!(text.chars().count(), 20);
 
-    let short = search_prompt_display_text("hi", &search, 20);
+    let short = search_prompt_display_text("hi", 0, &search, 20);
     assert_eq!(
         short, "Find: hi\u{258F} 0/0",
         "a short buffer is shown in full"
+    );
+}
+
+#[test]
+fn search_prompt_display_text_draws_the_caret_inside_the_query() {
+    let search = SearchState::default();
+
+    assert_eq!(
+        search_prompt_display_text("hello", 2, &search, 30),
+        "Find: hel\u{258F}lo 0/0"
+    );
+    assert_eq!(
+        search_prompt_display_text("hello", 5, &search, 30),
+        "Find: \u{258F}hello 0/0"
+    );
+}
+
+#[test]
+fn search_prompt_display_text_keeps_the_caret_visible_in_a_long_query() {
+    let search = SearchState::default();
+
+    // cols=20 leaves 9 columns of query, as above.
+    assert_eq!(
+        search_prompt_display_text("0123456789", 10, &search, 20),
+        "Find: \u{258F}012345678 0/0",
+        "at the start the text after the caret takes all the room"
+    );
+    assert_eq!(
+        search_prompt_display_text("0123456789", 5, &search, 20),
+        "Find: 1234\u{258F}56789 0/0",
+        "in the middle both sides show"
     );
 }
 
@@ -26,7 +57,7 @@ fn search_prompt_display_text_reports_no_matches_for_non_empty_query() {
         noa_grid::SearchAnchor::Backward(SelectionPoint::new(0, 0)),
     );
 
-    let text = search_prompt_display_text("needle", &search, 30);
+    let text = search_prompt_display_text("needle", 0, &search, 30);
 
     assert_eq!(text, "Find: needle\u{258F} no matches");
 }
@@ -56,21 +87,24 @@ fn search_prompt_caret_matches_rendered_cells_after_truncation() {
             "short".to_string(),
             "日e\u{301}".repeat(100),
         ] {
-            for cols in [0, 1, 5, 11, 12, 20, 80] {
-                let text = search_prompt_display_text(&buffer, &search, cols);
-                let mut cells = search_prompt_segment_cells(&text, [255; 4]);
-                let excess = cells.len().saturating_sub(usize::from(cols));
-                cells.drain(..excess);
-                let drawn_caret = cells
-                    .iter()
-                    .rposition(|cell| cell.ch == '\u{258F}')
-                    .map_or(0, |index| usize::from(cols) - cells.len() + index);
-                assert_eq!(
-                    usize::from(search_prompt_caret_col(&buffer, &search, cols)),
-                    drawn_caret,
-                    "buffer {buffer:?}, cols {cols}, status {}",
-                    search_prompt_suffix(&buffer, &search),
-                );
+            let chars = buffer.chars().count();
+            for caret_tail in [0, 1, chars / 2, chars] {
+                for cols in [0, 1, 5, 11, 12, 20, 80] {
+                    let text = search_prompt_display_text(&buffer, caret_tail, &search, cols);
+                    let mut cells = search_prompt_segment_cells(&text, [255; 4]);
+                    let excess = cells.len().saturating_sub(usize::from(cols));
+                    cells.drain(..excess);
+                    let drawn_caret = cells
+                        .iter()
+                        .rposition(|cell| cell.ch == '\u{258F}')
+                        .map_or(0, |index| usize::from(cols) - cells.len() + index);
+                    assert_eq!(
+                        usize::from(search_prompt_caret_col(&buffer, caret_tail, &search, cols)),
+                        drawn_caret,
+                        "buffer {buffer:?}, tail {caret_tail}, cols {cols}, status {}",
+                        search_prompt_suffix(&buffer, &search),
+                    );
+                }
             }
         }
     }

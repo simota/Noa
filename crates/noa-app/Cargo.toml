@@ -32,6 +32,7 @@ zune-jpeg.workspace = true
 image-webp.workspace = true
 dirs.workspace = true
 unicode-width.workspace = true
+unicode-segmentation.workspace = true
 libc.workspace = true
 rand.workspace = true
 aes-gcm.workspace = true

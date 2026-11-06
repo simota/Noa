@@ -27,7 +27,7 @@
 ### Parity Fidelity Notes
 
 - Ghostty's palette enumerates a large set of actions (config-reload, inspector, goto_tab:N, etc.). noa's palette enumerates **only the `AppCommand`s noa has implemented**. This is not a "deviation from Ghostty behavior" but simply that "noa's set of implemented actions is smaller than Ghostty's"; the observable behavior (open/filter/execute/close) is faithfully reproduced.
-- **Explicit parity exceptions (deliberate scope differences)**: (a) Ghostty's `command_palette_entry` (user-defined custom entries) is **CUT** for v1. (b) `SelectTab(1..9)` (Go to Tab N) is **CUT** from the palette display as 9 redundant entries (kept in the title registry, directly reachable via `cmd+1..9`). Both are recorded here in L0.
+- **Explicit parity exceptions (deliberate scope differences)**: (a) Ghostty's `command_palette_entry` (user-defined custom entries) was **CUT** for v1; it has since been added (see `command-palette-entry` in `docs/CONFIGURATION.md`). (b) `SelectTab(1..9)` (Go to Tab N) is **CUT** from the palette display as 9 redundant entries (kept in the title registry, directly reachable via `cmd+1..9`). Both are recorded here in L0.
 - **Fidelity gap**: Ghostty's palette may have fuzzy-match scoring / most-recently-used ordering, whereas v1 uses only subsequence matching + registry declaration order (ranking and recency are CUT — see Scope below).
 
 ## FRAME — Reusable Assets and Constraints (Lens investigation 2026-07-04)
@@ -265,7 +265,7 @@ Every row of `command_palette_title(AppCommand)` (R-2, covering every `AppComman
 - **Command history / most-recently-used ordering / frequency ranking** — v1 uses declaration order only. **CUT**.
 - **Fuzzy scoring / highlighting matched characters** — v1 uses only a boolean subsequence check. **CUT**.
 - **Displaying `SelectTab(1..9)`** — 9 redundant entries, directly reachable via `cmd+1..9`. Kept in the title registry. **CUT**.
-- **User-defined custom entries** (Ghostty's `command_palette_entry`) — **CUT** (parity exception, recorded in L0).
+- **User-defined custom entries** (Ghostty's `command_palette_entry`) — CUT in v1, added later (`command-palette-entry` in `docs/CONFIGURATION.md`).
 - **Argument input from the palette** (actions taking arguments, prompt chaining) — unnecessary since noa's `AppCommand` takes no arguments. **CUT**.
 - **Palette display while overview is focused** — overview has a dedicated keymap, so it's hidden (no-op) in v1. **DEFER**.
 - **macOS glyph formatting for keybinding hints (⌘⇧ etc.)** — plain-text chord notation suffices; glyph rendering is a future increment. **DEFER**.

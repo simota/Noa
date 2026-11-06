@@ -2,6 +2,7 @@ use std::path::Path;
 
 use crate::{ConfigOverrides, FontConfig, KeybindConfig};
 
+use super::command_palette_entry::parse_command_palette_entry;
 use super::diagnostics::{
     invalid_value_diagnostic, unknown_key_diagnostic, window_pair_diagnostic,
 };
@@ -101,6 +102,7 @@ pub(crate) fn build_overrides(
     let mut send_selection_send_enter = None;
     let mut ember = None;
     let mut keybinds = Vec::new();
+    let mut command_palette_entries = Vec::new();
     let mut server_enable = None;
     let mut server_port = None;
     let mut server_bind = None;
@@ -520,6 +522,12 @@ pub(crate) fn build_overrides(
                     keybinds.push(keybind);
                 }
             }
+            "command-palette-entry" => {
+                if let Some(entry) = parse_command_palette_entry(path, directive, &mut diagnostics)
+                {
+                    command_palette_entries.push(entry);
+                }
+            }
             "palette" => {
                 parse_palette_entry(path, directive, &mut diagnostics, &mut palette);
             }
@@ -646,6 +654,7 @@ pub(crate) fn build_overrides(
             send_selection_send_enter,
             ember,
             keybinds,
+            command_palette_entries,
             server_enable,
             server_port,
             server_bind,

@@ -157,6 +157,7 @@ fn is_repeatable_key(key: &str) -> bool {
             | "font-variation-bold-italic"
             | "palette"
             | "keybind"
+            | "command-palette-entry"
             | "config-file"
     )
 }

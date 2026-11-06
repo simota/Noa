@@ -5,10 +5,11 @@ use noa_core::Rgb;
 
 use crate::{
     AlphaBlendingMode, BackgroundImageFit, BackgroundImagePosition, ClipboardAccess,
-    ConfigOverrides, CursorShape, FontConfig, FontFeature, FontVariation, GlassLevel,
-    KeybindConfig, MacosOptionAsAlt, MacosTitlebarStyle, PaletteOverride, QuickTerminalPosition,
-    QuickTerminalScreen, QuickTerminalSize, QuickTerminalSizeDim, ScratchTerminalSize,
-    ScrollbackPersist, SyntheticStyleMode, ThemeAppearancePair, ThemeSetting, WindowSaveState,
+    CommandPaletteEntryConfig, ConfigOverrides, CursorShape, FontConfig, FontFeature,
+    FontVariation, GlassLevel, KeybindConfig, MacosOptionAsAlt, MacosTitlebarStyle,
+    PaletteOverride, QuickTerminalPosition, QuickTerminalScreen, QuickTerminalSize,
+    QuickTerminalSizeDim, ScratchTerminalSize, ScrollbackPersist, SyntheticStyleMode,
+    ThemeAppearancePair, ThemeSetting, WindowSaveState,
 };
 
 use super::*;
@@ -2265,4 +2266,79 @@ fn abnormal_command_exit_runtime_parses_milliseconds() {
     let (overrides, diagnostics) = parse_overrides(path(), "abnormal-command-exit-runtime = -1");
     assert_eq!(overrides.abnormal_command_exit_runtime_ms, None);
     assert_eq!(diagnostics.len(), 1);
+}
+
+fn palette_entry(title: &str, description: &str, action: &str) -> CommandPaletteEntryConfig {
+    CommandPaletteEntryConfig::Entry {
+        title: title.to_string(),
+        description: description.to_string(),
+        action: action.to_string(),
+    }
+}
+
+/// The examples from Ghostty 1.4.0's `command-palette-entry` docs.
+#[test]
+fn command_palette_entry_parses_ghostty_fields() {
+    let (overrides, diagnostics) = parse_overrides(
+        path(),
+        "command-palette-entry = title:Reset Font Style, action:csi:0m\n\
+         command-palette-entry = title:Focus Split: Right,description:\"Focus the split to the right, if it exists.\",action:goto_split:right\n\
+         command-palette-entry = title:\"Ghostty\",description:\"Add a little Ghostty to your terminal.\",action:\"text:\\xf0\\x9f\\x91\\xbb\"",
+    );
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(
+        overrides.command_palette_entries,
+        vec![
+            palette_entry("Reset Font Style", "", "csi:0m"),
+            palette_entry(
+                "Focus Split: Right",
+                "Focus the split to the right, if it exists.",
+                "goto_split:right"
+            ),
+            palette_entry(
+                "Ghostty",
+                "Add a little Ghostty to your terminal.",
+                "text:\u{1f47b}"
+            ),
+        ]
+    );
+}
+
+#[test]
+fn command_palette_entry_clear_and_empty_keep_their_order() {
+    let (overrides, diagnostics) = parse_overrides(
+        path(),
+        "command-palette-entry = clear\n\
+         command-palette-entry = title:New Tab,action:new_tab\n\
+         command-palette-entry =",
+    );
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(
+        overrides.command_palette_entries,
+        vec![
+            CommandPaletteEntryConfig::Clear,
+            palette_entry("New Tab", "", "new_tab"),
+            CommandPaletteEntryConfig::Reset,
+        ]
+    );
+}
+
+#[test]
+fn command_palette_entry_rejects_what_ghostty_rejects() {
+    for value in [
+        "action:new_tab",
+        "title:New Tab",
+        "title:New Tab,action:new_tab,icon:tab",
+        "title New Tab,action:new_tab",
+        "title:\"New Tab,action:new_tab",
+        "title:\"bad \\q escape\",action:new_tab",
+    ] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("command-palette-entry = {value}"));
+
+        assert!(overrides.command_palette_entries.is_empty(), "{value}");
+        assert_eq!(diagnostics.len(), 1, "{value}: {diagnostics:?}");
+    }
 }

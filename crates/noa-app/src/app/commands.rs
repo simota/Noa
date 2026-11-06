@@ -235,7 +235,7 @@ impl App {
         {
             self.command_palette = Some(CommandPaletteSession {
                 window_id,
-                palette: CommandPalette::open(),
+                palette: CommandPalette::open(self.palette_entries.clone()),
                 opened_at: Instant::now(),
             });
         }

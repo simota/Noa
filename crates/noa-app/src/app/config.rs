@@ -250,6 +250,9 @@ pub struct AppConfig {
     /// Raw `keybind = ...` entries from config. Parsed into the runtime
     /// [`crate::commands::KeybindEngine`] by `App::new` and live reload.
     pub keybinds: Vec<noa_config::KeybindConfig>,
+    /// Raw `command-palette-entry = ...` entries from config, resolved over
+    /// the default palette entries by `App::new` and live reload.
+    pub command_palette_entries: Vec<noa_config::CommandPaletteEntryConfig>,
     /// `server-enable`: start the `noa-ipc` external control server
     /// (noa-server spec FR-1). Default off.
     pub server_enable: bool,
@@ -396,6 +399,7 @@ impl AppConfig {
             send_selection_send_enter: config.send_selection_send_enter,
             ember: config.ember,
             keybinds: config.keybinds,
+            command_palette_entries: config.command_palette_entries,
             server_enable: config.server_enable,
             server_port: config.server_port,
             server_bind: config.server_bind,

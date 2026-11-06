@@ -548,6 +548,44 @@ impl KeybindConfig {
     }
 }
 
+/// One `command-palette-entry = ...` directive. Like `keybind`, the entries
+/// apply in config order over the default palette; the config crate keeps
+/// the action text as written and `noa-app` looks it up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandPaletteEntryConfig {
+    /// `command-palette-entry =`: back to the default entries.
+    Reset,
+    /// `command-palette-entry = clear`: drop every entry so far, the
+    /// defaults included.
+    Clear,
+    /// `command-palette-entry = title:...,description:...,action:...`.
+    Entry {
+        title: String,
+        description: String,
+        action: String,
+    },
+}
+
+impl CommandPaletteEntryConfig {
+    pub fn config_value(&self) -> String {
+        let quote = |text: &str| format!("{:?}", text);
+        match self {
+            Self::Reset => String::new(),
+            Self::Clear => "clear".to_string(),
+            Self::Entry {
+                title,
+                description,
+                action,
+            } => format!(
+                "title:{},description:{},action:{}",
+                quote(title),
+                quote(description),
+                quote(action)
+            ),
+        }
+    }
+}
+
 /// `macos-option-as-alt`: which macOS Option key(s) should be treated as
 /// terminal Alt instead of producing macOS alternate characters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1158,6 +1196,9 @@ pub struct StartupConfig {
     /// `keybind`: repeatable in-app keybinding edits applied to the default
     /// [`noa-app`] keybinding engine in config order.
     pub keybinds: Vec<KeybindConfig>,
+    /// `command-palette-entry`: repeatable edits applied to the default
+    /// command palette entries in config order.
+    pub command_palette_entries: Vec<CommandPaletteEntryConfig>,
     /// `server-enable`: start the `noa-ipc` JSON-RPC-over-WebSocket server
     /// (noa-server spec FR-1). Default off — no port is ever opened unless
     /// explicitly enabled.
@@ -1278,6 +1319,7 @@ impl Default for StartupConfig {
             send_selection_send_enter: false,
             ember: false,
             keybinds: Vec::new(),
+            command_palette_entries: Vec::new(),
             server_enable: false,
             server_port: DEFAULT_SERVER_PORT,
             server_bind: DEFAULT_SERVER_BIND.to_string(),
@@ -1413,6 +1455,7 @@ pub struct ConfigOverrides {
     pub send_selection_send_enter: Option<bool>,
     pub ember: Option<bool>,
     pub keybinds: Vec<KeybindConfig>,
+    pub command_palette_entries: Vec<CommandPaletteEntryConfig>,
     pub server_enable: Option<bool>,
     pub server_port: Option<u16>,
     pub server_bind: Option<String>,
@@ -1543,6 +1586,7 @@ macro_rules! impl_redacted_config_debug {
                     .field("send_selection_send_enter", &self.send_selection_send_enter)
                     .field("ember", &self.ember)
                     .field("keybinds", &self.keybinds)
+                    .field("command_palette_entries", &self.command_palette_entries)
                     .field("server_enable", &self.server_enable)
                     .field("server_port", &self.server_port)
                     .field("server_bind", &self.server_bind)
@@ -1564,6 +1608,8 @@ impl ConfigOverrides {
     pub fn merge(self, higher_priority: Self) -> Self {
         let mut keybinds = self.keybinds;
         keybinds.extend(higher_priority.keybinds);
+        let mut command_palette_entries = self.command_palette_entries;
+        command_palette_entries.extend(higher_priority.command_palette_entries);
         Self {
             cols: higher_priority.cols.or(self.cols),
             rows: higher_priority.rows.or(self.rows),
@@ -1741,6 +1787,7 @@ impl ConfigOverrides {
                 .or(self.send_selection_send_enter),
             ember: higher_priority.ember.or(self.ember),
             keybinds,
+            command_palette_entries,
             server_enable: higher_priority.server_enable.or(self.server_enable),
             server_port: higher_priority.server_port.or(self.server_port),
             server_bind: higher_priority.server_bind.or(self.server_bind),
@@ -1755,6 +1802,8 @@ impl ConfigOverrides {
     pub fn apply_to(self, base: StartupConfig) -> StartupConfig {
         let mut keybinds = base.keybinds;
         keybinds.extend(self.keybinds);
+        let mut command_palette_entries = base.command_palette_entries;
+        command_palette_entries.extend(self.command_palette_entries);
         // A `theme` override is exclusive: a single name clears a base pair
         // and a pair clears a base single name, since both resolve the same
         // `theme` key and the app prefers `theme_appearance` when set.
@@ -1924,6 +1973,7 @@ impl ConfigOverrides {
                 .unwrap_or(base.send_selection_send_enter),
             ember: self.ember.unwrap_or(base.ember),
             keybinds,
+            command_palette_entries,
             server_enable: self.server_enable.unwrap_or(base.server_enable),
             server_port: self.server_port.unwrap_or(base.server_port),
             server_bind: self.server_bind.unwrap_or(base.server_bind),
@@ -2386,6 +2436,7 @@ mod tests {
                 send_selection_send_enter: false,
                 ember: false,
                 keybinds: Vec::new(),
+                command_palette_entries: Vec::new(),
                 server_enable: false,
                 server_port: DEFAULT_SERVER_PORT,
                 server_bind: DEFAULT_SERVER_BIND.to_string(),

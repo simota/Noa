@@ -2016,7 +2016,7 @@ fn command_palette_snapshot_reflects_query_selection_and_keybinds() {
     // symbol keybind hints / selected) with no terminal involved.
     use noa_render::PaletteRow;
     let keybinds = KeybindEngine::default();
-    let palette = CommandPalette::open();
+    let palette = CommandPalette::open(command_palette::default_palette_entries());
 
     let snapshot = command_palette_snapshot(&keybinds, &palette, |_| true);
     assert_eq!(snapshot.query, "");
@@ -2060,7 +2060,7 @@ fn command_palette_snapshot_reflects_query_selection_and_keybinds() {
 fn command_palette_snapshot_marks_unavailable_commands_disabled() {
     use noa_render::PaletteRow;
     let keybinds = KeybindEngine::default();
-    let mut palette = CommandPalette::open();
+    let mut palette = CommandPalette::open(command_palette::default_palette_entries());
     palette.push_text("add pane right");
 
     let snapshot = command_palette_snapshot(&keybinds, &palette, |command| {

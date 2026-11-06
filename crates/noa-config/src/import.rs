@@ -134,7 +134,7 @@ fn import_line(line: &str) -> (String, ImportLineKind) {
 }
 
 fn is_supported_import_key(key: &str) -> bool {
-    is_supported_scalar_key(key) || key == "keybind"
+    is_supported_scalar_key(key) || matches!(key, "keybind" | "command-palette-entry")
 }
 
 #[cfg(test)]

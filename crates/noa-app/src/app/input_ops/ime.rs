@@ -1,12 +1,18 @@
 use super::super::*;
 
 fn search_prompt_ime_caret_col(
-    buffer: &str,
+    before_caret: &str,
     preedit: &str,
+    after_caret: &str,
     search: &noa_grid::SearchState,
     cols: u16,
 ) -> u16 {
-    noa_render::search_prompt_caret_col(&format!("{buffer}{preedit}"), search, cols)
+    noa_render::search_prompt_caret_col(
+        &format!("{before_caret}{preedit}{after_caret}"),
+        after_caret.chars().count(),
+        search,
+        cols,
+    )
 }
 
 impl App {
@@ -232,9 +238,11 @@ impl App {
             ModalImeTarget::SearchPrompt => {
                 let session = self.search_prompt.as_ref()?;
                 let surface = state.surfaces.get(&session.pane_id)?;
+                let (before_caret, after_caret) = session.prompt.split_at_caret();
                 let col = search_prompt_ime_caret_col(
-                    session.prompt.buffer(),
+                    before_caret,
                     self.modal_preedit_for(window_id, target),
+                    after_caret,
                     &surface.terminal.lock().active().search,
                     surface.grid_size.cols,
                 );
@@ -318,18 +326,19 @@ mod tests {
             noa_grid::SearchAnchor::Backward(noa_grid::SelectionPoint::new(0, 0)),
         );
         assert_eq!(
-            search_prompt_ime_caret_col(&"a".repeat(30), &"b".repeat(10), &search, 80),
+            search_prompt_ime_caret_col(&"a".repeat(30), &"b".repeat(10), "", &search, 80),
             68
         );
-        assert_eq!(search_prompt_ime_caret_col("a", "", &search, 80), 68);
+        assert_eq!(search_prompt_ime_caret_col("a", "", "", &search, 80), 68);
+        assert_eq!(search_prompt_ime_caret_col("a", "", "bcd", &search, 80), 65);
         assert_eq!(
-            search_prompt_ime_caret_col(&"日".repeat(100), "本", &search, 80),
+            search_prompt_ime_caret_col(&"日".repeat(100), "本", "", &search, 80),
             68
         );
-        assert_eq!(search_prompt_ime_caret_col("a", "", &search, 5), 0);
-        assert_eq!(search_prompt_ime_caret_col("a", "", &search, 0), 0);
+        assert_eq!(search_prompt_ime_caret_col("a", "", "", &search, 5), 0);
+        assert_eq!(search_prompt_ime_caret_col("a", "", "", &search, 0), 0);
         assert_eq!(
-            search_prompt_ime_caret_col("", "日本", &noa_grid::SearchState::default(), 80),
+            search_prompt_ime_caret_col("", "日本", "", &noa_grid::SearchState::default(), 80),
             75
         );
     }

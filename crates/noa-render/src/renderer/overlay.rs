@@ -27,7 +27,8 @@ pub(super) fn append_search_prompt_instances(
     }
 
     let style = OverlayStyle::from_theme(theme);
-    let text = search_prompt_display_text(buffer, &snap.search, cols);
+    let text =
+        search_prompt_display_text(buffer, snap.search_prompt_caret_tail, &snap.search, cols);
     let text_color = to_u8_color(surface_output_rgba(
         style.surface_fg(),
         target_format_is_srgb,
@@ -964,27 +965,69 @@ pub(super) fn palette_line(left: &str, right: Option<&str>, inner: usize) -> Str
     line
 }
 
-/// Compose the prompt's display text: `Find: {buffer}▏ {status}`. The status
-/// is either the 1-based active match counter or an explicit `no matches`
-/// state for a non-empty query with zero hits. Clamps to `cols` by keeping the
-/// TAIL of a buffer too long to fit alongside the fixed prefix/status.
-pub(super) fn search_prompt_display_text(buffer: &str, search: &SearchState, cols: u16) -> String {
-    const PREFIX: &str = "Find: ";
-    const CURSOR_MARK: &str = "\u{258F}"; // "▏" left one eighth block, reads as a thin caret.
+/// Compose the prompt's display text: `Find: {before}▏{after} {status}`. The
+/// status is either the 1-based active match counter or an explicit
+/// `no matches` state for a non-empty query with zero hits. Clamps to `cols`
+/// by trimming around the caret, so it stays on screen.
+pub(super) fn search_prompt_display_text(
+    buffer: &str,
+    caret_tail: usize,
+    search: &SearchState,
+    cols: u16,
+) -> String {
     let suffix = search_prompt_suffix(buffer, search);
+    let (before, after) = search_prompt_visible_text(buffer, caret_tail, search, cols);
+    format!("{SEARCH_PROMPT_PREFIX}{before}{SEARCH_PROMPT_CARET}{after}{suffix}")
+}
 
-    let fixed_chars = PREFIX.chars().count() + CURSOR_MARK.chars().count() + suffix.chars().count();
-    let available = (cols as usize).saturating_sub(fixed_chars);
-    let buffer_chars: Vec<char> = buffer.chars().collect();
-    let shown: String = if buffer_chars.len() > available {
-        buffer_chars[buffer_chars.len() - available..]
-            .iter()
-            .collect()
-    } else {
-        buffer.to_string()
+const SEARCH_PROMPT_PREFIX: &str = "Find: ";
+const SEARCH_PROMPT_CARET: char = '\u{258F}'; // "▏" left one eighth block, reads as a thin caret.
+
+fn display_width(ch: char) -> usize {
+    UnicodeWidthChar::width(ch).unwrap_or(0)
+}
+
+/// The parts of `buffer` either side of the caret that fit in `cols` alongside
+/// the prompt's fixed text. Text before the caret keeps at least half of the
+/// room when it needs it; each side gives what it leaves unused to the other.
+fn search_prompt_visible_text<'a>(
+    buffer: &'a str,
+    caret_tail: usize,
+    search: &SearchState,
+    cols: u16,
+) -> (&'a str, &'a str) {
+    let fixed = SEARCH_PROMPT_PREFIX.len() + 1 + search_prompt_suffix_cols(buffer, search);
+    let available = usize::from(cols).saturating_sub(fixed);
+
+    let caret = match caret_tail.checked_sub(1) {
+        None => buffer.len(),
+        Some(skip) => buffer.char_indices().rev().nth(skip).map_or(0, |(i, _)| i),
     };
+    let (before, after) = buffer.split_at(caret);
+    let width = |text: &str| text.chars().map(display_width).sum::<usize>();
+    let before_room =
+        width(before).min((available / 2).max(available.saturating_sub(width(after))));
+    let after_room = available - before_room;
 
-    format!("{PREFIX}{shown}{CURSOR_MARK}{suffix}")
+    let mut used = 0;
+    let start = before
+        .char_indices()
+        .rev()
+        .take_while(|(_, ch)| {
+            used += display_width(*ch);
+            used <= before_room
+        })
+        .last()
+        .map_or(before.len(), |(i, _)| i);
+    let mut used = 0;
+    let end = after
+        .char_indices()
+        .find(|(_, ch)| {
+            used += display_width(*ch);
+            used > after_room
+        })
+        .map_or(after.len(), |(i, _)| i);
+    (&before[start..], &after[..end])
 }
 
 /// The trailing status suffix of the search prompt. A non-empty query with no
@@ -1007,12 +1050,20 @@ pub(super) fn search_prompt_suffix_cols(buffer: &str, search: &SearchState) -> u
 }
 
 /// The search prompt's caret column, shared with the OS IME anchor. The
-/// prompt is right-aligned and both truncation passes drop from the front,
-/// so only the trailing ASCII status separates the caret from the right
-/// edge, even for wide or combining query text. If the pane is too narrow
-/// to show the caret, anchor at its left edge.
-pub fn search_prompt_caret_col(buffer: &str, search: &SearchState, cols: u16) -> u16 {
-    usize::from(cols).saturating_sub(search_prompt_suffix_cols(buffer, search) + 1) as u16
+/// prompt is right-aligned and the cell clamp drops from the front, so only
+/// the visible text after the caret and the trailing ASCII status separate it
+/// from the right edge. If the pane is too narrow to show the caret, anchor at
+/// its left edge.
+pub fn search_prompt_caret_col(
+    buffer: &str,
+    caret_tail: usize,
+    search: &SearchState,
+    cols: u16,
+) -> u16 {
+    let (_, after) = search_prompt_visible_text(buffer, caret_tail, search, cols);
+    let after_cols: usize = after.chars().map(display_width).sum();
+    usize::from(cols).saturating_sub(search_prompt_suffix_cols(buffer, search) + after_cols + 1)
+        as u16
 }
 
 /// Turn the prompt's display text into row-local [`SegmentCell`]s, one per

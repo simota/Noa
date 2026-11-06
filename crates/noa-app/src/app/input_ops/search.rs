@@ -1,5 +1,48 @@
 use super::super::*;
 use super::ActiveOverlay;
+use crate::search_prompt::{CaretMotion, Deletion};
+
+/// A field-editing key of the open search prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchPromptEdit {
+    Move(CaretMotion),
+    Delete(Deletion),
+}
+
+/// The macOS text-field keys the prompt handles: arrows, Home/End and Delete
+/// unmodified, and the Emacs-style Ctrl chords. Anything with other modifiers
+/// stays with the keybind path.
+fn search_prompt_edit(key: &Key, modifiers: ModifiersState) -> Option<SearchPromptEdit> {
+    use SearchPromptEdit::{Delete, Move};
+    if modifiers.is_empty() {
+        return match key {
+            Key::Named(NamedKey::ArrowLeft) => Some(Move(CaretMotion::Left)),
+            Key::Named(NamedKey::ArrowRight) => Some(Move(CaretMotion::Right)),
+            Key::Named(NamedKey::Home) => Some(Move(CaretMotion::Start)),
+            Key::Named(NamedKey::End) => Some(Move(CaretMotion::End)),
+            Key::Named(NamedKey::Delete) => Some(Delete(Deletion::Forward)),
+            _ => None,
+        };
+    }
+    if modifiers != ModifiersState::CONTROL {
+        return None;
+    }
+    let Key::Character(text) = key else {
+        return None;
+    };
+    match text.to_ascii_lowercase().as_str() {
+        "a" => Some(Move(CaretMotion::Start)),
+        "e" => Some(Move(CaretMotion::End)),
+        "b" => Some(Move(CaretMotion::Left)),
+        "f" => Some(Move(CaretMotion::Right)),
+        "h" => Some(Delete(Deletion::Backward)),
+        "d" => Some(Delete(Deletion::Forward)),
+        "k" => Some(Delete(Deletion::ToEnd)),
+        "u" => Some(Delete(Deletion::ToStart)),
+        "w" => Some(Delete(Deletion::WordBackward)),
+        _ => None,
+    }
+}
 
 fn navigate_search(
     worker: Option<&crate::search_worker::SearchWorker>,
@@ -102,7 +145,8 @@ impl App {
     /// navigate to the next/previous match without closing it; a repeated
     /// `cmd+f` toggles the prompt closed keeping highlights + the active
     /// match; every other keystroke is either consumed by the prompt
-    /// (Escape/Backspace/copy/paste/printable text) or swallowed outright — nothing
+    /// (Escape/Backspace/caret and deletion keys/copy/paste/printable text) or
+    /// swallowed outright — nothing
     /// falls through to the pty while the prompt is open. Only called when
     /// `self.search_prompt` targets `window_id` (checked by the caller).
     pub(in crate::app) fn handle_search_prompt_key(
@@ -142,6 +186,11 @@ impl App {
             _ => {}
         }
 
+        if let Some(edit) = search_prompt_edit(&event.logical_key, self.modifiers) {
+            self.apply_search_prompt_edit(window_id, edit);
+            return;
+        }
+
         if let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers) {
             match command {
                 AppCommand::Search(SearchAction::FindNext | SearchAction::FindPrevious)
@@ -178,6 +227,26 @@ impl App {
             .and_then(|session| session.prompt.push_text(text));
         if let Some(effect) = effect {
             self.apply_search_prompt_effect(window_id, effect);
+        }
+    }
+
+    fn apply_search_prompt_edit(&mut self, window_id: WindowId, edit: SearchPromptEdit) {
+        let Some(session) = self.search_prompt.as_mut() else {
+            return;
+        };
+        match edit {
+            SearchPromptEdit::Move(motion) => {
+                if session.prompt.move_caret(motion)
+                    && let Some(state) = self.windows.get(&window_id)
+                {
+                    state.window.request_redraw();
+                }
+            }
+            SearchPromptEdit::Delete(deletion) => {
+                if let Some(effect) = session.prompt.delete(deletion) {
+                    self.apply_search_prompt_effect(window_id, effect);
+                }
+            }
         }
     }
 
@@ -346,6 +415,58 @@ mod tests {
     use noa_grid::Terminal;
     use parking_lot::Mutex;
     use std::time::Duration;
+
+    #[test]
+    fn prompt_edit_keys_require_their_exact_modifiers() {
+        use SearchPromptEdit::{Delete, Move};
+        let ctrl = ModifiersState::CONTROL;
+        let none = ModifiersState::empty();
+        let char_key = |text: &str| Key::Character(text.into());
+
+        for (text, edit) in [
+            ("a", Move(CaretMotion::Start)),
+            ("A", Move(CaretMotion::Start)),
+            ("e", Move(CaretMotion::End)),
+            ("b", Move(CaretMotion::Left)),
+            ("f", Move(CaretMotion::Right)),
+            ("h", Delete(Deletion::Backward)),
+            ("d", Delete(Deletion::Forward)),
+            ("k", Delete(Deletion::ToEnd)),
+            ("u", Delete(Deletion::ToStart)),
+            ("w", Delete(Deletion::WordBackward)),
+        ] {
+            assert_eq!(
+                search_prompt_edit(&char_key(text), ctrl),
+                Some(edit),
+                "{text}"
+            );
+        }
+        for (key, edit) in [
+            (NamedKey::ArrowLeft, Move(CaretMotion::Left)),
+            (NamedKey::ArrowRight, Move(CaretMotion::Right)),
+            (NamedKey::Home, Move(CaretMotion::Start)),
+            (NamedKey::End, Move(CaretMotion::End)),
+            (NamedKey::Delete, Delete(Deletion::Forward)),
+        ] {
+            assert_eq!(search_prompt_edit(&Key::Named(key), none), Some(edit));
+        }
+
+        // Plain letters stay text; other chords stay with the keybind path.
+        assert_eq!(search_prompt_edit(&char_key("a"), none), None);
+        assert_eq!(search_prompt_edit(&char_key("x"), ctrl), None);
+        assert_eq!(
+            search_prompt_edit(&char_key("a"), ctrl | ModifiersState::SHIFT),
+            None
+        );
+        assert_eq!(
+            search_prompt_edit(&char_key("c"), ModifiersState::SUPER),
+            None
+        );
+        assert_eq!(
+            search_prompt_edit(&Key::Named(NamedKey::ArrowLeft), ModifiersState::SHIFT),
+            None
+        );
+    }
 
     #[test]
     fn navigation_during_search_matches_synchronous_navigation() {

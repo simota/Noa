@@ -726,15 +726,17 @@ impl App {
                 self.memory_trim_deadline =
                     Some(Instant::now() + super::timers::MEMORY_TRIM_QUIESCENCE);
             }
-            snapshot.search_prompt = self
+            let prompt_text = self
                 .search_prompt
                 .as_ref()
                 .filter(|session| session.window_id == window_id && session.pane_id == pane_id)
-                .map(|session| {
-                    // Live IME composition appends to the displayed query
-                    // (display only — it joins the real buffer on commit).
-                    format!("{}{search_preedit}", session.prompt.buffer())
-                });
+                .map(|session| session.prompt.split_at_caret());
+            // Live IME composition shows at the caret (display only — it
+            // joins the real buffer on commit).
+            snapshot.search_prompt =
+                prompt_text.map(|(before, after)| format!("{before}{search_preedit}{after}"));
+            snapshot.search_prompt_caret_tail =
+                prompt_text.map_or(0, |(_, after)| after.chars().count());
             // A pane draws a solid cursor only when it is both the split's
             // focused pane AND its window has OS focus; otherwise (an
             // inactive split pane, or any pane in an unfocused window) it

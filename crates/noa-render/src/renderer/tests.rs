@@ -121,6 +121,7 @@ fn baseline_snapshot(chars: [char; 3]) -> FrameSnapshot {
         cursor_blink_visible: true,
         hover_link: None,
         search_prompt: None,
+        search_prompt_caret_tail: 0,
         command_palette: None,
         confirm_dialog: None,
         preedit: None,

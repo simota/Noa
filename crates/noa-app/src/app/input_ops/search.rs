@@ -44,6 +44,17 @@ fn search_prompt_edit(key: &Key, modifiers: ModifiersState) -> Option<SearchProm
     }
 }
 
+/// The keybound commands that do something while the prompt is open.
+fn search_prompt_acts_on_command(command: AppCommand) -> bool {
+    matches!(
+        command,
+        AppCommand::Search(
+            SearchAction::Find | SearchAction::FindNext | SearchAction::FindPrevious
+        ) | AppCommand::Copy
+            | AppCommand::Paste
+    )
+}
+
 fn navigate_search(
     worker: Option<&crate::search_worker::SearchWorker>,
     target: &Arc<parking_lot::Mutex<noa_grid::Terminal>>,
@@ -177,7 +188,7 @@ impl App {
                 let effect = self
                     .search_prompt
                     .as_mut()
-                    .map(|session| session.prompt.backspace());
+                    .and_then(|session| session.prompt.backspace());
                 if let Some(effect) = effect {
                     self.apply_search_prompt_effect(window_id, effect);
                 }
@@ -186,12 +197,18 @@ impl App {
             _ => {}
         }
 
-        if let Some(edit) = search_prompt_edit(&event.logical_key, self.modifiers) {
+        // A command the prompt acts on keeps its key even when it is one of
+        // the field's editing keys; every other command is swallowed below
+        // anyway, so the field gets those keys.
+        let command = self.keybinds.resolve(&event.logical_key, self.modifiers);
+        if !command.is_some_and(search_prompt_acts_on_command)
+            && let Some(edit) = search_prompt_edit(&event.logical_key, self.modifiers)
+        {
             self.apply_search_prompt_edit(window_id, edit);
             return;
         }
 
-        if let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers) {
+        if let Some(command) = command {
             match command {
                 AppCommand::Search(SearchAction::FindNext | SearchAction::FindPrevious)
                 | AppCommand::Copy
@@ -262,9 +279,19 @@ impl App {
 
     /// Copy the focused prompt's query. Returns whether a prompt took the
     /// command. The field has no partial selection, so this is the whole
-    /// buffer, and an empty one leaves the clipboard alone.
+    /// buffer, and an empty one leaves the clipboard alone. The pointer still
+    /// selects in the panes while the prompt is open, and a selection made
+    /// there is what the command copies instead.
     pub(in crate::app) fn copy_search_prompt_query(&mut self) -> bool {
         if self.focused_search_prompt_window().is_none() {
+            return false;
+        }
+        let pane_has_selection = self
+            .resolve_pane_command_target(AppCommand::Copy)
+            .and_then(|(window_id, pane_id)| self.windows.get(&window_id)?.surfaces.get(&pane_id))
+            .and_then(|surface| surface.terminal.lock().selected_text())
+            .is_some_and(|text| !text.is_empty());
+        if pane_has_selection {
             return false;
         }
         let query = self
@@ -415,6 +442,26 @@ mod tests {
     use noa_grid::Terminal;
     use parking_lot::Mutex;
     use std::time::Duration;
+
+    #[test]
+    fn only_commands_the_prompt_acts_on_outrank_its_editing_keys() {
+        for command in [
+            AppCommand::Search(SearchAction::Find),
+            AppCommand::Search(SearchAction::FindNext),
+            AppCommand::Search(SearchAction::FindPrevious),
+            AppCommand::Copy,
+            AppCommand::Paste,
+        ] {
+            assert!(search_prompt_acts_on_command(command), "{command:?}");
+        }
+        for command in [
+            AppCommand::Search(SearchAction::Clear),
+            AppCommand::NewTab,
+            AppCommand::ToggleCommandPalette,
+        ] {
+            assert!(!search_prompt_acts_on_command(command), "{command:?}");
+        }
+    }
 
     #[test]
     fn prompt_edit_keys_require_their_exact_modifiers() {

@@ -109,24 +109,22 @@ impl SearchPrompt {
         Some(SearchPromptEffect::UpdateQuery(self.buffer.clone()))
     }
 
-    /// Delete the character before the caret (Backspace). A no-op (nothing
-    /// before the caret) still yields the current query's effect — harmless
-    /// since it re-runs the same search, and it keeps the caller's dispatch
-    /// unconditional.
-    pub fn backspace(&mut self) -> SearchPromptEffect {
-        if !self.clear_if_selected()
-            && let Some((start, _)) = self.buffer[..self.caret].char_indices().next_back()
-        {
+    /// Delete the character before the caret (Backspace). `None` when there
+    /// is none: re-running the same search would pull a scrolled viewport back
+    /// to the active match and drop navigation still queued for the worker.
+    pub fn backspace(&mut self) -> Option<SearchPromptEffect> {
+        if !self.clear_if_selected() {
+            let (start, _) = self.buffer[..self.caret].char_indices().next_back()?;
             self.remove(start..self.caret);
         }
-        self.query_effect()
+        Some(self.query_effect())
     }
 
     /// Apply `deletion`. `None` when it removed nothing, so the caller can
     /// skip re-querying. A wholly selected buffer is cleared by any of them.
     pub fn delete(&mut self, deletion: Deletion) -> Option<SearchPromptEffect> {
         if deletion == Deletion::Backward {
-            return Some(self.backspace());
+            return self.backspace();
         }
         if self.clear_if_selected() {
             return Some(self.query_effect());
@@ -223,7 +221,7 @@ mod tests {
 
         // Backspace clears the selected text outright.
         prompt.replace_selected("haystack");
-        assert_eq!(prompt.backspace(), SearchPromptEffect::ClearQuery);
+        assert_eq!(prompt.backspace(), Some(SearchPromptEffect::ClearQuery));
         assert_eq!(prompt.buffer(), "");
     }
 
@@ -268,16 +266,10 @@ mod tests {
 
         assert_eq!(
             prompt.backspace(),
-            SearchPromptEffect::UpdateQuery("a".to_string())
+            Some(SearchPromptEffect::UpdateQuery("a".to_string()))
         );
-        assert_eq!(prompt.backspace(), SearchPromptEffect::ClearQuery);
+        assert_eq!(prompt.backspace(), Some(SearchPromptEffect::ClearQuery));
         assert_eq!(prompt.buffer(), "");
-    }
-
-    fn prompt_with_caret(before: &str, after: &str) -> SearchPrompt {
-        let mut prompt = SearchPrompt::open(format!("{before}{after}"));
-        prompt.caret = before.len();
-        prompt
     }
 
     #[test]
@@ -291,14 +283,25 @@ mod tests {
         assert_eq!(prompt.split_at_caret(), ("abX", "cd"));
         assert_eq!(
             prompt.backspace(),
-            SearchPromptEffect::UpdateQuery("abcd".to_string())
+            Some(SearchPromptEffect::UpdateQuery("abcd".to_string()))
         );
-        prompt.caret = 0;
-        assert_eq!(
-            prompt.backspace(),
-            SearchPromptEffect::UpdateQuery("abcd".to_string()),
-            "nothing before the caret leaves the text alone"
-        );
+    }
+
+    #[test]
+    fn backspace_with_nothing_before_the_caret_skips_the_requery() {
+        let mut prompt = prompt_with_caret("", "ab");
+        assert_eq!(prompt.backspace(), None);
+        assert_eq!(prompt.delete(Deletion::Backward), None);
+        assert_eq!(prompt.buffer(), "ab");
+
+        let mut empty = SearchPrompt::open(String::new());
+        assert_eq!(empty.backspace(), None);
+    }
+
+    fn prompt_with_caret(before: &str, after: &str) -> SearchPrompt {
+        let mut prompt = SearchPrompt::open(format!("{before}{after}"));
+        prompt.caret = before.len();
+        prompt
     }
 
     #[test]
@@ -411,12 +414,5 @@ mod tests {
             );
             assert_eq!(prompt.split_at_caret(), ("", ""), "{deletion:?}");
         }
-    }
-
-    #[test]
-    fn backspace_on_an_empty_buffer_stays_a_clear_query_noop() {
-        let mut prompt = SearchPrompt::open(String::new());
-        assert_eq!(prompt.backspace(), SearchPromptEffect::ClearQuery);
-        assert_eq!(prompt.buffer(), "");
     }
 }

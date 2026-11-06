@@ -218,7 +218,7 @@ impl App {
             metrics.cell_w,
             metrics.cell_h,
             surface.grid_size,
-            self.padding,
+            self.pane_grid_padding(surface.rect, metrics),
         ))
     }
 
@@ -230,12 +230,13 @@ impl App {
         window_id: WindowId,
         pane_id: PaneId,
         position: PhysicalPosition<f64>,
+        metrics: noa_font::Metrics,
     ) -> Option<mouse::MousePos> {
         let surface = self.windows.get(&window_id)?.surfaces.get(&pane_id)?;
         Some(mouse::physical_position_to_grid_pixel(
             position.x - f64::from(surface.rect.x),
             position.y - f64::from(surface.rect.y),
-            self.padding,
+            self.pane_grid_padding(surface.rect, metrics),
         ))
     }
 
@@ -272,7 +273,7 @@ impl App {
             let position = state.last_mouse_physical_position?;
             let metrics = self.gpu.as_ref()?.fonts.get(state.font_px).metrics();
             let (pane_id, cell) = self.pane_cell_at_position(window_id, position, metrics)?;
-            let pixel = self.pane_pixel_in(window_id, pane_id, position);
+            let pixel = self.pane_pixel_in(window_id, pane_id, position, metrics);
             Some((pane_id, cell, pixel))
         })();
         if let Some(state) = self.windows.get_mut(&window_id) {

@@ -47,6 +47,26 @@ impl App {
         )
     }
 
+    /// The padding a pane at `rect` draws its grid with: the explicit
+    /// padding balanced under `window-padding-balance`, as the renderer
+    /// places it. Sizing the grid keeps the explicit padding; the cell count
+    /// comes out the same either way.
+    pub(in crate::app) fn pane_grid_padding(
+        &self,
+        rect: PaneRectApp,
+        metrics: noa_font::Metrics,
+    ) -> GridPadding {
+        self.padding.balanced(
+            rect.w as f32,
+            rect.h as f32,
+            noa_core::CellSize {
+                w: metrics.cell_w,
+                h: metrics.cell_h,
+            },
+            self.config.window_padding_balance,
+        )
+    }
+
     pub(in crate::app) fn relayout_and_resize_window(&mut self, window_id: WindowId) {
         // Window/sidebar/font/fullscreen/split reflows all converge here.
         // Copy coordinates are not remapped across resize (FR-11).

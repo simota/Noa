@@ -6,7 +6,7 @@ use std::ops::Range;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use noa_core::{CellAttrs, CellSize, Color, GridPadding, PixelSize};
+use noa_core::{CellAttrs, CellSize, Color, GridPadding, PaddingBalance, PixelSize};
 use noa_font::{FontGrid, Metrics, ShapedGlyph};
 use noa_grid::{Cell, CursorStyle, PLACEHOLDER, Row, SearchState, Selection, TerminalColors};
 use unicode_width::UnicodeWidthChar;
@@ -343,6 +343,10 @@ pub struct Renderer {
     viewport: PixelSize,
     cell_size: (f32, f32),
     grid_padding: GridPadding,
+    /// `window-padding-balance`: each pane's grid is placed with
+    /// `grid_padding` balanced around its own rect. Off for the chrome
+    /// renderers, which set their padding per band.
+    padding_balance: PaddingBalance,
     clear_color: [f32; 4],
     /// Split-divider fill, re-derived from the active theme each
     /// [`Renderer::rebuild_panes`] (the overlay border tone) so the hairline
@@ -458,6 +462,7 @@ impl Renderer {
             viewport: PixelSize { w: 0, h: 0 },
             cell_size: (metrics.cell_w, metrics.cell_h),
             grid_padding,
+            padding_balance: PaddingBalance::Off,
             clear_color: [0.0, 0.0, 0.0, 1.0],
             divider_color: DIVIDER_RGBA,
             focus_indicator_color: FOCUS_INDICATOR_RGBA,
@@ -551,6 +556,22 @@ impl Renderer {
     /// instead of rebuilding the renderer per band.
     pub fn set_grid_padding(&mut self, padding: GridPadding) {
         self.grid_padding = padding;
+    }
+
+    /// Replace how subsequent draws balance the grid padding in each pane.
+    pub fn set_padding_balance(&mut self, balance: PaddingBalance) {
+        self.padding_balance = balance;
+    }
+
+    /// The padding `rect`'s grid is drawn with.
+    fn pane_grid_padding(&self, rect: PaneRect) -> GridPadding {
+        let (w, h) = self.cell_size;
+        self.grid_padding.balanced(
+            rect.w as f32,
+            rect.h as f32,
+            CellSize { w, h },
+            self.padding_balance,
+        )
     }
 
     /// Force the background clear color used by the next [`Renderer::draw`],
@@ -1149,7 +1170,7 @@ impl Renderer {
                 &pane_img.placements,
                 &pane_img.images,
                 *rect,
-                self.grid_padding,
+                self.pane_grid_padding(*rect),
                 self.cell_size,
                 self.viewport,
             );
@@ -1274,7 +1295,7 @@ impl Renderer {
             let uniforms = populate_pane_uniform(PaneUniformParams {
                 pane_rect: *rect,
                 window_size: self.viewport,
-                grid_padding: self.grid_padding,
+                grid_padding: self.pane_grid_padding(*rect),
                 cell_size: CellSize {
                     w: cell_w,
                     h: cell_h,

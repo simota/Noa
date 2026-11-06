@@ -217,7 +217,8 @@ impl App {
         }
 
         let padding_changed = previous.window_padding_x != applied.window_padding_x
-            || previous.window_padding_y != applied.window_padding_y;
+            || previous.window_padding_y != applied.window_padding_y
+            || previous.window_padding_balance != applied.window_padding_balance;
         let theme_changed = theme_inputs_changed(&previous, &applied);
         let cursor_changed = cursor_inputs_changed(&previous, &applied);
         let background_image_changed = background_image_inputs_changed(&previous, &applied);
@@ -279,6 +280,9 @@ impl App {
                 resolve_grid_padding(self.config.window_padding_x, self.config.window_padding_y);
             for state in self.windows.values_mut() {
                 state.renderer.set_grid_padding(self.padding);
+                state
+                    .renderer
+                    .set_padding_balance(self.config.window_padding_balance);
             }
         }
 

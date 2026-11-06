@@ -882,7 +882,7 @@ impl App {
             return;
         };
         let cell = self.pane_cell_in(window_id, pane_id, position, metrics);
-        let pixel = self.pane_pixel_in(window_id, pane_id, position);
+        let pixel = self.pane_pixel_in(window_id, pane_id, position, metrics);
         if let Some(state) = self.windows.get_mut(&window_id) {
             state.last_mouse_point = split_point_from_physical_position(position);
             state.last_mouse_physical_position = Some(position);

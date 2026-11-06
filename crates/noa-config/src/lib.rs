@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
-use noa_core::Rgb;
+use noa_core::{PaddingBalance, Rgb};
 
 mod ghostty;
 mod import;
@@ -918,6 +918,9 @@ pub struct StartupConfig {
     pub window_padding_x: Option<f32>,
     /// `window-padding-y`: vertical padding (top = bottom) in physical pixels.
     pub window_padding_y: Option<f32>,
+    /// `window-padding-balance`: where the space left over after the grid's
+    /// whole cells goes (`false` / `true` / `equal`, Ghostty 1.4.0).
+    pub window_padding_balance: PaddingBalance,
     /// `background` / `foreground`: theme default color overrides. `None`
     /// keeps the resolved theme's value.
     pub background: Option<Rgb>,
@@ -1216,6 +1219,7 @@ impl Default for StartupConfig {
             vt_xt_checksum_extension: XtChecksumExtension::default(),
             window_padding_x: None,
             window_padding_y: None,
+            window_padding_balance: PaddingBalance::Off,
             background: None,
             foreground: None,
             cursor_color: None,
@@ -1351,6 +1355,7 @@ pub struct ConfigOverrides {
     pub vt_xt_checksum_extension: Option<XtChecksumExtension>,
     pub window_padding_x: Option<f32>,
     pub window_padding_y: Option<f32>,
+    pub window_padding_balance: Option<PaddingBalance>,
     pub background: Option<Rgb>,
     pub foreground: Option<Rgb>,
     pub cursor_color: Option<Rgb>,
@@ -1454,6 +1459,7 @@ macro_rules! impl_redacted_config_debug {
                     .field("vt_xt_checksum_extension", &self.vt_xt_checksum_extension)
                     .field("window_padding_x", &self.window_padding_x)
                     .field("window_padding_y", &self.window_padding_y)
+                    .field("window_padding_balance", &self.window_padding_balance)
                     .field("background", &self.background)
                     .field("foreground", &self.foreground)
                     .field("cursor_color", &self.cursor_color)
@@ -1604,6 +1610,9 @@ impl ConfigOverrides {
                 .or(self.vt_xt_checksum_extension),
             window_padding_x: higher_priority.window_padding_x.or(self.window_padding_x),
             window_padding_y: higher_priority.window_padding_y.or(self.window_padding_y),
+            window_padding_balance: higher_priority
+                .window_padding_balance
+                .or(self.window_padding_balance),
             background: higher_priority.background.or(self.background),
             foreground: higher_priority.foreground.or(self.foreground),
             cursor_color: higher_priority.cursor_color.or(self.cursor_color),
@@ -1799,6 +1808,9 @@ impl ConfigOverrides {
                 .unwrap_or(base.vt_xt_checksum_extension),
             window_padding_x: self.window_padding_x.or(base.window_padding_x),
             window_padding_y: self.window_padding_y.or(base.window_padding_y),
+            window_padding_balance: self
+                .window_padding_balance
+                .unwrap_or(base.window_padding_balance),
             background: self.background.or(base.background),
             foreground: self.foreground.or(base.foreground),
             cursor_color: self.cursor_color.or(base.cursor_color),
@@ -2315,6 +2327,7 @@ mod tests {
                 vt_xt_checksum_extension: XtChecksumExtension::default(),
                 window_padding_x: None,
                 window_padding_y: None,
+                window_padding_balance: PaddingBalance::Off,
                 background: None,
                 foreground: None,
                 cursor_color: None,

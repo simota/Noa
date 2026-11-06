@@ -189,7 +189,7 @@ impl App {
             cursor.x,
             cursor.y,
             surface.rect,
-            self.padding,
+            self.pane_grid_padding(surface.rect, metrics),
         );
     }
 
@@ -238,7 +238,13 @@ impl App {
                     &surface.terminal.lock().active().search,
                     surface.grid_size.cols,
                 );
-                Some(ime_cursor_area(metrics, col, 0, surface.rect, self.padding))
+                Some(ime_cursor_area(
+                    metrics,
+                    col,
+                    0,
+                    surface.rect,
+                    self.pane_grid_padding(surface.rect, metrics),
+                ))
             }
             ModalImeTarget::CommandPalette => {
                 let session = self.command_palette.as_ref()?;

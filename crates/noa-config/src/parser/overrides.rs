@@ -44,6 +44,7 @@ pub(crate) fn build_overrides(
     let mut vt_xt_checksum_extension = None;
     let mut window_padding_x = None;
     let mut window_padding_y = None;
+    let mut window_padding_balance = None;
     let mut background = None;
     let mut foreground = None;
     let mut cursor_color = None;
@@ -290,6 +291,10 @@ pub(crate) fn build_overrides(
             }
             "window-padding-y" => {
                 window_padding_y = parse_non_negative_f32(path, directive, &mut diagnostics);
+            }
+            "window-padding-balance" => {
+                window_padding_balance =
+                    parse_window_padding_balance(path, directive, &mut diagnostics);
             }
             "background" => {
                 background = parse_color(path, directive, &mut diagnostics);
@@ -584,6 +589,7 @@ pub(crate) fn build_overrides(
             vt_xt_checksum_extension,
             window_padding_x,
             window_padding_y,
+            window_padding_balance,
             background,
             foreground,
             cursor_color,
@@ -712,6 +718,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "vt-xt-checksum-extension"
             | "window-padding-x"
             | "window-padding-y"
+            | "window-padding-balance"
             | "background"
             | "foreground"
             | "cursor-color"

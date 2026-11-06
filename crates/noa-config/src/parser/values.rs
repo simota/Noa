@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use noa_core::Rgb;
+use noa_core::{PaddingBalance, Rgb};
 
 use crate::{
     AlphaBlendingMode, BackgroundImageFit, BackgroundImagePosition, ClipboardAccess, CursorShape,
@@ -234,6 +234,23 @@ pub(super) fn parse_alpha_blending(
         "native" => Some(AlphaBlendingMode::Native),
         "linear" => Some(AlphaBlendingMode::Linear),
         "linear-corrected" => Some(AlphaBlendingMode::LinearCorrected),
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+pub(super) fn parse_window_padding_balance(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<PaddingBalance> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "false" => Some(PaddingBalance::Off),
+        "true" => Some(PaddingBalance::Capped),
+        "equal" => Some(PaddingBalance::Equal),
         other => {
             diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
             None

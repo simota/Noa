@@ -683,6 +683,25 @@ fn window_padding_rejects_negative_and_non_numeric() {
 }
 
 #[test]
+fn window_padding_balance_parses_ghostty_values() {
+    for (value, expected) in [
+        ("false", noa_core::PaddingBalance::Off),
+        ("true", noa_core::PaddingBalance::Capped),
+        ("equal", noa_core::PaddingBalance::Equal),
+    ] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("window-padding-balance = {value}"));
+
+        assert!(diagnostics.is_empty(), "{value}: {diagnostics:?}");
+        assert_eq!(overrides.window_padding_balance, Some(expected));
+    }
+
+    let (overrides, diagnostics) = parse_overrides(path(), "window-padding-balance = center");
+    assert_eq!(overrides.window_padding_balance, None);
+    assert_eq!(diagnostics.len(), 1);
+}
+
+#[test]
 fn colors_parse_both_hex_forms_case_insensitively() {
     let (overrides, diagnostics) = parse_overrides(
         path(),

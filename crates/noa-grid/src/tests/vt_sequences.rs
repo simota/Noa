@@ -818,6 +818,13 @@ fn decrqcra_and_xtchecksum_are_ignored_unless_enabled() {
 }
 
 #[test]
+fn decrqcra_over_an_empty_rectangle_still_replies_with_zero() {
+    // Top below bottom, and a rectangle starting past the screen's edge.
+    let t = run_checksum(|_| {}, b"a\x1b[1;1;3;1;2;10*y\x1b[2;1;1;11;1;12*y");
+    assert_eq!(t.pending_writes, b"\x1bP1!~0000\x1b\\\x1bP2!~0000\x1b\\");
+}
+
+#[test]
 fn decrqcra_with_too_many_parameters_gets_no_reply() {
     let t = run_checksum(|_| {}, b"a\x1b[1;1;1;1;1;1;1*y");
     assert!(t.pending_writes.is_empty());

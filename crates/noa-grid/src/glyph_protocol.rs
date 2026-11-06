@@ -447,6 +447,46 @@ mod tests {
             run(&mut g, b"r;cp=e0a0;AAAAAAAAAAAAAA=="),
             reply("r;cp=e0a0;status=0")
         );
+        // A zero-contour header followed by one stray byte, and by an
+        // instruction length of zero, still registers.
+        for tail in [&[0u8][..], &[0, 0]] {
+            let mut glyf = vec![0; 10];
+            glyf.extend_from_slice(tail);
+            let request = format!("r;cp=e0a0;{}", b64(&glyf));
+            assert_eq!(
+                run(&mut g, request.as_bytes()),
+                reply("r;cp=e0a0;status=0"),
+                "{tail:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_payloads_and_glyphs_are_rejected() {
+        let mut g = Glossary::default();
+        let malformed = |payload: String| format!("r;cp=e0a0;{payload}");
+        // Not padded to four symbols, padding in the middle, and nothing at all.
+        let mut cases = vec![
+            malformed("QQ=".to_string()),
+            malformed("AB=CAAAA".to_string()),
+            "r;cp=e0a0;".to_string(),
+        ];
+        // End points that don't increase.
+        let mut descending = vec![0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0];
+        descending.extend_from_slice(&[0x31, 0x31]);
+        cases.push(malformed(b64(&descending)));
+        // A flag repeated past the last point.
+        let mut overrun = vec![0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0];
+        overrun.extend_from_slice(&[0x39, 2]);
+        cases.push(malformed(b64(&overrun)));
+        for request in cases {
+            assert_eq!(
+                run(&mut g, request.as_bytes()),
+                reply("r;cp=e0a0;status=1;reason=malformed_payload"),
+                "{request}"
+            );
+        }
+        assert!(g.entries.is_empty());
     }
 
     #[test]

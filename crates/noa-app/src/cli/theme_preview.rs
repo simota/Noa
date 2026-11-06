@@ -110,8 +110,9 @@ pub(super) struct Preview {
     top: usize,
     overlay: Overlay,
     hex: bool,
-    /// The outcome of `w`, shown in the save window.
-    status: Option<String>,
+    /// The theme `w` wrote and the outcome, shown in the save window while
+    /// that theme is selected.
+    status: Option<(String, String)>,
 }
 
 impl Preview {
@@ -293,7 +294,9 @@ impl Preview {
             Overlay::Save => {
                 if let Some(theme) = self.selected_theme() {
                     let mut lines = save_lines(theme.name);
-                    if let Some(status) = &self.status {
+                    if let Some((_, status)) =
+                        self.status.as_ref().filter(|(name, _)| name == theme.name)
+                    {
                         lines.extend([String::new(), format!("  {status}")]);
                     }
                     let width = lines.iter().map(|line| text_width(line)).max().unwrap_or(0);
@@ -325,8 +328,8 @@ impl Preview {
         out
     }
 
-    pub(super) fn set_status(&mut self, status: String) {
-        self.status = Some(status);
+    pub(super) fn set_status(&mut self, name: String, status: String) {
+        self.status = Some((name, status));
     }
 }
 
@@ -647,65 +650,97 @@ impl Canvas {
     }
 }
 
-/// Decode the keys in one read from the terminal. A lone ESC is the Esc key;
-/// unknown sequences are dropped.
-pub(super) fn parse_keys(bytes: &[u8]) -> Vec<Key> {
-    let mut keys = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        let byte = bytes[i];
-        i += 1;
-        let key = match byte {
-            0x1b => match bytes.get(i) {
-                Some(b'[') => {
-                    let start = i + 1;
-                    let Some(len) = bytes[start..]
-                        .iter()
-                        .position(|b| (0x40..=0x7e).contains(b))
-                    else {
-                        break;
-                    };
-                    let params = &bytes[start..start + len];
-                    let fin = bytes[start + len];
-                    i = start + len + 1;
-                    csi_key(params, fin)
-                }
-                Some(b'O') => {
-                    i += 2;
-                    match bytes.get(i - 1) {
-                        Some(b'A') => Some(Key::Up),
-                        Some(b'B') => Some(Key::Down),
-                        Some(b'H') => Some(Key::Home),
-                        Some(b'F') => Some(Key::End),
-                        Some(b'P') => Some(Key::F1),
-                        _ => None,
-                    }
-                }
-                _ => Some(Key::Esc),
-            },
-            b'\r' | b'\n' => Some(Key::Enter),
-            0x7f => Some(Key::Backspace),
-            0x1f => Some(Key::Ctrl('/')),
-            0x01..=0x1a => Some(Key::Ctrl(char::from(b'a' + byte - 1))),
-            0x00..=0x1f => None,
-            _ => {
-                let len = match byte {
-                    0xc0..=0xdf => 2,
-                    0xe0..=0xef => 3,
-                    0xf0..=0xf7 => 4,
-                    _ => 1,
-                };
-                let end = (i - 1 + len).min(bytes.len());
-                let decoded = std::str::from_utf8(&bytes[i - 1..end])
-                    .ok()
-                    .and_then(|text| text.chars().next());
-                i = end;
-                decoded.map(Key::Char)
-            }
-        };
-        keys.extend(key);
+/// Decodes keys from terminal reads. A read can end inside a key's escape
+/// sequence or UTF-8 encoding, so an unfinished tail waits for the next read;
+/// a lone ESC is the Esc key only once no more input follows it ([`flush`]).
+///
+/// [`flush`]: KeyReader::flush
+#[derive(Default)]
+pub(super) struct KeyReader {
+    pending: Vec<u8>,
+}
+
+impl KeyReader {
+    pub(super) fn feed(&mut self, bytes: &[u8]) -> Vec<Key> {
+        self.pending.extend_from_slice(bytes);
+        let mut keys = Vec::new();
+        let mut i = 0;
+        while let Some((key, len)) = next_key(&self.pending[i..]) {
+            keys.extend(key);
+            i += len;
+        }
+        self.pending.drain(..i);
+        keys
     }
-    keys
+
+    /// No input followed: a held lone ESC was the Esc key. Any other
+    /// unfinished sequence keeps waiting, since its rest can arrive late
+    /// (over ssh, say).
+    pub(super) fn flush(&mut self) -> Option<Key> {
+        if self.pending != [0x1b] {
+            return None;
+        }
+        self.pending.clear();
+        Some(Key::Esc)
+    }
+}
+
+/// The key at the start of `bytes` (`None` for a sequence Noa ignores) and
+/// its length, or `None` when `bytes` is empty or ends before the key does.
+fn next_key(bytes: &[u8]) -> Option<(Option<Key>, usize)> {
+    let byte = *bytes.first()?;
+    let key = match byte {
+        0x1b => match *bytes.get(1)? {
+            // An X10 mouse report (`CSI M Cb Cx Cy`), from a terminal that
+            // ignores SGR mouse mode: its three bytes are not keys.
+            b'[' if bytes.get(2) == Some(&b'M') => {
+                let report = bytes.get(3..6)?;
+                let key = match report[0] {
+                    96 => Some(Key::WheelUp),
+                    97 => Some(Key::WheelDown),
+                    _ => None,
+                };
+                return Some((key, 6));
+            }
+            b'[' => {
+                let len = bytes[2..].iter().position(|b| (0x40..=0x7e).contains(b))?;
+                let key = csi_key(&bytes[2..2 + len], bytes[2 + len]);
+                return Some((key, len + 3));
+            }
+            b'O' => {
+                let key = match *bytes.get(2)? {
+                    b'A' => Some(Key::Up),
+                    b'B' => Some(Key::Down),
+                    b'H' => Some(Key::Home),
+                    b'F' => Some(Key::End),
+                    b'P' => Some(Key::F1),
+                    _ => None,
+                };
+                return Some((key, 3));
+            }
+            _ => Some(Key::Esc),
+        },
+        b'\r' | b'\n' => Some(Key::Enter),
+        0x7f => Some(Key::Backspace),
+        0x1f => Some(Key::Ctrl('/')),
+        0x01..=0x1a => Some(Key::Ctrl(char::from(b'a' + byte - 1))),
+        0x00..=0x1f => None,
+        _ => {
+            let len = match byte {
+                0xc0..=0xdf => 2,
+                0xe0..=0xef => 3,
+                0xf0..=0xf7 => 4,
+                _ => 1,
+            };
+            let encoded = bytes.get(..len)?;
+            let key = std::str::from_utf8(encoded)
+                .ok()
+                .and_then(|text| text.chars().next())
+                .map(Key::Char);
+            return Some((key, len));
+        }
+    };
+    Some((key, 1))
 }
 
 fn csi_key(params: &[u8], fin: u8) -> Option<Key> {
@@ -797,10 +832,13 @@ impl RawTerminal {
             }
             saved
         };
+        // Built before the writes, so a failed write still restores the
+        // terminal when the guard drops.
+        let terminal = Self { saved };
         let mut stdout = io::stdout();
         stdout.write_all(b"\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h")?;
         stdout.flush()?;
-        Ok(Self { saved })
+        Ok(terminal)
     }
 }
 
@@ -833,6 +871,7 @@ pub(super) fn run() -> io::Result<()> {
     let mut stdout = io::stdout();
     let mut size = terminal_size();
     let mut buf = [0u8; 1024];
+    let mut reader = KeyReader::default();
     stdout.write_all(preview.render(size.0, size.1).as_bytes())?;
     stdout.flush()?;
     loop {
@@ -845,19 +884,25 @@ pub(super) fn run() -> io::Result<()> {
         // SAFETY: one valid pollfd.
         let ready = unsafe { libc::poll(&mut poll, 1, 100) };
         let mut dirty = false;
-        if ready > 0 {
+        let keys = if ready > 0 {
             // SAFETY: reads into `buf`, at most its length.
             let read =
                 unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr().cast(), buf.len()) };
             if read <= 0 {
                 return Ok(());
             }
-            for key in parse_keys(&buf[..read as usize]) {
-                match preview.handle(key) {
-                    Action::None => {}
-                    Action::Quit => return Ok(()),
-                    Action::Copy(text) => stdout.write_all(osc52(&text).as_bytes())?,
-                    Action::WriteAutoTheme(name) => preview.set_status(write_auto_theme(&name)),
+            reader.feed(&buf[..read as usize])
+        } else {
+            reader.flush().into_iter().collect()
+        };
+        for key in keys {
+            match preview.handle(key) {
+                Action::None => {}
+                Action::Quit => return Ok(()),
+                Action::Copy(text) => stdout.write_all(osc52(&text).as_bytes())?,
+                Action::WriteAutoTheme(name) => {
+                    let status = write_auto_theme(&name);
+                    preview.set_status(name, status);
                 }
             }
             dirty = true;
@@ -877,6 +922,14 @@ pub(super) fn run() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Keys from one read with nothing after it.
+    fn parse_keys(bytes: &[u8]) -> Vec<Key> {
+        let mut reader = KeyReader::default();
+        let mut keys = reader.feed(bytes);
+        keys.extend(reader.flush());
+        keys
+    }
 
     fn preview() -> Preview {
         Preview::new(noa_theme::THEMES)
@@ -919,6 +972,47 @@ mod tests {
             parse_keys("gé".as_bytes()),
             [Key::Char('g'), Key::Char('é')]
         );
+    }
+
+    #[test]
+    fn a_key_split_across_reads_waits_for_the_rest() {
+        let mut reader = KeyReader::default();
+        assert_eq!(reader.feed(b"\x1b"), []);
+        assert_eq!(reader.feed(b"[B"), [Key::Down]);
+        assert_eq!(reader.feed(b"j\x1b[<65;1"), [Key::Char('j')]);
+        assert_eq!(reader.feed(b"0;5M"), [Key::WheelDown]);
+        assert_eq!(reader.feed(b"\x1bO"), []);
+        assert_eq!(reader.feed(b"P\xc3"), [Key::F1]);
+        assert_eq!(reader.feed(b"\xa9"), [Key::Char('é')]);
+        assert_eq!(reader.flush(), None);
+    }
+
+    #[test]
+    fn a_held_esc_is_the_esc_key_once_input_stops() {
+        let mut reader = KeyReader::default();
+        assert_eq!(reader.feed(b"\x1b"), []);
+        assert_eq!(reader.flush(), Some(Key::Esc));
+        assert_eq!(reader.feed(b"j"), [Key::Char('j')]);
+    }
+
+    #[test]
+    fn other_unfinished_input_outlasts_a_pause() {
+        let mut reader = KeyReader::default();
+        assert_eq!(reader.feed(b"\x1b["), []);
+        assert_eq!(reader.flush(), None);
+        assert_eq!(reader.feed(b"B"), [Key::Down]);
+        assert_eq!(reader.feed(b"\xc3"), []);
+        assert_eq!(reader.flush(), None);
+        assert_eq!(reader.feed(b"\xa9"), [Key::Char('é')]);
+    }
+
+    #[test]
+    fn x10_mouse_reports_are_not_keys() {
+        let mut reader = KeyReader::default();
+        // Clicks at column 81 (Cx = 'q') and row 74 (Cy = 'j').
+        assert_eq!(reader.feed(b"\x1b[M qj\x1b[M#qj"), []);
+        assert_eq!(reader.feed(b"\x1b[M`!!\x1b[Ma!"), [Key::WheelUp]);
+        assert_eq!(reader.feed(b"!"), [Key::WheelDown]);
     }
 
     #[test]
@@ -1117,12 +1211,17 @@ mod tests {
         assert!(frame.contains("Write theme to auto config file."));
         preview.handle(Key::F1);
         preview.handle(Key::Enter);
-        preview.set_status("Wrote /tmp/auto/theme".to_string());
-        let frame = preview.render(100, 30);
         let name = selected_name(&preview);
+        preview.set_status(name.to_string(), "Wrote /tmp/auto/theme".to_string());
+        let frame = preview.render(100, 30);
         assert!(frame.contains(&format!("theme = {name}")));
         assert!(frame.contains("config-file = ?auto/theme"));
         assert!(frame.contains("Wrote /tmp/auto/theme"));
+        // Another theme in the save window: the status was not about it.
+        preview.handle(Key::Down);
+        assert!(!preview.render(100, 30).contains("Wrote /tmp/auto/theme"));
+        preview.handle(Key::Up);
+        assert!(preview.render(100, 30).contains("Wrote /tmp/auto/theme"));
     }
 
     #[test]

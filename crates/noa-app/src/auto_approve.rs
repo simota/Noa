@@ -1238,7 +1238,8 @@ fn row_text(cells: &[Cell]) -> String {
     for cell in cells {
         cell.push_text_to(&mut text);
     }
-    text.trim_end().to_string()
+    text.truncate(text.trim_end().len());
+    text
 }
 
 #[cfg(test)]

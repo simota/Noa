@@ -633,7 +633,20 @@ impl App {
         // tabs behind it too.
         #[cfg(not(target_os = "macos"))]
         let window_id = {
-            let front = self.tab_hosts.get(&window_id).copied().unwrap_or(window_id);
+            let front = match self.tab_hosts.get(&window_id) {
+                Some(front) => *front,
+                // A tab keyed by the OS window it was moved out of: the old
+                // window's late events (after its last tab closed) are not
+                // the moved tab's.
+                None if self
+                    .windows
+                    .get(&window_id)
+                    .is_some_and(|state| state.window.id() != window_id) =>
+                {
+                    return;
+                }
+                None => window_id,
+            };
             let background = || {
                 self.tab_siblings(front)
                     .into_iter()

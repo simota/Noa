@@ -916,11 +916,17 @@ impl App {
         state.surface_config = config;
         state.group = new_group;
         state.occluded = false;
+        state.created_transparent = window_created_transparent(self.config.background_opacity);
         // Front (and only) tab of the new window: takes `tab_hosts`, focus,
         // a relayout without the tab bar, and a redraw.
         self.activate_tab(tab);
         self.focused = Some(tab);
         window.focus_window();
+        // The new window may open on a monitor with another scale, and its
+        // initial scale is not guaranteed to arrive as `ScaleFactorChanged`.
+        if window.scale_factor() != old_window.scale_factor() {
+            self.on_scale_factor_changed(tab, window.scale_factor());
+        }
         self.finish_moving_tab_to_new_window(tab, group, new_group, siblings);
     }
 

@@ -183,6 +183,38 @@ mod tests {
         );
     }
 
+    /// A pane too narrow for one cell plus its padding still has the one
+    /// cell the grid is sized to, and no negative padding.
+    #[test]
+    fn a_pane_smaller_than_one_cell_gets_no_padding() {
+        let explicit = GridPadding::new(4.0, 4.0, 4.0, 4.0);
+        assert_eq!(
+            explicit.balanced(12.0, 18.0, CELL_10X20, PaddingBalance::Equal),
+            GridPadding::new(0.0, 1.0, 0.0, 1.0)
+        );
+        assert_eq!(
+            explicit.balanced(5.0, 5.0, CELL_10X20, PaddingBalance::Capped),
+            GridPadding::ZERO
+        );
+    }
+
+    /// `true` leaves a top at or under the cap alone: (0 + 0 + 20) / 2 = 10.
+    #[test]
+    fn capped_keeps_a_top_at_or_under_the_cap() {
+        let cell = CellSize { w: 20.0, h: 40.0 };
+        // 1070 - 26 * 40 = 30 → 15 on top, over the cap.
+        // 1060 - 26 * 40 = 20 → 10 on top, exactly the cap.
+        // 1058 - 26 * 40 = 18 → 9 on top, under it.
+        for (height, top, bottom) in [
+            (1070.0, 10.0, 20.0),
+            (1060.0, 10.0, 10.0),
+            (1058.0, 9.0, 9.0),
+        ] {
+            let padding = GridPadding::ZERO.balanced(1090.0, height, cell, PaddingBalance::Capped);
+            assert_eq!((padding.top, padding.bottom), (top, bottom), "{height}");
+        }
+    }
+
     #[test]
     fn an_odd_leftover_drops_the_last_pixel() {
         // 1051 - 104 * 10 = 11 → 5 on each side.

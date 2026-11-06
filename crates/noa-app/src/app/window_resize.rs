@@ -240,6 +240,20 @@ mod tests {
         );
     }
 
+    /// A delta that would leave an axis at or below zero pixels asks for
+    /// one pixel instead; one or two pixels stay as they are.
+    #[test]
+    fn a_shrinking_delta_never_asks_for_less_than_one_pixel() {
+        let live = PhysicalSize::new(100, 100);
+        for (delta, expected) in [(-200, 1), (-100, 1), (-99, 1), (-98, 2)] {
+            assert_eq!(
+                window_resize_target_inner(request(1, 1), (delta, delta), live, None),
+                PhysicalSize::new(expected, expected),
+                "{delta}"
+            );
+        }
+    }
+
     #[test]
     fn a_late_resize_keeps_newer_pending_sizes() {
         let first = PhysicalSize::new(800, 600);

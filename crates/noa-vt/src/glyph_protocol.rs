@@ -401,6 +401,27 @@ mod tests {
         );
     }
 
+    /// Insets summing to exactly 1 on either axis leave no room and mean
+    /// none; just under 1 is kept. Anything but four values is malformed.
+    #[test]
+    fn pad_boundaries() {
+        let pad = |value: &str| register(format!("r;cp=e0a0;pad={value};QQ==").as_bytes()).pad();
+        assert_eq!(pad("0,0.5,0,0.5"), Some(GlyphPad::default()));
+        assert_eq!(pad("0.5,0,0.5,0"), Some(GlyphPad::default()));
+        assert_eq!(
+            pad("0,0.5,0,0.25"),
+            Some(GlyphPad {
+                top: 0.0,
+                right: 0.5,
+                bottom: 0.0,
+                left: 0.25
+            })
+        );
+        for malformed in ["", "0,0,0", "0,0,0,0,0", "0,0,,0"] {
+            assert_eq!(pad(malformed), None, "{malformed:?}");
+        }
+    }
+
     #[test]
     fn register_payload_is_after_the_last_semicolon() {
         let reg = register(b"r;cp=E0A0;status=4;reason=out_of_namespace");

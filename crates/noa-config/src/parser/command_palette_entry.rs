@@ -15,11 +15,13 @@ pub(super) fn parse_command_palette_entry(
     directive: &Directive,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<CommandPaletteEntryConfig> {
-    // Ghostty: an empty value brings the default entries back, and `clear`
-    // drops every entry so far, the defaults included.
-    let Some(value) = directive.value.as_deref() else {
+    // Ghostty: an empty value (`""` included, its quotes stripped like
+    // any value's) brings the default entries back, and `clear` drops every
+    // entry so far, the defaults included.
+    let value = directive.value.as_deref().unwrap_or_default();
+    if value.is_empty() {
         return Some(CommandPaletteEntryConfig::Reset);
-    };
+    }
     if value == "clear" {
         return Some(CommandPaletteEntryConfig::Clear);
     }
@@ -115,7 +117,13 @@ fn decode_value(value: &str) -> Option<String> {
                 if chars.next()? != '{' {
                     return None;
                 }
-                let hex: String = chars.by_ref().take_while(|&c| c != '}').collect();
+                let mut hex = String::new();
+                loop {
+                    match chars.next()? {
+                        '}' => break,
+                        c => hex.push(c),
+                    }
+                }
                 let scalar = char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?;
                 let mut buf = [0; 4];
                 bytes.extend_from_slice(scalar.encode_utf8(&mut buf).as_bytes());

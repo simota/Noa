@@ -2311,7 +2311,8 @@ fn command_palette_entry_clear_and_empty_keep_their_order() {
         path(),
         "command-palette-entry = clear\n\
          command-palette-entry = title:New Tab,action:new_tab\n\
-         command-palette-entry =",
+         command-palette-entry =\n\
+         command-palette-entry = \"\"",
     );
 
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -2320,6 +2321,7 @@ fn command_palette_entry_clear_and_empty_keep_their_order() {
         vec![
             CommandPaletteEntryConfig::Clear,
             palette_entry("New Tab", "", "new_tab"),
+            CommandPaletteEntryConfig::Reset,
             CommandPaletteEntryConfig::Reset,
         ]
     );
@@ -2334,6 +2336,7 @@ fn command_palette_entry_rejects_what_ghostty_rejects() {
         "title New Tab,action:new_tab",
         "title:\"New Tab,action:new_tab",
         "title:\"bad \\q escape\",action:new_tab",
+        "title:\"open \\u{41\",action:new_tab",
     ] {
         let (overrides, diagnostics) =
             parse_overrides(path(), &format!("command-palette-entry = {value}"));
@@ -2341,4 +2344,17 @@ fn command_palette_entry_rejects_what_ghostty_rejects() {
         assert!(overrides.command_palette_entries.is_empty(), "{value}");
         assert_eq!(diagnostics.len(), 1, "{value}: {diagnostics:?}");
     }
+}
+
+/// What `+show-config` prints for an entry parses back to the same entry.
+#[test]
+fn command_palette_entry_config_value_reads_back() {
+    let entry = palette_entry("Say \"hi\", then\0 \\ wave\n", "tab\there", "new_tab");
+    let (overrides, diagnostics) = parse_overrides(
+        path(),
+        &format!("command-palette-entry = {}", entry.config_value()),
+    );
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(overrides.command_palette_entries, vec![entry]);
 }

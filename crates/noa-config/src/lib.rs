@@ -568,7 +568,23 @@ pub enum CommandPaletteEntryConfig {
 
 impl CommandPaletteEntryConfig {
     pub fn config_value(&self) -> String {
-        let quote = |text: &str| format!("{:?}", text);
+        // Only escapes the parser decodes, so `+show-config` reads back.
+        let quote = |text: &str| {
+            let mut quoted = String::from('"');
+            for c in text.chars() {
+                match c {
+                    '"' => quoted.push_str("\\\""),
+                    '\\' => quoted.push_str("\\\\"),
+                    '\n' => quoted.push_str("\\n"),
+                    '\r' => quoted.push_str("\\r"),
+                    '\t' => quoted.push_str("\\t"),
+                    c if c.is_control() => quoted.push_str(&format!("\\u{{{:x}}}", u32::from(c))),
+                    c => quoted.push(c),
+                }
+            }
+            quoted.push('"');
+            quoted
+        };
         match self {
             Self::Reset => String::new(),
             Self::Clear => "clear".to_string(),

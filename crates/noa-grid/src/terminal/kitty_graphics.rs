@@ -377,7 +377,18 @@ impl Terminal {
         // session-absolute for intersection tests.
         let target_col = i64::from(cmd.src_x.saturating_sub(1));
         let target_abs = live_top + i64::from(cmd.src_y.saturating_sub(1));
-        let origins = self.kitty_placement_origins();
+        let origins = if matches!(
+            spec,
+            KittyDelete::ById { .. }
+                | KittyDelete::ByNumber { .. }
+                | KittyDelete::ByIdRange { .. }
+                | KittyDelete::ByZ { .. }
+                | KittyDelete::AnimationFrames { .. }
+        ) {
+            HashMap::new()
+        } else {
+            self.kitty_placement_origins()
+        };
         let origin = |p: &KittyPlacement| origins.get(&p.key()).copied();
         let covers = |p: &KittyPlacement, row: i64, col: i64| {
             origin(p).is_some_and(|(top, left)| {
@@ -500,6 +511,9 @@ impl Terminal {
     /// Evict images over the byte budget, with their placements on both
     /// screens.
     fn enforce_kitty_quota(&mut self) {
+        if !self.kitty_images.over_budget() {
+            return;
+        }
         let evicted = self
             .kitty_images
             .enforce_quota(&self.referenced_image_ids());

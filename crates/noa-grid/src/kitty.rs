@@ -213,6 +213,9 @@ pub struct ImageStore {
     /// oversized frame can't exceed the whole terminal's budget.
     byte_limit: usize,
     next_seq: u64,
+    /// Every id below this is in use, so the search for the smallest free id
+    /// starts here rather than re-probing the whole store per image.
+    auto_id_floor: u32,
     transfer: Option<PendingTransfer>,
     /// Mirrors [`Self::has_running_animation`], refreshed by
     /// [`Self::sync_animation_flag`]. Handed out via [`Self::animation_flag`]
@@ -235,6 +238,7 @@ impl Default for ImageStore {
             total_bytes: 0,
             byte_limit: TOTAL_BYTES_LIMIT,
             next_seq: 0,
+            auto_id_floor: 1,
             transfer: None,
             animation_flag: Arc::new(AtomicBool::new(false)),
             local_media_enabled: true,
@@ -295,6 +299,7 @@ impl ImageStore {
     /// Drop the image with `id` and its bytes. Returns whether anything changed.
     pub fn remove(&mut self, id: u32) -> bool {
         if let Some(image) = self.images.remove(&id) {
+            self.auto_id_floor = self.auto_id_floor.min(id);
             self.total_bytes -= image.total_frame_bytes();
             self.total_frames -= image.frames.len();
             self.order.remove(&(image.seq, id));
@@ -313,6 +318,7 @@ impl ImageStore {
     /// Drop everything, including any in-flight chunked transfer.
     pub fn clear(&mut self) {
         self.images.clear();
+        self.auto_id_floor = 1;
         self.order.clear();
         self.numbers.clear();
         self.total_frames = 0;
@@ -337,14 +343,14 @@ impl ImageStore {
             Ok(bytes) => bytes,
             Err(e) => {
                 return TransmitStep::Done(TransmitDone {
-                    ctrl: cmd.clone(),
+                    ctrl: control_keys(cmd),
                     result: Err(e),
                 });
             }
         };
         let result = self.finalize(cmd, decoded);
         TransmitStep::Done(TransmitDone {
-            ctrl: cmd.clone(),
+            ctrl: control_keys(cmd),
             result,
         })
     }
@@ -392,13 +398,13 @@ impl ImageStore {
             Ok(bytes) => bytes,
             Err(e) => {
                 return TransmitStep::Done(TransmitDone {
-                    ctrl: cmd.clone(),
+                    ctrl: control_keys(cmd),
                     result: Err(e),
                 });
             }
         };
         self.transfer = Some(PendingTransfer {
-            ctrl: cmd.clone(),
+            ctrl: control_keys(cmd),
             decoded,
         });
         TransmitStep::NeedMore
@@ -624,12 +630,13 @@ impl ImageStore {
         self.assign_auto_id()
     }
 
-    /// The smallest id not in use, as Ghostty 1.4.0 and Kitty assign it. The
-    /// store holds at most `MAX_STORED_IMAGES`, so the probe is short.
-    fn assign_auto_id(&self) -> u32 {
-        (1..=u32::MAX)
+    /// The smallest id not in use, as Ghostty 1.4.0 and Kitty assign it.
+    fn assign_auto_id(&mut self) -> u32 {
+        let id = (self.auto_id_floor..=u32::MAX)
             .find(|&id| !self.contains(id))
-            .expect("fewer images than ids")
+            .expect("fewer images than ids");
+        self.auto_id_floor = id;
+        id
     }
 
     fn insert(
@@ -677,6 +684,10 @@ impl ImageStore {
         Ok(())
     }
 
+    pub(crate) fn over_budget(&self) -> bool {
+        self.total_bytes > self.byte_limit
+    }
+
     /// Evict images until the total byte budget is satisfied, in Ghostty
     /// 1.4.0's order: unplaced images (id not in `referenced`) before placed
     /// ones, transient (`N=1`) before the rest within each, oldest by `seq`
@@ -685,19 +696,18 @@ impl ImageStore {
     /// would appear where the evicted one was placed.
     pub fn enforce_quota(&mut self, referenced: &HashSet<u32>) -> Vec<u32> {
         let mut evicted = Vec::new();
-        while self.total_bytes > self.byte_limit {
-            let rank = |id: &u32| (referenced.contains(id), !self.images[id].transient);
-            let victim = self
-                .order
-                .iter()
-                .min_by_key(|(seq, id)| (rank(id), *seq))
-                .map(|(_, id)| *id);
-            match victim {
-                Some(id) => {
-                    self.remove(id);
-                    evicted.push(id);
+        if self.total_bytes > self.byte_limit {
+            // `order` runs oldest first and the sort is stable, so this is rank
+            // then age. Evicting one image changes no other image's rank.
+            let mut candidates: Vec<u32> = self.order.iter().map(|(_, id)| *id).collect();
+            candidates
+                .sort_by_cached_key(|id| (referenced.contains(id), !self.images[id].transient));
+            for id in candidates {
+                if self.total_bytes <= self.byte_limit {
+                    break;
                 }
-                None => break,
+                self.remove(id);
+                evicted.push(id);
             }
         }
         if !evicted.is_empty() {
@@ -764,12 +774,8 @@ impl ImageStore {
             img.frames[idx - 1].rgba.to_vec()
         } else {
             let bg = cmd.cell_y_off; // Y= background as 0xRRGGBBAA
-            let px = bg.to_be_bytes();
-            let mut v = Vec::with_capacity(canvas_px);
-            for _ in 0..(canvas_w as usize * canvas_h as usize) {
-                v.extend_from_slice(&px);
-            }
-            v
+            bg.to_be_bytes()
+                .repeat(canvas_w as usize * canvas_h as usize)
         };
         debug_assert_eq!(canvas.len(), canvas_px);
 
@@ -1052,6 +1058,15 @@ fn normalize_gap(z: i32) -> i32 {
     if z == 0 { DEFAULT_FRAME_GAP_MS } else { z }
 }
 
+/// `cmd` without its payload, which can run to tens of MiB and has already been
+/// decoded by the time anything reads the keys.
+fn control_keys(cmd: &KittyGraphicsCommand) -> KittyGraphicsCommand {
+    KittyGraphicsCommand {
+        payload: Vec::new(),
+        ..*cmd
+    }
+}
+
 /// Composite a `data_w`×`data_h` straight-RGBA source rectangle onto `canvas`
 /// (of width `canvas_w`) at pixel offset (`off_x`, `off_y`). `overwrite` copies
 /// source pixels verbatim; otherwise the source is alpha-blended over the base.
@@ -1066,6 +1081,15 @@ fn composite_rect(
     off_y: u32,
     overwrite: bool,
 ) {
+    if overwrite {
+        let row_bytes = data_w as usize * 4;
+        for row in 0..data_h as usize {
+            let s = row * row_bytes;
+            let d = ((off_y as usize + row) * canvas_w as usize + off_x as usize) * 4;
+            canvas[d..d + row_bytes].copy_from_slice(&data[s..s + row_bytes]);
+        }
+        return;
+    }
     for row in 0..data_h {
         for col in 0..data_w {
             // Index in usize so the arithmetic cannot wrap even if a future caller
@@ -1650,6 +1674,38 @@ mod tests {
             assert_eq!(store.len(), before - 1);
         }
         assert!(store.contains(1), "referenced image must survive");
+    }
+
+    #[test]
+    fn enforce_quota_evicts_in_rank_then_age_order() {
+        let mut store = ImageStore::new();
+        for (id, transient) in [(1, false), (2, true), (3, false), (4, true), (5, false)] {
+            store
+                .insert(id, 0, transient, 1, 1, vec![0; 4])
+                .expect("under the image cap");
+        }
+        let referenced = HashSet::from([1u32, 2]);
+        store.byte_limit = 4;
+        assert_eq!(store.enforce_quota(&referenced), vec![4, 3, 5, 2]);
+        assert!(store.contains(1));
+    }
+
+    #[test]
+    fn auto_ids_take_the_smallest_free_id() {
+        let mut store = ImageStore::new();
+        let insert = |store: &mut ImageStore| store.insert_rgba(1, 1, vec![0; 4]).unwrap();
+        assert_eq!((1..=3).map(|_| insert(&mut store)).max(), Some(3));
+        store.remove(2);
+        assert_eq!(insert(&mut store), 2);
+        store.insert(4, 0, false, 1, 1, vec![0; 4]).unwrap();
+        assert_eq!(insert(&mut store), 5);
+        store.remove(1);
+        store.remove(3);
+        assert_eq!(insert(&mut store), 1);
+        assert_eq!(insert(&mut store), 3);
+        assert_eq!(insert(&mut store), 6);
+        store.clear();
+        assert_eq!(insert(&mut store), 1);
     }
 
     #[test]

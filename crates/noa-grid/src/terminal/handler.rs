@@ -58,6 +58,12 @@ impl Handler for Terminal {
         let bytes = s.as_bytes();
         let mut i = 0;
         while i < bytes.len() {
+            if autowrap {
+                i += screen.print_plain_text(&s[i..], grapheme_clustering);
+                if i == bytes.len() {
+                    break;
+                }
+            }
             if bytes[i].is_ascii() {
                 let end = bytes[i..]
                     .iter()

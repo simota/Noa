@@ -81,14 +81,16 @@
 //!   (owner-side sys-time growth from shifted worker/pool timing; a
 //!   page-residency probe of the skipped tail did not recover it) — the
 //!   decisive fullscreen widths (~198-213 cols) win on every workload.
-//! - **[`SEAL_BATCH_TARGET_BYTES`]** / [`PACK_WORKERS`]: ~1MiB of raw rows
-//!   × 3 workers is the locality sweet spot — the circulating raw-row set
-//!   must stay near the shared L2, so the optimum tracks the batch's *byte*
-//!   footprint, not a fixed row count ([`seal_batch_rows_for`] derives rows
-//!   from width; see its doc for the wish #3 cycle-2 sweep on the 24-byte
-//!   POD `Cell`). Doubling workers measured *slower* at every batch size
-//!   tried (owner + 3 packers + carcass traffic already saturate the
-//!   P-cluster, extra workers spill to E-cores and drag the whole batch).
+//! - **[`SEAL_BATCH_TARGET_BYTES`]**: ~1MiB of raw rows is the locality sweet
+//!   spot: the circulating raw-row set must stay near the shared L2, so the
+//!   optimum tracks the batch's *byte* footprint, not a fixed row count
+//!   ([`seal_batch_rows_for`] derives rows from width; see its doc for the
+//!   wish #3 cycle-2 sweep on the 24-byte POD `Cell`).
+//! - **[`PACK_WORKERS`]**: one. Feeding a file in-process favours three, but a
+//!   real flood also runs the writer and the pty reader, and more busy threads
+//!   slow the pty transport itself (bare pty drain of the unicode file on an
+//!   M4: 366 ms alone, 490 ms beside a separate process feeding with three
+//!   workers, 395 ms with one).
 
 use crate::cell::{Cell, HyperlinkId, Row};
 use crate::grapheme::GraphemeId;
@@ -141,7 +143,7 @@ fn seal_batch_rows_for(cols: usize) -> usize {
 }
 /// Worker threads in the lazy per-scrollback pack pool; a published batch
 /// splits into this many contiguous chunks.
-const PACK_WORKERS: usize = 3;
+const PACK_WORKERS: usize = 1;
 /// Span-only pending flushes inline every `SPAN_FLUSH_MULTIPLE x batch_rows`
 /// rows (see `deferred_boundary`): span packing is cheap enough that a wider
 /// cadence just amortizes the flush call further, while the quarter-limit
@@ -2417,6 +2419,10 @@ struct PackJob {
 /// blocks until `outstanding` drains and takes the per-chunk results.
 struct PackerShared {
     state: Mutex<PackerBoard>,
+    /// Mirrors `state.outstanding == 0`. While a batch is in flight the owner
+    /// polls this once per scrolled row, which through the mutex was hundreds
+    /// of thousands of lock round-trips against the workers per 150 MiB.
+    idle: AtomicBool,
     work_cv: Condvar,
     done_cv: Condvar,
 }
@@ -2444,6 +2450,7 @@ impl Packer {
     fn spawn() -> Self {
         let shared = Arc::new(PackerShared {
             state: Mutex::new(PackerBoard::default()),
+            idle: AtomicBool::new(true),
             work_cv: Condvar::new(),
             done_cv: Condvar::new(),
         });
@@ -2460,15 +2467,14 @@ impl Packer {
     }
 
     fn worker_loop(shared: &PackerShared) {
-        // Background-tier QoS (macOS): packing is deadline-free batch work
-        // that must never displace the latency-critical pty reader / io
-        // threads from performance cores — under a sustained flood the
-        // scheduler otherwise interleaves three pack workers with the
-        // reader's ~1KiB-quantum wake cycle and stretches the whole drain.
+        // Default QoS (macOS), not a background tier: one worker at UTILITY falls
+        // behind on a unicode flood (measured 88% busy, the blank-row pool runs
+        // dry and the owner saturates allocating rows: 500 ms against 407 ms
+        // for 150 MiB in the app).
         #[cfg(target_os = "macos")]
         // SAFETY: plain FFI call configuring the calling thread's own QoS.
         unsafe {
-            libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
+            libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_DEFAULT, 0);
         }
         loop {
             let job = {
@@ -2483,29 +2489,37 @@ impl Packer {
                     state = shared.work_cv.wait(state).unwrap();
                 }
             };
-            // `pack_chunk` is pure; a panic here is a bug, surfaced on the
-            // collecting thread instead of deadlocking its completion wait.
-            let id = job.id;
-            let batch = Arc::clone(&job.batch);
-            let range = job.range.clone();
-            let to_clear = job.to_clear;
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                pack_chunk(&batch, range, to_clear)
-            }));
-            // Release this worker's handles on the batch *before* reporting
-            // completion: the collector `Arc::try_unwrap`s the batch as soon
-            // as `outstanding` hits zero.
-            drop(batch);
-            drop(job.batch);
-            let mut state = shared.state.lock().unwrap();
-            match result {
-                Ok(packed) => state.results[id] = Some(packed),
-                Err(_) => state.poisoned = true,
-            }
-            state.outstanding -= 1;
-            if state.outstanding == 0 || state.poisoned {
-                shared.done_cv.notify_all();
-            }
+            Self::run_job(shared, job);
+        }
+    }
+
+    /// Pack one chunk and report it, on a worker or on the collecting owner.
+    fn run_job(shared: &PackerShared, job: PackJob) {
+        // `pack_chunk` is pure; a panic here is a bug, surfaced on the
+        // collecting thread instead of deadlocking its completion wait.
+        let id = job.id;
+        let batch = Arc::clone(&job.batch);
+        let range = job.range.clone();
+        let to_clear = job.to_clear;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pack_chunk(&batch, range, to_clear)
+        }));
+        // Release this worker's handles on the batch *before* reporting
+        // completion: the collector `Arc::try_unwrap`s the batch as soon
+        // as `outstanding` hits zero.
+        drop(batch);
+        drop(job.batch);
+        let mut state = shared.state.lock().unwrap();
+        match result {
+            Ok(packed) => state.results[id] = Some(packed),
+            Err(_) => state.poisoned = true,
+        }
+        state.outstanding -= 1;
+        if state.outstanding == 0 {
+            shared.idle.store(true, Ordering::Release);
+        }
+        if state.outstanding == 0 || state.poisoned {
+            shared.done_cv.notify_all();
         }
     }
 
@@ -2538,6 +2552,7 @@ impl Packer {
                 .collect();
             state.results = std::iter::repeat_with(|| None).take(parts).collect();
             state.outstanding = parts;
+            self.shared.idle.store(false, Ordering::Release);
         }
         self.shared.work_cv.notify_all();
     }
@@ -2546,14 +2561,27 @@ impl Packer {
     /// would return without blocking). Owner-side poll for the batch-boundary
     /// fast path.
     fn results_ready(&self) -> bool {
-        let state = self.shared.state.lock().unwrap();
-        state.outstanding == 0
+        self.shared.idle.load(Ordering::Acquire)
     }
 
     /// Block until every published chunk is packed and take the results in
     /// chunk (row) order. After this returns, no worker holds a reference to
     /// the batch.
     fn wait_results(&self) -> Vec<PackResult> {
+        // Workers run at a background QoS, so on a busy machine they may not
+        // be scheduled for a long time. Waiting on them from the pty thread
+        // is a priority inversion (measured: 480 ms of work taking 4 s), so
+        // the owner packs every chunk no worker has started yet.
+        loop {
+            let job = {
+                let mut state = self.shared.state.lock().unwrap();
+                state.jobs.iter_mut().find_map(Option::take)
+            };
+            let Some(job) = job else {
+                break;
+            };
+            Self::run_job(&self.shared, job);
+        }
         let mut state = self.shared.state.lock().unwrap();
         while state.outstanding > 0 && !state.poisoned {
             state = self.shared.done_cv.wait(state).unwrap();
@@ -2623,6 +2651,43 @@ mod tests {
             cells.push(Cell::default());
         }
         row_from(cells)
+    }
+
+    /// Workers run at a background QoS and may not be scheduled for a long
+    /// time: collecting must not need them for a chunk none has started.
+    #[test]
+    fn collecting_packs_chunks_no_worker_started() {
+        let packer = Packer {
+            shared: Arc::new(PackerShared {
+                state: Mutex::new(PackerBoard::default()),
+                idle: AtomicBool::new(true),
+                work_cv: Condvar::new(),
+                done_cv: Condvar::new(),
+            }),
+            workers: Vec::new(),
+        };
+        let rows = (0..PACK_WORKERS * 2)
+            .map(|_| DeferredRow::Cells(text_row("abc", 8)))
+            .collect();
+        let batch = Arc::new(SealBatch {
+            rows,
+            span_bytes: Vec::new(),
+            page_row_cap: PAGE_ROW_CAPACITY,
+        });
+        packer.publish(&batch, None);
+        let (done, collected) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let packed: usize = packer.wait_results().iter().map(|r| r.lens.len()).sum();
+            done.send(packed).unwrap();
+        });
+        let packed = collected
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("collecting waited for a worker that never ran");
+        assert_eq!(packed, PACK_WORKERS * 2);
+        assert!(
+            Arc::try_unwrap(batch).is_ok(),
+            "chunks kept the batch alive"
+        );
     }
 
     /// `row` bisects `page_row_ends`; it must find what an in-order walk finds

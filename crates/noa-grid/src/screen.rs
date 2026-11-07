@@ -540,6 +540,29 @@ impl Screen {
         }
     }
 
+    /// [`Self::sanitize_wide_row`] for a row whose `erased` range was just
+    /// overwritten by `blank`: only a pair straddling either edge can have been
+    /// split, so full-screen repaints (an EL per row) needn't rescan the row.
+    fn heal_erase_edges(row: &mut Row, erased: std::ops::Range<usize>, blank: &Cell) {
+        if erased.start > 0 && row.cells[erased.start - 1].attrs.contains(CellAttrs::WIDE) {
+            row.cells[erased.start - 1].set_from(blank);
+        }
+        if erased.end < row.cells.len()
+            && row.cells[erased.end].attrs.contains(CellAttrs::WIDE_SPACER)
+        {
+            row.cells[erased.end].set_from(blank);
+        }
+        #[cfg(debug_assertions)]
+        {
+            let mut full = row.clone();
+            Self::sanitize_wide_row(&mut full, blank);
+            debug_assert!(
+                full.cells == row.cells,
+                "a wide pair was already split outside the erased range"
+            );
+        }
+    }
+
     /// Post-burst memory trim: settle deferred scrollback rows into packed
     /// pages and release the flood-sized scratch buffers (recycled-row pool,
     /// spare page, parked pack workers). Cheap when there is nothing to

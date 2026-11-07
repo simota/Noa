@@ -1001,13 +1001,9 @@ impl Screen {
         let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
         match mode {
             EraseDisplay::Below => {
-                for c in &mut self.grid[y].cells[x..] {
-                    c.set_from(&blank);
-                }
-                if !Self::is_default_blank(&blank) {
-                    self.grid[y].mark_all();
-                }
-                Self::sanitize_wide_row(&mut self.grid[y], &blank);
+                let cols = self.grid[y].cells.len();
+                self.grid[y].fill_range(x..cols, &blank);
+                Self::heal_erase_edges(&mut self.grid[y], x..cols, &blank);
                 self.grid[y].dirty = true;
                 for r in &mut self.grid.canonicalize()[y + 1..] {
                     r.clear(&blank);
@@ -1017,13 +1013,8 @@ impl Screen {
                 for r in &mut self.grid.canonicalize()[..y] {
                     r.clear(&blank);
                 }
-                for c in &mut self.grid[y].cells[..=x] {
-                    c.set_from(&blank);
-                }
-                if !Self::is_default_blank(&blank) {
-                    self.grid[y].mark_occupied(x + 1);
-                }
-                Self::sanitize_wide_row(&mut self.grid[y], &blank);
+                self.grid[y].fill_range(0..x + 1, &blank);
+                Self::heal_erase_edges(&mut self.grid[y], 0..x + 1, &blank);
                 self.grid[y].dirty = true;
             }
             EraseDisplay::Complete => {
@@ -1049,34 +1040,14 @@ impl Screen {
         let blank = self.blank();
         let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
         let row = &mut self.grid[y];
-        let styled = !Self::is_default_blank(&blank);
-        match mode {
-            EraseLine::Right => {
-                for c in &mut row.cells[x..] {
-                    c.set_from(&blank);
-                }
-                if styled {
-                    row.mark_all();
-                }
-            }
-            EraseLine::Left => {
-                for c in &mut row.cells[..=x] {
-                    c.set_from(&blank);
-                }
-                if styled {
-                    row.mark_occupied(x + 1);
-                }
-            }
-            EraseLine::Complete => {
-                for c in &mut row.cells {
-                    c.set_from(&blank);
-                }
-                if styled {
-                    row.mark_all();
-                }
-            }
-        }
-        Self::sanitize_wide_row(row, &blank);
+        let cols = row.cells.len();
+        let range = match mode {
+            EraseLine::Right => x..cols,
+            EraseLine::Left => 0..x + 1,
+            EraseLine::Complete => 0..cols,
+        };
+        row.fill_range(range.clone(), &blank);
+        Self::heal_erase_edges(row, range, &blank);
         row.dirty = true;
     }
 
@@ -1158,13 +1129,8 @@ impl Screen {
         let len = self.cols as usize - x;
         let n = (n.max(1) as usize).min(len);
         let row = &mut self.grid[y];
-        for c in &mut row.cells[x..x + n] {
-            c.set_from(&blank);
-        }
-        if !Self::is_default_blank(&blank) {
-            row.mark_occupied(x + n);
-        }
-        Self::sanitize_wide_row(row, &blank);
+        row.fill_range(x..x + n, &blank);
+        Self::heal_erase_edges(row, x..x + n, &blank);
         row.dirty = true;
     }
 

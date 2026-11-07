@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-11-07
+
+A performance release for TUI output and raw attach connections.
+
+### Changed
+
+- Faster TUI-shaped output: erases stop at each row's occupied cells, and wide
+  characters are repaired only at the erased range's edges. CJK TUI output takes
+  26% less time, and combining marks, erase-heavy edits and full repaints 17-19%
+  less. Bulk throughput is unchanged.
+- Raw attach connections wait on `poll(2)` instead of a 1 ms read loop. Output
+  latency (p50) drops from 761 µs to 52 µs, flood throughput rises from 51 MiB/s
+  to 1930 MiB/s, and idle context switches fall from 900/s to 40/s.
+- An attach connection can now take up to 50 ms, rather than 1 ms, to notice
+  shutdown or a revoked lease.
+- JSON-RPC success responses and `noa.getText` drop redundant copies, and
+  auto-approve reads live rows without copying them.
+
 ## [0.7.1] - 2026-11-07
 
 A performance release with no behavior changes.

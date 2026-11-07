@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-07
+
+A performance release with no behavior changes.
+
+### Changed
+
+- Faster non-ASCII output: mixed-script text prints in one bulk loop and
+  scrollback packs on a single worker, so concurrent threads no longer slow the
+  pty transport. A windowed 199x60 unicode flood drops from 475 ms to about
+  410 ms, on par with Ghostty 1.4.0 in the fullscreen harness.
+- Faster work over long history: reflow, scrolled-back frames, select-all copy
+  and search take roughly half to a third of the time at 138k retained rows.
+- Faster frame rebuilds, most of all on sparse screens (1180 µs → 255 µs), and
+  unchanged redraws, which no longer upload pane uniforms (138 µs → 75 µs).
+- Faster Kitty images: 6 MiB chunked transmission 69.7 ms → 6.0 ms, insert with
+  4096 images stored 134 ms → 1.7 ms, and lower peak memory.
+- Faster shaping and glyph lookup: shape plans are reused, and shape cache hits
+  take half the time.
+
 ## [0.7.0] - 2026-11-06
 
 Brings Noa in line with Ghostty 1.4.0.

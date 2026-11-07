@@ -1090,3 +1090,126 @@ fn normal_receiver_delivers_fifty_mib_in_order_without_disconnect() {
         .recv_timeout(Duration::from_secs(2))
         .expect("raw attach disconnected after sustained transfer");
 }
+
+/// Idle wakeups/CPU of one attached connection, plus output and input latency
+/// and flood throughput. A report, not an assertion (timing depends on the
+/// machine); run with `--release --ignored --nocapture`.
+#[test]
+#[ignore]
+fn attach_perf_report() {
+    let _lock = QA_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    fn rusage() -> (i64, f64) {
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+        let cpu = usage.ru_utime.tv_sec as f64
+            + usage.ru_utime.tv_usec as f64 * 1e-6
+            + usage.ru_stime.tv_sec as f64
+            + usage.ru_stime.tv_usec as f64 * 1e-6;
+        (usage.ru_nvcsw + usage.ru_nivcsw, cpu)
+    }
+    fn percentiles(label: &str, mut samples: Vec<Duration>) {
+        samples.sort();
+        let at = |pct: usize| samples[(samples.len() - 1) * pct / 100];
+        println!(
+            "{label}: p50={:?} p95={:?} p99={:?}",
+            at(50),
+            at(95),
+            at(99)
+        );
+    }
+
+    let (backend, handle) = start(ScopeSet::from_strings(["attach"]));
+    let mut control = connect_control(handle.port(), &["attach"]);
+    let (url, token) = reserve(&mut control, 2);
+    let mut raw = connect_attach(&url, token);
+    let output = backend.output();
+
+    let idle = Duration::from_secs(5);
+    let (switches, cpu) = rusage();
+    std::thread::sleep(idle);
+    let (switches_after, cpu_after) = rusage();
+    println!(
+        "idle: {:.0} ctx-switches/s, {:.3}% of a core",
+        (switches_after - switches) as f64 / idle.as_secs_f64(),
+        (cpu_after - cpu) / idle.as_secs_f64() * 100.0
+    );
+
+    set_read_timeout(&mut raw, Duration::from_secs(5));
+    let mut samples = Vec::new();
+    for _ in 0..2000 {
+        std::thread::sleep(Duration::from_micros(300));
+        let start = Instant::now();
+        output.send(vec![b'x'; 64]).unwrap();
+        read_binary(&mut raw);
+        samples.push(start.elapsed());
+    }
+    percentiles("output latency (idle queue)", samples);
+
+    let mut samples = Vec::new();
+    for _ in 0..2000 {
+        std::thread::sleep(Duration::from_micros(300));
+        let start = Instant::now();
+        raw.send(Message::Binary(vec![b'k'])).unwrap();
+        backend
+            .input_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        samples.push(start.elapsed());
+    }
+    percentiles("input latency", samples);
+
+    let total = 256usize << 20;
+    let chunk = vec![b'y'; 16 * 1024];
+    let sender = output.clone();
+    let start = Instant::now();
+    let producer = std::thread::spawn(move || {
+        let mut sent = 0;
+        while sent < total {
+            sender.send(chunk.clone()).unwrap();
+            sent += chunk.len();
+        }
+    });
+    let (mut received, cpu_start) = (0usize, rusage().1);
+    while received < total {
+        received += read_binary(&mut raw).len();
+    }
+    let elapsed = start.elapsed();
+    producer.join().unwrap();
+    println!(
+        "flood: {:.0} MiB/s, {:.2} core-seconds per GiB",
+        received as f64 / (1 << 20) as f64 / elapsed.as_secs_f64(),
+        (rusage().1 - cpu_start) / (received as f64 / (1u64 << 30) as f64)
+    );
+
+    // Input fairness: the keystroke path while output floods the connection.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let producer = std::thread::spawn({
+        let (stop, sender) = (stop.clone(), output.clone());
+        move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                sender.send(vec![b'z'; 16 * 1024]).unwrap();
+            }
+        }
+    });
+    let mut samples = Vec::new();
+    let mut next_key = Instant::now();
+    let flood_until = Instant::now() + Duration::from_secs(4);
+    while Instant::now() < flood_until {
+        read_binary(&mut raw);
+        if Instant::now() >= next_key {
+            let start = Instant::now();
+            raw.send(Message::Binary(vec![b'k'])).unwrap();
+            while backend.input_rx.try_recv().is_err() {
+                read_binary(&mut raw);
+            }
+            samples.push(start.elapsed());
+            next_key = Instant::now() + Duration::from_millis(5);
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    while !producer.is_finished() {
+        read_binary(&mut raw);
+    }
+    producer.join().unwrap();
+    percentiles("input latency during flood", samples);
+}

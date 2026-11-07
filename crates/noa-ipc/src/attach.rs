@@ -283,12 +283,56 @@ struct OutputState {
     sender_count: usize,
     receiver_alive: bool,
     closed: bool,
+    /// The receiver sleeps in [`AttachOutputReceiver::park`] and must be woken.
+    #[cfg(unix)]
+    parked: bool,
 }
 
 struct OutputInner {
     state: Mutex<OutputState>,
     readable: Condvar,
     writable: Condvar,
+    /// `None` if the pair couldn't be created (fd exhaustion): the connection
+    /// still works, paced by its socket read timeout.
+    #[cfg(unix)]
+    wake: Option<OutputWake>,
+}
+
+/// Lets a producer interrupt the receiver's `poll(2)`, which can't wait on a
+/// condvar and the socket at once. Both ends are non-blocking and close-on-exec
+/// (pty children must not inherit them).
+#[cfg(unix)]
+struct OutputWake {
+    tx: std::os::unix::net::UnixStream,
+    rx: std::os::unix::net::UnixStream,
+}
+
+#[cfg(unix)]
+impl OutputWake {
+    fn new() -> Option<Self> {
+        let (tx, rx) = std::os::unix::net::UnixStream::pair().ok()?;
+        tx.set_nonblocking(true).ok()?;
+        rx.set_nonblocking(true).ok()?;
+        Some(OutputWake { tx, rx })
+    }
+}
+
+impl OutputInner {
+    /// Wake a parked receiver. The state lock (held by the caller) orders this
+    /// against `park`'s check, so a wake can't be lost; a byte written just as
+    /// `park` times out only causes one spurious return from the next `park`.
+    #[cfg(unix)]
+    fn wake_parked(&self, state: &mut OutputState) {
+        use std::io::Write as _;
+        if std::mem::take(&mut state.parked)
+            && let Some(wake) = &self.wake
+        {
+            let _ = (&wake.tx).write(&[1]);
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn wake_parked(&self, _state: &mut OutputState) {}
 }
 
 /// Producer endpoint registered by the application raw tap. Cloning is
@@ -331,6 +375,7 @@ impl AttachOutputSender {
                 state.queued_bytes += bytes.len();
                 state.queue.push_back(bytes);
                 self.inner.readable.notify_one();
+                self.inner.wake_parked(&mut state);
                 return Ok(());
             }
 
@@ -345,6 +390,7 @@ impl AttachOutputSender {
                 state.closed = true;
                 self.inner.readable.notify_all();
                 self.inner.writable.notify_all();
+                self.inner.wake_parked(&mut state);
                 return Err(AttachOutputError::TimedOut);
             }
         }
@@ -355,6 +401,7 @@ impl AttachOutputSender {
         state.closed = true;
         self.inner.readable.notify_all();
         self.inner.writable.notify_all();
+        self.inner.wake_parked(&mut state);
     }
 }
 
@@ -365,6 +412,7 @@ impl Drop for AttachOutputSender {
         if state.sender_count == 0 {
             state.closed = true;
             self.inner.readable.notify_all();
+            self.inner.wake_parked(&mut state);
         }
     }
 }
@@ -403,6 +451,53 @@ impl AttachOutputReceiver {
             Err(AttachTryRecvError::Empty)
         }
     }
+
+    /// Sleep until `socket` is readable or output is ready to drain, for at
+    /// most `timeout`. Returns whether the socket should be read. Without a
+    /// wake pair this returns `true` at once and the socket's read timeout
+    /// paces the caller instead.
+    #[cfg(unix)]
+    pub fn park(&self, socket: std::os::fd::RawFd, timeout: Duration) -> bool {
+        use std::io::Read as _;
+        use std::os::fd::AsRawFd as _;
+
+        let Some(wake) = &self.inner.wake else {
+            return true;
+        };
+        let timeout_ms = {
+            let mut state = self.inner.state.lock();
+            if state.queue.is_empty() && !state.closed && state.sender_count != 0 {
+                state.parked = true;
+                timeout.as_millis() as libc::c_int
+            } else {
+                0
+            }
+        };
+        let mut fds = [
+            libc::pollfd {
+                fd: socket,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: wake.rx.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        // SAFETY: `fds` is a valid array of two `pollfd`s for the whole call.
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, timeout_ms) };
+        self.inner.state.lock().parked = false;
+        if fds[1].revents != 0 {
+            let _ = (&wake.rx).read(&mut [0u8; 8]);
+        }
+        ready < 0 || fds[0].revents != 0
+    }
+
+    #[cfg(not(unix))]
+    pub fn park(&self, _socket: (), _timeout: Duration) -> bool {
+        true
+    }
 }
 
 impl Drop for AttachOutputReceiver {
@@ -422,9 +517,13 @@ pub(crate) fn output_channel() -> (AttachOutputSender, AttachOutputReceiver) {
             sender_count: 1,
             receiver_alive: true,
             closed: false,
+            #[cfg(unix)]
+            parked: false,
         }),
         readable: Condvar::new(),
         writable: Condvar::new(),
+        #[cfg(unix)]
+        wake: OutputWake::new(),
     });
     (
         AttachOutputSender {
@@ -437,6 +536,95 @@ pub(crate) fn output_channel() -> (AttachOutputSender, AttachOutputReceiver) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    mod park {
+        use super::*;
+        use std::io::Write as _;
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::net::UnixStream;
+
+        const LONG: Duration = Duration::from_secs(5);
+
+        /// Parks on a second thread, then runs `wake`; the park must return
+        /// well before its timeout, reporting `socket_expected`.
+        fn assert_wakes(
+            wake: impl FnOnce(&AttachOutputSender, &mut UnixStream),
+            socket_expected: bool,
+        ) {
+            let (sender, receiver) = output_channel();
+            let (mut peer, socket) = UnixStream::pair().unwrap();
+            let fd = socket.as_raw_fd();
+            let parked = std::thread::spawn(move || {
+                let start = Instant::now();
+                let ready = receiver.park(fd, LONG);
+                (ready, start.elapsed())
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            wake(&sender, &mut peer);
+            let (ready, elapsed) = parked.join().unwrap();
+            assert_eq!(ready, socket_expected);
+            assert!(elapsed < LONG / 2, "park slept {elapsed:?}");
+            drop(socket);
+        }
+
+        #[test]
+        fn output_wakes_a_parked_receiver() {
+            assert_wakes(|sender, _| sender.send(vec![1]).unwrap(), false);
+        }
+
+        #[test]
+        fn closing_wakes_a_parked_receiver() {
+            assert_wakes(|sender, _| sender.close(), false);
+        }
+
+        #[test]
+        fn client_input_wakes_a_parked_receiver_and_reports_the_socket() {
+            assert_wakes(|_, peer| peer.write_all(b"k").unwrap(), true);
+        }
+
+        #[test]
+        fn dropping_the_last_sender_wakes_a_parked_receiver() {
+            let (sender, receiver) = output_channel();
+            let (_peer, socket) = UnixStream::pair().unwrap();
+            let fd = socket.as_raw_fd();
+            let parked = std::thread::spawn(move || {
+                let start = Instant::now();
+                receiver.park(fd, LONG);
+                start.elapsed()
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            drop(sender);
+            assert!(parked.join().unwrap() < LONG / 2);
+        }
+
+        #[test]
+        fn park_returns_at_once_while_output_is_queued() {
+            let (sender, receiver) = output_channel();
+            let (_peer, socket) = UnixStream::pair().unwrap();
+            sender.send(vec![1]).unwrap();
+            let start = Instant::now();
+            assert!(!receiver.park(socket.as_raw_fd(), LONG));
+            assert!(start.elapsed() < LONG / 2);
+        }
+
+        #[test]
+        fn park_times_out_when_nothing_happens() {
+            let (_sender, receiver) = output_channel();
+            let (_peer, socket) = UnixStream::pair().unwrap();
+            let start = Instant::now();
+            assert!(!receiver.park(socket.as_raw_fd(), Duration::from_millis(30)));
+            assert!(start.elapsed() >= Duration::from_millis(25));
+        }
+
+        #[test]
+        fn a_closed_peer_reports_the_socket_so_the_read_sees_eof() {
+            let (_sender, receiver) = output_channel();
+            let (peer, socket) = UnixStream::pair().unwrap();
+            drop(peer);
+            assert!(receiver.park(socket.as_raw_fd(), LONG));
+        }
+    }
 
     #[test]
     fn registry_enforces_single_attach_and_expiry_without_sleep() {

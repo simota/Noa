@@ -262,6 +262,23 @@ impl Row {
         );
     }
 
+    /// Overwrite `range` with `template`, keeping the watermark invariant. A
+    /// default template stops at the watermark: the cells past it already
+    /// equal it, and full-screen repaints erase mostly that blank tail.
+    #[inline]
+    pub(crate) fn fill_range(&mut self, range: std::ops::Range<usize>, template: &Cell) {
+        if *template == Cell::default() {
+            self.debug_assert_tail_default();
+            let end = range.end.min(self.occupied());
+            if range.start < end {
+                self.cells[range.start..end].fill(*template);
+            }
+        } else {
+            self.cells[range.clone()].fill(*template);
+            self.mark_occupied(range.end);
+        }
+    }
+
     /// Fill every cell with `template` and reset wrap. `Cell` is POD, so
     /// this is a branchless pattern fill (memset-shaped, vectorizable); a
     /// default template only re-blanks the occupied prefix (the watermark

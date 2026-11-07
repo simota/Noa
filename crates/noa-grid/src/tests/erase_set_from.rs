@@ -6,7 +6,7 @@
 // touch every field a struct-literal replace would have, so a cell that
 // carried combining marks, a hyperlink, non-default colors, or wide flags
 // leaves no trace after any of these five erase paths — including the
-// `sanitize_wide_row` self-heal when an erase boundary splits a wide
+// `heal_erase_edges` self-heal when an erase boundary splits a wide
 // lead/spacer pair, which this refactor must not have disturbed.
 
 /// A decorated wide cluster: bold + underline + palette fg + rgb underline
@@ -58,7 +58,7 @@ fn erase_line_right_heals_split_wide_lead_and_clears_full_state() {
 
     // Cursor lands on the spacer (col 1): the main loop only erases the
     // spacer directly, leaving an orphaned WIDE lead at col 0 that
-    // `sanitize_wide_row` must heal to full blank too.
+    // `heal_erase_edges` must heal to full blank too.
     let bytes = format!("{prefix}\x1b[41m\x1b[1;2H\x1b[0K");
     let t = run_size(6, 1, bytes.as_bytes());
     for x in 0..6 {
@@ -73,7 +73,7 @@ fn erase_line_left_heals_orphaned_wide_spacer_and_clears_full_state() {
 
     // Cursor lands on the lead (col 0): the main loop only erases the lead
     // directly ([..=0]), leaving an orphaned WIDE_SPACER at col 1 that
-    // `sanitize_wide_row` must heal to full blank too.
+    // `heal_erase_edges` must heal to full blank too.
     let bytes = format!("{prefix}\x1b[41m\x1b[1;1H\x1b[1K");
     let t = run_size(6, 1, bytes.as_bytes());
     assert_full_blank(&cell(&t, 0, 0), Color::Palette(1));
@@ -183,4 +183,99 @@ fn erase_chars_clears_full_state_not_just_ch() {
     assert_full_blank(&cell(&t, 1, 0), Color::Palette(1));
     assert_full_blank(&cell(&t, 2, 0), Color::Palette(1));
     assert_eq!(cell(&t, 0, 0).ch, 'A'); // untouched control
+}
+
+/// Random edits around wide glyphs: `Screen::heal_erase_edges` debug-asserts
+/// that healing only the erased range's edges matches a full-row sanitize, so
+/// any path that leaves a split pair elsewhere in a row fails here.
+#[test]
+fn erase_edge_healing_matches_full_sanitize_under_random_edits() {
+    use std::fmt::Write as _;
+    const TEXT: [&str; 8] = [
+        "漢字",
+        "a",
+        "🇯🇵",
+        "e\u{301}",
+        "❤\u{fe0f}",
+        "한",
+        "👩\u{200d}💻",
+        "ab",
+    ];
+    for seed in 1..=8u32 {
+        let mut state = seed.wrapping_mul(0x9e37_79b9) | 1;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        };
+        let mut term = Terminal::new(GridSize::new(24, 8));
+        let mut stream = Stream::new();
+        let mut input = String::new();
+        for step in 0..30_000u32 {
+            let v = next();
+            let (a, b) = (1 + (v >> 8) % 26, 1 + (v >> 16) % 10);
+            input.clear();
+            match v % 24 {
+                0..=7 => input.push_str(TEXT[(v >> 24) as usize % TEXT.len()]),
+                8 => {
+                    let _ = write!(input, "\x1b[{b};{a}H");
+                }
+                9 => {
+                    let _ = write!(input, "\x1b[{}K", a % 3);
+                }
+                10 => {
+                    let _ = write!(input, "\x1b[{}J", a % 3);
+                }
+                11 => {
+                    let _ = write!(input, "\x1b[{b}X");
+                }
+                12 => {
+                    let _ = write!(input, "\x1b[{b}P");
+                }
+                13 => {
+                    let _ = write!(input, "\x1b[{b}@");
+                }
+                14 => {
+                    let _ = write!(input, "\x1b[{}L", b % 4);
+                }
+                15 => {
+                    let _ = write!(input, "\x1b[{}M", b % 4);
+                }
+                16 => {
+                    let _ = write!(input, "\x1b[{}r", b % 8);
+                }
+                17 => input.push_str("\x1b[?69h"),
+                18 => {
+                    let _ = write!(input, "\x1b[{};{}s", b, a);
+                }
+                19 => input.push_str("\x1b[?69l\x1b[r"),
+                20 => {
+                    let _ = write!(input, "\x1b[{}m", 40 + a % 8);
+                }
+                21 => input.push_str(
+                    ["\x1b[0m", "\r\n", "\x1bM", "\x1b[S", "\x1b[T", "\x1b[2b"]
+                        [(v >> 24) as usize % 6],
+                ),
+                22 => input.push_str(
+                    [
+                        "\x1b[?7l",
+                        "\x1b[?7h",
+                        "\x1b[?1049h",
+                        "\x1b[?1049l",
+                        "\x1b[4h",
+                        "\x1b[4l",
+                    ][(v >> 24) as usize % 6],
+                ),
+                _ if step % 16 == 0 => {
+                    term.resize(GridSize::new(
+                        10 + (v >> 8) as u16 % 30,
+                        4 + (v >> 16) as u16 % 8,
+                    ));
+                }
+                _ => {}
+            }
+            stream.feed(input.as_bytes(), &mut term);
+        }
+    }
 }

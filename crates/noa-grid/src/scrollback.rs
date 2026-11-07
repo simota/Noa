@@ -396,9 +396,10 @@ struct Page {
     cells: CellArena,
     rows: Vec<RowMeta>,
     styles: StyleTable,
-    /// Cell index within `cells` -> interned combining tail, for
-    /// `HAS_GRAPHEME` cells.
-    graphemes: HashMap<u32, GraphemeId>,
+    /// (cell index within `cells`, interned combining tail) for `HAS_GRAPHEME`
+    /// cells, ascending by index. Packing appends cells in order, so pushes
+    /// keep it sorted without the hashing a map pays per combining cell.
+    graphemes: Vec<(u32, GraphemeId)>,
     /// Deterministic accounting size (see module doc).
     bytes: usize,
 }
@@ -418,7 +419,7 @@ impl Page {
             cells: CellArena::with_capacity(PAGE_CELL_CAPACITY + cols as usize),
             rows: Vec::with_capacity(PAGE_CELL_CAPACITY / cols.max(1) as usize + 1),
             styles,
-            graphemes: HashMap::new(),
+            graphemes: Vec::new(),
             bytes,
         }
     }
@@ -437,7 +438,11 @@ impl Page {
             attrs.insert(CellAttrs::WIDE_SPACER);
         }
         let grapheme = if packed.flags.contains(PackedFlags::HAS_GRAPHEME) {
-            self.graphemes.get(&(cell_index as u32)).copied()
+            let index = cell_index as u32;
+            self.graphemes
+                .binary_search_by_key(&index, |&(i, _)| i)
+                .ok()
+                .map(|found| self.graphemes[found].1)
         } else {
             None
         };
@@ -537,7 +542,7 @@ impl Page {
         // Raw destination pointer, not a `&mut` slice: writing through it does
         // not borrow `self.cells`, so `self.styles`/`self.graphemes` stay
         // freely usable in the loop, and each store carries no bounds or length
-        // bookkeeping. `intern`/`graphemes.insert` never touch `self.cells`, so
+        // bookkeeping. `intern`/`graphemes.push` never touch `self.cells`, so
         // the pointer stays valid across them.
         let dst = self.cells.as_mut_ptr();
         let cells = &row.cells[..len];
@@ -572,7 +577,12 @@ impl Page {
                 // Rare (only combining-mark cells); keep the index arithmetic
                 // and the map insert off the common per-cell path.
                 delta += GRAPHEME_ENTRY_COST;
-                self.graphemes.insert((base + i) as u32, grapheme);
+                debug_assert!(
+                    self.graphemes
+                        .last()
+                        .is_none_or(|&(last, _)| last < (base + i) as u32)
+                );
+                self.graphemes.push(((base + i) as u32, grapheme));
             }
             // One aligned-width store (`ch` OR-ed into the run's constant
             // style/flags word) rather than three sub-word writes.
@@ -1216,8 +1226,8 @@ impl CompressedPage {
             }
         }
         put(&mut raw, page.graphemes.len() as u32);
-        for (&index, id) in &page.graphemes {
-            put(&mut raw, index);
+        for (index, id) in &page.graphemes {
+            put(&mut raw, *index);
             put(&mut raw, id.raw());
         }
         let mut encoder =
@@ -1277,11 +1287,12 @@ impl CompressedPage {
             });
         }
         let n = r.u32() as usize;
-        let mut graphemes = HashMap::with_capacity(n);
+        // Pages are only compressed in memory, so `encode` wrote these sorted.
+        let mut graphemes = Vec::with_capacity(n);
         for _ in 0..n {
             let index = r.u32();
             let id = GraphemeId::from_raw(r.u32()).expect("a stored grapheme id");
-            graphemes.insert(index, id);
+            graphemes.push((index, id));
         }
         Page {
             cols,
@@ -3065,6 +3076,31 @@ mod tests {
             compressed as f64 * 100.0 / resident as f64
         );
         assert!(compressed * 3 < resident);
+    }
+
+    #[test]
+    fn combining_tails_resolve_by_cell_across_rows_and_compression() {
+        let mut sb = PagedScrollback::new(64 * 1024 * 1024);
+        let mut rows = varied_rows(3000, 80);
+        for (y, row) in rows.iter_mut().enumerate() {
+            // Sparse, irregular positions, so a wrong lookup lands on a
+            // neighbouring tail or none rather than passing by accident.
+            for x in [y % 7, 11 + y % 13, 40 + y % 3] {
+                row.cells[x].ch = 'e';
+                row.cells[x].set_combining(if y % 2 == 0 { "\u{301}" } else { "\u{308}" });
+                row.mark_occupied(x + 1);
+            }
+            sb.push_row(row);
+        }
+        assert!(sb.page_count() > 2);
+        let before = all_rows(&mut sb);
+        for (y, row) in rows.iter().enumerate() {
+            assert_eq!(before[y].0, row.cells, "resident row {y}");
+        }
+        for slot in &sb.pages {
+            slot.compress();
+        }
+        assert_eq!(all_rows(&mut sb), before);
     }
 
     #[test]

@@ -1032,11 +1032,11 @@ impl Screen {
                 return false;
             }
         }
-        // Tailed cells (emoji with VS16, ZWJ sequences) come from a small set
-        // per stream, and an interned tail never changes, so the whole-text
-        // verdict is memoized on (base, tail id, next) in a direct-mapped
-        // table.
-        type Memo = [Option<(char, crate::grapheme::GraphemeId, char, bool)>; 256];
+        // Tailed cells (emoji with VS16, ZWJ sequences) and the pairs the table
+        // can't decide (Hangul runs) come from a small set per stream, and an
+        // interned tail never changes, so the whole-text verdict is memoized
+        // on (base, tail id, next) in a direct-mapped table.
+        type Memo = [Option<(char, Option<crate::grapheme::GraphemeId>, char, bool)>; 256];
         thread_local! {
             static MEMO: std::cell::RefCell<Memo> = const { std::cell::RefCell::new([None; 256]) };
         }
@@ -1045,19 +1045,17 @@ impl Screen {
                 text.graphemes(true).nth(1).is_none()
             })
         };
-        let Some(id) = target.grapheme else {
-            return segment();
-        };
-        let slot = Self::memo_slot(target.ch, Some(id), next);
+        let tail = target.grapheme;
+        let slot = Self::memo_slot(target.ch, tail, next);
         MEMO.with_borrow_mut(|memo| match memo[slot] {
-            Some((ch, memo_id, memo_next, extends))
-                if ch == target.ch && memo_id == id && memo_next == next =>
+            Some((ch, memo_tail, memo_next, extends))
+                if ch == target.ch && memo_tail == tail && memo_next == next =>
             {
                 extends
             }
             _ => {
                 let extends = segment();
-                memo[slot] = Some((target.ch, id, next, extends));
+                memo[slot] = Some((target.ch, tail, next, extends));
                 extends
             }
         })
@@ -1128,14 +1126,17 @@ mod tests {
                 targets.push(with_tail);
             }
         }
-        for target in &targets {
-            for &next in CLASSES {
-                assert_eq!(
-                    Screen::extends_cluster(target, next),
-                    segmenter_extends(target, next),
-                    "target {:?} next {next:?}",
-                    target.text()
-                );
+        // Twice: the second pass answers from the memo.
+        for _ in 0..2 {
+            for target in &targets {
+                for &next in CLASSES {
+                    assert_eq!(
+                        Screen::extends_cluster(target, next),
+                        segmenter_extends(target, next),
+                        "target {:?} next {next:?}",
+                        target.text()
+                    );
+                }
             }
         }
     }

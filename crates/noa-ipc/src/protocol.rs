@@ -463,12 +463,16 @@ pub fn truncate_tail(text: &str, max_bytes: usize) -> (String, bool) {
     if text.len() <= max_bytes {
         return (text.to_string(), false);
     }
-    let start = text.len() - max_bytes;
-    let mut idx = start;
+    (text[tail_start(text, max_bytes)..].to_string(), true)
+}
+
+/// Where [`truncate_tail`]'s kept tail begins, for `text` over `max_bytes`.
+pub(crate) fn tail_start(text: &str, max_bytes: usize) -> usize {
+    let mut idx = text.len() - max_bytes;
     while idx < text.len() && !text.is_char_boundary(idx) {
         idx += 1;
     }
-    (text[idx..].to_string(), true)
+    idx
 }
 
 /// Reserved headroom subtracted from `cap_bytes` before summing row sizes

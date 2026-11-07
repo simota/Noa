@@ -83,6 +83,9 @@ const ATTACH_READ_POLL: Duration = Duration::from_millis(1);
 /// Bound one output-drain turn so a continuously refilled PTY queue cannot
 /// starve client input waiting on the same WebSocket.
 const ATTACH_OUTPUT_BYTES_PER_POLL: usize = 64 * 1024;
+/// Longest a parked raw connection sleeps before rechecking shutdown and its
+/// lease; output and client input wake it immediately.
+const ATTACH_PARK_POLL: Duration = Duration::from_millis(50);
 
 fn connection_ws_config() -> WebSocketConfig {
     #[allow(deprecated)]
@@ -596,6 +599,14 @@ impl DeadlineStream {
         }
     }
 
+    #[cfg(unix)]
+    fn park_handle(&self) -> std::os::fd::RawFd {
+        std::os::fd::AsRawFd::as_raw_fd(&self.inner)
+    }
+
+    #[cfg(not(unix))]
+    fn park_handle(&self) {}
+
     fn mark_attach_connected(&mut self) -> io::Result<()> {
         self.mode = StreamMode::Connected;
         self.inner.set_read_timeout(Some(ATTACH_READ_POLL))?;
@@ -1017,13 +1028,21 @@ fn run_raw_loop(
     identity: LeaseIdentity,
     receiver: AttachOutputReceiver,
 ) -> io::Result<()> {
+    // A socket read returning `WouldBlock` proves tungstenite holds no buffered
+    // frame, so only then is it safe to sleep on the socket.
+    let mut socket_ready = true;
     loop {
         if shutdown.load(Ordering::SeqCst) || !registry.is_active(identity) {
             return Ok(());
         }
 
-        if !drain_attach_output(&receiver, |bytes| send_attach_binary(ws, &bytes))? {
+        if !drain_attach_output(&receiver, |bytes| send_attach_output(ws, bytes))? {
             return Ok(());
+        }
+
+        if !socket_ready {
+            socket_ready = receiver.park(ws.get_ref().park_handle(), ATTACH_PARK_POLL);
+            continue;
         }
 
         match ws.read() {
@@ -1046,13 +1065,28 @@ fn run_raw_loop(
             }
             Err(tungstenite::Error::Io(err))
                 if err.kind() == io::ErrorKind::WouldBlock
-                    || err.kind() == io::ErrorKind::TimedOut => {}
+                    || err.kind() == io::ErrorKind::TimedOut =>
+            {
+                socket_ready = false;
+            }
             Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
                 return Ok(());
             }
             Err(err) => return Err(ws_err_to_io(err)),
         }
     }
+}
+
+/// [`send_attach_binary`] for an owned chunk: the usual pty read fits one
+/// message and needs no copy.
+fn send_attach_output(
+    ws: &mut tungstenite::WebSocket<DeadlineStream>,
+    bytes: Vec<u8>,
+) -> io::Result<()> {
+    if bytes.len() > ATTACH_BINARY_CHUNK_BYTES {
+        return send_attach_binary(ws, &bytes);
+    }
+    ws.send(Message::Binary(bytes)).map_err(ws_err_to_io)
 }
 
 /// Send one logical raw byte stream as frame-safe Binary messages. WebSocket
@@ -1191,12 +1225,26 @@ impl From<IpcError> for RpcFail {
     }
 }
 
-fn success_response(id: Value, result: Value) -> String {
-    serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string()
+/// Declared in the key order `serde_json::Map` sorts to, so it serializes to
+/// the same bytes as the equivalent `Value` without copying `id` or `result`.
+#[derive(serde::Serialize)]
+struct SuccessEnvelope<'a> {
+    id: &'a Value,
+    jsonrpc: &'static str,
+    result: &'a Value,
 }
 
-fn capped_get_text_response(id: Value, mut result: Value) -> String {
-    let response = success_response(id.clone(), result.clone());
+fn success_response(id: &Value, result: &Value) -> String {
+    serde_json::to_string(&SuccessEnvelope {
+        id,
+        jsonrpc: "2.0",
+        result,
+    })
+    .expect("a Value always serializes")
+}
+
+fn capped_get_text_response(id: &Value, mut result: Value) -> String {
+    let response = success_response(id, &result);
     if response.len() <= MAX_WS_TEXT_PAYLOAD_SIZE {
         return response;
     }
@@ -1216,7 +1264,7 @@ fn capped_get_text_response(id: Value, mut result: Value) -> String {
         let candidate_bytes = fits + (exceeds - fits) / 2;
         let (candidate, _) = truncate_tail(&text, candidate_bytes);
         result["text"] = Value::String(candidate);
-        let candidate_response = success_response(id.clone(), result.clone());
+        let candidate_response = success_response(id, &result);
         if candidate_response.len() <= MAX_WS_TEXT_PAYLOAD_SIZE {
             fits = candidate_bytes;
         } else {
@@ -1226,7 +1274,7 @@ fn capped_get_text_response(id: Value, mut result: Value) -> String {
 
     let (text, _) = truncate_tail(&text, fits);
     result["text"] = Value::String(text);
-    success_response(id, result)
+    success_response(id, &result)
 }
 
 fn error_response(id: Value, code: ErrorCode, message: &str) -> String {
@@ -1396,8 +1444,8 @@ fn dispatch(
     })();
 
     Some(match outcome {
-        Ok(result) if is_get_text => capped_get_text_response(id, result),
-        Ok(result) => success_response(id, result),
+        Ok(result) if is_get_text => capped_get_text_response(&id, result),
+        Ok(result) => success_response(&id, &result),
         Err(fail) => error_response(id, fail.code, &fail.message),
     })
 }
@@ -1451,7 +1499,7 @@ fn handle_hello(
         server_version: env!("CARGO_PKG_VERSION").to_string(),
         server_instance_id: server_instance_id().to_string(),
     };
-    success_response(id, serde_json::to_value(result).unwrap())
+    success_response(&id, &serde_json::to_value(result).unwrap())
 }
 
 fn handle_get_text(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value, RpcFail> {
@@ -1466,13 +1514,20 @@ fn handle_get_text(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value
         .unwrap_or(DEFAULT_TEXT_MAX_BYTES)
         .min(MAX_TEXT_MAX_BYTES);
     let backend_result = backend.get_text(p.pane_id.0, p.source, max_bytes)?;
-    let (text, truncated_here) = truncate_tail(&backend_result.text, max_bytes);
-    let result = GetTextResult {
+    let mut text = backend_result.text;
+    let truncated_here = text.len() > max_bytes;
+    if truncated_here {
+        text.drain(..tail_start(&text, max_bytes));
+    }
+    // Moved in after `to_value`, which would copy this (up to 1 MiB) string.
+    let mut result = serde_json::to_value(GetTextResult {
         pane_id: p.pane_id,
-        text,
+        text: String::new(),
         truncated: truncated_here || backend_result.truncated,
-    };
-    Ok(serde_json::to_value(result).unwrap())
+    })
+    .unwrap();
+    result["text"] = Value::String(text);
+    Ok(result)
 }
 
 fn handle_get_grid(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value, RpcFail> {
@@ -1674,6 +1729,30 @@ fn handle_unsubscribe(
 mod tests {
     use super::*;
 
+    /// The JSON-RPC bytes clients saw when the envelope was a `Value`.
+    fn value_envelope(id: &Value, result: &Value) -> String {
+        serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string()
+    }
+
+    #[test]
+    fn success_envelope_bytes_match_a_value_envelope() {
+        let results = [
+            Value::Null,
+            serde_json::json!({ "z": 1, "a": [1, "two", null], "text": "\"é\n" }),
+            serde_json::to_value(GetTextResult {
+                pane_id: WireId(7),
+                text: "tail".to_string(),
+                truncated: true,
+            })
+            .unwrap(),
+        ];
+        for id in [Value::from(1), Value::from("req"), Value::Null] {
+            for result in &results {
+                assert_eq!(success_response(&id, result), value_envelope(&id, result));
+            }
+        }
+    }
+
     #[test]
     fn default_get_text_response_fits_the_client_frame_bound() {
         // A default-sized text made entirely of characters JSON must escape
@@ -1686,7 +1765,7 @@ mod tests {
             truncated: false,
         })
         .unwrap();
-        let response = capped_get_text_response(Value::from(1), result);
+        let response = capped_get_text_response(&Value::from(1), result);
         assert!(response.len() <= crate::client::MAX_WS_FRAME_SIZE);
         assert!(response.len() <= MAX_WS_TEXT_PAYLOAD_SIZE);
     }

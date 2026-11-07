@@ -408,6 +408,7 @@ pub(crate) fn trace_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("NOA_AUTO_APPROVE_TRACE").is_some())
 }
 
+#[cfg(test)]
 pub(crate) fn viewport_rows_from_terminal(terminal: &Terminal) -> Vec<RowText> {
     terminal
         .active()
@@ -425,7 +426,13 @@ pub(crate) fn viewport_rows_from_terminal(terminal: &Terminal) -> Vec<RowText> {
 pub(crate) fn live_rows_from_terminal(terminal: &Terminal) -> Vec<RowText> {
     let screen = terminal.active();
     if screen.viewport_offset() == 0 {
-        return viewport_rows_from_terminal(terminal);
+        // The viewport is the grid: read it in place, without the row copies
+        // `visible_rows` makes.
+        return screen
+            .grid
+            .iter()
+            .map(|row| row_text(&row.cells[..row.occupied()]))
+            .collect();
     }
     let rows = usize::from(screen.rows);
     let total = screen.total_rows();
@@ -1234,7 +1241,7 @@ fn region_hash(rows: &[RowText], region: RangeInclusive<usize>) -> u64 {
 }
 
 fn row_text(cells: &[Cell]) -> String {
-    let mut text = String::new();
+    let mut text = String::with_capacity(cells.len());
     for cell in cells {
         cell.push_text_to(&mut text);
     }

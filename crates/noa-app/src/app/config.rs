@@ -1153,6 +1153,15 @@ pub(super) fn window_created_transparent(background_opacity: f32) -> bool {
     background_opacity < 1.0
 }
 
+/// Whether a window's swapchain has to keep the alpha the renderer writes,
+/// at the background `opacity` it is shown with. `overlay_panel` is the
+/// quick terminal shown as an overlay (see
+/// `quick_terminal::QuickTerminalState`), which is transparent around its
+/// panel at any opacity.
+pub(super) fn window_surface_transparent(opacity: f32, overlay_panel: bool) -> bool {
+    overlay_panel || opacity < 1.0
+}
+
 /// Reverse-DNS application id shared with the macOS bundle identifier. On
 /// Linux it is the Wayland `app_id` and the X11 `WM_CLASS` class, so desktop
 /// shells match windows to `com.simota.noa.desktop` (icon, dock grouping) the

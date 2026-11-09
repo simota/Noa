@@ -157,6 +157,12 @@ Every binding can be changed with `keybind = …` (see
 - `quick-terminal-hotkey` is not registered system-wide, because Wayland gives
   applications no global-shortcut API. A `toggle_quick_terminal` keybinding
   still works while a Noa window is focused.
+- On Wayland the quick terminal does not slide, and its window is larger than
+  it looks. Wayland lets no application position a window, so the quick
+  terminal opens as a maximized, transparent window and draws its panel at the
+  `quick-terminal-position` edge inside it; clicks outside the panel go to
+  the windows below. The Activities overview and the window switcher show
+  that full-size window. On X11 it is positioned and slides as on macOS.
 - These macOS-only integrations are absent:
   - the menu bar and Ember
   - AppleScript

@@ -47,6 +47,11 @@ pub(super) struct QuickTerminalState {
     /// cleared — a re-toggle while already shown/animating must not overwrite
     /// it with Noa's own frontmost state.
     previous_app_pid: Option<i32>,
+    /// The windowing system places the window itself (Wayland), so the
+    /// panel can't be put at a screen position. The window is instead
+    /// maximized and transparent, and the panel is laid out inside it — see
+    /// [`quick_terminal_overlay_panel`].
+    overlay: bool,
 }
 
 /// One in-flight quick-terminal slide.
@@ -93,6 +98,10 @@ impl QuickTerminalAnim {
 }
 
 impl QuickTerminalState {
+    pub(super) fn is_overlay(&self) -> bool {
+        self.overlay
+    }
+
     fn current_reveal(&self, now: Instant) -> f32 {
         if let Some(anim) = self.anim {
             return anim.reveal_at(now);
@@ -305,6 +314,90 @@ pub(super) fn quick_terminal_position_geometry(
     }
 }
 
+/// Where the panel sits inside its own maximized, transparent window of
+/// `surface_width`x`surface_height` physical px when the windowing system
+/// won't position windows (see [`QuickTerminalState::overlay`]): the same
+/// placement rules as on a monitor, with the window standing in for it.
+pub(super) fn quick_terminal_overlay_panel(
+    position: QuickTerminalPosition,
+    size: QuickTerminalSize,
+    surface_width: u32,
+    surface_height: u32,
+    scale_factor: f64,
+) -> PaneRectApp {
+    let (width, height) =
+        quick_terminal_size_footprint(position, size, surface_width, surface_height, scale_factor);
+    let ((x, y), _) = quick_terminal_position_geometry(
+        position,
+        0,
+        0,
+        surface_width,
+        surface_height,
+        width,
+        height,
+    );
+    PaneRectApp::new(x.max(0) as u32, y.max(0) as u32, width, height)
+}
+
+/// `rect` (physical px) as the smallest `(x, y, width, height)` in logical
+/// px that covers it.
+pub(super) fn logical_cover(rect: PaneRectApp, scale_factor: f64) -> (i32, i32, i32, i32) {
+    let left = (f64::from(rect.x) / scale_factor).floor();
+    let top = (f64::from(rect.y) / scale_factor).floor();
+    let right = (f64::from(rect.x + rect.w) / scale_factor).ceil();
+    let bottom = (f64::from(rect.y + rect.h) / scale_factor).ceil();
+    (
+        left as i32,
+        top as i32,
+        (right - left) as i32,
+        (bottom - top) as i32,
+    )
+}
+
+/// What showing an existing quick terminal again has to redo, its placement
+/// having been re-derived since it was last shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum QuickTerminalReshow {
+    /// Nothing: the window already has the right size.
+    Keep,
+    /// Resize the window to the new panel size.
+    Resize,
+    /// Lay the panel out again inside its unchanged window.
+    Relayout,
+}
+
+pub(super) fn quick_terminal_reshow(
+    overlay: bool,
+    shown_size: (u32, u32),
+    new_size: (u32, u32),
+) -> QuickTerminalReshow {
+    if overlay {
+        // An overlay's window size is the compositor's, not the panel's; the
+        // panel inside it follows the config, which may have changed.
+        QuickTerminalReshow::Relayout
+    } else if shown_size != new_size {
+        QuickTerminalReshow::Resize
+    } else {
+        QuickTerminalReshow::Keep
+    }
+}
+
+/// Whether the quick terminal has to be shown as an overlay (see
+/// [`QuickTerminalState::overlay`]): Wayland gives clients no way to
+/// position a window.
+fn quick_terminal_needs_overlay(event_loop: &ActiveEventLoop) -> bool {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use winit::platform::wayland::ActiveEventLoopExtWayland;
+        event_loop.is_wayland()
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        let _ = event_loop;
+        false
+    }
+}
+
 pub(super) fn quick_terminal_should_autohide_on_focus_loss(
     visible: bool,
     focused_this_reveal: bool,
@@ -334,6 +427,19 @@ pub(super) fn quick_terminal_anchor_window_id<W: Copy>(
         .find(|id| is_regular_window(*id))
 }
 
+/// Whether `window` is a Wayland toplevel that must not be presented to right
+/// now: unmapped by `set_visible(false)`, or mapped again and still waiting
+/// for the compositor's configure (which arrives with a redraw request).
+/// Attaching a buffer in either state is a protocol error. Always `false` off
+/// Wayland, where a hidden window is pre-painted on purpose.
+pub(super) fn wayland_window_unmapped(window: &Window) -> bool {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    window.is_visible() == Some(false)
+        && window
+            .window_handle()
+            .is_ok_and(|handle| matches!(handle.as_raw(), RawWindowHandle::Wayland(_)))
+}
+
 /// Quick terminal (drop-down) support.
 impl App {
     pub(super) fn is_quick_terminal_window(&self, window_id: WindowId) -> bool {
@@ -351,6 +457,57 @@ impl App {
             qt.window_id == window_id
                 && quick_terminal_should_suppress_redraw(qt.visible, qt.anim.is_some())
         })
+    }
+
+    /// The quick terminal's panel inside its own surface (physical px) when
+    /// `window_id` is the quick terminal shown as an overlay.
+    pub(super) fn quick_terminal_overlay_panel_rect(
+        &self,
+        window_id: WindowId,
+    ) -> Option<PaneRectApp> {
+        self.quick_terminal
+            .as_ref()
+            .filter(|qt| qt.overlay && qt.window_id == window_id)?;
+        let window = &self.windows.get(&window_id)?.window;
+        let size = window.inner_size();
+        Some(quick_terminal_overlay_panel(
+            self.config.quick_terminal_position,
+            self.config.quick_terminal_size,
+            size.width,
+            size.height,
+            window.scale_factor(),
+        ))
+    }
+
+    /// Keep an overlay quick terminal's background and pointer input
+    /// confined to its panel, so the rest of its window shows the desktop
+    /// and clicks there reach the windows below. Called on every relayout.
+    pub(super) fn sync_quick_terminal_overlay(&mut self, window_id: WindowId) {
+        let Some(panel) = self.quick_terminal_overlay_panel_rect(window_id) else {
+            return;
+        };
+        let Some(state) = self.windows.get_mut(&window_id) else {
+            return;
+        };
+        state
+            .renderer
+            .set_backdrop_rect(Some(render_pane_rect(panel)));
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            use winit::platform::wayland::WindowExtWayland;
+            state
+                .window
+                .set_input_rect(Some(logical_cover(panel, state.window.scale_factor())));
+        }
+    }
+
+    /// The slide's duration. An overlay never slides: its window can't be
+    /// moved.
+    fn quick_terminal_slide_duration(&self) -> Duration {
+        if self.quick_terminal.as_ref().is_some_and(|qt| qt.overlay) {
+            return Duration::ZERO;
+        }
+        Duration::from_secs_f32(self.config.quick_terminal_animation_duration)
     }
 
     /// Register the global `quick-terminal-hotkey` once, after the app is
@@ -492,7 +649,8 @@ impl App {
             return;
         };
         if self.quick_terminal.is_none() {
-            let Some(window_id) = self.create_quick_terminal(event_loop, geometry) else {
+            let overlay = quick_terminal_needs_overlay(event_loop);
+            let Some(window_id) = self.create_quick_terminal(event_loop, geometry, overlay) else {
                 return;
             };
             self.quick_terminal = Some(QuickTerminalState {
@@ -502,18 +660,31 @@ impl App {
                 focused_this_reveal: false,
                 anim: None,
                 previous_app_pid: captured_app_pid,
+                overlay,
             });
+            if overlay {
+                // The window was laid out as an ordinary one while it was
+                // being created; place the panel now that it is known to be
+                // the quick terminal.
+                self.relayout_and_resize_window(window_id);
+            }
         } else if let Some(qt) = self.quick_terminal.as_mut() {
             // Re-derive geometry each open: the active monitor (or its
             // resolution) may have changed since last time.
             let window_id = qt.window_id;
-            let geometry_changed =
-                qt.geometry.width != geometry.width || qt.geometry.height != geometry.height;
+            let reshow = quick_terminal_reshow(
+                qt.overlay,
+                (qt.geometry.width, qt.geometry.height),
+                (geometry.width, geometry.height),
+            );
             qt.geometry = geometry;
             if was_hidden {
                 qt.previous_app_pid = captured_app_pid;
             }
-            if geometry_changed {
+            if reshow == QuickTerminalReshow::Relayout {
+                self.relayout_and_resize_window(window_id);
+            }
+            if reshow == QuickTerminalReshow::Resize {
                 let new_size = self.windows.get(&window_id).and_then(|state| {
                     state
                         .window
@@ -530,7 +701,7 @@ impl App {
             }
         }
 
-        let slide_duration = Duration::from_secs_f32(self.config.quick_terminal_animation_duration);
+        let slide_duration = self.quick_terminal_slide_duration();
         let Some(qt) = self.quick_terminal.as_mut() else {
             return;
         };
@@ -569,7 +740,7 @@ impl App {
     }
 
     pub(super) fn start_quick_terminal_hide(&mut self) {
-        let slide_duration = Duration::from_secs_f32(self.config.quick_terminal_animation_duration);
+        let slide_duration = self.quick_terminal_slide_duration();
         let Some(qt) = self.quick_terminal.as_mut() else {
             return;
         };
@@ -701,13 +872,21 @@ impl App {
         &mut self,
         event_loop: &ActiveEventLoop,
         geometry: QuickTerminalGeometry,
+        overlay: bool,
     ) -> Option<WindowId> {
+        // An overlay shows the desktop around its panel, so it is
+        // transparent whatever `background-opacity` says.
+        let transparent = overlay || window_created_transparent(self.config.background_opacity);
         let attrs = with_desktop_app_id(WindowAttributes::default())
             .with_title("Quick Terminal")
             .with_decorations(false)
             .with_inner_size(PhysicalSize::new(geometry.width, geometry.height))
             .with_position(PhysicalPosition::new(geometry.hidden_x, geometry.hidden_y))
-            .with_transparent(window_created_transparent(self.config.background_opacity))
+            .with_transparent(transparent)
+            // Maximizing is the one placement a compositor that positions
+            // windows itself still honors: it pins the window to the work
+            // area's edges.
+            .with_maximized(overlay)
             // Never on screen until the show path explicitly reveals it
             // (RC1): avoids ordering an unpainted window front.
             .with_visible(false);
@@ -743,7 +922,10 @@ impl App {
                 // `lifecycle.rs`): a single frame in flight keeps a keypress
                 // echo from queueing behind an already-submitted frame.
                 desired_maximum_frame_latency: 1,
-                alpha_mode: preferred_surface_alpha_mode(&caps, background_opacity < 1.0),
+                alpha_mode: preferred_surface_alpha_mode(
+                    &caps,
+                    window_surface_transparent(background_opacity, overlay),
+                ),
                 view_formats: vec![],
             };
             surface.configure(&gpu.device, &surface_config);
@@ -813,7 +995,7 @@ impl App {
             window_id,
             WindowState {
                 font_px,
-                created_transparent: window_created_transparent(self.config.background_opacity),
+                created_transparent: transparent,
                 window,
                 group,
                 tab_id: crate::macos_applescript::alloc_tab_id(),

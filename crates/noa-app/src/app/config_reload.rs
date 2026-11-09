@@ -645,11 +645,17 @@ impl App {
     /// the watcher's reload-diff then sees no change at all.
     pub(in crate::app) fn apply_background_opacity_to_windows(&mut self, opacity: f32) {
         let opacity = self.shown_opacity(opacity);
+        let overlay_window = self
+            .quick_terminal
+            .as_ref()
+            .filter(|qt| qt.is_overlay())
+            .map(|qt| qt.window_id);
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
-        let transparent = opacity < 1.0;
-        for state in self.windows.values_mut() {
+        for (window_id, state) in &mut self.windows {
+            let transparent =
+                window_surface_transparent(opacity, overlay_window == Some(*window_id));
             let caps = state.surface.get_capabilities(&gpu.adapter);
             let alpha_mode = preferred_surface_alpha_mode(&caps, transparent);
             if state.surface_config.alpha_mode != alpha_mode {

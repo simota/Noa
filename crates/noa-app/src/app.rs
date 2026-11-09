@@ -118,7 +118,8 @@ use state::*;
 use config::{
     BackgroundImageRuntime, alpha_blending_mode, apply_palette_overrides, effective_theme_name,
     font_config_from_noa_config, load_background_image_runtime, resolve_cursor_style,
-    resolve_grid_padding, window_created_transparent, with_desktop_app_id,
+    resolve_grid_padding, window_created_transparent, window_surface_transparent,
+    with_desktop_app_id,
 };
 #[cfg(target_os = "macos")]
 use config::{apply_macos_titlebar_style, macos_option_as_alt, needs_macos_titlebar_backdrop};
@@ -126,8 +127,9 @@ use helpers::*;
 use input_ops::ActiveOverlay;
 #[cfg(test)]
 use quick_terminal::{
-    ease_out_cubic, quick_terminal_anchor_window_id, quick_terminal_position_geometry,
-    quick_terminal_progress, quick_terminal_reveal_origin,
+    QuickTerminalReshow, ease_out_cubic, logical_cover, quick_terminal_anchor_window_id,
+    quick_terminal_overlay_panel, quick_terminal_position_geometry, quick_terminal_progress,
+    quick_terminal_reshow, quick_terminal_reveal_origin,
     quick_terminal_should_autohide_on_focus_loss, quick_terminal_should_suppress_redraw,
     quick_terminal_size_footprint, quick_terminal_slide_reveal,
 };

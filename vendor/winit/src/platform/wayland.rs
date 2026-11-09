@@ -81,6 +81,12 @@ impl<T> EventLoopBuilderExtWayland for EventLoopBuilder<T> {
 pub trait WindowExtWayland {
     /// Returns `xdg_toplevel` of the window or [`None`] if the window is X11 window.
     fn xdg_toplevel(&self) -> Option<NonNull<c_void>>;
+
+    /// Noa patch: accept pointer and touch input only inside `rect` — `(x, y, width, height)`
+    /// in surface-local logical pixels — letting it through to whatever is below elsewhere.
+    /// `None` accepts input on the whole surface again. Takes effect with the next presented
+    /// frame. Does nothing for an X11 window.
+    fn set_input_rect(&self, rect: Option<(i32, i32, i32, i32)>);
 }
 
 impl WindowExtWayland for Window {
@@ -92,6 +98,17 @@ impl WindowExtWayland for Window {
             crate::platform_impl::Window::X(_) => None,
             #[cfg(wayland_platform)]
             crate::platform_impl::Window::Wayland(window) => window.xdg_toplevel(),
+        }
+    }
+
+    #[inline]
+    fn set_input_rect(&self, rect: Option<(i32, i32, i32, i32)>) {
+        #[allow(clippy::single_match)]
+        match &self.window {
+            #[cfg(x11_platform)]
+            crate::platform_impl::Window::X(_) => (),
+            #[cfg(wayland_platform)]
+            crate::platform_impl::Window::Wayland(window) => window.set_input_rect(rect),
         }
     }
 }

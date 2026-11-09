@@ -403,6 +403,13 @@ impl App {
         if self.quick_terminal_redraw_suppressed(window_id) {
             return;
         }
+        if self
+            .windows
+            .get(&window_id)
+            .is_some_and(|state| quick_terminal::wayland_window_unmapped(&state.window))
+        {
+            return;
+        }
         // Build the sidebar's draw model up front (reads only the store + pure
         // layout, AC-17) before borrowing `gpu`/`state` mutably, so the band can
         // be composited inline after the panes without a second borrow.
@@ -410,6 +417,7 @@ impl App {
         let idle_ember_pose = self.idle_ember_for_draw(window_id);
         let copy_mode_pane = self.copy_mode_pane_for_redraw(window_id);
         let padding = self.padding;
+        let overlay_panel = self.quick_terminal_overlay_panel_rect(window_id);
         // scratch-terminal kaizen item 4: resolved up front for the same
         // reason as `padding`/`sidebar_model` above — `state`/`gpu` are
         // borrowed mutably below, so this can't be read inline at the
@@ -1291,6 +1299,7 @@ impl App {
                 state.surface_config.format,
                 &view,
                 surface_size,
+                window_card_area(surface_size, overlay_panel),
                 &toast.text,
                 state.window.scale_factor() as f32,
             );
@@ -1300,7 +1309,13 @@ impl App {
                 w: state.surface_config.width,
                 h: state.surface_config.height,
             };
-            sidebar::draw_bell_flash(gpu, state.surface_config.format, &view, surface_size);
+            sidebar::draw_bell_flash(
+                gpu,
+                state.surface_config.format,
+                &view,
+                surface_size,
+                window_card_area(surface_size, overlay_panel),
+            );
         }
         frame.present();
         // NOA_LATENCY_TRACE t2: the echo frame has been handed to the

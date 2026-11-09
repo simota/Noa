@@ -141,6 +141,13 @@ pub struct WindowState {
     /// The state of the frame callback.
     frame_callback_state: FrameCallbackState,
 
+    /// Noa patch: the application unmapped the toplevel with `set_visible(false)`.
+    hidden: bool,
+
+    /// Noa patch: the toplevel was mapped again and its initial configure has not arrived yet,
+    /// so attaching a buffer would be a protocol error.
+    remap_pending: bool,
+
     viewport: Option<WpViewport>,
     fractional_scale: Option<WpFractionalScaleV1>,
     blur: Option<OrgKdeKwinBlur>,
@@ -196,6 +203,8 @@ impl WindowState {
             fractional_scale,
             frame: None,
             frame_callback_state: FrameCallbackState::None,
+            hidden: false,
+            remap_pending: false,
             seat_focus: Default::default(),
             has_pending_move: None,
             ime_allowed: false,
@@ -393,6 +402,8 @@ impl WindowState {
 
         // NOTE: Set the configure before doing a resize, since we query it during it.
         self.last_configure = Some(configure);
+        // Noa patch: a configure is what makes a remapped toplevel drawable again.
+        self.remap_pending = false;
 
         if state_change_requires_resize || new_size != self.inner_size() {
             self.resize(new_size);
@@ -576,6 +587,50 @@ impl WindowState {
     #[inline]
     pub fn inner_size(&self) -> LogicalSize<u32> {
         self.size
+    }
+
+    /// Noa patch: whether the toplevel is mapped and may have a buffer attached.
+    #[inline]
+    pub fn is_visible(&self) -> bool {
+        !self.hidden && !self.remap_pending
+    }
+
+    /// Noa patch: unmap the toplevel by attaching a null buffer, or map it again with a new
+    /// initial commit. The caller must not present until `is_visible` reports `true`, which
+    /// happens once the compositor answers that commit with a configure (followed by a redraw
+    /// request).
+    pub fn set_visible(&mut self, visible: bool, app_id: Option<&str>) {
+        if visible != self.hidden {
+            return;
+        }
+
+        if visible {
+            self.hidden = false;
+            self.remap_pending = true;
+
+            // Unmapping discarded every toplevel attribute, so send them again.
+            if let Some(app_id) = app_id {
+                self.window.set_app_id(app_id);
+            }
+            self.window.set_title(&self.title);
+            self.window.set_min_size(Some(self.min_inner_size.into()));
+            self.window.set_max_size(self.max_inner_size.map(Into::into));
+            if self.last_configure.as_ref().is_some_and(WindowConfigure::is_maximized) {
+                self.window.set_maximized();
+            }
+            self.window.commit();
+        } else {
+            self.hidden = true;
+            self.remap_pending = false;
+
+            // The compositor never completes the frame callback of an unmapped surface, and a
+            // pending one would hold back every later redraw request.
+            self.frame_callback_reset();
+
+            let surface = self.window.wl_surface();
+            surface.attach(None, 0, 0);
+            surface.commit();
+        }
     }
 
     /// Whether the window received initial configure event from the compositor.

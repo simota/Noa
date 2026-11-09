@@ -62,6 +62,22 @@ pub(crate) fn content_inset_bounds(bounds: PaneRectApp, top: u32, margin: u32) -
     )
 }
 
+/// The part of a `surface`-sized window that window-level cards (the resize
+/// toast, the bell flash) are drawn over: `panel` when the window shows only
+/// a panel of itself (the overlay quick terminal), the whole surface
+/// otherwise.
+pub(crate) fn window_card_area(surface: PixelSize, panel: Option<PaneRectApp>) -> PaneRectApp {
+    panel.unwrap_or_else(|| PaneRectApp::new(0, 0, surface.w, surface.h))
+}
+
+/// Top-left origin that centers a `block` in `area`.
+pub(crate) fn centered_in(area: PaneRectApp, block: PixelSize) -> (u32, u32) {
+    (
+        area.x + area.w.saturating_sub(block.w) / 2,
+        area.y + area.h.saturating_sub(block.h) / 2,
+    )
+}
+
 pub(crate) fn can_split_rect(rect: PaneRectApp, orientation: SplitOrientation) -> bool {
     let required = MIN_PANE_SIZE_PX
         .saturating_mul(2)

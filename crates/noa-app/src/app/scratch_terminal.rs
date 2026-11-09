@@ -90,15 +90,19 @@ pub(super) fn scratch_terminal_footprint_px(
 
 /// The popup's top-left origin (physical px), centered on the anchor
 /// window's outer frame (R2/L2: "フォーカス中ウィンドウの outer frame 中央").
+/// `None` when the anchor's position is unknowable (Wayland never reports
+/// window positions), leaving placement to the compositor.
 pub(super) fn scratch_terminal_origin(
-    anchor_outer_origin: (i32, i32),
+    anchor_outer_origin: Option<(i32, i32)>,
     anchor_outer_size: (u32, u32),
     popup_size: (u32, u32),
-) -> (i32, i32) {
-    (
-        anchor_outer_origin.0 + (anchor_outer_size.0 as i32 - popup_size.0 as i32) / 2,
-        anchor_outer_origin.1 + (anchor_outer_size.1 as i32 - popup_size.1 as i32) / 2,
-    )
+) -> Option<(i32, i32)> {
+    anchor_outer_origin.map(|(x, y)| {
+        (
+            x + (anchor_outer_size.0 as i32 - popup_size.0 as i32) / 2,
+            y + (anchor_outer_size.1 as i32 - popup_size.1 as i32) / 2,
+        )
+    })
 }
 
 /// The shared "Scratch Terminal" identity prefix — the OS window title
@@ -257,9 +261,7 @@ impl App {
         // different scale — on a 1x/2x pair, roughly half the configured
         // columns and rows would fit.
         let anchor_font_px = anchor.font_px;
-        let Ok(anchor_outer_position) = anchor_window.outer_position() else {
-            return;
-        };
+        let anchor_outer_position = anchor_window.outer_position().ok();
         let anchor_outer_size = anchor_window.outer_size();
         let anchor_inner_size = anchor_window.inner_size();
         let scale_factor = anchor_window.scale_factor();
@@ -278,8 +280,8 @@ impl App {
             (anchor_inner_size.width, anchor_inner_size.height),
             SCRATCH_TERMINAL_MAX_FRACTION,
         );
-        let (origin_x, origin_y) = scratch_terminal_origin(
-            (anchor_outer_position.x, anchor_outer_position.y),
+        let origin = scratch_terminal_origin(
+            anchor_outer_position.map(|position| (position.x, position.y)),
             (anchor_outer_size.width, anchor_outer_size.height),
             (width, height),
         );
@@ -288,9 +290,12 @@ impl App {
             .with_title(scratch_terminal_window_title(cwd.as_deref()))
             .with_decorations(false)
             .with_inner_size(PhysicalSize::new(width, height))
-            .with_position(PhysicalPosition::new(origin_x, origin_y))
             .with_transparent(window_created_transparent(self.config.background_opacity))
             .with_visible(false);
+        let attrs = match origin {
+            Some((x, y)) => attrs.with_position(PhysicalPosition::new(x, y)),
+            None => attrs,
+        };
         #[cfg(target_os = "macos")]
         let attrs = attrs.with_option_as_alt(macos_option_as_alt(self.config.macos_option_as_alt));
         let Ok(window) = event_loop.create_window(attrs) else {
@@ -607,8 +612,13 @@ mod tests {
 
     #[test]
     fn origin_centers_on_anchor_outer_frame() {
-        let origin = scratch_terminal_origin((100, 200), (800, 600), (400, 300));
-        assert_eq!(origin, (100 + 200, 200 + 150));
+        let origin = scratch_terminal_origin(Some((100, 200)), (800, 600), (400, 300));
+        assert_eq!(origin, Some((100 + 200, 200 + 150)));
+    }
+
+    #[test]
+    fn origin_is_left_to_the_compositor_when_anchor_position_is_unknown() {
+        assert_eq!(scratch_terminal_origin(None, (800, 600), (400, 300)), None);
     }
 
     // AC-4: a `None` cwd (unreported/vanished dir) passes through unchanged

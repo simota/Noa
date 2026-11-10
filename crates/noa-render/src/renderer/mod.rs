@@ -12,7 +12,7 @@ use noa_grid::{Cell, CursorStyle, PLACEHOLDER, Row, SearchState, Selection, Term
 use unicode_width::UnicodeWidthChar;
 
 use crate::background_image::{BackgroundImage, BackgroundImageLayer};
-use crate::draw_plan::{DrawOp, PaneId, PaneRect, build_draw_plan};
+use crate::draw_plan::{DrawOp, OverlayGroup, PaneId, PaneRect, build_draw_plan_with_overlays};
 use crate::image_layer::{ImageDraw, ImageLayer};
 use crate::instance::{
     BlendMode, CellInstance, PaneUniformParams, Uniforms, populate_pane_uniform,
@@ -409,6 +409,16 @@ pub struct Renderer {
     /// [`FOCUS_INDICATOR_ALPHA`], converted to the target's output space each
     /// [`Renderer::rebuild_panes`].
     focus_indicator_color: [u8; 4],
+    /// Overlay groups drawn above the split layout
+    /// ([`Renderer::set_overlays`]).
+    overlays: Vec<OverlayGroup>,
+    /// Opaque default background for an overlay group's backdrop, re-derived
+    /// each [`Renderer::rebuild_panes`]: a group must hide what is under it
+    /// whatever `background-opacity` is.
+    overlay_backdrop_color: [u8; 4],
+    /// Per [`DrawOp::OverlayFrame`], in plan order: its backdrop and border
+    /// instance ranges.
+    overlay_frame_ranges: Vec<Range<u32>>,
     target_format: wgpu::TextureFormat,
     target_format_is_srgb: bool,
     /// Per-pane row-instance cache for dirty-row diffing (WP4), keyed by the
@@ -521,6 +531,9 @@ impl Renderer {
             backdrop_pipeline: None,
             divider_color: DIVIDER_RGBA,
             focus_indicator_color: FOCUS_INDICATOR_RGBA,
+            overlays: Vec::new(),
+            overlay_backdrop_color: [0, 0, 0, 255],
+            overlay_frame_ranges: Vec::new(),
             target_format: format,
             target_format_is_srgb: format.is_srgb(),
             pane_render_cache: HashMap::new(),
@@ -644,6 +657,12 @@ impl Renderer {
     /// surface is left fully transparent, for a window that shows the
     /// desktop around a smaller panel. `None` (the default) fills the whole
     /// surface.
+    /// Set the overlay groups for the following draws. Each group's panes
+    /// must also be in the layout given to [`Renderer::rebuild_panes`].
+    pub fn set_overlays(&mut self, overlays: Vec<OverlayGroup>) {
+        self.overlays = overlays;
+    }
+
     pub fn set_backdrop_rect(&mut self, rect: Option<PaneRect>) {
         self.backdrop_rect = rect;
     }
@@ -1013,6 +1032,8 @@ impl Renderer {
 
         if let Some(clear_color) = first_clear_color {
             self.clear_color = apply_background_opacity(clear_color, self.background_opacity);
+            let opaque = to_u8_color(clear_color);
+            self.overlay_backdrop_color = [opaque[0], opaque[1], opaque[2], 255];
         }
         // Theme-derived overlay colors for the divider / focus-indicator
         // instances emitted later in `prepare_overlay_instances` (which has no
@@ -1080,7 +1101,8 @@ impl Renderer {
         zoomed: Option<PaneId>,
         force_ring: bool,
     ) {
-        let plan = build_draw_plan(layout, focused, zoomed, force_ring);
+        let plan =
+            build_draw_plan_with_overlays(layout, &self.overlays, focused, zoomed, force_ring);
         self.ensure_pane_gpu_count(device, layout.len());
         self.upload_uniforms(queue, layout);
         self.prepare_overlay_instances(&plan);
@@ -1174,9 +1196,15 @@ impl Renderer {
                 );
             }
 
+            let mut overlay_frames = self.overlay_frame_ranges.iter();
             for op in &plan {
                 match op {
                     DrawOp::Clear => {}
+                    DrawOp::OverlayFrame { .. } => {
+                        if let Some(range) = overlay_frames.next() {
+                            self.draw_pixel_overlay_range(&mut pass, range.clone());
+                        }
+                    }
                     DrawOp::PaneCells {
                         pane,
                         scissor,
@@ -1431,9 +1459,40 @@ impl Renderer {
         instances.clear();
         self.divider_range = 0..0;
         self.focus_indicator_range = 0..0;
+        self.overlay_frame_ranges.clear();
 
         for op in plan {
             match op {
+                DrawOp::OverlayFrame {
+                    backdrop,
+                    header,
+                    border,
+                    focused,
+                } => {
+                    let start = (self.cell_instance_len + instances.len()) as u32;
+                    instances.push(pixel_overlay_instance(
+                        *backdrop,
+                        self.overlay_backdrop_color,
+                    ));
+                    if let Some((rect, color)) = header {
+                        let color =
+                            to_u8_color(surface_output_rgba(rgba(*color), self.target_format_is_srgb));
+                        instances.push(pixel_overlay_instance(
+                            *rect,
+                            [color[0], color[1], color[2], 255],
+                        ));
+                    }
+                    let border_color = if *focused {
+                        self.focus_indicator_color
+                    } else {
+                        self.divider_color
+                    };
+                    for rect in border {
+                        instances.push(pixel_overlay_instance(*rect, border_color));
+                    }
+                    let end = (self.cell_instance_len + instances.len()) as u32;
+                    self.overlay_frame_ranges.push(start..end);
+                }
                 DrawOp::Dividers { rects } => {
                     let start = (self.cell_instance_len + instances.len()) as u32;
                     for rect in rects {

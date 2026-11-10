@@ -149,7 +149,8 @@ Every binding can be changed with `keybind = …` (see
 | `ctrl+shift+l` | Session overview (`ctrl+shift+o` is Split Right here) |
 | `ctrl+shift+m` | Send selection to pane |
 | `ctrl+shift+j` | Next notification |
-| `ctrl+shift+x` | Scratch terminal (`ctrl+shift+t` is New Tab here) |
+| `ctrl+shift+d` | Scratch terminal (`ctrl+shift+t` is New Tab here) |
+| `ctrl+shift+b` | Quick terminal (only while a Noa window is focused) |
 | `ctrl+,` / `ctrl+shift+,` | Preferences / reload config |
 
 ## Differences from macOS

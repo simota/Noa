@@ -803,8 +803,21 @@ fn linux_scratch_terminal_default_does_not_shadow_new_tab() {
         Some(AppCommand::NewTab)
     );
     assert_eq!(
-        engine.resolve(&Key::Character("X".into()), ctrl_shift),
+        engine.resolve(&Key::Character("D".into()), ctrl_shift),
         Some(AppCommand::ToggleScratchTerminal)
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn linux_default_engine_binds_quick_terminal_in_app() {
+    let engine = KeybindEngine::default();
+    assert_eq!(
+        engine.resolve(
+            &Key::Character("B".into()),
+            ModifiersState::CONTROL | ModifiersState::SHIFT
+        ),
+        Some(AppCommand::ToggleQuickTerminal)
     );
 }
 

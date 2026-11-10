@@ -60,12 +60,13 @@ pub const DEFAULT_QUICK_TERMINAL_ANIMATION_DURATION: f32 = 0.2;
 ///
 /// Off macOS there is no global-hotkey backend, so the default is empty
 /// (disabled) rather than a chord that only produces a warning; the quick
-/// terminal stays reachable through the palette or a `keybind`.
+/// terminal stays reachable through the palette, the in-app `ctrl+shift+b`
+/// default keybind, or a `keybind`.
 #[cfg(target_os = "macos")]
 pub const DEFAULT_QUICK_TERMINAL_HOTKEY: &str = "cmd+grave";
 #[cfg(not(target_os = "macos"))]
 pub const DEFAULT_QUICK_TERMINAL_HOTKEY: &str = "";
-/// `scratch-terminal-key` default: `cmd+shift+t` on macOS, `ctrl+shift+x`
+/// `scratch-terminal-key` default: `cmd+shift+t` on macOS, `ctrl+shift+d`
 /// elsewhere (`ctrl+shift+t` is New Tab in Ghostty's Linux defaults). An
 /// in-app keybind (not a global hotkey — see [`crate::KeybindConfig`]/
 /// `noa-app`'s `KeybindEngine`). Set `scratch-terminal-key = none` to
@@ -73,7 +74,7 @@ pub const DEFAULT_QUICK_TERMINAL_HOTKEY: &str = "";
 #[cfg(target_os = "macos")]
 pub const DEFAULT_SCRATCH_TERMINAL_KEY: &str = "cmd+shift+t";
 #[cfg(not(target_os = "macos"))]
-pub const DEFAULT_SCRATCH_TERMINAL_KEY: &str = "ctrl+shift+x";
+pub const DEFAULT_SCRATCH_TERMINAL_KEY: &str = "ctrl+shift+d";
 /// `scratch-terminal-size` default: 100x25 cells.
 pub const DEFAULT_SCRATCH_TERMINAL_SIZE: ScratchTerminalSize = ScratchTerminalSize {
     cols: 100,
@@ -2529,7 +2530,7 @@ mod tests {
             Some(if cfg!(target_os = "macos") {
                 "cmd+shift+t"
             } else {
-                "ctrl+shift+x"
+                "ctrl+shift+d"
             })
         );
     }

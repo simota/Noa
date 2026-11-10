@@ -332,7 +332,10 @@ fn default_specs() -> Vec<(&'static str, AppCommand)> {
         ("ctrl+shift+<", AppCommand::ReloadConfig),
         // Not `ctrl+shift+t` as on macOS (that is New Tab here); see
         // `noa_config::DEFAULT_SCRATCH_TERMINAL_KEY`.
-        ("ctrl+shift+x", AppCommand::ToggleScratchTerminal),
+        ("ctrl+shift+d", AppCommand::ToggleScratchTerminal),
+        // In-app only: there is no global-hotkey backend off macOS (see
+        // `noa_config::DEFAULT_QUICK_TERMINAL_HOTKEY`).
+        ("ctrl+shift+b", AppCommand::ToggleQuickTerminal),
     ]
 }
 

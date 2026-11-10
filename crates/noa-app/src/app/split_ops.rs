@@ -176,6 +176,36 @@ fn source_focus_after_cross_tab_move(
         .unwrap_or(focused_before)
 }
 
+/// Point a moved `Surface`'s io thread at `dest_window`: its event target,
+/// its auto-approve flag and its redraw-pacing clock.
+pub(super) fn retarget_surface_io(
+    surface: &Surface,
+    dest_window: WindowId,
+    dest_auto_approve_enabled: &Arc<AtomicBool>,
+    dest_redraw_floor: &crate::io_thread::RedrawFloor,
+) {
+    if let SurfaceTransport::Local(local) = &surface.transport {
+        local
+            .io_window_id
+            .store(u64::from(dest_window), Ordering::Release);
+        // P2-1: re-point the moved pane's auto-approve producer at the
+        // destination tab's flag. A one-time value copy would not be
+        // enough (a later toggle of either tab's checkbox would then be
+        // invisible to this pane), so this swaps the *holder*'s contents
+        // — the io thread re-reads through `AutoApprovePublish::enabled`
+        // on every batch, so it starts following the destination flag,
+        // including its future toggles, from the very next feed.
+        *local.auto_approve_flag.lock() = dest_auto_approve_enabled.clone();
+        // P2-4: same re-attach, for the pane's redraw-pacing clock — see
+        // `RedrawFloorHandle`. Without this the moved pane keeps
+        // coalescing redraws against the source tab's (now orphaned)
+        // clock: a second independent floor ticking inside one tab
+        // (extra frames), and one that stops following monitor-refresh
+        // changes forever once the source tab closes.
+        *local.redraw_floor.lock() = dest_redraw_floor.clone();
+    }
+}
+
 impl App {
     pub(super) fn new_split(&mut self, window_id: WindowId, direction: Direction) {
         let Some(gpu) = self.gpu.as_ref() else {
@@ -587,26 +617,7 @@ impl App {
         // sends — to whichever window currently holds the pane at *receive*
         // time, so a stale baked-in id here never produces a stale-routed
         // event; it's a no-op for `Remote`, not a rejected move.
-        if let SurfaceTransport::Local(local) = &surface.transport {
-            local
-                .io_window_id
-                .store(u64::from(dest_window), Ordering::Release);
-            // P2-1: re-point the moved pane's auto-approve producer at the
-            // destination tab's flag. A one-time value copy would not be
-            // enough (a later toggle of either tab's checkbox would then be
-            // invisible to this pane), so this swaps the *holder*'s contents
-            // — the io thread re-reads through `AutoApprovePublish::enabled`
-            // on every batch, so it starts following the destination flag,
-            // including its future toggles, from the very next feed.
-            *local.auto_approve_flag.lock() = dest_auto_approve_enabled.clone();
-            // P2-4: same re-attach, for the pane's redraw-pacing clock — see
-            // `RedrawFloorHandle`. Without this the moved pane keeps
-            // coalescing redraws against the source tab's (now orphaned)
-            // clock: a second independent floor ticking inside one tab
-            // (extra frames), and one that stops following monitor-refresh
-            // changes forever once the source tab closes.
-            *local.redraw_floor.lock() = dest_redraw_floor.clone();
-        }
+        retarget_surface_io(&surface, dest_window, &dest_auto_approve_enabled, &dest_redraw_floor);
 
         let Some(dest_state) = self.windows.get_mut(&dest_window) else {
             // Unreachable: nothing between the checks above and here can
@@ -672,6 +683,99 @@ impl App {
         }
         let dest_window_handle = dest_state.window.clone();
 
+        self.rekey_moved_pane(source_window, pane, dest_window, &dest_auto_approve_enabled);
+        // floating-panes L2.3: the pane's floats move with it.
+        self.move_pane_floats(
+            source_window,
+            pane,
+            dest_window,
+            transform.remove_outcome.tab_should_close,
+        );
+
+        if transform.remove_outcome.tab_should_close {
+            // The destination tab exists whenever this move was valid, so
+            // `source_window` is never the last window here — the
+            // `TabCloseOutcome::Quit` app-exit cascade is unreachable
+            // (L2(e)). It may be the last tab of its own window group (a
+            // move to another group), which `close_tab` closes like any
+            // emptied window. The Overview lives in its host window: when the
+            // host is the tab closing, it re-opens on the window that takes
+            // focus, so a drag from the host's last pane doesn't end it.
+            // The query and pointer carry over, so the re-opened Overview
+            // shows the same tiles and takes a click without a move first.
+            let overview_was_hosted_here = self
+                .overview_window
+                .as_ref()
+                .filter(|overview| self.overview_visible && overview.host == source_window)
+                .map(|overview| (overview.search_query.clone(), overview.last_cursor_point));
+            // Release the source window before the close so its native
+            // teardown happens there, not after the Overview moved hosts.
+            drop(source_window_handle);
+            self.close_tab(event_loop, source_window);
+            if let Some((search_query, last_cursor_point)) = overview_was_hosted_here {
+                self.show_tab_overview();
+                if let Some(overview) = self.overview_window.as_mut() {
+                    overview.search_query = search_query;
+                    overview.last_cursor_point = last_cursor_point;
+                }
+            }
+        } else {
+            self.relayout_and_resize_window(source_window);
+            // P2-2: the source tab's focus moved to `next_focus`/a fallback
+            // pane above — its IME candidate window must follow, exactly
+            // like an in-tab reposition. Skipped when the tab closed: there
+            // is no `WindowState` left for it to anchor to.
+            self.update_focused_ime_cursor_area(source_window);
+            source_window_handle.request_redraw();
+        }
+        self.relayout_and_resize_window(dest_window);
+        self.sync_pane_visibility(dest_window);
+        // P2-2: the moved pane now lives (and is focused) in `dest_window` —
+        // its IME candidate window must anchor there, not linger at the
+        // source tab's pre-move position.
+        self.update_focused_ime_cursor_area(dest_window);
+        // The moved pane now holds `dest_window`'s keyboard focus. If that
+        // window has OS focus, report it: the pane got FocusOut when it left
+        // the source above, and no `Focused(true)` will follow for a window
+        // that already has it. The pane it displaced loses that focus.
+        if self.os_focused == Some(dest_window) {
+            if dest_previous_focus != pane
+                && let Some(previous) = self
+                    .windows
+                    .get(&dest_window)
+                    .and_then(|state| state.surfaces.get(&dest_previous_focus))
+            {
+                let reporting = previous.terminal.lock().modes.focus_reporting();
+                if let Some(bytes) = focus_report_bytes(false, reporting) {
+                    self.write_pane_pty_bytes(dest_window, dest_previous_focus, bytes);
+                }
+            }
+            if let Some(bytes) = focus_report_bytes(true, self.focus_reporting(dest_window)) {
+                self.write_pane_pty_bytes(dest_window, pane, bytes);
+            }
+        }
+        dest_window_handle.request_redraw();
+        // A move between window groups takes the card from one group's
+        // sidebar to another's.
+        self.request_sidebar_redraw();
+        self.mark_all_overview_tiles_dirty();
+        self.request_overview_redraw();
+        self.reconcile_session_store();
+        self.persist_session();
+        true
+    }
+
+    /// Re-key everything outside `WindowState` that names a pane by its
+    /// window — the sidebar card, the per-card flash tables, the IPC
+    /// registrations and the process probe — after its `Surface` moved from
+    /// `source_window` to `dest_window`.
+    pub(super) fn rekey_moved_pane(
+        &mut self,
+        source_window: WindowId,
+        pane: PaneId,
+        dest_window: WindowId,
+        dest_auto_approve_enabled: &Arc<AtomicBool>,
+    ) {
         // FR-12: the moved pane's sidebar card follows to its new window.
         self.session_store.rekey(
             Self::session_card_id(source_window, pane),
@@ -747,78 +851,6 @@ impl App {
                 Self::session_card_id(dest_window, pane),
             );
         }
-
-        if transform.remove_outcome.tab_should_close {
-            // The destination tab exists whenever this move was valid, so
-            // `source_window` is never the last window here — the
-            // `TabCloseOutcome::Quit` app-exit cascade is unreachable
-            // (L2(e)). It may be the last tab of its own window group (a
-            // move to another group), which `close_tab` closes like any
-            // emptied window. The Overview lives in its host window: when the
-            // host is the tab closing, it re-opens on the window that takes
-            // focus, so a drag from the host's last pane doesn't end it.
-            // The query and pointer carry over, so the re-opened Overview
-            // shows the same tiles and takes a click without a move first.
-            let overview_was_hosted_here = self
-                .overview_window
-                .as_ref()
-                .filter(|overview| self.overview_visible && overview.host == source_window)
-                .map(|overview| (overview.search_query.clone(), overview.last_cursor_point));
-            // Release the source window before the close so its native
-            // teardown happens there, not after the Overview moved hosts.
-            drop(source_window_handle);
-            self.close_tab(event_loop, source_window);
-            if let Some((search_query, last_cursor_point)) = overview_was_hosted_here {
-                self.show_tab_overview();
-                if let Some(overview) = self.overview_window.as_mut() {
-                    overview.search_query = search_query;
-                    overview.last_cursor_point = last_cursor_point;
-                }
-            }
-        } else {
-            self.relayout_and_resize_window(source_window);
-            // P2-2: the source tab's focus moved to `next_focus`/a fallback
-            // pane above — its IME candidate window must follow, exactly
-            // like an in-tab reposition. Skipped when the tab closed: there
-            // is no `WindowState` left for it to anchor to.
-            self.update_focused_ime_cursor_area(source_window);
-            source_window_handle.request_redraw();
-        }
-        self.relayout_and_resize_window(dest_window);
-        self.sync_pane_visibility(dest_window);
-        // P2-2: the moved pane now lives (and is focused) in `dest_window` —
-        // its IME candidate window must anchor there, not linger at the
-        // source tab's pre-move position.
-        self.update_focused_ime_cursor_area(dest_window);
-        // The moved pane now holds `dest_window`'s keyboard focus. If that
-        // window has OS focus, report it: the pane got FocusOut when it left
-        // the source above, and no `Focused(true)` will follow for a window
-        // that already has it. The pane it displaced loses that focus.
-        if self.os_focused == Some(dest_window) {
-            if dest_previous_focus != pane
-                && let Some(previous) = self
-                    .windows
-                    .get(&dest_window)
-                    .and_then(|state| state.surfaces.get(&dest_previous_focus))
-            {
-                let reporting = previous.terminal.lock().modes.focus_reporting();
-                if let Some(bytes) = focus_report_bytes(false, reporting) {
-                    self.write_pane_pty_bytes(dest_window, dest_previous_focus, bytes);
-                }
-            }
-            if let Some(bytes) = focus_report_bytes(true, self.focus_reporting(dest_window)) {
-                self.write_pane_pty_bytes(dest_window, pane, bytes);
-            }
-        }
-        dest_window_handle.request_redraw();
-        // A move between window groups takes the card from one group's
-        // sidebar to another's.
-        self.request_sidebar_redraw();
-        self.mark_all_overview_tiles_dirty();
-        self.request_overview_redraw();
-        self.reconcile_session_store();
-        self.persist_session();
-        true
     }
 
     pub(super) fn focus_pane(&mut self, window_id: WindowId, pane_id: PaneId) {
@@ -828,8 +860,18 @@ impl App {
         if !state.contains_pane(pane_id) {
             return;
         }
+        // A float that is collapsed or off screen never takes the keyboard
+        // as it is (floating-panes REQ-009/REQ-024), whoever asks.
+        if floating::focus_route(self.float_accepts_focus(window_id, pane_id))
+            == floating::FocusRoute::Reveal
+        {
+            self.reveal_float(window_id, pane_id);
+            return;
+        }
         let already_focused = state.focused_pane == pane_id;
-        if state.zoomed.is_some_and(|zoomed| zoomed != pane_id) {
+        let is_float = state.is_float(pane_id);
+        // A float sits above the split layout: focusing it leaves zoom alone.
+        if !is_float && state.zoomed.is_some_and(|zoomed| zoomed != pane_id) {
             // Acknowledgement must not hide a notification behind another zoomed pane.
             if let Some(state) = self.windows.get_mut(&window_id) {
                 state.zoomed = Some(pane_id);
@@ -837,6 +879,12 @@ impl App {
             self.relayout_and_resize_window(window_id);
         }
         if already_focused {
+            if floating::refocus_raises(already_focused, is_float)
+                && let Some(state) = self.windows.get_mut(&window_id)
+            {
+                state.floats.raise(pane_id);
+                state.window.request_redraw();
+            }
             self.clear_focused_session_bell(window_id);
             return;
         }
@@ -863,6 +911,11 @@ impl App {
                         if state.contains_pane(pane) {
                             state.focused_pane = pane;
                             state.last_mouse_pane = Some(pane);
+                            if is_float {
+                                state.floats.note_focus(pane);
+                            } else {
+                                state.return_pane = pane;
+                            }
                         }
                     }
                 }

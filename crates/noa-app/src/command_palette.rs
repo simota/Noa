@@ -14,8 +14,8 @@
 use std::borrow::Cow;
 
 use crate::commands::{
-    AppCommand, CopyModeAction, FontSizeAction, KeybindEngine, SearchAction, TerminalAction,
-    ViewportScroll,
+    AppCommand, CopyModeAction, FloatAction, FontSizeAction, KeybindEngine, SearchAction,
+    TerminalAction, ViewportScroll,
 };
 use crate::split_tree::Direction;
 
@@ -115,6 +115,13 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::ToggleCommandPalette => "Toggle Command Palette",
         AppCommand::ToggleQuickTerminal => "Toggle Quick Terminal",
         AppCommand::ToggleScratchTerminal => "Toggle Scratch Terminal",
+        AppCommand::Float(FloatAction::New) => "New Floating Pane",
+        AppCommand::Float(FloatAction::ToggleFocus) => "Toggle Floating Pane Focus",
+        AppCommand::Float(FloatAction::FocusNext) => "Next Floating Pane",
+        AppCommand::Float(FloatAction::FocusPrevious) => "Previous Floating Pane",
+        AppCommand::Float(FloatAction::ToggleCollapse) => "Collapse or Expand Floating Pane",
+        AppCommand::Float(FloatAction::ToggleMaximize) => "Maximize or Restore Floating Pane",
+        AppCommand::Float(FloatAction::CycleAnchor) => "Change Floating Pane Anchor",
         AppCommand::ToggleSecureKeyboardEntry => "Toggle Secure Keyboard Entry",
         AppCommand::ToggleBackgroundOpacity => "Toggle Background Opacity",
         AppCommand::ToggleSidebar => "Toggle Sidebar",
@@ -227,6 +234,23 @@ pub(crate) fn command_palette_description(command: AppCommand) -> &'static str {
         AppCommand::ToggleScratchTerminal => {
             "Show or hide a disposable terminal over the current window."
         }
+        AppCommand::Float(FloatAction::New) => {
+            "Open a terminal that floats over the focused split pane."
+        }
+        AppCommand::Float(FloatAction::ToggleFocus) => {
+            "Move focus between the last floating pane and the split pane."
+        }
+        AppCommand::Float(FloatAction::FocusNext) => "Focus the next floating pane.",
+        AppCommand::Float(FloatAction::FocusPrevious) => "Focus the previous floating pane.",
+        AppCommand::Float(FloatAction::ToggleCollapse) => {
+            "Collapse the floating pane to its title strip, or expand it."
+        }
+        AppCommand::Float(FloatAction::ToggleMaximize) => {
+            "Fill the anchor with the floating pane, or restore it."
+        }
+        AppCommand::Float(FloatAction::CycleAnchor) => {
+            "Attach the floating pane to its pane, tab or window in turn."
+        }
         AppCommand::ToggleSecureKeyboardEntry => "Toggle secure input mode.",
         AppCommand::ToggleBackgroundOpacity => {
             "Toggle the background opacity of a window that started transparent."
@@ -312,6 +336,13 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::ResizeSplit(Direction::Down),
         AppCommand::EqualizeSplits,
         AppCommand::ToggleSplitZoom,
+        AppCommand::Float(FloatAction::New),
+        AppCommand::Float(FloatAction::ToggleFocus),
+        AppCommand::Float(FloatAction::FocusNext),
+        AppCommand::Float(FloatAction::FocusPrevious),
+        AppCommand::Float(FloatAction::ToggleCollapse),
+        AppCommand::Float(FloatAction::ToggleMaximize),
+        AppCommand::Float(FloatAction::CycleAnchor),
         AppCommand::ToggleTabOverview,
         AppCommand::ToggleFullscreen,
         AppCommand::ToggleQuickTerminal,
@@ -629,7 +660,8 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         | AppCommand::FocusDirection(_)
         | AppCommand::ResizeSplit(_)
         | AppCommand::EqualizeSplits
-        | AppCommand::ToggleSplitZoom => CommandCategory::Splits,
+        | AppCommand::ToggleSplitZoom
+        | AppCommand::Float(_) => CommandCategory::Splits,
         AppCommand::NewTab
         | AppCommand::SetTabTitle
         | AppCommand::CloseTab

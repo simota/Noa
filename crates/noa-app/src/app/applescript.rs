@@ -248,7 +248,13 @@ impl App {
 
             // Terminals in a stable order (by PaneId), so `terminal N` is
             // deterministic across snapshots.
-            let mut panes: Vec<PaneId> = state.surfaces.keys().copied().collect();
+            // Floats are not scriptable terminals (floating-panes REQ-023).
+            let mut panes: Vec<PaneId> = state
+                .surfaces
+                .keys()
+                .copied()
+                .filter(|pane| !state.is_float(*pane))
+                .collect();
             panes.sort_by_key(|pane| pane.get());
             let terminals = panes
                 .iter()
@@ -263,7 +269,7 @@ impl App {
                         name: String::new(),
                         name_override: surface.title_override.clone(),
                         base_name: terminal_name(&title, cwd.as_deref()),
-                        selected: state.focused_pane == *pane,
+                        selected: state.split_focus() == *pane,
                         cwd,
                         pid: surface.child_pid,
                         tty: surface.tty_name.clone(),
@@ -344,6 +350,7 @@ impl App {
                 .surfaces
                 .iter()
                 .filter(|(pane, _)| state.zoomed.is_none_or(|zoomed| zoomed == **pane))
+                .filter(|(pane, _)| !state.is_float(**pane))
                 .map(|(pane, surface)| crate::macos_accessibility::AxPane {
                     id: pane.get(),
                     rect: surface.rect,

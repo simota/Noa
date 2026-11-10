@@ -778,6 +778,8 @@ impl App {
                 if self.is_scratch_terminal_window(window_id) {
                     self.mark_scratch_terminal_focused(window_id);
                 }
+                self.unfocus_floats_in_sibling_tabs(window_id);
+                self.adopt_window_floats(window_id);
                 self.reset_cursor_blink_phase();
                 // Another app's find bar may have changed the shared needle
                 // (Ghostty rereads it when the app becomes active).
@@ -836,6 +838,7 @@ impl App {
                 // arrive): drop it now so the pane isn't left "pressed".
                 self.cancel_mouse_capture(window_id);
                 self.finish_active_split_drag(window_id);
+                self.interrupt_float_pointer(window_id, floating::DragInterrupt::FocusLost);
                 // Cancel an in-flight overview pane drag when its host window
                 // loses focus (Cmd-Tab / native tab switch mid-drag): the
                 // eventual mouse-up may land elsewhere or never arrive, so the
@@ -907,7 +910,17 @@ impl App {
                 if self.is_quick_terminal_window(window_id) {
                     return;
                 }
+                if occluded {
+                    self.interrupt_float_pointer(window_id, floating::DragInterrupt::Occluded);
+                    if floating::hide_unfocuses_float(floating::HideCause::Occluded) {
+                        self.unfocus_float_on_tab_hide(window_id);
+                    }
+                }
                 if !occluded {
+                    // The tab now on screen holds its window's floats
+                    // (floating-panes L2.3), also when it came forward
+                    // without taking focus.
+                    self.adopt_window_floats(window_id);
                     self.reset_cursor_blink_phase();
                     // NOA_TAB_SWITCH_TRACE t0: begin the occlusion-reveal
                     // sample (see `tab_switch_trace` module docs).
@@ -1587,6 +1600,9 @@ impl App {
             if self.drag_active_sidebar(window_id, point) {
                 return;
             }
+            if self.drag_active_float(window_id, point) {
+                return;
+            }
             if self.drag_active_split(window_id, point) {
                 return;
             }
@@ -1868,10 +1884,92 @@ impl App {
         {
             return;
         }
+        // The float layer sees every button first (floating-panes REQ-011):
+        // its strip and edges swallow the right and middle buttons, and a
+        // press on its terminal goes there whatever the last pointer motion
+        // resolved to.
+        if scripted.is_none() {
+            let hit = self
+                .windows
+                .get(&window_id)
+                .and_then(|tab| tab.last_mouse_point)
+                .and_then(|point| self.float_hit_at(window_id, point));
+            let over_chrome =
+                hit.is_some_and(|hit| hit.part != crate::floating::FloatHitPart::Content);
+            // The pane that saw this button go down, if this is its release.
+            let owed = (state == ElementState::Released)
+                .then(|| {
+                    self.windows.get(&window_id).and_then(|tab| {
+                        tab.surfaces
+                            .iter()
+                            .find(|(_, surface)| surface.pressed_mouse_button == Some(button))
+                            .map(|(pane, _)| *pane)
+                    })
+                })
+                .flatten();
+            if floating::chrome_swallows_button(
+                over_chrome,
+                button == MouseButton::Left,
+                false,
+                owed.is_some(),
+            ) {
+                return;
+            }
+            if over_chrome
+                && let Some(owed) = owed
+                && let Some(tab) = self.windows.get_mut(&window_id)
+            {
+                tab.last_mouse_pane = Some(owed);
+            }
+            if state == ElementState::Pressed {
+                let content = hit
+                    .filter(|hit| hit.part == crate::floating::FloatHitPart::Content)
+                    .map(|hit| hit.id);
+                let (hovered, position) = self.windows.get(&window_id).map_or((None, None), |tab| {
+                    (tab.last_mouse_pane, tab.last_mouse_physical_position)
+                });
+                let split_under = match (content, position, self.gpu.as_ref()) {
+                    (None, Some(position), Some(gpu)) if !over_chrome => {
+                        let metrics = gpu.fonts.get(self.window_font_px(window_id)).metrics();
+                        self.pane_cell_at_position(window_id, position, metrics)
+                            .map(|(pane, _)| pane)
+                    }
+                    _ => None,
+                };
+                if floating::press_hover(content, split_under, hovered) != hovered
+                    && let Some(position) = position
+                {
+                    // Re-resolve the pointer so the float's cell is fresh too.
+                    self.on_cursor_moved(window_id, position);
+                }
+            }
+        }
         if button == MouseButton::Left {
             match state {
                 ElementState::Pressed => {
-                    if self.start_split_drag_at_last_mouse_point(window_id) {
+                    // Floats sit above the split layout: their chrome takes
+                    // the press, and their terminal shields the divider
+                    // under it.
+                    let float_press = if scripted.is_none() {
+                        self.float_mouse_press(event_loop, window_id)
+                    } else {
+                        floating::FloatPress::Miss
+                    };
+                    if let Some(tab) = self.windows.get_mut(&window_id) {
+                        tab.float_press_consumed = floating::chrome_press_flag(
+                            if float_press == floating::FloatPress::Consumed {
+                                floating::ChromePressEvent::PressConsumed
+                            } else {
+                                floating::ChromePressEvent::PressOther
+                            },
+                        );
+                    }
+                    if float_press == floating::FloatPress::Consumed {
+                        return;
+                    }
+                    if float_press == floating::FloatPress::Miss
+                        && self.start_split_drag_at_last_mouse_point(window_id)
+                    {
                         return;
                     }
                     // Cmd+click on a hovered link opens it and is fully
@@ -1910,6 +2008,18 @@ impl App {
                 ElementState::Released => {
                     if scripted.is_none() && self.finish_active_sidebar_drag(window_id) {
                         return;
+                    }
+                    if scripted.is_none() {
+                        let drag_finished = self.finish_float_drag(window_id);
+                        let press_consumed = self.windows.get_mut(&window_id).is_some_and(|tab| {
+                            std::mem::replace(
+                                &mut tab.float_press_consumed,
+                                floating::chrome_press_flag(floating::ChromePressEvent::Release),
+                            )
+                        });
+                        if floating::left_release_swallowed(drag_finished, press_consumed) {
+                            return;
+                        }
                     }
                     if scripted.is_none() && self.finish_active_split_drag(window_id) {
                         return;
@@ -2090,11 +2200,18 @@ impl App {
         {
             return;
         }
-        let pane_id = self
-            .windows
-            .get(&window_id)
-            .and_then(|state| self.script_target(state).or(state.last_mouse_pane))
-            .or_else(|| self.windows.get(&window_id).map(|state| state.focused_pane));
+        let pane_id = self.windows.get(&window_id).and_then(|state| {
+            let over_float_chrome = state
+                .last_mouse_point
+                .and_then(|point| self.float_hit_at(window_id, point))
+                .is_some_and(|hit| hit.part != crate::floating::FloatHitPart::Content);
+            floating::wheel_pane(
+                self.script_target(state),
+                state.last_mouse_pane,
+                state.focused_pane,
+                over_float_chrome,
+            )
+        });
         let Some(pane_id) = pane_id else {
             return;
         };

@@ -291,6 +291,21 @@ pub(super) struct WindowState {
     pub(super) split_tree: SplitTree,
     pub(super) zoomed: Option<PaneId>,
     pub(super) focused_pane: PaneId,
+    /// The split pane that last held focus: where focus returns when a float
+    /// closes, collapses or hides (floating-panes "復帰先ペイン"). Equals
+    /// `focused_pane` unless a float has focus.
+    pub(super) return_pane: PaneId,
+    /// This tab's floats. Their `Surface`s live in `surfaces` beside the
+    /// split panes'; `split_tree` never names them.
+    pub(super) floats: crate::floating::FloatSet,
+    pub(super) float_drag: Option<crate::floating::FloatDrag>,
+    /// Each visible float's title strip, rendered as a one-row terminal.
+    pub(super) float_strips: HashMap<PaneId, super::floating::FloatStrip>,
+    /// The last title-strip press, for double-click detection.
+    pub(super) float_strip_click: Option<(PaneId, Instant)>,
+    /// A float's strip, button or edge took the left press whose release is
+    /// still to come.
+    pub(super) float_press_consumed: bool,
     pub(super) surfaces: HashMap<PaneId, Surface>,
     pub(super) last_mouse_pane: Option<PaneId>,
     /// The modal last seen owning this window's typing (`None`: the
@@ -386,7 +401,7 @@ pub(super) struct WindowState {
     pub(super) resize_throttle: crate::debounce::Throttle<Vec<(PaneId, GridSize)>>,
     /// The focused pane's last laid-out grid size, for the resize-overlay
     /// change check (`resize-overlay = after-first` skips the first layout).
-    pub(super) last_grid: Option<(u16, u16)>,
+    pub(super) last_grid: Option<(PaneId, (u16, u16))>,
     /// The inner sizes `CSI 8 t` requested that the window system has not
     /// acknowledged with `Resized` yet, oldest first. Only filled off macOS,
     /// where the resize is asynchronous (see `acknowledge_window_resize`).
@@ -1381,8 +1396,24 @@ impl WindowState {
         true
     }
 
+    /// Split panes in this tab. Floats share `surfaces` but are not counted
+    /// (floating-panes REQ-019).
     pub(super) fn pane_count(&self) -> usize {
-        self.surfaces.len()
+        self.surfaces.len() - self.floats.floats().len()
+    }
+
+    pub(super) fn is_float(&self, pane_id: PaneId) -> bool {
+        self.floats.contains(pane_id)
+    }
+
+    /// The focused split pane: `focused_pane`, or the return pane while a
+    /// float has focus.
+    pub(super) fn split_focus(&self) -> PaneId {
+        if self.is_float(self.focused_pane) {
+            self.return_pane
+        } else {
+            self.focused_pane
+        }
     }
 
     pub(super) fn contains_pane(&self, pane_id: PaneId) -> bool {

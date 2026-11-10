@@ -102,6 +102,8 @@ impl App {
             self.end_copy_mode_for_window(prev);
             self.cancel_mouse_capture(prev);
             self.finish_active_split_drag(prev);
+            self.interrupt_float_pointer(prev, floating::DragInterrupt::TabHidden);
+            self.unfocus_float_on_tab_hide(prev);
             if was_os_focused {
                 self.report_focus_event(prev, false);
             }
@@ -129,6 +131,7 @@ impl App {
                 }
             }
         }
+        self.adopt_window_floats(tab);
         let Some(state) = self.windows.get_mut(&tab) else {
             return;
         };

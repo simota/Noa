@@ -61,7 +61,7 @@ impl App {
         }
         let focused_panes: Vec<_> = ordered
             .iter()
-            .filter_map(|id| self.windows.get(id).map(|state| (*id, state.focused_pane)))
+            .filter_map(|id| self.windows.get(id).map(|state| (*id, state.split_focus())))
             .collect();
         if let Some(overview) = self.overview_window.as_ref() {
             let cache = overview.source_tile_ids_cache.borrow();
@@ -138,7 +138,7 @@ impl App {
     /// dot semantics). `None` for a window that no longer exists.
     pub(in crate::app) fn overview_tab_label(&self, window_id: WindowId) -> Option<String> {
         let state = self.windows.get(&window_id)?;
-        let id = Self::session_card_id(window_id, state.focused_pane);
+        let id = Self::session_card_id(window_id, state.split_focus());
         let progress = self
             .session_store
             .get(&id)

@@ -82,6 +82,8 @@ pub enum AppCommand {
     /// accelerator tracks the keybind engine's effective chord the same way
     /// [`Self::ToggleSidebar`]'s does.
     ToggleScratchTerminal,
+    /// Floating panes (`docs/specs/floating-panes.md` REQ-018).
+    Float(FloatAction),
     ToggleSecureKeyboardEntry,
     /// Hold every window's background opaque, or let `background-opacity`
     /// show again (Ghostty's `toggle_background_opacity`, macOS only).
@@ -120,6 +122,42 @@ pub enum AppCommand {
 pub enum CopyModeAction {
     CursorOnly,
     Extend(CopyDirection),
+}
+
+/// Floating-pane commands (`docs/specs/floating-panes.md` L2.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatAction {
+    New,
+    ToggleFocus,
+    FocusNext,
+    FocusPrevious,
+    ToggleCollapse,
+    ToggleMaximize,
+    CycleAnchor,
+}
+
+impl FloatAction {
+    pub(crate) const ALL: [Self; 7] = [
+        Self::New,
+        Self::ToggleFocus,
+        Self::FocusNext,
+        Self::FocusPrevious,
+        Self::ToggleCollapse,
+        Self::ToggleMaximize,
+        Self::CycleAnchor,
+    ];
+
+    const fn action_name(self) -> &'static str {
+        match self {
+            Self::New => "float.new",
+            Self::ToggleFocus => "float.toggle-focus",
+            Self::FocusNext => "float.focus-next",
+            Self::FocusPrevious => "float.focus-previous",
+            Self::ToggleCollapse => "float.toggle-collapse",
+            Self::ToggleMaximize => "float.toggle-maximize",
+            Self::CycleAnchor => "float.cycle-anchor",
+        }
+    }
 }
 
 /// Terminal-state commands handled by noa instead of sending escape bytes.
@@ -307,6 +345,7 @@ impl AppCommand {
             AppCommand::ToggleCommandPalette => Self::TOGGLE_COMMAND_PALETTE_MENU_ID,
             AppCommand::ToggleQuickTerminal => Self::TOGGLE_QUICK_TERMINAL_MENU_ID,
             AppCommand::ToggleScratchTerminal => Self::TOGGLE_SCRATCH_TERMINAL_MENU_ID,
+            AppCommand::Float(_) => "",
             AppCommand::ToggleSecureKeyboardEntry => Self::TOGGLE_SECURE_KEYBOARD_ENTRY_MENU_ID,
             AppCommand::ToggleSidebar => Self::TOGGLE_SIDEBAR_MENU_ID,
             AppCommand::ToggleAutoApprove => Self::TOGGLE_AUTO_APPROVE_MENU_ID,
@@ -398,6 +437,12 @@ impl AppCommand {
     #[cfg(test)]
     pub(crate) fn from_key(logical_key: &Key, mods: ModifiersState) -> Option<Self> {
         KeybindEngine::default().resolve(logical_key, mods)
+    }
+
+    /// Whether this acts on the split layout — the actions a focused
+    /// floating pane ignores (floating-panes REQ-020).
+    pub(crate) fn is_split_action(self) -> bool {
+        self.action_name().starts_with("split.")
     }
 
     /// The action's name in Noa's own vocabulary, as `+list-keybinds` and
@@ -494,6 +539,7 @@ impl AppCommand {
             Self::ToggleCommandPalette => "command-palette.toggle",
             Self::ToggleQuickTerminal => "quick-terminal.toggle",
             Self::ToggleScratchTerminal => "scratch-terminal.toggle",
+            Self::Float(action) => action.action_name(),
             Self::ToggleSecureKeyboardEntry => "secure-keyboard-entry.toggle",
             Self::ToggleBackgroundOpacity => "background-opacity.toggle",
             Self::ToggleSidebar => "sidebar.toggle",
@@ -596,10 +642,15 @@ impl AppCommand {
             "session.next-notification" => Some(Self::NextNotification),
             "agent.compose-prompt" => Some(Self::ComposePrompt),
             "terminal.read-output" => Some(Self::ReadOutput),
-            _ => name
-                .strip_prefix("tab.move:")
-                .and_then(|amount| amount.parse::<isize>().ok())
-                .map(Self::MoveTab),
+            _ => FloatAction::ALL
+                .into_iter()
+                .find(|action| action.action_name() == name)
+                .map(Self::Float)
+                .or_else(|| {
+                    name.strip_prefix("tab.move:")
+                        .and_then(|amount| amount.parse::<isize>().ok())
+                        .map(Self::MoveTab)
+                }),
         }
     }
 }

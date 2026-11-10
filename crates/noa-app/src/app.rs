@@ -80,6 +80,7 @@ mod context_menu;
 #[cfg(target_os = "macos")]
 mod ember;
 mod event_loop;
+mod floating;
 mod font_cache;
 mod helpers;
 mod idle_ember;

@@ -12,11 +12,12 @@ use std::fs;
 use std::path::Path;
 
 /// Current schema version. Version 2 adds per-leaf remote metadata; version 3
-/// adds the per-leaf persisted-scrollback key. The reader intentionally
+/// adds the per-leaf persisted-scrollback key; version 4 adds floating panes
+/// (`floats` on a leaf, a tab and a window). The reader intentionally
 /// accepts older versions as well, but the writer always emits the current
 /// one so an older binary rejects a session it would misinterpret instead of
 /// silently respawning its leaves with the wrong shape.
-pub const SESSION_VERSION: u32 = 3;
+pub const SESSION_VERSION: u32 = 4;
 const MIN_SESSION_VERSION: u32 = 1;
 
 /// The whole persisted session: every logical window, plus which one had OS
@@ -38,8 +39,14 @@ pub struct WindowSession {
     pub frame: Option<WindowFrame>,
     /// Index into `tabs` of the active tab.
     pub focused_tab: usize,
+    /// The window-anchored floating panes (floating-panes REQ-017).
+    pub floats: Vec<FloatRecord>,
     pub tabs: Vec<TabSession>,
 }
+
+/// A floating pane's saved geometry. Where it sits in the document — under a
+/// leaf, a tab or a window — is its anchor.
+pub type FloatRecord = crate::floating::FloatRecord;
 
 /// A logical-pixel window frame (position optional, size always present).
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +65,8 @@ pub struct TabSession {
     /// The user-set tab title override (tab-title REQ-TTL-10), if any.
     /// Optional in the schema: files predating the field parse to `None`.
     pub title: Option<String>,
+    /// The tab-anchored floating panes.
+    pub floats: Vec<FloatRecord>,
     pub split: PaneNode,
 }
 
@@ -77,6 +86,8 @@ pub enum PaneNode {
         /// structural change, and a megabyte of terminal output is not
         /// something to rewrite on each split.
         scrollback: Option<String>,
+        /// The floating panes anchored to this pane.
+        floats: Vec<FloatRecord>,
     },
     Split {
         orientation: Orientation,
@@ -169,6 +180,9 @@ fn serialize_window(out: &mut String, window: &WindowSession) {
     push_key(out, "focused_tab");
     out.push_str(&window.focused_tab.to_string());
     out.push(',');
+    push_key(out, "floats");
+    push_array(out, &window.floats, serialize_float);
+    out.push(',');
     push_key(out, "tabs");
     push_array(out, &window.tabs, serialize_tab);
     out.push('}');
@@ -201,8 +215,43 @@ fn serialize_tab(out: &mut String, tab: &TabSession) {
         None => out.push_str("null"),
     }
     out.push(',');
+    push_key(out, "floats");
+    push_array(out, &tab.floats, serialize_float);
+    out.push(',');
     push_key(out, "split");
     serialize_node(out, &tab.split);
+    out.push('}');
+}
+
+fn serialize_float(out: &mut String, float: &FloatRecord) {
+    out.push('{');
+    for (key, (a, b)) in [("origin", float.origin), ("size", float.size)] {
+        push_key(out, key);
+        out.push('[');
+        push_opt_num(out, a.is_finite().then_some(a));
+        out.push(',');
+        push_opt_num(out, b.is_finite().then_some(b));
+        out.push_str("],");
+    }
+    push_key(out, "collapsed");
+    out.push_str(if float.collapsed { "true" } else { "false" });
+    out.push(',');
+    push_key(out, "seq");
+    out.push_str(&float.seq.to_string());
+    out.push(',');
+    push_key(out, "z");
+    out.push_str(&float.z.to_string());
+    out.push(',');
+    push_key(out, "cwd");
+    match &float.cwd {
+        Some(path) => push_string(out, path),
+        None => out.push_str("null"),
+    }
+    if float.strip_moved {
+        out.push(',');
+        push_key(out, "strip_moved");
+        out.push_str("true");
+    }
     out.push('}');
 }
 
@@ -213,7 +262,11 @@ fn serialize_node(out: &mut String, node: &PaneNode) {
             cwd,
             remote,
             scrollback,
+            floats,
         } => {
+            push_key(out, "floats");
+            push_array(out, floats, serialize_float);
+            out.push(',');
             push_key(out, "type");
             push_string(out, "leaf");
             out.push(',');
@@ -363,6 +416,7 @@ fn parse_window(value: &json::Value, version: u32) -> Option<WindowSession> {
     Some(WindowSession {
         frame,
         focused_tab,
+        floats: parse_floats(object.field("floats")),
         tabs,
     })
 }
@@ -396,8 +450,42 @@ fn parse_tab(value: &json::Value, version: u32) -> Option<TabSession> {
     Some(TabSession {
         focused_leaf,
         title,
+        floats: parse_floats(object.field("floats")),
         split,
     })
+}
+
+/// The valid float records under a `floats` key. An absent key (files from
+/// before version 4) is no floats; a record that is malformed or out of range
+/// is dropped alone, the rest restore (floating-panes L2.4).
+fn parse_floats(value: Option<&json::Value>) -> Vec<FloatRecord> {
+    let Some(items) = value.and_then(json::Value::as_array) else {
+        return Vec::new();
+    };
+    items.iter().filter_map(parse_float).collect()
+}
+
+fn parse_float(value: &json::Value) -> Option<FloatRecord> {
+    let object = value.as_object()?;
+    let pair = |key: &str| -> Option<(f64, f64)> {
+        match object.field(key)?.as_array()? {
+            [a, b] => Some((a.as_f64()?, b.as_f64()?)),
+            _ => None,
+        }
+    };
+    let record = FloatRecord {
+        origin: pair("origin")?,
+        size: pair("size")?,
+        collapsed: matches!(object.field("collapsed"), Some(json::Value::Bool(true))),
+        seq: object.field("seq")?.as_u64()?,
+        z: object.field("z")?.as_u64()?,
+        cwd: object
+            .field("cwd")
+            .and_then(json::Value::as_str)
+            .map(str::to_string),
+        strip_moved: matches!(object.field("strip_moved"), Some(json::Value::Bool(true))),
+    };
+    record.is_valid().then_some(record)
 }
 
 fn parse_node(value: &json::Value, version: u32) -> Option<PaneNode> {
@@ -428,6 +516,7 @@ fn parse_node(value: &json::Value, version: u32) -> Option<PaneNode> {
                 cwd,
                 remote,
                 scrollback,
+                floats: parse_floats(object.field("floats")),
             })
         }
         "split" => {
@@ -804,22 +893,27 @@ mod tests {
                         height: 600.0,
                     }),
                     focused_tab: 0,
+                    floats: Vec::new(),
                     tabs: vec![TabSession {
                         focused_leaf: 0,
+                        floats: Vec::new(),
                         title: Some("api server \u{65e5}\u{672c}\u{8a9e} \u{1f680}".to_string()),
                         split: PaneNode::Leaf {
                             cwd: Some("/home/user".to_string()),
                             remote: None,
                             scrollback: None,
+                            floats: Vec::new(),
                         },
                     }],
                 },
                 WindowSession {
                     frame: None,
                     focused_tab: 1,
+                    floats: Vec::new(),
                     tabs: vec![
                         TabSession {
                             focused_leaf: 2,
+                            floats: Vec::new(),
                             title: None,
                             split: PaneNode::Split {
                                 orientation: Orientation::Horizontal,
@@ -828,6 +922,7 @@ mod tests {
                                     cwd: Some("/a".to_string()),
                                     remote: None,
                                     scrollback: None,
+                                    floats: Vec::new(),
                                 }),
                                 second: Box::new(PaneNode::Split {
                                     orientation: Orientation::Vertical,
@@ -836,22 +931,26 @@ mod tests {
                                         cwd: None,
                                         remote: None,
                                         scrollback: None,
+                                        floats: Vec::new(),
                                     }),
                                     second: Box::new(PaneNode::Leaf {
                                         cwd: Some("/b/c".to_string()),
                                         remote: None,
                                         scrollback: None,
+                                        floats: Vec::new(),
                                     }),
                                 }),
                             },
                         },
                         TabSession {
                             focused_leaf: 0,
+                            floats: Vec::new(),
                             title: Some("logs \"quoted\"\\slash".to_string()),
                             split: PaneNode::Leaf {
                                 cwd: None,
                                 remote: None,
                                 scrollback: None,
+                                floats: Vec::new(),
                             },
                         },
                     ],
@@ -881,17 +980,20 @@ mod tests {
                     cwd: Some("/one".to_string()),
                     remote: None,
                     scrollback: None,
+                    floats: Vec::new(),
                 }),
                 second: Box::new(PaneNode::Leaf {
                     cwd: Some("/two".to_string()),
                     remote: None,
                     scrollback: None,
+                    floats: Vec::new(),
                 }),
             }),
             second: Box::new(PaneNode::Leaf {
                 cwd: None,
                 remote: None,
                 scrollback: None,
+                floats: Vec::new(),
             }),
         };
         assert_eq!(split.leaf_count(), 3);
@@ -902,8 +1004,10 @@ mod tests {
             windows: vec![WindowSession {
                 frame: None,
                 focused_tab: 0,
+                floats: Vec::new(),
                 tabs: vec![TabSession {
                     focused_leaf: 1,
+                    floats: Vec::new(),
                     title: None,
                     split,
                 }],
@@ -919,13 +1023,16 @@ mod tests {
             windows: vec![WindowSession {
                 frame: None,
                 focused_tab: 0,
+                floats: Vec::new(),
                 tabs: vec![TabSession {
                     focused_leaf: 0,
+                    floats: Vec::new(),
                     title: None,
                     split: PaneNode::Leaf {
                         cwd: Some("/path/with \"quote\"\tand\\slash".to_string()),
                         remote: None,
                         scrollback: None,
+                        floats: Vec::new(),
                     },
                 }],
             }],
@@ -958,8 +1065,10 @@ mod tests {
             windows: vec![WindowSession {
                 frame: None,
                 focused_tab: 0,
+                floats: Vec::new(),
                 tabs: vec![TabSession {
                     focused_leaf: 0,
+                    floats: Vec::new(),
                     title: None,
                     split: PaneNode::Leaf {
                         cwd: None,
@@ -969,13 +1078,14 @@ mod tests {
                             cached_title: Some("remote shell".to_string()),
                         }),
                         scrollback: None,
+                        floats: Vec::new(),
                     },
                 }],
             }],
         };
 
         let text = serialize(&state);
-        assert!(text.contains("\"version\":3"));
+        assert!(text.contains(&format!("\"version\":{SESSION_VERSION}")));
         assert!(!text.contains("token"));
         assert_eq!(parse(&text), Some(state));
     }
@@ -987,8 +1097,10 @@ mod tests {
             windows: vec![WindowSession {
                 frame: None,
                 focused_tab: 0,
+                floats: Vec::new(),
                 tabs: vec![TabSession {
                     focused_leaf: 0,
+                    floats: Vec::new(),
                     title: None,
                     split: PaneNode::Split {
                         orientation: Orientation::Horizontal,
@@ -997,11 +1109,13 @@ mod tests {
                             cwd: Some("/a".to_string()),
                             remote: None,
                             scrollback: Some("3f1c8a02b7d94e56".to_string()),
+                            floats: Vec::new(),
                         }),
                         second: Box::new(PaneNode::Leaf {
                             cwd: None,
                             remote: None,
                             scrollback: None,
+                            floats: Vec::new(),
                         }),
                     },
                 }],
@@ -1066,6 +1180,107 @@ mod tests {
         ] {
             assert!(parse(source).is_none(), "{source:?} should be None");
         }
+    }
+
+    fn float_record(seq: u64, collapsed: bool) -> FloatRecord {
+        FloatRecord {
+            origin: (0.25, 0.125),
+            size: (0.5, 0.75),
+            collapsed,
+            seq,
+            z: seq + 10,
+            cwd: Some(format!("/float/{seq}")),
+            strip_moved: false,
+        }
+    }
+
+    fn leaf(floats: Vec<FloatRecord>) -> PaneNode {
+        PaneNode::Leaf {
+            cwd: None,
+            remote: None,
+            scrollback: None,
+            floats,
+        }
+    }
+
+    #[test]
+    fn tc_020_floats_roundtrip_under_their_leaf_tab_and_window() {
+        let state = SessionState {
+            focused_window: Some(0),
+            windows: vec![WindowSession {
+                frame: None,
+                focused_tab: 0,
+                floats: vec![float_record(3, false)],
+                tabs: vec![TabSession {
+                    focused_leaf: 0,
+                    title: None,
+                    floats: vec![float_record(2, true)],
+                    split: PaneNode::Split {
+                        orientation: Orientation::Horizontal,
+                        ratio: 0.5,
+                        first: Box::new(leaf(Vec::new())),
+                        second: Box::new(leaf(vec![float_record(1, false)])),
+                    },
+                }],
+            }],
+        };
+        let text = serialize(&state);
+        assert!(text.contains(&format!("\"version\":{SESSION_VERSION}")));
+        assert_eq!(SESSION_VERSION, 4);
+        assert_eq!(parse(&text), Some(state));
+    }
+
+    #[test]
+    fn tc_021_bad_float_record_is_dropped_alone_and_a_v3_file_has_no_floats() {
+        let tab = |floats: &str| {
+            format!(
+                r#"{{"version":4,"focused_window":0,"windows":[{{"frame":null,"focused_tab":0,
+                "tabs":[{{"focused_leaf":0,"title":null,"floats":[{floats}],
+                "split":{{"type":"leaf","cwd":null,"remote":null,"scrollback":null}}}}]}}]}}"#
+            )
+        };
+        let good = r#"{"origin":[0.1,0.2],"size":[0.3,0.4],"collapsed":false,"seq":1,"z":1,"cwd":null}"#;
+        for bad in [
+            // A non-finite coordinate is written as null.
+            r#"{"origin":[null,0.2],"size":[0.3,0.4],"collapsed":false,"seq":2,"z":2,"cwd":null}"#,
+            r#"{"origin":[1.5,0.2],"size":[0.3,0.4],"collapsed":false,"seq":2,"z":2,"cwd":null}"#,
+            r#"{"origin":[0.1,0.2],"size":[0.0,0.4],"collapsed":false,"seq":2,"z":2,"cwd":null}"#,
+            r#"{"origin":[0.1,0.2],"collapsed":false,"seq":2,"z":2,"cwd":null}"#,
+        ] {
+            let parsed = parse(&tab(&format!("{good},{bad}"))).expect("the session still parses");
+            let floats = &parsed.windows[0].tabs[0].floats;
+            assert_eq!(floats.len(), 1, "{bad}");
+            assert_eq!(floats[0].seq, 1);
+        }
+
+        // review4_4: a dragged collapsed strip survives the round trip.
+        let moved = FloatRecord {
+            strip_moved: true,
+            ..float_record(3, true)
+        };
+        let mut out = String::new();
+        serialize_float(&mut out, &moved);
+        let value = json::parse(&out).expect("float json");
+        assert_eq!(parse_float(&value), Some(moved));
+
+        let nan = FloatRecord {
+            origin: (f64::NAN, 0.2),
+            ..float_record(2, false)
+        };
+        let mut out = String::new();
+        serialize_float(&mut out, &nan);
+        assert!(out.contains(r#""origin":[null,0.2]"#), "{out}");
+
+        let v3 = r#"{"version":3,"focused_window":0,"windows":[{"frame":null,
+            "focused_tab":0,"tabs":[{"focused_leaf":0,"title":null,
+            "split":{"type":"leaf","cwd":"/a","remote":null,"scrollback":null}}]}]}"#;
+        let parsed = parse(v3).expect("a v3 session still parses");
+        assert!(parsed.windows[0].floats.is_empty());
+        assert!(parsed.windows[0].tabs[0].floats.is_empty());
+        assert!(matches!(
+            &parsed.windows[0].tabs[0].split,
+            PaneNode::Leaf { floats, .. } if floats.is_empty()
+        ));
     }
 
     #[test]

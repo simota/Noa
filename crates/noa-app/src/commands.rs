@@ -8,7 +8,8 @@ mod keybind;
 mod tests;
 
 pub use command::{
-    AppCommand, CopyModeAction, FontSizeAction, SearchAction, TerminalAction, ViewportScroll,
+    AppCommand, CopyModeAction, FloatAction, FontSizeAction, SearchAction, TerminalAction,
+    ViewportScroll,
 };
 #[cfg(test)]
 pub(crate) use key_token::KeybindParseError;

@@ -58,6 +58,7 @@ pub fn resolve_pane_command_target(
         | AppCommand::ToggleProcessMonitor
         | AppCommand::NextNotification
         | AppCommand::ToggleFullscreen
+        | AppCommand::Float(_)
         | AppCommand::ToggleQuickTerminal
         | AppCommand::ToggleScratchTerminal
         | AppCommand::ToggleSecureKeyboardEntry

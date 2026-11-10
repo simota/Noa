@@ -223,26 +223,34 @@ impl App {
         };
         let scale = state.window.scale_factor();
         let cell_h = f64::from(gpu.fonts.get(state.font_px).metrics().cell_h) / scale;
-        let bars = visible_pane_ids(&state.split_tree, state.zoomed)
+        let floats = self
+            .float_draws(window_id)
             .into_iter()
-            .filter_map(|pane_id| {
-                let surface = state.surfaces.get(&pane_id)?;
-                let message = surface.child_exited.as_ref()?;
-                let rect = surface.rect;
-                let pane = crate::macos_overlay::PaneRectPt::from_px(
-                    rect.x, rect.y, rect.w, rect.h, scale,
-                );
-                Some((
-                    pane_id,
-                    crate::macos_overlay::ChildExitedBar::new(
-                        pane,
-                        cell_h,
-                        message.text.clone(),
-                        message.bold.clone(),
-                    ),
-                ))
-            })
-            .collect::<Vec<_>>();
+            .filter(|draw| draw.placed.content.is_some())
+            .map(|draw| draw.placed.id)
+            .collect();
+        let bars = floating::child_exited_bar_panes(
+            visible_pane_ids(&state.split_tree, state.zoomed),
+            floats,
+        )
+        .into_iter()
+        .filter_map(|pane_id| {
+            let surface = state.surfaces.get(&pane_id)?;
+            let message = surface.child_exited.as_ref()?;
+            let rect = surface.rect;
+            let pane =
+                crate::macos_overlay::PaneRectPt::from_px(rect.x, rect.y, rect.w, rect.h, scale);
+            Some((
+                pane_id,
+                crate::macos_overlay::ChildExitedBar::new(
+                    pane,
+                    cell_h,
+                    message.text.clone(),
+                    message.bold.clone(),
+                ),
+            ))
+        })
+        .collect::<Vec<_>>();
         let hovered = state.last_mouse_physical_position.and_then(|position| {
             bars.iter()
                 .find(|(_, bar)| bar.contains(position.x / scale, position.y / scale))

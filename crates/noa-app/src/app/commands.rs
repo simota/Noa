@@ -96,6 +96,15 @@ impl App {
                 return;
             }
         }
+        // floating-panes REQ-020: a float has no splits to act on.
+        if command.is_split_action()
+            && self
+                .focused
+                .and_then(|window_id| self.windows.get(&window_id))
+                .is_some_and(|state| state.is_float(state.focused_pane))
+        {
+            return;
+        }
         match command {
             AppCommand::About => crate::app_actions::show_about(),
             // R-22: Cmd+, now opens the GUI settings overlay instead of the
@@ -157,6 +166,11 @@ impl App {
             AppCommand::ToggleSplitZoom => {
                 if let Some(window_id) = self.focused {
                     self.toggle_split_zoom(window_id);
+                }
+            }
+            AppCommand::Float(action) => {
+                if let Some(window_id) = self.focused {
+                    self.handle_float_action(window_id, action);
                 }
             }
             AppCommand::ToggleTabOverview => self.toggle_tab_overview(),

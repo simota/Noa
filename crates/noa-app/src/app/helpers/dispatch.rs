@@ -388,6 +388,7 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::ResizeSplit(_)
         | AppCommand::EqualizeSplits
         | AppCommand::ToggleSplitZoom
+        | AppCommand::Float(_)
         | AppCommand::ToggleAutoApprove
         | AppCommand::SetTabTitle
         | AppCommand::MoveTabToNewWindow
@@ -517,6 +518,7 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::ResizeSplit(_)
         | AppCommand::EqualizeSplits
         | AppCommand::ToggleSplitZoom
+        | AppCommand::Float(_)
         | AppCommand::ToggleAutoApprove
         | AppCommand::SetTabTitle
         | AppCommand::MoveTabToNewWindow

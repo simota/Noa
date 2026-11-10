@@ -180,6 +180,15 @@ impl App {
     ) -> Option<(PaneId, Point)> {
         let state = self.windows.get(&window_id)?;
         let point = split_point_from_physical_position(position)?;
+        // A float shields what is under it: its terminal takes the event, its
+        // chrome swallows it (floating-panes REQ-011).
+        if let Some(hit) = self.float_hit_at(window_id, point) {
+            if hit.part != crate::floating::FloatHitPart::Content {
+                return None;
+            }
+            let cell = self.pane_cell_in(window_id, hit.id, position, metrics)?;
+            return Some((hit.id, cell));
+        }
         let layout = visible_pane_ids(&state.split_tree, state.zoomed)
             .into_iter()
             .filter_map(|pane_id| {
@@ -518,6 +527,28 @@ impl App {
         let Some(state) = self.windows.get(&window_id) else {
             return;
         };
+        // A float's chrome sets its own shape: a resize arrow on its edges,
+        // a pointer on its buttons.
+        let float_icon = state
+            .last_mouse_point
+            .and_then(|point| self.float_hit_at(window_id, point))
+            .and_then(|hit| match hit.part {
+                crate::floating::FloatHitPart::Resize(edges) => {
+                    Some(match (edges.left || edges.right, edges.top || edges.bottom) {
+                        (true, false) => CursorIcon::EwResize,
+                        (false, _) => CursorIcon::NsResize,
+                        (true, true) if edges.left == edges.top => CursorIcon::NwseResize,
+                        (true, true) => CursorIcon::NeswResize,
+                    })
+                }
+                crate::floating::FloatHitPart::Button(_) => Some(CursorIcon::Pointer),
+                crate::floating::FloatHitPart::Strip => Some(CursorIcon::Default),
+                crate::floating::FloatHitPart::Content => None,
+            });
+        if let Some(icon) = float_icon {
+            state.window.set_cursor(icon);
+            return;
+        }
         let pane = state
             .last_mouse_pane
             .and_then(|pane_id| state.surfaces.get(&pane_id));

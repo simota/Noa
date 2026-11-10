@@ -986,6 +986,7 @@ impl App {
                 auto_approve_enabled.clone(),
                 redraw_floor.clone(),
                 true,
+                floating::IpcExposure::Listed,
             )
             .ok()?;
         let mut surfaces = HashMap::new();
@@ -1006,6 +1007,12 @@ impl App {
                 split_tree: SplitTree::leaf(initial_pane),
                 zoomed: None,
                 focused_pane: initial_pane,
+                return_pane: initial_pane,
+                floats: crate::floating::FloatSet::default(),
+                float_drag: None,
+                float_strips: HashMap::new(),
+                float_strip_click: None,
+                float_press_consumed: false,
                 surfaces,
                 last_mouse_pane: Some(initial_pane),
                 #[cfg(target_os = "macos")]

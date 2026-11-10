@@ -1,6 +1,6 @@
 use super::{
-    AppCommand, CopyModeAction, FontSizeAction, KeyBinding, KeybindEngine, KeybindParseError,
-    SearchAction, TerminalAction, ViewportScroll,
+    AppCommand, CopyModeAction, FloatAction, FontSizeAction, KeyBinding, KeybindEngine,
+    KeybindParseError, SearchAction, TerminalAction, ViewportScroll,
 };
 use crate::split_tree::Direction;
 use noa_grid::CopyDirection;
@@ -1027,5 +1027,102 @@ fn open_config_action_names_are_accepted() {
     assert_eq!(
         AppCommand::from_action_name(&AppCommand::EditConfigFileInNewWindow.action_name()),
         Some(AppCommand::EditConfigFileInNewWindow)
+    );
+}
+
+/// floating-panes TC-027 (a): only `float.new` and `float.toggle-focus` have
+/// default chords, the same letters on every platform, and `cmd+shift+f`
+/// stays reserved.
+#[test]
+fn tc_027_float_defaults_bind_two_actions_and_leave_cmd_shift_f_free() {
+    let engine = KeybindEngine::default();
+    let app_mods = if cfg!(target_os = "macos") {
+        ModifiersState::SUPER | ModifiersState::SHIFT
+    } else {
+        ModifiersState::CONTROL | ModifiersState::SHIFT
+    };
+    assert_eq!(
+        engine.resolve(&Key::Character("Y".into()), app_mods),
+        Some(AppCommand::Float(FloatAction::New))
+    );
+    assert_eq!(
+        engine.resolve(&Key::Character("I".into()), app_mods),
+        Some(AppCommand::Float(FloatAction::ToggleFocus))
+    );
+    let bound: Vec<FloatAction> = FloatAction::ALL
+        .into_iter()
+        .filter(|action| engine.chord_for(AppCommand::Float(*action)).is_some())
+        .collect();
+    assert_eq!(bound, [FloatAction::New, FloatAction::ToggleFocus]);
+    #[cfg(target_os = "macos")]
+    assert_eq!(
+        engine.resolve(
+            &Key::Character("F".into()),
+            ModifiersState::SUPER | ModifiersState::SHIFT
+        ),
+        None
+    );
+}
+
+/// floating-panes TC-027 (b): every float action is nameable in `keybind =`.
+#[test]
+fn tc_027_every_float_action_is_bindable_by_name() {
+    let configs: Vec<noa_config::KeybindConfig> = FloatAction::ALL
+        .into_iter()
+        .enumerate()
+        .map(|(index, action)| noa_config::KeybindConfig::Bind {
+            trigger: format!("cmd+alt+{}", index + 1),
+            action: AppCommand::Float(action).action_name().into_owned(),
+        })
+        .collect();
+    let (engine, diagnostics) = KeybindEngine::from_config(&configs, None);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    for (index, action) in FloatAction::ALL.into_iter().enumerate() {
+        assert_eq!(
+            engine.resolve(
+                &Key::Character((index + 1).to_string().into()),
+                ModifiersState::SUPER | ModifiersState::ALT
+            ),
+            Some(AppCommand::Float(action))
+        );
+        assert_eq!(
+            AppCommand::from_action_name(&AppCommand::Float(action).action_name()),
+            Some(AppCommand::Float(action))
+        );
+    }
+}
+
+/// floating-panes TC-028: the actions a focused float ignores are exactly
+/// the split-layout ones, enumerated from the palette's command list.
+#[test]
+fn tc_028_split_actions_are_exactly_the_split_layout_commands() {
+    let split: Vec<AppCommand> = crate::command_palette::command_palette_entries()
+        .iter()
+        .copied()
+        .filter(|command| command.is_split_action())
+        .collect();
+    let mut expected = vec![
+        AppCommand::NewSplitLeft,
+        AppCommand::NewSplitRight,
+        AppCommand::NewSplitUp,
+        AppCommand::NewSplitDown,
+    ];
+    for make in [AppCommand::FocusDirection, AppCommand::ResizeSplit] {
+        expected.extend(
+            [
+                Direction::Left,
+                Direction::Right,
+                Direction::Up,
+                Direction::Down,
+            ]
+            .map(make),
+        );
+    }
+    expected.extend([AppCommand::EqualizeSplits, AppCommand::ToggleSplitZoom]);
+    assert_eq!(split, expected);
+    assert!(
+        FloatAction::ALL
+            .into_iter()
+            .all(|action| !AppCommand::Float(action).is_split_action())
     );
 }

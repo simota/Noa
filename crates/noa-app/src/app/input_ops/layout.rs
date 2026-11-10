@@ -131,7 +131,7 @@ impl App {
         let Some(state) = self.windows.get(&window_id) else {
             return;
         };
-        let targets = zoom_resize_targets(&state.split_tree, state.zoomed, bounds)
+        let mut targets = zoom_resize_targets(&state.split_tree, state.zoomed, bounds)
             .into_iter()
             .map(|(pane_id, rect)| {
                 (
@@ -148,6 +148,13 @@ impl App {
         // Live half runs every relayout: pane rects + pixel metrics track the
         // window size frame-by-frame (no letterboxing during a drag).
         apply_pane_layout_live(state, &targets, metrics, padding);
+        // Floats resolve against the split panes' fresh rects, then join the
+        // same live/throttled halves (floating-panes REQ-007).
+        state.sync_return_pane();
+        let float_targets =
+            crate::app::floating::float_layout_targets(state, bounds, metrics, padding);
+        apply_pane_layout_live(state, &float_targets, metrics, padding);
+        targets.extend(float_targets);
         // Throttled half: the scrollback-walking grid reflow + pty winsize.
         // Item 1 — during a continuous resize this coalesces to at most one
         // apply per interval instead of firing on every cell-width boundary
@@ -172,9 +179,10 @@ impl App {
             .find(|(pane_id, _, _)| *pane_id == state.focused_pane)
             .map(|(_, _, grid)| (grid.cols, grid.rows))
         {
-            let changed = state.last_grid.is_some_and(|prev| prev != grid);
-            let first = state.last_grid.is_none();
-            state.last_grid = Some(grid);
+            let now = (state.focused_pane, grid);
+            let (changed, first) =
+                crate::app::floating::resize_overlay_change(state.last_grid, now);
+            state.last_grid = Some(now);
             let show = match self.config.resize_overlay {
                 noa_config::ResizeOverlay::Never => false,
                 noa_config::ResizeOverlay::Always => changed || first,
@@ -189,5 +197,6 @@ impl App {
                 state.window.request_redraw();
             }
         }
+        self.sync_float_focus(window_id);
     }
 }

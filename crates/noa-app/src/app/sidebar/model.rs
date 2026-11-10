@@ -25,6 +25,13 @@ impl App {
     /// `None` when the window has no visible sidebar. Reads only the store and
     /// the pure layout — never a `Terminal` (AC-17). Computed before the redraw
     /// path borrows `gpu`/`state` mutably, so the drawer can run inline.
+    /// Whether `card` belongs to a floating pane (floating-panes REQ-016).
+    pub(in crate::app) fn session_card_is_float(&self, card: &SessionCardId) -> bool {
+        self.windows
+            .get(&WindowId::from(card.window_id.0))
+            .is_some_and(|state| state.is_float(card.pane_id))
+    }
+
     pub(in crate::app) fn sidebar_draw_model(
         &self,
         window_id: WindowId,
@@ -114,8 +121,12 @@ impl App {
             let Some(card) = self.session_store.get(&card_rects.id) else {
                 continue;
             };
-            let tab_title = self.tab_title_override_for_card(&card_rects.id);
+            let is_float = self.session_card_is_float(&card_rects.id);
+            let tab_title = (!is_float)
+                .then(|| self.tab_title_override_for_card(&card_rects.id))
+                .flatten();
             let mut lines: CardLines = card_lines(card, now, home, tab_title.as_deref());
+            mark_float_card(&mut lines, is_float);
             lines.remote_unsupported = self.session_card_is_remote(&card_rects.id);
             let renaming = self
                 .sidebar_rename
@@ -272,8 +283,12 @@ impl App {
             .filter(|drag| drag.active)
             .and_then(|drag| {
                 let card = self.session_store.get(&drag.card)?;
-                let tab_title = self.tab_title_override_for_card(&drag.card);
+                let is_float = self.session_card_is_float(&drag.card);
+                let tab_title = (!is_float)
+                    .then(|| self.tab_title_override_for_card(&drag.card))
+                    .flatten();
                 let mut lines = card_lines(card, now, home, tab_title.as_deref());
+                mark_float_card(&mut lines, is_float);
                 lines.remote_unsupported = self.session_card_is_remote(&drag.card);
                 let local = layout_metrics.card_local_rects(drag.card, card_w);
                 let mut card_runs = Vec::new();
@@ -613,6 +628,16 @@ fn emit_card_text(
             .map(|span| resolve_preview_color(span.fg, palette))
             .unwrap_or(chrome().dim_fg);
         out.extend(window_run(to_cell, *rect, text, fg, false));
+    }
+}
+
+/// The mark a floating pane's card carries in front of its name
+/// (floating-panes REQ-016).
+pub(in crate::app) const FLOAT_CARD_MARK: &str = "\u{25f0} ";
+
+fn mark_float_card(lines: &mut CardLines, is_float: bool) {
+    if is_float {
+        lines.name.insert_str(0, FLOAT_CARD_MARK);
     }
 }
 

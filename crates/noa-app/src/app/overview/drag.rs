@@ -36,7 +36,7 @@ impl App {
         let tab = overview_tile_target_at_point(&page_view.slice, &layout.tiles, point)?;
         let pane = self
             .overview_tab_pane_at_point(tab, &layout.tiles, &page_view.slice, point)
-            .or_else(|| self.windows.get(&tab).map(|state| state.focused_pane))?;
+            .or_else(|| self.windows.get(&tab).map(|state| state.split_focus()))?;
         Some(OverviewTileId::new(tab, pane))
     }
 

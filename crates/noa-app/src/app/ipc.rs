@@ -216,7 +216,8 @@ impl App {
                 let Some(state) = self.windows.get(&window_id) else {
                     continue;
                 };
-                if !state.contains_pane(id.pane_id) {
+                // Floats are not listed over IPC (floating-panes REQ-023).
+                if !state.contains_pane(id.pane_id) || state.is_float(id.pane_id) {
                     continue;
                 }
                 let key = registry_key(id);
@@ -553,6 +554,15 @@ impl App {
         );
         let (window, pane) = registry_key(id);
         self.ipc_shared.lock().registry.mint(window, pane)
+    }
+}
+
+/// The output tap of a pane IPC must not see (floating-panes REQ-023): it
+/// pushes to a broadcaster nothing can subscribe to, under no pane id.
+pub(super) fn hidden_ipc_output_tap() -> crate::io_thread::IpcOutputTap {
+    crate::io_thread::IpcOutputTap {
+        broadcaster: noa_ipc::Broadcaster::new(),
+        ipc_pane_id: 0,
     }
 }
 

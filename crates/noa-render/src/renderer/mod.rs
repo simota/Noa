@@ -1086,12 +1086,22 @@ impl Renderer {
         self.prepare_overlay_instances(&plan);
         self.upload_instances(device, queue);
         let image_draws = self.build_frame_image_draws(device, queue, layout);
-        // Background image: one full-surface quad below everything, resolved
-        // against the current viewport (recomputes on resize — spec AC-13/14).
+        let backdrop = self.backdrop_rect.and_then(|rect| {
+            let w = rect.w.min(self.viewport.w.saturating_sub(rect.x));
+            let h = rect.h.min(self.viewport.h.saturating_sub(rect.y));
+            (w > 0 && h > 0).then_some(PaneRect::new(rect.x, rect.y, w, h))
+        });
+        // Background image: one quad below everything, resolved against the
+        // area the background covers — the backdrop when there is one, the
+        // whole viewport otherwise (recomputes on resize — spec AC-13/14).
         // A tiling `repeat` is still one quad (Repeat sampler), so this is O(1).
+        let bg_image_area = backdrop.map_or(self.viewport, |rect| PixelSize {
+            w: rect.w,
+            h: rect.h,
+        });
         let bg_image_draw = self
             .background_image_layer
-            .build_draw(device, queue, self.viewport);
+            .build_draw(device, queue, bg_image_area);
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("noa-frame-encoder"),
@@ -1103,11 +1113,6 @@ impl Renderer {
             b: f64::from(self.clear_color[2]),
             a: f64::from(self.clear_color[3]),
         };
-        let backdrop = self.backdrop_rect.and_then(|rect| {
-            let w = rect.w.min(self.viewport.w.saturating_sub(rect.x));
-            let h = rect.h.min(self.viewport.h.saturating_sub(rect.y));
-            (w > 0 && h > 0).then_some(PaneRect::new(rect.x, rect.y, w, h))
-        });
         if self.backdrop_rect.is_some() && self.backdrop_pipeline.is_none() {
             self.backdrop_pipeline = Some(backdrop_pipeline(device, self.target_format));
         }
@@ -1140,6 +1145,16 @@ impl Renderer {
                 pass.set_pipeline(pipeline);
                 pass.set_blend_constant(background);
                 pass.draw(0..3, 0..1);
+                // The background image was resolved in the backdrop's own
+                // coordinates; this maps them onto it.
+                pass.set_viewport(
+                    rect.x as f32,
+                    rect.y as f32,
+                    rect.w as f32,
+                    rect.h as f32,
+                    0.0,
+                    1.0,
+                );
             }
 
             // Draw the terminal background image first, spanning the whole
@@ -1148,6 +1163,16 @@ impl Renderer {
             // the per-pane kitty `BelowBackground` band.
             self.background_image_layer
                 .draw(&mut pass, bg_image_draw.as_ref());
+            if backdrop.is_some() {
+                pass.set_viewport(
+                    0.0,
+                    0.0,
+                    self.viewport.w as f32,
+                    self.viewport.h as f32,
+                    0.0,
+                    1.0,
+                );
+            }
 
             for op in &plan {
                 match op {

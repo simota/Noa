@@ -2,7 +2,8 @@ use super::shared::*;
 use noa_core::{Color, DEFAULT_GRID_PADDING, PixelSize, Rgb};
 use noa_font::FontGrid;
 use noa_render::{
-    BackgroundImage, BackgroundImageFit, BackgroundImagePosition, FrameSnapshot, Renderer, Theme,
+    BackgroundImage, BackgroundImageFit, BackgroundImagePosition, FrameSnapshot, PaneRect,
+    Renderer, Theme,
 };
 use std::sync::Arc;
 
@@ -420,4 +421,73 @@ fn background_image_transition_draws_without_validation_error() {
         err.is_none(),
         "wgpu validation error drawing background-image transition: {err:?}"
     );
+}
+
+/// With a backdrop rect, the background image is fitted and positioned in
+/// that rectangle — the panel is the terminal — not in the whole surface and
+/// then cropped: a small centered image must land in the panel's center.
+#[test]
+fn background_image_is_placed_within_the_backdrop_rect() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping backdrop background-image test");
+        return;
+    };
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        &mut font,
+        DEFAULT_GRID_PADDING,
+    )
+    .expect("build renderer");
+    let (w, h) = (64u32, 96u32);
+    renderer.resize(PixelSize { w, h });
+    // The panel: the top third, inset from the left edge.
+    renderer.set_backdrop_rect(Some(PaneRect::new(16, 0, 48, 32)));
+    renderer.set_background_image(
+        &device,
+        &queue,
+        Some(BackgroundImage {
+            rgba: Arc::from([255u8, 0, 0, 255].repeat(16)),
+            width: 4,
+            height: 4,
+            fit: BackgroundImageFit::None,
+            position: BackgroundImagePosition::Center,
+            repeat: false,
+            opacity: 1.0,
+        }),
+    );
+
+    let mut snap = snapshot_for_text(" ");
+    snap.cursor.visible = false;
+    renderer.rebuild_cells(&snap, &mut font, &Theme::new());
+    renderer.sync_atlas(&device, &queue, &mut font);
+
+    let (target, view) = render_target(&device, w, h);
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    renderer.draw(&device, &queue, &view);
+    let err = pollster::block_on(device.pop_error_scope());
+    assert!(err.is_none(), "wgpu validation error: {err:?}");
+
+    let pixels = read_rgba_pixels(&device, &queue, &target, w, h);
+    let pixel = |x: u32, y: u32| {
+        let offset = ((y * w + x) * 4) as usize;
+        [
+            pixels[offset],
+            pixels[offset + 1],
+            pixels[offset + 2],
+            pixels[offset + 3],
+        ]
+    };
+    let background = pixel(20, 4);
+    // The panel's center is (40, 16); the surface's is (32, 48).
+    assert_ne!(
+        pixel(40, 16),
+        background,
+        "the image should cover the panel's center"
+    );
+    assert_eq!(pixel(32, 16), background, "left of the 4px image");
+    assert_eq!(pixel(32, 48), [0, 0, 0, 0], "outside the panel");
 }

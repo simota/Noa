@@ -39,7 +39,8 @@ impl App {
         };
         content_inset_bounds(
             sidebar_inset_bounds(
-                pane_bounds_for_size(state.window.inner_size()),
+                self.quick_terminal_overlay_panel_rect(window_id)
+                    .unwrap_or_else(|| pane_bounds_for_size(state.window.inner_size())),
                 self.window_sidebar_inset_px(window_id),
             ),
             self.window_titlebar_inset_px(window_id),
@@ -126,6 +127,7 @@ impl App {
         // transparent-titlebar chrome (Omen P1: `pane_bounds_for_size` itself
         // is untouched — the insets live in `window_pane_bounds`).
         let bounds = self.window_pane_bounds(window_id);
+        self.sync_quick_terminal_overlay(window_id);
         let Some(state) = self.windows.get(&window_id) else {
             return;
         };

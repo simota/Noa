@@ -144,6 +144,48 @@ struct PaneInstances {
     text_end: u32,
 }
 
+/// Fills the scissor rect with the pass's blend constant, replacing what is
+/// there — the solid background of [`Renderer::set_backdrop_rect`].
+fn backdrop_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("noa-backdrop-shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/backdrop.wgsl").into()),
+    });
+    let replace_with_constant = wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::Constant,
+        dst_factor: wgpu::BlendFactor::Zero,
+        operation: wgpu::BlendOperation::Add,
+    };
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("noa-backdrop-pipeline"),
+        layout: None,
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState {
+                    color: replace_with_constant,
+                    alpha: replace_with_constant,
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
 /// One pane's kitty-graphics inputs, retained across `rebuild_panes` →
 /// `draw_panes` so the image quads can be resolved against the draw-time pane
 /// rect (the snapshot itself is not kept past rebuild).
@@ -353,6 +395,12 @@ pub struct Renderer {
     /// renderers, which set their padding per band.
     padding_balance: PaddingBalance,
     clear_color: [f32; 4],
+    /// When set, only this rectangle gets the background `clear_color`; the
+    /// rest of the surface is cleared fully transparent. See
+    /// [`Renderer::set_backdrop_rect`].
+    backdrop_rect: Option<PaneRect>,
+    /// Built on the first frame that has a `backdrop_rect`.
+    backdrop_pipeline: Option<wgpu::RenderPipeline>,
     /// Split-divider fill, re-derived from the active theme each
     /// [`Renderer::rebuild_panes`] (the overlay border tone) so the hairline
     /// tracks light/dark themes instead of staying a fixed gray.
@@ -469,6 +517,8 @@ impl Renderer {
             grid_padding,
             padding_balance: PaddingBalance::Off,
             clear_color: [0.0, 0.0, 0.0, 1.0],
+            backdrop_rect: None,
+            backdrop_pipeline: None,
             divider_color: DIVIDER_RGBA,
             focus_indicator_color: FOCUS_INDICATOR_RGBA,
             target_format: format,
@@ -588,6 +638,14 @@ impl Renderer {
     /// background quad and so inherit the clear color.
     pub fn set_clear_color(&mut self, color: [f32; 4]) {
         self.clear_color = color;
+    }
+
+    /// Confine the background to `rect` (surface pixels): the rest of the
+    /// surface is left fully transparent, for a window that shows the
+    /// desktop around a smaller panel. `None` (the default) fills the whole
+    /// surface.
+    pub fn set_backdrop_rect(&mut self, rect: Option<PaneRect>) {
+        self.backdrop_rect = rect;
     }
 
     /// Mask atlas generation this renderer has uploaded.
@@ -1028,16 +1086,36 @@ impl Renderer {
         self.prepare_overlay_instances(&plan);
         self.upload_instances(device, queue);
         let image_draws = self.build_frame_image_draws(device, queue, layout);
-        // Background image: one full-surface quad below everything, resolved
-        // against the current viewport (recomputes on resize — spec AC-13/14).
+        let backdrop = self.backdrop_rect.and_then(|rect| {
+            let w = rect.w.min(self.viewport.w.saturating_sub(rect.x));
+            let h = rect.h.min(self.viewport.h.saturating_sub(rect.y));
+            (w > 0 && h > 0).then_some(PaneRect::new(rect.x, rect.y, w, h))
+        });
+        // Background image: one quad below everything, resolved against the
+        // area the background covers — the backdrop when there is one, the
+        // whole viewport otherwise (recomputes on resize — spec AC-13/14).
         // A tiling `repeat` is still one quad (Repeat sampler), so this is O(1).
+        let bg_image_area = backdrop.map_or(self.viewport, |rect| PixelSize {
+            w: rect.w,
+            h: rect.h,
+        });
         let bg_image_draw = self
             .background_image_layer
-            .build_draw(device, queue, self.viewport);
+            .build_draw(device, queue, bg_image_area);
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("noa-frame-encoder"),
         });
+
+        let background = wgpu::Color {
+            r: f64::from(self.clear_color[0]),
+            g: f64::from(self.clear_color[1]),
+            b: f64::from(self.clear_color[2]),
+            a: f64::from(self.clear_color[3]),
+        };
+        if self.backdrop_rect.is_some() && self.backdrop_pipeline.is_none() {
+            self.backdrop_pipeline = Some(backdrop_pipeline(device, self.target_format));
+        }
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1047,11 +1125,10 @@ impl Renderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: f64::from(self.clear_color[0]),
-                            g: f64::from(self.clear_color[1]),
-                            b: f64::from(self.clear_color[2]),
-                            a: f64::from(self.clear_color[3]),
+                        load: wgpu::LoadOp::Clear(if self.backdrop_rect.is_some() {
+                            wgpu::Color::TRANSPARENT
+                        } else {
+                            background
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -1061,12 +1138,41 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
+            // The scissor set here also confines the background image below
+            // to the backdrop; every pane op sets its own afterwards.
+            if let (Some(rect), Some(pipeline)) = (backdrop, self.backdrop_pipeline.as_ref()) {
+                pass.set_scissor_rect(rect.x, rect.y, rect.w, rect.h);
+                pass.set_pipeline(pipeline);
+                pass.set_blend_constant(background);
+                pass.draw(0..3, 0..1);
+                // The background image was resolved in the backdrop's own
+                // coordinates; this maps them onto it.
+                pass.set_viewport(
+                    rect.x as f32,
+                    rect.y as f32,
+                    rect.w as f32,
+                    rect.h as f32,
+                    0.0,
+                    1.0,
+                );
+            }
+
             // Draw the terminal background image first, spanning the whole
             // surface (default full-framebuffer scissor), so it sits below every
             // pane's background quad and above the clear color. Independent of
             // the per-pane kitty `BelowBackground` band.
             self.background_image_layer
                 .draw(&mut pass, bg_image_draw.as_ref());
+            if backdrop.is_some() {
+                pass.set_viewport(
+                    0.0,
+                    0.0,
+                    self.viewport.w as f32,
+                    self.viewport.h as f32,
+                    0.0,
+                    1.0,
+                );
+            }
 
             for op in &plan {
                 match op {

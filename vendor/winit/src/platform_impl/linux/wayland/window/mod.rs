@@ -52,6 +52,9 @@ pub struct Window {
     /// Compositor to handle WlRegion stuff.
     compositor: Arc<CompositorState>,
 
+    /// Noa patch: the app_id, kept to send it again when the toplevel is mapped again.
+    app_id: Option<String>,
+
     /// The wayland display used solely for raw window handle.
     #[allow(dead_code)]
     display: WlDisplay,
@@ -125,7 +128,8 @@ impl Window {
         window_state.set_decorate(attributes.decorations);
 
         // Set the app_id.
-        if let Some(name) = attributes.platform_specific.name.map(|name| name.general) {
+        let app_id = attributes.platform_specific.name.map(|name| name.general);
+        if let Some(name) = app_id.as_ref() {
             window.set_app_id(name);
         }
 
@@ -222,6 +226,7 @@ impl Window {
             monitors,
             window_id,
             compositor,
+            app_id,
             window_state,
             queue_handle,
             xdg_activation,
@@ -250,13 +255,15 @@ impl Window {
     }
 
     #[inline]
-    pub fn set_visible(&self, _visible: bool) {
-        // Not possible on Wayland.
+    pub fn set_visible(&self, visible: bool) {
+        // Noa patch: upstream leaves this a no-op.
+        self.window_state.lock().unwrap().set_visible(visible, self.app_id.as_deref());
     }
 
     #[inline]
     pub fn is_visible(&self) -> Option<bool> {
-        None
+        // Noa patch: upstream reports `None`.
+        Some(self.window_state.lock().unwrap().is_visible())
     }
 
     #[inline]
@@ -595,6 +602,19 @@ impl Window {
             region.add(0, 0, 0, 0);
             surface.set_input_region(Some(region.wl_region()));
             Ok(())
+        }
+    }
+
+    /// Noa patch: see `WindowExtWayland::set_input_rect`.
+    pub fn set_input_rect(&self, rect: Option<(i32, i32, i32, i32)>) {
+        let surface = self.window.wl_surface();
+        let Some((x, y, width, height)) = rect else {
+            surface.set_input_region(None);
+            return;
+        };
+        if let Ok(region) = Region::new(&*self.compositor) {
+            region.add(x, y, width, height);
+            surface.set_input_region(Some(region.wl_region()));
         }
     }
 

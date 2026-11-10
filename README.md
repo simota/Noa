@@ -95,7 +95,8 @@ installed) for the audible bell. Linux limitations compared to macOS:
 
 - `quick-terminal-hotkey` is not registered system-wide (Wayland offers no
   global-shortcut API to applications); a `toggle_quick_terminal` keybinding works
-  while a Noa window is focused.
+  while a Noa window is focused. On Wayland the quick terminal appears at its
+  edge without sliding (see `docs/LINUX.md`).
 - macOS-only integrations are absent: the menu bar and Ember, AppleScript,
   Dock badges, background blur, and the native AppKit overlay cards (the
   command palette and dialogs are drawn by the GPU renderer instead).

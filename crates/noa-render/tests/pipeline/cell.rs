@@ -3,7 +3,7 @@ use noa_core::{CellAttrs, Color, DEFAULT_GRID_PADDING, GridPadding, PixelSize, R
 use noa_font::FontGrid;
 use noa_grid::{Cell, Cursor, Row, SearchState, Selection, SelectionPoint, TerminalColors};
 use noa_render::{
-    CommandPaletteSnapshot, FrameSnapshot, OverlayStyle, PaletteRow, Renderer, Theme,
+    CommandPaletteSnapshot, FrameSnapshot, OverlayStyle, PaletteRow, PaneRect, Renderer, Theme,
     command_palette_layout, overlay_surface_alpha, set_overlay_surface_alpha,
 };
 
@@ -813,4 +813,65 @@ fn cell_pipeline_draws_color_glyph_without_validation_error_and_samples_passthro
         "expected at least one opaque pixel that is not magenta-tinted — a color glyph must \
          sample the RGBA8 atlas as passthrough (REQ-EMOJI-2), not tint with the cell fg color"
     );
+}
+
+/// A backdrop rect confines the background to that rectangle and leaves the
+/// rest of the surface fully transparent, so a window larger than its panel
+/// shows the desktop around it; without one the background fills the surface.
+#[test]
+fn backdrop_rect_leaves_the_rest_of_the_surface_transparent() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping backdrop-rect test");
+        return;
+    };
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        &mut font,
+        GridPadding::new(0.0, 0.0, 0.0, 0.0),
+    )
+    .expect("build renderer");
+    let size = PixelSize { w: 64, h: 64 };
+    renderer.resize(size);
+
+    let mut snap = snapshot_for_text(" ");
+    snap.cursor.visible = false;
+    renderer.rebuild_cells(&snap, &mut font, &Theme::new());
+    renderer.sync_atlas(&device, &queue, &mut font);
+
+    let mut draw = |backdrop: Option<PaneRect>| {
+        renderer.set_backdrop_rect(backdrop);
+        let (target, view) = render_target(&device, size.w, size.h);
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        renderer.draw(&device, &queue, &view);
+        let err = pollster::block_on(device.pop_error_scope());
+        assert!(err.is_none(), "wgpu validation error: {err:?}");
+        read_rgba_pixels(&device, &queue, &target, size.w, size.h)
+    };
+    let pixel = |pixels: &[u8], x: u32, y: u32| {
+        let offset = ((y * size.w + x) * 4) as usize;
+        [
+            pixels[offset],
+            pixels[offset + 1],
+            pixels[offset + 2],
+            pixels[offset + 3],
+        ]
+    };
+
+    let full = draw(None);
+    let background = pixel(&full, 32, 48);
+    assert_eq!(background[3], 255, "the background is opaque by default");
+
+    let confined = draw(Some(PaneRect::new(8, 0, 48, 32)));
+    assert_eq!(pixel(&confined, 32, 31), background, "inside the backdrop");
+    for (x, y) in [(32, 32), (32, 48), (7, 16), (56, 16)] {
+        assert_eq!(
+            pixel(&confined, x, y),
+            [0, 0, 0, 0],
+            "({x}, {y}) is outside the backdrop"
+        );
+    }
 }

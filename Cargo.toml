@@ -98,4 +98,12 @@ sctk-adwaita = { path = "vendor/sctk-adwaita" }
 # every change is marked "Noa patch" in
 # vendor/winit/src/platform_impl/macos/view.rs.
 #TODO(agent): drop this patch once winit handles lone surrogates in insertText.
+# winit 0.30.13 also can't hide a Wayland window (`set_visible` is a no-op) or
+# limit where it takes pointer input, both of which the quick terminal needs
+# there. The vendored copy unmaps and remaps the toplevel in `set_visible`,
+# reports the result from `is_visible`, and adds
+# `WindowExtWayland::set_input_rect`; every change is marked "Noa patch" in
+# vendor/winit/src/platform/wayland.rs and
+# vendor/winit/src/platform_impl/linux/wayland/window/.
+#TODO(agent): drop this patch once winit can hide a Wayland toplevel and set its input region.
 winit = { path = "vendor/winit" }

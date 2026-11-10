@@ -53,6 +53,115 @@ fn quick_terminal_reveal_origin_lerps_hidden_to_final_per_axis() {
     assert_eq!(quick_terminal_reveal_origin(center, center, 1.0), center);
 }
 
+// On Wayland the panel is laid out inside its own maximized window, which
+// stands in for the monitor: same size and edge rules, origin at the
+// window's own top-left.
+#[test]
+fn quick_terminal_overlay_panel_follows_position_inside_the_window() {
+    use noa_config::QuickTerminalPosition::{Bottom, Center, Right, Top};
+    use noa_config::{QuickTerminalSize, QuickTerminalSizeDim};
+
+    let unset = QuickTerminalSize {
+        primary: None,
+        secondary: None,
+    };
+    assert_eq!(
+        quick_terminal_overlay_panel(Top, unset, 1920, 1168, 1.0),
+        PaneRectApp::new(0, 0, 1920, 400)
+    );
+    assert_eq!(
+        quick_terminal_overlay_panel(Bottom, unset, 1920, 1168, 1.0),
+        PaneRectApp::new(0, 768, 1920, 400)
+    );
+    assert_eq!(
+        quick_terminal_overlay_panel(Right, unset, 1920, 1168, 1.0),
+        PaneRectApp::new(1520, 0, 400, 1168)
+    );
+    assert_eq!(
+        quick_terminal_overlay_panel(Center, unset, 1920, 1168, 1.0),
+        PaneRectApp::new(560, 384, 800, 400)
+    );
+
+    // A narrower panel is centered along its edge.
+    let half_width = QuickTerminalSize {
+        primary: Some(QuickTerminalSizeDim::Percent(25.0)),
+        secondary: Some(QuickTerminalSizeDim::Percent(50.0)),
+    };
+    assert_eq!(
+        quick_terminal_overlay_panel(Top, half_width, 1920, 1168, 1.0),
+        PaneRectApp::new(480, 0, 960, 292)
+    );
+}
+
+// The overlay's swapchain must keep alpha at every background opacity: the
+// rest of its window is cleared transparent, and an opaque swapchain would
+// paint that black over the desktop.
+#[test]
+fn overlay_quick_terminal_surface_stays_transparent_at_full_opacity() {
+    assert!(window_surface_transparent(1.0, true));
+    assert!(window_surface_transparent(0.8, true));
+    assert!(window_surface_transparent(0.8, false));
+    assert!(!window_surface_transparent(1.0, false));
+}
+
+// Window-level cards belong on the panel, not in the transparent rest of an
+// overlay's window.
+#[test]
+fn window_cards_are_confined_to_an_overlay_panel() {
+    let surface = PixelSize { w: 1920, h: 1168 };
+    let panel = PaneRectApp::new(480, 0, 960, 400);
+    assert_eq!(
+        window_card_area(surface, None),
+        PaneRectApp::new(0, 0, 1920, 1168)
+    );
+    assert_eq!(window_card_area(surface, Some(panel)), panel);
+
+    let toast = PixelSize { w: 100, h: 40 };
+    assert_eq!(
+        centered_in(window_card_area(surface, Some(panel)), toast),
+        (910, 180)
+    );
+    assert_eq!(
+        centered_in(window_card_area(surface, None), toast),
+        (910, 564)
+    );
+}
+
+// An overlay re-derives its panel from the config on every show, as a
+// positioned quick terminal re-derives its window size.
+#[test]
+fn reshowing_an_overlay_quick_terminal_lays_its_panel_out_again() {
+    use QuickTerminalReshow::{Keep, Relayout, Resize};
+    assert_eq!(
+        quick_terminal_reshow(true, (800, 400), (800, 400)),
+        Relayout
+    );
+    assert_eq!(
+        quick_terminal_reshow(true, (800, 400), (800, 300)),
+        Relayout
+    );
+    assert_eq!(quick_terminal_reshow(false, (800, 400), (800, 300)), Resize);
+    assert_eq!(quick_terminal_reshow(false, (800, 400), (800, 400)), Keep);
+}
+
+// The input region is in logical px and must not leave a sliver of the
+// panel unclickable under fractional scaling.
+#[test]
+fn logical_cover_rounds_outward() {
+    assert_eq!(
+        logical_cover(PaneRectApp::new(0, 0, 1920, 467), 1.0),
+        (0, 0, 1920, 467)
+    );
+    assert_eq!(
+        logical_cover(PaneRectApp::new(480, 0, 960, 292), 2.0),
+        (240, 0, 480, 146)
+    );
+    assert_eq!(
+        logical_cover(PaneRectApp::new(101, 3, 300, 200), 1.5),
+        (67, 2, 201, 134)
+    );
+}
+
 #[test]
 fn quick_terminal_position_geometry_hidden_and_final_per_position() {
     use noa_config::QuickTerminalPosition::{Bottom, Center, Left, Right, Top};

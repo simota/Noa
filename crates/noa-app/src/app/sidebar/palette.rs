@@ -550,6 +550,7 @@ pub(in crate::app) fn draw_confirm_dialog_card(
 /// the scrim (the toast is informational, not modal). The text is fed through
 /// a one-row synthetic terminal so it renders with the same font/metrics as
 /// every other overlay.
+#[allow(clippy::too_many_arguments)]
 pub(in crate::app) fn draw_toast_card(
     gpu: &mut GpuState,
     // Pixel size of the window being drawn into; see `ensure_overlay_card_gpu`.
@@ -557,6 +558,8 @@ pub(in crate::app) fn draw_toast_card(
     surface_format: wgpu::TextureFormat,
     view: &wgpu::TextureView,
     surface_size: PixelSize,
+    // Where in the surface the toast is centered; see `window_card_area`.
+    area: PaneRectApp,
     text: &str,
     scale: f32,
 ) {
@@ -616,8 +619,7 @@ pub(in crate::app) fn draw_toast_card(
         renderer.draw(&gpu.device, &gpu.queue, scratch_view);
     }
 
-    let x = (surface_size.w.saturating_sub(block_px.w)) / 2;
-    let y = (surface_size.h.saturating_sub(block_px.h)) / 2;
+    let (x, y) = centered_in(area, block_px);
     let border = style.border();
     let shadow_style = CardStyle {
         background: [0.0; 4],
@@ -1873,6 +1875,8 @@ pub(in crate::app) fn draw_bell_flash(
     surface_format: wgpu::TextureFormat,
     view: &wgpu::TextureView,
     surface_size: PixelSize,
+    // The part of the surface the flash washes; see `window_card_area`.
+    area: PaneRectApp,
 ) {
     ensure_card_pipeline(gpu, surface_format);
     {
@@ -1916,10 +1920,10 @@ pub(in crate::app) fn draw_bell_flash(
         &flash_style,
         &[CardTexturePlacement {
             texture_view: flash_view,
-            x: 0,
-            y: 0,
-            w: surface_size.w,
-            h: surface_size.h,
+            x: area.x,
+            y: area.y,
+            w: area.w,
+            h: area.h,
             selected: false,
         }],
     );

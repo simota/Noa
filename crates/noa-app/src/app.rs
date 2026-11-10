@@ -124,7 +124,7 @@ use config::{
 #[cfg(target_os = "macos")]
 use config::{apply_macos_titlebar_style, macos_option_as_alt, needs_macos_titlebar_backdrop};
 use helpers::*;
-use input_ops::ActiveOverlay;
+use input_ops::{ActiveOverlay, SentImeCursorAreas};
 #[cfg(test)]
 use quick_terminal::{
     QuickTerminalReshow, ease_out_cubic, logical_cover, quick_terminal_anchor_window_id,
@@ -204,6 +204,7 @@ pub struct App {
     /// window's id to the tab currently shown in it (see `linux_tabs`). Empty
     /// on macOS, where every tab is its own native window.
     tab_hosts: HashMap<WindowId, WindowId>,
+    sent_ime_cursor_areas: SentImeCursorAreas,
     /// Counter behind the synthetic `WindowId`s minted for in-window tabs.
     next_tab_id: u64,
     overview_window: Option<OverviewWindowState>,
@@ -850,6 +851,7 @@ impl App {
             windows: HashMap::new(),
             window_order: Vec::new(),
             tab_hosts: HashMap::new(),
+            sent_ime_cursor_areas: SentImeCursorAreas::default(),
             next_tab_id: 0,
             overview_window: None,
             overview_tiles: HashMap::new(),

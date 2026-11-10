@@ -537,6 +537,7 @@ impl App {
             self.cleanup_ipc_attach_pane(state.window_id, pane_id);
         }
         if let Some(mut window_state) = self.windows.remove(&state.window_id) {
+            self.sent_ime_cursor_areas.clear(window_state.window.id());
             window_state.shutdown();
         }
         if self.focused != Some(state.window_id) {

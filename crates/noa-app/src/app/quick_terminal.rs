@@ -853,6 +853,7 @@ impl App {
             return;
         };
         if let Some(mut state) = self.windows.remove(&qt.window_id) {
+            self.sent_ime_cursor_areas.clear(state.window.id());
             state.shutdown();
         }
         if self.focused == Some(qt.window_id) {

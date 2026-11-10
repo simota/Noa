@@ -2174,6 +2174,11 @@ impl App {
             self.reset_cursor_blink_phase();
             self.note_user_activity();
         }
+        if matches!(event, Ime::Enabled | Ime::Disabled)
+            && let Some(state) = self.windows.get(&window_id)
+        {
+            self.sent_ime_cursor_areas.clear(state.window.id());
+        }
         // The modal layers own the keyboard in the same order as
         // `KeyboardInput`: confirm dialog → search prompt → palette → rename.
         // While one is up the composition belongs to *it*: the pane's

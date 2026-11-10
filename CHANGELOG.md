@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-10
+
+Floating panes, and a working scratch and quick terminal on Wayland.
+
+### Added
+
+- Floating panes: terminals that float above the split layout and stay until
+  closed (`float.new`, `cmd+shift+y` on macOS, `ctrl+shift+y` elsewhere). Drag
+  the title strip to move one and an edge or corner to resize it; the strip
+  collapses it, maximizes it over its anchor, and switches the anchor between
+  the pane, the tab and the window. The strip shows the agent's state and takes
+  the attention color. `float.toggle-focus` (`cmd+shift+i` / `ctrl+shift+i`)
+  moves focus between the last float and the split pane.
+- Floating panes are saved with the session when `window-save-state` is on. The
+  session file moves to version 4.
+- A quick terminal key on Linux: `ctrl+shift+b`, as an in-app keybind.
+- A Linux shortcut cheat sheet (`docs/LINUX-CHEATSHEET.md`).
+
+### Changed
+
+- On Linux the scratch terminal moves from `ctrl+shift+x` to `ctrl+shift+d`.
+
+### Fixed
+
+- The scratch terminal opens on Wayland; it used to fail silently because the
+  compositor never reports window positions.
+- The quick terminal on Wayland opens at the `quick-terminal-position` edge and
+  can be hidden again.
+- The background image is placed within the quick terminal's panel rather than
+  the whole surface.
+- The IME cursor area no longer drives a redraw loop on Wayland.
+
 ## [0.7.2] - 2026-11-07
 
 A performance release for TUI output and raw attach connections.

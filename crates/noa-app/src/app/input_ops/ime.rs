@@ -15,6 +15,31 @@ fn search_prompt_ime_caret_col(
     )
 }
 
+type ImeCursorArea = (PhysicalPosition<i32>, PhysicalSize<u32>);
+
+/// The IME cursor area last sent to each OS window. On Wayland every
+/// `set_ime_cursor_area` commits text-input state and the compositor answers
+/// with a `done`, which winit reports as an empty `Ime::Preedit`; that event
+/// requests a redraw, so sending an unchanged area on each redraw never
+/// settles. Keyed by the OS window, not the tab: off macOS the tabs of a
+/// window share one OS window, which holds a single area for all of them.
+#[derive(Default)]
+pub(in crate::app) struct SentImeCursorAreas(std::cell::RefCell<HashMap<WindowId, ImeCursorArea>>);
+
+impl SentImeCursorAreas {
+    /// Record `area` as sent to `os_window`; `false` when it already holds it.
+    fn replace(&self, os_window: WindowId, area: ImeCursorArea) -> bool {
+        self.0.borrow_mut().insert(os_window, area) != Some(area)
+    }
+
+    /// Forget what `os_window` holds: it dropped the area, so the next one
+    /// must be sent even if it is unchanged (text-input-v3 `enable` resets
+    /// the rectangle).
+    pub(in crate::app) fn clear(&self, os_window: WindowId) {
+        self.0.borrow_mut().remove(&os_window);
+    }
+}
+
 impl App {
     /// macOS: hand the window's typing to the modal that now owns it, or
     /// back to the pane. Ghostty's modals are input fields of their own (the
@@ -181,22 +206,21 @@ impl App {
             return;
         };
         let metrics = gpu.fonts.get(state.font_px).metrics();
-        if let Some((position, size)) = self.modal_ime_caret_area(window_id, state, metrics) {
-            state.window.set_ime_cursor_area(position, size);
-            return;
+        let area = self
+            .modal_ime_caret_area(window_id, state, metrics)
+            .unwrap_or_else(|| {
+                let cursor = surface.terminal.lock().active().cursor;
+                ime_cursor_area(
+                    metrics,
+                    cursor.x,
+                    cursor.y,
+                    surface.rect,
+                    self.pane_grid_padding(surface.rect, metrics),
+                )
+            });
+        if self.sent_ime_cursor_areas.replace(state.window.id(), area) {
+            state.window.set_ime_cursor_area(area.0, area.1);
         }
-        let cursor = {
-            let terminal = surface.terminal.lock();
-            terminal.active().cursor
-        };
-        update_ime_cursor_area(
-            &state.window,
-            metrics,
-            cursor.x,
-            cursor.y,
-            surface.rect,
-            self.pane_grid_padding(surface.rect, metrics),
-        );
     }
 
     /// The caret area (window-relative physical pixels) of the modal that
@@ -316,6 +340,39 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Off macOS the tabs of a window share one OS window, so the OS holds
+    /// one cursor area for all of them.
+    #[test]
+    fn tab_switch_on_a_shared_os_window_resends_the_cursor_area() {
+        let sent = SentImeCursorAreas::default();
+        let os_window = WindowId::from(1);
+        let area_a = (PhysicalPosition::new(10, 20), PhysicalSize::new(8, 16));
+        let area_b = (PhysicalPosition::new(10, 200), PhysicalSize::new(8, 16));
+
+        assert!(sent.replace(os_window, area_a));
+        // Tab B comes to the front: the OS window now holds B's area.
+        assert!(sent.replace(os_window, area_b));
+        // Back to tab A: its area must reach the OS again.
+        assert!(sent.replace(os_window, area_a));
+    }
+
+    #[test]
+    fn unchanged_ime_cursor_area_is_sent_once_until_cleared() {
+        let sent = SentImeCursorAreas::default();
+        let (window, other) = (WindowId::from(1), WindowId::from(2));
+        let area = (PhysicalPosition::new(10, 20), PhysicalSize::new(8, 16));
+        let moved = (PhysicalPosition::new(18, 20), PhysicalSize::new(8, 16));
+
+        assert!(sent.replace(window, area));
+        assert!(!sent.replace(window, area));
+        assert!(sent.replace(other, area));
+        assert!(sent.replace(window, moved));
+        assert!(!sent.replace(window, moved));
+        sent.clear(window);
+        assert!(sent.replace(window, moved));
+        assert!(!sent.replace(other, area));
+    }
 
     #[test]
     fn search_prompt_ime_caret_follows_the_drawn_status_suffix() {

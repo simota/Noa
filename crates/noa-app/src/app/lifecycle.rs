@@ -1569,6 +1569,7 @@ impl App {
             self.cleanup_ipc_attach_pane(window_id, pane_id);
         }
         if let Some(mut state) = self.windows.remove(&window_id) {
+            self.sent_ime_cursor_areas.clear(state.window.id());
             state.shutdown();
         }
         self.window_order.retain(|id| *id != window_id);

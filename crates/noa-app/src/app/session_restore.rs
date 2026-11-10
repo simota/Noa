@@ -608,10 +608,7 @@ fn referenced_scrollback_keys(state: &session::SessionState) -> std::collections
 }
 
 /// Each leaf's float records, in the pre-order [`collect_leaf_ids`] uses.
-fn collect_leaf_floats<'a>(
-    node: &'a session::PaneNode,
-    out: &mut Vec<&'a [session::FloatRecord]>,
-) {
+fn collect_leaf_floats<'a>(node: &'a session::PaneNode, out: &mut Vec<&'a [session::FloatRecord]>) {
     match node {
         session::PaneNode::Leaf { floats, .. } => out.push(floats),
         session::PaneNode::Split { first, second, .. } => {

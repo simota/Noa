@@ -1475,8 +1475,10 @@ impl Renderer {
                         self.overlay_backdrop_color,
                     ));
                     if let Some((rect, color)) = header {
-                        let color =
-                            to_u8_color(surface_output_rgba(rgba(*color), self.target_format_is_srgb));
+                        let color = to_u8_color(surface_output_rgba(
+                            rgba(*color),
+                            self.target_format_is_srgb,
+                        ));
                         instances.push(pixel_overlay_instance(
                             *rect,
                             [color[0], color[1], color[2], 255],

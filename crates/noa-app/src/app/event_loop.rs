@@ -1925,9 +1925,10 @@ impl App {
                 let content = hit
                     .filter(|hit| hit.part == crate::floating::FloatHitPart::Content)
                     .map(|hit| hit.id);
-                let (hovered, position) = self.windows.get(&window_id).map_or((None, None), |tab| {
-                    (tab.last_mouse_pane, tab.last_mouse_physical_position)
-                });
+                let (hovered, position) =
+                    self.windows.get(&window_id).map_or((None, None), |tab| {
+                        (tab.last_mouse_pane, tab.last_mouse_physical_position)
+                    });
                 let split_under = match (content, position, self.gpu.as_ref()) {
                     (None, Some(position), Some(gpu)) if !over_chrome => {
                         let metrics = gpu.fonts.get(self.window_font_px(window_id)).metrics();

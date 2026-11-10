@@ -74,7 +74,11 @@ impl App {
                     .get(&window_id)
                     .is_some_and(|state| state.contains_pane(*pane))
             })
-            .or_else(|| self.windows.get(&window_id).map(|state| state.split_focus()));
+            .or_else(|| {
+                self.windows
+                    .get(&window_id)
+                    .map(|state| state.split_focus())
+            });
         self.hide_tab_overview();
         if let Some(pane) = pane {
             self.focus_pane(window_id, pane);

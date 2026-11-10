@@ -1239,7 +1239,8 @@ mod tests {
                 "split":{{"type":"leaf","cwd":null,"remote":null,"scrollback":null}}}}]}}]}}"#
             )
         };
-        let good = r#"{"origin":[0.1,0.2],"size":[0.3,0.4],"collapsed":false,"seq":1,"z":1,"cwd":null}"#;
+        let good =
+            r#"{"origin":[0.1,0.2],"size":[0.3,0.4],"collapsed":false,"seq":1,"z":1,"cwd":null}"#;
         for bad in [
             // A non-finite coordinate is written as null.
             r#"{"origin":[null,0.2],"size":[0.3,0.4],"collapsed":false,"seq":2,"z":2,"cwd":null}"#,

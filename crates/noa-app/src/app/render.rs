@@ -822,10 +822,15 @@ impl App {
             .iter()
             .map(|draw| state.float_strip_snapshot(draw))
             .collect();
-        state.float_strips.retain(|id, _| state.floats.contains(*id));
         state
-            .renderer
-            .set_overlays(float_draws.iter().map(|draw| draw.overlay_group()).collect());
+            .float_strips
+            .retain(|id, _| state.floats.contains(*id));
+        state.renderer.set_overlays(
+            float_draws
+                .iter()
+                .map(|draw| draw.overlay_group())
+                .collect(),
+        );
         let mut panes = snapshots
             .iter()
             .map(|(pane_id, rect, snapshot)| PaneFrame {

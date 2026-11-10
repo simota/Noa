@@ -48,9 +48,7 @@ impl App {
     pub(super) fn tabs_with_running_programs(&self, tabs: &[WindowId]) -> Vec<WindowId> {
         tabs.iter()
             .copied()
-            .filter(|tab| {
-                self.tab_running_program_count_in(*tab, floating::CloseScope::Window) > 0
-            })
+            .filter(|tab| self.tab_running_program_count_in(*tab, floating::CloseScope::Window) > 0)
             .collect()
     }
 

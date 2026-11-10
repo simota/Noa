@@ -498,29 +498,60 @@ mod tests {
 
         // Zooming a split pane must not hide the overlay, and the overlay
         // must not become the focus ring's or a divider's subject.
-        let plan = build_draw_plan_with_overlays(&layout, &overlays, Some(content), Some(split_b), false);
+        let plan =
+            build_draw_plan_with_overlays(&layout, &overlays, Some(content), Some(split_b), false);
         let kinds: Vec<String> = plan
             .iter()
             .map(|op| match op {
                 DrawOp::Clear => "clear".to_string(),
-                DrawOp::PaneCells { pane, bind_group_index, .. } => {
+                DrawOp::PaneCells {
+                    pane,
+                    bind_group_index,
+                    ..
+                } => {
                     format!("cells:{}@{bind_group_index}", pane.get())
                 }
                 DrawOp::Dividers { rects } => format!("dividers:{}", rects.len()),
                 DrawOp::FocusIndicator { .. } => "focus".to_string(),
-                DrawOp::OverlayFrame { backdrop, border, focused, .. } => {
-                    format!("frame:{}x{}:{}:{focused}", backdrop.w, backdrop.h, border.len())
+                DrawOp::OverlayFrame {
+                    backdrop,
+                    border,
+                    focused,
+                    ..
+                } => {
+                    format!(
+                        "frame:{}x{}:{}:{focused}",
+                        backdrop.w,
+                        backdrop.h,
+                        border.len()
+                    )
                 }
             })
             .collect();
         assert_eq!(
             kinds,
-            ["clear", "cells:2@1", "dividers:0", "frame:300x200:4:true", "cells:10@2", "cells:11@3"]
+            [
+                "clear",
+                "cells:2@1",
+                "dividers:0",
+                "frame:300x200:4:true",
+                "cells:10@2",
+                "cells:11@3"
+            ]
         );
 
-        let unzoomed = build_draw_plan_with_overlays(&layout, &overlays, Some(split_a), None, false);
-        assert!(unzoomed.iter().any(|op| matches!(op, DrawOp::Dividers { rects } if rects.len() == 1)));
-        assert!(unzoomed.iter().any(|op| matches!(op, DrawOp::FocusIndicator { pane, .. } if *pane == split_a)));
+        let unzoomed =
+            build_draw_plan_with_overlays(&layout, &overlays, Some(split_a), None, false);
+        assert!(
+            unzoomed
+                .iter()
+                .any(|op| matches!(op, DrawOp::Dividers { rects } if rects.len() == 1))
+        );
+        assert!(
+            unzoomed
+                .iter()
+                .any(|op| matches!(op, DrawOp::FocusIndicator { pane, .. } if *pane == split_a))
+        );
         assert_eq!(build_draw_plan(&layout[..2], Some(split_a), None, false), {
             let mut base = unzoomed.clone();
             base.truncate(5);

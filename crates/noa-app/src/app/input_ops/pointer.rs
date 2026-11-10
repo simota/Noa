@@ -533,14 +533,14 @@ impl App {
             .last_mouse_point
             .and_then(|point| self.float_hit_at(window_id, point))
             .and_then(|hit| match hit.part {
-                crate::floating::FloatHitPart::Resize(edges) => {
-                    Some(match (edges.left || edges.right, edges.top || edges.bottom) {
+                crate::floating::FloatHitPart::Resize(edges) => Some(
+                    match (edges.left || edges.right, edges.top || edges.bottom) {
                         (true, false) => CursorIcon::EwResize,
                         (false, _) => CursorIcon::NsResize,
                         (true, true) if edges.left == edges.top => CursorIcon::NwseResize,
                         (true, true) => CursorIcon::NeswResize,
-                    })
-                }
+                    },
+                ),
                 crate::floating::FloatHitPart::Button(_) => Some(CursorIcon::Pointer),
                 crate::floating::FloatHitPart::Strip => Some(CursorIcon::Default),
                 crate::floating::FloatHitPart::Content => None,

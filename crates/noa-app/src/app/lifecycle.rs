@@ -1959,77 +1959,75 @@ impl App {
         self.discard_pane_floats(window_id, pane_id);
 
         let mut tab_should_close = false;
-        let window =
-            {
-                let Some(state) = self.windows.get_mut(&window_id) else {
-                    return;
-                };
-                if !state.contains_pane(pane_id) {
-                    return;
-                }
+        let window = {
+            let Some(state) = self.windows.get_mut(&window_id) else {
+                return;
+            };
+            if !state.contains_pane(pane_id) {
+                return;
+            }
 
-                let closed_key = state
+            let closed_key = state
+                .surfaces
+                .get(&pane_id)
+                .and_then(|surface| surface.scrollback_key.clone());
+            if state.mouse_capture_pane == Some(pane_id) {
+                state.mouse_capture_pane = None;
+            }
+            // Read before the Surface goes: closing the composing pane
+            // still needs the IME reset below.
+            let closing_preedit = state.focused_pane == pane_id
+                && state
                     .surfaces
                     .get(&pane_id)
-                    .and_then(|surface| surface.scrollback_key.clone());
-                if state.mouse_capture_pane == Some(pane_id) {
-                    state.mouse_capture_pane = None;
-                }
-                // Read before the Surface goes: closing the composing pane
-                // still needs the IME reset below.
-                let closing_preedit = state.focused_pane == pane_id
-                    && state
-                        .surfaces
-                        .get(&pane_id)
-                        .is_some_and(|surface| surface.ime_state.preedit_active());
-                if let Some(mut surface) = state.surfaces.remove(&pane_id) {
-                    surface.shutdown();
-                }
-                if let Some(key) = closed_key
-                    && let Some(persister) = self.scrollback_persister.as_ref()
-                {
-                    persister.discard(key);
-                }
-                if self.search_prompt.as_ref().is_some_and(|session| {
-                    session.window_id == window_id && session.pane_id == pane_id
-                }) {
-                    // The prompt's target pane is gone; keeping the session
-                    // would leave a modal prompt bound to a dead pane and
-                    // block every future cmd+f behind the open-guard.
-                    self.search_prompt = None;
-                }
-                let outcome =
-                    split_tree::close_pane_with_zoom(&mut state.split_tree, pane_id, state.zoomed);
-                state.zoomed = outcome.zoomed;
-                if outcome.close_outcome.tab_should_close {
-                    tab_should_close = true;
+                    .is_some_and(|surface| surface.ime_state.preedit_active());
+            if let Some(mut surface) = state.surfaces.remove(&pane_id) {
+                surface.shutdown();
+            }
+            if let Some(key) = closed_key
+                && let Some(persister) = self.scrollback_persister.as_ref()
+            {
+                persister.discard(key);
+            }
+            if self
+                .search_prompt
+                .as_ref()
+                .is_some_and(|session| session.window_id == window_id && session.pane_id == pane_id)
+            {
+                // The prompt's target pane is gone; keeping the session
+                // would leave a modal prompt bound to a dead pane and
+                // block every future cmd+f behind the open-guard.
+                self.search_prompt = None;
+            }
+            let outcome =
+                split_tree::close_pane_with_zoom(&mut state.split_tree, pane_id, state.zoomed);
+            state.zoomed = outcome.zoomed;
+            if outcome.close_outcome.tab_should_close {
+                tab_should_close = true;
+            } else {
+                let losing = state.focused_pane;
+                let next_split = outcome
+                    .close_outcome
+                    .next_focus
+                    .filter(|pane| state.contains_pane(*pane))
+                    .or_else(|| state.surfaces.keys().copied().next())
+                    .unwrap_or(state.focused_pane);
+                if state.is_float(losing) {
+                    // A float on another pane keeps the keyboard; only
+                    // its return pane moves.
+                    state.return_pane =
+                        floating::return_pane_after_close(state.return_pane, pane_id, next_split);
                 } else {
-                    let losing = state.focused_pane;
-                    let next_split = outcome
-                        .close_outcome
-                        .next_focus
-                        .filter(|pane| state.contains_pane(*pane))
-                        .or_else(|| state.surfaces.keys().copied().next())
-                        .unwrap_or(state.focused_pane);
-                    if state.is_float(losing) {
-                        // A float on another pane keeps the keyboard; only
-                        // its return pane moves.
-                        state.return_pane = floating::return_pane_after_close(
-                            state.return_pane,
-                            pane_id,
-                            next_split,
-                        );
-                    } else {
-                        state.focused_pane = next_split;
-                    }
-                    state.last_mouse_pane = Some(state.focused_pane);
-                    if state.focused_pane != losing {
-                        let losing_preedit = state.end_pane_preedit(losing) || closing_preedit;
-                        split_ops::reset_ime_for_focus_switch(&state.window, losing_preedit);
-                    }
+                    state.focused_pane = next_split;
                 }
-                state.window.clone()
-            };
+                state.last_mouse_pane = Some(state.focused_pane);
+                if state.focused_pane != losing {
+                    let losing_preedit = state.end_pane_preedit(losing) || closing_preedit;
+                    split_ops::reset_ime_for_focus_switch(&state.window, losing_preedit);
+                }
+            }
+            state.window.clone()
+        };
 
         if tab_should_close {
             self.close_tab(event_loop, window_id);

@@ -711,7 +711,11 @@ mod tests {
                 .filter(|other| other.trigger.overlaps(&float.trigger))
                 .map(|other| other.command)
                 .collect();
-            assert!(clashes.is_empty(), "{:?} clashes with {clashes:?}", float.command);
+            assert!(
+                clashes.is_empty(),
+                "{:?} clashes with {clashes:?}",
+                float.command
+            );
         }
     }
 

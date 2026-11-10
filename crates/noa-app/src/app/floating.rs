@@ -165,7 +165,8 @@ pub(super) fn float_ipc_exposure() -> IpcExposure {
 }
 
 /// The panes that can show a child-exited bar: every pane with a visible
-/// terminal.
+/// terminal. Only macOS draws the bar.
+#[cfg(any(target_os = "macos", test))]
 pub(super) fn child_exited_bar_panes(mut split: Vec<PaneId>, floats: Vec<PaneId>) -> Vec<PaneId> {
     split.extend(floats);
     split

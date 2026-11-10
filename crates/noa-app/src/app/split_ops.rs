@@ -617,7 +617,12 @@ impl App {
         // sends — to whichever window currently holds the pane at *receive*
         // time, so a stale baked-in id here never produces a stale-routed
         // event; it's a no-op for `Remote`, not a rejected move.
-        retarget_surface_io(&surface, dest_window, &dest_auto_approve_enabled, &dest_redraw_floor);
+        retarget_surface_io(
+            &surface,
+            dest_window,
+            &dest_auto_approve_enabled,
+            &dest_redraw_floor,
+        );
 
         let Some(dest_state) = self.windows.get_mut(&dest_window) else {
             // Unreachable: nothing between the checks above and here can

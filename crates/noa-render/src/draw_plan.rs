@@ -59,6 +59,27 @@ pub enum DrawOp {
         pane: PaneId,
         rects: Vec<PaneRect>,
     },
+    /// An overlay group's opaque backdrop and one-pixel border, drawn before
+    /// that group's own [`DrawOp::PaneCells`].
+    OverlayFrame {
+        backdrop: PaneRect,
+        header: Option<(PaneRect, noa_core::Rgb)>,
+        border: Vec<PaneRect>,
+        focused: bool,
+    },
+}
+
+/// Panes drawn above the split layout, as one stacked unit: an opaque
+/// backdrop over `outer`, a border, then each pane's cells. Groups are drawn
+/// in slice order, so a later group covers an earlier one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OverlayGroup {
+    pub outer: PaneRect,
+    /// A solid band painted over the backdrop (the group's title strip), so
+    /// the strip's color reaches the group's edges past its grid padding.
+    pub header: Option<(PaneRect, noa_core::Rgb)>,
+    pub panes: Vec<PaneId>,
+    pub focused: bool,
 }
 
 /// Build the single-pass draw plan for the visible pane set.
@@ -78,12 +99,32 @@ pub fn build_draw_plan(
     zoomed: Option<PaneId>,
     force_ring: bool,
 ) -> Vec<DrawOp> {
-    let zoomed = zoomed.filter(|pane| layout.iter().any(|(candidate, _)| candidate == pane));
-    let mut plan = Vec::with_capacity(layout.len() + 3);
+    build_draw_plan_with_overlays(layout, &[], focused, zoomed, force_ring)
+}
+
+/// [`build_draw_plan`] plus overlay groups. A pane named by a group is left
+/// out of the split layout's cells, dividers, focus ring and zoom filter, and
+/// drawn after them with its group; `bind_group_index` stays the pane's index
+/// in `layout`.
+pub fn build_draw_plan_with_overlays(
+    layout: &[(PaneId, PaneRect)],
+    overlays: &[OverlayGroup],
+    focused: Option<PaneId>,
+    zoomed: Option<PaneId>,
+    force_ring: bool,
+) -> Vec<DrawOp> {
+    let is_overlay = |pane: &PaneId| overlays.iter().any(|group| group.panes.contains(pane));
+    let base: Vec<(PaneId, PaneRect)> = layout
+        .iter()
+        .filter(|(pane, _)| !is_overlay(pane))
+        .copied()
+        .collect();
+    let zoomed = zoomed.filter(|pane| base.iter().any(|(candidate, _)| candidate == pane));
+    let mut plan = Vec::with_capacity(layout.len() + overlays.len() + 3);
     plan.push(DrawOp::Clear);
 
     for (index, (pane, rect)) in layout.iter().enumerate() {
-        if zoomed.is_some_and(|zoomed| zoomed != *pane) {
+        if is_overlay(pane) || zoomed.is_some_and(|zoomed| zoomed != *pane) {
             continue;
         }
 
@@ -97,15 +138,55 @@ pub fn build_draw_plan(
     let rects = if zoomed.is_some() {
         Vec::new()
     } else {
-        divider_rects(layout)
+        divider_rects(&base)
     };
     plan.push(DrawOp::Dividers { rects });
 
-    if let Some((pane, rects)) = focus_indicator(layout, focused, zoomed, force_ring) {
+    if let Some((pane, rects)) = focus_indicator(&base, focused, zoomed, force_ring) {
         plan.push(DrawOp::FocusIndicator { pane, rects });
     }
 
+    for group in overlays {
+        if group.outer.w == 0 || group.outer.h == 0 {
+            continue;
+        }
+        plan.push(DrawOp::OverlayFrame {
+            backdrop: group.outer,
+            header: group.header,
+            border: overlay_border_rects(group.outer),
+            focused: group.focused,
+        });
+        for pane in &group.panes {
+            if let Some((index, (_, rect))) = layout
+                .iter()
+                .enumerate()
+                .find(|(_, (candidate, _))| candidate == pane)
+            {
+                plan.push(DrawOp::PaneCells {
+                    pane: *pane,
+                    scissor: *rect,
+                    bind_group_index: index,
+                });
+            }
+        }
+    }
+
     plan
+}
+
+/// A one-pixel frame just inside `rect`.
+fn overlay_border_rects(rect: PaneRect) -> Vec<PaneRect> {
+    let mut rects = vec![PaneRect::new(rect.x, rect.y, rect.w, 1)];
+    if rect.h > 1 {
+        rects.push(PaneRect::new(rect.x, rect.bottom() - 1, rect.w, 1));
+    }
+    if rect.h > 2 {
+        rects.push(PaneRect::new(rect.x, rect.y + 1, 1, rect.h - 2));
+        if rect.w > 1 {
+            rects.push(PaneRect::new(rect.right() - 1, rect.y + 1, 1, rect.h - 2));
+        }
+    }
+    rects
 }
 
 fn divider_rects(layout: &[(PaneId, PaneRect)]) -> Vec<PaneRect> {
@@ -243,7 +324,10 @@ mod tests {
                     scissor,
                     bind_group_index,
                 } => Some((*pane, *scissor, *bind_group_index)),
-                DrawOp::Clear | DrawOp::Dividers { .. } | DrawOp::FocusIndicator { .. } => None,
+                DrawOp::Clear
+                | DrawOp::Dividers { .. }
+                | DrawOp::FocusIndicator { .. }
+                | DrawOp::OverlayFrame { .. } => None,
             })
             .collect()
     }
@@ -393,6 +477,88 @@ mod tests {
     // scratch-terminal kaizen item 4: `force_ring` is the one override that
     // still draws a focus indicator around a single visible pane, giving the
     // scratch terminal popup (always exactly one pane) its ephemerality cue.
+    #[test]
+    fn overlay_panes_draw_after_the_split_layout_and_stay_out_of_it() {
+        let split_a = PaneId::new(1);
+        let split_b = PaneId::new(2);
+        let strip = PaneId::new(10);
+        let content = PaneId::new(11);
+        let layout = [
+            (split_a, PaneRect::new(0, 0, 499, 600)),
+            (split_b, PaneRect::new(500, 0, 500, 600)),
+            (strip, PaneRect::new(100, 100, 300, 20)),
+            (content, PaneRect::new(100, 120, 300, 180)),
+        ];
+        let overlays = [OverlayGroup {
+            outer: PaneRect::new(100, 100, 300, 200),
+            header: None,
+            panes: vec![strip, content],
+            focused: true,
+        }];
+
+        // Zooming a split pane must not hide the overlay, and the overlay
+        // must not become the focus ring's or a divider's subject.
+        let plan =
+            build_draw_plan_with_overlays(&layout, &overlays, Some(content), Some(split_b), false);
+        let kinds: Vec<String> = plan
+            .iter()
+            .map(|op| match op {
+                DrawOp::Clear => "clear".to_string(),
+                DrawOp::PaneCells {
+                    pane,
+                    bind_group_index,
+                    ..
+                } => {
+                    format!("cells:{}@{bind_group_index}", pane.get())
+                }
+                DrawOp::Dividers { rects } => format!("dividers:{}", rects.len()),
+                DrawOp::FocusIndicator { .. } => "focus".to_string(),
+                DrawOp::OverlayFrame {
+                    backdrop,
+                    border,
+                    focused,
+                    ..
+                } => {
+                    format!(
+                        "frame:{}x{}:{}:{focused}",
+                        backdrop.w,
+                        backdrop.h,
+                        border.len()
+                    )
+                }
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "clear",
+                "cells:2@1",
+                "dividers:0",
+                "frame:300x200:4:true",
+                "cells:10@2",
+                "cells:11@3"
+            ]
+        );
+
+        let unzoomed =
+            build_draw_plan_with_overlays(&layout, &overlays, Some(split_a), None, false);
+        assert!(
+            unzoomed
+                .iter()
+                .any(|op| matches!(op, DrawOp::Dividers { rects } if rects.len() == 1))
+        );
+        assert!(
+            unzoomed
+                .iter()
+                .any(|op| matches!(op, DrawOp::FocusIndicator { pane, .. } if *pane == split_a))
+        );
+        assert_eq!(build_draw_plan(&layout[..2], Some(split_a), None, false), {
+            let mut base = unzoomed.clone();
+            base.truncate(5);
+            base
+        });
+    }
+
     #[test]
     fn force_ring_draws_focus_indicator_for_a_single_visible_pane() {
         let layout = [(PaneId::new(1), PaneRect::new(0, 0, 50, 20))];

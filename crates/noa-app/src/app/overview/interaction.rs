@@ -74,7 +74,11 @@ impl App {
                     .get(&window_id)
                     .is_some_and(|state| state.contains_pane(*pane))
             })
-            .or_else(|| self.windows.get(&window_id).map(|state| state.focused_pane));
+            .or_else(|| {
+                self.windows
+                    .get(&window_id)
+                    .map(|state| state.split_focus())
+            });
         self.hide_tab_overview();
         if let Some(pane) = pane {
             self.focus_pane(window_id, pane);
@@ -423,7 +427,7 @@ impl App {
                                 let focused_pane = self
                                     .windows
                                     .get(&target_tab)
-                                    .map(|state| state.focused_pane);
+                                    .map(|state| state.split_focus());
                                 self.hide_tab_overview();
                                 self.focus_tab(target_tab);
                                 if let Some(pane) = focused_pane {

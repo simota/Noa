@@ -88,7 +88,9 @@ impl App {
                 continue;
             };
             for (pane, surface) in &state.surfaces {
-                if surface.is_remote() {
+                // A float's contents are never written (floating-panes
+                // REQ-017).
+                if surface.is_remote() || state.is_float(*pane) {
                     continue;
                 }
                 out.push((*window_id, *pane));

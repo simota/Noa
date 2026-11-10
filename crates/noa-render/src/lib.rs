@@ -25,7 +25,9 @@ pub use blit::{
     BlitPipeline, CardPipeline, CardStyle, CardTexturePlacement, CardTilePlacement,
     OverviewThumbnailResources,
 };
-pub use draw_plan::{DrawOp, PaneId, PaneRect, build_draw_plan};
+pub use draw_plan::{
+    DrawOp, OverlayGroup, PaneId, PaneRect, build_draw_plan, build_draw_plan_with_overlays,
+};
 pub use image_layer::{ImageBand, Z_BG_THRESHOLD, classify_band, resolve_image_quad};
 pub use instance::{BlendMode, CellInstance, PaneUniformParams, Uniforms, populate_pane_uniform};
 pub use renderer::{

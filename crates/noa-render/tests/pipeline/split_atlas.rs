@@ -502,3 +502,91 @@ fn emoji_candidate_range() -> impl Iterator<Item = char> {
         .chain('\u{1F680}'..='\u{1F6FF}')
         .chain('\u{1F900}'..='\u{1F9FF}')
 }
+
+/// floating-panes REQ-008/REQ-022 (TC-030): an overlay group draws after the
+/// split layout in the same pass without a validation error, and its backdrop
+/// is opaque whatever `background-opacity` is.
+#[test]
+fn tc_030_overlay_group_draws_over_a_translucent_split_with_an_opaque_backdrop() {
+    use noa_render::OverlayGroup;
+
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping overlay-group test");
+        return;
+    };
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        &mut font,
+        DEFAULT_GRID_PADDING,
+    )
+    .expect("build renderer");
+    let (width, height) = (240, 160);
+    renderer.resize(PixelSize {
+        w: width,
+        h: height,
+    });
+    renderer.set_background_opacity(0.5);
+
+    let left = snapshot_for_text("MMMMMMMMMMMM");
+    let right = snapshot_for_text("MMMMMMMMMMMM");
+    let strip = snapshot_for_text("x");
+    let content = snapshot_for_text("y");
+    let strip_id = PaneId::new(10);
+    let content_id = PaneId::new(11);
+    let outer = PaneRect::new(60, 40, 120, 90);
+    let strip_rect = PaneRect::new(60, 40, 120, 30);
+    let layout = [
+        (PaneId::new(1), PaneRect::new(0, 0, 119, height)),
+        (PaneId::new(2), PaneRect::new(120, 0, 120, height)),
+        (strip_id, strip_rect),
+        (content_id, PaneRect::new(60, 70, 120, 60)),
+    ];
+    let snapshots = [&left, &right, &strip, &content];
+    let panes: Vec<PaneFrame<'_>> = layout
+        .iter()
+        .zip(snapshots)
+        .map(|((pane, rect), snapshot)| PaneFrame {
+            pane: *pane,
+            rect: *rect,
+            snapshot,
+        })
+        .collect();
+    renderer.set_overlays(vec![OverlayGroup {
+        outer,
+        header: Some((strip_rect, Rgb::new(200, 30, 30))),
+        panes: vec![strip_id, content_id],
+        focused: true,
+    }]);
+    renderer.rebuild_panes(&panes, &mut font, &Theme::new());
+    renderer.sync_atlas(&device, &queue, &mut font);
+
+    let (target, view) = render_target(&device, width, height);
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    renderer.draw_rebuilt_panes(&device, &queue, &view, Some(content_id), None, false);
+    let err = pollster::block_on(device.pop_error_scope());
+    assert!(
+        err.is_none(),
+        "wgpu validation error drawing an overlay group: {err:?}"
+    );
+
+    let pixels = read_rgba_pixels(&device, &queue, &target, width, height);
+    let alpha = |x: u32, y: u32| pixels[((y * width + x) * 4 + 3) as usize];
+    // Inside the group, below its text rows: the opaque backdrop.
+    assert_eq!(alpha(170, 125), 255, "overlay backdrop must be opaque");
+    // The header band carries its own color, also opaque.
+    assert_eq!(alpha(170, 45), 255, "overlay header must be opaque");
+    let header = &pixels[((45 * width + 170) * 4) as usize..][..3];
+    assert!(
+        header[0] > header[1] && header[0] > header[2],
+        "header band is drawn in the group's header color: {header:?}"
+    );
+    // Outside the group, in a split pane's empty area: still translucent.
+    assert!(
+        alpha(20, 150) < 255,
+        "the split layout keeps background-opacity"
+    );
+}

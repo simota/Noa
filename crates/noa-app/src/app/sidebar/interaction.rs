@@ -313,6 +313,12 @@ impl App {
         if !self.windows.contains_key(&window_id) {
             return;
         }
+        // floating-panes REQ-016: a float's card brings it into view first.
+        if self.session_card_is_float(&card) {
+            self.focus_tab(window_id);
+            self.reveal_float(window_id, card.pane_id);
+            return;
+        }
         self.focus_pane(window_id, card.pane_id);
         self.focus_tab(window_id);
     }

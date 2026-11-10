@@ -1,5 +1,6 @@
 use super::command::{
-    AppCommand, CopyModeAction, FontSizeAction, SearchAction, TerminalAction, ViewportScroll,
+    AppCommand, CopyModeAction, FloatAction, FontSizeAction, SearchAction, TerminalAction,
+    ViewportScroll,
 };
 use super::key_token::{KeyTrigger, KeybindParseError};
 use crate::split_tree::Direction;
@@ -186,6 +187,10 @@ fn default_specs() -> Vec<(&'static str, AppCommand)> {
         // scratch-terminal R1: default chord for the scratch terminal
         // popup (verified unused in this list before adding it).
         ("cmd+shift+t", AppCommand::ToggleScratchTerminal),
+        // floating-panes REQ-018 (verified unused in this list; cmd+shift+f
+        // stays reserved).
+        ("cmd+shift+y", AppCommand::Float(FloatAction::New)),
+        ("cmd+shift+i", AppCommand::Float(FloatAction::ToggleFocus)),
     ]
 }
 
@@ -336,6 +341,9 @@ fn default_specs() -> Vec<(&'static str, AppCommand)> {
         // In-app only: there is no global-hotkey backend off macOS (see
         // `noa_config::DEFAULT_QUICK_TERMINAL_HOTKEY`).
         ("ctrl+shift+b", AppCommand::ToggleQuickTerminal),
+        // floating-panes REQ-018.
+        ("ctrl+shift+y", AppCommand::Float(FloatAction::New)),
+        ("ctrl+shift+i", AppCommand::Float(FloatAction::ToggleFocus)),
     ]
 }
 
@@ -683,6 +691,33 @@ fn ghostty_action_alias(action: &str) -> Option<AppCommand> {
 mod tests {
     use super::*;
     use winit::keyboard::{Key, ModifiersState};
+
+    /// floating-panes TC-027 (a): the float defaults share a chord with no
+    /// other default binding.
+    #[test]
+    fn tc_027_float_default_chords_clash_with_no_other_default() {
+        let engine = KeybindEngine::default();
+        let floats: Vec<&KeyBinding> = engine
+            .bindings
+            .iter()
+            .filter(|binding| matches!(binding.command, AppCommand::Float(_)))
+            .collect();
+        assert_eq!(floats.len(), 2);
+        for float in floats {
+            let clashes: Vec<AppCommand> = engine
+                .bindings
+                .iter()
+                .filter(|other| other.command != float.command)
+                .filter(|other| other.trigger.overlaps(&float.trigger))
+                .map(|other| other.command)
+                .collect();
+            assert!(
+                clashes.is_empty(),
+                "{:?} clashes with {clashes:?}",
+                float.command
+            );
+        }
+    }
 
     // Asserts the macOS (Command-based) default chords.
     #[cfg(target_os = "macos")]

@@ -1,4 +1,5 @@
 use super::*;
+use crate::floating::FloatAnchor;
 
 /// Session persistence (`window-save-state`): capture the live window/tab/split
 /// topology + per-pane cwd, and rebuild it on launch.
@@ -58,9 +59,16 @@ impl App {
                 Some(self.capture_tab(*id, state))
             })
             .collect();
+        // Window-anchored floats sit in whichever tab was last on screen.
+        let floats = tabs
+            .iter()
+            .filter_map(|id| Some((*id, self.windows.get(id)?)))
+            .flat_map(|(id, state)| self.float_records(id, state, FloatAnchor::Window))
+            .collect();
         session::WindowSession {
             frame,
             focused_tab,
+            floats,
             tabs: tab_sessions,
         }
     }
@@ -71,13 +79,95 @@ impl App {
         collect_leaf_ids(&state.split_tree, &mut leaves);
         let focused_leaf = leaves
             .iter()
-            .position(|pane| *pane == state.focused_pane)
+            .position(|pane| *pane == state.split_focus())
             .unwrap_or(0);
         session::TabSession {
             focused_leaf,
             title: state.title_override.clone(),
+            floats: self.float_records(window_id, state, FloatAnchor::Tab),
             split,
         }
+    }
+
+    /// floating-panes REQ-017: `state`'s floats on `anchor`, with each one's
+    /// cwd.
+    fn float_records(
+        &self,
+        window_id: WindowId,
+        state: &WindowState,
+        anchor: FloatAnchor,
+    ) -> Vec<session::FloatRecord> {
+        state
+            .floats
+            .records_on(anchor, |id| self.pane_cwd(window_id, id))
+    }
+
+    /// floating-panes REQ-017: respawn a restored tab's floats. Pane-anchored
+    /// records pair with the rebuilt tree's leaves in pre-order, the order
+    /// they were saved in.
+    fn restore_tab_floats(
+        &mut self,
+        window_id: WindowId,
+        tab: &session::TabSession,
+        window_floats: &[session::FloatRecord],
+    ) {
+        let Some(state) = self.windows.get(&window_id) else {
+            return;
+        };
+        let mut panes = Vec::new();
+        collect_leaf_ids(&state.split_tree, &mut panes);
+        let mut leaf_floats = Vec::new();
+        collect_leaf_floats(&tab.split, &mut leaf_floats);
+        let mut pending: Vec<(FloatAnchor, &session::FloatRecord)> = panes
+            .iter()
+            .zip(&leaf_floats)
+            .flat_map(|(pane, records)| {
+                records
+                    .iter()
+                    .map(|record| (FloatAnchor::Pane(*pane), record))
+            })
+            .collect();
+        pending.extend(tab.floats.iter().map(|record| (FloatAnchor::Tab, record)));
+        pending.extend(
+            window_floats
+                .iter()
+                .map(|record| (FloatAnchor::Window, record)),
+        );
+        if pending.is_empty() {
+            return;
+        }
+        let placeholder_grid = GridSize::new(self.config.cols, self.config.rows);
+        let placeholder_rect = PaneRectApp::new(
+            0,
+            0,
+            state.surface_config.width,
+            state.surface_config.height,
+        );
+        let auto_approve_enabled = state.auto_approve_enabled.clone();
+        let redraw_floor = state.redraw_floor.clone();
+        for (anchor, record) in pending {
+            let id = PaneId::alloc();
+            let surface = match self.spawn_float_surface(
+                window_id,
+                id,
+                placeholder_grid,
+                placeholder_rect,
+                record.cwd.clone(),
+                auto_approve_enabled.clone(),
+                redraw_floor.clone(),
+            ) {
+                Ok(surface) => surface,
+                Err(err) => {
+                    log::warn!("session restore: failed to spawn floating pane: {err}");
+                    continue;
+                }
+            };
+            if let Some(state) = self.windows.get_mut(&window_id) {
+                state.surfaces.insert(id, surface);
+                state.floats.restore(id, anchor, record);
+            }
+        }
+        self.relayout_and_resize_window(window_id);
     }
 
     fn split_tree_to_node(&self, window_id: WindowId, tree: &SplitTree) -> session::PaneNode {
@@ -96,6 +186,9 @@ impl App {
                             .and_then(|surface| surface.scrollback_key.clone())
                     })
                     .flatten(),
+                floats: self.windows.get(&window_id).map_or_else(Vec::new, |state| {
+                    self.float_records(window_id, state, FloatAnchor::Pane(*pane))
+                }),
                 remote: self
                     .windows
                     .get(&window_id)
@@ -222,6 +315,14 @@ impl App {
                     );
                 }
                 self.materialize_tab(window_id, tab);
+                // The window's own floats ride on its first restored tab;
+                // whichever tab comes to the front adopts them.
+                let window_floats: &[session::FloatRecord] = if tab_ids.len() == 1 {
+                    &window.floats
+                } else {
+                    &[]
+                };
+                self.restore_tab_floats(window_id, tab, window_floats);
             }
             if let Some(first) = tab_ids.first() {
                 self.apply_window_frame(*first, window.frame.as_ref());
@@ -451,6 +552,7 @@ fn build_split_tree(
             cwd,
             remote,
             scrollback,
+            ..
         } => {
             let (pane, is_root) = minter.mint();
             leaves.push(LeafSpec {
@@ -503,6 +605,17 @@ fn referenced_scrollback_keys(state: &session::SessionState) -> std::collections
         }
     }
     out
+}
+
+/// Each leaf's float records, in the pre-order [`collect_leaf_ids`] uses.
+fn collect_leaf_floats<'a>(node: &'a session::PaneNode, out: &mut Vec<&'a [session::FloatRecord]>) {
+    match node {
+        session::PaneNode::Leaf { floats, .. } => out.push(floats),
+        session::PaneNode::Split { first, second, .. } => {
+            collect_leaf_floats(first, out);
+            collect_leaf_floats(second, out);
+        }
+    }
 }
 
 fn collect_leaf_ids(tree: &SplitTree, out: &mut Vec<PaneId>) {
@@ -590,11 +703,13 @@ mod tests {
                 cwd: None,
                 remote: Some(remote.clone()),
                 scrollback: None,
+                floats: Vec::new(),
             }),
             second: Box::new(session::PaneNode::Leaf {
                 cwd: Some("/local".to_string()),
                 remote: None,
                 scrollback: None,
+                floats: Vec::new(),
             }),
         };
         let root = PaneId::new(7);

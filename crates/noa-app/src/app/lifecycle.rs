@@ -680,6 +680,12 @@ impl App {
                 split_tree: SplitTree::leaf(initial_pane),
                 zoomed: None,
                 focused_pane: initial_pane,
+                return_pane: initial_pane,
+                floats: crate::floating::FloatSet::default(),
+                float_drag: None,
+                float_strips: HashMap::new(),
+                float_strip_click: None,
+                float_press_consumed: false,
                 surfaces,
                 last_mouse_pane: Some(initial_pane),
                 #[cfg(target_os = "macos")]
@@ -830,6 +836,12 @@ impl App {
         if !crate::macos_window::move_tab_to_new_window(&state.window, &identifier) {
             return;
         }
+        // The window's own floats stay in the window the tab is leaving
+        // (floating-panes L2.3) — while the tab still counts as part of it.
+        self.rehome_window_floats_before_close(window_id);
+        let Some(state) = self.windows.get_mut(&window_id) else {
+            return;
+        };
         state.group = new_group;
         self.finish_moving_tab_to_new_window(window_id, group, new_group, siblings);
     }
@@ -908,6 +920,8 @@ impl App {
                 self.activate_tab(successor);
             }
         }
+        // The window's own floats stay behind (floating-panes L2.3).
+        self.rehome_window_floats_before_close(tab);
         let Some(state) = self.windows.get_mut(&tab) else {
             return;
         };
@@ -1085,6 +1099,7 @@ impl App {
             auto_approve_enabled,
             redraw_floor,
             self.is_quick_terminal_window(window_id),
+            floating::IpcExposure::Listed,
         )
     }
 
@@ -1103,6 +1118,7 @@ impl App {
         auto_approve_enabled: Arc<AtomicBool>,
         redraw_floor: crate::io_thread::RedrawFloor,
         quick_terminal: bool,
+        ipc: floating::IpcExposure,
     ) -> anyhow::Result<Surface> {
         let script = self.script_spawn.as_ref();
         let mut pty_config = PtyConfig {
@@ -1185,13 +1201,23 @@ impl App {
             enabled: auto_approve_flag.clone(),
             guards: auto_approve_guards.clone(),
         };
-        let ipc_tap = self.ipc_output_tap(window_id, pane_id);
-        let raw_attach_tap = self.register_ipc_attach_pane(
-            window_id,
-            pane_id,
-            terminal.clone(),
-            pty_input_tx.clone(),
-        );
+        let (ipc_tap, raw_attach_tap) = match ipc {
+            floating::IpcExposure::Listed => (
+                self.ipc_output_tap(window_id, pane_id),
+                self.register_ipc_attach_pane(
+                    window_id,
+                    pane_id,
+                    terminal.clone(),
+                    pty_input_tx.clone(),
+                ),
+            ),
+            // No id is minted and nothing is registered: the pane cannot be
+            // listed, resolved, attached to or pushed.
+            floating::IpcExposure::Hidden => (
+                ipc::hidden_ipc_output_tap(),
+                crate::io_thread::RawAttachTap::default(),
+            ),
+        };
         // Main-thread writer clone taken before `pty` moves into the io thread,
         // so keyboard/paste input writes straight to the writer thread.
         let pty_writer = pty.writer();
@@ -1452,11 +1478,47 @@ impl App {
             .is_some_and(surface_has_running_program)
     }
 
+    /// Running programs in the floats that close with split pane `pane_id`
+    /// (floating-panes REQ-013): its own, or — when it is the tab's last
+    /// split pane, so the tab closes — every float of the tab.
+    fn pane_float_running_program_count(&self, window_id: WindowId, pane_id: PaneId) -> usize {
+        let survive = self.window_floats_survive_tab(window_id);
+        self.windows.get(&window_id).map_or(0, |state| {
+            let last_split_pane = !state.is_float(pane_id) && state.pane_count() <= 1;
+            running_program_count(
+                state
+                    .floats
+                    .closing_with_pane(pane_id, last_split_pane, survive)
+                    .iter()
+                    .filter_map(|id| state.surfaces.get(id)),
+            )
+        })
+    }
+
+    /// Running programs that end with tab `window_id`: its split panes and
+    /// the floats that close with it (floating-panes REQ-013).
     pub(super) fn tab_running_program_count(&self, window_id: WindowId) -> usize {
-        self.windows
-            .get(&window_id)
-            .map(|state| running_program_count(state.surfaces.values()))
-            .unwrap_or(0)
+        self.tab_running_program_count_in(window_id, floating::CloseScope::Tab)
+    }
+
+    /// As [`Self::tab_running_program_count`], for a tab closing on its own
+    /// or along with its whole window.
+    pub(super) fn tab_running_program_count_in(
+        &self,
+        window_id: WindowId,
+        scope: floating::CloseScope,
+    ) -> usize {
+        let survive = self.window_floats_survive(window_id, scope);
+        self.windows.get(&window_id).map_or(0, |state| {
+            let closing = state.floats.closing_with_tab(survive);
+            running_program_count(
+                state
+                    .surfaces
+                    .iter()
+                    .filter(|(pane, _)| !state.is_float(**pane) || closing.contains(pane))
+                    .map(|(_, surface)| surface),
+            )
+        })
     }
 
     pub(super) fn group_running_program_count(&self, group: WindowGroupId) -> usize {
@@ -1503,6 +1565,7 @@ impl App {
         // tab's record must not outlive the tab.
         self.discard_window_records(window_id);
         self.end_copy_mode_for_window(window_id);
+        self.rehome_window_floats_before_close(window_id);
         // The Overview overlay lives inside its host window; closing the host
         // tears the overlay down with it (before `close_tab_outcome`, so the
         // last-window case quits instead of keeping a ghost overlay alive).
@@ -1803,6 +1866,12 @@ impl App {
         let Some(state) = self.windows.get(&window_id) else {
             return;
         };
+        // floating-panes REQ-012: a focused float closes alone.
+        if state.is_float(state.focused_pane) {
+            let pane_id = state.focused_pane;
+            self.request_close_pane(event_loop, window_id, pane_id);
+            return;
+        }
         if state.pane_count() <= 1 {
             self.request_close_tab(event_loop, window_id);
             return;
@@ -1823,7 +1892,7 @@ impl App {
         if !state.contains_pane(pane_id) {
             return;
         }
-        if state.pane_count() <= 1 {
+        if !state.is_float(pane_id) && state.pane_count() <= 1 {
             self.close_tab(event_loop, window_id);
             return;
         }
@@ -1836,10 +1905,23 @@ impl App {
         window_id: WindowId,
         pane_id: PaneId,
     ) {
-        if self.pane_has_running_program(window_id, pane_id) {
+        // floating-panes REQ-013: the pane's floats close with it, so their
+        // running programs count too.
+        let float_programs = self.pane_float_running_program_count(window_id, pane_id);
+        let own_program = usize::from(self.pane_has_running_program(window_id, pane_id));
+        if own_program + float_programs > 0 {
+            let message = if float_programs == 0 {
+                close_confirm_message(CloseConfirmTarget::Pane, 1)
+            } else {
+                close_confirm_plural(
+                    own_program + float_programs,
+                    "this pane and its floating panes",
+                    "Close them?",
+                )
+            };
             self.open_confirm_dialog(
                 window_id,
-                close_confirm_message(CloseConfirmTarget::Pane, 1),
+                message,
                 ConfirmAction::ClosePane { window_id, pane_id },
             );
             return;
@@ -1853,6 +1935,14 @@ impl App {
         window_id: WindowId,
         pane_id: PaneId,
     ) {
+        if self
+            .windows
+            .get(&window_id)
+            .is_some_and(|state| state.is_float(pane_id))
+        {
+            self.close_float(window_id, pane_id);
+            return;
+        }
         self.end_copy_mode_for_pane(window_id, pane_id);
         // A closing pane may be an overview drag's source or target tile — the
         // tile set is about to change, so cancel any in-flight overview drag.
@@ -1867,68 +1957,78 @@ impl App {
         }
 
         self.cleanup_ipc_attach_pane(window_id, pane_id);
+        self.discard_pane_floats(window_id, pane_id);
 
         let mut tab_should_close = false;
-        let window =
-            {
-                let Some(state) = self.windows.get_mut(&window_id) else {
-                    return;
-                };
-                if !state.contains_pane(pane_id) {
-                    return;
-                }
+        let window = {
+            let Some(state) = self.windows.get_mut(&window_id) else {
+                return;
+            };
+            if !state.contains_pane(pane_id) {
+                return;
+            }
 
-                let closed_key = state
+            let closed_key = state
+                .surfaces
+                .get(&pane_id)
+                .and_then(|surface| surface.scrollback_key.clone());
+            if state.mouse_capture_pane == Some(pane_id) {
+                state.mouse_capture_pane = None;
+            }
+            // Read before the Surface goes: closing the composing pane
+            // still needs the IME reset below.
+            let closing_preedit = state.focused_pane == pane_id
+                && state
                     .surfaces
                     .get(&pane_id)
-                    .and_then(|surface| surface.scrollback_key.clone());
-                if state.mouse_capture_pane == Some(pane_id) {
-                    state.mouse_capture_pane = None;
-                }
-                // Read before the Surface goes: closing the composing pane
-                // still needs the IME reset below.
-                let closing_preedit = state.focused_pane == pane_id
-                    && state
-                        .surfaces
-                        .get(&pane_id)
-                        .is_some_and(|surface| surface.ime_state.preedit_active());
-                if let Some(mut surface) = state.surfaces.remove(&pane_id) {
-                    surface.shutdown();
-                }
-                if let Some(key) = closed_key
-                    && let Some(persister) = self.scrollback_persister.as_ref()
-                {
-                    persister.discard(key);
-                }
-                if self.search_prompt.as_ref().is_some_and(|session| {
-                    session.window_id == window_id && session.pane_id == pane_id
-                }) {
-                    // The prompt's target pane is gone; keeping the session
-                    // would leave a modal prompt bound to a dead pane and
-                    // block every future cmd+f behind the open-guard.
-                    self.search_prompt = None;
-                }
-                let outcome =
-                    split_tree::close_pane_with_zoom(&mut state.split_tree, pane_id, state.zoomed);
-                state.zoomed = outcome.zoomed;
-                if outcome.close_outcome.tab_should_close {
-                    tab_should_close = true;
+                    .is_some_and(|surface| surface.ime_state.preedit_active());
+            if let Some(mut surface) = state.surfaces.remove(&pane_id) {
+                surface.shutdown();
+            }
+            if let Some(key) = closed_key
+                && let Some(persister) = self.scrollback_persister.as_ref()
+            {
+                persister.discard(key);
+            }
+            if self
+                .search_prompt
+                .as_ref()
+                .is_some_and(|session| session.window_id == window_id && session.pane_id == pane_id)
+            {
+                // The prompt's target pane is gone; keeping the session
+                // would leave a modal prompt bound to a dead pane and
+                // block every future cmd+f behind the open-guard.
+                self.search_prompt = None;
+            }
+            let outcome =
+                split_tree::close_pane_with_zoom(&mut state.split_tree, pane_id, state.zoomed);
+            state.zoomed = outcome.zoomed;
+            if outcome.close_outcome.tab_should_close {
+                tab_should_close = true;
+            } else {
+                let losing = state.focused_pane;
+                let next_split = outcome
+                    .close_outcome
+                    .next_focus
+                    .filter(|pane| state.contains_pane(*pane))
+                    .or_else(|| state.surfaces.keys().copied().next())
+                    .unwrap_or(state.focused_pane);
+                if state.is_float(losing) {
+                    // A float on another pane keeps the keyboard; only
+                    // its return pane moves.
+                    state.return_pane =
+                        floating::return_pane_after_close(state.return_pane, pane_id, next_split);
                 } else {
-                    let losing = state.focused_pane;
-                    state.focused_pane = outcome
-                        .close_outcome
-                        .next_focus
-                        .filter(|pane| state.contains_pane(*pane))
-                        .or_else(|| state.surfaces.keys().copied().next())
-                        .unwrap_or(state.focused_pane);
-                    state.last_mouse_pane = Some(state.focused_pane);
-                    if state.focused_pane != losing {
-                        let losing_preedit = state.end_pane_preedit(losing) || closing_preedit;
-                        split_ops::reset_ime_for_focus_switch(&state.window, losing_preedit);
-                    }
+                    state.focused_pane = next_split;
                 }
-                state.window.clone()
-            };
+                state.last_mouse_pane = Some(state.focused_pane);
+                if state.focused_pane != losing {
+                    let losing_preedit = state.end_pane_preedit(losing) || closing_preedit;
+                    split_ops::reset_ime_for_focus_switch(&state.window, losing_preedit);
+                }
+            }
+            state.window.clone()
+        };
 
         if tab_should_close {
             self.close_tab(event_loop, window_id);

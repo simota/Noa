@@ -88,6 +88,8 @@ The prompt accepts Emacs-style editing: `Ctrl+A` / `E` (start / end),
 | `Ctrl+Shift+S` | Sidebar |
 | `Ctrl+Shift+L` | Session overview |
 | `Ctrl+Shift+D` | Scratch terminal |
+| `Ctrl+Shift+Y` | New floating pane |
+| `Ctrl+Shift+I` | Move focus between the last floating pane and the split pane |
 | `Ctrl+Shift+B` | Quick terminal (only while a Noa window is focused) |
 | `Ctrl+Shift+J` | Next unread notification |
 | `Ctrl+,` | Preferences |
@@ -113,6 +115,8 @@ zoom.
 | Split right / down | `⌘D` / `⌘⇧D` | `Ctrl+Shift+O` / `Ctrl+Shift+E` |
 | Session overview | `⌘⇧O` | `Ctrl+Shift+L` |
 | Scratch terminal | `⌘⇧T` | `Ctrl+Shift+D` |
+| New floating pane | `⌘⇧Y` | `Ctrl+Shift+Y` |
+| Floating pane focus | `⌘⇧I` | `Ctrl+Shift+I` |
 | Quick terminal | `` ⌘` `` (system-wide) | `Ctrl+Shift+B` (in-app only) |
 | Select tab N | `⌘N` | `Alt+N` |
 | Find next / previous | `⌘G` / `⌘⇧G` | `Ctrl+Shift+G` / `Ctrl+Shift+H` |

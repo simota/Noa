@@ -423,6 +423,7 @@ impl App {
         // borrowed mutably below, so this can't be read inline at the
         // `draw_rebuilt_panes` call site.
         let scratch_terminal_ring = self.is_scratch_terminal_window(window_id);
+        let float_draws = self.float_draws(window_id);
         #[cfg(target_os = "macos")]
         let (child_exited_bars, child_exited_hovered) = self.visible_child_exited_bars(window_id);
         // Resolve the open palette's render payload up front (like the sidebar
@@ -554,7 +555,7 @@ impl App {
         // that changes nothing about viewport or atlas, so without this
         // check the guard would otherwise present a stale, closed-pane
         // layout.
-        let expected_panes: Vec<(RenderPaneId, PaneRect)> =
+        let mut expected_panes: Vec<(RenderPaneId, PaneRect)> =
             visible_pane_ids(&state.split_tree, state.zoomed)
                 .into_iter()
                 .filter_map(|pane_id| {
@@ -564,6 +565,19 @@ impl App {
                         .map(|surface| (render_pane_id(pane_id), render_pane_rect(surface.rect)))
                 })
                 .collect();
+        // Floats follow the split panes in `rebuild_panes`' input: every
+        // expanded float's terminal, then every float's title strip.
+        expected_panes.extend(float_draws.iter().filter_map(|draw| {
+            draw.placed
+                .content
+                .map(|rect| (render_pane_id(draw.placed.id), render_pane_rect(rect)))
+        }));
+        expected_panes.extend(float_draws.iter().map(|draw| {
+            (
+                floating::strip_render_pane_id(draw.placed.id),
+                render_pane_rect(draw.placed.strip),
+            )
+        }));
         // Tab-switch stall fix: consume the one-shot post-reveal flag
         // regardless of outcome — it only ever applies to the very next
         // redraw after `Occluded(false)`, win or lose. `has_renderable_frame`
@@ -603,7 +617,14 @@ impl App {
         // Scrolled panes' scrollbar-thumb state, captured under the same
         // terminal lock the snapshot takes (no extra lock later).
         let mut scroll_thumbs: Vec<sidebar::ScrollThumb> = Vec::new();
-        let visible_panes = visible_pane_ids(&state.split_tree, state.zoomed);
+        let mut scroll_thumb_panes: Vec<PaneId> = Vec::new();
+        let mut visible_panes = visible_pane_ids(&state.split_tree, state.zoomed);
+        visible_panes.extend(
+            float_draws
+                .iter()
+                .filter(|draw| draw.placed.content.is_some())
+                .map(|draw| draw.placed.id),
+        );
         let now = Instant::now();
         for pane_id in visible_panes {
             let Some(surface) = state.surfaces.get_mut(&pane_id) else {
@@ -651,6 +672,7 @@ impl App {
                 focused_cwd_update = proxy_icon_update(&state.proxy_icon_cwd, cwd);
             }
             if term.viewport_offset() > 0 {
+                scroll_thumb_panes.push(pane_id);
                 scroll_thumbs.push(sidebar::ScrollThumb {
                     rect: render_pane_rect(surface.rect),
                     offset: term.viewport_offset(),
@@ -796,7 +818,20 @@ impl App {
             crate::macos_window::set_represented_url(&state.window, resolved.as_deref());
             state.proxy_icon_cwd = new_cwd;
         }
-        let panes = snapshots
+        let strip_snapshots: Vec<FrameSnapshot> = float_draws
+            .iter()
+            .map(|draw| state.float_strip_snapshot(draw))
+            .collect();
+        state
+            .float_strips
+            .retain(|id, _| state.floats.contains(*id));
+        state.renderer.set_overlays(
+            float_draws
+                .iter()
+                .map(|draw| draw.overlay_group())
+                .collect(),
+        );
+        let mut panes = snapshots
             .iter()
             .map(|(pane_id, rect, snapshot)| PaneFrame {
                 pane: render_pane_id(*pane_id),
@@ -804,6 +839,16 @@ impl App {
                 snapshot,
             })
             .collect::<Vec<_>>();
+        panes.extend(
+            float_draws
+                .iter()
+                .zip(&strip_snapshots)
+                .map(|(draw, snapshot)| PaneFrame {
+                    pane: floating::strip_render_pane_id(draw.placed.id),
+                    rect: render_pane_rect(draw.placed.strip),
+                    snapshot,
+                }),
+        );
         if reveal_fast_path {
             // Instant reveal frame: present the renderer's already-cached
             // instances (kept warm by background refreshes while occluded,
@@ -884,6 +929,30 @@ impl App {
             state.zoomed.map(render_pane_id),
             scratch_terminal_ring,
         );
+        // Thumbs are composited after every pane, so one whose track lies
+        // under a float stacked above its pane would show through the float
+        // (floating-panes REQ-022): leave it out.
+        if !float_draws.is_empty() {
+            let track_w = (9.0 * state.window.scale_factor()).round().max(2.0) as u32;
+            let mut index = 0;
+            scroll_thumbs.retain(|thumb| {
+                let pane = scroll_thumb_panes[index];
+                index += 1;
+                let above = float_draws
+                    .iter()
+                    .position(|draw| draw.placed.id == pane)
+                    .map_or(0, |at| at + 1);
+                let covers: Vec<PaneRectApp> = float_draws[above..]
+                    .iter()
+                    .map(|draw| draw.placed.outer)
+                    .collect();
+                let w = track_w.min(thumb.rect.w);
+                floating::scroll_thumb_shown(
+                    PaneRectApp::new(thumb.rect.right() - w, thumb.rect.y, w, thumb.rect.h),
+                    &covers,
+                )
+            });
+        }
         // Scrollback thumbs along scrolled panes' right edges (state-driven:
         // only panes with `viewport_offset > 0` collected one).
         if !scroll_thumbs.is_empty() {

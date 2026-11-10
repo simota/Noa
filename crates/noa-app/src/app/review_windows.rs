@@ -48,7 +48,7 @@ impl App {
     pub(super) fn tabs_with_running_programs(&self, tabs: &[WindowId]) -> Vec<WindowId> {
         tabs.iter()
             .copied()
-            .filter(|tab| self.tab_running_program_count(*tab) > 0)
+            .filter(|tab| self.tab_running_program_count_in(*tab, floating::CloseScope::Window) > 0)
             .collect()
     }
 
@@ -57,7 +57,7 @@ impl App {
     pub(super) fn quit_review_tabs(&self) -> Vec<WindowId> {
         let mut tabs = self.tabs_with_running_programs(&self.window_order);
         if let Some(quick) = self.quick_terminal.as_ref().map(|qt| qt.window_id)
-            && self.tab_running_program_count(quick) > 0
+            && self.tab_running_program_count_in(quick, floating::CloseScope::Window) > 0
         {
             tabs.push(quick);
         }
@@ -156,7 +156,7 @@ impl App {
             Review::Quit => true,
             Review::CloseWindow { group } => state.group == group,
         };
-        in_scope && self.tab_running_program_count(tab) > 0
+        in_scope && self.tab_running_program_count_in(tab, floating::CloseScope::Window) > 0
     }
 
     /// Confirm the next tab still needing `review`: the first of `tabs`, or,

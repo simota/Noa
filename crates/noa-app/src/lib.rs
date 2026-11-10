@@ -27,6 +27,7 @@ pub mod debounce;
 mod ember;
 mod ember_sprite;
 mod events;
+mod floating;
 mod idle_ember;
 mod input;
 mod io_thread;

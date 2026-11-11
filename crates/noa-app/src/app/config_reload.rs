@@ -575,7 +575,7 @@ impl App {
             &overrides,
         );
         gpu.preview_theme = None;
-        crate::chrome::select_palette(gpu.theme.is_light(), glassmorphism);
+        crate::chrome::select_palette(&gpu.theme, glassmorphism);
         gpu.chrome_textures.reset();
 
         let default_fg = gpu.theme.default_fg;

@@ -304,7 +304,7 @@ impl App {
             // this palette draws into is always translucent and blurred —
             // there is no "frosted chrome over an opaque window" case left
             // to warn about here.
-            crate::chrome::select_palette(theme.is_light(), self.config.glassmorphism);
+            crate::chrome::select_palette(&theme, self.config.glassmorphism);
 
             let caps = surface.get_capabilities(&adapter);
             // The adapter is picked before any window exists (prewarm), so on

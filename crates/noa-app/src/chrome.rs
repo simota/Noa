@@ -22,10 +22,12 @@ pub const CHROME_BORDER: Rgb = Rgb::new(0x4c, 0x51, 0x61);
 /// hair lighter than [`CHROME_BG`] so the edge reads as a faint depth cue
 /// rather than a drawn line competing with the card strokes.
 pub const CHROME_DIVIDER: Rgb = Rgb::new(0x14, 0x18, 0x22);
-/// Blue accent: focus ring, selection, hover — the shared
-/// [`noa_render::UI_ACCENT`], so the chrome, the overlay (palette/dialog)
-/// selection cues, and the pane focus indicator all read as one hue.
-pub const CHROME_ACCENT: Rgb = noa_render::UI_ACCENT;
+/// Accent of the fallback dark palette: focus ring, selection, hover. The
+/// brand orange; [`select_palette`] replaces it with the active theme's
+/// [`noa_render::Theme::ui_accent`], so the chrome, the overlay
+/// (palette/dialog) selection cues, and the pane focus indicator all read as
+/// one hue.
+pub const CHROME_ACCENT: Rgb = noa_render::BRAND_ACCENT;
 /// Chrome pill face (overview search / hint bars, sidebar menu popup).
 pub const CHROME_PILL: Rgb = Rgb::new(0x21, 0x23, 0x36);
 /// Thin border around chrome pills.
@@ -296,7 +298,9 @@ pub const CHROME_LIGHT: ChromePalette = ChromePalette {
     band: Rgb::new(0xe2, 0xe5, 0xee),
     border: Rgb::new(0xb8, 0xbf, 0xcf),
     divider: Rgb::new(0xdf, 0xe2, 0xec),
-    accent: CHROME_ACCENT,
+    // `CHROME_ACCENT` darkened to 3:1 against this palette's faces — what
+    // `themed` yields for the brand accent (pinned by a test below).
+    accent: Rgb::new(0xab, 0x7a, 0x2d),
     pill: Rgb::new(0xe8, 0xea, 0xf2),
     pill_border: Rgb::new(0xc2, 0xc8, 0xda),
     fg: Rgb::new(0x23, 0x29, 0x3a),
@@ -318,7 +322,21 @@ pub const CHROME_LIGHT: ChromePalette = ChromePalette {
 /// have to reason about lock poisoning, matching the rest of the crate.
 static ACTIVE_PALETTE: parking_lot::RwLock<Option<ChromePalette>> = parking_lot::RwLock::new(None);
 
-/// Select light or dark chrome from the terminal theme's polarity. The first
+/// `base` with its accent replaced by `theme`'s UI accent, clamped to
+/// [`noa_render::UI_ACCENT_MIN_CONTRAST`] against every opaque face the
+/// accent is drawn on (rings on the backdrop and cards, text on bands/pills).
+fn themed(base: ChromePalette, theme: &noa_render::Theme) -> ChromePalette {
+    ChromePalette {
+        accent: noa_render::accent_on(
+            theme.ui_accent(),
+            &[base.bg, base.card, base.card_selected, base.band, base.pill],
+        ),
+        ..base
+    }
+}
+
+/// Select light or dark chrome from the terminal theme's polarity, carrying
+/// the theme's own UI accent. The first
 /// call initializes the active palette; every later call (a theme-settings
 /// confirm swapping in a newly resolved theme, or a second window reusing
 /// the shared GPU) now replaces it rather than no-op'ing — see
@@ -326,13 +344,13 @@ static ACTIVE_PALETTE: parking_lot::RwLock<Option<ChromePalette>> = parking_lot:
 /// `level` installs the [`glassify`]'d variant of the chosen polarity at that
 /// level; [`GlassLevel::Off`] installs the byte-identical opaque palette this
 /// function has always installed, so the default path is unchanged.
-pub fn select_palette(theme_is_light: bool, level: GlassLevel) {
-    let base = if theme_is_light {
+pub fn select_palette(theme: &noa_render::Theme, level: GlassLevel) {
+    let base = if theme.is_light() {
         CHROME_LIGHT
     } else {
         CHROME_DARK
     };
-    swap_palette(glassify(base, level));
+    swap_palette(glassify(themed(base, theme), level));
 }
 
 /// Replace the active chrome palette in place (theme-settings-ui R-13's
@@ -388,7 +406,7 @@ mod tests {
         assert_eq!(rgba(Rgb::new(0, 0, 0)), [0.0, 0.0, 0.0, 1.0]);
         assert_eq!(rgba(Rgb::new(255, 255, 255)), [1.0, 1.0, 1.0, 1.0]);
         let mid = rgba(CHROME_ACCENT);
-        assert!((mid[0] - 0x14 as f32 / 255.0).abs() < f32::EPSILON);
+        assert!((mid[0] - 0xe8 as f32 / 255.0).abs() < f32::EPSILON);
         assert_eq!(mid[3], 1.0);
     }
 
@@ -415,6 +433,78 @@ mod tests {
     // every other such test or their swap+assert sequences interleave and
     // become flaky.
     static PALETTE_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    /// The unset default theme: dark, hueless cursor -> brand accent.
+    fn dark_theme() -> noa_render::Theme {
+        noa_render::Theme::new()
+    }
+
+    /// The default theme with its polarity flipped (cursor still hueless).
+    fn light_theme() -> noa_render::Theme {
+        let mut theme = noa_render::Theme::new();
+        std::mem::swap(&mut theme.default_fg, &mut theme.default_bg);
+        theme
+    }
+
+    // P-008: `theme = Noa` locks the chrome accent to the brand orange, the
+    // same value as its cursor.
+    #[test]
+    fn noa_theme_chrome_accent_is_the_brand_orange() {
+        let noa = crate::theme::resolve_theme(Some("Noa"));
+        assert_eq!(themed(CHROME_DARK, &noa).accent, Rgb::new(0xe8, 0xa3, 0x3d));
+        assert_eq!(
+            noa_render::OverlayStyle::from_theme(&noa).accent(),
+            rgba(Rgb::new(0xe8, 0xa3, 0x3d))
+        );
+    }
+
+    // P-008: across the whole bundled catalog the accent clears 3:1 against
+    // every chrome face it is drawn on, the overlay card face, and the
+    // terminal background the pane focus ring sits on.
+    #[test]
+    fn every_bundled_theme_accent_clears_the_contrast_floor() {
+        let floor = noa_render::UI_ACCENT_MIN_CONTRAST;
+        assert_eq!(noa_theme::THEMES.len(), 575);
+        for (name, _) in noa_theme::THEMES {
+            let theme = crate::theme::resolve_theme(Some(name));
+            let base = if theme.is_light() {
+                CHROME_LIGHT
+            } else {
+                CHROME_DARK
+            };
+            let chrome = themed(base, &theme);
+            for face in [
+                chrome.bg,
+                chrome.card,
+                chrome.card_selected,
+                chrome.band,
+                chrome.pill,
+            ] {
+                let ratio = noa_render::contrast_ratio(chrome.accent, face);
+                assert!(ratio >= floor, "{name}: chrome accent {ratio}");
+            }
+            let overlay_face = noa_render::blend(theme.default_bg, theme.default_fg, 0.08);
+            let overlay_accent = noa_render::accent_on(theme.ui_accent(), &[overlay_face]);
+            assert_eq!(
+                noa_render::OverlayStyle::from_theme(&theme).accent(),
+                rgba(overlay_accent),
+                "{name}"
+            );
+            let ratio = noa_render::contrast_ratio(overlay_accent, overlay_face);
+            assert!(ratio >= floor, "{name}: overlay accent {ratio}");
+            let focus = noa_render::accent_on(theme.ui_accent(), &[theme.default_bg]);
+            let ratio = noa_render::contrast_ratio(focus, theme.default_bg);
+            assert!(ratio >= floor, "{name}: focus ring {ratio}");
+        }
+    }
+
+    #[test]
+    fn light_palette_accent_is_the_clamped_brand_accent() {
+        assert_eq!(
+            themed(CHROME_LIGHT, &light_theme()).accent,
+            CHROME_LIGHT.accent
+        );
+    }
 
     // AC-9: swapping the active palette is visible to the next read, with no
     // `GpuState`/GPU involved at all.
@@ -452,9 +542,9 @@ mod tests {
     #[test]
     fn select_palette_off_installs_the_opaque_palette() {
         let _guard = PALETTE_TEST_LOCK.lock();
-        select_palette(false, GlassLevel::Off);
+        select_palette(&dark_theme(), GlassLevel::Off);
         assert_eq!(palette(), CHROME_DARK);
-        select_palette(true, GlassLevel::Off);
+        select_palette(&light_theme(), GlassLevel::Off);
         assert_eq!(palette(), CHROME_LIGHT);
         swap_palette(CHROME_DARK);
     }
@@ -462,11 +552,11 @@ mod tests {
     #[test]
     fn select_palette_on_installs_the_glass_palette() {
         let _guard = PALETTE_TEST_LOCK.lock();
-        select_palette(false, GlassLevel::One);
+        select_palette(&dark_theme(), GlassLevel::One);
         let dark_glass = palette();
         assert_eq!(dark_glass, glassify(CHROME_DARK, GlassLevel::One));
         assert!(dark_glass.is_glass());
-        select_palette(true, GlassLevel::One);
+        select_palette(&light_theme(), GlassLevel::One);
         assert_eq!(palette(), glassify(CHROME_LIGHT, GlassLevel::One));
         swap_palette(CHROME_DARK);
     }
@@ -590,12 +680,12 @@ mod tests {
         swap_palette(CHROME_DARK);
         assert_eq!(noa_render::overlay_surface_alpha(), 1.0);
 
-        select_palette(true, GlassLevel::One);
+        select_palette(&light_theme(), GlassLevel::One);
         assert_eq!(
             noa_render::overlay_surface_alpha(),
             glass_overlay_alpha(GlassLevel::One)
         );
-        select_palette(true, GlassLevel::Off);
+        select_palette(&light_theme(), GlassLevel::Off);
         assert_eq!(noa_render::overlay_surface_alpha(), 1.0);
         swap_palette(CHROME_DARK);
     }

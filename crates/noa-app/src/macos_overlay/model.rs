@@ -809,16 +809,8 @@ mod tests {
     // regression guard against `selected_bg`/`surface_fg` ever silently
     // degrading to a low-contrast hardcoded value.
     //
-    // `accent` is checked against a lower floor than `selected_bg` above:
-    // spot-checking 5 bundled themes found `selected_bg`/`surface_fg`
-    // consistently well clear of 3.0 (5.8-8.0:1), but `accent`/`surface_bg`
-    // ranges 2.3-4.9:1 — because `OverlayStyle::accent()`
-    // (`noa-render/src/theme.rs`) is `OVERLAY_ACCENT`, one fixed app-wide
-    // constant, tested here against each theme's own derived `surface_bg`,
-    // not a per-theme-tuned pair. "3024 Day" specifically measures 2.26:1,
-    // so a 3.0 floor on this pairing would fail on the very fixture R-10's
-    // spec text names — 2.0 is the honest regression floor for what this
-    // fixed constant currently achieves, not a new AA-compliance claim.
+    // `accent` holds the same floor: `OverlayStyle::accent()` is the theme's
+    // UI accent clamped to 3.0:1 against `surface_bg` (`noa_render::accent_on`).
     #[test]
     fn selected_row_and_accent_colors_meet_the_contrast_floor_for_a_real_theme() {
         let theme = crate::theme::resolve_theme(Some("3024 Day"));
@@ -833,11 +825,11 @@ mod tests {
             "selected_bg vs surface_fg contrast {selected_contrast} is below the {WCAG_AA_LARGE_TEXT_FLOOR}:1 floor"
         );
 
-        const ACCENT_CONTRAST_FLOOR: f32 = 2.0;
+        const ACCENT_CONTRAST_FLOOR: f32 = WCAG_AA_LARGE_TEXT_FLOOR;
         let accent_contrast = OverlayColors::contrast_ratio(colors.accent, colors.surface_bg);
         assert!(
             accent_contrast >= ACCENT_CONTRAST_FLOOR,
-            "accent vs surface_bg contrast {accent_contrast} is below the {ACCENT_CONTRAST_FLOOR}:1 regression floor"
+            "accent vs surface_bg contrast {accent_contrast} is below the {ACCENT_CONTRAST_FLOOR}:1 floor"
         );
     }
 

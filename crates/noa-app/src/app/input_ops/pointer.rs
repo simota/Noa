@@ -337,21 +337,23 @@ impl App {
         let cell = surface.last_mouse_cell?;
 
         let terminal = surface.terminal.lock();
-        let row = terminal.active().visible_row(cell.y)?;
+        let line = terminal.active().visible_logical_line(cell.y)?;
         if self.config.link_osc8
-            && let Some(link_id) = row.cells.get(cell.x as usize).and_then(|c| c.hyperlink)
+            && let Some(link_id) = line
+                .row()
+                .cells
+                .get(cell.x as usize)
+                .and_then(|c| c.hyperlink)
         {
             return Some((pane_id, HoverLink::Registry(link_id.get())));
         }
-        if let Some(url) = noa_grid::detect_url_at_column(&row, cell.x) {
-            return Some((
-                pane_id,
-                HoverLink::Range {
-                    y: cell.y,
-                    x_start: url.start_x,
-                    x_end: url.end_x,
-                },
-            ));
+        if let Some(url) = line.url_at(cell.x) {
+            let range = hover_range(
+                &line,
+                (url.start_row, url.start_x),
+                (url.end_row, url.end_x),
+            );
+            return Some((pane_id, range));
         }
         // Paths in a remote pane's output live on the remote host — never
         // detect (let alone open) them as local files, even when a same-named
@@ -359,25 +361,20 @@ impl App {
         if surface.is_remote() {
             return None;
         }
-        // Path detection needs no more of the terminal than the row already
+        // Path detection needs no more of the terminal than the line already
         // borrowed and `cwd` for relative-path resolution; drop the lock
         // before the existence probe below.
-        let path_match = noa_grid::detect_path_at_column(&row, cell.x);
+        let path_match = line
+            .path_at(cell.x)
+            .map(|m| (path_hover_range(&line, &m), m));
         let cwd = terminal.cwd.clone();
         drop(terminal);
-        let path_match = path_match?;
+        let (range, path_match) = path_match?;
         let resolved = resolve_hover_path(&path_match.path, cwd.as_deref())?;
         if !self.probe_path_exists(window_id, resolved) {
             return None;
         }
-        Some((
-            pane_id,
-            HoverLink::Range {
-                y: cell.y,
-                x_start: path_match.start_x,
-                x_end: path_match.end_x,
-            },
-        ))
+        Some((pane_id, range))
     }
 
     /// Whether `path` is known to exist, per the probe cache. A miss (or an
@@ -574,9 +571,13 @@ impl App {
         let cell = surface.last_mouse_cell?;
 
         let terminal = surface.terminal.lock();
-        let row = terminal.active().visible_row(cell.y)?;
+        let line = terminal.active().visible_logical_line(cell.y)?;
         if self.config.link_osc8
-            && let Some(link_id) = row.cells.get(cell.x as usize).and_then(|c| c.hyperlink)
+            && let Some(link_id) = line
+                .row()
+                .cells
+                .get(cell.x as usize)
+                .and_then(|c| c.hyperlink)
         {
             let uri = &terminal.hyperlinks.get(link_id.get())?.uri;
             // Same remote gate as below: a remote pane's `file://` names
@@ -588,7 +589,7 @@ impl App {
                 },
             );
         }
-        if let Some(url) = noa_grid::detect_url_at_column(&row, cell.x) {
+        if let Some(url) = line.url_at(cell.x) {
             return Some(LinkTarget::Uri(url.uri));
         }
         // Same remote gate as `hover_link_target` — a remote pane's paths
@@ -596,20 +597,17 @@ impl App {
         if surface.is_remote() {
             return None;
         }
-        let path_match = noa_grid::detect_path_at_column(&row, cell.x);
+        let path_match = line
+            .path_at(cell.x)
+            .map(|m| (path_hover_range(&line, &m), m));
         let cwd = terminal.cwd.clone();
         drop(terminal);
-        let path_match = path_match?;
+        let (expected, path_match) = path_match?;
         // The row may have been rewritten under a stationary pointer (a PTY
         // redraw doesn't re-sync the hover), leaving `hover_link` pointing
         // at text that no longer matches what was underlined. Only open a
         // path the hover machinery actually vetted: same geometry as the
         // live hover, and a probe that answered "exists".
-        let expected = HoverLink::Range {
-            y: cell.y,
-            x_start: path_match.start_x,
-            x_end: path_match.end_x,
-        };
         if hover_link != expected {
             return None;
         }
@@ -621,6 +619,26 @@ impl App {
                 column: path_match.column,
             })
     }
+}
+
+/// The viewport underline range for a match spanning `start..=end`
+/// (`(row index in line.rows, x)` corners).
+fn hover_range(
+    line: &noa_grid::LogicalLine<'_>,
+    start: (usize, u16),
+    end: (usize, u16),
+) -> HoverLink {
+    let ((y_start, x_start), (y_end, x_end)) = line.viewport_span(start, end);
+    HoverLink::Range {
+        y_start,
+        x_start,
+        y_end,
+        x_end,
+    }
+}
+
+fn path_hover_range(line: &noa_grid::LogicalLine<'_>, m: &noa_grid::PathMatch) -> HoverLink {
+    hover_range(line, (m.start_row, m.start_x), (m.end_row, m.end_x))
 }
 
 /// Whether the modifier that arms link hover/click is held: Cmd on macOS,

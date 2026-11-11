@@ -830,6 +830,20 @@ impl Screen {
         self.storage_row(idx)
     }
 
+    /// The soft-wrapped line through one visible row (`0..rows`): that row
+    /// plus the rows chained to it by `Row::wrapped`, which may reach into
+    /// scrollback or past the viewport's bottom edge.
+    pub fn visible_logical_line(&self, viewport_y: u16) -> Option<LogicalLine<'_>> {
+        if viewport_y >= self.rows {
+            return None;
+        }
+        let idx = self.visible_row_base() + viewport_y as usize;
+        let margins = self
+            .horizontal_margins
+            .map(|m| (usize::from(m.left), usize::from(m.right)));
+        LogicalLine::collect(|y| self.storage_row(y), idx, margins, viewport_y, self.rows)
+    }
+
     pub fn visible_rows(&self) -> Vec<Row> {
         let mut out_rows = Vec::new();
         self.visible_rows_into(&mut out_rows);

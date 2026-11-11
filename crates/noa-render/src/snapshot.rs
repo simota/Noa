@@ -19,9 +19,17 @@ pub enum HoverLink {
     /// underlined — an OSC 8 link highlights as a whole, matching Ghostty,
     /// not just the cell under the pointer.
     Registry(usize),
-    /// An explicit run of cells on one viewport row (an auto-detected
-    /// plain-text URL, which has no registry entry).
-    Range { y: u16, x_start: u16, x_end: u16 },
+    /// An explicit run of viewport cells in reading order, from
+    /// `(y_start, x_start)` through `(y_end, x_end)` inclusive (an
+    /// auto-detected plain-text URL or path, which has no registry entry).
+    /// Rows strictly between the two are covered whole — the run follows a
+    /// soft wrap.
+    Range {
+        y_start: u16,
+        x_start: u16,
+        y_end: u16,
+        x_end: u16,
+    },
 }
 
 /// One display row of the command palette: either a non-selectable category
@@ -902,8 +910,9 @@ mod tests {
         let mut snap = FrameSnapshot::peek(&term);
         let row0_ptr = snap.rows[0].cells.as_ptr();
         snap.hover_link = Some(HoverLink::Range {
-            y: 0,
+            y_start: 0,
             x_start: 0,
+            y_end: 0,
             x_end: 1,
         });
 

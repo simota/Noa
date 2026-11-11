@@ -217,10 +217,11 @@ pub(super) fn is_hover_link_cell(snap: &FrameSnapshot, cell: &Cell, x: u16, y: u
     match snap.hover_link {
         Some(HoverLink::Registry(id)) => cell.hyperlink.is_some_and(|link| link.get() == id),
         Some(HoverLink::Range {
-            y: row_y,
+            y_start,
             x_start,
+            y_end,
             x_end,
-        }) => y == row_y && x >= x_start && x <= x_end,
+        }) => (y_start, x_start) <= (y, x) && (y, x) <= (y_end, x_end),
         None => false,
     }
 }

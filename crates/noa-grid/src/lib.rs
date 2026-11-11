@@ -16,6 +16,7 @@ pub mod kitty;
 pub mod kitty_clipboard;
 pub mod kitty_keyboard;
 pub mod kitty_placeholder;
+mod logical_line;
 pub mod modes;
 mod osc;
 pub mod path;
@@ -43,6 +44,7 @@ pub use kitty_keyboard::{
     KITTY_REPORT_ASSOCIATED_TEXT, KITTY_REPORT_EVENT_TYPES, KittyKeyboard, SetMode,
 };
 pub use kitty_placeholder::{PLACEHOLDER, PlaceholderRun, scan_row};
+pub use logical_line::LogicalLine;
 pub use modes::ModeState;
 pub use osc::{
     AgentState, AgentStatus, Notification, Osc52Policy, ProgressCue, ProgressUpdate, ProgressValue,

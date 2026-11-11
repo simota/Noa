@@ -264,15 +264,17 @@ fn match_in_run<R: Borrow<Row>>(
     let match_start = start + offset;
     let match_end = match_start + trimmed_len; // includes suffix, excludes trimmed punctuation
     let (first, last) = text.span(rows, match_start, match_end);
-    (first <= target && target <= last && !text.cuts(start, end)).then_some(PathMatch {
-        start_row: first.0,
-        start_x: first.1,
-        end_row: last.0,
-        end_x: last.1,
-        path,
-        line,
-        column: col,
-    })
+    (first <= target && target <= last && !text.cuts(start, end, is_run_boundary)).then_some(
+        PathMatch {
+            start_row: first.0,
+            start_x: first.1,
+            end_row: last.0,
+            end_x: last.1,
+            path,
+            line,
+            column: col,
+        },
+    )
 }
 
 /// Collapse `\<whitespace>` escapes into the bare whitespace so the escaped

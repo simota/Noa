@@ -200,11 +200,11 @@ impl LineText {
     }
 
     /// Whether a match over `chars[start..end]` may be only the visible part
-    /// of something longer: it begins at a cut start, or nothing separates
-    /// it from a cut end.
-    pub fn cuts(&self, start: usize, end: usize) -> bool {
+    /// of something longer: it begins at a cut start, or none of the
+    /// detector's delimiters separates it from a cut end.
+    pub fn cuts(&self, start: usize, end: usize, is_delimiter: impl Fn(char) -> bool) -> bool {
         (self.cut_start && start == 0)
-            || (self.cut_end && !self.chars[end..].iter().any(|c| c.is_whitespace()))
+            || (self.cut_end && !self.chars[end..].iter().any(|&c| is_delimiter(c)))
     }
 
     /// The cell span of `chars[start..end]` (non-empty), with the end pulled
@@ -369,6 +369,19 @@ mod tests {
         let line = terminal.primary.visible_logical_line(150).unwrap();
         assert_eq!((line.rows.len(), line.index), (34, 32));
         assert_eq!(line.path_at(0), None);
+    }
+
+    #[test]
+    fn keeps_delimited_links_in_a_line_without_whitespace() {
+        // Compact JSON: nothing but quotes separates the links from a blob
+        // that runs far past the window.
+        let blob = "x".repeat(2000);
+        let text = format!(r#"{{"url":"https://e.co","p":"/tmp/a.rs","blob":"{blob}"}}"#);
+        let terminal = feed(40, 80, text.as_bytes());
+        let line = terminal.primary.visible_logical_line(0).unwrap();
+        assert_eq!(line.rows.len(), 33);
+        assert_eq!(line.url_at(10).map(|m| m.uri), Some("https://e.co".into()));
+        assert_eq!(line.path_at(28).map(|m| m.path), Some("/tmp/a.rs".into()));
     }
 
     #[test]

@@ -3,8 +3,8 @@
 //! `Handler` implementation drives.
 
 use crate::cell::{Cell, RingGrid, Row};
-use crate::logical_line::LogicalLine;
 use crate::cursor::{Cursor, HorizontalMargins, SavedCursor, ScrollRegion};
+use crate::logical_line::LogicalLine;
 use crate::scrollback::PagedScrollback;
 use crate::search::{RowSearch, SearchAnchor, SearchMatch, SearchState};
 use crate::selection::{Selection, SelectionPoint};

@@ -44,12 +44,12 @@ pub use kitty_keyboard::{
     KITTY_REPORT_ASSOCIATED_TEXT, KITTY_REPORT_EVENT_TYPES, KittyKeyboard, SetMode,
 };
 pub use kitty_placeholder::{PLACEHOLDER, PlaceholderRun, scan_row};
+pub use logical_line::LogicalLine;
 pub use modes::ModeState;
 pub use osc::{
     AgentState, AgentStatus, Notification, Osc52Policy, ProgressCue, ProgressUpdate, ProgressValue,
     TerminalColors, TerminalProgress, local_file_uri_path,
 };
-pub use logical_line::LogicalLine;
 pub use path::{PathMatch, detect_path_at_column};
 pub use screen::{KittyParent, KittyPlacement, Screen, VisibleKittyPlacement, kitty_image_size};
 pub use search::{SearchAnchor, SearchMatch, SearchState};

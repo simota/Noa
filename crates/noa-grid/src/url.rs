@@ -795,7 +795,7 @@ pub(crate) fn url_in<R: Borrow<Row>>(
         if end > char_start + scheme_len {
             let (start, last) = line.span(rows, char_start, end);
             if start <= target && target <= last {
-                if line.cuts(char_start, end) {
+                if line.cuts(char_start, end, is_run_boundary) {
                     return None;
                 }
                 return Some(UrlMatch {

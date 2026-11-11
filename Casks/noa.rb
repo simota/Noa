@@ -1,5 +1,5 @@
 cask "noa" do
-  version "0.9.0"
+  version "0.8.1"
   sha256 :no_check
 
   url "https://github.com/simota/Noa/releases/download/v#{version}/Noa-#{version}-macos-arm64.zip"

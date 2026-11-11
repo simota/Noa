@@ -439,8 +439,9 @@ fn hover_link_range_underlines_only_the_matching_run_on_its_row() {
 
     let mut snap = FrameSnapshot::from_terminal(&mut terminal);
     snap.hover_link = Some(HoverLink::Range {
-        y: 0,
+        y_start: 0,
         x_start: 1,
+        y_end: 0,
         x_end: 2,
     });
 
@@ -456,6 +457,42 @@ fn hover_link_range_underlines_only_the_matching_run_on_its_row() {
         underlined,
         vec![[1, 0], [2, 0]],
         "only columns 1..=2 on row 0 are underlined; row 1 and the rest of row 0 are not"
+    );
+}
+
+#[test]
+fn hover_link_range_follows_a_soft_wrap_onto_the_next_row() {
+    let Some(mut font) = font_with_rasterized_m() else {
+        return;
+    };
+
+    let mut terminal = Terminal::new(GridSize::new(4, 3));
+    for row in 0..3 {
+        for x in 0..4 {
+            terminal.primary.grid[row].cells[x].ch = 'M';
+        }
+    }
+
+    let mut snap = FrameSnapshot::from_terminal(&mut terminal);
+    snap.hover_link = Some(HoverLink::Range {
+        y_start: 0,
+        x_start: 2,
+        y_end: 2,
+        x_end: 0,
+    });
+
+    let mut instances = Vec::new();
+    rebuild_cell_instances(&mut instances, &snap, &mut font, &Theme::new(), false);
+    let mut underlined: Vec<[u16; 2]> = instances
+        .iter()
+        .filter(|i| i.flags == CellInstance::FLAG_DECORATION)
+        .map(|i| i.grid_pos)
+        .collect();
+    underlined.sort_by_key(|pos| (pos[1], pos[0]));
+    assert_eq!(
+        underlined,
+        vec![[2, 0], [3, 0], [0, 1], [1, 1], [2, 1], [3, 1], [0, 2]],
+        "the tail of row 0, all of row 1, and the head of row 2"
     );
 }
 

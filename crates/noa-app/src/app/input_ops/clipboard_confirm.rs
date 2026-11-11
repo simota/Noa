@@ -138,8 +138,19 @@ impl App {
         }
         surface.selection_anchor = None;
         match link {
-            Some(HoverLink::Range { y, x_start, x_end }) => {
-                terminal.set_viewport_selection(Point { x: x_start, y }, Point { x: x_end, y });
+            Some(HoverLink::Range {
+                y_start,
+                x_start,
+                y_end,
+                x_end,
+            }) => {
+                terminal.set_viewport_selection(
+                    Point {
+                        x: x_start,
+                        y: y_start,
+                    },
+                    Point { x: x_end, y: y_end },
+                );
             }
             Some(HoverLink::Registry(_)) => terminal.set_viewport_selection(cell, cell),
             None => terminal.select_word_at_viewport_point(cell),

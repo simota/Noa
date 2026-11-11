@@ -175,7 +175,10 @@ pub(super) fn rebuild_row_instances(
         && snap.cursor.y != y
         && copy_cursor.is_none_or(|(_, cursor_y)| cursor_y != y)
         && !record_row_hit
-        && !matches!(snap.hover_link, Some(HoverLink::Range { y: link_y, .. }) if link_y == y);
+        && !matches!(
+            snap.hover_link,
+            Some(HoverLink::Range { y_start, y_end, .. }) if (y_start..=y_end).contains(&y)
+        );
     let walked = if blank_tail {
         (row.occupied() + 1).min(row.cells.len())
     } else {

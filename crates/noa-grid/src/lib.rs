@@ -16,6 +16,7 @@ pub mod kitty;
 pub mod kitty_clipboard;
 pub mod kitty_keyboard;
 pub mod kitty_placeholder;
+mod logical_line;
 pub mod modes;
 mod osc;
 pub mod path;
@@ -48,6 +49,7 @@ pub use osc::{
     AgentState, AgentStatus, Notification, Osc52Policy, ProgressCue, ProgressUpdate, ProgressValue,
     TerminalColors, TerminalProgress, local_file_uri_path,
 };
+pub use logical_line::LogicalLine;
 pub use path::{PathMatch, detect_path_at_column};
 pub use screen::{KittyParent, KittyPlacement, Screen, VisibleKittyPlacement, kitty_image_size};
 pub use search::{SearchAnchor, SearchMatch, SearchState};

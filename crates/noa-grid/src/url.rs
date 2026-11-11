@@ -1,24 +1,27 @@
-//! Plain-text `https?://` URL detection within a single row, for the
-//! Cmd+hover auto-link feature (`noa-app` mouse hover path). Operates on one
-//! [`Row`] at a time — wrapped multi-row URLs (a URL that soft-wraps across
-//! the `Row::wrapped` boundary) are out of scope for v1 and are not
-//! detected.
+//! Plain-text `https?://` URL detection for the Cmd+hover auto-link feature
+//! (`noa-app` mouse hover path). Operates on one logical line: a single
+//! [`Row`], or the run of rows a URL soft-wraps across (`Row::wrapped`).
 //!
 //! Surrounding brackets and prose punctuation delimit links; balanced ASCII
 //! brackets inside URL components are retained. Letters without a delimiter
 //! remain part of the URL, including Japanese path and domain characters.
 //!
-//! Char-index-to-cell-x mapping follows the same WIDE_SPACER-skipping
-//! approach as [`crate::search::compute_matches`].
+//! Char-index-to-cell mapping is [`crate::logical_line::LineText`]'s.
+
+use std::borrow::Borrow;
 
 use crate::cell::Row;
-use noa_core::CellAttrs;
+use crate::logical_line::LineText;
 
-/// A detected URL run, in both cell-x (for underline rendering) and text
-/// (for opening) form.
+/// A detected URL run, in both cell (for underline rendering) and text
+/// (for opening) form. `start_row`/`end_row` index the rows passed to
+/// [`detect_url_at`]; the run covers every cell between its two corners in
+/// reading order.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct UrlMatch {
+    pub start_row: usize,
     pub start_x: u16,
+    pub end_row: usize,
     pub end_x: u16,
     pub uri: String,
 }
@@ -760,37 +763,46 @@ fn url_end(
 
 /// Find the `https?://` run covering `column` in `row`, if any.
 pub fn detect_url_at_column(row: &Row, column: u16) -> Option<UrlMatch> {
-    let mut text = String::new();
-    let mut cell_x = Vec::new();
-    for (x, cell) in row.cells.iter().enumerate() {
-        if cell.attrs.contains(CellAttrs::WIDE_SPACER) {
-            continue;
-        }
-        cell.push_text_to(&mut text);
-        cell_x.extend(std::iter::repeat_n(x as u16, cell.text_chars().count()));
-    }
-    let chars: Vec<char> = text.chars().collect();
-    let sql_quotes = starts_sql_statement(&chars);
+    detect_url_at(std::slice::from_ref(row), 0, column)
+}
+
+/// Find the `https?://` run covering `column` of `rows[row]`, reading `rows`
+/// as one soft-wrapped line.
+pub fn detect_url_at<R: Borrow<Row>>(rows: &[R], row: usize, column: u16) -> Option<UrlMatch> {
+    url_in(&LineText::new(rows), rows, (row, column))
+}
+
+/// Find the `https?://` run covering `target` (`(row index, column)`) in
+/// `line`, the text of `rows`.
+pub(crate) fn url_in<R: Borrow<Row>>(
+    line: &LineText,
+    rows: &[R],
+    target: (usize, u16),
+) -> Option<UrlMatch> {
+    let chars = &line.chars;
+    let sql_quotes = starts_sql_statement(chars);
 
     // Visit URLs in text order and skip their contents, so a redirect URL
     // embedded in a query cannot override the surrounding link on hover.
     let mut char_start = 0;
     while char_start < chars.len() {
-        let Some(scheme_len) = scheme_len_at(&chars, char_start) else {
+        let Some(scheme_len) = scheme_len_at(chars, char_start) else {
             char_start += 1;
             continue;
         };
-        let quote_width = open_single_quote_width(&chars, char_start, sql_quotes);
-        let end = url_end(&chars, char_start, scheme_len, quote_width, sql_quotes);
+        let quote_width = open_single_quote_width(chars, char_start, sql_quotes);
+        let end = url_end(chars, char_start, scheme_len, quote_width, sql_quotes);
         if end > char_start + scheme_len {
-            let start_x = cell_x[char_start];
-            let last_x = cell_x[end - 1];
-            let end_x =
-                last_x + u16::from(row.cells[last_x as usize].attrs.contains(CellAttrs::WIDE));
-            if start_x <= column && column <= end_x {
+            let (start, last) = line.span(rows, char_start, end);
+            if start <= target && target <= last {
+                if line.cuts(char_start, end) {
+                    return None;
+                }
                 return Some(UrlMatch {
-                    start_x,
-                    end_x,
+                    start_row: start.0,
+                    start_x: start.1,
+                    end_row: last.0,
+                    end_x: last.1,
                     uri: chars[char_start..end].iter().collect(),
                 });
             }
@@ -805,6 +817,7 @@ pub fn detect_url_at_column(row: &Row, column: u16) -> Option<UrlMatch> {
 mod tests {
     use super::*;
     use crate::cell::Cell;
+    use noa_core::CellAttrs;
 
     fn row_from_str(text: &str) -> Row {
         let cols = text.chars().count() as u16;
@@ -1886,5 +1899,53 @@ mod tests {
             assert_eq!((found.start_x, found.end_x), (2, 27));
         }
         assert_eq!(detect_url_at_column(row, 28), None);
+    }
+
+    fn wrapped_terminal(cols: u16, text: &str) -> crate::Terminal {
+        let mut terminal = crate::Terminal::new(noa_core::GridSize::new(cols, 4));
+        noa_vt::Stream::new().feed(text.as_bytes(), &mut terminal);
+        terminal
+    }
+
+    #[test]
+    fn detects_a_url_soft_wrapped_across_rows() {
+        let terminal = wrapped_terminal(20, "see https://example.com/a/long/path?q=1 ok");
+        let rows = &terminal.primary.grid;
+        assert!(rows[0].wrapped && rows[1].wrapped);
+        let rows = [&rows[0], &rows[1], &rows[2]];
+
+        for (row, column) in [(0, 4), (0, 19), (1, 0), (1, 18)] {
+            let found = detect_url_at(&rows, row, column).expect("inside the wrapped URL");
+            assert_eq!(found.uri, "https://example.com/a/long/path?q=1");
+            assert_eq!((found.start_row, found.start_x), (0, 4));
+            assert_eq!((found.end_row, found.end_x), (1, 18));
+        }
+        for (row, column) in [(0, 3), (1, 19), (2, 0)] {
+            assert_eq!(detect_url_at(&rows, row, column), None);
+        }
+    }
+
+    #[test]
+    fn rows_given_alone_do_not_see_across_the_wrap() {
+        let terminal = wrapped_terminal(20, "see https://example.com/a/long/path?q=1 ok");
+        let rows = &terminal.primary.grid;
+        assert_eq!(
+            detect_url_at_column(&rows[0], 4).map(|m| m.uri),
+            Some("https://example".into())
+        );
+        assert_eq!(detect_url_at_column(&rows[1], 0), None);
+    }
+
+    #[test]
+    fn skips_the_margin_filler_of_a_wrapped_wide_character() {
+        let terminal = wrapped_terminal(11, "https://a/界x");
+        let rows = &terminal.primary.grid;
+        assert!(rows[0].ends_with_wide_pad());
+        let rows = [&rows[0], &rows[1]];
+
+        let found = detect_url_at(&rows, 1, 1).expect("the wide glyph's spacer column");
+        assert_eq!(found.uri, "https://a/界x");
+        assert_eq!((found.start_row, found.start_x), (0, 0));
+        assert_eq!((found.end_row, found.end_x), (1, 2));
     }
 }

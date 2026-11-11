@@ -1,7 +1,8 @@
-//! Plain-text filesystem path detection within a single row, for the
-//! Cmd+hover auto-link feature (`noa-app` mouse hover path). Mirrors
-//! [`crate::url`]'s row-text + cell-x mapping, with path-specific boundaries
-//! and trailing-punctuation trimming for `/abs/path`, `~/path`,
+//! Plain-text filesystem path detection for the Cmd+hover auto-link feature
+//! (`noa-app` mouse hover path), over one logical line: a single row, or the
+//! run of rows a path soft-wraps across. Mirrors [`crate::url`]'s line-text
+//! and cell mapping, with path-specific boundaries and
+//! trailing-punctuation trimming for `/abs/path`, `~/path`,
 //! `./rel/path`, `../rel/path`, and bare relative paths with an interior
 //! slash (`src/main.rs`), optionally suffixed with `:LINE` or `:LINE:COL`
 //! (rustc/grep style).
@@ -12,16 +13,22 @@
 //! actually existing — that's what makes the bare-relative-path heuristic
 //! (any token with an interior `/`) safe against false positives.
 
-use crate::cell::Row;
-use noa_core::CellAttrs;
+use std::borrow::Borrow;
 
-/// A detected path run, in both cell-x (for underline rendering) and text
-/// (for resolving/opening) form. `line`/`column` come from a trailing
-/// `:LINE` or `:LINE:COL` suffix, if present; the suffix is included in
-/// `start_x..end_x` (so it underlines too) but excluded from `path`.
+use crate::cell::Row;
+use crate::logical_line::LineText;
+
+/// A detected path run, in both cell (for underline rendering) and text
+/// (for resolving/opening) form. `start_row`/`end_row` index the rows passed
+/// to [`detect_path_at`]; the run covers every cell between its two corners
+/// in reading order. `line`/`column` come from a trailing `:LINE` or
+/// `:LINE:COL` suffix, if present; the suffix is included in the run (so it
+/// underlines too) but excluded from `path`.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PathMatch {
+    pub start_row: usize,
     pub start_x: u16,
+    pub end_row: usize,
     pub end_x: u16,
     pub path: String,
     pub line: Option<u32>,
@@ -161,16 +168,23 @@ fn split_line_col_suffix(token: &[char]) -> (usize, Option<u32>, Option<u32>) {
 
 /// Find the path run covering `column` in `row`, if any.
 pub fn detect_path_at_column(row: &Row, column: u16) -> Option<PathMatch> {
-    let mut text = String::new();
-    let mut cell_x = Vec::new();
-    for (x, cell) in row.cells.iter().enumerate() {
-        if cell.attrs.contains(CellAttrs::WIDE_SPACER) {
-            continue;
-        }
-        cell.push_text_to(&mut text);
-        cell_x.extend(std::iter::repeat_n(x as u16, cell.text_chars().count()));
-    }
-    let chars: Vec<char> = text.chars().collect();
+    detect_path_at(std::slice::from_ref(row), 0, column)
+}
+
+/// Find the path run covering `column` of `rows[row]`, reading `rows` as one
+/// soft-wrapped line.
+pub fn detect_path_at<R: Borrow<Row>>(rows: &[R], row: usize, column: u16) -> Option<PathMatch> {
+    path_in(&LineText::new(rows), rows, (row, column))
+}
+
+/// Find the path run covering `target` (`(row index, column)`) in `line`,
+/// the text of `rows`.
+pub(crate) fn path_in<R: Borrow<Row>>(
+    line: &LineText,
+    rows: &[R],
+    target: (usize, u16),
+) -> Option<PathMatch> {
+    let chars = &line.chars;
 
     let mut i = 0;
     while i < chars.len() {
@@ -184,7 +198,7 @@ pub fn detect_path_at_column(row: &Row, column: u16) -> Option<PathMatch> {
             let start = i + 1;
             let end = start + close;
             i = end + 1;
-            if let Some(m) = match_in_run(row, &chars, &cell_x, column, start, end) {
+            if let Some(m) = match_in_run(rows, line, target, start, end) {
                 return Some(m);
             }
             continue;
@@ -209,7 +223,7 @@ pub fn detect_path_at_column(row: &Row, column: u16) -> Option<PathMatch> {
             end += 1;
         }
         i = end;
-        if let Some(m) = match_in_run(row, &chars, &cell_x, column, start, end) {
+        if let Some(m) = match_in_run(rows, line, target, start, end) {
             return Some(m);
         }
     }
@@ -218,16 +232,15 @@ pub fn detect_path_at_column(row: &Row, column: u16) -> Option<PathMatch> {
 }
 
 /// Run the path-candidate machinery over `chars[start..end]` (one token) and
-/// return its match if it covers `column`.
-fn match_in_run(
-    row: &Row,
-    chars: &[char],
-    cell_x: &[u16],
-    column: u16,
+/// return its match if it covers `target` (`(row index, column)`).
+fn match_in_run<R: Borrow<Row>>(
+    rows: &[R],
+    text: &LineText,
+    target: (usize, u16),
     start: usize,
     end: usize,
 ) -> Option<PathMatch> {
-    let raw_run = &chars[start..end];
+    let raw_run = &text.chars[start..end];
     // A `://` anywhere in the run marks it as a URL, not a path — URL
     // detection already runs first in the hover-link caller, and the
     // candidate-start scan below would otherwise latch onto the `//`.
@@ -250,27 +263,12 @@ fn match_in_run(
 
     let match_start = start + offset;
     let match_end = match_start + trimmed_len; // includes suffix, excludes trimmed punctuation
-    let (Some(&start_x), Some(&end_x)) = (
-        cell_x.get(match_start),
-        cell_x.get(match_end.saturating_sub(1)),
-    ) else {
-        return None;
-    };
-    // `cell_x` skips WIDE_SPACER cells, so a path ending in a wide char
-    // maps `end_x` to the char's *first* column; pull the spacer column
-    // in too, or hovering the char's right half misses the link.
-    let end_x = if row
-        .cells
-        .get(end_x as usize)
-        .is_some_and(|c| c.attrs.contains(CellAttrs::WIDE))
-    {
-        end_x + 1
-    } else {
-        end_x
-    };
-    (start_x <= column && column <= end_x).then_some(PathMatch {
-        start_x,
-        end_x,
+    let (first, last) = text.span(rows, match_start, match_end);
+    (first <= target && target <= last && !text.cuts(start, end)).then_some(PathMatch {
+        start_row: first.0,
+        start_x: first.1,
+        end_row: last.0,
+        end_x: last.1,
         path,
         line,
         column: col,
@@ -295,6 +293,7 @@ fn unescape_whitespace(run: &[char]) -> String {
 mod tests {
     use super::*;
     use crate::cell::Cell;
+    use noa_core::CellAttrs;
 
     fn row_from_str(text: &str) -> Row {
         let cols = text.chars().count() as u16;
@@ -548,5 +547,24 @@ mod tests {
     fn no_match_on_urls() {
         let row = row_from_str("see https://example.com/path here");
         assert_eq!(detect_path_at_column(&row, 10), None);
+    }
+
+    #[test]
+    fn detects_a_path_soft_wrapped_across_rows() {
+        let mut terminal = crate::Terminal::new(noa_core::GridSize::new(20, 4));
+        noa_vt::Stream::new().feed(b"at src/very/long/dir/name/file.rs:12:3 ok", &mut terminal);
+        let rows = &terminal.primary.grid;
+        assert!(rows[0].wrapped && rows[1].wrapped);
+        let rows = [&rows[0], &rows[1], &rows[2]];
+
+        for (row, column) in [(0, 3), (0, 19), (1, 0), (1, 17)] {
+            let found = detect_path_at(&rows, row, column).expect("inside the wrapped path");
+            assert_eq!(found.path, "src/very/long/dir/name/file.rs");
+            assert_eq!((found.line, found.column), (Some(12), Some(3)));
+            assert_eq!((found.start_row, found.start_x), (0, 3));
+            assert_eq!((found.end_row, found.end_x), (1, 17));
+        }
+        assert_eq!(detect_path_at(&rows, 1, 18), None);
+        assert_eq!(detect_path_at(&rows, 2, 0), None);
     }
 }

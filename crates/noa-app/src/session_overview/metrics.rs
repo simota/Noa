@@ -67,7 +67,7 @@ pub fn overview_title_bar_color() -> [f32; 4] {
 pub fn overview_border_color() -> [f32; 4] {
     crate::chrome::rgba(crate::chrome::palette().border)
 }
-/// Blue accent focus ring for the selected tile (REQ-OV-14).
+/// Accent focus ring for the selected tile (REQ-OV-14).
 pub fn overview_focus_ring_color() -> [f32; 4] {
     crate::chrome::rgba(crate::chrome::palette().accent)
 }

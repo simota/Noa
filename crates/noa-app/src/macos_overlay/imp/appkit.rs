@@ -2008,7 +2008,7 @@ pub(in crate::macos_overlay) fn rebuild_scratch_badge(
         }
 
         // The "Scratch Terminal" prefix renders accent + semibold (brand
-        // book: UI_ACCENT for the identity cue), the " — <cwd>" remainder in
+        // book: the UI accent for the identity cue), the " — <cwd>" remainder in
         // the normal low-contrast surface foreground.
         let prefix_chars = SCRATCH_BADGE_PREFIX
             .chars()

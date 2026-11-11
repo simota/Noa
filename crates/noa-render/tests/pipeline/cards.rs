@@ -423,7 +423,7 @@ fn pane_drag_visuals_composite_without_validation_error() {
     let surface_size = PixelSize { w: 400, h: 300 };
     let (target_tex, target_view) = render_target(&device, surface_size.w, surface_size.h);
 
-    // Zone highlight: a 1x1 UI_ACCENT-tinted texture (alpha carries the
+    // Zone highlight: a 1x1 accent-tinted texture (alpha carries the
     // ~28% overlay opacity, matching `ensure_tint_texture`'s convention).
     let zone_tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("noa-test-pane-drag-zone"),

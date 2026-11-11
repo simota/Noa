@@ -31,7 +31,7 @@ use instance_update::InstanceChanges;
 const DEFAULT_PANE_ID: PaneId = PaneId::new(0);
 /// Pre-first-rebuild fallbacks only: both colors are re-derived from the
 /// active theme every [`Renderer::rebuild_panes`] (divider = the overlay
-/// border tone, focus = the shared [`crate::theme::UI_ACCENT`]).
+/// border tone, focus = the theme's shared [`crate::theme::Theme::ui_accent`]).
 const DIVIDER_RGBA: [u8; 4] = [82, 82, 82, 255];
 const FOCUS_INDICATOR_RGBA: [u8; 4] = [0x14, 0xa2, 0xff, FOCUS_INDICATOR_ALPHA];
 /// The focused-pane outline's opacity (~90%), kept independent of the accent
@@ -1044,7 +1044,10 @@ impl Renderer {
             self.target_format_is_srgb,
         ));
         let accent = to_u8_color(surface_output_rgba(
-            rgba(crate::theme::UI_ACCENT),
+            rgba(crate::theme::accent_on(
+                theme.ui_accent(),
+                &[theme.default_bg],
+            )),
             self.target_format_is_srgb,
         ));
         self.focus_indicator_color = [accent[0], accent[1], accent[2], FOCUS_INDICATOR_ALPHA];

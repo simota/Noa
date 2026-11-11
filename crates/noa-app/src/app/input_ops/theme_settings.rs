@@ -841,7 +841,7 @@ impl App {
             let new_theme = active_theme(&gpu.theme, &gpu.preview_theme).clone();
             gpu.theme = new_theme;
             gpu.preview_theme = None;
-            crate::chrome::select_palette(gpu.theme.is_light(), glassmorphism);
+            crate::chrome::select_palette(&gpu.theme, glassmorphism);
             gpu.chrome_textures.reset();
         }
         // `glassmorphism` has no continuous live preview (unlike
@@ -1022,7 +1022,7 @@ impl App {
                 &overrides,
             );
             gpu.preview_theme = None;
-            crate::chrome::select_palette(gpu.theme.is_light(), glassmorphism);
+            crate::chrome::select_palette(&gpu.theme, glassmorphism);
             gpu.chrome_textures.reset();
         }
         match &payload.theme_pair {

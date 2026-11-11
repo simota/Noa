@@ -1045,7 +1045,7 @@ impl App {
 
             // Persistent red attention ring over non-focused/non-hovered tiles
             // with a pending interaction request (FR-16). Focus and hover keep
-            // the blue accent ring; during the bounded arrival cue only their
+            // the accent ring; during the bounded arrival cue only their
             // blue glow strengthens, so interaction state is preserved without
             // hiding the new notification.
             for (index, rect) in tile_rects.iter().enumerate() {

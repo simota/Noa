@@ -41,6 +41,6 @@ pub use snapshot::{
     ImagePlacementSnapshot, PaletteRow, Preedit, SnapshotImage,
 };
 pub use theme::{
-    OverlayStyle, Theme, UI_ACCENT, blend, contrast_ratio, overlay_surface_alpha,
-    set_overlay_surface_alpha,
+    BRAND_ACCENT, OverlayStyle, Theme, UI_ACCENT_MIN_CONTRAST, accent_on, blend, contrast_ratio,
+    overlay_surface_alpha, set_overlay_surface_alpha,
 };

@@ -14,11 +14,15 @@ use noa_grid::TerminalColors;
 
 pub const DEFAULT_MINIMUM_CONTRAST: f32 = 1.0;
 
-/// The one blue accent shared by every noa-owned UI surface: the chrome
-/// (sidebar / tab overview) focus rings, the overlay (palette / dialog)
-/// selection cues, and the split-pane focus indicator. A single source so the
-/// "focused / selected" hue reads identically everywhere.
-pub const UI_ACCENT: Rgb = Rgb::new(0x14, 0xa2, 0xff);
+/// Noa's single brand accent (`docs/mascot-profile.md`: the one warm
+/// terminal-orange, "never a second accent"). The UI accent of every theme
+/// whose cursor carries no usable hue of its own — the unset default
+/// included — see [`Theme::ui_accent`].
+pub const BRAND_ACCENT: Rgb = Rgb::new(0xe8, 0xa3, 0x3d);
+
+/// WCAG floor (UI component / large text) every UI accent must clear against
+/// the surfaces it is drawn on — enforced by [`accent_on`].
+pub const UI_ACCENT_MIN_CONTRAST: f32 = 3.0;
 
 /// A resolved terminal color theme: default fg/bg plus the 256-color palette.
 ///
@@ -170,6 +174,56 @@ impl Theme {
     pub fn record_gutter(&self) -> Rgb {
         blend(self.selection_bg, self.active_search_bg, 0.5)
     }
+
+    /// The one accent shared by every noa-owned UI surface under this theme:
+    /// the chrome (sidebar / tab overview) focus rings, the overlay (palette
+    /// / dialog) selection cues, and the split-pane focus indicator. A single
+    /// source so the "focused / selected" hue reads identically everywhere
+    /// *and* matches the terminal it frames.
+    ///
+    /// The theme's cursor color when that is a real accent hue, otherwise
+    /// [`BRAND_ACCENT`] — so `theme = Noa` (cursor `#E8A33D`) and the unset
+    /// default (cursor = foreground gray) both resolve to the brand orange.
+    /// Unclamped: draw sites pass it through [`accent_on`] with the surfaces
+    /// they actually paint over.
+    pub fn ui_accent(&self) -> Rgb {
+        if is_accent_hue(self.cursor) {
+            self.cursor
+        } else {
+            BRAND_ACCENT
+        }
+    }
+}
+
+/// Whether `c` can serve as a UI accent: chromatic enough to read as a hue
+/// rather than a gray, and not red — red is reserved for the needs-attention
+/// ring/dot, so a red-cursor theme must not make "selected" look like
+/// "attention".
+fn is_accent_hue(c: Rgb) -> bool {
+    let (r, g, b) = (i32::from(c.r), i32::from(c.g), i32::from(c.b));
+    let max = r.max(g).max(b);
+    let chroma = max - r.min(g).min(b);
+    if chroma < 48 {
+        return false;
+    }
+    // Red sector = hue within 15 degrees of 0: red is the max channel and
+    // the other two differ by under a quarter of the chroma.
+    !(max == r && (g - b).abs() * 4 < chroma)
+}
+
+/// `accent` nudged toward black or white until it clears
+/// [`UI_ACCENT_MIN_CONTRAST`] against every one of `surfaces`; returned
+/// unchanged when it already does.
+pub fn accent_on(accent: Rgb, surfaces: &[Rgb]) -> Rgb {
+    let mut out = accent;
+    // Two passes: a fix for a later surface moves the color in the same
+    // direction for same-polarity surfaces, but re-check the earlier ones.
+    for _ in 0..2 {
+        for &surface in surfaces {
+            out = ensure_minimum_contrast(out, surface, UI_ACCENT_MIN_CONTRAST);
+        }
+    }
+    out
 }
 
 pub(crate) fn rgba(rgb: Rgb) -> [f32; 4] {
@@ -295,11 +349,6 @@ pub struct OverlayStyle {
     selected_bg: Rgb,
 }
 
-/// The command palette's vivid accent (the highlighted-row bar and query-match
-/// highlight, D/C). The shared [`UI_ACCENT`] rather than a theme-derived tint,
-/// so the selection cue reads the same across themes.
-const OVERLAY_ACCENT: Rgb = UI_ACCENT;
-
 /// Alpha applied to overlay *surface fills* (card face, highlighted row) —
 /// `1.0` normally, below it under `glassmorphism`, so the navigation surfaces
 /// (command palette, search prompt, confirm dialogs) read as frosted panes
@@ -341,6 +390,9 @@ impl OverlayStyle {
         let fg = theme.default_fg;
         let bg = theme.default_bg;
         let surface_bg = blend(bg, fg, 0.08);
+        // The vivid accent (highlighted-row bar, query-match highlight):
+        // the theme's shared UI accent, legible on the card face.
+        let accent = accent_on(theme.ui_accent(), &[surface_bg]);
         OverlayStyle {
             surface_bg,
             surface_fg: fg,
@@ -348,11 +400,11 @@ impl OverlayStyle {
             border: blend(fg, bg, 0.70),
             accent_bg: theme.selection_bg,
             accent_fg: theme.selection_fg,
-            accent: OVERLAY_ACCENT,
+            accent,
             // The highlighted row: the elevated surface tinted toward the
             // accent so the selection reads as an accent-family highlight
             // (with the 2px bar) without the heavy full-accent fill (D).
-            selected_bg: blend(surface_bg, OVERLAY_ACCENT, 0.20),
+            selected_bg: blend(surface_bg, accent, 0.20),
         }
     }
 
@@ -560,6 +612,33 @@ mod tests {
         let light_style = OverlayStyle::from_theme(&light);
         assert!(light_style.surface_bg.r < light.default_bg.r);
         assert!(light_style.muted_fg.r > light.default_fg.r);
+    }
+
+    #[test]
+    fn ui_accent_follows_a_chromatic_cursor_else_the_brand() {
+        // Unset default: the cursor is the foreground gray, not a hue.
+        assert_eq!(Theme::new().ui_accent(), BRAND_ACCENT);
+
+        let mut theme = Theme::new();
+        theme.cursor = Rgb::new(0x7a, 0x9c, 0xc6);
+        assert_eq!(theme.ui_accent(), theme.cursor);
+
+        // Red is the attention hue — never the selection accent.
+        theme.cursor = Rgb::new(0xff, 0x4d, 0x4d);
+        assert_eq!(theme.ui_accent(), BRAND_ACCENT);
+    }
+
+    #[test]
+    fn accent_on_clears_the_floor_and_keeps_passing_colors() {
+        let dark = Rgb::new(0x1b, 0x1d, 0x21);
+        assert_eq!(accent_on(BRAND_ACCENT, &[dark]), BRAND_ACCENT);
+
+        let light = [Rgb::new(0xf7, 0xf7, 0xf7), Rgb::new(0xe2, 0xe5, 0xee)];
+        let adjusted = accent_on(BRAND_ACCENT, &light);
+        assert_ne!(adjusted, BRAND_ACCENT);
+        for surface in light {
+            assert!(contrast_ratio(adjusted, surface) >= UI_ACCENT_MIN_CONTRAST);
+        }
     }
 
     // `OVERLAY_SURFACE_ALPHA` is a process-wide static and cargo runs tests

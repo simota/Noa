@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-11
+
+Links that follow soft wraps, and a UI accent that comes from the theme.
+
+### Added
+
+- Cmd+hover URL and path detection follows soft-wrapped lines: a link that
+  wraps at the right margin is underlined, selected and opened as a whole
+  instead of being cut at the wrap. Rows wrapped at DECLRMM left/right margins
+  contribute only the cells inside the margins. Wraps an application draws
+  itself with hard newlines are not joined.
+
+### Changed
+
+- The UI accent of the sidebar, Session Overview, the overlays and the
+  split-pane focus ring is derived from the active theme instead of the fixed
+  blue `#14A2FF`. A theme whose cursor has a usable hue supplies the accent; a
+  hueless or red cursor falls back to the brand orange `#E8A33D`, which is also
+  what `theme = Noa` and the unset default resolve to. Every accent is kept at
+  3.0:1 contrast or better against the surfaces it is drawn on.
+
 ## [0.8.0] - 2026-11-10
 
 Floating panes, and a working scratch and quick terminal on Wayland.

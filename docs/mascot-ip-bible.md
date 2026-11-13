@@ -1,13 +1,11 @@
-# Noa Mascot — Character Bible & Franchise Kit
+# Noa Mascot: Character Bible & Franchise Kit
 
 The layer *under* the scene prompts (`mascot-ip.md`). Where those sheets say
 "draw her doing X", this doc defines **who she is, who stands beside her, what she
-wears, and how the IP expands** — so every artist, caption, and product stays on
+wears, and how the IP expands**, so every artist, caption, and product stays on
 model. Character-first, terminal-independent.
 
----
-
-## 1. Noa — Character Profile
+## 1. Noa: Character Profile
 
 > Canonical quick sheet: **`mascot-profile.md`**. This section is the in-bible copy;
 > if they drift, `mascot-profile.md` wins for identity.
@@ -18,10 +16,10 @@ means every bit of it.
 | Field | Canon |
 |-------|-------|
 | Build | Petite; 148 cm; youthful; jet-black bob, blunt bangs; default ~5.5 heads tall (balanced, slightly smaller head) |
-| Register | Introverted, deadpan, few words — but a sharp, dry wit when she does speak |
+| Register | Introverted, deadpan, few words, but a sharp, dry wit when she does speak |
 | Core | Strong-willed, own-pace, unfawning; **soft and loyal underneath** |
 | Signature look | Very oversized black hoodie (dress-like) with a `>▮` chest emblem, black crew socks + chunky black sneakers with orange accents, single warm-orange `#E8A33D`; white die-cut sticker outline |
-| Companion | Ember, her ghost sprite (see §2) — almost always with her |
+| Companion | Ember, her ghost sprite (see §2); almost always with her |
 
 **Speech style** (for captions / voice / VTuber): short flat lines, trailing "…",
 occasional cutting one-liner. Never bubbly, never a caption full of emoji. Warmth
@@ -41,46 +39,42 @@ snack, being left alone *with company nearby*.
 - Says she doesn't care, then quietly does the kind thing.
 
 **Do / Don't** (keeps her from decaying into generic-cute):
-- **Do** keep the deadpan default; let warmth *leak*, never gush.
-- **Do** hold the single-orange accent rule.
-- **Don't** make her hyper, moe-squeaky, or fan-servicey — that kills the appeal.
-- **Don't** add a second accent color to *her* (cast may have their own — see §4).
+- Do keep the deadpan default; let warmth *leak*, never gush.
+- Do hold the single-orange accent rule.
+- Don't make her hyper, moe-squeaky, or fan-servicey: that kills the appeal.
+- Don't add a second accent color to *her* (cast may have their own; see §4).
 
----
+## 2. The Ghost Companion: Ember
 
-## 2. The Ghost Companion — Ember
-
-**Ember** — her emotional and comedic **foil**: as expressive as she is flat.
+**Ember**, her emotional and comedic **foil**: as expressive as she is flat.
 Needy, warm, bouncy, wears its heart on its (nonexistent) sleeve. Ember does the
-reacting so Noa doesn't have to — the duo dynamic is the heart of the IP.
+reacting so Noa doesn't have to: the duo dynamic is the heart of the IP.
 
-- **Role**: reaction engine, comfort object, occasional troublemaker.
-- **Personality**: clingy, food-motivated, brave-when-it-matters; glows brighter
+- Role: reaction engine, comfort object, occasional troublemaker.
+- Personality: clingy, food-motivated, brave-when-it-matters; glows brighter
   with emotion (and on Halloween).
-- **Name meaning**: a warm coal that flares with feeling — ties directly to Noa's
+- Name meaning: a warm coal that flares with feeling; ties directly to Noa's
   `#E8A33D` accent, so the duo shares one light.
-- **Visual rules**: small, chubby and extra-plump (**~1 head tall, ~as wide as
+- Visual rules: small, chubby and extra-plump (**~1 head tall, ~as wide as
   tall**); a **smooth rounded dome top, a wavy / scalloped hem with soft points and
   one longer tail flicking to one side, small stubby side nubs**; **body pure white**
   (`#F7F7F2`) with soft light-grey lower shading; the same **white die-cut sticker
   outline** as Noa; face = **two big round black eyes with tiny white catchlights +
-  a small oval mouth + tiny rosy cheek blushes**, low-set — soft and endearing
+  a small oval mouth + tiny rosy cheek blushes**, low-set, soft and endearing
   (cute, faintly worried, never blank). A faint warm glow may **flare only with strong emotion**
-  (or on Halloween) — it must never tint the white body orange; in dark / orange-lit
+  (or on Halloween); it must never tint the white body orange; in dark / orange-lit
   scenes (e.g. wallpaper) render pure white. The `#E8A33D` accent stays Noa's.
-- **Size / placement**: ~1 head tall; floats upright at Noa's side, chest–shoulder
+- Size / placement: ~1 head tall; floats upright at Noa's side, chest–shoulder
   height, with a clear gap; faces forward with a gentle hover / bob.
-- **Pronoun / voice**: *it*; **non-verbal** — communicates only through motion,
+- Pronoun / voice: *it*; **non-verbal**; communicates only through motion,
   glow, and face. Noa speaks; Ember emotes.
 
 > **Name locked (2026-07-10): Ember.** The named duo unlocks duo-content, plush
-> merch, and collab framing — an Ember plush is the recommended first goods lead (§5).
-
----
+> merch, and collab framing: an Ember plush is the recommended first goods lead (§5).
 
 ## 3. Outfit / Costume Line (merch & seasonal driver)
 
-Variants keep the black × orange DNA but change silhouette — the engine behind
+Variants keep the black × orange DNA but change silhouette: the engine behind
 "new goods drop" and collab looks. Each concatenates after `[IP Common Block]`.
 
 **Streetwear (default+)**
@@ -111,14 +105,12 @@ re-skins
 > The collab-ready base is intentionally under-designed so partners can drop in a
 > themed accent without breaking her identity.
 
----
+## 4. Supporting Cast: Proposal (world expansion)
 
-## 4. Supporting Cast — Proposal (world expansion)
-
-Turns a duo into a *world*. Kept small on purpose. **Proposals — open to reshaping.**
+Turns a duo into a *world*. Kept small on purpose. **Proposals: open to reshaping.**
 Cast may carry their **own** single accent color (that's how they read as distinct).
 
-**The Foil — bright extrovert** *(working name: "Sora")*
+**The Foil: bright extrovert** *(working name: "Sora")*
 ```
 character illustration of a warm, loud, expressive girl who drags Noa outside,
 bright coral-red single accent, open bubbly grin, athletic casual wear, always
@@ -126,7 +118,7 @@ mid-gesture, flat vector / cel-shaded style, sticker-ready, 4k
 ```
 > Noa's opposite; the one who gets her to leave the house. Comedy + heart.
 
-**The Rival — cool perfectionist** *(working name: "Rei")*
+**The Rival: cool perfectionist** *(working name: "Rei")*
 ```
 character illustration of a poised, immaculate girl, cool silver-white palette
 with a single cyan accent, calm confident half-smile, sleek minimalist outfit,
@@ -137,13 +129,11 @@ mirror-opposite of Noa's warm-orange scruff, flat vector / cel-shaded, 4k
 > Recommendation: introduce **one** cast member first (the Foil reads fastest),
 > validate engagement, then add the Rival. Don't ship the whole cast at once.
 
----
-
 ## 5. Format & Media Expansion Roadmap
 
 | Format | Premise / hook | Effort |
 |--------|----------------|--------|
-| **4-koma / comic strip** | Noa's flat one-liners vs the ghost's overreactions — daily-life gags, "she says she doesn't care" punchline engine | Low |
+| **4-koma / comic strip** | Noa's flat one-liners vs the ghost's overreactions: daily-life gags, "she says she doesn't care" punchline engine | Low |
 | **Sticker / emote sets** | Themed packs off §F reactions (`mascot-ip.md`): "deadpan", "night owl", "the ghost & me" | Low |
 | **Motion / VTuber-style** | Rig the Signature stand; idle = flat blink + ghost bob; her dry voice is the draw | Med |
 | **Plush / acrylic goods** | Lead with the **Ember plush** (§2), then chibi Noa acrylic stands | Med |
@@ -153,15 +143,13 @@ mirror-opposite of Noa's warm-orange scruff, flat vector / cel-shaded, 4k
 **Cadence idea**: weekly slice-of-life 4-koma + monthly seasonal key visual +
 quarterly merch/outfit drop. Consistent duo presence in every piece.
 
----
-
 ## 6. Brand Guardrails (one place, so nothing drifts)
 
-1. **Silhouette**: petite ~5.5 heads (balanced), black bob + blunt bangs, very oversized hoodie (dress-like), black crew socks + chunky orange-accented sneakers.
-2. **Color**: Noa = single `#E8A33D` orange, always. Cast get their own single accent.
-3. **Register**: deadpan default; warmth leaks through action, never gushes.
-4. **Duo**: Ember appears in nearly every piece; it carries the emotion.
-5. **Style**: flat vector / clean cel-shaded, crisp outlines, sticker-ready.
+1. Silhouette: petite ~5.5 heads (balanced), black bob + blunt bangs, very oversized hoodie (dress-like), black crew socks + chunky orange-accented sneakers.
+2. Color: Noa = single `#E8A33D` orange, always. Cast get their own single accent.
+3. Register: deadpan default; warmth leaks through action, never gushes.
+4. Duo: Ember appears in nearly every piece; it carries the emotion.
+5. Style: flat vector / clean cel-shaded, crisp outlines, sticker-ready.
 
 #TODO(agent): decide cast scope (§4) — introduce one Foil first, or commit to the
 full duo-cast. Creative-owner call left open. (Ghost name locked: Ember.)

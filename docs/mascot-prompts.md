@@ -7,13 +7,11 @@ Anthropomorphized mascot for Noa (a Rust clone of the Ghostty terminal). Prompts
 > Full canonical profile: **`mascot-profile.md`**. Below is the prompt-tuning digest.
 
 - Jet-black bob, full blunt bangs; **petite, youthful ~5.5 heads tall** (balanced, slightly smaller head)
-- **Large, dark deadpan eyes** with small catchlights and a quiet, strong-willed, unfawning gaze; a small flat mouth
+- Large, dark deadpan eyes with small catchlights and a quiet, strong-willed, unfawning gaze; a small flat mouth
 - Introverted, few words, **cool and self-possessed at her own pace** (strong-willed underneath, never fawning); **very oversized black hoodie worn dress-like** (hem at mid-thigh)
 - Chest emblem = **orange shell-prompt `>▮`**; **black crew socks** + bare legs; chunky **black sneakers with orange accents** (same `>▮` on the side)
-- Strong-willed with her own values: rebuilds an existing product (Ghostty) through her own interpretation — her own path
+- Strong-willed with her own values: rebuilds an existing product (Ghostty) through her own interpretation, her own path
 - Terminal motif: dark base + a single terminal-orange accent, block cursor, a subtle nod to Ghostty's "ghost"; presented with a white die-cut sticker outline
-
----
 
 ## Common Block (prepend to every prompt)
 
@@ -36,40 +34,40 @@ blushes, soft and cute) floating beside her, sticker-ready, 4k
 ```
 
 > **Attitude to convey** (bake into every prompt): cool, self-possessed, and at her
-> own pace — introverted but quietly strong-willed and unbothered, never fawning or
+> own pace: introverted but quietly strong-willed and unbothered, never fawning or
 > perky. Deadpan on the surface, soft underneath. Let **Ember carry the emotion**
 > beside her; the flat-girl / expressive-ghost contrast is what sells her character.
 
 ## What to avoid (negative guidance)
 
 **Primary generator = GPT-Image-2** (OpenAI's ChatGPT image generator). It follows
-instructions and has **no separate negative-prompt field** — fold the exclusions
+instructions and has **no separate negative-prompt field**: fold the exclusions
 below into the prompt itself as plain "do not / avoid …" sentences. The token block
 after it is for **Stable Diffusion / Midjourney**, which do take a negative field
 (Midjourney: `--no ...`).
 
-### Avoid — phrase as instructions (GPT-Image-2)
+### Avoid: phrase as instructions (GPT-Image-2)
 
-- Keep her **petite, ~5.5 heads tall** (balanced) — not a tall / adult / mature woman, no long
+- Keep her **petite, ~5.5 heads tall** (balanced), not a tall / adult / mature woman, no long
   realistic legs, no elongated body.
-- Eyes stay **large but flat and deadpan, with a quiet strong-willed gaze** — not
+- Eyes stay **large but flat and deadpan, with a quiet strong-willed gaze**, not
   sparkly wide moe eyes, no heavy eyelashes, no winking, no glossy over-highlighting
   (a single small catchlight is fine).
-- Exactly **one orange (`#E8A33D`) accent** — no second accent colour, no rainbow;
+- Exactly **one orange (`#E8A33D`) accent**: no second accent colour, no rainbow;
   the hoodie stays **plain black** (no patterns or all-over graphics).
-- The chest emblem is the **orange `>|` shell-prompt** — no other logos, brand
+- The chest emblem is the **orange `>|` shell-prompt**: no other logos, brand
   marks, letters, or words anywhere, and never drop the emblem.
-- **Ember is pure white** — never orange / tinted / glowing-orange; keep it a simple
+- Ember is pure white, never orange / tinted / glowing-orange; keep it a simple
   plump ghost (two oval eyes + a small oval mouth), not scary, not a sheet-ghost,
   not big-eyed, no hands, and **only one ghost**.
-- Footwear = **black crew socks + black sneakers with orange accents** — not
+- Footwear = **black crew socks + black sneakers with orange accents**, not
   barefoot, no boots, heels, or white shoes.
 - Hold the **flat cel-shaded** look with the **white die-cut sticker outline** on a
-  plain dark background — not 3D, not photorealistic, no cluttered / photographic /
+  plain dark background, not 3D, not photorealistic, no cluttered / photographic /
   rainbow background, no visible text or watermark.
-- **Always SFW** — never sexualised, revealing, or fan-servicey (she reads young).
+- Always SFW, never sexualised, revealing, or fan-servicey (she reads young).
 
-### Negative prompt — token style (Stable Diffusion / Midjourney)
+### Negative prompt: token style (Stable Diffusion / Midjourney)
 
 ```
 tall, adult, mature woman, elongated body, long realistic legs, sparkly huge moe
@@ -81,8 +79,6 @@ white shoes, cluttered background, photographic background, rainbow background,
 3d render, realistic, photorealistic, oil painting, extra fingers, deformed hands,
 extra limbs, bad anatomy, lowres, blurry, jpeg artifacts, sexualized, revealing
 ```
-
----
 
 ## Expression Variants (four base emotions + 6 extras)
 
@@ -107,7 +103,7 @@ a small confident thumbs-up, relaxed shoulders, the ghost sprite bouncing
 happily, the block-cursor emblem glowing bright orange, tiny sparkle accents
 ```
 
-> She's introverted, so a restrained-but-genuine smile — not a beaming grin.
+> She's introverted, so a restrained-but-genuine smile, not a beaming grin.
 
 ### Anger
 
@@ -118,7 +114,7 @@ the ghost sprite puffed up with an angry pop mark, the cursor emblem
 flashing an intense orange, subtle heat-shimmer lines
 ```
 
-> Her values won't budge — anger as "pushing through," not emotional flailing.
+> Her values won't budge: anger as "pushing through," not emotional flailing.
 
 ### Sadness
 
@@ -159,7 +155,7 @@ the ghost sprite mimicking the pose, the cursor emblem pulsing bright orange,
 tiny "✓" spark accent
 ```
 
-> Her face when she explains her own values — a "my interpretation is right" look.
+> Her face when she explains her own values: a "my interpretation is right" look.
 
 ### Surprised
 
@@ -179,7 +175,7 @@ dozing on her head, the cursor emblem in a slow lazy fade-blink
 
 > Late-night terminal-work energy. Pairs well with the introverted + petite build.
 
-### Focused / Working (at the terminal — good for key visuals)
+### Focused / Working (at the terminal; good for key visuals)
 
 ```
 [Common Block] + intense focused stare, faint monospace code glow reflected
@@ -190,15 +186,13 @@ blinks, subtle dark-UI light from below
 
 > Noa's "day job" scene. Good for a key visual / OGP image.
 
----
-
 ## Scenes
 
 Like the expression variants, concatenate each prompt after `[Common Block]`.
 
 ### Product-tied (key visual / OGP / README header)
 
-**Boot splash — homage to Ghostty**
+**Boot splash: homage to Ghostty**
 
 ```
 [Common Block] + standing proud in front of a giant glowing terminal window,
@@ -269,7 +263,7 @@ centered, no background detail
 > Abstracted version, easy to reuse as an app icon / favicon. The `>▮` mark is the
 > shared brand glyph (chest emblem + sneakers + logo), so keep it the anchor.
 
-**Mark only — the pure emblem**
+**Mark only: the pure emblem**
 
 ```
 the orange shell-prompt ">|" mark (a ">" chevron + block cursor) as a standalone
@@ -277,7 +271,7 @@ logo, bold crisp geometry, flat 2-color (dark tile + #E8A33D), app-icon / favico
 ready, centered, no background detail
 ```
 
-> The `>▮` glyph by itself — the tightest reduction, for favicons / tiny sizes.
+> The `>▮` glyph by itself: the tightest reduction, for favicons / tiny sizes.
 
 **Wide banner composition**
 
@@ -294,7 +288,7 @@ orange accent underline like a blinking prompt, GitHub social-preview ratio
 
 ### Rest / sleep
 
-**Asleep at the keyboard — passed out from exhaustion**
+**Asleep at the keyboard: passed out from exhaustion**
 
 ```
 [Common Block] + fast asleep face-down on the desk, cheek resting on the
@@ -324,7 +318,7 @@ keyboard, empty mug beside her, the ghost sprite yawning and drifting off too,
 soft orange screen glow on her sleeping face
 ```
 
-> The dozing-off version — half mid-task, drifted under.
+> The dozing-off version: half mid-task, drifted under.
 
 **Blanket burrito on the couch**
 
@@ -335,17 +329,15 @@ content, the ghost sprite nestled against her, a paused terminal on a screen in
 the background, tranquil overnight scene
 ```
 
----
-
 ## Wallpaper
 
-Desktop / lock-screen wallpapers — including Noa's own `background-image` (the PNG
+Desktop / lock-screen wallpapers, including Noa's own `background-image` (the PNG
 rendered behind the terminal grid; see `docs/specs/background-image.md` and the
 directory-slideshow `docs/specs/live-wallpaper.md`). Finished wallpapers live in
 `assets/wallpapers/`.
 
 Wallpapers are **not stickers**. The character sits small and off-center, the frame
-is wide and cinematic, and a large calm area is left empty — for desktop icons, the
+is wide and cinematic, and a large calm area is left empty, for desktop icons, the
 menu bar / dock, and (when used as a terminal background) so the monospace text
 stays readable on top. The shared Negative Prompt still applies.
 
@@ -383,7 +375,7 @@ glowing orange, ghost matching the accent color, warm-tinted ghost
 
 > Swap in `[Wallpaper Block]` wherever the other sheets say `[Common Block]`: any
 > Expression or Scene variant above becomes a wallpaper by prepending this block
-> instead — e.g. `[Wallpaper Block] + {Focused / Working variant}`. That's how the
+> instead, e.g. `[Wallpaper Block] + {Focused / Working variant}`. That's how the
 > existing `assets/wallpapers/*.png` map back to the expression set.
 
 ### Aspect ratios ({AR})
@@ -401,7 +393,7 @@ glowing orange, ghost matching the accent color, warm-tinted ghost
 
 ### Variants
 
-**Hero desk — canonical desktop**
+**Hero desk: canonical desktop**
 
 ```
 [Wallpaper Block] + she sits at a dark desk on the right third, faint orange
@@ -412,11 +404,11 @@ aspect ratio 16:10
 
 > The default desktop shot. The left area stays empty for icons.
 
-> **Hero desk variations** — all keep the subject on one third and a large calm
+> **Hero desk variations**: all keep the subject on one third and a large calm
 > empty area for icons; they vary time of day, camera angle, the subject's side,
 > season, and desk setup. Lock the canonical shot's seed first, then run these.
 
-**Hero desk — dawn shift (mirror, subject left)**
+**Hero desk: dawn shift (mirror, subject left)**
 
 ```
 [Wallpaper Block] + she sits at a dark desk on the left third, cool pale dawn
@@ -425,9 +417,9 @@ Ember dozing on the desk, an empty calm wall filling the right two thirds, the
 quiet after an all-nighter, aspect ratio 16:10
 ```
 
-> Mirror of the canonical shot — subject left, icons on the right.
+> Mirror of the canonical shot: subject left, icons on the right.
 
-**Hero desk — multi-monitor command center**
+**Hero desk: multi-monitor command center**
 
 ```
 [Wallpaper Block] + she sits center-right before a curved wall of dim terminal
@@ -436,7 +428,7 @@ screens, the foreground desk in soft shadow, a dark ceiling void above for
 negative space, focused command-center mood, aspect ratio 21:9
 ```
 
-**Hero desk — coffee break**
+**Hero desk: coffee break**
 
 ```
 [Wallpaper Block] + she leans back in her chair on the right third, both hands
@@ -445,7 +437,7 @@ steam, a paused terminal glowing soft on the desk, a wide calm dark room to the
 left, cozy pause, aspect ratio 16:9
 ```
 
-**Hero desk — top-down flat lay**
+**Hero desk: top-down flat lay**
 
 ```
 [Wallpaper Block] + high overhead top-down view of her dark desk, she rests her
@@ -456,7 +448,7 @@ aspect ratio 16:10
 
 > Bird's-eye framing; the empty desk surface is the icon area.
 
-**Hero desk — city window night**
+**Hero desk: city window night**
 
 ```
 [Wallpaper Block] + she sits at a desk pushed against a floor-to-ceiling night
@@ -465,7 +457,7 @@ glass, a faint reflection of her screen on the pane, Ember perched on the sill,
 the dark room opening to the left for negative space, aspect ratio 16:10
 ```
 
-**Hero desk — winter blanket (seasonal)**
+**Hero desk: winter blanket (seasonal)**
 
 ```
 [Wallpaper Block] + she sits at the desk on the right third wrapped in a dark
@@ -476,7 +468,7 @@ an empty cool wall to the left, cozy winter night, aspect ratio 16:10
 
 > Reskin the season by swapping the window: cherry blossoms, rain, or autumn leaves.
 
-**Hero desk — foreground depth (keyboard bokeh)**
+**Hero desk: foreground depth (keyboard bokeh)**
 
 ```
 [Wallpaper Block] + shallow depth of field, a mechanical keyboard with faint
@@ -485,7 +477,7 @@ mid-ground on the right, a dark bokeh room, cinematic framing, empty blurred spa
 on the left, aspect ratio 16:9
 ```
 
-**Minimal dark — terminal-background-safe**
+**Minimal dark: terminal-background-safe**
 
 ```
 [Wallpaper Block] + extreme minimalism, tiny silhouette of the girl and Ember in
@@ -523,18 +515,18 @@ faint reflections of monospace code on the pane, quiet rainy-night calm, empty
 glass area on the right of frame, aspect ratio 16:9
 ```
 
-### Charm variants — surface Noa's many sides (energetic · cute · gap-appeal)
+### Charm variants: surface Noa's many sides (energetic · cute · gap-appeal)
 
 > The other wallpapers lean moody/late-night. These excavate her brighter, cuter,
-> livelier facets — but **through her own lens**: gap-moe, not generic-cute (see
+> livelier facets, but **through her own lens**: gap-moe, not generic-cute (see
 > `mascot-ip-bible.md` §1 Do/Don't). Keep her deadpan-that-cracks, her dry
 > competitiveness, the sweater-paws / hood-up gags, and the devoted duo with Ember.
-> Palette discipline still holds — dark icon-friendly base, a single `#E8A33D`
-> accent, Ember pure-white — so the subject radiates personality while the frame
+> Palette discipline still holds: dark icon-friendly base, a single `#E8A33D`
+> accent, Ember pure-white, so the subject radiates personality while the frame
 > stays a usable wallpaper. Any Expression variant above (Joy / Smug / Embarrassed
 > / Surprised / Ease) also works: `[Wallpaper Block] + {that variant}`.
 
-**Victory grin — benchmark win (energetic · triumphant)**
+**Victory grin: benchmark win (energetic · triumphant)**
 
 ```
 [Wallpaper Block] + a rare bright genuine grin with a small triumphant fist-pump
@@ -543,7 +535,7 @@ Ember bouncing overhead trailing tiny white sparkles, a burst of energy against
 the calm dark room to the left, her guard-down happy moment, aspect ratio 16:10
 ```
 
-> Her deadpan cracking into a real smile — the gap-moe that sells the IP.
+> Her deadpan cracking into a real smile: the gap-moe that sells the IP.
 
 **Competitive fire (game-face)**
 
@@ -610,13 +602,11 @@ trailing white sparkles, an empty dark room giving room for the motion and for
 icons, aspect ratio 16:9
 ```
 
----
-
 ## Operational Notes
 
-- **Consistency tip**: Lock the Neutral pose first with a fixed seed, then run every other variant via i2i (image-to-image) so the art style matches.
-- **Set production**: A one-image expression pack (3×3 grid) prompt is also possible.
-- **Color**: Restrict the accent to the single terminal-orange `#E8A33D` (multiple accents scatter the look).
+- Consistency tip: Lock the Neutral pose first with a fixed seed, then run every other variant via i2i (image-to-image) so the art style matches.
+- Set production: A one-image expression pack (3×3 grid) prompt is also possible.
+- Color: Restrict the accent to the single terminal-orange `#E8A33D` (multiple accents scatter the look).
 
 ## Reference: Portrait Version (single illustration, not a mascot)
 

@@ -1,4 +1,4 @@
-# Noa Mascot — 4-koma Image-Generation Prompts
+# Noa Mascot: 4-koma Image-Generation Prompts
 
 **One block = one complete 2×2 strip.** Each prompt below is fully self-contained:
 copy a single block, paste it into your image generator, get the whole four-panel
@@ -7,23 +7,23 @@ Scripts these render: `mascot-4koma.md`.
 
 ## Notes
 
-- **Layout**: 2×2 grid, square 1:1, read **top-left → top-right → bottom-left →
+- Layout: 2×2 grid, square 1:1, read **top-left → top-right → bottom-left →
   bottom-right**.
-- **Clarity**: panel 1 sets the situation, the bottom-right bubble **states the
-  payoff** — so the joke reads without the viewer already knowing the meme.
-- **Text**: short EN lines are baked into the bubbles. They render best on
+- Clarity: panel 1 sets the situation, the bottom-right bubble **states the
+  payoff**, so the joke reads without the viewer already knowing the meme.
+- Text: short EN lines are baked into the bubbles. They render best on
   text-capable models (Ideogram / gpt-image / nano-banana). If type comes out
   messy, drop the `bubble "…"` clauses and letter in post from `mascot-4koma.md`.
-- **`Avoid:`** is the negative prompt inline. Midjourney users: move those terms to
+- `Avoid:` is the negative prompt inline. Midjourney users: move those terms to
   `--no`.
-- **Consistency**: for print finals, split a block into its four TL/TR/BL/BR lines
+- Consistency: for print finals, split a block into its four TL/TR/BL/BR lines
   and generate each with the same opening paragraph via i2i / a locked seed.
 
 ---
 
 ## Copy-paste prompts
 
-### #1 — It Works On My Machine
+### #1: It Works On My Machine
 ```
 manga 4-koma, 2x2 four-panel grid, square 1:1, four equal panels, clean gutters,
 read top-left → top-right → bottom-left → bottom-right. Consistent characters in
@@ -43,7 +43,7 @@ Avoid: garbled text, extra fingers, deformed hands, realistic photo, cluttered
 background, multiple accent colors, inconsistent character design, watermark.
 ```
 
-### #2 — Rubber Duck
+### #2: Rubber Duck
 ```
 manga 4-koma, 2x2 four-panel grid, square 1:1, four equal panels, clean gutters,
 read top-left → top-right → bottom-left → bottom-right. Consistent characters in
@@ -63,7 +63,7 @@ Avoid: garbled text, extra fingers, deformed hands, realistic photo, cluttered
 background, multiple accent colors, inconsistent character design, watermark.
 ```
 
-### #3 — The One-Character Fix
+### #3: The One-Character Fix
 ```
 manga 4-koma, 2x2 four-panel grid, square 1:1, four equal panels, clean gutters,
 read top-left → top-right → bottom-left → bottom-right. Consistent characters in
@@ -82,7 +82,7 @@ Avoid: garbled text, extra fingers, deformed hands, realistic photo, cluttered
 background, multiple accent colors, inconsistent character design, watermark.
 ```
 
-### #4 — The Five-Minute Estimate
+### #4: The Five-Minute Estimate
 ```
 manga 4-koma, 2x2 four-panel grid, square 1:1, four equal panels, clean gutters,
 read top-left → top-right → bottom-left → bottom-right, IDENTICAL camera and pose
@@ -104,7 +104,7 @@ Avoid: garbled text, extra fingers, deformed hands, realistic photo, cluttered
 background, multiple accent colors, inconsistent character design, watermark.
 ```
 
-### #5 — git blame
+### #5: git blame
 ```
 manga 4-koma, 2x2 four-panel grid, square 1:1, four equal panels, clean gutters,
 read top-left → top-right → bottom-left → bottom-right. Consistent characters in
@@ -122,7 +122,7 @@ Avoid: garbled text, extra fingers, deformed hands, realistic photo, cluttered
 background, multiple accent colors, inconsistent character design, watermark.
 ```
 
-### #6 — --force
+### #6: --force
 ```
 manga 4-koma, 2x2 four-panel grid, square 1:1, four equal panels, clean gutters,
 read top-left → top-right → bottom-left → bottom-right. Consistent characters in
@@ -142,7 +142,7 @@ Avoid: garbled text, extra fingers, deformed hands, realistic photo, cluttered
 background, multiple accent colors, inconsistent character design, watermark.
 ```
 
-### #7 — Just One More Feature
+### #7: Just One More Feature
 ```
 manga 4-koma, 2x2 four-panel grid, square 1:1, four equal panels, clean gutters,
 read top-left → top-right → bottom-left → bottom-right. Consistent characters in
@@ -162,7 +162,7 @@ Avoid: garbled text, extra fingers, deformed hands, realistic photo, cluttered
 background, multiple accent colors, inconsistent character design, watermark.
 ```
 
-### #8 — The Heisenbug (the log that can't be removed)
+### #8: The Heisenbug (the log that can't be removed)
 ```
 manga 4-koma, 2x2 four-panel grid, square 1:1, four equal panels, clean gutters,
 read top-left → top-right → bottom-left → bottom-right. Consistent characters in

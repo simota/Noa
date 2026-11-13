@@ -1,4 +1,4 @@
-# Noa Mascot — IP / Character Line
+# Noa Mascot: IP / Character Line
 
 Character-first prompts for growing Noa as a standalone IP, **independent of the
 terminal product**. Where `mascot-prompts.md` ties the mascot to noa's features,
@@ -9,13 +9,11 @@ worldview, daily life, hobbies, her ghost companion, seasons, and merch.
 
 > Full canonical profile: **`mascot-profile.md`**.
 
-1. **Low-key & her own pace** — introverted, deadpan, few words.
-2. **Soft underneath** — genuinely kind once you get past the flat face.
-3. **The ghost companion** — **Ember**, a mutual, devoted duo (profile: `mascot-ip-bible.md` §2).
-4. **Black × orange identity** — jet-black bob + oversized black hoodie + a single
+1. Low-key & her own pace: introverted, deadpan, few words.
+2. Soft underneath: genuinely kind once you get past the flat face.
+3. The ghost companion: **Ember**, a mutual, devoted duo (profile: `mascot-ip-bible.md` §2).
+4. Black × orange identity: jet-black bob + oversized black hoodie + a single
    warm signature-orange accent, held across every scene.
-
----
 
 ## IP Common Block (prepend to every prompt)
 
@@ -37,24 +35,24 @@ deadpan-but-secretly-warm, strong-willed unfawning direct gaze, flat vector / cl
 
 ## What to avoid (negative guidance)
 
-**Primary generator = GPT-Image-2** — no negative-prompt field; fold these in as
+**Primary generator = GPT-Image-2**: no negative-prompt field; fold these in as
 "do not / avoid …" sentences. The token block is for Stable Diffusion / Midjourney.
 (Terminal-independent line: **no chest emblem** here.)
 
-### Avoid — phrase as instructions (GPT-Image-2)
+### Avoid: phrase as instructions (GPT-Image-2)
 
-- Keep her **petite, ~5 heads tall** — not a tall / adult / mature woman.
-- Eyes **large but flat and deadpan, with a quiet strong-willed gaze** — not sparkly
+- Keep her **petite, ~5 heads tall**, not a tall / adult / mature woman.
+- Eyes **large but flat and deadpan, with a quiet strong-willed gaze**, not sparkly
   moe eyes, no winking (a single small catchlight is fine).
-- Exactly **one orange (`#E8A33D`) accent**; the base outfit stays black — no second
+- Exactly **one orange (`#E8A33D`) accent**; the base outfit stays black: no second
   colour, no patterns.
-- **Ember is pure white** — never orange / tinted; a chubby cute ghost (big round
+- Ember is pure white, never orange / tinted; a chubby cute ghost (big round
   eyes with tiny catchlights + a small oval mouth + tiny rosy cheeks), not scary, no
   hands, **one ghost only**.
-- Flat cel-shaded and clean; **always SFW** (she reads young) — no sexualised or
+- Flat cel-shaded and clean; **always SFW** (she reads young); no sexualised or
   revealing framing.
 
-### Negative prompt — token style (SD / Midjourney)
+### Negative prompt: token style (SD / Midjourney)
 
 ```
 tall, adult, mature woman, elongated body, sparkly huge moe eyes, heavy eyelashes,
@@ -64,8 +62,6 @@ big-eyed ghost, multiple ghosts, ghost with hands, cluttered background, 3d rend
 realistic, photorealistic, extra fingers, deformed hands, bad anatomy, lowres,
 blurry, jpeg artifacts, sexualized, revealing
 ```
-
----
 
 ## A. Signature / Worldview (the "this is Noa" shots)
 
@@ -90,7 +86,7 @@ sprite drifting beside her like a balloon, lonely-but-cool city mood
 
 > Establishes the "she suits the night" mood. Good for an SNS header.
 
-## B. Slice of Life (relatable — the fuel for shares)
+## B. Slice of Life (relatable: the fuel for shares)
 
 **Midnight convenience-store run**
 
@@ -126,7 +122,7 @@ spinning nearby with a warm-orange glow, gentle head-tilt to the beat, the ghost
 sprite floating in slow circles, dim listening-room ambience
 ```
 
-> An introvert's absorption — a "why we love her" moment with no words.
+> An introvert's absorption: a "why we love her" moment with no words.
 
 **Late-night gaming (strong-willed side)**
 
@@ -136,7 +132,7 @@ forward, faint smirk of "I don't lose", warm-orange screen light on her face, th
 ghost sprite panicking beside her, intense-but-fun night mood
 ```
 
-> Usually flat, but she flips in a match — the gap is the appeal.
+> Usually flat, but she flips in a match: the gap is the appeal.
 
 **Balcony plant care**
 
@@ -146,7 +142,7 @@ tiny potted plant, unexpectedly soft caring expression, the ghost sprite holding
 the watering can's spout, quiet morning warm light
 ```
 
-> Shows the unexpected kindness — the crack that turns viewers into fans.
+> Shows the unexpected kindness: the crack that turns viewers into fans.
 
 ## D. The Duo (the heart of a mascot IP)
 
@@ -176,7 +172,7 @@ blanket, ultra sticker-ready symmetry
 
 ## E. Seasonal Calendar (a template for recurring posts)
 
-**Spring — under the blossoms**
+**Spring: under the blossoms**
 
 ```
 [IP Common Block] + standing beneath falling cherry blossoms, unbothered deadpan
@@ -184,7 +180,7 @@ face as petals land on her bob, one caught on the ghost sprite, soft pink air wi
 her single warm-orange accent standing out
 ```
 
-**Summer — festival night**
+**Summer: festival night**
 
 ```
 [IP Common Block] + at a night summer festival, holding shaved ice, hoodie tied at
@@ -192,7 +188,7 @@ the waist over a simple top, faint content look under paper lanterns, the ghost
 sprite wearing a tiny festival mask, warm-orange lantern glow
 ```
 
-**Autumn — scarf & leaves**
+**Autumn: scarf & leaves**
 
 ```
 [IP Common Block] + wrapped in a chunky knit scarf, kicking through orange autumn
@@ -200,7 +196,7 @@ leaves, breath faintly visible, calm cozy mood, the ghost sprite riding a drifti
 leaf, golden-hour warmth
 ```
 
-**Winter — kotatsu hermit**
+**Winter: kotatsu hermit**
 
 ```
 [IP Common Block] + burrowed into a kotatsu up to her nose, only eyes and black
@@ -208,7 +204,7 @@ bob peeking out, a mikan in hand, deeply-content "not moving all day" stare, the
 ghost sprite half-submerged under the blanket too, warm-orange room light
 ```
 
-**Halloween — the ghost's day**
+**Halloween: the ghost's day**
 
 ```
 [IP Common Block] + tiny witch hat on her bob, holding a jack-o'-lantern glowing
@@ -239,15 +235,13 @@ embarrassed blush at being caught being sweet, cozy bed corner, warm-orange
 night light, merch key-art vibe
 ```
 
-> Sets up plush merch — the companion becomes the storefront lead.
-
----
+> Sets up plush merch: the companion becomes the storefront lead.
 
 ## Operational Notes
 
-- **Consistency tip**: Lock the Signature stand first with a fixed seed, then run
+- Consistency tip: Lock the Signature stand first with a fixed seed, then run
   every other scene via i2i (image-to-image) so the art style matches.
-- **Color**: Restrict the accent to the single signature-orange `#E8A33D` — multiple
+- Color: Restrict the accent to the single signature-orange `#E8A33D`; multiple
   accents scatter the look and dilute the brand.
-- **Duo discipline**: Ember (the ghost sprite) should appear in almost every cut.
+- Duo discipline: Ember (the ghost sprite) should appear in almost every cut.
   The duo relationship, not the girl alone, is what makes the IP.

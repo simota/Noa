@@ -1,6 +1,6 @@
 # Ghostty Parity Roadmap
 
-> **⚠️ Archived — historical planning artifact frozen at Increment 1/2 (2026-07-02).**
+> **⚠️ Archived: historical planning artifact frozen at Increment 1/2 (2026-07-02).**
 > The requirement-status columns and checklist boxes below were never advanced and are now
 > roughly half stale: everything from Phase 3 onward (surfaces/splits, Kitty graphics & keyboard,
 > OSC 8/9 hyperlinks & notifications, shell integration, command palette, secure input, background

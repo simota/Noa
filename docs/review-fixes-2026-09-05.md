@@ -1,4 +1,4 @@
-# Review fixes — 2026-09-05
+# Review fixes: 2026-09-05
 
 Baseline: `55ff1a19f05e1720f3557d9923412b13943232fb`.
 No new dependencies, persisted formats or configuration keys.

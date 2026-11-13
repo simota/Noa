@@ -3,8 +3,8 @@
 # Noa
 
 Noa is a GPU-accelerated terminal emulator for macOS and Linux, implemented independently
-in Rust with `winit` and `wgpu`. It is built to be **the fastest terminal at
-swallowing output floods** — `cat huge.log`, build logs, CI streams — and aims
+in Rust with `winit` and `wgpu`. It is built to be the fastest terminal at
+swallowing output floods (`cat huge.log`, build logs, CI streams) and aims
 for observable compatibility with [Ghostty](https://ghostty.org) while keeping
 the core terminal model reusable and testable.
 
@@ -48,9 +48,9 @@ the Cargo, Cask, tag, and app-bundle versions match before publishing the
 archive and its SHA-256 checksum.
 
 The cask temporarily uses `sha256 :no_check` because no release archive exists
-yet. Replace it with the published checksum after the first release. Release
-artifacts are Developer ID signed and notarized for a prompt-free Gatekeeper
-experience after download when the signing secrets are configured; without them
+yet. Replace it with the published checksum after the first release. When the
+signing secrets are configured, release artifacts are Developer ID signed and
+notarized, so Gatekeeper accepts the download without a prompt; without them
 the workflow falls back to ad-hoc signing. See
 [docs/release-signing.md](docs/release-signing.md) for the required secrets and
 local testing steps.
@@ -59,7 +59,7 @@ local testing steps.
 
 Noa also builds and runs on Linux (X11 and Wayland); see
 [docs/LINUX.md](docs/LINUX.md) for the full guide. Ghostty's
-Linux (GTK) keybindings are the defaults — `ctrl+shift+c`/`ctrl+shift+v` copy and
+Linux (GTK) keybindings are the defaults: `ctrl+shift+c`/`ctrl+shift+v` copy and
 paste, `ctrl+shift+t` opens a tab, `ctrl+shift+p` opens the command palette.
 
 Build dependencies (Debian/Ubuntu names):
@@ -130,11 +130,10 @@ git tag -d v0.1.0
 
 ## Performance
 
-Noa's defining trait is sustained output throughput: render throughput of
-220–233 MB/s across plain, ANSI, and CJK workloads, with CJK as the fastest
-variant — wide-character handling carries no cost. Command overhead (1336 µs,
-zsh), idle input latency (1.2–1.3 ms), and settled idle memory (52 MB) round
-out the profile.
+Render throughput is 220–233 MB/s across plain, ANSI, and CJK workloads. CJK
+is the fastest of the three: wide-character handling carries no cost. Command
+overhead is 1336 µs (zsh), idle input latency is 1.2–1.3 ms, and settled idle
+memory is 52 MB.
 
 Every number is reproducible with the bundled benchmark harness
 (`bench/run_all.sh`), and performance changes are gated on it. See
@@ -165,7 +164,7 @@ font-size = 15.0
 theme = "Catppuccin Mocha"
 ```
 
-Useful one-shot queries include `+version`, `+list-themes`, `+list-keybinds`,
+One-shot queries include `+version`, `+list-themes`, `+list-keybinds`,
 `+list-fonts`, `+show-config`, `+explain-config`, `+list-actions`, and `+help`.
 
 ### Importing a Ghostty configuration

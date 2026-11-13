@@ -33,7 +33,7 @@ Keep dependency boundaries intact: only `noa-app` and `noa-render` should use
 
 ## Coding Style & Naming Conventions
 
-Use idiomatic Rust with `rustfmt` defaults and 4-space indentation. Name crates
+Format with `rustfmt` defaults (4-space indentation). Name crates
 with the `noa-*` pattern, modules and functions in `snake_case`, and
 types/traits in `UpperCamelCase`. Keep lower-level crates GUI-agnostic. Comments
 should explain terminal semantics, platform constraints, or parity decisions.
@@ -44,7 +44,7 @@ Use Rust's built-in test harness. Place unit tests near the crate module or in
 files such as `crates/noa-vt/src/tests.rs`; use `crates/<name>/tests/` for
 integration checks. Prefer deterministic byte-sequence to
 action/grid assertions for VT and grid behavior. Renderer tests may skip
-gracefully when no GPU adapter is available. Run `cargo test --workspace` before
+when no GPU adapter is available. Run `cargo test --workspace` before
 opening a pull request.
 
 ## Commit & Pull Request Guidelines

@@ -1,12 +1,12 @@
 # Noa Configuration Reference
 
-This document is a reference for the config keys, values, and defaults accepted by the current `noa-config` implementation.
+This reference lists the config keys, values, and defaults accepted by the current `noa-config` implementation.
 See [KEYBINDINGS.md](KEYBINDINGS.md) for the default keybinding table and action names.
 
 ## Load location and format
 
 Noa reads `$XDG_CONFIG_HOME/noa/config` at startup. If `XDG_CONFIG_HOME` is unset, it falls back to
-`~/.config/noa/config`. The old `config.toml` is not read for content — only a migration warning is shown.
+`~/.config/noa/config`. The old `config.toml` is not read for content; only a migration warning is shown.
 
 The format is Ghostty-compatible line-oriented `key = value`. Blank lines and lines starting with `#`
 (after leading whitespace is stripped) are ignored. The entire value can be wrapped in double quotes, but
@@ -46,7 +46,7 @@ as does `--no-pager`.
 ## Live reload
 
 Noa watches the config file and applies edits at runtime. The idle poll is deliberately slow
-(every **3 seconds** — it is the only wake-up an otherwise fully idle noa would keep forever),
+(every **3 seconds**: it is the only wake-up an otherwise fully idle noa would keep forever),
 and the latency-sensitive flows are expedited instead: the file is re-checked immediately when a
 noa window **gains focus** (the "edited in another app, switched back" flow) and when the
 settings panel **commits or undoes** a change. The one flow that rides the slow interval is
@@ -213,7 +213,7 @@ client-remote = 127.0.0.1:61771
 client-token-file = ~/.config/noa/remote-server-token
 ```
 
-Copy the server's token into the client token file through an appropriate secure channel; do not commit tokens to source control. `client-token` is convenient for temporary local setups, but stores the secret in plaintext configuration.
+Copy the server's token into the client token file through a secure channel; do not commit tokens to source control. `client-token` is convenient for temporary local setups, but stores the secret in plaintext configuration.
 
 Noa's WebSocket transport does not provide TLS. Before the first connection to a non-loopback `client-remote`, the UI asks you to confirm that the endpoint is on a trusted LAN or behind a protected tunnel. Cancelling the warning opens no socket. When using a tunnel, the network between endpoints is assumed to be protected by the tunnel. A loopback tunnel endpoint cannot be distinguished from a purely local connection, so the warning does not fire in that case.
 
@@ -242,7 +242,7 @@ the corresponding keys.
 
 ## Scratch Terminal
 
-A disposable popup terminal, centered on the focused window and spawned in the focused pane's cwd (falling back to noa's own process cwd when none is reported). Distinct from the Quick Terminal above: no animation, no persistence across toggles, single instance, and no global hotkey. It closes on: re-pressing the toggle chord, the popup losing focus, the shell exiting, `cmd+w` inside the popup, a config reload, or app quit — always tearing down the pty immediately, with no confirmation.
+A disposable popup terminal, centered on the focused window and spawned in the focused pane's cwd (falling back to noa's own process cwd when none is reported). Distinct from the Quick Terminal above: no animation, no persistence across toggles, single instance, and no global hotkey. It closes on: re-pressing the toggle chord, the popup losing focus, the shell exiting, `cmd+w` inside the popup, a config reload, or app quit, always tearing down the pty immediately, with no confirmation.
 
 | Key | Accepted values | Default | Description |
 |---|---|---|---|
@@ -309,4 +309,4 @@ Unknown keys and invalid values show a diagnostic, and that override is not appl
 
 `noa --import-ghostty-config` reads Ghostty's candidate config and copies the lines that Noa recognizes
 as importable into `$XDG_CONFIG_HOME/noa/config`. If the target file already exists, it is not overwritten.
-Unsupported lines are not removed — they are commented out with `# `.
+Unsupported lines are not removed; they are commented out with `# `.

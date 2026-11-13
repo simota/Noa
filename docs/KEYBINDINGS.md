@@ -1,6 +1,6 @@
 # Noa Keyboard Shortcut Reference
 
-A complete reference of the keyboard shortcuts Noa handles (excludes
+The keyboard shortcuts Noa handles (excluding
 shell-side keys). The default bindings are implemented at
 `KeybindEngine::default()` in `crates/noa-app/src/commands/keybind.rs`.
 Config `keybind =` entries are applied on top of this default table in
@@ -10,13 +10,13 @@ order. The list of active bindings can also be checked from the CLI:
 noa +list-keybinds
 ```
 
-## Config `keybind =`
-
 Agent workflow additions: **⌘⇧J** opens the next unread notification
 (`session.next-notification`). **Compose Prompt** (`agent.compose-prompt`) and
 **Read Output Snapshot** (`terminal.read-output`) are available from the command
 palette and can be assigned custom keys. **⌘⌥-click** previews local text files;
 **⌘-click** opens them in the configured editor. See [Agent workflows](AGENT_WORKFLOW.md).
+
+## Config `keybind =`
 
 `keybind = <chord>=<action>` adds to or overrides the default table.
 The same chord takes the later entry. `keybind = <chord>=unbind` clears
@@ -37,9 +37,9 @@ keybind = cmd+shift+n=tab.new
 `<action>` uses a name from the "canonical action list" below.
 `noa +list-keybinds` only shows currently active bindings, so actions
 that are unbound by default aren't printed. Some Ghostty-style action
-names — such as `new_tab`, `prompt_surface_title`,
+names, such as `new_tab`, `prompt_surface_title`,
 `toggle_quick_terminal`, `jump_to_prompt:-1` / `jump_to_prompt:1`,
-`scroll_to_top` / `scroll_to_bottom` — are also accepted as compatible input.
+`scroll_to_top` / `scroll_to_bottom`, are also accepted as compatible input.
 To make ⌘↑ / ⌘↓ scroll to the top / bottom as in Ghostty 1.3, set
 `keybind = cmd+arrow_up=scroll_to_top` and `keybind = cmd+arrow_down=scroll_to_bottom`.
 
@@ -163,7 +163,7 @@ The one-line scroll actions remain configurable but have no default binding.
 | ⌘⇧S | Toggle sidebar |
 
 Actions with no default keybinding can also be run from the command
-palette / menu. Notable ones include Reload Configuration, Clear
+palette / menu. They include Reload Configuration, Clear
 Scrollback, Toggle Quick Terminal, Secure Keyboard Entry, About, Open
 Preferences, Open Theme & Settings, Export Scrollback, Pipe Scrollback
 to Pager, Toggle Auto Approve, Set Tab Title, Move Tab to New Window.
@@ -204,7 +204,7 @@ Unlike in-app `keybind`, global hotkeys don't accept arrow keys,
 
 ## Key Handling Within Overlays
 
-Each overlay is modal — while it's shown, key input never reaches the
+Each overlay is modal: while it's shown, key input never reaches the
 pty.
 
 ### Search Prompt (⌘F)
@@ -266,12 +266,12 @@ pty.
 
 ## Primary Sources
 
-- `crates/noa-app/src/commands/keybind.rs` — `KeybindEngine`, default bindings, config application (source of truth)
-- `crates/noa-app/src/commands/command.rs` — `AppCommand`, action name conversion
-- `crates/noa-app/src/commands/key_token.rs` — chord parser, key aliases
-- `crates/noa-app/src/commands.rs` — facade / re-export of the above modules
-- `crates/noa-app/src/macos_menu.rs` — menu accelerators + context menu
-- `crates/noa-app/src/app/event_loop.rs` — key / mouse routing
-- `crates/noa-app/src/app/input_ops.rs` — search prompt / command palette / confirmation dialogs
-- `crates/noa-app/src/macos_hotkey.rs` — global hotkeys
-- `docs/CONFIGURATION.md` — complete reference of config keys, values, and defaults
+- `crates/noa-app/src/commands/keybind.rs`: `KeybindEngine`, default bindings, config application (source of truth)
+- `crates/noa-app/src/commands/command.rs`: `AppCommand`, action name conversion
+- `crates/noa-app/src/commands/key_token.rs`: chord parser, key aliases
+- `crates/noa-app/src/commands.rs`: facade / re-export of the above modules
+- `crates/noa-app/src/macos_menu.rs`: menu accelerators + context menu
+- `crates/noa-app/src/app/event_loop.rs`: key / mouse routing
+- `crates/noa-app/src/app/input_ops.rs`: search prompt / command palette / confirmation dialogs
+- `crates/noa-app/src/macos_hotkey.rs`: global hotkeys
+- `docs/CONFIGURATION.md`: complete reference of config keys, values, and defaults

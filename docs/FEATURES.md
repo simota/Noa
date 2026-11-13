@@ -4,71 +4,71 @@ Noa is a terminal emulator that faithfully reproduces the observable behavior of
 
 ## Terminal core (noa-grid)
 
-- **Screen grid / cursor / modes** — active region with DEC-compliant cursor clamping
-- **Paged scrollback** — style-interned, byte-capped (`scrollback-limit-bytes`) page storage, compressed while idle (`scrollback-compression`)
-- **Alt screen / DECSC・DECRC** — alternate screen switching, cursor save/restore
-- **Scroll region / left-right margins** — DECSTBM + DECLRMM
-- **Tab stops** — set / clear / clear all
-- **Selection** — cell-range selection (word / line selection via mouse operations)
-- **Interactive search** — full-text search across scrollback
-- **URL detection** — hit-testing for plain-text URLs (⌘-click to open)
-- **Character sets** — G0–G3 designation, locking shift (DEC Special Graphics, etc.)
-- **Wide cells** — 2-cell width handling for CJK / emoji
-- **Soft-wrap reflow** — reflows wrapped lines on column-count changes (coordinated with grid resize)
+- **Screen grid / cursor / modes**: active region with DEC-compliant cursor clamping
+- **Paged scrollback**: style-interned, byte-capped (`scrollback-limit-bytes`) page storage, compressed while idle (`scrollback-compression`)
+- **Alt screen / DECSC・DECRC**: alternate screen switching, cursor save/restore
+- **Scroll region / left-right margins**: DECSTBM + DECLRMM
+- **Tab stops**: set / clear / clear all
+- **Selection**: cell-range selection (word / line selection via mouse operations)
+- **Interactive search**: full-text search across scrollback
+- **URL detection**: hit-testing for plain-text URLs (⌘-click to open)
+- **Character sets**: G0–G3 designation, locking shift (DEC Special Graphics, etc.)
+- **Wide cells**: 2-cell width handling for CJK / emoji
+- **Soft-wrap reflow**: reflows wrapped lines on column-count changes (coordinated with grid resize)
 
 ## VT protocol support (noa-vt + noa-grid)
 
 A from-scratch DFA parser plus a `Handler` trait separating parsing from state.
 
-- **Full C0 / CSI / SGR set** — 16-color + 256-color + truecolor, bold / faint / italic / inverse / invisible / strike, underline variants (single / double / curly / dotted / dashed)
-- **Cursor, erase, scroll, insert/delete families** — ICH / IL / DL / DCH / ECH / SU / SD / REP, etc.
-- **DA / DSR responses** — DA1 `ESC[?62;4;22c`, cursor position report (CPR, and DECXCPR `CSI ? 6 n` with page 1), DECRQCRA screen checksums (opt-in, `vt-xt-checksum-report`), etc.
-- **DEC private modes** — DECAWM, DECTCEM, DECCKM, DECNKM / DECPAM, DECBKM, DECLRMM, DECOM, etc.
-- **ANSI modes** — IRM (4), LNM (20); KAM (2) and SRM (12) are tracked for DECRQM only. DECRQM reports the unimplemented ANSI modes 1, 5, 7, 10, 11 and 13–19, and DECECM (`?117`), as permanently reset
-- **Mouse tracking** — X10 / 1000 / 1002 / 1003, encodings Legacy / UTF-8 (1005) / Urxvt (1015) / SGR (1006)
-- **OSC** — 0/2 (title, stack via 22/23), 7 (cwd), 8 (hyperlinks), 9/777 (notifications), 9;4 (task progress), 52 (clipboard, with policy), 5522 (Kitty clipboard protocol: multi-type read/write, paste events via mode 5522), 4 / color family, 133 (shell integration marks; `click_events` prompt clicks)
-- **Kitty graphics protocol** — image command parsing + image-layer rendering
-- **Glyph Protocol** (APC `25a1`) — answers `s` / `q` / `r` / `c` like Ghostty 1.4.0: validates `glyf` registrations (simple glyphs only, no hinting, 64 KiB) into a per-terminal glossary of up to 1024 Private Use Area codepoints, cleared by RIS. Registered glyphs are not drawn (Ghostty 1.4.0 doesn't either)
-- **Sixel graphics** — parsing of `DCS Pa;Pb;Ph q ... ST`, Sixel rasterization, rendering through the existing image layer
-- **Legacy key encoding** — Ghostty 1.4.0's table: modified Backspace / Tab / Enter / Escape send `CSI 27 ; mods ; code ~` (except Alt alone, which ESC-prefixes, and Shift+Tab / Shift+Enter: `CSI Z` / `ESC CR`), xterm `modifyOtherKeys` level 2 (`CSI > 4 ; 2 m`), Alt ESC-prefixes the whole text, keypad keys keep their character (or `ESC O <mods> <final>` under DECKPAM once mode 1035, on by default as in Ghostty, is reset) whatever the modifiers
-- **Kitty keyboard protocol** — full support for all 5 flags (disambiguate / event-types / alternate-keys / all-keys / associated-text), push / pop / set stack
+- **Full C0 / CSI / SGR set**: 16-color + 256-color + truecolor, bold / faint / italic / inverse / invisible / strike, underline variants (single / double / curly / dotted / dashed)
+- **Cursor, erase, scroll, insert/delete families**: ICH / IL / DL / DCH / ECH / SU / SD / REP, etc.
+- **DA / DSR responses**: DA1 `ESC[?62;4;22c`, cursor position report (CPR, and DECXCPR `CSI ? 6 n` with page 1), DECRQCRA screen checksums (opt-in, `vt-xt-checksum-report`), etc.
+- **DEC private modes**: DECAWM, DECTCEM, DECCKM, DECNKM / DECPAM, DECBKM, DECLRMM, DECOM, etc.
+- **ANSI modes**: IRM (4), LNM (20); KAM (2) and SRM (12) are tracked for DECRQM only. DECRQM reports the unimplemented ANSI modes 1, 5, 7, 10, 11 and 13–19, and DECECM (`?117`), as permanently reset
+- **Mouse tracking**: X10 / 1000 / 1002 / 1003, encodings Legacy / UTF-8 (1005) / Urxvt (1015) / SGR (1006)
+- **OSC**: 0/2 (title, stack via 22/23), 7 (cwd), 8 (hyperlinks), 9/777 (notifications), 9;4 (task progress), 52 (clipboard, with policy), 5522 (Kitty clipboard protocol: multi-type read/write, paste events via mode 5522), 4 / color family, 133 (shell integration marks; `click_events` prompt clicks)
+- **Kitty graphics protocol**: image command parsing + image-layer rendering
+- **Glyph Protocol** (APC `25a1`): answers `s` / `q` / `r` / `c` like Ghostty 1.4.0: validates `glyf` registrations (simple glyphs only, no hinting, 64 KiB) into a per-terminal glossary of up to 1024 Private Use Area codepoints, cleared by RIS. Registered glyphs are not drawn (Ghostty 1.4.0 doesn't either)
+- **Sixel graphics**: parsing of `DCS Pa;Pb;Ph q ... ST`, Sixel rasterization, rendering through the existing image layer
+- **Legacy key encoding**: Ghostty 1.4.0's table: modified Backspace / Tab / Enter / Escape send `CSI 27 ; mods ; code ~` (except Alt alone, which ESC-prefixes, and Shift+Tab / Shift+Enter: `CSI Z` / `ESC CR`), xterm `modifyOtherKeys` level 2 (`CSI > 4 ; 2 m`), Alt ESC-prefixes the whole text, keypad keys keep their character (or `ESC O <mods> <final>` under DECKPAM once mode 1035, on by default as in Ghostty, is reset) whatever the modifiers
+- **Kitty keyboard protocol**: full support for all 5 flags (disambiguate / event-types / alternate-keys / all-keys / associated-text), push / pop / set stack
 - **Bracketed paste (2004) / full reset / DECSTR / DECALN**
 
 ## Windows, tabs, and splits (noa-app)
 
-- **Multiple windows / native tabs** — new / close / select-by-number / cycle forward-backward
-- **Manual tab title** — Set Tab Title prompt (from the palette / Window menu). Masks shell-originated title updates (OSC 0/2) while editing; committing an empty value clears the override. Also shown on sidebar cards (an individual card rename takes priority). Preserved across session restore (equivalent to Ghostty's `prompt_surface_title`)
-- **Split tree (Splits)** — add panes left / right / up / down, max 3 panes per row/column and 9 panes overall (3x3 equivalent), directional focus movement, resizing, equalize, zoom toggle
-- **Session overview** — a monitoring dashboard that live-tiles all tabs. Switch by key or click, incremental search, quick-look zoom
+- **Multiple windows / native tabs**: new / close / select-by-number / cycle forward-backward
+- **Manual tab title**: Set Tab Title prompt (from the palette / Window menu). Masks shell-originated title updates (OSC 0/2) while editing; committing an empty value clears the override. Also shown on sidebar cards (an individual card rename takes priority). Preserved across session restore (equivalent to Ghostty's `prompt_surface_title`)
+- **Split tree (Splits)**: add panes left / right / up / down, max 3 panes per row/column and 9 panes overall (3x3 equivalent), directional focus movement, resizing, equalize, zoom toggle
+- **Session overview**: a monitoring dashboard that live-tiles all tabs. Switch by key or click, incremental search, quick-look zoom
 
 ## UI overlays
 
-- **Idle Ember** — opt in with `ember-idle-after` (default off): a silent, display-only companion in the focused main pane, with fade-in/out, a 4.8-second play, and a question emote. Gentle gestures run every 20 seconds for up to 10 minutes of resting; macOS Reduce Motion uses a still pose without gestures.
-- **Command palette** — fuzzy (subsequence) search to run actions; the initials of a title's words match too (`nt` → New Tab), and entries whose description matches (as a substring or by initials, like Ghostty 1.4.0) are listed below the title matches
-- **Search prompt** — incremental search UI. On macOS the query is shared through the system find pasteboard, like Ghostty 1.4.0: a new prompt starts from the text another app's find bar left there, and each edit publishes the query
-- **Theme & settings overlay** — a theme/settings editor with live preview opened from `Settings…` (⌘,), writes back to config
-- **Sidebar (session list)** — per-window session cards, process badges, inline rename, OSC 9;4 determinate/indeterminate progress
-- **Agent attention** — agent-process classification, bell-to-attention escalation, categorical status rails, one-shot arrival emphasis, Dock attention
-- **Agent workflows** — pane-scoped notifications, next-unread navigation (⌘⇧J), explicit agent state and a Claude Code hook adapter, native multiline prompt drafts, and read-only output snapshots with search/code copying; see [Agent workflows](AGENT_WORKFLOW.md)
-- **Local file navigation** — configurable editor line/column navigation on ⌘-click; UTF-8 file preview on ⌘⌥-click
-- **About panel** — version + git hash + build date, bundled-icon resolution
-- **Confirmation dialogs** — paste protection / clipboard read and write (OSC 52, OSC 5522, with "allow and remember") / close confirmation, with "Review Windows" when quitting or closing a window leaves several tabs' programs running
-- **IME preedit** — underlined display of in-progress composition text
+- **Idle Ember**: opt in with `ember-idle-after` (default off): a silent, display-only companion in the focused main pane, with fade-in/out, a 4.8-second play, and a question emote. Gentle gestures run every 20 seconds for up to 10 minutes of resting; macOS Reduce Motion uses a still pose without gestures.
+- **Command palette**: fuzzy (subsequence) search to run actions; the initials of a title's words match too (`nt` → New Tab), and entries whose description matches (as a substring or by initials, like Ghostty 1.4.0) are listed below the title matches
+- **Search prompt**: incremental search UI. On macOS the query is shared through the system find pasteboard, like Ghostty 1.4.0: a new prompt starts from the text another app's find bar left there, and each edit publishes the query
+- **Theme & settings overlay**: a theme/settings editor with live preview opened from `Settings…` (⌘,), writes back to config
+- **Sidebar (session list)**: per-window session cards, process badges, inline rename, OSC 9;4 determinate/indeterminate progress
+- **Agent attention**: agent-process classification, bell-to-attention escalation, categorical status rails, one-shot arrival emphasis, Dock attention
+- **Agent workflows**: pane-scoped notifications, next-unread navigation (⌘⇧J), explicit agent state and a Claude Code hook adapter, native multiline prompt drafts, and read-only output snapshots with search/code copying; see [Agent workflows](AGENT_WORKFLOW.md)
+- **Local file navigation**: configurable editor line/column navigation on ⌘-click; UTF-8 file preview on ⌘⌥-click
+- **About panel**: version + git hash + build date, bundled-icon resolution
+- **Confirmation dialogs**: paste protection / clipboard read and write (OSC 52, OSC 5522, with "allow and remember") / close confirmation, with "Review Windows" when quitting or closing a window leaves several tabs' programs running
+- **IME preedit**: underlined display of in-progress composition text
 
 ## Rendering and appearance (noa-render + noa-font)
 
-- **wgpu instanced cell rendering** — surface-less design, minimizes lock duration via `FrameSnapshot`
-- **Cursor styles** — block / bar / underline / hollow, focus / blink phase support
-- **Underline rendering** — single / double / curly / dotted / dashed, hover-link underline
-- **Background transparency / blur** — `background-opacity`, `background-blur-radius` (native macOS blur)
-- **Glassmorphism mode** — `glassmorphism` (`off`/`1`–`5`, default `off`, higher = more transparent): translucent frosted sidebar / tab-overview / titlebar-tab-bar chrome and frosted command palette / prompts / dialogs over the blurred desktop; the rim takes over drawing each pane's edge as the faces thin out, reaching the foreground color at `5`. Any on-level takes over `background-opacity` / `background-blur-radius` with that level's own recommended pair
-- **Background image** — `background-image` (single file / directory rotation), fit / position / repeat / opacity / interval settings
-- **minimum-contrast** — enforcement of a WCAG contrast-ratio floor
-- **Font pipeline** — font-kit discovery → rustybuzz shaping → swash rasterization → etagere atlas (monochrome + color emoji)
-- **Emoji presentation** — VS16 selects color emoji, VS15 prefers text glyphs, and color artwork fits its actual cell width and line height. Skin tones, ZWJ families/professions, flags, and keycaps compose in ordinary shell and agent output, including across PTY reads. Grapheme mode 2027 defaults on; applications can query it with `CSI ? 2027 $ p` or disable it with `CSI ? 2027 l` for scalar-width compatibility. A selector arriving at the last column keeps the existing one-cell footprint and the artwork fits that space.
-- **Ligatures / fallback** — liga / calt, CJK fallback, Nerd Font and box-drawing glyphs
-- **Synthetic styles** — synthetic bold / italic, `font-thicken`
-- **Themes** — bundles 574 Ghostty-compatible themes plus `Noa`, built from the brand palette (charcoal, Ember white, one orange accent on the cursor and ANSI yellow; not the default)
+- **wgpu instanced cell rendering**: surface-less design, minimizes lock duration via `FrameSnapshot`
+- **Cursor styles**: block / bar / underline / hollow, focus / blink phase support
+- **Underline rendering**: single / double / curly / dotted / dashed, hover-link underline
+- **Background transparency / blur**: `background-opacity`, `background-blur-radius` (native macOS blur)
+- **Glassmorphism mode**: `glassmorphism` (`off`/`1`–`5`, default `off`, higher = more transparent): translucent frosted sidebar / tab-overview / titlebar-tab-bar chrome and frosted command palette / prompts / dialogs over the blurred desktop; the rim takes over drawing each pane's edge as the faces thin out, reaching the foreground color at `5`. Any on-level takes over `background-opacity` / `background-blur-radius` with that level's own recommended pair
+- **Background image**: `background-image` (single file / directory rotation), fit / position / repeat / opacity / interval settings
+- **minimum-contrast**: enforcement of a WCAG contrast-ratio floor
+- **Font pipeline**: font-kit discovery → rustybuzz shaping → swash rasterization → etagere atlas (monochrome + color emoji)
+- **Emoji presentation**: VS16 selects color emoji, VS15 prefers text glyphs, and color artwork fits its actual cell width and line height. Skin tones, ZWJ families/professions, flags, and keycaps compose in ordinary shell and agent output, including across PTY reads. Grapheme mode 2027 defaults on; applications can query it with `CSI ? 2027 $ p` or disable it with `CSI ? 2027 l` for scalar-width compatibility. A selector arriving at the last column keeps the existing one-cell footprint and the artwork fits that space.
+- **Ligatures / fallback**: liga / calt, CJK fallback, Nerd Font and box-drawing glyphs
+- **Synthetic styles**: synthetic bold / italic, `font-thicken`
+- **Themes**: bundles 574 Ghostty-compatible themes plus `Noa`, built from the brand palette (charcoal, Ember white, one orange accent on the cursor and ANSI yellow; not the default)
 
 ## Configuration (noa-config)
 
@@ -90,36 +90,36 @@ For the type, allowed values, defaults, and clamp/fallback rules of every key, s
 | Scratch Terminal | `scratch-terminal-key/-size` |
 | Sidebar | `sidebar-enabled/-width/-hotkey/-preview-lines` |
 
-- **Ghostty config import** — import with migration statistics
-- **Custom keybindings** — reassignment via `keybind = <chord>=<action>` / `unbind` / `clear`
-- **Recognized-but-unsupported keys** — `palette` and `config-file` emit a diagnostic and their values are ignored; palette override and include are not implemented
-- **Live reload** — the config file is watched and re-applied at runtime: immediately on window focus gain and settings-panel commits, otherwise on a slow 3s idle poll (so a save from inside a focused noa pane applies within ≤3s; refocus or use the settings UI to apply instantly)
-- **Deviating defaults** — `cursor-stop-blinking-after = 10` (Ghostty blinks forever; `0` restores parity) and `quick-terminal-screen = mouse` (Ghostty: `main`); see CONFIGURATION.md "Deviations from Ghostty defaults" for rationale
+- **Ghostty config import**: import with migration statistics
+- **Custom keybindings**: reassignment via `keybind = <chord>=<action>` / `unbind` / `clear`
+- **Recognized-but-unsupported keys**: `palette` and `config-file` emit a diagnostic and their values are ignored; palette override and include are not implemented
+- **Live reload**: the config file is watched and re-applied at runtime: immediately on window focus gain and settings-panel commits, otherwise on a slow 3s idle poll (so a save from inside a focused noa pane applies within ≤3s; refocus or use the settings UI to apply instantly)
+- **Deviating defaults**: `cursor-stop-blinking-after = 10` (Ghostty blinks forever; `0` restores parity) and `quick-terminal-screen = mouse` (Ghostty: `main`); see CONFIGURATION.md "Deviations from Ghostty defaults" for rationale
 
 ## macOS integration
 
-- **Native menu bar** — Noa / File / Edit / View / Window / Help. `Settings…` (⌘,) opens the theme & settings overlay
-- **Fullscreen toggle** — `⌘⌃F` / View menu / command palette. Defaults to native macOS fullscreen; `macos-non-native-fullscreen = true` switches to borderless fullscreen
-- **Quick Terminal** — a dropdown terminal triggered by a global hotkey (default ⌘\`), with auto-hide support
-- **Scratch Terminal** — a disposable popup terminal (default ⌘⇧T, in-app only) centered on the focused window, opened in the focused pane's cwd; closes on toggle/focus-loss/shell-exit/⌘W, with no persistence
-- **Floating panes** — terminals that float above the split layout and stay until closed (default ⌘⇧Y; ⌘⇧I moves focus between the last float and the split pane). Drag the title strip to move, an edge or corner to resize; the strip's buttons collapse a float to its strip, maximize it over its anchor, and close it. The strip's icon switches the anchor between the pane (clipped to it, hidden and closed with it), the tab, and the window (stays across tab switches). The strip shows the agent's state and turns to the attention color when it needs you. Saved with the session when `window-save-state` is on; spec in [`docs/specs/floating-panes.md`](specs/floating-panes.md)
-- **Secure keyboard entry** — toggleable
-- **Ember** — Noa's ghost in the menu bar: every pane ordered `waiting.` → `running…` → `idle` → `done.`, with the waiting count beside the ghost; pick a row to jump there. View → Ember in Menu Bar, or `ember = true` at launch
-- **Titlebar proxy icon** — reflects the focused pane's OSC 7 pwd in the titlebar proxy icon; disabled with `macos-titlebar-proxy-icon = hidden`
-- **Quick Look word lookup** — a trackpad force click (deep press) shows a dictionary popup for the word under the pointer; does not change the selection
-- **Desktop notifications** — OSC 9 / 777, Dock attention
-- **Clipboard** — OSC 52 and Kitty OSC 5522 (read/write policy, `clipboard-write-limit-bytes`), paste protection
-- **`.app` bundle** — `scripts/bundle-macos.sh` produces an ad-hoc signed bundle
-- **CLI actions** — `+version`, `+list-themes`, `+list-keybinds`, `+list-fonts`, `+show-config`, `+explain-config`, `+list-actions`, `+help`
+- **Native menu bar**: Noa / File / Edit / View / Window / Help. `Settings…` (⌘,) opens the theme & settings overlay
+- **Fullscreen toggle**: `⌘⌃F` / View menu / command palette. Defaults to native macOS fullscreen; `macos-non-native-fullscreen = true` switches to borderless fullscreen
+- **Quick Terminal**: a dropdown terminal triggered by a global hotkey (default ⌘\`), with auto-hide support
+- **Scratch Terminal**: a disposable popup terminal (default ⌘⇧T, in-app only) centered on the focused window, opened in the focused pane's cwd; closes on toggle/focus-loss/shell-exit/⌘W, with no persistence
+- **Floating panes**: terminals that float above the split layout and stay until closed (default ⌘⇧Y; ⌘⇧I moves focus between the last float and the split pane). Drag the title strip to move, an edge or corner to resize; the strip's buttons collapse a float to its strip, maximize it over its anchor, and close it. The strip's icon switches the anchor between the pane (clipped to it, hidden and closed with it), the tab, and the window (stays across tab switches). The strip shows the agent's state and turns to the attention color when it needs you. Saved with the session when `window-save-state` is on; spec in [`docs/specs/floating-panes.md`](specs/floating-panes.md)
+- **Secure keyboard entry**: toggleable
+- **Ember**: Noa's ghost in the menu bar: every pane ordered `waiting.` → `running…` → `idle` → `done.`, with the waiting count beside the ghost; pick a row to jump there. View → Ember in Menu Bar, or `ember = true` at launch
+- **Titlebar proxy icon**: reflects the focused pane's OSC 7 pwd in the titlebar proxy icon; disabled with `macos-titlebar-proxy-icon = hidden`
+- **Quick Look word lookup**: a trackpad force click (deep press) shows a dictionary popup for the word under the pointer; does not change the selection
+- **Desktop notifications**: OSC 9 / 777, Dock attention
+- **Clipboard**: OSC 52 and Kitty OSC 5522 (read/write policy, `clipboard-write-limit-bytes`), paste protection
+- **`.app` bundle**: `scripts/bundle-macos.sh` produces an ad-hoc signed bundle
+- **CLI actions**: `+version`, `+list-themes`, `+list-keybinds`, `+list-fonts`, `+show-config`, `+explain-config`, `+list-actions`, `+help`
 
 ## Session and shell integration
 
-- **Session restore** — saves/restores window / tab / split layout
-- **Shell integration** — OSC 133 (prompt/command boundaries) + OSC 7 (cwd). Bundles bash / zsh / fish scripts under `shell-integration/`
-- **Jump between prompts** — ⌘↑ / ⌘↓ to scroll to the previous/next prompt
-- **Child exit notice** — a process that fails within `abnormal-command-exit-runtime` (250 ms) keeps its pane open with an error, like Ghostty 1.4.0: a red bar along the pane's bottom edge on macOS, a message in the terminal elsewhere. Any key closes the pane
-- **`NOA_SURFACE_ID`** — every pane's child gets a random nonzero 64-bit id as `0x` plus 16 hex digits, like Ghostty's `GHOSTTY_SURFACE_ID`
-- **`NOA_QUICK_TERMINAL`** — set to `1` for every pane in the Quick Terminal, its first pane and its splits, like Ghostty's `GHOSTTY_QUICK_TERMINAL`
+- **Session restore**: saves/restores window / tab / split layout
+- **Shell integration**: OSC 133 (prompt/command boundaries) + OSC 7 (cwd). Bundles bash / zsh / fish scripts under `shell-integration/`
+- **Jump between prompts**: ⌘↑ / ⌘↓ to scroll to the previous/next prompt
+- **Child exit notice**: a process that fails within `abnormal-command-exit-runtime` (250 ms) keeps its pane open with an error, like Ghostty 1.4.0: a red bar along the pane's bottom edge on macOS, a message in the terminal elsewhere. Any key closes the pane
+- **`NOA_SURFACE_ID`**: every pane's child gets a random nonzero 64-bit id as `0x` plus 16 hex digits, like Ghostty's `GHOSTTY_SURFACE_ID`
+- **`NOA_QUICK_TERMINAL`**: set to `1` for every pane in the Quick Terminal, its first pane and its splits, like Ghostty's `GHOSTTY_QUICK_TERMINAL`
 
 ## Related documentation
 

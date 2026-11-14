@@ -10,3 +10,4 @@ bench/tools/bin/
 bench/results/
 bench/__pycache__/
 docs/history/
+.verify/

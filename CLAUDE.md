@@ -9,6 +9,8 @@ Requires Rust 1.92+ (edition 2024).
 ## Commands
 
 ```bash
+scripts/verify.sh                # checks the change reaches (logs in .verify/); see AGENTS.md
+scripts/verify.sh --full         # every check, exactly what CI runs
 cargo build --workspace          # build everything
 cargo test  --workspace          # all VT/grid conformance + smoke tests
 cargo clippy --workspace         # keep this clean — CI-equivalent gate

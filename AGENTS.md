@@ -15,6 +15,7 @@ fixture-based parity regression harness in `tests/parity`.
 - `crates/noa-config`: config discovery, parsing, validation, and precedence.
 - `crates/noa-render`: `wgpu` renderer, shaders, snapshots, and theme mapping.
 - `crates/noa-pty`: PTY spawning plus reader/writer threads.
+- `crates/noa-ipc`: JSON-RPC-over-WebSocket control server (`noa-server`).
 - `crates/noa-app`: `winit` app loop, input, IO thread, and UI integration.
 - `assets/`: app icon, AppleScript dictionary, entitlements, and images.
 - `scripts/`: macOS bundle, Linux package, and release scripts, theme and icon

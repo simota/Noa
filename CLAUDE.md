@@ -51,6 +51,7 @@ noa-font  (font-kit discovery → swash raster → etagere atlas)
 noa-theme (vendored Ghostty-compatible theme catalog, 574 Ghostty themes + `Noa`)
 noa-config (Ghostty-compatible config discovery/parse/validation/precedence)
 noa-pty   (portable-pty spawn + reader/writer threads)
+noa-ipc   (JSON-RPC-over-WebSocket control server; no Ghostty analog)
    ↓
 noa-render (wgpu instanced-cell renderer, surface-less)
    ↓

@@ -36,12 +36,12 @@ pty bytes
 
 | Value | Meaning | Supported |
 |---|---|---|
-| `t` | Transfer only | ✅ |
-| `T` | Transfer and display immediately | ✅ |
-| `p` | Display an already-transferred image (put) | ✅ |
-| `d` | Delete image/placement | ✅ (see delete specifiers below) |
-| `q` | Query (validate only, no storage, respond) | ✅ |
-| `f` / `a` / `c` | Animation frame/control/composition | ✅ |
+| `t` | Transfer only | yes |
+| `T` | Transfer and display immediately | yes |
+| `p` | Display an already-transferred image (put) | yes |
+| `d` | Delete image/placement | yes (see delete specifiers below) |
+| `q` | Query (validate only, no storage, respond) | yes |
+| `f` / `a` / `c` | Animation frame/control/composition | yes |
 
 ### Format (`f=`)
 
@@ -101,11 +101,11 @@ referencing that image remains on any screen. `d=f`/`F` (animation) is `EUNSUPPO
 A placement with `U=1` is stored as a virtual placement only (not drawn directly). The client prints cells with
 the base scalar `U+10EEEE` and embeds the drawing position in the cell style:
 
-- **Foreground color** → low bits of the image id (`Palette(n)` → 8 bits, `Rgb` → 24 bits).
-- **1st combining diacritic** → image row.
-- **2nd combining diacritic** → image column.
-- **3rd combining diacritic** → high byte of the image id.
-- **Underline color** → placement id (0 if omitted).
+- Foreground color → low bits of the image id (`Palette(n)` → 8 bits, `Rgb` → 24 bits).
+- 1st combining diacritic → image row.
+- 2nd combining diacritic → image column.
+- 3rd combining diacritic → high byte of the image id.
+- Underline color → placement id (0 if omitted).
 
 If row/column/high byte are omitted, they are inferred from the immediately preceding cell on the same screen row
 (row and high byte carry over, column is +1). The row/column mapping table embeds kitty's
@@ -119,11 +119,11 @@ virtual grid is computed. Placeholder cells are excluded from glyph rendering, s
 
 Within the same render pass, drawing interleaves with the cell pass, compositing placements into 3 bands by `z`:
 
-1. `z < -2^30` — **below** the cell background.
+1. `z < -2^30`: **below** the cell background.
 2. cell background pass.
-3. `-2^30 ≤ z < 0` — above the background, below the text.
+3. `-2^30 ≤ z < 0`: above the background, below the text.
 4. cell glyph/decoration pass.
-5. `z ≥ 0` — **above** the text (but below UI overlays).
+5. `z ≥ 0`: **above** the text (but below UI overlays).
 
 ## Quota
 

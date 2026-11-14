@@ -31,9 +31,9 @@ as terminal input.
 
 ### Success Definition
 
-The app presents a coherent macOS menu experience, routes supported menu and
-Cmd-key commands through the app layer, preserves terminal input behavior, and
-keeps `winit`/native macOS concerns contained in `crates/noa-app`.
+The app routes supported menu and Cmd-key commands through the app layer,
+preserves terminal input behavior, and keeps `winit`/native macOS concerns
+contained in `crates/noa-app`.
 
 ## Reuse And Constraints
 

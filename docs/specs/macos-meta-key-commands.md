@@ -42,23 +42,23 @@ Standard shortcuts such as `Cmd+K` are defined as testable `AppCommand`s, and me
 
 ## Candidate Directions
 
-- **A. Focused Cmd+K Clear** — v1 adds only `Cmd+K`. A single command such as `AppCommand::ClearTerminal` clears the focused tab's visible screen and scrollback on the app side. The menu item is added as `Clear` under `Edit` or `View`. Minimal and fast, but the "and other common features" scope is pushed to a follow-up spec.
-- **B. Clear / Reset Command Suite** — Centered on `Cmd+K`, this splits clear screen + scrollback, clear scrollback only, and reset terminal into separate actions. Only `Cmd+K` gets a default shortcut; the others start as menu items to avoid accidental destructive shortcuts. This is a natural first batch for unlocking the existing deferred terminal actions, but reset semantics need to be clarified.
-- **C. Common macOS Terminal Commands Pack** — In addition to `Cmd+K` clear, this includes `Cmd+A` select all, `Cmd++` / `Cmd+-` / `Cmd+0` font-size controls, and cleanup of the existing `Cmd+F/G/Shift+G` search route. The user experience is the most cohesive, but it spans multiple areas: the Terminal API, font grid / atlas / renderer resize, and the search UI placeholder.
-- **D. Configurable Keybind Foundation First** — Builds persistence, loading, and action-registry integration for the `keybind = ...` config first, with `Cmd+K` as one example of a default keybind. This aligns strongly with existing Ghostty config assets, but foundation work would precede the clear behavior users want now, and the scope is large.
-- **E. Shell-Compatible Clear** — `Cmd+K` does not touch app state directly; instead it sends the equivalent of `Ctrl+L` to the PTY. This is a lightweight implementation since it defers to shell/editor behavior, but scrollback is not cleared, the meaning changes in full-screen apps, and it conflicts with the current design where `Cmd` combos are never sent as shell input.
+- A. Focused Cmd+K Clear: v1 adds only `Cmd+K`. A single command such as `AppCommand::ClearTerminal` clears the focused tab's visible screen and scrollback on the app side. The menu item is added as `Clear` under `Edit` or `View`. Minimal and fast, but the "and other common features" scope is pushed to a follow-up spec.
+- B. Clear / Reset Command Suite: Centered on `Cmd+K`, this splits clear screen + scrollback, clear scrollback only, and reset terminal into separate actions. Only `Cmd+K` gets a default shortcut; the others start as menu items to avoid accidental destructive shortcuts. This is a natural first batch for unlocking the existing deferred terminal actions, but reset semantics need to be clarified.
+- C. Common macOS Terminal Commands Pack: In addition to `Cmd+K` clear, this includes `Cmd+A` select all, `Cmd++` / `Cmd+-` / `Cmd+0` font-size controls, and cleanup of the existing `Cmd+F/G/Shift+G` search route. The user experience is the most cohesive, but it spans multiple areas: the Terminal API, font grid / atlas / renderer resize, and the search UI placeholder.
+- D. Configurable Keybind Foundation First: Builds persistence, loading, and action-registry integration for the `keybind = ...` config first, with `Cmd+K` as one example of a default keybind. This aligns strongly with existing Ghostty config assets, but foundation work would precede the clear behavior users want now, and the scope is large.
+- E. Shell-Compatible Clear: `Cmd+K` does not touch app state directly; instead it sends the equivalent of `Ctrl+L` to the PTY. This is a lightweight implementation since it defers to shell/editor behavior, but scrollback is not cleared, the meaning changes in full-screen apps, and it conflicts with the current design where `Cmd` combos are never sent as shell input.
 
-Selected direction: **C. Common macOS Terminal Commands Pack**.
+Selected direction: C. Common macOS Terminal Commands Pack.
 
-Checkpoint result: Per the user's decision, scope includes not only `Cmd+K` clear but also `Cmd+A` select all, `Cmd++` / `Cmd+-` / `Cmd+0` font-size controls, and cleanup of the existing search route.
+Checkpoint result: Per the user's decision, scope includes `Cmd+K` clear, `Cmd+A` select all, `Cmd++` / `Cmd+-` / `Cmd+0` font-size controls, and cleanup of the existing search route.
 
-Convergence decision: C is adopted as the spec target. However, implementation is split into independent slices — clear command, select all, font-size controls, and search route cleanup — rather than one large change. A new search prompt UI and runtime configurable keybinds are out of scope for this spec.
+Convergence decision: C is adopted as the spec target. However, implementation is split into independent slices (clear command, select all, font-size controls, and search route cleanup) rather than one large change. A new search prompt UI and runtime configurable keybinds are out of scope for this spec.
 
 ## Challenge Notes
 
-- Magi: **conditional approve**. C matches expectations for a macOS terminal, but completion criteria must be pinned to `Cmd+K`, `Cmd+A`, `Cmd++` / `Cmd+-` / `Cmd+0`, and search route cleanup. Because font-size interacts with grid/window resize, acceptance criteria must be spelled out explicitly.
-- Void: **simplify pressure**. The minimum value is `Cmd+K` clear and search placeholder cleanup. `Cmd+A` and font-size have higher maintenance cost, so even if included in C they should be treated as independent slices, and runtime configurable keybinds should be excluded.
-- Ripple: **medium-high impact**. The estimated impact of all of C is roughly 8-10 files / 250-450 LOC. The highest risk is font-size controls, which ripple into `FontGrid`, the renderer atlas, grid resize, PTY winsize, and shared behavior across multiple tabs. Split implementation is required.
+- Magi: conditional approve. C matches expectations for a macOS terminal, but completion criteria must be pinned to `Cmd+K`, `Cmd+A`, `Cmd++` / `Cmd+-` / `Cmd+0`, and search route cleanup. Because font-size interacts with grid/window resize, acceptance criteria must be spelled out explicitly.
+- Void: simplify pressure. The minimum value is `Cmd+K` clear and search placeholder cleanup. `Cmd+A` and font-size have higher maintenance cost, so even if included in C they should be treated as independent slices, and runtime configurable keybinds should be excluded.
+- Ripple: medium-high impact. The estimated impact of all of C is roughly 8-10 files / 250-450 LOC. The highest risk is font-size controls, which ripple into `FontGrid`, the renderer atlas, grid resize, PTY winsize, and shared behavior across multiple tabs. Split implementation is required.
 - Nexus ruling: Include up through C per the user's directive. Risk is managed not by "exclusion" but by "staging within the spec" and "AC separation."
 
 ## Shape Proposal
@@ -121,7 +121,7 @@ The spec should be reconsidered if implementation requires a new keybinding conf
 
 ## L1 - Requirements
 
-Scope mode: **Standard**. This feature has 7 functional requirements and 3 cross-functional requirements, touches app/grid/render surfaces, and needs traceable acceptance criteria, but does not introduce a new data model, external integration, or persistent configuration surface.
+Scope mode: Standard. This feature has 7 functional requirements and 3 cross-functional requirements, touches app/grid/render surfaces, and needs traceable acceptance criteria, but does not introduce a new data model, external integration, or persistent configuration surface.
 
 ### User Stories
 
@@ -159,86 +159,86 @@ Linked requirements: REQ-001, REQ-007, CFR-001, CFR-003.
 
 #### REQ-001: App command coverage for terminal meta-key actions
 
-- **Description:** Add explicit `AppCommand` representations for clear, select all, font-size controls, and search route cleanup where those commands do not already exist.
-- **Input:** Native menu events or `KeybindEngine` matches for the supported command set.
-- **Output:** A resolved `AppCommand` dispatched through `handle_app_command`.
-- **Constraints:** Commands must not be implemented as ad hoc keyboard special cases outside the command engine.
-- **Priority:** Must.
-- **Linked:** US-001, US-002, US-003, US-004, US-005.
+- Description: Add explicit `AppCommand` representations for clear, select all, font-size controls, and search route cleanup where those commands do not already exist.
+- Input: Native menu events or `KeybindEngine` matches for the supported command set.
+- Output: A resolved `AppCommand` dispatched through `handle_app_command`.
+- Constraints: Commands must not be implemented as ad hoc keyboard special cases outside the command engine.
+- Priority: Must.
+- Linked: US-001, US-002, US-003, US-004, US-005.
 
 #### REQ-002: Focused-tab targeting and PTY isolation
 
-- **Description:** Every terminal meta-key command acts only on the focused tab and must not emit shortcut bytes to the PTY.
-- **Input:** A supported `Cmd` shortcut while a terminal window is focused.
-- **Output:** The focused tab changes state, or the command no-ops when no focused terminal exists.
-- **Constraints:** Existing unknown `Cmd` combo behavior remains PTY-isolated.
-- **Priority:** Must.
-- **Linked:** US-001, US-002, US-003, US-004.
+- Description: Every terminal meta-key command acts only on the focused tab and must not emit shortcut bytes to the PTY.
+- Input: A supported `Cmd` shortcut while a terminal window is focused.
+- Output: The focused tab changes state, or the command no-ops when no focused terminal exists.
+- Constraints: Existing unknown `Cmd` combo behavior remains PTY-isolated.
+- Priority: Must.
+- Linked: US-001, US-002, US-003, US-004.
 
 #### REQ-003: Clear terminal commands
 
-- **Description:** Provide a default `Cmd+K` command that clears the focused tab's active display and, when the primary screen is active, its scrollback; also provide a menu-only `Clear Scrollback` command that clears primary scrollback without clearing the live screen.
-- **Input:** `Cmd+K`, menu `Clear`, or menu `Clear Scrollback`.
-- **Output:** Terminal state is cleared according to the command variant; stale selection/search/viewport state is reconciled.
-- **Constraints:** `Cmd+K` must not send `Ctrl+L` or any other bytes to the PTY.
-- **Priority:** Must.
-- **Linked:** US-001.
+- Description: Provide a default `Cmd+K` command that clears the focused tab's active display and, when the primary screen is active, its scrollback; also provide a menu-only `Clear Scrollback` command that clears primary scrollback without clearing the live screen.
+- Input: `Cmd+K`, menu `Clear`, or menu `Clear Scrollback`.
+- Output: Terminal state is cleared according to the command variant; stale selection/search/viewport state is reconciled.
+- Constraints: `Cmd+K` must not send `Ctrl+L` or any other bytes to the PTY.
+- Priority: Must.
+- Linked: US-001.
 
 #### REQ-004: Terminal select all
 
-- **Description:** Provide `Cmd+A` terminal select-all behavior for the focused tab.
-- **Input:** `Cmd+A` or menu `Select All`.
-- **Output:** Main screen selects scrollback + live grid content; alt screen selects the visible alt-screen content only.
-- **Constraints:** Selection must feed the existing copy path and avoid selecting evicted scrollback rows.
-- **Priority:** Should.
-- **Linked:** US-002.
+- Description: Provide `Cmd+A` terminal select-all behavior for the focused tab.
+- Input: `Cmd+A` or menu `Select All`.
+- Output: Main screen selects scrollback + live grid content; alt screen selects the visible alt-screen content only.
+- Constraints: Selection must feed the existing copy path and avoid selecting evicted scrollback rows.
+- Priority: Should.
+- Linked: US-002.
 
 #### REQ-005: Runtime font-size controls
 
-- **Description:** Provide `Cmd++`, `Cmd+-`, and `Cmd+0` commands for font-size increase, decrease, and reset.
-- **Input:** Keyboard shortcuts or matching menu commands.
-- **Output:** App/session-wide font size updates, font metrics rebuild, grid dimensions recompute, affected renderers redraw, and PTY winsize is synchronized.
-- **Constraints:** v1 does not persist per-tab font size and does not add config keys.
-- **Priority:** Should.
-- **Linked:** US-003.
+- Description: Provide `Cmd++`, `Cmd+-`, and `Cmd+0` commands for font-size increase, decrease, and reset.
+- Input: Keyboard shortcuts or matching menu commands.
+- Output: App/session-wide font size updates, font metrics rebuild, grid dimensions recompute, affected renderers redraw, and PTY winsize is synchronized.
+- Constraints: v1 does not persist per-tab font size and does not add config keys.
+- Priority: Should.
+- Linked: US-003.
 
 #### REQ-006: Search command route cleanup
 
-- **Description:** Ensure `Cmd+F`, `Cmd+G`, and `Cmd+Shift+G` resolve to honest, testable behavior while the search prompt UI remains out of scope.
-- **Input:** Existing search shortcuts or menu search items.
-- **Output:** `Find` is disabled in the native menu and is not registered as a default keybind until a prompt exists; find-next and find-previous operate only when search state exists.
-- **Constraints:** This requirement must not add a new search overlay or prompt.
-- **Priority:** Should.
-- **Linked:** US-004.
+- Description: Ensure `Cmd+F`, `Cmd+G`, and `Cmd+Shift+G` resolve to honest, testable behavior while the search prompt UI remains out of scope.
+- Input: Existing search shortcuts or menu search items.
+- Output: `Find` is disabled in the native menu and is not registered as a default keybind until a prompt exists; find-next and find-previous operate only when search state exists.
+- Constraints: This requirement must not add a new search overlay or prompt.
+- Priority: Should.
+- Linked: US-004.
 
 #### REQ-007: Unified keybind and native menu integration
 
-- **Description:** Default keybinds, action names, menu IDs, and native menu selections use the same command identities.
-- **Input:** A default shortcut, action-name lookup, or menu selection.
-- **Output:** The same `AppCommand` reaches the same handler with identical behavior.
-- **Constraints:** Existing copy, paste, tab, and scroll navigation bindings remain unchanged.
-- **Priority:** Must.
-- **Linked:** US-001, US-002, US-003, US-004, US-005.
+- Description: Default keybinds, action names, menu IDs, and native menu selections use the same command identities.
+- Input: A default shortcut, action-name lookup, or menu selection.
+- Output: The same `AppCommand` reaches the same handler with identical behavior.
+- Constraints: Existing copy, paste, tab, and scroll navigation bindings remain unchanged.
+- Priority: Must.
+- Linked: US-001, US-002, US-003, US-004, US-005.
 
 ### Cross-Functional Requirements
 
 #### CFR-001: Testability and traceability
 
-- **Requirement:** Every in-scope command has unit or integration coverage for command mapping and behavior, and every L1 requirement maps to at least one L3 acceptance criterion.
-- **Target:** Standard-package traceability from REQ/CFR to `AC-META-*` is present before lock.
-- **Priority:** Must.
+- Requirement: Every in-scope command has unit or integration coverage for command mapping and behavior, and every L1 requirement maps to at least one L3 acceptance criterion.
+- Target: Standard-package traceability from REQ/CFR to `AC-META-*` is present before lock.
+- Priority: Must.
 
 #### CFR-002: Resize and renderer consistency
 
-- **Requirement:** Runtime font-size changes preserve renderer, grid, and PTY size consistency.
-- **Target:** Font-size commands trigger deterministic font metric rebuild, grid-size recompute, redraw request, and PTY winsize update without panics.
-- **Priority:** Should.
+- Requirement: Runtime font-size changes preserve renderer, grid, and PTY size consistency.
+- Target: Font-size commands trigger deterministic font metric rebuild, grid-size recompute, redraw request, and PTY winsize update without panics.
+- Priority: Should.
 
 #### CFR-003: Scope and safety boundaries
 
-- **Requirement:** The implementation must preserve explicit scope boundaries for destructive or deferred behavior.
-- **Target:** Runtime keybind config, terminal reset, search prompt UI, PTY `Ctrl+L` clear, and per-tab font persistence remain out of scope unless a later spec changes them.
-- **Priority:** Must.
+- Requirement: The implementation must preserve explicit scope boundaries for destructive or deferred behavior.
+- Target: Runtime keybind config, terminal reset, search prompt UI, PTY `Ctrl+L` clear, and per-tab font persistence remain out of scope unless a later spec changes them.
+- Priority: Must.
 
 ### MoSCoW Priority Matrix
 
@@ -600,11 +600,11 @@ Out of scope:
 
 ## Considered But Rejected
 
-- **A. Focused Cmd+K Clear** — rejected as too narrow for the requested "and other common features"; kept as the first implementation slice inside C.
-- **B. Clear / Reset Command Suite** — rejected as the sole direction because it does not cover select-all, font-size, and search command expectations; clear command semantics remain part of C.
-- **D. Configurable Keybind Foundation First** — rejected because `keybind` config is intentionally recognized-but-unimplemented in the Ghostty config spec, and would make this feature a configuration-platform project.
-- **E. Shell-Compatible Clear** — rejected because sending `Ctrl+L` to the PTY would not clear scrollback, would vary by foreground program, and would conflict with the current app-command handling of unknown `Cmd` combos.
-- **Monolithic C implementation** — rejected because font-size and select-all have different risk profiles from `Cmd+K`; C should be specified as one user-facing pack but built as separate verifiable slices.
+- A. Focused Cmd+K Clear: rejected as too narrow for the requested "and other common features"; kept as the first implementation slice inside C.
+- B. Clear / Reset Command Suite: rejected as the sole direction because it does not cover select-all, font-size, and search command expectations; clear command semantics remain part of C.
+- D. Configurable Keybind Foundation First: rejected because `keybind` config is intentionally recognized-but-unimplemented in the Ghostty config spec, and would make this feature a configuration-platform project.
+- E. Shell-Compatible Clear: rejected because sending `Ctrl+L` to the PTY would not clear scrollback, would vary by foreground program, and would conflict with the current app-command handling of unknown `Cmd` combos.
+- Monolithic C implementation: rejected because font-size and select-all have different risk profiles from `Cmd+K`; C should be specified as one user-facing pack but built as separate verifiable slices.
 
 ## Open Questions / Deferred Decisions
 
@@ -620,10 +620,10 @@ Out of scope:
 | Check | Result |
 |-------|--------|
 | AC count | 12 |
-| L1 requirement coverage | PASS — 7 functional requirements and 3 cross-functional requirements all map to at least one `AC-META-*`. |
-| Testability | PASS — every AC has a concrete trigger, observable expected outcome, and verification method. |
-| Ambiguity flags | PASS — no blocking ambiguity remains. Search `Find` behavior is fixed as disabled and unbound until prompt support exists. |
-| Scenario count | PASS — 12 scenarios, within the Standard-package target. |
+| L1 requirement coverage | PASS: 7 functional requirements and 3 cross-functional requirements all map to at least one `AC-META-*`. |
+| Testability | PASS: every AC has a concrete trigger, observable expected outcome, and verification method. |
+| Ambiguity flags | PASS: no blocking ambiguity remains. Search `Find` behavior is fixed as disabled and unbound until prompt support exists. |
+| Scenario count | PASS: 12 scenarios, within the Standard-package target. |
 
 ### Nexus Quality Gate
 
@@ -639,9 +639,9 @@ Lock preconditions: satisfied for spec sign-off. The draft remains unpromoted un
 
 ## Build-Path Decision
 
-Selected: **orbit**.
+Selected: orbit.
 
-Executor engine: **codex**.
+Executor engine: codex.
 
 Handoff recommendation:
 

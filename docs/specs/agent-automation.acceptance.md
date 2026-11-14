@@ -1,4 +1,4 @@
-# Acceptance Test Specification — エージェント自動化サーフェス強化
+# Acceptance Test Specification: エージェント自動化サーフェス強化
 
 | | |
 |---|---|
@@ -10,15 +10,15 @@
 | review trigger | spec の変更 |
 
 ## 1. Test scope
-- **In scope** — AC-001..033（AppleScript の新しい動詞・プロパティ、Noa Extensions、AX 公開、CFR-001..003）。
-- **Out of scope** — spec の Out of scope 一覧の項目。既存 `applescript.md` の AC はここでは扱わない（AC-024 で回帰のみ確認）。
-- **Not proven by this suite** — US 配列と Dvorak 以外の配列での `send key`（JIS かな入力・IME 入力ソース）。Claude 以外の computer use クライアントからの読み取り。マルチモニタでの AXFrame。巨大な scrollback の reflow 中の読み取りの待ち時間（spec OQ-2）。
+- In scope: AC-001..033（AppleScript の新しい動詞・プロパティ、Noa Extensions、AX 公開、CFR-001..003）。
+- Out of scope: spec の Out of scope 一覧の項目。既存 `applescript.md` の AC はここでは扱わない（AC-024 で回帰のみ確認）。
+- Not proven by this suite: US 配列と Dvorak 以外の配列での `send key`（JIS かな入力・IME 入力ソース）。Claude 以外の computer use クライアントからの読み取り。マルチモニタでの AXFrame。巨大な scrollback の reflow 中の読み取りの待ち時間（spec OQ-2）。
 
 ## 2. Entry & exit criteria
 | | Criterion |
 |---|-----------|
-| **Entry** | spec が `locked`。対象コミットから `scripts/bundle-macos.sh` で作った署名済み Noa.app を `/Applications` 以外の場所から起動している。§3 の能力を満たしている |
-| **Exit** | must-have の TC がすべて PASS。§6 の手順の結果が記録されている。S1/S2 の未解決欠陥がない |
+| Entry | spec が `locked`。対象コミットから `scripts/bundle-macos.sh` で作った署名済み Noa.app を `/Applications` 以外の場所から起動している。§3 の能力を満たしている |
+| Exit | must-have の TC がすべて PASS。§6 の手順の結果が記録されている。S1/S2 の未解決欠陥がない |
 
 ## 3. Environment
 | Item | Value | How to obtain / set |
@@ -123,8 +123,8 @@ smoke は `scripts/agent-automation-smoke.sh`（新規）にまとめ、各 TC �
 |----------|-----------|-------------|
 | S1 | must-have の AC を満たさない、またはクラッシュ・ハングする | yes |
 | S2 | must-have の AC を回避策を使わないと満たせない | yes |
-| S3 | must-have 以外の AC を満たさない | no — 記録する |
-| S4 | 表示・文言 | no — 記録する |
+| S3 | must-have 以外の AC を満たさない | no（記録する） |
+| S4 | 表示・文言 | no（記録する） |
 
 must-have の TC が失敗したら、ビルドの欠陥か、AC が書かれたままでは作れないかを判定する。作れない場合は `spec-dialogue agent-automation` に戻す。
 

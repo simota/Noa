@@ -37,24 +37,24 @@ approve dangerous operations").
   (`crates/noa-app/src/auto_approve/denylist.rs`). The check reads the rows
   above the choices (the choices only echo the command), and a blank row ends
   a paragraph.
-  - **Wraps:** a row boundary may fall between words or inside one, and the
+  - Wraps: a row boundary may fall between words or inside one, and the
     grid cannot tell which. The words on both sides are kept as separate words
     and are also offered glued together. The check stays linear in the length
     of the paragraph, however its wraps mix.
-  - **Quoting:** words are split twice, once shell-quoted and once plainly. A
+  - Quoting: words are split twice (once shell-quoted, once plainly). A
     quoted path such as `"/tmp/my project"` stays one argument, and a quoted
     program (`| 'bash'`, `sh -c '…'`) is still seen.
-  - **Position:** rules ask what appears after what, never where. A flag can
+  - Position: rules ask what appears after what, never where. A flag can
     appear anywhere in the command (`git clean target -f`). A git subcommand is
     found by name, so global options such as `-C <dir>` need no parsing.
     Programs are matched by basename (`/bin/rm`).
-  - **Rules:** `rm -r`/`--recursive`, `sudo`/`doas`, forced `git push`,
+  - Rules: `rm -r`/`--recursive`, `sudo`/`doas`, forced `git push`,
     `git reset --hard`, `git clean -f`/`--force`, `--no-verify`, a pipe into a
     shell (`sh`, `bash`, `zsh`, `dash`, `ksh`, `fish`) or `sudo`, recursive
     `chmod`/`chown`, `dd of=`, `mkfs*`, `diskutil erase*`,
     `shutdown`/`reboot`/`halt`, and `DROP TABLE`/`DROP DATABASE`/`TRUNCATE
     TABLE`.
-  - **Ambiguity resolves toward denying.** A false hit costs only a manual
+  - Ambiguity resolves toward denying. A false hit costs only a manual
     approval. For example, `| grep sh` is denied, as is a destructive command
     named only inside a commit message.
 - A hit withholds the automatic answer, and the dialog waits for the user as
@@ -156,11 +156,11 @@ approvals remain outside the signature table.
 
 ## L0 — Vision
 
-- **Problem:** When running Claude Code / Codex / agy inside a noa tab, every tool execution stops at an approval prompt (y/n, numbered menu, Enter confirmation), and the agent keeps waiting until the user comes back to the terminal and types. With multiple tabs running in parallel, waiting for approvals dominates throughput.
-- **Target:** Users running multiple AI agent CLIs in parallel on noa (i.e., simota's own workflow).
-- **Job:** For opt-in tabs only, noa detects approval prompts from recognized agent CLIs and automatically sends an affirmative response, enabling unattended operation.
-- **Definition of success:** In tabs with auto-approve ON, agents never stall waiting for approval. Zero unintended keystrokes from false positives.
-- **Biggest risk:** Auto-approving a destructive operation due to a false positive. Detection accuracy and gate design are the core of this spec.
+- Problem: When running Claude Code / Codex / agy inside a noa tab, every tool execution stops at an approval prompt (y/n, numbered menu, Enter confirmation), and the agent keeps waiting until the user comes back to the terminal and types. With multiple tabs running in parallel, waiting for approvals dominates throughput.
+- Target: Users running multiple AI agent CLIs in parallel on noa (i.e., simota's own workflow).
+- Job: For opt-in tabs only, noa detects approval prompts from recognized agent CLIs and automatically sends an affirmative response, enabling unattended operation.
+- Definition of success: In tabs with auto-approve ON, agents never stall waiting for approval. Zero unintended keystrokes from false positives.
+- Biggest risk: Auto-approving a destructive operation due to a false positive. Detection accuracy and gate design are the core of this spec.
 
 ### FRAME decisions (user answers, 2026-07-08)
 
@@ -214,9 +214,9 @@ Riff assessment: minimal risk for v1 = C, assuming future extension = D. Exposin
 ### CHALLENGE revisions (Omen/Ripple review, 2026-07-08)
 
 **Trigger-layer swap (conditional GO):** Piggybacking on branch_poll doesn't actually work in the real code — the worker doesn't hold `Arc<Mutex<Terminal>>` (branch_poll.rs:220-243), the per-tab flag (owned by `Surface` on the main thread) isn't visible there, and window/pane resolution isn't possible. Therefore:
-1. **Move detection into `feed_terminal_batch` in io_thread** (lock already held, pane already known, natural throttling, near io_thread.rs:395). Scanning uses two-consecutive-match debouncing to block false matches from partial rendering (RPN80).
-2. **Injection uses a new `UserEvent::AutoApprove{..}`** → main thread resolves card→(window,pane) authoritatively → existing `write_pane_pty_bytes`. `SessionDelta` is store-apply-only and can't be reused for this.
-3. **Invert to an allowlist approach**: approve only known-benign prompt signatures. After approving, lock the matched region's cell-hash and cap consecutive approvals to block re-arming loops (RPN45).
+1. Move detection into `feed_terminal_batch` in io_thread (lock already held, pane already known, natural throttling, near io_thread.rs:395). Scanning uses two-consecutive-match debouncing to block false matches from partial rendering (RPN80).
+2. Injection uses a new `UserEvent::AutoApprove{..}` → main thread resolves card→(window,pane) authoritatively → existing `write_pane_pty_bytes`. `SessionDelta` is store-apply-only and can't be reused for this.
+3. Invert to an allowlist approach: approve only known-benign prompt signatures. After approving, lock the matched region's cell-hash and cap consecutive approvals to block re-arming loops (RPN45).
 
 **Void scope compression — v1 safety mechanisms are 6 systems plus 1 addition:**
 Signature matching (fail-safe against unknown text is built in as a non-fire) / tab badge / consumed flag (subsumes cell-hash and screen-advance confirmation) / armed only during alt-screen or while tracking the viewport tail / suppression during IME/paste/recent user input (3s) / rolling 6-in-window auto-OFF + attention. Addition = **audit log of auto-approvals** (ring buffer, most recent N entries).
@@ -266,7 +266,7 @@ A per-tab opt-in "auto-approve mode." In tabs where it's ON, within io_thread's 
 
 ### SHAPE decisions (user answers, 2026-07-08)
 
-- **Fires even on the focused tab.** Collision avoidance is left to recent-user-input suppression (3s) + IME/paste guards
+- Fires even on the focused tab. Collision avoidance is left to recent-user-input suppression (3s) + IME/paste guards
 - The canonical in-scope list is the 10 items under the "## Scope" section (the 9 items in this SHAPE section plus firing while focused)
 - Audit log display surface: **inside the sidebar card** (recent approval count/latest item; a dedicated modal is deferred to v2)
 
@@ -274,34 +274,34 @@ A per-tab opt-in "auto-approve mode." In tabs where it's ON, within io_thread's 
 
 ### Functional Requirements (FR)
 
-- **FR-1** Per-tab opt-in toggle: auto-approve mode can be turned ON/OFF per `Surface` (`AppCommand::ToggleAutoApprove`, command palette entry, keybind, `config` default value). Default is OFF.
-- **FR-2** Agent gate: armed only on panes where `classify_agent` returns `ClaudeCode`/`Codex`/`Agy`. `Generic`/unrecognized never fires.
-- **FR-3** Prompt detection: match the visible viewport against a **hardcoded signature matrix** of `AgentKind` × prompt type. Dual signature = ① anchor text + numeric label, ② **selection-marker condition** (the selection cursor character, e.g. "❯", must be at the start of the line for the first affirmative option; grid character-based check, independent of SGR attributes). If either fails to match, no fire.
-- **FR-4** Two-consecutive-match debounce: confirm only when the same signature matches on two consecutive feed scans in a row (blocks false matches from partial rendering).
-- **FR-5** Precondition gate: armed only during alt-screen or while tracking the viewport tail (**scrollback display offset == 0**, i.e. the live tail is being displayed).
+- FR-1 Per-tab opt-in toggle: auto-approve mode can be turned ON/OFF per `Surface` (`AppCommand::ToggleAutoApprove`, command palette entry, keybind, `config` default value). Default is OFF.
+- FR-2 Agent gate: armed only on panes where `classify_agent` returns `ClaudeCode`/`Codex`/`Agy`. `Generic`/unrecognized never fires.
+- FR-3 Prompt detection: match the visible viewport against a **hardcoded signature matrix** of `AgentKind` × prompt type. Dual signature = ① anchor text + numeric label, ② **selection-marker condition** (the selection cursor character, e.g. "❯", must be at the start of the line for the first affirmative option; grid character-based check, independent of SGR attributes). If either fails to match, no fire.
+- FR-4 Two-consecutive-match debounce: confirm only when the same signature matches on two consecutive feed scans in a row (blocks false matches from partial rendering).
+- FR-5 Precondition gate: armed only during alt-screen or while tracking the viewport tail (**scrollback display offset == 0**, i.e. the live tail is being displayed).
   - Addendum (2026-09-11): the gate suppresses *firing* only. Detection scans the **live tail rows** (not the scrolled viewport) so a prompt that lands while the user is reading history stays tracked under `ViewportNotLive`, and the 350 ms stability rescan keeps polling until the viewport returns to offset 0 (a wheel scroll produces no pty output to rescan on). Two unsuppressed matches are still required before injection. `NOA_AUTO_APPROVE_TRACE=1` logs every tracked decision and main-thread reject to stderr.
-- **FR-6** Affirmative response injection: on confirmation, the main thread authoritatively resolves (window,pane) via `UserEvent::AutoApprove` and sends the fixed injection byte sequence for that agent × signature via `write_pane_pty_bytes`.
-- **FR-7** Pre-injection reconfirmation: right before injecting, the main thread rescans the target pane; if the signature has disappeared, abort the send (guards against wrong target pane / stale state).
-- **FR-8** Consumed flag: after approval, don't rearm until the **cell-content hash of the signature-matched row range (anchor row through the last option row)** changes, plus a cap on consecutive approvals.
-- **FR-9** Input-conflict suppression: no-fire during IME preedit, during paste, or within 3s of recent user input.
-- **FR-10** Runaway breaker: auto-OFF + attention notification after M approvals (default 6) within a rolling 60s window.
-- **FR-11** Non-approval of dangerous operations: Bash execution approvals and unknown text are never included in the matrix signatures, and always fail to fire (fail-safe).
-- **FR-12** Visualization: badge on the tab/sidebar card while mode is ON, flash on fire.
-- **FR-13** Audit log: record the most recent N (default 16) auto-approvals in a ring buffer, and show the recent approval count/latest item inside the sidebar card.
+- FR-6 Affirmative response injection: on confirmation, the main thread authoritatively resolves (window,pane) via `UserEvent::AutoApprove` and sends the fixed injection byte sequence for that agent × signature via `write_pane_pty_bytes`.
+- FR-7 Pre-injection reconfirmation: right before injecting, the main thread rescans the target pane; if the signature has disappeared, abort the send (guards against wrong target pane / stale state).
+- FR-8 Consumed flag: after approval, don't rearm until the **cell-content hash of the signature-matched row range (anchor row through the last option row)** changes, plus a cap on consecutive approvals.
+- FR-9 Input-conflict suppression: no-fire during IME preedit, during paste, or within 3s of recent user input.
+- FR-10 Runaway breaker: auto-OFF + attention notification after M approvals (default 6) within a rolling 60s window.
+- FR-11 Non-approval of dangerous operations: Bash execution approvals and unknown text are never included in the matrix signatures, and always fail to fire (fail-safe).
+- FR-12 Visualization: badge on the tab/sidebar card while mode is ON, flash on fire.
+- FR-13 Audit log: record the most recent N (default 16) auto-approvals in a ring buffer, and show the recent approval count/latest item inside the sidebar card.
 
 ### Non-Functional Requirements (NFR)
 
-- **NFR-1** Performance: the detection scan piggybacks on the already-held lock inside `feed_terminal_batch` (`io_thread.rs:395`), with zero extra Terminal lock acquisitions. Scan range is limited to the visible viewport row count, keeping the per-feed extra cost within O(rows×cols), comparable to `preview_rows`.
-- **NFR-2** Fail-safe principle: unknown means no-fire. Signature mismatch, unrecognized version text, or unmet precondition gate all consistently resolve to "do nothing."
-- **NFR-3** Thread safety: detection happens in io_thread (inside the lock, pane already known); injection is a two-stage flow via `UserEvent::AutoApprove` → main thread. Synthetic keystrokes share `PTY_INPUT_OVERFLOW_BYTE_CAP` with user input.
-- **NFR-4** No CLI-side pollution: don't-ask-again-style responses are never chosen; always send only the first affirmative choice (leaves no side effect in the CLI's own allowlist).
-- **NFR-5** Room for extension: the signature matrix is structured to allow later additions such as a Bash denylist, but v1 exposes no public config and no trait-ization (YAGNI).
+- NFR-1 Performance: the detection scan piggybacks on the already-held lock inside `feed_terminal_batch` (`io_thread.rs:395`), with zero extra Terminal lock acquisitions. Scan range is limited to the visible viewport row count, keeping the per-feed extra cost within O(rows×cols), comparable to `preview_rows`.
+- NFR-2 Fail-safe principle: unknown means no-fire. Signature mismatch, unrecognized version text, or unmet precondition gate all consistently resolve to "do nothing."
+- NFR-3 Thread safety: detection happens in io_thread (inside the lock, pane already known); injection is a two-stage flow via `UserEvent::AutoApprove` → main thread. Synthetic keystrokes share `PTY_INPUT_OVERFLOW_BYTE_CAP` with user input.
+- NFR-4 No CLI-side pollution: don't-ask-again-style responses are never chosen; always send only the first affirmative choice (leaves no side effect in the CLI's own allowlist).
+- NFR-5 Room for extension: the signature matrix is structured to allow later additions such as a Bash denylist, but v1 exposes no public config and no trait-ization (YAGNI).
 
 ## L2 — Detail
 
 ### Detector (pure-function core + io_thread glue)
 
-- **Pure-function seam (test boundary)**: the detection core is factored out as a side-effect-free pure function —
+- Pure-function seam (test boundary): the detection core is factored out as a side-effect-free pure function —
   `detect(viewport_rows: &[RowText], cursor: CursorPos, agent: AgentKind, now: Timestamp, state: &AutoApproveState) -> Decision` (`Decision = Fire{signature_id, bytes} | Hold | Suppressed{reason}`). Time, the recent-user-input timestamp, and IME/paste state are all injected as arguments, and AC-2..9 are verified as unit tests of this pure function. No io_thread/pty/GUI required.
 - Placement (glue): inside `feed_terminal_batch`'s lock section, alongside the `preview_rows` scan. It just extracts the viewport row text and calls `detect`. The pane is already known, no extra lock acquisition.
 - Scan range: the visible viewport (only during alt-screen or when scrollback display offset == 0).
@@ -336,23 +336,23 @@ A per-tab opt-in "auto-approve mode." In tabs where it's ON, within io_thread's 
 
 Prerequisite: AC-2..9 are verified as unit tests of the pure detection function `detect(...) -> Decision` (see L2), requiring no io_thread/pty/GUI.
 
-- **AC-1 (FR-1)** Unit: toggling `Surface.auto_approve` flips ON/OFF, default OFF. The item appears in the palette.
-- **AC-2 (FR-2)** Unit: with `agent=Generic`, `detect` never returns `Fire` even when given screen text matching a known signature.
-- **AC-3 (FR-3, FR-11)** Unit: for text outside the matrix (Bash approval prompt, or any unknown text), `detect` never returns `Fire`.
-- **AC-4 (FR-3)** Unit: if the selection marker "❯" is not at the start of the line for the first affirmative option (pointing at a different option, or absent), no fire even if the anchor text matches.
-- **AC-5 (FR-4)** Unit: if the signature matches only on one scan (and disappears on the next), it is not confirmed and no fire occurs. `Fire` occurs on two consecutive matches.
-- **AC-6 (FR-5)** Unit: `detect` returns `Suppressed` when outside alt-screen and scrollback display offset > 0.
-- **AC-7 (FR-6, FR-7)** Unit: after firing, if the pre-injection rescan (on the main thread side) finds the signature gone, `write_pane_pty_bytes` is not called.
-- **AC-8 (FR-8)** Unit: immediately after approval, no refire occurs while the same signature remains and the cell-content hash of the signature-matched row range is unchanged. Rearms after the hash changes.
-- **AC-9 (FR-9)** Unit: `detect` returns `Suppressed` under each of these argument conditions: IME preedit active / paste in progress / recent-user-input timestamp within 3s of now.
-- **AC-10 (FR-10)** Unit: after 6 approvals within a 60s window, the mode auto-disables and an attention notification is raised.
-- **AC-11 (FR-12, FR-13)** Live GUI: with mode ON, badges appear on the tab/sidebar, a flash occurs on fire, and the card's approval count/latest item update. The audit ring buffer discards the oldest entry beyond 16 (also covered by unit tests).
-- **AC-12 (FR-3, FR-6)** Live GUI: on a tab with mode ON, each Claude Code PromptKind (Edit/Write/Read/AskUserQuestion/Enter confirmation) is automatically approved, visually confirmed to let the agent proceed without stalling. **Requires prerequisite task T-1 to be complete.**
-- **AC-13 (FR-6)** Live GUI (version-difference check): confirm the injection byte sequence for each agent × signature (e.g. "1" vs "1\r") is accepted on real hardware, and lock it into the table.
+- AC-1 (FR-1) Unit: toggling `Surface.auto_approve` flips ON/OFF, default OFF. The item appears in the palette.
+- AC-2 (FR-2) Unit: with `agent=Generic`, `detect` never returns `Fire` even when given screen text matching a known signature.
+- AC-3 (FR-3, FR-11) Unit: for text outside the matrix (Bash approval prompt, or any unknown text), `detect` never returns `Fire`.
+- AC-4 (FR-3) Unit: if the selection marker "❯" is not at the start of the line for the first affirmative option (pointing at a different option, or absent), no fire even if the anchor text matches.
+- AC-5 (FR-4) Unit: if the signature matches only on one scan (and disappears on the next), it is not confirmed and no fire occurs. `Fire` occurs on two consecutive matches.
+- AC-6 (FR-5) Unit: `detect` returns `Suppressed` when outside alt-screen and scrollback display offset > 0.
+- AC-7 (FR-6, FR-7) Unit: after firing, if the pre-injection rescan (on the main thread side) finds the signature gone, `write_pane_pty_bytes` is not called.
+- AC-8 (FR-8) Unit: immediately after approval, no refire occurs while the same signature remains and the cell-content hash of the signature-matched row range is unchanged. Rearms after the hash changes.
+- AC-9 (FR-9) Unit: `detect` returns `Suppressed` under each of these argument conditions: IME preedit active / paste in progress / recent-user-input timestamp within 3s of now.
+- AC-10 (FR-10) Unit: 6 approvals within a 60s window auto-disable the mode and raise an attention notification.
+- AC-11 (FR-12, FR-13) Live GUI: with mode ON, badges appear on the tab/sidebar, a flash occurs on fire, and the card's approval count/latest item update. The audit ring buffer discards the oldest entry beyond 16 (also covered by unit tests).
+- AC-12 (FR-3, FR-6) Live GUI: on a tab with mode ON, each Claude Code PromptKind (Edit/Write/Read/AskUserQuestion/Enter confirmation) is automatically approved, visually confirmed to let the agent proceed without stalling. **Requires prerequisite task T-1 to be complete.**
+- AC-13 (FR-6) Live GUI (version-difference check): confirm the injection byte sequence for each agent × signature (e.g. "1" vs "1\r") is accepted on real hardware, and lock it into the table.
 
 ### Prerequisite task (implementation phase, precedes the ACs)
 
-- **T-1 Signature capture**: capture real approval prompts on real hardware for Claude Code (first), Codex, and agy, and finalize the signature matrix (anchor text, numeric label, selection marker, injection byte sequence). Any agent × PromptKind not yet captured is left out of the matrix (i.e. remains a no-fire).
+- T-1 Signature capture: capture real approval prompts on real hardware for Claude Code (first), Codex, and agy, and finalize the signature matrix (anchor text, numeric label, selection marker, injection byte sequence). Any agent × PromptKind not yet captured is left out of the matrix (i.e. remains a no-fire).
 
 ## Scope
 
@@ -382,9 +382,9 @@ Prerequisite: AC-2..9 are verified as unit tests of the pure detection function 
 
 ## Open Questions / Deferred Decisions
 
-- **Structured OSC channel** (CLI declares approval requests via control sequences, the VS Code approach): parked. v1 uses on-screen detection. Since the detection core is isolated in the pure function `detect`, a future swap is localized
-- **CLIs behind a node wrapper**: originally a known limitation (fell into `Generic`); resolved after v1 by argv-based canonicalization in `noa-pty` (`WRAPPED_AGENTS`). Wrappers whose argv names no known agent still fall into `Generic`
-- **Extending the Bash approval denylist** (a substring denylist of roughly 20 lines): v2 candidate. The signature matrix keeps a structure that can be extended (NFR-5)
-- **Dedicated audit-log modal**: v2 candidate (v1 keeps it inside the sidebar card only)
-- **If Codex/agy signature capture (T-1) is delayed**: proceed with Claude Code alone first; agents not yet captured simply remain no-fire (the fail-safe design allows a safe partial release)
+- Structured OSC channel (CLI declares approval requests via control sequences, the VS Code approach): parked. v1 uses on-screen detection. Since the detection core is isolated in the pure function `detect`, a future swap is localized
+- CLIs behind a node wrapper: originally a known limitation (fell into `Generic`); resolved after v1 by argv-based canonicalization in `noa-pty` (`WRAPPED_AGENTS`). Wrappers whose argv names no known agent still fall into `Generic`
+- Extending the Bash approval denylist (a substring denylist of roughly 20 lines): v2 candidate. The signature matrix keeps a structure that can be extended (NFR-5)
+- Dedicated audit-log modal: v2 candidate (v1 keeps it inside the sidebar card only)
+- If Codex/agy signature capture (T-1) is delayed: proceed with Claude Code alone first; agents not yet captured simply remain no-fire (the fail-safe design allows a safe partial release)
 - Concrete animation for the fire flash: follow the existing anim foundation (UI_ACCENT/token) conventions at implementation time

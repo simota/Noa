@@ -1,17 +1,17 @@
 # Spec: Sidebar per-window session display
 
-- **slug:** sidebar-per-window-sessions
-- **status:** locked (2026-07-05)
-- **owner:** simota
-- **build-path decision:** apex (single unattended run) — fallback: feature / manual implementation
-- **quality gate:** PASS (Judge findings S1–S5 all addressed)
+- slug: sidebar-per-window-sessions
+- status: locked (2026-07-05)
+- owner: simota
+- build-path decision: apex (single unattended run); fallback: feature / manual implementation
+- quality gate: PASS (Judge findings S1–S5 all addressed)
 
-## L0 — Vision
+## L0: Vision
 
-- **Problem:** With multiple windows in use, each window's sidebar shows a mix of sessions from every window, making it impossible to tell "which sessions belong to this window."
-- **Target:** users who run noa with multiple windows (= the developer themself).
-- **Job-to-be-done:** looking at the sidebar, only sessions belonging to the window currently being operated are listed, and that window's state (busy / attention) is visible at a glance.
-- **Success definition:** each window's sidebar displays, counts, and hit-tests only its own window's sessions, with no regression to existing GC / delta / scroll behavior.
+- Problem: With multiple windows in use, each window's sidebar shows a mix of sessions from every window, making it impossible to tell "which sessions belong to this window."
+- Target: users who run noa with multiple windows (= the developer themself).
+- Job-to-be-done: looking at the sidebar, only sessions belonging to the window currently being operated are listed, and that window's state (busy / attention) is visible at a glance.
+- Success definition: each window's sidebar displays, counts, and hit-tests only its own window's sessions, with no regression to existing GC / delta / scroll behavior.
 
 ## Reuse / constraint findings (Lens scan, 2026-07-05)
 
@@ -27,23 +27,23 @@
 ## FRAME decisions (user confirmed)
 
 1. Problem Statement: settled above in L0.
-2. **Overview keeps showing all windows** (sidebar = own window, Overview = whole-picture overview — a deliberate division of roles; the resulting mismatch in visible sets is intentional).
-3. **Attention is fully per-window** (only shows/counts attention for the current window; attention in other windows is noticed there instead).
-4. **The sidebar_visible toggle stays app-wide as-is**. Making it per-window is recorded as an Open Question.
+2. Overview keeps showing all windows (sidebar = own window, Overview = whole-picture overview, a deliberate division of roles; the resulting mismatch in visible sets is intentional).
+3. Attention is fully per-window (only shows/counts attention for the current window; attention in other windows is noticed there instead).
+4. The sidebar_visible toggle stays app-wide as-is. Making it per-window is recorded as an Open Question.
 
-## EXPAND — candidates and selection
+## EXPAND: candidates and selection
 
-- **A: add filter methods to SessionStore** (`ordered_ids_for_window` / `busy_count_for_window` / `attention_count_for_window`) + swap in the 5 call sites in sidebar.rs — **adopted (user pick)**. Minimally invasive, consolidates the filter logic in one place, unit-testable.
-- B: split the store per window (`HashMap<SessionWindowId, SessionStore>`) — **rejected**: changes would ripple across GC, delta, and Overview paths, and conflicts with keeping Overview showing everything.
-- C: filter at the view layer (retain in App) — **rejected**: duplicates the filter in 3 places, breaks the invariant that hit_test/draw share the same list, and isn't testable.
+- A: add filter methods to SessionStore (`ordered_ids_for_window` / `busy_count_for_window` / `attention_count_for_window`) + swap in the 5 call sites in sidebar.rs; **adopted (user pick)**. Minimally invasive, consolidates the filter logic in one place, unit-testable.
+- B: split the store per window (`HashMap<SessionWindowId, SessionStore>`); **rejected**: changes would ripple across GC, delta, and Overview paths, and conflicts with keeping Overview showing everything.
+- C: filter at the view layer (retain in App); **rejected**: duplicates the filter in 3 places, breaks the invariant that hit_test/draw share the same list, and isn't testable.
 
-## CHALLENGE — stress-test results and confirmed direction A′ (user confirmed)
+## CHALLENGE: stress-test results and confirmed direction A′ (user confirmed)
 
 Three corrections to the original proposal A (from the Void/Ripple/Omen panels, based on code inspection):
 
-1. **The filter granularity is `WindowGroupId` (logical window)**. A macOS native tab is a separate winit `WindowId` even within the same logical window (`app.rs:125-151`). Filtering at winit WindowId granularity would degenerate to a single-tab list, hiding sibling tabs. The App side computes the `HashSet<SessionWindowId>` of winit WindowIds belonging to the focused window's group and passes it to the store (precedent: `group_running_program_count` `app.rs:1534-1541`).
-2. **There are 6 call sites**, not the original 5. In addition, `handle_sidebar_wheel`'s `session_store.len()` (`sidebar.rs:719`) — if left alone, the scrollable range would drift from the actual card count.
-3. **Only one filter method is added**: `ordered_ids_for_windows(&HashSet<SessionWindowId>) -> Vec<SessionCardId>`. busy/attention counts are aggregated inline within `sidebar_draw_model` from the already-filtered `ids` (two dedicated count methods would be YAGNI). The wheel handler's count uses `.len()` on the filter result.
+1. The filter granularity is `WindowGroupId` (logical window). A macOS native tab is a separate winit `WindowId` even within the same logical window (`app.rs:125-151`). Filtering at winit WindowId granularity would degenerate to a single-tab list, hiding sibling tabs. The App side computes the `HashSet<SessionWindowId>` of winit WindowIds belonging to the focused window's group and passes it to the store (precedent: `group_running_program_count` `app.rs:1534-1541`).
+2. There are 6 call sites, not the original 5. In addition, `handle_sidebar_wheel`'s `session_store.len()` (`sidebar.rs:719`): if left alone, the scrollable range would drift from the actual card count.
+3. Only one filter method is added: `ordered_ids_for_windows(&HashSet<SessionWindowId>) -> Vec<SessionCardId>`. busy/attention counts are aggregated inline within `sidebar_draw_model` from the already-filtered `ids` (two dedicated count methods would be YAGNI). The wheel handler's count uses `.len()` on the filter result.
 
 Additional findings:
 - Overview only uses `get(&card_id)` and never calls `ordered_ids` (`overview.rs:484,1272`) → "keep Overview global" is therefore satisfied automatically with zero changes.
@@ -51,7 +51,7 @@ Additional findings:
 - Attention blink/float is driven by per-card state → no dependency on the global set. Not showing attention from other windows is the intentional loss laid out in the scope decision.
 - Existing tests remain unbroken (the `ordered_ids`/`busy_count`/`attention_count` bodies themselves are kept in place).
 
-Complete list of call sites (all must consistently use the same filtered set — an invariant):
+Complete list of call sites (all must consistently use the same filtered set, an invariant):
 | # | Site | Location |
 |---|------|------|
 | 1 | hit_test | `sidebar.rs:532` |
@@ -61,15 +61,15 @@ Complete list of call sites (all must consistently use the same filtered set —
 | 5 | attention count (aggregated in draw) | `sidebar.rs:790-797` |
 | 6 | busy count (aggregated in draw) | `sidebar.rs:806-813` |
 
-## SHAPE — proposal (user confirmed)
+## SHAPE: proposal (user confirmed)
 
-- **Problem:** with multiple windows in use, the sidebar mixes sessions from all windows.
-- **Solution:** restrict the sidebar's list/hit-test/scroll/header counts to the sessions of its own logical window (`WindowGroupId`, including native tabs). Add one method, `SessionStore::ordered_ids_for_windows(&HashSet<SessionWindowId>)`, plus an App-side group→SessionWindowId set helper, and swap in 6 call sites in `sidebar.rs`.
-- **In-scope:** group-restricting the card list / hit_test / scroll region / busy & attention counts, the App-side group→window set helper (derivation logic as a pure function), unit tests.
-- **Out-of-scope:** Overview (stays global, zero changes), making `sidebar_visible` per-window, other-window attention indicators, structural changes to GC/delta/scroll state.
-- **Assumptions:** "window" means `WindowGroupId` (AppKit logical window). An empty filter result is acceptable, rendering the header only (equivalent to the existing empty-store behavior). If the target window_id is missing from the `windows` map or its group can't be resolved, treat it as an empty set (degrading to header-only rendering).
+- Problem: with multiple windows in use, the sidebar mixes sessions from all windows.
+- Solution: restrict the sidebar's list/hit-test/scroll/header counts to the sessions of its own logical window (`WindowGroupId`, including native tabs). Add one method, `SessionStore::ordered_ids_for_windows(&HashSet<SessionWindowId>)`, plus an App-side group→SessionWindowId set helper, and swap in 6 call sites in `sidebar.rs`.
+- In-scope: group-restricting the card list / hit_test / scroll region / busy & attention counts, the App-side group→window set helper (derivation logic as a pure function), unit tests.
+- Out-of-scope: Overview (stays global, zero changes), making `sidebar_visible` per-window, other-window attention indicators, structural changes to GC/delta/scroll state.
+- Assumptions: "window" means `WindowGroupId` (AppKit logical window). An empty filter result is acceptable, rendering the header only (equivalent to the existing empty-store behavior). If the target window_id is missing from the `windows` map or its group can't be resolved, treat it as an empty set (degrading to header-only rendering).
 
-## L1 — Requirements
+## L1: Requirements
 
 | ID | Type | Requirement |
 |----|------|-----|
@@ -82,9 +82,9 @@ Complete list of call sites (all must consistently use the same filtered set —
 | R7 | Non-functional | `session_store.rs` stays GUI-independent (no winit/wgpu imports; filter arguments are `SessionWindowId`-based). |
 | R8 | Non-functional | No change to GC (reconcile) / delta path / per-window scroll state / Overview behavior. Existing tests pass unmodified. |
 
-## L2 — Detail
+## L2: Detail
 
-- **SessionStore API** (`crates/noa-app/src/session_store.rs`):
+- SessionStore API (`crates/noa-app/src/session_store.rs`):
   ```rust
   /// Returns only the cards whose window_id is in `windows`, in the same sort order as ordered_ids.
   pub fn ordered_ids_for_windows(
@@ -99,17 +99,17 @@ Complete list of call sites (all must consistently use the same filtered set —
   ) -> (usize, usize)
   ```
   The existing `ordered_ids` / `busy_count` / `attention_count` are kept in place (to preserve existing tests). `HashSet` is from `std::collections` (already used in session_store.rs, no GUI dependency).
-- **Derivation of a group→window set (pure function):** given a list of `(SessionWindowId, WindowGroupId)` pairs and a target group, return the `HashSet<SessionWindowId>` for that group, factored out as a pure function (winit-independent, unit-testable). A thin App-side wrapper builds the pair list from the `windows` map + `window_order` and calls it. Precedent: `group_running_program_count` (`app.rs:1534-1541`).
-- **Call-site swaps (6 sites, all sourced from the same set):**
+- Derivation of a group→window set (pure function): given a list of `(SessionWindowId, WindowGroupId)` pairs and a target group, return the `HashSet<SessionWindowId>` for that group, factored out as a pure function (winit-independent, unit-testable). A thin App-side wrapper builds the pair list from the `windows` map + `window_order` and calls it. Precedent: `group_running_program_count` (`app.rs:1534-1541`).
+- Call-site swaps (6 sites, all sourced from the same set):
   1. hit_test (`sidebar.rs:532`)
   2. card_menu_anchor reverse lookup (`sidebar.rs:693`)
   3. count in `handle_sidebar_wheel` (`sidebar.rs:719`, `session_store.len()` → filtered `.len()`)
   4. `sidebar_draw_model` (`sidebar.rs:765`, → flows into layout at 766)
   5. attention count → `counts_for_windows` (`:790-797`)
   6. busy count → same (`:806-813`)
-- **Empty filter result**: renders the header only (same path as the existing empty-store behavior).
+- Empty filter result: renders the header only (same path as the existing empty-store behavior).
 
-## L3 — Acceptance Criteria
+## L3: Acceptance Criteria
 
 | ID | Requirement verified | Criterion | Verification method |
 |----|--------------|------|----------|

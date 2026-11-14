@@ -41,9 +41,7 @@ jobs:
             --no-self-update
           rustup default 1.92.0
 
-      # The checks live in scripts/verify.sh; CI lists none of its own.
-      # #TODO(agent): UNVERIFIED — no pull request has run this workflow yet; remove once one has, green on both jobs.
-      - name: Verify
+      # The checks live in scripts/verify.sh; CI lists none of its own.      - name: Verify
         run: scripts/verify.sh --full
 
       - name: Keep verify output

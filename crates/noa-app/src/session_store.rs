@@ -8,11 +8,6 @@
 //! and pure logic: this module is GUI-agnostic and must not import `winit` or
 //! `wgpu` (NFR-6, enforced by the source-scan test below), so the sidebar's
 //! state model stays unit-testable without a window or GPU.
-//!
-//! PR1 wires the module into the crate but nothing consumes it yet; the
-//! `dead_code` allow is temporary and removed when the io thread and app
-//! integrate the store (PR3).
-#![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -39,6 +34,7 @@ pub type PreviewLine = Vec<PreviewSpan>;
 
 /// The plain text of a preview line — its spans concatenated. Used by tests and
 /// any consumer that only needs the characters, not the colors.
+#[cfg(test)]
 pub fn preview_line_text(line: &[PreviewSpan]) -> String {
     line.iter().map(|span| span.text.as_str()).collect()
 }
@@ -370,12 +366,9 @@ impl SessionStore {
         Self::default()
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.cards.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.cards.is_empty()
     }
 
     pub fn get(&self, id: &SessionCardId) -> Option<&SessionCard> {
@@ -543,14 +536,10 @@ impl SessionStore {
         }
     }
 
-    /// The number of live cards whose program is running (FR-5 header status).
-    pub fn busy_count(&self) -> usize {
-        self.cards.values().filter(|card| card.busy).count()
-    }
-
     /// The number of live cards with a pending attention request (FR-16),
     /// surfaced as a header badge so a request whose card has scrolled out of
     /// the viewport is still noticeable.
+    #[cfg(test)]
     pub fn attention_count(&self) -> usize {
         self.cards.values().filter(|card| card.attention).count()
     }
@@ -568,7 +557,8 @@ impl SessionStore {
 
     /// The `(busy, attention)` counts among cards whose `window_id` is in
     /// `windows` (per-window sidebar header counts, R5) — the filtered
-    /// counterpart of [`busy_count`](Self::busy_count)/[`attention_count`](Self::attention_count).
+    /// counterpart of [`attention_count`](Self::attention_count).
+    #[cfg(test)]
     pub fn counts_for_windows(&self, windows: &HashSet<SessionWindowId>) -> (usize, usize) {
         self.cards
             .iter()

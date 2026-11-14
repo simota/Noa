@@ -8,7 +8,6 @@ license.workspace = true
 noa-core.workspace = true
 bitflags.workspace = true
 noa-vt.workspace = true
-thiserror.workspace = true
 unicode-width.workspace = true
 unicode-segmentation.workspace = true
 png.workspace = true

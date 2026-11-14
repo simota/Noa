@@ -15,6 +15,7 @@ fixture-based parity regression harness in `tests/parity`.
 - `crates/noa-config`: config discovery, parsing, validation, and precedence.
 - `crates/noa-render`: `wgpu` renderer, shaders, snapshots, and theme mapping.
 - `crates/noa-pty`: PTY spawning plus reader/writer threads.
+- `crates/noa-ipc`: JSON-RPC-over-WebSocket control server (`noa-server`).
 - `crates/noa-app`: `winit` app loop, input, IO thread, and UI integration.
 - `assets/`: app icon, AppleScript dictionary, entitlements, and images.
 - `scripts/`: macOS bundle, Linux package, and release scripts, theme and icon
@@ -62,8 +63,9 @@ when no GPU adapter is available.
 - A failing check is named in the output; its full log is
   `.verify/<check>.log`, and timings are in `.verify/timings`.
 - The script pins the CI toolchain (`RUSTUP_TOOLCHAIN=1.92.0`). In a sandbox,
-  set `CARGO_NET_OFFLINE=true`; `noa-pty` tests need real `openpty` and fail
-  with `PermissionDenied` inside it.
+  set `CARGO_NET_OFFLINE=true`; `noa-pty` tests need real `openpty` and
+  `noa-ipc` tests bind a loopback port, so both fail with `PermissionDenied`
+  inside it.
 - GUI behaviour and visual parity have no automated check: verify them by hand
   and say so in the pull request.
 

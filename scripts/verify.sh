@@ -6,8 +6,8 @@
 # Exits 1 and names every check that failed.
 #
 # Sandboxed agents: export CARGO_NET_OFFLINE=true (dependencies are already
-# fetched), and run with the sandbox disabled when noa-pty tests are reached:
-# they need openpty.
+# fetched), and run with the sandbox disabled when noa-pty or noa-ipc tests are
+# reached: they need openpty and a loopback bind.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p .verify && : >.verify/timings

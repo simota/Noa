@@ -802,7 +802,6 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 name = "drain-staircase"
 version = "0.8.1"
 dependencies = [
- "crossbeam-channel",
  "libc",
  "noa-core",
  "noa-grid",
@@ -1671,7 +1670,6 @@ dependencies = [
  "arboard",
  "crossbeam-channel",
  "dirs",
- "env_logger",
  "image-webp",
  "libc",
  "log",
@@ -1730,7 +1728,6 @@ dependencies = [
  "font-kit",
  "log",
  "memmap2",
- "noa-core",
  "rustybuzz",
  "swash",
  "thiserror 2.0.18",
@@ -1749,7 +1746,6 @@ dependencies = [
  "noa-core",
  "noa-vt",
  "png",
- "thiserror 2.0.18",
  "unicode-segmentation",
  "unicode-width",
 ]
@@ -1821,7 +1817,6 @@ version = "0.8.1"
 dependencies = [
  "noa-core",
  "simdutf8",
- "thiserror 2.0.18",
 ]
 
 [[package]]

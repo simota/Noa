@@ -41,14 +41,17 @@ jobs:
             --no-self-update
           rustup default 1.92.0
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+      # The checks live in scripts/verify.sh; CI lists none of its own.
+      - name: Verify
+        run: scripts/verify.sh --full
 
-      - name: Build workspace
-        run: cargo build --workspace --locked
-
-      - name: Test workspace
-        run: cargo test --workspace --locked
+      - name: Keep verify output
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: verify-output-macos
+          include-hidden-files: true
+          path: .verify/
 
   build-and-test-linux:
     name: Build and test (Linux)
@@ -76,19 +79,17 @@ jobs:
           rustup toolchain install 1.92.0 \
             --profile minimal \
             --component clippy \
+            --component rustfmt \
             --no-self-update
           rustup default 1.92.0
 
-      - name: Build workspace
-        run: cargo build --workspace --locked
+      - name: Verify
+        run: scripts/verify.sh --full
 
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: Test workspace
-        run: cargo test --workspace --locked
-
-      - name: Validate desktop integration files
-        run: |
-          desktop-file-validate dist/linux/com.simota.noa.desktop
-          appstreamcli validate --no-net dist/linux/com.simota.noa.metainfo.xml
+      - name: Keep verify output
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: verify-output-linux
+          include-hidden-files: true
+          path: .verify/

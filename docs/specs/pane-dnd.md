@@ -7,24 +7,24 @@
 - owner: simota
 - language: English
 
-## L0 — Vision
-- **Problem**: noa implements split panes (`SplitTree`), but without a movement
+## L0: Vision
+- Problem: noa implements split panes (`SplitTree`), but without a movement
   mechanism, rearranging a layout requires closing panes and re-splitting.
-- **Audience**: heavy split users (developers running sessions across multiple
+- Audience: heavy split users (developers running sessions across multiple
   panes/tabs).
-- **Job**: reposition panes — within a tab and across tabs — without disturbing
+- Job: reposition panes (within a tab and across tabs) without disturbing
   the terminal (Pty/Surface), from a single bird's-eye surface.
-- **Success**: a drag in the Overview moves the pane to the intended position,
+- Success: a drag in the Overview moves the pane to the intended position,
   `SplitTree` is transformed correctly, and the shell/process continues
   uninterrupted.
 
 ## Terminology
-- **Tab**: one `WindowState` (one NSWindow; winit reports each as a distinct
+- Tab: one `WindowState` (one NSWindow; winit reports each as a distinct
   `WindowId`). A tab owns `split_tree: SplitTree` and
   `surfaces: HashMap<PaneId, Surface>`.
-- **Window group**: a `WindowGroupId` groups the NSWindows (tabs) of one macOS
+- Window group: a `WindowGroupId` groups the NSWindows (tabs) of one macOS
   tab group (`app/state.rs`).
-- **Overview**: the full-screen tab overview. It is the **sole pane-movement
+- Overview: the full-screen tab overview. It is the **sole pane-movement
   surface**: one tile per tab, reproducing that tab's internal split layout.
 
 ## UX Specification (Overview layout minimap)
@@ -46,31 +46,31 @@
 ### Drag
 - Left-press on a tile body, movement past the 5px threshold starts a pane
   drag (no modifier key). The pane under the press point is the drag source.
-- **In-tab rearrange** (drop within the source tile): 60/40 zones on the
-  target pane — center 60% = **swap** (`swap_pane_with_zoom`; tree shape
+- In-tab rearrange (drop within the source tile): 60/40 zones on the
+  target pane; center 60% = **swap** (`swap_pane_with_zoom`; tree shape
   unchanged, Leaf ids exchanged), outer 40% = **split insert** in that
   direction (`move_pane_with_zoom`).
-- **Cross-tab move** (drop on a pane inside another tab's tile): the pane
+- Cross-tab move (drop on a pane inside another tab's tile): the pane
   moves to that tab with position targeting via
-  `move_pane_to_tab_at(source_window, pane, dest_window, Some((target, dir)))`
-  — edge zones = insert at the target pane's edge in that direction, center =
+  `move_pane_to_tab_at(source_window, pane, dest_window, Some((target, dir)))`;
+  edge zones = insert at the target pane's edge in that direction, center =
   insert to the **right** of the target pane. Cross-tab swap does not exist
   (the engine is one-way). The target tab may be in any window group (Ghostty
   1.4.0 moves splits between windows).
-- **Detach** (drop on grid space outside every tile): the pane moves into a
+- Detach (drop on grid space outside every tile): the pane moves into a
   new tab of its own window group; with **Option** held, into a new window
-  (`App::detach_pane_to_new_tab`). A detach that would only reorder — a tab's
-  only pane to a new tab, or a lone tab's only pane to a new window —
+  (`App::detach_pane_to_new_tab`). A detach that would only reorder (a tab's
+  only pane to a new tab, or a lone tab's only pane to a new window)
   cancels. There is no zone ring for a detach. The new tab takes focus, so
   the Overview closes.
-- **Zone feedback**: a ring around the resolved zone rect — center = inner-box
+- Zone feedback: a ring around the resolved zone rect; center = inner-box
   outline, edge = edge band; the shape difference (not color alone)
   distinguishes swap vs insert. Only resolutions that would actually commit
   light up: the source pane's own zones never highlight.
-- **Floating chip**: the dragged pane's sub-rect sampled from the tile texture
+- Floating chip: the dragged pane's sub-rect sampled from the tile texture
   (`src_uv`), roughly half size at 70% opacity, cursor-following. All drag
   visuals are cached; no per-frame allocation.
-- **Cancel** (restores prior state, no tree change): release on the source
+- Cancel (restores prior state, no tree change): release on the source
   pane / a same-window sibling zone that resolves to no-op / a divider gap /
   the chrome bands / a no-op detach; page or search change mid-drag; Overview close; host window
   focus loss; tab or pane close mid-drag. One shared teardown covers all
@@ -80,18 +80,18 @@
 ## Engine Specification
 
 ### SplitTree primitives (`split_tree/tree/reposition.rs`, `zoom.rs`)
-- `swap_pane(tree, a, b)` — exchanges two Leaf `PaneId`s; no-op on self/absent.
-- `extract_pane(tree, pane) -> RemoveOutcome { next_focus, tab_should_close }`
-  — removes a pane, collapsing the parent split; never touches Surface/Pty.
-- `move_pane(tree, moved, target, direction, tab_cap_ok)` — atomic
-  extract+insert composition: runs against a clone and commits only on
+- `swap_pane(tree, a, b)`: exchanges two Leaf `PaneId`s; no-op on self/absent.
+- `extract_pane(tree, pane) -> RemoveOutcome { next_focus, tab_should_close }`:
+  removes a pane, collapsing the parent split; never touches Surface/Pty.
+- `move_pane(tree, moved, target, direction, tab_cap_ok)`: atomic
+  extract+insert composition. It runs against a clone and commits only on
   success, so every rejection leaves the tree unchanged. Enforces the axis cap
   (`MAX_PANES_PER_AXIS`, via `can_add_pane_in_direction`) itself; callers must
   compute `tab_cap_ok` from real geometry (`can_create_split`,
   `MAX_PANES_PER_TAB`).
 - `*_with_zoom` wrappers: any successful swap/move force-unzooms the tab
   regardless of which pane is zoomed; rejected operations leave zoom intact.
-- `PaneId::alloc()` is a process-global monotonic allocator — PaneIds are
+- `PaneId::alloc()` is a process-global monotonic allocator; PaneIds are
   never reused, so cross-tab `surfaces` key transfer cannot collide. Session
   restore does not persist numeric PaneIds (fresh allocation on restore).
 
@@ -104,7 +104,7 @@ against real destination geometry; named target must exist):
    reset; hover-link state cleared; FocusOut (CSI O, mode-gated) is sent when
    the moved pane was the OS-focused window's focused pane.
 2. The Surface moves between `surfaces` maps with its identity preserved (the
-   Pty is carried alive — never respawned).
+   Pty is carried alive, never respawned).
 3. The io thread's shared `window_id` cell (`Arc<AtomicU64>`,
    Release/Acquire) is stored **before** the insert; every io-thread send site
    (Redraw, PtyExit, Clipboard read/write, Notify, both AutoApprove sites)
@@ -117,7 +117,7 @@ against real destination geometry; named target must exist):
 5. Focus: the moved pane becomes the destination's focused pane; the source
    keeps its focus unless the moved pane held it (successor then chosen).
    The destination renderer invalidates its cache for the moved PaneId.
-6. An emptied source tab closes through the normal close path — even its
+6. An emptied source tab closes through the normal close path, even its
    group's last tab, when the destination is another group. (The destination
    always exists at commit time, so the close can never cascade to app exit.)
    When that tab hosts the Overview, the Overview re-opens on the window that
@@ -127,13 +127,13 @@ against real destination geometry; named target must exist):
 The Overview closes, and the new tab (same group, or a fresh group for a new
 window) is spawned around a process-less placeholder pane; the pane then takes
 the placeholder's place through `move_pane_to_tab_at`
-(`DestPlacement::Replace` — all of the above applies), so it is laid out once
+(`DestPlacement::Replace`; all of the above applies), so it is laid out once
 at the new tab's full size and the placeholder is never drawn. A rejected move
 closes the new tab again.
 
 ### Event delivery
-Pane-scoped `UserEvent`s — including AppleScript WriteText / RaiseWindow /
-ClosePane — re-resolve the owning window by process-global PaneId at receive
+Pane-scoped `UserEvent`s (including AppleScript WriteText / RaiseWindow /
+ClosePane) re-resolve the owning window by process-global PaneId at receive
 time, so events queued before a move still reach the pane. Stale session
 deltas for panes that no longer resolve anywhere are dropped
 (`SessionDelta::Remove` still applies).
@@ -173,7 +173,7 @@ deltas for panes that no longer resolve anywhere are dropped
 
 ## Out of Scope
 - Pane movement in the main terminal view (drag gestures, keyboard commands,
-  or menu items) — the Overview is the sole movement surface.
+  or menu items); the Overview is the sole movement surface.
 - Dragging a pane out of the Overview window itself, and D&D on the macOS
   native tab bar.
 - Ghostty's per-split drag handle in the terminal view and its `drag-handle`

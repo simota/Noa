@@ -1,6 +1,6 @@
 # noa-server Operations Runbook
 
-Target: `noa-ipc` — a JSON-RPC 2.0 over WebSocket server (spec: `docs/specs/noa-server.md`).
+Target: `noa-ipc`, a JSON-RPC 2.0 over WebSocket server (spec: `docs/specs/noa-server.md`; the FR-/AC- IDs below refer to it).
 Lets a client connect to a running noa instance to list panels, fetch text/grid, perform operations, send input, subscribe in real time, or attach another Noa instance to a pane's raw VT stream.
 
 ## 1. Enabling it
@@ -30,13 +30,13 @@ Restart and confirm it's enabled:
 lsof -nP -iTCP:61771 -sTCP:LISTEN   # OK if noa is LISTENing on 127.0.0.1:61771
 ```
 
-On a bind failure (e.g. port conflict), the app does not crash — it only logs a warning:
+On a bind failure (e.g. port conflict), the app does not crash; it only logs a warning:
 `noa-ipc: failed to bind <server-bind>:<port>: <err>`.
 
 Instead of editing the config file directly, `server-enable`/`server-port`/`server-bind`/`server-scopes`
 can also be controlled from the Settings panel (opened via `⌘,` or similar, Settings mode). The row names
 in the panel are "Server", "Server Port", "Server Bind" (right after Server Port), and "Server Scopes",
-all applied via Save (ON SAVE badge) — once saved, `ConfigWatcher` detects the file change and
+all applied via Save (ON SAVE badge); once saved, `ConfigWatcher` detects the file change and
 restarts/stops/rebinds the server within 1 second. The "Server Bind" row toggles between the two values
 `127.0.0.1` and `0.0.0.0` with `←`/`→` (if the config was hand-edited to a value that is neither of these
 two, that value is shown as-is, and the next ←/→ lands on one of the two values). The `server-token`
@@ -48,7 +48,7 @@ of three forms: `Running (<bind>:<port>, <N> client(s))` / `Stopped` / `Bind fai
 (editing/Reset disabled, not subject to Save, always the LIVE badge). Because the panel's render path
 cannot directly reference `App`'s live state, this row is written back explicitly every time `App`
 re-runs `install_ipc_server_if_needed`/`restart_ipc_server` while a session is open (including when it
-detects a config reload change to `server-enable`/`server-port`/`server-bind`/`server-scopes`) — from
+detects a config reload change to `server-enable`/`server-port`/`server-bind`/`server-scopes`); from
 saving a toggle in the panel to the actual display update, this lands within one cycle of
 `ConfigWatcher`'s 500ms poll.
 
@@ -57,7 +57,7 @@ saving a toggle in the panel to the actual display update, this lands within one
 Steps to opt into widening the default loopback-only bind so other hosts on the same LAN can reach it
 directly. **There is no TLS, so only use this on a trusted network (e.g. your home LAN)**. On an
 untrusted network (public Wi-Fi, a shared office network, etc.), continue to reach it via an SSH port
-forward, Tailscale, or a similar tunnel as before — token auth alone does not protect the plaintext
+forward, Tailscale, or a similar tunnel as before: token auth alone does not protect the plaintext
 communication itself. When using a tunnel, the network between endpoints is assumed to be protected
 by that tunnel.
 
@@ -90,11 +90,12 @@ TOKEN=$(cat ~/.config/noa/server-token)
 ```
 
 The "Server Token" row (right after Server Scopes) in the Settings panel (Settings mode) copies the
-token currently in use — the `server-token` value if set, otherwise the file above (auto-generated if
-not yet created) — to the clipboard each time you press `←`/`→` or `Enter`. The value itself is never
-shown on screen; the row display cycles through three states only: "Copy to clipboard" → "Copied ✓"
-(or "Copy failed" on failure). Since it's an action row with no value, it is not subject to Save and
-always shows the LIVE badge (completes the instant you press it, no save needed).
+token currently in use, the `server-token` value if set, otherwise the file above (auto-generated if
+not yet created), to the clipboard each time you press `←`/`→` or `Enter`. The value itself is never
+shown on screen; the row display shows one of three states only: "Copy to clipboard" before a copy,
+"Copied ✓" after a successful copy, or "Copy failed" on failure. Since it's an action row with no
+value, it is not subject to Save and always shows the LIVE badge (completes the instant you press it,
+no save needed).
 
 ## 3. Connection and handshake
 
@@ -143,7 +144,7 @@ Notes:
   screen. Exceeding `maxBytes` (default 256KiB, server-side cap clamped to 1MiB) truncates
   **preferring the tail**, with `truncated:true`.
 - `getGrid`: row 0 is the absolute coordinate of the oldest scrollback row. Max 2048 rows per request +
-  256KiB response cap. If truncated, `hasMore:true` — advance `startRow` to fetch the rest.
+  256KiB response cap. If truncated, `hasMore:true`; advance `startRow` to fetch the rest.
 - `sendText`'s `paste` (optional, default `true`): `false` injects raw text without bracketed-paste
   wrapping. To send a bare Enter, use `{"text":"\r","paste":false}`.
 - `newTab`'s `windowId`: resolves against either a native window id or a window group id. If omitted,
@@ -173,26 +174,26 @@ Notes:
 
 ## 6. Operational notes
 
-- **Exposure scope**: bound to `127.0.0.1` only by default. `server-bind` (e.g. `0.0.0.0`) allows
-  opting into a direct LAN bind (v2, see "LAN exposure procedure" at the start of this section) — but
+- Exposure scope: bound to `127.0.0.1` only by default. `server-bind` (e.g. `0.0.0.0`) allows
+  opting into a direct LAN bind (v2, see "LAN exposure procedure" in §1), but
   note that there is still no TLS, so communication remains plaintext. For remote access from an
   untrusted network (e.g. iOS), continue to reach it via an SSH port forward / Tailscale / similar
   tunnel rather than a LAN bind.
-- **Mutating scopes are opt-in**: minimize the permissions of tokens handed to automation agents via
+- Mutating scopes are opt-in: minimize the permissions of tokens handed to automation agents via
   `server-scopes` (keep `read` only if just browsing).
-- **Mutation timeouts**: focus/newTab/split/close/sendText execute via a main-thread round trip and time
-  out after 2 seconds (Internal error). **They may still execute with delay after the timeout**
+- Mutation timeouts: focus/newTab/split/close/sendText/resizePane execute via a main-thread round trip
+  and time out after 2 seconds (Internal error). **They may still execute with delay after the timeout**
   (at-least-once). Blindly retrying on error can result in double execution.
-- **Performance**: structured `noa.output` notifications use bounded try-send + drop-oldest; a stalled
+- Performance: structured `noa.output` notifications use bounded try-send + drop-oldest; a stalled
   structured client receives `dropped:true`. Raw attach output must never drop bytes, so it uses a
   separate byte-counted 1MiB queue and waits outside the Terminal lock. If backpressure persists for
   2 seconds, only that raw attach disconnects and the client re-attaches with a fresh seed.
-- **Connection limits**: 32 concurrent WebSockets, including both JSON-RPC control connections and raw
+- Connection limits: 32 concurrent WebSockets, including both JSON-RPC control connections and raw
   attach connections. Excess connections are closed immediately. 1MiB per
   message / 256KiB per frame cap. 16 subscriptions per connection (exceeding `noa.subscribe` returns
   `-32005` without closing the connection).
-- **Effect of config reload**: changes to `server-enable`/`server-port`/`server-bind`/`server-token`/
-  `server-scopes` take effect immediately on config file rewrite (500ms polling) — the server restarts
+- Effect of config reload: changes to `server-enable`/`server-port`/`server-bind`/`server-token`/
+  `server-scopes` take effect immediately on config file rewrite (500ms polling); the server restarts
   (existing connections self-terminate within ~50ms) and rebinds with the new settings. If disabled, it
   simply does not start. Other (non-server) keys do not trigger a restart. The broadcaster is held once
   for the app's lifetime and reused across server restarts, so output pushes for panes spawned before a
@@ -201,12 +202,12 @@ Notes:
   already-open panes keep their output-push tap even while disabled (gating is by subscriber presence,
   not tap presence), so once enabled, a client subscribing to `output` via `noa.subscribe` starts
   receiving delivery immediately without reopening the pane.
-- **Quick Terminal is excluded**: for the same reason it's excluded from the sidebar, Quick Terminal
+- Quick Terminal is excluded: for the same reason it's excluded from the sidebar, Quick Terminal
   panes never appear in `noa.listPanels` or in output pushes (an intentional v1 spec).
-- **closePane skips confirmation**: `noa.closePane` treats the `control` scope as authorized automation
+- closePane skips confirmation: `noa.closePane` treats the `control` scope as authorized automation
   and closes the pane immediately without the GUI confirmation dialog, even if a process is running
   (unlike the confirmation dialog shown by normal operations like cmd+w). Passing the wrong pane id
-  closes it — and any running process — without confirmation, so validate the target id on the
+  closes it (and any running process) without confirmation, so validate the target id on the
   automation side before calling it.
 
 ## 7. Troubleshooting

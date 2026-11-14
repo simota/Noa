@@ -1,10 +1,10 @@
 # Terminal IO Throughput Benchmark
 
-This project is a benchmark environment for measuring I/O throughput and rendering performance across various terminal emulators (Ghostty, Alacritty, Kitty, Warp, iTerm2, etc.).
+A benchmark environment for measuring I/O throughput and rendering performance across terminal emulators (Ghostty, Alacritty, Kitty, Warp, iTerm2, etc.).
 
-## About the benchmark data
-- `150MB_ascii.txt`: a 150MB text file consisting solely of ASCII characters.
-- `150MB_unicode.txt`: a 150MB text file mixing Japanese, English, Korean, Chinese, Russian, emoji, and CSI (control sequence) characters.
+This page covers the quick manual throughput check. The reproducible
+multi-axis suite behind the numbers in `README.md` and `docs/positioning.md`
+is `run_all.sh`; see [METHODOLOGY.md](METHODOLOGY.md).
 
 ## Quick start
 
@@ -15,6 +15,9 @@ Use Python 3 to generate the two 150MB test text files.
 python3 generate_data.py
 ```
 
+- `150MB_ascii.txt`: ASCII characters only.
+- `150MB_unicode.txt`: a mix of Japanese, English, Korean, Chinese, Russian, emoji, and ANSI color escape sequences (SGR).
+
 ### 2. Run the benchmark
 To measure the terminal's rendering speed, the output is streamed directly to the terminal without redirection.
 
@@ -23,7 +26,7 @@ chmod +x run_benchmark.sh
 ./run_benchmark.sh
 ```
 
-To measure manually and individually, run the following:
+To measure each file by hand:
 ```bash
 time cat 150MB_ascii.txt
 time cat 150MB_unicode.txt

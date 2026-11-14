@@ -1,4 +1,4 @@
-# 受け入れテスト仕様 — フローティングペイン
+# フローティングペインの受け入れテスト仕様
 
 | | |
 |---|---|
@@ -6,49 +6,49 @@
 | spec source | `docs/specs/floating-panes.md` as-of 2026-11-10 |
 | status | locked |
 | owner | simota |
-| reader | 実装者と受け入れ担当 — スイートを実行し、ビルドを受け入れるか決める |
+| reader | 実装者と受け入れ担当。スイートを実行し、ビルドを受け入れるか決める |
 | as-of | 2026-11-10 |
 | review trigger | 仕様が変わったとき |
 
 ## 1. Test scope
 
-- **In scope** — 仕様 L3 の AC-001〜AC-044。
-- **Out of scope** — 仕様の Out of scope に挙げた項目。どこでもテストしない。
-- **Not proven by this suite** — ドラッグ中の描画の滑らかさ。上限 8 枚を使い切ったときの資源消費。マルチモニタと HiDPI の混在。IME 入力（分割ペインと同じ入力経路を通る前提で、個別には確かめない）。
+- In scope: 仕様 L3 の AC-001〜AC-044。
+- Out of scope: 仕様の Out of scope に挙げた項目。どこでもテストしない。
+- Not proven by this suite: ドラッグ中の描画の滑らかさ。上限 8 枚を使い切ったときの資源消費。マルチモニタと HiDPI の混在。IME 入力（分割ペインと同じ入力経路を通る前提で、個別には確かめない）。
 
 ## 2. Entry & exit criteria
 
 | | Criterion |
 |---|-----------|
-| **Entry** | 仕様が `locked`。コミットで識別できるビルドが §3 の環境にある |
-| **Exit** | must-have の TC が macOS と Linux の両方で全 PASS。§8 の S1・S2 が残っていない。must-have でない失敗はすべて欠陥として記録済み |
+| Entry | 仕様が `locked`。コミットで識別できるビルドが §3 の環境にある |
+| Exit | must-have の TC が macOS と Linux の両方で全 PASS。§8 の S1・S2 が残っていない。must-have でない失敗はすべて欠陥として記録済み |
 
 ## 3. Environment
 
 | Item | Value | How to obtain / set |
 |------|-------|---------------------|
-| Environment | ローカル。(a) macOS Apple Silicon、(b) Linux。どちらもディスプレイと GPU があり、pty を開ける（サンドボックス外）こと | (b) の具体構成は `TBD(simota)` — 仕様 OQ-3 |
+| Environment | ローカル。(a) macOS Apple Silicon、(b) Linux。どちらもディスプレイと GPU があり、pty を開ける（サンドボックス外）こと | (b) の具体構成は `TBD(simota)`（仕様 OQ-3） |
 | Build under test | 実行時のコミット | `git rev-parse HEAD` を §9 に記録 |
 | Data state | 空。セッションファイルなしで起動 | §4 F-0 |
-| Accounts & roles | N/A — ローカル単一利用者 | — |
-| Feature flags | N/A — フラグなし | — |
-| External dependencies | N/A — 外部依存なし。エージェント状態は OSC を手で出して再現する | §4 F-2 |
-| Clock / timezone / locale | N/A — 時刻に依存する挙動なし | — |
+| Accounts & roles | N/A（ローカル単一利用者） | — |
+| Feature flags | N/A（フラグなし） | — |
+| External dependencies | N/A（外部依存なし。エージェント状態は OSC を手で出して再現する） | §4 F-2 |
+| Clock / timezone / locale | N/A（時刻に依存する挙動なし） | — |
 
 ## 4. Test data
 
 | Fixture | Purpose | Source | Reset procedure | Contains personal data |
 |---------|---------|--------|-----------------|------------------------|
 | F-0 | 空の起動状態 | noa のセッションファイルと scrollback ディレクトリを退避して起動 | テスト後に退避したものを戻す | no |
-| F-1 | 幾何の単体テスト用の固定値 | 仕様 L3 冒頭の F-1 をテストコード内の定数にする | N/A — 状態を持たない | no |
+| F-1 | 幾何の単体テスト用の固定値 | 仕様 L3 冒頭の F-1 をテストコード内の定数にする | N/A（状態を持たない） | no |
 | F-2a | `AgentState::Permission` の再現 | フロート内で `printf '\033]7501;state=blocked:kind=permission:app=test\033\\'` | フロートを閉じる | no |
 | F-2b | `AgentState::Input` の再現 | フロート内で `printf '\033]7501;state=blocked:app=test\033\\'` | フロートを閉じる | no |
 | F-2c | `AgentState::Error` の再現 | フロート内で `printf '\033]7501;state=blocked:kind=auth:app=test\033\\'` | フロートを閉じる | no |
-| F-3 | 壊れたセッションファイル: フロート記録2件、うち1件の origin の x が `NaN` | テストコード内で生成 | N/A — 一時ファイル | no |
+| F-3 | 壊れたセッションファイル: フロート記録2件、うち1件の origin の x が `NaN` | テストコード内で生成 | N/A（一時ファイル） | no |
 
 ## 5. Test cases
 
-machine モードのケースは自動テストで実装し、テスト名に TC の ID を含める。ファイルパスは `TBD(実装者)` — 仕様 OQ-2。Automation ref 列の `OQ-2` はこれを指す。TC の番号は検証する AC と同じ番号にしてある。
+machine モードのケースは自動テストで実装し、テスト名に TC の ID を含める。ファイルパスは `TBD(実装者)`（仕様 OQ-2）。Automation ref 列の `OQ-2` はこれを指す。TC の番号は検証する AC と同じ番号にしてある。
 
 | ID | Verifies | Title | Precondition | Steps | Expected result | Mode | Automation ref | Must-have | Priority | Result |
 |----|----------|-------|--------------|-------|-----------------|------|----------------|-----------|----------|--------|
@@ -91,72 +91,72 @@ machine モードのケースは自動テストで実装し、テスト名に TC
 | TC-043 | AC-043 | サイドバーからのジャンプ（特殊な状態） | (a) B ズーム中の A のフロート (b) 別ウィンドウのフロート (c) アンカー 150×60 px のペインアンカー | 各カードを選択 | (a) ズーム解除＋フロートにフォーカス (b) ウィンドウ前面＋フロートにフォーカス (c) アンカーの分割ペインにフォーカス | machine | OQ-2 | yes | HIGH | NOT_RUN |
 | TC-044 | AC-044 | フォントサイズ変更 | F-1、(200,100) 400×300 px、40×14 | セルを 20×40 px にする | 矩形不変、タイトル帯 40 px、20×6、最後の通知が 20×6 | machine | OQ-2 | yes | HIGH | NOT_RUN |
 
-### TC-004 — タイトル帯の構成
-- **Verifies:** `AC-004` (`REQ-002`)
-- **Mode:** human · **Must-have:** yes · **Automation ref:** N/A — 目視 · **Result:** `NOT_RUN`
-- **Precondition:** F-0 で起動。
-- **Steps:**
+### TC-004: タイトル帯の構成
+- Verifies: `AC-004` (`REQ-002`)
+- Mode: human · Must-have: yes · Automation ref: N/A（目視） · Result: `NOT_RUN`
+- Precondition: F-0 で起動。
+- Steps:
   1. `float.new` を実行する。
   2. フロートを含むスクリーンショットを撮る。
-- **Expected result:** 実装者が、タイトル帯に左からアンカー種別アイコン、タイトル、エージェント状態の領域、最大化、折りたたみ、閉じるの6要素を確認できる。欠けまたは順序違いがあれば FAIL。
-- **Teardown:** フロートを閉じる。
+- Expected result: 実装者が、タイトル帯に左からアンカー種別アイコン、タイトル、エージェント状態の領域、最大化、折りたたみ、閉じるの6要素を確認できる。欠けまたは順序違いがあれば FAIL。
+- Teardown: フロートを閉じる。
 
-### TC-016 — 折りたたみ中の入力待ち表示
-- **Verifies:** `AC-016` (`REQ-014`)
-- **Mode:** human · **Must-have:** yes · **Automation ref:** N/A — 目視 · **Result:** `NOT_RUN`
-- **Precondition:** F-0 で起動。サイドバーを開く。分割ペインで F-2a を実行し、そのカードの attention 色を控える。
-- **Steps:**
+### TC-016: 折りたたみ中の入力待ち表示
+- Verifies: `AC-016` (`REQ-014`)
+- Mode: human · Must-have: yes · Automation ref: N/A（目視） · Result: `NOT_RUN`
+- Precondition: F-0 で起動。サイドバーを開く。分割ペインで F-2a を実行し、そのカードの attention 色を控える。
+- Steps:
   1. フロートを作り、`sleep 5; ` に続けて F-2a のコマンドを実行する。
   2. 5秒以内にフロートを折りたたむ。
   3. 10秒待ってスクリーンショットを撮る。
   4. フロートを閉じ、F-2b、F-2c でそれぞれ 1〜3 を繰り返す。
-- **Expected result:** 実装者が各回で次の3点を確認できる: フロートが折りたたまれたまま、タイトル帯の背景色が控えた attention 色と同じ、状態ラベルが F-2a では `approval needed`、F-2b では `reply needed`、F-2c では `error`。1点でも欠ければ FAIL。
-- **Teardown:** フロートを閉じる。
+- Expected result: 実装者が各回で次の3点を確認できる: フロートが折りたたまれたまま、タイトル帯の背景色が控えた attention 色と同じ、状態ラベルが F-2a では `approval needed`、F-2b では `reply needed`、F-2c では `error`。1点でも欠ければ FAIL。
+- Teardown: フロートを閉じる。
 
-### TC-019 — サイドバーと通知からのジャンプ
-- **Verifies:** `AC-019` (`REQ-016`)
-- **Mode:** human · **Must-have:** yes · **Automation ref:** N/A — 目視 · **Result:** `NOT_RUN`
-- **Precondition:** F-0 で起動。タブ1でフロートを作り、`sleep 8; ` に続けて F-2a のコマンドを実行して折りたたむ。タブ2を作って表示する。サイドバーを開き、8秒待つ。
-- **Steps:**
+### TC-019: サイドバーと通知からのジャンプ
+- Verifies: `AC-019` (`REQ-016`)
+- Mode: human · Must-have: yes · Automation ref: N/A（目視） · Result: `NOT_RUN`
+- Precondition: F-0 で起動。タブ1でフロートを作り、`sleep 8; ` に続けて F-2a のコマンドを実行して折りたたむ。タブ2を作って表示する。サイドバーを開き、8秒待つ。
+- Steps:
   1. サイドバーでそのフロートのカードを確認し、選択する。
   2. Precondition をやり直し、`NextNotification`（macOS `cmd+shift+j`、Linux `ctrl+shift+j`）を実行する。
-- **Expected result:** 実装者が次を確認できる: カードにフロートの印がある。どちらの操作でもタブ1が表示され、フロートが展開されており、打鍵がフロートに入る。1点でも欠ければ FAIL。
-- **Teardown:** タブを閉じる。
+- Expected result: 実装者が次を確認できる: カードにフロートの印がある。どちらの操作でもタブ1が表示され、フロートが展開されており、打鍵がフロートに入る。1点でも欠ければ FAIL。
+- Teardown: タブを閉じる。
 
-### TC-030 — 背景が透けない
-- **Verifies:** `AC-030` (`REQ-022`)
-- **Mode:** human · **Must-have:** yes · **Automation ref:** N/A — 目視 · **Result:** `NOT_RUN`
-- **Precondition:** 設定に `background-opacity = 0.5`。分割ペインで `yes ABCDEFGHIJ | head -200` を実行。
-- **Steps:**
+### TC-030: 背景が透けない
+- Verifies: `AC-030` (`REQ-022`)
+- Mode: human · Must-have: yes · Automation ref: N/A（目視） · Result: `NOT_RUN`
+- Precondition: 設定に `background-opacity = 0.5`。分割ペインで `yes ABCDEFGHIJ | head -200` を実行。
+- Steps:
   1. `float.new` を実行する。
   2. フロートの内容領域を 400% に拡大したスクリーンショットを撮る。
-- **Expected result:** 実装者がフロートの矩形内に `ABCDEFGHIJ` を判読できない。判読できれば FAIL。
-- **Teardown:** 設定を戻す。
+- Expected result: 実装者がフロートの矩形内に `ABCDEFGHIJ` を判読できない。判読できれば FAIL。
+- Teardown: 設定を戻す。
 
-### TC-034 — 両 OS での実行
-- **Verifies:** `AC-034` (`CFR-004`)
-- **Mode:** human · **Must-have:** yes · **Automation ref:** N/A — 実行記録の確認 · **Result:** `NOT_RUN`
-- **Precondition:** §3 の (a) と (b) の環境。
-- **Steps:**
+### TC-034: 両 OS での実行
+- Verifies: `AC-034` (`CFR-004`)
+- Mode: human · Must-have: yes · Automation ref: N/A（実行記録の確認） · Result: `NOT_RUN`
+- Precondition: §3 の (a) と (b) の環境。
+- Steps:
   1. このスイートを (a) で実行し、§9 に1行記録する。
   2. 同じコミットで (b) で実行し、§9 に1行記録する。
-- **Expected result:** §9 に同じ Build の行が2つあり、どちらも must-have の Failed と Blocked が 0。
-- **Teardown:** none required
+- Expected result: §9 に同じ Build の行が2つあり、どちらも must-have の Failed と Blocked が 0。
+- Teardown: none required
 
-### TC-035 — オーバーレイがフロートより上
-- **Verifies:** `AC-035` (`REQ-008`)
-- **Mode:** human · **Must-have:** yes · **Automation ref:** N/A — 目視 · **Result:** `NOT_RUN`
-- **Precondition:** F-0 で起動。フロートを作り、最大化する。フロート内で `sleep 600` を実行する。
-- **Steps:**
+### TC-035: オーバーレイがフロートより上
+- Verifies: `AC-035` (`REQ-008`)
+- Mode: human · Must-have: yes · Automation ref: N/A（目視） · Result: `NOT_RUN`
+- Precondition: F-0 で起動。フロートを作り、最大化する。フロート内で `sleep 600` を実行する。
+- Steps:
   1. コマンドパレットを開き、スクリーンショットを撮って閉じる。
   2. フロートの閉じるボタンを押して確認ダイアログを出し、スクリーンショットを撮ってキャンセルする。
   3. Overview を開き、スクリーンショットを撮って閉じる。
-- **Expected result:** 実装者が3枚それぞれで、オーバーレイの領域にフロートの文字やタイトル帯が重なっていないことを確認できる。1枚でも重なっていれば FAIL。
-- **Teardown:** フロートを閉じる。
+- Expected result: 実装者が3枚それぞれで、オーバーレイの領域にフロートの文字やタイトル帯が重なっていないことを確認できる。1枚でも重なっていれば FAIL。
+- Teardown: フロートを閉じる。
 
 ## 6. Non-functional procedures (`CFR-n`)
 
-N/A — 負荷や標本を伴う測定がない。CFR-001〜CFR-004 は §5 の TC-032、TC-012、TC-033、TC-034 が担う。
+N/A。負荷や標本を伴う測定がない。CFR-001〜CFR-004 は §5 の TC-032、TC-012、TC-033、TC-034 が担う。
 
 ## 7. Coverage matrix
 
@@ -171,8 +171,8 @@ N/A — 負荷や標本を伴う測定がない。CFR-001〜CFR-004 は §5 の 
 |----------|-----------|-------------|
 | S1 | must-have の AC を満たさない。またはフロート内のプロセスが意図せず終了する | yes |
 | S2 | must-have の AC を回避手順でしか満たせない | yes |
-| S3 | must-have でない AC を満たさない | no — 記録 |
-| S4 | 見た目や文言 | no — 記録 |
+| S3 | must-have でない AC を満たさない | no（記録） |
+| S4 | 見た目や文言 | no（記録） |
 
 must-have の失敗は、ビルドの欠陥（修正して再実行）か、書かれたとおりには作れない AC かに振り分ける。後者はここで読み替えず、`spec-dialogue floating-panes` で仕様を改訂する。
 

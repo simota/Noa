@@ -5,18 +5,20 @@
 | slug | floating-panes |
 | status | locked |
 | owner | simota |
-| reader | 実装者 — 何を作り、何を作らないか、どう受け入れ判定するかを決める |
+| reader | 実装者（何を作り、何を作らないか、どう受け入れ判定するかを決める） |
 | as-of | 2026-11-10 |
 | review trigger | `SplitTree`、レンダラの描画計画、セッションスキーマ、`AgentState` のいずれかが変わったとき |
 | depth | standard |
 
-## L0 — Vision
+## L0: Vision
 
-- **Problem** — 分割ペインは画面を等分に切るため、エージェントを脇で走らせたり出力を横目で見たりするだけの端末のために、レイアウト全体を崩す必要がある。Scratch Terminal は重ねて出せるが、フォーカスを外すと pty ごと破棄され、位置は固定、サイズは実行中に変えられず、アプリ全体で1枚きり（`docs/specs/scratch-terminal.md` R4/R5、`crates/noa-app/src/app.rs:396`）。
-- **Audience** — noa で複数のエージェント CLI（Claude Code、codex）を並走させる利用者。
-- **Job to be done** — 主: 分割レイアウトを変えずにエージェントを小窓で走らせ、進捗を見守り、必要なときだけ広げる。副: `htop` やログを流しっぱなしにして横目で監視する。
-- **Success definition** — 分割レイアウトを一切変更せずにエージェントを起動でき（AC-001）、畳んだ状態のままエージェントの承認待ちに気づけ（AC-016）、1操作で全面表示と元の配置を往復できる（AC-013）。
-- **Existing assets & constraints** — as-of main `c079459`。パスは `crates/` 起点。
+- Problem: 分割ペインは画面を等分に切るため、エージェントを脇で走らせたり出力を横目で見たりするだけの端末のために、レイアウト全体を崩す必要がある。Scratch Terminal は重ねて出せるが、フォーカスを外すと pty ごと破棄され、位置は固定、サイズは実行中に変えられず、アプリ全体で1枚きり（`docs/specs/scratch-terminal.md` R4/R5、`crates/noa-app/src/app.rs:396`）。
+- Audience: noa で複数のエージェント CLI（Claude Code、codex）を並走させる利用者。
+- Job to be done
+  - 主: 分割レイアウトを変えずにエージェントを小窓で走らせ、進捗を見守り、必要なときだけ広げる。
+  - 副: `htop` やログを流しっぱなしにして横目で監視する。
+- Success definition: 分割レイアウトを一切変更せずにエージェントを起動でき（AC-001）、畳んだ状態のままエージェントの承認待ちに気づけ（AC-016）、1操作で全面表示と元の配置を往復できる（AC-013）。
+- Existing assets & constraints: as-of main `c079459`。パスは `crates/` 起点。
   - Scratch Terminal は別 OS ウィンドウ実装（`noa-app/src/app/scratch_terminal.rs:245`）。流用できるのは pty 生成 `spawn_pane_surface`（`noa-app/src/app/lifecycle.rs:1069`）のみ。
   - 描画は1ウィンドウ1サーフェスで、ペインはシザー分割（`noa-render/src/renderer/mod.rs:900`、`noa-render/src/draw_plan.rs:74`）。重ね描きと z順の仕組みはない。
   - macOS ではネイティブタブ1枚が `WindowState` 1つと描画面1つを持つ（`noa-app/src/app/state.rs:271`）。ウィンドウアンカーのフロートは表示中のタブの描画面に描くことになる。
@@ -28,16 +30,16 @@
   - サイドバーのカードは分割ペイン1枚につき1枚（`session_card_id(window_id, pane_id)`、`noa-app/src/app/sidebar/state.rs:40`）。
   - ペイン列挙は2系統: `window_order` 経由（セッション、scrollback、サイドバー、Overview、AppleScript）と全 `windows` 経由（AX、IPC、タイマー）。
   - コマンドは `AppCommand`（`noa-app/src/commands/command.rs:10`）、アクション名はドット区切り、`keybind =` で再割り当て可能（`noa-config/src/parser/overrides.rs:520`）。`cmd+shift+f` は既存テストが予約済みとして未割り当てを検証している（`noa-app/src/commands/tests.rs:170`）。
-  - 実行中プログラムがあるときの閉じる確認は `close_confirm_message`（`noa-app/src/app/helpers/lifecycle.rs:30`）。
-  - エージェント状態は `AgentState { Running, Permission, Input, Finished, Error }`（`noa-grid/src/osc.rs:370`）。OSC 7501 では `state=blocked:kind=permission` が `Permission`、`state=blocked` が `Input` になる（`noa-grid/src/osc.rs:475`）。
+  - 実行中プログラムがあるときの閉じる確認は、`noa-app/src/app/helpers/lifecycle.rs:30` の `close_confirm_message`。
+  - エージェント状態は `noa-grid/src/osc.rs:370` の `AgentState { Running, Permission, Input, Finished, Error }`。OSC 7501 では `state=blocked:kind=permission` が `Permission`、`state=blocked` が `Input` になる（`noa-grid/src/osc.rs:475`）。
 
 ## Glossary
 
 | Term | Definition | Not to be called | Code identifier |
 |------|-----------|------------------|-----------------|
-| フロート | 分割レイアウトの上に重ねて置く、独自の pty を持つ端末ペイン | ポップアップ、scratch、オーバーレイ | TBD(実装者) — OQ-1 |
+| フロート | 分割レイアウトの上に重ねて置く、独自の pty を持つ端末ペイン | ポップアップ、scratch、オーバーレイ | TBD(実装者)、OQ-1 |
 | 分割ペイン | `SplitTree` の葉である既存のペイン | 通常ペイン、下のペイン | `PaneId` / `SplitTree` |
-| アンカー | フロートが所属し、可動範囲・表示条件・寿命を決める対象。ペイン／タブ／ウィンドウの3種 | 親、スコープ | TBD(実装者) — OQ-1 |
+| アンカー | フロートが所属し、可動範囲・表示条件・寿命を決める対象。ペイン／タブ／ウィンドウの3種 | 親、スコープ | TBD(実装者)、OQ-1 |
 | アンカー矩形 | アンカーが画面上に占めるピクセル矩形。ペイン=その分割ペインの矩形、タブ=そのタブの分割領域全体、ウィンドウ=端末領域全体（タブバーとサイドバーを除く） | 親領域 | — |
 | 復帰先ペイン | そのウィンドウで表示中のタブの、最後にフォーカスを持っていた分割ペイン | 直近のペイン、下のペイン | `WindowState.focused_pane` |
 | タイトル帯 | フロート上端の、高さセル1行分の帯 | ヘッダ、タイトルバー | — |
@@ -47,7 +49,7 @@
 | 非表示 | 表示条件（L2.3）を満たさず描かれていない状態。フロートは存在し pty は動く | 折りたたみ、破棄 | — |
 | attention 表示 | タイトル帯の背景が、同じ `AgentState` の分割ペインのサイドバーカードが attention 時に使う色になること。消える条件もそのカードと同じ | 通知、バッジ | — |
 
-## L1 — Requirements
+## L1: Requirements
 
 `Source` の `T-n` は末尾「対話の記録」の行を指す。
 
@@ -89,7 +91,7 @@
 | CFR-003 | 非表示のフロートに描画コストを払わない | 1フレームの描画計画に含まれるフロート数 | 非表示のフロートは 0 | 描画計画を検査する単体テスト | HIGH | ASSUME-33 |
 | CFR-004 | macOS と Linux で同じ挙動 | L3 の must-have AC | 両 OS で全 PASS | 受け入れテスト仕様を OS ごとに実行 | HIGH | elicited T-5（範囲案）→ T-6 (C1) で承認 |
 
-## L2 — Detail
+## L2: Detail
 
 ### L2.1 Data model
 
@@ -108,7 +110,7 @@
 
 | Operation | Trigger | Input | Output | Errors | Idempotent | Auth |
 |-----------|---------|-------|--------|--------|------------|------|
-| `float.new` | 既定 macOS `cmd+shift+y` / Linux `ctrl+shift+y` | — | REQ-001 | 上限（REQ-019）、pty 生成失敗（Behavior matrix）、対象外ウィンドウ（REQ-021） | no | N/A — ローカル操作 |
+| `float.new` | 既定 macOS `cmd+shift+y` / Linux `ctrl+shift+y` | — | REQ-001 | 上限（REQ-019）、pty 生成失敗（Behavior matrix）、対象外ウィンドウ（REQ-021） | no | N/A（ローカル操作） |
 | `float.toggle-focus` | 既定 macOS `cmd+shift+i` / Linux `ctrl+shift+i` | — | REQ-011 | 巡回の対象なし → 何もしない | no | 同上 |
 | `float.focus-next` | 既定なし | — | REQ-011 | 同上 | no | 同上 |
 | `float.focus-previous` | 既定なし | — | REQ-011 | 同上 | no | 同上 |
@@ -154,7 +156,7 @@
 |-----------|-----------|-------------------|--------------|----------|
 | Empty state（フロート0枚） | REQ-018 | `float.new` 以外の `float.*` は何もしない | 変化なし | AC-023 |
 | Invalid input（壊れたセッション記録） | REQ-017 | L2.4 のとおり該当フロートだけ捨てる | そのフロートが現れない | AC-021 |
-| Unauthorized | — | N/A — ローカル単一利用者の操作で、権限境界がない | — | — |
+| Unauthorized | — | N/A（ローカル単一利用者の操作で、権限境界がない） | — | — |
 | Dependency unavailable（pty 生成失敗） | REQ-001 | フロートを作らず、フォーカスを変えず、エラーをログに書く | 変化なし | AC-024 |
 | Concurrent modification（ドラッグ中にフロートが破棄される: アンカー消滅またはシェル終了） | REQ-012, REQ-013 | ドラッグを中止する | フロートが消える | AC-025 |
 | Concurrent modification（ドラッグ中にアンカー矩形が変わる） | REQ-007 | ドラッグを続け、新しいアンカー矩形へクランプする | フロートがアンカー内に留まる | AC-009 |
@@ -175,11 +177,11 @@
 
 ## Migration & rollout
 
-- **Existing data** — 後方互換。`SESSION_VERSION` を 4 に上げ、バージョン 3 のファイルはフロート0枚として読む（AC-021）。
-- **Staged release** — フラグなし。フロートを作らない限り既存の画面と操作は変わらない。
-- **Rollback** — この機能より前のビルドは、バージョン 4 のファイルを既存の挙動どおりセッションなしとして扱う（`session.rs:331`）。失われるのはウィンドウ配置の復元だけで、不可逆な変更はない。
+- Existing data: 後方互換。`SESSION_VERSION` を 4 に上げ、バージョン 3 のファイルはフロート0枚として読む（AC-021）。
+- Staged release: フラグなし。フロートを作らない限り既存の画面と操作は変わらない。
+- Rollback: この機能より前のビルドは、バージョン 4 のファイルを既存の挙動どおりセッションなしとして扱う（`session.rs:331`）。失われるのはウィンドウ配置の復元だけで、不可逆な変更はない。
 
-## L3 — Acceptance Criteria
+## L3: Acceptance Criteria
 
 共通の前提 F-1: タブの分割領域 1000×600 px（左上が原点）、セル 10×20 px、タイトル帯 20 px。A や B に触れない AC では分割ペインは1枚で、それがアンカー矩形になる。A と B に触れる AC では左右2分割で、A は x=0〜500、B は x=500〜1000。座標はすべて分割領域内の px。タブアンカーとウィンドウアンカーのアンカー矩形は、この分割領域と同じ 1000×600 px とする。
 
@@ -232,7 +234,7 @@
 
 ## Scope
 
-- **In scope**
+- In scope
   - 作成、閉じる、移動、リサイズ、アンカー切替、z順、折りたたみ、最大化（elicited T-3, T-5, T-6）
   - フォーカス移動とキーバインド（ratified T-6）
   - タイトル帯のエージェント状態と attention、自動承認の対象化（elicited T-4〜T-6）
@@ -240,7 +242,7 @@
   - セッション保存と復元（ratified T-6）
   - macOS と Linux（ratified T-6）
   - アンカーごとの枚数上限、Scratch / Quick Terminal での作成不可、背景の不透過（ratified T-8）
-- **Out of scope**
+- Out of scope
   - フロート内の分割（ratified T-6）
   - フロートと分割ペインの相互変換（ratified T-6）
   - ウィンドウ外への切り離し（ratified T-6）
@@ -253,14 +255,14 @@
 
 ## Considered but rejected
 
-**選択した方向**: 1種類のフロートがアンカー属性（ペイン／タブ／ウィンドウ）を持ち、作成後に切り替えられる（elicited T-2, T-3）。
+選択した方向: 1種類のフロートがアンカー属性（ペイン／タブ／ウィンドウ）を持ち、作成後に切り替えられる（elicited T-2, T-3）。
 
-- アンカー種別ごとに別機能を3つ作る — 利用者は3種すべてを求めており、属性1つで表せる。操作と実装が3重になる。
-- アンカーをどれか1種に固定する — 利用者が3種すべてを要求（T-2）。
-- Scratch Terminal を拡張する — 別 OS ウィンドウ実装で、ペイン内クリップもタブ追従もできない。
-- Quick Terminal を `quick-terminal-autohide = false` で代用する — pty は隠しても生きるが、1枚きりで、画面に対して配置され、ドラッグでリサイズできず、サイドバーと自動承認の対象外（`crates/noa-app/src/app/sidebar/state.rs:399`）。
-- 折りたたみをアンカー下端への整列にする／完全に隠す — 利用者がその場で帯に畳む形を選択（T-5）。
-- 入力待ちで自動展開する — 作業中の画面が動くため不採用（T-6: A1）。
+- アンカー種別ごとに別機能を3つ作る。利用者は3種すべてを求めており、属性1つで表せる。操作と実装が3重になる。
+- アンカーをどれか1種に固定する。利用者が3種すべてを要求（T-2）。
+- Scratch Terminal を拡張する。別 OS ウィンドウ実装で、ペイン内クリップもタブ追従もできない。
+- Quick Terminal を `quick-terminal-autohide = false` で代用する。pty は隠しても生きるが、1枚きりで、画面に対して配置され、ドラッグでリサイズできず、サイドバーと自動承認の対象外（`crates/noa-app/src/app/sidebar/state.rs:399`）。
+- 折りたたみをアンカー下端への整列にする／完全に隠す。利用者がその場で帯に畳む形を選択（T-5）。
+- 入力待ちで自動展開する。作業中の画面が動くため不採用（T-6: A1）。
 
 ## Assumption Ledger
 
@@ -290,17 +292,17 @@ ASSUME-1〜20 の既定値は、表の右から2列目に挙げた要件が正�
 
 | ID | Question | Blocks | Owner | Resolve by | Impact if wrong |
 |----|----------|--------|-------|-----------|-----------------|
-| OQ-1 | フロートとアンカーの型名 | nothing — 命名のみで、挙動と受け入れ基準に影響しない | 実装者 | before-ship | 用語のずれ |
-| OQ-2 | machine モードの TC を実装する自動テストのファイルパス | nothing — 判定内容は各 AC と TC で確定済み。束縛するのは実行時の場所だけ | 実装者 | before-ship | 実行記録からテストを辿れない |
-| OQ-3 | 受け入れを実行する Linux 環境の具体的な構成 | nothing — 必要な能力は受け入れテスト仕様 §3 で確定済み | simota | before-ship | Linux の結果を再現できない |
+| OQ-1 | フロートとアンカーの型名 | nothing（命名のみで、挙動と受け入れ基準に影響しない） | 実装者 | before-ship | 用語のずれ |
+| OQ-2 | machine モードの TC を実装する自動テストのファイルパス | nothing（判定内容は各 AC と TC で確定済み。束縛するのは実行時の場所だけ） | 実装者 | before-ship | 実行記録からテストを辿れない |
+| OQ-3 | 受け入れを実行する Linux 環境の具体的な構成 | nothing（必要な能力は受け入れテスト仕様 §3 で確定済み） | simota | before-ship | Linux の結果を再現できない |
 
-**Refutation record.**
-- 問題は本物か（根拠: リポジトリの既存機能）— `survived`。Scratch Terminal、Quick Terminal、ズーム、サイドバーのいずれも主用途を満たさない。L0 の記述2点を正確化し、Quick Terminal を不採用案に追加した。
-- AC は要件を証明するか（根拠: 仕様書のみ）— `refuted-on-evidence`。must-have 要件の節のうち AC が触れないものが 20 件超あり、SPECIFY へ戻した。AC-005, 006, 008, 009, 011〜022, 024〜029, 033 を強化し、AC-035〜044 を追加。独立した再検証を3回行い、2回目までの指摘（到達できない前提、対象の選び方、数値、未検証の節）を修正して、3回目で残件なし（`GATE: PASS`）。
+Refutation record:
+- 問題は本物か（根拠: リポジトリの既存機能）の判定は `survived`。Scratch Terminal、Quick Terminal、ズーム、サイドバーのいずれも主用途を満たさない。L0 の記述2点を正確化し、Quick Terminal を不採用案に追加した。
+- AC は要件を証明するか（根拠: 仕様書のみ）の判定は `refuted-on-evidence`。must-have 要件の節のうち AC が触れないものが 20 件超あり、SPECIFY へ戻した。AC-005, 006, 008, 009, 011〜022, 024〜029, 033 を強化し、AC-035〜044 を追加。独立した再検証を3回行い、2回目までの指摘（到達できない前提、対象の選び方、数値、未検証の節）を修正して、3回目で残件なし（`GATE: PASS`）。
 
 ## Build-path decision
 
-**一括の自律実装**（elicited T-8）。範囲が1機能に収まり、目視の受け入れ基準が6件あるため、利用者が立ち会える連続作業で設計・実装・検証まで進める。L3 の must-have AC が出荷判定になる。
+一括の自律実装（elicited T-8）。範囲が1機能に収まり、目視の受け入れ基準が6件あるため、利用者が立ち会える連続作業で設計・実装・検証まで進める。L3 の must-have AC が出荷判定になる。
 
 ## 対話の記録
 

@@ -2,13 +2,13 @@
 
 ## Metadata
 
-- **slug:** settings-panel-enrichment
-- **title:** Settings Panel Enrichment & Optimization
-- **status:** **draft** (magi verdict scope B+ finalized 2026-07-11; the spec body itself is not yet signed off)
-- **owner:** simota
-- **scope mode:** **Standard** (10 requirements [8 must + 2 nice] + 3 NFRs, medium complexity — matches the Accord template selection criteria)
-- **upstream:** `theme-settings-ui.md` (locked — the foundation for the overlay's launch entry point, preview mechanism, commit sequence, and config writes. This spec is an increment on top of it that adds "quality of information design" and does not re-litigate upstream decisions)
-- **traceability:** 10 R + 3 NFR = 13 items, each with 1-3 ACs, full coverage across all items (100%, exceeding the Standard scope's 85% floor)
+- slug: settings-panel-enrichment
+- title: Settings Panel Enrichment & Optimization
+- status: **draft** (magi verdict scope B+ finalized 2026-07-11; the spec body itself is not yet signed off)
+- owner: simota
+- scope mode: **Standard** (10 requirements [8 must + 2 nice] + 3 NFRs, medium complexity — matches the Accord template selection criteria)
+- upstream: `theme-settings-ui.md` (locked — the foundation for the overlay's launch entry point, preview mechanism, commit sequence, and config writes. This spec is an increment on top of it that adds "quality of information design" and does not re-litigate upstream decisions)
+- traceability: 10 R + 3 NFR = 13 items, each with 1-3 ACs, full coverage across all items (100%, exceeding the Standard scope's 85% floor)
 
 ## L0 — Vision
 
@@ -53,25 +53,25 @@ Per the magi verdict (2026-07-11, not to be re-litigated), the adopted scope is 
 
 ### Must-have (magi Critical/required, 8 items)
 
-- **R-1 (restart note with reason)**: Replace `ThemeSettings::restart_note(kind) -> bool` (`theme_settings/state.rs:306-332`) with a type that distinguishes the reason (e.g., `RestartReason::None | RestartReason::OpaqueStartup | RestartReason::CommitOnly`). Display distinct copy for the opacity/blur row at opaque startup versus a touched commit-only row (e.g., font-family). Do not change the transparency mechanism itself (out of scope).
-- **R-2 (native menu item)**: Give `AppCommand::OpenSettings` (existing, already wired to `open_theme_settings(Settings mode)` at `app/commands.rs:146`) a non-empty `menu_id()`, and add it as a new item in the native menu in `macos_menu.rs`. Do not change the existing ⌘,/"Settings..." (`AppCommand::Preferences` → `open_config_file()`) in any way.
-- **R-3 (always-on badges for all rows)**: Derive "Live"/"Next launch" badges from `SettingsRowKind::is_live()` (existing, static classification) and display them at all times on all 16 rows (20 after nice#9 is adopted), regardless of `touched` state. Keep this as a signal independent of R-1's reason-annotated note, so both coexist (zero misleading display — resolving the current issue where an unedited commit-only row is indistinguishable from a live row at a glance).
-- **R-4 (eliminate per-frame clone)**: Remove `session.state.clone()` (a full clone of `ThemeSettings`, including `filtered: Vec<ThemeMatch>` up to 574 entries) at `app/render.rs:48`. Make `ThemeSettingsSession.state` an `Arc<ThemeSettings>`; the render path uses `Arc::clone` (a refcount bump only), and mutating methods go through `Arc::make_mut`.
-- **R-5 (fuzzy search over settings rows)**: Repurpose `command_palette::fuzzy_match` to fuzzy-search the 16 (20) Settings-mode rows by label. Empty query shows all rows; no matches shows zero rows.
-- **R-6 (description for the selected row)**: Add a static one-line description to every `SettingsRowKind`, and display it in the view for the currently selected row (both the AppKit card and the wgpu text card).
-- **R-7 (Reset to Default)**: Add an operation to reset the currently selected row, per-row, to the default value derived from `noa_config::StartupConfig::default()`.
-- **R-8 (zero existing regressions, hard gate)**: Do not change the externally observable behavior of the existing 16 rows' values, key operations, commit/revert, or restart-note detection logic in any way. All existing tests in `theme_settings/tests.rs` (981 lines) and `app/input_ops/theme_settings.rs` must stay green without modification.
+- R-1 (restart note with reason): Replace `ThemeSettings::restart_note(kind) -> bool` (`theme_settings/state.rs:306-332`) with a type that distinguishes the reason (e.g., `RestartReason::None | RestartReason::OpaqueStartup | RestartReason::CommitOnly`). Display distinct copy for the opacity/blur row at opaque startup versus a touched commit-only row (e.g., font-family). Do not change the transparency mechanism itself (out of scope).
+- R-2 (native menu item): Give `AppCommand::OpenSettings` (existing, already wired to `open_theme_settings(Settings mode)` at `app/commands.rs:146`) a non-empty `menu_id()`, and add it as a new item in the native menu in `macos_menu.rs`. Do not change the existing ⌘,/"Settings..." (`AppCommand::Preferences` → `open_config_file()`) in any way.
+- R-3 (always-on badges for all rows): Derive "Live"/"Next launch" badges from `SettingsRowKind::is_live()` (existing, static classification) and display them at all times on all 16 rows (20 after nice#9 is adopted), regardless of `touched` state. Keep this as a signal independent of R-1's reason-annotated note, so both coexist (zero misleading display — resolving the current issue where an unedited commit-only row is indistinguishable from a live row at a glance).
+- R-4 (eliminate per-frame clone): Remove `session.state.clone()` (a full clone of `ThemeSettings`, including `filtered: Vec<ThemeMatch>` up to 574 entries) at `app/render.rs:48`. Make `ThemeSettingsSession.state` an `Arc<ThemeSettings>`; the render path uses `Arc::clone` (a refcount bump only), and mutating methods go through `Arc::make_mut`.
+- R-5 (fuzzy search over settings rows): Repurpose `command_palette::fuzzy_match` to fuzzy-search the 16 (20) Settings-mode rows by label. Empty query shows all rows; no matches shows zero rows.
+- R-6 (description for the selected row): Add a static one-line description to every `SettingsRowKind`, and display it in the view for the currently selected row (both the AppKit card and the wgpu text card).
+- R-7 (Reset to Default): Add an operation to reset the currently selected row, per-row, to the default value derived from `noa_config::StartupConfig::default()`.
+- R-8 (zero existing regressions, hard gate): Do not change the externally observable behavior of the existing 16 rows' values, key operations, commit/revert, or restart-note detection logic in any way. All existing tests in `theme_settings/tests.rs` (981 lines) and `app/input_ops/theme_settings.rs` must stay green without modification.
 
 ### Nice-to-have (only after all musts are green, 2 items)
 
-- **R-9 (unlock 4 C-safe keys)**: Add `scrollback-limit` / `cursor-style-blink` / `minimum-contrast` / `macos-option-as-alt` (all real fields of `StartupConfig`) as new rows. Each row includes the "5-piece set" from R-2 through R-6 (a `RowDraft` variant, `is_live()` classification, `commit_updates()` mapping, label, and description). `SettingsRowKind::COUNT` goes from 16 to 20.
-- **R-10 (regression protection for selected-row contrast)**: The code audit confirmed that the selected row's background color (`OverlayColors::selected_bg`) and foreground color (`accent: Rgb`) already go through existing UI tokens in both render paths (AppKit/wgpu). Since there is no code left to migrate, this requirement is redefined as "add contrast-ratio regression tests that guarantee the existing token paths never regress to hardcoded values in the future."
+- R-9 (unlock 4 C-safe keys): Add `scrollback-limit` / `cursor-style-blink` / `minimum-contrast` / `macos-option-as-alt` (all real fields of `StartupConfig`) as new rows. Each row includes the "5-piece set" from R-2 through R-6 (a `RowDraft` variant, `is_live()` classification, `commit_updates()` mapping, label, and description). `SettingsRowKind::COUNT` goes from 16 to 20.
+- R-10 (regression protection for selected-row contrast): The code audit confirmed that the selected row's background color (`OverlayColors::selected_bg`) and foreground color (`accent: Rgb`) already go through existing UI tokens in both render paths (AppKit/wgpu). Since there is no code left to migrate, this requirement is redefined as "add contrast-ratio regression tests that guarantee the existing token paths never regress to hardcoded values in the future."
 
 ### Non-functional requirements (NFR)
 
-- **NFR-1 (allocation)**: Across consecutive redraws between frames with no input (no selection or edit occurring), no deep clone of `ThemeSettings` may occur (directly tied to R-4).
-- **NFR-2 (no 60fps degradation)**: The settings-row fuzzy search (R-5, up to 20 rows) uses the same `fuzzy_match` as the existing 574-theme fuzzy search, and recomputes only on text-input events (the same trigger discipline as the existing `refilter_and_mark`). It must not introduce a per-frame recompute path while idle.
-- **NFR-3 (no config-writer expansion)**: None of R-1/R-3/R-6/R-7/R-9 may introduce a new config write path other than `noa_config::write_config_updates` (existing, introduced in `theme-settings-ui.md` R-14).
+- NFR-1 (allocation): Across consecutive redraws between frames with no input (no selection or edit occurring), no deep clone of `ThemeSettings` may occur (directly tied to R-4).
+- NFR-2 (no 60fps degradation): The settings-row fuzzy search (R-5, up to 20 rows) uses the same `fuzzy_match` as the existing 574-theme fuzzy search, and recomputes only on text-input events (the same trigger discipline as the existing `refilter_and_mark`). It must not introduce a per-frame recompute path while idle.
+- NFR-3 (no config-writer expansion): None of R-1/R-3/R-6/R-7/R-9 may introduce a new config write path other than `noa_config::write_config_updates` (existing, introduced in `theme-settings-ui.md` R-14).
 
 ## L2 — Detail
 
@@ -110,8 +110,8 @@ Per the magi verdict (2026-07-11, not to be re-litigated), the adopted scope is 
 
 - Target files: `theme_settings/state.rs` (`ThemeSettings` struct, `push_text`/`backspace`), `app/input_ops/theme_settings.rs` (Tab key handling).
 - Add new fields specific to `Section::SettingsRows`: `settings_search_active: bool`, `settings_filter: String`, and `settings_filtered: Vec<usize>` (indices into `SettingsRowKind::ALL`, ordered with the same scoring as `ThemeMatch`).
-- **Search enter/exit gesture**: currently in `Section::SettingsRows`, the `Tab` key merely calls `toggle_section()` (a dead code path that's a no-op due to DEC-2, see the doc comment at `state.rs:240-244`). Reuse this dead hook and repurpose `Tab`, only within a `ThemeSettingsMode::Settings` session, as "toggle search mode" (leave Theme mode's `Tab` unchanged — it only ever meant section switching there, and is out of scope for this spec).
-- **Input routing while search is active**: while `settings_search_active == true`, `push_text`/`backspace` prioritize appending to/deleting from `settings_filter`, regardless of the currently selected row's kind (digit entry for `FontSize`, path entry for `BackgroundImage`). Exiting search (Tab again, or Enter) returns to normal row-edit input routing.
+- Search enter/exit gesture: currently in `Section::SettingsRows`, the `Tab` key merely calls `toggle_section()` (a dead code path that's a no-op due to DEC-2, see the doc comment at `state.rs:240-244`). Reuse this dead hook and repurpose `Tab`, only within a `ThemeSettingsMode::Settings` session, as "toggle search mode" (leave Theme mode's `Tab` unchanged — it only ever meant section switching there, and is out of scope for this spec).
+- Input routing while search is active: while `settings_search_active == true`, `push_text`/`backspace` prioritize appending to/deleting from `settings_filter`, regardless of the currently selected row's kind (digit entry for `FontSize`, path entry for `BackgroundImage`). Exiting search (Tab again, or Enter) returns to normal row-edit input routing.
 - An empty query shows all of `SettingsRowKind::ALL` in original display order (following the same empty-query behavior as `fuzzy_match`, `command_palette_matches`/`filter_themes`). No matches shows zero rows, and — following the same pattern as `ThemePicker`'s `filtered.is_empty()` guard (`move_up`/`move_down`, `state.rs:347-379`) — makes `move_up`/`move_down` a no-op when the list is empty.
 - On exiting search, select whichever filtered-result row was highlighted at that moment (the same approach as the command palette's confirm operation).
 
@@ -127,7 +127,7 @@ Per the magi verdict (2026-07-11, not to be re-litigated), the adopted scope is 
 - Target files: `theme_settings/state.rs` (new `ThemeSettings::reset_selected_row`), `theme_settings/rows.rs` (new `RowDraft::default_for(kind) -> RowDraft`), `app/input_ops/theme_settings.rs` (Delete key handling).
 - Default value source: `noa_config::StartupConfig::default()` (`noa-config/src/lib.rs:590-649`, confirmed to exist). Symmetric with how `ThemeSettingsInit` assembles initial values from `StartupConfig`'s fields, add `RowDraft::default_for(kind: SettingsRowKind) -> RowDraft` to `rows.rs` as a pure function that assembles a `RowDraft` from the corresponding field of `StartupConfig::default()` (to avoid duplicate maintenance against the `ThemeSettingsInit` assembly logic, design `open_theme_settings`'s initial-value mapping and `default_for` to reference a shared conversion function — reconcile against the field mapping in `app/input_ops/theme_settings.rs:open_theme_settings` at implementation time).
 - `ThemeSettings::reset_selected_row(&mut self, now: Instant) -> RowEffect`: replace the selected row's `draft` with `RowDraft::default_for(kind)` and set `touched = true` (written on commit only if the default differs from the snapshot, reusing the existing `touched` gate in `commit_updates()`). For live rows (`FontSize`/`BackgroundOpacity`/`BackgroundBlurRadius`/`CursorStyle`/`SidebarPreviewLines`), return the same `RowEffect` as `adjust()`, joining the same apply path as `adjust_theme_settings_row` in `app/input_ops/theme_settings.rs`.
-- **Key binding**: since `Backspace` is already used for digit entry in `FontSize`/path entry in `BackgroundImage`, avoid a conflict and assign `NamedKey::Delete` (forward delete, a physical key distinct from `Backspace`, present in `winit::keyboard::NamedKey`) for Reset (added to the top-level match in `handle_theme_settings_key`, alongside `Escape`/`Enter`/`Tab`). No confirmation dialog is added, since Esc (the existing R-16 whole-session revert) already provides recovery from a mistaken press (a reversible operation — defaulting to no confirmation per the Ambiguous+reversible principle).
+- Key binding: since `Backspace` is already used for digit entry in `FontSize`/path entry in `BackgroundImage`, avoid a conflict and assign `NamedKey::Delete` (forward delete, a physical key distinct from `Backspace`, present in `winit::keyboard::NamedKey`) for Reset (added to the top-level match in `handle_theme_settings_key`, alongside `Escape`/`Enter`/`Tab`). No confirmation dialog is added, since Esc (the existing R-16 whole-session revert) already provides recovery from a mistaken press (a reversible operation — defaulting to no confirmation per the Ambiguous+reversible principle).
 - If Reset is pressed while a FontSize debounce (the existing R-9 debouncer) is in flight, route it through the same debounce-submission path as `set_font_size` (submit to the debouncer rather than writing the value directly, staying consistent with the existing R-9 (old spec) font-size handling).
 
 ### R-8: Zero existing regressions (hard gate)
@@ -152,62 +152,62 @@ Per the magi verdict (2026-07-11, not to be re-litigated), the adopted scope is 
 
 ## Edge cases / unverified items (explicit)
 
-- **Interaction between search and selected_row/font_size_digits/background_image_text**: it's undecided how to handle the `FontSize` row being mid-edit (`font_size_digits: Some(..)`) when entering search mode via R-5 (whether to commit or discard the unconfirmed digit entry when search starts). Decide at implementation time, together with the call timing of `clear_row_input_state()` (existing, `state.rs:439-442`).
-- **Index stability when exiting search**: when returning from a filtered `settings_filtered` state to showing all rows, it's undecided whether `selected_row` (a raw index into `SettingsRowKind::ALL`) keeps pointing at the pre-search row or preserves its relative position within the search results. Confirm consistency with the command palette's confirm behavior at implementation time.
-- **Runtime application of R-9's 4 rows**: this spec treats all of them as persist-only (applied on next launch), but since `cursor-style-blink` is closely related to the existing live `CursorStyle` row, there may be a future opportunity to integrate it with `apply_live_cursor_style`'s `blinking` argument (currently statically derived from `initial_cursor_style`, `app/input_ops/theme_settings.rs:518-528`) and make it live — recorded as a future increment candidate outside this spec's scope.
-- **Final text of R-1's copy**: subject to copy review at implementation time; this spec only contracts the meaning (distinguishing the reason).
+- Interaction between search and selected_row/font_size_digits/background_image_text: it's undecided how to handle the `FontSize` row being mid-edit (`font_size_digits: Some(..)`) when entering search mode via R-5 (whether to commit or discard the unconfirmed digit entry when search starts). Decide at implementation time, together with the call timing of `clear_row_input_state()` (existing, `state.rs:439-442`).
+- Index stability when exiting search: when returning from a filtered `settings_filtered` state to showing all rows, it's undecided whether `selected_row` (a raw index into `SettingsRowKind::ALL`) keeps pointing at the pre-search row or preserves its relative position within the search results. Confirm consistency with the command palette's confirm behavior at implementation time. (Resolved by Addendum B: `Enter` confirms the highlighted row, `Tab` exits restoring the pre-search selection.)
+- Runtime application of R-9's 4 rows: this spec treats all of them as persist-only (applied on next launch), but since `cursor-style-blink` is closely related to the existing live `CursorStyle` row, there may be a future opportunity to integrate it with `apply_live_cursor_style`'s `blinking` argument (currently statically derived from `initial_cursor_style`, `app/input_ops/theme_settings.rs:518-528`) and make it live — recorded as a future increment candidate outside this spec's scope.
+- Final text of R-1's copy: subject to copy review at implementation time; this spec only contracts the meaning (distinguishing the reason). (Resolved by Addendum B: `(restart to apply)` / `(opaque window — restart to preview)`.)
 
 ## L3 — Acceptance Criteria
 
 Verification-method legend: [unit] = GPU-free unit test / [integration] = integration test / [code-review] = implementation inspection / [manual-visual] = manual confirmation.
 
 ### R-1 (restart note with reason)
-- **AC-1** [unit]: Given opaque startup (`opaque_at_startup=true`) with the `BackgroundOpacity` row unedited. When calling `restart_reason(BackgroundOpacity)`. Then it returns `RestartReason::OpaqueStartup`.
-- **AC-2** [unit]: Given the `FontFamily` row (commit-only) has been touched. When calling `restart_reason(FontFamily)`. Then it returns `RestartReason::CommitOnly`, a different variant from AC-1's case.
-- **AC-3** [manual-visual]: An opaque-startup session's opacity/blur row displays copy distinct from other commit-only rows' "(restart to apply)".
+- AC-1 [unit]: Given opaque startup (`opaque_at_startup=true`) with the `BackgroundOpacity` row unedited. When calling `restart_reason(BackgroundOpacity)`. Then it returns `RestartReason::OpaqueStartup`.
+- AC-2 [unit]: Given the `FontFamily` row (commit-only) has been touched. When calling `restart_reason(FontFamily)`. Then it returns `RestartReason::CommitOnly`, a different variant from AC-1's case.
+- AC-3 [manual-visual]: An opaque-startup session's opacity/blur row displays copy distinct from other commit-only rows' "(restart to apply)".
 
 ### R-2 (native menu item)
-- **AC-4** [unit]: `AppCommand::OpenSettings.menu_id()` returns a non-empty string, and `AppCommand::from_menu_id` reverses it back to `OpenSettings` (a window-free test of the same shape as the existing `preferences_menu_item_spec` test).
-- **AC-5** [code-review]: Confirm via diff that `AppCommand::Preferences`'s menu_id, label, accelerator, and wiring to `open_config_file()` show no changes.
-- **AC-6** [manual-visual]: The new menu item opens the Settings overlay (Settings mode), and does not launch the external editor.
+- AC-4 [unit]: `AppCommand::OpenSettings.menu_id()` returns a non-empty string, and `AppCommand::from_menu_id` reverses it back to `OpenSettings` (a window-free test of the same shape as the existing `preferences_menu_item_spec` test).
+- AC-5 [code-review]: Confirm via diff that `AppCommand::Preferences`'s menu_id, label, accelerator, and wiring to `open_config_file()` show no changes.
+- AC-6 [manual-visual]: The new menu item opens the Settings overlay (Settings mode), and does not launch the external editor.
 
 ### R-3 (always-on badges for all rows)
-- **AC-7** [unit]: Given the overlay was just opened (all rows `touched=false`). When building the view model. Then all 20 rows' `live` field matches `SettingsRowKind::is_live()`'s value, one for one.
-- **AC-8** [unit]: Given editing a live row. When rebuilding the view model. Then that row's `live` field remains `true`, unchanged (independent of R-1's `RestartReason`).
+- AC-7 [unit]: Given the overlay was just opened (all rows `touched=false`). When building the view model. Then all 20 rows' `live` field matches `SettingsRowKind::is_live()`'s value, one for one.
+- AC-8 [unit]: Given editing a live row. When rebuilding the view model. Then that row's `live` field remains `true`, unchanged (independent of R-1's `RestartReason`).
 
 ### R-4 (eliminate per-frame clone)
-- **AC-9** [unit]: Given a session is open, and two consecutive redraw-equivalent read-only snapshot fetches (`Arc::clone`) occur without any mutating method being called in between. When comparing the two `Arc` pointers with `Arc::ptr_eq`. Then they are equal (no deep clone occurred).
-- **AC-10** [unit]: Given the prior snapshot `Arc` has gone out of scope and been dropped. When calling a mutating method such as `move_down`. Then all existing (R-8-frozen) behavior tests still pass unchanged (regression proof that semantics are unchanged even via `Arc::make_mut`).
-- **AC-11** [code-review]: Confirm that the `theme_settings_card` construction code in `app/render.rs` contains no `.clone()` on the `ThemeSettings` value itself.
+- AC-9 [unit]: Given a session is open, and two consecutive redraw-equivalent read-only snapshot fetches (`Arc::clone`) occur without any mutating method being called in between. When comparing the two `Arc` pointers with `Arc::ptr_eq`. Then they are equal (no deep clone occurred).
+- AC-10 [unit]: Given the prior snapshot `Arc` has gone out of scope and been dropped. When calling a mutating method such as `move_down`. Then all existing (R-8-frozen) behavior tests still pass unchanged (regression proof that semantics are unchanged even via `Arc::make_mut`).
+- AC-11 [code-review]: Confirm that the `theme_settings_card` construction code in `app/render.rs` contains no `.clone()` on the `ThemeSettings` value itself.
 
 ### R-5 (fuzzy search over settings rows)
-- **AC-12** [unit]: Given pressing `Tab` in Settings mode. When inspecting state. Then `settings_search_active` becomes `true`.
-- **AC-13** [unit]: Given search is active and typing "curs". When inspecting `settings_filtered`. Then only rows whose label fuzzy-matches "curs" appear, sorted by descending score.
-- **AC-14** [unit]: Given a search query with zero matches. When inspecting the list. Then the list is empty, but `move_up`/`move_down` do not panic (no-op).
-- **AC-15** [unit]: Given an empty query. When inspecting `settings_filtered`. Then it contains all 20 entries, in the same order as `SettingsRowKind::ALL`.
+- AC-12 [unit]: Given pressing `Tab` in Settings mode. When inspecting state. Then `settings_search_active` becomes `true`.
+- AC-13 [unit]: Given search is active and typing "curs". When inspecting `settings_filtered`. Then only rows whose label fuzzy-matches "curs" appear, sorted by descending score.
+- AC-14 [unit]: Given a search query with zero matches. When inspecting the list. Then the list is empty, but `move_up`/`move_down` do not panic (no-op).
+- AC-15 [unit]: Given an empty query. When inspecting `settings_filtered`. Then it contains all 20 entries, in the same order as `SettingsRowKind::ALL`.
 
 ### R-6 (description for the selected row)
-- **AC-16** [unit]: For every kind in `SettingsRowKind::ALL`, `description()` returns a non-empty string that also differs from `label()`.
-- **AC-17** [unit]: The `selected_description` returned by `theme_settings_view_model()` always matches `SettingsRowKind::ALL[state.selected_row()].description()`.
+- AC-16 [unit]: For every kind in `SettingsRowKind::ALL`, `description()` returns a non-empty string that also differs from `label()`.
+- AC-17 [unit]: The `selected_description` returned by `theme_settings_view_model()` always matches `SettingsRowKind::ALL[state.selected_row()].description()`.
 
 ### R-7 (Reset to Default)
-- **AC-18** [unit]: Given the `FontSize` row (live) has been changed from its default. When executing the `Delete`-key-equivalent operation (`reset_selected_row`). Then the row's `draft` reverts to the value equivalent to `StartupConfig::default().font_size`, `touched=true` is set, and the corresponding `RowEffect` is returned for live application.
-- **AC-19** [unit]: Given the `FontFamily` row (commit-only) is unedited. When executing Reset. Then `draft` becomes the default value and `touched=true` is set (touched is set even if the value equals the existing snapshot — to preserve the intent of an explicit reset operation).
+- AC-18 [unit]: Given the `FontSize` row (live) has been changed from its default. When executing the `Delete`-key-equivalent operation (`reset_selected_row`). Then the row's `draft` reverts to the value equivalent to `StartupConfig::default().font_size`, `touched=true` is set, and the corresponding `RowEffect` is returned for live application.
+- AC-19 [unit]: Given the `FontFamily` row (commit-only) is unedited. When executing Reset. Then `draft` becomes the default value and `touched=true` is set (touched is set even if the value equals the existing snapshot — to preserve the intent of an explicit reset operation).
 
 ### R-8 (zero existing regressions, hard gate)
-- **AC-20** [unit/integration]: When running `cargo test -p noa-app`, all existing test functions under `theme_settings::tests` and `app::input_ops::theme_settings::commit_theme_settings_tests` (981 lines' worth) pass with no changes to their assertion bodies.
+- AC-20 [unit/integration]: When running `cargo test -p noa-app`, all existing test functions under `theme_settings::tests` and `app::input_ops::theme_settings::commit_theme_settings_tests` (981 lines' worth) pass with no changes to their assertion bodies.
 
 ### R-9 (unlock 4 C-safe keys)
-- **AC-21** [unit]: For each of the 4 new rows, confirm the `RowDraft` variant, `is_live() == false`, and that `commit_updates()` maps to the corresponding config key (`scrollback-limit`/`cursor-style-blink`/`minimum-contrast`/`macos-option-as-alt`).
-- **AC-22** [unit]: `SettingsRowKind::COUNT == 20`, and the existing `SettingsRowKind::ALL[i]` invariant (matching `rows[i]`'s draft variant) holds for all 20 rows.
+- AC-21 [unit]: For each of the 4 new rows, confirm the `RowDraft` variant, `is_live() == false`, and that `commit_updates()` maps to the corresponding config key (`scrollback-limit`/`cursor-style-blink`/`minimum-contrast`/`macos-option-as-alt`).
+- AC-22 [unit]: `SettingsRowKind::COUNT == 20`, and the existing `SettingsRowKind::ALL[i]` invariant (matching `rows[i]`'s draft variant) holds for all 20 rows.
 
 ### R-10 (regression protection for selected-row contrast)
-- **AC-23** [unit]: For `OverlayColors` derived from an existing test fixture theme (e.g., "3024 Day"), verify that the WCAG relative-luminance contrast ratios of `selected_bg` vs `surface_fg` and `accent` vs `surface_bg` both meet or exceed the defined minimum floor.
+- AC-23 [unit]: For `OverlayColors` derived from an existing test fixture theme (e.g., "3024 Day"), verify that the WCAG relative-luminance contrast ratios of `selected_bg` vs `surface_fg` and `accent` vs `surface_bg` both meet or exceed the defined minimum floor.
 
 ### NFR
-- **AC-24 (NFR-1)** [unit]: Same as AC-9 (direct proof that no allocation occurs).
-- **AC-25 (NFR-2)** [code-review]: Confirm via code review that settings-row fuzzy-search recomputation is triggered only by text-input events (the same discipline as the existing `refilter_and_mark`), and that no per-frame recompute path exists while idle.
-- **AC-26 (NFR-3)** [code-review]: Confirm that none of the diffs for R-1/R-3/R-6/R-7/R-9 add any new config-write function other than `noa_config::write_config_updates`.
+- AC-24 (NFR-1) [unit]: Same as AC-9 (direct proof that no allocation occurs).
+- AC-25 (NFR-2) [code-review]: Confirm via code review that settings-row fuzzy-search recomputation is triggered only by text-input events (the same discipline as the existing `refilter_and_mark`), and that no per-frame recompute path exists while idle.
+- AC-26 (NFR-3) [code-review]: Confirm that none of the diffs for R-1/R-3/R-6/R-7/R-9 add any new config-write function other than `noa_config::write_config_updates`.
 
 ### Traceability
 
@@ -282,58 +282,57 @@ L4:
 
 ## Meta
 
-- **status:** draft (spec body pending sign-off. magi verdict scope is finalized and not to be re-litigated)
-- **version:** 1.0
-- **authored by:** Accord agent (including code audit, 2026-07-11). L3 is a refinement pass only — a formal Three Amigos review (product/dev/QA) has not been performed — a human review is recommended before implementation begins.
-- **reviews:** none performed
-- **upstream lock:** `theme-settings-ui.md` (locked) — this spec increments on top of it and does not change upstream's R/AC/L2 decisions.
-- **next:** parallel design by atlas + vision (per the magi verdict's "Next" instruction). Both agents should reference this spec's L2 (particularly R-4's Arc design and R-5's search state machine) as the starting point for implementation design.
+- status: draft (spec body pending sign-off. magi verdict scope is finalized and not to be re-litigated)
+- version: 1.0
+- authored by: Accord agent (including code audit, 2026-07-11). L3 is a refinement pass only — a formal Three Amigos review (product/dev/QA) has not been performed — a human review is recommended before implementation begins.
+- reviews: none performed
+- upstream lock: `theme-settings-ui.md` (locked) — this spec increments on top of it and does not change upstream's R/AC/L2 decisions.
+- next: parallel design by atlas + vision (per the magi verdict's "Next" instruction). Both agents should reference this spec's L2 (particularly R-4's Arc design and R-5's search state machine) as the starting point for implementation design.
 
 ## Open Questions / Deferred Decisions
 
 - The design for eventually making one of R-9's 4 rows live (particularly `cursor-style-blink`), and how to integrate it with the existing `apply_live_cursor_style`'s `blinking` argument.
-- Index stability when exiting R-5's search (pre-search row vs. relative position within filtered results).
-- R-1's final display copy (only the meaning is fixed by this spec; the copy is reviewed at implementation time).
+- ~~Index stability when exiting R-5's search~~ and ~~R-1's final display copy~~: duplicates of the "Edge cases / unverified items" entries; both resolved by Addendum B.
 - How R-6's description coexists with the existing "card min-3 row-count shrink" constraint (see the `theme-settings-ui spec` memory), and the adjustment range for `THEME_SETTINGS_ROWS`/`THEME_LIST_ROWS`.
 
 ---
 
 ## Addendum A — Tech design (Atlas ADR-0001, binding)
 
-- **R-4 (per-frame clone)**: `Arc<ThemeSettings>` + `Arc::make_mut` CONFIRMED — strictly better than status quo.
+- R-4 (per-frame clone): `Arc<ThemeSettings>` + `Arc::make_mut` CONFIRMED — strictly better than status quo.
   - `render.rs:48` `session.state.clone()` → `Arc::clone`. wgpu path unchanged (deref coercion); macOS sync path: `(ts.as_ref(), r)` one-token change.
   - 9 mutation sites in `app/input_ops/theme_settings.rs` (move_up/down, backspace, push_text, adjust, toggle_section, revert, commit, +poll path) go through `Arc::make_mut`.
   - CoW fires effectively never: render's Arc clone is frame-local (dropped at frame end); mutations see refcount==1.
-  - **New invariant (code-review gate)**: the render path must NEVER store its Arc clone back into `self` across event-loop turns — that would silently re-enable deep copies via make_mut forks. AC-9 (ptr_eq) covers only the happy path.
+  - New invariant (code-review gate): the render path must NEVER store its Arc clone back into `self` across event-loop turns — that would silently re-enable deep copies via make_mut forks. AC-9 (ptr_eq) covers only the happy path.
   - Rejected: per-field Arc (whack-a-mole, spine still cloned), thin snapshot type (wgpu windowing needs full state — `render.rs:439`).
-- **R-5 (search)**: modal sub-state — `settings_search_active: bool` + `settings_filter: String` + `settings_highlight` (symmetric with ThemePicker's filtered/highlighted). In-progress FontSize digits / BackgroundImage text buffers are DISCARDED on search enter+exit via `clear_row_input_state()` (safe: drafts already committed per keystroke). Exit leaves selection on the highlighted row. Empty query = all rows in ALL order; 0 matches = ↑↓ no-op (same guard pattern as `state.rs:367`). Tab toggles search only when `section == SettingsRows`.
-- **R-9 (4 new keys)**: use a **6-point set** per key: ALL entry / label / is_live / RowDraft variant / RowEffect+apply path / restart_reason classification. New 4 keys have no runtime-apply → `RestartReason::CommitOnly`; cursor-style-blink is persist-only. COUNT is type-enforced (`[SettingsRow; COUNT]` + open()'s array literal); zero existing tests assume 16.
+- R-5 (search): modal sub-state — `settings_search_active: bool` + `settings_filter: String` + `settings_highlight` (symmetric with ThemePicker's filtered/highlighted). In-progress FontSize digits / BackgroundImage text buffers are DISCARDED on search enter+exit via `clear_row_input_state()` (safe: drafts already committed per keystroke). Exit leaves selection on the highlighted row. Empty query = all rows in ALL order; 0 matches = ↑↓ no-op (same guard pattern as `state.rs:367`). Tab toggles search only when `section == SettingsRows`.
+- R-9 (4 new keys): use a **6-point set** per key: ALL entry / label / is_live / RowDraft variant / RowEffect+apply path / restart_reason classification. New 4 keys have no runtime-apply → `RestartReason::CommitOnly`; cursor-style-blink is persist-only. COUNT is type-enforced (`[SettingsRow; COUNT]` + open()'s array literal); zero existing tests assume 16.
 
 ## Addendum B — UX design (Vision, binding)
 
-- **Search row**: below the section header (`settings_top` slot), hidden entirely when inactive; active row = mono 12pt muted `/{query}` (byte-identical convention to Theme filter). `needed()` unconditionally adds `description_h(19)`, plus `16` when search active.
-- **Badges**: label column slack — label w 220→170; badge x=196 w=44 right-aligned 9.5pt semibold. `LIVE` (accent) for `is_live()==true` rows; `ON LAUNCH` (muted) for the rest. Never depends on `touched`. Do NOT use "●" (semantic collision with section-focus glyph).
-- **RestartReason display**: `None` → nothing; `CommitOnly` → `(restart to apply)` (existing string); `OpaqueStartup` → `(opaque window — restart to preview)`.
-- **Descriptions**: fixed one-line slot directly above the footer (12pt regular muted); never positioned under the selected row. 16 static strings per Vision's table (SettingsRowKind::description()).
-- **Keys**: `Tab` toggles search (SettingsRows only; Theme mode keeps no-op). `Enter` in search = confirm highlighted row + exit search; `Tab` again = exit restoring pre-search selection; `Esc` unchanged (whole-overlay cancel, never search-only). Reset = bare `Delete` (NamedKey::Delete; rejected: `r` collides with text entry, Backspace-hold needs a new primitive, cmd+Delete breaks bare-key vocabulary).
-- **Footer hint**: `↑↓ navigate   ←→ adjust   Tab search   Delete reset   Esc cancel   Enter save`.
-- **Empty state**: `No settings match "{query}"` centered in the list area (muted 12.5pt).
-- **wgpu fallback row format**: `{badge:<10}{label:<22}{value}{reason}` — badge words identical to AppKit. Search/description/footer lines mirror AppKit content.
+- Search row: below the section header (`settings_top` slot), hidden entirely when inactive; active row = mono 12pt muted `/{query}` (byte-identical convention to Theme filter). `needed()` unconditionally adds `description_h(19)`, plus `16` when search active.
+- Badges: label column slack — label w 220→170; badge x=196 w=44 right-aligned 9.5pt semibold. `LIVE` (accent) for `is_live()==true` rows; `ON LAUNCH` (muted) for the rest. Never depends on `touched`. Do NOT use "●" (semantic collision with section-focus glyph).
+- RestartReason display: `None` → nothing; `CommitOnly` → `(restart to apply)` (existing string); `OpaqueStartup` → `(opaque window — restart to preview)`.
+- Descriptions: fixed one-line slot directly above the footer (12pt regular muted); never positioned under the selected row. 16 static strings per Vision's table (SettingsRowKind::description()).
+- Keys: `Tab` toggles search (SettingsRows only; Theme mode keeps no-op). `Enter` in search = confirm highlighted row + exit search; `Tab` again = exit restoring pre-search selection; `Esc` unchanged (whole-overlay cancel, never search-only). Reset = bare `Delete` (NamedKey::Delete; rejected: `r` collides with text entry, Backspace-hold needs a new primitive, cmd+Delete breaks bare-key vocabulary).
+- Footer hint: `↑↓ navigate   ←→ adjust   Tab search   Delete reset   Esc cancel   Enter save`.
+- Empty state: `No settings match "{query}"` centered in the list area (muted 12.5pt).
+- wgpu fallback row format: `{badge:<10}{label:<22}{value}{reason}` — badge words identical to AppKit. Search/description/footer lines mirror AppKit content.
 - Implementation-time recommendation (non-mandatory): brief highlight feedback on Reset (reuse tint_layer pattern).
 
 ## Addendum C — Risk-Gate conditions (binding, incorporated before implementation)
 
 From Ripple (Conditional-Go conditions):
-- **C-1**: R-4's file list additionally includes `app/timers.rs:490-501` (`tick_theme_settings_debounce` calls `poll_font_size` — the 9th mutation site; 8 are in `app/input_ops/theme_settings.rs`). `macos_overlay/sync.rs` needs no change (deref).
-- **C-2**: R-1/R-8 amendment — `restart_note(&self, row) -> bool` is KEPT as a thin compatibility wrapper (`self.restart_reason(row) != RestartReason::None`); the 28 existing test call sites in `tests.rs` stay untouched. Only new code (model.rs, palette.rs, appkit.rs) calls the new `restart_reason(&self, row) -> RestartReason`.
+- C-1: R-4's file list additionally includes `app/timers.rs:490-501` (`tick_theme_settings_debounce` calls `poll_font_size` — the 9th mutation site; 8 are in `app/input_ops/theme_settings.rs`). `macos_overlay/sync.rs` needs no change (deref).
+- C-2: R-1/R-8 amendment — `restart_note(&self, row) -> bool` is KEPT as a thin compatibility wrapper (`self.restart_reason(row) != RestartReason::None`); the 28 existing test call sites in `tests.rs` stay untouched. Only new code (model.rs, palette.rs, appkit.rs) calls the new `restart_reason(&self, row) -> RestartReason`.
 
 From Echo (adopted design refinements):
-- **C-3** (MAJOR-1): while search is active, the footer hint switches to a search-specific string (e.g. `Enter confirm row   Tab exit search   Esc cancel`) — Enter's row-confirm (vs save) meaning must be visible in the moment.
-- **C-4** (MAJOR-2): Reset accepts BOTH `NamedKey::Delete` (forward delete) and `Cmd+Backspace` (laptop-reachable alias; bare Backspace stays text-delete). Footer text stays `Delete reset`.
-- **C-5** (MAJOR-3): the brief Reset highlight feedback (tint_layer pattern) is MANDATORY, not optional — it is the only misfire detection cue.
-- **C-6** (MODERATE-4): the badge derives from *effective* liveness: a live-class row downgraded by `RestartReason::OpaqueStartup` shows `ON LAUNCH` (muted) for that session, not `LIVE`. Zero-lie display is per-session truth.
-- **C-7** (MODERATE-5, accepted deviation): Settings search row stays hidden when inactive (differs from Theme's always-visible filter row) — accepted for vertical-budget reasons; revisit only if user feedback contradicts.
-- **C-8** (MINOR-6): visual-review checklist item: with a selected row, at most badge + reason + description + footer are simultaneously relevant — reviewer confirms this reads as layered, not cluttered.
+- C-3 (MAJOR-1): while search is active, the footer hint switches to a search-specific string (e.g. `Enter confirm row   Tab exit search   Esc cancel`) — Enter's row-confirm (vs save) meaning must be visible in the moment.
+- C-4 (MAJOR-2): Reset accepts BOTH `NamedKey::Delete` (forward delete) and `Cmd+Backspace` (laptop-reachable alias; bare Backspace stays text-delete). Footer text stays `Delete reset`.
+- C-5 (MAJOR-3): the brief Reset highlight feedback (tint_layer pattern) is MANDATORY, not optional — it is the only misfire detection cue.
+- C-6 (MODERATE-4): the badge derives from *effective* liveness: a live-class row downgraded by `RestartReason::OpaqueStartup` shows `ON LAUNCH` (muted) for that session, not `LIVE`. Zero-lie display is per-session truth.
+- C-7 (MODERATE-5, accepted deviation): Settings search row stays hidden when inactive (differs from Theme's always-visible filter row) — accepted for vertical-budget reasons; revisit only if user feedback contradicts.
+- C-8 (MINOR-6): visual-review checklist item: with a selected row, at most badge + reason + description + footer are simultaneously relevant — reviewer confirms this reads as layered, not cluttered.
 
 ## Addendum D — Gate aggregate: FM-01 spec correction + orbit contract clauses (binding)
 

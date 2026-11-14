@@ -8,7 +8,7 @@ Restoring the layout but not the output is a promise the layout makes and the
 contents break, so the two are wired together deliberately: a pane restored
 with no record shows a one-line notice saying its output was not saved and
 naming the key that would change that. Contents are opt-in through the
-separate `scrollback-persist` key — see
+separate `scrollback-persist` key; see
 [`scrollback-persistence.md`](scrollback-persistence.md), which also owns the
 `scrollback` field this document's leaf schema carries.
 
@@ -29,14 +29,15 @@ Surfaced by `+show-config` and accepted by the Ghostty config importer
 
 `<data-dir>/noa/session.json` (`noa-config::session_state_path`); on macOS
 `<data-dir>` is `~/Library/Application Support`. Written atomically (temp file +
-rename). A versioned, hand-written JSON document (`SESSION_VERSION = 3`; the
+rename). A versioned, hand-written JSON document (`SESSION_VERSION = 4`; the
 crate has no serde, matching the hand-written config parser). Version 2 added
-per-leaf `remote` metadata, version 3 the per-leaf `scrollback` snapshot key.
+per-leaf `remote` metadata, version 3 the per-leaf `scrollback` snapshot key, version 4 the `floats`
+arrays (floating panes) on windows, tabs and leaves, omitted from the example.
 Schema:
 
 ```json
 {
-  "version": 1,
+  "version": 4,
   "focused_window": 0,
   "windows": [
     {
@@ -67,14 +68,14 @@ Schema:
   read: this file is user-writable and the key is interpolated into a path.
 
 A missing, unreadable, malformed, or version-mismatched file parses to "no
-session" — startup is **never** blocked by session state.
+session"; startup is **never** blocked by session state.
 
 ## Save triggers
 
 `persist_session()` writes the live topology on every structural change (new
 tab/window, close tab, split, close pane) and on clean quit (`exiting`). It is a
 no-op while restoring, when `window-save-state = never`, and **when no windows
-are live** — the last case deliberately leaves the previously written file
+are live**; the last case deliberately leaves the previously written file
 intact, so the close-last-window path still restores that final window next
 launch, and a crash restores the most recent structural state.
 

@@ -1,4 +1,4 @@
-# noa-parity — screen-dump parity harness
+# noa-parity: screen-dump parity harness
 
 Fixture-based regression tests for the fidelity core (`noa-vt` + `noa-grid`).
 Each fixture feeds a raw byte stream through the real parse→state pipeline
@@ -31,17 +31,17 @@ A
 Autowrap boundary: the 11th character resolves the pending wrap ...
 ```
 
-- `## cols:` / `## rows:` — grid size (required, > 0).
-- `## mode:` — `text` or `attrs` (see dump formats below).
-- `## input:` — the bytes fed to the terminal. Each line is unescaped and
+- `## cols:` / `## rows:` set the grid size (required, > 0).
+- `## mode:` is `text` or `attrs` (see dump formats below).
+- `## input:` holds the bytes fed to the terminal. Each line is unescaped and
   concatenated; **line-end newlines are never part of the input** (write `\r`
   `\n` explicitly). Escapes: `\e` (ESC), `\r`, `\n`, `\t`, `\\`, `\xNN` (one
   raw byte from two hex digits). Everything else is literal UTF-8, so CJK and
   other multibyte text goes in directly.
-- `## expect:` — the expected dump, verbatim. Trailing blank lines are
+- `## expect:` is the expected dump, verbatim. Trailing blank lines are
   ignored (both dump modes end with the `# cursor:` line). Dump lines must
-  not start with `## ` — that prefix is reserved for section markers.
-- `## why:` — required free text: which xterm/Ghostty behavior the fixture
+  not start with `## `, which is reserved for section markers.
+- `## why:` is required free text: which xterm/Ghostty behavior the fixture
   pins, and any known noa gap the expectation deliberately records.
 
 ## Dump formats
@@ -52,8 +52,8 @@ One line per grid row of the **active** screen (primary or alt), top to
 bottom:
 
 - trailing blank cells are trimmed from each line;
-- a wide (CJK) cell prints its scalar once — the trailing spacer cell is
-  skipped;
+- a wide (CJK) cell prints its scalar once (the trailing spacer cell is
+  skipped);
 - combining marks are emitted attached to their base cell.
 
 The dump ends with a cursor line (0-based row/column):
@@ -73,18 +73,18 @@ and is never dumped):
 <row>: [<x0>-<x1>] "<text>" fg=<color> bg=<color> ul=<color> attrs=<flag+flag>
 ```
 
-- `<row>`, `<x0>-<x1>` — 0-based row and inclusive column range.
-- `"<text>"` — the run's visible text (`\` and `"` are backslash-escaped).
+- `<row>`, `<x0>-<x1>`: 0-based row and inclusive column range.
+- `"<text>"`: the run's visible text (`\` and `"` are backslash-escaped).
   Wide cells fold lead + spacer into one run, so a range wider than the text
   is how the dump encodes wideness (e.g. a double-width CJK glyph such as `[0-1] "漢"`).
-- `fg=` / `bg=` — omitted when default; palette colors as the bare index
+- `fg=` / `bg=`: omitted when default; palette colors as the bare index
   (`fg=196`), truecolor as `#rrggbb`.
-- `ul=` — underline color, omitted when unset.
-- `attrs=` — omitted when empty; `+`-joined flags: `bold faint italic
+- `ul=`: underline color, omitted when unset.
+- `attrs=`: omitted when empty; `+`-joined flags: `bold faint italic
   underline blink inverse invisible strike overline double-underline
   curly-underline dotted-underline dashed-underline`.
 
-Blank cells carrying only a background (BCE) are dumped — that is the point.
+Blank cells carrying only a background (BCE) are dumped: that is the point.
 The same `# cursor:` line terminates the dump.
 
 ## Bless workflow
@@ -94,19 +94,19 @@ The same `# cursor:` line terminates the dump.
 2. `NOA_PARITY_BLESS=1 cargo test -p noa-parity` fills in the expect section
    (only that section is rewritten; every other byte is preserved).
 3. **Review the blessed dump line by line against xterm/Ghostty semantics**
-   before committing — bless records what noa *does*, not what is *correct*.
+   before committing: bless records what noa *does*, not what is *correct*.
    If noa is known-divergent, keep the fixture and say so in `## why:` so the
    future fix shows up as a deliberate re-bless.
 
 ## Future: Ghostty oracle, esctest2, vttest
 
-- **Ghostty oracle** — replay `## input:` into a headless Ghostty (or xterm
+- Ghostty oracle: replay `## input:` into a headless Ghostty (or xterm
   via a pty + screen scrape) and diff its dump against `## expect:` instead
-  of trusting the blessed value. The runner is already the right seam:
-  `run_fixture_with_mode()` is pure bytes-in/dump-out, so an oracle is just a
+  of trusting the blessed value. The runner is the seam:
+  `run_fixture_with_mode()` is pure bytes-in/dump-out, so an oracle is a
   second implementation of the same signature.
-- **esctest2** — its per-sequence assertions map onto small fixtures;
+- esctest2: its per-sequence assertions map onto small fixtures;
   a converter can emit this format directly.
-- **vttest** — interactive menus don't convert directly, but captured
+- vttest: interactive menus don't convert directly, but captured
   byte transcripts of individual vttest screens can be checked in as
   fixtures once scraped.

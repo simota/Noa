@@ -1,20 +1,18 @@
 # Noa on Linux
 
 Noa is macOS-first, but it also builds and runs on Linux under X11 and Wayland.
-This guide covers building, installing, desktop integration, Linux default
-keybindings, and how Linux differs from macOS. See
-[CONFIGURATION.md](CONFIGURATION.md) for config keys and
+See [CONFIGURATION.md](CONFIGURATION.md) for config keys and
 [KEYBINDINGS.md](KEYBINDINGS.md) for action names.
 
 ## Requirements
 
-- **Display server**: Wayland or X11. winit uses Wayland when
+- Display server: Wayland or X11. winit uses Wayland when
   `WAYLAND_DISPLAY` is set and falls back to X11 otherwise.
-- **GPU**: a Vulkan driver (Mesa or a vendor driver), or OpenGL ES as a
+- GPU: a Vulkan driver (Mesa or a vendor driver), or OpenGL ES as a
   fallback.
-- **Runtime libraries**: X11/Wayland and `libxkbcommon` are loaded
+- Runtime libraries: X11/Wayland and `libxkbcommon` are loaded
   dynamically.
-- **Optional tools** (each feature degrades silently when its tool is missing):
+- Optional tools (each feature degrades silently when its tool is missing):
 
   | Tool | Used for |
   |---|---|
@@ -71,27 +69,27 @@ The packaging assets live in `dist/linux/`.
 
 ## Desktop integration
 
-- **App id**: the Wayland app id and the X11 `WM_CLASS` are `com.simota.noa`,
+- App id: the Wayland app id and the X11 `WM_CLASS` are `com.simota.noa`,
   matching the desktop entry's `StartupWMClass`, so docks and task switchers
   group Noa windows under its icon.
-- **Running a command**: `Noa -e <command> [args...]` runs a command instead of
+- Running a command: `Noa -e <command> [args...]` runs a command instead of
   the shell. The desktop entry declares `X-TerminalArgExec=-e` for launchers
   that open programs in a terminal.
-- **Clipboard**: `ctrl+shift+c` / `ctrl+shift+v` use the CLIPBOARD selection.
+- Clipboard: `ctrl+shift+c` / `ctrl+shift+v` use the CLIPBOARD selection.
   The PRIMARY selection is supported: `copy-on-select` (`primary` by
   default) fills it, and
   middle-click pastes it.
-- **Links and files**: Ctrl-click a URL, an OSC 8 hyperlink, or a file path to
+- Links and files: Ctrl-click a URL, an OSC 8 hyperlink, or a file path to
   open it (with `xdg-open`, or the configured editor for files), as in
   Ghostty's GTK build.
-- **Notifications and bell**: desktop notifications go through `notify-send`.
+- Notifications and bell: desktop notifications go through `notify-send`.
   The bell plays the sound theme's `bell` event through `canberra-gtk-play` and
   also marks the window as urgent.
-- **Fonts**: fonts come from fontconfig. If `font-family` is unset, Noa uses
+- Fonts: fonts come from fontconfig. If `font-family` is unset, Noa uses
   the first installed of JetBrains Mono, DejaVu Sans Mono, Noto Sans Mono,
   Ubuntu Mono, and Liberation Mono, then the generic `monospace` alias.
   Fontconfig fallback covers CJK, emoji, and symbols.
-- **Config**: Noa reads `$XDG_CONFIG_HOME/noa/config`, or
+- Config: Noa reads `$XDG_CONFIG_HOME/noa/config`, or
   `~/.config/noa/config` when `XDG_CONFIG_HOME` is unset.
 
 ## Tabs and the context menu
@@ -99,10 +97,10 @@ The packaging assets live in `dist/linux/`.
 winit has no native tab or popup-menu API off macOS, so the renderer draws both
 inside the window:
 
-- **Tabs**: New Tab (`ctrl+shift+t`) adds a tab to the current window rather
+- Tabs: New Tab (`ctrl+shift+t`) adds a tab to the current window rather
   than opening a new one. A tab bar appears once a window has two or more tabs.
   Click a tab to select it, or click its close button to close it.
-- **Right-click menu**: right-click a pane to open it. Its items are:
+- Right-click menu: right-click a pane to open it. Its items are:
   - Copy, Paste, Clear
   - Add Pane Left/Right/Up/Down, Equalize Splits, Toggle Split Zoom
   - Auto Approve
@@ -118,8 +116,8 @@ inside the window:
 
 Linux follows Ghostty's GTK defaults:
 
-- App commands use **Ctrl+Shift**, so plain Ctrl chords stay with the shell.
-- Super is mostly left to the desktop; only split resizing uses it.
+- App commands use Ctrl+Shift, so plain Ctrl chords stay with the shell.
+- Super is mostly left to the desktop; only split resizing and equalizing use it.
 
 Every binding can be changed with `keybind = …` (see
 [KEYBINDINGS.md](KEYBINDINGS.md)).
@@ -141,6 +139,7 @@ Every binding can be changed with `keybind = …` (see
 | `ctrl+shift+enter` | Toggle split zoom |
 | `ctrl+enter` | Toggle fullscreen |
 | `ctrl+shift+f` / `ctrl+shift+g` / `ctrl+shift+h` | Find / find next / find previous |
+| `shift+arrow` | Enter copy mode and extend the selection |
 | `shift+pageup` / `shift+pagedown`, `shift+home` / `shift+end` | Scroll by page / to top or bottom |
 | `ctrl+shift+arrowup` / `ctrl+shift+arrowdown` | Jump to previous / next prompt |
 | `ctrl+=` / `ctrl+-` / `ctrl+0` | Font size up / down / reset |
@@ -148,9 +147,11 @@ Every binding can be changed with `keybind = …` (see
 | `ctrl+shift+s` | Sidebar |
 | `ctrl+shift+l` | Session overview (`ctrl+shift+o` is Split Right here) |
 | `ctrl+shift+m` | Send selection to pane |
-| `ctrl+shift+j` | Next notification |
+| `ctrl+shift+j` | Next unread notification |
 | `ctrl+shift+d` | Scratch terminal (`ctrl+shift+t` is New Tab here) |
 | `ctrl+shift+b` | Quick terminal (only while a Noa window is focused) |
+| `ctrl+shift+y` | New floating pane |
+| `ctrl+shift+i` | Move focus between the last floating pane and the split pane |
 | `ctrl+,` / `ctrl+shift+,` | Preferences / reload config |
 
 ## Differences from macOS
@@ -177,18 +178,18 @@ Every binding can be changed with `keybind = …` (see
 
 ## Troubleshooting
 
-- **Logs**: run from a terminal with `RUST_LOG=info Noa` (or `debug`). Noa logs
+- Logs: run from a terminal with `RUST_LOG=info Noa` (or `debug`). Noa logs
   through `env_logger`.
-- **Window does not appear / GPU errors**: check that a Vulkan driver is
+- Window does not appear / GPU errors: check that a Vulkan driver is
   installed (`vulkaninfo --summary` from `vulkan-tools`). Without one, Noa
   falls back to OpenGL ES.
-- **Forcing X11 on a Wayland session**: `env -u WAYLAND_DISPLAY Noa` runs Noa
+- Forcing X11 on a Wayland session: `env -u WAYLAND_DISPLAY Noa` runs Noa
   through XWayland.
-- **The shell exits right away**: run `cargo run -p noa-pty --example probe` to
+- The shell exits right away: run `cargo run -p noa-pty --example probe` to
   check pty and shell startup.
-- **The launcher entry does nothing**: reinstall with `install.sh` so that
+- The launcher entry does nothing: reinstall with `install.sh` so that
   `Exec=` points at the installed binary. Then check
   `desktop-file-validate ~/.local/share/applications/com.simota.noa.desktop`.
-- **No notifications or bell sound**: install `libnotify-bin` (`notify-send`)
+- No notifications or bell sound: install `libnotify-bin` (`notify-send`)
   and `gnome-session-canberra` or `libcanberra-gtk3-module`
   (`canberra-gtk-play`; the package name varies by distribution).

@@ -10,12 +10,15 @@ fixture-based parity regression harness in `tests/parity`.
 - `crates/noa-vt`: from-scratch ANSI/DEC VT parser and stream dispatch.
 - `crates/noa-grid`: terminal state, cursor, modes, rows, and scrolling.
 - `crates/noa-font`: system font discovery, rasterization, and glyph atlas data.
-- `crates/noa-theme`: vendored Ghostty-compatible theme catalog (574 themes).
+- `crates/noa-theme`: vendored Ghostty-compatible theme catalog (574 Ghostty
+  themes plus `Noa`).
 - `crates/noa-config`: config discovery, parsing, validation, and precedence.
 - `crates/noa-render`: `wgpu` renderer, shaders, snapshots, and theme mapping.
 - `crates/noa-pty`: PTY spawning plus reader/writer threads.
 - `crates/noa-app`: `winit` app loop, input, IO thread, and UI integration.
-- `assets/` and `scripts/`: app icon assets and macOS packaging helpers.
+- `assets/`: app icon, AppleScript dictionary, entitlements, and images.
+- `scripts/`: macOS bundle, Linux package, and release scripts, theme and icon
+  generation, PGO builds, and smoke-test helpers.
 
 Keep dependency boundaries intact: only `noa-app` and `noa-render` should use
 `wgpu`, and only `noa-app` should use `winit`.
@@ -33,7 +36,7 @@ Keep dependency boundaries intact: only `noa-app` and `noa-render` should use
 
 ## Coding Style & Naming Conventions
 
-Use idiomatic Rust with `rustfmt` defaults and 4-space indentation. Name crates
+Format with `rustfmt` defaults (4-space indentation). Name crates
 with the `noa-*` pattern, modules and functions in `snake_case`, and
 types/traits in `UpperCamelCase`. Keep lower-level crates GUI-agnostic. Comments
 should explain terminal semantics, platform constraints, or parity decisions.
@@ -44,7 +47,7 @@ Use Rust's built-in test harness. Place unit tests near the crate module or in
 files such as `crates/noa-vt/src/tests.rs`; use `crates/<name>/tests/` for
 integration checks. Prefer deterministic byte-sequence to
 action/grid assertions for VT and grid behavior. Renderer tests may skip
-gracefully when no GPU adapter is available. Run `cargo test --workspace` before
+when no GPU adapter is available. Run `cargo test --workspace` before
 opening a pull request.
 
 ## Commit & Pull Request Guidelines

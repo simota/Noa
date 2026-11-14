@@ -31,9 +31,9 @@ as terminal input.
 
 ### Success Definition
 
-The app presents a coherent macOS menu experience, routes supported menu and
-Cmd-key commands through the app layer, preserves terminal input behavior, and
-keeps `winit`/native macOS concerns contained in `crates/noa-app`.
+The app routes supported menu and Cmd-key commands through the app layer,
+preserves terminal input behavior, and keeps `winit`/native macOS concerns
+contained in `crates/noa-app`.
 
 ## Reuse And Constraints
 
@@ -69,7 +69,8 @@ keeps `winit`/native macOS concerns contained in `crates/noa-app`.
   primary menu entry point.
 - E. Full Native Cocoa Menu: replace the default menu with a custom native
   macOS menu using Cocoa/AppKit-level integration or a native menu utility
-  crate.
+  crate. Sub-options: E1 via the `muda` crate, E2 via direct
+  `objc2-app-kit`/AppKit.
 
 Selected direction: E1. Full Native Cocoa Menu via `muda`.
 
@@ -113,7 +114,7 @@ than direct `objc2-app-kit` integration.
 
 - The menu bar should identify the app as `noa`.
 - The top-level menu bar should follow standard macOS terminal-app shape:
-  `noa`, `File`, `Edit`, `View`, `Window`, and `Help`.
+  `Noa`, `File`, `Edit`, `View`, `Window`, and `Help`.
 - The first slice should include these user-visible commands:
   - `About noa`
   - `Preferences...`
@@ -311,7 +312,7 @@ Scenario: SC-AC-MACOS-MENUS-008-HP-001 - Cargo and bundle launches both show the
 Scenario: SC-AC-MACOS-MENUS-009-HP-001 - Terminal-style top-level menus are visible
   Given noa is running on macOS
   When the menu bar is visible
-  Then the top-level menu bar includes noa
+  Then the top-level menu bar includes Noa
   And the top-level menu bar includes File
   And the top-level menu bar includes Edit
   And the top-level menu bar includes View

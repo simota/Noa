@@ -26,14 +26,14 @@ microphone permission; packaging does not grant recording permission itself.
 
 ## Settings panel
 
-Open **Settings** with **Cmd+,**. Use **Tab** to search for **File Link Editor**,
-then **Enter** to select the row. Use **Left/Right** to choose **System Default**,
-**VS Code**, **Cursor**, **Zed**, or **Sublime Text**, and **Enter** to save.
-The editor changes on save without restarting Noa. **Escape** cancels changes;
-**Delete** or **Cmd+Backspace** resets to System Default. **Cmd+Z** on the saved
+Open Settings with Cmd+,. Use Tab to search for File Link Editor,
+then Enter to select the row. Use Left/Right to choose System Default,
+VS Code, Cursor, Zed, or Sublime Text, and Enter to save.
+The editor changes on save without restarting Noa. Escape cancels changes;
+Delete or Cmd+Backspace resets to System Default. Cmd+Z on the saved
 settings toast restores the previous editor.
 
-The **Agent Workflows** row opens this built-in guide with **Left/Right**.
+The Agent Workflows row opens this built-in guide with Left/Right.
 Opening it keeps unsaved settings intact. Close the guide and Settings before
 running the prompt/reader commands below from the command palette.
 
@@ -43,19 +43,19 @@ Unread notifications belong to individual panes. Selecting a pane acknowledges
 only that pane. An unselected pane can become unread even while its window is
 focused. Desktop notifications retain their existing window-level suppression.
 
-Use **Cmd+Shift+J**, or **Go to Next Unread Notification** in the command palette,
+Use Cmd+Shift+J, or Go to Next Unread Notification in the command palette,
 to visit unread panes in the current window group. The configurable action is
 `session.next-notification`.
 
 ## Writing a prompt
 
-Open **Compose Prompt** (`agent.compose-prompt`) from the command palette.
+Open Compose Prompt (`agent.compose-prompt`) from the command palette.
 The modeless native editor supports multiline text, Japanese IME, selection,
 undo, and Find. Its title identifies the destination session, branch, and
 directory. Selected terminal text becomes a quoted starting point when there
 is no draft.
 
-**Paste to Pane** uses the existing bracketed paste/protection path and does
+Paste to Pane uses the existing bracketed paste/protection path and does
 not send Enter. If the foreground process changed, reopen the composer to
 review the destination. Confirm an active IME composition before pasting.
 
@@ -70,23 +70,23 @@ keybind = cmd+shift+e=agent.compose-prompt
 
 ## Reading output
 
-Open **Read Output Snapshot** (`terminal.read-output`). It shows the selection,
+Open Read Output Snapshot (`terminal.read-output`). It shows the selection,
 or the retained output tail when nothing is selected, in a read-only native
 view. Snapshots are limited to 1 MiB. Live output cannot move the reader's
 selection or scroll position.
 
 The view supports Find and copying, emphasizes Markdown headings, and uses
-monospace for fenced code. **Copy Next Code Block** selects and copies each
+monospace for fenced code. Copy Next Code Block selects and copies each
 fenced block in order, excluding fences. This is basic text/Markdown styling,
 not a full HTML/Markdown renderer.
 
-New terminal output adds **New output available** to the title. **Return to
-Latest** focuses the source pane at the live tail. Reopen the snapshot to read
+New terminal output adds New output available to the title. Return to
+Latest focuses the source pane at the live tail. Reopen the snapshot to read
 updated output.
 
 ## File navigation and preview
 
-Choose **File Link Editor** in Settings, or configure it directly:
+Choose File Link Editor in Settings, or configure it directly:
 
 ```conf
 file-link-editor = code
@@ -98,7 +98,7 @@ and column as one argument; `code`/`cursor` also receive `--goto`. No shell
 evaluates the path. Directories and failed launches use the default macOS
 handler. `default` preserves ordinary opening without line navigation.
 
-**Cmd+Option+click** previews a detected local path in a monospace panel.
+Cmd+Option+click previews a detected local path in a monospace panel.
 Only regular UTF-8 files are previewed, up to 1 MiB; a worker reads the file.
 Remote-pane paths remain excluded from local opening.
 

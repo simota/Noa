@@ -5,7 +5,7 @@ that Gatekeeper accepts the downloaded `.app` without a prompt. Signing and
 notarization run automatically in the `Release` workflow
 (`.github/workflows/release.yml`) when a `v*` tag is pushed, provided the GitHub
 secrets below are configured. When they are absent (forks, or a repo that has not
-set them up), the workflow falls back to the previous behavior: an ad-hoc
+set them up), the workflow falls back to an ad-hoc
 signature with no notarization.
 
 ## Required GitHub secrets
@@ -21,14 +21,14 @@ signature with no notarization.
 
 ### Producing each value
 
-**`MACOS_SIGN_IDENTITY`** — after installing the certificate locally, list it:
+**`MACOS_SIGN_IDENTITY`**: after installing the certificate locally, list it:
 
 ```bash
 security find-identity -v -p codesigning
 # -> "Developer ID Application: Your Name (TEAMID)"
 ```
 
-**`MACOS_CERTIFICATE_P12`** — in Keychain Access, select the *Developer ID
+**`MACOS_CERTIFICATE_P12`**: in Keychain Access, select the *Developer ID
 Application* certificate together with its private key, export as
 `certificate.p12` (set an export password), then base64-encode it:
 
@@ -38,11 +38,11 @@ base64 -i certificate.p12 | pbcopy   # paste as the secret value
 
 Store the export password as `MACOS_CERTIFICATE_PASSWORD`.
 
-**App Store Connect API key** — in App Store Connect → *Users and Access* →
+**App Store Connect API key**: in App Store Connect → *Users and Access* →
 *Integrations* → *App Store Connect API*, create a key with the *Developer* role
 and download the `AuthKey_XXXXXXXXXX.p8` file (downloadable only once). Record the
 `Key ID` (`APPLE_API_KEY_ID`) and the team's `Issuer ID` (`APPLE_API_ISSUER_ID`).
-Store the key file contents as `APPLE_API_KEY` — either raw:
+Store the key file contents as `APPLE_API_KEY`, either raw:
 
 ```bash
 pbcopy < AuthKey_XXXXXXXXXX.p8

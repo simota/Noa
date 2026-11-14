@@ -6,7 +6,7 @@
 - owner: simota
 - build-path: apex (single unattended run. fallback: feature / orbit)
 
-## L0 — Vision
+## L0: Vision
 
 `noa` keeps an independent pty session per tab/split pane, but there is no way to see across panes what's currently running and how much resource it's consuming. When running many agents (Claude Code/codex, etc.) side by side, a view that lists per-pane running process name, CPU usage, and memory usage is needed to identify runaway/high-load sessions and decide how to triage them.
 
@@ -14,15 +14,15 @@
 - Job: identify a high-load/runaway pane within seconds and get the information needed to decide on a response (kill/cleanup)
 - Success: all live panes' process/CPU/mem can be listed with 1s freshness, and a high-load pane can be identified within seconds
 - Assumption: macOS-first (non-macOS shows all columns as "—" as a degraded fallback)
-- Measurement target: **the foreground process tree** (foreground process group + its descendants) — ratified
+- Measurement target: **the foreground process tree** (foreground process group + its descendants); ratified
 
 ## Reuse / constraints (Lens scan results)
 
 ### Reusable assets
-- `ForegroundProcessProbe` (noa-pty/src/pty.rs:213) — already holds a dup'd fd, is Send, and already polls in the background. Starting point for extending `poll_metrics()`
-- `branch_poll.rs` metadata worker — 1–4s adaptive polling, a probe map per `SessionCardId`. Where the metrics tick gets added
-- `SessionStore` + `SessionDelta` (session_store.rs) — add `SessionDelta::Metrics`, mirroring `Process` (:582)
-- `SessionCard` (session_store.rs:130) — add a metrics field alongside `process`
+- `ForegroundProcessProbe` (noa-pty/src/pty.rs:213): already holds a dup'd fd, is Send, and already polls in the background. Starting point for extending `poll_metrics()`
+- `branch_poll.rs` metadata worker: 1–4s adaptive polling, a probe map per `SessionCardId`. Where the metrics tick gets added
+- `SessionStore` + `SessionDelta` (session_store.rs): add `SessionDelta::Metrics`, mirroring `Process` (:582)
+- `SessionCard` (session_store.rs:130): add a metrics field alongside `process`
 - Sidebar row model/render (sidebar.rs:138, app/sidebar/render.rs)
 - macOS syscall template: tcgetpgrp + proc_name + sysctl(KERN_PROCARGS2) (pty.rs:270-324)
 
@@ -42,13 +42,13 @@
 
 ## Direction decision (CHALLENGE)
 
-- **Adopted: B — dedicated "process monitor" overlay** (sortable table-form modal + jump to pane) — ratified
+- **Adopted: B, dedicated "process monitor" overlay** (sortable table-form modal + jump to pane); ratified
 - Considered but rejected:
-  - A: sidebar extension — cards get overcrowded, no sorting, invisible when sidebar is hidden (the data layer is shared, so this can be added on top later)
-  - C: Tab Overview integration — tiles suit visual confirmation but not numeric comparison/sorting
-  - D: hybrid (B + lightweight A warning) — too much scope for v1. Can be built on top of B's data layer later
+  - A (sidebar extension): cards get overcrowded, no sorting, invisible when sidebar is hidden (the data layer is shared, so this can be added on top later)
+  - C (Tab Overview integration): tiles suit visual confirmation but not numeric comparison/sorting
+  - D (hybrid, B + lightweight A warning): too much scope for v1. Can be built on top of B's data layer later
 
-## SHAPE — proposal (ratified)
+## SHAPE: proposal (ratified)
 
 - Working name: **Process Monitor** overlay
 - A wgpu modal of the same shape as the command palette/theme settings. Lists every live pane across all windows and all tabs, one row per pane, in table form
@@ -56,7 +56,7 @@
 - Operations: ↑↓ to select, Enter to jump, Esc to close. A key cycles the sort column. No destructive operations
 - Collection: only while displayed, fixed 1s interval, branch_poll worker
 
-## L1 — Requirements
+## L1: Requirements
 
 Functional requirements:
 - **FR-1** The process monitor can be opened/closed from a command palette entry (a dedicated keybinding is out of scope)
@@ -70,18 +70,18 @@ Functional requirements:
 
 Non-functional requirements:
 - **NFR-1** Collection happens on the branch_poll worker thread (no io read loop, no UI thread)
-- **NFR-2** Process enumeration happens once per tick and the result is shared across all panes (design target: under 50ms per tick at ~30 panes — a reference figure; the AC only verifies a single enumeration)
+- **NFR-2** Process enumeration happens once per tick and the result is shared across all panes (design target: under 50ms per tick at ~30 panes, a reference figure; the AC only verifies a single enumeration)
 - **NFR-3** Sort/formatting/selection/row-construction pure logic lives in a GUI-independent module and is unit-testable
 - **NFR-4** No new heavyweight dependency (e.g. sysinfo) is added. Follow the existing direct-libc-call convention
 - **NFR-5** winit/wgpu dependencies stay confined to noa-app / noa-render (existing convention)
 
-## L2 — Detail
+## L2: Detail
 
 ### Collection layer (noa-pty + branch_poll)
 - Extend `ForegroundProcessProbe` with `poll_metrics(&mut self, snapshot: &ProcSnapshot) -> Option<PaneMetrics>`
 - **Process snapshot** (once per tick, shared across all panes): enumerate all pids via `proc_listallpids`, and get ppid/pgid/start time for each pid via `proc_pidinfo(PROC_PIDTBSDINFO)` (`proc_bsdinfo`: `pbi_ppid` / `pbi_pgid` / `pbi_start_tvsec`), both already defined in the libc crate
-- **Tree construction**: for the foreground pgid from `tcgetpgrp(fd)`, take all processes with `pbi_pgid == pgid` ∪ their descendants (walking ppid). Must not miss grandchildren reparented to launchd after an intermediate parent exits, nor surviving members after the pgid leader dies
-- **Per-pid measurement**: get `ri_user_time + ri_system_time` (CPU time, mach ticks → ns conversion) and `ri_phys_footprint` (memory) via `proc_pid_rusage(RUSAGE_INFO_V4)`
+- Tree construction: for the foreground pgid from `tcgetpgrp(fd)`, take all processes with `pbi_pgid == pgid` ∪ their descendants (walking ppid). Must not miss grandchildren reparented to launchd after an intermediate parent exits, nor surviving members after the pgid leader dies
+- Per-pid measurement: get `ri_user_time + ri_system_time` (CPU time, mach ticks → ns conversion) and `ri_phys_footprint` (memory) via `proc_pid_rusage(RUSAGE_INFO_V4)`
 - CPU% = (tree-summed CPU time delta from the previous tick) ÷ (elapsed wall time), on a 1-core = 100% basis. The first sample is "—". A pid that disappeared between ticks is treated as 0 and summation continues
 - Elapsed time = anchored at the pgid leader's `pbi_start_tvsec`. If the leader has died, fall back to the oldest process's start time within the group; if none, "—"
 - `PaneMetrics { cpu_permille: Option<u32>, mem_bytes: u64, proc_count: u32, started_at: Option<SystemTime> }`. When unobtainable for a pane, `SessionDelta::Metrics { metrics: None }` (all columns "—")
@@ -95,11 +95,11 @@ Non-functional requirements:
 ### UI layer (noa-app + noa-render)
 - New pure-logic module `crates/noa-app/src/process_monitor.rs`: implements the row model (SessionStore → row list construction), sort state, selection state, and value formatters, GUI-independent
   - Formatters: CPU% as an integer percentage (can exceed 100%), memory in auto-scaled MB/GB, elapsed time as `mm:ss`, `hh:mm:ss` once past one hour
-- Rendering follows the same shape as the command palette/theme settings: add a snapshot type to `noa_render` and draw a wgpu overlay (following the existing modal-addition boilerplate — palette registration, input routing, snapshot, rendering, Esc handling)
+- Rendering follows the same shape as the command palette/theme settings: add a snapshot type to `noa_render` and draw a wgpu overlay (following the existing modal-addition boilerplate: palette registration, input routing, snapshot, rendering, Esc handling)
 - Affiliation column = window/tab title + pane position (reusing existing SessionCard metadata)
 - Jump = reuses the existing sidebar/Overview pane-focus path
 
-## L3 — Acceptance Criteria
+## L3: Acceptance Criteria
 
 | ID | What is verified | Verification method | Requirement |
 |----|---------|---------|---------|
@@ -127,7 +127,7 @@ Non-functional requirements:
 ## Open Questions / Deferred Decisions
 
 - Default assignment of a dedicated keybinding (once the keybind config foundation is in place; v1 is command-palette only)
-- Sidebar high-load warning indicator (option D) — can be built on top of this spec's data layer (`SessionDelta::Metrics`), but requires a decision on switching to always-on collection
+- Sidebar high-load warning indicator (option D): can be built on top of this spec's data layer (`SessionDelta::Metrics`), but requires a decision on switching to always-on collection
 - The NFR-2 50ms target is a design reference figure (not covered by an AC). Consider turning it into a benchmark AC if a real-world issue shows up
 
 ## Quality gate results (2026-07-11)

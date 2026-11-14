@@ -1,12 +1,12 @@
 # Noa Configuration Reference
 
-This document is a reference for the config keys, values, and defaults accepted by the current `noa-config` implementation.
+This reference lists the config keys, values, and defaults accepted by the current `noa-config` implementation.
 See [KEYBINDINGS.md](KEYBINDINGS.md) for the default keybinding table and action names.
 
 ## Load location and format
 
 Noa reads `$XDG_CONFIG_HOME/noa/config` at startup. If `XDG_CONFIG_HOME` is unset, it falls back to
-`~/.config/noa/config`. The old `config.toml` is not read for content — only a migration warning is shown.
+`~/.config/noa/config`. The old `config.toml` is not read for content; only a migration warning is shown.
 
 The format is Ghostty-compatible line-oriented `key = value`. Blank lines and lines starting with `#`
 (after leading whitespace is stripped) are ignored. The entire value can be wrapped in double quotes, but
@@ -24,6 +24,10 @@ theme = "Catppuccin Mocha"
 If the same scalar key appears more than once, the last occurrence wins. `font-family*`,
 `font-feature`, `font-variation*`, and `keybind` are repeatable and accumulate in the order they appear.
 CLI options take precedence over the config file.
+
+| Key | Accepted values | Default | Description |
+|---|---|---|---|
+| `config-file` | path, optionally prefixed with `?` | none | Includes another config file at this point: its keys apply where the include appears. Relative paths resolve against the including file's directory. With the `?` prefix a missing file is skipped silently; otherwise it shows a diagnostic. Repeatable. Include cycles, chains past the depth cap (10), and more than 256 included files are rejected with a diagnostic. Live reload also watches included files |
 
 You can inspect the currently resolved configuration with:
 
@@ -46,7 +50,7 @@ as does `--no-pager`.
 ## Live reload
 
 Noa watches the config file and applies edits at runtime. The idle poll is deliberately slow
-(every **3 seconds** — it is the only wake-up an otherwise fully idle noa would keep forever),
+(every **3 seconds**: it is the only wake-up an otherwise fully idle noa would keep forever),
 and the latency-sensitive flows are expedited instead: the file is re-checked immediately when a
 noa window **gains focus** (the "edited in another app, switched back" flow) and when the
 settings panel **commits or undoes** a change. The one flow that rides the slow interval is
@@ -57,16 +61,15 @@ that matters: briefly refocus the window, or use the settings UI.
 ## Deviations from Ghostty defaults
 
 noa is a fidelity clone, so out-of-the-box behavior differences are kept rare, deliberate, and
-listed here. Each one has a config value that restores Ghostty parity.
+listed here. Each key in the table has a config value that restores Ghostty parity.
 
 | Key | noa default | Ghostty behavior | Why deviate | Restore parity |
 |---|---|---|---|---|
 | `cursor-stop-blinking-after` | `10` (seconds) | No such key — the cursor blinks forever | Intentional, benchmark-/idle-power-motivated: the eternal blink forces a redraw wake-up every 600ms, keeping idle CPU and context-switch rates measurably above terminals that quiesce (kitty stops after 15 idle seconds for the same reason). After 10s with no keyboard/IME input or output on the focused pane, the cursor settles solid and the blink timer disarms | `cursor-stop-blinking-after = 0` |
 | `quick-terminal-screen` | `mouse` | Defaults to `main` | The global hotkey fires while noa is usually *not* the active app; `NSScreen.mainScreen` then degrades to the screen holding noa's existing window — the exact "opens on the wrong screen" bug the key exists to fix. The mouse screen follows where the user is actually looking | `quick-terminal-screen = main` |
 
-Behavioral (non-key) deviation: the config-file **live reload** cadence described above
-(≤3s while noa stays focused, immediate on refocus/settings commit; Ghostty reloads on
-`reload_config` / its own file-watch cadence).
+Behavioral (non-key) deviation: the config-file [live reload](#live-reload) cadence. Ghostty
+reloads on `reload_config` / its own file-watch cadence. No config value changes noa's cadence.
 
 ## Window and session
 
@@ -122,12 +125,13 @@ font-variation = wght=550
 
 | Key | Accepted values | Default | Description |
 |---|---|---|---|
-| `theme` | one bundled theme name | unspecified | Name of a `.conf` file under `crates/noa-theme/vendor/themes/` or `crates/noa-theme/themes/` (Noa's own `Noa` theme), minus the extension. Paired `light:...` / `dark:...` specification is not yet supported |
+| `theme` | one bundled theme name | unspecified | Name of a `.conf` file under `crates/noa-theme/vendor/themes/` or `crates/noa-theme/themes/` (Noa's own `Noa` theme), minus the extension. `light:NAME,dark:NAME` picks one of two themes by the system appearance |
 | `background` | `#RRGGBB` or `RRGGBB` | theme value | Background color override |
 | `foreground` | `#RRGGBB` or `RRGGBB` | theme value | Foreground color override |
 | `cursor-color` | `#RRGGBB` or `RRGGBB` | theme value | Cursor color override |
 | `selection-foreground` | `#RRGGBB` or `RRGGBB` | theme value | Selected text color override |
 | `selection-background` | `#RRGGBB` or `RRGGBB` | theme value | Selected background color override |
+| `palette` | `N=#RRGGBB` (`N` is `0`–`255`) | theme value | Repeatable. Overrides one entry of the 256-color palette on top of the theme |
 | `minimum-contrast` | finite decimal `1.0..=21.0` | `1.0` | Lower bound of the WCAG contrast ratio. `1.0` means no correction |
 | `cursor-style` | `block`, `bar`, `underline` | blinking block | `block_hollow` is recognized but ignored as unsupported |
 | `cursor-style-blink` | `true`, `false` | equivalent to `true` | Cursor blinking. It also blinks when only the shape is specified |
@@ -135,7 +139,7 @@ font-variation = wght=550
 | `ember-idle-after` | integer seconds `0..=86400` | `0` | Opt-in idle companion; `0` disables it. Idle Ember in Settings adjusts it live in 30-second steps. After input and focused-pane output are quiet, Ember fades in at the pane's bottom-right, plays for 4.8 seconds, then rests with an analytic question emote. Every 20 seconds it blinks, bobs, looks around, or re-asks (2.4 seconds each); gestures stop after 10 minutes of resting. Input or output fades it out over 0.30 seconds; output ends the episode. Main windows only, at least 20 columns × 8 rows; hidden during overlays or IME composition. macOS Reduce Motion uses a still pose and opacity-only dismissal, without gestures. Hot reload resets the episode |
 | `background-opacity` | finite decimal | `1.0` | Clamped to `0.0..=1.0`. **Ignored while `glassmorphism` is on any level** (that key installs the level's own opacity — see below) |
 | `background-blur-radius` | `true`, `false`, non-negative integer | `0` | macOS blur. `true` maps to `20`, `false` to `0`; integers are clamped to `0..=64`. **Ignored while `glassmorphism` is on any level** (that key installs `64`, the maximum, at every on-level) |
-| `glassmorphism` | `off`, `1`, `2`, `3`, `4`, `5` (`true`/`false` are accepted for compatibility, as are `on`/`off`/`yes`/`no`/`0`/`1`, case-insensitively — `true`/`on`/`yes`/`1` all mean level `1`) | `off` | noa-specific key. Renders noa's own chrome (session sidebar, tab overview) as translucent frosted panes with a brightened rim instead of opaque ones, matching the native overlays. A 5-step level, not a plain toggle — higher numbers mean *more* transparent. Per level, `background-opacity` / chrome alphas (backdrop/surface/pill): `1` → `0.50` / 0.18·0.16·0.34; `2` → `0.35` / 0.12·0.10·0.26; `3` → `0.20` / 0.07·0.06·0.18; `4` → `0.12` / 0.040·0.034·0.125; `5` → `0.06` / 0.020·0.014·0.085. `background-blur-radius` is `64` (the maximum) at every on-level. As the faces thin out the rim takes over drawing each pane's edge, reaching the foreground color outright at `5` — which is why the ladder stops there. `4` and `5` are panes you read *through* rather than *on*: the text is never faded, but almost nothing else is left. `off` installs the byte-identical opaque chrome palette, so it costs nothing when unused. Any on-level **takes over `background-opacity` and `background-blur-radius`**: frosted chrome over an opaque window has nothing behind it to show through, so those two keys are resolved from the level instead of being honored — configured values are ignored, and a warning names them. Turn `glassmorphism` off to control them yourself. A window created opaque can't become translucent in place, so turning it on in a running opaque session takes full effect on the next launch |
+| `glassmorphism` | `off`, `1`, `2`, `3`, `4`, `5` (`true`/`false` are accepted for compatibility, as are `on`/`off`/`yes`/`no`/`0`/`1`, case-insensitively — `true`/`on`/`yes`/`1` all mean level `1`) | `off` | noa-specific key. Renders noa's own chrome (session sidebar, session overview, titlebar tab bar) as translucent frosted panes with a brightened rim instead of opaque ones, matching the native overlays. A 5-step level, not a plain toggle — higher numbers mean *more* transparent. Per level, `background-opacity` / chrome alphas (backdrop/surface/pill): `1` → `0.50` / 0.18·0.16·0.34; `2` → `0.35` / 0.12·0.10·0.26; `3` → `0.20` / 0.07·0.06·0.18; `4` → `0.12` / 0.040·0.034·0.125; `5` → `0.06` / 0.020·0.014·0.085. `background-blur-radius` is `64` (the maximum) at every on-level. As the faces thin out the rim takes over drawing each pane's edge, reaching the foreground color outright at `5` — which is why the ladder stops there. `4` and `5` are panes you read *through* rather than *on*: the text is never faded, but almost nothing else is left. `off` installs the byte-identical opaque chrome palette, so it costs nothing when unused. Any on-level **takes over `background-opacity` and `background-blur-radius`**: frosted chrome over an opaque window has nothing behind it to show through, so those two keys are resolved from the level instead of being honored — configured values are ignored, and a warning names them. Turn `glassmorphism` off to control them yourself. A window created opaque can't become translucent in place, so turning it on in a running opaque session takes full effect on the next launch |
 
 In a terminal, `noa +list-themes` opens an interactive preview like Ghostty's: the theme list on the left, the selected theme's palette and sample text on the right. `F1` lists its keys, `/` searches, `f` cycles all/dark/light themes, `c` copies the theme name (OSC 52), and `Enter` shows how to apply the theme; there `w` writes `theme = <name>` to `~/.config/noa/auto/theme`, which `config-file = ?auto/theme` in your config picks up. `noa +list-themes --plain`, or piping the output, prints the plain list (one theme per line, annotated light/dark).
 
@@ -213,7 +217,7 @@ client-remote = 127.0.0.1:61771
 client-token-file = ~/.config/noa/remote-server-token
 ```
 
-Copy the server's token into the client token file through an appropriate secure channel; do not commit tokens to source control. `client-token` is convenient for temporary local setups, but stores the secret in plaintext configuration.
+Copy the server's token into the client token file through a secure channel; do not commit tokens to source control. `client-token` is convenient for temporary local setups, but stores the secret in plaintext configuration.
 
 Noa's WebSocket transport does not provide TLS. Before the first connection to a non-loopback `client-remote`, the UI asks you to confirm that the endpoint is on a trusted LAN or behind a protected tunnel. Cancelling the warning opens no socket. When using a tunnel, the network between endpoints is assumed to be protected by the tunnel. A loopback tunnel endpoint cannot be distinguished from a purely local connection, so the warning does not fire in that case.
 
@@ -234,7 +238,7 @@ See [noa-server-protocol.md](api/noa-server-protocol.md) for scope and attach-ch
 | `sidebar-enabled` | `true`, `false` | `false` | Initial sidebar visibility for new windows |
 | `sidebar-width` | finite decimal `200..=600` | `360` | Sidebar width (points) |
 | `sidebar-font-size` | finite decimal `8..=20` | `11.5` | Session sidebar font size (points) |
-| `sidebar-hotkey` | in-app keybind chord, or `none` / `off` / `false` | none | Rebinds the sidebar toggle's in-app chord (default `cmd+shift+s`). **Not** a system-wide hotkey — it only fires while noa is focused. `none` / an empty value keeps the default chord. A chord already used by another binding (e.g. `cmd+t`) is rejected with a diagnostic |
+| `sidebar-hotkey` | in-app keybind chord, or `none` / `off` / `false` | unspecified | Rebinds the sidebar toggle's in-app chord (default `cmd+shift+s`). **Not** a system-wide hotkey — it only fires while noa is focused. `none` / an empty value keeps the default chord. A chord already used by another binding (e.g. `cmd+t`) is rejected with a diagnostic |
 | `sidebar-preview-lines` | integer `0..=20` | `5` | Number of trailing lines shown in a card. `0` means no preview |
 
 See [KEYBINDINGS.md](KEYBINDINGS.md#global-system-hotkeys) for the syntax of global hotkey chords and
@@ -242,7 +246,7 @@ the corresponding keys.
 
 ## Scratch Terminal
 
-A disposable popup terminal, centered on the focused window and spawned in the focused pane's cwd (falling back to noa's own process cwd when none is reported). Distinct from the Quick Terminal above: no animation, no persistence across toggles, single instance, and no global hotkey. It closes on: re-pressing the toggle chord, the popup losing focus, the shell exiting, `cmd+w` inside the popup, a config reload, or app quit — always tearing down the pty immediately, with no confirmation.
+A disposable popup terminal, centered on the focused window and spawned in the focused pane's cwd (falling back to noa's own process cwd when none is reported). Distinct from the Quick Terminal above: no animation, no persistence across toggles, single instance, and no global hotkey. It closes on: re-pressing the toggle chord, the popup losing focus, the shell exiting, `cmd+w` inside the popup, a config reload, or app quit, always tearing down the pty immediately, with no confirmation.
 
 | Key | Accepted values | Default | Description |
 |---|---|---|---|
@@ -296,17 +300,10 @@ command-palette-entry = title:Split Right,action:new_split:right
 command-palette-entry = title:"Focus Left",description:"Focus the split to the left, if any.",action:goto_split:left
 ```
 
-## Recognized but unsupported keys
-
-| Key | Current behavior |
-|---|---|
-| `palette` | Shows a diagnostic and is ignored. Palette override is not implemented |
-| `config-file` | Shows a diagnostic and is ignored. Config include is not implemented |
-
 Unknown keys and invalid values show a diagnostic, and that override is not applied.
 
 ## Importing a Ghostty config
 
 `noa --import-ghostty-config` reads Ghostty's candidate config and copies the lines that Noa recognizes
 as importable into `$XDG_CONFIG_HOME/noa/config`. If the target file already exists, it is not overwritten.
-Unsupported lines are not removed — they are commented out with `# `.
+Unsupported lines are not removed; they are commented out with `# `.

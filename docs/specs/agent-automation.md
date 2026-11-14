@@ -10,19 +10,19 @@
 | depth | standard |
 | build path | one-shot autonomous build |
 
-## L0 — Vision
-- **Problem** — エージェントが Noa を外から操作して出力を読み返すには、今は noa-server（`noa.getText`/`sendText`/`split`、`docs/specs/noa-server.md:70-76`）を使うしかない。noa-server は既定で無効で、使うには起動とトークンの払い出しが必要になる。設定なしで使える AppleScript は Ghostty 1.3 の辞書より狭く、出力を読めず、実際のキーイベントも送れない（`input text` は paste 扱い）。AX ツリーには端末ペインが一切出てこないので、AX を読むアシスタントやエージェントからは Noa の中身が見えない。（FRAME 改訂 2026-10-17：反証パネルの指摘を受けて書き直し、ratified）
-- **Audience** — (a) shell から `osascript` で Noa を操作するエージェント。設定もトークンも使わない。(b) macOS の AX ツリーを読むアシスタントや、AX ベースのエージェントフレームワーク。スクリーンショットと座標操作だけで動く computer use クライアントには、AX は何も足さない（Anthropic の computer use ツールの公開仕様）。（elicited 2026-10-17、改訂 ratified）
-- **Job to be done** — 設定なしで、エージェントが Noa の terminal を特定し、キーやテキストを送り、その結果をテキストとして読み返すこと。
-- **Success definition** — 1 本の osascript で「split → input text → contents 読み取り」が完走すること（AC-010）。AX を読むクライアントから各ペインの画面テキストと位置が取れること（AC-019/020）。Ghostty.sdef の用語がすべて Noa の辞書にあること（AC-028）。
-- **Existing assets & constraints**（Reuse scan 2026-10-17、HEAD 25577d2）
+## L0：Vision
+- Problem：エージェントが Noa を外から操作して出力を読み返すには、今は noa-server（`noa.getText`/`sendText`/`split`、`docs/specs/noa-server.md:70-76`）を使うしかない。noa-server は既定で無効で、使うには起動とトークンの払い出しが必要になる。設定なしで使える AppleScript は Ghostty 1.3 の辞書より狭く、出力を読めず、実際のキーイベントも送れない（`input text` は paste 扱い）。AX ツリーには端末ペインが一切出てこないので、AX を読むアシスタントやエージェントからは Noa の中身が見えない。（FRAME 改訂 2026-10-17：反証パネルの指摘を受けて書き直し、ratified）
+- Audience：(a) shell から `osascript` で Noa を操作するエージェント。設定もトークンも使わない。(b) macOS の AX ツリーを読むアシスタントや、AX ベースのエージェントフレームワーク。スクリーンショットと座標操作だけで動く computer use クライアントには、AX は何も足さない（Anthropic の computer use ツールの公開仕様）。（elicited 2026-10-17、改訂 ratified）
+- Job to be done：設定なしで、エージェントが Noa の terminal を特定し、キーやテキストを送り、その結果をテキストとして読み返すこと。
+- Success definition：1 本の osascript で「split → input text → contents 読み取り」が完走すること（AC-010）。AX を読むクライアントから各ペインの画面テキストと位置が取れること（AC-019/020）。Ghostty.sdef の用語がすべて Noa の辞書にあること（AC-028）。
+- Existing assets & constraints（Reuse scan 2026-10-17、HEAD 25577d2）
   - 既存 AppleScript：`assets/Noa.sdef`、`crates/noa-app/src/macos_applescript.rs`、`crates/noa-app/src/app/applescript.rs`。spec は `docs/specs/applescript.md`（locked）。今は `coregetd`、`coreclos`、`miscactv` と Noa Suite だけを自前で登録している（`macos_applescript.rs:640-662`）。それ以外の標準イベント（`count` など）には、`NSAppleScriptEnabled` によって Cocoa Scripting が応答している。
-  - **C1**：Apple Event は main スレッドで dispatch される。ハンドラ内でイベントループの応答を待つことは禁止。読み取りは `Arc<Mutex<AppStateSnapshot>>` から行う（applescript Amendment 1.1）。`sync_applescript_snapshot` は、signature が変わるか 500 ms 経つと snapshot を丸ごと置き換える。
-  - **C2**：`PaneId` は `split_tree/tree/types.rs:31` のグローバル `AtomicU64`。tab id は今 `u64::from(WindowId)`。`WindowGroupId` は `App::next_group_id` が採番する（`lifecycle.rs:729`）。既存の `UserEvent::WriteText`/`RaiseWindow`/`ClosePane` は winit の `WindowId` を運ぶ（`events.rs:100-125`）。`UserEvent` は `Eq` を derive している。
-  - **C3**：winit 0.30.13 の macOS 実装に accessibility の実装はない。NSView は既定で AX から無視されるので、子要素の AX 上の親は、無視されていない最も近い祖先になる。
-  - **C4**：フォントサイズはタブ単位（`WindowState.font_px`、`state.rs:262`）。
-  - **C5**：`PtyConfig`（`noa-pty/src/pty.rs:21`）は環境変数を受け取れない。`Pty` は子の pid も tty 名も公開していない。wait-after-command は未実装。
-  - **C6**：io thread は最大 64 KiB のチャンクごとに `Terminal` のロックを握る（`io_thread/feed.rs:220`）。リサイズ時の reflow もロックの中で行う。
+  - C1：Apple Event は main スレッドで dispatch される。ハンドラ内でイベントループの応答を待つことは禁止。読み取りは `Arc<Mutex<AppStateSnapshot>>` から行う（applescript Amendment 1.1）。`sync_applescript_snapshot` は、signature が変わるか 500 ms 経つと snapshot を丸ごと置き換える。
+  - C2：`PaneId` は `split_tree/tree/types.rs:31` のグローバル `AtomicU64`。tab id は今 `u64::from(WindowId)`。`WindowGroupId` は `App::next_group_id` が採番する（`lifecycle.rs:729`）。既存の `UserEvent::WriteText`/`RaiseWindow`/`ClosePane` は winit の `WindowId` を運ぶ（`events.rs:100-125`）。`UserEvent` は `Eq` を derive している。
+  - C3：winit 0.30.13 の macOS 実装に accessibility の実装はない。NSView は既定で AX から無視されるので、子要素の AX 上の親は、無視されていない最も近い祖先になる。
+  - C4：フォントサイズはタブ単位（`WindowState.font_px`、`state.rs:262`）。
+  - C5：`PtyConfig`（`noa-pty/src/pty.rs:21`）は環境変数を受け取れない。`Pty` は子の pid も tty 名も公開していない。wait-after-command は未実装。
+  - C6：io thread は最大 64 KiB のチャンクごとに `Terminal` のロックを握る（`io_thread/feed.rs:220`）。リサイズ時の reflow もロックの中で行う。
   - 再利用：`ipc_bridge.rs:498` の `screen_text()`（今は private。`pub(crate)` にする）、`Terminal::scrollback_text_tail()`（`noa-grid/src/terminal.rs:427`、active screen を含む全履歴の末尾）、`Terminal::selected_text()`、`encode_key_with_modes`（`input/key.rs:82`）、`encode_mouse_input/motion/wheel`（`mouse.rs:244-300`）、`APPLESCRIPT_INPUT_TEXT_CAP`（8 MiB）、`noa_ipc::DEFAULT_TEXT_MAX_BYTES`（256 KiB）、`noa_ipc::truncate_tail`。
   - 準拠の基準：Ghostty `macos/Ghostty.sdef` と `macos/Sources/Features/AppleScript/*.swift`（main、2026-10-17 取得）。必要な部分は Appendix A/B としてこの文書に取り込んである。
 
@@ -38,7 +38,7 @@
 | scrollback | active screen を含む全履歴の末尾 256 KiB | history | `scrollback_text_tail` |
 | AX element | terminal 1 つに対応する NSAccessibility 要素 | accessibility node | `TerminalAxElement` |
 
-## L1 — Requirements
+## L1：Requirements
 
 ### Functional (`REQ-n`)
 | ID | Requirement | Priority | Source |
@@ -66,7 +66,7 @@
 | CFR-002 | 問い合わせがないときのコストはゼロ | AX と AE の値計算は getter の中だけで行い、定期処理やスレッドは増やさない／idle RSS | 新しいタイマー・スレッドは 0（レビュー）。idle RSS は main 比 +1 MiB 以下 | コードレビュー + `bench/` の idle 計測 | HIGH | derived（Noa の省メモリ方針） |
 | CFR-003 | スレッド規律 | AE と AX のハンドラが、イベントループ・チャネル・condvar を待たず、winit オブジェクトに触れない（`Terminal` の mutex は CFR-001 の範囲で可） | 該当箇所 0（レビュー） | コードレビュー | CRITICAL | grounded（applescript Amendment 1.1） |
 
-## L2 — Detail
+## L2：Detail
 
 ### L2.1 Data model
 | Entity | Field | Type | Constraints | Default | Nullable | Owned by |
@@ -177,12 +177,12 @@ AX（`TerminalAxElement`、`NSAccessibilityElement` のサブクラス）：
 | Ghostty.sdef の用語 | 外部仕様 | no | Appendix B（main 2026-10-17） | Ghostty 側の改名 | review trigger で再照合 |
 
 ## Migration & rollout
-- **Existing data** — 永続データはない。
-- **挙動の変化** — (1) tab id が `WindowId` 由来から `TabId` に変わる。id は実行中だけ有効な値なので互換性の問題はない。(2) `count windows` は、Cocoa Scripting が数えていた NSWindow の数（ネイティブタブ 1 枚ごとに 1）から、window（タブグループ）の数に変わる。Noa の `window` クラスの定義に合わせた変更として CHANGELOG に記載する。
-- **Staged release** — フラグは使わない。既存の `macos-applescript` が AppleScript 側の有効・無効を決める。
-- **Rollback** — コミットを revert するだけ。不可逆な変更はない。
+- Existing data：永続データはない。
+- 挙動の変化：(1) tab id が `WindowId` 由来から `TabId` に変わる。id は実行中だけ有効な値なので互換性の問題はない。(2) `count windows` は、Cocoa Scripting が数えていた NSWindow の数（ネイティブタブ 1 枚ごとに 1）から、window（タブグループ）の数に変わる。Noa の `window` クラスの定義に合わせた変更として CHANGELOG に記載する。
+- Staged release：フラグは使わない。既存の `macos-applescript` が AppleScript 側の有効・無効を決める。
+- Rollback：コミットを revert するだけ。不可逆な変更はない。
 
-## L3 — Acceptance Criteria
+## L3：Acceptance Criteria
 マーカー文字列は、入力したコマンド行には現れず、実行結果にだけ現れる形で作る（例：`printf 'NOA-%s\n' AC10` の出力は `NOA-AC10`）。
 
 | ID | Given | When | Then | Verifies | Mode | Oracle | Must-have |
@@ -222,20 +222,20 @@ AX（`TerminalAxElement`、`NSAccessibilityElement` のサブクラス）：
 | AC-033 | at build | 同梱する sdef を辞書として、`osacompile` で `tell app "Noa" to close tab 2 of window 1`、`close tab (tab 2 of window 1)`、`close (tab 2 of window 1)` をコンパイルし、`osadecompile` で戻す | 旧形式はコンパイルエラーになる（Amendment 2 の breaking change が実在する）。新形式 2 つはコンパイルでき、元の文に戻る | REQ-002, REQ-013 | machine | `scripts/applescript-sdef-check.sh`（sandbox 外で実行） | yes |
 
 ## Scope
-- **In scope** — REQ-001..015、CFR-001..003。新しい smoke スクリプト `scripts/agent-automation-smoke.sh` と sdef コンパイル確認 `scripts/applescript-sdef-check.sh`。sdef の更新。Appendix B のフィクスチャファイル。CHANGELOG への `count windows` の変化の記載。
-- **Out of scope** — `wait for` 系の待機プリミティブ、AX の値変化通知、自前描画 UI（サイドバー、Overview、設定、パレット、モーダル）の AX 化、`whose` フィルタ、VoiceOver 向けの調整、Shortcuts（App Intents）、AppleScript からの設定変更、AX の範囲指定属性（`AXBoundsForRange` など）、ペイン単位のフォントサイズ、AXValue の書き込み、Secure Input 中のマスク処理、AX 公開の config キー、noa-server 側の変更。
+- In scope：REQ-001..015、CFR-001..003。新しい smoke スクリプト `scripts/agent-automation-smoke.sh` と sdef コンパイル確認 `scripts/applescript-sdef-check.sh`。sdef の更新。Appendix B のフィクスチャファイル。CHANGELOG への `count windows` の変化の記載。
+- Out of scope：`wait for` 系の待機プリミティブ、AX の値変化通知、自前描画 UI（サイドバー、Overview、設定、パレット、モーダル）の AX 化、`whose` フィルタ、VoiceOver 向けの調整、Shortcuts（App Intents）、AppleScript からの設定変更、AX の範囲指定属性（`AXBoundsForRange` など）、ペイン単位のフォントサイズ、AXValue の書き込み、Secure Input 中のマスク処理、AX 公開の config キー、noa-server 側の変更。
 
 ## Considered but rejected
-- D1 Ghostty 準拠の厳守のみ — 出力の読み返しがなく、エージェントの JTBD を満たせない（独自 suite に隔離する部分だけ採用）。
-- D3 AccessKit でアプリ全体を AX 化 — 依存と作業量が最大。自前描画 UI は対象外とした。
-- D4 読み取りを noa-server に任せる — 起動とトークンが要り、設定なしの osascript 経路にならない。反証パネルで再検討したが、ユーザーは範囲の維持を選んだ（2026-10-17）。
-- D5 読み取り面を AX に一本化 — 呼び出す側に Accessibility 権限が要り、System Events 経由は脆い。
-- 範囲の縮小（AX と send mouse を外す、または準拠と send key だけにする）— 反証パネルを受けて提示したが、ユーザーは範囲の維持を選んだ（2026-10-17）。
-- `wait for` — C1 の制約で、AE の suspend/resume 機構が必要になる。`contents` のポーリングで代わりになる。
-- AX の値変化通知 — VoiceOver は対象外。大量出力中の CPU コストに見合わない。
-- ペイン単位のフォントサイズ — 描画とレイアウトへの影響が大きい（ユーザー選択 2026-10-17）。
-- US-ANSI 固定のキー変換 — Ghostty と結果がずれる（ユーザー選択 2026-10-17）。
-- `close tab`/`close window` を足さない — Ghostty 向けスクリプトとの一致を優先した（ユーザー選択 2026-10-17）。
+- D1 Ghostty 準拠の厳守のみ：出力の読み返しがなく、エージェントの JTBD を満たせない（独自 suite に隔離する部分だけ採用）。
+- D3 AccessKit でアプリ全体を AX 化：依存と作業量が最大。自前描画 UI は対象外とした。
+- D4 読み取りを noa-server に任せる：起動とトークンが要り、設定なしの osascript 経路にならない。反証パネルで再検討したが、ユーザーは範囲の維持を選んだ（2026-10-17）。
+- D5 読み取り面を AX に一本化：呼び出す側に Accessibility 権限が要り、System Events 経由は脆い。
+- 範囲の縮小（AX と send mouse を外す、または準拠と send key だけにする）：反証パネルを受けて提示したが、ユーザーは範囲の維持を選んだ（2026-10-17）。
+- `wait for`：C1 の制約で、AE の suspend/resume 機構が必要になる。`contents` のポーリングで代わりになる。
+- AX の値変化通知：VoiceOver は対象外。大量出力中の CPU コストに見合わない。
+- ペイン単位のフォントサイズ：描画とレイアウトへの影響が大きい（ユーザー選択 2026-10-17）。
+- US-ANSI 固定のキー変換：Ghostty と結果がずれる（ユーザー選択 2026-10-17）。
+- `close tab`/`close window` を足さない：Ghostty 向けスクリプトとの一致を優先した（ユーザー選択 2026-10-17）。
 
 ## Assumption Ledger
 | ID | Assumption | Default chosen | Why | Status |
@@ -251,13 +251,13 @@ AX（`TerminalAxElement`、`NSAccessibilityElement` のサブクラス）：
 ## Open Questions / Deferred Decisions
 | ID | Question | Blocks | Owner | Resolve by | Impact if wrong |
 |----|----------|--------|-------|-----------|-----------------|
-| OQ-1 | 実機テストを行う Mac の割り当て（Dvorak 入力ソース、Accessibility と Automation の権限を付与した端末） | nothing — 能力要件は acceptance §3 で確定済み。割り当てだけ | simota | before-ship | 受け入れを実行できない |
-| OQ-2 | 巨大な scrollback の reflow 中（10 MB で約 76 ms の実測あり）に AE/AX の読み取りが待つ時間に上限を設けるか（`try_lock` と古い値での応答など） | nothing — CFR-001 は reflow 中を対象外として確定済み。発生頻度が低く、ユーザー操作中に限られるため、今回のビルドには影響しない | simota | deferred | リサイズ中に AX クライアントが読むと、最大で数十 ms 止まる |
+| OQ-1 | 実機テストを行う Mac の割り当て（Dvorak 入力ソース、Accessibility と Automation の権限を付与した端末） | nothing（能力要件は acceptance §3 で確定済み。割り当てだけ） | simota | before-ship | 受け入れを実行できない |
+| OQ-2 | 巨大な scrollback の reflow 中（10 MB で約 76 ms の実測あり）に AE/AX の読み取りが待つ時間に上限を設けるか（`try_lock` と古い値での応答など） | nothing（CFR-001 は reflow 中を対象外として確定済み。発生頻度が低く、ユーザー操作中に限られるため、今回のビルドには影響しない） | simota | deferred | リサイズ中に AX クライアントが読むと、最大で数十 ms 止まる |
 
 ## Build-path decision
 one-shot autonomous build（elicited 2026-10-17）。machine AC（AC-001/004/012/017/022/028/030/032/033）と `cargo build/test/clippy --workspace` をビルドのゲートにする。human AC は `scripts/agent-automation-smoke.sh` を渡して実機確認待ちとする（OQ-1）。
 
-## Appendix A — send key のキー名（Ghostty `Ghostty.Input.Key` rawValue、main 2026-10-17）
+## Appendix A：send key のキー名（Ghostty `Ghostty.Input.Key` rawValue、main 2026-10-17）
 
 形式：`名前=macOS 仮想キーコード(hex)`。`-` は Mac に対応するキーコードがないキー。配列変換を経ずに、キー名から winit `KeyCode` へ直接対応させて符号化する（L2.4）。
 
@@ -285,7 +285,7 @@ mediaTrackNext=- mediaTrackPrevious=- power=- sleep=- audioVolumeDown=0x49 audio
 audioVolumeUp=0x48 wakeUp=- copy=- cut=- paste=-
 ```
 
-## Appendix B — Ghostty.sdef の用語と四文字コード（main 2026-10-17。新規用語はこのコードをそのまま使う）
+## Appendix B：Ghostty.sdef の用語と四文字コード（main 2026-10-17。新規用語はこのコードをそのまま使う）
 
 ```
 application=capp; name=pnam; frontmost=pisf; front window=GFWn; version=vers; window=Gwnd; id=ID  ; 
@@ -305,17 +305,17 @@ scroll=GhstSMSc; x=GMsX; y=GMsY; precision=GMsP; momentum=GMsM; to=GMsT; count=c
 exists=coredoex; quit=aevtquit
 ```
 
-## Amendment 1 — 実装時の確定（2026-10-17）
-- **`command` の実行方式**：L2.4 の「既存の `SpawnTab.command` と同じ（シェルに 1 行入力）」と AC-006(c)（wait なしなら 2 秒以内に消える）が矛盾していた。ユーザーの選択により、Ghostty と同じ「シェルの代わりに起動」に確定する（elicited 2026-10-17）。旧パラメータ `new tab command "x"` も同じ意味になり、従来の「シェルに入力して残る」挙動から変わる。CHANGELOG に記載する。`docs/specs/applescript.md` の AC-4（指定コマンドが新しい surface で実行される）はこの意味でも満たされる。
-- **`momentum`**：Ghostty 辞書との互換（AC-028）のため引数は残し、列挙値を検証する（不正なら -1700）が、効果はない。Noa のホイール処理（`event_loop.rs` の `MouseWheel { delta, .. }`）は物理イベントの phase も使わないため、渡し先がない。sdef の説明にも明記した（2026-10-17 レビュー指摘）。
-- **`font size` の寿命**：tab に設定したサイズは、その window の scale 変更や実行時のフォントサイズ変更（`cmd+=` など全体操作・config reload）で全体のサイズに戻る。REQ-004 は生成時の反映だけを求めている。
-- **`wait after command` の保持中のキー**：修飾キー単独と Cmd ショートカットでは閉じない（出力のコピーやアプリ切り替えのため）。IME の入力（空でない Preedit・Commit）でも閉じ、変換中の入力は破棄する。
-- **`close tab`**：対象タブ全体を UI と同じ確認つきの経路（`request_close_tab`）で閉じる。`AppCommand::CloseTab` は分割タブではフォーカス中のペインしか閉じないため使わない。
-- **`space` キー**：Space も配列変換を通す（US 配列の Option+Space は U+00A0）。普通の空白になったときだけ名前付きキー Space として扱う。
-- **pending の退役**：生成に成功した時点で、その id を registry から外す（短命なコマンドで snapshot の再構築より先に閉じても、pending として残り続けない）。外すのはその id だけで、同じ tab に先に約束した split は残す。
-- **UserEvent のペイロード**：L2.1 の「`Eq` を満たす `SurfaceConfigPayload`」の代わりに、noa-server の `IpcAction` と同じ形（共有の待ち表にペイロードを置き、`UserEvent` は request id だけを運ぶ）にする。`Eq` の制約を受けずに f64 などを運べる。観測できる挙動は変わらない。
+## Amendment 1：実装時の確定（2026-10-17）
+- `command` の実行方式：L2.4 の「既存の `SpawnTab.command` と同じ（シェルに 1 行入力）」と AC-006(c)（wait なしなら 2 秒以内に消える）が矛盾していた。ユーザーの選択により、Ghostty と同じ「シェルの代わりに起動」に確定する（elicited 2026-10-17）。旧パラメータ `new tab command "x"` も同じ意味になり、従来の「シェルに入力して残る」挙動から変わる。CHANGELOG に記載する。`docs/specs/applescript.md` の AC-4（指定コマンドが新しい surface で実行される）はこの意味でも満たされる。
+- `momentum`：Ghostty 辞書との互換（AC-028）のため引数は残し、列挙値を検証する（不正なら -1700）が、効果はない。Noa のホイール処理（`event_loop.rs` の `MouseWheel { delta, .. }`）は物理イベントの phase も使わないため、渡し先がない。sdef の説明にも明記した（2026-10-17 レビュー指摘）。
+- `font size` の寿命：tab に設定したサイズは、その window の scale 変更や実行時のフォントサイズ変更（`cmd+=` など全体操作・config reload）で全体のサイズに戻る。REQ-004 は生成時の反映だけを求めている。
+- `wait after command` の保持中のキー：修飾キー単独と Cmd ショートカットでは閉じない（出力のコピーやアプリ切り替えのため）。IME の入力（空でない Preedit・Commit）でも閉じ、変換中の入力は破棄する。
+- `close tab`：対象タブ全体を UI と同じ確認つきの経路（`request_close_tab`）で閉じる。`AppCommand::CloseTab` は分割タブではフォーカス中のペインしか閉じないため使わない。
+- `space` キー：Space も配列変換を通す（US 配列の Option+Space は U+00A0）。普通の空白になったときだけ名前付きキー Space として扱う。
+- pending の退役：生成に成功した時点で、その id を registry から外す（短命なコマンドで snapshot の再構築より先に閉じても、pending として残り続けない）。外すのはその id だけで、同じ tab に先に約束した split は残す。
+- UserEvent のペイロード：L2.1 の「`Eq` を満たす `SurfaceConfigPayload`」の代わりに、noa-server の `IpcAction` と同じ形（共有の待ち表にペイロードを置き、`UserEvent` は request id だけを運ぶ）にする。`Eq` の制約を受けずに f64 などを運べる。観測できる挙動は変わらない。
 
-## Amendment 2 — 旧形式 `close tab N of window M` の扱い（2026-10-17）
+## Amendment 2：旧形式 `close tab N of window M` の扱い（2026-10-17）
 - AC-033 の実測で、Ghostty の `close tab` コマンドを辞書に加えると、旧形式 `close tab 2 of window 1` がコンパイルできなくなる（AppleScript が `close tab` コマンド ＋ `2 of window 1` と解釈し、`Can't get 2 of window 1 (-1723)` になる）ことを確認した。`close window 1` と新形式 `close tab (tab 2 of window 1)` / `close (tab 2 of window 1)` は動く。
 - ASSUME-7 に従って spec に戻し、ユーザーが breaking change として受け入れた（elicited 2026-10-17）。REQ-002 の「旧形式も同じ結果になる」は削除し、旧形式は CHANGELOG で置き換え先（`close (tab 2 of window 1)` または `close tab (tab 2 of window 1)`）を案内する。AC-029 の旧形式ステップは `close (tab 2 of window 1)` に置き換え、AC-033 の Then は「旧形式はコンパイルエラー、新形式 2 つはコンパイルできる」に改める。
 

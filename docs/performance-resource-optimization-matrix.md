@@ -1,25 +1,9 @@
 # CPU/Memory Optimization Candidate Matrix
 
-## Title
-
-`noa` CPU/Memory Optimization Candidate Matrix
-
-## Purpose
-
-Rank CPU/memory usage optimization candidates by expected payoff, blast
-radius, and implementation risk, to make it easy to pick what to measure
-and implement first.
-
-## Target
-
-Maintainers who touch `noa-app`, `noa-grid`, `noa-render`, `noa-pty`,
-`noa-font`.
-
-## Format
-
-Mermaid `quadrantChart`, Markdown table, ASCII fallback.
-
-## Abstraction
+Ranks `noa`'s CPU/memory optimization candidates by expected payoff, blast
+radius, and implementation risk, so maintainers of `noa-app`, `noa-grid`,
+`noa-render`, `noa-pty`, and `noa-font` can pick what to measure and
+implement first.
 
 This is a planning view produced before profiling. The quantitative
 values are estimates derived from source structure and known constants,
@@ -49,7 +33,7 @@ quadrantChart
 
 ```text
 Expected payoff
-High  | [1] Cursor blink gate       [2] Dirty-row snapshot copy      [7] Cell layout shrink
+High  | [1] Cursor blink gate       [2] Dirty-row snapshot copy      [7] Cell layout compaction
       | [4] PTY reader buffer reuse [3] Overview peek reuse          [6] Occluded surface release
 Mid   | [5] Process poll backoff
 Low   |
@@ -92,7 +76,7 @@ Payoff scale:
 | 4 | PTY reader allocates a `Box<[u8]>` on every read | Up to 64KiB allocated/copied per read. The PTY event queue is bounded at 1024 events, so queued payload is roughly bounded at 64MiB + overhead at most. | Reduces allocator churn on bulk output and could also improve throughput. | `noa-pty` reader and `PtyEvent::Data` ownership model. Downstream IO thread changes should be small if the API is preserved. | Medium-low. Pooling must be bounded, or it could hold onto many 64KiB buffers after a burst and become counterproductive. |
 | 5 | Foreground process name polling runs on a fixed 1-second interval | Roughly 1 probe/sec per pane. With 50 panes, that's about 50 foreground-process polls/sec even at idle. | Reduces wakeups/syscalls for idle sessions with many panes. | `noa-app::branch_poll` worker, session metadata, agent-bell process classification. | Medium. Polling is intentionally not stopped by sidebar visibility. Backoff must reset on focus, output, process change, and pane lifecycle events. |
 | 6 | Occluded windows keep holding a configured surface | A 3840 x 2160 RGBA texture is about 31.6MiB. With double/triple buffering that's roughly 63-95MiB class per tab, though actual Metal/wgpu residency needs measurement. | Could reduce GPU memory footprint for high-resolution, multi-tab usage. | `WindowState` surface lifecycle, resize/reconfigure path, macOS tab occlusion, overview host assumptions. | High. wgpu 27 has no clear public `Surface::unconfigure` API. May require an `Option<Surface>` model or recreate/configure sequencing. |
-| 7 | `Cell` holds combining text and hyperlink index in a wide inline layout | Shrinking from 64B to roughly 48B saves 16B per live cell. On a 200 x 50 grid that's about 160KiB saved per live grid or snapshot copy, multiplied across pane/snapshot count. Packed scrollback is already 8B/cell, so it's mostly out of scope. | Structurally lowers retained size across hot terminal state and snapshot copies. | `noa-grid::Cell`, row clone/reuse, renderer/search/url/scrollback materialization. | High. `String` currently supports buffer reuse via `clone_from`. `Option<Box<str>>` shrinks size but may increase churn. `Option<u32>` needs a niche type — e.g. `Option<NonZeroU32>` — to pack as expected. |
+| 7 | `Cell` holds combining text and hyperlink index in a wide inline layout | Shrinking from 64B to roughly 48B saves 16B per live cell. On a 200 x 50 grid that's about 160KiB saved per live grid or snapshot copy, multiplied across pane/snapshot count. Packed scrollback is already 8B/cell, so it's mostly out of scope. | Structurally lowers retained size across hot terminal state and snapshot copies. | `noa-grid::Cell`, row clone/reuse, renderer/search/url/scrollback materialization. | High. `String` currently supports buffer reuse via `clone_from`. `Option<Box<str>>` shrinks size but may increase churn. `Option<u32>` needs a niche type, e.g. `Option<NonZeroU32>`, to pack as expected. |
 
 ## Recommended Order
 
@@ -271,8 +255,8 @@ but per-read allocation is likely to show up in allocator samples under
 sustained output.
 
 ID 5 is mainly about reducing idle wakeups. The current behavior is
-intentional — process state is also used for session metadata and
-agent attention even when the sidebar is hidden — so backoff must
+intentional: process state is also used for session metadata and
+agent attention even when the sidebar is hidden, so backoff must
 preserve those semantics.
 
 ID 6 and ID 7 may have a large memory payoff but also a large change

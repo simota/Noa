@@ -3,7 +3,9 @@
 Default shortcuts on Linux (X11 and Wayland). App commands use **Ctrl+Shift**,
 so plain Ctrl chords stay with the shell. Every binding can be changed with
 `keybind = <chord>=<action>`; run `noa +list-keybinds` to print the active
-table. See [LINUX.md](LINUX.md) for the Linux guide and
+table. The source of truth is the non-macOS `default_specs()` in
+`crates/noa-app/src/commands/keybind.rs`.
+See [LINUX.md](LINUX.md) for the Linux guide and
 [KEYBINDINGS.md](KEYBINDINGS.md) for action names and chord syntax.
 
 ## Windows and tabs
@@ -121,6 +123,3 @@ zoom.
 | Select tab N | `⌘N` | `Alt+N` |
 | Find next / previous | `⌘G` / `⌘⇧G` | `Ctrl+Shift+G` / `Ctrl+Shift+H` |
 | Fullscreen | `⌘⌃F` | `Ctrl+Enter` |
-
-Source of truth: the non-macOS `default_specs()` in
-`crates/noa-app/src/commands/keybind.rs`.

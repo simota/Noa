@@ -21,7 +21,7 @@ Acceptance:
    panes in the current window group.
 2. A configured editor receives the absolute filename, line, and column as
    arguments without shell evaluation. Missing editors fall back to the
-   default file handler; directories use the default handler.
+   default file handler, and directories use the default handler.
 3. Explicit status reports distinguish running, permission/input waiting,
    response end, and error. Generic BEL/OSC notifications remain neutral.
    Acknowledging a notification does not resolve an outstanding agent request.

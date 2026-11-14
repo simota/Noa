@@ -34,6 +34,7 @@ regression test (see GPU gotchas below).
 
 - Dependencies are already fetched, so run cargo with `--offline` inside the sandbox (`~/.cargo` writes are blocked; `failed to write cache … Operation not permitted` is a harmless warning). Only the very first dependency fetch/compile needs `dangerouslyDisableSandbox`.
 - `noa-pty` tests need real device (openpty) access → they only pass with the sandbox disabled (sandboxed runs get `PermissionDenied`).
+- `noa-ipc` tests bind a loopback port → same: sandboxed runs get `PermissionDenied`, and `cargo test --workspace` stops there without `--no-fail-fast`.
 - GUI launch (`cargo run -p noa`) needs a display; visual parity is verified by hand.
 
 ## Architecture

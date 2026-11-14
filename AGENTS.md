@@ -62,8 +62,9 @@ when no GPU adapter is available.
 - A failing check is named in the output; its full log is
   `.verify/<check>.log`, and timings are in `.verify/timings`.
 - The script pins the CI toolchain (`RUSTUP_TOOLCHAIN=1.92.0`). In a sandbox,
-  set `CARGO_NET_OFFLINE=true`; `noa-pty` tests need real `openpty` and fail
-  with `PermissionDenied` inside it.
+  set `CARGO_NET_OFFLINE=true`; `noa-pty` tests need real `openpty` and
+  `noa-ipc` tests bind a loopback port, so both fail with `PermissionDenied`
+  inside it.
 - GUI behaviour and visual parity have no automated check: verify them by hand
   and say so in the pull request.
 

@@ -43,7 +43,7 @@ package_of() {
     tests/parity/*) echo noa-parity ;;
     bench/probes/drain-staircase/*) echo drain-staircase ;;
     shell-integration/*) echo noa-pty ;;
-    scripts/gen-themes/*) echo noa-theme ;;
+    scripts/gen-themes) echo noa-theme ;;
     docs/AGENT_WORKFLOW.md | docs/CONFIGURATION.md | assets/Noa.sdef) echo noa-app ;;
   esac
 }

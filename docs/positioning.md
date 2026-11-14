@@ -1,6 +1,6 @@
 # Noa Positioning: The Fastest Terminal
 
-> Status: draft (ratified upon merge). Source of truth for how "fastest" is
+> Status: ratified (merged in #23, 2026-07-17). Source of truth for how "fastest" is
 > claimed, defended, and measured. Benchmarks live in `bench/`
 > (see `bench/METHODOLOGY.md`).
 
@@ -56,5 +56,6 @@ headline gains.
 1. Re-run `bench/` on post-#21 main; record the loaded input-latency figure.
 2. Add an efficiency variant to `bench/` (throughput per watt) so battery
    behavior is measured, not assumed.
-3. Surface the headline numbers in `README.md` with a link here and to
-   `bench/METHODOLOGY.md`; claims without reproducible numbers are marketing.
+3. Done: `README.md` (Performance) shows the headline numbers and links here
+   and to `bench/METHODOLOGY.md`; claims without reproducible numbers are
+   marketing.

@@ -1,6 +1,7 @@
 # Benchmark Methodology
 
-A reproducible 7-axis comparison of terminal emulators on macOS/Apple Silicon.
+A reproducible comparison of terminal emulators on macOS/Apple Silicon across
+seven default axes plus an opt-in eighth (latency under load).
 Everything is driven by `bench/run_all.sh`; a third party can re-run the whole
 suite with one command and get a machine-readable `results.json` plus a
 human-readable `table.md` under `bench/results/<timestamp>/`.
@@ -85,7 +86,7 @@ pty child** (`bench/wrapper.sh`) regardless of how it is told to do so. noa,
 Ghostty, and kitty accept the wrapper as an explicit command (`-e` / trailing
 arg); Termy has no `-e`/command flag, so the wrapper is installed as `$SHELL`
 (Termy spawns `$SHELL` as the pty child). The workload logic, timestamps, and
-sentinels are then identical across all four. The only thing that differs is
+sentinels are then identical across all terminals. The only thing that differs is
 the OS-level launch verb, which is unavoidable and disclosed above.
 
 Because a custom-named shell is used, none of the terminals inject their
@@ -290,7 +291,7 @@ Numbers from fullscreen runs are not comparable to pre-2026-07-17 windowed
 runs (visible grid area differs); as always, compare within one results
 directory only.
 
-## The four axes
+## The eight axes
 
 ### 1. Throughput
 Time for the terminal to consume/display `150MB_ascii.txt` and
@@ -392,7 +393,7 @@ startup from `.zshrc`.
 `footprint` tool (`footprint -j <file> -f bytes <pids...>`, summing the JSON
 `processes[].footprint` field). This is the same number Activity Monitor's
 "Memory" column shows (dirty + compressed + IOSurface/GPU-owned memory) and
-matters here specifically because all four terminals are GPU-accelerated
+matters here specifically because noa, Ghostty, Termy and kitty are GPU-accelerated
 (Metal/wgpu-backed): plain `ps`-reported RSS undercounts them by 2-3x (e.g. one
 spot check: Ghostty RSS 241 MB vs footprint 718 MB for the same process at the
 same instant; the gap is IOSurface + IOAccelerator (graphics) categories that
@@ -408,7 +409,7 @@ user's own concurrently-running instance of the same terminal is never summed
 into the measurement (the previous name-based `pgrep` matching could do
 exactly that). The pty child (`wrapper.sh` and whatever it runs) is included
 as a descendant of every terminal, but it is the exact same tiny script for
-all four, so it adds an equal, negligible constant everywhere: it does not
+all of them, so it adds an equal, negligible constant everywhere: it does not
 bias the comparison.
 
 Four scenarios, one launch mode: the harness adds `NOA_HOLD=1` to the pty
@@ -419,7 +420,7 @@ child exits would vanish before the harness could sample it.
 #### Memory: two numbers per scenario (active / settled)
 
 **Why one sample is a coin flip: GPU-driver-pool reclaim is
-nondeterministic.** All four terminals are GPU-accelerated, and on macOS the
+nondeterministic.** noa, Ghostty, Termy and kitty are GPU-accelerated, and on macOS the
 Metal/driver-owned memory pools ("Owned physical footprint (unmapped)
 (graphics)" in vmmap terms) are **auto-reclaimed by the driver 5–40 s after
 the last GPU submit**: the timing is driver-scheduled, varies run to run,
@@ -437,7 +438,7 @@ and Ghostty similarly 170.4 → 253.5 MiB. Neither number is wrong: they are
 two different points on the same decay curve.
 
 **The fix: every memory scenario reports two labeled values, uniformly for
-all four terminals** (`bench/run_all.sh: mem_dual_sample`):
+all terminals** (`bench/run_all.sh: mem_dual_sample`):
 
 - active: footprint at **t = 15 s** after the scenario's work
   (`MEM_ACTIVE_AT_S`; 3 s in `--quick`). This is the *in-use footprint*: what
@@ -482,11 +483,8 @@ would rank driver-reclaim timing luck, not the terminals.
   `server-enable = true`, and a `client-remote`. noa's isolation is via
   `XDG_CONFIG_HOME` (the iso config carries only the measurement-neutral
   `window-save-state = never` pin); `noa --config-default-files=false`
-  exists for manual parity runs. Termy reads its user config either way;
-  inspected: a theme plus feature toggles all at/near defaults (tmux
-  integration off, debug overlay off, no size/font overrides), nothing that
-  schedules work or retains buffers, so it is default-equivalent for these
-  axes. It is **not** summed `ps` RSS (that
+  exists for manual parity runs. Termy is isolated the same way via
+  `XDG_CONFIG_HOME` (see "Config isolation"). It is **not** summed `ps` RSS (that
   undercounts GPU-backed apps 2–3×, see above) and **not** an
   interactive-shell session (no zsh/rc cost is included).
 
@@ -530,7 +528,7 @@ would rank driver-reclaim timing luck, not the terminals.
   If a terminal reuses one process/window across launches (singleton
   behavior) instead of opening N independent ones, that is reported as-is:
   it's a real architectural difference, not a failure, and is never faked.
-- mem-longevity: ≥5 (5 full run / 2 quick) repeated flood
+- mem-longevity: 5 (2 in `--quick`) repeated flood
   (`scroll_stress.txt`) + **short** idle cycles (3 s between cycles; 1 s in
   `--quick`) **inside one long-lived pty child** (a dedicated
   `NOA_MODE=longevity` loop in `wrapper.sh`): relaunching per cycle would
@@ -591,7 +589,7 @@ would rank driver-reclaim timing luck, not the terminals.
   max (a prior noa "idle max 17%" was RCA'd to exactly this artifact, not to
   idle-loop behavior).
   **Wakeups: reported via a context-switch proxy (`csw_per_s`), not faked.**
-  `top -stats` was tried first per the brief; on this macOS build (26.5.1)
+  `top -stats` was tried first; on this macOS build (26.5.1)
   `top`'s own usage text lists the valid `-stats` keys and neither `wakeups`
   nor `power` is among them (confirmed empirically: passing them makes `top`
   print its usage and exit non-zero). What *is* exposed is `csw`, cumulative
@@ -605,7 +603,7 @@ would rank driver-reclaim timing luck, not the terminals.
   per-wakeup work is not weighted). `wakeups` itself stays `N/A` with the
   reason recorded. **Power: N/A, not faked**: `powermetrics` can report it,
   but requires `sudo`, and this machine has no passwordless sudo configured;
-  per the brief, that means "don't attempt it, don't prompt."
+  the harness neither attempts it nor prompts, and records `power` as N/A.
 - load-active: process-tree cumulative CPU time (`ps -o time=`, parsed as
   user+sys centiseconds, summed per-pid so one dead pid can't abort a whole
   batch) sampled immediately before launch-visible and immediately after the
@@ -614,7 +612,7 @@ would rank driver-reclaim timing luck, not the terminals.
   `cat` child's own CPU time**: the "before" snapshot is taken before `cat`
   exists and the "after" snapshot after it has exited (and been reaped), so
   its cost never enters either side. This is intentional, not an oversight:
-  `cat` is identical software run identically by all four terminals and isn't
+  `cat` is identical software run identically by all terminals and isn't
   part of any terminal's own efficiency; only the terminal process's own
   parse/render CPU is being measured. Reported in ms total and ms-per-MiB
   processed (normalized).
@@ -829,7 +827,8 @@ complete load-active data.
 A second mode pins every terminal to the **same grid (120×40) and font
 (Menlo 14pt, no ligatures / no background effects)** and re-runs the two
 render-sensitive axes (throughput + scroll). Latency/startup/memory/load are
-skipped in this mode: the first two are condition-independent, and
+skipped in this mode, as are fire (see axis 7) and the opt-in latency under
+load: latency and startup are condition-independent, and
 memory/load equalization (grid size does affect GPU buffer sizing) was out of
 scope for this pass; see `run_all.sh` for where to add it if needed. What
 could and couldn't be equalized:
@@ -904,9 +903,13 @@ machine requirement instead of assuming it:
 
 ## Equalization notes & limitations
 
-- Grid size is not fully equalized. noa is pinned to 120×40; the other
-  terminals open at their own default window/grid size (no portable per-terminal
-  cell-count flag). Throughput is dominated by parse cost, which is largely
+- Grid size is not fully equalized. In windowed measurements (startup, memory,
+  load-idle, and every axis under `--no-fullscreen`), noa is pinned to 120×40
+  and the other terminals open at their own default window/grid size (no
+  portable per-terminal cell-count flag). The render-path axes run fullscreen
+  by default (see "Fullscreen measurement"), where every terminal fills the
+  same screen and its cell count follows its own font defaults. Throughput
+  is dominated by parse cost, which is largely
   grid-size-independent; scroll is mildly grid-sensitive. Documented, not hidden.
 - Font is each terminal's default. Not equalized; affects render axes
   slightly. A future pass could pin a common font via each terminal's config.
@@ -931,7 +934,7 @@ machine requirement instead of assuming it:
 
 ```bash
 cargo build --release -p noa --offline   # or without --offline outside sandbox
-bench/run_all.sh                         # full 6-axis suite
+bench/run_all.sh                         # full default suite (7 axes)
 bench/run_all.sh --quick                 # smoke (fewer reps/shorter settles)
 bench/run_all.sh --only noa,kitty        # subset of terminals
 bench/run_all.sh --axes memory,load      # subset of axes

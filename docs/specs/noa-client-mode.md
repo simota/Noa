@@ -39,7 +39,7 @@ Success: the connect → show pane → type → see output loop runs at practica
 - FR-16 (explicit local-only for auto-approve/process display): for remote panes, `process` metadata and auto-approve are out of scope in v1 and are displayed as an explicit unsupported state (e.g. `process=None`) — not a silent no-op.
 - FR-17 (non-loopback warning): when the server the client is about to connect to is a non-loopback address and the requested scopes include `attach`/`input`, the UI shows an active warning before connecting.
 - FR-18 (connection UX): connection settings live in config keys (the `client-*` family) plus a single "Attach Remote" command-palette entry. No dedicated connection-settings UI (GUI form) is provided in v1.
-- FR-19 (protocol compatibility): all attach-related additions (`noa.attach`/`noa.detach`/`noa.resizePane`, scope `attach`, error codes `-32007`/`-32008`) follow the additive-only policy of the existing `noa-server.md` FR-19. `protocolVersion` stays at the existing value `1` (not a breaking change). Unknown-method/unknown-field handling is identical to the existing protocol.
+- FR-19 (protocol compatibility): all attach-related additions (`noa.attach`/`noa.detach`/`noa.resizePane`, scope `attach`, error codes `-32007`/`-32008`) follow the additive-only policy of the existing `noa-server.md` FR-19. `protocolVersion` stays at the existing value `1` (not a breaking change). Unknown-method/unknown-field handling is identical to the existing protocol. *(Amendment 2026-11-14: the attach additions shipped at `1` as specified (#12); later, unrelated breaking changes bumped the major to `2` (#13, 2026-07-15) and `3` (#101, 2026-10-16). The current value is `3`, per `noa-server.md`.)*
 
 ### Non-Functional (NFR)
 
@@ -154,7 +154,7 @@ Add a `client-*` family paired with the existing `server-*` keys (`noa-server.md
 - AC-15 (FR-15): restarting the app with a remote tab present restores it as a "disconnected" remote tab and never silently respawns it as a local shell (manual GUI verification).
 - AC-16 (FR-16): the sidebar/process field of a remote pane shows an explicit unsupported indication (e.g. empty `process` field / dedicated icon) and the pane is excluded from auto-approve. Its card switches among Connected/Reconnecting/Detached status and connected raw output updates the colored preview through `SessionDelta` (unit test plus manual GUI verification).
 - AC-17 (FR-17): with `client-remote` set to a non-loopback address and requested scopes including `attach` or `input`, attempting to connect shows the UI warning before connection establishment (manual GUI verification; execution pending OQ-4 trigger-condition resolution).
-- AC-18 (FR-19, NFR-4): after the attach RPC additions, the behavior of non-attach clients (`noa.listPanels` etc.) and the `protocolVersion` value (`1`) are unchanged (re-run and pass the existing `noa-server` protocol compatibility tests).
+- AC-18 (FR-19, NFR-4): after the attach RPC additions, the behavior of non-attach clients (`noa.listPanels` etc.) and the `protocolVersion` value (`1`) are unchanged (re-run and pass the existing `noa-server` protocol compatibility tests). *(See the FR-19 amendment: the value is now `3`.)*
 - AC-19 (NFR-3): no async runtime such as tokio appears as a dependency of the client-side attach receive thread (verified via `cargo tree`). Note: dependency absence is a necessary condition only; positive conformance to "sync tungstenite + dedicated thread + crossbeam" is confirmed by implementation review.
 - AC-20 (NFR-5): with multiple concurrent `noa.attach` attempts on the same paneId, the later request is always rejected with `-32007` and no double ownership of winsize occurs (integration test).
 - AC-21 (NFR-6): with the total connection count — including attach channels (second WS connections) — at the existing max concurrent connection limit (32), a new `noa.attach` attempt behaves the same as the existing connection-cap error handling (connection refused) (integration test; reuse the existing `tcp_pair()` helper's connection-loop pattern).
@@ -225,7 +225,7 @@ Out-of-scope (v1):
 - OD-3 (scope): minimal v1 as the base, with two items restored: remote pane creation and scrollback lazy backfill. The other cuts stand (multi-server, multi-attach, mDNS, kitty graphics, OSC52, settings UI).
 - DEC-1 (interpretation): in OD-3, "approve all cuts" and the two restored items were selected simultaneously; interpreted as "minimal v1 plus exactly those two items."
 - OD-4 (SPECIFY checkpoint): attach second WS connections count toward the existing 32 max concurrent connections (no separate limit; NFR-6 approved).
-- OD-5 (SPECIFY checkpoint): attach-channel I/O is complete with the `attach` scope alone (OQ-5 resolved). protocolVersion=1 unchanged and the `client-*` key names were also approved at this point.
+- OD-5 (SPECIFY checkpoint): attach-channel I/O is complete with the `attach` scope alone (OQ-5 resolved). protocolVersion=1 unchanged and the `client-*` key names were also approved at this point. *(See the FR-19 amendment: the value is now `3`.)*
 
 ## History
 

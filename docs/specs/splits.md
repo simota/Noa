@@ -206,7 +206,8 @@ decision carried to SPECIFY, not resolved here: N per-pane uniform
 buffers + N bind groups (Flux/Magi's path, matching today's
 one-bind-group pattern) versus baking pane origin into `CellInstance`
 CPU-side (Omen's counter-proposal); both are recorded and must be
-arbitrated before implementation. `UserEvent`'s per-surface variants
+arbitrated before implementation (resolved at LOCK: N uniform buffers +
+N bind groups; see Metadata and Open Questions). `UserEvent`'s per-surface variants
 (Redraw/PtyExit/ClipboardWrite) gain a `(WindowId, PaneId)` pair
 atomically across every send/match site, closing the pane-identity gap
 Omen ranked the top pre-mortem risk. Layout, directional focus lookup,
@@ -275,7 +276,7 @@ CHALLENGE staging decision.
 
 ### Functional
 
-- REQ-SPL-1: Cmd+D adds a new `Surface` to the right of the focused pane and focuses it. If the focused pane is already in a horizontal row model, the new pane is inserted into that row and the row is rebalanced by pane count; otherwise the focused pane is locally split right. Adding to a pane too small to host two panes plus a divider above the minimum-size floor (REQ-NF-4) is a no-op (provisional rule; see Open Questions).
+- REQ-SPL-1: Cmd+D adds a new `Surface` to the right of the focused pane and focuses it. If the focused pane is already in a horizontal row model, the new pane is inserted into that row and the row is rebalanced by pane count; otherwise the focused pane is locally split right. Adding to a pane too small to host two panes plus a divider above the minimum-size floor (REQ-NF-4) is a no-op (provisional rule, CONFIRMED at LOCK; see Open Questions).
 - REQ-SPL-2: Cmd+Shift+D adds a new `Surface` below the focused pane, using the same mechanics as REQ-SPL-1 with vertical orientation.
 - REQ-SPL-2A: Add Pane Left and Add Pane Up are reachable from the command palette, action-name registry, and split context menu. They use the same same-axis insertion mechanics as right/down, but insert before the focused pane in that row/column and focus the new pane.
 - REQ-SPL-2B: A tab can host at most nine live panes, and a row/column can host at most three panes along its axis. Any pane-add command issued while the tab or target axis group is already at its limit is a no-op.

@@ -23,7 +23,7 @@ strong-willed, unfawning gaze, and a small flat mouth, a cool and self-possessed
 at-her-own-pace air (introverted yet strong-willed, unbothered and quietly confident
 — deadpan on the surface, soft underneath), a very oversized black hoodie
 worn dress-like
-(hem at mid-thigh) with an orange shell-prompt ">|" (a chevron plus a block cursor)
+(hem at mid-thigh) with an orange shell-prompt ">▮" (a chevron plus a block cursor)
 emblem on the chest, black crew socks with bare legs, chunky black dad-sneakers
 with orange accents, flat vector / clean cel-shaded style, thick clean outlines,
 white die-cut sticker border, dark charcoal background, monochrome palette with a
@@ -55,11 +55,12 @@ after it is for **Stable Diffusion / Midjourney**, which do take a negative fiel
   (a single small catchlight is fine).
 - Exactly **one orange (`#E8A33D`) accent**: no second accent colour, no rainbow;
   the hoodie stays **plain black** (no patterns or all-over graphics).
-- The chest emblem is the **orange `>|` shell-prompt**: no other logos, brand
+- The chest emblem is the **orange `>▮` shell-prompt**: no other logos, brand
   marks, letters, or words anywhere, and never drop the emblem.
 - Ember is pure white, never orange / tinted / glowing-orange; keep it a simple
-  plump ghost (two oval eyes + a small oval mouth), not scary, not a sheet-ghost,
-  not big-eyed, no hands, and **only one ghost**.
+  plump ghost (two big round black eyes with tiny catchlights + a small oval mouth
+  + tiny rosy cheeks), not scary, not a sheet-ghost, only small stubby side nubs
+  for arms (no human hands or fingers), and **only one ghost**.
 - Footwear = **black crew socks + black sneakers with orange accents**, not
   barefoot, no boots, heels, or white shoes.
 - Hold the **flat cel-shaded** look with the **white die-cut sticker outline** on a
@@ -74,7 +75,7 @@ tall, adult, mature woman, elongated body, long realistic legs, sparkly huge moe
 eyes, heavy eyelashes, winking, multiple accent colors, rainbow, colored hoodie,
 patterned clothes, extra logos, brand logo, text, letters, watermark, signature,
 orange ghost, tinted ghost, glowing-orange ghost, scary ghost, sheet ghost,
-big-eyed ghost, multiple ghosts, ghost with hands, barefoot, boots, high heels,
+multiple ghosts, ghost with human hands, ghost with fingers, barefoot, boots, high heels,
 white shoes, cluttered background, photographic background, rainbow background,
 3d render, realistic, photorealistic, oil painting, extra fingers, deformed hands,
 extra limbs, bad anatomy, lowres, blurry, jpeg artifacts, sexualized, revealing
@@ -255,7 +256,7 @@ low light, relatable dev-life humor
 
 ```
 petite black-bob girl reduced to a clean minimal logo mark: her blunt-bangs bob
-silhouette wrapped around the orange shell-prompt ">|" mark (a ">" chevron + block
+silhouette wrapped around the orange shell-prompt ">▮" mark (a ">" chevron + block
 cursor) as the signature glyph, flat 2-color (black + #E8A33D), app-icon ready,
 centered, no background detail
 ```
@@ -266,7 +267,7 @@ centered, no background detail
 **Mark only: the pure emblem**
 
 ```
-the orange shell-prompt ">|" mark (a ">" chevron + block cursor) as a standalone
+the orange shell-prompt ">▮" mark (a ">" chevron + block cursor) as a standalone
 logo, bold crisp geometry, flat 2-color (dark tile + #E8A33D), app-icon / favicon
 ready, centered, no background detail
 ```
@@ -283,7 +284,7 @@ orange accent underline like a blinking prompt, GitHub social-preview ratio
 
 > **Use-case summary**
 > - README / OGP → boot splash, wide banner
-> - Settei sheet → crate group shot, three-view sheet
+> - Settei sheet → crate group shot
 > - SNS / stickers → late-night coding, mug, cat
 
 ### Rest / sleep
@@ -346,12 +347,12 @@ stays readable on top. The shared Negative Prompt still applies.
 ```
 wide cinematic wallpaper illustration, a petite youthful girl (~5.5 heads tall, balanced) with
 a sleek jet-black bob and full blunt bangs, large dark deadpan eyes with a quiet
-strong-willed gaze, a very oversized black hoodie with an orange shell-prompt ">|"
+strong-willed gaze, a very oversized black hoodie with an orange shell-prompt ">▮"
 emblem on the chest, black crew socks and chunky black sneakers with orange accents,
 a white die-cut sticker outline, placed small toward one third of the frame (rule of
 thirds), Ember her small round pure-white ghost sprite (chubby, two big round black
 eyes with tiny catchlights, a small oval mouth and tiny rosy cheeks, cute) nearby
-(matte white body with a cool soft-white glow, never orange or tinted — the warm
+(matte pure-white body with no glow, never orange or tinted — the warm
 accent belongs only to the girl, not the ghost), dark charcoal atmosphere with
 deep negative space, a single warm terminal-orange
 (#E8A33D) accent, ambient depth and soft volumetric light, clean cel-shaded
@@ -367,13 +368,13 @@ glowing orange, ghost matching the accent color, warm-tinted ghost
 ```
 
 > The scene's warm light and the "single orange accent" keep bleeding onto Ember.
-> Pin her white in the Wallpaper Block **and** exclude the orange ghost here, so
-> the `#E8A33D` accent stays on the girl only. If it still tints, drop the word
-> "glowing" from Ember's description and render her as a flat matte-white shape.
+> Pin it white in the Wallpaper Block **and** exclude the orange ghost here, so
+> the `#E8A33D` accent stays on the girl only. If it still tints, describe Ember
+> as a flat matte-white shape with no glow.
 > On **GPT-Image-2** (no negative field) add this as a sentence, e.g. "the ghost is
 > pure white — it must not pick up any orange from the scene light."
 
-> Swap in `[Wallpaper Block]` wherever the other sheets say `[Common Block]`: any
+> Swap in `[Wallpaper Block]` wherever the prompts above say `[Common Block]`: any
 > Expression or Scene variant above becomes a wallpaper by prepending this block
 > instead, e.g. `[Wallpaper Block] + {Focused / Working variant}`. That's how the
 > existing `assets/wallpapers/*.png` map back to the expression set.
@@ -614,7 +615,7 @@ icons, aspect ratio 16:9
 anime-style portrait of a petite, youthful girl with a sleek jet-black bob and
 full blunt bangs, large dark deadpan eyes with a quiet strong-willed gaze looking
 directly at the viewer, subtle flat expression (introverted, reserved), wearing a
-very oversized black hoodie with an orange shell-prompt ">|" (a chevron plus a
+very oversized black hoodie with an orange shell-prompt ">▮" (a chevron plus a
 block cursor) emblem on the chest, slightly slouched posture but confident
 presence, a single warm terminal-orange (#E8A33D) accent, dark UI aesthetic, faint
 monospace glyphs and a blinking block-cursor motif glowing softly in the

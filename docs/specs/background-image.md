@@ -56,6 +56,7 @@ Functional:
 - FR-7: Thread the five values through `StartupConfig`/`ConfigOverrides` (merge/apply_to), `bin/noa` `app_config_from_startup`, and `AppConfig`.
 - FR-8: Decode the PNG at startup. Non-PNG extension/content, missing file, or decode failure → surfaced diagnostic (log/warn, not silent); background image disabled; terminal launches normally.
 - FR-9: Render the decoded image as a quad in `ImageBand::BelowBackground` spanning the surface, below the background quad and above the clear color.
+  - _Superseded (implementation)_: drawn by the dedicated `BackgroundImageLayer` (`noa-render/src/background_image.rs`) as one full-surface quad at the head of the render pass, not in the kitty `ImageBand::BelowBackground` band. The z-order requirement (below the background quad, above the clear color, spanning the surface) is unchanged; see the AC-9 implementation note.
 - FR-10: `background-image-fit` computes source↔dest mapping: `stretch` fills the surface ignoring aspect; `cover` fills preserving aspect, cropping overflow; `contain` fits inside preserving aspect (letterbox); `none` uses native pixel size.
 - FR-11: `background-image-position` anchors the image within the surface for `contain`/`none` (the 9-anchor grid); ignored for `stretch`; sets the crop anchor for `cover`.
 - FR-12: `background-image-repeat` tiles the image across the surface (meaningful for `none`; when the image does not cover the surface).

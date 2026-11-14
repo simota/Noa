@@ -207,7 +207,7 @@ Closing a raw WebSocket tears down only the attach subscription. Attach connecti
 {"jsonrpc":"2.0","method":"noa.stateChanged","params":{"panels":[Panel]}}
 ```
 
-Delivers **only the Panels that changed or were added** when panel metadata changes. Changes to busy / attention / name are reflected immediately; changes to cwd / preview may lag up to 500ms. **There is no v1 notification for panel deletion**: if an operation on a known paneId returns `-32002`, resync with `noa.listPanels`. If `subscribe`'s `paneIds` was specified, this array is filtered to Panels within that set (if zero entries in the set changed, no notification is sent at all). May optionally carry `"dropped":true` (same marker as `output`, for subscription queue overflow; see below).
+Delivers **only the Panels that changed or were added** when panel metadata changes. Changes to busy / attention / name are reflected immediately; changes to cwd / preview may lag up to 500ms. **There is no notification for panel deletion**: if an operation on a known paneId returns `-32002`, resync with `noa.listPanels`. If `subscribe`'s `paneIds` was specified, this array is filtered to Panels within that set (if zero entries in the set changed, no notification is sent at all). May optionally carry `"dropped":true` (same marker as `output`, for subscription queue overflow; see below).
 
 ### noa.output
 
@@ -236,7 +236,7 @@ When the subscription queue overflows, the oldest notifications are dropped and 
 }
 ```
 
-`branch` / `process` are **omitted as keys** when unknown. `attachable` reports whether this exact panel is registered with the raw attach endpoint; clients must not call `noa.attach` for a panel where it is `false`. It defaults to `true` when omitted by an older protocol-v1 peer. `preview` is the sidebar-equivalent last few rows (with color runs). Each `Row.row` in `preview` is **not an absolute row number** but a 0-based preview-row index (first row is 0); note this differs in meaning from `noa.getGrid`'s `Row.row` (absolute row).
+`branch` / `process` are **omitted as keys** when unknown. `attachable` reports whether this exact panel is registered with the raw attach endpoint; clients must not call `noa.attach` for a panel where it is `false`. It defaults to `true` when the key is absent; the field was added while the protocol was still at version 1, and peers from before that fail the `noa.hello` major-version check, so a protocolVersion 3 peer always sends it. `preview` is the sidebar-equivalent last few rows (with color runs). Each `Row.row` in `preview` is **not an absolute row number** but a 0-based preview-row index (first row is 0); note this differs in meaning from `noa.getGrid`'s `Row.row` (absolute row).
 
 ### Row / Span
 
@@ -283,7 +283,7 @@ When the subscription queue overflows, the oldest notifications are dropped and 
 
 ## 11. Client implementation checklist
 
-- [ ] Ignore unknown fields and unknown notifications (assumes FR-19)
+- [ ] Ignore unknown fields and unknown notifications (the additive-only rule, FR-19 in `docs/specs/noa-server.md`)
 - [ ] Keep IDs as strings (don't parse u64 into a number; can exceed 2^53)
 - [ ] On receiving `-32002`, resync via `listPanels` (there is no deletion notification)
 - [ ] Full refetch on receiving `dropped:true`

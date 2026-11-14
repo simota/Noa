@@ -77,7 +77,10 @@ restore, so this is net-new surface, not a deviation).
 ### Out of scope
 
 - Sidebar session-card rename (`name_override`): existing FR-7 stays
-  as-is; no linkage in either direction.
+  as-is; no linkage in either direction. Amended 2026-07-08 by
+  REQ-TTL-11: the tab title is now shown on the tab's cards one-way
+  (display only, tab → card, below a card's own rename); the
+  `name_override` mechanism itself is still neither read nor written.
 - Per-pane (split leaf) titles: the override names the tab, not a
   pane.
 - Ghostty's `title` config key (fixed app-wide title): separate
@@ -187,7 +190,8 @@ Constraints:
   variant, IME routing in input_ops/ime.rs, key handling (Enter/Esc/
   Backspace/text) mirroring app/sidebar/interaction.rs:154-208; rendered
   as a native overlay card via the existing compositor.
-- Command wiring: `AppCommand::PromptTabTitle`; display name
+- Command wiring: `AppCommand::SetTabTitle` (named `PromptTabTitle`
+  at design time; shipped as `SetTabTitle`, see Implementation record); display name
   "Set Tab Title…", menu_id/action_name following the existing `tab.*`
   pattern; dispatch arm in app.rs:815; palette entry in
   `command_palette_entries()` under the tab category; menu item next to
@@ -241,7 +245,8 @@ noa-pty. The mask is display-side only.
   pressing no default chord opens it.
 - AC-TTL-9 (REQ-TTL-9) [unit]: Given a Ghostty config line
   `keybind = cmd+i=prompt_surface_title`, When imported, Then the
-  resulting keymap binds cmd+i to `PromptTabTitle`.
+  resulting keymap binds cmd+i to `SetTabTitle` (design-time name
+  `PromptTabTitle`).
 - AC-TTL-10 (REQ-TTL-10) [integration]: Given a session state with
   one overridden tab ("api server", CJK/emoji variants included), When
   serialized and re-parsed, Then the override round-trips; and a

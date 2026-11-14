@@ -8,14 +8,14 @@ swallowing output floods (`cat huge.log`, build logs, CI streams) and aims
 for observable compatibility with [Ghostty](https://ghostty.org) while keeping
 the core terminal model reusable and testable.
 
-Noa is under active development and is currently built from source. The macOS
-app bundle targets macOS 13 or later. Fixture-based regression tests cover
+Noa is under active development. It builds from source and installs with
+Homebrew on Apple Silicon Macs (see below). The macOS app bundle targets macOS 13 or later. Fixture-based regression tests cover
 terminal behavior; automated differential comparison against Ghostty is still
 planned.
 
 ## Quick start
 
-Use a current stable Rust toolchain with Rust 2024 edition support.
+Use Rust 1.92 or newer (Rust 2024 edition); CI builds with Rust 1.92.0.
 
 ```bash
 cargo run -p noa
@@ -47,11 +47,11 @@ it by pushing a `v<workspace-version>` tag; the release workflow verifies that
 the Cargo, Cask, tag, and app-bundle versions match before publishing the
 archive and its SHA-256 checksum.
 
-The cask temporarily uses `sha256 :no_check` because no release archive exists
-yet. Replace it with the published checksum after the first release. When the
-signing secrets are configured, release artifacts are Developer ID signed and
-notarized, so Gatekeeper accepts the download without a prompt; without them
-the workflow falls back to ad-hoc signing. See
+The cask uses `sha256 :no_check`: the checksum published with each release is
+not written into `Casks/noa.rb`. When the signing secrets are configured,
+release artifacts are Developer ID signed and notarized, so Gatekeeper accepts
+the download without a prompt; without them the workflow falls back to ad-hoc
+signing. See
 [docs/release-signing.md](docs/release-signing.md) for the required secrets and
 local testing steps.
 
@@ -218,8 +218,8 @@ than source-level equivalence.
 - Current parity protection is fixture-based; the automated Ghostty oracle is
   not implemented yet.
 - Some advanced terminal behavior may still differ from Ghostty.
-- Installation is available from source; the custom Homebrew tap becomes usable
-  after a matching release is published.
+- Installation is available from source or through the custom Homebrew tap,
+  which installs the archive from the matching GitHub Release.
 
 See the [parity harness](tests/parity/README.md) and
 [parity roadmap](docs/roadmaps/ghostty-parity-roadmap.md) for current coverage

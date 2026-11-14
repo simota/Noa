@@ -33,7 +33,7 @@ quadrantChart
 
 ```text
 Expected payoff
-High  | [1] Cursor blink gate       [2] Dirty-row snapshot copy      [7] Cell layout shrink
+High  | [1] Cursor blink gate       [2] Dirty-row snapshot copy      [7] Cell layout compaction
       | [4] PTY reader buffer reuse [3] Overview peek reuse          [6] Occluded surface release
 Mid   | [5] Process poll backoff
 Low   |

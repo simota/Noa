@@ -137,6 +137,6 @@ Full profile: `mascot-ip-bible.md` §2.
 ## Open questions
 
 - Cast scope: introduce one Foil first, or commit to the full duo-cast?
-  (`mascot-ip-bible.md` §6 TODO)
+  (`mascot-ip-bible.md` §4; tracked in the TODO at the end of the bible)
 - Birthday / anniversary: deferred until community activity starts (candidate:
   the first public release date).

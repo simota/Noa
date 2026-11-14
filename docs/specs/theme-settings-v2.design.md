@@ -160,7 +160,7 @@ Under a `theme = light:X,dark:Y` setting, committing a single theme from the pan
 
 ### Consequences
 - (+) One branch covers AC-49/50/51. AC-51 (`theme_pair=None` → `("theme","C")`) has no regression via the else branch.
-- (−) `ThemeSettingsInit` gains a new field (mechanically appended across all 14 construction sites, see "Test fallout" below).
+- (−) `ThemeSettingsInit` gains a new field (mechanically appended across all 13 direct construction sites plus 32 indirect via helpers, corrected from 14 in Amendments; see "Test fallout" below).
 - Fitness: AC-50 is verified via a tempdir integration test round-tripping through `parse_theme_pair` plus asserting the inactive side is byte-identical (alongside the existing 11 writer tests).
 
 ## ADR-5: new display elements, favorites, and toast follow the existing leaf-sharing pattern, no "unified model"
@@ -212,9 +212,9 @@ theme-settings has 3 rendering sync points: (1) wgpu `theme_settings_overlay_tex
 - R-32 wheel: At the top of `on_mouse_wheel` (`event_loop.rs:1124`), right after the `handle_sidebar_wheel` early return, add `if self.active_overlay(window_id)==ActiveOverlay::ThemeSettings { return self.handle_theme_settings_wheel(window_id, lines); }` (the same bool-consumption contract). Accumulation follows the `WHEEL_PAGE_THRESHOLD`-style pattern from `apply_overview_wheel`, mapping onto highlighted/selected_row movement (AC-45/46).
 - R-22/23/24 menu / keybindings: Swap the dispatch body of `AppCommand::Preferences` (`app/commands.rs:66`) for `open_theme_settings(Settings)` (menu id/accelerator unchanged = AC-31). New `AppCommand::EditConfigFile` (retains the old `open_config_file()`, menu item + palette row, no default chord). `OpenThemePicker` gets a menu item plus default `cmd+shift+,` (added to `KeybindEngine::default()` specs).
 
-## Handling of test fallout (14 `ThemeSettingsInit` construction sites)
+## Handling of test fallout (13 direct + 32 indirect `ThemeSettingsInit` construction sites; originally counted as 14, corrected in Amendments)
 
-All new Init fields default to `Option`/owned-empty (`theme_pair:None, carryover:None, favorites:Arc::new(HashSet::new()), favorites_epoch:0, attribute_filter:None`), so the 14 sites can be handled with **mechanical appends** (most are absorbed by the `init()/settings_init()/transparent_init()` helpers in `tests.rs`; only `rows.rs`/`input_ops` tests construct it directly). This is churn, not design risk. The existing 51 tests (`theme_settings/tests.rs` 34 + `input_ops/theme_settings.rs` 6 + `writer.rs` 11) are not broken in semantics by any decision here (Arc-ification = duplication semantics unchanged, fingerprint = new, commit_updates pair branch = follows the existing path when `theme_pair:None`).
+All new Init fields default to `Option`/owned-empty (`theme_pair:None, carryover:None, favorites:Arc::new(HashSet::new()), favorites_epoch:0, attribute_filter:None`), so the 13 direct sites (plus 32 indirect via helpers) can be handled with **mechanical appends** (most are absorbed by the `init()/settings_init()/transparent_init()` helpers in `tests.rs`; only `rows.rs`/`input_ops` tests construct it directly). This is churn, not design risk. The existing 51 tests (`theme_settings/tests.rs` 34 + `input_ops/theme_settings.rs` 6 + `writer.rs` 11) are not broken in semantics by any decision here (Arc-ification = duplication semantics unchanged, fingerprint = new, commit_updates pair branch = follows the existing path when `theme_pair:None`).
 
 ## Dependency rules / conservation constraints check
 - The winit `Theme` check happens only at the App layer (ADR-4). The pure `theme_settings` module receives only `bool`/owned values = stays GUI-independent and testable.
@@ -227,7 +227,7 @@ All new Init fields default to `Option`/owned-empty (`theme_pair:None, carryover
 Land the 3 performance-remediation items (ADR-1→2→3) first (local, low-risk, regressions caught by existing tests), then ADR-4 (data safety, integration tests via tempdir first), and finally the ADR-5-family richness items (leaf additions plus favorites/toast). Each ADR is independently revertible (Arc-ification/fingerprint/pair-branch/leaf functions are loosely coupled). AC-C1/C2 can be dropped individually per spec, only when judged cheap.
 
 ## Next steps
-Risk Gate (omen: FM-EA-family pre-mortem / ripple: fallout confirmation for the 14 `ThemeSettingsInit` sites, `commit_updates`, `sync.rs` / echo: UX of the Tab third transition and toast replacement). Implementation proceeds via the titan/builder loop.
+Risk Gate (omen: FM-EA-family pre-mortem / ripple: fallout confirmation for the `ThemeSettingsInit` construction sites (estimated 14 here; measured 13 direct + 32 indirect, see Amendments), `commit_updates`, `sync.rs` / echo: UX of the Tab third transition and toast replacement). Implementation proceeds via the titan/builder loop.
 
 ## Amendments (Phase 5 Risk Gate: omen FMEA / ripple reflected, 2026-07-11)
 
@@ -235,7 +235,7 @@ Risk Gate (omen: FM-EA-family pre-mortem / ripple: fallout confirmation for the 
 Fix the derivation of `current_theme` in `open_theme_settings`. Currently it only reads `self.config.theme`, so while a pair (`theme = light:X,dark:Y`) is active, it always falls through to `""`, causing a Settings-only commit's `commit_updates()` to emit a phantom theme diff that silently overwrites the pair. Fix: derive it using the same shape as `effective_theme_name(config, system_appearance)` (the active side's name for a pair, or `config.theme` otherwise), eliminating the path where `current_theme` becomes empty under a pair configuration. This is a **precondition** for adding `ThemePairContext`, not an independent add-on task. Special-casing an empty snapshot on the `commit_updates` side to swallow it is forbidden (it would break the initial theme-setting flow). As defense in depth, add an invariant test that "`highlight_moved` is always false in Settings mode."
 
 ### ADR-2 reinforcement (FM-02): upgrade the property test for view_fingerprint simultaneity across all mutators from nice-to-have to a required AC.
-### ADR-3 addendum (FM-07): rather than reusing `apply_overview_wheel`'s `WHEEL_PAGE_THRESHOLD` value directly, introduce a dedicated separate constant for the wheel accumulation threshold.
+### R-32 wheel sub-ADR addendum (FM-07; originally filed as an ADR-3 addendum): rather than reusing `apply_overview_wheel`'s `WHEEL_PAGE_THRESHOLD` value directly, introduce a dedicated separate constant for the wheel accumulation threshold.
 ### ADR-5 addendum (FM-08/FM-09): give undo re-commit a guard that "invalidates if another commit/reopen occurred since the toast was shown." Favorites file write failures must not be silent: warn-log plus, if possible, a one-line commit_error-equivalent notification.
 ### Correction to construction site count (ripple condition 1 / omen measurement): "14 sites" was off by one. omen measurement is 13 (tests.rs 10 + input_ops 3) plus 32 indirect sites via helpers (ripple). The Builder must mechanically recount at implementation start.
 ### carryover design change (FM-04): `ThemeSettingsCarryover` should include the `RevertValues` (at minimum theme_name) from the point of the very first open, carrying it through Tab round trips without re-fetching the snapshot. Esc always rolls back to the very first open point.

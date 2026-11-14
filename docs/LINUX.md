@@ -117,7 +117,7 @@ inside the window:
 Linux follows Ghostty's GTK defaults:
 
 - App commands use Ctrl+Shift, so plain Ctrl chords stay with the shell.
-- Super is mostly left to the desktop; only split resizing uses it.
+- Super is mostly left to the desktop; only split resizing and equalizing use it.
 
 Every binding can be changed with `keybind = …` (see
 [KEYBINDINGS.md](KEYBINDINGS.md)).
@@ -139,6 +139,7 @@ Every binding can be changed with `keybind = …` (see
 | `ctrl+shift+enter` | Toggle split zoom |
 | `ctrl+enter` | Toggle fullscreen |
 | `ctrl+shift+f` / `ctrl+shift+g` / `ctrl+shift+h` | Find / find next / find previous |
+| `shift+arrow` | Enter copy mode and extend the selection |
 | `shift+pageup` / `shift+pagedown`, `shift+home` / `shift+end` | Scroll by page / to top or bottom |
 | `ctrl+shift+arrowup` / `ctrl+shift+arrowdown` | Jump to previous / next prompt |
 | `ctrl+=` / `ctrl+-` / `ctrl+0` | Font size up / down / reset |
@@ -146,9 +147,11 @@ Every binding can be changed with `keybind = …` (see
 | `ctrl+shift+s` | Sidebar |
 | `ctrl+shift+l` | Session overview (`ctrl+shift+o` is Split Right here) |
 | `ctrl+shift+m` | Send selection to pane |
-| `ctrl+shift+j` | Next notification |
+| `ctrl+shift+j` | Next unread notification |
 | `ctrl+shift+d` | Scratch terminal (`ctrl+shift+t` is New Tab here) |
 | `ctrl+shift+b` | Quick terminal (only while a Noa window is focused) |
+| `ctrl+shift+y` | New floating pane |
+| `ctrl+shift+i` | Move focus between the last floating pane and the split pane |
 | `ctrl+,` / `ctrl+shift+,` | Preferences / reload config |
 
 ## Differences from macOS

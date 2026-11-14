@@ -44,6 +44,7 @@ Three corrections to the original proposal A (from the Void/Ripple/Omen panels, 
 1. The filter granularity is `WindowGroupId` (logical window). A macOS native tab is a separate winit `WindowId` even within the same logical window (`app.rs:125-151`). Filtering at winit WindowId granularity would degenerate to a single-tab list, hiding sibling tabs. The App side computes the `HashSet<SessionWindowId>` of winit WindowIds belonging to the focused window's group and passes it to the store (precedent: `group_running_program_count` `app.rs:1534-1541`).
 2. There are 6 call sites, not the original 5. In addition, `handle_sidebar_wheel`'s `session_store.len()` (`sidebar.rs:719`): if left alone, the scrollable range would drift from the actual card count.
 3. Only one filter method is added: `ordered_ids_for_windows(&HashSet<SessionWindowId>) -> Vec<SessionCardId>`. busy/attention counts are aggregated inline within `sidebar_draw_model` from the already-filtered `ids` (two dedicated count methods would be YAGNI). The wheel handler's count uses `.len()` on the filter result.
+   - Superseded 2026-07-05 by L2: the locked L2 adds a second method, `counts_for_windows(&HashSet<SessionWindowId>) -> (usize, usize)`, returning both counts in one call (sites 5 and 6); the YAGNI ruling still holds against two separate count methods. Shipped in `session_store.rs` (commit b6cc5cc).
 
 Additional findings:
 - Overview only uses `get(&card_id)` and never calls `ordered_ids` (`overview.rs:484,1272`) → "keep Overview global" is therefore satisfied automatically with zero changes.
@@ -64,7 +65,7 @@ Complete list of call sites (all must consistently use the same filtered set, an
 ## SHAPE: proposal (user confirmed)
 
 - Problem: with multiple windows in use, the sidebar mixes sessions from all windows.
-- Solution: restrict the sidebar's list/hit-test/scroll/header counts to the sessions of its own logical window (`WindowGroupId`, including native tabs). Add one method, `SessionStore::ordered_ids_for_windows(&HashSet<SessionWindowId>)`, plus an App-side group→SessionWindowId set helper, and swap in 6 call sites in `sidebar.rs`.
+- Solution: restrict the sidebar's list/hit-test/scroll/header counts to the sessions of its own logical window (`WindowGroupId`, including native tabs). Add one filter method, `SessionStore::ordered_ids_for_windows(&HashSet<SessionWindowId>)` (L2 later adds `counts_for_windows` for the header counts), plus an App-side group→SessionWindowId set helper, and swap in 6 call sites in `sidebar.rs`.
 - In-scope: group-restricting the card list / hit_test / scroll region / busy & attention counts, the App-side group→window set helper (derivation logic as a pure function), unit tests.
 - Out-of-scope: Overview (stays global, zero changes), making `sidebar_visible` per-window, other-window attention indicators, structural changes to GC/delta/scroll state.
 - Assumptions: "window" means `WindowGroupId` (AppKit logical window). An empty filter result is acceptable, rendering the header only (equivalent to the existing empty-store behavior). If the target window_id is missing from the `windows` map or its group can't be resolved, treat it as an empty set (degrading to header-only rendering).

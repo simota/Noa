@@ -9,7 +9,7 @@
 - source mockup: `~/Downloads/ChatGPT Image 2026-07-05 08_43_15.png`
 
 ## L0: Vision
-noa's current tabs are native macOS tabs, and the only overview is the separate Tab Overview window. When working across multiple projects in parallel, there's no way to constantly see "what's happening in which session" (cwd, branch, last output, running state) and switch instantly. So we're adding a persistent left sidebar listing session cards (icon, name, cwd, branch, updated time, status dot, last-output 2-line preview).
+noa's current tabs are native macOS tabs, and the only overview is the separate Tab Overview window. When working across multiple projects in parallel, there's no way to constantly see "what's happening in which session" (cwd, branch, last output, running state) and switch instantly. So we're adding a persistent left sidebar listing session cards (icon, name, cwd, branch, updated time, status dot, last-output preview; originally 2 lines, now `sidebar-preview-lines`, default 5).
 
 - audience: developers working across multiple projects/sessions in parallel (i.e. the author)
 - job-to-be-done: keep track of every session's state without leaving the terminal, and switch with one click
@@ -98,7 +98,7 @@ Header bar: busy label (reduced form) + centered title + session-name pill. + bu
 - + button: opens a new tab in the focused window, inheriting cwd from the active session (reuses the existing new-tab path).
 - Status dot: busy (OSC 133 `has_running_program`) = blue / idle = green / bell-attention (unread bell) = yellow.
 - updated-time: relative display ("3 minutes ago"; beyond 24h shown as "Yesterday 23:47"). The io thread stamps Instant + wall-clock time whenever there's new output.
-- Sidebar width / preview line count: config `sidebar-width` (points, default 360pt). Converted via grid-first resize. `sidebar-preview-lines` sets the card's last-output preview line count (default 3, `0` hides it).
+- Sidebar width / preview line count: config `sidebar-width` (points, default 360pt). Converted via grid-first resize. `sidebar-preview-lines` sets the card's last-output preview line count (default 3, `0` hides it; default changed to 5 on 2026-07-08, commit 9d849ab).
 - Header label: the foreground-process-name detection originally parked was implemented at user request on 2026-07-05 (`Pty::foreground_probe` = dup the master fd → tcgetpgrp → libproc `proc_name`, polled at 1s by the session-metadata worker, only while the sidebar is visible). The label shows the actual process name (`✳ <proc>`); falls back to Running/Idle when undetected.
 
 ### Assumptions
@@ -116,7 +116,7 @@ Header bar: busy label (reduced form) + centered title + session-name pill. + bu
 
 ### Functional
 - FR-1 SessionStore: a central `SessionStore` holding session card state across all windows is the source of truth; deltas from the io thread are applied and owned by the main thread (no cross-thread locking).
-- FR-2 Card rendering: each card is rendered as 3 lines, `●dot [icon] name … relative updated-time` / `cwd … branch` / a running-process line (`✳ proc` = busy / `❯ shell` = idle) (2026-07-05 user ruling: the last-output 2-line preview was replaced by the process line. The preview plumbing is kept in the store/io_thread, only rendering was stopped).
+- FR-2 Card rendering: each card is rendered as 3 lines, `●dot [icon] name … relative updated-time` / `cwd … branch` / a running-process line (`✳ proc` = busy / `❯ shell` = idle) (2026-07-05 user ruling: the last-output 2-line preview was replaced by the process line. The preview plumbing is kept in the store/io_thread, only rendering was stopped). (Later update: preview rendering has since returned below the meta row, which now carries the process, branch and cwd on one line; its row count became configurable via `sidebar-preview-lines` on 2026-07-07, commit b1b6b6a.)
 - FR-3 Click-to-switch: clicking a card moves window focus to that session's `{window_id, pane_id}` (A-flavor, no active-swap).
 - FR-4 Toggle + resize: sidebar visibility is toggled **per focused window** via hotkey/config, and toggling applies a grid-first resize (grid → pty winsize) to **every pane of that window** (quick-terminal windows excluded). Other windows' visibility/grid are unaffected.
 - FR-5 Header bar: ~~renders an execution-status label at the top of the sidebar (the focused session's actual process name `✳ <proc>`, or Running/Idle when undetected) + centered title + session-name pill on the right.~~ (2026-07-11 update: **removed** from the implementation. Collapsed to `SIDEBAR_HEADER_H = 0` due to information duplication with the terminal title bar; see the constant comment in `sidebar.rs`. AC-7 is obsolete)
@@ -127,7 +127,7 @@ Header bar: busy label (reduced form) + centered title + session-name pill. + bu
 - FR-10 Updated-time: shows the last-output timestamp relatively as `just now` / `Nm ago` / `Nh ago` same-day, `Yday HH:MM` for yesterday, `Mon D` beyond that. Every form is abbreviated to fit the ~11-cell right-aligned column (`CARD_UPDATED_W`); an overlong form would be drawn over the card name.
 - FR-11 Status indicators: busy (OSC 133 `has_running_program`) = blue play icon + segmented rail / idle = hollow green circle + no rail / unread bell = yellow bell + short rail notch. The unread bell is drained by the io thread from `Terminal::take_pending_bell` (terminal.rs:305, sourced from BEL) and sent as a SessionDelta, cleared once that session's window is focused. Rail shapes are categorical, not completion percentages.
 - FR-12 GC/teardown: removes the corresponding entry from SessionStore at all 5 teardown sites when a session ends.
-- FR-13 Config keys: adds `sidebar-enabled` (bool initial value), `sidebar-width` (points, default 360), `sidebar-hotkey` (toggle chord, following the existing parse/dispatch pattern of `quick-terminal-hotkey`), and `sidebar-preview-lines` (card last-output preview line count, default 3) to noa-config. No generic keybind→action system is introduced.
+- FR-13 Config keys: adds `sidebar-enabled` (bool initial value), `sidebar-width` (points, default 360), `sidebar-hotkey` (toggle chord, following the existing parse/dispatch pattern of `quick-terminal-hotkey`), and `sidebar-preview-lines` (card last-output preview line count, default 5; was 3 until the 2026-07-08 card redesign, commit 9d849ab) to noa-config. No generic keybind→action system is introduced.
 - FR-14 Quick-terminal exclusion: quick-terminal windows are excluded from the sidebar, and no inset is applied either.
 - FR-15 Scroll: when the card count exceeds the sidebar's visible area, vertical scrolling (with clamped scroll offset) reaches every card. No grouping/collapsing.
 - FR-16 Attention (notification indicator): when a pane in a non-focused window issues an OSC 9/777 desktop notification, an `attention` flag is set on that session card. This shows as (a) red exclamation icon + solid status rail (priority: attention > bell > busy > idle), (b) `· notification` appended to the process line, and (c) a persistent red marker/ring in the tab overview. The initial transition gets a one-shot 150 ms emphasis and then stays still. Cleared together with unread bell when the window gains focus. Notifications on the currently focused window don't raise attention because the user is already looking at it.
@@ -170,7 +170,7 @@ Header bar: busy label (reduced form) + centered title + session-name pill. + bu
 - AC-12 (FR-10): the updated-time formatter returns the correct string at each boundary, `3m ago` / `just now` / `2h ago` / `Yday 23:47` / `Jul 1` (unit test), and every form it can emit stays ASCII and within the 11-cell column (unit test).
 - AC-13 (FR-11): the dot-color mapping is verified by unit test (`has_running_program`=true→blue, false→green, unread bell→yellow).
 - AC-14 (FR-12): the pure function `reconcile_sessions(&mut store, live_ids)` removes entries not in live_ids, and store size == live_ids count is verified by unit test. That all 5 teardown sites actually call this is confirmed via implementation review + [manual] integration check (since `App` can't be constructed from a unit test).
-- AC-15a (FR-13): `sidebar-enabled`/`sidebar-width`/`sidebar-preview-lines` parse correctly, and the defaults (width=360, preview-lines=3) apply (parser unit test, following the `parse_bool`/`quick-terminal-size` pattern).
+- AC-15a (FR-13): `sidebar-enabled`/`sidebar-width`/`sidebar-preview-lines` parse correctly, and the defaults (width=360, preview-lines=5; was 3 until 2026-07-08) apply (parser unit test, following the `parse_bool`/`quick-terminal-size` pattern).
 - AC-15b (FR-13): the `sidebar-hotkey` chord is accepted via the same parse path as `quick-terminal-hotkey` (parser unit test). Diagnostics for an invalid chord occur at app-layer registration time via `parse_hotkey`, not at parse time, since noa-config cannot depend on noa-app (same precedent as quick-terminal-hotkey; Judge ruling, 2026-07-05).
 - AC-16a (FR-14): the sidebar inset is not applied to `pane_bounds_for_size` for quick-terminal windows (pure-function unit test).
 - AC-16b (FR-14): the sidebar-eligibility predicate returns false for quick-terminal windows, and they're never registered in the store (pure-function unit test).
@@ -187,9 +187,9 @@ Header bar: busy label (reduced form) + centered title + session-name pill. + bu
 ### In-scope (v1)
 - Central SessionStore (channel-delta type, owned by the main thread) and GC at all 5 teardown sites
 - Persistent, toggle-based left sidebar + grid-first resize (per-window visibility)
-- All card elements: icon, name, cwd, status dot, branch, 2-line preview, relative updated-time
+- All card elements: icon, name, cwd, status dot, branch, last-output preview (`sidebar-preview-lines` rows, default 5; originally 2 lines), relative updated-time
 - Click-to-switch (window focus, A-flavor)
-- Header bar (`Running`/`Idle` reduced label + title + session-name pill)
+- ~~Header bar (`Running`/`Idle` reduced label + title + session-name pill)~~ (removed 2026-07-11, see FR-5)
 - + button (cwd-inheriting new-tab) / … menu (close/rename)
 - Git branch detection (dedicated branch-poll thread, cache/negative-cache) / project icon detection
 - Config keys (`sidebar-enabled`/`sidebar-width`/`sidebar-hotkey`/`sidebar-preview-lines`)
@@ -205,7 +205,7 @@ Header bar: busy label (reduced form) + centered title + session-name pill. + bu
 - Soft-wrap reflow (existing scope of inc≥3)
 
 ## Considered but rejected
-(not yet started)
+See CHALLENGE, "Considered but rejected (from EXPAND)" (A, B, D, E).
 
 ## Open Questions / Deferred Decisions
 1. ~~Foreground process-name detection~~: **implemented 2026-07-05** (tcgetpgrp + libproc, session-metadata worker. Used in both card and header). Remaining: an option to re-enable the last-output preview (plumbing kept, only rendering stopped).

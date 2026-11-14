@@ -10,12 +10,15 @@ fixture-based parity regression harness in `tests/parity`.
 - `crates/noa-vt`: from-scratch ANSI/DEC VT parser and stream dispatch.
 - `crates/noa-grid`: terminal state, cursor, modes, rows, and scrolling.
 - `crates/noa-font`: system font discovery, rasterization, and glyph atlas data.
-- `crates/noa-theme`: vendored Ghostty-compatible theme catalog (574 themes).
+- `crates/noa-theme`: vendored Ghostty-compatible theme catalog (574 Ghostty
+  themes plus `Noa`).
 - `crates/noa-config`: config discovery, parsing, validation, and precedence.
 - `crates/noa-render`: `wgpu` renderer, shaders, snapshots, and theme mapping.
 - `crates/noa-pty`: PTY spawning plus reader/writer threads.
 - `crates/noa-app`: `winit` app loop, input, IO thread, and UI integration.
-- `assets/` and `scripts/`: app icon assets and macOS packaging helpers.
+- `assets/`: app icon, AppleScript dictionary, entitlements, and images.
+- `scripts/`: macOS bundle, Linux package, and release scripts, theme and icon
+  generation, PGO builds, and smoke-test helpers.
 
 Keep dependency boundaries intact: only `noa-app` and `noa-render` should use
 `wgpu`, and only `noa-app` should use `winit`.

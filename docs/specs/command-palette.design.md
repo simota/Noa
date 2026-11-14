@@ -38,7 +38,7 @@ Conclusion: the palette reuses search_prompt's overlay + cleanup machinery whole
 - `app.rs`: `CommandPaletteSession` struct, field, scope arms, toggle, routing, key handler, cleanup, snapshot build.
 - `snapshot.rs` (noa-render): `CommandPaletteSnapshot` type + `FrameSnapshot` field. This is a render-facing DTO (titles + keybind hints already resolved in the app layer); noa-render stays terminal-agnostic.
 
-Rationale for a new file over extending `commands.rs`: keeps the ~40-arm title registry and filter logic cohesive and separately testable; `commands.rs` is already a large enum-plumbing module (God-module pressure). Register with `mod command_palette;` in `lib.rs`.
+Rationale for a new file over extending `commands.rs`: keeps the 49-arm title registry and filter logic cohesive and separately testable; `commands.rs` is already a large enum-plumbing module (God-module pressure). Register with `mod command_palette;` in `lib.rs`.
 
 ## 3. State struct + ownership / cleanup (the #1 must-have)
 
@@ -116,7 +116,7 @@ Add a View-menu `MenuItem::with_id(AppCommand::ToggleCommandPalette.menu_id(), "
 
 ### ripple: blast radius
 
-- Files changed (7): `commands.rs`, `command_palette.rs` (new), `app.rs`, `snapshot.rs`, `renderer.rs`, `macos_menu.rs`, `lib.rs`.
+- Files changed (7): `commands.rs`, `command_palette.rs` (new), `app.rs`, `snapshot.rs`, `renderer.rs` (now `renderer/overlay.rs`, see the note at the top and §6), `macos_menu.rs`, `lib.rs`.
 - Compile-forced breaks (intended gates): the 4 exhaustive matches in `commands.rs` + `command_palette_title` won't compile until the new arm is added; this is the NFR-4 completeness guarantee, not a regression.
 - Tests touched: add roundtrip cases to `commands.rs` tests (AC-1/2/3/5); new modal tests in `app.rs` (AC-6..17); optional headless assert in `noa-render/tests/pipeline.rs` (AC-19). Existing tests are unaffected (their command lists are hardcoded, not exhaustive).
 - Dependency rule: no `noa-grid`-and-below edits; no new crates/FFI (NFR-1); `cargo tree -p noa-grid/-p noa-vt` stays `wgpu`/`winit`-free (AC-22).

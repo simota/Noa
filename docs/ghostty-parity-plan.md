@@ -4,7 +4,7 @@
 > This document is a plan snapshot based on the 2026-07-02 inventory and has not been kept in sync since.
 > The gap descriptions from Phase 2 onward (decoration rendering, protocols, tabs/splits/search/themes/background
 > opacity, etc., listed as "not implemented") are **mostly implemented by now, and the content is stale**.
-> For the latest implementation status, see the Status / Roadmap sections in `README.md`.
+> For the latest implementation status, see `docs/FEATURES.md` and the Compatibility and limitations section in `README.md`.
 
 Written 2026-07-02. A phased plan to reach "Ghostty-level" parity, based on a feature inventory taken
 after inc-1 was complete and inc-2 was nearly complete (a full review of every crate, ~182 tests). It
@@ -201,7 +201,7 @@ Excluded from session restore (automatically, by being left out of `window_order
 
 **Manual verification steps** (not automated, since it requires a GUI launch):
 1. Add `quick-terminal-hotkey = cmd+grave` to `~/.config/noa/config` and run `cargo run -p noa`.
-2. With any app in the foreground, press `Cmd+\`` → the terminal slides in from the top edge and gains
+2. With any app in the foreground, press ``Cmd+` `` → the terminal slides in from the top edge and gains
    focus.
 3. Press the same hotkey again, or move focus away (autohide) → it slides out and hides.
 4. Confirm it also appears on a different Space / over a fullscreen app.

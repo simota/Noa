@@ -120,7 +120,7 @@ Ripple feasibility check (key points):
 
 ### Assumptions
 - The overlay opens on a single window. Commit swap propagates automatically to other windows because it is single-process state
-- The font-family list uses the existing font-kit discovery as-is, with the same fuzzy-search UX as the theme list
+- The font-family list uses the existing font-kit discovery as-is, with the same fuzzy-search UX as the theme list (superseded 2026-07-06: simple cycle row with no fuzzy filter; see Settings rows and Revision history (2))
 - The existing constraint that runtime opaque→transparent transition is not possible (fixed at winit window creation) is unchanged
 
 ## L1: Requirements

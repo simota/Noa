@@ -1,6 +1,6 @@
 # noa-server Operations Runbook
 
-Target: `noa-ipc`, a JSON-RPC 2.0 over WebSocket server (spec: `docs/specs/noa-server.md`).
+Target: `noa-ipc`, a JSON-RPC 2.0 over WebSocket server (spec: `docs/specs/noa-server.md`; the FR-/AC- IDs below refer to it).
 Lets a client connect to a running noa instance to list panels, fetch text/grid, perform operations, send input, subscribe in real time, or attach another Noa instance to a pane's raw VT stream.
 
 ## 1. Enabling it
@@ -92,9 +92,10 @@ TOKEN=$(cat ~/.config/noa/server-token)
 The "Server Token" row (right after Server Scopes) in the Settings panel (Settings mode) copies the
 token currently in use, the `server-token` value if set, otherwise the file above (auto-generated if
 not yet created), to the clipboard each time you press `←`/`→` or `Enter`. The value itself is never
-shown on screen; the row display cycles through three states only: "Copy to clipboard" → "Copied ✓"
-(or "Copy failed" on failure). Since it's an action row with no value, it is not subject to Save and
-always shows the LIVE badge (completes the instant you press it, no save needed).
+shown on screen; the row display shows one of three states only: "Copy to clipboard" before a copy,
+"Copied ✓" after a successful copy, or "Copy failed" on failure. Since it's an action row with no
+value, it is not subject to Save and always shows the LIVE badge (completes the instant you press it,
+no save needed).
 
 ## 3. Connection and handshake
 
@@ -174,14 +175,14 @@ Notes:
 ## 6. Operational notes
 
 - Exposure scope: bound to `127.0.0.1` only by default. `server-bind` (e.g. `0.0.0.0`) allows
-  opting into a direct LAN bind (v2, see "LAN exposure procedure" at the start of this section), but
+  opting into a direct LAN bind (v2, see "LAN exposure procedure" in §1), but
   note that there is still no TLS, so communication remains plaintext. For remote access from an
   untrusted network (e.g. iOS), continue to reach it via an SSH port forward / Tailscale / similar
   tunnel rather than a LAN bind.
 - Mutating scopes are opt-in: minimize the permissions of tokens handed to automation agents via
   `server-scopes` (keep `read` only if just browsing).
-- Mutation timeouts: focus/newTab/split/close/sendText execute via a main-thread round trip and time
-  out after 2 seconds (Internal error). **They may still execute with delay after the timeout**
+- Mutation timeouts: focus/newTab/split/close/sendText/resizePane execute via a main-thread round trip
+  and time out after 2 seconds (Internal error). **They may still execute with delay after the timeout**
   (at-least-once). Blindly retrying on error can result in double execution.
 - Performance: structured `noa.output` notifications use bounded try-send + drop-oldest; a stalled
   structured client receives `dropped:true`. Raw attach output must never drop bytes, so it uses a

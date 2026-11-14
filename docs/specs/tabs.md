@@ -20,7 +20,8 @@
   cohesive per-window struct; Ripple's 4 mitigations become ACs.
 - scope change (CHALLENGE, user-confirmed): cwd inheritance deferred to
   Phase 5 (OSC 7 proper); v1 opens tabs in the login-shell default dir.
-- build-path decision: (decided at LOCK)
+- build-path decision (pre-LOCK placeholder): (decided at LOCK);
+  superseded by the orbit loop (engine: codex) entry above
 
 ## L0 - Vision
 

@@ -8,7 +8,7 @@ community IO benchmark for terminals (Ghostty's release notes cite it).
 ## Motivation
 
 DOOM-fire-zig fps figures are widely published for many terminals (various
-machines/window sizes, **not** comparable to ours; see Fairness).
+machines/window sizes, **not** comparable to ours; see Decision 2).
 
 What it exercises that the existing axes do not: a **frame-structured,
 truecolor-dense, cursor-repositioning flood**: every frame repaints the
@@ -113,7 +113,9 @@ header env contract. `NOA_HOLD` composes as usual (unused by this axis).
   gate and loadavg bookends.
 - `--equalize` mode: skip (the fixed 80×24 region makes the workload
   grid/font-independent by construction; font rendering differences remain
-  part of each terminal's own cost, as with scroll).
+  part of each terminal's own cost, as with scroll). Revised 2026-07-17: the
+  skip stands, but the fixed region now applies only to windowed fallback
+  runs; fullscreen runs use the full window (Decision 2).
 
 ### `bench/aggregate.py` / `table.md`
 
@@ -125,7 +127,8 @@ header env contract. `NOA_HOLD` composes as usual (unused by this axis).
 ### `bench/METHODOLOGY.md`
 
 New "Axis 7: fire" section covering: lineage (DOOM-fire-zig / Sanglard
-algorithm), the fixed-region fairness decision, the flow-control fps proxy
+algorithm), the region fairness decision (Decision 2: full-window on
+fullscreen runs, fixed 80×24 on windowed fallback), the flow-control fps proxy
 and its caveat (drain rate, not photon rate), the focus policy, and an
 explicit note that published DOOM-fire-zig figures are other machines +
 full-window regions and must not be compared to this axis's numbers.
@@ -158,8 +161,10 @@ out at most 1024 B per master read regardless of baud; parse throughput is
 2. `raw.tsv` contains per-rep `fps/frames/elapsed_ns` and the winsize note.
 3. Byte-stream identity: running `fire.c` twice redirected to a file yields
    identical output (deterministic seed), verifiable with `cmp`.
-4. A visual spot check in noa shows the fire animating in the top-left
-   80×24 region (alt screen, restored cleanly on exit).
+4. A visual spot check in noa shows the fire animating across the full
+   window on fullscreen runs, or in the top-left 80×24 region on windowed
+   fallback runs (alt screen, restored cleanly on exit). (Revised
+   2026-07-17 with Decision 2; originally the 80×24 region only.)
 5. Rankings appear in `table.md` with fps ranked higher-is-better.
 6. The EXIT-trap / kill_term lifecycle leaves no processes behind (existing
    invariant, unchanged).
@@ -176,3 +181,8 @@ out at most 1024 B per master read regardless of baud; parse throughput is
   fixed-region fps reads ~2.5× higher than full-window fps on the same
   terminal), which is exactly why the scored axis pins the region: full-mode
   numbers depend on window geometry and never enter ranking.
+  Superseded 2026-07-17 by Decision 2: fullscreen `run_all.sh` runs now
+  score the full-window region (ranked by Mcells/s since Decision 4), and
+  only windowed fallback runs pin 80×24. `bench/run_benchmark.sh` now
+  defaults to full-window, with `FIRE_FIXED=1` selecting a fixed 168×36
+  region (`FIRE_FULL` no longer exists).

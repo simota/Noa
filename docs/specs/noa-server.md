@@ -61,7 +61,7 @@ Assumptions: iOS reaches the server via a tunnel / loopback bind is possible eve
 ### Functional (FR)
 
 - FR-1 (lifecycle/gate): The server starts only when config `server-enable` (bool, default `false`) is true; if false, it opens no port at all.
-- FR-2 (bind): The server binds a WebSocket only on `127.0.0.1:<server-port>` (default `61771`) and does not listen on any non-loopback interface. On bind failure, the app continues running and only logs a warning.
+- FR-2 (bind): The server binds a WebSocket only on `127.0.0.1:<server-port>` (default `61771`) and does not listen on any non-loopback interface. On bind failure, the app continues running and only logs a warning. *(Amendment 2026-07-14: loopback-only is now the default rather than a hard requirement; the opt-in `server-bind` key (default `127.0.0.1`) can widen the bind to a LAN address. See the Out-of-scope amendment above.)*
 - FR-3 (token provisioning): On first launch, a token is auto-generated and saved to a file with 0600 permissions, then reused thereafter. If config `server-token` is set, it takes priority and file generation is skipped.
 - FR-4 (handshake): After connection establishment, the server and client exchange `protocolVersion` (integer major). A connection with a major mismatch is rejected with an error.
 - FR-5 (auth): The client must present the token via an `Authorization: Bearer <token>` header or in the initial `noa.hello` message; a connection is refused if the token doesn't match.
@@ -161,7 +161,7 @@ Assumptions: iOS reaches the server via a tunnel / loopback bind is possible eve
 ## L3 — Acceptance Criteria
 
 - AC-1 (FR-1): With `server-enable=false` (default) at startup, `61771` is not listened on (verified via `lsof`/connection attempt refusal); setting it to true makes it listen.
-- AC-2 (FR-2): The server binds only `127.0.0.1`; connections to a LAN IP are refused. The app continues to run even if bind fails.
+- AC-2 (FR-2): The server binds only `127.0.0.1`; connections to a LAN IP are refused. The app continues to run even if bind fails. *(Amendment 2026-07-14: holds for the default `server-bind = 127.0.0.1`; an explicit non-loopback `server-bind` is the shipped LAN opt-in.)*
 - AC-3 (FR-3): After the first launch, the token file exists with `0600` permissions and non-empty content. When `server-token` is set via config, no file is generated and the specified value is used.
 - AC-4 (FR-5, NFR-1): A connection that does not present a valid token is rejected with `-32001`, and no `read`/`control`/`input` method executes.
 - AC-5 (FR-6, NFR-1): A client granted only `read` calling `noa.sendText`/`noa.focusPane` receives `-32003`, and no pty injection or focus change occurs.

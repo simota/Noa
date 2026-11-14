@@ -7,8 +7,9 @@
 - status: locked
 - owner: noa maintainers
 - current phase: LOCKED
-- scope mode: Full (16 functional + non-functional requirements, 5 work
-  packages, 18 acceptance criteria)
+- scope mode: Full (23 requirements: 19 functional + 4 non-functional,
+  5 work packages, 21 acceptance criteria: 18 must-have / 3
+  nice-to-have; see Traceability)
 - build-path decision: implementation loop consumes the L3 acceptance
   criteria directly as the machine-checkable completion contract; work
   packages land in the WP0 → WP4 sequence (D5).
@@ -639,7 +640,7 @@ re-touch, not a single revert.
 | `rustybuzz` ≠ CoreText on complex scripts | D1 documented deviation | L-M | Document; escalate on concrete report | User reports / CJK visual |
 | `FrameSnapshot` insufficient for run segmentation | D2 seam | L-M | Extend snapshot, not grid (fail cond. 4) | WP2 integration |
 | Dirty-row patch diverges from full rebuild | WP4 per-row patch | M | Output-identical test (AC-WP4-03) | Instance-list equality |
-| Atlas cap hit (no eviction) once emoji/variations inflate | D5 deferral (OUT) | L | Warn already present; two-atlas keeps R8 lean | 8192² cap warnings |
+| Atlas cap hit (no eviction) once emoji/variations inflate | Magi OUT list (atlas eviction deferred) | L | Warn already present; two-atlas keeps R8 lean | 8192² cap warnings |
 
 ## Meta
 

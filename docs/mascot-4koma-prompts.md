@@ -29,7 +29,8 @@ manga 4-koma, 2x2 four-panel grid, square 1:1, four equal panels, clean gutters,
 read top-left → top-right → bottom-left → bottom-right. Consistent characters in
 every panel: Noa — a petite short girl, sleek jet-black bob with blunt bangs,
 oversized black hoodie, one warm signature-orange (#E8A33D) accent; Ember — a small
-round pure-white ghost with a simple two-dot face (a faint warm glow only when emotional, never an orange body). Clean
+round pure-white ghost with two big round black eyes with tiny catchlights, a small oval mouth and
+tiny rosy cheeks (a faint warm glow only with strong emotion, never an orange body). Clean
 flat cel-shaded webcomic style, crisp black outlines, limited charcoal + warm-orange
 palette, soft screentone, short clean English speech-bubble lettering.
 (TL) Noa's laptop showing all-green passing tests, she looks calm — bubble "all
@@ -49,7 +50,8 @@ manga 4-koma, 2x2 four-panel grid, square 1:1, four equal panels, clean gutters,
 read top-left → top-right → bottom-left → bottom-right. Consistent characters in
 every panel: Noa — a petite short girl, sleek jet-black bob with blunt bangs,
 oversized black hoodie, one warm signature-orange (#E8A33D) accent; Ember — a small
-round pure-white ghost with a simple two-dot face (a faint warm glow only when emotional, never an orange body). Clean
+round pure-white ghost with two big round black eyes with tiny catchlights, a small oval mouth and
+tiny rosy cheeks (a faint warm glow only with strong emotion, never an orange body). Clean
 flat cel-shaded webcomic style, crisp black outlines, limited charcoal + warm-orange
 palette, soft screentone, short clean English speech-bubble lettering.
 (TL) Noa turning to Ember, serious, one finger raised — bubble "let me explain the
@@ -69,7 +71,8 @@ manga 4-koma, 2x2 four-panel grid, square 1:1, four equal panels, clean gutters,
 read top-left → top-right → bottom-left → bottom-right. Consistent characters in
 every panel: Noa — a petite short girl, sleek jet-black bob with blunt bangs,
 oversized black hoodie, one warm signature-orange (#E8A33D) accent; Ember — a small
-round pure-white ghost with a simple two-dot face (a faint warm glow only when emotional, never an orange body). Clean
+round pure-white ghost with two big round black eyes with tiny catchlights, a small oval mouth and
+tiny rosy cheeks (a faint warm glow only with strong emotion, never an orange body). Clean
 flat cel-shaded webcomic style, crisp black outlines, limited charcoal + warm-orange
 palette, soft screentone, short clean English speech-bubble lettering.
 (TL) Noa wrecked and hollow-eyed, a clock reading 3:00 behind her — bubble "found
@@ -89,7 +92,8 @@ read top-left → top-right → bottom-left → bottom-right, IDENTICAL camera a
 in every panel — only the window light / time of day changes. Consistent characters:
 Noa — a petite short girl, sleek jet-black bob with blunt bangs, oversized black
 hoodie, one warm signature-orange (#E8A33D) accent; Ember — a small round pure-white
-ghost with a simple two-dot face (a faint warm glow only when emotional, never an
+ghost with two big round black eyes with tiny catchlights, a small oval mouth and
+tiny rosy cheeks (a faint warm glow only with strong emotion, never an
 orange body). Clean flat cel-shaded
 webcomic style, crisp black outlines, limited charcoal + warm-orange palette, soft
 screentone, short clean English speech-bubble lettering.
@@ -110,7 +114,8 @@ manga 4-koma, 2x2 four-panel grid, square 1:1, four equal panels, clean gutters,
 read top-left → top-right → bottom-left → bottom-right. Consistent characters in
 every panel: Noa — a petite short girl, sleek jet-black bob with blunt bangs,
 oversized black hoodie, one warm signature-orange (#E8A33D) accent; Ember — a small
-round pure-white ghost with a simple two-dot face (a faint warm glow only when emotional, never an orange body). Clean
+round pure-white ghost with two big round black eyes with tiny catchlights, a small oval mouth and
+tiny rosy cheeks (a faint warm glow only with strong emotion, never an orange body). Clean
 flat cel-shaded webcomic style, crisp black outlines, limited charcoal + warm-orange
 palette, soft screentone, short clean English speech-bubble lettering.
 (TL) Noa scowling at code in disgust — bubble "who wrote this garbage?"
@@ -128,14 +133,15 @@ manga 4-koma, 2x2 four-panel grid, square 1:1, four equal panels, clean gutters,
 read top-left → top-right → bottom-left → bottom-right. Consistent characters in
 every panel: Noa — a petite short girl, sleek jet-black bob with blunt bangs,
 oversized black hoodie, one warm signature-orange (#E8A33D) accent; Ember — a small
-round pure-white ghost with a simple two-dot face (a faint warm glow only when emotional, never an orange body). Clean
+round pure-white ghost with two big round black eyes with tiny catchlights, a small oval mouth and
+tiny rosy cheeks (a faint warm glow only with strong emotion, never an orange body). Clean
 flat cel-shaded webcomic style, crisp black outlines, limited charcoal + warm-orange
 palette, soft screentone, short clean English speech-bubble lettering.
 (TL) Noa's finger over the Enter key running a "git push --force" command, calm face
 — bubble "it's fine."
 (TR) the screen flashing as the team's commit list gets wiped to empty, dead silence,
 Noa expressionless — no dialogue.
-(BL) Ember melting down in horror, hands to its face — bubble "you deleted EVERYONE'S
+(BL) Ember melting down in horror, side nubs pressed to its face — bubble "you deleted EVERYONE'S
 work!!"
 (BR) Noa calmly typing as the commits restore on screen — bubble "git never forgets."
 Avoid: garbled text, extra fingers, deformed hands, realistic photo, cluttered
@@ -148,7 +154,8 @@ manga 4-koma, 2x2 four-panel grid, square 1:1, four equal panels, clean gutters,
 read top-left → top-right → bottom-left → bottom-right. Consistent characters in
 every panel: Noa — a petite short girl, sleek jet-black bob with blunt bangs,
 oversized black hoodie, one warm signature-orange (#E8A33D) accent; Ember — a small
-round pure-white ghost with a simple two-dot face (a faint warm glow only when emotional, never an orange body). Clean
+round pure-white ghost with two big round black eyes with tiny catchlights, a small oval mouth and
+tiny rosy cheeks (a faint warm glow only with strong emotion, never an orange body). Clean
 flat cel-shaded webcomic style, crisp black outlines, limited charcoal + warm-orange
 palette, soft screentone, short clean English speech-bubble lettering.
 (TL) cozy dark room, warm-orange screen glow on Noa's calm-determined face — bubble
@@ -168,7 +175,8 @@ manga 4-koma, 2x2 four-panel grid, square 1:1, four equal panels, clean gutters,
 read top-left → top-right → bottom-left → bottom-right. Consistent characters in
 every panel: Noa — a petite short girl, sleek jet-black bob with blunt bangs,
 oversized black hoodie, one warm signature-orange (#E8A33D) accent; Ember — a small
-round pure-white ghost with a simple two-dot face (a faint warm glow only when emotional, never an orange body). Clean
+round pure-white ghost with two big round black eyes with tiny catchlights, a small oval mouth and
+tiny rosy cheeks (a faint warm glow only with strong emotion, never an orange body). Clean
 flat cel-shaded webcomic style, crisp black outlines, limited charcoal + warm-orange
 palette, soft screentone, short clean English speech-bubble lettering.
 (TL) Noa glaring at a glitchy crash error on her screen — bubble "why does it crash?"

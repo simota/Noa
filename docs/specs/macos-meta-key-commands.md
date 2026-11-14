@@ -635,7 +635,7 @@ Out of scope:
 | Testability | PASS | ACs are verifiable by unit tests, integration/smoke tests, manual macOS smoke tests, or source inspection where appropriate. |
 | Scope coherence | PASS | In-scope and out-of-scope are mutually exclusive and collectively cover the selected C direction. |
 
-Lock preconditions: satisfied for spec sign-off. The draft remains unpromoted until the user explicitly says to lock it.
+Lock preconditions: satisfied for spec sign-off. The draft remained unpromoted until the user explicitly said to lock it; it has since been locked (see Metadata: `status: locked`, `current phase: LOCKED`).
 
 ## Build-Path Decision
 

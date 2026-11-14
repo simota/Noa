@@ -29,14 +29,15 @@ Surfaced by `+show-config` and accepted by the Ghostty config importer
 
 `<data-dir>/noa/session.json` (`noa-config::session_state_path`); on macOS
 `<data-dir>` is `~/Library/Application Support`. Written atomically (temp file +
-rename). A versioned, hand-written JSON document (`SESSION_VERSION = 3`; the
+rename). A versioned, hand-written JSON document (`SESSION_VERSION = 4`; the
 crate has no serde, matching the hand-written config parser). Version 2 added
-per-leaf `remote` metadata, version 3 the per-leaf `scrollback` snapshot key.
+per-leaf `remote` metadata, version 3 the per-leaf `scrollback` snapshot key, version 4 the `floats`
+arrays (floating panes) on windows, tabs and leaves, omitted from the example.
 Schema:
 
 ```json
 {
-  "version": 1,
+  "version": 4,
   "focused_window": 0,
   "windows": [
     {

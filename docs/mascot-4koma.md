@@ -64,7 +64,7 @@ Layout key: **TL** top-left · **TR** top-right · **BL** bottom-left · **BR** 
 *Relatable: force-push nukes the team's work, but git never truly forgets.*
 - TL `[Noa's finger over Enter on `git push --force`, calm]` Noa: "it's fine."
 - TR `[the screen flashes; the team's commits wiped; dead silence]`
-- BL `[Ember melting down, hands to face]` Ember: "you deleted EVERYONE'S work!!"
+- BL `[Ember melting down, side nubs to its face]` Ember: "you deleted EVERYONE'S work!!"
 - BR `[Noa calmly typing, the commits restoring]` Noa: "git never forgets."
 
 ### #7: Just One More Feature

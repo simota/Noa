@@ -19,9 +19,10 @@ worldview, daily life, hobbies, her ghost companion, seasons, and merch.
 
 ```
 full-body character illustration of a petite short girl, sleek jet-black bob cut
-with blunt bangs, oversized black hoodie, a single warm signature-orange (#E8A33D)
-accent (drawstrings / hairclip / earbud cord), a small chubby round pure-white ghost
-sprite (Ember, big round eyes with tiny catchlights and tiny rosy cheeks, cute) as
+with blunt bangs, oversized black hoodie, black crew socks, chunky black
+dad-sneakers whose orange sole / side accents are her single warm signature-orange
+(#E8A33D) accent, a small chubby round pure-white ghost sprite (Ember, two big round
+black eyes with tiny catchlights, a small oval mouth and tiny rosy cheeks, cute) as
 her companion, introverted, cool and self-possessed at her own pace,
 deadpan-but-secretly-warm, strong-willed unfawning direct gaze, flat vector / clean cel-shaded style, crisp outlines, sticker-ready, 4k
 ```
@@ -41,14 +42,15 @@ deadpan-but-secretly-warm, strong-willed unfawning direct gaze, flat vector / cl
 
 ### Avoid: phrase as instructions (GPT-Image-2)
 
-- Keep her **petite, ~5 heads tall**, not a tall / adult / mature woman.
+- Keep her **petite, ~5.5 heads tall**, not a tall / adult / mature woman.
 - Eyes **large but flat and deadpan, with a quiet strong-willed gaze**, not sparkly
   moe eyes, no winking (a single small catchlight is fine).
 - Exactly **one orange (`#E8A33D`) accent**; the base outfit stays black: no second
   colour, no patterns.
-- Ember is pure white, never orange / tinted; a chubby cute ghost (big round
-  eyes with tiny catchlights + a small oval mouth + tiny rosy cheeks), not scary, no
-  hands, **one ghost only**.
+- Ember is pure white, never orange / tinted; a chubby cute ghost (two big round
+  black eyes with tiny catchlights + a small oval mouth + tiny rosy cheeks), not
+  scary, only small stubby side nubs for arms (no human hands or fingers), **one
+  ghost only**.
 - Flat cel-shaded and clean; **always SFW** (she reads young); no sexualised or
   revealing framing.
 
@@ -58,7 +60,7 @@ deadpan-but-secretly-warm, strong-willed unfawning direct gaze, flat vector / cl
 tall, adult, mature woman, elongated body, sparkly huge moe eyes, heavy eyelashes,
 winking, multiple accent colors, rainbow, patterned clothes, text, letters,
 watermark, orange ghost, tinted ghost, glowing-orange ghost, scary ghost,
-big-eyed ghost, multiple ghosts, ghost with hands, cluttered background, 3d render,
+multiple ghosts, ghost with human hands, ghost with fingers, cluttered background, 3d render,
 realistic, photorealistic, extra fingers, deformed hands, bad anatomy, lowres,
 blurry, jpeg artifacts, sexualized, revealing
 ```

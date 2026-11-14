@@ -4,7 +4,8 @@
 
 - slug: macos-quick-look-proxy-icon
 - feature title: Titlebar Proxy Icon + Force-Click Quick Look
-- status: draft
+- status: implemented (2026-07-10; was draft, and this spec records no
+  separate lock step)
 - owner: noa maintainers
 - current phase: IMPLEMENTED (2026-07-10; unit ACs verified, manual-visual
   ACs pending a live-app pass; see L3 "Manual verification")
@@ -445,7 +446,7 @@ beyond the existing OSC 7 path, nor the render pipeline.
 | REQ-PXI-4 | per-window diff cache before calling `set_represented_url` | AC-PXI-5 |
 | REQ-PXI-5 | no-op path resolution (no `Path::exists` check) | AC-PXI-6 |
 | REQ-PXI-6 | documentation only (no dedicated code path) | manual verification |
-| REQ-QLK-1 | `app/event_loop.rs:296-306` `TouchpadPressure` stage tracking + UserDefaults gate | AC-QLK-1, AC-QLK-2 |
+| REQ-QLK-1 | new `TouchpadPressure` arm above the `_ => {}` wildcard (`app/event_loop.rs:488` at design time; risk-gate finding #1) with stage tracking + UserDefaults gate | AC-QLK-1, AC-QLK-2 |
 | REQ-QLK-2 | new `word_at_viewport_point` on `noa-grid` `Terminal`/`Screen` | AC-QLK-3, AC-QLK-4, AC-QLK-5 |
 | REQ-QLK-3 | `mouse.rs:150` mapping + call into `word_at_viewport_point` | AC-QLK-4 |
 | REQ-QLK-4 | coordinate-conversion helper + `macos_window.rs::show_definition` | AC-QLK-6, AC-QLK-7 |

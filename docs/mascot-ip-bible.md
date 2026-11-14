@@ -18,7 +18,7 @@ means every bit of it.
 | Build | Petite; 148 cm; youthful; jet-black bob, blunt bangs; default ~5.5 heads tall (balanced, slightly smaller head) |
 | Register | Introverted, deadpan, few words, but a sharp, dry wit when she does speak |
 | Core | Strong-willed, own-pace, unfawning; **soft and loyal underneath** |
-| Signature look | Very oversized black hoodie (dress-like) with a `>▮` chest emblem, black crew socks + chunky black sneakers with orange accents, single warm-orange `#E8A33D`; white die-cut sticker outline |
+| Signature look | Very oversized black hoodie (dress-like) with a `>▮` chest emblem (product-tied line only; dropped in terminal-independent work, per `mascot-profile.md`), black crew socks + chunky black sneakers with orange accents, single warm-orange `#E8A33D`; white die-cut sticker outline |
 | Companion | Ember, her ghost sprite (see §2); almost always with her |
 
 **Speech style** (for captions / voice / VTuber): short flat lines, trailing "…",
@@ -51,8 +51,8 @@ Needy, warm, bouncy, wears its heart on its (nonexistent) sleeve. Ember does the
 reacting so Noa doesn't have to: the duo dynamic is the heart of the IP.
 
 - Role: reaction engine, comfort object, occasional troublemaker.
-- Personality: clingy, food-motivated, brave-when-it-matters; glows brighter
-  with emotion (and on Halloween).
+- Personality: clingy, food-motivated, brave-when-it-matters; a faint warm glow
+  flares only with strong emotion (and on Halloween).
 - Name meaning: a warm coal that flares with feeling; ties directly to Noa's
   `#E8A33D` accent, so the duo shares one light.
 - Visual rules: small, chubby and extra-plump (**~1 head tall, ~as wide as

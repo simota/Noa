@@ -2,7 +2,7 @@
 
 - slug: applescript
 - status: locked (2026-07-10)
-- build-path: undecided (to be selected at the post-LOCK checkpoint)
+- build-path: not recorded (implemented 2026-07-10, see Amendment 2)
 - owner: simota
 
 ## L0: Vision
@@ -50,7 +50,7 @@ Ghostty introduced AppleScript support in 1.3.0 (treated as preview):
 - Add `UserEvent::WriteText` (events.rs). Window/pane resolution defaults to the focused one if no id is given.
 - id scheme: window id = existing `WindowGroupId`/winit WindowId stable integer; tab/terminal id = reuses the existing session_store id (no new id scheme is introduced).
 - Add objc2-foundation features (NSAppleEventManager / NSAppleEventDescriptor).
-- perform action mapping table (initial set, closed): `new_tab`→NewTab, `new_window`→NewWindow, `new_split:right|left|up|down`→NewSplit*, `close_tab`→CloseTab, `close_window`→CloseWindow, `next_tab`→NextTab, `previous_tab`→PrevTab, `goto_tab:<n>`→SelectTab(n-1), `toggle_fullscreen`→ToggleFullscreen, `copy_to_clipboard`→Copy, `paste_from_clipboard`→Paste, `reload_config`→ReloadConfig, `quit`→Quit. Actions not in the table return -1708. Place the table next to `commands/command.rs`; share it with the keybind action-string parser if one exists.
+- perform action mapping table (initial set, closed): `new_tab`→NewTab, `new_window`→NewWindow, `new_split:right|left|up|down`→NewSplit*, `close_tab`→CloseTab, `close_window`→CloseWindow, `next_tab`→NextTab, `previous_tab`→PrevTab, `goto_tab:<n>`→SelectTab(n) (corrected from SelectTab(n-1) in Amendment 2), `toggle_fullscreen`→ToggleFullscreen, `copy_to_clipboard`→Copy, `paste_from_clipboard`→Paste, `reload_config`→ReloadConfig, `quit`→Quit. Actions not in the table return -1708. Place the table next to `commands/command.rs`; share it with the keybind action-string parser if one exists (superseded: Amendment 2 uses a dedicated closed table, `command_from_applescript_action`).
 - Path for pane(terminal)-targeted verbs: since `focus`(terminal) and `close`(terminal) have no AppCommand variant, introduce new `UserEvent::FocusPane { window_id, pane_id }` / `UserEvent::ClosePane { window_id, pane_id }` and connect them to the existing `split_tree` focus-move / `request_close_pane` paths (direct calls are prohibited per R-11).
 
 ## L3: Acceptance Criteria
@@ -110,7 +110,7 @@ Implementation constraints confirmed that don't conflict with L1. Where this sec
 4. **AE four-char codes come from a single const table**, registered from it, with a unit test that cross-checks it against the sdef XML (to prevent silent no-ops). The catch-all returns at minimum -1708.
 5. WriteText convention: window_id/pane_id are frozen at AE-resolution time (re-resolving to focused at processing time is prohibited); if the target has disappeared, the event is dropped. Bracketed-paste wrapping is applied based on the pane mode at processing time. AE input text has a size cap (matches the existing paste limit).
 6. Config key: mirrors `macos_non_native_fullscreen` as the 10th touch point (note default is **true**) + adds `is_supported_scalar_key` (overrides.rs:432) so the import path picks it up too.
-7. The perform action table reuses the existing `command_from_keybind_action`/`ghostty_action_alias` (commands/keybind.rs:237,244) (no AppCommand changes needed; unknown → None → -1708).
+7. The perform action table reuses the existing `command_from_keybind_action`/`ghostty_action_alias` (commands/keybind.rs:237,244) (no AppCommand changes needed; unknown → None → -1708). *Superseded by Amendment 2: a dedicated closed table replaced keybind-parser reuse.*
 
 ## Amendment 2: Implementation-Time Decisions (2026-07-10, attest/judge)
 

@@ -57,7 +57,7 @@ The R-27 original text says "either color or icon" as an either/or choice, but *
 
 ### Placement
 Place it **directly below** the existing fg/bg swatch (the semantic swatches column, `Foreground`/`Background`) in the sample area, so it's clear at a glance what exactly is being contrasted against what. Below the existing truecolor ramp, and below the newly added sample text lines (§7): a top-to-bottom order of "color swatch → in-context appearance → summary number," moving from abstract to concrete to conclusion.
-- wgpu: row `LIST_TOP_ROW + 4` (existing: 2 ANSI rows + semantic row + truecolor row = immediately after `LIST_TOP_ROW`–`+3`), starting at `SAMPLE_COL`.
+- wgpu: row `LIST_TOP_ROW + 7` (existing: 2 ANSI rows + semantic row + truecolor row = `LIST_TOP_ROW`–`+3`, then §7's 3 sample lines = `+4`–`+6`), starting at `SAMPLE_COL`.
 - Native: `+14pt` further below `semantic_top + sw + gap + 4.0` (the truecolor-ramp band), starting at `sample_x`, 11pt, `system_font` (same family as existing labels).
 
 ## 4. Favorite star mark (R-29)

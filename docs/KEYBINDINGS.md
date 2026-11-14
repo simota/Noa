@@ -103,10 +103,10 @@ from the command palette or the right-click context menu. Panes can be
 added up to 3 per row/column, up to 9 panes per tab maximum. Adding a
 pane past the limit is a no-op. In the command palette and right-click
 context menu, Add Pane directions that can no longer be created are
-disabled. Split actions have no menu entry and are only reachable via
-keybindings and the right-click context menu (Add Pane Left / Add Pane
-Right / Add Pane Up / Add Pane Down / Equalize Splits / Toggle Split
-Zoom).
+disabled. Split actions have no menu bar entry. They are reachable via
+keybindings, the command palette, and the right-click context menu (Add
+Pane Left / Add Pane Right / Add Pane Up / Add Pane Down / Equalize Splits
+/ Toggle Split Zoom).
 
 ### Edit / Terminal / Font
 
@@ -195,8 +195,9 @@ aliases: `cmd`/`command`/`super`/`meta`, `ctrl`/`control`, `alt`/`option`,
 - Backtick: `grave`, `backtick`, `` ` ``
 - Backslash: `backslash` or `\`. Registers both ANSI `\` and the JIS Yen (`¥`) / Ro key
   simultaneously
-- JIS-specific: `yen`/`jis-yen`/`intl-yen`,
-  `underscore`/`jis-underscore`/`intl-ro` (aliases for `_` and `-` also work)
+- JIS-specific: `yen`/`jis-yen`/`intl-yen` (`¥`),
+  `underscore`/`jis-underscore`/`intl-ro` (`_`). The `jis_`/`intl_`
+  spellings with `_` in place of `-` also work
 
 Unlike in-app `keybind`, global hotkeys don't accept arrow keys,
 `PageUp` / `PageDown`, or `Home` / `End`. A hotkey can be disabled with

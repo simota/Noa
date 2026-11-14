@@ -61,7 +61,7 @@ A from-scratch DFA parser plus a `Handler` trait separating parsing from state.
 - **Cursor styles**: block / bar / underline / hollow, focus / blink phase support
 - **Underline rendering**: single / double / curly / dotted / dashed, hover-link underline
 - **Background transparency / blur**: `background-opacity`, `background-blur-radius` (native macOS blur)
-- **Glassmorphism mode**: `glassmorphism` (`off`/`1`–`5`, default `off`, higher = more transparent): translucent frosted sidebar / tab-overview / titlebar-tab-bar chrome and frosted command palette / prompts / dialogs over the blurred desktop; the rim takes over drawing each pane's edge as the faces thin out, reaching the foreground color at `5`. Any on-level takes over `background-opacity` / `background-blur-radius` with that level's own recommended pair
+- **Glassmorphism mode**: `glassmorphism` (`off`/`1`–`5`, default `off`, higher = more transparent): translucent frosted sidebar / session-overview / titlebar-tab-bar chrome and frosted command palette / prompts / dialogs over the blurred desktop; the rim takes over drawing each pane's edge as the faces thin out, reaching the foreground color at `5`. Any on-level takes over `background-opacity` / `background-blur-radius` with that level's own recommended pair
 - **Background image**: `background-image` (single file / directory rotation), fit / position / repeat / opacity / interval settings
 - **minimum-contrast**: enforcement of a WCAG contrast-ratio floor
 - **Font pipeline**: font-kit discovery → rustybuzz shaping → swash rasterization → etagere atlas (monochrome + color emoji)
@@ -92,7 +92,7 @@ For the type, allowed values, defaults, and clamp/fallback rules of every key, s
 
 - **Ghostty config import**: import with migration statistics
 - **Custom keybindings**: reassignment via `keybind = <chord>=<action>` / `unbind` / `clear`
-- **Recognized-but-unsupported keys**: `palette` and `config-file` emit a diagnostic and their values are ignored; palette override and include are not implemented
+- **Palette overrides and includes**: `palette = N=#RRGGBB` overrides one palette entry; `config-file` includes another file (`?` makes it optional)
 - **Live reload**: the config file is watched and re-applied at runtime: immediately on window focus gain and settings-panel commits, otherwise on a slow 3s idle poll (so a save from inside a focused noa pane applies within ≤3s; refocus or use the settings UI to apply instantly)
 - **Deviating defaults**: `cursor-stop-blinking-after = 10` (Ghostty blinks forever; `0` restores parity) and `quick-terminal-screen = mouse` (Ghostty: `main`); see CONFIGURATION.md "Deviations from Ghostty defaults" for rationale
 

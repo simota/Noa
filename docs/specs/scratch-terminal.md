@@ -1,4 +1,4 @@
-# Scratch Terminal (transient popup terminal): Draft Spec
+# Scratch Terminal (transient popup terminal): Spec
 
 - slug: scratch-terminal
 - status: locked (2026-07-24)

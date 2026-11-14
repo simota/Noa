@@ -23,7 +23,7 @@ cwd だけを復元し、端末の内容は「Ghostty に合わせて復元し�
 | # | 欠陥 | 種類 | 対応 |
 |---|------|------|------|
 | D-1 | 「何が復元され、何が復元されないか」が事前にも事後にも伝わらない | 正直さの欠如（今のコードのバグに近い） | Stage 0 |
-| D-2 | 直前の表示内容そのものが失われる | 機能の不在 | Stage 1–3 |
+| D-2 | 直前の表示内容そのものが失われる | 機能の不在 | Stage 1–2 |
 
 D-1 は D-2 を実装しなくても単独で解消でき、コストが桁違いに小さい。先に D-1 を
 潰す。
@@ -155,7 +155,7 @@ RAM にしか存在せず、プロセスと共に消える。永続化はこの�
   （`NSURLIsExcludedFromBackupKey`）。記録がバックアップ経由で外へ漏れる経路を塞ぐ。
 - `scrollback-persist = never`（既定）のときはディレクトリごと作らない。
 
-**Stage 3 の追加（オプトイン）:**
+**Stage 2 の追加（オプトイン）:**
 
 - `scrollback-persist-encrypt = true` で AES-256-GCM。鍵は Keychain
   （`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`）。ファイルごとに nonce。
@@ -206,7 +206,7 @@ noa 拡張として既定 `never`。AC-1 の意図は Stage 0 が担保する。
 | Stage | 内容 | 閉じる AC | 規模の目安 |
 |---|---|---|---|
 | 0（正直さ） | 復元されたペインに 1 行の告知（`layout restored · previous output was not saved · set scrollback-persist = tail to keep it`）。Settings に `Persist Scrollback` 行。永続化なし | AC-2 | 実装済み |
-| 1（履歴テール永続化） | 末尾 `scrollback-persist-limit` バイトぶんの履歴を属性付きで保存／復元（deflate 圧縮）。記録ビュー（セパレータ + ガター + バッジ）。ファイル形式・権限・Time Machine 除外・起動時 GC のベースライン。復元領域は既存 `search.rs` でそのまま検索対象になる | AC-1, AC-3 | 本命。`noa-grid` に serialize/deserialize、`noa-app` に capture/restore/記録ビュー、`noa-config` に 4 キー |
+| 1（履歴テール永続化） | 末尾 `scrollback-persist-limit` バイトぶんの履歴を属性付きで保存／復元（deflate 圧縮）。記録ビュー（セパレータ + ガター + バッジ。バッジは見送り、§12 D-3）。ファイル形式・権限・Time Machine 除外・起動時 GC のベースライン。復元領域は既存 `search.rs` でそのまま検索対象になる | AC-1, AC-3 | 本命。`noa-grid` に serialize/deserialize、`noa-app` に capture/restore/記録ビュー、`noa-config` に 4 キー（Stage 2 の `scrollback-persist-encrypt` を加えて計 5 キー、§8） |
 | 2（堅牢化） | Keychain 暗号化、総量 LRU、`max-age` 失効、`+scrollback-gc` サブコマンド、ペイン単位の非保存トグル | — | 独立して後追い可 |
 
 Stage 0 は Stage 1 が無くても価値がある。逆は成り立たない（Stage 1 だけ入れて
@@ -220,7 +220,7 @@ Stage 0 は Stage 1 が無くても価値がある。逆は成り立たない（
 | `scrollback-persist-limit` | バイト | `1048576` |
 | `scrollback-persist-total-limit` | バイト | `67108864` |
 | `scrollback-persist-max-age-days` | 整数（日） | `7` |
-| `scrollback-persist-encrypt` | bool | `false`（Stage 2・未実装） |
+| `scrollback-persist-encrypt` | bool | `false`（Stage 2・実装済み） |
 
 `+show-config` への露出と、`theme_settings/rows.rs` の `SettingsRowKind::COUNT`
 bump を忘れないこと。
@@ -229,10 +229,10 @@ bump を忘れないこと。
 
 | リスク | 影響 | 緩和 |
 |---|---|---|
-| 機微情報がディスクに残る | 高 | 既定 OFF、`0600`/`0700`、バックアップ除外、Stage 3 で暗号化。有効化時に一度だけ警告を出す |
+| 機微情報がディスクに残る | 高 | 既定 OFF、`0600`/`0700`、バックアップ除外、Stage 2 で暗号化（実装済み）。有効化時に一度だけ警告を出す |
 | 復元時のウィンドウ幅が保存時と違う | 中 | `Row::wrapped` と `cols` を保存し、`screen/reflow.rs` に通す |
 | 終了時のキャプチャで quit が遅くなる | 中 | 上限が効くので最悪ケースが有界。`exiting` は既に persister の flush を待っている |
-| ディスクを食い潰す | 中 | 4 層キャップ + 起動時 GC |
+| ディスクを食い潰す | 中 | 3 層キャップ（§4.3）+ 起動時 GC |
 | 記録がライブと誤認される | 中 | §5 の記録ビュー。これを削ると元の欠陥に戻る |
 | Ghostty パリティからの逸脱 | 低 | 既定 OFF + Parity Map に明示的逸脱として記載 |
 
@@ -244,7 +244,7 @@ bump を忘れないこと。
 | DEC-2 | 保存対象は履歴全体の末尾テール。1 画面モード（`screen`）は作らない | Q2 回答。量は `scrollback-persist-limit` 一本で制御でき、2 経路を持つ理由がない（`screen` は「小さい `tail`」に過ぎない） | 確定 |
 | DEC-3 | v1 の保護は FileVault + `0700`/`0600` + バックアップ除外。Keychain 暗号化は Stage 2 で opt-in | Q3 未回答につき §4.6 の推奨値を採用。A-3（個人所有の単独ユーザー Mac）が前提 | 仮決め |
 | DEC-4 | 復元された記録は残す。ライブ出力が来ても消えない（通常の scrollback と同じ寿命）。破棄はコマンドパレット `Discard restored history` と `clear` から明示的に行う | Q4 未回答。勝手に消える方が驚きが大きく、「読みに戻れる」ことがそもそもの要望 | 仮決め |
-| DEC-5 | 保存単位はペイン単位（split の各 leaf が独立） | Q5 未回答。タブ単位に縮めると「復元されたのに片方の split だけ空」という、元の欠陥（D-1）と同型の非対称が生まれる。総量は §4.3 の 4 層キャップで抑える | 仮決め |
+| DEC-5 | 保存単位はペイン単位（split の各 leaf が独立） | Q5 未回答。タブ単位に縮めると「復元されたのに片方の split だけ空」という、元の欠陥（D-1）と同型の非対称が生まれる。総量は §4.3 の 3 層キャップで抑える | 仮決め |
 
 DEC-3 / 4 / 5 は仮決め。実装着手までに異議があれば差し替える。
 
@@ -277,7 +277,7 @@ DEC-3 / 4 / 5 は仮決め。実装着手までに異議があれば差し替え
 | D-4 | `scrollback-persist-max-age = 7d` | `scrollback-persist-max-age-days = 7` | noa の config には suffix 構文がどこにも無い（`cursor-stop-blinking-after` も `background-image-interval` も素の整数秒）。単位はキー名で表すのが既存の規約 |
 | D-5 | per-pane 上限は「圧縮後バイト」 | 「エンコード後・deflate 前バイト」 | 圧縮後で予算を切るには、切って圧縮して溢れたらやり直す必要がある。圧縮前は一度で確定でき、圧縮は必ず約束より小さくする方向にしか効かない |
 | D-6 | `SESSION_VERSION` を 2 へ | 3 へ | 2 は remote ペインのメタデータで既に使用済みだった |
-| D-8 | （提案に無し） | 記録の破棄は既存 scrollback を作り直して実装 | ページは packed 後は不変で、ページ単位でしか evict されない。`erase_display(Scrollback)` はライブ履歴まで消してしまうため、残存行を materialize して詰め直す O(n) 経路を足した。ユーザー起点の稀なコマンドなので、bulk-output のホットパスには触っていない |
+| D-7 | （提案に無し） | 記録の破棄は既存 scrollback を作り直して実装 | ページは packed 後は不変で、ページ単位でしか evict されない。`erase_display(Scrollback)` はライブ履歴まで消してしまうため、残存行を materialize して詰め直す O(n) 経路を足した。ユーザー起点の稀なコマンドなので、bulk-output のホットパスには触っていない |
 | D-8 | 記録領域のガター範囲は常に有効 | 座標が再採番されたらマーキングだけ捨てる | `record_rows`/`annotation_row` は絶対行のキャッシュで、列数 reflow と scrollback clear は空間ごと振り直す。`Terminal::grid_coordinate_generation` はまさにその2つで bump し、通常の eviction では bump しない（既存テストが保証）ので、これを突き合わせるのが完全な陳腐化判定になる。不一致時はガターと `skip_row` と Discard を止める。誤った行を消すより、印が消えるほうが遥かに軽い。境界そのものはセパレータ行（=内容）なので reflow を跨いで残り、AC-3 は維持される |
 | D-9 | （提案に無し） | 永続化リンクは 4 KiB で打ち切る | OSC 8 のペイロード上限はパーサの 12 MiB。リンクは side table に載るため行単位の予算計算からは見えず、URI 1本でスナップショット全体の上限を突破できた。これより長い URL は誰も踏まないので、セルの文字は残しリンクだけ落とす |
 | D-10 | `scrollback-persist-max-age-days` は記録内容の古さを縛る | ファイルの古さを縛る | 使い続けているペインは終了のたびに再キャプチャされ、復元した記録を持ち越すのでファイルの mtime は更新され続ける。内容の年齢を縛るには行ごとの時刻が要り、形式変更になる。キーの意味を `CONFIGURATION.md` で明示する側に倒した。量を縛るのは `scrollback-persist-limit` の仕事 |

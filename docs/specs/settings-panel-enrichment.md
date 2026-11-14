@@ -153,9 +153,9 @@ Per the magi verdict (2026-07-11, not to be re-litigated), the adopted scope is 
 ## Edge cases / unverified items (explicit)
 
 - Interaction between search and selected_row/font_size_digits/background_image_text: it's undecided how to handle the `FontSize` row being mid-edit (`font_size_digits: Some(..)`) when entering search mode via R-5 (whether to commit or discard the unconfirmed digit entry when search starts). Decide at implementation time, together with the call timing of `clear_row_input_state()` (existing, `state.rs:439-442`).
-- Index stability when exiting search: when returning from a filtered `settings_filtered` state to showing all rows, it's undecided whether `selected_row` (a raw index into `SettingsRowKind::ALL`) keeps pointing at the pre-search row or preserves its relative position within the search results. Confirm consistency with the command palette's confirm behavior at implementation time.
+- Index stability when exiting search: when returning from a filtered `settings_filtered` state to showing all rows, it's undecided whether `selected_row` (a raw index into `SettingsRowKind::ALL`) keeps pointing at the pre-search row or preserves its relative position within the search results. Confirm consistency with the command palette's confirm behavior at implementation time. (Resolved by Addendum B: `Enter` confirms the highlighted row, `Tab` exits restoring the pre-search selection.)
 - Runtime application of R-9's 4 rows: this spec treats all of them as persist-only (applied on next launch), but since `cursor-style-blink` is closely related to the existing live `CursorStyle` row, there may be a future opportunity to integrate it with `apply_live_cursor_style`'s `blinking` argument (currently statically derived from `initial_cursor_style`, `app/input_ops/theme_settings.rs:518-528`) and make it live — recorded as a future increment candidate outside this spec's scope.
-- Final text of R-1's copy: subject to copy review at implementation time; this spec only contracts the meaning (distinguishing the reason).
+- Final text of R-1's copy: subject to copy review at implementation time; this spec only contracts the meaning (distinguishing the reason). (Resolved by Addendum B: `(restart to apply)` / `(opaque window — restart to preview)`.)
 
 ## L3 — Acceptance Criteria
 
@@ -292,8 +292,7 @@ L4:
 ## Open Questions / Deferred Decisions
 
 - The design for eventually making one of R-9's 4 rows live (particularly `cursor-style-blink`), and how to integrate it with the existing `apply_live_cursor_style`'s `blinking` argument.
-- Index stability when exiting R-5's search (pre-search row vs. relative position within filtered results).
-- R-1's final display copy (only the meaning is fixed by this spec; the copy is reviewed at implementation time).
+- ~~Index stability when exiting R-5's search~~ and ~~R-1's final display copy~~: duplicates of the "Edge cases / unverified items" entries; both resolved by Addendum B.
 - How R-6's description coexists with the existing "card min-3 row-count shrink" constraint (see the `theme-settings-ui spec` memory), and the adjustment range for `THEME_SETTINGS_ROWS`/`THEME_LIST_ROWS`.
 
 ---

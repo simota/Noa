@@ -272,8 +272,6 @@ fn explain_option(name: &str) -> Option<String> {
             [row_key, values, default, description] if row_key == key => Some(format!(
                 "{name}\n\n  Values:  {values}\n  Default: {default}\n\n{description}\n"
             )),
-            // The "Recognized but unsupported keys" table.
-            [row_key, behavior] if row_key == key => Some(format!("{name}\n\n{behavior}\n")),
             _ => None,
         }
     })

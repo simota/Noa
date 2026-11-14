@@ -8,11 +8,6 @@
 //! window or GPU. The module must not import `winit` or `wgpu` (NFR-6/AC-2,
 //! enforced by the source-scan test below) and never locks the terminal
 //! (NFR-1/AC-17) — it only reads already-published card state.
-//!
-//! PR2 wires the module into the crate but nothing consumes it yet; the
-//! `dead_code` allow is temporary and removed when the app integrates the
-//! sidebar (PR3).
-#![allow(dead_code)]
 
 pub use crate::split_tree::{Point, Rect as SidebarRect};
 
@@ -36,6 +31,7 @@ pub const SIDEBAR_HEADER_H: u32 = 0;
 pub const SIDEBAR_TOOLBAR_H: u32 = 30;
 
 /// Default number of last-output preview rows in one session card.
+#[cfg(test)]
 pub const DEFAULT_SIDEBAR_PREVIEW_LINES: usize = noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES;
 
 /// Vertical gap between adjacent cards. Zero keeps the sidebar list flat and
@@ -94,11 +90,13 @@ fn card_height_for_preview_lines(preview_lines: usize) -> u32 {
 }
 
 /// Height of one session card at the default preview-line count.
+#[cfg(test)]
 pub const SIDEBAR_CARD_H: u32 = CARD_PREVIEW_START_Y
     + DEFAULT_SIDEBAR_PREVIEW_LINES as u32 * CARD_PREVIEW_LINE_STEP
     + CARD_BOTTOM_PAD;
 
 /// Vertical stride from one default-height card's top to the next.
+#[cfg(test)]
 pub const SIDEBAR_CARD_STRIDE: u32 = SIDEBAR_CARD_H + SIDEBAR_CARD_GUTTER;
 
 // Toolbar `+` button metrics (kept as comfortable hit targets). Nudged a little
@@ -114,9 +112,6 @@ const TOOLBAR_BUTTON_OFFSET_Y: u32 = 1;
 /// Minimum gap (logical px) kept below the button so its border never kisses the
 /// card region that begins at the toolbar band's bottom edge.
 const TOOLBAR_BUTTON_GAP_BOTTOM: u32 = 3;
-
-// Header line height for the status / title / pill rects.
-const HEADER_LINE_H: u32 = 16;
 
 /// The three horizontal bands the sidebar is split into: a fixed top header, a
 /// fixed toolbar (`+` / `…`), and the scrolling card viewport below.
@@ -195,6 +190,7 @@ impl SidebarMetrics {
     /// value falls back to 1.0). `card_stride` is derived from the scaled parts
     /// so it always equals `card_h + card_gutter` exactly (the layout and
     /// hit-test both rely on that identity).
+    #[cfg(test)]
     pub fn new(scale: f32) -> Self {
         Self::new_with_preview_lines(scale, DEFAULT_SIDEBAR_PREVIEW_LINES)
     }

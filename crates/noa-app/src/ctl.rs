@@ -768,6 +768,26 @@ struct Session {
     lacks_surface_ids: bool,
 }
 
+/// A worker's environment: `--env` first, then what the orchestrator has that
+/// the GUI app's own environment may lack. Its locale (`LANG`, `LC_*`): a
+/// Noa started from the Dock has none, and without it a worker's scripts
+/// cut multibyte text into bytes. And for a command, which spawns without a
+/// shell, its `PATH`.
+pub(crate) fn worker_env(
+    given: Vec<(String, String)>,
+    command: bool,
+    orchestrator: impl Iterator<Item = (String, String)>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut env: std::collections::BTreeMap<String, String> = given.into_iter().collect();
+    for (key, value) in orchestrator {
+        let wanted = key == "LANG" || key.starts_with("LC_") || (command && key == "PATH");
+        if wanted && !env.contains_key(&key) {
+            env.insert(key, value);
+        }
+    }
+    env
+}
+
 /// After a spawn, open `own`'s board when none is open. A failure here is a
 /// warning to print, never the spawn's: the worker already started (D9).
 pub(crate) fn board_after_spawn(
@@ -1189,15 +1209,7 @@ impl Session {
                 args.max_children
             )));
         }
-        let mut env: std::collections::BTreeMap<String, String> = args.env.into_iter().collect();
-        // A command spawns without a shell, so it is looked up on the
-        // orchestrator's own PATH rather than the GUI app's minimal one.
-        if !args.command.is_empty()
-            && !env.contains_key("PATH")
-            && let Ok(path) = std::env::var("PATH")
-        {
-            env.insert("PATH".to_string(), path);
-        }
+        let env = worker_env(args.env, !args.command.is_empty(), std::env::vars());
         let cwd = spawn_cwd(args.cwd, std::env::current_dir().ok());
         let params = SpawnParams {
             config: Some(SpawnConfig {
@@ -1813,6 +1825,42 @@ mod tests {
             None
         );
         assert_eq!(board_after_spawn(|| Ok(Vec::new()), 1, || Ok(9)), None);
+    }
+
+    // Reported with a screenshot, reproduced in a Noa started without LANG:
+    // a worker got no locale, so its status line script (`tr ' ' '█'`) cut
+    // the bar into single bytes and the pane showed replacement characters.
+    #[test]
+    fn a_worker_inherits_the_orchestrators_locale() {
+        let orchestrator = || {
+            [
+                ("LANG", "ja_JP.UTF-8"),
+                ("LC_CTYPE", "UTF-8"),
+                ("PATH", "/usr/bin"),
+                ("HOME", "/Users/me"),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+        };
+        let env = worker_env(Vec::new(), true, orchestrator());
+        assert_eq!(env.get("LANG").map(String::as_str), Some("ja_JP.UTF-8"));
+        assert_eq!(env.get("LC_CTYPE").map(String::as_str), Some("UTF-8"));
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
+        assert!(!env.contains_key("HOME"));
+
+        // A shell worker gets the locale too, but its shell sets PATH.
+        let shell = worker_env(Vec::new(), false, orchestrator());
+        assert_eq!(shell.get("LANG").map(String::as_str), Some("ja_JP.UTF-8"));
+        assert!(!shell.contains_key("PATH"));
+
+        // `--env` wins.
+        let given = vec![("LANG".to_string(), "C".to_string())];
+        assert_eq!(
+            worker_env(given, true, orchestrator())
+                .get("LANG")
+                .map(String::as_str),
+            Some("C")
+        );
     }
 
     #[test]

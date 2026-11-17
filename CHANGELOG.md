@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A worker spawned with `+ctl spawn` got no locale when Noa was started from
+  the Dock, so scripts in it (a Claude Code status line drawing a bar with
+  `tr`) cut multibyte characters into bytes and the pane showed replacement
+  characters. Workers now get the orchestrator's `LANG` and `LC_*`.
 - A Claude Code turn that ended (OSC 7501 `state=done`, or `state=error` for a
   failed one) left the session card at "running"; it now shows finished or
   error.

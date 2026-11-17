@@ -65,7 +65,7 @@ accepted and changes nothing.
 |---|---|
 | `--no-board` | Do not open the board |
 | `--cwd DIR` | Working directory. Relative paths are taken from this process's cwd. Default: this process's cwd |
-| `--env KEY=VALUE` | Repeatable. `PATH` defaults to this process's `PATH` when a command is given |
+| `--env KEY=VALUE` | Repeatable. `PATH` defaults to this process's `PATH` when a command is given, and `LANG` and `LC_*` to this process's, so a worker keeps your locale even when Noa itself has none |
 | `--label TEXT` | Shown in the panel's `label` |
 | `--input TEXT` | Typed into the worker once it starts |
 | `--no-wait-after` | Close the pane when its command exits. By default it stays open with `exit.code` readable |

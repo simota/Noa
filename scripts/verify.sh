@@ -78,15 +78,17 @@ if [ "$full" = 1 ]; then
   run build cargo build --workspace --locked
   run test cargo test --workspace --locked
   run hook-test python3 -I -B scripts/test_noa_agent_hook.py
+  run skill-install-test python3 -I -B scripts/test_install_agent_skill.py
   if [ "$os" = Linux ]; then
     run desktop-files sh -c 'desktop-file-validate dist/linux/com.simota.noa.desktop &&
       appstreamcli validate --no-net dist/linux/com.simota.noa.metainfo.xml'
   fi
 elif [ "${#changed[@]}" -gt 0 ]; then
-  pkgs=() hook=0
+  pkgs=() hook=0 skill=0
   for path in "${changed[@]}"; do
     p=$(package_of "$path"); [ -n "$p" ] && pkgs+=("$p")
     case $path in scripts/noa-agent-hook.py | scripts/test_noa_agent_hook.py) hook=1 ;; esac
+    case $path in scripts/install-agent-skill.sh | scripts/test_install_agent_skill.py | skills/*) skill=1 ;; esac
   done
   if [ "${#pkgs[@]}" -gt 0 ]; then
     # The changed packages plus every workspace package that depends on them.
@@ -99,6 +101,7 @@ elif [ "${#changed[@]}" -gt 0 ]; then
     run test cargo test --locked "${args[@]}"
   fi
   [ "$hook" = 1 ] && run hook-test python3 -I -B scripts/test_noa_agent_hook.py
+  [ "$skill" = 1 ] && run skill-install-test python3 -I -B scripts/test_install_agent_skill.py
 fi
 
 summary="verify: ok"; [ "${#failed[@]}" -gt 0 ] && summary="verify: FAILED: ${failed[*]}"

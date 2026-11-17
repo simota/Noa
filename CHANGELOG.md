@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Noa +ctl` orchestrates worker panes from a script or an agent: `spawn`, `send`,
+  `wait`, `read`, `close`, `ls`, `self`, and `report` (agent-orchestration).
+- noa-server: `Panel` gains `surfaceId`, `agent` (kind, state, report count),
+  `exit`, `parentPaneId`, and `label`; `noa.newTab`/`noa.split` accept a spawn
+  config, label, parent, and `focus`, and `noa.split` accepts `direction: "auto"`.
+  All additive; the protocol stays at version 3.
+- Every pane's environment carries `NOA_BIN`, the running Noa's path.
+- `Noa +ctl board` shows an orchestrator's workers in a pane: who needs you
+  first, then who is working, done or exited, each with its last report, the
+  last lines of its work above the agent's input box, and how long it has been
+  in its state. Open a worker for its live screen and the reports seen
+  since the board opened; send it a message, move to it, or close it.
+  `+ctl board --open` starts one next to the orchestrator.
+- `Noa +ctl spawn` puts every worker in a floating pane over the
+  orchestrator, collapsed to its title strip, so workers stay out of the way
+  while the board shows them; the first spawn opens the board (`--no-board`
+  to skip). noa-server lists such worker floats (`noa.split` with
+  `direction: "float"`); other floats stay hidden from it.
+
+### Fixed
+
+- A worker spawned with `+ctl spawn` got no locale when Noa was started from
+  the Dock, so scripts in it (a Claude Code status line drawing a bar with
+  `tr`) cut multibyte characters into bytes and the pane showed replacement
+  characters. Workers now get the orchestrator's `LANG` and `LC_*`.
+- A Claude Code turn that ended (OSC 7501 `state=done`, or `state=error` for a
+  failed one) left the session card at "running"; it now shows finished or
+  error.
+
 ## [0.8.1] - 2026-11-11
 
 Links that follow soft wraps, and a UI accent that comes from the theme.

@@ -49,7 +49,7 @@ An upgrade request carrying an `Origin` header (every browser sends one) is clos
 |---------|-------------|
 | `read` | listPanels / getText / getGrid / subscribe / unsubscribe |
 | `control` | focusPane / newTab / split / closePane |
-| `input` | sendText |
+| `input` | sendText; also newTab / split when their `config` runs or types something |
 | `attach` | attach / detach / resizePane |
 
 `grantedScopes` = the intersection of hello's `scopes` (requested) and the server's `server-scopes` config. `control`/`input`/`attach` are granted only when explicitly allowed server-side. The default `server-scopes=read` never grants attach access. Methods on an ungranted scope return `-32003`.
@@ -104,6 +104,7 @@ Injects UTF-8 text into the target panel's pty. Include `\n` to send a newline.
 
 - `paste` (optional, default `true`): if the panel is in bracketed paste mode, this is automatically wrapped as a paste (existing behavior).
 - `paste:false`: raw injection with no bracketed-paste wrapping. The `text`'s UTF-8 byte sequence is written to the pty as-is. To send a bare Enter, use `{"text":"\r","paste":false}` (useful for emulating keypresses into TUI apps).
+- Sending non-empty text that the panel accepts acknowledges its notification, as focusing it does (refused input, such as to an exited panel, leaves it unread): its `attention` (and unread bell) drops, and a subscriber receives that `stateChanged` before the text reaches the pty. A client answering an agent can then wait for its next `attention`.
 
 ### noa.focusPane (requires control)
 
@@ -114,10 +115,33 @@ params: `{"paneId":"1"}` / result: `{"ok":true}`; brings the window to the front
 params: `{"windowId":"..."}` (optional. Either a `windowId` or a window-group id resolves. Omitted defaults to the active window)
 result: `{"paneId":"7"}`; the initial panel id of the created tab.
 
+Also accepts the [spawn extensions](#spawn-extensions-newtab--split).
+
 ### noa.split (requires control)
 
-params: `{"paneId":"1","direction":"horizontal"|"vertical"}`; horizontal = side-by-side, vertical = stacked.
+params: `{"paneId":"1","direction":"horizontal"|"vertical"|"auto"|"float"}`; horizontal = side-by-side, vertical = stacked.
 result: `{"paneId":"8"}`; the created pane's id.
+
+`auto` lets the server choose: with no pane yet spawned with `parentPaneId` equal to `paneId`, it splits `paneId` side-by-side; otherwise it splits the largest such pane along its longer side. When no candidate has room left, the new pane opens in a new tab of the same window instead. Also accepts the spawn extensions below.
+
+`float` opens a floating pane over `paneId` instead of splitting: collapsed to its title strip with `focus:false`, open and focused otherwise. It needs `parentPaneId` (invalid params without it), since `noa.listPanels` lists a float only as an orchestrator's worker; other floats stay out of every listing. A pane holds at most 8 floats; past that the request fails with an internal error. A server older than `float` rejects the value as invalid params.
+
+### Spawn extensions (newTab / split)
+
+Optional fields for an orchestrator that starts worker panes (see [Agent workflows](../AGENT_WORKFLOW.md#orchestrating-worker-panes)). A request with none of them, and a fixed `direction`, behaves exactly as before.
+
+| field | type | description |
+|---|---|---|
+| `config.command` | string[] | argv to run instead of the shell, spawned directly (no shell). `argv[0]` is looked up on `config.env.PATH` when given |
+| `config.cwd` | string | working directory; ignored unless it is an existing directory |
+| `config.env` | object | extra environment, applied after Noa's own |
+| `config.initialInput` | string | written raw to the new pane right after spawn |
+| `config.waitAfterCommand` | boolean | keep the pane open after its child exits, so its output and `Panel.exit` stay readable until it is closed |
+| `label` | string | free text shown as `Panel.label` (at most 128 bytes) |
+| `parentPaneId` | string | the orchestrator's pane; shown as `Panel.parentPaneId` and used by `direction:"auto"` |
+| `focus` | boolean | `false` puts keyboard focus back where it was after the spawn. Omitted means `true`. A spawn that fails (no room to split) always puts focus back |
+
+A `config` with `command`, `initialInput`, or `env` also needs the `input` scope (`-32003` otherwise). An empty `command`, an `env` key that is empty or contains `=`, or an over-long `label` is `-32602`. An unknown `parentPaneId` is `-32002`.
 
 ### noa.closePane (requires control)
 
@@ -232,9 +256,24 @@ When the subscription queue overflows, the oldest notifications are dropped and 
   "branch": "main", "process": "vim",
   "busy": true, "attention": false,
   "attachable": true,
-  "preview": [Row]
+  "preview": [Row],
+  "surfaceId": "0x2f9c0e5a7b1d4c33",
+  "agent": { "kind": "claude", "state": "finished", "detail": "", "seq": 7 },
+  "exit": { "code": 0 },
+  "parentPaneId": "1", "label": "fix-tests"
 }
 ```
+
+The last five keys are optional and omitted when they do not apply:
+
+- `surfaceId`: the value of `NOA_SURFACE_ID` in the pane's child environment, so a process inside a pane can find its own panel.
+- `agent`: present when the foreground process is a recognized coding agent (`kind` is `claude`, `codex`, or `agy`) or when an `OSC 777;noa-agent` report arrived. `state`/`detail` mirror the last report (`running`, `permission`, `input`, `finished`, `error`; absent after `clear`). `seq` counts reports for this pane, every report including `clear` adding one, so a client that sends input can ignore a report that predates it.
+- `exit`: present only while a pane whose child exited is held open (`config.waitAfterCommand`, or an abnormal exit). `code` is omitted when the platform reported none.
+- `parentPaneId` / `label`: as given to the spawn extensions.
+
+A pane is listed even before its first output (a pane spawned with `parentPaneId` or `label` from the moment the spawn returns); until then its `name` and `cwd` are empty and it has no `agent`.
+
+Changes to `agent.seq`, `process`, and `exit` are pushed in `noa.stateChanged` without waiting for the coarse refresh tick.
 
 `branch` / `process` are **omitted as keys** when unknown. `attachable` reports whether this exact panel is registered with the raw attach endpoint; clients must not call `noa.attach` for a panel where it is `false`. It defaults to `true` when the key is absent; the field was added while the protocol was still at version 1, and peers from before that fail the `noa.hello` major-version check, so a protocolVersion 3 peer always sends it. `preview` is the sidebar-equivalent last few rows (with color runs). Each `Row.row` in `preview` is **not an absolute row number** but a 0-based preview-row index (first row is 0); note this differs in meaning from `noa.getGrid`'s `Row.row` (absolute row).
 

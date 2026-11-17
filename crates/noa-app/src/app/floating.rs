@@ -621,31 +621,50 @@ impl App {
 
     /// REQ-001: a float on the tab's return pane.
     pub(super) fn new_float(&mut self, window_id: WindowId) {
-        // REQ-021: the disposable windows hold no floats.
-        if self.is_scratch_terminal_window(window_id) || self.is_quick_terminal_window(window_id) {
-            return;
-        }
-        let Some(geometry) = self.window_float_geometry(window_id) else {
-            return;
-        };
-        let Some(gpu) = self.gpu.as_ref() else {
-            return;
-        };
-        let Some(state) = self.windows.get(&window_id) else {
-            return;
-        };
-        let anchor_pane = state.split_focus();
-        if state.floats.count_on(FloatAnchor::Pane(anchor_pane)) >= MAX_PER_ANCHOR {
-            self.show_float_limit_toast(window_id);
-            return;
-        }
-        let Some(rect) =
-            state
-                .floats
-                .default_content_rect(anchor_pane, &geometry.layout(), geometry.metrics)
+        let Some(anchor_pane) = self
+            .windows
+            .get(&window_id)
+            .map(|state| state.split_focus())
         else {
             return;
         };
+        let full = self.windows.get(&window_id).is_some_and(|state| {
+            state.floats.count_on(FloatAnchor::Pane(anchor_pane)) >= MAX_PER_ANCHOR
+        });
+        if full {
+            self.show_float_limit_toast(window_id);
+            return;
+        }
+        if let Some(id) = self.create_float(window_id, anchor_pane, float_ipc_exposure()) {
+            self.focus_pane(window_id, id);
+            self.after_float_change(window_id);
+        }
+    }
+
+    /// A new float over `anchor_pane`, its pty spawned with `ipc` exposure
+    /// (and any pending script overrides); `None` when the window holds no
+    /// floats, the anchor is full, or the spawn failed. Focus and repaint are
+    /// the caller's.
+    pub(super) fn create_float(
+        &mut self,
+        window_id: WindowId,
+        anchor_pane: PaneId,
+        ipc: IpcExposure,
+    ) -> Option<PaneId> {
+        // REQ-021: the disposable windows hold no floats.
+        if self.is_scratch_terminal_window(window_id) || self.is_quick_terminal_window(window_id) {
+            return None;
+        }
+        let geometry = self.window_float_geometry(window_id)?;
+        let gpu = self.gpu.as_ref()?;
+        let state = self.windows.get(&window_id)?;
+        if state.floats.count_on(FloatAnchor::Pane(anchor_pane)) >= MAX_PER_ANCHOR {
+            return None;
+        }
+        let rect =
+            state
+                .floats
+                .default_content_rect(anchor_pane, &geometry.layout(), geometry.metrics)?;
         let grid_size = grid_size_for_pane_rect(
             rect,
             gpu.fonts.get(self.window_font_px(window_id)).metrics(),
@@ -662,17 +681,18 @@ impl App {
             self.pane_cwd(window_id, anchor_pane),
             auto_approve_enabled,
             redraw_floor,
+            ipc,
         ) {
             Ok(surface) => surface,
             Err(err) => {
                 log::warn!("failed to spawn floating pane pty: {err}");
-                return;
+                return None;
             }
         };
         let Some(state) = self.windows.get_mut(&window_id) else {
             let mut surface = surface;
             surface.shutdown();
-            return;
+            return None;
         };
         if state
             .floats
@@ -681,16 +701,15 @@ impl App {
         {
             let mut surface = surface;
             surface.shutdown();
-            return;
+            return None;
         }
         state.surfaces.insert(id, surface);
-        self.focus_pane(window_id, id);
-        self.after_float_change(window_id);
+        Some(id)
     }
 
     /// Relayout, repaint and persist after a float's geometry, state or
     /// existence changed.
-    fn after_float_change(&mut self, window_id: WindowId) {
+    pub(super) fn after_float_change(&mut self, window_id: WindowId) {
         self.relayout_and_resize_window(window_id);
         self.update_focused_ime_cursor_area(window_id);
         self.request_window_redraw(window_id);
@@ -862,6 +881,7 @@ impl App {
         cwd: Option<String>,
         auto_approve_enabled: Arc<AtomicBool>,
         redraw_floor: crate::io_thread::RedrawFloor,
+        ipc: IpcExposure,
     ) -> anyhow::Result<Surface> {
         self.spawn_pane_surface_in(
             window_id,
@@ -872,7 +892,7 @@ impl App {
             auto_approve_enabled,
             redraw_floor,
             false,
-            float_ipc_exposure(),
+            ipc,
         )
     }
 

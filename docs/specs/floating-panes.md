@@ -79,7 +79,7 @@
 | REQ-020 | フロートにフォーカスがある間、アクション名が `split.` で始まるすべてのアクションは何もしない | MEDIUM | ratified T-8 (ASSUME-17) |
 | REQ-021 | Scratch Terminal と Quick Terminal のウィンドウでは `float.new` は何もしない | MEDIUM | ratified T-8 (ASSUME-17) |
 | REQ-022 | フロートの背景は、ウィンドウの透過設定にかかわらず、下にある分割ペインや他のフロートの内容を透かさない | HIGH | ratified T-8 (ASSUME-19) |
-| REQ-023 | フロートは AppleScript、IPC、AX のペイン列挙と Overview のタイルに現れない | MEDIUM | ratified T-8 (ASSUME-16) |
+| REQ-023 | フロートは AppleScript、AX のペイン列挙と Overview のタイルに現れない。IPC のペイン列挙と出力にも現れない。ただしオーケストレーターが spawn したワーカーの float（`parentPaneId` あり）だけは IPC で列挙し、読み取れる（2026-11-17 改定、agent-orchestration D8） | MEDIUM | ratified T-8 (ASSUME-16)、owner により改定 2026-11-17 |
 | REQ-024 | フォーカスを持つフロートが非表示になると（タブ切替、アンカー矩形が下限未満）、フォーカスは復帰先ペインへ移る。再び表示されても自動ではフォーカスを戻さない | HIGH | ASSUME-24 |
 
 ### Cross-functional (`CFR-n`)
@@ -217,7 +217,7 @@
 | AC-028 | フロートにフォーカス | アクション名が `split.` で始まる全アクションを順に実行 | 分割ツリー、ズーム状態、フォーカスがどれも変わらない | REQ-020 | machine | 単体テストの assert（アクション一覧から機械的に列挙） | yes |
 | AC-029 | (a) Scratch Terminal (b) Quick Terminal のウィンドウにフォーカス | `float.new` | どちらでもフロートは増えない | REQ-021 | machine | 同上 | yes |
 | AC-030 | `background-opacity = 0.5`、文字で埋まった分割ペインの上にフロート | 画面を見る | フロートの矩形内に下の分割ペインの文字が見えない | REQ-022 | human | 実装者がスクリーンショットを拡大し、下の文字が判読できれば FAIL | yes |
-| AC-031 | フロート1枚 | AppleScript、IPC、AX のスナップショットと Overview のレイアウトを生成 | どれにもフロートの `PaneId` がない | REQ-023 | machine | 各スナップショット生成の単体テストの assert | yes |
+| AC-031 | フロート1枚（ワーカーでない） | AppleScript、IPC、AX のスナップショットと Overview のレイアウトを生成 | どれにもフロートの `PaneId` がない。ワーカーの float は IPC にだけ現れる | REQ-023 | machine | 各スナップショット生成の単体テストの assert | yes |
 | AC-032 | この機能を含むビルド | at build | `cargo test --workspace` 全通過、`cargo clippy --workspace` 警告なし | CFR-001 | machine | コマンドの終了コード | yes |
 | AC-033 | (a) 別タブのフロート (b) 他の分割ペインがズームされたペインアンカーのフロート (c) アンカー矩形が下限未満のフロート | 描画計画を作る | どの場合も計画にそのフロートが含まれない | CFR-003 | machine | 描画計画の単体テストの assert | yes |
 | AC-034 | macOS と Linux のビルド | 受け入れテスト仕様を実行 | must-have の TC が両方で全 PASS | CFR-004 | human | 受け入れテスト仕様 §9 の実行記録2行 | yes |

@@ -106,7 +106,7 @@ use crate::attach::{
     LeaseIdentity, ReserveError, output_channel,
 };
 use crate::auth::{Scope, ScopeSet, constant_time_eq};
-use crate::backend::{IpcBackend, PaneRef};
+use crate::backend::{IpcBackend, PaneRef, SpawnTarget};
 use crate::error::{ErrorCode, IpcError};
 use crate::protocol::*;
 use crate::push::{AddSubscriptionError, Broadcaster, EventMask, PushQueue, QueuedNotification};
@@ -1406,11 +1406,11 @@ fn dispatch(
             }
             "noa.newTab" => {
                 require_scope(session, Scope::Control)?;
-                handle_new_tab(backend, req.params)
+                handle_new_tab(backend, session, req.params)
             }
             "noa.split" => {
                 require_scope(session, Scope::Control)?;
-                handle_split(backend, req.params)
+                handle_split(backend, session, req.params)
             }
             "noa.closePane" => {
                 require_scope(session, Scope::Control)?;
@@ -1565,22 +1565,97 @@ fn handle_focus_pane(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Val
     Ok(serde_json::to_value(OkResult::ok()).unwrap())
 }
 
-fn handle_new_tab(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value, RpcFail> {
+fn handle_new_tab(
+    backend: &Arc<dyn IpcBackend>,
+    session: &Session,
+    params: Value,
+) -> Result<Value, RpcFail> {
     let p: NewTabParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
-    let pane_id = backend.new_tab(p.window_id.map(|w| w.0))?;
+    let window = p.window_id.map(|w| w.0);
+    let pane_id = if p.spawn.is_extended() {
+        check_spawn_params(session, &p.spawn)?;
+        backend.spawn(SpawnTarget::Tab { window }, p.spawn)?
+    } else {
+        backend.new_tab(window)?
+    };
     Ok(serde_json::to_value(PaneIdResult {
         pane_id: WireId(pane_id),
     })
     .unwrap())
 }
 
-fn handle_split(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value, RpcFail> {
+fn handle_split(
+    backend: &Arc<dyn IpcBackend>,
+    session: &Session,
+    params: Value,
+) -> Result<Value, RpcFail> {
     let p: SplitParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
-    let pane_id = backend.split(p.pane_id.0, p.direction)?;
+    let direction = p.direction.direction();
+    let pane_id = match direction {
+        Some(direction) if !p.spawn.is_extended() => backend.split(p.pane_id.0, direction)?,
+        _ => {
+            check_spawn_params(session, &p.spawn)?;
+            // Only an orchestrator's worker may be a float IPC can see
+            // (floating-panes REQ-023 as amended).
+            if p.direction == SplitPlacement::Float && p.spawn.parent_pane_id.is_none() {
+                return Err(RpcFail::new(
+                    ErrorCode::InvalidParams,
+                    "direction \"float\" needs parentPaneId",
+                ));
+            }
+            let target = if p.direction == SplitPlacement::Float {
+                SpawnTarget::Float { pane: p.pane_id.0 }
+            } else {
+                SpawnTarget::Split {
+                    pane: p.pane_id.0,
+                    direction,
+                }
+            };
+            backend.spawn(target, p.spawn)?
+        }
+    };
     Ok(serde_json::to_value(PaneIdResult {
         pane_id: WireId(pane_id),
     })
     .unwrap())
+}
+
+/// Validation shared by the extended `newTab`/`split` forms
+/// (agent-orchestration D2): a config that runs or types something needs
+/// `input` on top of `control`, and every field is bounded.
+fn check_spawn_params(session: &Session, params: &SpawnParams) -> Result<(), RpcFail> {
+    if let Some(config) = &params.config {
+        if config.needs_input_scope() {
+            require_scope(session, Scope::Input)?;
+        }
+        if config.command.as_ref().is_some_and(|argv| argv.is_empty()) {
+            return Err(RpcFail::new(
+                ErrorCode::InvalidParams,
+                "config.command must not be empty",
+            ));
+        }
+        if config
+            .env
+            .keys()
+            .any(|key| key.is_empty() || key.contains('='))
+        {
+            return Err(RpcFail::new(
+                ErrorCode::InvalidParams,
+                "config.env keys must be non-empty and contain no '='",
+            ));
+        }
+    }
+    if params
+        .label
+        .as_ref()
+        .is_some_and(|label| label.len() > MAX_SPAWN_LABEL_BYTES)
+    {
+        return Err(RpcFail::new(
+            ErrorCode::InvalidParams,
+            format!("label exceeds {MAX_SPAWN_LABEL_BYTES} bytes"),
+        ));
+    }
+    Ok(())
 }
 
 fn handle_close_pane(

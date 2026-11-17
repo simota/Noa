@@ -155,6 +155,9 @@ impl App {
                 record.cwd.clone(),
                 auto_approve_enabled.clone(),
                 redraw_floor.clone(),
+                // A restored float is no worker (orchestration is not
+                // restored), so IPC does not see it.
+                super::floating::float_ipc_exposure(),
             ) {
                 Ok(surface) => surface,
                 Err(err) => {

@@ -430,6 +430,11 @@ pub(crate) enum ProgramStatusOsc {
         state: AgentState,
         detail: String,
     },
+    /// The turn ended: `done` (completed) or `error` (failed).
+    Ended {
+        state: AgentState,
+        detail: String,
+    },
     Idle,
     Clear,
     /// Malformed, an unknown state, or a per-subagent (`id=`) entry: the
@@ -478,6 +483,14 @@ pub(crate) fn parse_program_status_osc(data: &[u8]) -> Option<ProgramStatusOsc> 
                 Some("auth") => AgentState::Error,
                 _ => AgentState::Input,
             },
+            detail: detail(),
+        },
+        Some("done") => ProgramStatusOsc::Ended {
+            state: AgentState::Finished,
+            detail: detail(),
+        },
+        Some("error") => ProgramStatusOsc::Ended {
+            state: AgentState::Error,
             detail: detail(),
         },
         Some("idle") => ProgramStatusOsc::Idle,

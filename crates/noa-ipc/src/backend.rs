@@ -5,7 +5,7 @@
 
 use crate::AttachOutputSender;
 use crate::error::IpcError;
-use crate::protocol::{Panel, Row, SplitDirection, TextSource};
+use crate::protocol::{Panel, Row, SpawnParams, SplitDirection, TextSource};
 
 /// An IPC-visible pane id. The app maps this to its internal pointer-derived
 /// id; `noa-ipc` only ever sees `u64`.
@@ -13,6 +13,20 @@ pub type PaneRef = u64;
 
 /// An IPC-visible window id.
 pub type WindowRef = u64;
+
+/// Where [`IpcBackend::spawn`] puts the new pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpawnTarget {
+    /// A new tab in `window` (the active window if `None`).
+    Tab { window: Option<WindowRef> },
+    /// A split of `pane`; `direction: None` is `auto` placement.
+    Split {
+        pane: PaneRef,
+        direction: Option<SplitDirection>,
+    },
+    /// A floating pane over `pane`.
+    Float { pane: PaneRef },
+}
 
 #[derive(Clone, Debug)]
 pub struct TextResult {
@@ -76,6 +90,14 @@ pub trait IpcBackend: Send + Sync + 'static {
     fn split(&self, pane: PaneRef, direction: SplitDirection) -> Result<PaneRef, IpcError>;
 
     fn close_pane(&self, pane: PaneRef) -> Result<(), IpcError>;
+
+    /// `noa.newTab`/`noa.split` carrying any agent-orchestration extension
+    /// (a spawn config, label, parent, `focus`, or `direction: auto`).
+    /// Requests without one keep using [`Self::new_tab`]/[`Self::split`], so
+    /// existing backends stay source-compatible through this default.
+    fn spawn(&self, _target: SpawnTarget, _params: SpawnParams) -> Result<PaneRef, IpcError> {
+        Err(IpcError::Unsupported("spawn"))
+    }
 
     /// Checks that `pane` exists and supports raw attach before the server
     /// reserves a one-time token. Existing backend implementations remain

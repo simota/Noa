@@ -22,7 +22,7 @@ const APPLESCRIPT_SNAPSHOT_REFRESH: Duration = Duration::from_millis(500);
 /// L2.1): the ids the AE handler already handed out, and the parts of a
 /// `surface configuration` the pty spawn consumes. Set by the executor around
 /// one spawn and read by `spawn_pane_surface`/`allocate_group_id`/`new_split`.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct ScriptSpawn {
     pub(super) pane_id: Option<PaneId>,
     pub(super) tab_id: Option<u64>,
@@ -53,7 +53,7 @@ impl ScriptSpawn {
 /// A configured `initial working directory`, or `None` when it is not an
 /// existing directory — the spawn then falls back the way it does without
 /// one (focused shell's cwd, else inherited) instead of failing (L2.4).
-fn usable_cwd(cwd: Option<String>) -> Option<String> {
+pub(super) fn usable_cwd(cwd: Option<String>) -> Option<String> {
     cwd.filter(|dir| std::path::Path::new(dir).is_dir())
 }
 
@@ -653,7 +653,12 @@ impl App {
 
     /// `initial input`: written raw to the new pane's pty, right after spawn
     /// (L2.4), capped like `input text`.
-    fn write_initial_input(&mut self, window_id: WindowId, pane_id: PaneId, text: Option<String>) {
+    pub(super) fn write_initial_input(
+        &mut self,
+        window_id: WindowId,
+        pane_id: PaneId,
+        text: Option<String>,
+    ) {
         if let Some(bytes) = text.as_deref().and_then(input::raw_input_bytes) {
             self.write_pane_pty_bytes(window_id, pane_id, bytes);
         }

@@ -3,6 +3,7 @@
 //! This module intentionally contains no reconnect policy or UI state. The
 //! application owns those concerns while reusing this typed, sync transport.
 
+use std::collections::VecDeque;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
@@ -17,8 +18,8 @@ use tungstenite::{Message, WebSocket};
 use crate::attach::{ATTACH_BINARY_CHUNK_BYTES, MAX_ATTACH_SEED_BYTES};
 use crate::auth::ScopeSet;
 use crate::protocol::{
-    AttachResult, GetTextResult, HelloResult, ListPanelsResult, OkResult, PaneIdResult, Panel,
-    SplitDirection, TextSource, WireId,
+    AttachResult, EventKind, GetTextResult, HelloResult, ListPanelsResult, OkResult, PaneIdResult,
+    Panel, SpawnParams, SplitDirection, SplitPlacement, TextSource, WireId,
 };
 use crate::server::ATTACH_HANDSHAKE_CLOSE_REASON;
 
@@ -39,6 +40,34 @@ const MAX_WS_MESSAGE_SIZE: usize = 1024 * 1024;
 // rejected on receipt.
 pub(crate) const MAX_WS_FRAME_SIZE: usize = MAX_WS_MESSAGE_SIZE;
 const ATTACH_PATH: &str = "/attach";
+/// Notifications kept while no one reads them; older ones are dropped first
+/// and the next [`Client::next_notification`] reports the loss.
+const MAX_BUFFERED_NOTIFICATIONS: usize = 1024;
+
+/// A server-to-client notification received on the control socket.
+#[derive(Clone, Debug)]
+pub enum Notification {
+    /// `noa.stateChanged`: panels that changed or were added. `dropped`
+    /// means earlier notifications were lost (server- or client-side), so
+    /// the caller must re-read state with [`Client::list_panels`].
+    StateChanged { panels: Vec<Panel>, dropped: bool },
+    /// Any other notification (`noa.output`, …), by method name.
+    Other { method: String, dropped: bool },
+}
+
+impl Notification {
+    pub fn dropped(&self) -> bool {
+        match self {
+            Self::StateChanged { dropped, .. } | Self::Other { dropped, .. } => *dropped,
+        }
+    }
+
+    fn mark_dropped(&mut self) {
+        match self {
+            Self::StateChanged { dropped, .. } | Self::Other { dropped, .. } => *dropped = true,
+        }
+    }
+}
 
 /// A connected JSON-RPC control client. Reconnect/backoff belongs to
 /// `noa-app`; this type represents one live transport attempt.
@@ -48,6 +77,9 @@ pub struct Client {
     granted_scopes: ScopeSet,
     server_instance_id: String,
     control_origin: (String, u16),
+    /// Notifications that arrived while a request waited for its response.
+    notifications: VecDeque<Notification>,
+    notifications_dropped: bool,
 }
 
 impl Client {
@@ -86,6 +118,8 @@ impl Client {
             granted_scopes: ScopeSet::empty(),
             server_instance_id: String::new(),
             control_origin,
+            notifications: VecDeque::new(),
+            notifications_dropped: false,
         };
         let result: HelloResult = client.request_with_timeout(
             "noa.hello",
@@ -168,6 +202,139 @@ impl Client {
     /// Reserves a single-use raw channel without opening it. Most callers
     /// should use [`Self::attach`]; this lower-level split is useful when a
     /// connection manager needs to stage resources before the second socket.
+    /// `noa.newTab` with agent-orchestration spawn extensions.
+    pub fn spawn_tab(
+        &mut self,
+        window: Option<u64>,
+        params: &SpawnParams,
+    ) -> Result<u64, ClientError> {
+        let mut body = serde_json::to_value(params).map_err(|_| {
+            ClientError::InvalidInput("spawn parameters are not serializable".to_string())
+        })?;
+        if let (Some(window), Some(object)) = (window, body.as_object_mut()) {
+            object.insert("windowId".to_string(), serde_json::json!(WireId(window)));
+        }
+        let result: PaneIdResult = self.request("noa.newTab", body)?;
+        Ok(result.pane_id.0)
+    }
+
+    /// `noa.split` with a placement (`auto` included) and agent-orchestration
+    /// spawn extensions.
+    pub fn spawn_split(
+        &mut self,
+        pane: u64,
+        placement: SplitPlacement,
+        params: &SpawnParams,
+    ) -> Result<u64, ClientError> {
+        let mut body = serde_json::to_value(params).map_err(|_| {
+            ClientError::InvalidInput("spawn parameters are not serializable".to_string())
+        })?;
+        if let Some(object) = body.as_object_mut() {
+            object.insert("paneId".to_string(), serde_json::json!(WireId(pane)));
+            object.insert("direction".to_string(), serde_json::json!(placement));
+        }
+        let result: PaneIdResult = self.request("noa.split", body)?;
+        Ok(result.pane_id.0)
+    }
+
+    /// `noa.sendText`. `paste: false` writes the UTF-8 bytes raw.
+    pub fn send_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), ClientError> {
+        let _: OkResult = self.request(
+            "noa.sendText",
+            serde_json::json!({ "paneId": WireId(pane), "text": text, "paste": paste }),
+        )?;
+        Ok(())
+    }
+
+    /// `noa.subscribe`; `panes: None` subscribes to every pane. Returns the
+    /// subscription id. Notifications then arrive through
+    /// [`Self::next_notification`].
+    pub fn subscribe(
+        &mut self,
+        events: &[EventKind],
+        panes: Option<&[u64]>,
+    ) -> Result<u64, ClientError> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct SubscribeResult {
+            subscription_id: WireId,
+        }
+        let result: SubscribeResult = self.request(
+            "noa.subscribe",
+            serde_json::json!({
+                "events": events,
+                "paneIds": panes.map(|panes| panes.iter().copied().map(WireId).collect::<Vec<_>>()),
+            }),
+        )?;
+        Ok(result.subscription_id.0)
+    }
+
+    /// The next notification, waiting up to `timeout`. `Ok(None)` when none
+    /// arrived in time.
+    pub fn next_notification(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<Notification>, ClientError> {
+        if let Some(notification) = self.pop_notification() {
+            return Ok(Some(notification));
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            set_socket_read_timeout(&mut self.socket, remaining)?;
+            match self.socket.read() {
+                Ok(Message::Text(text)) => {
+                    let value: Value = serde_json::from_str(&text).map_err(|_| {
+                        ClientError::Protocol("control message is not valid JSON".to_string())
+                    })?;
+                    // A late response to a request that already gave up has
+                    // no owner left; skip it.
+                    if let Some(notification) = parse_notification(&value) {
+                        self.push_notification(notification);
+                        return Ok(self.pop_notification());
+                    }
+                }
+                Ok(Message::Ping(payload)) => self
+                    .socket
+                    .send(Message::Pong(payload))
+                    .map_err(ClientError::transport)?,
+                Ok(Message::Pong(_)) => {}
+                Ok(Message::Close(frame)) => return Err(ClientError::closed(frame)),
+                Ok(_) => {
+                    return Err(ClientError::Protocol(
+                        "control channel received a non-text data frame".to_string(),
+                    ));
+                }
+                Err(tungstenite::Error::Io(error))
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        || error.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    return Ok(None);
+                }
+                Err(error) => return Err(ClientError::transport(error)),
+            }
+        }
+    }
+
+    fn push_notification(&mut self, notification: Notification) {
+        if self.notifications.len() >= MAX_BUFFERED_NOTIFICATIONS {
+            self.notifications.pop_front();
+            self.notifications_dropped = true;
+        }
+        self.notifications.push_back(notification);
+    }
+
+    fn pop_notification(&mut self) -> Option<Notification> {
+        let mut notification = self.notifications.pop_front()?;
+        if std::mem::take(&mut self.notifications_dropped) {
+            notification.mark_dropped();
+        }
+        Some(notification)
+    }
+
     pub fn reserve_attach(&mut self, pane: u64) -> Result<AttachResult, ClientError> {
         self.request("noa.attach", serde_json::json!({ "paneId": WireId(pane) }))
     }
@@ -257,7 +424,14 @@ impl Client {
             set_socket_read_timeout(&mut self.socket, remaining_until(deadline)?)?;
             match self.socket.read().map_err(ClientError::transport)? {
                 Message::Text(text) => {
-                    let response: RpcResponse = serde_json::from_str(&text).map_err(|_| {
+                    let value: Value = serde_json::from_str(&text).map_err(|_| {
+                        ClientError::Protocol("control response is not valid JSON-RPC".to_string())
+                    })?;
+                    if let Some(notification) = parse_notification(&value) {
+                        self.push_notification(notification);
+                        continue;
+                    }
+                    let response: RpcResponse = serde_json::from_value(value).map_err(|_| {
                         ClientError::Protocol("control response is not valid JSON-RPC".to_string())
                     })?;
                     if response.id.as_u64() != Some(id) {
@@ -685,6 +859,37 @@ where
             "websocket DNS resolver stopped unexpectedly".to_string(),
         )),
     }
+}
+
+/// A JSON-RPC notification (a `method` and no `id`), or `None` for a response.
+fn parse_notification(value: &Value) -> Option<Notification> {
+    if value.get("id").is_some_and(|id| !id.is_null()) {
+        return None;
+    }
+    let method = value.get("method")?.as_str()?;
+    let params = value.get("params");
+    let dropped = params
+        .and_then(|params| params.get("dropped"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if method == "noa.stateChanged" {
+        let panels = params
+            .and_then(|params| params.get("panels"))
+            .and_then(|panels| serde_json::from_value::<Vec<Panel>>(panels.clone()).ok());
+        // A panel list this client cannot read is reported as a loss, so the
+        // caller re-reads state instead of missing a change.
+        return Some(match panels {
+            Some(panels) => Notification::StateChanged { panels, dropped },
+            None => Notification::StateChanged {
+                panels: Vec::new(),
+                dropped: true,
+            },
+        });
+    }
+    Some(Notification::Other {
+        method: method.to_string(),
+        dropped,
+    })
 }
 
 #[derive(serde::Deserialize)]

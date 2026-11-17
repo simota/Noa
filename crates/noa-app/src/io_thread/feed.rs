@@ -58,6 +58,9 @@ pub(super) struct TerminalOutput {
     pub(super) pending_kitty_clipboard: Vec<noa_grid::kitty_clipboard::KittyClipboardRequest>,
     pub(super) pending_notifications: Vec<noa_grid::Notification>,
     pub(super) agent_status: Option<Option<noa_grid::AgentStatus>>,
+    /// Agent-status reports behind `agent_status` (see
+    /// `Terminal::take_pending_agent_reports`).
+    pub(super) agent_reports: u64,
     /// The `OSC 22` pointer shape changed in this batch.
     pub(super) mouse_shape_changed: bool,
     /// Last `OSC 9;4` change parsed in this batch, if any.
@@ -330,6 +333,7 @@ pub(super) fn feed_terminal_batch<T: AsRef<[u8]>>(
         pending_kitty_clipboard: term.take_pending_kitty_clipboard(),
         pending_notifications: term.take_pending_notifications(),
         agent_status: term.take_pending_agent_status(),
+        agent_reports: term.take_pending_agent_reports(),
         mouse_shape_changed: term.take_mouse_shape_changed(),
         progress_update: term.take_pending_progress_update(),
         progress_cue: term.take_pending_progress_cue(),

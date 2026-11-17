@@ -240,4 +240,108 @@ terminal reports nothing.
 
 Event meanings follow the [Claude Code hook reference](https://code.claude.com/docs/en/hooks).
 Other agents can emit the protocol; only a Claude Code adapter is included.
-Structured status currently feeds local cards; remote client metadata is unchanged.
+Structured status feeds local cards and, through `Panel.agent`, noa-server clients
+(see below).
+
+Any hook can also report with `"$NOA_BIN" +ctl report <state> [detail]`, which writes
+the same sequence to the hook's controlling terminal. `NOA_BIN` is the absolute path
+of the running Noa, set in every pane.
+
+## Orchestrating worker panes
+
+An orchestrator (an agent or a script in one pane) can start worker panes, type
+into them, wait for their agents, read their output, and close them with
+`Noa +ctl`. Each command prints one JSON object per line. Workers are floating
+panes over the orchestrator, collapsed to their title strips, and the first spawn
+opens a board next to the orchestrator that shows them all.
+
+Enable the control server with the scopes the commands need:
+
+```conf
+server-enable = true
+server-scopes = read,control,input
+```
+
+A typical round, from inside the orchestrator's pane:
+
+```sh
+noa() { "$NOA_BIN" +ctl "$@"; }
+pane=$(noa spawn --label tests -- claude | jq -r .paneId)
+noa send "$pane" --enter --wait --timeout 1800 "Fix the failing test in crates/noa-vt"
+noa read "$pane" --scrollback --max-bytes 65536
+noa close "$pane"
+```
+
+| Command | What it does |
+|---|---|
+| `spawn [--cwd D] [--env K=V] [--label L] [--input T] [--no-wait-after] [--focus] [--no-board] [--max-children N] [-- CMD...]` | Starts a worker in a floating pane over this pane, collapsed to its title strip (which shows the agent's state); open it from the strip or with the board's `g`. `--focus` opens it and moves focus to it; otherwise focus stays where it was. The first spawn also opens this pane's board unless `--no-board`. The command runs without a shell, found on the orchestrator's own `PATH`, and the worker gets the orchestrator's locale (`LANG`, `LC_*`), which a Noa started from the Dock lacks; the cwd defaults to the orchestrator's (a relative `--cwd` is taken from it). Finished workers stay open (with their exit code in `Panel.exit`) until closed, unless `--no-wait-after`. One pane holds at most 8 floats, and one orchestrator 8 workers unless `--max-children` says otherwise; the count is checked before each spawn, so spawns run in parallel can exceed it. `--split` and `--tab` are refused |
+| `send PANE [--enter] [--raw] [--wait ...] TEXT\|-` | Pastes `TEXT` (or stdin) and, with `--enter`, submits it. Prints `{"paneId","seq"}`: pass `seq` to `wait --after`, which covers state reports but not `attention` (a notification-only worker that finishes before the wait starts is missed). `--wait` waits right away, with no chance to miss the reply |
+| `wait PANE...\|--children [--after SEQ] [--for LIST] [--all] [--timeout S]` | Returns when one of the panes (all of them with `--all`) stops: `finished`, `permission`, `input`, `error`, `exit` (printed whatever `--for` lists when a pane is gone or has exited and stays open, since neither will report again; without `--all`, a pane that had already exited when the wait began is skipped while other panes are left), or `attention`. Prints one line per pane that stopped; exits 2 on timeout |
+| `read PANE [--scrollback] [--max-bytes N]` | Prints the screen, or the retained output tail |
+| `close PANE...\|--children` | Closes workers without a confirmation dialog |
+| `ls [--children]` / `self` | Lists panels / prints this pane's panel |
+
+Put `--` before a `send` text (or `report` detail) that starts with `--`.
+
+`send` and `close` refuse panes this orchestrator did not spawn unless `--any-pane`
+is given. This guards against a wrong id; it is not a security boundary.
+
+`wait` relies on agent-state reports. Claude Code reports on its own through
+OSC 7501 (working, blocked on a prompt, done or failed), and also through the hook
+adapter above when it is configured. For Codex and Antigravity CLI,
+configure their hooks to call `+ctl report`; their documented events (as of this
+writing; check your installed version) cover the start and end of a turn but not
+approval prompts, which therefore surface as `attention` (the agent's own
+notification). `attention` means a notification arrived, not that the agent is
+blocked; read the pane to decide. Without any report, a worker can only be waited
+on for `exit`.
+
+| Agent | Run `"$NOA_BIN" +ctl report running` on | Run `"$NOA_BIN" +ctl report finished` on |
+|---|---|---|
+| Codex | `UserPromptSubmit` | `Stop` |
+| Antigravity CLI | `PreInvocation` | `Stop` |
+
+The event names come from third-party and vendor documentation that Noa does not
+test against, and both tools change where and how hooks are configured between
+versions. Check your installed version's hook documentation (`/hooks` lists
+loaded hooks in agy) before relying on them.
+
+Exit status: 0 success, 1 error (bad arguments, unknown pane), 2 `wait` timed out,
+3 the server is disabled, unreachable, lacks a scope, or went away mid-command.
+
+### Watching the workers
+
+`Noa +ctl board` turns a pane into a live view of an orchestrator's workers.
+The orchestrator's first `spawn` opens one to its right (a new tab when there is
+no room). If it was closed, `"$NOA_BIN" +ctl board --open` from the orchestrator's
+pane opens another (`--split down` or `--tab` to choose where). Run
+in a pane of its own, `+ctl board` follows that pane's orchestrator, or every
+worker when it has none; `--of PANE` picks one.
+
+The list puts workers that need you first (an approval or question prompt, an
+error, an unread notification), then those working, done, and exited. Each card
+shows the worker's last report (or the last detail it gave), the last lines of
+its work (above an agent's input box and status line), its report count, and
+how long it has been in its state. Keys: `j`/`k`
+select, `Enter` opens a worker's live screen and the reports seen since the board
+opened, `g` moves to the worker's pane (answer prompts there), `s` types a
+message (a paste can span lines) and sends it with Enter, except to a worker
+waiting for an approval, `x` then `y` closes the worker, `Esc` goes back,
+`q` quits. The board pane is not a worker: it does not count toward
+`--max-children` and `close --children` leaves it alone.
+
+### A skill for the orchestrating agent
+
+`skills/noa-orchestration/` is an agent skill: `SKILL.md` tells an agent when and
+how to orchestrate workers, and `reference.md` is the full `+ctl` reference it
+reads on demand. To make it available to Claude Code, link it into your skills
+directory from a checkout of this repository:
+
+```sh
+scripts/install-agent-skill.sh               # ~/.claude/skills/noa-orchestration
+scripts/install-agent-skill.sh --dir DIR     # another skills directory, e.g. a project's .claude/skills
+scripts/install-agent-skill.sh --uninstall   # remove the link (add --dir DIR for another directory)
+```
+
+The skill is a symbolic link to the checkout, so it follows `git pull`. The
+script leaves anything else already at the destination alone.

@@ -4,6 +4,24 @@ fn title_from_osc() {
     assert_eq!(t.title, "my title");
 }
 
+// agent-orchestration D1: the status slot keeps only the latest report, but
+// every report must still be counted, or `Panel.agent.seq` undercounts two
+// reports that arrive in one pty batch.
+#[test]
+fn agent_reports_in_one_batch_are_each_counted() {
+    let mut t = run(b"\x1b]777;noa-agent;running;\x07\x1b]777;noa-agent;finished;\x07");
+    assert_eq!(
+        t.take_pending_agent_status().unwrap().unwrap().state,
+        crate::AgentState::Finished
+    );
+    assert_eq!(t.take_pending_agent_reports(), 2);
+    assert_eq!(t.take_pending_agent_reports(), 0);
+
+    let mut cleared = run(b"\x1b]777;noa-agent;input;q\x07\x1b]777;noa-agent;clear;\x07");
+    assert_eq!(cleared.take_pending_agent_status(), Some(None));
+    assert_eq!(cleared.take_pending_agent_reports(), 2);
+}
+
 #[test]
 fn explicit_agent_status_is_bounded_and_separate_from_notifications() {
     let mut t = run(b"\x1b]777;noa-agent;permission;Edit\x1b\\");
@@ -1080,6 +1098,37 @@ fn program_status_idle_is_finished_only_after_activity() {
         t.take_pending_agent_status().unwrap().unwrap().state,
         crate::AgentState::Finished
     );
+}
+
+// Claude Code ends a completed turn with `state=done` and a failed one with
+// `state=error` (`idle` only after a stopped turn); both were ignored, so a
+// finished worker stayed `running`.
+#[test]
+fn program_status_done_and_error_end_the_turn() {
+    // msg=base64("All tests pass")
+    let mut t = run(
+        b"\x1b]7501;state=working:app=claude-code\x1b\\\x1b]7501;state=done:app=claude-code:msg=QWxsIHRlc3RzIHBhc3M=\x1b\\",
+    );
+    let report = t.take_pending_agent_status().unwrap().unwrap();
+    assert_eq!(report.state, crate::AgentState::Finished);
+    assert_eq!(report.detail, "All tests pass");
+
+    // msg=base64("API error")
+    let mut t = run(
+        b"\x1b]7501;state=working:app=claude-code\x1b\\\x1b]7501;state=error:app=claude-code:msg=QVBJIGVycm9y\x1b\\",
+    );
+    let report = t.take_pending_agent_status().unwrap().unwrap();
+    assert_eq!(report.state, crate::AgentState::Error);
+    assert_eq!(report.detail, "API error");
+}
+
+// Review finding: a full reset (RIS, `ESC c`) clears the agent state but is
+// not a report, yet it advanced the report count.
+#[test]
+fn a_full_reset_clears_the_agent_state_without_counting_a_report() {
+    let mut t = run(b"\x1bc");
+    assert_eq!(t.take_pending_agent_status(), Some(None));
+    assert_eq!(t.take_pending_agent_reports(), 0);
 }
 
 #[test]

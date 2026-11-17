@@ -29,13 +29,13 @@ pub use attach::{
     AttachOutputSender,
 };
 pub use auth::{Scope, ScopeSet, constant_time_eq, load_or_create_token};
-pub use backend::{GridResult, IpcBackend, PaneRef, TextResult, WindowRef};
-pub use client::{AttachClient, Client, ClientError, DEFAULT_ATTACH_POLL_TIMEOUT};
+pub use backend::{GridResult, IpcBackend, PaneRef, SpawnTarget, TextResult, WindowRef};
+pub use client::{AttachClient, Client, ClientError, DEFAULT_ATTACH_POLL_TIMEOUT, Notification};
 pub use error::{ErrorCode, IpcError};
 pub use protocol::{
     AttachParams, AttachResult, Attr, DetachParams, EventKind, GetTextResult, ListPanelsResult,
-    PROTOCOL_VERSION, PaneIdResult, Panel, ResizePaneParams, Row, Span, SpanColor, SplitDirection,
-    TextSource, WireId,
+    PROTOCOL_VERSION, PaneIdResult, Panel, PanelAgent, PanelExit, ResizePaneParams, Row, Span,
+    SpanColor, SpawnConfig, SpawnParams, SplitDirection, SplitPlacement, TextSource, WireId,
 };
 pub use push::{Broadcaster, EventMask, PushQueue};
 pub use server::{ATTACH_HANDSHAKE_CLOSE_REASON, Server, ServerConfig, ServerHandle};

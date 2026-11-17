@@ -150,6 +150,10 @@ pub struct Terminal {
     /// [`NOTIFICATION_QUEUE_CAP`]; the oldest is evicted on overflow.
     pending_notifications: VecDeque<Notification>,
     pending_agent_status: Option<Option<crate::AgentStatus>>,
+    /// Agent-status reports since the last drain. `pending_agent_status`
+    /// keeps only the latest, so this is what tells an orchestrator that two
+    /// reports arrived in one batch (agent-orchestration D1, `Panel.agent.seq`).
+    pending_agent_reports: u64,
     /// Whether the last `OSC 7501` report was working/blocked, so a following
     /// `idle` reads as "response ended" rather than a fresh program's idle.
     program_status_active: bool,
@@ -267,6 +271,7 @@ impl Terminal {
             kitty_clipboard_write_limit: Some(64 * 1024 * 1024),
             pending_notifications: VecDeque::new(),
             pending_agent_status: None,
+            pending_agent_reports: 0,
             program_status_active: false,
             mouse_shape: None,
             mouse_shape_changed: false,
@@ -976,6 +981,17 @@ impl Terminal {
 
     pub fn take_pending_agent_status(&mut self) -> Option<Option<crate::AgentStatus>> {
         self.pending_agent_status.take()
+    }
+
+    /// How many agent-status reports arrived since the last call; the
+    /// status itself is drained by [`Self::take_pending_agent_status`].
+    pub fn take_pending_agent_reports(&mut self) -> u64 {
+        std::mem::take(&mut self.pending_agent_reports)
+    }
+
+    fn set_pending_agent_status(&mut self, status: Option<crate::AgentStatus>) {
+        self.pending_agent_status = Some(status);
+        self.pending_agent_reports += 1;
     }
 
     /// The `OSC 22` pointer shape the application asked for, if any.

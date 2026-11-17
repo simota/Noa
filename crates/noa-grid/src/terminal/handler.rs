@@ -541,6 +541,7 @@ impl Handler for Terminal {
         // 5522 write running.
         self.kitty_clipboard.grants.clear();
         self.pending_notifications.clear();
+        // Cleared, but not a report: the report count stays.
         self.pending_agent_status = Some(None);
         self.program_status_active = false;
         self.set_mouse_shape(None);
@@ -798,7 +799,7 @@ impl Handler for Terminal {
     fn osc_dispatch(&mut self, data: &[u8], terminator: noa_vt::OscTerminator) {
         if data.starts_with(b"777;noa-agent;") {
             if let Some(status) = crate::osc::parse_agent_status_osc(data) {
-                self.pending_agent_status = Some(status);
+                self.set_pending_agent_status(status);
             }
             return;
         }

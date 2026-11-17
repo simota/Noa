@@ -1595,9 +1595,21 @@ fn handle_split(
         Some(direction) if !p.spawn.is_extended() => backend.split(p.pane_id.0, direction)?,
         _ => {
             check_spawn_params(session, &p.spawn)?;
-            let target = SpawnTarget::Split {
-                pane: p.pane_id.0,
-                direction,
+            // Only an orchestrator's worker may be a float IPC can see
+            // (floating-panes REQ-023 as amended).
+            if p.direction == SplitPlacement::Float && p.spawn.parent_pane_id.is_none() {
+                return Err(RpcFail::new(
+                    ErrorCode::InvalidParams,
+                    "direction \"float\" needs parentPaneId",
+                ));
+            }
+            let target = if p.direction == SplitPlacement::Float {
+                SpawnTarget::Float { pane: p.pane_id.0 }
+            } else {
+                SpawnTarget::Split {
+                    pane: p.pane_id.0,
+                    direction,
+                }
             };
             backend.spawn(target, p.spawn)?
         }

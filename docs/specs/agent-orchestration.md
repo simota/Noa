@@ -121,6 +121,16 @@
 - 報告の履歴は、ボードを開いてから見た報告だけで、ボードの中にしかない。開いた時点の状態は「開始時」と表示する（時刻が分からないため）。
 - 未対応：ワーカーの入力欄の書きかけの検出（画面から推定する方法を確かめていない）、GUI のキーバインドやメニューからの起動、履歴の永続化。
 
+### D8：ワーカーを float に置ける（2026-11-17）
+
+ボードを見ているあいだワーカーのペインを隠したい、という owner の求めで、`spawn --float`（`noa.split` の `direction:"float"`）を足した。
+
+- ワーカーはオーケストレーターのペインにアンカーした float として開き、`focus:false`（`+ctl spawn` の既定）ならタイトル帯だけにたたんだ状態で、`focus:true`（`--focus`）なら開いてフォーカスを持った状態で始まる。`direction:"float"` は `parentPaneId` を必須にする（ないと invalid params）。一覧に載るのはワーカーの float だけなので、親のない float を IPC から作れないようにした。タイトル帯はエージェントの状態と要対応の色を出すので、たたんだままでも止まったワーカーが分かる。開くのはタイトル帯か、ボードの `g`（`focus_pane` がたたんだ float を開く）。
+- floating-panes の REQ-023 を改め、IPC は `parentPaneId` を持つ float（ワーカー）だけを列挙する。AppleScript、AX、Overview はこれまでどおりすべての float を出さない。ワーカーでない float は IPC からも見えない。
+- `auto` の分割候補から float のワーカーを外す（分割レイアウトにないため）。
+- 1 つのペインに置ける float は 8 つ（`MAX_PER_ANCHOR`）で、超えると spawn はエラーになる。`--max-children` の既定と同じ数。
+- セッション復元では orchestration の情報を戻さないので、復元した float はワーカーでなくなり、IPC からは見えなくなる。
+
 ### D6：エージェントごとの差はフックの設定だけに閉じ込める
 
 状態の報告経路は 3 種とも `OSC 777;noa-agent` に揃える。各エージェントのフックが `"$NOA_BIN" +ctl report` を呼ぶだけにし、Noa 本体と `+ctl wait` には種別ごとの分岐を持たせない。`scripts/noa-agent-hook.py` は既存の利用者の設定を壊さないよう残し、`+ctl report` は同じ処理（制御端末へ書く、端末がなければ何もせず成功）を持つ。
@@ -151,7 +161,7 @@
 ## Scope
 
 - In：D1〜D4 と D6、`docs/api/noa-server-protocol.md` と `docs/AGENT_WORKFLOW.md` の更新、smoke スクリプト。
-- Out：UI（D5 の別 spec）、codex と agy のフック設定の自動書き込み（設定例をドキュメントに載せるだけ）、worker の自動承認の既定有効化、float ペインへの spawn、`parent`/`label` のセッション復元、LAN 越しのオーケストレーション、`server-enable` の既定値の変更、mutation の冪等キー（at-least-once のまま。`spawn` をタイムアウト後に再送すると二重起動しうる）。
+- Out：UI（D5 の別 spec）、codex と agy のフック設定の自動書き込み（設定例をドキュメントに載せるだけ）、worker の自動承認の既定有効化、`parent`/`label` のセッション復元、LAN 越しのオーケストレーション、`server-enable` の既定値の変更、mutation の冪等キー（at-least-once のまま。`spawn` をタイムアウト後に再送すると二重起動しうる）。
 
 ## 前提と反証
 

@@ -173,6 +173,53 @@ fn auto_split_with_a_command_reaches_spawn_with_every_field() {
     assert_eq!(spawns[0].1, params);
 }
 
+// Worker floats (floating-panes REQ-023 as amended): `direction: "float"`
+// reaches the backend as a float on the pane, extensions or not.
+#[test]
+fn a_float_placement_reaches_spawn_as_a_float_on_the_pane() {
+    let (backend, _broadcaster, handle) = start(&["read", "control", "input"]);
+    let mut client = connect(&handle, &["read", "control", "input"]);
+    let params = SpawnParams {
+        config: Some(command_config()),
+        label: Some("review".to_string()),
+        parent_pane_id: Some(WireId(1)),
+        focus: Some(false),
+    };
+
+    client
+        .spawn_split(1, SplitPlacement::Float, &params)
+        .unwrap();
+
+    let spawns = backend.spawns.lock().unwrap();
+    assert_eq!(spawns[0].0, SpawnTarget::Float { pane: 1 });
+    assert_eq!(spawns[0].1, params);
+    assert!(backend.legacy_splits.lock().unwrap().is_empty());
+}
+
+// Review finding: a float spawned without `parentPaneId` (bare, or with only
+// a label) was exposed over IPC, though only worker floats may be.
+#[test]
+fn a_float_without_a_parent_pane_is_refused() {
+    let (backend, _broadcaster, handle) = start(&["read", "control", "input"]);
+    let mut client = connect(&handle, &["read", "control", "input"]);
+    let labelled = SpawnParams {
+        label: Some("scratch".to_string()),
+        ..SpawnParams::default()
+    };
+
+    assert!(
+        client
+            .spawn_split(1, SplitPlacement::Float, &SpawnParams::default())
+            .is_err()
+    );
+    assert!(
+        client
+            .spawn_split(1, SplitPlacement::Float, &labelled)
+            .is_err()
+    );
+    assert!(backend.spawns.lock().unwrap().is_empty());
+}
+
 #[test]
 fn auto_split_without_extensions_still_goes_through_spawn() {
     let (backend, _broadcaster, handle) = start(&["read", "control"]);

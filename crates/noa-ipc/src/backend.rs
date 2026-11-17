@@ -24,6 +24,8 @@ pub enum SpawnTarget {
         pane: PaneRef,
         direction: Option<SplitDirection>,
     },
+    /// A floating pane over `pane`.
+    Float { pane: PaneRef },
 }
 
 #[derive(Clone, Debug)]

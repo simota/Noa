@@ -59,6 +59,7 @@ Starts a worker whose parent is this pane and prints `{"paneId":"…"}`.
 | `--split auto` (default) | First worker to the right of this pane, later ones split the largest of this pane's workers along its longer side. With no room left, a new tab in the same window |
 | `--split right` / `--split down` | Split this pane in that direction (fails when there is no room) |
 | `--tab` | New tab in this pane's window |
+| `--float` | A floating pane over this pane, collapsed to its title strip, so workers stay out of the way. The strip shows the agent's state; the board's `g` opens it. At most 8 floats per pane |
 | `--cwd DIR` | Working directory. Relative paths are taken from this process's cwd. Default: this process's cwd |
 | `--env KEY=VALUE` | Repeatable. `PATH` defaults to this process's `PATH` when a command is given |
 | `--label TEXT` | Shown in the panel's `label` |

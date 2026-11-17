@@ -52,7 +52,7 @@ Commands:
   ls [--children]               Print every panel (or only this pane's workers).
   spawn [placement] [options] [-- COMMAND...]
                                 Start a worker pane; prints {\"paneId\":...}.
-      placement: --split auto|right|down (default auto) | --tab
+      placement: --split auto|right|down (default auto) | --tab | --float
       --cwd DIR  --env KEY=VALUE  --label TEXT  --input TEXT
       --no-wait-after  --focus  --max-children N (default 8)
   send PANE [--enter] [--raw] [--wait [wait options]] [--any-pane] [--] TEXT|-
@@ -125,6 +125,8 @@ pub(crate) enum Placement {
     Right,
     Down,
     Tab,
+    /// A floating pane over the orchestrator, collapsed to its title strip.
+    Float,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -284,6 +286,9 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
                 .value("--of")?
                 .map(|v| parse_u64("--of", &v))
                 .transpose()?;
+            if placement == Placement::Float {
+                return Err("a board opens in a split or a tab, not a float".to_string());
+            }
             if !opening && placement != Placement::Auto {
                 return Err("--split and --tab go with --open".to_string());
             }
@@ -322,10 +327,17 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
     Ok(command)
 }
 
-/// `--tab` or `--split auto|right|down` (default `auto`).
+/// `--tab`, `--float` or `--split auto|right|down` (default `auto`).
 fn parse_placement(rest: &mut Args) -> Result<Placement, String> {
     let tab = rest.flag("--tab");
+    let float = rest.flag("--float");
     let split = rest.value("--split")?;
+    if float {
+        return match (tab, split) {
+            (false, None) => Ok(Placement::Float),
+            _ => Err("--float, --tab and --split are exclusive".to_string()),
+        };
+    }
     Ok(match (tab, split.as_deref()) {
         (true, Some(_)) => return Err("--tab and --split are exclusive".to_string()),
         (true, None) => Placement::Tab,
@@ -1104,6 +1116,11 @@ impl Session {
             .find(|panel| panel.pane_id.0 == own)
             .map(|panel| panel.window_group_id.0);
         let pane = match placement {
+            Placement::Float => {
+                return Err(Failure::error(
+                    "a board opens in a split or a tab, not a float",
+                ));
+            }
             Placement::Tab => self.client.spawn_tab(window, &params)?,
             // Without a placement, a pane with no room to split opens the
             // board in a new tab, as `spawn`'s auto placement does.
@@ -1180,6 +1197,9 @@ impl Session {
             Placement::Down => self
                 .client
                 .spawn_split(own, SplitPlacement::Vertical, &params)?,
+            Placement::Float => self
+                .client
+                .spawn_split(own, SplitPlacement::Float, &params)?,
         };
         print_json(&serde_json::json!({ "paneId": WireId(pane) }));
         Ok(EXIT_OK)
@@ -1719,6 +1739,18 @@ mod tests {
         assert!(!lacks_surface_ids(&[other]));
         assert!(lacks_surface_ids(&[panel(0, None, false)]));
         assert!(!lacks_surface_ids(&[]));
+    }
+
+    #[test]
+    fn spawn_can_place_a_worker_in_a_float() {
+        let Ok(Command::Spawn(spawn)) = parse_args(&args(&["spawn", "--float", "--", "claude"]))
+        else {
+            panic!("spawn --float did not parse");
+        };
+        assert_eq!(spawn.placement, Placement::Float);
+        assert!(parse_args(&args(&["spawn", "--float", "--tab"])).is_err());
+        assert!(parse_args(&args(&["spawn", "--float", "--split", "right"])).is_err());
+        assert!(parse_args(&args(&["board", "--open", "--float"])).is_err());
     }
 
     #[test]

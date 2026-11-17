@@ -119,10 +119,12 @@ Also accepts the [spawn extensions](#spawn-extensions-newtab--split).
 
 ### noa.split (requires control)
 
-params: `{"paneId":"1","direction":"horizontal"|"vertical"|"auto"}`; horizontal = side-by-side, vertical = stacked.
+params: `{"paneId":"1","direction":"horizontal"|"vertical"|"auto"|"float"}`; horizontal = side-by-side, vertical = stacked.
 result: `{"paneId":"8"}`; the created pane's id.
 
 `auto` lets the server choose: with no pane yet spawned with `parentPaneId` equal to `paneId`, it splits `paneId` side-by-side; otherwise it splits the largest such pane along its longer side. When no candidate has room left, the new pane opens in a new tab of the same window instead. Also accepts the spawn extensions below.
+
+`float` opens a floating pane over `paneId` instead of splitting: collapsed to its title strip with `focus:false`, open and focused otherwise. It needs `parentPaneId` (invalid params without it), since `noa.listPanels` lists a float only as an orchestrator's worker; other floats stay out of every listing. A pane holds at most 8 floats; past that the request fails with an internal error. A server older than `float` rejects the value as invalid params.
 
 ### Spawn extensions (newTab / split)
 

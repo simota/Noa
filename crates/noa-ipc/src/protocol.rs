@@ -522,15 +522,18 @@ pub enum SplitPlacement {
     Horizontal,
     Vertical,
     Auto,
+    /// A floating pane over `paneId`, not a split (floating-panes REQ-023
+    /// as amended: a worker float is listed).
+    Float,
 }
 
 impl SplitPlacement {
-    /// The fixed direction, or `None` for `auto`.
+    /// The fixed direction, or `None` for `auto` and `float`.
     pub fn direction(self) -> Option<SplitDirection> {
         match self {
             Self::Horizontal => Some(SplitDirection::Horizontal),
             Self::Vertical => Some(SplitDirection::Vertical),
-            Self::Auto => None,
+            Self::Auto | Self::Float => None,
         }
     }
 }

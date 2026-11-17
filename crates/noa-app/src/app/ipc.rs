@@ -219,8 +219,17 @@ impl App {
                 let Some(state) = self.windows.get(&window_id) else {
                     continue;
                 };
-                // Floats are not listed over IPC (floating-panes REQ-023).
-                if !state.contains_pane(id.pane_id) || state.is_float(id.pane_id) {
+                // Floats are not listed over IPC, except a worker float: one
+                // with a parent pane (floating-panes REQ-023 as amended).
+                let has_parent = state.surfaces.get(&id.pane_id).is_some_and(|surface| {
+                    surface
+                        .orchestration
+                        .as_ref()
+                        .is_some_and(|meta| meta.parent.is_some())
+                });
+                if !state.contains_pane(id.pane_id)
+                    || !listed_over_ipc(state.is_float(id.pane_id), has_parent)
+                {
                     continue;
                 }
                 let key = registry_key(id);
@@ -256,6 +265,10 @@ impl App {
                         key: (u64::from(*window_id), pane_id.get()),
                         float: state.is_float(*pane_id),
                         worker: surface.orchestration.is_some(),
+                        parent: surface
+                            .orchestration
+                            .as_ref()
+                            .is_some_and(|meta| meta.parent.is_some()),
                         eligible,
                     })
             });
@@ -601,6 +614,38 @@ impl App {
                 };
                 self.ipc_spawn_tab(event_loop, window, spawn)?
             }
+            noa_ipc::SpawnTarget::Float { pane } => {
+                let (window_id, target) = self.resolve_ipc_pane(pane)?;
+                let (anchor, full) = self
+                    .windows
+                    .get(&window_id)
+                    .map(|state| {
+                        let anchor = float_host(
+                            target,
+                            state.floats.get(target).map(|float| float.anchor),
+                            state.split_focus(),
+                        );
+                        let full = state
+                            .floats
+                            .count_on(crate::floating::FloatAnchor::Pane(anchor))
+                            >= crate::floating::MAX_PER_ANCHOR;
+                        (anchor, full)
+                    })
+                    .ok_or(noa_ipc::IpcError::PaneClosed)?;
+                let float = self
+                    .ipc_float_with(window_id, anchor, spawn, float_start(params.focus))
+                    .ok_or_else(|| {
+                        noa_ipc::IpcError::Internal(if full {
+                            format!(
+                                "this pane already holds the most floats it can ({})",
+                                crate::floating::MAX_PER_ANCHOR
+                            )
+                        } else {
+                            "the float could not open".to_string()
+                        })
+                    })?;
+                (window_id, float)
+            }
             noa_ipc::SpawnTarget::Split { pane, direction } => {
                 let (window_id, anchor) = self.resolve_ipc_pane(pane)?;
                 let candidates = match direction {
@@ -667,6 +712,33 @@ impl App {
             .filter(|pane| *pane != target)
     }
 
+    /// A worker float over `anchor` with `spawn`'s overrides: collapsed to
+    /// its title strip so it stays out of the way until someone opens it, or
+    /// open with focus when `start` says so; `None` when the pane already
+    /// holds as many floats as it can.
+    fn ipc_float_with(
+        &mut self,
+        window_id: WindowId,
+        anchor: PaneId,
+        spawn: ScriptSpawn,
+        start: FloatStart,
+    ) -> Option<PaneId> {
+        self.script_spawn = Some(spawn);
+        let float = self.create_float(window_id, anchor, super::floating::IpcExposure::Listed);
+        self.script_spawn = None;
+        let float = float?;
+        match start {
+            FloatStart::Collapsed => {
+                if let Some(state) = self.windows.get_mut(&window_id) {
+                    state.floats.toggle_collapse(float);
+                }
+            }
+            FloatStart::OpenFocused => self.focus_pane(window_id, float),
+        }
+        self.after_float_change(window_id);
+        Some(float)
+    }
+
     /// A new tab with `spawn`'s overrides, in `window`'s group (the focused
     /// window's when `None`), like `noa.newTab`.
     fn ipc_spawn_tab(
@@ -724,6 +796,7 @@ impl App {
                     pane: *pane,
                     rect: surface.rect,
                     parent: surface.orchestration.as_ref().and_then(|meta| meta.parent),
+                    float: state.is_float(*pane),
                 })
         });
         let children = anchor_children(anchor_ipc, surfaces);
@@ -916,12 +989,55 @@ fn structural_signature(
     hasher.finish()
 }
 
+/// Whether IPC lists a pane (floating-panes REQ-023 as amended): every split
+/// pane, and a float only when an orchestrator spawned it as a worker (it has
+/// a parent pane), so `+ctl` can wait on, read and close it. AppleScript, AX
+/// and the Overview still leave every float out.
+fn listed_over_ipc(float: bool, has_parent: bool) -> bool {
+    !float || has_parent
+}
+
+/// The split pane a new worker float goes over when `target` asked for it.
+/// A float can only hang from a pane of the split layout, so a float worker
+/// that orchestrates in turn hands its workers to the pane it floats over
+/// (the tab's split focus for a tab- or window-anchored float).
+fn float_host(
+    target: PaneId,
+    target_anchor: Option<crate::floating::FloatAnchor>,
+    split_focus: PaneId,
+) -> PaneId {
+    match target_anchor {
+        None => target,
+        Some(crate::floating::FloatAnchor::Pane(pane)) => pane,
+        Some(_) => split_focus,
+    }
+}
+
+/// How a float spawned over IPC starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FloatStart {
+    Collapsed,
+    OpenFocused,
+}
+
+/// `focus` (omitted means true, as for a split) opens the float and moves
+/// focus to it; otherwise it stays collapsed to its title strip.
+fn float_start(focus: Option<bool>) -> FloatStart {
+    if focus.unwrap_or(true) {
+        FloatStart::OpenFocused
+    } else {
+        FloatStart::Collapsed
+    }
+}
+
 /// One live pane `sync_ipc_snapshot` may list without a session card.
 struct ListCandidate {
     key: (u64, u64),
     float: bool,
     /// Spawned by an orchestrator over IPC.
     worker: bool,
+    /// Spawned with a parent pane (an orchestrator's worker).
+    parent: bool,
     /// In a window that keeps session cards (not the quick terminal or the
     /// scratch popup), so its pane is listed once it has a card anyway.
     eligible: bool,
@@ -932,8 +1048,8 @@ struct ListCandidate {
 /// or an agent still starting), and any pane of a card-keeping window, such
 /// as an orchestrator script that prints nothing before its first `+ctl`.
 /// Without them `+ctl wait` reads a just-spawned worker as closed, and `+ctl`
-/// cannot find its own pane (agent-orchestration D1). Floats are never
-/// listed (REQ-023).
+/// cannot find its own pane (agent-orchestration D1). A float is listed only
+/// when it is a worker (REQ-023 as amended).
 fn uncarded_panes(
     listed: &HashSet<(u64, u64)>,
     candidates: impl Iterator<Item = ListCandidate>,
@@ -941,7 +1057,7 @@ fn uncarded_panes(
     candidates
         .filter(|candidate| {
             (candidate.worker || candidate.eligible)
-                && !candidate.float
+                && listed_over_ipc(candidate.float, candidate.parent)
                 && !listed.contains(&candidate.key)
         })
         .map(|candidate| candidate.key)
@@ -967,6 +1083,8 @@ struct SpawnedPane {
     pane: PaneId,
     rect: PaneRectApp,
     parent: Option<u64>,
+    /// A worker float, which is not in the split layout.
+    float: bool,
 }
 
 /// The panes `anchor_ipc` spawned that an `auto` split may divide, with
@@ -977,7 +1095,7 @@ fn anchor_children(
     surfaces: impl Iterator<Item = SpawnedPane>,
 ) -> Vec<(WindowId, PaneId, PaneRectApp)> {
     surfaces
-        .filter(|surface| surface.parent == Some(anchor_ipc))
+        .filter(|surface| surface.parent == Some(anchor_ipc) && !surface.float)
         .map(|surface| (surface.window, surface.pane, surface.rect))
         .collect()
 }
@@ -1308,6 +1426,7 @@ mod unlisted_worker_tests {
             key,
             float,
             worker,
+            parent: worker,
             eligible: false,
         }
     }
@@ -1322,6 +1441,7 @@ mod unlisted_worker_tests {
             key: (1, 1),
             float: false,
             worker: false,
+            parent: false,
             eligible: true,
         };
 
@@ -1339,13 +1459,39 @@ mod unlisted_worker_tests {
             candidate((1, 2), false, true),
             candidate((1, 3), false, false),
             candidate((1, 4), true, true),
+            candidate((1, 5), true, false),
         ];
 
+        // A worker float is listed (floating-panes REQ-023 as amended); any
+        // other float never is.
         assert_eq!(
             uncarded_panes(&listed, candidates.into_iter()),
-            vec![(1, 2)],
-            "only the card-less, non-float worker is added"
+            vec![(1, 2), (1, 4)],
+            "only card-less workers are added, a worker float included"
         );
+    }
+
+    // Review finding: a float with only a label counted as a worker, so it
+    // was listed though it has no orchestrator.
+    #[test]
+    fn a_float_needs_a_parent_to_be_listed() {
+        let listed = HashSet::new();
+        let labelled_float = ListCandidate {
+            key: (1, 6),
+            float: true,
+            worker: true,
+            parent: false,
+            eligible: true,
+        };
+        assert!(uncarded_panes(&listed, [labelled_float].into_iter()).is_empty());
+    }
+
+    #[test]
+    fn only_a_float_that_is_a_worker_is_listed_over_ipc() {
+        assert!(listed_over_ipc(false, false));
+        assert!(listed_over_ipc(false, true));
+        assert!(listed_over_ipc(true, true));
+        assert!(!listed_over_ipc(true, false));
     }
 
     #[test]
@@ -1359,6 +1505,47 @@ mod unlisted_worker_tests {
 #[cfg(test)]
 mod auto_split_tests {
     use super::*;
+
+    // Review finding, reproduced in a real Noa: a float worker running
+    // `+ctl spawn` asked for a float over itself, which no float can hang
+    // from, and was told its pane held the maximum of 8.
+    #[test]
+    fn a_float_workers_own_worker_floats_over_the_pane_below() {
+        use crate::floating::FloatAnchor;
+        let (split, float, focus) = (PaneId::new(1), PaneId::new(4), PaneId::new(2));
+        assert_eq!(float_host(split, None, focus), split);
+        assert_eq!(
+            float_host(float, Some(FloatAnchor::Pane(split)), focus),
+            split
+        );
+        assert_eq!(float_host(float, Some(FloatAnchor::Tab), focus), focus);
+        assert_eq!(float_host(float, Some(FloatAnchor::Window), focus), focus);
+    }
+
+    // Review finding: `focus: true` (and `+ctl spawn --float --focus`) left
+    // the new float collapsed and unfocused.
+    #[test]
+    fn a_float_spawned_with_focus_opens_and_takes_it() {
+        assert_eq!(float_start(Some(true)), FloatStart::OpenFocused);
+        assert_eq!(float_start(None), FloatStart::OpenFocused);
+        assert_eq!(float_start(Some(false)), FloatStart::Collapsed);
+    }
+
+    // A worker float is not in the split layout, so an `auto` split never
+    // tries to divide it.
+    #[test]
+    fn a_worker_float_is_not_split_by_auto_placement() {
+        let tab = WindowId::from(1);
+        let pane = |pane: u64, float: bool| SpawnedPane {
+            window: tab,
+            pane: PaneId::new(pane),
+            rect: rect(400, 300),
+            parent: Some(10),
+            float,
+        };
+        let children = anchor_children(10, [pane(2, false), pane(3, true)].into_iter());
+        assert_eq!(children, vec![(tab, PaneId::new(2), rect(400, 300))]);
+    }
 
     fn rect(w: u32, h: u32) -> PaneRectApp {
         PaneRectApp { x: 0, y: 0, w, h }
@@ -1417,6 +1604,7 @@ mod auto_split_tests {
             pane: PaneId::new(pane),
             rect: rect(w, h),
             parent,
+            float: false,
         };
         let surfaces = [
             spawned(1, 1, 200, 900, None),

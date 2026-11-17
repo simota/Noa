@@ -311,8 +311,13 @@ Exit status: 0 success, 1 error (bad arguments, unknown pane), 2 `wait` timed ou
 `skills/noa-orchestration/` is an agent skill: `SKILL.md` tells an agent when and
 how to orchestrate workers, and `reference.md` is the full `+ctl` reference it
 reads on demand. To make it available to Claude Code, link it into your skills
-directory:
+directory from a checkout of this repository:
 
 ```sh
-ln -s /absolute/path/Noa/skills/noa-orchestration ~/.claude/skills/noa-orchestration
+scripts/install-agent-skill.sh               # ~/.claude/skills/noa-orchestration
+scripts/install-agent-skill.sh --dir DIR     # another skills directory, e.g. a project's .claude/skills
+scripts/install-agent-skill.sh --uninstall   # remove the link (add --dir DIR for another directory)
 ```
+
+The skill is a symbolic link to the checkout, so it follows `git pull`. The
+script leaves anything else already at the destination alone.

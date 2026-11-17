@@ -470,23 +470,46 @@ const PASTE_END: &[u8] = b"\x1b[201~";
 pub(crate) struct KeyReader {
     pending: Vec<u8>,
     paste: Option<Vec<u8>>,
+    /// When the held-over escape start arrived.
+    pending_since: Option<Instant>,
 }
 
 impl KeyReader {
-    /// Whether the last read ended in a lone ESC: the Esc key, or the start
-    /// of a sequence (a paste's start marker included) still on its way.
-    pub(crate) fn waiting_on_esc(&self) -> bool {
-        self.paste.is_none() && self.pending == [0x1b]
+    /// Keys in `bytes`, which arrived at `at`. An escape start held over
+    /// from a read [`ESC_WAIT`] or more before is settled first: keys
+    /// pressed apart never join into one sequence, however late the loop
+    /// gets to them.
+    pub(crate) fn feed_at(&mut self, bytes: &[u8], at: Instant) -> Vec<Key> {
+        let mut keys = Vec::new();
+        if self
+            .pending_since
+            .is_some_and(|since| at.saturating_duration_since(since) >= ESC_WAIT)
+        {
+            keys.extend(self.flush());
+        }
+        keys.extend(self.feed(bytes));
+        self.pending_since = self.waiting_on_esc().then_some(at);
+        keys
     }
 
-    /// Nothing followed a lone ESC in time: it was the Esc key.
+    /// Whether the last read ended inside an escape start: a lone ESC (the
+    /// Esc key, or a sequence still on its way) or an unfinished `ESC [` /
+    /// `ESC O`.
+    pub(crate) fn waiting_on_esc(&self) -> bool {
+        self.paste.is_none() && self.pending.first() == Some(&0x1b)
+    }
+
+    /// Nothing completed the escape start in time: a lone ESC was the Esc
+    /// key, and an unfinished `ESC [` or `ESC O` was Option/Meta with `[` or
+    /// `O`, which does nothing here.
     pub(crate) fn flush(&mut self) -> Vec<Key> {
-        if self.waiting_on_esc() {
-            self.pending.clear();
-            vec![Key::Esc]
-        } else {
-            Vec::new()
+        if !self.waiting_on_esc() {
+            return Vec::new();
         }
+        let lone = self.pending == [0x1b];
+        self.pending.clear();
+        self.pending_since = None;
+        if lone { vec![Key::Esc] } else { Vec::new() }
     }
     pub(crate) fn feed(&mut self, bytes: &[u8]) -> Vec<Key> {
         let mut buf = std::mem::take(&mut self.pending);
@@ -1154,13 +1177,18 @@ pub(crate) fn run(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
     let mut board = Board::new(of, me);
     board.update(client.list_panels()?, Instant::now());
 
-    let (keys_tx, keys_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let (keys_tx, keys_rx) = std::sync::mpsc::channel::<(Instant, Vec<u8>)>();
     std::thread::spawn(move || {
         let mut buf = [0u8; 1024];
         loop {
             // SAFETY: reads into a stack buffer of the given length.
             let n = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
-            if n <= 0 || keys_tx.send(buf[..n as usize].to_vec()).is_err() {
+            // Stamped on arrival: the loop may get to it later.
+            if n <= 0
+                || keys_tx
+                    .send((Instant::now(), buf[..n as usize].to_vec()))
+                    .is_err()
+            {
                 break;
             }
         }
@@ -1206,7 +1234,7 @@ pub(crate) fn run(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
             Duration::from_millis(100)
         };
         let keys = match keys_rx.recv_timeout(wait) {
-            Ok(bytes) => reader.feed(&bytes),
+            Ok((at, bytes)) => reader.feed_at(&bytes, at),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => reader.flush(),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(EXIT_OK),
         };
@@ -1605,6 +1633,50 @@ mod tests {
         assert_eq!(reader.feed("\x1bあj".as_bytes()), vec![Key::Char('j')]);
         // Two ESCs: the first is the Esc key.
         assert_eq!(reader.feed(b"\x1b\x1b[A"), vec![Key::Esc, Key::Up]);
+    }
+
+    // Review finding: Option+[ or Option+Shift+O (`ESC [`, `ESC O`) began a
+    // sequence that swallowed everything typed after it up to a letter.
+    #[test]
+    fn a_meta_bracket_does_not_swallow_what_is_typed_after() {
+        let t0 = Instant::now();
+        let later = t0 + Duration::from_millis(200);
+        let mut reader = KeyReader::default();
+        assert_eq!(reader.feed_at(b"\x1b[", t0), Vec::new());
+        assert_eq!(
+            reader.feed_at(b"123 a", later),
+            "123 a".chars().map(Key::Char).collect::<Vec<_>>()
+        );
+        let mut reader = KeyReader::default();
+        assert_eq!(reader.feed_at(b"\x1bO", t0), Vec::new());
+        assert_eq!(reader.feed_at(b"x", later), vec![Key::Char('x')]);
+        // A sequence that really was split arrives within the wait.
+        let mut reader = KeyReader::default();
+        assert_eq!(reader.feed_at(b"\x1b[", t0), Vec::new());
+        assert_eq!(
+            reader.feed_at(b"A", t0 + Duration::from_millis(5)),
+            vec![Key::Up]
+        );
+    }
+
+    // Review finding: an Esc and a key pressed well apart were joined into
+    // one Option/Meta key, and both lost, when the loop handled them late.
+    #[test]
+    fn keys_that_arrived_apart_stay_apart_when_handled_late() {
+        let t0 = Instant::now();
+        let mut reader = KeyReader::default();
+        assert_eq!(reader.feed_at(b"\x1b", t0), Vec::new());
+        assert_eq!(
+            reader.feed_at(b"j", t0 + Duration::from_millis(100)),
+            vec![Key::Esc, Key::Char('j')]
+        );
+        // Arriving together, they are one Option/Meta key.
+        let mut reader = KeyReader::default();
+        assert_eq!(reader.feed_at(b"\x1b", t0), Vec::new());
+        assert_eq!(
+            reader.feed_at(b"j", t0 + Duration::from_millis(5)),
+            Vec::new()
+        );
     }
 
     // Review finding: a read that ended right after the ESC of a paste's

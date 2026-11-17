@@ -25,6 +25,9 @@ impl Terminal {
             ProgramStatusOsc::Blocked { state, detail } => {
                 (Some(AgentStatus { state, detail }), true)
             }
+            ProgramStatusOsc::Ended { state, detail } => {
+                (Some(AgentStatus { state, detail }), false)
+            }
             ProgramStatusOsc::Idle if self.program_status_active => (
                 Some(AgentStatus {
                     state: AgentState::Finished,

@@ -284,8 +284,9 @@ Put `--` before a `send` text (or `report` detail) that starts with `--`.
 `send` and `close` refuse panes this orchestrator did not spawn unless `--any-pane`
 is given. This guards against a wrong id; it is not a security boundary.
 
-`wait` relies on agent-state reports. Claude Code reports through the hook adapter
-above, including approval and question prompts. For Codex and Antigravity CLI,
+`wait` relies on agent-state reports. Claude Code reports on its own through
+OSC 7501 (working, blocked on a prompt, done or failed), and also through the hook
+adapter above when it is configured. For Codex and Antigravity CLI,
 configure their hooks to call `+ctl report`; their documented events (as of this
 writing; check your installed version) cover the start and end of a turn but not
 approval prompts, which therefore surface as `attention` (the agent's own

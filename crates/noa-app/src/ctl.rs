@@ -713,12 +713,18 @@ struct Session {
     client: Client,
     /// This process's own panel, when it runs inside a Noa pane.
     own: Option<u64>,
+    /// The control port this session reached, for diagnostics.
+    port: u16,
 }
 
 /// This process's panel among `panels`, by its `NOA_SURFACE_ID`. A server
-/// that lists local panes without any `surfaceId` predates `+ctl`, which is
-/// worth saying instead of "not inside a Noa pane".
-pub(crate) fn own_pane(panels: &[Panel], surface_id: &str) -> Result<Option<u64>, String> {
+/// that lists local panes without any `surfaceId` is not the Noa this pane
+/// runs in, which is worth saying instead of "not inside a Noa pane".
+pub(crate) fn own_pane(
+    panels: &[Panel],
+    surface_id: &str,
+    port: u16,
+) -> Result<Option<u64>, String> {
     if let Some(panel) = panels
         .iter()
         .find(|panel| panel.surface_id.as_deref() == Some(surface_id))
@@ -726,12 +732,37 @@ pub(crate) fn own_pane(panels: &[Panel], surface_id: &str) -> Result<Option<u64>
         return Ok(Some(panel.pane_id.0));
     }
     if !panels.is_empty() && panels.iter().all(|panel| panel.surface_id.is_none()) {
-        return Err(
-            "the running Noa does not report surface ids; restart it with a version that has +ctl"
-                .to_string(),
-        );
+        return Err(format!(
+            "the Noa answering on port {port} does not report surface ids, so it is not \
+             the Noa this pane runs in: another Noa (an older one, or a second \
+             instance) holds the port. {}",
+            port_owner_hint(port)
+        ));
     }
     Ok(None)
+}
+
+/// Why a command that needs this process's own pane cannot run.
+pub(crate) fn not_own_message(surface_id: Option<&str>, port: u16) -> String {
+    match surface_id {
+        None => {
+            "this process is not running inside a Noa pane (NOA_SURFACE_ID is unset)".to_string()
+        }
+        Some(surface_id) => format!(
+            "this pane (NOA_SURFACE_ID={surface_id}) is not among the panes of the Noa \
+             answering on port {port}. If another Noa holds that port, this one could \
+             not listen. {} Floating panes and the quick and scratch terminals cannot \
+             orchestrate.",
+            port_owner_hint(port)
+        ),
+    }
+}
+
+fn port_owner_hint(port: u16) -> String {
+    format!(
+        "See which process listens with `lsof -nP -iTCP:{port} -sTCP:LISTEN`; a Noa that \
+         could not listen shows \"Bind failed\" under Settings > Server Status."
+    )
 }
 
 /// The control URL for the configured bind address (an unspecified bind
@@ -791,7 +822,11 @@ impl Session {
             ClientError::Rpc { .. } => Failure::unavailable(err.to_string()),
             other => Failure::unavailable(format!("cannot reach Noa at {url}: {other}")),
         })?;
-        let mut session = Self { client, own: None };
+        let mut session = Self {
+            client,
+            own: None,
+            port: config.server_port,
+        };
         session.own = session.find_own()?;
         Ok(session)
     }
@@ -800,14 +835,15 @@ impl Session {
         let Ok(surface_id) = std::env::var(SURFACE_ID_ENV) else {
             return Ok(None);
         };
-        own_pane(&self.client.list_panels()?, &surface_id).map_err(Failure::unavailable)
+        own_pane(&self.client.list_panels()?, &surface_id, self.port).map_err(Failure::unavailable)
     }
 
     fn require_own(&self) -> Result<u64, Failure> {
         self.own.ok_or_else(|| {
-            Failure::error(
-                "this process is not running inside a Noa pane (no NOA_SURFACE_ID match)",
-            )
+            Failure::error(not_own_message(
+                std::env::var(SURFACE_ID_ENV).ok().as_deref(),
+                self.port,
+            ))
         })
     }
 
@@ -841,7 +877,11 @@ impl Session {
             return Ok(());
         }
         let own = self.own.ok_or_else(|| {
-            Failure::error("not inside a Noa pane, so no workers to target; pass --any-pane")
+            Failure::error(format!(
+                "{} Without a pane of its own there are no workers to target; pass \
+                 --any-pane to target a pane anyway.",
+                not_own_message(std::env::var(SURFACE_ID_ENV).ok().as_deref(), self.port)
+            ))
         })?;
         let panels = self.client.list_panels()?;
         for pane in panes {
@@ -1501,10 +1541,42 @@ mod tests {
         other.pane_id = WireId(9);
         other.surface_id = Some("0x02".to_string());
 
-        assert_eq!(own_pane(&[other.clone(), mine], "0x01"), Ok(Some(8)));
-        assert_eq!(own_pane(&[other], "0x01"), Ok(None));
-        assert!(own_pane(&[panel(0, None, false)], "0x01").is_err());
-        assert_eq!(own_pane(&[], "0x01"), Ok(None));
+        assert_eq!(own_pane(&[other.clone(), mine], "0x01", 61771), Ok(Some(8)));
+        assert_eq!(own_pane(&[other], "0x01", 61771), Ok(None));
+        assert!(own_pane(&[panel(0, None, false)], "0x01", 61771).is_err());
+        assert_eq!(own_pane(&[], "0x01", 61771), Ok(None));
+    }
+
+    // Feedback: an older Noa still held the port, so +ctl reached it and told
+    // the user to restart with a version that has +ctl, which they had done.
+    #[test]
+    fn a_server_without_surface_ids_names_the_port_and_how_to_find_its_owner() {
+        let message = own_pane(&[panel(0, None, false)], "0x01", 61771).unwrap_err();
+
+        assert!(message.contains("61771"), "{message}");
+        assert!(message.contains("another Noa"), "{message}");
+        assert!(
+            message.contains("lsof -nP -iTCP:61771 -sTCP:LISTEN"),
+            "{message}"
+        );
+    }
+
+    // The same situation with a server that does report surface ids said
+    // "not running inside a Noa pane", though NOA_SURFACE_ID was set.
+    #[test]
+    fn a_pane_missing_from_the_listing_is_not_called_outside_noa() {
+        let listed_elsewhere = not_own_message(Some("0x01"), 61771);
+        assert!(
+            !listed_elsewhere.contains("not running inside"),
+            "{listed_elsewhere}"
+        );
+        assert!(listed_elsewhere.contains("0x01"), "{listed_elsewhere}");
+        assert!(
+            listed_elsewhere.contains("lsof -nP -iTCP:61771 -sTCP:LISTEN"),
+            "{listed_elsewhere}"
+        );
+
+        assert!(not_own_message(None, 61771).contains("NOA_SURFACE_ID is unset"));
     }
 
     /// A scripted server: `lists` are answered in order (the last one

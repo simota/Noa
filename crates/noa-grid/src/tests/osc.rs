@@ -1100,6 +1100,28 @@ fn program_status_idle_is_finished_only_after_activity() {
     );
 }
 
+// Claude Code ends a completed turn with `state=done` and a failed one with
+// `state=error` (`idle` only after a stopped turn); both were ignored, so a
+// finished worker stayed `running`.
+#[test]
+fn program_status_done_and_error_end_the_turn() {
+    // msg=base64("All tests pass")
+    let mut t = run(
+        b"\x1b]7501;state=working:app=claude-code\x1b\\\x1b]7501;state=done:app=claude-code:msg=QWxsIHRlc3RzIHBhc3M=\x1b\\",
+    );
+    let report = t.take_pending_agent_status().unwrap().unwrap();
+    assert_eq!(report.state, crate::AgentState::Finished);
+    assert_eq!(report.detail, "All tests pass");
+
+    // msg=base64("API error")
+    let mut t = run(
+        b"\x1b]7501;state=working:app=claude-code\x1b\\\x1b]7501;state=error:app=claude-code:msg=QVBJIGVycm9y\x1b\\",
+    );
+    let report = t.take_pending_agent_status().unwrap().unwrap();
+    assert_eq!(report.state, crate::AgentState::Error);
+    assert_eq!(report.detail, "API error");
+}
+
 #[test]
 fn program_status_subagent_entries_do_not_touch_the_card() {
     let mut t = run(b"\x1b]7501;state=working:app=claude-code:id=agent-1\x1b\\\x1b]7501;state=clear:id=agent-1\x1b\\");

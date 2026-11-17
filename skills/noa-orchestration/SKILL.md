@@ -18,6 +18,11 @@ output shapes and exit codes: [reference.md](reference.md).
      names the config line to add (`server-enable = true`,
      `server-scopes = read,control,input`). Ask the human to add it; do not edit
      their Noa config yourself.
+   - "does not report surface ids", or "this pane … is not among the panes": you
+     reached a different Noa than the one you run in. Usually an older Noa or a
+     second instance still holds the control port, so this one could not
+     listen. Find it with `lsof -nP -iTCP:<port> -sTCP:LISTEN` and tell the
+     human which process holds the port. Do not kill it yourself.
 2. Decide what each worker gets: which agent (or command), which directory, and a
    task that stands on its own. A worker sees nothing of your conversation.
 3. Keep the number of workers small (the default limit is 8 per orchestrator) and
@@ -35,9 +40,12 @@ noa close "$pane"
 
 - Always `send … --wait`. It subscribes before typing, so a fast reply cannot be
   missed. A separate `send` then `wait` can miss a turn that ends in between.
-- An agent's first screen may be a trust or login prompt. If the first wait ends
-  with `input`, `permission` or `attention`, `read` the pane before sending the
-  task.
+- `read` the pane before every `send`, not only the first. The first screen may
+  be a trust or login prompt. Later, the input line may still hold text (a
+  draft or a suggestion), and `send` types after it rather than replacing it.
+  If the input line is not empty, do not send; tell the human what is there.
+- Give every wait a timeout that fits the task, and see "When no report comes"
+  below if it runs out.
 
 ## Several workers in parallel
 
@@ -53,6 +61,22 @@ wait   # the shell's wait: every worker's turn has ended
 
 For "whichever stops first", use `noa wait --children` only for panes whose
 current turn started before the wait (for example, the next time round a loop).
+
+## When no report comes
+
+A wait ends only on a report, a notification or an exit. If a worker never
+reports the end of its turn, the wait runs until its timeout, so do not use an
+unbounded wait. When a wait times out:
+
+1. `noa ls --children`: note `agent.state` and `agent.seq` for each pending pane.
+   Do not judge by `busy`: it only says a shell reported a running command, so
+   it stays `false` for an agent started directly (`spawn -- claude`).
+2. `noa read PANE`: look at the screen. If the agent is back at its prompt, treat
+   the turn as over and continue from what the screen shows.
+3. If the screen shows it still working, wait again with a new timeout.
+
+Tell the human when a worker's reports are missing; its hooks may need setting
+up (see reference.md, "Which agents report turns").
 
 ## Reading why a wait ended
 

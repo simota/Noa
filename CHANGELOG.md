@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   All additive; the protocol stays at version 3.
 - Every pane's environment carries `NOA_BIN`, the running Noa's path.
 
+### Fixed
+
+- A Claude Code turn that ended (OSC 7501 `state=done`, or `state=error` for a
+  failed one) left the session card at "running"; it now shows finished or
+  error.
+
 ## [0.8.1] - 2026-11-11
 
 Links that follow soft wraps, and a UI accent that comes from the theme.

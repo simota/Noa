@@ -37,7 +37,8 @@ Panel fields that matter for orchestration:
   "parentPaneId": "1",           // only for workers
   "process": "claude",           // foreground process
   "cwd": "/repo",
-  "busy": true,
+  "busy": true,                  // a shell reported a running command (OSC 133);
+                                 // always false for a command spawned without one
   "attention": false,            // an unread notification (OSC 9 and the like)
   "agent": {"kind": "claude", "state": "finished", "detail": "", "seq": 7},
                                  // omitted for no known agent and no report;
@@ -136,11 +137,24 @@ succeeds.
 | 2 | `wait` timed out |
 | 3 | Server disabled, unreachable, missing a scope, or gone mid-command. stderr names the config to add |
 
+When `+ctl` reaches a Noa that does not list this pane (stderr says "does not
+report surface ids", exit 3, or "is not among the panes", exit 1), the control
+port belongs to another Noa: an older one, or a second instance. The Noa this
+pane runs in then failed to listen, and its Settings > Server Status reads
+"Bind failed". Find the process that holds the port:
+
+```sh
+lsof -nP -iTCP:61771 -sTCP:LISTEN   # 61771 is the default server-port
+```
+
+Report it to the human; quitting the other Noa and restarting this one (or
+choosing another `server-port`) is their call.
+
 ## Which agents report turns
 
 | Agent | Reports | Approval or question prompts |
 |---|---|---|
-| Claude Code | `running`/`finished`/`permission`/`input` through `scripts/noa-agent-hook.py`, once the human configured the hooks (`docs/AGENT_WORKFLOW.md`) | `permission` / `input` |
+| Claude Code | On its own through OSC 7501 (Claude Code 2.1.295 and later): `running` while working, `finished` when a turn completes, `error` when it fails. Noa versions before the 7501 `done`/`error` fix left the state at `running` after a turn. The hook adapter `scripts/noa-agent-hook.py` reports the same, if configured (`docs/AGENT_WORKFLOW.md`) | `permission` / `input` |
 | Codex | `running`/`finished` from hooks calling `+ctl report` (`UserPromptSubmit`, `Stop`), if configured | Only as `attention` |
 | Antigravity CLI | `running`/`finished` from hooks calling `+ctl report` (`PreInvocation`, `Stop`), if configured | Only as `attention` |
 | Anything else | Nothing | Only `exit`, or `attention` if it sends a desktop notification |

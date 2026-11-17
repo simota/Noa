@@ -21,8 +21,13 @@ const SCREEN_EVERY: Duration = Duration::from_secs(1);
 const HISTORY_CAP: usize = 50;
 /// Screen lines kept per worker.
 const SCREEN_CAP: usize = 200;
-/// Screen lines a card shows.
-const CARD_PREVIEW: usize = 2;
+/// Screen lines shown under a worker's row, and under the selected one.
+const PREVIEW_ROWS: usize = 1;
+const SELECTED_PREVIEW_ROWS: usize = 3;
+/// Closed workers kept at the end of the list.
+const GONE_CAP: usize = 5;
+/// Where a row's name starts, which its preview lines line up with.
+const ROW_INDENT: usize = 6;
 /// How long a lone ESC waits for the rest of a sequence before it counts
 /// as the Esc key.
 const ESC_WAIT: Duration = Duration::from_millis(50);
@@ -181,7 +186,37 @@ pub(crate) enum Key {
     Right,
     Backspace,
     CtrlC,
+    /// Clear the send line.
+    CtrlU,
+    /// Delete the last word of the send line.
+    CtrlW,
     Paste(String),
+}
+
+/// A one-line result shown above the footer; `warn` when it needs a look.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Notice {
+    pub(crate) text: String,
+    pub(crate) warn: bool,
+}
+
+impl Notice {
+    fn ok(text: String) -> Self {
+        Self { text, warn: false }
+    }
+
+    fn warn(text: String) -> Self {
+        Self { text, warn: true }
+    }
+}
+
+/// A worker that was closed while the board watched: what it last said.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Gone {
+    name: String,
+    status: Status,
+    detail: String,
+    at: Instant,
 }
 
 pub(crate) struct Board {
@@ -202,7 +237,14 @@ pub(crate) struct Board {
     pub(crate) view: View,
     pub(crate) mode: Mode,
     /// A one-line result of the last action.
-    pub(crate) message: Option<String>,
+    pub(crate) message: Option<Notice>,
+    /// Workers closed since the board opened, newest first.
+    gone: Vec<Gone>,
+    /// The key help is shown over the current view.
+    pub(crate) help: bool,
+    /// Lines the list is scrolled past the selected row: `j` on the last
+    /// worker goes on through the closed section, `k` comes back first.
+    past: usize,
 }
 
 impl Board {
@@ -219,7 +261,34 @@ impl Board {
             view: View::List,
             mode: Mode::Normal,
             message: None,
+            gone: Vec::new(),
+            help: false,
+            past: 0,
         }
+    }
+
+    /// The last thing `panel` said: its report's detail, else the newest
+    /// detail it gave before, else that its process ended.
+    fn last_word(&self, panel: &Panel) -> String {
+        panel
+            .agent
+            .as_ref()
+            .and_then(|agent| agent.detail.clone())
+            .filter(|detail| !detail.is_empty())
+            .or_else(|| {
+                self.history
+                    .get(&panel.pane_id.0)?
+                    .iter()
+                    .map(|report| report.detail.clone())
+                    .find(|detail| !detail.is_empty())
+            })
+            .or_else(|| {
+                panel
+                    .exit
+                    .as_ref()
+                    .map(|_| "プロセスが終了しました".to_string())
+            })
+            .unwrap_or_default()
     }
 
     /// Take a fresh pane listing. A report count that moved is kept in the
@@ -227,6 +296,19 @@ impl Board {
     pub(crate) fn update(&mut self, panels: Vec<Panel>, now: Instant) {
         let first = !self.started;
         self.started = true;
+        let before: Vec<(u64, Gone)> = self
+            .workers()
+            .iter()
+            .map(|panel| {
+                let gone = Gone {
+                    name: worker_name(panel),
+                    status: Status::of(panel),
+                    detail: self.last_word(panel),
+                    at: now,
+                };
+                (panel.pane_id.0, gone)
+            })
+            .collect();
         self.panels = panels;
         let workers: Vec<(u64, Option<u64>, Status, String)> = self
             .workers()
@@ -269,10 +351,17 @@ impl Board {
             }
         }
         let live: Vec<u64> = self.workers().iter().map(|panel| panel.pane_id.0).collect();
+        for (pane, gone) in before {
+            if !live.contains(&pane) {
+                self.gone.insert(0, gone);
+            }
+        }
+        self.gone.truncate(GONE_CAP);
         self.history.retain(|pane, _| live.contains(pane));
         self.since.retain(|pane, _| live.contains(pane));
         self.screens.retain(|pane, _| live.contains(pane));
         if self.selected.is_none_or(|pane| !live.contains(&pane)) {
+            self.past = 0;
             self.selected = live.first().copied();
         }
         if let View::Detail(pane) = self.view
@@ -350,17 +439,73 @@ impl Board {
     fn move_selection(&mut self, step: isize) {
         let workers: Vec<u64> = self.workers().iter().map(|panel| panel.pane_id.0).collect();
         if workers.is_empty() {
+            // Nothing to select: j/k scroll the closed section, as far as
+            // its title and entries go.
+            if self.view == View::List {
+                let reach = 1 + self.gone.len();
+                self.past = self.past.saturating_add_signed(step).min(reach);
+            }
             return;
         }
         let at = self
             .selected
             .and_then(|pane| workers.iter().position(|&p| p == pane))
             .unwrap_or(0) as isize;
-        let next = (at + step).clamp(0, workers.len() as isize - 1) as usize;
-        self.selected = Some(workers[next]);
-        if let View::Detail(_) = self.view {
-            self.view = View::Detail(workers[next]);
+        let last = at as usize + 1 == workers.len();
+        if self.view == View::List {
+            // As far as the selected row and its preview, and the closed
+            // section's title and entries, can scroll.
+            let reach = SELECTED_PREVIEW_ROWS + 1 + self.gone.len();
+            if step > 0 && last && !self.gone.is_empty() {
+                self.past = (self.past + 1).min(reach);
+                return;
+            }
+            if step < 0 && self.past > 0 {
+                self.past -= 1;
+                return;
+            }
         }
+        let next = (at + step).clamp(0, workers.len() as isize - 1) as usize;
+        self.select(workers[next]);
+    }
+
+    fn select(&mut self, pane: u64) {
+        self.past = 0;
+        self.selected = Some(pane);
+        if let View::Detail(_) = self.view {
+            self.view = View::Detail(pane);
+        }
+    }
+
+    /// Select the worker numbered `number` in the list (from 1).
+    fn select_number(&mut self, number: usize) {
+        let pane = self
+            .workers()
+            .get(number.wrapping_sub(1))
+            .map(|panel| panel.pane_id.0);
+        match pane {
+            Some(pane) => self.select(pane),
+            None => self.message = Some(Notice::warn(format!("{number} 番のワーカーはいません"))),
+        }
+    }
+
+    /// Select the next worker that needs someone, after the selected one.
+    fn select_next_needing(&mut self) {
+        let needing: Vec<u64> = self
+            .workers()
+            .iter()
+            .filter(|panel| Status::of(panel).group() == Group::Needs)
+            .map(|panel| panel.pane_id.0)
+            .collect();
+        if needing.is_empty() {
+            self.message = Some(Notice::ok("要対応のワーカーはいません".to_string()));
+            return;
+        }
+        let next = self
+            .selected
+            .and_then(|pane| needing.iter().position(|&p| p == pane))
+            .map_or(0, |at| (at + 1) % needing.len());
+        self.select(needing[next]);
     }
 
     /// Whether `pane` waits for an approval, which is answered in its own
@@ -372,7 +517,7 @@ impl Board {
 
     fn refuse_send(&mut self, pane: u64) {
         self.mode = Mode::Normal;
-        self.message = Some(approval_message(&self.name(pane)));
+        self.message = Some(Notice::warn(approval_message(&self.name(pane))));
     }
 
     pub(crate) fn key(&mut self, key: Key) -> Option<Action> {
@@ -389,6 +534,16 @@ impl Board {
                     }
                     Key::Backspace => {
                         text.pop();
+                        self.mode = Mode::Send(pane, text);
+                    }
+                    Key::CtrlU => self.mode = Mode::Send(pane, String::new()),
+                    Key::CtrlW => {
+                        let kept = text.trim_end().len();
+                        let word = text[..kept]
+                            .char_indices()
+                            .rfind(|(_, ch)| ch.is_whitespace())
+                            .map_or(0, |(at, ch)| at + ch.len_utf8());
+                        text.truncate(word);
                         self.mode = Mode::Send(pane, text);
                     }
                     Key::Enter => {
@@ -410,8 +565,18 @@ impl Board {
             }
             Mode::Normal => {
                 self.message = None;
+                // Any key closes the help; Ctrl-C still quits.
+                if self.help && key != Key::CtrlC {
+                    self.help = false;
+                    return None;
+                }
                 match key {
                     Key::Char('q') | Key::CtrlC => return Some(Action::Quit),
+                    Key::Char('?') => self.help = true,
+                    Key::Char('n') => self.select_next_needing(),
+                    Key::Char(digit @ '1'..='9') => {
+                        self.select_number(digit as usize - '0' as usize);
+                    }
                     Key::Char('j') | Key::Down => self.move_selection(1),
                     Key::Char('k') | Key::Up => self.move_selection(-1),
                     Key::Enter | Key::Char('l') | Key::Right => {
@@ -671,6 +836,8 @@ fn char_key(ch: char) -> Option<Key> {
         '\r' | '\n' => Some(Key::Enter),
         '\u{7f}' | '\u{8}' => Some(Key::Backspace),
         '\u{3}' => Some(Key::CtrlC),
+        '\u{15}' => Some(Key::CtrlU),
+        '\u{17}' => Some(Key::CtrlW),
         ch if ch.is_control() => None,
         ch => Some(Key::Char(ch)),
     }
@@ -751,6 +918,88 @@ fn fit(s: &str, width: usize) -> String {
     out
 }
 
+/// `s` fitted to exactly `width` columns: cut with `…`, or padded.
+fn pad(s: &str, width: usize) -> String {
+    let s = fit(s, width);
+    let room = width.saturating_sub(s.width());
+    s + &" ".repeat(room)
+}
+
+/// What a scrolled list hides: (workers, of them needing someone) above and
+/// below, and closed entries below.
+struct Hidden {
+    above: (usize, usize),
+    below: (usize, usize),
+    gone: usize,
+}
+
+/// "↓ あと 3 件 · うち要対応 1 · 閉じた 2 件": what a scrolled list hides.
+/// Only parts with something in them are said.
+fn more_line(arrow: &str, (n, needs): (usize, usize), gone: usize, cols: usize) -> String {
+    let mut line = Line::default();
+    line.plain("   ").fg(DIM, arrow);
+    if n > 0 {
+        line.fg(DIM, &format!(" あと {n} 件"));
+        if needs > 0 {
+            line.fg(DIM, " ·")
+                .fg(ORANGE, &format!(" うち要対応 {needs}"));
+        }
+    }
+    if gone > 0 {
+        let sep = if n > 0 { " ·" } else { "" };
+        line.fg(DIM, &format!("{sep} 閉じた {gone} 件"));
+    }
+    line.finish(cols)
+}
+
+/// The widths of a list's columns, shared by every row so they line up. A
+/// column that does not fit the pane is left out (0).
+struct Columns {
+    name: usize,
+    /// Shown only when the workers run different programs.
+    kind: usize,
+    state: usize,
+}
+
+impl Columns {
+    fn of(workers: &[&Panel], cols: usize, state: impl Fn(&Panel) -> String) -> Self {
+        let widest = |text: &dyn Fn(&Panel) -> String| {
+            workers
+                .iter()
+                .map(|panel| text(panel).width())
+                .max()
+                .unwrap_or(0)
+        };
+        let room = cols.saturating_sub(ROW_INDENT + 1);
+        let name = widest(&|panel| worker_name(panel))
+            .min(24)
+            .min((room / 3).max(4));
+        let kinds: std::collections::HashSet<String> = workers
+            .iter()
+            .map(|panel| worker_kind(panel))
+            .filter(|kind| !kind.is_empty())
+            .collect();
+        let mut kind = if kinds.len() > 1 {
+            widest(&|panel| worker_kind(panel)).min(10)
+        } else {
+            0
+        };
+        let mut state_width = widest(&|panel| state(panel));
+        // Keep about 10 columns for the detail; give up the kind first.
+        if name + 2 + kind + 2 + state_width + 10 > room {
+            kind = 0;
+        }
+        if name + 2 + state_width > room {
+            state_width = 0;
+        }
+        Self {
+            name,
+            kind,
+            state: state_width,
+        }
+    }
+}
+
 /// A styled line cut at `width` columns, keeping its escape sequences.
 fn cut_styled(text: &str, width: usize) -> String {
     let mut out = String::new();
@@ -822,20 +1071,100 @@ impl Board {
                 })
                 .collect();
         }
-        let mut lines = match self.view {
-            View::List => self.render_list(cols, rows, now),
-            View::Detail(pane) => self.render_detail(pane, cols, rows, now),
+        let mut lines = match (self.help, self.view) {
+            (true, _) => self.render_help(cols),
+            (false, View::List) => self.render_list(cols, rows, now),
+            (false, View::Detail(pane)) => self.render_detail(pane, cols, rows, now),
         };
         lines.truncate(rows - 2);
         while lines.len() < rows - 2 {
             lines.push(Line::default().finish(cols));
         }
-        let mut status = Line::default();
-        if let Some(message) = &self.message {
-            status.fg(DIM, &fit(&clean(message), cols));
-        }
-        lines.push(status.finish(cols));
+        lines.push(self.status_line(cols));
         lines.push(self.footer(cols));
+        lines
+    }
+
+    /// The pane title: what needs someone, so it shows on a collapsed or
+    /// background pane too.
+    pub(crate) fn title(&self) -> String {
+        let workers = self.workers();
+        let count = |group: Group| {
+            workers
+                .iter()
+                .filter(|panel| Status::of(panel).group() == group)
+                .count()
+        };
+        let needs = count(Group::Needs);
+        let working = count(Group::Working);
+        if needs > 0 {
+            format!("ボード · 要対応 {needs}")
+        } else if working > 0 {
+            format!("ボード · 作業中 {working}")
+        } else {
+            "ボード".to_string()
+        }
+    }
+
+    /// The line above the footer: how to send while typing, else the result
+    /// of the last action.
+    fn status_line(&self, cols: usize) -> String {
+        let mut line = Line::default();
+        match &self.mode {
+            Mode::Send(pane, _) => {
+                line.plain(" ")
+                    .fg(
+                        BLUE,
+                        &fit(&format!("{} に送る", self.name(*pane)), cols / 2),
+                    )
+                    .fg(DIM, "   Enter 送信  Esc 取り消し  ^U 全部消す  ^W 1 語消す");
+            }
+            _ => {
+                if let Some(notice) = &self.message {
+                    let color = if notice.warn { ORANGE } else { DIM };
+                    line.plain(" ")
+                        .fg(color, &fit(&clean(&notice.text), cols.saturating_sub(1)));
+                }
+            }
+        }
+        line.finish(cols)
+    }
+
+    fn render_help(&self, cols: usize) -> Vec<String> {
+        let mut lines = Vec::new();
+        let mut title = Line::default();
+        title
+            .plain(" ")
+            .bold("キー操作")
+            .fg(DIM, "  どのキーでも閉じます");
+        lines.push(title.finish(cols));
+        lines.push(Line::default().finish(cols));
+        let keys: [(&str, &str); 13] = [
+            ("j k ↑ ↓", "ワーカーを選ぶ"),
+            ("1–9", "番号のワーカーを選ぶ"),
+            ("n", "次の要対応のワーカーへ"),
+            ("Enter l →", "詳細(画面と報告の履歴)"),
+            ("Esc h ←", "一覧に戻る"),
+            ("g", "ワーカーのペインへ移動する(承認はそこで答える)"),
+            ("s", "ワーカーに送る(承認待ちには送れません)"),
+            ("x", "ワーカーを閉じる(確認あり。出力は消えます)"),
+            ("q ^C", "ボードを終える(ワーカーはそのまま)"),
+            ("", ""),
+            ("送信欄", ""),
+            ("Enter / Esc", "送る / 取り消す"),
+            ("^U / ^W", "全部消す / 1 語消す"),
+        ];
+        for (key, what) in keys {
+            let mut line = Line::default();
+            if what.is_empty() {
+                line.plain(" ").bold(key);
+            } else {
+                line.plain("   ")
+                    .plain(&pad(key, 12))
+                    .fg(DIM, &fit(what, cols.saturating_sub(16)));
+            }
+            lines.push(line.finish(cols));
+        }
         lines
     }
 
@@ -843,18 +1172,20 @@ impl Board {
         let workers = self.workers();
         let mut title = Line::default();
         title.plain(" ").bold("オーケストレーション").plain("  ");
+        // The orchestrator by its pane's name (its session title), which a
+        // person recognises; the pane id only when it has none.
         let scope = match self.of {
-            Some(of) => self
-                .panel(of)
-                .map(|panel| {
-                    let kind = worker_kind(panel);
-                    if kind.is_empty() {
-                        format!("親 pane {of}")
-                    } else {
-                        format!("親 pane {of} · {kind}")
-                    }
-                })
-                .unwrap_or_else(|| format!("親 pane {of}")),
+            Some(of) => {
+                let panel = self.panel(of);
+                let name = panel
+                    .map(|panel| clean(&panel.name))
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or_else(|| format!("pane {of}"));
+                match panel.map(worker_kind).filter(|kind| !kind.is_empty()) {
+                    Some(kind) => format!("{name} · {kind}"),
+                    None => name,
+                }
+            }
             None => "すべてのワーカー".to_string(),
         };
         let count = format!("ワーカー {} ", workers.len());
@@ -870,9 +1201,21 @@ impl Board {
                 .iter()
                 .filter(|panel| Status::of(panel).group() == group)
                 .count();
-            chips
-                .fg(group.color(), "●")
-                .plain(&format!(" {} {n}   ", group.title()));
+            // An empty section is dimmed, so the ones with workers stand out.
+            if n == 0 {
+                chips
+                    .fg(BORDER, "●")
+                    .fg(DIM, &format!(" {} 0   ", group.title()));
+            } else if group == Group::Needs {
+                chips
+                    .fg(group.color(), "●")
+                    .fg(group.color(), &format!(" {} {n}", group.title()))
+                    .plain("   ");
+            } else {
+                chips
+                    .fg(group.color(), "●")
+                    .plain(&format!(" {} {n}   ", group.title()));
+            }
         }
         vec![
             title.finish(cols),
@@ -889,37 +1232,171 @@ impl Board {
             empty.plain(" ").fg(
                 DIM,
                 &fit(
-                    "ワーカーはまだいません。`+ctl spawn` で起動するとここに出ます。",
+                    "ワーカーはまだいません。オーケストレーターが `+ctl spawn` すると、ここに並びます。",
                     cols - 1,
                 ),
             );
-            lines.push(empty.finish(cols));
+            let mut body = vec![empty.finish(cols)];
+            body.extend(self.gone_lines(cols, now));
+            // The closed section scrolls by `past`; its entries start after
+            // the note and the section title.
+            let room = rows.saturating_sub(lines.len() + 2);
+            let marks = room >= 3;
+            let (mut above, mut below) = (false, false);
+            let mut offset = 0;
+            let gone_hidden = |offset: usize, avail: usize| {
+                let lines = 2..body.len();
+                let above = lines.clone().filter(|&line| line < offset).count();
+                let below = lines.filter(|&line| line >= offset + avail).count();
+                (above, below)
+            };
+            for _ in 0..3 {
+                let avail = room.saturating_sub(above as usize + below as usize).max(1);
+                offset = self.past.min(body.len().saturating_sub(avail));
+                let (up, down) = gone_hidden(offset, avail);
+                let now = (marks && up > 0, marks && down > 0);
+                if now == (above, below) {
+                    break;
+                }
+                (above, below) = now;
+            }
+            let avail = room.saturating_sub(above as usize + below as usize).max(1);
+            let (up, down) = gone_hidden(offset, avail);
+            if above {
+                lines.push(more_line("↑", (0, 0), up, cols));
+            }
+            lines.extend(body.iter().skip(offset).take(avail).cloned());
+            if below {
+                lines.push(more_line("↓", (0, 0), down, cols));
+            }
             return lines;
         }
+        let columns = Columns::of(&workers, cols, |panel| {
+            self.state_text(panel.pane_id.0, Status::of(panel), now)
+        });
         let mut body: Vec<String> = Vec::new();
+        // Each worker's first and past-last line in `body`, and its group.
+        let mut spans: Vec<(usize, usize, Group)> = Vec::new();
         let mut selected_span = (0, 0);
         let mut last_group = None;
-        for panel in workers {
-            let status = Status::of(panel);
-            if last_group != Some(status.group()) {
-                last_group = Some(status.group());
+        for (index, panel) in workers.iter().enumerate() {
+            let group = Status::of(panel).group();
+            if last_group != Some(group) {
+                last_group = Some(group);
+                let n = workers
+                    .iter()
+                    .filter(|panel| Status::of(panel).group() == group)
+                    .count();
                 let mut title = Line::default();
                 title
                     .plain(" ")
-                    .fg(status.group().color(), status.group().title());
+                    .fg(group.color(), group.title())
+                    .fg(DIM, &format!(" {n}"));
                 body.push(title.finish(cols));
             }
             let start = body.len();
-            body.extend(self.card(panel, cols, now));
+            body.extend(self.row(panel, index + 1, &columns, cols, now));
+            spans.push((start, body.len(), group));
             if Some(panel.pane_id.0) == self.selected {
                 selected_span = (start, body.len());
             }
         }
+        body.extend(self.gone_lines(cols, now));
+
+        // Scroll so the selected worker is in view; when it is taller than
+        // the room, keep its first line (number, name, state) rather than its
+        // end. A clipped end says how many workers it hides, and how many of
+        // them need someone, on a line of its own.
+        // The last worker's range runs on through the closed section, so
+        // selecting it brings that section into view.
+        let workers_end = spans.last().map_or(0, |span| span.1);
+        let (sel_start, mut sel_end) = selected_span;
+        if sel_end == workers_end {
+            sel_end = body.len();
+        }
         let room = rows.saturating_sub(lines.len() + 2);
-        // Scroll so the selected card is in view; when it is taller than the
-        // room, keep its first line (name, state, pane) rather than its end.
-        let offset = selected_span.1.saturating_sub(room).min(selected_span.0);
-        lines.extend(body.into_iter().skip(offset));
+        // What a view from `offset` showing `avail` lines hides: a worker
+        // counts only when its row (number, name, state) is out of view, so
+        // a cut preview or section title is not a hidden worker.
+        let hidden = |offset: usize, avail: usize| {
+            let end = offset + avail;
+            let above: Vec<_> = spans.iter().filter(|span| span.0 < offset).collect();
+            let below: Vec<_> = spans.iter().filter(|span| span.0 >= end).collect();
+            let needs = |list: &[&(usize, usize, Group)]| {
+                list.iter().filter(|span| span.2 == Group::Needs).count()
+            };
+            // Closed entries follow the section title at `workers_end`.
+            let gone = (workers_end + 1..body.len())
+                .filter(|&line| line >= end)
+                .count();
+            Hidden {
+                above: (above.len(), needs(&above)),
+                below: (below.len(), needs(&below)),
+                gone,
+            }
+        };
+        let (mut above, mut below) = (false, false);
+        let mut offset = 0;
+        // A pane too short for the markers spends its rows on the selection.
+        let marks = room >= 3;
+        for _ in 0..3 {
+            let avail = room.saturating_sub(above as usize + below as usize).max(1);
+            offset = sel_end.saturating_sub(avail).min(sel_start + self.past);
+            let seen = hidden(offset, avail);
+            let now_above = marks && seen.above.0 > 0;
+            let now_below = marks && (seen.below.0 > 0 || seen.gone > 0);
+            if (now_above, now_below) == (above, below) {
+                break;
+            }
+            (above, below) = (now_above, now_below);
+        }
+        let avail = room.saturating_sub(above as usize + below as usize).max(1);
+        let seen = hidden(offset, avail);
+        if above {
+            lines.push(more_line("↑", seen.above, 0, cols));
+        }
+        lines.extend(body.iter().skip(offset).take(avail).cloned());
+        if below {
+            lines.push(more_line("↓", seen.below, seen.gone, cols));
+        }
+        lines
+    }
+
+    /// The state column: "承認待ち 5 秒", "完了 3 分前".
+    fn state_text(&self, pane: u64, status: Status, now: Instant) -> String {
+        format!("{} {}", status.label(), self.state_age(pane, status, now))
+    }
+
+    /// Workers closed while the board watched, and what they last said.
+    fn gone_lines(&self, cols: usize, now: Instant) -> Vec<String> {
+        if self.gone.is_empty() {
+            return Vec::new();
+        }
+        let mut title = Line::default();
+        title
+            .plain(" ")
+            .fg(GREY, "閉じた")
+            .fg(DIM, "  このボードを開いてから");
+        let mut lines = vec![title.finish(cols)];
+        for gone in &self.gone {
+            let mut line = Line::default();
+            line.plain("   ")
+                .fg(GREY, "✕ ")
+                .plain(&fit(&gone.name, 20))
+                .fg(
+                    DIM,
+                    &format!(
+                        "  {}で閉じた · {}",
+                        gone.status.label(),
+                        ago(Some(gone.at), now)
+                    ),
+                );
+            if !gone.detail.is_empty() {
+                let room = cols.saturating_sub(line.width + 3);
+                line.plain("  ").fg(DIM, &fit(&clean(&gone.detail), room));
+            }
+            lines.push(line.finish(cols));
+        }
         lines
     }
 
@@ -936,96 +1413,82 @@ impl Board {
         }
     }
 
-    fn card(&self, panel: &Panel, cols: usize, now: Instant) -> Vec<String> {
+    /// A worker's row, `▶ 1 ● name  kind  state age  detail`, and the end of
+    /// its work under it: one line, or a few for the selected worker. A
+    /// finished or exited worker shows its work only when selected.
+    fn row(
+        &self,
+        panel: &Panel,
+        number: usize,
+        columns: &Columns,
+        cols: usize,
+        now: Instant,
+    ) -> Vec<String> {
         let pane = panel.pane_id.0;
         let status = Status::of(panel);
         let selected = Some(pane) == self.selected;
-        let border = if selected { status.color() } else { BORDER };
-        let inner = cols - 4;
 
-        let mut top = Line::default();
-        top.fg(border, " ┌ ").fg(status.color(), "●").plain(" ");
-        let right = match (self.of, panel.parent_pane_id) {
-            (None, Some(parent)) => format!(" pane {pane} ← {} ", parent.0),
-            _ => format!(" pane {pane} "),
+        let mut line = Line::default();
+        line.plain(" ");
+        if selected {
+            line.fg(status.color(), "▶");
+        } else {
+            line.plain(" ");
+        }
+        let number = if number <= 9 {
+            number.to_string()
+        } else {
+            " ".to_string()
         };
-        let name = worker_name(panel);
-        let kind = worker_kind(panel);
-        let state = status.label();
-        let budget = cols.saturating_sub(top.width + right.width() + 2);
-        let name = fit(&name, budget);
-        top.bold(&name);
-        let budget = budget.saturating_sub(name.width());
-        if !kind.is_empty() && budget > kind.width() + 2 {
-            top.plain("  ").fg(DIM, &kind);
+        line.fg(DIM, &number)
+            .plain(" ")
+            .fg(status.color(), "●")
+            .plain(" ");
+        let name = pad(&worker_name(panel), columns.name);
+        if selected {
+            line.bold(&name);
+        } else {
+            line.plain(&name);
         }
-        let budget = cols.saturating_sub(top.width + right.width() + 2);
-        if budget > state.width() + 2 {
-            top.plain("  ").fg(status.color(), &state);
+        if columns.kind > 0 {
+            line.plain("  ")
+                .fg(DIM, &pad(&worker_kind(panel), columns.kind));
         }
-        let fill = cols.saturating_sub(top.width + right.width() + 2);
-        top.fg(border, &format!(" {}", "─".repeat(fill.saturating_sub(1))))
-            .fg(DIM, &right)
-            .fg(border, "┐");
+        if columns.state > 0 {
+            let state = self.state_text(pane, status, now);
+            line.plain("  ")
+                .fg(status.color(), &pad(&state, columns.state));
+        }
+        let detail = self.last_word(panel);
+        if !detail.is_empty() {
+            let room = cols.saturating_sub(line.width + 2);
+            line.plain("  ").plain(&fit(&clean(&detail), room));
+        }
+        let mut out = vec![line.finish(cols)];
 
-        // The report's detail, else the last detail it gave, else its state.
-        let age = self.state_age(pane, status, now);
-        let detail = panel
-            .agent
-            .as_ref()
-            .and_then(|agent| agent.detail.clone())
-            .filter(|detail| !detail.is_empty())
-            .or_else(|| {
-                panel
-                    .exit
-                    .as_ref()
-                    .map(|_| "プロセスが終了しました".to_string())
-            })
-            .or_else(|| {
-                self.history
-                    .get(&pane)?
-                    .iter()
-                    .map(|report| report.detail.clone())
-                    .find(|detail| !detail.is_empty())
-            })
-            .unwrap_or_else(|| format!("{} · {age}", status.label()));
-        let mut out = vec![top.finish(cols)];
-        let mut row = |text: &str, color: Rgb| {
-            let mut line = Line::default();
-            line.fg(border, " │ ");
-            let text = fit(&clean(text), inner.saturating_sub(1));
-            line.fg(color, &text);
-            line.plain(&" ".repeat(inner.saturating_sub(1 + text.width())));
-            line.fg(border, " │");
-            out.push(line.finish(cols));
+        let rows = match (selected, status.group()) {
+            (true, _) => SELECTED_PREVIEW_ROWS,
+            (false, Group::Needs | Group::Working) => PREVIEW_ROWS,
+            (false, Group::Done | Group::Exited) => 0,
         };
-        row(&detail, Rgb(201, 204, 214));
-        let screen = self.screens.get(&pane);
-        let preview: Vec<&String> = screen
+        let preview: Vec<&String> = self
+            .screens
+            .get(&pane)
             .map(|lines| {
                 content_lines(lines)
                     .iter()
                     .filter(|line| !line.trim().is_empty())
-                    .collect::<Vec<_>>()
+                    .collect()
             })
             .unwrap_or_default();
-        let skip = preview.len().saturating_sub(CARD_PREVIEW);
-        for index in 0..CARD_PREVIEW {
-            let text = preview.get(skip + index).map(|s| s.as_str()).unwrap_or("");
-            row(text, DIM);
+        for text in preview.iter().skip(preview.len().saturating_sub(rows)) {
+            let mut line = Line::default();
+            line.plain(&" ".repeat(ROW_INDENT)).fg(
+                DIM,
+                &fit(&clean(text.trim_end()), cols.saturating_sub(ROW_INDENT + 1)),
+            );
+            out.push(line.finish(cols));
         }
-
-        let mut bottom = Line::default();
-        bottom.fg(border, " └ ");
-        let mut facts = Vec::new();
-        if let Some(agent) = &panel.agent {
-            facts.push(format!("報告 {}", agent.seq));
-        }
-        facts.push(format!("{} {age}", status.label()));
-        bottom.fg(DIM, &format!("{} ", facts.join(" · ")));
-        let fill = cols.saturating_sub(bottom.width + 2);
-        bottom.fg(border, &"─".repeat(fill)).fg(border, "┘");
-        out.push(bottom.finish(cols));
         out
     }
 
@@ -1130,9 +1593,9 @@ impl Board {
     fn footer(&self, cols: usize) -> String {
         let mut line = Line::default();
         match &self.mode {
-            Mode::Send(pane, text) => {
-                line.plain(" ")
-                    .fg(BLUE, &format!("{} に送る › ", self.name(*pane)));
+            // The line above names the worker and the keys.
+            Mode::Send(_, text) => {
+                line.plain(" ").fg(BLUE, "› ");
                 let room = cols.saturating_sub(line.width + 2);
                 // Show the end of a long message, where the typing happens.
                 let shown: String = {
@@ -1157,21 +1620,61 @@ impl Board {
                 line.plain(&shown).plain("█");
             }
             Mode::ConfirmClose(pane) => {
+                // Closing a worker mid-task loses its work, not only its
+                // screen: say so.
+                let busy = self
+                    .panel(*pane)
+                    .map(Status::of)
+                    .filter(|status| matches!(status.group(), Group::Needs | Group::Working))
+                    .map(|status| format!("まだ{}です。", status.label()))
+                    .unwrap_or_default();
                 line.plain(" ")
                     .fg(
                         RED,
-                        &format!("{} を閉じますか? 出力は消えます。", self.name(*pane)),
+                        &format!("{} を閉じますか? {busy}出力は消えます。", self.name(*pane)),
                     )
                     .fg(DIM, "  y 閉じる / ほかのキーで取り消し");
             }
+            Mode::Normal if self.help => {
+                line.fg(DIM, " どのキーでもヘルプを閉じます");
+            }
             Mode::Normal => {
-                let help = match self.view {
-                    View::List => " j/k 選択   Enter 詳細   g 移動   s 送る   x 閉じる   q 終了",
-                    View::Detail(_) => {
-                        " g 移動して答える   s 送る   x 閉じる   j/k 前後   Esc 一覧   q 終了"
-                    }
+                let approval = self.target().is_some_and(|pane| self.awaits_approval(pane));
+                let go = if approval {
+                    "移動して答える"
+                } else {
+                    "移動"
                 };
-                line.fg(DIM, help);
+                let keys: &[(&str, &str)] = match self.view {
+                    View::List => &[
+                        ("j/k", "選択"),
+                        ("n", "次の要対応"),
+                        ("Enter", "詳細"),
+                        ("g", go),
+                        ("s", "送る"),
+                        ("x", "閉じる"),
+                        ("q", "終了"),
+                    ],
+                    View::Detail(_) => &[
+                        ("g", go),
+                        ("s", "送る"),
+                        ("x", "閉じる"),
+                        ("j/k", "前後"),
+                        ("Esc", "一覧"),
+                        ("q", "終了"),
+                    ],
+                };
+                // As many keys as fit, always ending with where the rest are.
+                let more = " ? ヘルプ";
+                line.plain(" ");
+                for (key, what) in keys {
+                    let piece = format!("{key} {what}   ");
+                    if line.width + piece.width() + more.width() > cols {
+                        break;
+                    }
+                    line.plain(key).fg(DIM, &format!(" {what}   "));
+                }
+                line.plain("?").fg(DIM, " ヘルプ");
             }
         }
         line.finish(cols)
@@ -1204,8 +1707,9 @@ impl Screen {
             }
         };
         let mut out = std::io::stdout().lock();
-        // Bracketed paste, so pasted text is never read as keys.
-        let _ = out.write_all(b"\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[2J");
+        // Bracketed paste, so pasted text is never read as keys; the pane
+        // title is saved (CSI 22 t) for `set_title`, and put back on drop.
+        let _ = out.write_all(b"\x1b[22;0t\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[2J");
         let _ = out.flush();
         Self { saved }
     }
@@ -1222,6 +1726,13 @@ impl Screen {
         }
     }
 
+    /// The pane's title (OSC 2), from text the board built itself.
+    fn set_title(title: &str) {
+        let mut out = std::io::stdout().lock();
+        let _ = write!(out, "\x1b]2;{}\x07", clean(title));
+        let _ = out.flush();
+    }
+
     fn draw(lines: &[String]) {
         let mut out = std::io::stdout().lock();
         let _ = out.write_all(b"\x1b[H");
@@ -1233,7 +1744,7 @@ impl Screen {
 impl Drop for Screen {
     fn drop(&mut self) {
         let mut out = std::io::stdout().lock();
-        let _ = out.write_all(b"\x1b[0m\x1b[?2004l\x1b[?25h\x1b[?1049l");
+        let _ = out.write_all(b"\x1b[0m\x1b[?2004l\x1b[?25h\x1b[?1049l\x1b[23;0t");
         let _ = out.flush();
         if let Some(saved) = self.saved {
             // SAFETY: restores the termios read in `enter`.
@@ -1271,6 +1782,7 @@ pub(crate) fn run(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
     let mut screens_at: Option<Instant> = None;
     let mut size = (0, 0);
     let mut dirty = true;
+    let mut title = String::new();
     let mut reader = KeyReader::default();
     loop {
         let now = Instant::now();
@@ -1297,6 +1809,11 @@ pub(crate) fn run(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
         }
         if dirty {
             Screen::draw(&board.render(size.0, size.1, now));
+            let current = board.title();
+            if current != title {
+                Screen::set_title(&current);
+                title = current;
+            }
             dirty = false;
         }
         // A lone ESC waits briefly for the rest of a sequence.
@@ -1353,7 +1870,8 @@ impl Server for Client {
 }
 
 /// Carry out an action and describe the result in one line.
-fn perform(server: &mut impl Server, board: &Board, action: Action) -> String {
+fn perform(server: &mut impl Server, board: &Board, action: Action) -> Notice {
+    let failed = |err: noa_ipc::ClientError| Notice::warn(format!("できませんでした: {err}"));
     // The board's listing can be up to `LIST_EVERY` old: look again right
     // before typing, so a worker that started waiting for an approval since
     // is never answered from here (spec D7).
@@ -1363,17 +1881,17 @@ fn perform(server: &mut impl Server, board: &Board, action: Action) -> String {
                 if panels.iter().any(|panel| {
                     panel.pane_id.0 == *pane && Status::of(panel) == Status::Permission
                 }) {
-                    return approval_message(&board.name(*pane));
+                    return Notice::warn(approval_message(&board.name(*pane)));
                 }
             }
-            Err(err) => return format!("できませんでした: {err}"),
+            Err(err) => return failed(err),
         }
     }
     let result = match &action {
         Action::Focus(pane) => server.focus(*pane),
         Action::Send(pane, text) => {
             if let Err(err) = server.type_text(*pane, text, true) {
-                return format!("できませんでした: {err}");
+                return failed(err);
             }
             std::thread::sleep(SUBMIT_DELAY);
             // The Enter could answer a prompt that appeared in the pause.
@@ -1383,10 +1901,10 @@ fn perform(server: &mut impl Server, board: &Board, action: Action) -> String {
                         panel.pane_id.0 == *pane && Status::of(panel) == Status::Permission
                     }) =>
                 {
-                    return format!(
+                    return Notice::warn(format!(
                         "{} が承認待ちになったので Enter は送っていません。g でペインへ移動して答えてください",
                         board.name(*pane)
-                    );
+                    ));
                 }
                 Ok(_) => server.type_text(*pane, "\r", false),
                 Err(err) => Err(err),
@@ -1397,11 +1915,11 @@ fn perform(server: &mut impl Server, board: &Board, action: Action) -> String {
     };
     let name = |pane: &u64| board.name(*pane);
     match (action, result) {
-        (Action::Focus(pane), Ok(())) => format!("{} へ移動しました", name(&pane)),
-        (Action::Send(pane, _), Ok(())) => format!("{} に送りました", name(&pane)),
-        (Action::Close(pane), Ok(())) => format!("{} を閉じました", name(&pane)),
-        (_, Err(err)) => format!("できませんでした: {err}"),
-        (Action::Quit, Ok(())) => String::new(),
+        (Action::Focus(pane), Ok(())) => Notice::ok(format!("{} へ移動しました", name(&pane))),
+        (Action::Send(pane, _), Ok(())) => Notice::ok(format!("{} に送りました", name(&pane))),
+        (Action::Close(pane), Ok(())) => Notice::ok(format!("{} を閉じました", name(&pane))),
+        (_, Err(err)) => failed(err),
+        (Action::Quit, Ok(())) => Notice::ok(String::new()),
     }
 }
 
@@ -1604,7 +2122,7 @@ mod tests {
         board.update(sample(), Instant::now());
         board.set_screen(
             3,
-            "older line\nAllow command? cargo test\n› 1. Yes   2. No\n",
+            "older line\nreading src\nAllow command? cargo test\n› 1. Yes   2. No\n",
         );
         let text: Vec<String> = board
             .render(80, 40, Instant::now())
@@ -1614,7 +2132,9 @@ mod tests {
         let all = text.join("\n");
 
         assert!(all.contains("要対応"));
-        assert!(all.contains("ui") && all.contains("承認待ち") && all.contains("pane 3"));
+        assert!(all.contains("ui") && all.contains("承認待ち"));
+        // Pane ids are for +ctl, not for a person: only the detail shows one.
+        assert!(!all.contains("pane 3"), "{all}");
         assert!(all.contains("ui detail"));
         assert!(all.contains("› 1. Yes   2. No"));
         assert!(!all.contains("older line"));
@@ -1671,7 +2191,8 @@ mod tests {
         let message = perform(&mut server, &board, Action::Send(2, "y".to_string()));
 
         assert_eq!(server.typed, Vec::new());
-        assert!(message.contains("承認待ち"), "{message}");
+        assert!(message.text.contains("承認待ち"), "{message:?}");
+        assert!(message.warn);
     }
 
     // Review finding: the Enter that submits goes 150 ms after the text, and
@@ -1691,7 +2212,8 @@ mod tests {
         let message = perform(&mut server, &board, Action::Send(2, "run it".to_string()));
 
         assert_eq!(server.typed, vec![(2, "run it".to_string())]);
-        assert!(message.contains("承認待ち"), "{message}");
+        assert!(message.text.contains("承認待ち"), "{message:?}");
+        assert!(message.warn);
     }
 
     // Review finding: ESC and the key after it in one read (Option/Meta
@@ -1832,7 +2354,12 @@ mod tests {
         assert_eq!(board.selected(), Some(3));
         assert_eq!(board.key(Key::Char('s')), None);
         assert_eq!(board.mode, Mode::Normal);
-        assert!(board.message.as_deref().is_some_and(|m| m.contains("g")));
+        assert!(
+            board
+                .message
+                .as_ref()
+                .is_some_and(|m| m.warn && m.text.contains("g"))
+        );
 
         // It started waiting while the message was being typed.
         board.key(Key::Char('j'));
@@ -1893,7 +2420,7 @@ mod tests {
                 .map(|l| visible(l))
                 .collect();
             assert!(
-                all.contains("api") && all.contains("pane 2"),
+                all.contains("▶2 ● api") && all.contains("作業中"),
                 "{rows} rows: {all}"
             );
         }
@@ -1913,6 +2440,8 @@ mod tests {
     fn a_card_previews_the_work_above_the_agents_input_box() {
         let mut board = Board::new(Some(1), Some(8));
         board.update(sample(), Instant::now());
+        // Selected, it previews a few lines (others show one).
+        board.key(Key::Char('j'));
         let rule = "─".repeat(40);
         board.set_screen(
             2,
@@ -1956,7 +2485,7 @@ mod tests {
         panels[2].agent.as_mut().unwrap().detail = None;
         quiet.update(panels, start);
         let all = rendered(&quiet, 80, 40, start);
-        assert!(all.contains("完了 · 開始時から"), "{all}");
+        assert!(all.contains("完了 開始時から"), "{all}");
     }
 
     // Owner request 4: how long a worker has been in its state.
@@ -2016,5 +2545,363 @@ mod tests {
         assert!(all.contains("報告 5"));
         assert!(!all.contains("ターン"));
         assert!(all.contains("開始時"));
+    }
+
+    // UI pass: eight workers, the most one pane holds, fit a 30-row pane
+    // without scrolling (a boxed card took 5 rows, so 3 fit).
+    #[test]
+    fn eight_workers_fit_a_thirty_row_pane() {
+        let mut board = Board::new(Some(1), None);
+        let panels: Vec<Panel> = (2..10)
+            .map(|pane| worker(pane, 1, &format!("w{pane}"), Some("running"), 1))
+            .collect();
+        board.update(panels, Instant::now());
+        for pane in 2..10 {
+            board.set_screen(pane, &format!("work of w{pane}\n"));
+        }
+        let all = rendered(&board, 80, 30, Instant::now());
+        for pane in 2..10 {
+            assert!(all.contains(&format!("w{pane}")), "{all}");
+        }
+        assert!(!all.contains("あと"), "{all}");
+    }
+
+    #[test]
+    fn number_keys_and_n_pick_workers_without_stepping() {
+        let mut board = Board::new(Some(1), Some(8));
+        let mut panels = sample();
+        panels[2].agent.as_mut().unwrap().state = Some("input".to_string());
+        board.update(panels, Instant::now());
+        // Order: ui (permission), docs (input), api, tests.
+        assert_eq!(board.selected(), Some(3));
+        board.key(Key::Char('3'));
+        assert_eq!(board.selected(), Some(2));
+        board.key(Key::Char('n'));
+        assert_eq!(board.selected(), Some(3));
+        board.key(Key::Char('n'));
+        assert_eq!(board.selected(), Some(4));
+        board.key(Key::Char('n'));
+        assert_eq!(board.selected(), Some(3), "n wraps round");
+
+        board.key(Key::Char('9'));
+        assert_eq!(board.selected(), Some(3));
+        assert!(board.message.as_ref().is_some_and(|m| m.warn));
+
+        // In the detail, a number switches the worker shown.
+        board.key(Key::Enter);
+        board.key(Key::Char('4'));
+        assert_eq!(board.view, View::Detail(5));
+    }
+
+    #[test]
+    fn n_says_so_when_no_worker_needs_anyone() {
+        let mut board = Board::new(Some(1), None);
+        board.update(
+            vec![worker(2, 1, "api", Some("running"), 1)],
+            Instant::now(),
+        );
+        board.key(Key::Char('n'));
+        assert_eq!(board.selected(), Some(2));
+        assert!(board.message.as_ref().is_some_and(|m| !m.warn));
+    }
+
+    #[test]
+    fn help_opens_with_a_question_mark_and_any_key_closes_it() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), Instant::now());
+        board.key(Key::Char('?'));
+        assert!(board.help);
+        let all = rendered(&board, 80, 30, Instant::now());
+        assert!(
+            all.contains("キー操作") && all.contains("次の要対応"),
+            "{all}"
+        );
+        // q closes the help rather than the board.
+        assert_eq!(board.key(Key::Char('q')), None);
+        assert!(!board.help);
+        board.key(Key::Char('?'));
+        assert_eq!(board.key(Key::CtrlC), Some(Action::Quit));
+    }
+
+    #[test]
+    fn the_footer_fits_and_always_points_at_the_help() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), Instant::now());
+        for cols in [24, 40, 80] {
+            let footer = visible(&board.render(cols, 20, Instant::now()).pop().unwrap());
+            assert!(footer.contains("? ヘルプ"), "{cols}: {footer}");
+            assert!(!footer.contains('…'), "{cols}: {footer}");
+        }
+        // The selected worker waits for an approval: g is where it is answered.
+        let footer = visible(&board.render(120, 20, Instant::now()).pop().unwrap());
+        assert!(footer.contains("g 移動して答える"), "{footer}");
+    }
+
+    #[test]
+    fn a_closed_worker_stays_listed_with_its_last_word() {
+        let start = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), start);
+        let without_docs: Vec<Panel> = sample().into_iter().filter(|p| p.pane_id.0 != 4).collect();
+        board.update(without_docs, start + Duration::from_secs(1));
+        let all = rendered(&board, 80, 40, start + Duration::from_secs(120));
+        assert!(all.contains("閉じた"), "{all}");
+        assert!(
+            all.contains("✕ docs  完了で閉じた · 1 分前  docs detail"),
+            "{all}"
+        );
+        // The first listing is the state found, not a closing.
+        let mut fresh = Board::new(Some(1), Some(8));
+        fresh.update(Vec::new(), start);
+        assert!(fresh.gone.is_empty());
+    }
+
+    #[test]
+    fn a_scrolled_list_says_what_it_hides_and_how_many_need_someone() {
+        let mut board = Board::new(Some(1), None);
+        let mut panels: Vec<Panel> = (2..12)
+            .map(|pane| worker(pane, 1, &format!("w{pane}"), Some("running"), 1))
+            .collect();
+        panels[9].agent.as_mut().unwrap().state = Some("error".to_string());
+        board.update(panels, Instant::now());
+        // w11 errored, so it is listed first and selected.
+        let all = rendered(&board, 60, 12, Instant::now());
+        assert!(all.contains("w11") && all.contains("↓ あと"), "{all}");
+        assert!(!all.contains("↑"), "{all}");
+        for _ in 0..9 {
+            board.key(Key::Char('j'));
+        }
+        let all = rendered(&board, 60, 12, Instant::now());
+        assert!(
+            all.contains("↑ あと") && all.contains("うち要対応 1"),
+            "{all}"
+        );
+        assert!(all.contains("▶"), "{all}");
+    }
+
+    #[test]
+    fn the_send_line_clears_and_deletes_a_word() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), Instant::now());
+        board.key(Key::Char('j'));
+        board.key(Key::Char('s'));
+        board.key(Key::Paste("fix the　テスト ".to_string()));
+        board.key(Key::CtrlW);
+        assert_eq!(board.mode, Mode::Send(2, "fix the　".to_string()));
+        board.key(Key::CtrlW);
+        assert_eq!(board.mode, Mode::Send(2, "fix ".to_string()));
+        board.key(Key::CtrlU);
+        assert_eq!(board.mode, Mode::Send(2, String::new()));
+        assert_eq!(
+            KeyReader::default().feed(b"\x15\x17"),
+            vec![Key::CtrlU, Key::CtrlW]
+        );
+        let status = visible(&board.render(80, 20, Instant::now())[18]);
+        assert!(
+            status.contains("api に送る") && status.contains("Esc 取り消し"),
+            "{status}"
+        );
+    }
+
+    #[test]
+    fn closing_a_busy_worker_says_it_is_still_at_work() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), Instant::now());
+        board.key(Key::Char('j'));
+        board.key(Key::Char('x'));
+        let footer = visible(&board.render(100, 20, Instant::now()).pop().unwrap());
+        assert!(footer.contains("まだ作業中です。"), "{footer}");
+    }
+
+    #[test]
+    fn the_header_and_title_name_the_orchestrator_and_what_needs_someone() {
+        let mut panels = sample();
+        let mut me = worker(1, 0, "", Some("running"), 1);
+        me.parent_pane_id = None;
+        me.label = None;
+        me.name = "fix the flaky suite".to_string();
+        panels.push(me);
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(panels, Instant::now());
+        let all = rendered(&board, 80, 30, Instant::now());
+        assert!(all.contains("fix the flaky suite · claude"), "{all}");
+        assert_eq!(board.title(), "ボード · 要対応 1");
+
+        let mut calm = Board::new(Some(1), None);
+        calm.update(
+            vec![worker(2, 1, "api", Some("finished"), 1)],
+            Instant::now(),
+        );
+        assert_eq!(calm.title(), "ボード");
+    }
+
+    /// The number in a "あと N 件" marker line with `arrow`, if drawn.
+    fn marker(all: &str, arrow: &str) -> Option<usize> {
+        let at = all.find(&format!("{arrow} あと "))?;
+        let rest = &all[at + arrow.len() + " あと ".len()..];
+        rest.split(' ').next()?.parse().ok()
+    }
+
+    /// Workers w2.. running, each with a few lines of work on screen.
+    fn tall_board(n: u64) -> Board {
+        let mut board = Board::new(Some(1), None);
+        let panels: Vec<Panel> = (2..2 + n)
+            .map(|pane| worker(pane, 1, &format!("w{pane}"), Some("running"), 1))
+            .collect();
+        board.update(panels, Instant::now());
+        for pane in 2..2 + n {
+            board.set_screen(pane, "one\ntwo\nthree\nfour\n");
+        }
+        board
+    }
+
+    // Review finding (codex): with more lines than room, the closed section
+    // came after the last worker's end, which was as far as the list
+    // scrolled: selecting the last worker never brought it into view.
+    #[test]
+    fn the_closed_section_is_reachable_by_selecting_the_last_worker() {
+        let start = Instant::now();
+        let mut board = tall_board(4);
+        let panels: Vec<Panel> = (2..5)
+            .map(|pane| worker(pane, 1, &format!("w{pane}"), Some("running"), 1))
+            .collect();
+        board.update(panels, start + Duration::from_secs(1));
+        for _ in 0..3 {
+            board.key(Key::Char('j'));
+        }
+        assert_eq!(board.selected(), Some(4));
+        let all = rendered(&board, 60, 12, start + Duration::from_secs(2));
+        assert!(all.contains("✕ w5"), "{all}");
+        assert!(all.contains("▶3 ● w4"), "{all}");
+    }
+
+    // Review findings (agy, claude): a marker said "あと 0 件" when only a
+    // section title or the closed section was cut, and counted a worker
+    // whose row was in view but whose preview was cut.
+    #[test]
+    fn scroll_markers_count_exactly_the_workers_whose_row_is_out_of_view() {
+        let start = Instant::now();
+        for with_gone in [false, true] {
+            // Shorter panes draw no markers (they spend the rows on the selection).
+            for rows in 8..=24 {
+                for pick in 0..4 {
+                    let mut board = tall_board(if with_gone { 5 } else { 4 });
+                    if with_gone {
+                        let panels: Vec<Panel> = (2..6)
+                            .map(|p| worker(p, 1, &format!("w{p}"), Some("running"), 1))
+                            .collect();
+                        board.update(panels, start);
+                    }
+                    for _ in 0..pick {
+                        board.key(Key::Char('j'));
+                    }
+                    let all = rendered(&board, 60, rows, start);
+                    let shown = (2..6).filter(|p| all.contains(&format!("● w{p} "))).count();
+                    let above = marker(&all, "↑").unwrap_or(0);
+                    let below = marker(&all, "↓").unwrap_or(0);
+                    let ctx = format!("rows {rows}, pick {pick}, gone {with_gone}:\n{all}");
+                    assert!(!all.contains("あと 0 件"), "{ctx}");
+                    assert_eq!(shown + above + below, 4, "{ctx}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_cut_preview_of_the_selected_worker_is_not_a_hidden_worker() {
+        let mut board = Board::new(Some(1), None);
+        let mut panels = vec![worker(2, 1, "w2", Some("permission"), 1)];
+        panels.push(worker(3, 1, "w3", Some("running"), 1));
+        board.update(panels, Instant::now());
+        board.set_screen(2, "one\ntwo\nthree\n");
+        // Room for the section title, the row and one preview line only.
+        let all = rendered(&board, 60, 9, Instant::now());
+        assert!(all.contains("▶1 ● w2"), "{all}");
+        assert!(!all.contains("うち要対応"), "{all}");
+    }
+
+    // Review finding (codex): in a short pane the view stopped at the last
+    // worker's row, so most of a long closed section stayed out of reach.
+    #[test]
+    fn j_past_the_last_worker_scrolls_through_the_closed_section() {
+        let start = Instant::now();
+        let mut board = tall_board(6);
+        board.update(
+            vec![worker(2, 1, "w2", Some("running"), 1)],
+            start + Duration::from_secs(1),
+        );
+        assert_eq!(board.gone.len(), 5);
+        let view = |board: &Board| rendered(board, 60, 12, start + Duration::from_secs(2));
+        assert!(view(&board).contains("閉じた 4 件"), "{}", view(&board));
+
+        for _ in 0..10 {
+            board.key(Key::Char('j'));
+        }
+        let all = view(&board);
+        for pane in 3..8 {
+            assert!(all.contains(&format!("✕ w{pane}")), "w{pane}:\n{all}");
+        }
+        assert!(!all.contains("閉じた 4 件") && !all.contains("↓"), "{all}");
+        // The selected row scrolled out of view, and the marker says so.
+        assert!(
+            !all.contains("▶1 ● w2") && all.contains("↑ あと 1 件"),
+            "{all}"
+        );
+        assert_eq!(board.selected(), Some(2));
+
+        // k scrolls back before it moves the selection.
+        for _ in 0..10 {
+            board.key(Key::Char('k'));
+        }
+        let all = view(&board);
+        assert!(all.contains("▶1 ● w2") && !all.contains("↑"), "{all}");
+    }
+
+    // Review finding (codex, PR #194): once every worker had closed, the
+    // list skipped its scrolling and cut the closed section at the pane's
+    // height, and j/k did nothing without a live worker.
+    #[test]
+    fn the_closed_section_scrolls_when_no_worker_is_left() {
+        let start = Instant::now();
+        let mut board = tall_board(5);
+        board.update(Vec::new(), start + Duration::from_secs(1));
+        assert_eq!(board.gone.len(), 5);
+        let view = |board: &Board| rendered(board, 80, 8, start + Duration::from_secs(2));
+        assert!(view(&board).contains("↓ 閉じた"), "{}", view(&board));
+
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..10 {
+            let all = view(&board);
+            assert!(!all.contains("あと 0 件"), "{all}");
+            for pane in 2..7 {
+                if all.contains(&format!("✕ w{pane}")) {
+                    seen.insert(pane);
+                }
+            }
+            board.key(Key::Char('j'));
+        }
+        assert_eq!(seen.len(), 5, "{seen:?}");
+        let all = view(&board);
+        assert!(all.contains("↑ 閉じた") && !all.contains("↓"), "{all}");
+
+        for _ in 0..10 {
+            board.key(Key::Char('k'));
+        }
+        let all = view(&board);
+        assert!(
+            all.contains("ワーカーはまだいません") && !all.contains("↑"),
+            "{all}"
+        );
+
+        // A worker that starts while the section is scrolled is in view.
+        for _ in 0..10 {
+            board.key(Key::Char('j'));
+        }
+        board.update(
+            vec![worker(9, 1, "w9", Some("running"), 1)],
+            start + Duration::from_secs(3),
+        );
+        let all = view(&board);
+        assert!(all.contains("▶1 ● w9"), "{all}");
     }
 }

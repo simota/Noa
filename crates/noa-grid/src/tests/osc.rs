@@ -1122,6 +1122,15 @@ fn program_status_done_and_error_end_the_turn() {
     assert_eq!(report.detail, "API error");
 }
 
+// Review finding: a full reset (RIS, `ESC c`) clears the agent state but is
+// not a report, yet it advanced the report count.
+#[test]
+fn a_full_reset_clears_the_agent_state_without_counting_a_report() {
+    let mut t = run(b"\x1bc");
+    assert_eq!(t.take_pending_agent_status(), Some(None));
+    assert_eq!(t.take_pending_agent_reports(), 0);
+}
+
 #[test]
 fn program_status_subagent_entries_do_not_touch_the_card() {
     let mut t = run(b"\x1b]7501;state=working:app=claude-code:id=agent-1\x1b\\\x1b]7501;state=clear:id=agent-1\x1b\\");

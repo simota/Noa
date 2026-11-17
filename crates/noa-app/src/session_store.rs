@@ -720,7 +720,8 @@ impl SessionStore {
                 reports,
             } => {
                 if let Some(card) = self.cards.get_mut(&id) {
-                    card.agent_seq += reports.max(1);
+                    // A reset clears the state without a report (0).
+                    card.agent_seq += reports;
                     if card.agent_status != status {
                         card.agent_status_at = status.as_ref().map(|_| at);
                     }
@@ -1944,6 +1945,15 @@ mod tests {
         assert_eq!(store.get(&id).unwrap().agent_seq, 5);
         // An upsert from pty output keeps the count.
         store.apply(upsert(id, 2, "agent"));
+        assert_eq!(store.get(&id).unwrap().agent_seq, 5);
+        // Review finding: a state change that was no report (a full reset)
+        // advanced it too.
+        store.apply(SessionDelta::AgentStatus {
+            id,
+            status: None,
+            at: wall(10, 2),
+            reports: 0,
+        });
         assert_eq!(store.get(&id).unwrap().agent_seq, 5);
     }
 

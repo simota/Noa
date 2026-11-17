@@ -541,7 +541,8 @@ impl Handler for Terminal {
         // 5522 write running.
         self.kitty_clipboard.grants.clear();
         self.pending_notifications.clear();
-        self.set_pending_agent_status(None);
+        // Cleared, but not a report: the report count stays.
+        self.pending_agent_status = Some(None);
         self.program_status_active = false;
         self.set_mouse_shape(None);
         self.mouse_shift_capture = None;

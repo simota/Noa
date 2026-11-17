@@ -556,16 +556,22 @@ impl KeyReader {
                     }
                     continue;
                 }
-                keys.push(Key::Esc);
-                i += 1;
+                if rest[1] == 0x1b {
+                    keys.push(Key::Esc);
+                    i += 1;
+                    continue;
+                }
+                // ESC and a key in one read is Option/Meta with that key: no
+                // command here, and never Esc plus a stray key.
+                let len = utf8_len(rest[1]);
+                if rest.len() < 1 + len {
+                    self.pending = rest.to_vec();
+                    return keys;
+                }
+                i += 1 + len;
                 continue;
             }
-            let len = match first {
-                0xc0..=0xdf => 2,
-                0xe0..=0xef => 3,
-                0xf0..=0xf7 => 4,
-                _ => 1,
-            };
+            let len = utf8_len(first);
             if rest.len() < len {
                 self.pending = rest.to_vec();
                 return keys;
@@ -581,6 +587,16 @@ impl KeyReader {
                 }
             }
         }
+    }
+}
+
+/// The length of the UTF-8 character that starts with `first`.
+fn utf8_len(first: u8) -> usize {
+    match first {
+        0xc0..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf7 => 4,
+        _ => 1,
     }
 }
 
@@ -1255,10 +1271,27 @@ fn perform(server: &mut impl Server, board: &Board, action: Action) -> String {
     }
     let result = match &action {
         Action::Focus(pane) => server.focus(*pane),
-        Action::Send(pane, text) => server.type_text(*pane, text, true).and_then(|()| {
+        Action::Send(pane, text) => {
+            if let Err(err) = server.type_text(*pane, text, true) {
+                return format!("できませんでした: {err}");
+            }
             std::thread::sleep(SUBMIT_DELAY);
-            server.type_text(*pane, "\r", false)
-        }),
+            // The Enter could answer a prompt that appeared in the pause.
+            match server.panels() {
+                Ok(panels)
+                    if panels.iter().any(|panel| {
+                        panel.pane_id.0 == *pane && Status::of(panel) == Status::Permission
+                    }) =>
+                {
+                    return format!(
+                        "{} が承認待ちになったので Enter は送っていません。g でペインへ移動して答えてください",
+                        board.name(*pane)
+                    );
+                }
+                Ok(_) => server.type_text(*pane, "\r", false),
+                Err(err) => Err(err),
+            }
+        }
         Action::Close(pane) => server.close(*pane),
         Action::Quit => Ok(()),
     };
@@ -1491,13 +1524,18 @@ mod tests {
 
     /// A server that answers with fixed panels and records what was typed.
     struct FakeServer {
-        panels: Vec<Panel>,
+        /// Listings answered in order; the last one repeats.
+        listings: Vec<Vec<Panel>>,
         typed: Vec<(u64, String)>,
     }
 
     impl Server for FakeServer {
         fn panels(&mut self) -> Result<Vec<Panel>, noa_ipc::ClientError> {
-            Ok(self.panels.clone())
+            if self.listings.len() > 1 {
+                Ok(self.listings.remove(0))
+            } else {
+                Ok(self.listings[0].clone())
+            }
         }
         fn focus(&mut self, _pane: u64) -> Result<(), noa_ipc::ClientError> {
             Ok(())
@@ -1526,7 +1564,7 @@ mod tests {
         let mut now_waiting = sample();
         now_waiting[0].agent.as_mut().unwrap().state = Some("permission".to_string());
         let mut server = FakeServer {
-            panels: now_waiting,
+            listings: vec![now_waiting],
             typed: Vec::new(),
         };
 
@@ -1534,6 +1572,39 @@ mod tests {
 
         assert_eq!(server.typed, Vec::new());
         assert!(message.contains("承認待ち"), "{message}");
+    }
+
+    // Review finding: the Enter that submits goes 150 ms after the text, and
+    // a worker that started waiting for an approval in that pause took the
+    // Enter as its answer.
+    #[test]
+    fn the_submitting_enter_is_not_sent_to_a_worker_now_waiting() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), Instant::now());
+        let mut now_waiting = sample();
+        now_waiting[0].agent.as_mut().unwrap().state = Some("permission".to_string());
+        let mut server = FakeServer {
+            listings: vec![sample(), now_waiting],
+            typed: Vec::new(),
+        };
+
+        let message = perform(&mut server, &board, Action::Send(2, "run it".to_string()));
+
+        assert_eq!(server.typed, vec![(2, "run it".to_string())]);
+        assert!(message.contains("承認待ち"), "{message}");
+    }
+
+    // Review finding: ESC and the key after it in one read (Option/Meta
+    // with a key) became Esc plus that key: the send line closed and the key
+    // ran as a command.
+    #[test]
+    fn a_meta_key_is_neither_esc_nor_its_key() {
+        let mut reader = KeyReader::default();
+        assert_eq!(reader.feed(b"\x1bx"), Vec::new());
+        assert_eq!(reader.feed(b"\x1b\x7f"), Vec::new());
+        assert_eq!(reader.feed("\x1bあj".as_bytes()), vec![Key::Char('j')]);
+        // Two ESCs: the first is the Esc key.
+        assert_eq!(reader.feed(b"\x1b\x1b[A"), vec![Key::Esc, Key::Up]);
     }
 
     // Review finding: a read that ended right after the ESC of a paste's

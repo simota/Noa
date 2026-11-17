@@ -242,6 +242,9 @@ pub(crate) struct Board {
     gone: Vec<Gone>,
     /// The key help is shown over the current view.
     pub(crate) help: bool,
+    /// Lines the list is scrolled past the selected row: `j` on the last
+    /// worker goes on through the closed section, `k` comes back first.
+    past: usize,
 }
 
 impl Board {
@@ -260,6 +263,7 @@ impl Board {
             message: None,
             gone: Vec::new(),
             help: false,
+            past: 0,
         }
     }
 
@@ -440,11 +444,26 @@ impl Board {
             .selected
             .and_then(|pane| workers.iter().position(|&p| p == pane))
             .unwrap_or(0) as isize;
+        let last = at as usize + 1 == workers.len();
+        if self.view == View::List {
+            // As far as the selected row and its preview, and the closed
+            // section's title and entries, can scroll.
+            let reach = SELECTED_PREVIEW_ROWS + 1 + self.gone.len();
+            if step > 0 && last && !self.gone.is_empty() {
+                self.past = (self.past + 1).min(reach);
+                return;
+            }
+            if step < 0 && self.past > 0 {
+                self.past -= 1;
+                return;
+            }
+        }
         let next = (at + step).clamp(0, workers.len() as isize - 1) as usize;
         self.select(workers[next]);
     }
 
     fn select(&mut self, pane: u64) {
+        self.past = 0;
         self.selected = Some(pane);
         if let View::Detail(_) = self.view {
             self.view = View::Detail(pane);
@@ -1284,7 +1303,7 @@ impl Board {
         let marks = room >= 3;
         for _ in 0..3 {
             let avail = room.saturating_sub(above as usize + below as usize).max(1);
-            offset = sel_end.saturating_sub(avail).min(sel_start);
+            offset = sel_end.saturating_sub(avail).min(sel_start + self.past);
             let seen = hidden(offset, avail);
             let now_above = marks && seen.above.0 > 0;
             let now_below = marks && (seen.below.0 > 0 || seen.gone > 0);
@@ -2761,5 +2780,42 @@ mod tests {
         let all = rendered(&board, 60, 9, Instant::now());
         assert!(all.contains("▶1 ● w2"), "{all}");
         assert!(!all.contains("うち要対応"), "{all}");
+    }
+
+    // Review finding (codex): in a short pane the view stopped at the last
+    // worker's row, so most of a long closed section stayed out of reach.
+    #[test]
+    fn j_past_the_last_worker_scrolls_through_the_closed_section() {
+        let start = Instant::now();
+        let mut board = tall_board(6);
+        board.update(
+            vec![worker(2, 1, "w2", Some("running"), 1)],
+            start + Duration::from_secs(1),
+        );
+        assert_eq!(board.gone.len(), 5);
+        let view = |board: &Board| rendered(board, 60, 12, start + Duration::from_secs(2));
+        assert!(view(&board).contains("閉じた 4 件"), "{}", view(&board));
+
+        for _ in 0..10 {
+            board.key(Key::Char('j'));
+        }
+        let all = view(&board);
+        for pane in 3..8 {
+            assert!(all.contains(&format!("✕ w{pane}")), "w{pane}:\n{all}");
+        }
+        assert!(!all.contains("閉じた 4 件") && !all.contains("↓"), "{all}");
+        // The selected row scrolled out of view, and the marker says so.
+        assert!(
+            !all.contains("▶1 ● w2") && all.contains("↑ あと 1 件"),
+            "{all}"
+        );
+        assert_eq!(board.selected(), Some(2));
+
+        // k scrolls back before it moves the selection.
+        for _ in 0..10 {
+            board.key(Key::Char('k'));
+        }
+        let all = view(&board);
+        assert!(all.contains("▶1 ● w2") && !all.contains("↑"), "{all}");
     }
 }

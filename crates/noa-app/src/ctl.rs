@@ -39,6 +39,10 @@ const WAIT_RELIST_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_REPORT_DETAIL_CHARS: usize = 160;
 
 const SURFACE_ID_ENV: &str = "NOA_SURFACE_ID";
+/// How long a command that needs its own pane waits for it to be listed:
+/// 30 listings 100 ms apart.
+const OWN_WAIT_LOOKS: usize = 30;
+const OWN_WAIT_PAUSE: Duration = Duration::from_millis(100);
 
 pub(crate) const USAGE: &str = "\
 Usage: Noa +ctl <command> [options]
@@ -747,6 +751,8 @@ struct Session {
     own: Option<u64>,
     /// The control port this session reached, for diagnostics.
     port: u16,
+    /// Whether a missing own pane was already waited for.
+    waited_for_own: bool,
 }
 
 /// This process's panel among `panels`, by its `NOA_SURFACE_ID`. A server
@@ -770,6 +776,27 @@ pub(crate) fn own_pane(
              instance) holds the port. {}",
             port_owner_hint(port)
         ));
+    }
+    Ok(None)
+}
+
+/// This process's pane, looked up again while it is not listed yet: a script
+/// started with Noa can run before its pane's first listing. `looks` bounds
+/// how many listings are taken, `pause` runs between them.
+pub(crate) fn wait_for_own(
+    mut list: impl FnMut() -> Result<Vec<Panel>, Failure>,
+    surface_id: &str,
+    port: u16,
+    looks: usize,
+    mut pause: impl FnMut(),
+) -> Result<Option<u64>, Failure> {
+    for look in 1..=looks.max(1) {
+        if let Some(own) = own_pane(&list()?, surface_id, port).map_err(Failure::unavailable)? {
+            return Ok(Some(own));
+        }
+        if look < looks {
+            pause();
+        }
     }
     Ok(None)
 }
@@ -858,6 +885,7 @@ impl Session {
             client,
             own: None,
             port: config.server_port,
+            waited_for_own: false,
         };
         session.own = session.find_own()?;
         Ok(session)
@@ -870,8 +898,28 @@ impl Session {
         own_pane(&self.client.list_panels()?, &surface_id, self.port).map_err(Failure::unavailable)
     }
 
-    fn require_own(&self) -> Result<u64, Failure> {
-        self.own.ok_or_else(|| {
+    /// This process's pane. When the first look missed it, wait up to
+    /// [`OWN_WAIT_LOOKS`] listings for it: a script started with Noa can run
+    /// before its pane is first listed. Only commands that need the pane wait.
+    fn own_now(&mut self) -> Result<Option<u64>, Failure> {
+        if self.own.is_none() && !self.waited_for_own {
+            self.waited_for_own = true;
+            if let Ok(surface_id) = std::env::var(SURFACE_ID_ENV) {
+                let client = &mut self.client;
+                self.own = wait_for_own(
+                    || Ok(client.list_panels()?),
+                    &surface_id,
+                    self.port,
+                    OWN_WAIT_LOOKS,
+                    || std::thread::sleep(OWN_WAIT_PAUSE),
+                )?;
+            }
+        }
+        Ok(self.own)
+    }
+
+    fn require_own(&mut self) -> Result<u64, Failure> {
+        self.own_now()?.ok_or_else(|| {
             Failure::error(not_own_message(
                 std::env::var(SURFACE_ID_ENV).ok().as_deref(),
                 self.port,
@@ -908,7 +956,7 @@ impl Session {
         if any_pane {
             return Ok(());
         }
-        let own = self.own.ok_or_else(|| {
+        let own = self.own_now()?.ok_or_else(|| {
             Failure::error(format!(
                 "{} Without a pane of its own there are no workers to target; pass \
                  --any-pane to target a pane anyway.",
@@ -1687,6 +1735,50 @@ mod tests {
             })
         );
         assert!(parse_args(&args(&["board", "--tab"])).is_err());
+    }
+
+    // Review finding: a script started with Noa (`Noa -e …`) ran `+ctl self`
+    // before its pane was first listed and was told it was not in Noa.
+    #[test]
+    fn a_pane_not_listed_yet_is_looked_up_again() {
+        let mut mine = panel(0, None, false);
+        mine.surface_id = Some("0x01".to_string());
+        let mut other = panel(0, None, false);
+        other.pane_id = WireId(9);
+        other.surface_id = Some("0x02".to_string());
+        let mut listings = vec![
+            vec![other.clone()],
+            vec![other.clone()],
+            vec![other.clone(), mine],
+        ]
+        .into_iter();
+        let mut pauses = 0;
+
+        let own = wait_for_own(
+            || Ok(listings.next().unwrap_or_default()),
+            "0x01",
+            61771,
+            30,
+            || pauses += 1,
+        );
+
+        assert_eq!(own.ok(), Some(Some(8)));
+        assert_eq!(pauses, 2);
+
+        // A pane that never shows up gives up after the bound.
+        let mut looked = 0;
+        let own = wait_for_own(
+            || {
+                looked += 1;
+                Ok(vec![other.clone()])
+            },
+            "0x01",
+            61771,
+            5,
+            || {},
+        );
+        assert_eq!(own.ok(), Some(None));
+        assert_eq!(looked, 5);
     }
 
     // Feedback: an older Noa still held the port, so +ctl reached it and told

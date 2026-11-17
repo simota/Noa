@@ -829,9 +829,10 @@ impl Board {
                 selected_span = (start, body.len());
             }
         }
-        // Scroll so the selected card is in view.
         let room = rows.saturating_sub(lines.len() + 2);
-        let offset = selected_span.1.saturating_sub(room);
+        // Scroll so the selected card is in view; when it is taller than the
+        // room, keep its first line (name, state, pane) rather than its end.
+        let offset = selected_span.1.saturating_sub(room).min(selected_span.0);
         lines.extend(body.into_iter().skip(offset));
         lines
     }
@@ -1660,6 +1661,27 @@ mod tests {
         let later = start + Duration::from_secs(3);
         board.update(sample(), later);
         assert_eq!(board.history[&2][0].at, Some(later));
+    }
+
+    // Review finding: in a pane 6 to 9 rows tall, keeping the selected
+    // card's bottom in view pushed its top, with the name and pane, out.
+    #[test]
+    fn a_short_pane_still_names_the_selected_worker() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), Instant::now());
+        board.key(Key::Char('j'));
+        assert_eq!(board.selected(), Some(2));
+        for rows in MIN_ROWS..=12 {
+            let all: String = board
+                .render(60, rows, Instant::now())
+                .iter()
+                .map(|l| visible(l))
+                .collect();
+            assert!(
+                all.contains("api") && all.contains("pane 2"),
+                "{rows} rows: {all}"
+            );
+        }
     }
 
     #[test]

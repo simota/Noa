@@ -97,6 +97,7 @@
 
 - 出力は 1 行 1 JSON（`read` だけはテキスト）。終了コードは 0（成立）、1（引数・未知のペインなど）、2（タイムアウト）、3（サーバー無効・接続不可・スコープ不足。直し方の設定行を stderr に出す）。
 - 接続先は `noa-config` の `server-bind`/`server-port`（未指定アドレスは同じアドレス族の loopback に読み替え。`0.0.0.0` は `127.0.0.1`、`::` は `::1`。v6only の `::` は IPv4 を受けないため）と、`server-token` またはトークンファイル（`noa_config::server_token_path()`）から引く。トークンファイルは読むだけで作らない。
+- 自分のペインが要るコマンド（`self`、`spawn`、`--children`、`send`/`close` の確認）は、自分のペインが一覧にまだなければ最長 3 秒（100 ms 間隔で 30 回）読み直して待つ。`Noa -e` で起動したスクリプトは、ペインが最初に一覧に載る前に走りうるため。一覧に載らないペイン（float など）からの `ls`/`read` は待たない。
 - `send`/`close` は、`parentPaneId` が自分でないペインを既定で拒否する（`--any-pane` で解除）。これは誤爆防止であって、セキュリティ境界ではない（下記「採らなかった案」）。
 - 子の PATH に `noa` を入れるコードは見つかっていない（`crates/noa-pty/src`、`crates/noa-app/src/app.rs`、`shell-integration/`、`scripts/bundle-macos.sh` を grep して 0 件。実機では未確認、A4）。そのため `NOA_SURFACE_ID` と同じ場所で `NOA_BIN`（実行ファイルの絶対パス）を子に渡す。
 

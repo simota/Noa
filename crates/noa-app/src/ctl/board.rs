@@ -899,13 +899,29 @@ fn pad(s: &str, width: usize) -> String {
     s + &" ".repeat(room)
 }
 
-/// "↓ あと 3 件 · うち要対応 1": workers a scrolled list hides.
-fn more_line(arrow: &str, n: usize, needs: usize, cols: usize) -> String {
+/// What a scrolled list hides: (workers, of them needing someone) above and
+/// below, and closed entries below.
+struct Hidden {
+    above: (usize, usize),
+    below: (usize, usize),
+    gone: usize,
+}
+
+/// "↓ あと 3 件 · うち要対応 1 · 閉じた 2 件": what a scrolled list hides.
+/// Only parts with something in them are said.
+fn more_line(arrow: &str, (n, needs): (usize, usize), gone: usize, cols: usize) -> String {
     let mut line = Line::default();
-    line.plain("   ").fg(DIM, &format!("{arrow} あと {n} 件"));
-    if needs > 0 {
-        line.fg(DIM, " · ")
-            .fg(ORANGE, &format!("うち要対応 {needs}"));
+    line.plain("   ").fg(DIM, arrow);
+    if n > 0 {
+        line.fg(DIM, &format!(" あと {n} 件"));
+        if needs > 0 {
+            line.fg(DIM, " ·")
+                .fg(ORANGE, &format!(" うち要対応 {needs}"));
+        }
+    }
+    if gone > 0 {
+        let sep = if n > 0 { " ·" } else { "" };
+        line.fg(DIM, &format!("{sep} 閉じた {gone} 件"));
     }
     line.finish(cols)
 }
@@ -1234,35 +1250,57 @@ impl Board {
         // the room, keep its first line (number, name, state) rather than its
         // end. A clipped end says how many workers it hides, and how many of
         // them need someone, on a line of its own.
+        // The last worker's range runs on through the closed section, so
+        // selecting it brings that section into view.
+        let workers_end = spans.last().map_or(0, |span| span.1);
+        let (sel_start, mut sel_end) = selected_span;
+        if sel_end == workers_end {
+            sel_end = body.len();
+        }
         let room = rows.saturating_sub(lines.len() + 2);
+        // What a view from `offset` showing `avail` lines hides: a worker
+        // counts only when its row (number, name, state) is out of view, so
+        // a cut preview or section title is not a hidden worker.
+        let hidden = |offset: usize, avail: usize| {
+            let end = offset + avail;
+            let above: Vec<_> = spans.iter().filter(|span| span.0 < offset).collect();
+            let below: Vec<_> = spans.iter().filter(|span| span.0 >= end).collect();
+            let needs = |list: &[&(usize, usize, Group)]| {
+                list.iter().filter(|span| span.2 == Group::Needs).count()
+            };
+            // Closed entries follow the section title at `workers_end`.
+            let gone = (workers_end + 1..body.len())
+                .filter(|&line| line >= end)
+                .count();
+            Hidden {
+                above: (above.len(), needs(&above)),
+                below: (below.len(), needs(&below)),
+                gone,
+            }
+        };
         let (mut above, mut below) = (false, false);
         let mut offset = 0;
         // A pane too short for the markers spends its rows on the selection.
         let marks = room >= 3;
         for _ in 0..3 {
             let avail = room.saturating_sub(above as usize + below as usize).max(1);
-            offset = selected_span.1.saturating_sub(avail).min(selected_span.0);
-            let now_above = marks && offset > 0;
-            let now_below = marks && body.len() > offset + avail;
+            offset = sel_end.saturating_sub(avail).min(sel_start);
+            let seen = hidden(offset, avail);
+            let now_above = marks && seen.above.0 > 0;
+            let now_below = marks && (seen.below.0 > 0 || seen.gone > 0);
             if (now_above, now_below) == (above, below) {
                 break;
             }
             (above, below) = (now_above, now_below);
         }
         let avail = room.saturating_sub(above as usize + below as usize).max(1);
-        let hidden = |pick: &dyn Fn(&(usize, usize, Group)) -> bool| {
-            let hidden: Vec<_> = spans.iter().filter(|span| pick(span)).collect();
-            let needs = hidden.iter().filter(|span| span.2 == Group::Needs).count();
-            (hidden.len(), needs)
-        };
+        let seen = hidden(offset, avail);
         if above {
-            let (n, needs) = hidden(&|span| span.0 < offset);
-            lines.push(more_line("↑", n, needs, cols));
+            lines.push(more_line("↑", seen.above, 0, cols));
         }
         lines.extend(body.iter().skip(offset).take(avail).cloned());
         if below {
-            let (n, needs) = hidden(&|span| span.1 > offset + avail);
-            lines.push(more_line("↓", n, needs, cols));
+            lines.push(more_line("↓", seen.below, seen.gone, cols));
         }
         lines
     }
@@ -2638,5 +2676,90 @@ mod tests {
             Instant::now(),
         );
         assert_eq!(calm.title(), "ボード");
+    }
+
+    /// The number in a "あと N 件" marker line with `arrow`, if drawn.
+    fn marker(all: &str, arrow: &str) -> Option<usize> {
+        let at = all.find(&format!("{arrow} あと "))?;
+        let rest = &all[at + arrow.len() + " あと ".len()..];
+        rest.split(' ').next()?.parse().ok()
+    }
+
+    /// Workers w2.. running, each with a few lines of work on screen.
+    fn tall_board(n: u64) -> Board {
+        let mut board = Board::new(Some(1), None);
+        let panels: Vec<Panel> = (2..2 + n)
+            .map(|pane| worker(pane, 1, &format!("w{pane}"), Some("running"), 1))
+            .collect();
+        board.update(panels, Instant::now());
+        for pane in 2..2 + n {
+            board.set_screen(pane, "one\ntwo\nthree\nfour\n");
+        }
+        board
+    }
+
+    // Review finding (codex): with more lines than room, the closed section
+    // came after the last worker's end, which was as far as the list
+    // scrolled: selecting the last worker never brought it into view.
+    #[test]
+    fn the_closed_section_is_reachable_by_selecting_the_last_worker() {
+        let start = Instant::now();
+        let mut board = tall_board(4);
+        let panels: Vec<Panel> = (2..5)
+            .map(|pane| worker(pane, 1, &format!("w{pane}"), Some("running"), 1))
+            .collect();
+        board.update(panels, start + Duration::from_secs(1));
+        for _ in 0..3 {
+            board.key(Key::Char('j'));
+        }
+        assert_eq!(board.selected(), Some(4));
+        let all = rendered(&board, 60, 12, start + Duration::from_secs(2));
+        assert!(all.contains("✕ w5"), "{all}");
+        assert!(all.contains("▶3 ● w4"), "{all}");
+    }
+
+    // Review findings (agy, claude): a marker said "あと 0 件" when only a
+    // section title or the closed section was cut, and counted a worker
+    // whose row was in view but whose preview was cut.
+    #[test]
+    fn scroll_markers_count_exactly_the_workers_whose_row_is_out_of_view() {
+        let start = Instant::now();
+        for with_gone in [false, true] {
+            // Shorter panes draw no markers (they spend the rows on the selection).
+            for rows in 8..=24 {
+                for pick in 0..4 {
+                    let mut board = tall_board(if with_gone { 5 } else { 4 });
+                    if with_gone {
+                        let panels: Vec<Panel> = (2..6)
+                            .map(|p| worker(p, 1, &format!("w{p}"), Some("running"), 1))
+                            .collect();
+                        board.update(panels, start);
+                    }
+                    for _ in 0..pick {
+                        board.key(Key::Char('j'));
+                    }
+                    let all = rendered(&board, 60, rows, start);
+                    let shown = (2..6).filter(|p| all.contains(&format!("● w{p} "))).count();
+                    let above = marker(&all, "↑").unwrap_or(0);
+                    let below = marker(&all, "↓").unwrap_or(0);
+                    let ctx = format!("rows {rows}, pick {pick}, gone {with_gone}:\n{all}");
+                    assert!(!all.contains("あと 0 件"), "{ctx}");
+                    assert_eq!(shown + above + below, 4, "{ctx}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_cut_preview_of_the_selected_worker_is_not_a_hidden_worker() {
+        let mut board = Board::new(Some(1), None);
+        let mut panels = vec![worker(2, 1, "w2", Some("permission"), 1)];
+        panels.push(worker(3, 1, "w3", Some("running"), 1));
+        board.update(panels, Instant::now());
+        board.set_screen(2, "one\ntwo\nthree\n");
+        // Room for the section title, the row and one preview line only.
+        let all = rendered(&board, 60, 9, Instant::now());
+        assert!(all.contains("▶1 ● w2"), "{all}");
+        assert!(!all.contains("うち要対応"), "{all}");
     }
 }

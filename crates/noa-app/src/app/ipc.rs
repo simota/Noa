@@ -702,14 +702,18 @@ impl App {
         direction: Direction,
         spawn: &ScriptSpawn,
     ) -> Option<PaneId> {
+        let state = self.windows.get(&window_id)?;
+        // A float is not in the split layout: there is nothing to split.
+        if state.is_float(target) {
+            return None;
+        }
+        let before: HashSet<PaneId> = state.surfaces.keys().copied().collect();
         self.focus_pane(window_id, target);
         self.script_spawn = Some(spawn.clone());
         self.new_split(window_id, direction);
         self.script_spawn = None;
-        self.windows
-            .get(&window_id)
-            .map(|state| state.focused_pane)
-            .filter(|pane| *pane != target)
+        let state = self.windows.get(&window_id)?;
+        split_created(&before, state.surfaces.keys().copied())
     }
 
     /// A worker float over `anchor` with `spawn`'s overrides: collapsed to
@@ -995,6 +999,16 @@ fn structural_signature(
 /// and the Overview still leave every float out.
 fn listed_over_ipc(float: bool, has_parent: bool) -> bool {
     !float || has_parent
+}
+
+/// The pane a split created: the one surface that was not there before.
+/// Not "whatever has focus now": a split whose target could not take focus
+/// (a collapsed or hidden float) leaves it on another pane.
+fn split_created(
+    before: &HashSet<PaneId>,
+    mut after: impl Iterator<Item = PaneId>,
+) -> Option<PaneId> {
+    after.find(|pane| !before.contains(pane))
 }
 
 /// The split pane a new worker float goes over when `target` asked for it.
@@ -1520,6 +1534,22 @@ mod auto_split_tests {
         );
         assert_eq!(float_host(float, Some(FloatAnchor::Tab), focus), focus);
         assert_eq!(float_host(float, Some(FloatAnchor::Window), focus), focus);
+    }
+
+    // Review finding, reproduced in a real Noa: a collapsed float worker ran
+    // `+ctl spawn --split right` in a full window; focus stayed on the
+    // orchestrator's pane, nothing was split, and the orchestrator's own pane
+    // came back as the new worker (and got the float as its parent).
+    #[test]
+    fn a_split_that_created_nothing_returns_no_pane() {
+        let (orchestrator, worker, float) = (PaneId::new(1), PaneId::new(2), PaneId::new(4));
+        let before = HashSet::from([orchestrator, worker, float]);
+        assert_eq!(split_created(&before, before.clone().into_iter()), None);
+        let new = PaneId::new(5);
+        assert_eq!(
+            split_created(&before, [orchestrator, worker, float, new].into_iter()),
+            Some(new)
+        );
     }
 
     // Review finding: `focus: true` (and `+ctl spawn --float --focus`) left

@@ -305,3 +305,14 @@ loaded hooks in agy) before relying on them.
 
 Exit status: 0 success, 1 error (bad arguments, unknown pane), 2 `wait` timed out,
 3 the server is disabled, unreachable, lacks a scope, or went away mid-command.
+
+### A skill for the orchestrating agent
+
+`skills/noa-orchestration/` is an agent skill: `SKILL.md` tells an agent when and
+how to orchestrate workers, and `reference.md` is the full `+ctl` reference it
+reads on demand. To make it available to Claude Code, link it into your skills
+directory:
+
+```sh
+ln -s /absolute/path/Noa/skills/noa-orchestration ~/.claude/skills/noa-orchestration
+```

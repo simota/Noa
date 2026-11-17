@@ -4,6 +4,24 @@ fn title_from_osc() {
     assert_eq!(t.title, "my title");
 }
 
+// agent-orchestration D1: the status slot keeps only the latest report, but
+// every report must still be counted, or `Panel.agent.seq` undercounts two
+// reports that arrive in one pty batch.
+#[test]
+fn agent_reports_in_one_batch_are_each_counted() {
+    let mut t = run(b"\x1b]777;noa-agent;running;\x07\x1b]777;noa-agent;finished;\x07");
+    assert_eq!(
+        t.take_pending_agent_status().unwrap().unwrap().state,
+        crate::AgentState::Finished
+    );
+    assert_eq!(t.take_pending_agent_reports(), 2);
+    assert_eq!(t.take_pending_agent_reports(), 0);
+
+    let mut cleared = run(b"\x1b]777;noa-agent;input;q\x07\x1b]777;noa-agent;clear;\x07");
+    assert_eq!(cleared.take_pending_agent_status(), Some(None));
+    assert_eq!(cleared.take_pending_agent_reports(), 2);
+}
+
 #[test]
 fn explicit_agent_status_is_bounded_and_separate_from_notifications() {
     let mut t = run(b"\x1b]777;noa-agent;permission;Edit\x1b\\");

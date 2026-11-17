@@ -35,7 +35,7 @@ impl Terminal {
             ProgramStatusOsc::Idle | ProgramStatusOsc::Clear => (None, false),
         };
         self.program_status_active = active;
-        self.pending_agent_status = Some(status);
+        self.set_pending_agent_status(status);
     }
 
     pub(super) fn push_dcs_response(&mut self, body: &[u8]) {

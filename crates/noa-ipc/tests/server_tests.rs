@@ -1161,6 +1161,11 @@ fn subscribe_delivers_state_changed_and_unsubscribe_stops_it() {
         attention: false,
         attachable: true,
         preview: vec![],
+        surface_id: None,
+        agent: None,
+        exit: None,
+        parent_pane_id: None,
+        label: None,
     };
     broadcaster.broadcast_state_changed(vec![panel]);
 

@@ -6,9 +6,12 @@
 
 use std::hash::{Hash, Hasher};
 
+use super::applescript::{ScriptSpawn, usable_cwd};
+use super::state::Orchestration;
 use super::*;
 use crate::ipc_bridge::{
-    AppIpcBackend, IpcActionKind, IpcActionReply, card_to_panel, registry_key,
+    AppIpcBackend, IpcActionKind, IpcActionReply, PanelSurfaceFacts, bare_panel, card_to_panel,
+    registry_key,
 };
 use crate::session_store::SessionCardId;
 use noa_ipc::Panel;
@@ -224,16 +227,58 @@ impl App {
                 let ipc_id = shared.registry.mint(key.0, key.1);
                 let attachable = shared.attach_panes.contains_key(&key);
                 live_keys.insert(key);
+                let surface = state.surfaces.get(&id.pane_id);
                 panels.push(card_to_panel(
                     ipc_id,
                     state.group.0,
                     key.0,
                     card,
                     attachable,
+                    surface.map(surface_facts).unwrap_or_default(),
                 ));
-                if let Some(surface) = state.surfaces.get(&id.pane_id) {
+                if let Some(surface) = surface {
                     terminals.insert(key, surface.terminal.clone());
                 }
+            }
+            let listed: HashSet<(u64, u64)> = terminals.keys().copied().collect();
+            let eligible: HashSet<WindowId> = self
+                .windows
+                .keys()
+                .copied()
+                .filter(|window_id| self.window_sidebar_eligible(*window_id))
+                .collect();
+            let candidates = self.windows.iter().flat_map(|(window_id, state)| {
+                let eligible = eligible.contains(window_id);
+                state
+                    .surfaces
+                    .iter()
+                    .map(move |(pane_id, surface)| ListCandidate {
+                        key: (u64::from(*window_id), pane_id.get()),
+                        float: state.is_float(*pane_id),
+                        worker: surface.orchestration.is_some(),
+                        eligible,
+                    })
+            });
+            for key in uncarded_panes(&listed, candidates) {
+                let window_id = WindowId::from(key.0);
+                let pane_id = PaneId::new(key.1);
+                let Some((state, surface)) = self
+                    .windows
+                    .get(&window_id)
+                    .and_then(|state| Some((state, state.surfaces.get(&pane_id)?)))
+                else {
+                    continue;
+                };
+                let ipc_id = shared.registry.mint(key.0, key.1);
+                let attachable = shared.attach_panes.contains_key(&key);
+                panels.push(bare_panel(
+                    ipc_id,
+                    state.group.0,
+                    key.0,
+                    attachable,
+                    surface_facts(surface),
+                ));
+                terminals.insert(key, surface.terminal.clone());
             }
             let previous = std::mem::replace(&mut shared.panels, panels.clone());
             shared.terminals = terminals;
@@ -269,21 +314,25 @@ impl App {
     }
 
     /// A lock-free signature over the IPC snapshot's cheap, frequently
-    /// changing fields (pane set, busy, attention, display name) — cwd,
+    /// changing fields (pane set, busy, attention, display name, and the
+    /// agent-orchestration state a waiter blocks on: agent report count,
+    /// held-open exit) — cwd,
     /// branch, process, and preview are left to the coarser
     /// `IPC_SNAPSHOT_REFRESH` tick since they either change rarely or are
     /// too expensive to read every wake (preview specifically is never
     /// cloned here). Mirrors `applescript_structural_signature`.
     fn ipc_structural_signature(&self) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for (id, card) in self.session_store.ordered_cards() {
-            id.window_id.0.hash(&mut hasher);
-            id.pane_id.get().hash(&mut hasher);
-            card.busy.hash(&mut hasher);
-            card.attention.hash(&mut hasher);
-            card.display_name().hash(&mut hasher);
-        }
-        hasher.finish()
+        let mut panes: Vec<_> = self
+            .windows
+            .iter()
+            .flat_map(|(window_id, state)| {
+                state.surfaces.iter().map(move |(pane_id, surface)| {
+                    ((u64::from(*window_id), pane_id.get()), surface.exited)
+                })
+            })
+            .collect();
+        panes.sort_unstable();
+        structural_signature(&self.session_store.ordered_cards(), &panes)
     }
 
     /// Handle `UserEvent::IpcAction { request_id }`: take the pending
@@ -376,6 +425,11 @@ impl App {
                 // before this replies `Ok`.
                 let (window_id, pane_id) = self.resolve_ipc_pane(pane)?;
                 self.close_pane(event_loop, window_id, pane_id);
+                // Like a spawn: a client listing right after this reply must
+                // no longer see the pane.
+                self.ipc_snapshot_sig = 0;
+                self.ipc_snapshot_at = None;
+                self.sync_ipc_snapshot();
                 Ok(IpcActionReply::Ok)
             }
             IpcActionKind::SendText { pane, text, paste } => {
@@ -402,9 +456,23 @@ impl App {
                     // (N02). `write_pane_pty_bytes` only logs those.
                     let result = self.queue_pane_pty_bytes(window_id, pane_id, bytes);
                     ipc_input_queue_result(result)?;
+                    // Answering a pane acknowledges its notification, like
+                    // focusing it does: without that `attention` never drops
+                    // and a hookless agent's next turn cannot raise it again
+                    // (agent-orchestration D6). Only input that was accepted
+                    // answers. The drop is pushed now, before the pane's reply
+                    // can come back as a later event on this thread.
+                    if self.acknowledge_session_card(window_id, pane_id) {
+                        self.ipc_snapshot_sig = 0;
+                        self.ipc_snapshot_at = None;
+                        self.sync_ipc_snapshot();
+                    }
                 }
                 Ok(IpcActionReply::Ok)
             }
+            IpcActionKind::Spawn { target, params } => self
+                .execute_ipc_spawn(event_loop, target, params)
+                .map(IpcActionReply::NewPane),
             IpcActionKind::ResizePane { pane, cols, rows } => {
                 let (window_id, pane_id) = self.resolve_ipc_pane(pane)?;
                 let surface = self
@@ -438,6 +506,228 @@ impl App {
                 Ok(IpcActionReply::Ok)
             }
         }
+    }
+
+    /// `noa.newTab`/`noa.split` with agent-orchestration extensions (D2):
+    /// spawn with the request's config through the same `ScriptSpawn`
+    /// overrides AppleScript's `with configuration` uses, place an `auto`
+    /// split among the anchor's own spawns, and put keyboard focus back when
+    /// asked to. Returns the new pane's IPC id.
+    fn execute_ipc_spawn(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        target: noa_ipc::SpawnTarget,
+        params: noa_ipc::SpawnParams,
+    ) -> Result<u64, noa_ipc::IpcError> {
+        if let Some(parent) = params.parent_pane_id {
+            self.resolve_ipc_pane(parent.0)?;
+        }
+        let previous_focus = self
+            .focused
+            .and_then(|window| Some((window, self.windows.get(&window)?.focused_pane)));
+        let focus = params.focus;
+        let focused_before = self.window_focused_panes();
+        // Placing the worker focuses panes (split candidates, the anchor),
+        // which acknowledges their notifications; nobody looked at them.
+        let unread_before = self.session_store.unread_flags();
+        let result = self.ipc_spawn_pane(event_loop, target, params);
+        let focused_after = self.window_focused_panes();
+        let restores = focus_to_restore(
+            focus,
+            previous_focus,
+            &focused_before,
+            &focused_after,
+            result.as_ref().ok().copied(),
+            self.focused,
+        );
+        for (window, pane, raise_tab) in restores {
+            if self
+                .windows
+                .get(&window)
+                .is_some_and(|state| state.contains_pane(pane))
+            {
+                self.focus_pane(window, pane);
+                if raise_tab {
+                    // A script must not pull Noa in front of the app the
+                    // user is in (agent-automation ASSUME-6).
+                    self.raise_tab_without_activating(window);
+                }
+            }
+        }
+        if self.session_store.restore_unread(&unread_before) {
+            self.request_sidebar_redraw();
+        }
+        let (window_id, pane_id) = result?;
+        let ipc_id = self.mint_ipc_pane(window_id, pane_id);
+        // Rebuild the snapshot before replying, so a client that lists panes
+        // right after this reply already sees the new worker.
+        self.ipc_snapshot_sig = 0;
+        self.ipc_snapshot_at = None;
+        self.sync_ipc_snapshot();
+        Ok(ipc_id)
+    }
+
+    /// Every window's focused pane, to see which ones a spawn moved.
+    fn window_focused_panes(&self) -> Vec<(WindowId, PaneId)> {
+        self.windows
+            .iter()
+            .map(|(window, state)| (*window, state.focused_pane))
+            .collect()
+    }
+
+    /// The spawn half of [`Self::execute_ipc_spawn`]: create the pane and
+    /// apply its config and orchestration metadata. Focus is left wherever
+    /// the spawn put it.
+    fn ipc_spawn_pane(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        target: noa_ipc::SpawnTarget,
+        params: noa_ipc::SpawnParams,
+    ) -> Result<(WindowId, PaneId), noa_ipc::IpcError> {
+        let config = params.config.unwrap_or_default();
+        let spawn = ScriptSpawn {
+            cwd: usable_cwd(config.cwd.clone()),
+            argv: config.command.clone(),
+            env: config.env.clone().into_iter().collect(),
+            wait_after_command: config.wait_after_command,
+            ..ScriptSpawn::default()
+        };
+
+        let created = match target {
+            noa_ipc::SpawnTarget::Tab { window } => {
+                let window = match window {
+                    Some(id) => Some(self.resolve_ipc_window_or_group(id)?),
+                    None => None,
+                };
+                self.ipc_spawn_tab(event_loop, window, spawn)?
+            }
+            noa_ipc::SpawnTarget::Split { pane, direction } => {
+                let (window_id, anchor) = self.resolve_ipc_pane(pane)?;
+                let candidates = match direction {
+                    Some(noa_ipc::SplitDirection::Horizontal) => {
+                        vec![(window_id, anchor, Direction::Right)]
+                    }
+                    Some(noa_ipc::SplitDirection::Vertical) => {
+                        vec![(window_id, anchor, Direction::Down)]
+                    }
+                    None => self.auto_split_candidates(window_id, anchor, pane),
+                };
+                let split = candidates
+                    .into_iter()
+                    .find_map(|(window, target, direction)| {
+                        self.ipc_split_with(window, target, direction, &spawn)
+                            .map(|pane| (window, pane))
+                    });
+                match (split, direction) {
+                    (Some(created), _) => created,
+                    // `auto` overflows into a new tab of the same window once
+                    // no pane has room left to split.
+                    (None, None) => self.ipc_spawn_tab(event_loop, Some(window_id), spawn)?,
+                    (None, Some(_)) => {
+                        return Err(noa_ipc::IpcError::Internal(
+                            "split did not create a pane".to_string(),
+                        ));
+                    }
+                }
+            }
+        };
+        let (window_id, pane_id) = created;
+
+        if (params.parent_pane_id.is_some() || params.label.is_some())
+            && let Some(surface) = self
+                .windows
+                .get_mut(&window_id)
+                .and_then(|state| state.surfaces.get_mut(&pane_id))
+        {
+            surface.orchestration = Some(Orchestration {
+                parent: params.parent_pane_id.map(|id| id.0),
+                label: params.label,
+            });
+        }
+        self.write_initial_input(window_id, pane_id, config.initial_input);
+        Ok((window_id, pane_id))
+    }
+
+    /// Split `target` in `window_id` with `spawn`'s overrides; the new pane,
+    /// or `None` when the split had no room.
+    fn ipc_split_with(
+        &mut self,
+        window_id: WindowId,
+        target: PaneId,
+        direction: Direction,
+        spawn: &ScriptSpawn,
+    ) -> Option<PaneId> {
+        self.focus_pane(window_id, target);
+        self.script_spawn = Some(spawn.clone());
+        self.new_split(window_id, direction);
+        self.script_spawn = None;
+        self.windows
+            .get(&window_id)
+            .map(|state| state.focused_pane)
+            .filter(|pane| *pane != target)
+    }
+
+    /// A new tab with `spawn`'s overrides, in `window`'s group (the focused
+    /// window's when `None`), like `noa.newTab`.
+    fn ipc_spawn_tab(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window: Option<WindowId>,
+        spawn: ScriptSpawn,
+    ) -> Result<(WindowId, PaneId), noa_ipc::IpcError> {
+        if let Some(window_id) = window
+            && self.windows.contains_key(&window_id)
+        {
+            self.focused = Some(window_id);
+        }
+        // Without a requested cwd the tab inherits the focused shell's, like
+        // an interactive New Tab.
+        let cwd = spawn.cwd.clone().or_else(|| self.focused_pane_cwd());
+        self.script_spawn = Some(spawn);
+        let result = self.spawn_tab(event_loop, SpawnTarget::CurrentWindow);
+        self.script_spawn = None;
+        let new_window_id = result.map_err(|err| {
+            log::warn!("noa-ipc: spawn failed (cwd {cwd:?}): {err}");
+            noa_ipc::IpcError::Internal("failed to spawn pane".to_string())
+        })?;
+        let pane_id = self
+            .windows
+            .get(&new_window_id)
+            .map(|state| state.focused_pane)
+            .ok_or_else(|| noa_ipc::IpcError::Internal("new tab has no pane".to_string()))?;
+        Ok((new_window_id, pane_id))
+    }
+
+    /// Where an `auto` split goes (agent-orchestration D2), most preferred
+    /// first: among `anchor` and the panes in its window spawned with
+    /// `anchor_ipc` as parent. See [`auto_split_order`].
+    fn auto_split_candidates(
+        &self,
+        window_id: WindowId,
+        anchor: PaneId,
+        anchor_ipc: u64,
+    ) -> Vec<(WindowId, PaneId, Direction)> {
+        let Some(anchor_rect) = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&anchor))
+            .map(|surface| surface.rect)
+        else {
+            return Vec::new();
+        };
+        let surfaces = self.windows.iter().flat_map(|(window, state)| {
+            state
+                .surfaces
+                .iter()
+                .map(move |(pane, surface)| SpawnedPane {
+                    window: *window,
+                    pane: *pane,
+                    rect: surface.rect,
+                    parent: surface.orchestration.as_ref().and_then(|meta| meta.parent),
+                })
+        });
+        let children = anchor_children(anchor_ipc, surfaces);
+        auto_split_order((window_id, anchor, anchor_rect), &children)
     }
 
     /// Resolve `noa.newTab`'s `windowId` param (F-2). The wire value is
@@ -557,6 +847,176 @@ impl App {
     }
 }
 
+/// Where to put keyboard focus after an extended spawn, in order, as
+/// `(window, pane, raise_tab)`. Every tab whose focused pane the spawn moved
+/// (its target, or an `auto` candidate that had no room: a split focuses its
+/// target before it knows there is room) gets its own pane back, except the
+/// tab holding a new pane the caller wants focused. Then the pane that had
+/// focus goes last when the caller passed `focus: false` or the spawn failed;
+/// otherwise the new pane does, its tab raised when it is not the front one.
+/// `before`/`after` are every window's focused pane around the spawn;
+/// `created` is the new pane.
+fn focus_to_restore(
+    focus: Option<bool>,
+    previous: Option<(WindowId, PaneId)>,
+    before: &[(WindowId, PaneId)],
+    after: &[(WindowId, PaneId)],
+    created: Option<(WindowId, PaneId)>,
+    now_focused: Option<WindowId>,
+) -> Vec<(WindowId, PaneId, bool)> {
+    let keep_new = created.filter(|_| focus != Some(false));
+    let keep_new_window = keep_new.map(|(window, _)| window);
+    let previous_window = previous.map(|(window, _)| window);
+    let mut restores: Vec<_> = before
+        .iter()
+        .filter(|(window, pane)| {
+            after
+                .iter()
+                .any(|(after_window, after_pane)| after_window == window && after_pane != pane)
+        })
+        .filter(|(window, _)| Some(*window) != keep_new_window)
+        // Without a new pane to focus, the previous pane is restored last
+        // below; don't restore its window twice.
+        .filter(|(window, _)| keep_new.is_some() || Some(*window) != previous_window)
+        .map(|(window, pane)| (*window, *pane, false))
+        .collect();
+    match keep_new {
+        Some((window, pane)) => {
+            if Some(window) != now_focused {
+                restores.push((window, pane, true));
+            }
+        }
+        None => {
+            if let Some((window, pane)) = previous {
+                restores.push((window, pane, Some(window) != now_focused));
+            }
+        }
+    }
+    restores
+}
+
+/// What `sync_ipc_snapshot` rebuilds on as soon as it changes: each card's
+/// listed facts, and each live pane `((window, pane), exited)`, sorted.
+fn structural_signature(
+    cards: &[(SessionCardId, &crate::session_store::SessionCard)],
+    panes: &[((u64, u64), bool)],
+) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for (id, card) in cards {
+        id.window_id.0.hash(&mut hasher);
+        id.pane_id.get().hash(&mut hasher);
+        card.busy.hash(&mut hasher);
+        card.attention.hash(&mut hasher);
+        card.display_name().hash(&mut hasher);
+        card.agent_seq.hash(&mut hasher);
+        card.process.hash(&mut hasher);
+    }
+    // Every pane, not only carded ones: card-less panes are listed too.
+    panes.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// One live pane `sync_ipc_snapshot` may list without a session card.
+struct ListCandidate {
+    key: (u64, u64),
+    float: bool,
+    /// Spawned by an orchestrator over IPC.
+    worker: bool,
+    /// In a window that keeps session cards (not the quick terminal or the
+    /// scratch popup), so its pane is listed once it has a card anyway.
+    eligible: bool,
+}
+
+/// Panes to list although they have no session card yet, which only appears
+/// with a pane's first output: an orchestrator's workers (a silent `sleep`,
+/// or an agent still starting), and any pane of a card-keeping window, such
+/// as an orchestrator script that prints nothing before its first `+ctl`.
+/// Without them `+ctl wait` reads a just-spawned worker as closed, and `+ctl`
+/// cannot find its own pane (agent-orchestration D1). Floats are never
+/// listed (REQ-023).
+fn uncarded_panes(
+    listed: &HashSet<(u64, u64)>,
+    candidates: impl Iterator<Item = ListCandidate>,
+) -> Vec<(u64, u64)> {
+    candidates
+        .filter(|candidate| {
+            (candidate.worker || candidate.eligible)
+                && !candidate.float
+                && !listed.contains(&candidate.key)
+        })
+        .map(|candidate| candidate.key)
+        .collect()
+}
+
+/// `Panel` facts that live on the `Surface` (agent-orchestration D1).
+fn surface_facts(surface: &Surface) -> PanelSurfaceFacts {
+    PanelSurfaceFacts {
+        surface_id: surface.surface_id.clone(),
+        exit: surface.exited.then_some(surface.exit_status).flatten(),
+        parent_pane_id: surface.orchestration.as_ref().and_then(|meta| meta.parent),
+        label: surface
+            .orchestration
+            .as_ref()
+            .and_then(|meta| meta.label.clone()),
+    }
+}
+
+/// A live pane and the orchestrator that spawned it, if any.
+struct SpawnedPane {
+    window: WindowId,
+    pane: PaneId,
+    rect: PaneRectApp,
+    parent: Option<u64>,
+}
+
+/// The panes `anchor_ipc` spawned that an `auto` split may divide, with
+/// their windows: in any tab, so a worker that overflowed into a new tab is
+/// split before yet another tab opens.
+fn anchor_children(
+    anchor_ipc: u64,
+    surfaces: impl Iterator<Item = SpawnedPane>,
+) -> Vec<(WindowId, PaneId, PaneRectApp)> {
+    surfaces
+        .filter(|surface| surface.parent == Some(anchor_ipc))
+        .map(|surface| (surface.window, surface.pane, surface.rect))
+        .collect()
+}
+
+/// The order an `auto` split tries (agent-orchestration D2): with no
+/// spawned children yet, the anchor splits to its right; otherwise the
+/// largest child splits along its longer side (ties go to the lowest pane
+/// id), then the other side, then every smaller child the same way. The
+/// caller falls back to a new tab when none of them has room.
+fn auto_split_order(
+    anchor: (WindowId, PaneId, PaneRectApp),
+    children: &[(WindowId, PaneId, PaneRectApp)],
+) -> Vec<(WindowId, PaneId, Direction)> {
+    if children.is_empty() {
+        return vec![
+            (anchor.0, anchor.1, Direction::Right),
+            (anchor.0, anchor.1, Direction::Down),
+        ];
+    }
+    let mut by_size = children.to_vec();
+    by_size.sort_by_key(|(_, pane, rect)| {
+        (
+            std::cmp::Reverse(u64::from(rect.w) * u64::from(rect.h)),
+            pane.get(),
+        )
+    });
+    by_size
+        .into_iter()
+        .flat_map(|(window, pane, rect)| {
+            let (long, short) = if rect.w >= rect.h {
+                (Direction::Right, Direction::Down)
+            } else {
+                (Direction::Down, Direction::Right)
+            };
+            [(window, pane, long), (window, pane, short)]
+        })
+        .collect()
+}
+
 /// The output tap of a pane IPC must not see (floating-panes REQ-023): it
 /// pushes to a broadcaster nothing can subscribe to, under no pane id.
 pub(super) fn hidden_ipc_output_tap() -> crate::io_thread::IpcOutputTap {
@@ -648,6 +1108,332 @@ mod attach_tests {
             stale_registry_keys(registered.iter(), &live),
             vec![closed_surface]
         );
+    }
+}
+
+#[cfg(test)]
+mod focus_restore_tests {
+    use super::*;
+
+    fn w(id: u64) -> WindowId {
+        WindowId::from(id)
+    }
+
+    fn p(id: u64) -> PaneId {
+        PaneId::new(id)
+    }
+
+    fn previous() -> Option<(WindowId, PaneId)> {
+        Some((w(1), p(7)))
+    }
+
+    /// One window whose focused pane stayed put.
+    fn unchanged() -> Vec<(WindowId, PaneId)> {
+        vec![(w(1), p(7))]
+    }
+
+    // Review finding: a split or tab spawn that failed had already moved
+    // focus to its target, and returned before focus went back.
+    #[test]
+    fn a_failed_spawn_puts_focus_back() {
+        assert_eq!(
+            focus_to_restore(
+                Some(false),
+                previous(),
+                &unchanged(),
+                &unchanged(),
+                None,
+                Some(w(2))
+            ),
+            vec![(w(1), p(7), true)]
+        );
+        // With no new pane to focus, even a default-focus spawn gives the
+        // focus back.
+        assert_eq!(
+            focus_to_restore(
+                None,
+                previous(),
+                &unchanged(),
+                &unchanged(),
+                None,
+                Some(w(1))
+            ),
+            vec![(w(1), p(7), false)]
+        );
+    }
+
+    #[test]
+    fn a_successful_spawn_keeps_focus_unless_asked_not_to() {
+        let created = Some((w(1), p(9)));
+        for focus in [None, Some(true)] {
+            assert!(
+                focus_to_restore(
+                    focus,
+                    previous(),
+                    &unchanged(),
+                    &unchanged(),
+                    created,
+                    Some(w(1))
+                )
+                .is_empty()
+            );
+        }
+        assert_eq!(
+            focus_to_restore(
+                Some(false),
+                previous(),
+                &unchanged(),
+                &unchanged(),
+                created,
+                Some(w(1))
+            ),
+            vec![(w(1), p(7), false)]
+        );
+    }
+
+    // Review finding: an `auto` candidate in the focused tab had no room, so
+    // that tab's focus stayed on the candidate while the split succeeded in
+    // a background tab; the focused tab was skipped as "previous".
+    #[test]
+    fn the_focused_tab_gets_its_pane_back_when_the_split_lands_elsewhere() {
+        let previous = Some((w(1), p(7)));
+        let before = vec![(w(1), p(7)), (w(2), p(20))];
+        let after = vec![(w(1), p(11)), (w(2), p(21))];
+
+        let restores = focus_to_restore(
+            None,
+            previous,
+            &before,
+            &after,
+            Some((w(2), p(21))),
+            Some(w(1)),
+        );
+
+        assert_eq!(restores[0], (w(1), p(7), false));
+    }
+
+    // Review finding: `--focus` split a worker in a background tab, but
+    // nothing brought that tab forward, so the new pane never got the
+    // keyboard.
+    #[test]
+    fn a_focused_spawn_in_a_background_tab_brings_that_tab_forward() {
+        let previous = Some((w(1), p(7)));
+        let before = vec![(w(1), p(7)), (w(2), p(20))];
+        let after = vec![(w(1), p(7)), (w(2), p(21))];
+
+        assert_eq!(
+            focus_to_restore(
+                Some(true),
+                previous,
+                &before,
+                &after,
+                Some((w(2), p(21))),
+                Some(w(1))
+            ),
+            vec![(w(2), p(21), true)]
+        );
+    }
+
+    // Review finding: spawning into the orchestrator's tab while the human
+    // works in another left the orchestrator's tab focused on the new worker,
+    // so the human's next keystrokes there went to the worker.
+    #[test]
+    fn the_spawn_window_gets_its_own_focused_pane_back() {
+        let human = Some((w(2), p(20)));
+        let before = vec![(w(1), p(7)), (w(2), p(20))];
+        let after = vec![(w(1), p(9)), (w(2), p(20))];
+
+        assert_eq!(
+            focus_to_restore(
+                Some(false),
+                human,
+                &before,
+                &after,
+                Some((w(1), p(9))),
+                Some(w(2))
+            ),
+            vec![(w(1), p(7), false), (w(2), p(20), false)],
+            "the orchestrator tab first, then the human's pane last"
+        );
+        // A default-focus spawn keeps the new pane focused in its own tab,
+        // but a failed auto candidate elsewhere still goes back.
+        let after_auto = vec![(w(1), p(9)), (w(3), p(31))];
+        let before_auto = vec![(w(1), p(7)), (w(3), p(30))];
+        assert_eq!(
+            focus_to_restore(
+                None,
+                human,
+                &before_auto,
+                &after_auto,
+                Some((w(1), p(9))),
+                Some(w(1))
+            ),
+            vec![(w(3), p(30), false)]
+        );
+    }
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::*;
+
+    // Review finding: a card-less pane (a silent worker, a fresh split) is
+    // listed, but appearing or closing did not change the signature, so the
+    // listing lagged until the next timed refresh.
+    #[test]
+    fn a_card_less_pane_coming_or_going_changes_the_signature() {
+        let worker = ((1, 2), false);
+        let with = structural_signature(&[], &[((1, 1), false), worker]);
+        let without = structural_signature(&[], &[((1, 1), false)]);
+
+        assert_ne!(with, without);
+    }
+
+    #[test]
+    fn a_pane_exiting_changes_the_signature() {
+        let running = structural_signature(&[], &[((1, 2), false)]);
+        let exited = structural_signature(&[], &[((1, 2), true)]);
+
+        assert_ne!(running, exited);
+    }
+}
+
+#[cfg(test)]
+mod unlisted_worker_tests {
+    use super::*;
+
+    /// A candidate in a window that keeps no session cards (quick terminal).
+    fn candidate(key: (u64, u64), float: bool, worker: bool) -> ListCandidate {
+        ListCandidate {
+            key,
+            float,
+            worker,
+            eligible: false,
+        }
+    }
+
+    // Review finding: an orchestrator started with `Noa -e script` printed
+    // nothing before its first `+ctl spawn`, so its pane had no card, was not
+    // listed, and `+ctl` could not find itself by NOA_SURFACE_ID.
+    #[test]
+    fn a_silent_ordinary_pane_is_listed_before_its_first_output() {
+        let listed = HashSet::new();
+        let ordinary = ListCandidate {
+            key: (1, 1),
+            float: false,
+            worker: false,
+            eligible: true,
+        };
+
+        assert_eq!(
+            uncarded_panes(&listed, [ordinary].into_iter()),
+            vec![(1, 1)]
+        );
+    }
+
+    #[test]
+    fn a_silent_worker_is_listed_before_its_first_output() {
+        let listed = HashSet::from([(1, 1)]);
+        let candidates = [
+            candidate((1, 1), false, false),
+            candidate((1, 2), false, true),
+            candidate((1, 3), false, false),
+            candidate((1, 4), true, true),
+        ];
+
+        assert_eq!(
+            uncarded_panes(&listed, candidates.into_iter()),
+            vec![(1, 2)],
+            "only the card-less, non-float worker is added"
+        );
+    }
+
+    #[test]
+    fn a_worker_with_a_card_is_not_listed_twice() {
+        let listed = HashSet::from([(1, 2)]);
+
+        assert!(uncarded_panes(&listed, [candidate((1, 2), false, true)].into_iter()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod auto_split_tests {
+    use super::*;
+
+    fn rect(w: u32, h: u32) -> PaneRectApp {
+        PaneRectApp { x: 0, y: 0, w, h }
+    }
+
+    fn tab(id: u64) -> WindowId {
+        WindowId::from(id)
+    }
+
+    #[test]
+    fn the_first_worker_splits_the_anchor_to_the_right() {
+        let anchor = (tab(1), PaneId::new(1), rect(1600, 900));
+
+        assert_eq!(
+            auto_split_order(anchor, &[])[0],
+            (tab(1), PaneId::new(1), Direction::Right)
+        );
+    }
+
+    #[test]
+    fn later_workers_split_the_largest_child_along_its_longer_side() {
+        let anchor = (tab(1), PaneId::new(1), rect(800, 900));
+        let children = [
+            (tab(1), PaneId::new(5), rect(800, 450)),
+            (tab(1), PaneId::new(4), rect(800, 900)),
+        ];
+
+        let order = auto_split_order(anchor, &children);
+
+        // Pane 4 is largest and taller than wide, so it splits downward
+        // first; the anchor itself is never split once it has children.
+        assert_eq!(order[0], (tab(1), PaneId::new(4), Direction::Down));
+        assert_eq!(order[1], (tab(1), PaneId::new(4), Direction::Right));
+        assert_eq!(order[2], (tab(1), PaneId::new(5), Direction::Right));
+        assert!(order.iter().all(|(_, pane, _)| *pane != PaneId::new(1)));
+    }
+
+    #[test]
+    fn equal_sized_children_are_ordered_by_pane_id() {
+        let anchor = (tab(1), PaneId::new(1), rect(800, 900));
+        let children = [
+            (tab(1), PaneId::new(9), rect(400, 400)),
+            (tab(1), PaneId::new(3), rect(400, 400)),
+        ];
+
+        assert_eq!(auto_split_order(anchor, &children)[0].1, PaneId::new(3));
+    }
+
+    // Review finding: once the anchor's tab was full and a worker overflowed
+    // into a new tab, that worker was never a candidate, so every later
+    // spawn opened yet another tab instead of splitting it.
+    #[test]
+    fn a_worker_that_overflowed_into_another_tab_is_still_a_candidate() {
+        let spawned = |window: u64, pane: u64, w: u32, h: u32, parent: Option<u64>| SpawnedPane {
+            window: tab(window),
+            pane: PaneId::new(pane),
+            rect: rect(w, h),
+            parent,
+        };
+        let surfaces = [
+            spawned(1, 1, 200, 900, None),
+            spawned(1, 2, 200, 900, Some(10)),
+            spawned(2, 3, 1600, 900, Some(10)),
+            spawned(2, 4, 1600, 900, Some(99)),
+        ];
+
+        let children = anchor_children(10, surfaces.into_iter());
+        let order = auto_split_order((tab(1), PaneId::new(1), rect(200, 900)), &children);
+
+        assert_eq!(
+            children.len(),
+            2,
+            "both of the anchor's workers, in either tab"
+        );
+        assert_eq!(order[0], (tab(2), PaneId::new(3), Direction::Right));
     }
 }
 

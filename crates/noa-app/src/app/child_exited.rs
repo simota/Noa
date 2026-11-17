@@ -131,6 +131,7 @@ impl App {
             return false;
         }
         surface.exited = true;
+        surface.exit_status = Some(exit);
         let mut bytes = Vec::new();
         if abnormal {
             // Ghostty skips the native notice for a zero runtime (an exit

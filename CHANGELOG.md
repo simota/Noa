@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Noa +ctl` orchestrates worker panes from a script or an agent: `spawn`, `send`,
+  `wait`, `read`, `close`, `ls`, `self`, and `report` (agent-orchestration).
+- noa-server: `Panel` gains `surfaceId`, `agent` (kind, state, report count),
+  `exit`, `parentPaneId`, and `label`; `noa.newTab`/`noa.split` accept a spawn
+  config, label, parent, and `focus`, and `noa.split` accepts `direction: "auto"`.
+  All additive; the protocol stays at version 3.
+- Every pane's environment carries `NOA_BIN`, the running Noa's path.
+
 ## [0.8.1] - 2026-11-11
 
 Links that follow soft wraps, and a UI accent that comes from the theme.

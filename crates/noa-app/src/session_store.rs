@@ -139,6 +139,10 @@ pub struct SessionCard {
     pub progress: Option<noa_grid::TerminalProgress>,
     pub agent_status: Option<noa_grid::AgentStatus>,
     pub agent_status_at: Option<WallClock>,
+    /// Number of agent-status reports applied to this card (`clear`
+    /// included), so an orchestrator can tell a report that answers its
+    /// input from one that predates it (agent-orchestration D1, `Panel.agent.seq`).
+    pub agent_seq: u64,
     /// Per-tab agent-prompt auto approval is enabled for this card's tab.
     pub auto_approve_enabled: bool,
     /// Rolling audit of injected approvals, capped by the store.
@@ -233,6 +237,9 @@ pub enum SessionDelta {
         id: SessionCardId,
         status: Option<noa_grid::AgentStatus>,
         at: WallClock,
+        /// Reports this delta stands for (several in one pty batch collapse
+        /// into the latest `status`). Advances `SessionCard::agent_seq`.
+        reports: u64,
     },
     /// Replace or clear the pane's `OSC 9;4` task progress.
     Progress {
@@ -311,9 +318,17 @@ impl SessionDelta {
             SessionDelta::Rename { name, .. } => SessionDelta::Rename { id, name },
             SessionDelta::Bell { .. } => SessionDelta::Bell { id },
             SessionDelta::Attention { .. } => SessionDelta::Attention { id },
-            SessionDelta::AgentStatus { status, at, .. } => {
-                SessionDelta::AgentStatus { id, status, at }
-            }
+            SessionDelta::AgentStatus {
+                status,
+                at,
+                reports,
+                ..
+            } => SessionDelta::AgentStatus {
+                id,
+                status,
+                at,
+                reports,
+            },
             SessionDelta::Progress { progress, .. } => SessionDelta::Progress { id, progress },
             SessionDelta::ProgressComplete { .. } => SessionDelta::ProgressComplete { id },
             SessionDelta::ProgressError { .. } => SessionDelta::ProgressError { id },
@@ -516,6 +531,31 @@ impl SessionStore {
         }
     }
 
+    /// Every card's unread flags (`attention`, `unread_bell`) that has one,
+    /// for [`Self::restore_unread`].
+    pub fn unread_flags(&self) -> Vec<(SessionCardId, bool, bool)> {
+        self.cards
+            .iter()
+            .filter(|(_, card)| card.attention || card.unread_bell)
+            .map(|(id, card)| (*id, card.attention, card.unread_bell))
+            .collect()
+    }
+
+    /// Put back unread flags [`Self::unread_flags`] saw, for cards that still
+    /// exist: a focus move nobody looked at (an orchestrator placing a
+    /// worker) is not an acknowledgement. Returns whether a flag changed.
+    pub fn restore_unread(&mut self, flags: &[(SessionCardId, bool, bool)]) -> bool {
+        let mut changed = false;
+        for (id, attention, bell) in flags {
+            if let Some(card) = self.cards.get_mut(id) {
+                changed |= (card.attention, card.unread_bell) != (*attention, *bell);
+                card.attention |= attention;
+                card.unread_bell |= bell;
+            }
+        }
+        changed
+    }
+
     /// Mirror a per-tab auto-approve toggle into every card in that tab.
     pub fn set_auto_approve_for_window(&mut self, window_id: SessionWindowId, enabled: bool) {
         for (id, card) in self.cards.iter_mut() {
@@ -630,6 +670,7 @@ impl SessionStore {
                                 progress: None,
                                 agent_status: None,
                                 agent_status_at: None,
+                                agent_seq: 0,
                                 auto_approve_enabled: false,
                                 auto_approve_audit: VecDeque::new(),
                                 process: None,
@@ -672,8 +713,14 @@ impl SessionStore {
                     card.attention = true;
                 }
             }
-            SessionDelta::AgentStatus { id, status, at } => {
+            SessionDelta::AgentStatus {
+                id,
+                status,
+                at,
+                reports,
+            } => {
                 if let Some(card) = self.cards.get_mut(&id) {
+                    card.agent_seq += reports.max(1);
                     if card.agent_status != status {
                         card.agent_status_at = status.as_ref().map(|_| at);
                     }
@@ -1228,6 +1275,7 @@ mod tests {
             progress: None,
             agent_status: None,
             agent_status_at: None,
+            agent_seq: 0,
             auto_approve_enabled: false,
             auto_approve_audit: VecDeque::new(),
             process: None,
@@ -1313,6 +1361,36 @@ mod tests {
         let card = store.get(&id).unwrap();
         assert!(!card.attention);
         assert!(!card.unread_bell);
+    }
+
+    // Review finding: an `auto` spawn focuses split candidates, and focusing a
+    // worker cleared its attention. The flags saved before are put back on
+    // the cards still alive.
+    #[test]
+    fn unread_flags_cleared_in_between_are_restored() {
+        let mut store = SessionStore::new();
+        let worker = card_id(1, 2);
+        let bell_only = card_id(1, 3);
+        let gone = card_id(1, 4);
+        for id in [worker, bell_only, gone] {
+            store.apply(upsert(id, 1, "s"));
+        }
+        store.apply(SessionDelta::Attention { id: worker });
+        store.apply(SessionDelta::Bell { id: bell_only });
+        store.apply(SessionDelta::Attention { id: gone });
+        let saved = store.unread_flags();
+
+        store.clear_bell_for_card(worker);
+        store.clear_bell_for_card(bell_only);
+        store.apply(SessionDelta::Remove { id: gone });
+
+        assert!(store.restore_unread(&saved));
+        let worker = store.get(&worker).unwrap();
+        assert!(worker.attention && !worker.unread_bell);
+        let bell_only = store.get(&bell_only).unwrap();
+        assert!(!bell_only.attention && bell_only.unread_bell);
+        assert!(store.get(&gone).is_none());
+        assert!(!store.restore_unread(&saved));
     }
 
     #[test]
@@ -1818,6 +1896,7 @@ mod tests {
             id,
             status: Some(status.clone()),
             at: wall(10, 0),
+            reports: 1,
         });
         store.apply(SessionDelta::Attention { id });
         store.clear_bell_for_card(id);
@@ -1828,8 +1907,44 @@ mod tests {
             id,
             status: None,
             at: wall(10, 1),
+            reports: 1,
         });
         assert!(store.get(&id).unwrap().agent_status.is_none());
+    }
+
+    // agent-orchestration D1: every report advances the count, a repeat of
+    // the same state and `clear` included, so a waiter can tell a fresh
+    // `finished` from the previous turn's.
+    #[test]
+    fn every_agent_report_advances_the_report_count() {
+        let mut store = SessionStore::new();
+        let id = card_id(1, 1);
+        store.apply(upsert(id, 1, "agent"));
+        assert_eq!(store.get(&id).unwrap().agent_seq, 0);
+        let finished = Some(noa_grid::AgentStatus {
+            state: noa_grid::AgentState::Finished,
+            detail: String::new(),
+        });
+        for status in [finished.clone(), finished, None] {
+            store.apply(SessionDelta::AgentStatus {
+                id,
+                status,
+                at: wall(10, 0),
+                reports: 1,
+            });
+        }
+        assert_eq!(store.get(&id).unwrap().agent_seq, 3);
+        // Two reports collapsed into one pty batch still count twice.
+        store.apply(SessionDelta::AgentStatus {
+            id,
+            status: None,
+            at: wall(10, 1),
+            reports: 2,
+        });
+        assert_eq!(store.get(&id).unwrap().agent_seq, 5);
+        // An upsert from pty output keeps the count.
+        store.apply(upsert(id, 2, "agent"));
+        assert_eq!(store.get(&id).unwrap().agent_seq, 5);
     }
 
     #[test]
@@ -1848,6 +1963,7 @@ mod tests {
                 detail: String::new(),
             }),
             at: wall(10, 0),
+            reports: 1,
         };
         store.apply(process("zsh"));
         // The hook's first report can beat the 1s poll noticing the agent.

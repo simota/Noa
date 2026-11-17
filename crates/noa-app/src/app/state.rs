@@ -1150,6 +1150,15 @@ pub(super) enum Review {
     CloseWindow { group: WindowGroupId },
 }
 
+/// A pane spawned by an orchestrator over IPC (agent-orchestration D2/D5).
+/// `parent` is the orchestrator's IPC pane id; IPC ids are never reused, so
+/// a closed parent can never be confused with a later pane.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Orchestration {
+    pub(super) parent: Option<u64>,
+    pub(super) label: Option<String>,
+}
+
 /// Terminal-owned state for one split leaf. `split_tree` leaves store the
 /// `PaneId`; this map owns the corresponding live surface payload.
 pub(super) struct Surface {
@@ -1267,6 +1276,15 @@ pub(super) struct Surface {
     /// The process exited and the pane was held open (`wait_after_command`
     /// or an abnormal exit); the next key press closes it.
     pub(super) exited: bool,
+    /// How the held-open pane's child exited, for `Panel.exit`
+    /// (agent-orchestration D1). Set together with `exited`.
+    pub(super) exit_status: Option<crate::events::ChildExit>,
+    /// The child's `NOA_SURFACE_ID`, for `Panel.surfaceId` (agent-orchestration
+    /// D1). `None` for remote panes.
+    pub(super) surface_id: Option<String>,
+    /// Who spawned this pane over IPC and under what label
+    /// (agent-orchestration D2/D5).
+    pub(super) orchestration: Option<Orchestration>,
     /// The pty child's argv, for the child-exited notice. `None` for remote
     /// panes.
     pub(super) child_command: Option<String>,
@@ -1462,6 +1480,9 @@ impl Surface {
             title_override: None,
             wait_after_command: false,
             exited: false,
+            exit_status: None,
+            surface_id: None,
+            orchestration: None,
             child_command: None,
             child_exited: None,
             script_pointer: None,

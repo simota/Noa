@@ -387,10 +387,26 @@ impl App {
         if !self.session_card_is_focused(id) {
             return;
         }
+        self.acknowledge_session_card(window_id, pane_id);
+    }
+
+    /// Clear one pane's unread bell and attention. Returns whether it had
+    /// either.
+    pub(in crate::app) fn acknowledge_session_card(
+        &mut self,
+        window_id: WindowId,
+        pane_id: PaneId,
+    ) -> bool {
+        let id = Self::session_card_id(window_id, pane_id);
+        let had_unread = self
+            .session_store
+            .get(&id)
+            .is_some_and(|card| card.attention || card.unread_bell);
         self.session_store.clear_bell_for_card(id);
         self.attention_flash_until.remove(&id);
         self.request_sidebar_redraw();
         self.mark_overview_label_dirty(OverviewTileId::new(window_id, pane_id));
+        had_unread
     }
 
     /// Whether a window may host a sidebar (FR-14, scratch-terminal R6):

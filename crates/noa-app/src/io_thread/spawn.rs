@@ -510,6 +510,7 @@ pub fn spawn(
                                 id: current_card_target(&window_id, pane_id).1,
                                 status,
                                 at: crate::localtime::wall_clock_now(),
+                                reports: output.agent_reports,
                             }));
                     }
                     if let Some(cue) = progress_cue {

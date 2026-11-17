@@ -22,6 +22,7 @@ mod clipboard;
 mod command_palette;
 mod commands;
 mod connection_qr;
+mod ctl;
 pub mod debounce;
 #[cfg(target_os = "macos")]
 mod ember;

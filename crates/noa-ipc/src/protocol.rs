@@ -180,6 +180,49 @@ pub struct Panel {
     #[serde(default = "default_attachable")]
     pub attachable: bool,
     pub preview: Vec<Row>,
+    /// The pane child's `NOA_SURFACE_ID`, so a process inside a pane can find
+    /// its own panel (agent-orchestration D1). Absent for remote panes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface_id: Option<String>,
+    /// Coding-agent state (agent-orchestration D1). Absent unless the
+    /// foreground process is a recognized agent or a report arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<PanelAgent>,
+    /// Present only while the pane is held open after its child exited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<PanelExit>,
+    /// The orchestrator pane that spawned this one, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_pane_id: Option<WireId>,
+    /// The label given at spawn, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// `Panel.agent`. `state`/`detail` mirror the last `OSC 777;noa-agent`
+/// report; `seq` counts reports for this pane (each report, `clear`
+/// included, advances it by one), so a waiter can ignore a report that
+/// predates the input it sent.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PanelAgent {
+    /// `claude` / `codex` / `agy`, from the foreground process name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// `running` / `permission` / `input` / `finished` / `error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub seq: u64,
+}
+
+/// `Panel.exit`: the held-open pane's child exit code, when one was reported.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PanelExit {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<i32>,
 }
 
 const fn default_attachable() -> bool {
@@ -390,7 +433,68 @@ pub struct ResizePaneParams {
 pub struct NewTabParams {
     #[serde(default)]
     pub window_id: Option<WireId>,
+    #[serde(flatten)]
+    pub spawn: SpawnParams,
 }
+
+/// What a new pane runs (agent-orchestration D2): the IPC form of the
+/// AppleScript `surface configuration`. `command` is an argv, spawned
+/// directly (resolved through `env.PATH` when given) instead of the shell.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SpawnConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// Written raw to the new pane's pty right after spawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_input: Option<String>,
+    /// Keep the pane open after its child exits (until closed), so its
+    /// output and exit code stay readable.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wait_after_command: bool,
+}
+
+impl SpawnConfig {
+    /// Whether this config makes the new pane run or type something, which
+    /// takes the `input` scope on top of `control`.
+    pub fn needs_input_scope(&self) -> bool {
+        self.command.is_some() || self.initial_input.is_some() || !self.env.is_empty()
+    }
+}
+
+/// The spawn extensions `noa.newTab`/`noa.split` share (agent-orchestration
+/// D2). All optional; a request with none of them behaves exactly as before.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SpawnParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<SpawnConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_pane_id: Option<WireId>,
+    /// `false` keeps keyboard focus where it was. Omitted means `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<bool>,
+}
+
+impl SpawnParams {
+    /// Whether any extension is present; `false` keeps the request on the
+    /// pre-orchestration `new_tab`/`split` backend path.
+    pub fn is_extended(&self) -> bool {
+        self.config.is_some()
+            || self.label.is_some()
+            || self.parent_pane_id.is_some()
+            || self.focus.is_some()
+    }
+}
+
+/// Upper bound on `SpawnParams.label`, in bytes.
+pub const MAX_SPAWN_LABEL_BYTES: usize = 128;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -404,7 +508,31 @@ pub struct PaneIdResult {
 #[serde(rename_all = "camelCase")]
 pub struct SplitParams {
     pub pane_id: WireId,
-    pub direction: SplitDirection,
+    pub direction: SplitPlacement,
+    #[serde(flatten)]
+    pub spawn: SpawnParams,
+}
+
+/// `direction` for `noa.split`: a fixed direction, or `auto`
+/// (agent-orchestration D2), where the server picks the pane to split and
+/// the direction among `paneId` and the panes it spawned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SplitPlacement {
+    Horizontal,
+    Vertical,
+    Auto,
+}
+
+impl SplitPlacement {
+    /// The fixed direction, or `None` for `auto`.
+    pub fn direction(self) -> Option<SplitDirection> {
+        match self {
+            Self::Horizontal => Some(SplitDirection::Horizontal),
+            Self::Vertical => Some(SplitDirection::Vertical),
+            Self::Auto => None,
+        }
+    }
 }
 
 // ---- noa.subscribe / noa.unsubscribe ----

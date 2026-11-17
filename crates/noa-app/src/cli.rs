@@ -32,11 +32,12 @@ pub enum CliAction {
     ExplainConfig,
     ListActions,
     Help,
+    Ctl,
 }
 
 impl CliAction {
     /// Every action, in the order `+list-actions` presents them.
-    pub const ALL: [CliAction; 8] = [
+    pub const ALL: [CliAction; 9] = [
         CliAction::Version,
         CliAction::ListThemes,
         CliAction::ListKeybinds,
@@ -45,6 +46,7 @@ impl CliAction {
         CliAction::ExplainConfig,
         CliAction::ListActions,
         CliAction::Help,
+        CliAction::Ctl,
     ];
 
     /// The action name as typed after `+` on the command line.
@@ -58,6 +60,7 @@ impl CliAction {
             Self::ExplainConfig => "explain-config",
             Self::ListActions => "list-actions",
             Self::Help => "help",
+            Self::Ctl => "ctl",
         }
     }
 
@@ -75,6 +78,7 @@ impl CliAction {
             Self::ExplainConfig => "Explain one config option or keybind action.",
             Self::ListActions => "List available +actions.",
             Self::Help => "Alias for +list-actions.",
+            Self::Ctl => "Drive worker panes from a script (see +ctl --help).",
         }
     }
 }
@@ -172,6 +176,13 @@ pub fn run_action<S: AsRef<str>>(action: CliAction, args: &[S]) -> anyhow::Resul
             }
         },
         CliAction::ListActions | CliAction::Help => print!("{}", list_actions_output()),
+        CliAction::Ctl => {
+            let args: Vec<String> = args.iter().map(|arg| arg.as_ref().to_string()).collect();
+            let code = crate::ctl::run(&args);
+            if code != crate::ctl::EXIT_OK {
+                std::process::exit(code);
+            }
+        }
     }
     Ok(())
 }

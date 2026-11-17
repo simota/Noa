@@ -22,8 +22,8 @@ use noa_core::{CellAttrs, Color};
 use noa_grid::{Cell, Row as GridRow, Terminal};
 use noa_ipc::protocol::{Span, SpanColor};
 use noa_ipc::{
-    Attr, GridResult, IpcBackend, IpcError, PaneRef, Panel, Row as WireRow, SplitDirection,
-    TextResult, TextSource, WindowRef,
+    Attr, GridResult, IpcBackend, IpcError, PaneRef, Panel, PanelAgent, PanelExit, Row as WireRow,
+    SpawnParams, SpawnTarget, SplitDirection, TextResult, TextSource, WindowRef, WireId,
 };
 
 use crate::events::UserEvent;
@@ -266,6 +266,11 @@ pub(crate) enum IpcActionKind {
         cols: u16,
         rows: u16,
     },
+    /// `noa.newTab`/`noa.split` with agent-orchestration extensions.
+    Spawn {
+        target: SpawnTarget,
+        params: SpawnParams,
+    },
 }
 
 pub(crate) enum IpcActionReply {
@@ -451,6 +456,13 @@ impl IpcBackend for AppIpcBackend {
         }
     }
 
+    fn spawn(&self, target: SpawnTarget, params: SpawnParams) -> Result<PaneRef, IpcError> {
+        match self.submit(IpcActionKind::Spawn { target, params })? {
+            IpcActionReply::NewPane(id) => Ok(id),
+            IpcActionReply::Ok => Err(IpcError::Internal("unexpected reply".to_string())),
+        }
+    }
+
     fn close_pane(&self, pane: PaneRef) -> Result<(), IpcError> {
         self.submit(IpcActionKind::ClosePane { pane }).map(|_| ())
     }
@@ -598,6 +610,16 @@ fn wire_attrs(cell: &Cell) -> Option<Vec<Attr>> {
     if out.is_empty() { None } else { Some(out) }
 }
 
+/// The per-pane facts `Panel` carries that live on the app's `Surface`
+/// rather than on its `SessionCard` (agent-orchestration D1).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct PanelSurfaceFacts {
+    pub(crate) surface_id: Option<String>,
+    pub(crate) exit: Option<crate::events::ChildExit>,
+    pub(crate) parent_pane_id: Option<u64>,
+    pub(crate) label: Option<String>,
+}
+
 /// `SessionCard` -> wire `Panel` (spec §L2 "ID モデル & Panel メタデータ":
 /// "`SessionCard` を鏡写しにする"). `preview` reuses the card's own color
 /// runs, converted through the same [`wire_color`] mapping as grid rows.
@@ -607,6 +629,7 @@ pub(crate) fn card_to_panel(
     window_id: u64,
     card: &SessionCard,
     attachable: bool,
+    facts: PanelSurfaceFacts,
 ) -> Panel {
     Panel {
         window_group_id: window_group_id.into(),
@@ -625,6 +648,92 @@ pub(crate) fn card_to_panel(
             .enumerate()
             .map(|(row, line)| preview_line_to_row(row as u64, line))
             .collect(),
+        surface_id: facts.surface_id,
+        agent: panel_agent(card),
+        exit: facts.exit.map(|exit| PanelExit {
+            code: exit.exit_code,
+        }),
+        parent_pane_id: facts.parent_pane_id.map(WireId),
+        label: facts.label,
+    }
+}
+
+/// A `Panel` for a live pane with no session card yet (an orchestrator's
+/// worker before its first output): no name, cwd, or preview to show.
+pub(crate) fn bare_panel(
+    ipc_id: u64,
+    window_group_id: u64,
+    window_id: u64,
+    attachable: bool,
+    facts: PanelSurfaceFacts,
+) -> Panel {
+    Panel {
+        window_group_id: window_group_id.into(),
+        window_id: window_id.into(),
+        pane_id: ipc_id.into(),
+        name: String::new(),
+        cwd: String::new(),
+        branch: None,
+        process: None,
+        busy: false,
+        attention: false,
+        attachable,
+        preview: Vec::new(),
+        surface_id: facts.surface_id,
+        agent: None,
+        exit: facts.exit.map(|exit| PanelExit {
+            code: exit.exit_code,
+        }),
+        parent_pane_id: facts.parent_pane_id.map(WireId),
+        label: facts.label,
+    }
+}
+
+/// `Panel.agent`: present when the foreground process is a recognized agent
+/// or any report has arrived (a report survives its agent leaving only until
+/// the session store clears it).
+fn panel_agent(card: &SessionCard) -> Option<PanelAgent> {
+    let kind = card
+        .process
+        .as_deref()
+        .and_then(|process| agent_wire_kind(crate::sidebar::classify_agent(process)));
+    if kind.is_none() && card.agent_status.is_none() && card.agent_seq == 0 {
+        return None;
+    }
+    Some(PanelAgent {
+        kind: kind.map(str::to_string),
+        state: card
+            .agent_status
+            .as_ref()
+            .map(|status| agent_wire_state(status.state).to_string()),
+        detail: card
+            .agent_status
+            .as_ref()
+            .map(|status| status.detail.clone())
+            .filter(|detail| !detail.is_empty()),
+        seq: card.agent_seq,
+    })
+}
+
+fn agent_wire_kind(kind: crate::sidebar::AgentKind) -> Option<&'static str> {
+    use crate::sidebar::AgentKind;
+    match kind {
+        AgentKind::ClaudeCode => Some("claude"),
+        AgentKind::Codex => Some("codex"),
+        AgentKind::Agy => Some("agy"),
+        AgentKind::Generic => None,
+    }
+}
+
+/// The `OSC 777;noa-agent` state names, which are also the wire names.
+fn agent_wire_state(state: noa_grid::AgentState) -> &'static str {
+    use noa_grid::AgentState;
+    match state {
+        AgentState::Running => "running",
+        AgentState::Permission => "permission",
+        AgentState::Input => "input",
+        AgentState::Finished => "finished",
+        AgentState::Error => "error",
     }
 }
 
@@ -656,6 +765,102 @@ mod tests {
     use super::*;
     use noa_core::Rgb;
     use noa_grid::cell::Cell;
+
+    fn agent_card(process: Option<&str>) -> SessionCard {
+        let mut store = crate::session_store::SessionStore::new();
+        let id = SessionCardId::new(crate::session_store::SessionWindowId(1), noa_grid_pane(1));
+        store.apply(crate::session_store::SessionDelta::Upsert {
+            id,
+            name: "agent".to_string(),
+            cwd: "/repo".to_string(),
+            busy: false,
+            preview: None,
+            updated_at: crate::localtime::wall_clock_now(),
+            seq: 1,
+        });
+        store.apply(crate::session_store::SessionDelta::Process {
+            id,
+            process: process.map(str::to_string),
+        });
+        store.get(&id).unwrap().clone()
+    }
+
+    fn noa_grid_pane(id: u64) -> crate::split_tree::PaneId {
+        crate::split_tree::PaneId::new(id)
+    }
+
+    // agent-orchestration D1.
+    #[test]
+    fn panel_carries_agent_kind_state_and_surface_facts() {
+        let mut card = agent_card(Some("codex"));
+        card.agent_status = Some(noa_grid::AgentStatus {
+            state: noa_grid::AgentState::Permission,
+            detail: "Bash".to_string(),
+        });
+        card.agent_seq = 4;
+        let facts = PanelSurfaceFacts {
+            surface_id: Some("0x00000000000000aa".to_string()),
+            exit: Some(crate::events::ChildExit {
+                runtime_ms: 10,
+                exit_code: Some(1),
+            }),
+            parent_pane_id: Some(3),
+            label: Some("review".to_string()),
+        };
+
+        let panel = card_to_panel(8, 1, 2, &card, true, facts);
+
+        assert_eq!(
+            panel.agent,
+            Some(PanelAgent {
+                kind: Some("codex".to_string()),
+                state: Some("permission".to_string()),
+                detail: Some("Bash".to_string()),
+                seq: 4,
+            })
+        );
+        assert_eq!(panel.exit, Some(PanelExit { code: Some(1) }));
+        assert_eq!(panel.surface_id.as_deref(), Some("0x00000000000000aa"));
+        assert_eq!(panel.parent_pane_id, Some(WireId(3)));
+        assert_eq!(panel.label.as_deref(), Some("review"));
+    }
+
+    #[test]
+    fn a_plain_shell_panel_has_no_agent_or_orchestration_fields() {
+        let panel = card_to_panel(
+            8,
+            1,
+            2,
+            &agent_card(Some("zsh")),
+            true,
+            PanelSurfaceFacts::default(),
+        );
+
+        assert!(panel.agent.is_none());
+        assert!(panel.exit.is_none() && panel.parent_pane_id.is_none() && panel.label.is_none());
+    }
+
+    #[test]
+    fn a_recognized_agent_without_reports_still_has_its_kind() {
+        let panel = card_to_panel(
+            8,
+            1,
+            2,
+            &agent_card(Some("claude")),
+            true,
+            PanelSurfaceFacts::default(),
+        );
+
+        assert_eq!(
+            panel.agent,
+            Some(PanelAgent {
+                kind: Some("claude".to_string()),
+                state: None,
+                detail: None,
+                seq: 0,
+            })
+        );
+    }
 
     #[test]
     fn registry_mint_is_idempotent_and_resolves_both_ways() {

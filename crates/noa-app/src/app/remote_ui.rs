@@ -1396,6 +1396,11 @@ mod tests {
             attention: false,
             attachable: true,
             preview: Vec::new(),
+            surface_id: None,
+            agent: None,
+            exit: None,
+            parent_pane_id: None,
+            label: None,
         }
     }
 

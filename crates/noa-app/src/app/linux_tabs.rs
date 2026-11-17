@@ -192,6 +192,23 @@ impl App {
         }
     }
 
+    /// [`Self::focus_tab`] without activating the app, for focus a script
+    /// moves: the tab comes to the front of its window and becomes key within
+    /// Noa, but another app the user is in stays in front.
+    pub(super) fn raise_tab_without_activating(&mut self, tab: WindowId) {
+        if self
+            .windows
+            .get(&tab)
+            .is_some_and(|state| state.background_tab)
+        {
+            self.activate_tab(tab);
+        }
+        self.focused = Some(tab);
+        if let Some(state) = self.windows.get(&tab) {
+            crate::macos_window::make_key_without_activating(&state.window);
+        }
+    }
+
     /// Height of the in-window tab bar `tab` paints: zero on macOS and while
     /// the OS window holds a single tab.
     pub(super) fn tab_bar_height_px(&self, tab: WindowId) -> u32 {

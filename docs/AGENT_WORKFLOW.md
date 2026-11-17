@@ -240,4 +240,68 @@ terminal reports nothing.
 
 Event meanings follow the [Claude Code hook reference](https://code.claude.com/docs/en/hooks).
 Other agents can emit the protocol; only a Claude Code adapter is included.
-Structured status currently feeds local cards; remote client metadata is unchanged.
+Structured status feeds local cards and, through `Panel.agent`, noa-server clients
+(see below).
+
+Any hook can also report with `"$NOA_BIN" +ctl report <state> [detail]`, which writes
+the same sequence to the hook's controlling terminal. `NOA_BIN` is the absolute path
+of the running Noa, set in every pane.
+
+## Orchestrating worker panes
+
+An orchestrator (an agent or a script in one pane) can start worker panes, type
+into them, wait for their agents, read their output, and close them with
+`Noa +ctl`. Each command prints one JSON object per line.
+
+Enable the control server with the scopes the commands need:
+
+```conf
+server-enable = true
+server-scopes = read,control,input
+```
+
+A typical round, from inside the orchestrator's pane:
+
+```sh
+noa() { "$NOA_BIN" +ctl "$@"; }
+pane=$(noa spawn --label tests -- claude | jq -r .paneId)
+noa send "$pane" --enter --wait --timeout 1800 "Fix the failing test in crates/noa-vt"
+noa read "$pane" --scrollback --max-bytes 65536
+noa close "$pane"
+```
+
+| Command | What it does |
+|---|---|
+| `spawn [--split auto\|right\|down \| --tab] [--cwd D] [--env K=V] [--label L] [--input T] [--no-wait-after] [--focus] [--max-children N] [-- CMD...]` | Starts a worker next to this pane (`auto` by default: right of the orchestrator first, then by splitting the largest worker). Focus stays where it was unless `--focus`. The command runs without a shell, found on the orchestrator's own `PATH`; the cwd defaults to the orchestrator's. Finished workers stay open (with their exit code in `Panel.exit`) until closed, unless `--no-wait-after`. One orchestrator may hold 8 workers unless `--max-children` says otherwise; the count is checked before each spawn, so spawns run in parallel can exceed it. A relative `--cwd` is taken from the orchestrator's cwd |
+| `send PANE [--enter] [--raw] [--wait ...] TEXT\|-` | Pastes `TEXT` (or stdin) and, with `--enter`, submits it. Prints `{"paneId","seq"}`: pass `seq` to `wait --after`, which covers state reports but not `attention` (a notification-only worker that finishes before the wait starts is missed). `--wait` waits right away, with no chance to miss the reply |
+| `wait PANE...\|--children [--after SEQ] [--for LIST] [--all] [--timeout S]` | Returns when one of the panes (all of them with `--all`) stops: `finished`, `permission`, `input`, `error`, `exit` (printed whatever `--for` lists when a pane is gone or has exited and stays open, since neither will report again; without `--all`, a pane that had already exited when the wait began is skipped while other panes are left), or `attention`. Prints one line per pane that stopped; exits 2 on timeout |
+| `read PANE [--scrollback] [--max-bytes N]` | Prints the screen, or the retained output tail |
+| `close PANE...\|--children` | Closes workers without a confirmation dialog |
+| `ls [--children]` / `self` | Lists panels / prints this pane's panel |
+
+Put `--` before a `send` text (or `report` detail) that starts with `--`.
+
+`send` and `close` refuse panes this orchestrator did not spawn unless `--any-pane`
+is given. This guards against a wrong id; it is not a security boundary.
+
+`wait` relies on agent-state reports. Claude Code reports through the hook adapter
+above, including approval and question prompts. For Codex and Antigravity CLI,
+configure their hooks to call `+ctl report`; their documented events (as of this
+writing; check your installed version) cover the start and end of a turn but not
+approval prompts, which therefore surface as `attention` (the agent's own
+notification). `attention` means a notification arrived, not that the agent is
+blocked; read the pane to decide. Without any report, a worker can only be waited
+on for `exit`.
+
+| Agent | Run `"$NOA_BIN" +ctl report running` on | Run `"$NOA_BIN" +ctl report finished` on |
+|---|---|---|
+| Codex | `UserPromptSubmit` | `Stop` |
+| Antigravity CLI | `PreInvocation` | `Stop` |
+
+The event names come from third-party and vendor documentation that Noa does not
+test against, and both tools change where and how hooks are configured between
+versions. Check your installed version's hook documentation (`/hooks` lists
+loaded hooks in agy) before relying on them.
+
+Exit status: 0 success, 1 error (bad arguments, unknown pane), 2 `wait` timed out,
+3 the server is disabled, unreachable, lacks a scope, or went away mid-command.

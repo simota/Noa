@@ -762,8 +762,14 @@ fn prespawn_matches(
 /// random nonzero 64-bit id, as 16 hex digits, unique to each pane's child.
 const SURFACE_ID_ENV: &str = "NOA_SURFACE_ID";
 
-/// `config` with a fresh [`SURFACE_ID_ENV`] in front of its own env, so an
-/// env the spawn asked for still wins (Ghostty applies `env` after it too).
+/// The absolute path of the running Noa executable, so a process in a pane
+/// can run `"$NOA_BIN" +ctl …` without Noa on its `PATH`
+/// (agent-orchestration D4).
+const NOA_BIN_ENV: &str = "NOA_BIN";
+
+/// `config` with a fresh [`SURFACE_ID_ENV`] (and [`NOA_BIN_ENV`]) in front of
+/// its own env, so an env the spawn asked for still wins (Ghostty applies
+/// `env` after it too).
 fn with_surface_id(mut config: PtyConfig) -> PtyConfig {
     let id = loop {
         let candidate: u64 = rand::random();
@@ -774,7 +780,21 @@ fn with_surface_id(mut config: PtyConfig) -> PtyConfig {
     config
         .env
         .insert(0, (SURFACE_ID_ENV.to_string(), format!("0x{id:016x}")));
+    if let Some(exe) = noa_bin_path() {
+        config.env.insert(1, (NOA_BIN_ENV.to_string(), exe));
+    }
     config
+}
+
+/// [`NOA_BIN_ENV`]'s value, resolved once per process.
+fn noa_bin_path() -> Option<String> {
+    static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|path| path.into_os_string().into_string().ok())
+    })
+    .clone()
 }
 
 impl App {
@@ -1159,7 +1179,12 @@ mod tests {
         let second = with_surface_id(request()).env;
 
         assert_eq!(first[0].0, SURFACE_ID_ENV);
-        assert_eq!(first[1], ("FOO".to_string(), "bar".to_string()));
+        // `NOA_BIN` follows (agent-orchestration D4); the requested env comes
+        // after both, so it still wins.
+        let exe = noa_bin_path().expect("the test binary's own path resolves");
+        assert_eq!(first[1], (NOA_BIN_ENV.to_string(), exe));
+        assert_eq!(first[2], ("FOO".to_string(), "bar".to_string()));
+        assert_eq!(first.len(), 3);
         let hex = first[0].1.strip_prefix("0x").expect("0x prefix");
         assert_eq!(hex.len(), 16);
         assert_ne!(u64::from_str_radix(hex, 16).expect("hex"), 0);

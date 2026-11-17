@@ -74,6 +74,8 @@ pub struct Pty {
     started_at: std::time::Instant,
     exited_at: std::sync::Arc<std::sync::OnceLock<std::time::Instant>>,
     command_line: String,
+    /// The extra environment the child was spawned with (`PtyConfig::env`).
+    env: Vec<(String, String)>,
 }
 
 impl Pty {
@@ -250,6 +252,7 @@ impl Pty {
             started_at,
             exited_at,
             command_line,
+            env: config.env,
         })
     }
 
@@ -262,6 +265,17 @@ impl Pty {
             .copied()
             .unwrap_or_else(std::time::Instant::now);
         end.saturating_duration_since(self.started_at)
+    }
+
+    /// The value of `key` in the extra environment the child was spawned
+    /// with (`PtyConfig::env`; the last assignment wins, as in the child).
+    /// Inherited variables are not visible here.
+    pub fn spawn_env(&self, key: &str) -> Option<&str> {
+        self.env
+            .iter()
+            .rev()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.as_str())
     }
 
     /// The child's argv joined by spaces, for messages about it.

@@ -17,8 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   All additive; the protocol stays at version 3.
 - Every pane's environment carries `NOA_BIN`, the running Noa's path.
 - `Noa +ctl board` shows an orchestrator's workers in a pane: who needs you
-  first, then who is working, done or exited, each with its last report and the
-  end of its screen. Open a worker for its live screen and the reports seen
+  first, then who is working, done or exited, each with its last report, the
+  last lines of its work above the agent's input box, and how long it has been
+  in its state. Open a worker for its live screen and the reports seen
   since the board opened; send it a message, move to it, or close it.
   `+ctl board --open` starts one next to the orchestrator.
 - `Noa +ctl spawn` puts every worker in a floating pane over the

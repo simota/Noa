@@ -320,7 +320,9 @@ worker when it has none; `--of PANE` picks one.
 
 The list puts workers that need you first (an approval or question prompt, an
 error, an unread notification), then those working, done, and exited. Each card
-shows the worker's last report and the last lines of its screen. Keys: `j`/`k`
+shows the worker's last report (or the last detail it gave), the last lines of
+its work (above an agent's input box and status line), its report count, and
+how long it has been in its state. Keys: `j`/`k`
 select, `Enter` opens a worker's live screen and the reports seen since the board
 opened, `g` moves to the worker's pane (answer prompts there), `s` types a
 message (a paste can span lines) and sends it with Enter, except to a worker

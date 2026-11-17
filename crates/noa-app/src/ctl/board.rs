@@ -195,6 +195,9 @@ pub(crate) struct Board {
     started: bool,
     screens: HashMap<u64, Vec<String>>,
     history: HashMap<u64, Vec<Report>>,
+    /// Each worker's status and when the board saw it begin (`None`: it
+    /// was already so when the board opened).
+    since: HashMap<u64, (Status, Option<Instant>)>,
     selected: Option<u64>,
     pub(crate) view: View,
     pub(crate) mode: Mode,
@@ -211,6 +214,7 @@ impl Board {
             started: false,
             screens: HashMap::new(),
             history: HashMap::new(),
+            since: HashMap::new(),
             selected: None,
             view: View::List,
             mode: Mode::Normal,
@@ -239,7 +243,14 @@ impl Board {
                 )
             })
             .collect();
-        for (pane, seq, status, detail) in workers {
+        for (pane, seq, status, detail) in workers.iter().cloned() {
+            match self.since.get(&pane) {
+                Some((seen, _)) if *seen == status => {}
+                _ => {
+                    let at = (!first).then_some(now);
+                    self.since.insert(pane, (status, at));
+                }
+            }
             let Some(seq) = seq else { continue };
             let history = self.history.entry(pane).or_default();
             let newest = history.first().map(|report| report.seq);
@@ -259,6 +270,7 @@ impl Board {
         }
         let live: Vec<u64> = self.workers().iter().map(|panel| panel.pane_id.0).collect();
         self.history.retain(|pane, _| live.contains(pane));
+        self.since.retain(|pane, _| live.contains(pane));
         self.screens.retain(|pane, _| live.contains(pane));
         if self.selected.is_none_or(|pane| !live.contains(&pane)) {
             self.selected = live.first().copied();
@@ -435,6 +447,31 @@ impl Board {
 // control characters reach this terminal.
 fn approval_message(name: &str) -> String {
     format!("{name} は承認待ちです。g でペインへ移動して答えてください")
+}
+
+/// A full-width rule, as agents draw around their input box.
+fn is_rule(line: &str) -> bool {
+    let line = line.trim();
+    line.chars().count() >= 20 && line.chars().all(|ch| matches!(ch, '─' | '━' | '═'))
+}
+
+/// The part of a screen that shows work: above the agent's input box (the
+/// rules near the bottom and what lies between and below them, where its
+/// prompt and status line live). A screen without one is all work.
+pub(crate) fn content_lines(lines: &[String]) -> &[String] {
+    const BOX_REACH: usize = 12;
+    const RULE_GAP: usize = 4;
+    let bottom = lines.len().saturating_sub(BOX_REACH);
+    let Some(mut first) = (bottom..lines.len()).rev().find(|&i| is_rule(&lines[i])) else {
+        return lines;
+    };
+    while let Some(above) = (first.saturating_sub(RULE_GAP)..first)
+        .rev()
+        .find(|&i| is_rule(&lines[i]))
+    {
+        first = above;
+    }
+    &lines[..first]
 }
 
 fn worker_name(panel: &Panel) -> String {
@@ -747,6 +784,16 @@ fn clean(s: &str) -> String {
     s.chars().filter(|ch| !ch.is_control()).collect()
 }
 
+/// "10 秒", "2 分", "3 時間".
+fn duration_text(span: Duration) -> String {
+    let secs = span.as_secs();
+    match secs {
+        0..60 => format!("{secs} 秒"),
+        60..3600 => format!("{} 分", secs / 60),
+        _ => format!("{} 時間", secs / 3600),
+    }
+}
+
 fn ago(at: Option<Instant>, now: Instant) -> String {
     let Some(at) = at else {
         return "開始時".to_string();
@@ -776,7 +823,7 @@ impl Board {
                 .collect();
         }
         let mut lines = match self.view {
-            View::List => self.render_list(cols, rows),
+            View::List => self.render_list(cols, rows, now),
             View::Detail(pane) => self.render_detail(pane, cols, rows, now),
         };
         lines.truncate(rows - 2);
@@ -834,7 +881,7 @@ impl Board {
         ]
     }
 
-    fn render_list(&self, cols: usize, rows: usize) -> Vec<String> {
+    fn render_list(&self, cols: usize, rows: usize, now: Instant) -> Vec<String> {
         let mut lines = self.header(cols);
         let workers = self.workers();
         if workers.is_empty() {
@@ -863,7 +910,7 @@ impl Board {
                 body.push(title.finish(cols));
             }
             let start = body.len();
-            body.extend(self.card(panel, cols));
+            body.extend(self.card(panel, cols, now));
             if Some(panel.pane_id.0) == self.selected {
                 selected_span = (start, body.len());
             }
@@ -876,7 +923,20 @@ impl Board {
         lines
     }
 
-    fn card(&self, panel: &Panel, cols: usize) -> Vec<String> {
+    /// How long `pane` has been in `status`: "2 分" while it lasts, "3 分前"
+    /// once it is done, "開始時から" when it predates the board.
+    fn state_age(&self, pane: u64, status: Status, now: Instant) -> String {
+        let Some((_, Some(at))) = self.since.get(&pane) else {
+            return "開始時から".to_string();
+        };
+        let span = duration_text(now.saturating_duration_since(*at));
+        match status.group() {
+            Group::Done | Group::Exited => format!("{span}前"),
+            Group::Needs | Group::Working => span,
+        }
+    }
+
+    fn card(&self, panel: &Panel, cols: usize, now: Instant) -> Vec<String> {
         let pane = panel.pane_id.0;
         let status = Status::of(panel);
         let selected = Some(pane) == self.selected;
@@ -908,6 +968,8 @@ impl Board {
             .fg(DIM, &right)
             .fg(border, "┐");
 
+        // The report's detail, else the last detail it gave, else its state.
+        let age = self.state_age(pane, status, now);
         let detail = panel
             .agent
             .as_ref()
@@ -919,7 +981,14 @@ impl Board {
                     .as_ref()
                     .map(|_| "プロセスが終了しました".to_string())
             })
-            .unwrap_or_default();
+            .or_else(|| {
+                self.history
+                    .get(&pane)?
+                    .iter()
+                    .map(|report| report.detail.clone())
+                    .find(|detail| !detail.is_empty())
+            })
+            .unwrap_or_else(|| format!("{} · {age}", status.label()));
         let mut out = vec![top.finish(cols)];
         let mut row = |text: &str, color: Rgb| {
             let mut line = Line::default();
@@ -934,7 +1003,7 @@ impl Board {
         let screen = self.screens.get(&pane);
         let preview: Vec<&String> = screen
             .map(|lines| {
-                lines
+                content_lines(lines)
                     .iter()
                     .filter(|line| !line.trim().is_empty())
                     .collect::<Vec<_>>()
@@ -948,9 +1017,12 @@ impl Board {
 
         let mut bottom = Line::default();
         bottom.fg(border, " └ ");
+        let mut facts = Vec::new();
         if let Some(agent) = &panel.agent {
-            bottom.fg(DIM, &format!("ターン {} ", agent.seq));
+            facts.push(format!("報告 {}", agent.seq));
         }
+        facts.push(format!("{} {age}", status.label()));
+        bottom.fg(DIM, &format!("{} ", facts.join(" · ")));
         let fill = cols.saturating_sub(bottom.width + 2);
         bottom.fg(border, &"─".repeat(fill)).fg(border, "┘");
         out.push(bottom.finish(cols));
@@ -973,7 +1045,7 @@ impl Board {
         }
         head.plain("  ").fg(status.color(), &status.label());
         let right = match &panel.agent {
-            Some(agent) => format!("pane {pane} · ターン {} ", agent.seq),
+            Some(agent) => format!("pane {pane} · 報告 {} ", agent.seq),
             None => format!("pane {pane} "),
         };
         if head.width + right.width() < cols {
@@ -1039,7 +1111,7 @@ impl Board {
             let mut line = Line::default();
             let when = ago(report.at, now);
             line.plain("   ")
-                .fg(DIM, &format!("ターン {:<4}", report.seq))
+                .fg(DIM, &format!("報告 {:<4}", report.seq))
                 .plain(" ")
                 .fg(
                     report.status.color(),
@@ -1827,6 +1899,85 @@ mod tests {
         }
     }
 
+    fn rendered(board: &Board, cols: usize, rows: usize, now: Instant) -> String {
+        board
+            .render(cols, rows, now)
+            .iter()
+            .map(|l| visible(l) + "\n")
+            .collect()
+    }
+
+    // Owner request 1 (from a screenshot): every card showed the agent's
+    // input box and status line, the bottom of its screen, not its work.
+    #[test]
+    fn a_card_previews_the_work_above_the_agents_input_box() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), Instant::now());
+        let rule = "─".repeat(40);
+        board.set_screen(
+            2,
+            &format!(
+                "⏺ Wrote store.js\n  ⎿ 42 lines\n\n{rule}\n› commit this\n{rule}\n  todo-sample main\n  ◆◆ 6% (~31t left)\n  -- INSERT -- ▸▸ auto mode on\n"
+            ),
+        );
+        let all = rendered(&board, 80, 40, Instant::now());
+        assert!(
+            all.contains("⏺ Wrote store.js") && all.contains("⎿ 42 lines"),
+            "{all}"
+        );
+        assert!(
+            !all.contains("INSERT") && !all.contains("commit this"),
+            "{all}"
+        );
+
+        // A screen without such a box (a plain command) is shown as before.
+        assert_eq!(content_lines(&["a".to_string(), "b".to_string()]).len(), 2);
+    }
+
+    // Owner request 2: a finished report without a detail left the card's
+    // first line blank.
+    #[test]
+    fn a_card_without_a_detail_says_what_it_last_reported_or_its_state() {
+        let start = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), start);
+        let mut next = sample();
+        let api = next[0].agent.as_mut().unwrap();
+        api.seq = 5;
+        api.state = Some("finished".to_string());
+        api.detail = Some(String::new());
+        board.update(next, start + Duration::from_secs(1));
+        // The earlier report's detail is the last word it gave.
+        let all = rendered(&board, 80, 40, start + Duration::from_secs(2));
+        assert!(all.contains("api detail"), "{all}");
+
+        let mut quiet = Board::new(Some(1), Some(8));
+        let mut panels = sample();
+        panels[2].agent.as_mut().unwrap().detail = None;
+        quiet.update(panels, start);
+        let all = rendered(&quiet, 80, 40, start);
+        assert!(all.contains("完了 · 開始時から"), "{all}");
+    }
+
+    // Owner request 4: how long a worker has been in its state.
+    #[test]
+    fn a_card_tells_how_long_the_worker_has_been_in_its_state() {
+        let start = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), start);
+        let all = rendered(&board, 80, 40, start);
+        assert!(all.contains("作業中 開始時から"), "{all}");
+
+        let mut next = sample();
+        next[0].agent.as_mut().unwrap().state = Some("finished".to_string());
+        next[0].agent.as_mut().unwrap().seq = 5;
+        let changed = start + Duration::from_secs(10);
+        board.update(next.clone(), changed);
+        board.update(next, changed + Duration::from_secs(30));
+        let all = rendered(&board, 80, 40, changed + Duration::from_secs(180));
+        assert!(all.contains("完了 3 分前"), "{all}");
+    }
+
     #[test]
     fn the_list_scrolls_to_keep_the_selection_in_view() {
         let mut board = Board::new(Some(1), None);
@@ -1861,7 +2012,9 @@ mod tests {
             .collect();
         assert!(all.contains("Would you like to run the following command?"));
         assert!(all.contains("報告の履歴"));
-        assert!(all.contains("ターン 5"));
+        // Owner request 3: `seq` counts reports, not turns.
+        assert!(all.contains("報告 5"));
+        assert!(!all.contains("ターン"));
         assert!(all.contains("開始時"));
     }
 }

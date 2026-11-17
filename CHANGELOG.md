@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-17
+
+Agents that run other agents: `Noa +ctl` and a live board of workers.
+
 ### Added
 
 - `Noa +ctl` orchestrates worker panes from a script or an agent: `spawn`, `send`,

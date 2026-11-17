@@ -57,17 +57,21 @@ Commands:
                                 pane's board.
       --cwd DIR  --env KEY=VALUE  --label TEXT  --input TEXT
       --no-wait-after  --focus  --no-board  --max-children N (default 8)
-  send PANE [--enter] [--raw] [--wait [wait options]] [--any-pane] [--] TEXT|-
-                                Type TEXT (or stdin) into PANE; prints the
-                                report count to pass to `wait --after`.
-  wait PANE...|--children [--after SEQ] [--for LIST] [--all] [--timeout SECS]
-                                Block until a worker stops. LIST is a comma list
+  send PANE [--enter] [--raw] [--wait [wait options]] [--answer] [--any-pane]
+       [--] TEXT|-              Type TEXT (or stdin) into PANE; prints the
+                                report count to pass to `wait --after`. Refused
+                                while PANE waits for an approval, unless --answer.
+  wait PANE...|--children [--after SEQ | --after PANE=SEQ ...] [--for LIST]
+       [--all] [--timeout SECS] Block until a worker stops. LIST is a comma list
                                 of finished,permission,input,error,exit,attention
-                                (default: all of them).
+                                (default: all of them). A timeout prints each
+                                pending pane's report count as `baseline`; pass
+                                it back as --after PANE=SEQ to wait on.
   read PANE [--scrollback] [--max-bytes N]
                                 Print PANE's screen (or retained output) text.
   close PANE...|--children [--any-pane]
-                                Close worker panes.
+                                Close worker panes. One that is already gone
+                                prints \"gone\":true and is not an error.
   report STATE [[--] DETAIL]    Write an agent-state report (running, permission,
                                 input, finished, error, clear) to this terminal.
   board [--of PANE]             Show an orchestrator's workers in this pane
@@ -156,6 +160,8 @@ pub(crate) struct SendArgs {
     pub(crate) enter: bool,
     pub(crate) raw: bool,
     pub(crate) any_pane: bool,
+    /// `--answer`: type into a pane that waits for an approval.
+    pub(crate) answer: bool,
     /// `--wait`: block like `wait PANE --after <seq before sending>`.
     pub(crate) wait: Option<WaitOptions>,
 }
@@ -163,7 +169,8 @@ pub(crate) struct SendArgs {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WaitArgs {
     pub(crate) panes: PaneSet,
-    pub(crate) after: Option<u64>,
+    /// `--after`: `(pane, report count)` baselines.
+    pub(crate) after: Vec<(u64, u64)>,
     pub(crate) options: WaitOptions,
 }
 
@@ -252,15 +259,13 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
         "spawn" => Command::Spawn(parse_spawn(&mut rest)?),
         "send" => Command::Send(parse_send(&mut rest)?),
         "wait" => {
-            let after = rest
-                .value("--after")?
-                .map(|v| parse_u64("--after", &v))
-                .transpose()?;
+            let mut afters = Vec::new();
+            while let Some(value) = rest.value("--after")? {
+                afters.push(value);
+            }
             let options = parse_wait_options(&mut rest)?;
             let panes = pane_set(&mut rest)?;
-            if after.is_some() && !matches!(&panes, PaneSet::Ids(ids) if ids.len() == 1) {
-                return Err("--after takes exactly one PANE".to_string());
-            }
+            let after = parse_afters(&afters, &panes)?;
             Command::Wait(WaitArgs {
                 panes,
                 after,
@@ -325,6 +330,25 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
     Ok(command)
 }
 
+/// `--after SEQ` (the one PANE named) or `--after PANE=SEQ`, repeatable.
+fn parse_afters(values: &[String], panes: &PaneSet) -> Result<Vec<(u64, u64)>, String> {
+    let mut after = Vec::new();
+    for value in values {
+        let (pane, seq) = match (value.split_once('='), panes) {
+            (Some((pane, seq)), _) => (parse_u64("--after PANE", pane)?, seq),
+            (None, PaneSet::Ids(ids)) if ids.len() == 1 && values.len() == 1 => (ids[0], &**value),
+            (None, _) => {
+                return Err(
+                    "--after SEQ takes exactly one PANE; use --after PANE=SEQ for several"
+                        .to_string(),
+                );
+            }
+        };
+        after.push((pane, parse_u64("--after", seq)?));
+    }
+    Ok(after)
+}
+
 /// `--tab` or `--split auto|right|down` (default `auto`).
 fn parse_placement(rest: &mut Args) -> Result<Placement, String> {
     let tab = rest.flag("--tab");
@@ -382,6 +406,7 @@ fn parse_send(rest: &mut Args) -> Result<SendArgs, String> {
     let enter = rest.flag("--enter");
     let raw = rest.flag("--raw");
     let any_pane = rest.flag("--any-pane");
+    let answer = rest.flag("--answer");
     let wait = if rest.flag("--wait") {
         Some(parse_wait_options(rest)?)
     } else {
@@ -402,6 +427,7 @@ fn parse_send(rest: &mut Args) -> Result<SendArgs, String> {
         enter,
         raw,
         any_pane,
+        answer,
         wait,
     })
 }
@@ -737,13 +763,16 @@ impl Failure {
     }
 }
 
+/// The server's JSON-RPC code for a request outside the client's scopes.
+const RPC_SCOPE_DENIED: i64 = -32003;
+
 const SCOPES_HINT: &str = "enable it in Noa's config with `server-enable = true` and `server-scopes = read,control,input`";
 
 impl From<ClientError> for Failure {
     fn from(error: ClientError) -> Self {
         match error {
             ClientError::Rpc {
-                code: -32003,
+                code: RPC_SCOPE_DENIED,
                 message,
             } => Failure::unavailable(format!("{message}; {SCOPES_HINT}")),
             ClientError::Rpc { code: -32002, .. } => Failure::error("unknown pane"),
@@ -1031,7 +1060,22 @@ impl Session {
         if any_pane {
             return Ok(());
         }
-        let own = self.own_now()?.ok_or_else(|| {
+        let own = self.guard_own()?;
+        let panels = self.client.list_panels()?;
+        for pane in panes {
+            let child = panels
+                .iter()
+                .any(|panel| panel.pane_id.0 == *pane && panel.parent_pane_id == Some(WireId(own)));
+            if !child {
+                return Err(Failure::error(not_worker_message(*pane)));
+            }
+        }
+        Ok(())
+    }
+
+    /// This pane, for a command that only targets its own workers.
+    fn guard_own(&mut self) -> Result<u64, Failure> {
+        self.own_now()?.ok_or_else(|| {
             Failure::error(format!(
                 "{} Without a pane of its own there are no workers to target; pass \
                  --any-pane to target a pane anyway.",
@@ -1041,19 +1085,19 @@ impl Session {
                     self.lacks_surface_ids
                 )
             ))
-        })?;
-        let panels = self.client.list_panels()?;
-        for pane in panes {
-            let child = panels
-                .iter()
-                .any(|panel| panel.pane_id.0 == *pane && panel.parent_pane_id == Some(WireId(own)));
-            if !child {
-                return Err(Failure::error(format!(
-                    "pane {pane} is not a worker of this pane (pass --any-pane to target it)"
-                )));
-            }
-        }
-        Ok(())
+        })
+    }
+
+    /// `close`: a pane that is already gone counts as closed, and one
+    /// failure does not keep the rest open, so cleanup after a failed run
+    /// always finishes.
+    fn close(&mut self, panes: &[u64], any_pane: bool) -> Result<i32, Failure> {
+        let own = if any_pane {
+            None
+        } else {
+            Some(self.guard_own()?)
+        };
+        close_panes(&mut self.client, panes, own, &mut print_json)
     }
 
     fn execute(&mut self, command: Command) -> Result<i32, Failure> {
@@ -1083,7 +1127,7 @@ impl Session {
                 if panes.is_empty() {
                     return Err(Failure::error("no panes to wait for"));
                 }
-                return self.wait(&panes, args.after, &args.options);
+                return self.wait(&panes, &args.after, &args.options);
             }
             Command::Read {
                 pane,
@@ -1104,11 +1148,7 @@ impl Session {
             }
             Command::Close { panes, any_pane } => {
                 let panes = self.resolve(&panes)?;
-                self.guard(&panes, any_pane)?;
-                for pane in panes {
-                    self.client.close_pane(pane)?;
-                    print_json(&serde_json::json!({ "paneId": WireId(pane), "closed": true }));
-                }
+                return self.close(&panes, any_pane);
             }
             Command::Board { of, open } => return self.board(of, open),
             Command::Report { .. } => unreachable!("handled before connecting"),
@@ -1259,6 +1299,15 @@ impl Session {
             .find(|panel| panel.pane_id.0 == args.pane)
             .ok_or_else(|| Failure::error("unknown pane"))?;
         let seq = before.agent.as_ref().map_or(0, |agent| agent.seq);
+        // Enter approves some prompts with their default choice (D7), so an
+        // approval is only answered on purpose.
+        if !args.answer && awaits_approval(&before) {
+            return Err(Failure::error(format!(
+                "pane {} is waiting for an approval; nothing was sent. Read it, and pass \
+                 --answer to answer it from here.",
+                args.pane
+            )));
+        }
         // Subscribe before typing, so the reply cannot arrive unobserved.
         if args.wait.is_some() {
             self.client
@@ -1270,6 +1319,18 @@ impl Session {
         if args.enter {
             if !text.is_empty() {
                 std::thread::sleep(SUBMIT_DELAY);
+                let asked = self
+                    .client
+                    .list_panels()?
+                    .iter()
+                    .any(|panel| panel.pane_id.0 == args.pane && awaits_approval(panel));
+                if !args.answer && asked {
+                    return Err(Failure::error(format!(
+                        "pane {} began waiting for an approval after the text was typed; \
+                         Enter was not sent, so the text may still be in its input line.",
+                        args.pane
+                    )));
+                }
             }
             self.client.send_text(args.pane, "\r", false)?;
         }
@@ -1287,11 +1348,12 @@ impl Session {
     fn wait(
         &mut self,
         panes: &[u64],
-        after: Option<u64>,
+        after: &[(u64, u64)],
         options: &WaitOptions,
     ) -> Result<i32, Failure> {
         self.client
             .subscribe(&[EventKind::StateChanged], Some(panes))?;
+        let after = wait_baselines(panes, after).map_err(Failure::error)?;
         self.wait_subscribed(panes, WaitStart::Listed { after }, options)
     }
 
@@ -1315,8 +1377,9 @@ impl Session {
 /// Where a wait's per-pane baselines come from.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum WaitStart {
-    /// The first listing inside the wait; `after` overrides the report count.
-    Listed { after: Option<u64> },
+    /// The first listing inside the wait; `after` overrides the report
+    /// count of the panes it names.
+    Listed { after: HashMap<u64, u64> },
     /// Panels observed before input was sent (`send --wait`): a change that
     /// lands between sending and the first listing still ends the wait.
     Before {
@@ -1377,7 +1440,7 @@ pub(crate) fn wait_loop(
     let mut watches: Vec<Watch> = match start {
         WaitStart::Listed { after } => panes
             .iter()
-            .map(|pane| Watch::new(*pane, latest.get(pane), after))
+            .map(|pane| Watch::new(*pane, latest.get(pane), after.get(pane).copied()))
             .collect(),
         WaitStart::Before { panels, after } => {
             let before = watched(panels, panes);
@@ -1422,9 +1485,20 @@ pub(crate) fn wait_loop(
                     let pending: Vec<_> = watches
                         .iter()
                         .filter(|watch| !done.contains(&watch.pane))
-                        .map(|watch| WireId(watch.pane))
                         .collect();
-                    emit(&serde_json::json!({ "timeout": true, "pending": pending }));
+                    // The baselines let a later `wait --after` carry on
+                    // without missing a report that lands in between.
+                    emit(&serde_json::json!({
+                        "timeout": true,
+                        "pending": pending.iter().map(|watch| WireId(watch.pane)).collect::<Vec<_>>(),
+                        "baseline": pending
+                            .iter()
+                            .map(|watch| serde_json::json!({
+                                "paneId": WireId(watch.pane),
+                                "seq": watch.baseline_seq,
+                            }))
+                            .collect::<Vec<_>>(),
+                    }));
                     return Ok(EXIT_TIMEOUT);
                 }
                 remaining.min(WAIT_RELIST_INTERVAL)
@@ -1460,6 +1534,108 @@ pub(crate) fn send_wait_start(before: Panel, seq: u64) -> WaitStart {
         panels: vec![before],
         after: Some(seq),
     }
+}
+
+/// The `--after` baselines of a wait on `panes` (already resolved, so
+/// `--children` is checked too).
+pub(crate) fn wait_baselines(
+    panes: &[u64],
+    after: &[(u64, u64)],
+) -> Result<HashMap<u64, u64>, String> {
+    if let Some((pane, _)) = after.iter().find(|(pane, _)| !panes.contains(pane)) {
+        return Err(format!("--after names pane {pane}, which is not waited on"));
+    }
+    Ok(after.iter().copied().collect())
+}
+
+fn not_worker_message(pane: u64) -> String {
+    format!("pane {pane} is not a worker of this pane (pass --any-pane to target it)")
+}
+
+/// Whether `panel`'s agent reported that it waits for an approval.
+pub(crate) fn awaits_approval(panel: &Panel) -> bool {
+    panel
+        .agent
+        .as_ref()
+        .is_some_and(|agent| agent.state.as_deref() == Some("permission"))
+}
+
+/// The panes `close` acts on, each once, with whether it is still listed
+/// (an unlisted one is already gone). `own` is the orchestrator whose
+/// workers are the only panes accepted; `None` (`--any-pane`) accepts any.
+pub(crate) fn close_targets(
+    panels: &[Panel],
+    panes: &[u64],
+    own: Option<u64>,
+) -> Result<Vec<(u64, bool)>, String> {
+    let mut targets: Vec<(u64, bool)> = Vec::with_capacity(panes.len());
+    for pane in panes {
+        if targets.iter().any(|(seen, _)| seen == pane) {
+            continue;
+        }
+        let panel = panels.iter().find(|panel| panel.pane_id.0 == *pane);
+        if let (Some(panel), Some(own)) = (panel, own)
+            && panel.parent_pane_id != Some(WireId(own))
+        {
+            return Err(not_worker_message(*pane));
+        }
+        targets.push((*pane, panel.is_some()));
+    }
+    Ok(targets)
+}
+
+/// What [`close_panes`] talks to: the pane listing and `noa.closePane`.
+pub(crate) trait PaneCloser {
+    fn list(&mut self) -> Result<Vec<Panel>, ClientError>;
+    fn close(&mut self, pane: u64) -> Result<(), ClientError>;
+}
+
+impl PaneCloser for Client {
+    fn list(&mut self) -> Result<Vec<Panel>, ClientError> {
+        self.list_panels()
+    }
+
+    fn close(&mut self, pane: u64) -> Result<(), ClientError> {
+        self.close_pane(pane)
+    }
+}
+
+/// `close`: a pane that is already gone counts as closed, and a pane that
+/// could not be closed does not keep the rest open, so cleanup after a
+/// failed run always finishes. Writes one JSON line per closed pane through
+/// `emit`; returns the exit status.
+pub(crate) fn close_panes(
+    source: &mut impl PaneCloser,
+    panes: &[u64],
+    own: Option<u64>,
+    emit: &mut dyn FnMut(&serde_json::Value),
+) -> Result<i32, Failure> {
+    let panels = source.list()?;
+    let mut failed = false;
+    for (pane, listed) in close_targets(&panels, panes, own).map_err(Failure::error)? {
+        let gone = !listed
+            || match source.close(pane) {
+                Ok(()) => false,
+                // Refused: fine if the pane went away since the listing. A
+                // missing scope refuses every pane, so it fails the command.
+                Err(ClientError::Rpc { code, message }) if code != RPC_SCOPE_DENIED => {
+                    let listed = source.list()?;
+                    if listed.iter().any(|panel| panel.pane_id.0 == pane) {
+                        eprintln!("Noa +ctl: pane {pane} was not closed: {message}");
+                        failed = true;
+                        continue;
+                    }
+                    true
+                }
+                Err(err) => return Err(err.into()),
+            };
+        let mut line = serde_json::json!({ "paneId": WireId(pane), "closed": true });
+        if gone {
+            line["gone"] = true.into();
+        }
+        emit(&line);
+    }
+    Ok(if failed { EXIT_ERROR } else { EXIT_OK })
 }
 
 /// The worker's cwd: `--cwd` (a relative one taken from this process's
@@ -1607,6 +1783,7 @@ mod tests {
                 enter: true,
                 raw: false,
                 any_pane: false,
+                answer: false,
                 wait: Some(WaitOptions {
                     reasons: vec![Reason::Finished, Reason::Error],
                     all: false,
@@ -1624,20 +1801,34 @@ mod tests {
     }
 
     #[test]
-    fn wait_takes_panes_or_children_and_after_only_for_one_pane() {
+    fn wait_takes_panes_or_children_and_a_baseline_per_pane() {
         assert_eq!(
             parse_args(&args(&["wait", "--children", "--all"])).unwrap(),
             Command::Wait(WaitArgs {
                 panes: PaneSet::Children,
-                after: None,
+                after: Vec::new(),
                 options: WaitOptions {
                     all: true,
                     ..WaitOptions::default()
                 },
             })
         );
-        assert!(parse_args(&args(&["wait", "8", "--after", "4"])).is_ok());
-        assert!(parse_args(&args(&["wait", "8", "9", "--after", "4"])).is_err());
+        let after = |items: &[&str]| match parse_args(&args(items)) {
+            Ok(Command::Wait(wait)) => Some(wait.after),
+            _ => None,
+        };
+        assert_eq!(after(&["wait", "8", "--after", "4"]), Some(vec![(8, 4)]));
+        assert_eq!(after(&["wait", "8", "9", "--after", "4"]), None);
+        assert_eq!(
+            after(&["wait", "8", "9", "--after", "8=4", "--after=9=2"]),
+            Some(vec![(8, 4), (9, 2)])
+        );
+        assert_eq!(
+            after(&["wait", "--children", "--after", "8=4"]),
+            Some(vec![(8, 4)])
+        );
+        assert_eq!(after(&["wait", "--children", "--after", "4"]), None);
+        assert_eq!(after(&["wait", "8", "--after", "8=x"]), None);
         assert!(parse_args(&args(&["wait", "--children", "8"])).is_err());
         assert!(parse_args(&args(&["wait"])).is_err());
         assert!(parse_args(&args(&["wait", "8", "--for", "done"])).is_err());
@@ -2047,7 +2238,9 @@ mod tests {
         let code = wait_loop(
             &mut source,
             &[1, 2],
-            WaitStart::Listed { after: None },
+            WaitStart::Listed {
+                after: HashMap::new(),
+            },
             &WaitOptions::default(),
             Duration::ZERO,
             &mut |line| lines.push(line.clone()),
@@ -2081,7 +2274,9 @@ mod tests {
         let code = wait_loop(
             &mut source,
             &[8],
-            WaitStart::Listed { after: None },
+            WaitStart::Listed {
+                after: HashMap::new(),
+            },
             &WaitOptions::default(),
             Duration::ZERO,
             &mut |line| lines.push(line.clone()),
@@ -2114,7 +2309,9 @@ mod tests {
         let code = wait_loop(
             &mut source,
             &[8],
-            WaitStart::Listed { after: None },
+            WaitStart::Listed {
+                after: HashMap::new(),
+            },
             &WaitOptions::default(),
             WAIT_RELIST_INTERVAL,
             &mut |line| lines.push(line.clone()),
@@ -2193,7 +2390,9 @@ mod tests {
         let code = wait_loop(
             &mut source,
             &[1, 2],
-            WaitStart::Listed { after: None },
+            WaitStart::Listed {
+                after: HashMap::new(),
+            },
             &WaitOptions::default(),
             WAIT_RELIST_INTERVAL,
             &mut |line| lines.push(line.clone()),
@@ -2221,7 +2420,9 @@ mod tests {
         let code = wait_loop(
             &mut source,
             &[1],
-            WaitStart::Listed { after: None },
+            WaitStart::Listed {
+                after: HashMap::new(),
+            },
             &WaitOptions::default(),
             WAIT_RELIST_INTERVAL,
             &mut |line| lines.push(line.clone()),
@@ -2248,7 +2449,9 @@ mod tests {
         let code = wait_loop(
             &mut source,
             &[8, 8],
-            WaitStart::Listed { after: Some(1) },
+            WaitStart::Listed {
+                after: HashMap::from([(8, 1)]),
+            },
             &WaitOptions {
                 all: true,
                 ..WaitOptions::default()
@@ -2279,12 +2482,188 @@ mod tests {
         let code = wait_loop(
             &mut source,
             &[8],
-            WaitStart::Listed { after: Some(1) },
+            WaitStart::Listed {
+                after: HashMap::from([(8, 1)]),
+            },
             &wait.options,
             WAIT_RELIST_INTERVAL,
             &mut |_| {},
         );
         assert_eq!(code.ok(), Some(EXIT_OK));
+    }
+
+    // A wait that timed out is carried on with `--after PANE=SEQ`: the
+    // timeout line names each pending pane's baseline, and a report that
+    // landed between the two waits ends the second one.
+    #[test]
+    fn a_timeout_prints_baselines_that_a_later_wait_carries_on_from() {
+        let running = |pane| with_pane(panel(3, Some("running"), false), pane);
+        let mut source = FakeSource {
+            lists: vec![vec![running(8), running(9)]],
+            notifications: Default::default(),
+            list_calls: 0,
+        };
+        let mut lines = Vec::new();
+        let code = wait_loop(
+            &mut source,
+            &[8, 9],
+            WaitStart::Listed {
+                after: HashMap::from([(8, 2)]),
+            },
+            &WaitOptions {
+                timeout: Some(Duration::ZERO),
+                ..WaitOptions::default()
+            },
+            WAIT_RELIST_INTERVAL,
+            &mut |line| lines.push(line.clone()),
+        );
+
+        assert_eq!(code.ok(), Some(EXIT_TIMEOUT));
+        assert_eq!(
+            lines,
+            vec![serde_json::json!({
+                "timeout": true,
+                "pending": ["8", "9"],
+                "baseline": [{"paneId": "8", "seq": 2}, {"paneId": "9", "seq": 3}],
+            })]
+        );
+
+        // Pane 9 finished before the second wait listed it.
+        let mut source = FakeSource {
+            lists: vec![vec![
+                running(8),
+                with_pane(panel(4, Some("finished"), false), 9),
+            ]],
+            notifications: Default::default(),
+            list_calls: 0,
+        };
+        let mut lines = Vec::new();
+        let code = wait_loop(
+            &mut source,
+            &[8, 9],
+            WaitStart::Listed {
+                after: HashMap::from([(8, 2), (9, 3)]),
+            },
+            &WaitOptions::default(),
+            WAIT_RELIST_INTERVAL,
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        assert_eq!(lines[0]["paneId"], serde_json::json!("9"));
+    }
+
+    // Review finding: `wait --children --after 9=4` with only pane 8 as a
+    // child ignored the baseline for 9, so a mistyped id silently waited on 8
+    // from its current report count and missed a report already in.
+    #[test]
+    fn a_baseline_for_a_pane_not_waited_on_is_refused_after_children_resolve() {
+        assert!(wait_baselines(&[8], &[(9, 4)]).is_err());
+        assert_eq!(
+            wait_baselines(&[8, 9], &[(9, 4)]),
+            Ok(HashMap::from([(9, 4)]))
+        );
+    }
+
+    struct FakeCloser {
+        panels: Vec<Panel>,
+        refuse_code: i64,
+    }
+
+    impl PaneCloser for FakeCloser {
+        fn list(&mut self) -> Result<Vec<Panel>, ClientError> {
+            Ok(self.panels.clone())
+        }
+
+        fn close(&mut self, _pane: u64) -> Result<(), ClientError> {
+            Err(ClientError::Rpc {
+                code: self.refuse_code,
+                message: "refused".to_string(),
+            })
+        }
+    }
+
+    // Review finding: a server without the control scope refused closePane
+    // with -32003, which close reported as a failed pane (exit 1) instead of
+    // the missing scope (exit 3 and the config hint).
+    #[test]
+    fn a_missing_scope_on_close_is_unavailable_not_a_failed_pane() {
+        let mut source = FakeCloser {
+            panels: vec![worker(8, 1)],
+            refuse_code: -32003,
+        };
+        let failure = close_panes(&mut source, &[8], Some(1), &mut |_| {}).unwrap_err();
+        assert_eq!(failure.code, EXIT_UNAVAILABLE);
+
+        // Any other refusal of a pane that is still listed fails that pane only.
+        source.refuse_code = -32000;
+        let mut lines = Vec::new();
+        let code = close_panes(&mut source, &[8], Some(1), &mut |line| {
+            lines.push(line.clone())
+        });
+        assert_eq!(code.ok(), Some(EXIT_ERROR));
+        assert!(lines.is_empty());
+    }
+
+    // Review finding: the docs said a wait carried on from `baseline`
+    // misses nothing, but a notification raised between the two waits is
+    // already on when the second starts, so it does not end that wait:
+    // `--after` covers reports only.
+    #[test]
+    fn a_notification_raised_between_two_waits_does_not_end_the_second() {
+        let mut source = FakeSource {
+            lists: vec![vec![with_pane(panel(3, None, true), 8)]],
+            notifications: Default::default(),
+            list_calls: 0,
+        };
+        let code = wait_loop(
+            &mut source,
+            &[8],
+            WaitStart::Listed {
+                after: HashMap::from([(8, 3)]),
+            },
+            &WaitOptions {
+                timeout: Some(Duration::ZERO),
+                ..WaitOptions::default()
+            },
+            WAIT_RELIST_INTERVAL,
+            &mut |_| {},
+        );
+        assert_eq!(code.ok(), Some(EXIT_TIMEOUT));
+    }
+
+    fn worker(pane: u64, parent: u64) -> Panel {
+        let mut worker = with_pane(panel(0, None, false), pane);
+        worker.parent_pane_id = Some(WireId(parent));
+        worker
+    }
+
+    #[test]
+    fn close_skips_panes_that_are_gone_and_refuses_live_strangers() {
+        let panels = vec![worker(8, 1), worker(9, 1), worker(5, 2)];
+
+        // 7 is gone (closed by hand, or it exited unheld): not an error.
+        assert_eq!(
+            close_targets(&panels, &[8, 7, 9, 8], Some(1)),
+            Ok(vec![(8, true), (7, false), (9, true)])
+        );
+        // A live pane of another orchestrator is still a wrong id.
+        assert!(close_targets(&panels, &[8, 5], Some(1)).is_err());
+        assert_eq!(
+            close_targets(&panels, &[5, 7], None),
+            Ok(vec![(5, true), (7, false)])
+        );
+    }
+
+    #[test]
+    fn only_a_reported_permission_state_awaits_approval() {
+        assert!(awaits_approval(&panel(2, Some("permission"), false)));
+        assert!(!awaits_approval(&panel(2, Some("input"), false)));
+        assert!(!awaits_approval(&panel(2, Some("running"), true)));
+        assert!(!awaits_approval(&panel(0, None, false)));
+        assert!(matches!(
+            parse_args(&args(&["send", "8", "--answer", "--enter", "y"])).unwrap(),
+            Command::Send(SendArgs { answer: true, .. })
+        ));
     }
 
     // Review finding: text that starts with `--` or equals a flag name could

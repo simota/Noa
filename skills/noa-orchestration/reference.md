@@ -75,7 +75,7 @@ accepted and changes nothing.
 `COMMAND` runs without a shell (argv, looked up on `PATH`). Without one, the worker
 gets the user's shell. For a shell pipeline, use `-- sh -c '…'`.
 
-### `send PANE [--enter] [--raw] [--wait [wait options]] [--any-pane] [--] TEXT|-`
+### `send PANE [--enter] [--raw] [--wait [wait options]] [--answer] [--any-pane] [--] TEXT|-`
 
 Types `TEXT` (or stdin with `-`) into the pane as a paste. `--enter` then sends
 Enter 150 ms later, which submits a prompt in agent TUIs. `--raw` types the text
@@ -88,9 +88,14 @@ as keystrokes instead of a bracketed paste.
   given wait options, and prints its lines. This is the safe default.
 - Refuses a pane this pane did not spawn unless `--any-pane` is given. That guards
   against a wrong id; it is not a security boundary.
+- Refuses a pane whose agent reported `permission` (it waits for an approval),
+  because Enter approves some prompts with their default choice. It checks before
+  typing and again before Enter; if the approval appeared in between, Enter is not
+  sent and the text stays in the input line. `--answer` sends anyway. Only agents
+  that report `permission` are covered (see "Which agents report turns").
 - Input the pane refused (for example, its process has exited) is an error.
 
-### `wait PANE...|--children [--after SEQ] [--for LIST] [--all] [--timeout SECS]`
+### `wait PANE...|--children [--after SEQ | --after PANE=SEQ ...] [--for LIST] [--all] [--timeout SECS]`
 
 Blocks until one pane (every pane with `--all`) stops, then prints one line per
 pane that stopped:
@@ -104,7 +109,8 @@ pane that stopped:
 - `--for` takes a comma list of `finished,permission,input,error,exit,attention`
   (default: all of them).
 - A report counts only when its `seq` is newer than the baseline. The baseline is
-  the `seq` at the start of the wait, or `--after SEQ` (one pane only).
+  the `seq` at the start of the wait, or the one `--after` gives: `--after SEQ`
+  for a single pane, `--after PANE=SEQ` (repeatable) for several.
   `--after` does not apply to `attention`.
 - `attention` counts only after it was seen cleared during the wait, so a
   notification left from an earlier turn does not end it. With `send --wait`, the
@@ -113,8 +119,12 @@ pane that stopped:
   `exit` whatever `--for` lists, since it will not report again. Without `--all`,
   a pane that had already exited when the wait began is skipped while other panes
   are still running.
-- Timeout: prints `{"timeout":true,"pending":["…"]}` and exits 2. Without
-  `--timeout`, it waits indefinitely.
+- Timeout: prints
+  `{"timeout":true,"pending":["7"],"baseline":[{"paneId":"7","seq":5}]}` and
+  exits 2. `baseline` is the report count each pending pane was waited from
+  (with `send --wait`, the count before sending). Pass it back as
+  `--after PANE=SEQ` and the next wait also sees a report that landed in
+  between. Without `--timeout`, it waits indefinitely.
 
 ### `read PANE [--scrollback] [--max-bytes N]`
 
@@ -125,6 +135,12 @@ output. `--max-bytes` bounds the output. Works on exited panes that are still op
 
 Closes panes without a confirmation dialog and prints
 `{"paneId":"…","closed":true}` for each. The pane's output is gone afterwards.
+
+A pane that is no longer listed (closed by hand, or exited without being held)
+prints `{"paneId":"…","closed":true,"gone":true}` and is not an error, so a
+mistyped id also shows up as `gone`. A pane that could not be closed is named on
+stderr; the rest are still closed and the exit status is 1. A live pane that is
+not this pane's worker is refused before anything is closed.
 
 ### `board [--of PANE]`, `board --open [--split right|down | --tab]`
 
@@ -198,6 +214,20 @@ sa=$(noa send "$a" --enter "…" | jq -r .seq)
 sb=$(noa send "$b" --enter "…" | jq -r .seq)
 noa wait "$a" --after "$sa" --timeout 1800
 noa wait "$b" --after "$sb" --timeout 1800
+```
+
+A wait longer than your shell tool allows: keep each wait short and carry on
+from the timeout line. A report that arrives between the waits is not missed.
+A notification is: `--after` covers reports only, so use this only for workers
+that report turns (see the table above). For a worker that only raises
+`attention`, `read` it after each timeout instead.
+
+```sh
+out=$(noa send "$a" --enter --wait --timeout 540 "…task…")
+while [ $? -eq 2 ]; do
+  seq=$(echo "$out" | jq -r '.baseline[0].seq')
+  out=$(noa wait "$a" --after "$a=$seq" --timeout 540)
+done
 ```
 
 A command instead of an agent:

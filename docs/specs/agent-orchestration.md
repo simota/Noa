@@ -89,10 +89,10 @@
 | `self` | `NOA_SURFACE_ID` と一致する `surfaceId` のペインを返す |
 | `ls [--children]` | Panel 一覧（`--children` は自分が親のものだけ） |
 | `spawn [--cwd D] [--env K=V] [--label L] [--input T] [--no-wait-after] [--focus] [--no-board] [--max-children N] [-- CMD…]` | D2 の `direction:"float"` を呼ぶ（D8・D9。ワーカーは常に float）。`parentPaneId` は自分、`focus` は false、cwd は自分の cwd。終了した worker は既定で残す（exit code を読めるように。`--no-wait-after` で無効）。自分の worker が 8 以上なら拒否する（`--max-children N` で変更）。ボードがなければ開く（`--no-board` で開かない）。`--split`/`--tab` は拒否 |
-| `send PANE [--enter] [--raw] [--wait …] [--any-pane] TEXT\|-` | `noa.sendText`。`--enter` は貼り付けの 150 ms 後に `\r` を `paste:false` で送る。送信前の `seq` を出力する。`--wait` は購読してから送信し、そのまま待つ（取りこぼしがない推奨経路） |
-| `wait PANE…\|--children [--for finished,permission,input,error,exit,attention] [--after SEQ] [--all] [--timeout S]` | D3。`--after` を省くと待機開始時点の `seq` を基準にする（別プロセスの `send` 直前の値は知りようがないため。取りこぼしたくなければ `send --wait` か `--after`）。`--after` は単一ペインのときだけ。消えたペインは `exit`（`closed:true`）として必ず返す |
+| `send PANE [--enter] [--raw] [--wait …] [--answer] [--any-pane] TEXT\|-` | `noa.sendText`。承認待ち（`permission`）のペインには送らない。送る直前と Enter の直前に確かめる（ボードと同じ理由、D7）。`--answer` で送る。`--enter` は貼り付けの 150 ms 後に `\r` を `paste:false` で送る。送信前の `seq` を出力する。`--wait` は購読してから送信し、そのまま待つ（取りこぼしがない推奨経路） |
+| `wait PANE…\|--children [--for finished,permission,input,error,exit,attention] [--after SEQ \| --after PANE=SEQ …] [--all] [--timeout S]` | D3。`--after` を省くと待機開始時点の `seq` を基準にする（別プロセスの `send` 直前の値は知りようがないため。取りこぼしたくなければ `send --wait` か `--after`）。`--after SEQ` は単一ペインのときだけで、複数ペインには `--after PANE=SEQ` を繰り返す。タイムアウト行は待機中の各ペインの基準を `baseline` に出すので、それを `--after` に渡せば、間に届いた報告を取りこぼさずに待ち直せる。消えたペインは `exit`（`closed:true`）として必ず返す |
 | `read PANE [--scrollback] [--max-bytes N]` | `noa.getText` |
-| `close PANE…\|--children [--any-pane]` | `noa.closePane` |
+| `close PANE…\|--children [--any-pane]` | `noa.closePane`。一覧にないペインは `gone:true` をつけて成功とし、1 つ失敗しても残りを閉じる（失敗があれば exit 1）。自分の worker でない生存ペインは、何も閉じる前に拒否する |
 | `report STATE [DETAIL]` | 制御端末に `OSC 777;noa-agent` を書く。各エージェントのフックから呼ぶ（D6） |
 
 - 出力は 1 行 1 JSON（`read` だけはテキスト）。終了コードは 0（成立）、1（引数・未知のペインなど）、2（タイムアウト）、3（サーバー無効・接続不可・スコープ不足。直し方の設定行を stderr に出す）。

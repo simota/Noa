@@ -51,6 +51,12 @@ noa close "$pane"
   If the input line is not empty, do not send; tell the human what is there.
 - Give every wait a timeout that fits the task, and see "When no report comes"
   below if it runs out.
+- Your own shell tool has a time limit too. A wait it kills prints nothing, so
+  keep `--timeout` under that limit (or run the wait in the background) and
+  carry on from the timeout line: it lists each pending pane's `baseline`, and
+  `noa wait PANE --after PANE=SEQ --timeout …` continues without missing a
+  report that arrived in between. It does not cover a notification
+  (`attention`): for a worker that only notifies, `read` it after a timeout.
 
 ## Several workers in parallel
 
@@ -78,7 +84,8 @@ unbounded wait. When a wait times out:
    it stays `false` for an agent started directly (`spawn -- claude`).
 2. `noa read PANE`: look at the screen. If the agent is back at its prompt, treat
    the turn as over and continue from what the screen shows.
-3. If the screen shows it still working, wait again with a new timeout.
+3. If the screen shows it still working, wait again with a new timeout, passing
+   the timeout line's `baseline` as `--after PANE=SEQ`.
 
 Tell the human when a worker's reports are missing; its hooks may need setting
 up (see reference.md, "Which agents report turns").
@@ -90,7 +97,7 @@ Each line has `paneId` and `reason`:
 | reason | What to do |
 |---|---|
 | `finished` | Turn ended. `read` the pane and check the work yourself |
-| `permission` / `input` | The agent is blocked on a prompt. `read` it. Approve or answer only if the human's instructions already cover it; otherwise ask the human |
+| `permission` / `input` | The agent is blocked on a prompt. `read` it. Approve or answer only if the human's instructions already cover it; otherwise ask the human. `send` refuses a pane in `permission` unless you pass `--answer` |
 | `error` | The agent reported an error. `read` it, then retry, re-scope or report |
 | `attention` | A desktop notification arrived. Not proof the agent is blocked or done: `read` and decide |
 | `exit` | The worker's process ended (`exitCode` when known) or the pane is gone (`closed: true`). It will not report again |
@@ -106,7 +113,7 @@ close them.
 - Do not pass auto-approve flags to a worker agent or enable Noa's auto-approve
   unless the human asked for it.
 - Close every worker you started when you are done, also after a failure
-  (`noa close --children`). Read what you need first: closing discards the
+  (`noa close --children`). A worker that is already gone is not an error. Read what you need first: closing discards the
   output. The board stays; it is the human's to close.
 - Workers are always floats: `spawn` has no `--split` or `--tab`. Do not open
   workers in panes or tabs some other way.

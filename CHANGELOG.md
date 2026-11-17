@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `Noa +ctl close` treats a pane that is already gone as closed (`"gone":true`)
+  and keeps closing the rest after a failure, so cleanup always finishes.
+- `Noa +ctl send` refuses a pane whose agent waits for an approval, before
+  typing and again before Enter; `--answer` sends anyway.
+- `Noa +ctl wait` prints each pending pane's report count as `baseline` when it
+  times out and takes `--after PANE=SEQ` for several panes, so a wait can be
+  carried on without missing a report.
+
 ## [0.9.0] - 2026-11-17
 
 Agents that run other agents: `Noa +ctl` and a live board of workers.

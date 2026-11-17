@@ -3,7 +3,8 @@
 # Run it from a shell inside a Noa pane whose config has
 #   server-enable = true
 #   server-scopes = read,control,input
-# It spawns two workers next to this pane, drives them, and closes them.
+# It spawns workers as floating panes over this pane (the first one also
+# opens this pane's board), drives them, and closes them.
 # Needs no coding agent: the workers report state with `+ctl report`.
 set -eu
 
@@ -21,6 +22,12 @@ result=$(ctl wait "$cmd" --for exit --timeout 20)
 echo "exit worker: $result"
 [ "$(echo "$result" | field exitCode)" = 3 ] || fail "expected exit code 3"
 ctl read "$cmd" | grep -q smoke-output || fail "worker output not readable"
+#    Workers are floats, and the first spawn opened this pane's board.
+ctl ls | grep -q "\"label\":\"board:$own\"" || fail "the first spawn opened no board"
+board=$(ctl ls | python3 -I -c 'import json,sys
+for l in sys.stdin:
+    p=json.loads(l)
+    if p.get("label")==sys.argv[1]: print(p["paneId"])' "board:$own")
 
 # 2. A shell worker that reports agent state like a hook would.
 sh_pane=$(ctl spawn --label smoke-report | field paneId)
@@ -69,5 +76,7 @@ ctl close --children
 
 # 6. The guard refuses a pane this orchestrator did not spawn.
 if ctl send "$own" x 2>/dev/null; then fail "send to a non-worker was accepted"; fi
+
+ctl close --any-pane "$board" >/dev/null
 
 echo "agent-orchestration smoke: OK"

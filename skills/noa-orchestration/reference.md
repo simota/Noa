@@ -50,22 +50,26 @@ Panel fields that matter for orchestration:
 `agent.seq` counts reports for that pane and only grows. A report newer than the
 `seq` you saw belongs to a later turn.
 
-### `spawn [placement] [options] [-- COMMAND...]`
+### `spawn [options] [-- COMMAND...]`
 
-Starts a worker whose parent is this pane and prints `{"paneId":"…"}`.
+Starts a worker whose parent is this pane and prints `{"paneId":"…"}`. A worker
+is always a floating pane over this pane, collapsed to its title strip, which
+shows the agent's state and turns to the attention color when it needs someone.
+The board's `g` (or the strip) opens it. One pane holds at most 8 floats, so a
+ninth spawn fails. When this pane has no board open, the spawn also opens one
+next to it (a new tab when there is no room); its stderr warns, and the spawn
+still succeeds, if that fails. `--split` and `--tab` are refused; `--float` is
+accepted and changes nothing.
 
 | Option | Meaning |
 |---|---|
-| `--split auto` (default) | First worker to the right of this pane, later ones split the largest of this pane's workers along its longer side. With no room left, a new tab in the same window |
-| `--split right` / `--split down` | Split this pane in that direction (fails when there is no room) |
-| `--tab` | New tab in this pane's window |
-| `--float` | A floating pane over this pane, collapsed to its title strip, so workers stay out of the way. The strip shows the agent's state; the board's `g` opens it. At most 8 floats per pane |
+| `--no-board` | Do not open the board |
 | `--cwd DIR` | Working directory. Relative paths are taken from this process's cwd. Default: this process's cwd |
 | `--env KEY=VALUE` | Repeatable. `PATH` defaults to this process's `PATH` when a command is given |
 | `--label TEXT` | Shown in the panel's `label` |
 | `--input TEXT` | Typed into the worker once it starts |
 | `--no-wait-after` | Close the pane when its command exits. By default it stays open with `exit.code` readable |
-| `--focus` | Move keyboard focus to the worker. By default focus stays where it was |
+| `--focus` | Open the worker's float and move keyboard focus to it. By default it stays collapsed and focus stays where it was |
 | `--max-children N` | Refuse when this pane already has N workers (default 8). Checked before each spawn, so parallel spawns can exceed it |
 
 `COMMAND` runs without a shell (argv, looked up on `PATH`). Without one, the worker
@@ -124,8 +128,8 @@ Closes panes without a confirmation dialog and prints
 
 ### `board [--of PANE]`, `board --open [--split right|down | --tab]`
 
-A live view for people, not for scripts. `board --open` starts a board pane next
-to this pane (a new tab when there is no room) and prints its `{"paneId":"…"}`;
+A live view for people, not for scripts. The first `spawn` opens one by itself.
+`board --open` starts a board pane next to this pane (a new tab when there is no room) and prints its `{"paneId":"…"}`;
 it is not one of this pane's workers. `board` without `--open` takes over the
 pane it runs in until `q`.
 
@@ -213,7 +217,5 @@ noa close --children
 
 ## Known limits
 
-- Placing a worker in a tab where a pane is zoomed may leave the tab unzoomed.
-  The code reads that way, but it has not been reproduced.
 - Parallel spawns from one orchestrator can exceed `--max-children`.
 - A spawn retried after a timeout can start the worker twice.

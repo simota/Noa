@@ -21,10 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   end of its screen. Open a worker for its live screen and the reports seen
   since the board opened; send it a message, move to it, or close it.
   `+ctl board --open` starts one next to the orchestrator.
-- `Noa +ctl spawn --float` puts a worker in a floating pane over the
+- `Noa +ctl spawn` puts every worker in a floating pane over the
   orchestrator, collapsed to its title strip, so workers stay out of the way
-  while the board shows them. noa-server lists such worker floats; other
-  floats stay hidden from it.
+  while the board shows them; the first spawn opens the board (`--no-board`
+  to skip). noa-server lists such worker floats (`noa.split` with
+  `direction: "float"`); other floats stay hidden from it.
 
 ### Fixed
 

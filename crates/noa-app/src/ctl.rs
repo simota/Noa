@@ -50,11 +50,13 @@ Usage: Noa +ctl <command> [options]
 Commands:
   self                          Print this pane's panel.
   ls [--children]               Print every panel (or only this pane's workers).
-  spawn [placement] [options] [-- COMMAND...]
-                                Start a worker pane; prints {\"paneId\":...}.
-      placement: --split auto|right|down (default auto) | --tab | --float
+  spawn [options] [-- COMMAND...]
+                                Start a worker in a floating pane over this
+                                pane, collapsed to its title strip; prints
+                                {\"paneId\":...}. The first one also opens this
+                                pane's board.
       --cwd DIR  --env KEY=VALUE  --label TEXT  --input TEXT
-      --no-wait-after  --focus  --max-children N (default 8)
+      --no-wait-after  --focus  --no-board  --max-children N (default 8)
   send PANE [--enter] [--raw] [--wait [wait options]] [--any-pane] [--] TEXT|-
                                 Type TEXT (or stdin) into PANE; prints the
                                 report count to pass to `wait --after`.
@@ -125,13 +127,12 @@ pub(crate) enum Placement {
     Right,
     Down,
     Tab,
-    /// A floating pane over the orchestrator, collapsed to its title strip.
-    Float,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SpawnArgs {
-    pub(crate) placement: Placement,
+    /// Open this orchestrator's board when none is open (`--no-board`: not).
+    pub(crate) board: bool,
     pub(crate) cwd: Option<String>,
     pub(crate) env: Vec<(String, String)>,
     pub(crate) label: Option<String>,
@@ -286,9 +287,6 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
                 .value("--of")?
                 .map(|v| parse_u64("--of", &v))
                 .transpose()?;
-            if placement == Placement::Float {
-                return Err("a board opens in a split or a tab, not a float".to_string());
-            }
             if !opening && placement != Placement::Auto {
                 return Err("--split and --tab go with --open".to_string());
             }
@@ -327,17 +325,10 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
     Ok(command)
 }
 
-/// `--tab`, `--float` or `--split auto|right|down` (default `auto`).
+/// `--tab` or `--split auto|right|down` (default `auto`).
 fn parse_placement(rest: &mut Args) -> Result<Placement, String> {
     let tab = rest.flag("--tab");
-    let float = rest.flag("--float");
     let split = rest.value("--split")?;
-    if float {
-        return match (tab, split) {
-            (false, None) => Ok(Placement::Float),
-            _ => Err("--float, --tab and --split are exclusive".to_string()),
-        };
-    }
     Ok(match (tab, split.as_deref()) {
         (true, Some(_)) => return Err("--tab and --split are exclusive".to_string()),
         (true, None) => Placement::Tab,
@@ -350,7 +341,15 @@ fn parse_placement(rest: &mut Args) -> Result<Placement, String> {
 
 fn parse_spawn(rest: &mut Args) -> Result<SpawnArgs, String> {
     let command = rest.take_after_double_dash();
-    let placement = parse_placement(rest)?;
+    if rest.flag("--tab") || rest.value("--split")?.is_some() {
+        return Err(
+            "workers always open as floating panes over this pane; --split and --tab are gone"
+                .to_string(),
+        );
+    }
+    // Accepted from before floats were the only placement; changes nothing.
+    rest.flag("--float");
+    let board = !rest.flag("--no-board");
     let mut env = Vec::new();
     while let Some(assignment) = rest.value("--env")? {
         let (key, value) = assignment
@@ -364,7 +363,7 @@ fn parse_spawn(rest: &mut Args) -> Result<SpawnArgs, String> {
         None => DEFAULT_MAX_CHILDREN,
     };
     Ok(SpawnArgs {
-        placement,
+        board,
         cwd: rest.value("--cwd")?,
         env,
         label: rest.value("--label")?,
@@ -769,6 +768,38 @@ struct Session {
     lacks_surface_ids: bool,
 }
 
+/// After a spawn, open `own`'s board when none is open. A failure here is a
+/// warning to print, never the spawn's: the worker already started (D9).
+pub(crate) fn board_after_spawn(
+    list: impl FnOnce() -> Result<Vec<Panel>, Failure>,
+    own: u64,
+    open: impl FnOnce() -> Result<u64, Failure>,
+) -> Option<String> {
+    match list() {
+        Ok(panels) if has_board(&panels, own) => None,
+        Ok(_) => open()
+            .err()
+            .map(|failure| format!("could not open the board: {}", failure.message)),
+        Err(failure) => Some(format!(
+            "could not check for the board: {}",
+            failure.message
+        )),
+    }
+}
+
+/// The label of `own`'s board pane, which a later spawn looks for.
+pub(crate) fn board_label(own: u64) -> String {
+    format!("board:{own}")
+}
+
+/// Whether `own` has a board open.
+pub(crate) fn has_board(panels: &[Panel], own: u64) -> bool {
+    let label = board_label(own);
+    panels
+        .iter()
+        .any(|panel| panel.label.as_deref() == Some(label.as_str()))
+}
+
 /// This process's panel among `panels`, by its `NOA_SURFACE_ID`.
 pub(crate) fn own_pane(panels: &[Panel], surface_id: &str) -> Option<u64> {
     panels
@@ -1085,6 +1116,15 @@ impl Session {
             return board::run(&mut self.client, of, self.own);
         };
         let own = self.require_own()?;
+        let pane = self.open_board(own, placement)?;
+        print_json(&serde_json::json!({ "paneId": WireId(pane) }));
+        Ok(EXIT_OK)
+    }
+
+    /// Start a board on `own`'s workers next to it (a new tab when there is
+    /// no room). The board pane has no parent, so it is not a worker; its
+    /// label names the orchestrator, so a later spawn finds it.
+    fn open_board(&mut self, own: u64, placement: Placement) -> Result<u64, Failure> {
         let exe = std::env::current_exe()
             .map_err(|err| Failure::error(format!("cannot find this Noa binary: {err}")))?;
         let mut env = std::collections::BTreeMap::new();
@@ -1105,7 +1145,7 @@ impl Session {
                 initial_input: None,
                 wait_after_command: false,
             }),
-            label: Some("board".to_string()),
+            label: Some(board_label(own)),
             parent_pane_id: None,
             focus: Some(false),
         };
@@ -1116,11 +1156,6 @@ impl Session {
             .find(|panel| panel.pane_id.0 == own)
             .map(|panel| panel.window_group_id.0);
         let pane = match placement {
-            Placement::Float => {
-                return Err(Failure::error(
-                    "a board opens in a split or a tab, not a float",
-                ));
-            }
             Placement::Tab => self.client.spawn_tab(window, &params)?,
             // Without a placement, a pane with no room to split opens the
             // board in a new tab, as `spawn`'s auto placement does.
@@ -1142,8 +1177,7 @@ impl Session {
                 .client
                 .spawn_split(own, SplitPlacement::Vertical, &params)?,
         };
-        print_json(&serde_json::json!({ "paneId": WireId(pane) }));
-        Ok(EXIT_OK)
+        Ok(pane)
     }
 
     fn spawn(&mut self, args: SpawnArgs) -> Result<i32, Failure> {
@@ -1177,30 +1211,19 @@ impl Session {
             parent_pane_id: Some(WireId(own)),
             focus: Some(args.focus),
         };
-        let pane = match args.placement {
-            Placement::Tab => {
-                let window = self
-                    .client
-                    .list_panels()?
-                    .into_iter()
-                    .find(|panel| panel.pane_id.0 == own)
-                    .map(|panel| panel.window_group_id.0);
-                self.client.spawn_tab(window, &params)?
+        // Workers are always floats over the orchestrator (D9).
+        let pane = self
+            .client
+            .spawn_split(own, SplitPlacement::Float, &params)?;
+        if args.board {
+            // A board problem is a warning: the worker already started.
+            let panels = self.client.list_panels().map_err(Failure::from);
+            if let Some(warning) =
+                board_after_spawn(|| panels, own, || self.open_board(own, Placement::Auto))
+            {
+                eprintln!("Noa +ctl: {warning}");
             }
-            Placement::Auto => self
-                .client
-                .spawn_split(own, SplitPlacement::Auto, &params)?,
-            Placement::Right => {
-                self.client
-                    .spawn_split(own, SplitPlacement::Horizontal, &params)?
-            }
-            Placement::Down => self
-                .client
-                .spawn_split(own, SplitPlacement::Vertical, &params)?,
-            Placement::Float => self
-                .client
-                .spawn_split(own, SplitPlacement::Float, &params)?,
-        };
+        }
         print_json(&serde_json::json!({ "paneId": WireId(pane) }));
         Ok(EXIT_OK)
     }
@@ -1491,8 +1514,6 @@ mod tests {
     fn spawn_parses_placement_options_and_the_command_after_double_dash() {
         let command = parse_args(&args(&[
             "spawn",
-            "--split",
-            "down",
             "--cwd",
             "/repo",
             "--env",
@@ -1512,7 +1533,7 @@ mod tests {
         assert_eq!(
             command,
             Command::Spawn(SpawnArgs {
-                placement: Placement::Down,
+                board: true,
                 cwd: Some("/repo".to_string()),
                 env: vec![
                     ("A".to_string(), "1".to_string()),
@@ -1529,12 +1550,11 @@ mod tests {
     }
 
     #[test]
-    fn spawn_defaults_to_auto_placement_and_keeps_finished_panes_open() {
+    fn spawn_defaults_keep_finished_panes_open_and_focus_where_it_was() {
         let Command::Spawn(spawn) = parse_args(&args(&["spawn", "--", "claude"])).unwrap() else {
             panic!("spawn expected");
         };
 
-        assert_eq!(spawn.placement, Placement::Auto);
         assert!(spawn.wait_after);
         assert!(!spawn.focus);
     }
@@ -1741,16 +1761,68 @@ mod tests {
         assert!(!lacks_surface_ids(&[]));
     }
 
+    // Owner decision (agent-orchestration D9): a worker is always a float,
+    // and the first spawn opens the orchestrator's board.
     #[test]
-    fn spawn_can_place_a_worker_in_a_float() {
-        let Ok(Command::Spawn(spawn)) = parse_args(&args(&["spawn", "--float", "--", "claude"]))
-        else {
-            panic!("spawn --float did not parse");
+    fn spawn_always_places_a_float_and_opens_the_board() {
+        let Ok(Command::Spawn(spawn)) = parse_args(&args(&["spawn", "--", "claude"])) else {
+            panic!("spawn did not parse");
         };
-        assert_eq!(spawn.placement, Placement::Float);
-        assert!(parse_args(&args(&["spawn", "--float", "--tab"])).is_err());
-        assert!(parse_args(&args(&["spawn", "--float", "--split", "right"])).is_err());
+        assert!(spawn.board);
+        // `--float` from before still parses; it changes nothing.
+        assert_eq!(
+            parse_args(&args(&["spawn", "--float", "--", "claude"])),
+            Ok(Command::Spawn(spawn))
+        );
+        let Ok(Command::Spawn(quiet)) = parse_args(&args(&["spawn", "--no-board"])) else {
+            panic!("spawn --no-board did not parse");
+        };
+        assert!(!quiet.board);
+        for gone in [
+            &["spawn", "--tab"][..],
+            &["spawn", "--split", "right"],
+            &["spawn", "--split", "auto"],
+        ] {
+            let error = parse_args(&args(gone)).unwrap_err();
+            assert!(error.contains("float"), "{gone:?}: {error}");
+        }
         assert!(parse_args(&args(&["board", "--open", "--float"])).is_err());
+    }
+
+    // Review finding: the board check after a spawn listed the panes with
+    // `?`, so a failed listing failed a spawn whose worker had started, and
+    // its pane id was never printed.
+    #[test]
+    fn a_failed_board_check_is_a_warning_not_a_failed_spawn() {
+        let warning = board_after_spawn(
+            || Err(Failure::unavailable("lost the connection to Noa")),
+            1,
+            || panic!("no board opens without a listing"),
+        );
+        assert!(
+            warning
+                .as_deref()
+                .is_some_and(|w| w.contains("lost the connection")),
+            "{warning:?}"
+        );
+
+        let mut board = panel(0, None, false);
+        board.label = Some(board_label(1));
+        assert_eq!(
+            board_after_spawn(|| Ok(vec![board]), 1, || panic!("already open")),
+            None
+        );
+        assert_eq!(board_after_spawn(|| Ok(Vec::new()), 1, || Ok(9)), None);
+    }
+
+    #[test]
+    fn an_orchestrators_board_is_found_by_its_label() {
+        let mut board = panel(0, None, false);
+        board.label = Some(board_label(1));
+        let mut other = panel(0, None, false);
+        other.label = Some(board_label(2));
+        assert!(has_board(&[other.clone(), board], 1));
+        assert!(!has_board(&[other], 1));
     }
 
     #[test]

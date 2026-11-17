@@ -88,7 +88,7 @@
 |---|---|
 | `self` | `NOA_SURFACE_ID` と一致する `surfaceId` のペインを返す |
 | `ls [--children]` | Panel 一覧（`--children` は自分が親のものだけ） |
-| `spawn [--split auto\|right\|down \| --tab] [--cwd D] [--env K=V] [--label L] [--input T] [--no-wait-after] [--focus] [--max-children N] [-- CMD…]` | D2 を呼ぶ。配置の既定は `auto`、`parentPaneId` は自分、`focus` は false、cwd は自分の cwd。終了した worker は既定で残す（exit code を読めるように。`--no-wait-after` で無効）。自分の worker が 8 以上なら拒否する（`--max-children N` で変更） |
+| `spawn [--cwd D] [--env K=V] [--label L] [--input T] [--no-wait-after] [--focus] [--no-board] [--max-children N] [-- CMD…]` | D2 の `direction:"float"` を呼ぶ（D8・D9。ワーカーは常に float）。`parentPaneId` は自分、`focus` は false、cwd は自分の cwd。終了した worker は既定で残す（exit code を読めるように。`--no-wait-after` で無効）。自分の worker が 8 以上なら拒否する（`--max-children N` で変更）。ボードがなければ開く（`--no-board` で開かない）。`--split`/`--tab` は拒否 |
 | `send PANE [--enter] [--raw] [--wait …] [--any-pane] TEXT\|-` | `noa.sendText`。`--enter` は貼り付けの 150 ms 後に `\r` を `paste:false` で送る。送信前の `seq` を出力する。`--wait` は購読してから送信し、そのまま待つ（取りこぼしがない推奨経路） |
 | `wait PANE…\|--children [--for finished,permission,input,error,exit,attention] [--after SEQ] [--all] [--timeout S]` | D3。`--after` を省くと待機開始時点の `seq` を基準にする（別プロセスの `send` 直前の値は知りようがないため。取りこぼしたくなければ `send --wait` か `--after`）。`--after` は単一ペインのときだけ。消えたペインは `exit`（`closed:true`）として必ず返す |
 | `read PANE [--scrollback] [--max-bytes N]` | `noa.getText` |
@@ -130,6 +130,16 @@
 - `auto` の分割候補から float のワーカーを外す（分割レイアウトにないため）。
 - 1 つのペインに置ける float は 8 つ（`MAX_PER_ANCHOR`）で、超えると spawn はエラーになる。`--max-children` の既定と同じ数。
 - セッション復元では orchestration の情報を戻さないので、復元した float はワーカーでなくなり、IPC からは見えなくなる。
+
+### D9：ワーカーは常に float、最初の spawn でボードを開く（2026-11-17）
+
+owner の指示で、`+ctl spawn` はワーカーを必ず float として起動し、`--split` と `--tab` を拒否する（`--float` は互換のため受け付けて何もしない）。オーケストレーションを始めたら、ボードも開く。
+
+- 強制するのは `+ctl` の層である。サーバーの `noa.split`（`horizontal`/`vertical`/`auto`）と `noa.newTab` の拡張は、ほかの API クライアントのために残す。
+- spawn の後、そのオーケストレーターのボードがなければ `board --open` と同じ配置（右に分割、余地がなければ新しいタブ）で開く。ボードは `board:<オーケストレーターの pane id>` というラベルで見分け、すでにあれば開かない。開けなくても、警告を出すだけで spawn は成功させる。`--no-board` で開かない。
+- ボードはワーカーではない（`parentPaneId` なし）ので、`close --children` では閉じない。閉じるのは人。
+- ワーカーが分割しなくなったので、分割に伴うズームの解除（未再現の既知の制約）はオーケストレーションでは起きない。
+- `--max-children` の既定 8 は、1 つのペインに置ける float の数（8）と同じ。
 
 ### D6：エージェントごとの差はフックの設定だけに閉じ込める
 

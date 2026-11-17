@@ -5,8 +5,10 @@ description: Run other coding agents (claude, codex, agy) or commands in worker 
 
 # Orchestrating worker panes in Noa
 
-You are the orchestrator. Each worker is a pane next to yours, started and
-controlled with `"$NOA_BIN" +ctl`. Every command prints one JSON object per
+You are the orchestrator. Each worker is a floating pane over yours, collapsed
+to its title strip, started and controlled with `"$NOA_BIN" +ctl`. Your first
+spawn also opens a board pane next to yours where the human watches every
+worker, most urgent first. Every command prints one JSON object per
 line, except `read`, which prints the pane's text. Full command reference,
 output shapes and exit codes: [reference.md](reference.md).
 
@@ -25,10 +27,10 @@ output shapes and exit codes: [reference.md](reference.md).
      human which process holds the port. Do not kill it yourself.
 2. Decide what each worker gets: which agent (or command), which directory, and a
    task that stands on its own. A worker sees nothing of your conversation.
-3. Keep the number of workers small (the default limit is 8 per orchestrator) and
-   tell the human what you are about to start.
-4. Offer the human a live view: `"$NOA_BIN" +ctl board --open` opens a board pane
-   next to yours that lists your workers, most urgent first. Never run
+3. Keep the number of workers small (8 at most: one pane holds 8 floats) and
+   tell the human what you are about to start, and that the board will show it.
+4. Leave the board to the human. It opens by itself on your first spawn; if they
+   closed it, `"$NOA_BIN" +ctl board --open` brings it back. Never run
    `+ctl board` without `--open` yourself: it takes over the pane it runs in.
 
 ## One worker, one round
@@ -105,7 +107,9 @@ close them.
   unless the human asked for it.
 - Close every worker you started when you are done, also after a failure
   (`noa close --children`). Read what you need first: closing discards the
-  output.
+  output. The board stays; it is the human's to close.
+- Workers are always floats: `spawn` has no `--split` or `--tab`. Do not open
+  workers in panes or tabs some other way.
 - `wait` can only see turns an agent reports. Claude Code reports through
   Noa's hook adapter, and codex/agy through hooks that call `+ctl report`,
   when the human has configured them. Without reports, a worker ends a wait

@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   config, label, parent, and `focus`, and `noa.split` accepts `direction: "auto"`.
   All additive; the protocol stays at version 3.
 - Every pane's environment carries `NOA_BIN`, the running Noa's path.
+- `Noa +ctl board` shows an orchestrator's workers in a pane: who needs you
+  first, then who is working, done or exited, each with its last report and the
+  end of its screen. Open a worker for its live screen and the reports seen
+  since the board opened; send it a message, move to it, or close it.
+  `+ctl board --open` starts one next to the orchestrator.
 
 ### Fixed
 

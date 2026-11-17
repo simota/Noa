@@ -27,6 +27,9 @@ output shapes and exit codes: [reference.md](reference.md).
    task that stands on its own. A worker sees nothing of your conversation.
 3. Keep the number of workers small (the default limit is 8 per orchestrator) and
    tell the human what you are about to start.
+4. Offer the human a live view: `"$NOA_BIN" +ctl board --open` opens a board pane
+   next to yours that lists your workers, most urgent first. Never run
+   `+ctl board` without `--open` yourself: it takes over the pane it runs in.
 
 ## One worker, one round
 

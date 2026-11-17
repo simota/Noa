@@ -7,6 +7,8 @@
 //! Argument parsing and the wait condition are pure functions so they are
 //! unit-testable without a server; [`run`] is the thin I/O shell around them.
 
+mod board;
+
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
@@ -62,6 +64,11 @@ Commands:
                                 Close worker panes.
   report STATE [[--] DETAIL]    Write an agent-state report (running, permission,
                                 input, finished, error, clear) to this terminal.
+  board [--of PANE]             Show an orchestrator's workers in this pane
+                                (default: this pane's own orchestrator, else
+                                every worker). Keys are listed at the bottom.
+  board --open [--split right|down | --tab]
+                                Open a board on this pane's workers next to it.
 
 Use `--` before a TEXT or DETAIL that starts with `--`. A pane that exits
 and stays open ends a wait whatever --for lists, as a closed pane does; one
@@ -94,6 +101,11 @@ pub(crate) enum Command {
     Report {
         state: String,
         detail: String,
+    },
+    Board {
+        of: Option<u64>,
+        /// `--open`: start a board pane next to this one instead.
+        open: Option<Placement>,
     },
 }
 
@@ -261,6 +273,21 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
                 max_bytes,
             }
         }
+        "board" => {
+            let opening = rest.flag("--open");
+            let placement = parse_placement(&mut rest)?;
+            let of = rest
+                .value("--of")?
+                .map(|v| parse_u64("--of", &v))
+                .transpose()?;
+            if !opening && placement != Placement::Auto {
+                return Err("--split and --tab go with --open".to_string());
+            }
+            Command::Board {
+                of,
+                open: opening.then_some(placement),
+            }
+        }
         "close" => {
             let any_pane = rest.flag("--any-pane");
             Command::Close {
@@ -291,18 +318,23 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
     Ok(command)
 }
 
-fn parse_spawn(rest: &mut Args) -> Result<SpawnArgs, String> {
-    let command = rest.take_after_double_dash();
+/// `--tab` or `--split auto|right|down` (default `auto`).
+fn parse_placement(rest: &mut Args) -> Result<Placement, String> {
     let tab = rest.flag("--tab");
     let split = rest.value("--split")?;
-    let placement = match (tab, split.as_deref()) {
+    Ok(match (tab, split.as_deref()) {
         (true, Some(_)) => return Err("--tab and --split are exclusive".to_string()),
         (true, None) => Placement::Tab,
         (false, None | Some("auto")) => Placement::Auto,
         (false, Some("right")) => Placement::Right,
         (false, Some("down")) => Placement::Down,
         (false, Some(other)) => return Err(format!("unknown --split value: {other}")),
-    };
+    })
+}
+
+fn parse_spawn(rest: &mut Args) -> Result<SpawnArgs, String> {
+    let command = rest.take_after_double_dash();
+    let placement = parse_placement(rest)?;
     let mut env = Vec::new();
     while let Some(assignment) = rest.value("--env")? {
         let (key, value) = assignment
@@ -951,8 +983,85 @@ impl Session {
                     print_json(&serde_json::json!({ "paneId": WireId(pane), "closed": true }));
                 }
             }
+            Command::Board { of, open } => return self.board(of, open),
             Command::Report { .. } => unreachable!("handled before connecting"),
         }
+        Ok(EXIT_OK)
+    }
+
+    /// `board`: run the board here, or with `--open` start one next to
+    /// this pane. The board pane has no parent, so it never counts as one
+    /// of this pane's workers.
+    fn board(&mut self, of: Option<u64>, open: Option<Placement>) -> Result<i32, Failure> {
+        let Some(placement) = open else {
+            let of = match of {
+                Some(of) => Some(of),
+                None => self.own.and_then(|own| {
+                    self.client
+                        .list_panels()
+                        .ok()?
+                        .into_iter()
+                        .find(|panel| panel.pane_id.0 == own)?
+                        .parent_pane_id
+                        .map(|parent| parent.0)
+                }),
+            };
+            return board::run(&mut self.client, of, self.own);
+        };
+        let own = self.require_own()?;
+        let exe = std::env::current_exe()
+            .map_err(|err| Failure::error(format!("cannot find this Noa binary: {err}")))?;
+        let mut env = std::collections::BTreeMap::new();
+        if let Ok(path) = std::env::var("PATH") {
+            env.insert("PATH".to_string(), path);
+        }
+        let params = SpawnParams {
+            config: Some(SpawnConfig {
+                command: Some(vec![
+                    exe.to_string_lossy().into_owned(),
+                    "+ctl".to_string(),
+                    "board".to_string(),
+                    "--of".to_string(),
+                    own.to_string(),
+                ]),
+                cwd: spawn_cwd(None, std::env::current_dir().ok()),
+                env,
+                initial_input: None,
+                wait_after_command: false,
+            }),
+            label: Some("board".to_string()),
+            parent_pane_id: None,
+            focus: Some(false),
+        };
+        let window = self
+            .client
+            .list_panels()?
+            .into_iter()
+            .find(|panel| panel.pane_id.0 == own)
+            .map(|panel| panel.window_group_id.0);
+        let pane = match placement {
+            Placement::Tab => self.client.spawn_tab(window, &params)?,
+            // Without a placement, a pane with no room to split opens the
+            // board in a new tab, as `spawn`'s auto placement does.
+            Placement::Auto => {
+                match self
+                    .client
+                    .spawn_split(own, SplitPlacement::Horizontal, &params)
+                {
+                    Ok(pane) => pane,
+                    Err(ClientError::Rpc { .. }) => self.client.spawn_tab(window, &params)?,
+                    Err(err) => return Err(err.into()),
+                }
+            }
+            Placement::Right => {
+                self.client
+                    .spawn_split(own, SplitPlacement::Horizontal, &params)?
+            }
+            Placement::Down => self
+                .client
+                .spawn_split(own, SplitPlacement::Vertical, &params)?,
+        };
+        print_json(&serde_json::json!({ "paneId": WireId(pane) }));
         Ok(EXIT_OK)
     }
 
@@ -1545,6 +1654,39 @@ mod tests {
         assert_eq!(own_pane(&[other], "0x01", 61771), Ok(None));
         assert!(own_pane(&[panel(0, None, false)], "0x01", 61771).is_err());
         assert_eq!(own_pane(&[], "0x01", 61771), Ok(None));
+    }
+
+    #[test]
+    fn board_runs_here_or_opens_next_to_this_pane() {
+        assert_eq!(
+            parse_args(&args(&["board"])),
+            Ok(Command::Board {
+                of: None,
+                open: None
+            })
+        );
+        assert_eq!(
+            parse_args(&args(&["board", "--of", "3"])),
+            Ok(Command::Board {
+                of: Some(3),
+                open: None
+            })
+        );
+        assert_eq!(
+            parse_args(&args(&["board", "--open", "--split", "down"])),
+            Ok(Command::Board {
+                of: None,
+                open: Some(Placement::Down)
+            })
+        );
+        assert_eq!(
+            parse_args(&args(&["board", "--open"])),
+            Ok(Command::Board {
+                of: None,
+                open: Some(Placement::Auto)
+            })
+        );
+        assert!(parse_args(&args(&["board", "--tab"])).is_err());
     }
 
     // Feedback: an older Noa still held the port, so +ctl reached it and told

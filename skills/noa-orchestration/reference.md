@@ -121,6 +121,13 @@ output. `--max-bytes` bounds the output. Works on exited panes that are still op
 Closes panes without a confirmation dialog and prints
 `{"paneId":"…","closed":true}` for each. The pane's output is gone afterwards.
 
+### `board [--of PANE]`, `board --open [--split right|down | --tab]`
+
+A live view for people, not for scripts. `board --open` starts a board pane next
+to this pane (a new tab when there is no room) and prints its `{"paneId":"…"}`;
+it is not one of this pane's workers. `board` without `--open` takes over the
+pane it runs in until `q`.
+
 ### `report STATE [[--] DETAIL]`
 
 Writes an agent-state report for the pane this process runs in. `STATE` is

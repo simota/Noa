@@ -104,9 +104,21 @@
 
 当初は 3 つとも `SessionCard` に置く予定だったが、`SessionCard` は io スレッドの delta でしか更新されない。spawn 時に main スレッドで決まる `parent`/`label`（と surface id・終了情報）は `Surface.orchestration` などに置き、報告ごとに増える `agent_seq` だけを `SessionCard` に置いた。`Panel` はどちらも写すだけで、UI フェーズも同じ 2 か所を読む。UI の中身は別 spec（`docs/specs/orchestration-board.md`）で決めるが、前提にする範囲は次のとおり。
 
-- サイドバーで worker カードを orchestrator カードの下に入れ子にし、親に集計（running / 要対応 / 完了 / error）を出す。新しいウィンドウやボードは作らない。
+- ~~サイドバーで worker カードを orchestrator カードの下に入れ子にし、親に集計（running / 要対応 / 完了 / error）を出す。新しいウィンドウやボードは作らない。~~ D7 で専用ペインに改めた（2026-11-17）。
 - Compose Prompt の宛先に「この orchestrator の worker 全部」を足す。送信経路は `+ctl send` と同じ。
 - 親が閉じた worker は最上位に戻す。ipc id は再利用されない（`crates/noa-app/src/ipc_bridge.rs:51-60`）ので、古い `parentPaneId` が別のペインを指すことはない。
+
+### D7：UI は専用ペインの TUI `+ctl board`（2026-11-17）
+
+人間向けの UI は、サイドバーの入れ子（D5 の当初案）ではなく、オーケストレーターの横に置く専用ペインにした。画面モックを見たうえで owner が決めた。
+
+- Noa のペインはすべて `Terminal` を持つ `Surface` で、ターミナル以外のペインはない。新しい種類のペインを足すと、レイアウト・入力・描画・セッション保存のすべてに手が入る。float のタイトル帯がすでに UI をセルで描いているのにならい、`Noa +ctl board` という TUI を普通のペインで動かす（owner が TUI 案を選んだ）。
+- データは `+ctl` と同じサーバーから読む。0.5 秒ごとに `listPanels`、1 秒ごとに表示中のワーカーの `getText`。購読はしない（描画中に読まれない通知がたまるため）。
+- 並びは要対応（permission / input / error / 未読通知）→ 作業中（running と報告なし）→ 完了 → 終了。finished は通知を伴うことが多いので、未読通知より finished を優先する（実機で、完了したワーカーが要対応に出た）。
+- 操作は移動（`noa.focusPane`）、送信（`+ctl send --enter` と同じ貼り付け + `\r`）、閉じる（確認つき）。承認はボードからはせず、ペインへ移動して人が答える。承認待ち（permission）のワーカーには送信欄を開かず、入力中に承認待ちになったら送らない。貼り付けは bracketed paste で受け、改行を含めて送信欄に入れる（改行を Enter として読むと、残りの文字が操作キーとして実行されるため）。
+- `--open` で開くボードは `parentPaneId` を持たない。ワーカーとして数えず、`close --children` でも閉じない。
+- 報告の履歴は、ボードを開いてから見た報告だけで、ボードの中にしかない。開いた時点の状態は「開始時」と表示する（時刻が分からないため）。
+- 未対応：ワーカーの入力欄の書きかけの検出（画面から推定する方法を確かめていない）、GUI のキーバインドやメニューからの起動、履歴の永続化。
 
 ### D6：エージェントごとの差はフックの設定だけに閉じ込める
 

@@ -307,6 +307,24 @@ loaded hooks in agy) before relying on them.
 Exit status: 0 success, 1 error (bad arguments, unknown pane), 2 `wait` timed out,
 3 the server is disabled, unreachable, lacks a scope, or went away mid-command.
 
+### Watching the workers
+
+`Noa +ctl board` turns a pane into a live view of an orchestrator's workers.
+From the orchestrator's pane, `"$NOA_BIN" +ctl board --open` starts one to its
+right (a new tab when there is no room; `--split down` or `--tab` to choose). Run
+in a pane of its own, `+ctl board` follows that pane's orchestrator, or every
+worker when it has none; `--of PANE` picks one.
+
+The list puts workers that need you first (an approval or question prompt, an
+error, an unread notification), then those working, done, and exited. Each card
+shows the worker's last report and the last lines of its screen. Keys: `j`/`k`
+select, `Enter` opens a worker's live screen and the reports seen since the board
+opened, `g` moves to the worker's pane (answer prompts there), `s` types a
+message (a paste can span lines) and sends it with Enter, except to a worker
+waiting for an approval, `x` then `y` closes the worker, `Esc` goes back,
+`q` quits. The board pane is not a worker: it does not count toward
+`--max-children` and `close --children` leaves it alone.
+
 ### A skill for the orchestrating agent
 
 `skills/noa-orchestration/` is an agent skill: `SKILL.md` tells an agent when and

@@ -361,6 +361,7 @@ impl Board {
         self.since.retain(|pane, _| live.contains(pane));
         self.screens.retain(|pane, _| live.contains(pane));
         if self.selected.is_none_or(|pane| !live.contains(&pane)) {
+            self.past = 0;
             self.selected = live.first().copied();
         }
         if let View::Detail(pane) = self.view
@@ -438,6 +439,12 @@ impl Board {
     fn move_selection(&mut self, step: isize) {
         let workers: Vec<u64> = self.workers().iter().map(|panel| panel.pane_id.0).collect();
         if workers.is_empty() {
+            // Nothing to select: j/k scroll the closed section, as far as
+            // its title and entries go.
+            if self.view == View::List {
+                let reach = 1 + self.gone.len();
+                self.past = self.past.saturating_add_signed(step).min(reach);
+            }
             return;
         }
         let at = self
@@ -1229,8 +1236,39 @@ impl Board {
                     cols - 1,
                 ),
             );
-            lines.push(empty.finish(cols));
-            lines.extend(self.gone_lines(cols, now));
+            let mut body = vec![empty.finish(cols)];
+            body.extend(self.gone_lines(cols, now));
+            // The closed section scrolls by `past`; its entries start after
+            // the note and the section title.
+            let room = rows.saturating_sub(lines.len() + 2);
+            let marks = room >= 3;
+            let (mut above, mut below) = (false, false);
+            let mut offset = 0;
+            let gone_hidden = |offset: usize, avail: usize| {
+                let lines = 2..body.len();
+                let above = lines.clone().filter(|&line| line < offset).count();
+                let below = lines.filter(|&line| line >= offset + avail).count();
+                (above, below)
+            };
+            for _ in 0..3 {
+                let avail = room.saturating_sub(above as usize + below as usize).max(1);
+                offset = self.past.min(body.len().saturating_sub(avail));
+                let (up, down) = gone_hidden(offset, avail);
+                let now = (marks && up > 0, marks && down > 0);
+                if now == (above, below) {
+                    break;
+                }
+                (above, below) = now;
+            }
+            let avail = room.saturating_sub(above as usize + below as usize).max(1);
+            let (up, down) = gone_hidden(offset, avail);
+            if above {
+                lines.push(more_line("↑", (0, 0), up, cols));
+            }
+            lines.extend(body.iter().skip(offset).take(avail).cloned());
+            if below {
+                lines.push(more_line("↓", (0, 0), down, cols));
+            }
             return lines;
         }
         let columns = Columns::of(&workers, cols, |panel| {
@@ -2817,5 +2855,53 @@ mod tests {
         }
         let all = view(&board);
         assert!(all.contains("▶1 ● w2") && !all.contains("↑"), "{all}");
+    }
+
+    // Review finding (codex, PR #194): once every worker had closed, the
+    // list skipped its scrolling and cut the closed section at the pane's
+    // height, and j/k did nothing without a live worker.
+    #[test]
+    fn the_closed_section_scrolls_when_no_worker_is_left() {
+        let start = Instant::now();
+        let mut board = tall_board(5);
+        board.update(Vec::new(), start + Duration::from_secs(1));
+        assert_eq!(board.gone.len(), 5);
+        let view = |board: &Board| rendered(board, 80, 8, start + Duration::from_secs(2));
+        assert!(view(&board).contains("↓ 閉じた"), "{}", view(&board));
+
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..10 {
+            let all = view(&board);
+            assert!(!all.contains("あと 0 件"), "{all}");
+            for pane in 2..7 {
+                if all.contains(&format!("✕ w{pane}")) {
+                    seen.insert(pane);
+                }
+            }
+            board.key(Key::Char('j'));
+        }
+        assert_eq!(seen.len(), 5, "{seen:?}");
+        let all = view(&board);
+        assert!(all.contains("↑ 閉じた") && !all.contains("↓"), "{all}");
+
+        for _ in 0..10 {
+            board.key(Key::Char('k'));
+        }
+        let all = view(&board);
+        assert!(
+            all.contains("ワーカーはまだいません") && !all.contains("↑"),
+            "{all}"
+        );
+
+        // A worker that starts while the section is scrolled is in view.
+        for _ in 0..10 {
+            board.key(Key::Char('j'));
+        }
+        board.update(
+            vec![worker(9, 1, "w9", Some("running"), 1)],
+            start + Duration::from_secs(3),
+        );
+        let all = view(&board);
+        assert!(all.contains("▶1 ● w9"), "{all}");
     }
 }

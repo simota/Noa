@@ -7,8 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-18
+
+A denser board that keeps worker floats out of the orchestrator's way.
+
 ### Changed
 
+- The `+ctl` board shows one aligned row per worker with the end of its work
+  below it; pane ids and report counts move to the detail view. Keys 1-9
+  select a worker, `n` jumps to the next one that needs someone, `?` shows the
+  key help. A scrolled list says how many workers it hides and how many need
+  someone, closed workers stay in a "閉じた" section, and the pane title shows
+  "ボード · 要対応 N".
+- Worker floats are stowed on the board instead of floating over the
+  orchestrator: collapsed, they draw no title strip and the board row stands
+  in for them; opened, they span the board below its top 35%, one at a time.
+  Closing the board hands them back to the orchestrator as collapsed floats;
+  closing the orchestrator still ends them. `--no-board` keeps the old
+  placement.
 - `Noa +ctl close` treats a pane that is already gone as closed (`"gone":true`)
   and keeps closing the rest after a failure, so cleanup always finishes.
 - `Noa +ctl send` refuses a pane whose agent waits for an approval, before

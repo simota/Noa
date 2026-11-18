@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-11-18
+
+Auto-approve and agent state reporting that match current Claude Code, Codex
+and agy.
+
 ### Fixed
 
 - Auto-approve recognizes Claude Code's real Edit, Write, Read and

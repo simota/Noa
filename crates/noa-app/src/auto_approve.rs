@@ -791,7 +791,8 @@ fn squeeze(row: &str) -> String {
 
 /// A Claude Code dialog drawn as the last thing on screen: a `─` rule, the
 /// title row, the dialog body, the selected first choice and the footer,
-/// with nothing but blank rows below. Returns the title..=footer rows.
+/// with nothing but blank rows below. Returns the title row through the
+/// footer's last row.
 ///
 /// A permission dialog (Edit/Write/Read) must ask the question its title
 /// implies and offer only `Yes, …` choices before a final `No`; a Bash
@@ -803,15 +804,18 @@ fn claude_dialog_region(
     sig: &Signature,
 ) -> Option<RangeInclusive<usize>> {
     let ask = sig.id == AutoApproveSignature::ClaudeAskUserQuestion;
-    let footer = rows.iter().rposition(|row| !row.trim().is_empty())?;
+    let last = rows.iter().rposition(|row| !row.trim().is_empty())?;
     let expected_footer = if ask {
         CLAUDE_QUESTION_FOOTER
     } else {
         CLAUDE_PERMISSION_FOOTER
     };
-    if squeeze(&rows[footer]) != expected_footer {
-        return None;
-    }
+    // In a narrow pane the footer wraps over the last few rows; `footer` is
+    // its first row.
+    let footer = (0..=last)
+        .rev()
+        .take(expected_footer.len())
+        .find(|&start| wrapped_footer_end(rows, start, expected_footer) == Some(last))?;
     // The selected choice is the nearest one above the footer; the dialog
     // opens at the rule above it (a question menu has a second rule below).
     let option = (0..footer)
@@ -860,7 +864,7 @@ fn claude_dialog_region(
             && sig.anchors.contains(&lowercase_rows[title].trim())
             && claude_permission_menu(rows, sig, title, option, footer)
     };
-    valid.then_some(title..=footer)
+    valid.then_some(title..=last)
 }
 
 /// The question a permission dialog asks, which may wrap over several rows
@@ -3426,6 +3430,36 @@ mod tests {
                 find_signature(&screen, cursor(0), sig, true),
                 None,
                 "{marker}"
+            );
+        }
+    }
+
+    // PR #197 review: in a narrow pane the footer wraps, and only the last
+    // row was compared with it.
+    #[test]
+    fn claude_footer_wrapped_over_rows_is_detected_from_vt_grid() {
+        for (prompt, cols, id) in [
+            (
+                claude_question_prompt(),
+                40,
+                AutoApproveSignature::ClaudeAskUserQuestion,
+            ),
+            (claude_edit_prompt(), 24, AutoApproveSignature::ClaudeEdit),
+        ] {
+            let mut terminal = Terminal::new(noa_core::GridSize::new(cols, 60));
+            let mut stream = noa_vt::Stream::new();
+            stream.feed(prompt.join("\r\n").as_bytes(), &mut terminal);
+            let screen = viewport_rows_from_terminal(&terminal);
+            assert!(
+                screen
+                    .iter()
+                    .any(|row| row.trim() == "to cancel" || row.trim() == "amend"),
+                "the footer should wrap: {screen:?}"
+            );
+            assert_eq!(
+                find_prompt(&screen, cursor(0), None, false).map(|matched| matched.signature),
+                Some(id),
+                "{screen:?}"
             );
         }
     }

@@ -13,6 +13,110 @@ use crate::floating::{
     MAX_PER_ANCHOR, PlacedFloat, StripButton,
 };
 
+/// Whether a new float is a worker stowed on its orchestrator's board
+/// (agent-orchestration D10), and if so whether it starts open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Stow {
+    No,
+    Open,
+    Collapsed,
+}
+
+/// agent-orchestration D10: which of a closing board's stowed workers fit on
+/// the orchestrator pane each `wants` (REQ-019), given the floats each pane
+/// `held` before any moved.
+fn admit_heirs<K: Copy + PartialEq>(
+    wants: Vec<(PaneId, K)>,
+    held: impl Fn(K) -> usize,
+) -> Vec<(PaneId, K)> {
+    let mut moved: Vec<(K, usize)> = Vec::new();
+    wants
+        .into_iter()
+        .filter(|(_, heir)| {
+            let index = moved
+                .iter()
+                .position(|(k, _)| k == heir)
+                .unwrap_or_else(|| {
+                    moved.push((*heir, 0));
+                    moved.len() - 1
+                });
+            let fits = held(*heir) + moved[index].1 < MAX_PER_ANCHOR;
+            if fits {
+                moved[index].1 += 1;
+            }
+            fits
+        })
+        .collect()
+}
+
+/// The return pane once `target` takes focus: a split pane becomes it, a
+/// worker stowed on a board makes that board it, so leaving the worker goes
+/// back to the board however it was reached (agent-orchestration D10), and
+/// any other float leaves it as it was (REQ-024).
+pub(super) fn return_pane_after_focus(
+    target: PaneId,
+    is_float: bool,
+    stowed_on: Option<PaneId>,
+    current: PaneId,
+) -> PaneId {
+    match (is_float, stowed_on) {
+        (false, _) => target,
+        (true, Some(board)) => board,
+        (true, None) => current,
+    }
+}
+
+/// Of a closing scope's heirs (stowed workers and the window group each goes
+/// to), the ones that outlive it (agent-orchestration D10).
+fn heirs_outliving<G: PartialEq>(
+    scope: CloseScope,
+    closing_group: &G,
+    heirs: Vec<(PaneId, G)>,
+) -> Vec<PaneId> {
+    heirs
+        .into_iter()
+        // A whole window closing takes the heirs in it along.
+        .filter(|(_, group)| scope == CloseScope::Tab || group != closing_group)
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// Whether a stowed worker whose orchestrator sits at `parent` (tab, pane)
+/// ends when `closing` — that split pane of tab `window`, or the whole tab
+/// when `None` — closes.
+fn orphaned_by<W: PartialEq>(
+    parent: Option<(W, PaneId)>,
+    window: &W,
+    closing: Option<PaneId>,
+) -> bool {
+    parent
+        .is_some_and(|(tab, pane)| &tab == window && closing.is_none_or(|closing| closing == pane))
+}
+
+/// Whether a stowed worker's program ends when window group `closing`
+/// closes: its board sits in group `board`, its orchestrator in
+/// `orchestrator` (`None` when gone), and closing its board would hand it
+/// to an orchestrator pane in group `heir` (`None` when it would not fit).
+pub(super) fn stowed_ends_with_group<G: PartialEq>(
+    board: &G,
+    orchestrator: Option<&G>,
+    heir: Option<&G>,
+    closing: &G,
+) -> bool {
+    let orchestrator_closes = orchestrator.is_some_and(|group| group == closing);
+    let survives_board = heir.is_some_and(|group| group != closing);
+    orchestrator_closes || (board == closing && !survives_board)
+}
+
+/// [`admit_heirs`] for boards in several tabs closing one after another, in
+/// `per_tab`'s order: the room a tab's workers take is gone for the next.
+fn admit_heirs_across<K: Copy + PartialEq>(
+    per_tab: Vec<Vec<(PaneId, K)>>,
+    held: impl Fn(K) -> usize,
+) -> Vec<(PaneId, K)> {
+    admit_heirs(per_tab.into_iter().flatten().collect(), held)
+}
+
 /// Two presses on a title strip within this long toggle collapse (REQ-009).
 const STRIP_DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// How long the "limit reached" toast stays up (REQ-019).
@@ -635,20 +739,23 @@ impl App {
             self.show_float_limit_toast(window_id);
             return;
         }
-        if let Some(id) = self.create_float(window_id, anchor_pane, float_ipc_exposure()) {
+        if let Some(id) = self.create_float(window_id, anchor_pane, Stow::No, float_ipc_exposure())
+        {
             self.focus_pane(window_id, id);
             self.after_float_change(window_id);
         }
     }
 
     /// A new float over `anchor_pane`, its pty spawned with `ipc` exposure
-    /// (and any pending script overrides); `None` when the window holds no
+    /// (and any pending script overrides), stowed on a board when `stow`
+    /// says so (agent-orchestration D10); `None` when the window holds no
     /// floats, the anchor is full, or the spawn failed. Focus and repaint are
     /// the caller's.
     pub(super) fn create_float(
         &mut self,
         window_id: WindowId,
         anchor_pane: PaneId,
+        stow: Stow,
         ipc: IpcExposure,
     ) -> Option<PaneId> {
         // REQ-021: the disposable windows hold no floats.
@@ -661,10 +768,12 @@ impl App {
         if state.floats.count_on(FloatAnchor::Pane(anchor_pane)) >= MAX_PER_ANCHOR {
             return None;
         }
-        let rect =
-            state
-                .floats
-                .default_content_rect(anchor_pane, &geometry.layout(), geometry.metrics)?;
+        let rect = state.floats.default_content_rect(
+            anchor_pane,
+            stow != Stow::No,
+            &geometry.layout(),
+            geometry.metrics,
+        )?;
         let grid_size = grid_size_for_pane_rect(
             rect,
             gpu.fonts.get(self.window_font_px(window_id)).metrics(),
@@ -694,11 +803,20 @@ impl App {
             surface.shutdown();
             return None;
         };
-        if state
-            .floats
-            .create(id, anchor_pane, &geometry.layout(), geometry.metrics)
-            .is_err()
-        {
+        let layout = geometry.layout();
+        let created = match stow {
+            Stow::No => state
+                .floats
+                .create(id, anchor_pane, &layout, geometry.metrics),
+            Stow::Open | Stow::Collapsed => state.floats.create_stowed(
+                id,
+                anchor_pane,
+                stow == Stow::Open,
+                &layout,
+                geometry.metrics,
+            ),
+        };
+        if created.is_err() {
             let mut surface = surface;
             surface.shutdown();
             return None;
@@ -1184,6 +1302,177 @@ impl App {
         self.request_window_redraw(window_id);
     }
 
+    /// agent-orchestration D10: the orchestrator split pane stowed worker
+    /// `id` of `window_id` would go back to when its board closes — when
+    /// that pane outlives the close. `closing` is the split pane closing, or
+    /// `None` when the whole tab does.
+    fn stowed_parent(
+        &self,
+        window_id: WindowId,
+        id: PaneId,
+        closing: Option<PaneId>,
+    ) -> Option<(WindowId, PaneId)> {
+        let state = self.windows.get(&window_id)?;
+        let float = state.floats.get(id).filter(|float| float.is_stowed())?;
+        if closing.is_some_and(|pane| float.anchor != FloatAnchor::Pane(pane)) {
+            return None;
+        }
+        let parent = state.surfaces.get(&id)?.orchestration.as_ref()?.parent?;
+        let (dest, pane) = self.resolve_ipc_pane(parent).ok()?;
+        let dest_state = self.windows.get(&dest)?;
+        let survives = dest != window_id || closing.is_some_and(|closing| closing != pane);
+        (survives && !dest_state.is_float(pane)).then_some((dest, pane))
+    }
+
+    /// agent-orchestration D10: the stowed workers of `window_id` that go
+    /// back to their orchestrator when `closing` (or the whole tab, when
+    /// `None`) closes, with where each goes — as many as each orchestrator
+    /// pane has room for (REQ-019). The rest close with the board, as any
+    /// float does (REQ-013).
+    pub(super) fn stowed_heirs(
+        &self,
+        window_id: WindowId,
+        closing: Option<PaneId>,
+    ) -> Vec<(PaneId, (WindowId, PaneId))> {
+        self.stowed_heirs_across(&[window_id], closing)
+    }
+
+    /// [`Self::stowed_heirs`] for `tabs` closing one after another, in
+    /// order, as a window close does: the room one tab's workers take on an
+    /// orchestrator pane is gone for the next.
+    pub(super) fn stowed_heirs_across(
+        &self,
+        tabs: &[WindowId],
+        closing: Option<PaneId>,
+    ) -> Vec<(PaneId, (WindowId, PaneId))> {
+        let per_tab = tabs
+            .iter()
+            .filter_map(|tab| Some((*tab, self.windows.get(tab)?)))
+            .map(|(tab, state)| {
+                state
+                    .floats
+                    .floats()
+                    .iter()
+                    .filter_map(|float| {
+                        Some((float.id, self.stowed_parent(tab, float.id, closing)?))
+                    })
+                    .collect()
+            })
+            .collect();
+        admit_heirs_across(per_tab, |(dest, pane)| {
+            self.windows.get(&dest).map_or(MAX_PER_ANCHOR, |state| {
+                state.floats.count_on(FloatAnchor::Pane(pane))
+            })
+        })
+    }
+
+    /// agent-orchestration D10: before a board closes (`closing`, or its
+    /// whole tab when `None`), hand its stowed workers back to their
+    /// orchestrators as collapsed floats, so closing the board ends no
+    /// worker. The caller closes the rest as before (REQ-013).
+    pub(super) fn rehome_stowed_floats_before_close(
+        &mut self,
+        window_id: WindowId,
+        closing: Option<PaneId>,
+    ) {
+        let mut touched = Vec::new();
+        for (id, (dest, pane)) in self.stowed_heirs(window_id, closing) {
+            if let Some(state) = self.windows.get_mut(&window_id) {
+                state.floats.rehome(id, pane);
+            }
+            self.transfer_floats(window_id, dest, FloatAnchor::Pane(pane));
+            if let Some(geometry) = self.window_float_geometry(dest)
+                && let Some(state) = self.windows.get_mut(&dest)
+            {
+                state
+                    .floats
+                    .settle(id, &geometry.layout(), geometry.metrics);
+            }
+            touched.push(dest);
+        }
+        touched.sort_unstable();
+        touched.dedup();
+        for dest in touched {
+            if dest != window_id {
+                self.relayout_and_resize_window(dest);
+                self.request_window_redraw(dest);
+            }
+        }
+    }
+
+    /// The stowed workers of `window_id` that outlive `closing` (or the
+    /// whole tab, when `None`) closing within `scope`: those going back to an
+    /// orchestrator that is not closing too (agent-orchestration D10).
+    pub(super) fn surviving_heirs(
+        &self,
+        window_id: WindowId,
+        closing: Option<PaneId>,
+        scope: CloseScope,
+    ) -> Vec<PaneId> {
+        let Some(group) = self.windows.get(&window_id).map(|state| state.group) else {
+            return Vec::new();
+        };
+        let heirs = self
+            .stowed_heirs(window_id, closing)
+            .into_iter()
+            .filter_map(|(id, (dest, _))| Some((id, self.windows.get(&dest)?.group)))
+            .collect();
+        heirs_outliving(scope, &group, heirs)
+    }
+
+    /// agent-orchestration D10: the stowed workers, on any board, whose
+    /// orchestrator is `closing` (a split pane of `window_id`, or any pane
+    /// of it when `None`). A worker lives no longer than its orchestrator,
+    /// as it did when it floated over it (REQ-013).
+    pub(super) fn stowed_orphans(
+        &self,
+        window_id: WindowId,
+        closing: Option<PaneId>,
+    ) -> Vec<(WindowId, PaneId)> {
+        self.windows
+            .iter()
+            .flat_map(|(tab, state)| {
+                state
+                    .floats
+                    .floats()
+                    .iter()
+                    .filter(|float| float.is_stowed())
+                    .filter_map(move |float| {
+                        let parent = state
+                            .surfaces
+                            .get(&float.id)?
+                            .orchestration
+                            .as_ref()?
+                            .parent?;
+                        Some((*tab, float.id, parent))
+                    })
+            })
+            .filter(|(_, _, parent)| {
+                orphaned_by(self.resolve_ipc_pane(*parent).ok(), &window_id, closing)
+            })
+            .map(|(tab, id, _)| (tab, id))
+            .collect()
+    }
+
+    /// Close the stowed workers [`Self::stowed_orphans`] names, before
+    /// their orchestrator goes. The caller relayouts `window_id`.
+    pub(super) fn discard_stowed_orphans(&mut self, window_id: WindowId, closing: Option<PaneId>) {
+        let orphans = self.stowed_orphans(window_id, closing);
+        let mut touched = Vec::new();
+        for (tab, id) in orphans {
+            self.discard_float(tab, id);
+            touched.push(tab);
+        }
+        touched.sort_unstable();
+        touched.dedup();
+        for tab in touched {
+            if tab != window_id {
+                self.relayout_and_resize_window(tab);
+                self.request_window_redraw(tab);
+            }
+        }
+    }
+
     /// L2.3: a tab that closes, or leaves for another window, hands its
     /// window-anchored floats to another tab of the window it was in, when
     /// one remains.
@@ -1305,6 +1594,106 @@ impl FloatDraw {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Review finding: a window close planned each tab's heirs on its own, so
+    // two boards of one orchestrator in two tabs both took the last free
+    // place on it, though the tabs close in turn and the second worker ends.
+    #[test]
+    fn boards_closing_in_turn_share_their_orchestrators_room() {
+        let tabs = vec![vec![(PaneId::new(1), 'a')], vec![(PaneId::new(2), 'a')]];
+        let held = |_| MAX_PER_ANCHOR - 1;
+        assert_eq!(admit_heirs_across(tabs, held), vec![(PaneId::new(1), 'a')]);
+    }
+
+    // Review finding: closing a window counted the programs of its own tabs
+    // only, so a running worker stowed on a board in another window, which
+    // ends with its orchestrator here, was not counted and closed unasked —
+    // and a worker on a board here that goes back to an orchestrator in
+    // another window was counted though it lives on (D10).
+    #[test]
+    fn a_window_close_counts_the_stowed_workers_that_end_with_it() {
+        let (x, y) = ('x', 'y');
+        // Board elsewhere, orchestrator closing: it ends.
+        assert!(stowed_ends_with_group(&y, Some(&x), None, &x));
+        // Board closing, orchestrator elsewhere with room: it lives on.
+        assert!(!stowed_ends_with_group(&x, Some(&y), Some(&y), &x));
+        // Board closing, orchestrator elsewhere but full: it ends.
+        assert!(stowed_ends_with_group(&x, Some(&y), None, &x));
+        // Both closing, or the orchestrator gone: it ends.
+        assert!(stowed_ends_with_group(&x, Some(&x), None, &x));
+        assert!(stowed_ends_with_group(&x, None, None, &x));
+        // Neither closing, or the orchestrator gone and the board elsewhere:
+        // untouched.
+        assert!(!stowed_ends_with_group(&y, Some(&y), Some(&y), &x));
+        assert!(!stowed_ends_with_group(&y, None, None, &x));
+    }
+
+    // Review finding: `spawn --focus` focused a stowed worker straight from
+    // the orchestrator, so the return pane stayed the orchestrator and
+    // ⌘⇧I or collapsing went there, not to the board (D10).
+    #[test]
+    fn a_stowed_worker_returns_focus_to_its_board() {
+        let (orchestrator, board, worker) = (PaneId::new(1), PaneId::new(2), PaneId::new(3));
+        assert_eq!(
+            return_pane_after_focus(worker, true, Some(board), orchestrator),
+            board
+        );
+        assert_eq!(
+            return_pane_after_focus(worker, true, None, orchestrator),
+            orchestrator
+        );
+        assert_eq!(
+            return_pane_after_focus(board, false, None, orchestrator),
+            board
+        );
+    }
+
+    // Review finding: closing a whole window counted every stowed worker as
+    // ending, though one whose orchestrator is in another window goes back
+    // to it and lives on.
+    #[test]
+    fn a_window_close_spares_workers_going_to_another_window() {
+        let heirs = || vec![(PaneId::new(1), 'a'), (PaneId::new(2), 'b')];
+        assert_eq!(
+            heirs_outliving(CloseScope::Window, &'a', heirs()),
+            vec![PaneId::new(2)]
+        );
+        assert_eq!(
+            heirs_outliving(CloseScope::Tab, &'a', heirs()),
+            vec![PaneId::new(1), PaneId::new(2)]
+        );
+    }
+
+    // Review finding: once workers moved to the board, closing their
+    // orchestrator's pane no longer ended them, and nothing counted them.
+    #[test]
+    fn closing_the_orchestrator_ends_its_stowed_workers() {
+        let (orchestrator, other) = (PaneId::new(1), PaneId::new(2));
+        assert!(orphaned_by(
+            Some(('t', orchestrator)),
+            &'t',
+            Some(orchestrator)
+        ));
+        assert!(orphaned_by(Some(('t', orchestrator)), &'t', None));
+        assert!(!orphaned_by(Some(('t', orchestrator)), &'t', Some(other)));
+        assert!(!orphaned_by(Some(('u', orchestrator)), &'t', None));
+        assert!(!orphaned_by(None, &'t', None));
+    }
+
+    // Review finding: the close confirmation asked each worker on its own
+    // whether its orchestrator had room, so with 7 floats there and 2
+    // running workers on the board both were left out of the count, though
+    // only one fits and the other closes.
+    #[test]
+    fn only_the_workers_that_fit_go_back_to_their_orchestrator() {
+        let worker = |raw| PaneId::new(raw);
+        let wants = vec![(worker(1), 'a'), (worker(2), 'a'), (worker(3), 'b')];
+        let held = |pane| if pane == 'a' { MAX_PER_ANCHOR - 1 } else { 0 };
+        assert_eq!(
+            admit_heirs(wants, held),
+            vec![(worker(1), 'a'), (worker(3), 'b')]
+        );
+    }
 
     #[test]
     fn tc_004_strip_lists_icon_title_status_and_three_buttons_in_order() {

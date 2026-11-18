@@ -31,6 +31,13 @@ const ROW_INDENT: usize = 6;
 /// How long a lone ESC waits for the rest of a sequence before it counts
 /// as the Esc key.
 const ESC_WAIT: Duration = Duration::from_millis(50);
+/// The `float.toggle-focus` binding, which takes focus from an open worker
+/// back to the board (agent-orchestration D10).
+const BACK_TO_BOARD: &str = if cfg!(target_os = "macos") {
+    "⌘⇧I"
+} else {
+    "^⇧I"
+};
 /// The smallest pane the board draws in.
 const MIN_COLS: usize = 24;
 const MIN_ROWS: usize = 6;
@@ -1139,16 +1146,17 @@ impl Board {
             .fg(DIM, "  どのキーでも閉じます");
         lines.push(title.finish(cols));
         lines.push(Line::default().finish(cols));
-        let keys: [(&str, &str); 13] = [
+        let keys: [(&str, &str); 14] = [
             ("j k ↑ ↓", "ワーカーを選ぶ"),
             ("1–9", "番号のワーカーを選ぶ"),
             ("n", "次の要対応のワーカーへ"),
             ("Enter l →", "詳細(画面と報告の履歴)"),
             ("Esc h ←", "一覧に戻る"),
-            ("g", "ワーカーのペインへ移動する(承認はそこで答える)"),
+            ("g", "ワーカーをこの下に開く(承認はそこで答える)"),
+            (BACK_TO_BOARD, "開いたワーカーからボードへ戻る"),
             ("s", "ワーカーに送る(承認待ちには送れません)"),
             ("x", "ワーカーを閉じる(確認あり。出力は消えます)"),
-            ("q ^C", "ボードを終える(ワーカーはそのまま)"),
+            ("q ^C", "ボードを終える(ワーカーはオーケストレーターへ戻る)"),
             ("", ""),
             ("送信欄", ""),
             ("Enter / Esc", "送る / 取り消す"),

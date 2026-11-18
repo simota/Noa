@@ -1009,3 +1009,99 @@ fn review4_4_a_dragged_collapsed_strip_restores_where_it_was_saved() {
         220
     );
 }
+
+// agent-orchestration D10: workers stowed on their orchestrator's board.
+
+#[test]
+fn a_stowed_worker_opens_across_the_board_below_its_top_part() {
+    let mut set = FloatSet::default();
+    set.create_stowed(id(1), B, true, &layout(&SPLIT), M)
+        .unwrap();
+    set.create_stowed(id(2), B, false, &layout(&SPLIT), M)
+        .unwrap();
+    // 35% of 600 px is 210 px: the list above stays in view, and every
+    // stowed worker shares the rect rather than stepping aside.
+    assert_eq!(outer(&set, id(1), &SPLIT), Rect::new(500, 210, 500, 390));
+    set.toggle_collapse(id(2));
+    assert_eq!(outer(&set, id(2), &SPLIT), Rect::new(500, 210, 500, 390));
+    let content = set
+        .default_content_rect(B, true, &layout(&SPLIT), M)
+        .unwrap();
+    assert_eq!(content, Rect::new(500, 230, 500, 370));
+}
+
+#[test]
+fn a_collapsed_stowed_worker_has_no_strip_to_draw_hit_or_cycle() {
+    let mut set = FloatSet::default();
+    set.create_stowed(id(1), B, false, &layout(&SPLIT), M)
+        .unwrap();
+    let l = layout(&SPLIT);
+    assert!(set.placed(id(1), &l, M).is_none());
+    assert!(set.draw_order(&l, M).is_empty());
+    assert!(set.hit_test(Point::new(700, 215), &l, M).is_none());
+    assert!(set.cycle_targets(&l, M).is_empty());
+
+    // Opened again, it is an ordinary float on screen.
+    set.toggle_collapse(id(1));
+    assert!(set.accepts_focus(id(1), &l, M));
+    assert_eq!(set.draw_order(&l, M).len(), 1);
+}
+
+#[test]
+fn a_rehomed_worker_is_an_ordinary_collapsed_float_on_the_new_pane() {
+    let mut set = FloatSet::default();
+    set.create_stowed(id(1), B, true, &layout(&SPLIT), M)
+        .unwrap();
+    set.toggle_maximize(id(1));
+    set.rehome(id(1), A);
+    set.settle(id(1), &layout(&SPLIT), M);
+    let float = set.get(id(1)).unwrap();
+    assert_eq!(float.anchor, FloatAnchor::Pane(A));
+    assert!(!float.is_stowed());
+    let placed = set.placed(id(1), &layout(&SPLIT), M).unwrap();
+    assert_eq!(placed.state, FloatState::Collapsed);
+    // The default rect on A (450×500 after the 90% cap), strip at its top.
+    assert_eq!(placed.outer, Rect::new(50, 100, 450, 20));
+}
+
+#[test]
+fn moving_a_stowed_worker_off_its_board_by_hand_unstows_it() {
+    let mut set = FloatSet::default();
+    set.create_stowed(id(1), B, true, &layout(&SPLIT), M)
+        .unwrap();
+    set.cycle_anchor(id(1), &layout(&SPLIT), M).unwrap();
+    set.toggle_collapse(id(1));
+    assert!(!set.get(id(1)).unwrap().is_stowed());
+    assert!(set.placed(id(1), &layout(&SPLIT), M).is_some());
+}
+
+// Review finding: "one open at a time" lived only in `reveal_float`, so a
+// worker spawned with `--focus` (created open) left the worker the board
+// already had open under it, in the same rect.
+#[test]
+fn opening_a_stowed_worker_collapses_the_others_open_on_its_board() {
+    let mut set = FloatSet::default();
+    set.create_stowed(id(1), B, true, &layout(&SPLIT), M)
+        .unwrap();
+    // `spawn --focus` creates the next one open.
+    set.create_stowed(id(2), B, true, &layout(&SPLIT), M)
+        .unwrap();
+    let state = |set: &FloatSet, raw| set.get(id(raw)).unwrap().state;
+    assert_eq!(state(&set, 1), FloatState::Collapsed);
+    assert_eq!(state(&set, 2), FloatState::Normal);
+
+    // A worker spawned in the background leaves the open one alone, and
+    // so does an ordinary float or a worker on another board.
+    set.create_stowed(id(3), B, false, &layout(&SPLIT), M)
+        .unwrap();
+    set.create(id(4), B, &layout(&SPLIT), M).unwrap();
+    set.create_stowed(id(5), A, true, &layout(&SPLIT), M)
+        .unwrap();
+    assert_eq!(state(&set, 2), FloatState::Normal);
+    assert_eq!(state(&set, 4), FloatState::Normal);
+
+    // Opened again by toggling, it collapses the one open now.
+    set.toggle_collapse(id(1));
+    assert_eq!(state(&set, 1), FloatState::Normal);
+    assert_eq!(state(&set, 2), FloatState::Collapsed);
+}

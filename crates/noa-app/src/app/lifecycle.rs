@@ -1482,18 +1482,34 @@ impl App {
 
     /// Running programs in the floats that close with split pane `pane_id`
     /// (floating-panes REQ-013): its own, or — when it is the tab's last
-    /// split pane, so the tab closes — every float of the tab.
+    /// split pane, so the tab closes — every float of the tab. Workers that
+    /// go back to their orchestrator (agent-orchestration D10) do not close.
     fn pane_float_running_program_count(&self, window_id: WindowId, pane_id: PaneId) -> usize {
         let survive = self.window_floats_survive_tab(window_id);
         self.windows.get(&window_id).map_or(0, |state| {
             let last_split_pane = !state.is_float(pane_id) && state.pane_count() <= 1;
-            running_program_count(
-                state
-                    .floats
-                    .closing_with_pane(pane_id, last_split_pane, survive)
-                    .iter()
-                    .filter_map(|id| state.surfaces.get(id)),
-            )
+            let closing = (!last_split_pane).then_some(pane_id);
+            let heirs = self.surviving_heirs(window_id, closing, floating::CloseScope::Tab);
+            let floats: Vec<PaneId> = state
+                .floats
+                .closing_with_pane(pane_id, last_split_pane, survive)
+                .into_iter()
+                .filter(|id| !heirs.contains(id))
+                .collect();
+            // Workers stowed on a board elsewhere end with their orchestrator
+            // split pane (a float closing ends none: `close_float`).
+            let orphans = if state.is_float(pane_id) {
+                Vec::new()
+            } else {
+                self.stowed_orphans(window_id, closing)
+            };
+            let orphans = orphans
+                .into_iter()
+                .filter(|(tab, id)| !(*tab == window_id && floats.contains(id)));
+            running_program_count(floats.iter().filter_map(|id| state.surfaces.get(id)))
+                + running_program_count(
+                    orphans.filter_map(|(tab, id)| self.windows.get(&tab)?.surfaces.get(&id)),
+                )
         })
     }
 
@@ -1512,23 +1528,84 @@ impl App {
     ) -> usize {
         let survive = self.window_floats_survive(window_id, scope);
         self.windows.get(&window_id).map_or(0, |state| {
-            let closing = state.floats.closing_with_tab(survive);
+            // A board's workers go back to an orchestrator that outlives the
+            // close (agent-orchestration D10).
+            let heirs = self.surviving_heirs(window_id, None, scope);
+            let closing: Vec<PaneId> = state
+                .floats
+                .closing_with_tab(survive)
+                .into_iter()
+                .filter(|id| !heirs.contains(id))
+                .collect();
+            // Workers stowed on a board outside the closing scope end with
+            // their orchestrator here; inside it they are counted where they are.
+            let orphans = self
+                .stowed_orphans(window_id, None)
+                .into_iter()
+                .filter(|(tab, _)| match scope {
+                    floating::CloseScope::Tab => *tab != window_id,
+                    floating::CloseScope::Window => self
+                        .windows
+                        .get(tab)
+                        .is_some_and(|other| other.group != state.group),
+                });
             running_program_count(
                 state
                     .surfaces
                     .iter()
                     .filter(|(pane, _)| !state.is_float(**pane) || closing.contains(pane))
                     .map(|(_, surface)| surface),
+            ) + running_program_count(
+                orphans.filter_map(|(tab, id)| self.windows.get(&tab)?.surfaces.get(&id)),
             )
         })
     }
 
+    /// Running programs that end when window group `group` closes: its own,
+    /// and the stowed workers that end with it wherever their board is
+    /// (agent-orchestration D10), less those that go back to an
+    /// orchestrator in another window.
     pub(super) fn group_running_program_count(&self, group: WindowGroupId) -> usize {
+        let group_of = |tab: WindowId| self.windows.get(&tab).map(|state| state.group);
+        // Only a board in the closing group hands its workers on, and its
+        // tabs close in turn (`close_group`), sharing the room left.
+        let tabs = ids_in_group(&self.window_order, group_of, group);
+        let heirs = self.stowed_heirs_across(&tabs, None);
         self.window_order
             .iter()
-            .filter_map(|window_id| self.windows.get(window_id))
-            .filter(|state| state.group == group)
-            .map(|state| running_program_count(state.surfaces.values()))
+            .filter_map(|tab| self.windows.get(tab))
+            .map(|state| {
+                state
+                    .surfaces
+                    .iter()
+                    .filter(|(pane, surface)| {
+                        let stowed = state
+                            .floats
+                            .get(**pane)
+                            .is_some_and(|float| float.is_stowed());
+                        if !stowed {
+                            return state.group == group;
+                        }
+                        let orchestrator = surface
+                            .orchestration
+                            .as_ref()
+                            .and_then(|orchestration| orchestration.parent)
+                            .and_then(|parent| self.resolve_ipc_pane(parent).ok())
+                            .and_then(|(tab, _)| group_of(tab));
+                        let heir = heirs
+                            .iter()
+                            .find(|(id, _)| id == *pane)
+                            .and_then(|(_, (dest, _))| group_of(*dest));
+                        floating::stowed_ends_with_group(
+                            &state.group,
+                            orchestrator.as_ref(),
+                            heir.as_ref(),
+                            &group,
+                        )
+                    })
+                    .filter(|(_, surface)| surface_has_running_program(surface))
+                    .count()
+            })
             .sum()
     }
 
@@ -1568,6 +1645,8 @@ impl App {
         self.discard_window_records(window_id);
         self.end_copy_mode_for_window(window_id);
         self.rehome_window_floats_before_close(window_id);
+        self.rehome_stowed_floats_before_close(window_id, None);
+        self.discard_stowed_orphans(window_id, None);
         // The Overview overlay lives inside its host window; closing the host
         // tears the overlay down with it (before `close_tab_outcome`, so the
         // last-window case quits instead of keeping a ghost overlay alive).
@@ -1959,6 +2038,8 @@ impl App {
         }
 
         self.cleanup_ipc_attach_pane(window_id, pane_id);
+        self.rehome_stowed_floats_before_close(window_id, Some(pane_id));
+        self.discard_stowed_orphans(window_id, Some(pane_id));
         self.discard_pane_floats(window_id, pane_id);
 
         let mut tab_should_close = false;

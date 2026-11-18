@@ -918,9 +918,21 @@ impl App {
                             state.last_mouse_pane = Some(pane);
                             if is_float {
                                 state.floats.note_focus(pane);
-                            } else {
-                                state.return_pane = pane;
                             }
+                            let stowed_on = state
+                                .floats
+                                .get(pane)
+                                .filter(|float| float.is_stowed())
+                                .and_then(|float| match float.anchor {
+                                    crate::floating::FloatAnchor::Pane(board) => Some(board),
+                                    _ => None,
+                                });
+                            state.return_pane = floating::return_pane_after_focus(
+                                pane,
+                                is_float,
+                                stowed_on,
+                                state.return_pane,
+                            );
                         }
                     }
                 }

@@ -251,9 +251,10 @@ of the running Noa, set in every pane.
 
 An orchestrator (an agent or a script in one pane) can start worker panes, type
 into them, wait for their agents, read their output, and close them with
-`Noa +ctl`. Each command prints one JSON object per line. Workers are floating
-panes over the orchestrator, collapsed to their title strips, and the first spawn
-opens a board next to the orchestrator that shows them all.
+`Noa +ctl`. Each command prints one JSON object per line. The first spawn
+opens a board next to the orchestrator, and workers are floating panes stowed
+on that board: the board's rows show them, and a worker appears over the board
+only when opened. The orchestrator's own pane stays clear.
 
 Enable the control server with the scopes the commands need:
 
@@ -274,7 +275,7 @@ noa close "$pane"
 
 | Command | What it does |
 |---|---|
-| `spawn [--cwd D] [--env K=V] [--label L] [--input T] [--no-wait-after] [--focus] [--no-board] [--max-children N] [-- CMD...]` | Starts a worker in a floating pane over this pane, collapsed to its title strip (which shows the agent's state); open it from the strip or with the board's `g`. `--focus` opens it and moves focus to it; otherwise focus stays where it was. The first spawn also opens this pane's board unless `--no-board`. The command runs without a shell, found on the orchestrator's own `PATH`, and the worker gets the orchestrator's locale (`LANG`, `LC_*`), which a Noa started from the Dock lacks; the cwd defaults to the orchestrator's (a relative `--cwd` is taken from it). Finished workers stay open (with their exit code in `Panel.exit`) until closed, unless `--no-wait-after`. One pane holds at most 8 floats, and one orchestrator 8 workers unless `--max-children` says otherwise; the count is checked before each spawn, so spawns run in parallel can exceed it. `--split` and `--tab` are refused |
+| `spawn [--cwd D] [--env K=V] [--label L] [--input T] [--no-wait-after] [--focus] [--no-board] [--max-children N] [-- CMD...]` | Starts a worker in a floating pane stowed on this pane's board, opening the board first when none is open; the board's row shows the worker's state, and the board's `g` opens it over the lower part of the board. With `--no-board`, or when the board cannot open, the worker floats over this pane instead, collapsed to its title strip. `--focus` opens it and moves focus to it; otherwise focus stays where it was. The command runs without a shell, found on the orchestrator's own `PATH`, and the worker gets the orchestrator's locale (`LANG`, `LC_*`), which a Noa started from the Dock lacks; the cwd defaults to the orchestrator's (a relative `--cwd` is taken from it). Finished workers stay open (with their exit code in `Panel.exit`) until closed, unless `--no-wait-after`. One pane (the board) holds at most 8 floats, and one orchestrator 8 workers unless `--max-children` says otherwise; the count is checked before each spawn, so spawns run in parallel can exceed it. `--split` and `--tab` are refused |
 | `send PANE [--enter] [--raw] [--wait ...] [--answer] TEXT\|-` | Pastes `TEXT` (or stdin) and, with `--enter`, submits it. Refused while the pane's agent reports `permission`, checked before typing and again before Enter, unless `--answer`. Prints `{"paneId","seq"}`: pass `seq` to `wait --after`, which covers state reports but not `attention` (a notification-only worker that finishes before the wait starts is missed). `--wait` waits right away, with no chance to miss the reply |
 | `wait PANE...\|--children [--after SEQ \| --after PANE=SEQ ...] [--for LIST] [--all] [--timeout S]` | Returns when one of the panes (all of them with `--all`) stops: `finished`, `permission`, `input`, `error`, `exit` (printed whatever `--for` lists when a pane is gone or has exited and stays open, since neither will report again; without `--all`, a pane that had already exited when the wait began is skipped while other panes are left), or `attention`. Prints one line per pane that stopped; exits 2 on timeout, printing each pending pane's report count as `baseline`, which a later wait takes as `--after PANE=SEQ` to carry on without missing a report in between |
 | `read PANE [--scrollback] [--max-bytes N]` | Prints the screen, or the retained output tail |
@@ -324,10 +325,13 @@ shows the worker's last report (or the last detail it gave), the last lines of
 its work (above an agent's input box and status line), its report count, and
 how long it has been in its state. Keys: `j`/`k`
 select, `Enter` opens a worker's live screen and the reports seen since the board
-opened, `g` moves to the worker's pane (answer prompts there), `s` types a
+opened, `g` opens the worker over the lower part of the board, closing any
+other worker it had open (answer prompts there; ⌘⇧I, ctrl+shift+i off macOS,
+comes back to the board), `s` types a
 message (a paste can span lines) and sends it with Enter, except to a worker
 waiting for an approval, `x` then `y` closes the worker, `Esc` goes back,
-`q` quits. The board pane is not a worker: it does not count toward
+`q` quits. Closing the board does not end its workers: they go back to the
+orchestrator's pane as collapsed floats with title strips. The board pane is not a worker: it does not count toward
 `--max-children` and `close --children` leaves it alone.
 
 ### A skill for the orchestrating agent

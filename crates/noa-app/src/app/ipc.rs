@@ -616,7 +616,7 @@ impl App {
             }
             noa_ipc::SpawnTarget::Float { pane } => {
                 let (window_id, target) = self.resolve_ipc_pane(pane)?;
-                let (anchor, full) = self
+                let (anchor, full, stowed) = self
                     .windows
                     .get(&window_id)
                     .map(|state| {
@@ -629,11 +629,17 @@ impl App {
                             .floats
                             .count_on(crate::floating::FloatAnchor::Pane(anchor))
                             >= crate::floating::MAX_PER_ANCHOR;
-                        (anchor, full)
+                        let anchor_label = state
+                            .surfaces
+                            .get(&anchor)
+                            .and_then(|surface| surface.orchestration.as_ref())
+                            .and_then(|orchestration| orchestration.label.as_deref());
+                        let stowed = stows_on(anchor_label, params.parent_pane_id.map(|id| id.0));
+                        (anchor, full, stowed)
                     })
                     .ok_or(noa_ipc::IpcError::PaneClosed)?;
                 let float = self
-                    .ipc_float_with(window_id, anchor, spawn, float_start(params.focus))
+                    .ipc_float_with(window_id, anchor, stowed, spawn, float_start(params.focus))
                     .ok_or_else(|| {
                         noa_ipc::IpcError::Internal(if full {
                             format!(
@@ -724,19 +730,32 @@ impl App {
         &mut self,
         window_id: WindowId,
         anchor: PaneId,
+        stowed: bool,
         spawn: ScriptSpawn,
         start: FloatStart,
     ) -> Option<PaneId> {
         self.script_spawn = Some(spawn);
-        let float = self.create_float(window_id, anchor, super::floating::IpcExposure::Listed);
+        let stow = match (stowed, start) {
+            (false, _) => super::floating::Stow::No,
+            (true, FloatStart::OpenFocused) => super::floating::Stow::Open,
+            (true, FloatStart::Collapsed) => super::floating::Stow::Collapsed,
+        };
+        let float = self.create_float(
+            window_id,
+            anchor,
+            stow,
+            super::floating::IpcExposure::Listed,
+        );
         self.script_spawn = None;
         let float = float?;
         match start {
-            FloatStart::Collapsed => {
+            // A stowed worker starts collapsed already.
+            FloatStart::Collapsed if !stowed => {
                 if let Some(state) = self.windows.get_mut(&window_id) {
                     state.floats.toggle_collapse(float);
                 }
             }
+            FloatStart::Collapsed => {}
             FloatStart::OpenFocused => self.focus_pane(window_id, float),
         }
         self.after_float_change(window_id);
@@ -832,7 +851,10 @@ impl App {
     /// Resolve an IPC pane id to its live `(WindowId, PaneId)`, rejecting
     /// stale registry entries whose pane has since closed (spec: "removed
     /// panes → later lookups return UnknownPane").
-    fn resolve_ipc_pane(&self, pane: u64) -> Result<(WindowId, PaneId), noa_ipc::IpcError> {
+    pub(super) fn resolve_ipc_pane(
+        &self,
+        pane: u64,
+    ) -> Result<(WindowId, PaneId), noa_ipc::IpcError> {
         let (native_window_id, native_pane_id) = self
             .ipc_shared
             .lock()
@@ -1024,6 +1046,17 @@ fn float_host(
         None => target,
         Some(crate::floating::FloatAnchor::Pane(pane)) => pane,
         Some(_) => split_focus,
+    }
+}
+
+/// agent-orchestration D10: a worker float is stowed when it goes over its
+/// orchestrator's board — the pane `+ctl board --open` labelled
+/// `board:<orchestrator's IPC id>`. Collapsed, it then shows no strip; the
+/// board's row stands in for it.
+fn stows_on(anchor_label: Option<&str>, parent: Option<u64>) -> bool {
+    match (anchor_label, parent) {
+        (Some(label), Some(parent)) => label == format!("board:{parent}"),
+        _ => false,
     }
 }
 
@@ -1550,6 +1583,16 @@ mod auto_split_tests {
             split_created(&before, [orchestrator, worker, float, new].into_iter()),
             Some(new)
         );
+    }
+
+    #[test]
+    fn a_worker_is_stowed_only_over_its_own_orchestrators_board() {
+        assert!(stows_on(Some("board:7"), Some(7)));
+        // Another orchestrator's board, an ordinary label, no label, no parent.
+        assert!(!stows_on(Some("board:8"), Some(7)));
+        assert!(!stows_on(Some("fix-tests"), Some(7)));
+        assert!(!stows_on(None, Some(7)));
+        assert!(!stows_on(Some("board:7"), None));
     }
 
     // Review finding: `focus: true` (and `+ctl spawn --float --focus`) left

@@ -51,10 +51,12 @@ Commands:
   self                          Print this pane's panel.
   ls [--children]               Print every panel (or only this pane's workers).
   spawn [options] [-- COMMAND...]
-                                Start a worker in a floating pane over this
-                                pane, collapsed to its title strip; prints
-                                {\"paneId\":...}. The first one also opens this
-                                pane's board.
+                                Start a worker in a floating pane stowed on
+                                this pane's board (opened by the first one),
+                                where its row shows it until someone opens
+                                it; prints {\"paneId\":...}. With --no-board,
+                                or no board, it floats over this pane,
+                                collapsed to its title strip.
       --cwd DIR  --env KEY=VALUE  --label TEXT  --input TEXT
       --no-wait-after  --focus  --no-board  --max-children N (default 8)
   send PANE [--enter] [--raw] [--wait [wait options]] [--answer] [--any-pane]
@@ -817,22 +819,30 @@ pub(crate) fn worker_env(
     env
 }
 
-/// After a spawn, open `own`'s board when none is open. A failure here is a
-/// warning to print, never the spawn's: the worker already started (D9).
-pub(crate) fn board_after_spawn(
+/// Before a spawn, the pane its worker goes over (D9, D10): `own`'s board,
+/// opened when none is, so the worker is stowed there. A board problem is a
+/// warning to print, never the spawn's failure: the worker then floats over
+/// `own`, as with `--no-board`.
+pub(crate) fn board_before_spawn(
     list: impl FnOnce() -> Result<Vec<Panel>, Failure>,
     own: u64,
     open: impl FnOnce() -> Result<u64, Failure>,
-) -> Option<String> {
-    match list() {
-        Ok(panels) if has_board(&panels, own) => None,
-        Ok(_) => open()
-            .err()
-            .map(|failure| format!("could not open the board: {}", failure.message)),
-        Err(failure) => Some(format!(
+) -> (u64, Option<String>) {
+    let opened = match list() {
+        Ok(panels) => match board_pane(&panels, own) {
+            Some(board) => return (board, None),
+            None => {
+                open().map_err(|failure| format!("could not open the board: {}", failure.message))
+            }
+        },
+        Err(failure) => Err(format!(
             "could not check for the board: {}",
             failure.message
         )),
+    };
+    match opened {
+        Ok(board) => (board, None),
+        Err(warning) => (own, Some(warning)),
     }
 }
 
@@ -841,12 +851,13 @@ pub(crate) fn board_label(own: u64) -> String {
     format!("board:{own}")
 }
 
-/// Whether `own` has a board open.
-pub(crate) fn has_board(panels: &[Panel], own: u64) -> bool {
+/// `own`'s board pane, when one is open.
+pub(crate) fn board_pane(panels: &[Panel], own: u64) -> Option<u64> {
     let label = board_label(own);
     panels
         .iter()
-        .any(|panel| panel.label.as_deref() == Some(label.as_str()))
+        .find(|panel| panel.label.as_deref() == Some(label.as_str()))
+        .map(|panel| panel.pane_id.0)
 }
 
 /// This process's panel among `panels`, by its `NOA_SURFACE_ID`.
@@ -1263,19 +1274,22 @@ impl Session {
             parent_pane_id: Some(WireId(own)),
             focus: Some(args.focus),
         };
-        // Workers are always floats over the orchestrator (D9).
-        let pane = self
-            .client
-            .spawn_split(own, SplitPlacement::Float, &params)?;
-        if args.board {
-            // A board problem is a warning: the worker already started.
+        // Workers are always floats (D9), stowed on the board when there is
+        // one (D10), so the board opens first.
+        let host = if args.board {
             let panels = self.client.list_panels().map_err(Failure::from);
-            if let Some(warning) =
-                board_after_spawn(|| panels, own, || self.open_board(own, Placement::Auto))
-            {
+            let (host, warning) =
+                board_before_spawn(|| panels, own, || self.open_board(own, Placement::Auto));
+            if let Some(warning) = warning {
                 eprintln!("Noa +ctl: {warning}");
             }
-        }
+            host
+        } else {
+            own
+        };
+        let pane = self
+            .client
+            .spawn_split(host, SplitPlacement::Float, &params)?;
         print_json(&serde_json::json!({ "paneId": WireId(pane) }));
         Ok(EXIT_OK)
     }
@@ -1992,16 +2006,17 @@ mod tests {
         assert!(parse_args(&args(&["board", "--open", "--float"])).is_err());
     }
 
-    // Review finding: the board check after a spawn listed the panes with
-    // `?`, so a failed listing failed a spawn whose worker had started, and
-    // its pane id was never printed.
+    // Review finding: the board check listed the panes with `?`, so a
+    // failed listing failed the spawn. It is a warning, and the worker then
+    // floats over the orchestrator (D10).
     #[test]
-    fn a_failed_board_check_is_a_warning_not_a_failed_spawn() {
-        let warning = board_after_spawn(
+    fn a_failed_board_check_is_a_warning_and_the_worker_floats_over_its_orchestrator() {
+        let (host, warning) = board_before_spawn(
             || Err(Failure::unavailable("lost the connection to Noa")),
             1,
             || panic!("no board opens without a listing"),
         );
+        assert_eq!(host, 1);
         assert!(
             warning
                 .as_deref()
@@ -2009,13 +2024,26 @@ mod tests {
             "{warning:?}"
         );
 
+        let (host, warning) =
+            board_before_spawn(|| Ok(Vec::new()), 1, || Err(Failure::error("no room")));
+        assert_eq!(host, 1);
+        assert!(warning.is_some_and(|w| w.contains("could not open the board")));
+    }
+
+    // D10: the worker is stowed on the board, which opens first when needed.
+    #[test]
+    fn a_worker_goes_over_its_orchestrators_board() {
         let mut board = panel(0, None, false);
+        board.pane_id = WireId(5);
         board.label = Some(board_label(1));
         assert_eq!(
-            board_after_spawn(|| Ok(vec![board]), 1, || panic!("already open")),
-            None
+            board_before_spawn(|| Ok(vec![board]), 1, || panic!("already open")),
+            (5, None)
         );
-        assert_eq!(board_after_spawn(|| Ok(Vec::new()), 1, || Ok(9)), None);
+        assert_eq!(
+            board_before_spawn(|| Ok(Vec::new()), 1, || Ok(9)),
+            (9, None)
+        );
     }
 
     // Reported with a screenshot, reproduced in a Noa started without LANG:
@@ -2057,11 +2085,12 @@ mod tests {
     #[test]
     fn an_orchestrators_board_is_found_by_its_label() {
         let mut board = panel(0, None, false);
+        board.pane_id = WireId(5);
         board.label = Some(board_label(1));
         let mut other = panel(0, None, false);
         other.label = Some(board_label(2));
-        assert!(has_board(&[other.clone(), board], 1));
-        assert!(!has_board(&[other], 1));
+        assert_eq!(board_pane(&[other.clone(), board], 1), Some(5));
+        assert_eq!(board_pane(&[other], 1), None);
     }
 
     #[test]

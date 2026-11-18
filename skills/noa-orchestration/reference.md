@@ -53,17 +53,18 @@ Panel fields that matter for orchestration:
 ### `spawn [options] [-- COMMAND...]`
 
 Starts a worker whose parent is this pane and prints `{"paneId":"…"}`. A worker
-is always a floating pane over this pane, collapsed to its title strip, which
-shows the agent's state and turns to the attention color when it needs someone.
-The board's `g` (or the strip) opens it. One pane holds at most 8 floats, so a
-ninth spawn fails. When this pane has no board open, the spawn also opens one
-next to it (a new tab when there is no room); its stderr warns, and the spawn
-still succeeds, if that fails. `--split` and `--tab` are refused; `--float` is
+is always a floating pane. When this pane has no board open, the spawn first
+opens one next to it (a new tab when there is no room), and the worker is
+stowed on the board: collapsed, it shows only as the board's row; the board's
+`g` opens it over the board. One pane holds at most 8 floats, so a ninth spawn
+fails. If the board cannot open (stderr warns, the spawn still succeeds), or
+with `--no-board`, the worker floats over this pane instead, collapsed to a
+title strip that shows the agent's state. `--split` and `--tab` are refused; `--float` is
 accepted and changes nothing.
 
 | Option | Meaning |
 |---|---|
-| `--no-board` | Do not open the board |
+| `--no-board` | Do not open the board; the worker floats over this pane |
 | `--cwd DIR` | Working directory. Relative paths are taken from this process's cwd. Default: this process's cwd |
 | `--env KEY=VALUE` | Repeatable. `PATH` defaults to this process's `PATH` when a command is given, and `LANG` and `LC_*` to this process's, so a worker keeps your locale even when Noa itself has none |
 | `--label TEXT` | Shown in the panel's `label` |

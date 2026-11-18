@@ -88,7 +88,7 @@
 |---|---|
 | `self` | `NOA_SURFACE_ID` と一致する `surfaceId` のペインを返す |
 | `ls [--children]` | Panel 一覧（`--children` は自分が親のものだけ） |
-| `spawn [--cwd D] [--env K=V] [--label L] [--input T] [--no-wait-after] [--focus] [--no-board] [--max-children N] [-- CMD…]` | D2 の `direction:"float"` を呼ぶ（D8・D9。ワーカーは常に float）。`parentPaneId` は自分、`focus` は false、cwd は自分の cwd。終了した worker は既定で残す（exit code を読めるように。`--no-wait-after` で無効）。自分の worker が 8 以上なら拒否する（`--max-children N` で変更）。ボードがなければ開く（`--no-board` で開かない）。`--split`/`--tab` は拒否 |
+| `spawn [--cwd D] [--env K=V] [--label L] [--input T] [--no-wait-after] [--focus] [--no-board] [--max-children N] [-- CMD…]` | D2 の `direction:"float"` を呼ぶ（D8・D9。ワーカーは常に float）。`parentPaneId` は自分、`focus` は false、cwd は自分の cwd。終了した worker は既定で残す（exit code を読めるように。`--no-wait-after` で無効）。自分の worker が 8 以上なら拒否する（`--max-children N` で変更）。ボードがなければ先に開き、ワーカーをボードに収納する（D10。`--no-board` で開かず、自分の上に置く）。`--split`/`--tab` は拒否 |
 | `send PANE [--enter] [--raw] [--wait …] [--answer] [--any-pane] TEXT\|-` | `noa.sendText`。承認待ち（`permission`）のペインには送らない。送る直前と Enter の直前に確かめる（ボードと同じ理由、D7）。`--answer` で送る。`--enter` は貼り付けの 150 ms 後に `\r` を `paste:false` で送る。送信前の `seq` を出力する。`--wait` は購読してから送信し、そのまま待つ（取りこぼしがない推奨経路） |
 | `wait PANE…\|--children [--for finished,permission,input,error,exit,attention] [--after SEQ \| --after PANE=SEQ …] [--all] [--timeout S]` | D3。`--after` を省くと待機開始時点の `seq` を基準にする（別プロセスの `send` 直前の値は知りようがないため。取りこぼしたくなければ `send --wait` か `--after`）。`--after SEQ` は単一ペインのときだけで、複数ペインには `--after PANE=SEQ` を繰り返す。タイムアウト行は待機中の各ペインの基準を `baseline` に出すので、それを `--after` に渡せば、間に届いた報告を取りこぼさずに待ち直せる。消えたペインは `exit`（`closed:true`）として必ず返す |
 | `read PANE [--scrollback] [--max-bytes N]` | `noa.getText` |
@@ -127,10 +127,10 @@
 
 ボードを見ているあいだワーカーのペインを隠したい、という owner の求めで、`spawn --float`（`noa.split` の `direction:"float"`）を足した。
 
-- ワーカーはオーケストレーターのペインにアンカーした float として開き、`focus:false`（`+ctl spawn` の既定）ならタイトル帯だけにたたんだ状態で、`focus:true`（`--focus`）なら開いてフォーカスを持った状態で始まる。`direction:"float"` は `parentPaneId` を必須にする（ないと invalid params）。一覧に載るのはワーカーの float だけなので、親のない float を IPC から作れないようにした。タイトル帯はエージェントの状態と要対応の色を出すので、たたんだままでも止まったワーカーが分かる。開くのはタイトル帯か、ボードの `g`（`focus_pane` がたたんだ float を開く）。
+- （D10 で改定：アンカーは原則ボード）ワーカーはオーケストレーターのペインにアンカーした float として開き、`focus:false`（`+ctl spawn` の既定）ならタイトル帯だけにたたんだ状態で、`focus:true`（`--focus`）なら開いてフォーカスを持った状態で始まる。`direction:"float"` は `parentPaneId` を必須にする（ないと invalid params）。一覧に載るのはワーカーの float だけなので、親のない float を IPC から作れないようにした。タイトル帯はエージェントの状態と要対応の色を出すので、たたんだままでも止まったワーカーが分かる。開くのはタイトル帯か、ボードの `g`（`focus_pane` がたたんだ float を開く）。
 - floating-panes の REQ-023 を改め、IPC は `parentPaneId` を持つ float（ワーカー）だけを列挙する。AppleScript、AX、Overview はこれまでどおりすべての float を出さない。ワーカーでない float は IPC からも見えない。
 - `auto` の分割候補から float のワーカーを外す（分割レイアウトにないため）。
-- 1 つのペインに置ける float は 8 つ（`MAX_PER_ANCHOR`）で、超えると spawn はエラーになる。`--max-children` の既定と同じ数。
+- 1 つのペインに置ける float は 8 つ（`MAX_PER_ANCHOR`）で、超えると spawn はエラーになる（D10 以降はボードのペインに掛かる）。`--max-children` の既定と同じ数。
 - セッション復元では orchestration の情報を戻さないので、復元した float はワーカーでなくなり、IPC からは見えなくなる。
 
 ### D9：ワーカーは常に float、最初の spawn でボードを開く（2026-11-17）
@@ -138,10 +138,24 @@
 owner の指示で、`+ctl spawn` はワーカーを必ず float として起動し、`--split` と `--tab` を拒否する（`--float` は互換のため受け付けて何もしない）。オーケストレーションを始めたら、ボードも開く。
 
 - 強制するのは `+ctl` の層である。サーバーの `noa.split`（`horizontal`/`vertical`/`auto`）と `noa.newTab` の拡張は、ほかの API クライアントのために残す。
-- spawn の後、そのオーケストレーターのボードがなければ `board --open` と同じ配置（右に分割、余地がなければ新しいタブ）で開く。ボードは `board:<オーケストレーターの pane id>` というラベルで見分け、すでにあれば開かない。開けなくても、警告を出すだけで spawn は成功させる。`--no-board` で開かない。
-- ボードはワーカーではない（`parentPaneId` なし）ので、`close --children` では閉じない。閉じるのは人。
+- （D10 で改定：ボードは spawn の前に開く）spawn の後、そのオーケストレーターのボードがなければ `board --open` と同じ配置（右に分割、余地がなければ新しいタブ）で開く。ボードは `board:<オーケストレーターの pane id>` というラベルで見分け、すでにあれば開かない。開けなくても、警告を出すだけで spawn は成功させる。`--no-board` で開かない。
+- ボードはワーカーではない（`parentPaneId` なし）ので、`close --children` では閉じない。閉じるのは人。閉じたとき、収納していたワーカーはオーケストレーターへ戻る（D10）。
 - ワーカーが分割しなくなったので、分割に伴うズームの解除（未再現の既知の制約）はオーケストレーションでは起きない。
 - `--max-children` の既定 8 は、1 つのペインに置ける float の数（8）と同じ。
+
+### D10：ワーカーはボードに収納する（2026-11-18）
+
+たたんだワーカーの帯（80 列幅）がオーケストレーターのペインの右下から左上へ階段状に積み重なり、オーケストレーターの出力を隠していた。状態も帯とボードの 2 か所に分かれていた。owner が「ボードに統合」を選んだ。
+
+- `+ctl spawn` は、オーケストレーターのボードを先に探すか開き、そのペインを `noa.split` の `paneId`（float のアンカー）に渡す。`parentPaneId` は従来どおりオーケストレーター。IPC は変えていない（サーバーはもともとアンカーを `paneId` から、所有を `parentPaneId` から取る）。`--no-board` のときは従来どおりオーケストレーターの上に置く。ボードを確かめられない、または開けないときも、警告を出したうえでそうする。
+- アンカーのペインのラベルが `board:<parentPaneId>` のワーカーは「収納」される（`Float.stowed`）。収納したワーカーはたたむと帯も出さず、描画・ヒットテスト・巡回のどれにも現れない。状態はボードの行だけに出す。
+- 開いた収納ワーカーは、ボードの幅いっぱいで上 35% を空けた位置に置く。ずらして重ねることはせず、ボードの一覧の上部が見えたまま、その下に開く。ボードの `g`（`focus_pane` → `reveal_float`）で開き、そのとき同じボードで開いていたほかの収納ワーカーをたたむ（ボードで開くのは一度に 1 つ）。戻るのは `float.toggle-focus`（⌘⇧I）、たたむボタン、またはダブルクリック。フォーカスは復帰先（ボード）に戻る。
+- ボードのペインやタブが閉じるとき（`q` や ⌘W を含む）、収納したワーカーは、親のペインが残り空きがあれば、親へ付け替える（たたんだ普通の float、帯つき）。floating-panes REQ-013 の例外である。付け替えるワーカーは、閉じる確認の実行中プログラム数に含めない。親が同じタブで一緒に閉じるとき、親が float のとき、または親が満杯のときは、従来どおり閉じる。
+- 収納したワーカーは、オーケストレーターより長く生きない。オーケストレーターの分割ペインやそのタブが閉じるとき、ボードがどこにあっても一緒に閉じ、閉じる確認の実行中プログラム数に含める（D10 以前に、オーケストレーターの上の float として REQ-013 で閉じていたのと同じ）。オーケストレーターが float のときは、閉じない（D8 以前と同じく、ワーカーは下の分割ペインに属する）。
+- 収納したワーカーにフォーカスが移ると、どの経路でも（`g`、`spawn --focus`）復帰先はそのボードになる。
+- ウィンドウごと閉じるとき、別のウィンドウのオーケストレーターへ戻るワーカーは、確認の実行中プログラム数に含めない。
+- アンカーの循環（REQ-006）で手でボードから外したワーカーは、普通の float になる。
+- 既知の制限：ボードを `board --open` で開き直しても、すでに親へ戻ったワーカーはボードへ移らない（それ以降の spawn からボードに置く）。セッション復元では orchestration が戻らないので、復元した float は収納されない（D8 と同じ）。
 
 ### D6：エージェントごとの差はフックの設定だけに閉じ込める
 

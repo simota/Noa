@@ -196,6 +196,28 @@ fn a_float_placement_reaches_spawn_as_a_float_on_the_pane() {
     assert!(backend.legacy_splits.lock().unwrap().is_empty());
 }
 
+// agent-orchestration D10: a worker floats over its orchestrator's board, so
+// the pane it goes over and its parent differ; both reach the backend.
+#[test]
+fn a_float_may_go_over_a_pane_other_than_its_parent() {
+    let (backend, _broadcaster, handle) = start(&["read", "control", "input"]);
+    let mut client = connect(&handle, &["read", "control", "input"]);
+    let params = SpawnParams {
+        config: Some(command_config()),
+        label: None,
+        parent_pane_id: Some(WireId(1)),
+        focus: Some(false),
+    };
+
+    client
+        .spawn_split(2, SplitPlacement::Float, &params)
+        .unwrap();
+
+    let spawns = backend.spawns.lock().unwrap();
+    assert_eq!(spawns[0].0, SpawnTarget::Float { pane: 2 });
+    assert_eq!(spawns[0].1.parent_pane_id, Some(WireId(1)));
+}
+
 // Review finding: a float spawned without `parentPaneId` (bare, or with only
 // a label) was exposed over IPC, though only worker floats may be.
 #[test]

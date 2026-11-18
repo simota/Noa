@@ -18,6 +18,9 @@ pub const MAX_PER_ANCHOR: usize = 8;
 const INITIAL_MAX_FRACTION: f64 = 0.9;
 /// Cells each title-strip button occupies.
 const STRIP_BUTTON_CELLS: u32 = 2;
+/// agent-orchestration D10: a stowed worker opens below this fraction of its
+/// board, so the board's list stays in view above it.
+const STOWED_TOP_FRACTION: f64 = 0.35;
 
 /// What a float belongs to (REQ-005).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,9 +63,18 @@ pub struct Float {
     /// The strip was dragged since it collapsed, so it sits where `origin`
     /// says rather than at the normal rect's corner.
     moved_while_collapsed: bool,
+    /// agent-orchestration D10: a worker stowed on its orchestrator's board.
+    /// Collapsed, it shows no strip at all; the board's row stands in for it.
+    stowed: bool,
     z: u64,
     seq: u64,
     focus_stamp: u64,
+}
+
+impl Float {
+    pub const fn is_stowed(&self) -> bool {
+        self.stowed
+    }
 }
 
 /// Cell metrics plus the grid padding a pane's content area carries.
@@ -255,6 +267,10 @@ fn resolve_normal(float: &Float, anchor: Rect, metrics: FloatMetrics) -> Option<
 }
 
 fn place(float: &Float, anchor: Rect, metrics: FloatMetrics) -> Option<PlacedFloat> {
+    // D10: a stowed worker is off screen until it is opened.
+    if float.stowed && float.state == FloatState::Collapsed {
+        return None;
+    }
     let normal = resolve_normal(float, anchor, metrics)?;
     let strip_h = metrics.strip_h();
     let (outer, content) = match float.state {
@@ -353,17 +369,68 @@ impl FloatSet {
         layout: &FloatLayout<'_>,
         metrics: FloatMetrics,
     ) -> Result<(), AnchorFull> {
+        self.insert(id, pane, false, layout, metrics)
+    }
+
+    /// agent-orchestration D10: add a worker float stowed on board pane
+    /// `pane`, `open` or collapsed. Open, it spans the board's width below
+    /// the top [`STOWED_TOP_FRACTION`]; every stowed float of a board shares
+    /// that rect, since the board opens one at a time: opening this one
+    /// collapses the others.
+    pub fn create_stowed(
+        &mut self,
+        id: PaneId,
+        pane: PaneId,
+        open: bool,
+        layout: &FloatLayout<'_>,
+        metrics: FloatMetrics,
+    ) -> Result<(), AnchorFull> {
+        self.insert(id, pane, true, layout, metrics)?;
+        if open {
+            self.collapse_other_stowed(id);
+        } else if let Some(float) = self.get_mut(id) {
+            float.state = FloatState::Collapsed;
+        }
+        Ok(())
+    }
+
+    /// D10: collapse every other stowed float open on `id`'s board.
+    fn collapse_other_stowed(&mut self, id: PaneId) {
+        let Some(anchor) = self
+            .get(id)
+            .filter(|float| float.stowed)
+            .map(|float| float.anchor)
+        else {
+            return;
+        };
+        for float in &mut self.floats {
+            if float.id != id
+                && float.stowed
+                && float.anchor == anchor
+                && float.state != FloatState::Collapsed
+            {
+                float.maximized_before_collapse = float.state == FloatState::Maximized;
+                float.state = FloatState::Collapsed;
+                float.moved_while_collapsed = false;
+            }
+        }
+    }
+
+    fn insert(
+        &mut self,
+        id: PaneId,
+        pane: PaneId,
+        stowed: bool,
+        layout: &FloatLayout<'_>,
+        metrics: FloatMetrics,
+    ) -> Result<(), AnchorFull> {
         let anchor = FloatAnchor::Pane(pane);
         if self.count_on(anchor) >= MAX_PER_ANCHOR {
             return Err(AnchorFull);
         }
-        let rect = layout.anchor_rect(anchor).map(|anchor_rect| {
-            default_rect(
-                anchor_rect,
-                self.floats_over(anchor_rect, layout, metrics),
-                metrics,
-            )
-        });
+        let rect = layout
+            .anchor_rect(anchor)
+            .map(|anchor_rect| self.initial_rect(anchor_rect, stowed, None, layout, metrics));
         let seq = tick();
         let z = tick();
         let mut float = Float {
@@ -374,6 +441,7 @@ impl FloatSet {
             state: FloatState::Normal,
             maximized_before_collapse: false,
             moved_while_collapsed: false,
+            stowed,
             z,
             seq,
             focus_stamp: 0,
@@ -390,15 +458,12 @@ impl FloatSet {
     pub fn default_content_rect(
         &self,
         pane: PaneId,
+        stowed: bool,
         layout: &FloatLayout<'_>,
         metrics: FloatMetrics,
     ) -> Option<Rect> {
         let anchor_rect = layout.anchor_rect(FloatAnchor::Pane(pane))?;
-        let rect = default_rect(
-            anchor_rect,
-            self.floats_over(anchor_rect, layout, metrics),
-            metrics,
-        );
+        let rect = self.initial_rect(anchor_rect, stowed, None, layout, metrics);
         Some(Rect::new(
             rect.x,
             rect.y + metrics.strip_h(),
@@ -407,11 +472,39 @@ impl FloatSet {
         ))
     }
 
+    /// Where a float placed on `anchor_rect` starts: the default rule
+    /// stepped clear of the floats already there (leaving `except` out), or
+    /// the board's lower part for a stowed worker (D10).
+    fn initial_rect(
+        &self,
+        anchor_rect: Rect,
+        stowed: bool,
+        except: Option<PaneId>,
+        layout: &FloatLayout<'_>,
+        metrics: FloatMetrics,
+    ) -> Rect {
+        if stowed {
+            return stowed_rect(anchor_rect);
+        }
+        default_rect(
+            anchor_rect,
+            self.floats_over(anchor_rect, except, layout, metrics),
+            metrics,
+        )
+    }
+
     /// Visible floats, on any anchor, that overlap `area` — the ones a new
     /// float placed there must step clear of (REQ-001).
-    fn floats_over(&self, area: Rect, layout: &FloatLayout<'_>, metrics: FloatMetrics) -> u32 {
+    fn floats_over(
+        &self,
+        area: Rect,
+        except: Option<PaneId>,
+        layout: &FloatLayout<'_>,
+        metrics: FloatMetrics,
+    ) -> u32 {
         self.draw_order(layout, metrics)
             .into_iter()
+            .filter(|placed| Some(placed.id) != except)
             .filter(|placed| {
                 let outer = placed.outer;
                 outer.x < area.right()
@@ -639,7 +732,8 @@ impl FloatSet {
             .map(|float| float.id)
     }
 
-    /// REQ-009. Returns the new state.
+    /// REQ-009. Returns the new state. Opening a stowed worker collapses
+    /// the others open on its board (agent-orchestration D10).
     pub fn toggle_collapse(&mut self, id: PaneId) -> Option<FloatState> {
         let float = self.get_mut(id)?;
         float.state = match float.state {
@@ -651,7 +745,11 @@ impl FloatSet {
             }
         };
         float.moved_while_collapsed = false;
-        Some(float.state)
+        let state = float.state;
+        if state != FloatState::Collapsed {
+            self.collapse_other_stowed(id);
+        }
+        Some(state)
     }
 
     /// REQ-010. A collapsed float ignores it.
@@ -718,12 +816,46 @@ impl FloatSet {
         let z = tick();
         let float = self.get_mut(id).expect("float checked above");
         float.anchor = next;
+        // Moved off its board by hand, a worker is an ordinary float again.
+        float.stowed = false;
         float.z = z;
         set_from_rect(float, Rect::new(x, y, w, h), new_anchor);
         if let Some(strip_y) = strip_y {
             float.origin.1 = ratio(strip_y - new_anchor.y, new_anchor.h);
         }
         Ok(Some(next))
+    }
+
+    /// agent-orchestration D10: hand stowed worker `id` back to its
+    /// orchestrator's pane when its board closes. It becomes an ordinary
+    /// float, collapsed to its strip; [`Self::settle`] then gives it the
+    /// default rect once it sits in the set that tab owns. The caller checks
+    /// that `pane` has room (REQ-019).
+    pub fn rehome(&mut self, id: PaneId, pane: PaneId) {
+        let z = tick();
+        if let Some(float) = self.get_mut(id) {
+            float.anchor = FloatAnchor::Pane(pane);
+            float.stowed = false;
+            float.state = FloatState::Collapsed;
+            float.maximized_before_collapse = false;
+            float.moved_while_collapsed = false;
+            float.z = z;
+        }
+    }
+
+    /// Give `id` the default rect on its anchor, stepped clear of the
+    /// floats already there (REQ-001).
+    pub fn settle(&mut self, id: PaneId, layout: &FloatLayout<'_>, metrics: FloatMetrics) {
+        let Some(float) = self.get(id) else {
+            return;
+        };
+        let Some(anchor_rect) = layout.anchor_rect(float.anchor) else {
+            return;
+        };
+        let rect = self.initial_rect(anchor_rect, float.stowed, Some(id), layout, metrics);
+        if let Some(float) = self.get_mut(id) {
+            set_from_rect(float, rect, anchor_rect);
+        }
     }
 
     /// Start a drag on `id` at `point`. `None` when the float's state does
@@ -869,6 +1001,7 @@ impl FloatSet {
             },
             maximized_before_collapse: false,
             moved_while_collapsed: record.collapsed && record.strip_moved,
+            stowed: false,
             z: record.z,
             seq: record.seq,
             focus_stamp: 0,
@@ -891,6 +1024,13 @@ fn default_rect(anchor: Rect, existing: u32, metrics: FloatMetrics) -> Rect {
         .saturating_sub(h + offset)
         .clamp(anchor.y, anchor.bottom().saturating_sub(h).max(anchor.y));
     Rect::new(x, y, w, h)
+}
+
+/// D10: a stowed worker's rect on its board — full width, below the top
+/// [`STOWED_TOP_FRACTION`]. `resolve_normal` enforces the minimum size.
+fn stowed_rect(anchor: Rect) -> Rect {
+    let top = round_px(STOWED_TOP_FRACTION, anchor.h);
+    Rect::new(anchor.x, anchor.y + top, anchor.w, anchor.h - top)
 }
 
 fn pane_under(point: Point, layout: &FloatLayout<'_>) -> Option<PaneId> {

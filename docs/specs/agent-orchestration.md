@@ -159,6 +159,8 @@ owner の指示で、`+ctl spawn` はワーカーを必ず float として起動
 
 ### D6：エージェントごとの差はフックの設定だけに閉じ込める
 
+> 2026-11-18 追記：3 種とも OSC 7501 で状態を自分で報告するようになった（Claude Code 2.1.295+、Codex 0.163+ の `app=codex`、agy 1.4+ の `app=antigravity`。いずれも `blocked:kind=permission|question` を含む）。そのため下の表のフック経路は不要になった。加えて Claude Code と Codex はフックを新しいセッション（setsid）で起動するので、フックからの `+ctl report` は `/dev/tty` を開けず何も届かない。Codex の手順は最初から機能していなかった。Claude Code 用の `scripts/noa-agent-hook.py` は、フックの `terminalSequence` 出力で報告するよう改めた。A6 は「フックは要らない」という形で解消した。agy のフックは `PreInvocation` がモデル呼び出しのたびに発火し、`.agents/hooks.json` の最上位はフック名で区切る形式である（`docs/AGENT_WORKFLOW.md` からは記述を外した）。
+
 状態の報告経路は 3 種とも `OSC 777;noa-agent` に揃える。各エージェントのフックが `"$NOA_BIN" +ctl report` を呼ぶだけにし、Noa 本体と `+ctl wait` には種別ごとの分岐を持たせない。`scripts/noa-agent-hook.py` は既存の利用者の設定を壊さないよう残し、`+ctl report` は同じ処理（制御端末へ書く、端末がなければ何もせず成功）を持つ。
 
 | kind | `running`/`finished` の出どころ | 承認・回答待ちの出どころ | 裏付け |

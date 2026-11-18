@@ -127,15 +127,20 @@ state. Generic BEL/OSC notifications retain the neutral `notification` label.
 
 ### Claude Code hooks
 
-The included `scripts/noa-agent-hook.py` writes lifecycle reports to the hook's
-controlling terminal, leaving hook stdout untouched. It reports only event
-kinds and tool names, and reads no transcripts. Agent settings are not changed
-automatically.
+Claude Code reports its state on its own through OSC 7501, so these hooks are
+optional; they add tool names and the `PermissionRequest` moment.
 
-Merge the following with existing Claude Code hooks, replacing the example
-script path with an absolute path to this checkout. Quote the script path
-inside the command if it contains spaces. A detached hook without a controlling
-terminal reports nothing.
+The included `scripts/noa-agent-hook.py` reports only event kinds and tool
+names, and reads no transcripts. Claude Code runs hooks without a controlling
+terminal, so the script prints the report as the hook's `terminalSequence`
+output, which Claude Code writes to the terminal for it (it writes to the
+controlling terminal directly when it has one). Claude Code honours
+`terminalSequence` only for hooks in user settings (`~/.claude/settings.json`),
+not project settings. Agent settings are not changed automatically.
+
+Merge the following with the existing hooks in `~/.claude/settings.json`,
+replacing the example script path with an absolute path to this checkout. Quote
+the script path inside the command if it contains spaces.
 
 ```json
 {
@@ -195,7 +200,7 @@ terminal reports nothing.
     ],
     "Notification": [
       {
-        "matcher": "permission_prompt|idle_prompt|elicitation_dialog",
+        "matcher": "permission_prompt|idle_prompt|elicitation_dialog|elicitation_url_dialog",
         "hooks": [
           {
             "type": "command",
@@ -243,9 +248,11 @@ Other agents can emit the protocol; only a Claude Code adapter is included.
 Structured status feeds local cards and, through `Panel.agent`, noa-server clients
 (see below).
 
-Any hook can also report with `"$NOA_BIN" +ctl report <state> [detail]`, which writes
-the same sequence to the hook's controlling terminal. `NOA_BIN` is the absolute path
-of the running Noa, set in every pane.
+A process in the pane can also report with `"$NOA_BIN" +ctl report <state> [detail]`,
+which writes the same sequence to its controlling terminal. `NOA_BIN` is the
+absolute path of the running Noa, set in every pane. Claude Code and Codex start
+hooks in a new session without a controlling terminal, so from their hooks
+`+ctl report` reports nothing.
 
 ## Orchestrating worker panes
 
@@ -287,25 +294,21 @@ Put `--` before a `send` text (or `report` detail) that starts with `--`.
 `send` and `close` refuse panes this orchestrator did not spawn unless `--any-pane`
 is given. This guards against a wrong id; it is not a security boundary.
 
-`wait` relies on agent-state reports. Claude Code reports on its own through
-OSC 7501 (working, blocked on a prompt, done or failed), and also through the hook
-adapter above when it is configured. For Codex and Antigravity CLI,
-configure their hooks to call `+ctl report`; their documented events (as of this
-writing; check your installed version) cover the start and end of a turn but not
-approval prompts, which therefore surface as `attention` (the agent's own
-notification). `attention` means a notification arrived, not that the agent is
-blocked; read the pane to decide. Without any report, a worker can only be waited
-on for `exit`.
+`wait` relies on agent-state reports. Claude Code (2.1.295+), Codex (0.163+) and
+Antigravity CLI (1.4+) report on their own through OSC 7501: working, blocked on
+an approval or a question, done, or failed. No hooks are needed. Claude Code also
+reports through the hook adapter above when it is configured. Older versions
+surface approval prompts only as `attention` (the agent's own notification);
+`attention` means a notification arrived, not that the agent is blocked, so
+read the pane to decide. Without any report, a worker can only be waited on for
+`exit`.
 
-| Agent | Run `"$NOA_BIN" +ctl report running` on | Run `"$NOA_BIN" +ctl report finished` on |
-|---|---|---|
-| Codex | `UserPromptSubmit` | `Stop` |
-| Antigravity CLI | `PreInvocation` | `Stop` |
-
-The event names come from third-party and vendor documentation that Noa does not
-test against, and both tools change where and how hooks are configured between
-versions. Check your installed version's hook documentation (`/hooks` lists
-loaded hooks in agy) before relying on them.
+- Claude Code keeps reporting `working` (with "N still running") after a turn
+  while background commands, monitors or MCP tasks it started are still running,
+  so `wait` returns `finished` only once they end.
+- Codex can report `blocked` up to a second before its approval modal is drawn,
+  while it waits for typing to stop.
+- agy reports can be turned off with `AGY_CLI_OSC7501=off`.
 
 Exit status: 0 success, 1 error (bad arguments, unknown pane), 2 `wait` timed out,
 3 the server is disabled, unreachable, lacks a scope, or went away mid-command.

@@ -81,6 +81,7 @@ impl App {
                 alt_screen: terminal.active_is_alt,
                 scrollback_offset: terminal.viewport_offset(),
                 guards: *surface.auto_approve_guards.lock(),
+                agent_awaits_answer: terminal.agent_awaits_answer(),
             };
             let rows = auto_approve::live_rows_from_terminal(&terminal);
             let cursor = terminal.active().cursor;

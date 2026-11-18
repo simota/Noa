@@ -59,6 +59,7 @@ pub(super) fn detect_auto_approve_candidate(
         alt_screen: term.active_is_alt,
         scrollback_offset: term.viewport_offset(),
         guards: *publish.guards.lock(),
+        agent_awaits_answer: term.agent_awaits_answer(),
     };
     let rows = auto_approve::live_rows_from_terminal(term);
     let cursor = term.active().cursor;

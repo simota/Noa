@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Auto-approve recognizes Claude Code's real Edit, Write, Read and
+  AskUserQuestion dialogs (checked against Claude Code 2.1.327); the earlier
+  patterns never matched.
+- Auto-approve answers agy dialogs drawn above a custom multi-row status line
+  while agy reports that it waits on an answer.
+- `scripts/noa-agent-hook.py` reports through Claude Code's `terminalSequence`
+  hook output, because Claude Code runs hooks without a controlling terminal.
+
+### Added
+
+- Auto-approve answers Codex's patch approval ("Would you like to make the
+  following edits?").
+
+### Changed
+
+- The agent docs say that Claude Code, Codex and agy report their state
+  through OSC 7501, and drop the Codex and agy hook recipes (the Codex one
+  could never reach the terminal; neither agent needs hooks for `+ctl wait`).
+
 ## [0.9.1] - 2026-11-18
 
 A denser board that keeps worker floats out of the orchestrator's way.

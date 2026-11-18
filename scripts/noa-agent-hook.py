@@ -26,6 +26,7 @@ def report(event):
             "permission_prompt": "permission",
             "idle_prompt": "input",
             "elicitation_dialog": "input",
+            "elicitation_url_dialog": "input",
         }.get(event.get("notification_type"))
     if state is None:
         return None
@@ -48,15 +49,27 @@ def main():
         payload = report(json.loads(data))
         if payload is None:
             return
-        # Hook stdout belongs to the agent's hook protocol, not the terminal.
-        # A detached hook without a controlling tty simply has nothing to report.
-        fd = os.open("/dev/tty", os.O_WRONLY | os.O_NOCTTY)
-        try:
-            os.write(fd, payload)
-        finally:
-            os.close(fd)
+        deliver(payload)
     except (OSError, ValueError, TypeError):
         return
+
+
+def deliver(payload):
+    """Write to the controlling terminal, or hand the sequence back to
+    Claude Code: on macOS and Linux it runs hooks in a new session with no
+    controlling terminal, and emits a hook's `terminalSequence` (OSC 777 is on
+    its allowlist) for it. Claude Code honours that only for hooks in user
+    settings."""
+    try:
+        fd = os.open("/dev/tty", os.O_WRONLY | os.O_NOCTTY)
+    except OSError:
+        sys.stdout.write(json.dumps({"terminalSequence": payload.decode("utf-8")}))
+        sys.stdout.flush()
+        return
+    try:
+        os.write(fd, payload)
+    finally:
+        os.close(fd)
 
 
 if __name__ == "__main__":

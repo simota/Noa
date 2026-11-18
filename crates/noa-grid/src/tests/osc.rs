@@ -1439,3 +1439,55 @@ fn base64_group_decoding_matches_symbol_decoding() {
     }
     assert!(decoded > 1000, "only {decoded} inputs decoded");
 }
+
+// agy 1.5 (`app=antigravity`) ends its reports with BEL and carries the
+// dialog text in `msg=`; Codex 0.163+ reports without probing first.
+#[test]
+fn program_status_accepts_agy_and_codex_forms() {
+    // msg=base64("Trust this folder?")
+    let mut t = run(
+        b"\x1b]7501;state=blocked:kind=permission:app=antigravity:msg=VHJ1c3QgdGhpcyBmb2xkZXI/\x07",
+    );
+    let report = t.take_pending_agent_status().unwrap().unwrap();
+    assert_eq!(report.state, crate::AgentState::Permission);
+    assert_eq!(report.detail, "Trust this folder?");
+
+    let mut t = run(b"\x1b]7501;state=blocked:app=codex:kind=question\x1b\\");
+    assert_eq!(
+        t.take_pending_agent_status().unwrap().unwrap().state,
+        crate::AgentState::Input
+    );
+}
+
+// Auto-approve asks whether the agent says it waits on an answer; the drain
+// that feeds the session card must not erase that.
+#[test]
+fn agent_awaits_answer_follows_the_latest_report() {
+    let mut t = run(b"\x1b]7501;state=blocked:app=antigravity:kind=permission\x07");
+    let _ = t.take_pending_agent_status();
+    assert!(t.agent_awaits_answer());
+
+    let t = run(b"\x1b]777;noa-agent;input;\x1b\\");
+    assert!(t.agent_awaits_answer());
+
+    let t = run(
+        b"\x1b]7501;state=blocked:app=codex:kind=permission\x1b\\\x1b]7501;state=working:app=codex\x1b\\",
+    );
+    assert!(!t.agent_awaits_answer());
+
+    let t = run(b"\x1b]7501;state=blocked:app=codex:kind=permission\x1b\\\x1bc");
+    assert!(!t.agent_awaits_answer());
+}
+
+// Review finding: an agent that dies while blocked never reports again, so
+// the flag outlived it and vouched for its leftover dialog. The shell taking
+// back the terminal (OSC 133 prompt or command end) ends any wait.
+#[test]
+fn the_shell_taking_back_the_terminal_ends_an_agent_wait() {
+    for mark in [&b"\x1b]133;D;137\x07"[..], b"\x1b]133;A\x07"] {
+        let mut input = b"\x1b]7501;state=blocked:app=antigravity:kind=permission\x07".to_vec();
+        input.extend_from_slice(mark);
+        let t = run(&input);
+        assert!(!t.agent_awaits_answer(), "{mark:?}");
+    }
+}

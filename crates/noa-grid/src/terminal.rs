@@ -154,6 +154,10 @@ pub struct Terminal {
     /// keeps only the latest, so this is what tells an orchestrator that two
     /// reports arrived in one batch (agent-orchestration D1, `Panel.agent.seq`).
     pending_agent_reports: u64,
+    /// Whether the latest agent-status report (OSC 7501 or `777;noa-agent`)
+    /// says the agent waits on an approval or an answer. Unlike
+    /// `pending_agent_status` it is not drained, so a screen scan can ask.
+    agent_awaits_answer: bool,
     /// Whether the last `OSC 7501` report was working/blocked, so a following
     /// `idle` reads as "response ended" rather than a fresh program's idle.
     program_status_active: bool,
@@ -271,6 +275,7 @@ impl Terminal {
             kitty_clipboard_write_limit: Some(64 * 1024 * 1024),
             pending_notifications: VecDeque::new(),
             pending_agent_status: None,
+            agent_awaits_answer: false,
             pending_agent_reports: 0,
             program_status_active: false,
             mouse_shape: None,
@@ -989,7 +994,20 @@ impl Terminal {
         std::mem::take(&mut self.pending_agent_reports)
     }
 
+    /// Whether the agent's latest status report says it waits on an approval
+    /// or an answer (`blocked` in OSC 7501, `permission`/`input` in
+    /// `777;noa-agent`).
+    pub fn agent_awaits_answer(&self) -> bool {
+        self.agent_awaits_answer
+    }
+
     fn set_pending_agent_status(&mut self, status: Option<crate::AgentStatus>) {
+        self.agent_awaits_answer = status.as_ref().is_some_and(|status| {
+            matches!(
+                status.state,
+                crate::AgentState::Permission | crate::AgentState::Input
+            )
+        });
         self.pending_agent_status = Some(status);
         self.pending_agent_reports += 1;
     }

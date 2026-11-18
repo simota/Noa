@@ -5,6 +5,33 @@
 - owner: simota
 - build-path decision: **apex** (`/nexus apex` — live AC: T-1 signature capture and AC-11/12/13 GUI visual checks remain manual)
 
+## 2026-11-18 revision — real Claude Code dialogs, Codex patches, agy status lines
+
+The Claude Code anchors (`Claude wants to edit …`) came from synthetic fixtures
+and never matched a real dialog. Dialogs were captured from Claude Code 2.1.327
+in a pty with `--permission-mode default`, and the signatures now follow them:
+
+| Agent | Recognized prompt | Answer |
+|---|---|---|
+| Claude Code | Last on screen: a `─` rule, the title `Edit file` / `Create file` / `Overwrite file` / `Write file` / `Read file`, the tool input, a question that fits the title (`Do you want to make this edit to …?`, `… create …?`, `… overwrite …?`, `… write to …?`, `… proceed?` for Read), selected `❯ 1. Yes`, then only `Yes, …` choices before a final `No`, and `Esc to cancel · Tab to amend` | Enter (`\r`) |
+| Claude Code | AskUserQuestion: a single `☐ <header>` chip (no second chip or `✔ Submit` tab), selected single-select `❯ 1. <choice>`, Claude Code's `Type something.` and final `Chat about this`, and `Enter to select · ↑/↓ to navigate · Esc to cancel` | Enter (`\r`), the first choice |
+| Codex | `Would you like to make the following edits?`, a nonempty `Destination:` row, selected `1. Yes, proceed (y)`, the optional `Yes, and don't ask again for these files (a)`, the rejection, and the command footer (upstream snapshot `approval_modal_patch`, rust-v0.169.1) | Enter (`\r`) after the Codex settle delay |
+
+- Bash dialogs, dialogs that offer `No` first (safety checks), and Codex
+  network, permission-grant and MCP prompts stay with the user.
+- The Claude answer changed from `1\r` to `\r`: the first choice is already
+  selected, and the stray `\r` landed in the input box.
+- agy runs the user's `statusline.sh`, which may paint several rows of any text
+  below a dialog. Beyond agy's stock one-row bar, those rows now count as the
+  live tail when agy's latest OSC 7501 report is `blocked` and no choice is
+  selected among them. The subagent notice still needs the stock bar.
+- A Claude dialog opens only at a `─` rule in column 0: Claude Code pads the
+  title, tool input and a Bash command's body, so a rule and a `Read file` line
+  inside a command cannot pose as a Read dialog (review finding).
+- The shell's OSC 133 prompt, command-start and command-end marks end the
+  reported wait, so an agent that died while blocked cannot vouch for its
+  leftover dialog.
+
 ## 2026-10-17 extension — agy subagent approval notice
 
 The user supplied a screenshot of agy's notice that a subagent waits on a tool

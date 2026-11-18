@@ -543,6 +543,7 @@ impl Handler for Terminal {
         self.pending_notifications.clear();
         // Cleared, but not a report: the report count stays.
         self.pending_agent_status = Some(None);
+        self.agent_awaits_answer = false;
         self.program_status_active = false;
         self.set_mouse_shape(None);
         self.mouse_shift_capture = None;
@@ -910,6 +911,12 @@ impl Handler for Terminal {
                     ShellIntegrationOscKind::CommandEnd => ShellIntegrationMarkKind::CommandEnd,
                 };
                 self.record_shell_mark(kind, exit_status, continuation);
+                // Any mark but 133;B comes from the shell running a prompt or a
+                // new command: an agent that reported a wait has stopped
+                // waiting, even one that died without saying so.
+                if kind != ShellIntegrationMarkKind::InputStart {
+                    self.agent_awaits_answer = false;
+                }
                 // The title→cwd rebind window opens at OSC 2, is consumed by the
                 // next OSC 7, and closes at 133;A (PromptStart) or 133;C
                 // (CommandStart), whichever comes first — bounding it to a

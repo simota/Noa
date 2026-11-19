@@ -67,10 +67,12 @@ Commands:
       --no-wait-after  --focus  --no-board
       --max-children N (default and most 20: the board holds 20 workers;
                          with --no-board this pane holds 8 floats)
-  send PANE [--enter] [--raw] [--wait [wait options]] [--answer] [--any-pane]
-       [--] TEXT|-              Type TEXT (or stdin) into PANE; prints the
+  send PANE [--enter] [--raw] [--replace] [--wait [wait options]] [--answer]
+       [--any-pane] [--] TEXT|-  Type TEXT (or stdin) into PANE; prints the
                                 report count to pass to `wait --after`. Refused
                                 while PANE waits for an approval, unless --answer.
+                                --replace first clears what the input line holds
+                                (Ctrl-E, then Ctrl-U per line, up to 32 lines).
   wait PANE...|--children [--after SEQ | --after PANE=SEQ ...] [--for LIST]
        [--all] [--timeout SECS] [--tail N]
                                 Block until a worker stops. LIST is a comma list
@@ -179,6 +181,8 @@ pub(crate) struct SendArgs {
     pub(crate) any_pane: bool,
     /// `--answer`: type into a pane that waits for an approval.
     pub(crate) answer: bool,
+    /// `--replace`: clear the input line before typing.
+    pub(crate) replace: bool,
     /// `--wait`: block like `wait PANE --after <seq before sending>`.
     pub(crate) wait: Option<WaitOptions>,
 }
@@ -436,6 +440,11 @@ fn parse_send(rest: &mut Args) -> Result<SendArgs, String> {
     let raw = rest.flag("--raw");
     let any_pane = rest.flag("--any-pane");
     let answer = rest.flag("--answer");
+    let replace = rest.flag("--replace");
+    if replace && answer {
+        // The keys that clear an input line would land in the prompt.
+        return Err("--replace does not go with --answer: a prompt has no input line".to_string());
+    }
     let wait = if rest.flag("--wait") {
         Some(parse_wait_options(rest)?)
     } else {
@@ -457,8 +466,24 @@ fn parse_send(rest: &mut Args) -> Result<SendArgs, String> {
         raw,
         any_pane,
         answer,
+        replace,
         wait,
     })
+}
+
+/// The most input lines `send --replace` clears.
+const REPLACE_MAX_LINES: usize = 32;
+
+/// What `send --replace` types before the text: Ctrl-E (end of line), then
+/// two Ctrl-U per line. In Claude Code, Codex and Antigravity CLI, Ctrl-U
+/// clears the current line only, and at the start of a line one more joins
+/// it to the line above, so a draft of N lines needs up to 2N (checked on
+/// Claude Code 2.1.329, Codex 0.170.0, agy 1.5.13; an empty input line is left
+/// as it is).
+pub(crate) fn replace_keys() -> String {
+    let mut keys = String::from("\x05");
+    keys.push_str(&"\x15".repeat(REPLACE_MAX_LINES * 2));
+    keys
 }
 
 fn parse_wait_options(rest: &mut Args) -> Result<WaitOptions, String> {
@@ -1515,6 +1540,11 @@ impl Session {
             self.client
                 .subscribe(&[EventKind::StateChanged], Some(&[args.pane]))?;
         }
+        if args.replace {
+            self.send_input(args.pane, &replace_keys(), false)?;
+            // Let the TUI take the keys before a paste arrives.
+            std::thread::sleep(SUBMIT_DELAY);
+        }
         if !text.is_empty() {
             self.send_input(args.pane, &text, !args.raw)?;
         }
@@ -2159,6 +2189,7 @@ mod tests {
                 raw: false,
                 any_pane: false,
                 answer: false,
+                replace: false,
                 wait: Some(WaitOptions {
                     reasons: vec![Reason::Finished, Reason::Error],
                     all: false,
@@ -3096,6 +3127,21 @@ mod tests {
             parse_args(&args(&["send", "8", "--answer", "--enter", "y"])).unwrap(),
             Command::Send(SendArgs { answer: true, .. })
         ));
+    }
+
+    #[test]
+    fn replace_clears_the_input_line_first_and_not_a_prompt() {
+        assert!(matches!(
+            parse_args(&args(&["send", "8", "--replace", "--enter", "go"])).unwrap(),
+            Command::Send(SendArgs { replace: true, .. })
+        ));
+        let err = parse_args(&args(&["send", "8", "--replace", "--answer", "y"])).unwrap_err();
+        assert!(err.contains("--answer"), "{err}");
+
+        let keys = replace_keys();
+        assert!(keys.starts_with('\x05'));
+        assert_eq!(keys.matches('\x15').count(), 2 * REPLACE_MAX_LINES);
+        assert_eq!(keys.chars().count(), 1 + 2 * REPLACE_MAX_LINES);
     }
 
     // Review finding: text that starts with `--` or equals a flag name could

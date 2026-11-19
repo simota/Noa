@@ -297,13 +297,19 @@ pub(crate) fn remove(cwd: &Path, path: &Path, branch: &str) -> Removal {
 }
 
 /// `close --prune` for one closed pane labelled `label`: remove its worktree
-/// and branch when `cwd`'s repository has them. `None` when there is no
-/// label or no matching worktree.
-pub(crate) fn prune(cwd: &Path, label: &str) -> Option<serde_json::Value> {
+/// and branch when `cwd`'s repository has them and the pane's own cwd
+/// (`pane_cwd`) is in that worktree. `None` when there is no label, no
+/// matching worktree, or the pane was not in it.
+pub(crate) fn prune(cwd: &Path, label: &str, pane_cwd: &Path) -> Option<serde_json::Value> {
     check_label(label).ok()?;
     let top = top_level(cwd).ok()?;
     let entries = parse_worktree_list(&git(cwd, &["worktree", "list", "--porcelain"]).ok()?);
     let entry = find_worktree(&entries, &top, label)?;
+    // Labels are not unique: only the pane that worked in the worktree
+    // prunes it, not another pane that happens to share the label.
+    if !within(pane_cwd, &entry.path) {
+        return None;
+    }
     let removal = remove(cwd, &entry.path, &branch_name(label));
     let mut info = serde_json::json!({
         "path": entry.path.to_string_lossy(),
@@ -314,6 +320,13 @@ pub(crate) fn prune(cwd: &Path, label: &str) -> Option<serde_json::Value> {
         info["kept"] = kept.into();
     }
     Some(info)
+}
+
+/// Whether `path` is `dir` or inside it, compared resolved when they exist
+/// (`/var` and `/private/var` are one directory on macOS).
+fn within(path: &Path, dir: &Path) -> bool {
+    let resolve = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    resolve(path).starts_with(resolve(dir))
 }
 
 #[cfg(test)]
@@ -513,7 +526,7 @@ detached
         assert_eq!(made.branch, "orch/job");
         assert!(made.path.join("a.txt").is_file());
 
-        let info = prune(&repo, "job").unwrap();
+        let info = prune(&repo, "job", &made.path).unwrap();
         assert_eq!(info["removed"], true);
         assert_eq!(info["branchDeleted"], true);
         assert!(info.get("kept").is_none());
@@ -549,7 +562,7 @@ detached
         let made = add(&repo, "job").unwrap();
         std::fs::write(made.path.join("new.txt"), "x").unwrap();
 
-        let info = prune(&repo, "job").unwrap();
+        let info = prune(&repo, "job", &made.path).unwrap();
         assert_eq!(info["removed"], false);
         assert_eq!(info["branchDeleted"], false);
         assert!(info["kept"].as_str().is_some_and(|k| !k.is_empty()));
@@ -565,7 +578,7 @@ detached
         run_git(&made.path, &["add", "."]);
         run_git(&made.path, &["commit", "-q", "-m", "work"]);
 
-        let info = prune(&repo, "job").unwrap();
+        let info = prune(&repo, "job", &made.path).unwrap();
         assert_eq!(info["removed"], true);
         assert_eq!(info["branchDeleted"], false);
         assert!(info["kept"].as_str().is_some_and(|k| !k.is_empty()));
@@ -581,15 +594,28 @@ detached
     #[test]
     fn prune_ignores_labels_without_a_matching_worktree() {
         let (base, repo) = repo("none");
-        assert!(prune(&repo, "nothing").is_none());
-        assert!(prune(&repo, "../escape").is_none());
+        assert!(prune(&repo, "nothing", &repo).is_none());
+        assert!(prune(&repo, "../escape", &repo).is_none());
         // A plain branch of the same name at the same path is not ours.
         let path = worktree_path(&repo, "other");
         run_git(
             &repo,
             &["worktree", "add", "-b", "feature", path.to_str().unwrap()],
         );
-        assert!(prune(&repo, "other").is_none());
+        assert!(prune(&repo, "other", &path).is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // Review finding: labels are not unique, so closing another pane that
+    // had the same label pruned the worktree a running worker still used.
+    #[test]
+    fn prune_leaves_a_worktree_the_closed_pane_was_not_in() {
+        let (base, repo) = repo("shared-label");
+        let made = add(&repo, "job").unwrap();
+
+        assert!(prune(&repo, "job", &repo).is_none());
+        assert!(made.path.exists());
+        assert!(prune(&repo, "job", &made.path.join("src")).is_some());
         let _ = std::fs::remove_dir_all(&base);
     }
 }

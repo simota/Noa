@@ -1389,9 +1389,9 @@ impl Session {
             Some(self.guard_own()?)
         };
         let here = std::env::current_dir().ok();
-        let mut prune_label = |label: &str| {
+        let mut prune_label = |label: &str, pane_cwd: &str| {
             if prune {
-                worktree::prune(here.as_deref()?, label)
+                worktree::prune(here.as_deref()?, label, std::path::Path::new(pane_cwd))
             } else {
                 None
             }
@@ -2343,7 +2343,7 @@ pub(crate) fn close_panes(
     source: &mut impl PaneCloser,
     panes: &[u64],
     own: Option<u64>,
-    prune: &mut dyn FnMut(&str) -> Option<serde_json::Value>,
+    prune: &mut dyn FnMut(&str, &str) -> Option<serde_json::Value>,
     emit: &mut dyn FnMut(&serde_json::Value),
 ) -> Result<i32, Failure> {
     let panels = source.list()?;
@@ -2352,7 +2352,7 @@ pub(crate) fn close_panes(
         let label = panels
             .iter()
             .find(|panel| panel.pane_id.0 == pane)
-            .and_then(|panel| panel.label.clone());
+            .and_then(|panel| Some((panel.label.clone()?, panel.cwd.clone())));
         let gone = !listed
             || match source.close(pane) {
                 Ok(()) => false,
@@ -2372,10 +2372,10 @@ pub(crate) fn close_panes(
         let mut line = serde_json::json!({ "paneId": WireId(pane), "closed": true });
         if gone {
             line["gone"] = true.into();
-        } else if let Some(label) = label {
+        } else if let Some((label, pane_cwd)) = label {
             // Only after the pane is closed, so its process no longer
             // holds the worktree; a refusal keeps it and does not fail.
-            if let Some(info) = prune(&label) {
+            if let Some(info) = prune(&label, &pane_cwd) {
                 line["worktree"] = info;
             }
         }
@@ -2680,7 +2680,7 @@ mod tests {
             &mut source,
             &[8, 9, 7],
             Some(1),
-            &mut |label| {
+            &mut |label, _cwd| {
                 asked.push(label.to_string());
                 Some(serde_json::json!({ "path": "/r-wt/job", "removed": true }))
             },
@@ -3583,13 +3583,13 @@ mod tests {
             refuse_code: -32003,
         };
         let failure =
-            close_panes(&mut source, &[8], Some(1), &mut |_| None, &mut |_| {}).unwrap_err();
+            close_panes(&mut source, &[8], Some(1), &mut |_, _| None, &mut |_| {}).unwrap_err();
         assert_eq!(failure.code, EXIT_UNAVAILABLE);
 
         // Any other refusal of a pane that is still listed fails that pane only.
         source.refuse_code = -32000;
         let mut lines = Vec::new();
-        let code = close_panes(&mut source, &[8], Some(1), &mut |_| None, &mut |line| {
+        let code = close_panes(&mut source, &[8], Some(1), &mut |_, _| None, &mut |line| {
             lines.push(line.clone())
         });
         assert_eq!(code.ok(), Some(EXIT_ERROR));

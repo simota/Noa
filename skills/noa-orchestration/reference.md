@@ -65,16 +65,18 @@ accepted and changes nothing.
 | Option | Meaning |
 |---|---|
 | `--no-board` | Do not open the board; the worker floats over this pane |
-| `--cwd DIR` | Working directory. Relative paths are taken from this process's cwd. Default: this process's cwd |
+| `--cwd DIR` | Working directory. Relative paths are taken from this process's cwd. Default: this process's cwd. One that is not a directory is refused (exit 1) before anything starts; `ls` shows it as the worker's `cwd` until the worker's shell reports its own |
 | `--env KEY=VALUE` | Repeatable. `PATH` defaults to this process's `PATH` when a command is given, and `LANG` and `LC_*` to this process's, so a worker keeps your locale even when Noa itself has none |
 | `--label TEXT` | Shown in the panel's `label` |
 | `--input TEXT` | Typed into the worker once it starts |
 | `--no-wait-after` | Close the pane when its command exits. By default it stays open with `exit.code` readable |
 | `--focus` | Open the worker's float and move keyboard focus to it. By default it stays collapsed and focus stays where it was |
-| `--max-children N` | Refuse when this pane already has N workers (default 8). Checked before each spawn, so parallel spawns can exceed it |
+| `--max-children N` | Refuse when this pane already has N workers (default and maximum 8, the floats a board holds). Exited workers count until closed; the refusal says how many have exited. Checked before each spawn, so parallel spawns can exceed it |
 
-`COMMAND` runs without a shell (argv, looked up on `PATH`). Without one, the worker
-gets the user's shell. For a shell pipeline, use `-- sh -c '…'`.
+`COMMAND` runs without a shell (argv, looked up on `PATH`). A command without a
+`/` that is not on the worker's `PATH` is refused (exit 1, "command not found on
+PATH"). Without one, the worker gets the user's shell. For a shell pipeline,
+use `-- sh -c '…'`.
 
 ### `send PANE [--enter] [--raw] [--wait [wait options]] [--answer] [--any-pane] [--] TEXT|-`
 
@@ -94,9 +96,16 @@ as keystrokes instead of a bracketed paste.
   typing and again before Enter; if the approval appeared in between, Enter is not
   sent and the text stays in the input line. `--answer` sends anyway. Only agents
   that report `permission` are covered (see "Which agents report turns").
-- Input the pane refused (for example, its process has exited) is an error.
+- Only `permission` is refused. `input` is not: it also means an agent idle at
+  its prompt (Claude Code's hook adapter reports `idle_prompt` as `input`), so
+  `read` an `input` pane before sending to it.
+- Answering a prompt: `send P --answer --enter ""` presses Enter alone, which
+  takes the selected choice; `send P --answer --raw 2` types a key;
+  `send P --answer --raw $'\e'` sends Esc.
+- Input to a pane whose process has exited is refused with "pane N's process
+  has exited (code C)"; `read` it, then `close` it.
 
-### `wait PANE...|--children [--after SEQ | --after PANE=SEQ ...] [--for LIST] [--all] [--timeout SECS]`
+### `wait PANE...|--children [--after SEQ | --after PANE=SEQ ...] [--for LIST] [--all] [--timeout SECS] [--tail N]`
 
 Blocks until one pane (every pane with `--all`) stops, then prints one line per
 pane that stopped:
@@ -107,6 +116,11 @@ pane that stopped:
 {"paneId":"5","reason":"exit","closed":true}
 ```
 
+- A pane named by id that is not listed when the wait starts is an error
+  (exit 1, "pane N is not listed"), so a stale or mistyped id does not pass for
+  a finished worker. One that goes away during the wait ends it with `exit`.
+- `--tail N` adds `"tail"`: the pane's last N lines of retained output, for each
+  line whose pane is still open.
 - `--for` takes a comma list of `finished,permission,input,error,exit,attention`
   (default: all of them).
 - A report counts only when its `seq` is newer than the baseline. The baseline is
@@ -121,16 +135,20 @@ pane that stopped:
   a pane that had already exited when the wait began is skipped while other panes
   are still running.
 - Timeout: prints
-  `{"timeout":true,"pending":["7"],"baseline":[{"paneId":"7","seq":5}]}` and
-  exits 2. `baseline` is the report count each pending pane was waited from
+  `{"timeout":true,"pending":["7"],"baseline":[{"paneId":"7","seq":5,"state":"running"}]}`
+  and exits 2 (`state` only for a pane with an agent state). A pane that had
+  already exited when the wait began is listed under `"exited"`, not
+  `"pending"`. `baseline` is the report count each pending pane was waited from
   (with `send --wait`, the count before sending). Pass it back as
   `--after PANE=SEQ` and the next wait also sees a report that landed in
   between. Without `--timeout`, it waits indefinitely.
 
 ### `read PANE [--scrollback] [--max-bytes N]`
 
-Prints the pane's visible screen as text, or with `--scrollback` its retained
-output. `--max-bytes` bounds the output. Works on exited panes that are still open.
+Prints the pane's visible screen as text (without the blank rows below it), or
+with `--scrollback` its retained output. `--max-bytes` bounds the output
+(default 256 KiB, at most 1 MiB); a cut keeps the end and prints
+`output truncated` on stderr. Works on exited panes that are still open.
 
 ### `close PANE...|--children [--any-pane]`
 
@@ -147,14 +165,16 @@ not this pane's worker is refused before anything is closed.
 
 A live view for people, not for scripts. The first `spawn` opens one by itself.
 `board --open` starts a board pane next to this pane (a new tab when there is no room) and prints its `{"paneId":"…"}`;
-it is not one of this pane's workers. `board` without `--open` takes over the
+when this pane's board is already open it opens nothing and prints
+`{"paneId":"…","existing":true}`. The board is not one of this pane's workers. `board` without `--open` takes over the
 pane it runs in until `q`.
 
 ### `report STATE [[--] DETAIL]`
 
 Writes an agent-state report for the pane this process runs in. `STATE` is
 `running`, `permission`, `input`, `finished`, `error` or `clear`. It is meant for a
-worker agent's hooks. Without a controlling terminal it writes nothing and
+script running in the pane (agent hooks that run without a controlling
+terminal cannot use it). Without a controlling terminal it writes nothing and
 succeeds.
 
 ## Exit status
@@ -162,9 +182,9 @@ succeeds.
 | Code | Meaning |
 |---|---|
 | 0 | Done |
-| 1 | Error: bad arguments, unknown pane, refused input, a pane that is not yours |
+| 1 | Error: bad arguments, unknown pane, refused input, a pane that is not yours. An argument error prints only its message and a pointer to `--help` |
 | 2 | `wait` timed out |
-| 3 | Server disabled, unreachable, missing a scope, or gone mid-command. stderr names the config to add |
+| 3 | Server disabled, unreachable, missing a scope, or gone mid-command. stderr says which: "sandbox likely blocks loopback" (your shell's sandbox refused the connection; run `+ctl` outside it), "not listening" (Noa's server is off), or a message naming the config to add |
 
 When `+ctl` reaches a Noa that does not list this pane (stderr says "does not
 report surface ids", exit 3, or "is not among the panes", exit 1), the control
@@ -184,12 +204,14 @@ choosing another `server-port`) is their call.
 | Agent | Reports | Approval or question prompts |
 |---|---|---|
 | Claude Code | On its own through OSC 7501 (Claude Code 2.1.295 and later): `running` while working, `finished` when a turn completes, `error` when it fails. Noa versions before the 7501 `done`/`error` fix left the state at `running` after a turn. The hook adapter `scripts/noa-agent-hook.py` reports the same, if configured (`docs/AGENT_WORKFLOW.md`) | `permission` / `input` |
-| Codex | `running`/`finished` from hooks calling `+ctl report` (`UserPromptSubmit`, `Stop`), if configured | Only as `attention` |
-| Antigravity CLI | `running`/`finished` from hooks calling `+ctl report` (`PreInvocation`, `Stop`), if configured | Only as `attention` |
+| Codex | On its own through OSC 7501 (Codex 0.163 and later, `app=codex`) | `permission` / `input` |
+| Antigravity CLI | On its own through OSC 7501 (agy 1.4 and later, `app=antigravity`; off with `AGY_CLI_OSC7501=off`) | `permission` / `input` |
 | Anything else | Nothing | Only `exit`, or `attention` if it sends a desktop notification |
 
-The Codex and Antigravity hook events come from their documentation and are not
-tested by Noa. Check the installed version if waits never end with `finished`.
+Older Codex and agy versions surface prompts only as `attention`. Hooks that
+call `+ctl report` deliver nothing from Claude Code or Codex, which run hooks
+without a controlling terminal; `+ctl report` is for scripts running in the
+pane. Check the installed version if waits never end with `finished`.
 
 ## Model tiers
 
@@ -238,7 +260,7 @@ a=$(noa spawn --label api -- claude | jq -r .paneId)
 b=$(noa spawn --label ui -- codex | jq -r .paneId)
 noa send "$a" --enter --wait --timeout 1800 "…task A…" > a.json &
 noa send "$b" --enter --wait --timeout 1800 "…task B…" > b.json &
-wait
+wait   # run the whole block with your tool's background mode
 ```
 
 The same without background jobs, only for workers that report turns (see the
@@ -250,8 +272,8 @@ never seen, and that wait runs until its timeout. Use the background
 ```sh
 sa=$(noa send "$a" --enter "…" | jq -r .seq)
 sb=$(noa send "$b" --enter "…" | jq -r .seq)
-noa wait "$a" --after "$sa" --timeout 1800
-noa wait "$b" --after "$sb" --timeout 1800
+noa wait "$a" --after "$sa" --timeout 540
+noa wait "$b" --after "$sb" --timeout 540
 ```
 
 A wait longer than your shell tool allows: keep each wait short and carry on

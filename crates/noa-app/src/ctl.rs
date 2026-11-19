@@ -60,7 +60,9 @@ Commands:
                                 where its row shows it until someone opens
                                 it; prints {\"paneId\":...}. With --no-board,
                                 or no board, it floats over this pane,
-                                collapsed to its title strip.
+                                collapsed to its title strip. A worker's
+                                workers go on its orchestrator's board (one
+                                level deep; no --no-board).
       --cwd DIR  --env KEY=VALUE  --label TEXT  --input TEXT
       --no-wait-after  --focus  --no-board
       --max-children N (default and most 20: the board holds 20 workers;
@@ -960,6 +962,23 @@ fn is_executable(file: &std::path::Path) -> bool {
     meta.is_file()
 }
 
+/// Whether a spawn from this pane looks for its board first, opening it
+/// when none is (D9, D10): an orchestrator's does unless `--no-board`. A
+/// worker's does not: the server puts a worker's workers on the board the
+/// worker is stowed on (D13), so it has no board of its own, and
+/// `--no-board` is refused there.
+pub(crate) fn spawn_opens_board(is_worker: bool, board: bool) -> Result<bool, String> {
+    match (is_worker, board) {
+        (true, false) => Err(
+            "--no-board does not apply here: this pane is a worker, and a \
+             worker's workers always go on its orchestrator's board"
+                .to_string(),
+        ),
+        (true, true) => Ok(false),
+        (false, board) => Ok(board),
+    }
+}
+
 /// Before a spawn, the pane its worker goes over (D9, D10): `own`'s board,
 /// opened when none is, so the worker is stowed there. A board problem is a
 /// warning to print, never the spawn's failure: the worker then floats over
@@ -1056,8 +1075,8 @@ pub(crate) fn not_own_message(surface_id: Option<&str>, port: u16, lacks_ids: bo
         Some(surface_id) => format!(
             "this pane (NOA_SURFACE_ID={surface_id}) is not among the panes of the Noa \
              answering on port {port}. If another Noa holds that port, this one could \
-             not listen. {} Floating panes and the quick and scratch terminals cannot \
-             orchestrate.",
+             not listen. {} Floating panes that are not workers, and the quick and \
+             scratch terminals, cannot orchestrate.",
             port_owner_hint(port)
         ),
     }
@@ -1408,7 +1427,15 @@ impl Session {
 
     fn spawn(&mut self, args: SpawnArgs) -> Result<i32, Failure> {
         let own = self.require_own()?;
-        let children = self.children()?;
+        let panels = self.client.list_panels()?;
+        let is_worker = panels
+            .iter()
+            .any(|panel| panel.pane_id.0 == own && panel.parent_pane_id.is_some());
+        let opens_board = spawn_opens_board(is_worker, args.board).map_err(Failure::error)?;
+        let children: Vec<Panel> = panels
+            .into_iter()
+            .filter(|panel| panel.parent_pane_id == Some(WireId(own)))
+            .collect();
         if children.len() >= args.max_children {
             let exited = children.iter().filter(|panel| panel.exit.is_some()).count();
             return Err(Failure::error(max_children_message(
@@ -1432,8 +1459,9 @@ impl Session {
             focus: Some(args.focus),
         };
         // Workers are always floats (D9), stowed on the board when there is
-        // one (D10), so the board opens first.
-        let host = if args.board {
+        // one (D10), so the board opens first. A worker's go over the worker
+        // itself, and the server stows them on the board it is on (D13).
+        let host = if opens_board {
             let panels = self.client.list_panels().map_err(Failure::from);
             let (host, warning) =
                 board_before_spawn(|| panels, own, || self.open_board(own, Placement::Auto));
@@ -2362,6 +2390,21 @@ mod tests {
             board_before_spawn(|| Ok(Vec::new()), 1, || Err(Failure::error("no room")));
         assert_eq!(host, 1);
         assert!(warning.is_some_and(|w| w.contains("could not open the board")));
+    }
+
+    // agent-orchestration D13: a worker spawning has no board of its own to
+    // find or open (the server stows its workers on the board it is on),
+    // and cannot opt out of that board.
+    #[test]
+    fn a_workers_spawn_opens_no_board_and_refuses_no_board() {
+        assert_eq!(spawn_opens_board(false, true), Ok(true));
+        assert_eq!(spawn_opens_board(false, false), Ok(false));
+        assert_eq!(spawn_opens_board(true, true), Ok(false));
+        let error = spawn_opens_board(true, false).unwrap_err();
+        assert!(
+            error.contains("a worker's workers always go on its orchestrator's board"),
+            "{error}"
+        );
     }
 
     // D10: the worker is stowed on the board, which opens first when needed.

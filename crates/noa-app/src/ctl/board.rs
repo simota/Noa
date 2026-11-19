@@ -4,6 +4,7 @@
 //! pane kind: the model, key handling and drawing below are pure, and only
 //! [`run`] touches the terminal and the connection.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -280,6 +281,10 @@ pub(crate) struct Board {
     gone: Vec<Gone>,
     /// The key help is shown over the current view.
     pub(crate) help: bool,
+    /// Lines the help is scrolled, and how far it can go (set as it is
+    /// drawn, which is when the pane's height is known).
+    help_scroll: usize,
+    help_reach: Cell<usize>,
     /// Lines the list is scrolled past the selected row: `j` on the last
     /// worker goes on through the closed section, `k` comes back first.
     past: usize,
@@ -302,6 +307,8 @@ impl Board {
             message: None,
             gone: Vec::new(),
             help: false,
+            help_scroll: 0,
+            help_reach: Cell::new(0),
             past: 0,
         }
     }
@@ -680,14 +687,31 @@ impl Board {
             }
             Mode::Normal => {
                 self.message = None;
-                // Any key closes the help; Ctrl-C still quits.
-                if self.help && key != Key::CtrlC {
-                    self.help = false;
-                    return None;
+                // j/k scroll the help, any other key closes it; Ctrl-C
+                // still quits.
+                if self.help {
+                    match key {
+                        Key::Char('j') | Key::Down => {
+                            self.help_scroll = (self.help_scroll + 1).min(self.help_reach.get());
+                            return None;
+                        }
+                        Key::Char('k') | Key::Up => {
+                            self.help_scroll = self.help_scroll.saturating_sub(1);
+                            return None;
+                        }
+                        Key::CtrlC => {}
+                        _ => {
+                            self.help = false;
+                            return None;
+                        }
+                    }
                 }
                 match key {
                     Key::Char('q') | Key::CtrlC => return Some(Action::Quit),
-                    Key::Char('?') => self.help = true,
+                    Key::Char('?') => {
+                        self.help = true;
+                        self.help_scroll = 0;
+                    }
                     Key::Char('n') => self.select_next_needing(),
                     Key::Char(digit @ '1'..='9') => {
                         self.select_number(digit as usize - '0' as usize);
@@ -1207,17 +1231,26 @@ impl Board {
                 })
                 .collect();
         }
+        // An opened worker covers the lower part of the board (D10), so
+        // what the person must see — the result of the last action, a
+        // prompt, the send line — is in the top band, under the header;
+        // only the key list is at the bottom.
+        let body_rows = rows - 1;
+        let mut help_cut = false;
         let mut lines = match (self.help, self.view) {
-            (true, _) => self.render_help(cols),
+            (true, _) => {
+                let (lines, cut) = self.render_help(cols, body_rows);
+                help_cut = cut;
+                lines
+            }
             (false, View::List) => self.render_list(cols, rows, now),
             (false, View::Detail(pane)) => self.render_detail(pane, cols, rows, now),
         };
-        lines.truncate(rows - 2);
-        while lines.len() < rows - 2 {
+        lines.truncate(body_rows);
+        while lines.len() < body_rows {
             lines.push(Line::default().finish(cols));
         }
-        lines.push(self.status_line(cols));
-        lines.push(self.footer(cols));
+        lines.push(self.footer(cols, help_cut));
         lines
     }
 
@@ -1242,39 +1275,78 @@ impl Board {
         }
     }
 
-    /// The line above the footer: how to send while typing, else the result
-    /// of the last action.
-    fn status_line(&self, cols: usize) -> String {
+    /// The line under the header: the send line while typing, a prompt
+    /// waiting for its key, else the result of the last action, else how to
+    /// get back here from an opened worker.
+    fn notice_line(&self, cols: usize) -> String {
         let mut line = Line::default();
+        line.plain(" ");
+        let room = cols.saturating_sub(1);
         match &self.mode {
-            Mode::Send(pane, _) => {
-                line.plain(" ")
-                    .fg(
-                        BLUE,
-                        &fit(&format!("{} に送る", self.name(*pane)), cols / 2),
-                    )
-                    .fg(DIM, "   Enter 送信  Esc 取り消し  ^U 全部消す  ^W 1 語消す");
-            }
-            _ => {
-                if let Some(notice) = &self.message {
-                    let color = if notice.warn { ORANGE } else { DIM };
-                    line.plain(" ")
-                        .fg(color, &fit(&clean(&notice.text), cols.saturating_sub(1)));
+            Mode::Send(pane, text) => {
+                line.fg(
+                    BLUE,
+                    &fit(&format!("{} に送る", self.name(*pane)), room / 2),
+                )
+                .fg(BLUE, " › ");
+                let room = cols.saturating_sub(line.width + 1);
+                // Show the end of a long message, where the typing happens,
+                // and line breaks without printing them.
+                let text: String = text
+                    .chars()
+                    .map(|ch| if ch == '\n' { '⏎' } else { ch })
+                    .filter(|ch| !ch.is_control())
+                    .collect();
+                let mut tail = String::new();
+                let mut used = 0;
+                for ch in text.chars().rev() {
+                    let w = ch.width().unwrap_or(0);
+                    if used + w > room {
+                        break;
+                    }
+                    tail.insert(0, ch);
+                    used += w;
                 }
+                line.plain(&tail).plain("█");
             }
+            Mode::ConfirmClose(pane) => {
+                // Closing a worker mid-task loses its work, not only its
+                // screen: say so.
+                let busy = self
+                    .panel(*pane)
+                    .map(Status::of)
+                    .filter(|status| {
+                        !matches!(status, Status::Exited(_))
+                            && matches!(status.group(), Group::Needs | Group::Working)
+                    })
+                    .map(|status| format!("まだ{}です。", status.label()))
+                    .unwrap_or_default();
+                let ask = format!("{} を閉じますか? {busy}出力は消えます。", self.name(*pane));
+                line.fg(RED, &fit(&ask, room));
+            }
+            Mode::Normal => match &self.message {
+                Some(notice) => {
+                    let color = if notice.warn { ORANGE } else { DIM };
+                    line.fg(color, &fit(&clean(&notice.text), room));
+                }
+                None => {
+                    let hint = format!("{BACK_TO_BOARD} 開いたワーカーからボードへ  ·  ? キー一覧");
+                    line.fg(DIM, &fit(&hint, room));
+                }
+            },
         }
         line.finish(cols)
     }
 
-    fn render_help(&self, cols: usize) -> Vec<String> {
-        let mut lines = Vec::new();
+    /// The key help in `rows` lines, and whether it was cut: then it
+    /// scrolls by `help_scroll`, and its last line says there is more.
+    fn render_help(&self, cols: usize, rows: usize) -> (Vec<String>, bool) {
         let mut title = Line::default();
         title
             .plain(" ")
             .bold("キー操作")
-            .fg(DIM, "  どのキーでも閉じます");
-        lines.push(title.finish(cols));
-        lines.push(Line::default().finish(cols));
+            .fg(DIM, "  j/k 以外のキーで閉じます");
+        let mut lines = vec![Line::default().finish(cols)];
         let keys: [(&str, &str); 14] = [
             ("j k ↑ ↓", "ワーカーを選ぶ"),
             ("1–9", "番号のワーカーを選ぶ"),
@@ -1305,13 +1377,45 @@ impl Board {
             }
             lines.push(line.finish(cols));
         }
-        lines
+        let room = rows.saturating_sub(1);
+        let mut out = vec![title.finish(cols)];
+        if lines.len() <= room {
+            self.help_reach.set(0);
+            out.extend(lines);
+            return (out, false);
+        }
+        // One line for the marker; the rest scroll.
+        let view = room.saturating_sub(1).max(1);
+        let reach = lines.len() - view;
+        self.help_reach.set(reach);
+        let offset = self.help_scroll.min(reach);
+        out.extend(lines.into_iter().skip(offset).take(view));
+        let mut marker = Line::default();
+        let text = if offset < reach {
+            "↓ 続き  j/k でスクロール"
+        } else {
+            "↑ j/k でスクロール"
+        };
+        marker
+            .plain("   ")
+            .fg(DIM, &fit(text, cols.saturating_sub(3)));
+        out.push(marker.finish(cols));
+        (out, true)
     }
 
     fn header(&self, cols: usize) -> Vec<String> {
         let workers = self.workers();
+        let count = format!("ワーカー {} ", workers.len());
+        // A narrow pane gets the short title before the count is cut.
+        const LONG: &str = "オーケストレーション";
+        const SCOPE_ROOM: usize = 8;
+        let name = if 1 + LONG.width() + 2 + SCOPE_ROOM + count.width() <= cols {
+            LONG
+        } else {
+            "ボード"
+        };
         let mut title = Line::default();
-        title.plain(" ").bold("オーケストレーション").plain("  ");
+        title.plain(" ").bold(name).plain("  ");
         // The orchestrator by its pane's name (its session title), which a
         // person recognises; the pane id only when it has none.
         let scope = match self.of {
@@ -1328,7 +1432,6 @@ impl Board {
             }
             None => "すべてのワーカー".to_string(),
         };
-        let count = format!("ワーカー {} ", workers.len());
         let room = cols.saturating_sub(title.width + count.width() + 1);
         title.fg(DIM, &fit(&scope, room));
         let pad = cols.saturating_sub(title.width + count.width());
@@ -1360,7 +1463,7 @@ impl Board {
         vec![
             title.finish(cols),
             chips.finish(cols),
-            Line::default().finish(cols),
+            self.notice_line(cols),
         ]
     }
 
@@ -1380,7 +1483,7 @@ impl Board {
             body.extend(self.gone_lines(cols, now));
             // The closed section scrolls by `past`; its entries start after
             // the note and the section title.
-            let room = rows.saturating_sub(lines.len() + 2);
+            let room = rows.saturating_sub(lines.len() + 1);
             let marks = room >= 3;
             let (mut above, mut below) = (false, false);
             let mut offset = 0;
@@ -1454,7 +1557,7 @@ impl Board {
         if sel_end == workers_end {
             sel_end = body.len();
         }
-        let room = rows.saturating_sub(lines.len() + 2);
+        let room = rows.saturating_sub(lines.len() + 1);
         // What a view from `offset` showing `avail` lines hides: a worker
         // counts only when its row (number, name, state) is out of view, so
         // a cut preview or section title is not a hidden worker.
@@ -1669,14 +1772,14 @@ impl Board {
             head.plain(&" ".repeat(pad)).fg(DIM, &right);
         }
         lines.push(head.finish(cols));
-        lines.push(Line::default().finish(cols));
+        lines.push(self.notice_line(cols));
 
         let history: &[Report] = self.history.get(&pane).map(Vec::as_slice).unwrap_or(&[]);
         let history_rows = history.len().clamp(1, 6);
-        // Title + box borders + history title + rows + gap, and the two
-        // status/footer rows below.
+        // Title + box borders + history title + rows + gap, and the footer
+        // below.
         let screen_rows = rows
-            .saturating_sub(lines.len() + 4 + 2 + history_rows + 2)
+            .saturating_sub(lines.len() + 4 + 2 + history_rows + 1)
             .max(3);
 
         let mut title = Line::default();
@@ -1743,56 +1846,28 @@ impl Board {
         lines
     }
 
-    fn footer(&self, cols: usize) -> String {
+    fn footer(&self, cols: usize, help_cut: bool) -> String {
         let mut line = Line::default();
-        match &self.mode {
-            // The line above names the worker and the keys.
-            Mode::Send(_, text) => {
-                line.plain(" ").fg(BLUE, "› ");
-                let room = cols.saturating_sub(line.width + 2);
-                // Show the end of a long message, where the typing happens.
-                let shown: String = {
-                    let mut tail = String::new();
-                    let mut used = 0;
-                    // Show line breaks without printing them.
-                    let text: String = text
-                        .chars()
-                        .map(|ch| if ch == '\n' { '⏎' } else { ch })
-                        .filter(|ch| !ch.is_control())
-                        .collect();
-                    for ch in text.chars().rev() {
-                        let w = ch.width().unwrap_or(0);
-                        if used + w > room {
-                            break;
-                        }
-                        tail.insert(0, ch);
-                        used += w;
-                    }
-                    tail
-                };
-                line.plain(&shown).plain("█");
-            }
-            Mode::ConfirmClose(pane) => {
-                // Closing a worker mid-task loses its work, not only its
-                // screen: say so.
-                let busy = self
-                    .panel(*pane)
-                    .map(Status::of)
-                    .filter(|status| {
-                        !matches!(status, Status::Exited(_))
-                            && matches!(status.group(), Group::Needs | Group::Working)
-                    })
-                    .map(|status| format!("まだ{}です。", status.label()))
-                    .unwrap_or_default();
-                line.plain(" ")
-                    .fg(
-                        RED,
-                        &format!("{} を閉じますか? {busy}出力は消えます。", self.name(*pane)),
-                    )
-                    .fg(DIM, "  y 閉じる / ほかのキーで取り消し");
-            }
+        // (key, what, what when the line is tight), most important first.
+        let keys: Vec<(&str, &str, &str)> = match &self.mode {
+            Mode::Send(..) => vec![
+                ("Enter", "送信", "送信"),
+                ("Esc", "取り消し", "取消"),
+                ("^U", "全部消す", "全消"),
+                ("^W", "1 語消す", "語消"),
+            ],
+            Mode::ConfirmClose(_) => vec![
+                ("y", "閉じる", "閉じる"),
+                ("ほかのキー", "取り消し", "取消"),
+            ],
             Mode::Normal if self.help => {
-                line.fg(DIM, " どのキーでもヘルプを閉じます");
+                let text = if help_cut {
+                    " j/k スクロール   ほかのキーで閉じます"
+                } else {
+                    " どのキーでもヘルプを閉じます"
+                };
+                line.fg(DIM, text);
+                return line.finish(cols);
             }
             Mode::Normal => {
                 let approval = self.target().is_some_and(|pane| self.awaits_approval(pane));
@@ -1801,39 +1876,57 @@ impl Board {
                 } else {
                     "移動"
                 };
-                let keys: &[(&str, &str)] = match self.view {
-                    View::List => &[
-                        ("j/k", "選択"),
-                        ("n", "次の要対応"),
-                        ("Enter", "詳細"),
-                        ("g", go),
-                        ("s", "送る"),
-                        ("x", "閉じる"),
-                        ("q", "終了"),
-                    ],
-                    View::Detail(_) => &[
-                        ("g", go),
-                        ("s", "送る"),
-                        ("x", "閉じる"),
-                        ("j/k", "前後"),
-                        ("Esc", "一覧"),
-                        ("q", "終了"),
-                    ],
-                };
                 // Nothing can be sent to an exited worker.
                 let exited = self.target().is_some_and(|pane| self.has_exited(pane));
-                // As many keys as fit, always ending with where the rest are.
-                let more = " ? ヘルプ";
-                line.plain(" ");
-                for (key, what) in keys.iter().filter(|(key, _)| !(exited && *key == "s")) {
-                    let piece = format!("{key} {what}   ");
-                    if line.width + piece.width() + more.width() > cols {
-                        break;
-                    }
-                    line.plain(key).fg(DIM, &format!(" {what}   "));
+                let mut keys = vec![("g", go, "移動")];
+                if !exited {
+                    keys.push(("s", "送る", "送る"));
                 }
-                line.plain("?").fg(DIM, " ヘルプ");
+                keys.extend([("x", "閉じる", "閉じる"), ("q", "終了", "終了")]);
+                match self.view {
+                    View::List => keys.extend([
+                        ("Enter", "詳細", "詳細"),
+                        ("n", "次の要対応", "次"),
+                        ("j/k", "選択", "選択"),
+                    ]),
+                    View::Detail(_) => {
+                        keys.extend([("Esc", "一覧", "一覧"), ("j/k", "前後", "前後")])
+                    }
+                }
+                keys
             }
+        };
+        let help = matches!(self.mode, Mode::Normal);
+        let more = if help { "? ヘルプ".width() } else { 0 };
+        // Every key in full, else every key short, else the most important
+        // ones that fit (short).
+        let width = |n: usize, short: bool| {
+            let gap = if short { 2 } else { 3 };
+            1 + keys[..n]
+                .iter()
+                .map(|(key, long, brief)| {
+                    key.width() + 1 + if short { brief } else { long }.width() + gap
+                })
+                .sum::<usize>()
+                + more
+        };
+        let (n, short) = if width(keys.len(), false) <= cols {
+            (keys.len(), false)
+        } else {
+            let n = (0..=keys.len())
+                .rev()
+                .find(|&n| width(n, true) <= cols)
+                .unwrap_or(0);
+            (n, true)
+        };
+        let gap = if short { "  " } else { "   " };
+        line.plain(" ");
+        for (key, long, brief) in &keys[..n] {
+            let what = if short { brief } else { long };
+            line.plain(key).fg(DIM, &format!(" {what}{gap}"));
+        }
+        if help {
+            line.plain("?").fg(DIM, " ヘルプ");
         }
         line.finish(cols)
     }
@@ -2464,10 +2557,10 @@ mod tests {
         let mut board = Board::new(Some(1), Some(8));
         board.update(sample(), Instant::now());
         board.mode = Mode::Send(2, "hello\nxy".to_string());
-        let footer = board.render(60, 20, Instant::now()).pop().unwrap();
-        assert!(!footer.contains('\n'), "{footer:?}");
-        assert!(visible(&footer).contains("hello⏎xy"));
-        assert_eq!(visible(&footer).width(), 60);
+        let send = board.render(60, 20, Instant::now())[2].clone();
+        assert!(!send.contains('\n'), "{send:?}");
+        assert!(visible(&send).contains("hello⏎xy"));
+        assert_eq!(visible(&send).width(), 60);
     }
 
     // Review finding: a pasted newline was read as Enter, so `hello\nxy`
@@ -2886,11 +2979,11 @@ mod tests {
             KeyReader::default().feed(b"\x15\x17"),
             vec![Key::CtrlU, Key::CtrlW]
         );
-        let status = visible(&board.render(80, 20, Instant::now())[18]);
-        assert!(
-            status.contains("api に送る") && status.contains("Esc 取り消し"),
-            "{status}"
-        );
+        let lines = board.render(80, 20, Instant::now());
+        let send = visible(&lines[2]);
+        assert!(send.contains("api に送る"), "{send}");
+        let footer = visible(&lines[19]);
+        assert!(footer.contains("Esc 取り消し"), "{footer}");
     }
 
     #[test]
@@ -2899,8 +2992,17 @@ mod tests {
         board.update(sample(), Instant::now());
         board.key(Key::Char('j'));
         board.key(Key::Char('x'));
-        let footer = visible(&board.render(100, 20, Instant::now()).pop().unwrap());
-        assert!(footer.contains("まだ作業中です。"), "{footer}");
+        let lines = board.render(100, 20, Instant::now());
+        assert!(
+            visible(&lines[2]).contains("まだ作業中です。"),
+            "{}",
+            visible(&lines[2])
+        );
+        assert!(
+            visible(&lines[19]).contains("y 閉じる"),
+            "{}",
+            visible(&lines[19])
+        );
     }
 
     #[test]
@@ -3021,7 +3123,7 @@ mod tests {
             start + Duration::from_secs(1),
         );
         assert_eq!(board.gone.len(), 5);
-        let view = |board: &Board| rendered(board, 60, 12, start + Duration::from_secs(2));
+        let view = |board: &Board| rendered(board, 60, 11, start + Duration::from_secs(2));
         assert!(view(&board).contains("閉じた 4 件"), "{}", view(&board));
 
         for _ in 0..10 {
@@ -3263,5 +3365,72 @@ mod tests {
         // Blocking first, oldest first (early since 1 s, late since 5 s);
         // then input and attention, both found at start, in spawn order.
         assert_eq!(order, vec![4, 3, 2, 5]);
+    }
+
+    // Review B01: an opened worker covers the board below its top 35%, and
+    // the result of `g`, every later warning and the send line were in the
+    // bottom rows.
+    #[test]
+    fn results_prompts_and_the_send_line_sit_under_the_header() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), Instant::now());
+        let top = |board: &Board| visible(&board.render(80, 30, Instant::now())[2]);
+        assert!(top(&board).contains("? キー一覧"));
+        board.message = Some(Notice::ok("ui へ移動しました".to_string()));
+        assert!(top(&board).contains("ui へ移動しました"));
+        board.view = View::Detail(3);
+        let detail = board.render(80, 30, Instant::now());
+        assert!(visible(&detail[1]).contains("ui へ移動しました"));
+        board.view = View::List;
+        board.key(Key::Char('j'));
+        board.key(Key::Char('s'));
+        board.key(Key::Char('h'));
+        assert!(top(&board).contains("api に送る › h█"));
+        // Only the keys are at the bottom.
+        let lines = board.render(80, 30, Instant::now());
+        assert!(visible(&lines[29]).contains("Enter 送信"));
+        assert!(visible(&lines[28]).trim().is_empty());
+    }
+
+    // Review B10: at about 80 columns the footer lost `x` and `q`, the help
+    // was cut without notice, and a narrow header cut its count.
+    #[test]
+    fn the_footer_keeps_close_and_quit_and_the_help_scrolls() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), Instant::now());
+        // ui waits for an approval: "g 移動して答える" is the longest label.
+        for cols in [60, 72, 80] {
+            let footer = visible(&board.render(cols, 20, Instant::now()).pop().unwrap());
+            assert!(
+                footer.contains("x 閉じる")
+                    && footer.contains("q 終了")
+                    && footer.contains("? ヘルプ"),
+                "{cols}: {footer}"
+            );
+        }
+        let footer = visible(&board.render(80, 20, Instant::now()).pop().unwrap());
+        assert!(footer.contains("j/k 選択"), "{footer}");
+
+        board.key(Key::Char('?'));
+        let all = rendered(&board, 60, 14, Instant::now());
+        assert!(all.contains("↓ 続き"), "{all}");
+        assert!(!all.contains("^U / ^W"), "{all}");
+        for _ in 0..20 {
+            assert_eq!(board.key(Key::Char('j')), None);
+        }
+        assert!(board.help);
+        let all = rendered(&board, 60, 14, Instant::now());
+        assert!(all.contains("^U / ^W") && !all.contains("↓ 続き"), "{all}");
+        // k comes straight back, however far j was pressed.
+        board.key(Key::Char('k'));
+        assert!(rendered(&board, 60, 14, Instant::now()).contains("↓ 続き"));
+        board.key(Key::Char('x'));
+        assert!(!board.help);
+
+        let header = visible(&board.render(30, 12, Instant::now())[0]);
+        assert!(
+            header.starts_with(" ボード") && header.contains("ワーカー 4"),
+            "{header}"
+        );
     }
 }

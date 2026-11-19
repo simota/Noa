@@ -83,10 +83,14 @@ Commands:
                                 --replace first clears what the input line holds
                                 (Ctrl-E, then Ctrl-U per line, up to 32 lines).
   wait PANE...|--children [--after SEQ | --after PANE=SEQ ...] [--for LIST]
-       [--all] [--timeout SECS] [--tail N]
+       [--all] [--timeout SECS] [--tail N] [--stall SECS]
                                 Block until a worker stops. LIST is a comma list
                                 of finished,permission,input,error,exit,attention
-                                (default: all of them). --tail adds each open
+                                (default: all of them), or stalled (needs
+                                --stall). --stall SECS also ends the wait for a
+                                pane whose screen text has not changed for SECS
+                                seconds (reason \"stalled\", with \"quietSecs\"),
+                                for an agent that does not report. --tail adds each open
                                 pane's last N output lines as \"tail\". A timeout
                                 prints each pending pane's report count as
                                 `baseline`; pass it back as --after PANE=SEQ.
@@ -221,6 +225,9 @@ pub(crate) struct WaitOptions {
     pub(crate) timeout: Option<Duration>,
     /// `--tail N`: add each still-open pane's last N output lines.
     pub(crate) tail: Option<usize>,
+    /// `--stall SECS`: also end the wait for a pane whose screen text has not
+    /// changed for this long (`Reason::Stalled`).
+    pub(crate) stall: Option<Duration>,
 }
 
 impl Default for WaitOptions {
@@ -230,6 +237,7 @@ impl Default for WaitOptions {
             all: false,
             timeout: None,
             tail: None,
+            stall: None,
         }
     }
 }
@@ -243,6 +251,8 @@ pub(crate) enum Reason {
     Error,
     Exit,
     Attention,
+    /// Only with `--stall`: the screen text stopped changing.
+    Stalled,
 }
 
 impl Reason {
@@ -263,11 +273,16 @@ impl Reason {
             Self::Error => "error",
             Self::Exit => "exit",
             Self::Attention => "attention",
+            Self::Stalled => "stalled",
         }
     }
 
+    /// `stalled` is parsed but is not in `ALL`: it is not a default reason.
     fn parse(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|reason| reason.name() == name)
+        Self::ALL
+            .into_iter()
+            .chain([Self::Stalled])
+            .find(|reason| reason.name() == name)
     }
 
     /// The reason an agent report in `state` stands for, if any.
@@ -555,6 +570,22 @@ fn parse_wait_options(rest: &mut Args) -> Result<WaitOptions, String> {
     if let Some(value) = rest.value("--tail")? {
         options.tail = Some(parse_u64("--tail", &value)? as usize);
     }
+    if let Some(value) = rest.value("--stall")? {
+        let seconds: f64 = value
+            .parse()
+            .ok()
+            .filter(|seconds: &f64| seconds.is_finite() && *seconds > 0.0)
+            .ok_or_else(|| format!("--stall expects seconds above 0, got {value:?}"))?;
+        options.stall = Some(
+            Duration::try_from_secs_f64(seconds)
+                .map_err(|_| format!("--stall is out of range: {value:?}"))?,
+        );
+        if !options.reasons.contains(&Reason::Stalled) {
+            options.reasons.push(Reason::Stalled);
+        }
+    } else if options.reasons.contains(&Reason::Stalled) {
+        return Err("--for stalled needs --stall SECS".to_string());
+    }
     Ok(options)
 }
 
@@ -750,7 +781,12 @@ pub(crate) fn evaluate(
     None
 }
 
-fn outcome_json(pane: u64, outcome: &Outcome, panel: Option<&Panel>) -> serde_json::Value {
+fn outcome_json(
+    pane: u64,
+    outcome: &Outcome,
+    panel: Option<&Panel>,
+    quiet: Option<Duration>,
+) -> serde_json::Value {
     let agent = panel.and_then(|panel| panel.agent.as_ref());
     let mut value = serde_json::json!({
         "paneId": WireId(pane),
@@ -774,6 +810,9 @@ fn outcome_json(pane: u64, outcome: &Outcome, panel: Option<&Panel>) -> serde_js
         .and_then(|exit| exit.code)
     {
         object.insert("exitCode".into(), code.into());
+    }
+    if let Some(quiet) = quiet {
+        object.insert("quietSecs".into(), quiet.as_secs().into());
     }
     value
 }
@@ -1754,6 +1793,8 @@ pub(crate) trait WaitSource {
     fn next(&mut self, timeout: Duration) -> Result<Option<Notification>, Failure>;
     /// `pane`'s retained output (`--tail`); `None` once the pane is gone.
     fn scrollback(&mut self, pane: u64) -> Result<Option<String>, Failure>;
+    /// `pane`'s visible screen text (`--stall`); `None` once the pane is gone.
+    fn screen(&mut self, pane: u64) -> Result<Option<String>, Failure>;
 }
 
 impl WaitSource for Client {
@@ -1766,15 +1807,27 @@ impl WaitSource for Client {
     }
 
     fn scrollback(&mut self, pane: u64) -> Result<Option<String>, Failure> {
-        match self.get_text(pane, TextSource::Scrollback, None) {
-            Ok(result) => Ok(Some(result.text)),
-            // It closed between its outcome and this request.
-            Err(ClientError::Rpc {
-                code: RPC_UNKNOWN_PANE | RPC_PANE_CLOSED,
-                ..
-            }) => Ok(None),
-            Err(err) => Err(err.into()),
-        }
+        client_text(self, pane, TextSource::Scrollback)
+    }
+
+    fn screen(&mut self, pane: u64) -> Result<Option<String>, Failure> {
+        client_text(self, pane, TextSource::Screen)
+    }
+}
+
+/// `None` when the pane closed between its outcome and this request.
+fn client_text(
+    client: &mut Client,
+    pane: u64,
+    source: TextSource,
+) -> Result<Option<String>, Failure> {
+    match client.get_text(pane, source, None) {
+        Ok(result) => Ok(Some(result.text)),
+        Err(ClientError::Rpc {
+            code: RPC_UNKNOWN_PANE | RPC_PANE_CLOSED,
+            ..
+        }) => Ok(None),
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -1796,6 +1849,35 @@ pub(crate) fn wait_loop(
     options: &WaitOptions,
     relist_every: Duration,
     emit: &mut dyn FnMut(&serde_json::Value),
+) -> Result<i32, Failure> {
+    wait_loop_with_clock(
+        source,
+        panes,
+        start,
+        options,
+        relist_every,
+        emit,
+        &mut Instant::now,
+    )
+}
+
+/// What the stall detector remembers of one pane's screen.
+struct Quiet {
+    text: Option<String>,
+    /// The wait's start, or the last time `text` was seen to change.
+    since: Instant,
+}
+
+/// [`wait_loop`] with the stall detector's time source supplied (the
+/// deadline and the re-list schedule keep using the real clock).
+pub(crate) fn wait_loop_with_clock(
+    source: &mut impl WaitSource,
+    panes: &[u64],
+    start: WaitStart,
+    options: &WaitOptions,
+    relist_every: Duration,
+    emit: &mut dyn FnMut(&serde_json::Value),
+    clock: &mut dyn FnMut() -> Instant,
 ) -> Result<i32, Failure> {
     // A pane named twice is one pane: `--all` counts each once.
     let mut unique = Vec::with_capacity(panes.len());
@@ -1847,6 +1929,9 @@ pub(crate) fn wait_loop(
     let skip_exited_before = !options.all && watches.iter().any(|watch| !watch.exited_before);
     let mut done: Vec<u64> = Vec::new();
     let mut relist_pending = false;
+    let started = clock();
+    let mut quiet: HashMap<u64, Quiet> = HashMap::new();
+    let mut screens_polled_at: Option<Instant> = None;
     loop {
         for watch in &mut watches {
             if done.contains(&watch.pane) || (skip_exited_before && watch.exited_before) {
@@ -1854,15 +1939,50 @@ pub(crate) fn wait_loop(
             }
             let panel = latest.get(&watch.pane);
             if let Some(outcome) = evaluate(watch, panel, &options.reasons) {
-                let mut line = outcome_json(watch.pane, &outcome, panel);
-                if let Some(lines) = options.tail
-                    && !outcome.closed
-                    && let Some(text) = source.scrollback(watch.pane)?
-                {
-                    line["tail"] = tail_lines(&text, lines).into();
-                }
-                emit(&line);
+                emit_outcome(source, options, watch.pane, &outcome, panel, None, emit)?;
                 done.push(watch.pane);
+            }
+        }
+        // A report or exit seen above wins over a stall in the same pass.
+        if let Some(stall) = options.stall {
+            let now = clock();
+            if screens_polled_at.is_none_or(|at| now.saturating_duration_since(at) >= relist_every)
+            {
+                screens_polled_at = Some(now);
+                for watch in &watches {
+                    if done.contains(&watch.pane) || (skip_exited_before && watch.exited_before) {
+                        continue;
+                    }
+                    let Some(text) = source.screen(watch.pane)? else {
+                        continue;
+                    };
+                    let entry = quiet.entry(watch.pane).or_insert(Quiet {
+                        text: None,
+                        since: started,
+                    });
+                    if entry.text.as_ref().is_some_and(|seen| *seen != text) {
+                        entry.since = now;
+                    }
+                    entry.text = Some(text);
+                    let quiet_for = now.saturating_duration_since(entry.since);
+                    if quiet_for >= stall {
+                        let outcome = Outcome {
+                            reason: Reason::Stalled,
+                            closed: false,
+                        };
+                        let panel = latest.get(&watch.pane);
+                        emit_outcome(
+                            source,
+                            options,
+                            watch.pane,
+                            &outcome,
+                            panel,
+                            Some(quiet_for),
+                            emit,
+                        )?;
+                        done.push(watch.pane);
+                    }
+                }
             }
         }
         if (options.all && done.len() == watches.len()) || (!options.all && !done.is_empty()) {
@@ -1907,6 +2027,27 @@ pub(crate) fn wait_loop(
         // notifying.
         relist_pending = relist || listed_at.elapsed() >= relist_every;
     }
+}
+
+/// Print the line for a pane whose wait ended, with `--tail` if asked.
+fn emit_outcome(
+    source: &mut impl WaitSource,
+    options: &WaitOptions,
+    pane: u64,
+    outcome: &Outcome,
+    panel: Option<&Panel>,
+    quiet: Option<Duration>,
+    emit: &mut dyn FnMut(&serde_json::Value),
+) -> Result<(), Failure> {
+    let mut line = outcome_json(pane, outcome, panel, quiet);
+    if let Some(lines) = options.tail
+        && !outcome.closed
+        && let Some(text) = source.scrollback(pane)?
+    {
+        line["tail"] = tail_lines(&text, lines).into();
+    }
+    emit(&line);
+    Ok(())
 }
 
 /// The line a timed-out wait prints. A pane that had exited before the wait
@@ -2415,6 +2556,7 @@ mod tests {
                     all: false,
                     timeout: Some(Duration::from_secs(30)),
                     tail: None,
+                    stall: None,
                 }),
             })
         );
@@ -2563,7 +2705,7 @@ mod tests {
         let outcome = evaluate(&mut watch, Some(&held), &Reason::ALL).unwrap();
         assert_eq!(outcome.reason, Reason::Exit);
         assert_eq!(
-            outcome_json(8, &outcome, Some(&held))["exitCode"],
+            outcome_json(8, &outcome, Some(&held), None)["exitCode"],
             serde_json::json!(2)
         );
         // A pane that disappeared ends the wait whatever was asked for.
@@ -2871,6 +3013,10 @@ mod tests {
 
         fn scrollback(&mut self, pane: u64) -> Result<Option<String>, Failure> {
             Ok(self.texts.get(&pane).cloned())
+        }
+
+        fn screen(&mut self, _pane: u64) -> Result<Option<String>, Failure> {
+            Ok(None)
         }
     }
 
@@ -3905,5 +4051,185 @@ mod tests {
             std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)).is_ok(),
             "{url} does not reach a v6-only listener on [::]:{port}"
         );
+    }
+
+    // `--stall`: a source whose idle ticks advance a fake clock by a second
+    // and whose screen text is a function of that clock.
+    struct StallSource {
+        inner: FakeSource,
+        now: std::rc::Rc<std::cell::Cell<u64>>,
+        /// The screen at second N (the last entry repeats).
+        screens: Vec<&'static str>,
+    }
+
+    impl WaitSource for StallSource {
+        fn list(&mut self) -> Result<Vec<Panel>, Failure> {
+            self.inner.list()
+        }
+
+        fn next(&mut self, _timeout: Duration) -> Result<Option<Notification>, Failure> {
+            if self.now.get() >= 100 {
+                return Err(Failure::error("never stalled"));
+            }
+            self.now.set(self.now.get() + 1);
+            Ok(None)
+        }
+
+        fn scrollback(&mut self, pane: u64) -> Result<Option<String>, Failure> {
+            self.inner.scrollback(pane)
+        }
+
+        fn screen(&mut self, _pane: u64) -> Result<Option<String>, Failure> {
+            let index = (self.now.get() as usize).min(self.screens.len() - 1);
+            Ok(Some(self.screens[index].to_string()))
+        }
+    }
+
+    fn run_stall_wait(
+        lists: Vec<Vec<Panel>>,
+        screens: Vec<&'static str>,
+        stall_secs: u64,
+    ) -> (Result<i32, Failure>, Vec<serde_json::Value>) {
+        run_stall_wait_from(lists, screens, stall_secs, HashMap::new(), 0)
+    }
+
+    /// `after` is the report baseline; `jump` seconds pass between the
+    /// wait's start and its first look at the screen.
+    fn run_stall_wait_from(
+        lists: Vec<Vec<Panel>>,
+        screens: Vec<&'static str>,
+        stall_secs: u64,
+        after: HashMap<u64, u64>,
+        jump: u64,
+    ) -> (Result<i32, Failure>, Vec<serde_json::Value>) {
+        let now = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut source = StallSource {
+            inner: FakeSource {
+                lists,
+                notifications: Default::default(),
+                list_calls: 0,
+                texts: HashMap::new(),
+            },
+            now: now.clone(),
+            screens,
+        };
+        let base = Instant::now();
+        let mut calls = 0;
+        let mut lines = Vec::new();
+        let options = WaitOptions {
+            reasons: vec![Reason::Finished, Reason::Stalled],
+            stall: Some(Duration::from_secs(stall_secs)),
+            ..WaitOptions::default()
+        };
+        let code = wait_loop_with_clock(
+            &mut source,
+            &[8],
+            WaitStart::Listed { after },
+            &options,
+            Duration::ZERO,
+            &mut |line| lines.push(line.clone()),
+            &mut || {
+                let skew = if calls > 0 { jump } else { 0 };
+                calls += 1;
+                base + Duration::from_secs(now.get() + skew)
+            },
+        );
+        (code, lines)
+    }
+
+    #[test]
+    fn an_unchanging_screen_ends_the_wait_as_stalled_after_the_stall_time() {
+        let (code, lines) = run_stall_wait(
+            vec![vec![panel(0, Some("running"), false)]],
+            vec!["same"],
+            3,
+        );
+
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["reason"], serde_json::json!("stalled"));
+        assert_eq!(lines[0]["quietSecs"], serde_json::json!(3));
+        assert_eq!(lines[0]["paneId"], serde_json::json!("8"));
+    }
+
+    #[test]
+    fn a_changing_screen_restarts_the_quiet_time() {
+        // Changes at second 2, so the quiet time is 3s only at second 5.
+        let (code, lines) = run_stall_wait(
+            vec![vec![panel(0, Some("running"), false)]],
+            vec!["a", "b", "c"],
+            3,
+        );
+
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        assert_eq!(lines[0]["reason"], serde_json::json!("stalled"));
+        assert_eq!(lines[0]["quietSecs"], serde_json::json!(3));
+
+        // A screen that never stops changing never stalls.
+        let screens: Vec<&'static str> = (0..200)
+            .map(|n| if n % 2 == 0 { "x" } else { "y" })
+            .collect();
+        let (code, lines) =
+            run_stall_wait(vec![vec![panel(0, Some("running"), false)]], screens, 3);
+        assert!(code.is_err());
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn a_report_wins_over_a_stall_in_the_same_pass() {
+        // The report is already listed when the screen is first looked at,
+        // and by then the quiet time is long past.
+        let (code, lines) = run_stall_wait_from(
+            vec![vec![panel(1, Some("finished"), false)]],
+            vec!["same"],
+            1,
+            HashMap::from([(8, 0)]),
+            10,
+        );
+
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["reason"], serde_json::json!("finished"));
+        assert!(lines[0].get("quietSecs").is_none());
+    }
+
+    #[test]
+    fn stall_is_parsed_and_stalled_needs_it() {
+        let wait = |items: &[&str]| match parse_args(&args(items)) {
+            Ok(Command::Wait(wait)) => Ok(wait.options),
+            Ok(other) => panic!("not a wait: {other:?}"),
+            Err(message) => Err(message),
+        };
+
+        let options = wait(&["wait", "8", "--stall", "2.5"]).unwrap();
+        assert_eq!(options.stall, Some(Duration::from_millis(2500)));
+        assert!(options.reasons.contains(&Reason::Stalled));
+        assert!(options.reasons.contains(&Reason::Finished));
+
+        // `--for` does not leave it out, and listing it too adds no copy.
+        let options = wait(&["wait", "8", "--for", "finished", "--stall", "1"]).unwrap();
+        assert_eq!(options.reasons, vec![Reason::Finished, Reason::Stalled]);
+        let options = wait(&["wait", "8", "--for", "stalled", "--stall", "1"]).unwrap();
+        assert_eq!(options.reasons, vec![Reason::Stalled]);
+
+        assert_eq!(wait(&["wait", "8"]).unwrap().stall, None);
+        assert!(
+            !wait(&["wait", "8"])
+                .unwrap()
+                .reasons
+                .contains(&Reason::Stalled)
+        );
+        let refused = wait(&["wait", "8", "--for", "stalled"]).unwrap_err();
+        assert!(refused.contains("--stall"), "{refused}");
+        assert!(wait(&["wait", "8", "--stall", "0"]).is_err());
+        assert!(wait(&["wait", "8", "--stall", "-1"]).is_err());
+        assert!(wait(&["wait", "8", "--stall", "soon"]).is_err());
+
+        let Ok(Command::Send(send)) =
+            parse_args(&args(&["send", "8", "--wait", "--stall", "4", "go"]))
+        else {
+            panic!("send --wait --stall should parse");
+        };
+        assert_eq!(send.wait.unwrap().stall, Some(Duration::from_secs(4)));
     }
 }

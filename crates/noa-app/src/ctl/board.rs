@@ -21,6 +21,9 @@ const LIST_EVERY: Duration = Duration::from_millis(500);
 const RETRY_FIRST: Duration = Duration::from_millis(500);
 const RETRY_MAX: Duration = Duration::from_secs(4);
 const GIVE_UP_AFTER: Duration = Duration::from_secs(30);
+/// How long a working worker's screen stays the same before the board says
+/// it shows no output.
+const QUIET_AFTER: Duration = Duration::from_secs(120);
 /// How often the workers' screens are read again.
 const SCREEN_EVERY: Duration = Duration::from_secs(1);
 /// Reports kept per worker.
@@ -272,6 +275,8 @@ pub(crate) struct Board {
     /// the board, later ones arrived while it watched.
     started: bool,
     screens: HashMap<u64, Vec<String>>,
+    /// When each worker's screen last changed, and when it was last read.
+    output: HashMap<u64, (Instant, Instant)>,
     history: HashMap<u64, Vec<Report>>,
     /// Each worker's status and when the board saw it begin (`None`: it
     /// was already so when the board opened).
@@ -309,6 +314,7 @@ impl Board {
             panels: Vec::new(),
             started: false,
             screens: HashMap::new(),
+            output: HashMap::new(),
             history: HashMap::new(),
             since: HashMap::new(),
             numbers: HashMap::new(),
@@ -453,6 +459,7 @@ impl Board {
         self.history.retain(|pane, _| live.contains(pane));
         self.since.retain(|pane, _| live.contains(pane));
         self.screens.retain(|pane, _| live.contains(pane));
+        self.output.retain(|pane, _| live.contains(pane));
         if self.selected.is_none_or(|pane| !live.contains(&pane)) {
             self.past = 0;
             self.selected = live.first().copied();
@@ -469,8 +476,14 @@ impl Board {
         }
     }
 
-    /// The last lines of a worker's screen (trailing blank lines dropped).
+    #[cfg(test)]
     pub(crate) fn set_screen(&mut self, pane: u64, text: &str) {
+        self.set_screen_at(pane, text, Instant::now());
+    }
+
+    /// The last lines of a worker's screen (trailing blank lines dropped),
+    /// read at `now`.
+    pub(crate) fn set_screen_at(&mut self, pane: u64, text: &str, now: Instant) {
         let mut lines: Vec<String> = text
             .lines()
             .map(|line| line.trim_end().to_string())
@@ -483,7 +496,35 @@ impl Board {
             lines.pop();
         }
         let skip = lines.len().saturating_sub(SCREEN_CAP);
-        self.screens.insert(pane, lines.split_off(skip));
+        let lines = lines.split_off(skip);
+        // Only the work counts: an agent's input box and status line can
+        // tick (a clock, a token count) while nothing happens.
+        let changed = self
+            .screens
+            .get(&pane)
+            .is_none_or(|old| content_lines(old) != content_lines(&lines));
+        let entry = self.output.entry(pane).or_insert((now, now));
+        if changed {
+            entry.0 = now;
+        }
+        entry.1 = now;
+        self.screens.insert(pane, lines);
+    }
+
+    /// How long a working worker's screen has shown the same work, once
+    /// that is [`QUIET_AFTER`] or more: as of the last time it was read,
+    /// and never from before its current state began.
+    fn quiet_for(&self, pane: u64, status: Status) -> Option<Duration> {
+        if status.group() != Group::Working {
+            return None;
+        }
+        let &(changed, checked) = self.output.get(&pane)?;
+        let from = match self.since.get(&pane) {
+            Some((_, Some(began))) => changed.max(*began),
+            _ => changed,
+        };
+        let span = checked.saturating_duration_since(from);
+        (span >= QUIET_AFTER).then_some(span)
     }
 
     /// The workers this board shows, in listing order.
@@ -526,10 +567,22 @@ impl Board {
         self.numbers.get(&pane).copied().unwrap_or(usize::MAX)
     }
 
-    /// The panes whose screens the current view shows.
+    /// The panes whose screens the current view shows: in the list, the
+    /// workers whose rows preview their work (and whose output is watched),
+    /// and the selected one.
     pub(crate) fn wanted_screens(&self) -> Vec<u64> {
         match self.view {
-            View::List => self.workers().iter().map(|panel| panel.pane_id.0).collect(),
+            View::List => self
+                .workers()
+                .iter()
+                .map(|panel| panel.pane_id.0)
+                .filter(|&pane| {
+                    Some(pane) == self.selected
+                        || self.panel(pane).is_some_and(|panel| {
+                            matches!(Status::of(panel).group(), Group::Needs | Group::Working)
+                        })
+                })
+                .collect(),
             View::Detail(pane) => vec![pane],
         }
     }
@@ -1641,13 +1694,35 @@ impl Board {
 
     /// The state column: "承認待ち 5 秒", "完了 3 分前", or shorter.
     fn state_text(&self, pane: u64, status: Status, form: StateForm, now: Instant) -> String {
+        match self.state_parts(pane, status, form, now) {
+            (state, Some(quiet)) => format!("{state} {quiet}"),
+            (state, None) => state,
+        }
+    }
+
+    /// The state column in its two styles: the state and its age, and for a
+    /// working worker whose screen has not moved for a while, "出力なし 3 分"
+    /// (drawn dimmed, in place of the age).
+    fn state_parts(
+        &self,
+        pane: u64,
+        status: Status,
+        form: StateForm,
+        now: Instant,
+    ) -> (String, Option<String>) {
         let label = match form {
             StateForm::Full => status.label(),
             StateForm::Short | StateForm::Bare => status.short_label(),
         };
+        if form == StateForm::Bare {
+            return (label, None);
+        }
+        if let Some(span) = self.quiet_for(pane, status) {
+            return (label, Some(format!("出力なし {}", duration_text(span))));
+        }
         match self.state_age(pane, status, now) {
-            Some(age) if form != StateForm::Bare => format!("{label} {age}"),
-            _ => label,
+            Some(age) => (format!("{label} {age}"), None),
+            None => (label, None),
         }
     }
 
@@ -1740,9 +1815,14 @@ impl Board {
                 .fg(DIM, &pad(&worker_kind(panel), columns.kind));
         }
         if columns.state > 0 {
-            let state = self.state_text(pane, status, columns.form, now);
-            line.plain("  ")
-                .fg(status.color(), &pad(&state, columns.state));
+            let (state, quiet) = self.state_parts(pane, status, columns.form, now);
+            line.plain("  ").fg(status.color(), &state);
+            let mut used = state.width();
+            if let Some(quiet) = quiet {
+                line.fg(DIM, &format!(" {quiet}"));
+                used += 1 + quiet.width();
+            }
+            line.plain(&" ".repeat(columns.state.saturating_sub(used)));
         }
         let detail = self.last_word(panel);
         if !detail.is_empty() {
@@ -2141,7 +2221,7 @@ pub(crate) fn run(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
             for pane in board.wanted_screens() {
                 // A pane that closed meanwhile is dropped at the next listing.
                 if let Ok(text) = client.get_text(pane, TextSource::Screen, None) {
-                    board.set_screen(pane, &text.text);
+                    board.set_screen_at(pane, &text.text, now);
                 }
             }
             screens_at = Some(now);
@@ -3598,5 +3678,69 @@ mod tests {
         let all = rendered(&board, 80, 30, t0 + Duration::from_secs(7));
         assert!(all.contains("接続できません · 再試行中 7 秒"), "{all}");
         assert!(all.contains("ui") && all.contains("api"), "{all}");
+    }
+
+    // Review B11: "作業中 12 分" looked the same whether the worker was
+    // streaming output or stuck.
+    #[test]
+    fn a_working_worker_whose_screen_stays_the_same_says_so() {
+        let t0 = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), t0);
+        let rule = "─".repeat(40);
+        let screen = |clock: u32| format!("⏺ Reading src\n{rule}\n› \n{rule}\n  {clock}s\n");
+        board.set_screen_at(2, &screen(1), t0);
+        // The status line ticks; the work does not.
+        board.set_screen_at(2, &screen(2), t0 + Duration::from_secs(60));
+        let at = t0 + Duration::from_secs(181);
+        board.set_screen_at(2, &screen(3), at);
+        let all = rendered(&board, 80, 40, at);
+        assert!(all.contains("● api    作業中 出力なし 3 分"), "{all}");
+        let lines = board.render(80, 40, at);
+        let row = lines.iter().find(|l| visible(l).contains("● api")).unwrap();
+        let Rgb(r, g, b) = DIM;
+        assert!(
+            row.contains(&format!("38;2;{r};{g};{b}m 出力なし 3 分")),
+            "{row:?}"
+        );
+
+        // New work clears it.
+        board.set_screen_at(
+            2,
+            "⏺ Reading src\n⏺ Wrote lib.rs\n",
+            at + Duration::from_secs(1),
+        );
+        assert!(!rendered(&board, 80, 40, at).contains("出力なし"));
+
+        // Only working workers, and not before the current state began.
+        board.set_screen_at(4, "done\n", t0);
+        board.set_screen_at(4, "done\n", at);
+        assert_eq!(board.quiet_for(4, Status::Finished), None);
+        let mut next = sample();
+        next[0].agent.as_mut().unwrap().seq = 9;
+        next[0].agent.as_mut().unwrap().state = Some("permission".to_string());
+        board.update(next.clone(), at + Duration::from_secs(149));
+        next[0].agent.as_mut().unwrap().state = Some("running".to_string());
+        board.update(next, at + Duration::from_secs(150));
+        board.set_screen_at(
+            2,
+            "⏺ Reading src\n⏺ Wrote lib.rs\n",
+            at + Duration::from_secs(200),
+        );
+        assert_eq!(board.quiet_for(2, Status::Running), None);
+    }
+
+    // Review B12: the list read the screens of finished and exited workers
+    // whose rows show no preview.
+    #[test]
+    fn the_list_reads_only_the_screens_it_shows() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), Instant::now());
+        // ui (permission) is selected; api runs; docs finished; tests exited.
+        assert_eq!(board.wanted_screens(), vec![3, 2]);
+        board.select(4);
+        assert_eq!(board.wanted_screens(), vec![3, 2, 4]);
+        board.view = View::Detail(5);
+        assert_eq!(board.wanted_screens(), vec![5]);
     }
 }

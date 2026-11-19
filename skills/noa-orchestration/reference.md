@@ -71,7 +71,7 @@ accepted and changes nothing.
 | Option | Meaning |
 |---|---|
 | `--no-board` | Do not open the board; the worker floats over this pane |
-| `--worktree` | Start the worker in a new git worktree of this process's repository: `git worktree add -b orch/LABEL <repo>-wt/LABEL HEAD`. Needs `--label` (letters, digits, `.`, `_`, `-`; not starting with `.` or `-`) and refuses `--cwd`. Prints `"worktree"` and `"branch"` too. A git failure (branch or path exists, not a repository) is exit 1 and starts nothing; uncommitted changes in your checkout are not in the worktree, and a stderr warning says so. If the worker then fails to start, the fresh worktree and branch are removed again |
+| `--worktree` | Start the worker in a new git worktree of this process's repository: `git worktree add -b orch/LABEL <repo>-wt/LABEL HEAD`. Needs `--label` (letters, digits, `.`, `_`, `-`; not starting with `.` or `-`) and refuses `--cwd`. Prints `"worktree"` and `"branch"` too. A git failure (branch or path exists, not a repository) is exit 1 and starts nothing; uncommitted changes in your checkout are not in the worktree, and a stderr warning says so. If Noa then refuses to start the worker, the fresh worktree and branch are removed again; if the answer is lost (a connection error), they are kept, since the worker may be running there, and stderr says so. The board, when this spawn would open it, opens only after the worktree was made |
 | `--tier light\|standard\|deep` | Add the tier's model and effort flags ("Model tiers" below) right after the program of a `claude`, `codex` or `agy` command. Refused for any other command, and for a command that already picks a model or effort, so a model the human named is never overridden. Prints `"tier"` too |
 | `--cwd DIR` | Working directory. Relative paths are taken from this process's cwd. Default: this process's cwd. One that is not a directory is refused (exit 1) before anything starts; `ls` shows it as the worker's `cwd` until the worker's shell reports its own |
 | `--env KEY=VALUE` | Repeatable. `PATH` defaults to this process's `PATH` when a command is given, and `LANG` and `LC_*` to this process's, so a worker keeps your locale even when Noa itself has none |
@@ -187,7 +187,7 @@ stderr; the rest are still closed and the exit status is 1. A live pane that is
 not this pane's worker is refused before anything is closed.
 
 `--prune`: for each closed worker whose label `L` has a worktree
-`<repo>-wt/L` on branch `orch/L` (as `spawn --worktree` made it; the
+`<repo>-wt/L` on branch `orch/L`, and whose cwd is in it (as `spawn --worktree` made it; the
 repository is the one this process runs in), run `git worktree remove` and then
 `git branch -d`, never forced. The line gains
 `"worktree":{"path":…,"removed":true,"branchDeleted":true}`. When git refuses

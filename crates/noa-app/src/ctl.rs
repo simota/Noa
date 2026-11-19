@@ -8,6 +8,7 @@
 //! unit-testable without a server; [`run`] is the thin I/O shell around them.
 
 mod board;
+mod worktree;
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -67,6 +68,14 @@ Commands:
       --no-wait-after  --focus  --no-board
       --max-children N (default and most 20: the board holds 20 workers;
                          with --no-board this pane holds 8 floats)
+      --worktree        Run the worker in its own git worktree
+                        <repo>-wt/LABEL on a new branch orch/LABEL (from
+                        HEAD; needs --label, refuses --cwd). Prints
+                        \"worktree\" and \"branch\" too.
+      --tier light|standard|deep
+                        Pick the model tier of a claude, codex or agy
+                        COMMAND (refused when it already picks a model
+                        or effort). Prints \"tier\" too.
   send PANE [--enter] [--raw] [--wait [wait options]] [--answer] [--any-pane]
        [--] TEXT|-              Type TEXT (or stdin) into PANE; prints the
                                 report count to pass to `wait --after`. Refused
@@ -82,9 +91,14 @@ Commands:
   read PANE [--scrollback] [--max-bytes N]
                                 Print PANE's screen (or retained output) text;
                                 a cut keeps the end and says so on stderr.
-  close PANE...|--children [--any-pane]
+  close PANE...|--children [--any-pane] [--prune]
                                 Close worker panes. One that is already gone
                                 prints \"gone\":true and is not an error.
+                                --prune also removes a closed worker's
+                                `spawn --worktree` worktree and its branch
+                                (git worktree remove, git branch -d; never
+                                forced, so unsaved work stays and is named
+                                under \"worktree\":{\"kept\":...}).
   report STATE [[--] DETAIL]    Write an agent-state report (running, permission,
                                 input, finished, error, clear) to this terminal.
   board [--of PANE]             Show an orchestrator's workers in this pane
@@ -124,6 +138,7 @@ pub(crate) enum Command {
     Close {
         panes: PaneSet,
         any_pane: bool,
+        prune: bool,
     },
     Report {
         state: String,
@@ -161,6 +176,10 @@ pub(crate) struct SpawnArgs {
     pub(crate) wait_after: bool,
     pub(crate) focus: bool,
     pub(crate) max_children: usize,
+    /// `--worktree`: run in `<repo>-wt/<label>` on branch `orch/<label>`.
+    pub(crate) worktree: bool,
+    /// `--tier`: the model tier flags to put on the agent command.
+    pub(crate) tier: Option<worktree::Tier>,
     pub(crate) command: Vec<String>,
 }
 
@@ -322,9 +341,11 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
         }
         "close" => {
             let any_pane = rest.flag("--any-pane");
+            let prune = rest.flag("--prune");
             Command::Close {
                 panes: pane_set(&mut rest)?,
                 any_pane,
+                prune,
             }
         }
         "report" => {
@@ -415,15 +436,36 @@ fn parse_spawn(rest: &mut Args) -> Result<SpawnArgs, String> {
             })?,
         None => DEFAULT_MAX_CHILDREN,
     };
+    let cwd = rest.value("--cwd")?;
+    let label = rest.value("--label")?;
+    let worktree = rest.flag("--worktree");
+    let tier = rest
+        .value("--tier")?
+        .map(|name| worktree::Tier::parse(&name))
+        .transpose()?;
+    if worktree {
+        if cwd.is_some() {
+            return Err("--worktree and --cwd conflict: the worktree is the cwd".to_string());
+        }
+        let label = label
+            .as_deref()
+            .ok_or("--worktree needs --label: it names the worktree and its branch")?;
+        worktree::check_label(label)?;
+    }
+    if tier.is_some() {
+        worktree::check_tier_command(&command)?;
+    }
     Ok(SpawnArgs {
         board,
-        cwd: rest.value("--cwd")?,
+        cwd,
         env,
-        label: rest.value("--label")?,
+        label,
         input: rest.value("--input")?,
         wait_after: !rest.flag("--no-wait-after"),
         focus: rest.flag("--focus"),
         max_children,
+        worktree,
+        tier,
         command,
     })
 }
@@ -1262,13 +1304,27 @@ impl Session {
     /// `close`: a pane that is already gone counts as closed, and one
     /// failure does not keep the rest open, so cleanup after a failed run
     /// always finishes.
-    fn close(&mut self, panes: &[u64], any_pane: bool) -> Result<i32, Failure> {
+    fn close(&mut self, panes: &[u64], any_pane: bool, prune: bool) -> Result<i32, Failure> {
         let own = if any_pane {
             None
         } else {
             Some(self.guard_own()?)
         };
-        close_panes(&mut self.client, panes, own, &mut print_json)
+        let here = std::env::current_dir().ok();
+        let mut prune_label = |label: &str| {
+            if prune {
+                worktree::prune(here.as_deref()?, label)
+            } else {
+                None
+            }
+        };
+        close_panes(
+            &mut self.client,
+            panes,
+            own,
+            &mut prune_label,
+            &mut print_json,
+        )
     }
 
     fn execute(&mut self, command: Command) -> Result<i32, Failure> {
@@ -1327,9 +1383,13 @@ impl Session {
                     eprintln!("{}", truncated_message(result.text.len()));
                 }
             }
-            Command::Close { panes, any_pane } => {
+            Command::Close {
+                panes,
+                any_pane,
+                prune,
+            } => {
                 let panes = self.resolve(&panes)?;
-                return self.close(&panes, any_pane);
+                return self.close(&panes, any_pane, prune);
             }
             Command::Board { of, open } => return self.board(of, open),
             Command::Report { .. } => unreachable!("handled before connecting"),
@@ -1445,18 +1505,10 @@ impl Session {
             )));
         }
         let env = worker_env(args.env, !args.command.is_empty(), std::env::vars());
-        let cwd = spawn_cwd(args.cwd, std::env::current_dir().ok());
-        let params = SpawnParams {
-            config: Some(SpawnConfig {
-                command: (!args.command.is_empty()).then_some(args.command),
-                cwd,
-                env,
-                initial_input: args.input,
-                wait_after_command: args.wait_after,
-            }),
-            label: args.label,
-            parent_pane_id: Some(WireId(own)),
-            focus: Some(args.focus),
+        let mut cwd = spawn_cwd(args.cwd, std::env::current_dir().ok());
+        let command = match args.tier {
+            Some(tier) => worktree::apply_tier(&args.command, tier).map_err(Failure::error)?,
+            None => args.command,
         };
         // Workers are always floats (D9), stowed on the board when there is
         // one (D10), so the board opens first. A worker's go over the worker
@@ -1472,10 +1524,52 @@ impl Session {
         } else {
             own
         };
-        let pane = self
+        // The worktree comes last, once nothing else can refuse the spawn.
+        let made = if args.worktree {
+            let label = args.label.as_deref().expect("--worktree has a label");
+            let here = std::env::current_dir().map_err(|err| {
+                Failure::error(format!("cannot read the current directory: {err}"))
+            })?;
+            let made = worktree::add(&here, label).map_err(Failure::error)?;
+            cwd = made.path.to_str().map(str::to_string);
+            Some((here, made))
+        } else {
+            None
+        };
+        let params = SpawnParams {
+            config: Some(SpawnConfig {
+                command: (!command.is_empty()).then_some(command),
+                cwd,
+                env,
+                initial_input: args.input,
+                wait_after_command: args.wait_after,
+            }),
+            label: args.label,
+            parent_pane_id: Some(WireId(own)),
+            focus: Some(args.focus),
+        };
+        let pane = match self
             .client
-            .spawn_split(host, SplitPlacement::Float, &params)?;
-        print_json(&serde_json::json!({ "paneId": WireId(pane) }));
+            .spawn_split(host, SplitPlacement::Float, &params)
+        {
+            Ok(pane) => pane,
+            Err(err) => {
+                if let Some((here, made)) = &made {
+                    // Fresh and untouched, so nothing is lost.
+                    worktree::remove(here, &made.path, &made.branch);
+                }
+                return Err(err.into());
+            }
+        };
+        let mut line = serde_json::json!({ "paneId": WireId(pane) });
+        if let Some((_, made)) = &made {
+            line["worktree"] = made.path.to_string_lossy().into_owned().into();
+            line["branch"] = made.branch.clone().into();
+        }
+        if let Some(tier) = args.tier {
+            line["tier"] = tier.name().into();
+        }
+        print_json(&line);
         Ok(EXIT_OK)
     }
 
@@ -1983,11 +2077,16 @@ pub(crate) fn close_panes(
     source: &mut impl PaneCloser,
     panes: &[u64],
     own: Option<u64>,
+    prune: &mut dyn FnMut(&str) -> Option<serde_json::Value>,
     emit: &mut dyn FnMut(&serde_json::Value),
 ) -> Result<i32, Failure> {
     let panels = source.list()?;
     let mut failed = false;
     for (pane, listed) in close_targets(&panels, panes, own).map_err(Failure::error)? {
+        let label = panels
+            .iter()
+            .find(|panel| panel.pane_id.0 == pane)
+            .and_then(|panel| panel.label.clone());
         let gone = !listed
             || match source.close(pane) {
                 Ok(()) => false,
@@ -2007,6 +2106,12 @@ pub(crate) fn close_panes(
         let mut line = serde_json::json!({ "paneId": WireId(pane), "closed": true });
         if gone {
             line["gone"] = true.into();
+        } else if let Some(label) = label {
+            // Only after the pane is closed, so its process no longer
+            // holds the worktree; a refusal keeps it and does not fail.
+            if let Some(info) = prune(&label) {
+                line["worktree"] = info;
+            }
         }
         emit(&line);
     }
@@ -2107,6 +2212,8 @@ mod tests {
                 wait_after: false,
                 focus: false,
                 max_children: DEFAULT_MAX_CHILDREN,
+                worktree: false,
+                tier: None,
                 command: args(&["codex", "--label", "x"]),
             })
         );
@@ -2133,6 +2240,119 @@ mod tests {
         ] {
             assert!(parse_args(&args(bad)).is_err(), "{bad:?} must be rejected");
         }
+    }
+
+    #[test]
+    fn spawn_worktree_needs_a_plain_label_and_no_cwd() {
+        let Command::Spawn(spawn) = parse_args(&args(&[
+            "spawn",
+            "--worktree",
+            "--label",
+            "fix-1",
+            "--",
+            "claude",
+        ]))
+        .unwrap() else {
+            panic!("spawn expected");
+        };
+        assert!(spawn.worktree);
+        assert_eq!(spawn.label.as_deref(), Some("fix-1"));
+
+        for bad in [
+            &["spawn", "--worktree"][..],
+            &["spawn", "--worktree", "--label", ".x"],
+            &["spawn", "--worktree", "--label", "-x"],
+            &["spawn", "--worktree", "--label", "a/b"],
+            &["spawn", "--worktree", "--label", "a", "--cwd", "/repo"],
+        ] {
+            assert!(parse_args(&args(bad)).is_err(), "{bad:?} must be rejected");
+        }
+        // The label rules apply to --worktree only.
+        assert!(parse_args(&args(&["spawn", "--label", "a b"])).is_ok());
+    }
+
+    #[test]
+    fn spawn_tier_needs_an_agent_command_that_picks_no_model() {
+        let Command::Spawn(spawn) =
+            parse_args(&args(&["spawn", "--tier", "deep", "--", "codex", "exec"])).unwrap()
+        else {
+            panic!("spawn expected");
+        };
+        assert_eq!(spawn.tier, Some(worktree::Tier::Deep));
+        // The command stays as given: the PATH check sees the program, and
+        // the flags are added when the worker starts.
+        assert_eq!(spawn.command, args(&["codex", "exec"]));
+
+        for bad in [
+            &["spawn", "--tier", "deep"][..],
+            &["spawn", "--tier", "deep", "--", "vim"],
+            &["spawn", "--tier", "max", "--", "claude"],
+            &[
+                "spawn", "--tier", "light", "--", "claude", "--model", "opus",
+            ],
+            &["spawn", "--tier", "light", "--", "codex", "-m", "x"],
+            &["spawn", "--tier", "light", "--", "agy", "--model", "x"],
+        ] {
+            assert!(parse_args(&args(bad)).is_err(), "{bad:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn close_takes_prune_with_or_without_any_pane() {
+        assert_eq!(
+            parse_args(&args(&["close", "--prune", "--any-pane", "8"])).unwrap(),
+            Command::Close {
+                panes: PaneSet::Ids(vec![8]),
+                any_pane: true,
+                prune: true,
+            }
+        );
+        assert_eq!(
+            parse_args(&args(&["close", "8"])).unwrap(),
+            Command::Close {
+                panes: PaneSet::Ids(vec![8]),
+                any_pane: false,
+                prune: false,
+            }
+        );
+    }
+
+    struct OkCloser(Vec<Panel>);
+
+    impl PaneCloser for OkCloser {
+        fn list(&mut self) -> Result<Vec<Panel>, ClientError> {
+            Ok(self.0.clone())
+        }
+
+        fn close(&mut self, _pane: u64) -> Result<(), ClientError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn prune_runs_after_a_close_for_labelled_listed_panes_only() {
+        let mut labelled = worker(8, 1);
+        labelled.label = Some("job".to_string());
+        let mut source = OkCloser(vec![labelled, worker(9, 1)]);
+        let mut asked = Vec::new();
+        let mut lines = Vec::new();
+        let code = close_panes(
+            &mut source,
+            &[8, 9, 7],
+            Some(1),
+            &mut |label| {
+                asked.push(label.to_string());
+                Some(serde_json::json!({ "path": "/r-wt/job", "removed": true }))
+            },
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        // No label (9) and already gone (7) are not asked about.
+        assert_eq!(asked, ["job"]);
+        assert_eq!(lines[0]["worktree"]["removed"], true);
+        assert!(lines[1].get("worktree").is_none());
+        assert_eq!(lines[2]["gone"], true);
+        assert!(lines[2].get("worktree").is_none());
     }
 
     #[test]
@@ -3016,13 +3236,14 @@ mod tests {
             panels: vec![worker(8, 1)],
             refuse_code: -32003,
         };
-        let failure = close_panes(&mut source, &[8], Some(1), &mut |_| {}).unwrap_err();
+        let failure =
+            close_panes(&mut source, &[8], Some(1), &mut |_| None, &mut |_| {}).unwrap_err();
         assert_eq!(failure.code, EXIT_UNAVAILABLE);
 
         // Any other refusal of a pane that is still listed fails that pane only.
         source.refuse_code = -32000;
         let mut lines = Vec::new();
-        let code = close_panes(&mut source, &[8], Some(1), &mut |line| {
+        let code = close_panes(&mut source, &[8], Some(1), &mut |_| None, &mut |line| {
             lines.push(line.clone())
         });
         assert_eq!(code.ok(), Some(EXIT_ERROR));
@@ -3197,6 +3418,8 @@ mod tests {
             wait_after: true,
             focus: false,
             max_children: DEFAULT_MAX_CHILDREN,
+            worktree: false,
+            tier: None,
             command: args(command),
         }
     }

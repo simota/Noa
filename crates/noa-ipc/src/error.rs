@@ -71,6 +71,10 @@ pub enum IpcError {
     Unsupported(&'static str),
     #[error("internal error: {0}")]
     Internal(String),
+    /// A request the backend refuses for what it asks (JSON-RPC invalid
+    /// params), with the reason as the message.
+    #[error("{0}")]
+    InvalidParams(String),
 }
 
 impl IpcError {
@@ -81,6 +85,22 @@ impl IpcError {
             IpcError::PayloadTooLarge => ErrorCode::PayloadTooLarge,
             IpcError::Unsupported(_) => ErrorCode::Internal,
             IpcError::Internal(_) => ErrorCode::Internal,
+            IpcError::InvalidParams(_) => ErrorCode::InvalidParams,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // agent-orchestration D13: the app refuses a spawn nested too deep as
+    // invalid params, with its own reason as the message.
+    #[test]
+    fn a_refused_request_is_invalid_params_with_its_reason() {
+        let error = IpcError::InvalidParams("nesting goes one level deep".to_string());
+        assert_eq!(error.code(), ErrorCode::InvalidParams);
+        assert_eq!(error.code().code(), -32602);
+        assert_eq!(error.to_string(), "nesting goes one level deep");
     }
 }

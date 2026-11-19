@@ -1961,11 +1961,16 @@ pub(crate) fn wait_loop_with_clock(
             }
         }
         // A report or exit seen above wins over a stall in the same pass.
-        if let Some(stall) = options.stall {
+        // With a re-list pending, `latest` may be stale (an exit only shows
+        // in a listing), so the stall waits for the next pass.
+        if let Some(stall) = options.stall
+            && !relist_pending
+        {
             let now = clock();
             if screens_polled_at.is_none_or(|at| now.saturating_duration_since(at) >= relist_every)
             {
                 screens_polled_at = Some(now);
+                let mut stalled: Vec<(u64, Duration)> = Vec::new();
                 for watch in &watches {
                     if done.contains(&watch.pane) || (skip_exited_before && watch.exited_before) {
                         continue;
@@ -1983,21 +1988,39 @@ pub(crate) fn wait_loop_with_clock(
                     entry.text = Some(text);
                     let quiet_for = now.saturating_duration_since(entry.since);
                     if quiet_for >= stall {
-                        let outcome = Outcome {
-                            reason: Reason::Stalled,
-                            closed: false,
+                        stalled.push((watch.pane, quiet_for));
+                    }
+                }
+                if !stalled.is_empty() {
+                    // Notifications received while the screens were read wait
+                    // in the client's queue: apply them, and judge the
+                    // stalled panes on them first.
+                    let mut relist = false;
+                    while let Some(notification) = source.next(Duration::ZERO)? {
+                        relist |= apply_notification(&mut latest, notification, panes);
+                    }
+                    if relist {
+                        latest = watched(source.list()?, panes);
+                        listed_at = Instant::now();
+                    }
+                    for (pane, quiet_for) in stalled {
+                        let Some(watch) = watches.iter_mut().find(|watch| watch.pane == pane)
+                        else {
+                            continue;
                         };
-                        let panel = latest.get(&watch.pane);
-                        emit_outcome(
-                            source,
-                            options,
-                            watch.pane,
-                            &outcome,
-                            panel,
-                            Some(quiet_for),
-                            emit,
-                        )?;
-                        done.push(watch.pane);
+                        let panel = latest.get(&pane);
+                        let (outcome, quiet) = match evaluate(watch, panel, &options.reasons) {
+                            Some(outcome) => (outcome, None),
+                            None => (
+                                Outcome {
+                                    reason: Reason::Stalled,
+                                    closed: false,
+                                },
+                                Some(quiet_for),
+                            ),
+                        };
+                        emit_outcome(source, options, pane, &outcome, panel, quiet, emit)?;
+                        done.push(pane);
                     }
                 }
             }
@@ -2025,17 +2048,7 @@ pub(crate) fn wait_loop_with_clock(
             None => WAIT_RELIST_INTERVAL,
         };
         let relist = match source.next(remaining)? {
-            // `dropped` means earlier notifications were lost, not this one:
-            // its state is applied (and evaluated first), then re-listed.
-            Some(Notification::StateChanged { panels, dropped }) => {
-                for panel in panels {
-                    if panes.contains(&panel.pane_id.0) {
-                        latest.insert(panel.pane_id.0, panel);
-                    }
-                }
-                dropped
-            }
-            Some(Notification::Other { dropped, .. }) => dropped,
+            Some(notification) => apply_notification(&mut latest, notification, panes),
             // An idle tick.
             None => true,
         };
@@ -2043,6 +2056,27 @@ pub(crate) fn wait_loop_with_clock(
         // noticed by listing: re-list on schedule even while other panes keep
         // notifying.
         relist_pending = relist || listed_at.elapsed() >= relist_every;
+    }
+}
+
+/// Apply a pushed notification to `latest`; returns whether earlier ones
+/// were lost (`dropped`), so a re-list is due. A dropped notification's own
+/// state is still applied (and evaluated first).
+fn apply_notification(
+    latest: &mut HashMap<u64, Panel>,
+    notification: Notification,
+    panes: &[u64],
+) -> bool {
+    match notification {
+        Notification::StateChanged { panels, dropped } => {
+            for panel in panels {
+                if panes.contains(&panel.pane_id.0) {
+                    latest.insert(panel.pane_id.0, panel);
+                }
+            }
+            dropped
+        }
+        Notification::Other { dropped, .. } => dropped,
     }
 }
 
@@ -4080,6 +4114,10 @@ mod tests {
         now: std::rc::Rc<std::cell::Cell<u64>>,
         /// The screen at second N (the last entry repeats).
         screens: Vec<&'static str>,
+        /// Notifications already received, returned before any wait.
+        queued: std::collections::VecDeque<Notification>,
+        /// Received while the screen is read at or after second N.
+        during_screen: Option<(u64, Notification)>,
     }
 
     impl WaitSource for StallSource {
@@ -4087,7 +4125,13 @@ mod tests {
             self.inner.list()
         }
 
-        fn next(&mut self, _timeout: Duration) -> Result<Option<Notification>, Failure> {
+        fn next(&mut self, timeout: Duration) -> Result<Option<Notification>, Failure> {
+            if let Some(notification) = self.queued.pop_front() {
+                return Ok(Some(notification));
+            }
+            if timeout.is_zero() {
+                return Ok(None);
+            }
             if self.now.get() >= 100 {
                 return Err(Failure::error("never stalled"));
             }
@@ -4100,6 +4144,14 @@ mod tests {
         }
 
         fn screen(&mut self, _pane: u64) -> Result<Option<String>, Failure> {
+            if self
+                .during_screen
+                .as_ref()
+                .is_some_and(|(at, _)| self.now.get() >= *at)
+                && let Some((_, notification)) = self.during_screen.take()
+            {
+                self.queued.push_back(notification);
+            }
             let index = (self.now.get() as usize).min(self.screens.len() - 1);
             Ok(Some(self.screens[index].to_string()))
         }
@@ -4122,6 +4174,19 @@ mod tests {
         after: HashMap<u64, u64>,
         jump: u64,
     ) -> (Result<i32, Failure>, Vec<serde_json::Value>) {
+        run_stall_wait_with(lists, screens, stall_secs, after, jump, None)
+    }
+
+    /// `during_screen`: a notification that arrives while the screen is
+    /// read at or after that second.
+    fn run_stall_wait_with(
+        lists: Vec<Vec<Panel>>,
+        screens: Vec<&'static str>,
+        stall_secs: u64,
+        after: HashMap<u64, u64>,
+        jump: u64,
+        during_screen: Option<(u64, Notification)>,
+    ) -> (Result<i32, Failure>, Vec<serde_json::Value>) {
         let now = std::rc::Rc::new(std::cell::Cell::new(0));
         let mut source = StallSource {
             inner: FakeSource {
@@ -4132,6 +4197,8 @@ mod tests {
             },
             now: now.clone(),
             screens,
+            queued: Default::default(),
+            during_screen,
         };
         let base = Instant::now();
         let mut calls = 0;
@@ -4211,6 +4278,50 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0]["reason"], serde_json::json!("finished"));
         assert!(lines[0].get("quietSecs").is_none());
+    }
+
+    // Review finding: an idle tick schedules a re-list, but the stall was
+    // judged on the stale listing first, so a worker that had exited in
+    // the meantime read as stalled.
+    #[test]
+    fn an_exit_seen_by_the_pending_relist_wins_over_a_stall() {
+        let mut exited = panel(0, Some("running"), false);
+        exited.exit = Some(PanelExit { code: Some(0) });
+        let (code, lines) = run_stall_wait(
+            vec![vec![panel(0, Some("running"), false)], vec![exited]],
+            vec!["same"],
+            1,
+        );
+
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["reason"], serde_json::json!("exit"));
+    }
+
+    // Review finding: a report received while the screens were read sat in
+    // the client's queue, and the stall was printed from the older state.
+    #[test]
+    fn a_report_received_while_reading_the_screen_wins_over_a_stall() {
+        let finished = panel(1, Some("finished"), false);
+        let (code, lines) = run_stall_wait_with(
+            vec![vec![panel(0, Some("running"), false)]],
+            vec!["same"],
+            3,
+            HashMap::new(),
+            0,
+            Some((
+                3,
+                Notification::StateChanged {
+                    panels: vec![finished],
+                    dropped: false,
+                },
+            )),
+        );
+
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["reason"], serde_json::json!("finished"));
+        assert_eq!(lines[0]["seq"], serde_json::json!(1));
     }
 
     #[test]

@@ -1677,7 +1677,20 @@ impl Board {
                     })
                     .map(|status| format!("まだ{}です。", status.label()))
                     .unwrap_or_default();
-                let ask = format!("{} を閉じますか? {busy}出力は消えます。", self.name(*pane));
+                // D13: its own workers close with it.
+                let kids = self
+                    .listed()
+                    .filter(|panel| panel.parent_pane_id.is_some_and(|p| p.0 == *pane))
+                    .count();
+                let kids = if kids > 0 {
+                    format!("ワーカーの子 {kids} 件も閉じます。")
+                } else {
+                    String::new()
+                };
+                let ask = format!(
+                    "{} を閉じますか? {busy}{kids}出力は消えます。",
+                    self.name(*pane)
+                );
                 line.fg(RED, &fit(&ask, room));
             }
             Mode::ConfirmQuit => {
@@ -4431,6 +4444,17 @@ mod tests {
 
     // D13 with D12: ending the board closes the workers of workers, whose
     // parent is a float once it is back on the orchestrator.
+    #[test]
+    fn closing_a_worker_says_its_own_workers_close_with_it() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(nested(), Instant::now());
+        board.key(Key::Char('1'));
+        assert_eq!(board.selected(), Some(2));
+        board.key(Key::Char('x'));
+        let top = visible(&board.render(200, 20, Instant::now())[2]);
+        assert!(top.contains("ワーカーの子 2 件も閉じます"), "{top}");
+    }
+
     #[test]
     fn quitting_says_the_workers_of_workers_close() {
         let mut board = Board::new(Some(1), Some(8));

@@ -33,7 +33,7 @@ output shapes and exit codes: [reference.md](reference.md).
    (see "Matching the worker to the task"), which directory or worktree (see
    "Giving a worker its own worktree"), and a task that stands on its own. A
    worker sees nothing of your conversation.
-3. Keep the number of workers small (8 at most: the board holds 8 floats; a
+3. Keep the number of workers small (20 at most: the board holds 20; a
    worker keeps its slot until you `close` it, also after it exits) and
    tell the human what you are about to start, with each worker's tier, and
    that the board will show it.
@@ -221,4 +221,5 @@ close them.
   ends a wait only with `exit` or `attention`. For plain commands, that is
   enough: `spawn -- make test`, then `wait PANE --for exit`.
 - Do not ask a worker to orchestrate workers of its own. A worker is a float
-  on your board, and its own workers would share that board's 8 slots.
+  on your board, and its own workers would land on that board as loose
+  floats, outside the board's list.

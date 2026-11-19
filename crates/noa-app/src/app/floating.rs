@@ -10,7 +10,7 @@ use super::*;
 use crate::commands::FloatAction;
 use crate::floating::{
     FloatAnchor, FloatDragKind, FloatHit, FloatHitPart, FloatLayout, FloatMetrics, FloatState,
-    MAX_PER_ANCHOR, PlacedFloat, StripButton,
+    MAX_PER_ANCHOR, PlacedFloat, StripButton, max_on_anchor,
 };
 
 /// Whether a new float is a worker stowed on its orchestrator's board
@@ -768,8 +768,9 @@ impl App {
             .ok_or_else(not_ready)?;
         let gpu = self.gpu.as_ref().ok_or_else(not_ready)?;
         let state = self.windows.get(&window_id).ok_or_else(not_ready)?;
-        if state.floats.count_on(FloatAnchor::Pane(anchor_pane)) >= MAX_PER_ANCHOR {
-            return Err(format!("the pane already holds {MAX_PER_ANCHOR} floats"));
+        let most = max_on_anchor(stow != Stow::No);
+        if state.floats.count_on(FloatAnchor::Pane(anchor_pane)) >= most {
+            return Err(format!("the pane already holds {most} floats"));
         }
         let rect = state
             .floats
@@ -825,7 +826,7 @@ impl App {
         if created.is_err() {
             let mut surface = surface;
             surface.shutdown();
-            return Err(format!("the pane already holds {MAX_PER_ANCHOR} floats"));
+            return Err(format!("the pane already holds {most} floats"));
         }
         state.surfaces.insert(id, surface);
         Ok(id)

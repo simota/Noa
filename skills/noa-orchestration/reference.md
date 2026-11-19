@@ -56,10 +56,11 @@ Starts a worker whose parent is this pane and prints `{"paneId":"…"}`. A worke
 is always a floating pane. When this pane has no board open, the spawn first
 opens one next to it (a new tab when there is no room), and the worker is
 stowed on the board: collapsed, it shows only as the board's row; the board's
-`g` opens it over the board. One pane holds at most 8 floats, so a ninth spawn
-fails. If the board cannot open (stderr warns, the spawn still succeeds), or
+`g` opens it over the board. A board holds at most 20 stowed workers, so a
+21st spawn fails; its list scrolls. If the board cannot open (stderr warns, the spawn still succeeds), or
 with `--no-board`, the worker floats over this pane instead, collapsed to a
-title strip that shows the agent's state. `--split` and `--tab` are refused; `--float` is
+title strip that shows the agent's state; a pane holds at most 8 such floats.
+`--split` and `--tab` are refused; `--float` is
 accepted and changes nothing.
 
 | Option | Meaning |
@@ -71,7 +72,7 @@ accepted and changes nothing.
 | `--input TEXT` | Typed into the worker once it starts |
 | `--no-wait-after` | Close the pane when its command exits. By default it stays open with `exit.code` readable |
 | `--focus` | Open the worker's float and move keyboard focus to it. By default it stays collapsed and focus stays where it was |
-| `--max-children N` | Refuse when this pane already has N workers (default and maximum 8, the floats a board holds). Exited workers count until closed; the refusal says how many have exited. Checked before each spawn, so parallel spawns can exceed it |
+| `--max-children N` | Refuse when this pane already has N workers (default and maximum 20, the workers a board holds). Exited workers count until closed; the refusal says how many have exited. Checked before each spawn, so parallel spawns can exceed it |
 
 `COMMAND` runs without a shell (argv, looked up on `PATH`). A command without a
 `/` that is not on the worker's `PATH` is refused (exit 1, "command not found on

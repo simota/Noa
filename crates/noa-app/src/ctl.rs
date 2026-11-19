@@ -27,11 +27,12 @@ pub(crate) const EXIT_TIMEOUT: i32 = 2;
 /// Exit status: the server is disabled, unreachable, or lacks a scope.
 pub(crate) const EXIT_UNAVAILABLE: i32 = 3;
 
-/// Default cap on live workers one orchestrator may hold (D4).
-const DEFAULT_MAX_CHILDREN: usize = crate::floating::MAX_PER_ANCHOR;
-/// The most `--max-children` accepts: every worker is a float on the
-/// orchestrator's board, which holds this many.
-const MOST_CHILDREN: usize = crate::floating::MAX_PER_ANCHOR;
+/// Default cap on live workers one orchestrator may hold (D4, D12): as many
+/// as its board holds.
+const DEFAULT_MAX_CHILDREN: usize = MOST_CHILDREN;
+/// The most `--max-children` accepts: every worker is a float stowed on the
+/// orchestrator's board, which holds this many (D12).
+const MOST_CHILDREN: usize = crate::floating::MAX_STOWED_PER_BOARD;
 /// Pause between a pasted prompt and the Enter that submits it, so a TUI
 /// that debounces paste sees them as two events.
 const SUBMIT_DELAY: Duration = Duration::from_millis(150);
@@ -62,7 +63,8 @@ Commands:
                                 collapsed to its title strip.
       --cwd DIR  --env KEY=VALUE  --label TEXT  --input TEXT
       --no-wait-after  --focus  --no-board
-      --max-children N (default 8, at most 8: the board holds 8 floats)
+      --max-children N (default and most 20: the board holds 20 workers;
+                         with --no-board this pane holds 8 floats)
   send PANE [--enter] [--raw] [--wait [wait options]] [--answer] [--any-pane]
        [--] TEXT|-              Type TEXT (or stdin) into PANE; prints the
                                 report count to pass to `wait --after`. Refused
@@ -3228,11 +3230,15 @@ mod tests {
     }
 
     // Review finding (F7/skill F5): exited workers held open keep their slot,
-    // and the error suggested raising --max-children past the board's 8.
+    // and the error suggested raising --max-children past the board's size
+    // (20 since D12).
     #[test]
     fn the_worker_limit_counts_exited_workers_and_stops_at_the_boards_size() {
-        let at_most = max_children_message(8, 5, 8);
-        assert!(at_most.contains("8 workers, 5 of them exited"), "{at_most}");
+        let at_most = max_children_message(20, 5, 20);
+        assert!(
+            at_most.contains("20 workers, 5 of them exited"),
+            "{at_most}"
+        );
         assert!(
             at_most.contains("close finished ones after reading them"),
             "{at_most}"
@@ -3242,7 +3248,7 @@ mod tests {
         let lowered = max_children_message(2, 0, 2);
         assert!(!lowered.contains("exited"), "{lowered}");
         assert!(
-            lowered.contains("raise --max-children (at most 8)"),
+            lowered.contains("raise --max-children (at most 20)"),
             "{lowered}"
         );
 
@@ -3251,10 +3257,10 @@ mod tests {
             Ok(_) => panic!("spawn expected"),
             Err(error) => Err(error),
         };
-        assert_eq!(parsed("8"), Ok(8));
+        assert_eq!(parsed("20"), Ok(20));
         assert_eq!(parsed("3"), Ok(3));
-        let above = parsed("9").unwrap_err();
-        assert!(above.contains("holds 8"), "{above}");
+        let above = parsed("21").unwrap_err();
+        assert!(above.contains("holds 20"), "{above}");
     }
 
     // Review finding (F8/skill F8): input to an exited, held-open worker was

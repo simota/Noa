@@ -13,7 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not listening, a pane whose process exited, a `wait` on a pane id that is not
   listed, and a float that could not open (with the pty error).
 - `Noa +ctl spawn` refuses a `--cwd` that is not a directory and a command not
-  found on the worker's `PATH`, and `--max-children` above 8.
+  found on the worker's `PATH`, and `--max-children` above 20.
+- A board holds up to 20 workers (was 8); its list scrolls, numbers take two
+  digits, and two digits typed in a row pick worker 10–20. Other floats keep
+  the limit of 8 per pane.
 - `Noa +ctl board` survives a failed listing, keeps worker numbers stable, shows
   failed commands and long-waiting workers first, flags workers with no output
   for 2 minutes, and asks before `q` closes it with workers open.

@@ -626,27 +626,25 @@ impl App {
                             state.floats.get(target).map(|float| float.anchor),
                             state.split_focus(),
                         );
-                        let full = state
-                            .floats
-                            .count_on(crate::floating::FloatAnchor::Pane(anchor))
-                            >= crate::floating::MAX_PER_ANCHOR;
                         let anchor_label = state
                             .surfaces
                             .get(&anchor)
                             .and_then(|surface| surface.orchestration.as_ref())
                             .and_then(|orchestration| orchestration.label.as_deref());
                         let stowed = stows_on(anchor_label, params.parent_pane_id.map(|id| id.0));
-                        (anchor, full, stowed)
+                        let most = crate::floating::max_on_anchor(stowed);
+                        let full = state
+                            .floats
+                            .count_on(crate::floating::FloatAnchor::Pane(anchor))
+                            >= most;
+                        (anchor, full.then_some(most), stowed)
                     })
                     .ok_or(noa_ipc::IpcError::PaneClosed)?;
                 let float = self
                     .ipc_float_with(window_id, anchor, stowed, spawn, float_start(params.focus))
                     .map_err(|reason| {
-                        noa_ipc::IpcError::Internal(if full {
-                            format!(
-                                "this pane already holds the most floats it can ({})",
-                                crate::floating::MAX_PER_ANCHOR
-                            )
+                        noa_ipc::IpcError::Internal(if let Some(most) = full {
+                            format!("this pane already holds the most floats it can ({most})")
                         } else {
                             format!("the float could not open: {reason}")
                         })

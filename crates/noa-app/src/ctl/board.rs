@@ -21,6 +21,9 @@ const LIST_EVERY: Duration = Duration::from_millis(500);
 const RETRY_FIRST: Duration = Duration::from_millis(500);
 const RETRY_MAX: Duration = Duration::from_secs(4);
 const GIVE_UP_AFTER: Duration = Duration::from_secs(30);
+/// How soon a second digit must follow the first to make a two-digit
+/// worker number.
+const SECOND_DIGIT: Duration = Duration::from_millis(1000);
 /// How long a working worker's screen stays the same before the board says
 /// it shows no output.
 const QUIET_AFTER: Duration = Duration::from_secs(120);
@@ -282,6 +285,9 @@ pub(crate) struct Board {
     /// while it lives, so `3` means the same worker however the list is
     /// sorted. A closed worker's number goes to the next one that appears.
     numbers: HashMap<u64, usize>,
+    /// The digit just typed and when, so a second digit soon after picks
+    /// a two-digit number (a board holds up to 20 workers, D12).
+    digit: Option<(usize, Instant)>,
     selected: Option<u64>,
     pub(crate) view: View,
     pub(crate) mode: Mode,
@@ -315,6 +321,7 @@ impl Board {
             history: HashMap::new(),
             since: HashMap::new(),
             numbers: HashMap::new(),
+            digit: None,
             selected: None,
             view: View::List,
             mode: Mode::Normal,
@@ -649,6 +656,27 @@ impl Board {
     }
 
     /// Select the worker numbered `number`.
+    /// A digit key: the worker with that number, or, typed within
+    /// [`SECOND_DIGIT`] of a first digit, the two-digit number they make
+    /// when such a worker exists (`1` then `2` is 12). `0` only completes.
+    fn type_digit(&mut self, digit: usize) {
+        let now = Instant::now();
+        let paired = self
+            .digit
+            .take()
+            .filter(|(_, at)| now.duration_since(*at) < SECOND_DIGIT)
+            .map(|(first, _)| first * 10 + digit)
+            .filter(|number| self.numbers.values().any(|n| n == number));
+        match paired {
+            Some(number) => self.select_number(number),
+            None if digit == 0 => {}
+            None => {
+                self.select_number(digit);
+                self.digit = Some((digit, now));
+            }
+        }
+    }
+
     fn select_number(&mut self, number: usize) {
         let pane = self
             .listed()
@@ -784,9 +812,7 @@ impl Board {
                         self.help_scroll = 0;
                     }
                     Key::Char('n') => self.select_next_needing(),
-                    Key::Char(digit @ '1'..='9') => {
-                        self.select_number(digit as usize - '0' as usize);
-                    }
+                    Key::Char(digit @ '0'..='9') => self.type_digit(digit as usize - '0' as usize),
                     Key::Char('j') | Key::Down => self.move_selection(1),
                     Key::Char('k') | Key::Up => self.move_selection(-1),
                     Key::Enter | Key::Char('l') | Key::Right => {
@@ -1396,10 +1422,19 @@ impl Board {
                 line.fg(RED, &fit(&ask, room));
             }
             Mode::ConfirmQuit => {
-                let ask = format!(
-                    "q をもう一度押すと終了します（ワーカー {} 件はオーケストレーターへ戻ります）",
-                    self.workers().len()
-                );
+                let live = self.workers().len();
+                // Back on the orchestrator they are ordinary floats, which
+                // a pane holds 8 of (floating-panes REQ-019).
+                let ask = if live > crate::floating::MAX_PER_ANCHOR {
+                    format!(
+                        "q をもう一度押すと終了します（ワーカー {live} 件のうち戻れる最大 {} 件はオーケストレーターへ戻り、残りは閉じます）",
+                        crate::floating::MAX_PER_ANCHOR
+                    )
+                } else {
+                    format!(
+                        "q をもう一度押すと終了します（ワーカー {live} 件はオーケストレーターへ戻ります）"
+                    )
+                };
                 line.fg(ORANGE, &fit(&ask, room));
             }
             Mode::Normal => match (&self.offline, &self.message) {
@@ -1433,7 +1468,7 @@ impl Board {
         let mut lines = vec![Line::default().finish(cols)];
         let keys: [(&str, &str); 14] = [
             ("j k ↑ ↓", "ワーカーを選ぶ"),
-            ("1–9", "番号のワーカーを選ぶ"),
+            ("1–20", "番号のワーカーを選ぶ(10 以上は 2 桁続けて)"),
             ("n", "次の要対応のワーカーへ"),
             ("Enter l →", "詳細(画面と報告の履歴)"),
             ("Esc h ←", "一覧に戻る"),
@@ -1792,11 +1827,13 @@ impl Board {
         } else {
             line.plain(" ");
         }
-        let number = if number <= 9 {
-            number.to_string()
+        // Two columns once any worker's number has two digits.
+        let width = if self.numbers.values().any(|n| *n >= 10) {
+            2
         } else {
-            " ".to_string()
+            1
         };
+        let number = format!("{number:>width$}");
         line.fg(DIM, &number)
             .plain(" ")
             .fg(status.color(), "●")
@@ -3047,6 +3084,30 @@ mod tests {
         board.key(Key::Enter);
         board.key(Key::Char('4'));
         assert_eq!(board.view, View::Detail(5));
+    }
+
+    // D12: with up to 20 workers, numbers take two columns and two digits
+    // typed in a row pick a two-digit number.
+    #[test]
+    fn two_digits_in_a_row_pick_a_two_digit_worker() {
+        let mut board = Board::new(Some(1), None);
+        let panels: Vec<Panel> = (0..12)
+            .map(|i| worker(10 + i, 1, &format!("w{}", i + 1), Some("running"), 1))
+            .collect();
+        board.update(panels, Instant::now());
+        board.key(Key::Char('1'));
+        assert_eq!(board.selected(), Some(10));
+        board.key(Key::Char('2'));
+        assert_eq!(board.selected(), Some(21), "1 then 2 is worker 12");
+        board.key(Key::Char('3'));
+        assert_eq!(board.selected(), Some(12), "32 does not exist: 3 alone");
+        board.key(Key::Char('0'));
+        assert_eq!(board.selected(), Some(12), "0 only completes a number");
+        let all = rendered(&board, 80, 40, Instant::now());
+        assert!(
+            all.contains(" 1 ● w1 ") && all.contains("12 ● w12"),
+            "{all}"
+        );
     }
 
     #[test]

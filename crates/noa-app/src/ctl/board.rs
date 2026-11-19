@@ -267,6 +267,10 @@ pub(crate) struct Board {
     /// Each worker's status and when the board saw it begin (`None`: it
     /// was already so when the board opened).
     since: HashMap<u64, (Status, Option<Instant>)>,
+    /// Each worker's number, given once when it is first listed and kept
+    /// while it lives, so `3` means the same worker however the list is
+    /// sorted. A closed worker's number goes to the next one that appears.
+    numbers: HashMap<u64, usize>,
     selected: Option<u64>,
     pub(crate) view: View,
     pub(crate) mode: Mode,
@@ -291,6 +295,7 @@ impl Board {
             screens: HashMap::new(),
             history: HashMap::new(),
             since: HashMap::new(),
+            numbers: HashMap::new(),
             selected: None,
             view: View::List,
             mode: Mode::Normal,
@@ -403,6 +408,22 @@ impl Board {
                 history.truncate(HISTORY_CAP);
             }
         }
+        let mut live: Vec<u64> = self.listed().map(|panel| panel.pane_id.0).collect();
+        live.sort_unstable();
+        self.numbers.retain(|pane, _| live.contains(pane));
+        // New workers in spawn order (pane ids grow), each the lowest free
+        // number.
+        for &pane in &live {
+            if !self.numbers.contains_key(&pane) {
+                let taken: std::collections::HashSet<usize> =
+                    self.numbers.values().copied().collect();
+                let mut number = 1;
+                while taken.contains(&number) {
+                    number += 1;
+                }
+                self.numbers.insert(pane, number);
+            }
+        }
         let live: Vec<u64> = self.workers().iter().map(|panel| panel.pane_id.0).collect();
         for (pane, gone) in before {
             if !live.contains(&pane) {
@@ -446,10 +467,9 @@ impl Board {
         self.screens.insert(pane, lines.split_off(skip));
     }
 
-    /// The workers shown, most urgent section first.
-    pub(crate) fn workers(&self) -> Vec<&Panel> {
-        let mut workers: Vec<&Panel> = self
-            .panels
+    /// The workers this board shows, in listing order.
+    fn listed(&self) -> impl Iterator<Item = &Panel> {
+        self.panels
             .iter()
             .filter(|panel| Some(panel.pane_id.0) != self.me)
             .filter(|panel| match (self.of, panel.parent_pane_id) {
@@ -457,9 +477,34 @@ impl Board {
                 (None, Some(_)) => true,
                 (_, None) => false,
             })
-            .collect();
-        workers.sort_by_key(|panel| (Status::of(panel).group(), panel.pane_id.0));
+    }
+
+    /// The workers shown, most urgent section first. Within 要対応, what
+    /// holds work up (an approval, an error, a failed command) comes before
+    /// a question or a notification, and then whoever has waited longest;
+    /// elsewhere, spawn order.
+    pub(crate) fn workers(&self) -> Vec<&Panel> {
+        let mut workers: Vec<&Panel> = self.listed().collect();
+        workers.sort_by_key(|panel| {
+            let pane = panel.pane_id.0;
+            let status = Status::of(panel);
+            let group = status.group();
+            let (rank, began) = if group == Group::Needs {
+                let rank = u8::from(matches!(status, Status::Input | Status::Attention));
+                // `None` (already so when the board opened) is the oldest.
+                let began = self.since.get(&pane).and_then(|(_, at)| *at);
+                (rank, began)
+            } else {
+                (0, None)
+            };
+            (group, rank, began, self.number(pane), pane)
+        });
         workers
+    }
+
+    /// `pane`'s number (see [`Board::numbers`]).
+    fn number(&self, pane: u64) -> usize {
+        self.numbers.get(&pane).copied().unwrap_or(usize::MAX)
     }
 
     /// The panes whose screens the current view shows.
@@ -534,12 +579,12 @@ impl Board {
         }
     }
 
-    /// Select the worker numbered `number` in the list (from 1).
+    /// Select the worker numbered `number`.
     fn select_number(&mut self, number: usize) {
         let pane = self
-            .workers()
-            .get(number.wrapping_sub(1))
-            .map(|panel| panel.pane_id.0);
+            .listed()
+            .map(|panel| panel.pane_id.0)
+            .find(|&pane| self.number(pane) == number);
         match pane {
             Some(pane) => self.select(pane),
             None => self.message = Some(Notice::warn(format!("{number} 番のワーカーはいません"))),
@@ -1374,7 +1419,7 @@ impl Board {
         let mut spans: Vec<(usize, usize, Group)> = Vec::new();
         let mut selected_span = (0, 0);
         let mut last_group = None;
-        for (index, panel) in workers.iter().enumerate() {
+        for panel in &workers {
             let group = Status::of(panel).group();
             if last_group != Some(group) {
                 last_group = Some(group);
@@ -1390,7 +1435,7 @@ impl Board {
                 body.push(title.finish(cols));
             }
             let start = body.len();
-            body.extend(self.row(panel, index + 1, &columns, cols, now));
+            body.extend(self.row(panel, self.number(panel.pane_id.0), &columns, cols, now));
             spans.push((start, body.len(), group));
             if Some(panel.pane_id.0) == self.selected {
                 selected_span = (start, body.len());
@@ -2542,7 +2587,7 @@ mod tests {
                 .map(|l| visible(l))
                 .collect();
             assert!(
-                all.contains("▶2 ● api") && all.contains("作業中"),
+                all.contains("▶1 ● api") && all.contains("作業中"),
                 "{rows} rows: {all}"
             );
         }
@@ -2716,9 +2761,10 @@ mod tests {
         let mut panels = sample();
         panels[2].agent.as_mut().unwrap().state = Some("input".to_string());
         board.update(panels, Instant::now());
-        // Order: ui (permission), docs (input), api, tests.
+        // Order: ui (permission), docs (input), api, tests; numbered by
+        // spawn: api 1, ui 2, docs 3, tests 4.
         assert_eq!(board.selected(), Some(3));
-        board.key(Key::Char('3'));
+        board.key(Key::Char('1'));
         assert_eq!(board.selected(), Some(2));
         board.key(Key::Char('n'));
         assert_eq!(board.selected(), Some(3));
@@ -3160,5 +3206,62 @@ mod tests {
             notice.text.contains("終了したか、閉じられています"),
             "{notice:?}"
         );
+    }
+
+    // Review B04: a number was the row's position, so it changed whenever
+    // the list was sorted again, and `3` could pick another worker.
+    #[test]
+    fn a_worker_keeps_its_number_however_the_list_is_sorted() {
+        let start = Instant::now();
+        let mut board = Board::new(Some(1), None);
+        let mut panels: Vec<Panel> = (2..5)
+            .map(|pane| worker(pane, 1, &format!("w{pane}"), Some("running"), 1))
+            .collect();
+        board.update(panels.clone(), start);
+        // w4 starts waiting and moves to the top; numbers stay.
+        panels[2].agent.as_mut().unwrap().state = Some("permission".to_string());
+        panels[2].agent.as_mut().unwrap().seq = 2;
+        board.update(panels.clone(), start + Duration::from_secs(1));
+        let order: Vec<u64> = board.workers().iter().map(|p| p.pane_id.0).collect();
+        assert_eq!(order, vec![4, 2, 3]);
+        let all = rendered(&board, 80, 30, start + Duration::from_secs(1));
+        assert!(all.contains("3 ● w4") && all.contains("1 ● w2"), "{all}");
+        board.key(Key::Char('2'));
+        assert_eq!(board.selected(), Some(3));
+
+        // A closed worker's number goes to the next one spawned.
+        panels.remove(0);
+        panels.push(worker(7, 1, "w7", Some("running"), 1));
+        board.update(panels, start + Duration::from_secs(2));
+        board.key(Key::Char('1'));
+        assert_eq!(board.selected(), Some(7));
+        board.key(Key::Char('3'));
+        assert_eq!(board.selected(), Some(4));
+    }
+
+    // Review B08: within 要対応 workers were in pane order, so an approval
+    // holding up a turn could sit below a fresh notification.
+    #[test]
+    fn needing_workers_are_ordered_by_what_blocks_and_by_how_long() {
+        let start = Instant::now();
+        let mut board = Board::new(Some(1), None);
+        let mut panels = vec![
+            worker(2, 1, "asks", Some("input"), 1),
+            worker(3, 1, "late", Some("running"), 1),
+            worker(4, 1, "early", Some("running"), 1),
+            worker(5, 1, "calm", Some("running"), 1),
+        ];
+        panels[3].attention = true;
+        board.update(panels.clone(), start);
+        panels[2].agent.as_mut().unwrap().state = Some("permission".to_string());
+        panels[2].agent.as_mut().unwrap().seq = 2;
+        board.update(panels.clone(), start + Duration::from_secs(1));
+        panels[1].agent.as_mut().unwrap().state = Some("error".to_string());
+        panels[1].agent.as_mut().unwrap().seq = 2;
+        board.update(panels, start + Duration::from_secs(5));
+        let order: Vec<u64> = board.workers().iter().map(|p| p.pane_id.0).collect();
+        // Blocking first, oldest first (early since 1 s, late since 5 s);
+        // then input and attention, both found at start, in spawn order.
+        assert_eq!(order, vec![4, 3, 2, 5]);
     }
 }

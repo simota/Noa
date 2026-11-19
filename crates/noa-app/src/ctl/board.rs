@@ -9,13 +9,18 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::time::{Duration, Instant};
 
-use noa_ipc::{Client, Panel, TextSource};
+use noa_ipc::{Client, ClientError, Panel, TextSource};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{EXIT_OK, Failure, SUBMIT_DELAY};
 
 /// How often the pane list is read again.
 const LIST_EVERY: Duration = Duration::from_millis(500);
+/// After a listing fails, the first wait before trying again, the most it
+/// grows to, and how long failing without a break ends the board.
+const RETRY_FIRST: Duration = Duration::from_millis(500);
+const RETRY_MAX: Duration = Duration::from_secs(4);
+const GIVE_UP_AFTER: Duration = Duration::from_secs(30);
 /// How often the workers' screens are read again.
 const SCREEN_EVERY: Duration = Duration::from_secs(1);
 /// Reports kept per worker.
@@ -199,6 +204,9 @@ pub(crate) enum Mode {
     Send(u64, String),
     /// Waiting for `y` to close the pane.
     ConfirmClose(u64),
+    /// Waiting for `q` (or ^C) again to end the board, which hands every
+    /// worker back to the orchestrator and cannot be undone from here.
+    ConfirmQuit,
 }
 
 /// What a key asks the outside world to do.
@@ -277,6 +285,9 @@ pub(crate) struct Board {
     pub(crate) mode: Mode,
     /// A one-line result of the last action.
     pub(crate) message: Option<Notice>,
+    /// Since when the pane list could not be read; what is shown is the
+    /// last listing that worked.
+    pub(crate) offline: Option<Instant>,
     /// Workers closed since the board opened, newest first.
     gone: Vec<Gone>,
     /// The key help is shown over the current view.
@@ -305,6 +316,7 @@ impl Board {
             view: View::List,
             mode: Mode::Normal,
             message: None,
+            offline: None,
             gone: Vec::new(),
             help: false,
             help_scroll: 0,
@@ -685,6 +697,10 @@ impl Board {
                 self.mode = Mode::Normal;
                 (key == Key::Char('y')).then_some(Action::Close(pane))
             }
+            Mode::ConfirmQuit => {
+                self.mode = Mode::Normal;
+                matches!(key, Key::Char('q') | Key::CtrlC).then_some(Action::Quit)
+            }
             Mode::Normal => {
                 self.message = None;
                 // j/k scroll the help, any other key closes it; Ctrl-C
@@ -707,7 +723,12 @@ impl Board {
                     }
                 }
                 match key {
-                    Key::Char('q') | Key::CtrlC => return Some(Action::Quit),
+                    Key::Char('q') | Key::CtrlC => {
+                        if self.workers().is_empty() {
+                            return Some(Action::Quit);
+                        }
+                        self.mode = Mode::ConfirmQuit;
+                    }
                     Key::Char('?') => {
                         self.help = true;
                         self.help_scroll = 0;
@@ -1278,7 +1299,7 @@ impl Board {
     /// The line under the header: the send line while typing, a prompt
     /// waiting for its key, else the result of the last action, else how to
     /// get back here from an opened worker.
-    fn notice_line(&self, cols: usize) -> String {
+    fn notice_line(&self, cols: usize, now: Instant) -> String {
         let mut line = Line::default();
         line.plain(" ");
         let room = cols.saturating_sub(1);
@@ -1324,12 +1345,25 @@ impl Board {
                 let ask = format!("{} を閉じますか? {busy}出力は消えます。", self.name(*pane));
                 line.fg(RED, &fit(&ask, room));
             }
-            Mode::Normal => match &self.message {
-                Some(notice) => {
+            Mode::ConfirmQuit => {
+                let ask = format!(
+                    "q をもう一度押すと終了します（ワーカー {} 件はオーケストレーターへ戻ります）",
+                    self.workers().len()
+                );
+                line.fg(ORANGE, &fit(&ask, room));
+            }
+            Mode::Normal => match (&self.offline, &self.message) {
+                // The listing failed: what is shown is as of `since`.
+                (Some(since), _) => {
+                    let secs = now.saturating_duration_since(*since).as_secs();
+                    let text = format!("接続できません · 再試行中 {secs} 秒");
+                    line.fg(ORANGE, &fit(&text, room));
+                }
+                (None, Some(notice)) => {
                     let color = if notice.warn { ORANGE } else { DIM };
                     line.fg(color, &fit(&clean(&notice.text), room));
                 }
-                None => {
+                (None, None) => {
                     let hint = format!("{BACK_TO_BOARD} 開いたワーカーからボードへ  ·  ? キー一覧");
                     line.fg(DIM, &fit(&hint, room));
                 }
@@ -1403,7 +1437,7 @@ impl Board {
         (out, true)
     }
 
-    fn header(&self, cols: usize) -> Vec<String> {
+    fn header(&self, cols: usize, now: Instant) -> Vec<String> {
         let workers = self.workers();
         let count = format!("ワーカー {} ", workers.len());
         // A narrow pane gets the short title before the count is cut.
@@ -1463,12 +1497,12 @@ impl Board {
         vec![
             title.finish(cols),
             chips.finish(cols),
-            self.notice_line(cols),
+            self.notice_line(cols, now),
         ]
     }
 
     fn render_list(&self, cols: usize, rows: usize, now: Instant) -> Vec<String> {
-        let mut lines = self.header(cols);
+        let mut lines = self.header(cols, now);
         let workers = self.workers();
         if workers.is_empty() {
             let mut empty = Line::default();
@@ -1772,7 +1806,7 @@ impl Board {
             head.plain(&" ".repeat(pad)).fg(DIM, &right);
         }
         lines.push(head.finish(cols));
-        lines.push(self.notice_line(cols));
+        lines.push(self.notice_line(cols, now));
 
         let history: &[Report] = self.history.get(&pane).map(Vec::as_slice).unwrap_or(&[]);
         let history_rows = history.len().clamp(1, 6);
@@ -1860,6 +1894,7 @@ impl Board {
                 ("y", "閉じる", "閉じる"),
                 ("ほかのキー", "取り消し", "取消"),
             ],
+            Mode::ConfirmQuit => vec![("q", "終了", "終了"), ("ほかのキー", "取り消し", "取消")],
             Mode::Normal if self.help => {
                 let text = if help_cut {
                     " j/k スクロール   ほかのキーで閉じます"
@@ -2006,10 +2041,60 @@ impl Drop for Screen {
     }
 }
 
+/// When to read the pane list next. A failed listing is tried again after
+/// a growing wait, and only a run of failures [`GIVE_UP_AFTER`] long ends
+/// the board: one timeout or a server restart must not close it, which
+/// would hand every worker back to the orchestrator (D10).
+#[derive(Default)]
+pub(crate) struct Polling {
+    next: Option<Instant>,
+    failing_since: Option<Instant>,
+    delay: Duration,
+}
+
+impl Polling {
+    pub(crate) fn due(&self, now: Instant) -> bool {
+        self.next.is_none_or(|next| now >= next)
+    }
+
+    pub(crate) fn succeeded(&mut self, now: Instant) {
+        *self = Self {
+            next: Some(now + LIST_EVERY),
+            ..Self::default()
+        };
+    }
+
+    /// Note a failed listing; `false` once they have failed for
+    /// [`GIVE_UP_AFTER`] without a break.
+    pub(crate) fn failed(&mut self, now: Instant) -> bool {
+        let since = *self.failing_since.get_or_insert(now);
+        self.delay = (self.delay * 2).clamp(RETRY_FIRST, RETRY_MAX);
+        self.next = Some(now + self.delay);
+        now.saturating_duration_since(since) < GIVE_UP_AFTER
+    }
+
+    pub(crate) fn failing_since(&self) -> Option<Instant> {
+        self.failing_since
+    }
+}
+
+/// One pane listing. A connection that was lost is opened again first.
+fn list(client: &mut Client, reconnect: &mut bool) -> Result<Vec<Panel>, Failure> {
+    if *reconnect {
+        *client = super::Session::connect()?.client;
+        *reconnect = false;
+    }
+    client.list_panels().map_err(|err| {
+        *reconnect = matches!(err, ClientError::Transport(_) | ClientError::Closed(_));
+        Failure::from(err)
+    })
+}
+
 /// Run the board until `q`. The terminal is restored before returning.
 pub(crate) fn run(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Result<i32, Failure> {
     let mut board = Board::new(of, me);
-    board.update(client.list_panels()?, Instant::now());
+    let mut polling = Polling::default();
+    let mut reconnect = false;
 
     let (keys_tx, keys_rx) = std::sync::mpsc::channel::<(Instant, Vec<u8>)>();
     std::thread::spawn(move || {
@@ -2029,7 +2114,6 @@ pub(crate) fn run(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
     });
 
     let _screen = Screen::enter();
-    let mut listed_at = Instant::now();
     let mut screens_at: Option<Instant> = None;
     let mut size = (0, 0);
     let mut dirty = true;
@@ -2037,12 +2121,23 @@ pub(crate) fn run(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
     let mut reader = KeyReader::default();
     loop {
         let now = Instant::now();
-        if now.duration_since(listed_at) >= LIST_EVERY {
-            board.update(client.list_panels()?, now);
-            listed_at = now;
+        if polling.due(now) {
+            match list(client, &mut reconnect) {
+                Ok(panels) => {
+                    board.update(panels, now);
+                    polling.succeeded(now);
+                }
+                Err(failure) if !polling.failed(now) => return Err(failure),
+                Err(_) => {}
+            }
+            board.offline = polling.failing_since();
             dirty = true;
         }
-        if screens_at.is_none_or(|at| now.duration_since(at) >= SCREEN_EVERY) {
+        // While offline the notice counts the seconds.
+        dirty |= board.offline.is_some();
+        if board.offline.is_none()
+            && screens_at.is_none_or(|at| now.duration_since(at) >= SCREEN_EVERY)
+        {
             for pane in board.wanted_screens() {
                 // A pane that closed meanwhile is dropped at the next listing.
                 if let Ok(text) = client.get_text(pane, TextSource::Screen, None) {
@@ -2333,6 +2428,7 @@ mod tests {
 
         board.key(Key::Esc);
         assert_eq!(board.view, View::List);
+        assert_eq!(board.key(Key::Char('q')), None);
         assert_eq!(board.key(Key::Char('q')), Some(Action::Quit));
     }
 
@@ -2903,6 +2999,7 @@ mod tests {
         assert_eq!(board.key(Key::Char('q')), None);
         assert!(!board.help);
         board.key(Key::Char('?'));
+        assert_eq!(board.key(Key::CtrlC), None);
         assert_eq!(board.key(Key::CtrlC), Some(Action::Quit));
     }
 
@@ -3432,5 +3529,74 @@ mod tests {
             header.starts_with(" ボード") && header.contains("ワーカー 4"),
             "{header}"
         );
+    }
+
+    // Review B07: one stray `q` ended the board and handed every worker
+    // back to the orchestrator, which the board cannot undo.
+    #[test]
+    fn quitting_with_workers_asks_first() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), Instant::now());
+        assert_eq!(board.key(Key::Char('q')), None);
+        assert_eq!(board.mode, Mode::ConfirmQuit);
+        let top = visible(&board.render(100, 20, Instant::now())[2]);
+        assert!(
+            top.contains("q をもう一度押すと終了します") && top.contains("ワーカー 4 件"),
+            "{top}"
+        );
+        // Any other key takes it back.
+        assert_eq!(board.key(Key::Char('j')), None);
+        assert_eq!(board.mode, Mode::Normal);
+        assert_eq!(board.key(Key::CtrlC), None);
+        assert_eq!(board.key(Key::CtrlC), Some(Action::Quit));
+
+        let mut empty = Board::new(Some(1), Some(8));
+        empty.update(Vec::new(), Instant::now());
+        assert_eq!(empty.key(Key::Char('q')), Some(Action::Quit));
+    }
+
+    // Review B02: one failed listing ended the board.
+    #[test]
+    fn failed_listings_are_retried_with_backoff_for_thirty_seconds() {
+        let t0 = Instant::now();
+        let mut polling = Polling::default();
+        assert!(polling.due(t0));
+        polling.succeeded(t0);
+        assert!(!polling.due(t0 + Duration::from_millis(400)));
+        assert!(polling.due(t0 + LIST_EVERY));
+
+        let mut at = t0 + LIST_EVERY;
+        let mut waits = Vec::new();
+        while polling.failed(at) {
+            assert_eq!(polling.failing_since(), Some(t0 + LIST_EVERY));
+            let next = polling.next.unwrap();
+            waits.push(next - at);
+            assert!(!polling.due(next - Duration::from_millis(1)));
+            at = next;
+        }
+        assert_eq!(
+            waits[..5],
+            [500, 1000, 2000, 4000, 4000].map(Duration::from_millis)
+        );
+        let failed_for = at - (t0 + LIST_EVERY);
+        assert!(failed_for >= GIVE_UP_AFTER && failed_for < GIVE_UP_AFTER + RETRY_MAX);
+
+        // One listing that works starts the count again.
+        let mut polling = Polling::default();
+        assert!(polling.failed(t0));
+        polling.succeeded(t0 + Duration::from_secs(20));
+        assert_eq!(polling.failing_since(), None);
+        assert!(polling.failed(t0 + Duration::from_secs(40)));
+    }
+
+    #[test]
+    fn the_board_says_it_cannot_connect_and_keeps_what_it_had() {
+        let t0 = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), t0);
+        board.offline = Some(t0);
+        let all = rendered(&board, 80, 30, t0 + Duration::from_secs(7));
+        assert!(all.contains("接続できません · 再試行中 7 秒"), "{all}");
+        assert!(all.contains("ui") && all.contains("api"), "{all}");
     }
 }

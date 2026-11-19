@@ -60,6 +60,11 @@ stowed on the board: collapsed, it shows only as the board's row; the board's
 21st spawn fails; its list scrolls. If the board cannot open (stderr warns, the spawn still succeeds), or
 with `--no-board`, the worker floats over this pane instead, collapsed to a
 title strip that shows the agent's state; a pane holds at most 8 such floats.
+
+A worker that spawns (one level of nesting) opens no board of its own: its
+workers are stowed on its orchestrator's board, under its row, and refuse
+`--no-board`. A worker's worker cannot spawn ("nesting goes one level deep").
+Closing a worker closes the workers it started.
 `--split` and `--tab` are refused; `--float` is
 accepted and changes nothing.
 

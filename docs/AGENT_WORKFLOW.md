@@ -341,7 +341,9 @@ message (a paste can span lines) and sends it with Enter, except to a worker
 waiting for an approval, `x` then `y` closes the worker, `Esc` goes back,
 `q` quits (asking again while workers are open). If the board loses its
 connection it keeps the last list and retries for 30 seconds. Closing the board does not end its workers: they go back to the
-orchestrator's pane as collapsed floats with title strips. The board pane is not a worker: it does not count toward
+orchestrator's pane as collapsed floats with title strips. A worker may start workers of its own, one level deep: they are listed under
+it on the same board, indented, with its row counting them; `Space` folds a
+worker's subtree. Closing a worker closes the workers it started. The board pane is not a worker: it does not count toward
 `--max-children` and `close --children` leaves it alone.
 
 ### A skill for the orchestrating agent

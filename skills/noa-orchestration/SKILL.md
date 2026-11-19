@@ -220,6 +220,7 @@ close them.
   Antigravity CLI report on their own, with no hooks. Without reports, a worker
   ends a wait only with `exit` or `attention`. For plain commands, that is
   enough: `spawn -- make test`, then `wait PANE --for exit`.
-- Do not ask a worker to orchestrate workers of its own. A worker is a float
-  on your board, and its own workers would land on that board as loose
-  floats, outside the board's list.
+- Nesting goes one level deep. A worker may start workers of its own (tell it
+  so in its task when you want that); they appear under it on your board and
+  share its 20 slots. A worker's worker cannot start more. Closing a worker
+  also closes the workers it started.

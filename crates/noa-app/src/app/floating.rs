@@ -93,6 +93,30 @@ fn orphaned_by<W: PartialEq>(
         .is_some_and(|(tab, pane)| &tab == window && closing.is_none_or(|closing| closing == pane))
 }
 
+/// agent-orchestration D13: the worker floats among `workers` (each with
+/// its orchestrator's pane) that close because a float of `closing` does —
+/// their orchestrator, or its orchestrator in turn — leaving out those in
+/// `closing` already. A worker lives no longer than its orchestrator.
+pub(super) fn workers_closing_with<K: Copy + PartialEq>(
+    closing: &[K],
+    workers: &[(K, K)],
+) -> Vec<K> {
+    let mut gone = closing.to_vec();
+    let mut found = Vec::new();
+    loop {
+        let more: Vec<K> = workers
+            .iter()
+            .filter(|(worker, parent)| !gone.contains(worker) && gone.contains(parent))
+            .map(|(worker, _)| *worker)
+            .collect();
+        if more.is_empty() {
+            return found;
+        }
+        gone.extend(&more);
+        found.extend(more);
+    }
+}
+
 /// Whether a stowed worker's program ends when window group `closing`
 /// closes: its board sits in group `board`, its orchestrator in
 /// `orchestrator` (`None` when gone), and closing its board would hand it
@@ -890,9 +914,38 @@ impl App {
         }
     }
 
-    /// Tear a float down: its pty, its strip, any drag on it. The caller
-    /// relayouts.
+    /// Tear a float down: first the worker floats it orchestrates, in any
+    /// tab (agent-orchestration D13: a worker's workers close with it,
+    /// whichever way it closes), then its pty, its strip, any drag on it.
+    /// The caller relayouts `window_id`.
     fn discard_float(&mut self, window_id: WindowId, id: PaneId) {
+        let workers = if self
+            .windows
+            .get(&window_id)
+            .is_some_and(|state| state.is_float(id))
+        {
+            self.float_workers_closing_with(&[(window_id, id)])
+        } else {
+            Vec::new()
+        };
+        let mut touched = Vec::new();
+        for (tab, worker) in workers {
+            self.discard_one_float(tab, worker);
+            touched.push(tab);
+        }
+        self.discard_one_float(window_id, id);
+        touched.sort_unstable();
+        touched.dedup();
+        for tab in touched {
+            if tab != window_id {
+                self.relayout_and_resize_window(tab);
+                self.request_window_redraw(tab);
+            }
+        }
+    }
+
+    /// [`Self::discard_float`] for the float alone.
+    fn discard_one_float(&mut self, window_id: WindowId, id: PaneId) {
         self.end_copy_mode_for_pane(window_id, id);
         if self
             .search_prompt
@@ -1461,6 +1514,31 @@ impl App {
             .collect()
     }
 
+    /// agent-orchestration D13: the worker floats, in any tab, that close
+    /// because the floats `closing` do (see [`workers_closing_with`]).
+    pub(super) fn float_workers_closing_with(
+        &self,
+        closing: &[(WindowId, PaneId)],
+    ) -> Vec<(WindowId, PaneId)> {
+        let workers: Vec<((WindowId, PaneId), (WindowId, PaneId))> = self
+            .windows
+            .iter()
+            .flat_map(|(tab, state)| {
+                state.floats.floats().iter().filter_map(move |float| {
+                    let parent = state
+                        .surfaces
+                        .get(&float.id)?
+                        .orchestration
+                        .as_ref()?
+                        .parent?;
+                    Some(((*tab, float.id), parent))
+                })
+            })
+            .filter_map(|(worker, parent)| Some((worker, self.resolve_ipc_pane(parent).ok()?)))
+            .collect();
+        workers_closing_with(closing, &workers)
+    }
+
     /// Close the stowed workers [`Self::stowed_orphans`] names, before
     /// their orchestrator goes. The caller relayouts `window_id`.
     pub(super) fn discard_stowed_orphans(&mut self, window_id: WindowId, closing: Option<PaneId>) {
@@ -1601,6 +1679,24 @@ impl FloatDraw {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // agent-orchestration D13: a worker's workers close with it. Root r has
+    // workers a and b, and a has c and d; e works for another root.
+    #[test]
+    fn a_workers_workers_close_with_it() {
+        let workers = [('a', 'r'), ('b', 'r'), ('c', 'a'), ('d', 'a'), ('e', 'q')];
+        assert_eq!(workers_closing_with(&['a'], &workers), vec!['c', 'd']);
+        assert!(workers_closing_with(&['b'], &workers).is_empty());
+        // The root's workers closing take theirs along, each once.
+        assert_eq!(workers_closing_with(&['a', 'b'], &workers), vec!['c', 'd']);
+        // Those closing already are not named again.
+        assert_eq!(workers_closing_with(&['a', 'c'], &workers), vec!['d']);
+        // Chains of any length close.
+        assert_eq!(
+            workers_closing_with(&['r'], &workers),
+            vec!['a', 'b', 'c', 'd']
+        );
+    }
 
     // Review finding: a window close planned each tab's heirs on its own, so
     // two boards of one orchestrator in two tabs both took the last free

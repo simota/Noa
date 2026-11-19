@@ -544,6 +544,7 @@ impl App {
         // Placing the worker focuses panes (split candidates, the anchor),
         // which acknowledges their notifications; nobody looked at them.
         let unread_before = self.session_store.unread_flags();
+        let board_of = board_orchestrator(params.label.as_deref());
         let result = self.ipc_spawn_pane(event_loop, target, params);
         let focused_after = self.window_focused_panes();
         let restores = focus_to_restore(
@@ -572,6 +573,12 @@ impl App {
             self.request_sidebar_redraw();
         }
         let (window_id, pane_id) = result?;
+        // D10: a new board takes back the workers an earlier board of the
+        // same orchestrator handed back to it. After the focus restore, so
+        // the pane the user has focused is the one left where it is.
+        if let Some(orchestrator) = board_of.and_then(|id| self.resolve_ipc_pane(id).ok()) {
+            self.restow_handed_back_floats(window_id, pane_id, orchestrator);
+        }
         let ipc_id = self.mint_ipc_pane(window_id, pane_id);
         // Rebuild the snapshot before replying, so a client that lists panes
         // right after this reply already sees the new worker.
@@ -1102,6 +1109,12 @@ fn stows_on(
         .into_iter()
         .flatten()
         .any(|orchestrator| label == format!("board:{orchestrator}"))
+}
+
+/// agent-orchestration D10: the orchestrator a pane labelled
+/// `board:<orchestrator's IPC id>` is the board of.
+fn board_orchestrator(label: Option<&str>) -> Option<u64> {
+    label?.strip_prefix("board:")?.parse().ok()
 }
 
 /// agent-orchestration D13: nesting goes one level deep. A spawn's `parent`
@@ -1670,6 +1683,15 @@ mod auto_split_tests {
         assert!(!stows_on(Some("board:7"), Some(12), Some(8)));
         assert!(!stows_on(Some("board:7"), Some(12), None));
         assert!(!stows_on(None, Some(12), Some(7)));
+    }
+
+    #[test]
+    fn a_board_label_names_its_orchestrator() {
+        assert_eq!(board_orchestrator(Some("board:7")), Some(7));
+        assert_eq!(board_orchestrator(Some("board:")), None);
+        assert_eq!(board_orchestrator(Some("board:x")), None);
+        assert_eq!(board_orchestrator(Some("fix-tests")), None);
+        assert_eq!(board_orchestrator(None), None);
     }
 
     // agent-orchestration D13: a root (1) may have workers (2), and they

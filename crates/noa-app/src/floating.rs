@@ -80,6 +80,11 @@ pub struct Float {
     /// agent-orchestration D10: a worker stowed on its orchestrator's board.
     /// Collapsed, it shows no strip at all; the board's row stands in for it.
     stowed: bool,
+    /// agent-orchestration D10: a stowed worker handed back to its
+    /// orchestrator's pane when its board closed. The orchestrator's next
+    /// board takes it back; a worker that never sat on a board (`--no-board`)
+    /// does not carry it.
+    handed_back: bool,
     z: u64,
     seq: u64,
     focus_stamp: u64,
@@ -456,6 +461,7 @@ impl FloatSet {
             maximized_before_collapse: false,
             moved_while_collapsed: false,
             stowed,
+            handed_back: false,
             z,
             seq,
             focus_stamp: 0,
@@ -832,6 +838,7 @@ impl FloatSet {
         float.anchor = next;
         // Moved off its board by hand, a worker is an ordinary float again.
         float.stowed = false;
+        float.handed_back = false;
         float.z = z;
         set_from_rect(float, Rect::new(x, y, w, h), new_anchor);
         if let Some(strip_y) = strip_y {
@@ -850,6 +857,40 @@ impl FloatSet {
         if let Some(float) = self.get_mut(id) {
             float.anchor = FloatAnchor::Pane(pane);
             float.stowed = false;
+            float.handed_back = true;
+            float.state = FloatState::Collapsed;
+            float.maximized_before_collapse = false;
+            float.moved_while_collapsed = false;
+            float.z = z;
+        }
+    }
+
+    /// agent-orchestration D10: the floats a new board of orchestrator pane
+    /// `pane` takes back — those [`Self::rehome`] handed to `pane` when an
+    /// earlier board closed, in creation order, leaving out `focused` (the
+    /// tab's focused pane: stowed and collapsed, it would vanish from under
+    /// the user) and any past the board's `room`.
+    pub fn restow_candidates(&self, pane: PaneId, focused: PaneId, room: usize) -> Vec<PaneId> {
+        self.floats
+            .iter()
+            .filter(|float| {
+                float.handed_back && float.anchor == FloatAnchor::Pane(pane) && float.id != focused
+            })
+            .map(|float| float.id)
+            .take(room)
+            .collect()
+    }
+
+    /// agent-orchestration D10: stow `id` on board pane `board` again,
+    /// collapsed, undoing [`Self::rehome`]. [`Self::settle`] then gives it
+    /// the board's rect once it sits in the set that tab owns. The caller
+    /// checks the board's room ([`MAX_STOWED_PER_BOARD`]).
+    pub fn restow(&mut self, id: PaneId, board: PaneId) {
+        let z = tick();
+        if let Some(float) = self.get_mut(id) {
+            float.anchor = FloatAnchor::Pane(board);
+            float.stowed = true;
+            float.handed_back = false;
             float.state = FloatState::Collapsed;
             float.maximized_before_collapse = false;
             float.moved_while_collapsed = false;
@@ -934,6 +975,9 @@ impl FloatSet {
         let Some(float) = self.get_mut(drag.id) else {
             return;
         };
+        // Moved or resized by hand, a handed-back worker stays where it was
+        // put when its board opens again.
+        float.handed_back = false;
         match drag.kind {
             FloatDragKind::Move => {
                 let x = shift(
@@ -1016,6 +1060,7 @@ impl FloatSet {
             maximized_before_collapse: false,
             moved_while_collapsed: record.collapsed && record.strip_moved,
             stowed: false,
+            handed_back: false,
             z: record.z,
             seq: record.seq,
             focus_stamp: 0,

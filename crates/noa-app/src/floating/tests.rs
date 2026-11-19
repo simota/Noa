@@ -1122,3 +1122,109 @@ fn opening_a_stowed_worker_collapses_the_others_open_on_its_board() {
     assert_eq!(state(&set, 1), FloatState::Normal);
     assert_eq!(state(&set, 2), FloatState::Collapsed);
 }
+
+// D10's known limitation, lifted: a board opened again takes back the
+// workers an earlier board handed to its orchestrator.
+
+#[test]
+fn only_a_rehomed_worker_is_marked_as_handed_back() {
+    let mut set = FloatSet::default();
+    set.create_stowed(id(1), B, false, &layout(&SPLIT), M)
+        .unwrap();
+    // `--no-board`: a worker over the orchestrator that never sat on a board.
+    set.create(id(2), A, &layout(&SPLIT), M).unwrap();
+    assert!(!set.get(id(1)).unwrap().handed_back);
+    assert!(!set.get(id(2)).unwrap().handed_back);
+
+    set.rehome(id(1), A);
+    assert!(set.get(id(1)).unwrap().handed_back);
+    assert!(!set.get(id(2)).unwrap().handed_back);
+}
+
+#[test]
+fn a_new_board_takes_back_only_handed_back_workers_that_fit_and_are_not_focused() {
+    let mut set = FloatSet::default();
+    for raw in 1..=4 {
+        set.create_stowed(id(raw), B, false, &layout(&SPLIT), M)
+            .unwrap();
+        set.rehome(id(raw), A);
+    }
+    set.create(id(5), A, &layout(&SPLIT), M).unwrap();
+    // Handed back to another orchestrator pane.
+    set.create_stowed(id(6), A, false, &layout(&SPLIT), M)
+        .unwrap();
+    set.rehome(id(6), B);
+
+    // The `--no-board` worker and the other pane's stay; creation order.
+    assert_eq!(
+        set.restow_candidates(A, A, MAX_STOWED_PER_BOARD),
+        vec![id(1), id(2), id(3), id(4)]
+    );
+    // The one the user has focused stays over the orchestrator.
+    assert_eq!(
+        set.restow_candidates(A, id(2), MAX_STOWED_PER_BOARD),
+        vec![id(1), id(3), id(4)]
+    );
+    // Past the board's room they stay too.
+    assert_eq!(set.restow_candidates(A, A, 2), vec![id(1), id(2)]);
+    assert!(set.restow_candidates(A, A, 0).is_empty());
+}
+
+#[test]
+fn a_restowed_worker_is_stowed_and_collapsed_on_the_board_again() {
+    let mut set = FloatSet::default();
+    set.create_stowed(id(1), B, false, &layout(&SPLIT), M)
+        .unwrap();
+    set.rehome(id(1), A);
+    set.settle(id(1), &layout(&SPLIT), M);
+    // Opened over the orchestrator by its user before the board came back.
+    set.toggle_collapse(id(1));
+    set.toggle_maximize(id(1));
+
+    set.restow(id(1), B);
+    set.settle(id(1), &layout(&SPLIT), M);
+    let float = set.get(id(1)).unwrap();
+    assert_eq!(float.anchor, FloatAnchor::Pane(B));
+    assert!(float.is_stowed());
+    assert!(!float.handed_back);
+    assert_eq!(float.state, FloatState::Collapsed);
+    assert!(set.placed(id(1), &layout(&SPLIT), M).is_none());
+    // Opened from the board, it takes the board's rect again.
+    set.toggle_collapse(id(1));
+    assert_eq!(outer(&set, id(1), &SPLIT), Rect::new(500, 210, 500, 390));
+}
+
+#[test]
+fn a_handed_back_worker_moved_by_hand_is_not_taken_back() {
+    let mut set = FloatSet::default();
+    set.create_stowed(id(1), B, false, &layout(&SPLIT), M)
+        .unwrap();
+    set.rehome(id(1), A);
+    set.settle(id(1), &layout(&SPLIT), M);
+    set.cycle_anchor(id(1), &layout(&SPLIT), M).unwrap();
+    assert!(!set.get(id(1)).unwrap().handed_back);
+}
+
+// Review finding: dragging a handed-back worker's title strip kept its mark,
+// so a reopened board took it away from where it was put.
+#[test]
+fn a_handed_back_worker_dragged_by_hand_is_not_taken_back() {
+    let mut set = FloatSet::default();
+    set.create_stowed(id(1), B, false, &layout(&SPLIT), M)
+        .unwrap();
+    set.rehome(id(1), A);
+    set.settle(id(1), &layout(&SPLIT), M);
+    assert!(set.get(id(1)).unwrap().handed_back);
+    let strip = set.placed(id(1), &layout(&SPLIT), M).unwrap().outer;
+    let from = Point::new(strip.x + strip.w / 2, strip.y + 1);
+    assert!(drag(
+        &mut set,
+        id(1),
+        FloatDragKind::Move,
+        from,
+        (-40, -20),
+        &SPLIT
+    ));
+    assert_ne!(set.placed(id(1), &layout(&SPLIT), M).unwrap().outer, strip);
+    assert!(set.restow_candidates(A, id(99), 20).is_empty());
+}

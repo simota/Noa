@@ -71,6 +71,8 @@ accepted and changes nothing.
 | Option | Meaning |
 |---|---|
 | `--no-board` | Do not open the board; the worker floats over this pane |
+| `--worktree` | Start the worker in a new git worktree of this process's repository: `git worktree add -b orch/LABEL <repo>-wt/LABEL HEAD`. Needs `--label` (letters, digits, `.`, `_`, `-`; not starting with `.` or `-`) and refuses `--cwd`. Prints `"worktree"` and `"branch"` too. A git failure (branch or path exists, not a repository) is exit 1 and starts nothing; uncommitted changes in your checkout are not in the worktree, and a stderr warning says so. If Noa then refuses to start the worker, the fresh worktree and branch are removed again; if the answer is lost (a connection error), they are kept, since the worker may be running there, and stderr says so. The board, when this spawn would open it, opens only after the worktree was made |
+| `--tier light\|standard\|deep` | Add the tier's model and effort flags ("Model tiers" below) right after the program of a `claude`, `codex` or `agy` command. Refused for any other command, and for a command that already picks a model or effort, so a model the human named is never overridden. Prints `"tier"` too |
 | `--cwd DIR` | Working directory. Relative paths are taken from this process's cwd. Default: this process's cwd. One that is not a directory is refused (exit 1) before anything starts; `ls` shows it as the worker's `cwd` until the worker's shell reports its own |
 | `--env KEY=VALUE` | Repeatable. `PATH` defaults to this process's `PATH` when a command is given, and `LANG` and `LC_*` to this process's, so a worker keeps your locale even when Noa itself has none |
 | `--label TEXT` | Shown in the panel's `label` |
@@ -84,7 +86,7 @@ accepted and changes nothing.
 PATH"). Without one, the worker gets the user's shell. For a shell pipeline,
 use `-- sh -c '…'`.
 
-### `send PANE [--enter] [--raw] [--wait [wait options]] [--answer] [--any-pane] [--] TEXT|-`
+### `send PANE [--enter] [--raw] [--replace] [--wait [wait options]] [--answer] [--any-pane] [--] TEXT|-`
 
 Types `TEXT` (or stdin with `-`) into the pane as a paste. `--enter` then sends
 Enter 150 ms later, which submits a prompt in agent TUIs. `--raw` types the text
@@ -105,13 +107,20 @@ as keystrokes instead of a bracketed paste.
 - Only `permission` is refused. `input` is not: it also means an agent idle at
   its prompt (Claude Code's hook adapter reports `idle_prompt` as `input`), so
   `read` an `input` pane before sending to it.
+- `--replace` clears the input line before typing: Ctrl-E, then Ctrl-U in
+  writes of 16 (Claude Code takes a longer burst as a paste and keeps the
+  draft), enough for a 32-line draft. Checked on Claude Code 2.1.329, Codex
+  0.170.0 and Antigravity CLI 1.5.13, with typed text, pasted lines and Claude
+  Code's collapsed `[Pasted text]`. Text after the cursor on later lines (a
+  draft someone moved the cursor up in) can stay. Refused with `--answer`: a
+  prompt has no input line.
 - Answering a prompt: `send P --answer --enter ""` presses Enter alone, which
   takes the selected choice; `send P --answer --raw 2` types a key;
   `send P --answer --raw $'\e'` sends Esc.
 - Input to a pane whose process has exited is refused with "pane N's process
   has exited (code C)"; `read` it, then `close` it.
 
-### `wait PANE...|--children [--after SEQ | --after PANE=SEQ ...] [--for LIST] [--all] [--timeout SECS] [--tail N]`
+### `wait PANE...|--children [--after SEQ | --after PANE=SEQ ...] [--for LIST] [--all] [--timeout SECS] [--tail N] [--stall SECS]`
 
 Blocks until one pane (every pane with `--all`) stops, then prints one line per
 pane that stopped:
@@ -128,7 +137,17 @@ pane that stopped:
 - `--tail N` adds `"tail"`: the pane's last N lines of retained output, for each
   line whose pane is still open.
 - `--for` takes a comma list of `finished,permission,input,error,exit,attention`
-  (default: all of them).
+  (default: all of them), and `stalled` with `--stall`.
+- `--stall SECS` also ends the wait for a pane whose visible screen has not
+  changed for SECS seconds while it is open:
+  `{"paneId":"7","reason":"stalled","quietSecs":120,"seq":5,"state":"running"}`.
+  The quiet time counts from the start of the wait or the last change. Claude
+  Code's working spinner shows elapsed seconds, so a working Claude Code does
+  not stall; one that went back to its prompt without reporting, or sits on a
+  prompt it does not report, does. Whether Codex and Antigravity CLI keep
+  their screens changing while they work is not checked, so `read` a stalled
+  pane before treating it as stopped. A report or exit seen in the same pass
+  wins. `--for stalled` without `--stall` is an argument error.
 - A report counts only when its `seq` is newer than the baseline. The baseline is
   the `seq` at the start of the wait, or the one `--after` gives: `--after SEQ`
   for a single pane, `--after PANE=SEQ` (repeatable) for several.
@@ -156,7 +175,7 @@ with `--scrollback` its retained output. `--max-bytes` bounds the output
 (default 256 KiB, at most 1 MiB); a cut keeps the end and prints
 `output truncated` on stderr. Works on exited panes that are still open.
 
-### `close PANE...|--children [--any-pane]`
+### `close PANE...|--children [--any-pane] [--prune]`
 
 Closes panes without a confirmation dialog and prints
 `{"paneId":"…","closed":true}` for each. The pane's output is gone afterwards.
@@ -167,13 +186,24 @@ mistyped id also shows up as `gone`. A pane that could not be closed is named on
 stderr; the rest are still closed and the exit status is 1. A live pane that is
 not this pane's worker is refused before anything is closed.
 
+`--prune`: for each closed worker whose label `L` has a worktree
+`<repo>-wt/L` on branch `orch/L`, and whose cwd is in it (as `spawn --worktree` made it; the
+repository is the one this process runs in), run `git worktree remove` and then
+`git branch -d`, never forced. The line gains
+`"worktree":{"path":…,"removed":true,"branchDeleted":true}`. When git refuses
+(uncommitted changes, a branch not merged into your `HEAD`), the work stays,
+`"kept"` gives git's reason, and the exit status is unchanged. Merge the
+branch first, or read what would be lost before removing it by hand.
+
 ### `board [--of PANE]`, `board --open [--split right|down | --tab]`
 
 A live view for people, not for scripts. The first `spawn` opens one by itself.
 `board --open` starts a board pane next to this pane (a new tab when there is no room) and prints its `{"paneId":"…"}`;
 when this pane's board is already open it opens nothing and prints
 `{"paneId":"…","existing":true}`. The board is not one of this pane's workers. `board` without `--open` takes over the
-pane it runs in until `q`.
+pane it runs in until `q`. Workers that went back to this pane when its
+board closed return to the board that `board --open` (or the next `spawn`)
+opens, up to its 20 slots; one that has keyboard focus stays where it is.
 
 ### `report STATE [[--] DETAIL]`
 
@@ -221,8 +251,10 @@ pane. Check the installed version if waits never end with `finished`.
 
 ## Model tiers
 
-Flags that pick a worker's model and effort, appended to the agent command at
-`spawn` (`spawn --label rename -- claude --model haiku --effort low`). Tiers
+Flags that pick a worker's model and effort. `spawn --tier T -- claude` adds
+the cells below (for Claude Code's `light`, the code-editing cell); write the
+flags yourself (`spawn --label rename -- claude --model haiku --effort low`)
+for another choice, such as Haiku for a read-only task. Tiers
 are described in SKILL.md, "Matching the worker to the task".
 
 | Tier | Claude Code | Codex | Antigravity CLI |

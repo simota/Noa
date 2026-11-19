@@ -53,8 +53,10 @@ expensive models for work that needs them. Pick a tier per task:
 | `standard` | Ordinary implementation or a fix whose cause is known, with a clear done-condition | Mid model, medium effort |
 | `deep` | Design choices, a bug whose cause is unknown, cross-cutting refactors, concurrency, security, reviewing other workers' output | Largest model, high effort |
 
-- The tier is set by flags on the worker command at `spawn`; the flags for
-  claude, codex and agy are in reference.md, "Model tiers". Pass them on the
+- Set the tier with `spawn --tier light|standard|deep -- claude` (or `codex`,
+  `agy`): it adds the model and effort flags listed in reference.md, "Model
+  tiers". For a read-only `light` task on Claude Code, write
+  `-- claude --model haiku --effort low` yourself instead. Pass flags on the
   command line only; do not change the human's agent config.
 - A model or effort the human named for the task wins over the table.
 - When a task fits two tiers, take the higher one. A retry costs more than the
@@ -81,26 +83,24 @@ Decide per worker:
 | The only one editing, and you wait for it before editing yourself | The shared checkout |
 | A command that tests the current tree while nobody edits | The shared checkout |
 
-Create the worktree yourself, so you know its path and branch, then point
-`spawn --cwd` at it. Do not use an agent's own worktree flag: you would not
-know where it put the work.
+Let `spawn --worktree` create it, so you know its path and branch. Do not use
+an agent's own worktree flag: you would not know where it put the work.
 
 ```sh
 noa() { "$NOA_BIN" +ctl "$@"; }
-top=$(git rev-parse --show-toplevel)
-wt="$top-wt/$label"                      # outside the repo, one per worker
-git worktree add -b "orch/$label" "$wt" HEAD || exit 1
-pane=$(noa spawn --label "$label" --cwd "$wt" -- claude --model sonnet --effort medium | jq -r .paneId)
+out=$(noa spawn --worktree --label "$label" --tier standard -- claude) || exit 1
+pane=$(echo "$out" | jq -r .paneId)      # $out also has "worktree" and "branch"
 noa read "$pane"                         # a new directory may show a trust prompt first
 noa send "$pane" --enter --wait --timeout 540 "You are in a git worktree on branch orch/$label. …task… Commit your work on this branch. Do not push or switch branches."
 ```
 
-`spawn` refuses a `--cwd` that is not a directory and a command it cannot find
-on the worker's `PATH`, so a failed `worktree add` stops here instead of
-starting the worker somewhere else. `ls --children` shows each worker's `cwd`.
+It runs `git worktree add -b orch/$label <repo>-wt/$label HEAD` from your
+checkout, and a git failure (the branch or directory already exists) starts
+nothing. `ls --children` shows each worker's `cwd`.
 
-- A worktree starts from a commit: your uncommitted changes are not in it.
-  Commit them first, or tell the worker what is missing.
+- A worktree starts from a commit: your uncommitted changes are not in it
+  (`spawn --worktree` warns on stderr). Commit them first, or tell the worker
+  what is missing.
 - A worktree has no build outputs, installed dependencies or ignored files
   (`.env`, local config). Its first build is cold; budget the timeout for it,
   and keep the number of worktrees that build at once small.
@@ -108,12 +108,13 @@ starting the worker somewhere else. `ls --children` shows each worker's `cwd`.
   (`git log -p HEAD..orch/$label`, then build and test it) before you merge.
   Merge branches one at a time and run the checks after each. A conflict goes
   to you or to a `deep` worker, not back to the worker that wrote one side.
-- Clean up in this order: `close` the pane, then `git worktree remove "$wt"`,
-  then `git branch -d "orch/$label"`. Both git commands refuse when work would
-  be lost (uncommitted changes, unmerged branch). Do not add `--force` or `-D`
-  without reading what would be lost; keep the branch and tell the human
-  instead.
-- If `git worktree add` fails with a permission error, your own shell may be
+- Clean up with `noa close --prune PANE` from your checkout once the branch is
+  merged (or dropped): it closes the pane, then runs `git worktree remove` and
+  `git branch -d`, never forced. When git refuses (uncommitted changes, branch
+  not merged), the line says so under `worktree.kept` and the work stays. Do
+  not remove it with `--force` or `-D` without reading what would be lost; keep
+  it and tell the human instead.
+- If `spawn --worktree` fails with a permission error, your own shell may be
   sandboxed away from `.git/worktrees`; say so rather than working around it.
 
 ## One worker, one round
@@ -132,11 +133,19 @@ noa close "$pane"
 - `read` the pane before every `send`, not only the first. The first screen may
   be a trust or login prompt. Later, the input line may still hold text (a
   draft or a suggestion), and `send` types after it rather than replacing it.
-  If the input line is not empty, do not send; tell the human what is there.
-  Claude Code shows a dim suggestion there (`❯ Try "…"`, or a proposed next
-  prompt) that `read` prints like typed text; it is replaced when you type, so
-  it does not count as a draft. A trust prompt on the first screen is the
-  human's to answer unless their instructions cover it.
+  When the text there is yours (a `send` whose Enter did not go through), send
+  again with `--replace`, which clears the input line first. When someone else
+  typed it (the human, in an opened worker), do not send; tell the human what
+  is there. Claude Code shows a dim suggestion there (`❯ Try "…"`, or a
+  proposed next prompt) that `read` prints like typed text; it is replaced when
+  you type, so it does not count as a draft. A trust prompt on the first screen
+  is the human's to answer unless their instructions cover it, or the
+  directory is a worktree you made with `spawn --worktree` (see "Running
+  without the human").
+- A `finished` does not always end the work: Claude Code workers have been
+  seen to keep working after reporting it (the cause, possibly a hook, is not
+  confirmed). If `read` shows the agent still working, wait again with
+  `--after` the `seq` from the line.
 - `--tail N` adds the pane's last N output lines to each wait line as `tail`,
   which often saves the `read` after a wait.
 - Give every wait a timeout that fits the task, and see "When no report comes"
@@ -169,9 +178,13 @@ current turn started before the wait (for example, the next time round a loop).
 
 ## When no report comes
 
-A wait ends only on a report, a notification or an exit. If a worker never
-reports the end of its turn, the wait runs until its timeout, so do not use an
-unbounded wait. When a wait times out:
+A wait ends only on a report, a notification, an exit, or with `--stall
+SECS` a screen that stopped changing. If a worker never reports the end of its
+turn, a wait without `--stall` runs until its timeout, so do not use an
+unbounded wait. Add `--stall 300` (or what fits the task) to long waits: an
+agent's working spinner keeps its screen changing, so `stalled` means it went
+back to its prompt without reporting, or sits on a prompt it does not report.
+`read` the pane and continue as in step 2 below. When a wait times out:
 
 1. `noa ls --children`: note `agent.state` and `agent.seq` for each pending pane.
    Do not judge by `busy`: it only says a shell reported a running command, so
@@ -192,15 +205,43 @@ Each line has `paneId` and `reason`:
 | reason | What to do |
 |---|---|
 | `finished` | Turn ended. `read` the pane and check the work yourself |
-| `permission` / `input` | The agent is blocked on a prompt, or (`input`) idle at its prompt. `read` it. Approve or answer only if the human's instructions already cover it; otherwise ask the human. `send` refuses a pane in `permission` unless you pass `--answer`. To accept the selected choice: `send P --answer --enter ""`; to type a choice's key or Esc: `send P --answer --raw 2` or `--raw $'\e'`. `read` again afterwards |
+| `permission` / `input` | The agent is blocked on a prompt, or (`input`) idle at its prompt. `read` it. Approve or answer only if the human's instructions already cover it, or under "Running without the human"; otherwise ask the human. `send` refuses a pane in `permission` unless you pass `--answer`. To accept the selected choice: `send P --answer --enter ""`; to type a choice's key or Esc: `send P --answer --raw 2` or `--raw $'\e'`. `read` again afterwards |
 | `error` | The agent reported an error. `read` it. A login, plan, quota or unavailable-model message goes to the human, not to a retry; otherwise retry, re-scope or report |
 | `attention` | A desktop notification arrived. Not proof the agent is blocked or done: `read` and decide |
 | `exit` | The worker's process ended (`exitCode` when known) or the pane is gone (`closed: true`). It will not report again |
+| `stalled` | Only with `--stall`: the screen has not changed for `quietSecs`. `read` it; see "When no report comes" |
 
 Exit status 2 means the timeout passed. The line `{"timeout":true,"pending":[…]}`
 lists the panes still running, each with its `seq` and agent `state` under
 `baseline`; panes that had already exited are under `exited`. Decide whether to wait longer, `read` them, or
 close them.
+
+## Running without the human
+
+When the human has said to carry on without them (they are away, or asked you
+to run the work unattended), answer worker prompts yourself instead of
+stopping at each one, within these limits:
+
+- Approve what stays inside the worker's own worktree and its task: reading
+  files, editing files in the worktree, building, testing, linting,
+  formatting, and committing on its `orch/…` branch.
+- Refuse (Esc, or the prompt's "no" choice) anything that pushes, publishes or
+  deploys, deletes or writes outside the worktree, installs or downloads,
+  changes the human's config, credentials or agent settings, or acts on other
+  panes. Then tell the worker what to do instead, or leave that part for the
+  human.
+- Accept the trust prompt of a worktree you made with `spawn --worktree` from
+  the repository you are working in. Any other trust prompt, and any login,
+  plan or quota prompt, is the human's.
+- Anything you cannot place in those lists: leave it waiting, keep the other
+  workers going, and ask the human when they are back.
+- Workers in the shared checkout get none of this: their prompts are the
+  human's.
+- Keep a list of every prompt you answered and how, and give it to the human
+  with your report.
+
+This is not leave to pass auto-approve flags or to enable Noa's auto-approve
+(see "Rules"); you still read each prompt before answering it.
 
 ## Rules
 
@@ -212,13 +253,14 @@ close them.
   (`noa close --children`). A worker that is already gone is not an error. Read what you need first: closing discards the
   output. The board stays; it is the human's to close (closing it hands
   any remaining workers back to your pane, still running).
-- Remove every worktree you created once its branch is merged or dropped, and
-  list any you kept (with their branch) for the human.
+- Remove every worktree you created once its branch is merged or dropped
+  (`noa close --prune`), and list any you kept (with their branch) for the
+  human.
 - Workers are always floats: `spawn` has no `--split` or `--tab`. Do not open
   workers in panes or tabs some other way.
 - `wait` can only see turns an agent reports. Current Claude Code, Codex and
   Antigravity CLI report on their own, with no hooks. Without reports, a worker
-  ends a wait only with `exit` or `attention`. For plain commands, that is
+  ends a wait only with `exit`, `attention`, or `stalled` (with `--stall`). For plain commands, that is
   enough: `spawn -- make test`, then `wait PANE --for exit`.
 - Nesting goes one level deep. A worker may start workers of its own (tell it
   so in its task when you want that); they appear under it on your board and

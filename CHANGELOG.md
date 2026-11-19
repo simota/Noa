@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-11-20
+
+Orchestration that explains its failures and scales to 20 workers, with one
+level of nested workers.
+
 ### Changed
 
 - `Noa +ctl` explains failures: a sandbox that blocks loopback, a server that is

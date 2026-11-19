@@ -38,6 +38,11 @@ const BACK_TO_BOARD: &str = if cfg!(target_os = "macos") {
 } else {
     "^⇧I"
 };
+/// How Noa's `wait-after-command` banner under an exited command starts
+/// (`app/child_exited.rs`).
+const HOLD_BANNER: &str = "[Process exited.";
+/// JSON-RPC code for a pane whose process ended or that closed.
+const RPC_PANE_CLOSED: i64 = -32004;
 /// The smallest pane the board draws in.
 const MIN_COLS: usize = 24;
 const MIN_ROWS: usize = 6;
@@ -91,9 +96,16 @@ impl Status {
         }
     }
 
+    /// A process that exited with a non-zero code: it failed, and someone
+    /// should look at it.
+    pub(crate) fn failed(self) -> bool {
+        matches!(self, Self::Exited(Some(code)) if code != 0)
+    }
+
     pub(crate) fn group(self) -> Group {
         match self {
             Self::Permission | Self::Input | Self::Error | Self::Attention => Group::Needs,
+            status if status.failed() => Group::Needs,
             Self::Running | Self::Quiet => Group::Working,
             Self::Finished => Group::Done,
             Self::Exited(_) => Group::Exited,
@@ -108,9 +120,23 @@ impl Status {
             Self::Attention => "通知あり".to_string(),
             Self::Running => "作業中".to_string(),
             Self::Finished => "完了".to_string(),
+            Self::Exited(Some(code)) if code != 0 => format!("失敗 {code}"),
             Self::Exited(Some(code)) => format!("終了 {code}"),
             Self::Exited(None) => "終了".to_string(),
             Self::Quiet => "報告なし".to_string(),
+        }
+    }
+
+    /// The label for a narrow pane: the states that share a colour keep a
+    /// word each, so they stay apart without the full label.
+    fn short_label(self) -> String {
+        match self {
+            Self::Permission => "承認".to_string(),
+            Self::Input => "入力".to_string(),
+            Self::Attention => "通知".to_string(),
+            Self::Error => "エラー".to_string(),
+            status if status.failed() => "失敗".to_string(),
+            status => status.label(),
         }
     }
 
@@ -118,6 +144,7 @@ impl Status {
         match self {
             Self::Permission | Self::Input | Self::Attention => ORANGE,
             Self::Error => RED,
+            status if status.failed() => RED,
             Self::Running => BLUE,
             Self::Finished => GREEN,
             Self::Exited(_) | Self::Quiet => GREY,
@@ -274,9 +301,19 @@ impl Board {
         }
     }
 
-    /// The last thing `panel` said: its report's detail, else the newest
-    /// detail it gave before, else that its process ended.
+    /// The last thing `panel` said: for a failed process its last line of
+    /// output; else its report's detail, else the newest detail it gave in
+    /// the same state (a detail from an earlier state, such as the last
+    /// turn's "finished" text on a worker running again, would mislead),
+    /// else that its process ended.
     fn last_word(&self, panel: &Panel) -> String {
+        let pane = panel.pane_id.0;
+        let status = Status::of(panel);
+        if status.failed()
+            && let Some(line) = self.last_output(pane)
+        {
+            return line.to_string();
+        }
         panel
             .agent
             .as_ref()
@@ -284,8 +321,9 @@ impl Board {
             .filter(|detail| !detail.is_empty())
             .or_else(|| {
                 self.history
-                    .get(&panel.pane_id.0)?
+                    .get(&pane)?
                     .iter()
+                    .take_while(|report| report.status == status)
                     .map(|report| report.detail.clone())
                     .find(|detail| !detail.is_empty())
             })
@@ -296,6 +334,14 @@ impl Board {
                     .map(|_| "プロセスが終了しました".to_string())
             })
             .unwrap_or_default()
+    }
+
+    /// The last non-empty line of the work on `pane`'s screen.
+    fn last_output(&self, pane: u64) -> Option<&str> {
+        content_lines(self.screens.get(&pane)?)
+            .iter()
+            .map(|line| line.trim())
+            .rfind(|line| !line.is_empty())
     }
 
     /// Take a fresh pane listing. A report count that moved is kept in the
@@ -389,7 +435,11 @@ impl Board {
             .lines()
             .map(|line| line.trim_end().to_string())
             .collect();
-        while lines.last().is_some_and(|line| line.is_empty()) {
+        // Noa's own hold banner under an exited command is not its output.
+        while lines
+            .last()
+            .is_some_and(|line| line.is_empty() || line.starts_with(HOLD_BANNER))
+        {
             lines.pop();
         }
         let skip = lines.len().saturating_sub(SCREEN_CAP);
@@ -522,9 +572,22 @@ impl Board {
             .is_some_and(|panel| Status::of(panel) == Status::Permission)
     }
 
-    fn refuse_send(&mut self, pane: u64) {
-        self.mode = Mode::Normal;
-        self.message = Some(Notice::warn(approval_message(&self.name(pane))));
+    /// Whether `pane`'s process has ended: nothing typed reaches it.
+    fn has_exited(&self, pane: u64) -> bool {
+        self.panel(pane)
+            .is_some_and(|panel| matches!(Status::of(panel), Status::Exited(_)))
+    }
+
+    /// Why nothing can be sent to `pane`, if so.
+    fn cannot_send(&self, pane: u64) -> Option<String> {
+        let name = self.name(pane);
+        if self.awaits_approval(pane) {
+            Some(approval_message(&name))
+        } else if self.has_exited(pane) {
+            Some(format!("{name} は終了しています。x で閉じる"))
+        } else {
+            None
+        }
     }
 
     pub(crate) fn key(&mut self, key: Key) -> Option<Action> {
@@ -555,8 +618,8 @@ impl Board {
                     }
                     Key::Enter => {
                         self.mode = Mode::Normal;
-                        if self.awaits_approval(pane) {
-                            self.refuse_send(pane);
+                        if let Some(why) = self.cannot_send(pane) {
+                            self.message = Some(Notice::warn(why));
                         } else if !text.trim().is_empty() {
                             return Some(Action::Send(pane, text));
                         }
@@ -595,10 +658,9 @@ impl Board {
                     Key::Char('g') => return self.target().map(Action::Focus),
                     Key::Char('s') => {
                         if let Some(pane) = self.target() {
-                            if self.awaits_approval(pane) {
-                                self.refuse_send(pane);
-                            } else {
-                                self.mode = Mode::Send(pane, String::new());
+                            match self.cannot_send(pane) {
+                                Some(why) => self.message = Some(Notice::warn(why)),
+                                None => self.mode = Mode::Send(pane, String::new()),
                             }
                         }
                     }
@@ -959,6 +1021,17 @@ fn more_line(arrow: &str, (n, needs): (usize, usize), gone: usize, cols: usize) 
     line.finish(cols)
 }
 
+/// How much of a worker's state its column says, from most to least.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StateForm {
+    /// "承認待ち 5 秒"
+    Full,
+    /// "承認 5 秒"
+    Short,
+    /// "承認"
+    Bare,
+}
+
 /// The widths of a list's columns, shared by every row so they line up. A
 /// column that does not fit the pane is left out (0).
 struct Columns {
@@ -966,10 +1039,11 @@ struct Columns {
     /// Shown only when the workers run different programs.
     kind: usize,
     state: usize,
+    form: StateForm,
 }
 
 impl Columns {
-    fn of(workers: &[&Panel], cols: usize, state: impl Fn(&Panel) -> String) -> Self {
+    fn of(workers: &[&Panel], cols: usize, state: impl Fn(&Panel, StateForm) -> String) -> Self {
         let widest = |text: &dyn Fn(&Panel) -> String| {
             workers
                 .iter()
@@ -991,11 +1065,20 @@ impl Columns {
         } else {
             0
         };
-        let mut state_width = widest(&|panel| state(panel));
-        // Keep about 10 columns for the detail; give up the kind first.
-        if name + 2 + kind + 2 + state_width + 10 > room {
+        let width = |form: StateForm| widest(&|panel| state(panel, form));
+        // Keep about 10 columns for the detail (what a worker asks is what
+        // a narrow pane must not lose): give up the kind first, then say
+        // the state more briefly, and drop it only when even its short
+        // label does not fit.
+        if name + 2 + kind + 2 + width(StateForm::Full) + 10 > room {
             kind = 0;
         }
+        let forms = [StateForm::Full, StateForm::Short, StateForm::Bare];
+        let (form, mut state_width) = forms
+            .iter()
+            .map(|&form| (form, width(form)))
+            .find(|&(_, w)| name + 2 + w + 10 <= room)
+            .unwrap_or((StateForm::Bare, width(StateForm::Bare)));
         if name + 2 + state_width > room {
             state_width = 0;
         }
@@ -1003,6 +1086,7 @@ impl Columns {
             name,
             kind,
             state: state_width,
+            form,
         }
     }
 }
@@ -1154,7 +1238,10 @@ impl Board {
             ("Esc h ←", "一覧に戻る"),
             ("g", "ワーカーをこの下に開く(承認はそこで答える)"),
             (BACK_TO_BOARD, "開いたワーカーからボードへ戻る"),
-            ("s", "ワーカーに送る(承認待ちには送れません)"),
+            (
+                "s",
+                "ワーカーに送る(承認待ち・終了したワーカーには送れません)",
+            ),
             ("x", "ワーカーを閉じる(確認あり。出力は消えます)"),
             ("q ^C", "ボードを終える(ワーカーはオーケストレーターへ戻る)"),
             ("", ""),
@@ -1279,8 +1366,8 @@ impl Board {
             }
             return lines;
         }
-        let columns = Columns::of(&workers, cols, |panel| {
-            self.state_text(panel.pane_id.0, Status::of(panel), now)
+        let columns = Columns::of(&workers, cols, |panel, form| {
+            self.state_text(panel.pane_id.0, Status::of(panel), form, now)
         });
         let mut body: Vec<String> = Vec::new();
         // Each worker's first and past-last line in `body`, and its group.
@@ -1370,9 +1457,16 @@ impl Board {
         lines
     }
 
-    /// The state column: "承認待ち 5 秒", "完了 3 分前".
-    fn state_text(&self, pane: u64, status: Status, now: Instant) -> String {
-        format!("{} {}", status.label(), self.state_age(pane, status, now))
+    /// The state column: "承認待ち 5 秒", "完了 3 分前", or shorter.
+    fn state_text(&self, pane: u64, status: Status, form: StateForm, now: Instant) -> String {
+        let label = match form {
+            StateForm::Full => status.label(),
+            StateForm::Short | StateForm::Bare => status.short_label(),
+        };
+        match self.state_age(pane, status, now) {
+            Some(age) if form != StateForm::Bare => format!("{label} {age}"),
+            _ => label,
+        }
     }
 
     /// Workers closed while the board watched, and what they last said.
@@ -1409,16 +1503,17 @@ impl Board {
     }
 
     /// How long `pane` has been in `status`: "2 分" while it lasts, "3 分前"
-    /// once it is done, "開始時から" when it predates the board.
-    fn state_age(&self, pane: u64, status: Status, now: Instant) -> String {
+    /// once it is done; nothing when it predates the board, whose start
+    /// says nothing about it.
+    fn state_age(&self, pane: u64, status: Status, now: Instant) -> Option<String> {
         let Some((_, Some(at))) = self.since.get(&pane) else {
-            return "開始時から".to_string();
+            return None;
         };
         let span = duration_text(now.saturating_duration_since(*at));
-        match status.group() {
-            Group::Done | Group::Exited => format!("{span}前"),
-            Group::Needs | Group::Working => span,
-        }
+        // A failed process is listed with what needs someone, but it is
+        // over: say when, like any other ended state.
+        let over = matches!(status, Status::Exited(_)) || status.group() == Group::Done;
+        Some(if over { format!("{span}前") } else { span })
     }
 
     /// A worker's row, `▶ 1 ● name  kind  state age  detail`, and the end of
@@ -1463,7 +1558,7 @@ impl Board {
                 .fg(DIM, &pad(&worker_kind(panel), columns.kind));
         }
         if columns.state > 0 {
-            let state = self.state_text(pane, status, now);
+            let state = self.state_text(pane, status, columns.form, now);
             line.plain("  ")
                 .fg(status.color(), &pad(&state, columns.state));
         }
@@ -1489,6 +1584,11 @@ impl Board {
                     .collect()
             })
             .unwrap_or_default();
+        // A failed command's last line is already its detail.
+        let preview = match preview.split_last() {
+            Some((_, rest)) if status.failed() => rest,
+            _ => &preview[..],
+        };
         for text in preview.iter().skip(preview.len().saturating_sub(rows)) {
             let mut line = Line::default();
             line.plain(&" ".repeat(ROW_INDENT)).fg(
@@ -1633,7 +1733,10 @@ impl Board {
                 let busy = self
                     .panel(*pane)
                     .map(Status::of)
-                    .filter(|status| matches!(status.group(), Group::Needs | Group::Working))
+                    .filter(|status| {
+                        !matches!(status, Status::Exited(_))
+                            && matches!(status.group(), Group::Needs | Group::Working)
+                    })
                     .map(|status| format!("まだ{}です。", status.label()))
                     .unwrap_or_default();
                 line.plain(" ")
@@ -1672,10 +1775,12 @@ impl Board {
                         ("q", "終了"),
                     ],
                 };
+                // Nothing can be sent to an exited worker.
+                let exited = self.target().is_some_and(|pane| self.has_exited(pane));
                 // As many keys as fit, always ending with where the rest are.
                 let more = " ? ヘルプ";
                 line.plain(" ");
-                for (key, what) in keys {
+                for (key, what) in keys.iter().filter(|(key, _)| !(exited && *key == "s")) {
                     let piece = format!("{key} {what}   ");
                     if line.width + piece.width() + more.width() > cols {
                         break;
@@ -1879,7 +1984,16 @@ impl Server for Client {
 
 /// Carry out an action and describe the result in one line.
 fn perform(server: &mut impl Server, board: &Board, action: Action) -> Notice {
-    let failed = |err: noa_ipc::ClientError| Notice::warn(format!("できませんでした: {err}"));
+    let failed = |err: noa_ipc::ClientError| {
+        let why = match err {
+            noa_ipc::ClientError::Rpc {
+                code: RPC_PANE_CLOSED,
+                ..
+            } => "そのワーカーは終了したか、閉じられています".to_string(),
+            err => err.to_string(),
+        };
+        Notice::warn(format!("できませんでした: {why}"))
+    };
     // The board's listing can be up to `LIST_EVERY` old: look again right
     // before typing, so a worker that started waiting for an approval since
     // is never answered from here (spec D7).
@@ -1973,7 +2087,7 @@ mod tests {
     fn sample() -> Vec<Panel> {
         let mut exited = worker(5, 1, "tests", None, 0);
         exited.agent = None;
-        exited.exit = Some(PanelExit { code: Some(101) });
+        exited.exit = Some(PanelExit { code: Some(0) });
         let mut other = worker(9, 7, "elsewhere", Some("running"), 1);
         other.label = Some("elsewhere".to_string());
         vec![
@@ -2146,7 +2260,7 @@ mod tests {
         assert!(all.contains("ui detail"));
         assert!(all.contains("› 1. Yes   2. No"));
         assert!(!all.contains("older line"));
-        assert!(all.contains("終了 101"));
+        assert!(all.contains("終了 0"));
         assert!(!all.contains("board"));
     }
 
@@ -2471,20 +2585,18 @@ mod tests {
         assert_eq!(content_lines(&["a".to_string(), "b".to_string()]).len(), 2);
     }
 
-    // Owner request 2: a finished report without a detail left the card's
-    // first line blank.
+    // Owner request 2: a report without a detail left the card's first
+    // line blank. It says what the worker last said in the same state.
     #[test]
-    fn a_card_without_a_detail_says_what_it_last_reported_or_its_state() {
+    fn a_card_without_a_detail_says_what_it_last_reported_in_that_state() {
         let start = Instant::now();
         let mut board = Board::new(Some(1), Some(8));
         board.update(sample(), start);
         let mut next = sample();
         let api = next[0].agent.as_mut().unwrap();
         api.seq = 5;
-        api.state = Some("finished".to_string());
         api.detail = Some(String::new());
         board.update(next, start + Duration::from_secs(1));
-        // The earlier report's detail is the last word it gave.
         let all = rendered(&board, 80, 40, start + Duration::from_secs(2));
         assert!(all.contains("api detail"), "{all}");
 
@@ -2493,17 +2605,41 @@ mod tests {
         panels[2].agent.as_mut().unwrap().detail = None;
         quiet.update(panels, start);
         let all = rendered(&quiet, 80, 40, start);
-        assert!(all.contains("完了 開始時から"), "{all}");
+        assert!(all.contains("● docs   完了  "), "{all}");
+        assert!(!all.contains("docs detail"), "{all}");
     }
 
-    // Owner request 4: how long a worker has been in its state.
+    // Review B03: a worker running a new turn showed the last turn's
+    // "finished" text, so it looked done.
+    #[test]
+    fn a_detail_from_an_earlier_state_is_not_shown() {
+        let start = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        let mut panels = sample();
+        let api = panels[0].agent.as_mut().unwrap();
+        api.state = Some("finished".to_string());
+        api.detail = Some("wrote 3 files".to_string());
+        board.update(panels.clone(), start);
+        let api = panels[0].agent.as_mut().unwrap();
+        api.seq += 1;
+        api.state = Some("running".to_string());
+        api.detail = None;
+        board.update(panels, start + Duration::from_secs(1));
+        let all = rendered(&board, 80, 40, start + Duration::from_secs(2));
+        assert!(!all.contains("wrote 3 files"), "{all}");
+        assert!(all.contains("● api    作業中 1 秒"), "{all}");
+    }
+
+    // Owner request 4: how long a worker has been in its state. Review
+    // B09: a state found at start has no known age, and says none.
     #[test]
     fn a_card_tells_how_long_the_worker_has_been_in_its_state() {
         let start = Instant::now();
         let mut board = Board::new(Some(1), Some(8));
         board.update(sample(), start);
         let all = rendered(&board, 80, 40, start);
-        assert!(all.contains("作業中 開始時から"), "{all}");
+        assert!(all.contains("● api    作業中    api detail"), "{all}");
+        assert!(!all.contains("開始時"), "{all}");
 
         let mut next = sample();
         next[0].agent.as_mut().unwrap().state = Some("finished".to_string());
@@ -2911,5 +3047,118 @@ mod tests {
         );
         let all = view(&board);
         assert!(all.contains("▶1 ● w9"), "{all}");
+    }
+
+    // Review B09: at 30 columns the state column was dropped, so 承認待ち,
+    // 入力待ち and 通知あり (one colour) looked the same.
+    #[test]
+    fn a_narrow_pane_shortens_the_state_before_dropping_it() {
+        let mut board = Board::new(Some(1), Some(8));
+        let mut panels = sample();
+        panels[0].agent.as_mut().unwrap().state = Some("input".to_string());
+        board.update(panels, Instant::now());
+        let all = rendered(&board, 30, 20, Instant::now());
+        assert!(all.contains("承認 ") && all.contains("入力 "), "{all}");
+        assert!(!all.contains("承認待ち"), "{all}");
+        let wide = rendered(&board, 80, 20, Instant::now());
+        assert!(
+            wide.contains("承認待ち") && wide.contains("入力待ち"),
+            "{wide}"
+        );
+    }
+
+    fn failed_worker(pane: u64, code: i32) -> Panel {
+        let mut panel = worker(pane, 1, "failer", None, 0);
+        panel.agent = None;
+        panel.exit = Some(PanelExit { code: Some(code) });
+        panel
+    }
+
+    // Review B06: a command that exited 3 was grey, listed last as "終了 3",
+    // and said only that its process ended.
+    #[test]
+    fn a_failed_command_needs_someone_and_says_its_last_line() {
+        let mut board = Board::new(Some(1), Some(8));
+        let mut panels = sample();
+        panels.push(failed_worker(6, 3));
+        board.update(panels, Instant::now());
+        assert_eq!(Status::of(board.panel(6).unwrap()).group(), Group::Needs);
+        board.set_screen(
+            6,
+            "about to fail\nboom\n\n[Process exited. Press any key to close the terminal.]\n",
+        );
+        let all = rendered(&board, 80, 40, Instant::now());
+        let row = all.lines().find(|l| l.contains("failer")).unwrap();
+        assert!(row.contains("失敗 3") && row.contains("boom"), "{all}");
+        // Listed with what needs someone, before the working ones.
+        assert!(
+            all.find("failer").unwrap() < all.find("● api").unwrap(),
+            "{all}"
+        );
+        assert!(!all.contains("[Process exited"), "{all}");
+        // Red, like an error.
+        let lines = board.render(80, 40, Instant::now());
+        let line = lines
+            .iter()
+            .find(|l| visible(l).contains("failer"))
+            .unwrap();
+        let Rgb(r, g, b) = RED;
+        assert!(
+            line.contains(&format!("38;2;{r};{g};{b}m失敗 3")),
+            "{line:?}"
+        );
+        // A clean exit stays where it was.
+        assert_eq!(Status::Exited(Some(0)).group(), Group::Exited);
+        assert_eq!(Status::Exited(None).group(), Group::Exited);
+    }
+
+    // Review B05: `s` on an exited worker opened the send line, and the
+    // send failed with "rpc error -32004: pane closed".
+    #[test]
+    fn nothing_is_sent_to_an_exited_worker() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), Instant::now());
+        board.select(5);
+        assert_eq!(board.key(Key::Char('s')), None);
+        assert_eq!(board.mode, Mode::Normal);
+        let message = board.message.clone().unwrap();
+        assert!(message.warn, "{message:?}");
+        assert_eq!(message.text, "tests は終了しています。x で閉じる");
+        for view in [View::List, View::Detail(5)] {
+            board.view = view;
+            let footer = visible(&board.render(120, 20, Instant::now()).pop().unwrap());
+            assert!(!footer.contains("s 送る"), "{footer}");
+            assert!(footer.contains("x 閉じる"), "{footer}");
+        }
+
+        struct Closed;
+        impl Server for Closed {
+            fn panels(&mut self) -> Result<Vec<Panel>, noa_ipc::ClientError> {
+                Ok(Vec::new())
+            }
+            fn focus(&mut self, _pane: u64) -> Result<(), noa_ipc::ClientError> {
+                Err(noa_ipc::ClientError::Rpc {
+                    code: -32004,
+                    message: "pane closed".to_string(),
+                })
+            }
+            fn type_text(
+                &mut self,
+                _pane: u64,
+                _text: &str,
+                _paste: bool,
+            ) -> Result<(), noa_ipc::ClientError> {
+                Ok(())
+            }
+            fn close(&mut self, _pane: u64) -> Result<(), noa_ipc::ClientError> {
+                Ok(())
+            }
+        }
+        let notice = perform(&mut Closed, &board, Action::Focus(5));
+        assert!(!notice.text.contains("-32004"), "{notice:?}");
+        assert!(
+            notice.text.contains("終了したか、閉じられています"),
+            "{notice:?}"
+        );
     }
 }

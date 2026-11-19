@@ -1,6 +1,6 @@
 ---
 name: noa-orchestration
-description: Run other coding agents (claude, codex, agy) or commands in worker panes of the Noa terminal and drive them from this pane with `"$NOA_BIN" +ctl`: spawn a worker, send it a task, wait for its turn to end, read its output, close it. Use when you are running inside a Noa pane and the task splits into parts that other agents or long commands can do in parallel, or when asked to delegate, fan out, or orchestrate agents in Noa.
+description: Delegate work to other coding agents (claude, codex, agy) or long commands in Noa worker panes via `"$NOA_BIN" +ctl`, each on a model tier sized to its task. Use in a Noa pane when work splits into parallel parts, when a part suits codex, agy or a cheaper or faster model, or when asked to delegate, fan out or orchestrate (並列で, 別エージェントに任せて, codexに投げて). Not outside Noa (NOA_BIN unset).
 ---
 
 # Orchestrating worker panes in Noa

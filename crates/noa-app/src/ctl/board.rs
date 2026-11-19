@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use noa_ipc::{Client, ClientError, Panel, TextSource};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::{EXIT_OK, Failure, SUBMIT_DELAY};
+use super::{EXIT_OK, Failure, HOLD_BANNER, SUBMIT_DELAY};
 
 /// How often the pane list is read again.
 const LIST_EVERY: Duration = Duration::from_millis(500);
@@ -47,9 +47,6 @@ const BACK_TO_BOARD: &str = if cfg!(target_os = "macos") {
 } else {
     "^⇧I"
 };
-/// How Noa's `wait-after-command` banner under an exited command starts
-/// (`app/child_exited.rs`).
-const HOLD_BANNER: &str = "[Process exited.";
 /// JSON-RPC code for a pane whose process ended or that closed.
 const RPC_PANE_CLOSED: i64 = -32004;
 /// The smallest pane the board draws in.

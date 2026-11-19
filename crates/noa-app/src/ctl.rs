@@ -66,8 +66,7 @@ Commands:
   send PANE [--enter] [--raw] [--wait [wait options]] [--answer] [--any-pane]
        [--] TEXT|-              Type TEXT (or stdin) into PANE; prints the
                                 report count to pass to `wait --after`. Refused
-                                while PANE waits for an approval or an answer
-                                (states permission, input), unless --answer.
+                                while PANE waits for an approval, unless --answer.
   wait PANE...|--children [--after SEQ | --after PANE=SEQ ...] [--for LIST]
        [--all] [--timeout SECS] [--tail N]
                                 Block until a worker stops. LIST is a comma list
@@ -1828,12 +1827,12 @@ fn not_worker_message(pane: u64) -> String {
 }
 
 /// What `panel`'s agent reported it waits for, if it is an approval
-/// (`permission`) or an answer to a question (`input`), as the noun phrase
-/// a refusal names.
+/// (`permission`), as the noun phrase a refusal names. `input` is not
+/// refused: it also stands for an agent idle at its prompt (the hook
+/// adapter's `idle_prompt`), where a follow-up send is the normal case.
 pub(crate) fn awaits_answer(panel: &Panel) -> Option<&'static str> {
     match panel.agent.as_ref()?.state.as_deref()? {
         "permission" => Some("an approval"),
-        "input" => Some("an answer"),
         _ => None,
     }
 }
@@ -1885,10 +1884,21 @@ pub(crate) fn trim_trailing_blank_lines(text: &str) -> &str {
 
 /// The last `lines` lines of `text`, trailing blank lines left out first.
 pub(crate) fn tail_lines(text: &str, lines: usize) -> String {
-    let text = trim_trailing_blank_lines(text);
-    let all: Vec<&str> = text.lines().collect();
+    let mut all: Vec<&str> = text.lines().collect();
+    // Noa's own banner under an exited command, and the blank rows around
+    // it, are not the worker's output.
+    while all
+        .last()
+        .is_some_and(|line| line.trim().is_empty() || line.starts_with(HOLD_BANNER))
+    {
+        all.pop();
+    }
     all[all.len().saturating_sub(lines)..].join("\n")
 }
+
+/// How Noa's `wait-after-command` banner under an exited command starts
+/// (`app/child_exited.rs`).
+pub(crate) const HOLD_BANNER: &str = "[Process exited.";
 
 /// The stderr line for a `getText` the server cut: it keeps the end.
 pub(crate) fn truncated_message(kept: usize) -> String {
@@ -3025,18 +3035,15 @@ mod tests {
         );
     }
 
-    // Review finding (skill F7): only `permission` was refused, but Enter
-    // into an `input` question picks its first choice just as silently.
+    // Only `permission` is refused: `input` also means an agent idle at its
+    // prompt (`scripts/noa-agent-hook.py` maps `idle_prompt` to it).
     #[test]
-    fn a_reported_permission_or_question_awaits_an_answer() {
+    fn only_a_reported_permission_awaits_an_answer() {
         assert_eq!(
             awaits_answer(&panel(2, Some("permission"), false)),
             Some("an approval")
         );
-        assert_eq!(
-            awaits_answer(&panel(2, Some("input"), false)),
-            Some("an answer")
-        );
+        assert_eq!(awaits_answer(&panel(2, Some("input"), false)), None);
         assert_eq!(awaits_answer(&panel(2, Some("running"), true)), None);
         assert_eq!(awaits_answer(&panel(2, Some("finished"), false)), None);
         assert_eq!(awaits_answer(&panel(0, None, false)), None);
@@ -3287,6 +3294,13 @@ mod tests {
         assert_eq!(tail_lines("1\n2\n3\n4\n\n  \n", 2), "3\n4");
         assert_eq!(tail_lines("1\n2\n", 5), "1\n2");
         assert_eq!(tail_lines("1\n2\n", 0), "");
+        assert_eq!(
+            tail_lines(
+                "one\ntwo\n\n[Process exited. Press any key to close the terminal.]\n",
+                2
+            ),
+            "one\ntwo"
+        );
         assert_eq!(
             truncated_message(65536),
             "Noa +ctl: output truncated; kept the last 65536 bytes"

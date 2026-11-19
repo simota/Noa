@@ -26,8 +26,9 @@ output shapes and exit codes: [reference.md](reference.md).
      listen. Find it with `lsof -nP -iTCP:<port> -sTCP:LISTEN` and tell the
      human which process holds the port. Do not kill it yourself.
 2. Decide what each worker gets: which agent (or command), which model tier
-   (see "Matching the worker to the task"), which directory, and a task that
-   stands on its own. A worker sees nothing of your conversation.
+   (see "Matching the worker to the task"), which directory or worktree (see
+   "Giving a worker its own worktree"), and a task that stands on its own. A
+   worker sees nothing of your conversation.
 3. Keep the number of workers small (8 at most: the board holds 8 floats) and
    tell the human what you are about to start, with each worker's tier, and
    that the board will show it.
@@ -59,6 +60,50 @@ expensive models for work that needs them. Pick a tier per task:
 - Split a mixed task so the mechanical part goes to `light` and only the hard
   part to `deep`, when the parts are independent.
 - Your own check of each result does not get cheaper with the worker's tier.
+
+## Giving a worker its own worktree
+
+Workers that share one checkout overwrite each other's edits, see each
+other's half-done changes in builds and tests, and race on the git index.
+Decide per worker:
+
+| Worker | Directory |
+|---|---|
+| Edits files while another worker (or you) edits the same repo | Its own worktree |
+| Builds or tests a branch other than the one checked out | Its own worktree |
+| Makes an experimental change you may throw away | Its own worktree |
+| Only reads: review, search, summarise, answer a question | The shared checkout |
+| The only one editing, and you wait for it before editing yourself | The shared checkout |
+| A command that tests the current tree while nobody edits | The shared checkout |
+
+Create the worktree yourself, so you know its path and branch, then point
+`spawn --cwd` at it. Do not use an agent's own worktree flag: you would not
+know where it put the work.
+
+```sh
+top=$(git rev-parse --show-toplevel)
+wt="$top-wt/$label"                      # outside the repo, one per worker
+git worktree add -b "orch/$label" "$wt" HEAD
+pane=$(noa spawn --label "$label" --cwd "$wt" -- claude --model sonnet --effort medium | jq -r .paneId)
+noa send "$pane" --enter --wait --timeout 1800 "You are in a git worktree on branch orch/$label. …task… Commit your work on this branch. Do not push or switch branches."
+```
+
+- A worktree starts from a commit: your uncommitted changes are not in it.
+  Commit them first, or tell the worker what is missing.
+- A worktree has no build outputs, installed dependencies or ignored files
+  (`.env`, local config). Its first build is cold; budget the timeout for it,
+  and keep the number of worktrees that build at once small.
+- After a worker finishes, check its branch from your checkout
+  (`git log -p HEAD..orch/$label`, then build and test it) before you merge.
+  Merge branches one at a time and run the checks after each. A conflict goes
+  to you or to a `deep` worker, not back to the worker that wrote one side.
+- Clean up in this order: `close` the pane, then `git worktree remove "$wt"`,
+  then `git branch -d "orch/$label"`. Both git commands refuse when work would
+  be lost (uncommitted changes, unmerged branch). Do not add `--force` or `-D`
+  without reading what would be lost; keep the branch and tell the human
+  instead.
+- If `git worktree add` fails with a permission error, your own shell may be
+  sandboxed away from `.git/worktrees`; say so rather than working around it.
 
 ## One worker, one round
 
@@ -143,6 +188,8 @@ close them.
   (`noa close --children`). A worker that is already gone is not an error. Read what you need first: closing discards the
   output. The board stays; it is the human's to close (closing it hands
   any remaining workers back to your pane, still running).
+- Remove every worktree you created once its branch is merged or dropped, and
+  list any you kept (with their branch) for the human.
 - Workers are always floats: `spawn` has no `--split` or `--tab`. Do not open
   workers in panes or tabs some other way.
 - `wait` can only see turns an agent reports. Claude Code reports through

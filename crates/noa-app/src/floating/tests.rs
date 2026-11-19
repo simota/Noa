@@ -1204,3 +1204,27 @@ fn a_handed_back_worker_moved_by_hand_is_not_taken_back() {
     set.cycle_anchor(id(1), &layout(&SPLIT), M).unwrap();
     assert!(!set.get(id(1)).unwrap().handed_back);
 }
+
+// Review finding: dragging a handed-back worker's title strip kept its mark,
+// so a reopened board took it away from where it was put.
+#[test]
+fn a_handed_back_worker_dragged_by_hand_is_not_taken_back() {
+    let mut set = FloatSet::default();
+    set.create_stowed(id(1), B, false, &layout(&SPLIT), M)
+        .unwrap();
+    set.rehome(id(1), A);
+    set.settle(id(1), &layout(&SPLIT), M);
+    assert!(set.get(id(1)).unwrap().handed_back);
+    let strip = set.placed(id(1), &layout(&SPLIT), M).unwrap().outer;
+    let from = Point::new(strip.x + strip.w / 2, strip.y + 1);
+    assert!(drag(
+        &mut set,
+        id(1),
+        FloatDragKind::Move,
+        from,
+        (-40, -20),
+        &SPLIT
+    ));
+    assert_ne!(set.placed(id(1), &layout(&SPLIT), M).unwrap().outer, strip);
+    assert!(set.restow_candidates(A, id(99), 20).is_empty());
+}

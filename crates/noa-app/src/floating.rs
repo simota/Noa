@@ -975,6 +975,9 @@ impl FloatSet {
         let Some(float) = self.get_mut(drag.id) else {
             return;
         };
+        // Moved or resized by hand, a handed-back worker stays where it was
+        // put when its board opens again.
+        float.handed_back = false;
         match drag.kind {
             FloatDragKind::Move => {
                 let x = shift(

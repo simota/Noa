@@ -191,6 +191,43 @@ choosing another `server-port`) is their call.
 The Codex and Antigravity hook events come from their documentation and are not
 tested by Noa. Check the installed version if waits never end with `finished`.
 
+## Model tiers
+
+Flags that pick a worker's model and effort, appended to the agent command at
+`spawn` (`spawn --label rename -- claude --model haiku --effort low`). Tiers
+are described in SKILL.md, "Matching the worker to the task".
+
+| Tier | Claude Code | Codex | Antigravity CLI |
+|---|---|---|---|
+| `light` | Reading only: `--model haiku --effort low`. Edits code: `--model sonnet --effort low` | `-m gpt-6-luna -c model_reasoning_effort=low` | `--model gemini-4-hydrogen-low` |
+| `standard` | `--model sonnet --effort medium` | `-m gpt-6.2-sol -c model_reasoning_effort=medium` | `--model gemini-4-argon-medium` |
+| `deep` | `--model opus --effort high` | `-m gpt-6.2-astra -c model_reasoning_effort=high` | `--model gemini-4-neon-high` |
+
+- Claude Code: Anthropic advises keeping Haiku to work whose mistakes are
+  quick to spot (finding files, running tests, reading logs, summarising),
+  and code edits on a larger model, hence the split `light` cell.
+- Antigravity: Google describes Gemini 4 Hydrogen as the fast model for
+  everyday coding without a planning phase, Argon as faster and lighter on
+  tokens than Carbon, and Neon, Carbon or Argon for work that needs the
+  deepest reasoning at every step. Gemini 4 models depend on the plan
+  (Hydrogen needs a non-trial Pro plan, Neon a paid plan, Carbon Ultra or
+  Enterprise). Gemini 3.8 Flash is being retired, so no tier uses it.
+  Gemini and Claude/GPT models draw on separate quotas.
+
+- Claude Code takes the aliases `haiku`, `sonnet`, `opus` and `fable` for the
+  latest model of each family, so its column does not go stale. `--effort`
+  takes `low`, `medium`, `high`, `xhigh`, `max`.
+- Codex and Antigravity model names change between releases. The names above
+  are from Codex 0.170.0 and Antigravity CLI 1.5.12. List what the installed
+  version offers before using them:
+  - Codex: `codex debug models | jq -r '.models[] | [.slug, .description] | @tsv'`.
+    The description says which models are the fast or affordable ones; each
+    model's `supported_reasoning_levels` lists the effort values it takes.
+  - Antigravity: `agy models`. The effort is part of the model id
+    (`…-low`, `…-high`).
+- `read` the pane after `spawn`, as before any first send: a model name the
+  installed version or the account does not offer shows up there.
+
 ## Patterns
 
 Several workers, each with a race-free wait:

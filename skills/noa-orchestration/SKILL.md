@@ -25,13 +25,40 @@ output shapes and exit codes: [reference.md](reference.md).
      second instance still holds the control port, so this one could not
      listen. Find it with `lsof -nP -iTCP:<port> -sTCP:LISTEN` and tell the
      human which process holds the port. Do not kill it yourself.
-2. Decide what each worker gets: which agent (or command), which directory, and a
-   task that stands on its own. A worker sees nothing of your conversation.
+2. Decide what each worker gets: which agent (or command), which model tier
+   (see "Matching the worker to the task"), which directory, and a task that
+   stands on its own. A worker sees nothing of your conversation.
 3. Keep the number of workers small (8 at most: the board holds 8 floats) and
-   tell the human what you are about to start, and that the board will show it.
+   tell the human what you are about to start, with each worker's tier, and
+   that the board will show it.
 4. Leave the board to the human. It opens by itself on your first spawn; if they
    closed it, `"$NOA_BIN" +ctl board --open` brings it back. Never run
    `+ctl board` without `--open` yourself: it takes over the pane it runs in.
+
+## Matching the worker to the task
+
+Give each task the cheapest, fastest worker that can do it, and keep the
+expensive models for work that needs them. Pick a tier per task:
+
+| Tier | Task looks like | Worker |
+|---|---|---|
+| none | Build, test, lint, benchmark, any command whose output you only read | No agent: `spawn -- cargo test …`, then `wait --for exit` |
+| `light` | Fully specified and easy to check: rename, mechanical edits across files, boilerplate tests from a given pattern, find-and-summarise, docs from facts you hand over | Smallest model, low effort |
+| `standard` | Ordinary implementation or a fix whose cause is known, with a clear done-condition | Mid model, medium effort |
+| `deep` | Design choices, a bug whose cause is unknown, cross-cutting refactors, concurrency, security, reviewing other workers' output | Largest model, high effort |
+
+- The tier is set by flags on the worker command at `spawn`; the flags for
+  claude, codex and agy are in reference.md, "Model tiers". Pass them on the
+  command line only; do not change the human's agent config.
+- A model or effort the human named for the task wins over the table.
+- When a task fits two tiers, take the higher one. A retry costs more than the
+  difference.
+- When a `light` or `standard` worker's result fails your check, retry with
+  a new worker one effort level higher on the same model first; if that also
+  fails, go one tier up. Do not repeat the same model and effort.
+- Split a mixed task so the mechanical part goes to `light` and only the hard
+  part to `deep`, when the parts are independent.
+- Your own check of each result does not get cheaper with the worker's tier.
 
 ## One worker, one round
 

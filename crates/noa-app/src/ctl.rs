@@ -531,16 +531,30 @@ fn parse_send(rest: &mut Args) -> Result<SendArgs, String> {
 /// The most input lines `send --replace` clears.
 const REPLACE_MAX_LINES: usize = 32;
 
-/// What `send --replace` types before the text: Ctrl-E (end of line), then
-/// two Ctrl-U per line. In Claude Code, Codex and Antigravity CLI, Ctrl-U
-/// clears the current line only, and at the start of a line one more joins
-/// it to the line above, so a draft of N lines needs up to 2N (checked on
-/// Claude Code 2.1.329, Codex 0.170.0, agy 1.5.13; an empty input line is left
-/// as it is).
-pub(crate) fn replace_keys() -> String {
-    let mut keys = String::from("\x05");
-    keys.push_str(&"\x15".repeat(REPLACE_MAX_LINES * 2));
-    keys
+/// Ctrl-U keys per write of `send --replace`. Claude Code takes a longer
+/// burst of input as a paste and leaves the draft in place (65 bytes in one
+/// write did, 33 did not), so the keys go in short writes.
+const REPLACE_CHUNK: usize = 16;
+
+/// The pause between two writes of `send --replace`.
+const REPLACE_PAUSE: Duration = Duration::from_millis(50);
+
+/// What `send --replace` types before the text, one write each: Ctrl-E (end
+/// of line), then two Ctrl-U per line. In Claude Code, Codex and Antigravity
+/// CLI, Ctrl-U clears the current line only, and at the start of a line one
+/// more joins it to the line above, so a draft of N lines needs up to 2N
+/// (checked on Claude Code 2.1.329, Codex 0.170.0, agy 1.5.13, including
+/// Claude Code's collapsed "[Pasted text]"; an empty input line is left as it
+/// is).
+pub(crate) fn replace_keys() -> Vec<String> {
+    let mut writes = vec!["\x05".to_string()];
+    let mut left = REPLACE_MAX_LINES * 2;
+    while left > 0 {
+        let n = left.min(REPLACE_CHUNK);
+        writes.push("\x15".repeat(n));
+        left -= n;
+    }
+    writes
 }
 
 fn parse_wait_options(rest: &mut Args) -> Result<WaitOptions, String> {
@@ -1674,7 +1688,10 @@ impl Session {
                 .subscribe(&[EventKind::StateChanged], Some(&[args.pane]))?;
         }
         if args.replace {
-            self.send_input(args.pane, &replace_keys(), false)?;
+            for keys in replace_keys() {
+                self.send_input(args.pane, &keys, false)?;
+                std::thread::sleep(REPLACE_PAUSE);
+            }
             // Let the TUI take the keys before a paste arrives.
             std::thread::sleep(SUBMIT_DELAY);
         }
@@ -3505,10 +3522,13 @@ mod tests {
         let err = parse_args(&args(&["send", "8", "--replace", "--answer", "y"])).unwrap_err();
         assert!(err.contains("--answer"), "{err}");
 
-        let keys = replace_keys();
-        assert!(keys.starts_with('\x05'));
-        assert_eq!(keys.matches('\x15').count(), 2 * REPLACE_MAX_LINES);
-        assert_eq!(keys.chars().count(), 1 + 2 * REPLACE_MAX_LINES);
+        let writes = replace_keys();
+        assert_eq!(writes[0], "\x05");
+        assert!(writes[1..].iter().all(|keys| {
+            !keys.is_empty() && keys.len() <= REPLACE_CHUNK && keys.chars().all(|c| c == '\x15')
+        }));
+        let clears: usize = writes[1..].iter().map(String::len).sum();
+        assert_eq!(clears, 2 * REPLACE_MAX_LINES);
     }
 
     // Review finding: text that starts with `--` or equals a flag name could

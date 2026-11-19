@@ -1460,6 +1460,57 @@ impl App {
         }
     }
 
+    /// agent-orchestration D10: a board pane `board` of `board_window` just
+    /// opened for the orchestrator split pane at `orchestrator`: move the
+    /// workers an earlier board handed back to it onto this one, stowed and
+    /// collapsed, as many as the board has room for. Their surfaces move
+    /// with them, across tabs and windows when the board is elsewhere; the
+    /// one the user has focused stays over the orchestrator.
+    pub(super) fn restow_handed_back_floats(
+        &mut self,
+        board_window: WindowId,
+        board: PaneId,
+        (window_id, pane): (WindowId, PaneId),
+    ) {
+        let Some(board_state) = self.windows.get(&board_window) else {
+            return;
+        };
+        if board_state.is_float(board) {
+            return;
+        }
+        let room = crate::floating::MAX_STOWED_PER_BOARD
+            .saturating_sub(board_state.floats.count_on(FloatAnchor::Pane(board)));
+        let Some(state) = self.windows.get_mut(&window_id) else {
+            return;
+        };
+        let ids = state
+            .floats
+            .restow_candidates(pane, state.focused_pane, room);
+        if ids.is_empty() {
+            return;
+        }
+        for id in &ids {
+            state.floats.restow(*id, board);
+        }
+        // A board in another tab or window: the restowed floats are the only
+        // ones on `board` in this tab, so the anchor names exactly them.
+        self.transfer_floats(window_id, board_window, FloatAnchor::Pane(board));
+        if let Some(geometry) = self.window_float_geometry(board_window)
+            && let Some(board_state) = self.windows.get_mut(&board_window)
+        {
+            for id in &ids {
+                board_state
+                    .floats
+                    .settle(*id, &geometry.layout(), geometry.metrics);
+            }
+        }
+        if window_id != board_window {
+            self.relayout_and_resize_window(window_id);
+            self.request_window_redraw(window_id);
+        }
+        self.after_float_change(board_window);
+    }
+
     /// The stowed workers of `window_id` that outlive `closing` (or the
     /// whole tab, when `None`) closing within `scope`: those going back to an
     /// orchestrator that is not closing too (agent-orchestration D10).

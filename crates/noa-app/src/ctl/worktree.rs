@@ -84,7 +84,8 @@ fn picks_model(agent: Agent, args: &[String]) -> bool {
         Agent::Codex => {
             let mut iter = args.iter();
             while let Some(arg) = iter.next() {
-                if arg == "-m" || long(arg, "--model") {
+                // `-m X`, or `-mX` joined.
+                if arg.starts_with("-m") || long(arg, "--model") {
                     return true;
                 }
                 if arg == "-c" || arg == "--config" {
@@ -411,6 +412,9 @@ mod tests {
             &["claude", "--model=opus"],
             &["claude", "--effort", "low"],
             &["codex", "-m", "x"],
+            // Review finding: the joined short form was let through, and
+            // Codex then exits on the model given twice.
+            &["codex", "-mgpt-6.2-sol"],
             &["codex", "--model", "x"],
             &["codex", "-c", "model_reasoning_effort=low"],
             &["codex", "-cmodel_reasoning_effort=low"],

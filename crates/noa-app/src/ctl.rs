@@ -2563,12 +2563,12 @@ mod tests {
         }
     }
 
+    /// What `run_spawn_steps` returns: the result and the steps taken.
+    type StepsRun = (Result<(u64, Option<&'static str>), Failure>, Vec<String>);
+
     /// `spawn_steps` with each step logged; `worktree` fails when
     /// `worktree_fails`, `spawn` fails with `spawn_error`.
-    fn run_spawn_steps(
-        worktree_fails: bool,
-        spawn_error: Option<ClientError>,
-    ) -> (Result<(u64, Option<&'static str>), Failure>, Vec<String>) {
+    fn run_spawn_steps(worktree_fails: bool, spawn_error: Option<ClientError>) -> StepsRun {
         let mut log: Vec<String> = Vec::new();
         let result = spawn_steps(
             &mut log,

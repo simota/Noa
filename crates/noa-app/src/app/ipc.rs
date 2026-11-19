@@ -598,8 +598,9 @@ impl App {
         params: noa_ipc::SpawnParams,
     ) -> Result<(WindowId, PaneId), noa_ipc::IpcError> {
         let config = params.config.unwrap_or_default();
+        let spawn_cwd = usable_cwd(config.cwd.clone());
         let spawn = ScriptSpawn {
-            cwd: usable_cwd(config.cwd.clone()),
+            cwd: spawn_cwd.clone(),
             argv: config.command.clone(),
             env: config.env.clone().into_iter().collect(),
             wait_after_command: config.wait_after_command,
@@ -640,14 +641,14 @@ impl App {
                     .ok_or(noa_ipc::IpcError::PaneClosed)?;
                 let float = self
                     .ipc_float_with(window_id, anchor, stowed, spawn, float_start(params.focus))
-                    .ok_or_else(|| {
+                    .map_err(|reason| {
                         noa_ipc::IpcError::Internal(if full {
                             format!(
                                 "this pane already holds the most floats it can ({})",
                                 crate::floating::MAX_PER_ANCHOR
                             )
                         } else {
-                            "the float could not open".to_string()
+                            format!("the float could not open: {reason}")
                         })
                     })?;
                 (window_id, float)
@@ -693,6 +694,7 @@ impl App {
             surface.orchestration = Some(Orchestration {
                 parent: params.parent_pane_id.map(|id| id.0),
                 label: params.label,
+                cwd: spawn_cwd,
             });
         }
         self.write_initial_input(window_id, pane_id, config.initial_input);
@@ -733,7 +735,7 @@ impl App {
         stowed: bool,
         spawn: ScriptSpawn,
         start: FloatStart,
-    ) -> Option<PaneId> {
+    ) -> Result<PaneId, String> {
         self.script_spawn = Some(spawn);
         let stow = match (stowed, start) {
             (false, _) => super::floating::Stow::No,
@@ -759,7 +761,7 @@ impl App {
             FloatStart::OpenFocused => self.focus_pane(window_id, float),
         }
         self.after_float_change(window_id);
-        Some(float)
+        Ok(float)
     }
 
     /// A new tab with `spawn`'s overrides, in `window`'s group (the focused
@@ -1121,6 +1123,10 @@ fn surface_facts(surface: &Surface) -> PanelSurfaceFacts {
             .orchestration
             .as_ref()
             .and_then(|meta| meta.label.clone()),
+        cwd: surface
+            .orchestration
+            .as_ref()
+            .and_then(|meta| meta.cwd.clone()),
     }
 }
 

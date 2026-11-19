@@ -739,8 +739,7 @@ impl App {
             self.show_float_limit_toast(window_id);
             return;
         }
-        if let Some(id) = self.create_float(window_id, anchor_pane, Stow::No, float_ipc_exposure())
-        {
+        if let Ok(id) = self.create_float(window_id, anchor_pane, Stow::No, float_ipc_exposure()) {
             self.focus_pane(window_id, id);
             self.after_float_change(window_id);
         }
@@ -748,8 +747,9 @@ impl App {
 
     /// A new float over `anchor_pane`, its pty spawned with `ipc` exposure
     /// (and any pending script overrides), stowed on a board when `stow`
-    /// says so (agent-orchestration D10); `None` when the window holds no
-    /// floats, the anchor is full, or the spawn failed. Focus and repaint are
+    /// says so (agent-orchestration D10); why not when the window holds no
+    /// floats, the anchor is full, or the spawn failed (the pty's error, so
+    /// an IPC spawn can say a command was not found). Focus and repaint are
     /// the caller's.
     pub(super) fn create_float(
         &mut self,
@@ -757,23 +757,29 @@ impl App {
         anchor_pane: PaneId,
         stow: Stow,
         ipc: IpcExposure,
-    ) -> Option<PaneId> {
+    ) -> Result<PaneId, String> {
         // REQ-021: the disposable windows hold no floats.
         if self.is_scratch_terminal_window(window_id) || self.is_quick_terminal_window(window_id) {
-            return None;
+            return Err("this window holds no floats".to_string());
         }
-        let geometry = self.window_float_geometry(window_id)?;
-        let gpu = self.gpu.as_ref()?;
-        let state = self.windows.get(&window_id)?;
+        let not_ready = || "the window is not ready".to_string();
+        let geometry = self
+            .window_float_geometry(window_id)
+            .ok_or_else(not_ready)?;
+        let gpu = self.gpu.as_ref().ok_or_else(not_ready)?;
+        let state = self.windows.get(&window_id).ok_or_else(not_ready)?;
         if state.floats.count_on(FloatAnchor::Pane(anchor_pane)) >= MAX_PER_ANCHOR {
-            return None;
+            return Err(format!("the pane already holds {MAX_PER_ANCHOR} floats"));
         }
-        let rect = state.floats.default_content_rect(
-            anchor_pane,
-            stow != Stow::No,
-            &geometry.layout(),
-            geometry.metrics,
-        )?;
+        let rect = state
+            .floats
+            .default_content_rect(
+                anchor_pane,
+                stow != Stow::No,
+                &geometry.layout(),
+                geometry.metrics,
+            )
+            .ok_or_else(|| "there is no room for a float".to_string())?;
         let grid_size = grid_size_for_pane_rect(
             rect,
             gpu.fonts.get(self.window_font_px(window_id)).metrics(),
@@ -795,13 +801,13 @@ impl App {
             Ok(surface) => surface,
             Err(err) => {
                 log::warn!("failed to spawn floating pane pty: {err}");
-                return None;
+                return Err(format!("{err:#}"));
             }
         };
         let Some(state) = self.windows.get_mut(&window_id) else {
             let mut surface = surface;
             surface.shutdown();
-            return None;
+            return Err("the window closed".to_string());
         };
         let layout = geometry.layout();
         let created = match stow {
@@ -819,10 +825,10 @@ impl App {
         if created.is_err() {
             let mut surface = surface;
             surface.shutdown();
-            return None;
+            return Err(format!("the pane already holds {MAX_PER_ANCHOR} floats"));
         }
         state.surfaces.insert(id, surface);
-        Some(id)
+        Ok(id)
     }
 
     /// Relayout, repaint and persist after a float's geometry, state or

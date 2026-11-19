@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- One level of nested orchestration: a worker's own workers are stowed on its
+  orchestrator's board, drawn under it as a tree with a count on its row;
+  `Space` folds a subtree. Closing a worker closes the workers it started, and
+  a worker's worker cannot spawn.
 - `Noa +ctl wait --tail N` (and `send --wait --tail N`) adds each pane's last
   output lines to its result; `board --open` reports an open board as
   `existing`; a worker's spawn directory appears as its `cwd`.

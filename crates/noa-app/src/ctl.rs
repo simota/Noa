@@ -1584,61 +1584,76 @@ impl Session {
         }
         let env = worker_env(args.env, !args.command.is_empty(), std::env::vars());
         let mut cwd = spawn_cwd(args.cwd, std::env::current_dir().ok());
+        // `--worktree` refuses `--cwd`; the worktree replaces this one.
         let command = match args.tier {
             Some(tier) => worktree::apply_tier(&args.command, tier).map_err(Failure::error)?,
             None => args.command,
         };
-        // Workers are always floats (D9), stowed on the board when there is
-        // one (D10), so the board opens first. A worker's go over the worker
-        // itself, and the server stows them on the board it is on (D13).
-        let host = if opens_board {
-            let panels = self.client.list_panels().map_err(Failure::from);
-            let (host, warning) =
-                board_before_spawn(|| panels, own, || self.open_board(own, Placement::Auto));
-            if let Some(warning) = warning {
-                eprintln!("Noa +ctl: {warning}");
-            }
-            host
-        } else {
-            own
-        };
-        // The worktree comes last, once nothing else can refuse the spawn.
-        let made = if args.worktree {
-            let label = args.label.as_deref().expect("--worktree has a label");
-            let here = std::env::current_dir().map_err(|err| {
-                Failure::error(format!("cannot read the current directory: {err}"))
-            })?;
-            let made = worktree::add(&here, label).map_err(Failure::error)?;
-            cwd = made.path.to_str().map(str::to_string);
-            Some((here, made))
-        } else {
-            None
-        };
-        let params = SpawnParams {
-            config: Some(SpawnConfig {
-                command: (!command.is_empty()).then_some(command),
-                cwd,
-                env,
-                initial_input: args.input,
-                wait_after_command: args.wait_after,
-            }),
-            label: args.label,
-            parent_pane_id: Some(WireId(own)),
-            focus: Some(args.focus),
-        };
-        let pane = match self
-            .client
-            .spawn_split(host, SplitPlacement::Float, &params)
-        {
-            Ok(pane) => pane,
-            Err(err) => {
-                if let Some((here, made)) = &made {
+        let worktree_label = args.worktree.then(|| args.label.clone()).flatten();
+        let label = args.label;
+        let (input, wait_after, focus) = (args.input, args.wait_after, args.focus);
+        let (pane, made) = spawn_steps(
+            self,
+            |_| match &worktree_label {
+                Some(label) => {
+                    let here = std::env::current_dir().map_err(|err| {
+                        Failure::error(format!("cannot read the current directory: {err}"))
+                    })?;
+                    let made = worktree::add(&here, label).map_err(Failure::error)?;
+                    Ok(Some((here, made)))
+                }
+                None => Ok(None),
+            },
+            // Workers are always floats (D9), stowed on the board when there
+            // is one (D10), so the board opens first. A worker's go over the
+            // worker itself, and the server stows them on the board it is on
+            // (D13).
+            |session| {
+                if !opens_board {
+                    return own;
+                }
+                let panels = session.client.list_panels().map_err(Failure::from);
+                let (host, warning) =
+                    board_before_spawn(|| panels, own, || session.open_board(own, Placement::Auto));
+                if let Some(warning) = warning {
+                    eprintln!("Noa +ctl: {warning}");
+                }
+                host
+            },
+            |session, host, made| {
+                if let Some((_, made)) = made {
+                    cwd = made.path.to_str().map(str::to_string);
+                }
+                let params = SpawnParams {
+                    config: Some(SpawnConfig {
+                        command: (!command.is_empty()).then_some(command),
+                        cwd,
+                        env,
+                        initial_input: input,
+                        wait_after_command: wait_after,
+                    }),
+                    label,
+                    parent_pane_id: Some(WireId(own)),
+                    focus: Some(focus),
+                };
+                session
+                    .client
+                    .spawn_split(host, SplitPlacement::Float, &params)
+            },
+            |_, (here, made), refused| {
+                if refused {
                     // Fresh and untouched, so nothing is lost.
                     worktree::remove(here, &made.path, &made.branch);
+                } else {
+                    eprintln!(
+                        "Noa +ctl: kept the worktree {} (branch {}): the spawn's answer was \
+                         lost, so the worker may be running there",
+                        made.path.display(),
+                        made.branch
+                    );
                 }
-                return Err(err.into());
-            }
-        };
+            },
+        )?;
         let mut line = serde_json::json!({ "paneId": WireId(pane) });
         if let Some((_, made)) = &made {
             line["worktree"] = made.path.to_string_lossy().into_owned().into();
@@ -1783,6 +1798,35 @@ impl Session {
             WAIT_RELIST_INTERVAL,
             &mut print_json,
         )
+    }
+}
+
+/// A spawn's steps once its checks passed: make the `--worktree` worktree
+/// (`worktree`, `None` without one), find the host pane (`host`, which opens
+/// the board), start the worker there (`spawn`), and undo the worktree when
+/// the start failed (`undo`).
+///
+/// The worktree comes first: git refusing it (the branch or directory
+/// exists) then starts nothing, not even the board. `undo` is told whether
+/// the server refused the spawn (an RPC error), the one case where no
+/// worker can be running in the worktree; after a lost answer it may be.
+pub(crate) fn spawn_steps<S, W>(
+    session: &mut S,
+    worktree: impl FnOnce(&mut S) -> Result<Option<W>, Failure>,
+    host: impl FnOnce(&mut S) -> u64,
+    spawn: impl FnOnce(&mut S, u64, Option<&W>) -> Result<u64, ClientError>,
+    undo: impl FnOnce(&mut S, &W, bool),
+) -> Result<(u64, Option<W>), Failure> {
+    let made = worktree(session)?;
+    let host = host(session);
+    match spawn(session, host, made.as_ref()) {
+        Ok(pane) => Ok((pane, made)),
+        Err(err) => {
+            if let Some(made) = &made {
+                undo(session, made, matches!(err, ClientError::Rpc { .. }));
+            }
+            Err(err.into())
+        }
     }
 }
 
@@ -2517,6 +2561,80 @@ mod tests {
         ] {
             assert!(parse_args(&args(bad)).is_err(), "{bad:?} must be rejected");
         }
+    }
+
+    /// `spawn_steps` with each step logged; `worktree` fails when
+    /// `worktree_fails`, `spawn` fails with `spawn_error`.
+    fn run_spawn_steps(
+        worktree_fails: bool,
+        spawn_error: Option<ClientError>,
+    ) -> (Result<(u64, Option<&'static str>), Failure>, Vec<String>) {
+        let mut log: Vec<String> = Vec::new();
+        let result = spawn_steps(
+            &mut log,
+            |log| {
+                log.push("worktree".to_string());
+                if worktree_fails {
+                    Err(Failure::error(
+                        "fatal: a branch named 'orch/x' already exists",
+                    ))
+                } else {
+                    Ok(Some("wt"))
+                }
+            },
+            |log| {
+                log.push("board".to_string());
+                7
+            },
+            |log, host, made| {
+                log.push(format!("spawn on {host} in {made:?}"));
+                match spawn_error {
+                    Some(err) => Err(err),
+                    None => Ok(9),
+                }
+            },
+            |log, made, refused| log.push(format!("undo {made} refused={refused}")),
+        );
+        (result, log)
+    }
+
+    // Review finding: the board opened before the worktree was made, so a
+    // `spawn --worktree` that git refused still left a board pane behind.
+    #[test]
+    fn a_failed_worktree_opens_no_board() {
+        let (result, log) = run_spawn_steps(true, None);
+        assert!(result.is_err());
+        assert_eq!(log, ["worktree"]);
+
+        let (result, log) = run_spawn_steps(false, None);
+        assert_eq!(result.ok(), Some((9, Some("wt"))));
+        assert_eq!(log, ["worktree", "board", "spawn on 7 in Some(\"wt\")"]);
+    }
+
+    // Review finding: any spawn error removed the worktree, also a lost
+    // answer to a spawn the server had carried out, taking the running
+    // worker's directory away.
+    #[test]
+    fn only_a_refused_spawn_removes_its_worktree() {
+        let (result, log) = run_spawn_steps(
+            false,
+            Some(ClientError::Rpc {
+                code: -32602,
+                message: "nesting goes one level deep".to_string(),
+            }),
+        );
+        assert!(result.is_err());
+        assert_eq!(log.last().map(String::as_str), Some("undo wt refused=true"));
+
+        let (result, log) = run_spawn_steps(
+            false,
+            Some(ClientError::Transport("connection reset".to_string())),
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            log.last().map(String::as_str),
+            Some("undo wt refused=false")
+        );
     }
 
     #[test]

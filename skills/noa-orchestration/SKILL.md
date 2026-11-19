@@ -181,9 +181,11 @@ current turn started before the wait (for example, the next time round a loop).
 A wait ends only on a report, a notification, an exit, or with `--stall
 SECS` a screen that stopped changing. If a worker never reports the end of its
 turn, a wait without `--stall` runs until its timeout, so do not use an
-unbounded wait. Add `--stall 300` (or what fits the task) to long waits: an
-agent's working spinner keeps its screen changing, so `stalled` means it went
-back to its prompt without reporting, or sits on a prompt it does not report.
+unbounded wait. Add `--stall 300` (or what fits the task) to long waits. Claude Code's
+working spinner shows elapsed seconds, so its screen keeps changing while it
+works, and `stalled` there means it went back to its prompt without reporting
+or sits on a prompt it does not report. For Codex and Antigravity CLI this is
+not checked: a quiet screen may also be an agent still working. In every case
 `read` the pane and continue as in step 2 below. When a wait times out:
 
 1. `noa ls --children`: note `agent.state` and `agent.seq` for each pending pane.

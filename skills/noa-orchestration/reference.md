@@ -141,10 +141,12 @@ pane that stopped:
 - `--stall SECS` also ends the wait for a pane whose visible screen has not
   changed for SECS seconds while it is open:
   `{"paneId":"7","reason":"stalled","quietSecs":120,"seq":5,"state":"running"}`.
-  The quiet time counts from the start of the wait or the last change. An
-  agent's working spinner changes the screen, so a working agent does not
-  stall; one that went back to its prompt without reporting, or sits on a
-  prompt it does not report, does. A report or exit seen in the same pass
+  The quiet time counts from the start of the wait or the last change. Claude
+  Code's working spinner shows elapsed seconds, so a working Claude Code does
+  not stall; one that went back to its prompt without reporting, or sits on a
+  prompt it does not report, does. Whether Codex and Antigravity CLI keep
+  their screens changing while they work is not checked, so `read` a stalled
+  pane before treating it as stopped. A report or exit seen in the same pass
   wins. `--for stalled` without `--stall` is an argument error.
 - A report counts only when its `seq` is newer than the baseline. The baseline is
   the `seq` at the start of the wait, or the one `--after` gives: `--after SEQ`

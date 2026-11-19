@@ -1497,18 +1497,33 @@ impl App {
                 .filter(|id| !heirs.contains(id))
                 .collect();
             // Workers stowed on a board elsewhere end with their orchestrator
-            // split pane (a float closing ends none: `close_float`).
-            let orphans = if state.is_float(pane_id) {
+            // split pane.
+            let orphans: Vec<(WindowId, PaneId)> = if state.is_float(pane_id) {
                 Vec::new()
             } else {
                 self.stowed_orphans(window_id, closing)
             };
-            let orphans = orphans
+            let orphans: Vec<(WindowId, PaneId)> = orphans
                 .into_iter()
-                .filter(|(tab, id)| !(*tab == window_id && floats.contains(id)));
+                .filter(|(tab, id)| !(*tab == window_id && floats.contains(id)))
+                .collect();
+            // agent-orchestration D13: every float closing here takes its
+            // own workers along (`discard_float`) — a closing float pane's
+            // too.
+            let closing_floats: Vec<(WindowId, PaneId)> = state
+                .is_float(pane_id)
+                .then_some((window_id, pane_id))
+                .into_iter()
+                .chain(floats.iter().map(|id| (window_id, *id)))
+                .chain(orphans.iter().copied())
+                .collect();
+            let workers = self.float_workers_closing_with(&closing_floats);
             running_program_count(floats.iter().filter_map(|id| state.surfaces.get(id)))
                 + running_program_count(
-                    orphans.filter_map(|(tab, id)| self.windows.get(&tab)?.surfaces.get(&id)),
+                    orphans
+                        .into_iter()
+                        .chain(workers)
+                        .filter_map(|(tab, id)| self.windows.get(&tab)?.surfaces.get(&id)),
                 )
         })
     }
@@ -1538,10 +1553,14 @@ impl App {
                 .filter(|id| !heirs.contains(id))
                 .collect();
             // Workers stowed on a board outside the closing scope end with
-            // their orchestrator here; inside it they are counted where they are.
-            let orphans = self
-                .stowed_orphans(window_id, None)
+            // their orchestrator here, and their own workers with them
+            // (agent-orchestration D13); inside it they are counted where
+            // they are.
+            let orphans = self.stowed_orphans(window_id, None);
+            let workers = self.float_workers_closing_with(&orphans);
+            let orphans = orphans
                 .into_iter()
+                .chain(workers)
                 .filter(|(tab, _)| match scope {
                     floating::CloseScope::Tab => *tab != window_id,
                     floating::CloseScope::Window => self
@@ -1579,34 +1598,70 @@ impl App {
                     .surfaces
                     .iter()
                     .filter(|(pane, surface)| {
-                        let stowed = state
-                            .floats
-                            .get(**pane)
-                            .is_some_and(|float| float.is_stowed());
-                        if !stowed {
-                            return state.group == group;
-                        }
-                        let orchestrator = surface
-                            .orchestration
-                            .as_ref()
-                            .and_then(|orchestration| orchestration.parent)
-                            .and_then(|parent| self.resolve_ipc_pane(parent).ok())
-                            .and_then(|(tab, _)| group_of(tab));
-                        let heir = heirs
-                            .iter()
-                            .find(|(id, _)| id == *pane)
-                            .and_then(|(_, (dest, _))| group_of(*dest));
-                        floating::stowed_ends_with_group(
-                            &state.group,
-                            orchestrator.as_ref(),
-                            heir.as_ref(),
-                            &group,
-                        )
+                        self.surface_ends_with_group(state, **pane, surface, group, &heirs)
                     })
                     .filter(|(_, surface)| surface_has_running_program(surface))
                     .count()
             })
             .sum()
+    }
+
+    /// Whether `surface` (pane `pane` of `state`) ends when window group
+    /// `group` closes, `heirs` being the stowed workers that go back to an
+    /// orchestrator instead: a pane of the group does, and a stowed worker
+    /// by [`floating::stowed_ends_with_group`] — or, a worker's worker, when
+    /// the worker it works for ends (agent-orchestration D13).
+    fn surface_ends_with_group(
+        &self,
+        state: &WindowState,
+        pane: PaneId,
+        surface: &Surface,
+        group: WindowGroupId,
+        heirs: &[(PaneId, (WindowId, PaneId))],
+    ) -> bool {
+        let group_of = |tab: WindowId| self.windows.get(&tab).map(|state| state.group);
+        let stowed = state
+            .floats
+            .get(pane)
+            .is_some_and(|float| float.is_stowed());
+        if !stowed {
+            return state.group == group;
+        }
+        let parent = surface
+            .orchestration
+            .as_ref()
+            .and_then(|orchestration| orchestration.parent)
+            .and_then(|parent| self.resolve_ipc_pane(parent).ok());
+        let orchestrator = parent.and_then(|(tab, _)| group_of(tab));
+        let heir = heirs
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .and_then(|(_, (dest, _))| group_of(*dest));
+        if floating::stowed_ends_with_group(
+            &state.group,
+            orchestrator.as_ref(),
+            heir.as_ref(),
+            &group,
+        ) {
+            return true;
+        }
+        parent.is_some_and(|(tab, parent)| {
+            self.windows.get(&tab).is_some_and(|parent_state| {
+                parent_state.is_float(parent)
+                    && parent_state
+                        .surfaces
+                        .get(&parent)
+                        .is_some_and(|parent_surface| {
+                            self.surface_ends_with_group(
+                                parent_state,
+                                parent,
+                                parent_surface,
+                                group,
+                                heirs,
+                            )
+                        })
+            })
+        })
     }
 
     fn app_running_program_count(&self) -> usize {

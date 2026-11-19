@@ -618,6 +618,9 @@ pub(crate) struct PanelSurfaceFacts {
     pub(crate) exit: Option<crate::events::ChildExit>,
     pub(crate) parent_pane_id: Option<u64>,
     pub(crate) label: Option<String>,
+    /// The directory the pane was spawned in, for `Panel.cwd` until shell
+    /// integration (OSC 7) reports one.
+    pub(crate) cwd: Option<String>,
 }
 
 /// `SessionCard` -> wire `Panel` (spec §L2 "ID モデル & Panel メタデータ":
@@ -636,7 +639,11 @@ pub(crate) fn card_to_panel(
         window_id: window_id.into(),
         pane_id: ipc_id.into(),
         name: card.display_name().to_string(),
-        cwd: card.cwd.clone(),
+        cwd: if card.cwd.is_empty() {
+            facts.cwd.unwrap_or_default()
+        } else {
+            card.cwd.clone()
+        },
         branch: card.branch.clone(),
         process: card.process.clone(),
         busy: card.busy,
@@ -672,7 +679,7 @@ pub(crate) fn bare_panel(
         window_id: window_id.into(),
         pane_id: ipc_id.into(),
         name: String::new(),
-        cwd: String::new(),
+        cwd: facts.cwd.unwrap_or_default(),
         branch: None,
         process: None,
         busy: false,
@@ -806,6 +813,7 @@ mod tests {
             }),
             parent_pane_id: Some(3),
             label: Some("review".to_string()),
+            cwd: None,
         };
 
         let panel = card_to_panel(8, 1, 2, &card, true, facts);
@@ -838,6 +846,30 @@ mod tests {
 
         assert!(panel.agent.is_none());
         assert!(panel.exit.is_none() && panel.parent_pane_id.is_none() && panel.label.is_none());
+    }
+
+    // Review finding: every spawned worker listed `"cwd":""`, since only
+    // shell integration fills the card's cwd; the spawn's directory stands
+    // in until it does.
+    #[test]
+    fn a_spawned_panes_cwd_stands_in_until_its_shell_reports_one() {
+        let facts = PanelSurfaceFacts {
+            cwd: Some("/repo-wt/fix".to_string()),
+            ..PanelSurfaceFacts::default()
+        };
+        let mut card = agent_card(Some("claude"));
+        card.cwd = String::new();
+        assert_eq!(
+            card_to_panel(8, 1, 2, &card, true, facts.clone()).cwd,
+            "/repo-wt/fix"
+        );
+        assert_eq!(bare_panel(8, 1, 2, true, facts.clone()).cwd, "/repo-wt/fix");
+
+        card.cwd = "/repo-wt/fix/crates".to_string();
+        assert_eq!(
+            card_to_panel(8, 1, 2, &card, true, facts).cwd,
+            "/repo-wt/fix/crates"
+        );
     }
 
     #[test]

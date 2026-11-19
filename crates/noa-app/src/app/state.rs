@@ -1157,6 +1157,9 @@ pub(super) enum Review {
 pub(super) struct Orchestration {
     pub(super) parent: Option<u64>,
     pub(super) label: Option<String>,
+    /// The directory the pane was spawned in, when the request named a
+    /// usable one: `Panel.cwd` until shell integration reports its own.
+    pub(super) cwd: Option<String>,
 }
 
 /// Terminal-owned state for one split leaf. `split_tree` leaves store the

@@ -14,6 +14,20 @@ pub const MIN_COLS: u32 = 20;
 pub const MIN_ROWS: u32 = 3;
 /// REQ-019: floats one anchor may hold.
 pub const MAX_PER_ANCHOR: usize = 8;
+/// agent-orchestration D12: floats a board may hold when the new one is a
+/// stowed worker. Stowed workers draw no title strip (D10), so the strip
+/// stacking REQ-019 bounds does not apply; the board's list scrolls.
+pub const MAX_STOWED_PER_BOARD: usize = 20;
+
+/// The most floats an anchor may hold before one more is added, by whether
+/// the new one is stowed on a board.
+pub const fn max_on_anchor(stowed: bool) -> usize {
+    if stowed {
+        MAX_STOWED_PER_BOARD
+    } else {
+        MAX_PER_ANCHOR
+    }
+}
 /// REQ-001: a new float never exceeds this fraction of its anchor per side.
 const INITIAL_MAX_FRACTION: f64 = 0.9;
 /// Cells each title-strip button occupies.
@@ -425,7 +439,7 @@ impl FloatSet {
         metrics: FloatMetrics,
     ) -> Result<(), AnchorFull> {
         let anchor = FloatAnchor::Pane(pane);
-        if self.count_on(anchor) >= MAX_PER_ANCHOR {
+        if self.count_on(anchor) >= max_on_anchor(stowed) {
             return Err(AnchorFull);
         }
         let rect = layout

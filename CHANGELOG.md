@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `Noa +ctl` explains failures: a sandbox that blocks loopback, a server that is
+  not listening, a pane whose process exited, a `wait` on a pane id that is not
+  listed, and a float that could not open (with the pty error).
+- `Noa +ctl spawn` refuses a `--cwd` that is not a directory and a command not
+  found on the worker's `PATH`, and `--max-children` above 20.
+- A board holds up to 20 workers (was 8); its list scrolls, numbers take two
+  digits, and two digits typed in a row pick worker 10–20. Other floats keep
+  the limit of 8 per pane.
+- `Noa +ctl board` survives a failed listing, keeps worker numbers stable, shows
+  failed commands and long-waiting workers first, flags workers with no output
+  for 2 minutes, and asks before `q` closes it with workers open.
+
+### Added
+
+- One level of nested orchestration: a worker's own workers are stowed on its
+  orchestrator's board, drawn under it as a tree with a count on its row;
+  `Space` folds a subtree. Closing a worker closes the workers it started, and
+  a worker's worker cannot spawn.
+- `Noa +ctl wait --tail N` (and `send --wait --tail N`) adds each pane's last
+  output lines to its result; `board --open` reports an open board as
+  `existing`; a worker's spawn directory appears as its `cwd`.
+
 ## [0.9.2] - 2026-11-18
 
 Auto-approve and agent state reporting that match current Claude Code, Codex

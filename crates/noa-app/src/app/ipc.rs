@@ -534,6 +534,7 @@ impl App {
     ) -> Result<u64, noa_ipc::IpcError> {
         if let Some(parent) = params.parent_pane_id {
             self.resolve_ipc_pane(parent.0)?;
+            check_nesting(parent.0, |pane| self.ipc_orchestrator_of(pane))?;
         }
         let previous_focus = self
             .focused
@@ -598,8 +599,9 @@ impl App {
         params: noa_ipc::SpawnParams,
     ) -> Result<(WindowId, PaneId), noa_ipc::IpcError> {
         let config = params.config.unwrap_or_default();
+        let spawn_cwd = usable_cwd(config.cwd.clone());
         let spawn = ScriptSpawn {
-            cwd: usable_cwd(config.cwd.clone()),
+            cwd: spawn_cwd.clone(),
             argv: config.command.clone(),
             env: config.env.clone().into_iter().collect(),
             wait_after_command: config.wait_after_command,
@@ -625,29 +627,47 @@ impl App {
                             state.floats.get(target).map(|float| float.anchor),
                             state.split_focus(),
                         );
-                        let full = state
-                            .floats
-                            .count_on(crate::floating::FloatAnchor::Pane(anchor))
-                            >= crate::floating::MAX_PER_ANCHOR;
                         let anchor_label = state
                             .surfaces
                             .get(&anchor)
                             .and_then(|surface| surface.orchestration.as_ref())
                             .and_then(|orchestration| orchestration.label.as_deref());
-                        let stowed = stows_on(anchor_label, params.parent_pane_id.map(|id| id.0));
-                        (anchor, full, stowed)
+                        // D13: a worker's worker goes on the board its own
+                        // orchestrator (the worker) is stowed on.
+                        let parent_stowed_under = params
+                            .parent_pane_id
+                            .and_then(|parent| self.resolve_ipc_pane(parent.0).ok())
+                            .filter(|(window, pane)| {
+                                *window == window_id
+                                    && state.floats.get(*pane).is_some_and(|float| {
+                                        float.is_stowed()
+                                            && float.anchor
+                                                == crate::floating::FloatAnchor::Pane(anchor)
+                                    })
+                            })
+                            .and_then(|(_, pane)| state.surfaces.get(&pane))
+                            .and_then(|surface| surface.orchestration.as_ref())
+                            .and_then(|orchestration| orchestration.parent);
+                        let stowed = stows_on(
+                            anchor_label,
+                            params.parent_pane_id.map(|id| id.0),
+                            parent_stowed_under,
+                        );
+                        let most = crate::floating::max_on_anchor(stowed);
+                        let full = state
+                            .floats
+                            .count_on(crate::floating::FloatAnchor::Pane(anchor))
+                            >= most;
+                        (anchor, full.then_some(most), stowed)
                     })
                     .ok_or(noa_ipc::IpcError::PaneClosed)?;
                 let float = self
                     .ipc_float_with(window_id, anchor, stowed, spawn, float_start(params.focus))
-                    .ok_or_else(|| {
-                        noa_ipc::IpcError::Internal(if full {
-                            format!(
-                                "this pane already holds the most floats it can ({})",
-                                crate::floating::MAX_PER_ANCHOR
-                            )
+                    .map_err(|reason| {
+                        noa_ipc::IpcError::Internal(if let Some(most) = full {
+                            format!("this pane already holds the most floats it can ({most})")
                         } else {
-                            "the float could not open".to_string()
+                            format!("the float could not open: {reason}")
                         })
                     })?;
                 (window_id, float)
@@ -693,6 +713,7 @@ impl App {
             surface.orchestration = Some(Orchestration {
                 parent: params.parent_pane_id.map(|id| id.0),
                 label: params.label,
+                cwd: spawn_cwd,
             });
         }
         self.write_initial_input(window_id, pane_id, config.initial_input);
@@ -733,7 +754,7 @@ impl App {
         stowed: bool,
         spawn: ScriptSpawn,
         start: FloatStart,
-    ) -> Option<PaneId> {
+    ) -> Result<PaneId, String> {
         self.script_spawn = Some(spawn);
         let stow = match (stowed, start) {
             (false, _) => super::floating::Stow::No,
@@ -759,7 +780,7 @@ impl App {
             FloatStart::OpenFocused => self.focus_pane(window_id, float),
         }
         self.after_float_change(window_id);
-        Some(float)
+        Ok(float)
     }
 
     /// A new tab with `spawn`'s overrides, in `window`'s group (the focused
@@ -936,6 +957,19 @@ impl App {
         }
     }
 
+    /// The orchestrator IPC pane `pane` was spawned for, when it is a
+    /// worker (`parentPaneId`).
+    fn ipc_orchestrator_of(&self, pane: u64) -> Option<u64> {
+        let (window_id, pane_id) = self.resolve_ipc_pane(pane).ok()?;
+        self.windows
+            .get(&window_id)?
+            .surfaces
+            .get(&pane_id)?
+            .orchestration
+            .as_ref()?
+            .parent
+    }
+
     fn mint_ipc_pane(&self, window_id: WindowId, pane_id: PaneId) -> u64 {
         let id = SessionCardId::new(
             crate::session_store::SessionWindowId(u64::from(window_id)),
@@ -1052,11 +1086,38 @@ fn float_host(
 /// agent-orchestration D10: a worker float is stowed when it goes over its
 /// orchestrator's board — the pane `+ctl board --open` labelled
 /// `board:<orchestrator's IPC id>`. Collapsed, it then shows no strip; the
-/// board's row stands in for it.
-fn stows_on(anchor_label: Option<&str>, parent: Option<u64>) -> bool {
-    match (anchor_label, parent) {
-        (Some(label), Some(parent)) => label == format!("board:{parent}"),
-        _ => false,
+/// board's row stands in for it. D13: a worker's worker is stowed too, on
+/// the board its orchestrator is stowed on: `parent_stowed_under` is the
+/// parent's own orchestrator when the parent is a worker stowed on this
+/// anchor.
+fn stows_on(
+    anchor_label: Option<&str>,
+    parent: Option<u64>,
+    parent_stowed_under: Option<u64>,
+) -> bool {
+    let (Some(label), Some(parent)) = (anchor_label, parent) else {
+        return false;
+    };
+    [Some(parent), parent_stowed_under]
+        .into_iter()
+        .flatten()
+        .any(|orchestrator| label == format!("board:{orchestrator}"))
+}
+
+/// agent-orchestration D13: nesting goes one level deep. A spawn's `parent`
+/// may be a worker (its workers go on its own orchestrator's board), but not
+/// a worker's worker. `orchestrator_of` names a pane's own orchestrator.
+fn check_nesting(
+    parent: u64,
+    orchestrator_of: impl Fn(u64) -> Option<u64>,
+) -> Result<(), noa_ipc::IpcError> {
+    match orchestrator_of(parent) {
+        Some(grandparent) if orchestrator_of(grandparent).is_some() => {
+            Err(noa_ipc::IpcError::InvalidParams(format!(
+                "nesting goes one level deep: pane {parent} is already a worker's worker"
+            )))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -1121,6 +1182,10 @@ fn surface_facts(surface: &Surface) -> PanelSurfaceFacts {
             .orchestration
             .as_ref()
             .and_then(|meta| meta.label.clone()),
+        cwd: surface
+            .orchestration
+            .as_ref()
+            .and_then(|meta| meta.cwd.clone()),
     }
 }
 
@@ -1587,12 +1652,43 @@ mod auto_split_tests {
 
     #[test]
     fn a_worker_is_stowed_only_over_its_own_orchestrators_board() {
-        assert!(stows_on(Some("board:7"), Some(7)));
+        assert!(stows_on(Some("board:7"), Some(7), None));
         // Another orchestrator's board, an ordinary label, no label, no parent.
-        assert!(!stows_on(Some("board:8"), Some(7)));
-        assert!(!stows_on(Some("fix-tests"), Some(7)));
-        assert!(!stows_on(None, Some(7)));
-        assert!(!stows_on(Some("board:7"), None));
+        assert!(!stows_on(Some("board:8"), Some(7), None));
+        assert!(!stows_on(Some("fix-tests"), Some(7), None));
+        assert!(!stows_on(None, Some(7), None));
+        assert!(!stows_on(Some("board:7"), None, None));
+    }
+
+    // agent-orchestration D13: a worker (12) of a worker stowed on root 7's
+    // board goes on that board too, stowed, instead of floating over it
+    // with a strip.
+    #[test]
+    fn a_workers_worker_is_stowed_on_the_board_its_orchestrator_is_on() {
+        assert!(stows_on(Some("board:7"), Some(12), Some(7)));
+        // Its parent stowed on another root's board, or not stowed at all.
+        assert!(!stows_on(Some("board:7"), Some(12), Some(8)));
+        assert!(!stows_on(Some("board:7"), Some(12), None));
+        assert!(!stows_on(None, Some(12), Some(7)));
+    }
+
+    // agent-orchestration D13: a root (1) may have workers (2), and they
+    // workers of their own (3), but those may not spawn.
+    #[test]
+    fn nesting_goes_one_level_deep() {
+        let orchestrator_of = |pane: u64| match pane {
+            2 => Some(1),
+            3 => Some(2),
+            _ => None,
+        };
+        assert!(check_nesting(1, orchestrator_of).is_ok());
+        assert!(check_nesting(2, orchestrator_of).is_ok());
+        let error = check_nesting(3, orchestrator_of).unwrap_err();
+        assert_eq!(error.code(), noa_ipc::ErrorCode::InvalidParams);
+        assert_eq!(
+            error.to_string(),
+            "nesting goes one level deep: pane 3 is already a worker's worker"
+        );
     }
 
     // Review finding: `focus: true` (and `+ctl spawn --float --focus`) left

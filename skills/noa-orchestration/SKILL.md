@@ -16,10 +16,14 @@ output shapes and exit codes: [reference.md](reference.md).
 
 1. Check that you can: `"$NOA_BIN" +ctl self`.
    - `NOA_BIN` unset: you are not in a Noa pane. Stop; this skill does not apply.
-   - Exit status 3: the control server is off or lacks a scope. The stderr line
-     names the config line to add (`server-enable = true`,
-     `server-scopes = read,control,input`). Ask the human to add it; do not edit
-     their Noa config yourself.
+   - Exit status 3 with "sandbox likely blocks loopback" (`Operation not
+     permitted`): your own shell's sandbox refuses the connection, not Noa. Run
+     every `+ctl` call outside the sandbox, and tell the human once, so they can
+     allow it instead of approving each call.
+   - Exit status 3 otherwise: read the stderr line. "not listening" means Noa's
+     server is off; a scope or disabled-server message names the config line to
+     add (`server-enable = true`, `server-scopes = read,control,input`). Ask the
+     human to add it; do not edit their Noa config yourself.
    - "does not report surface ids", or "this pane … is not among the panes": you
      reached a different Noa than the one you run in. Usually an older Noa or a
      second instance still holds the control port, so this one could not
@@ -29,7 +33,8 @@ output shapes and exit codes: [reference.md](reference.md).
    (see "Matching the worker to the task"), which directory or worktree (see
    "Giving a worker its own worktree"), and a task that stands on its own. A
    worker sees nothing of your conversation.
-3. Keep the number of workers small (8 at most: the board holds 8 floats) and
+3. Keep the number of workers small (20 at most: the board holds 20; a
+   worker keeps its slot until you `close` it, also after it exits) and
    tell the human what you are about to start, with each worker's tier, and
    that the board will show it.
 4. Leave the board to the human. It opens by itself on your first spawn; if they
@@ -81,12 +86,18 @@ Create the worktree yourself, so you know its path and branch, then point
 know where it put the work.
 
 ```sh
+noa() { "$NOA_BIN" +ctl "$@"; }
 top=$(git rev-parse --show-toplevel)
 wt="$top-wt/$label"                      # outside the repo, one per worker
-git worktree add -b "orch/$label" "$wt" HEAD
+git worktree add -b "orch/$label" "$wt" HEAD || exit 1
 pane=$(noa spawn --label "$label" --cwd "$wt" -- claude --model sonnet --effort medium | jq -r .paneId)
-noa send "$pane" --enter --wait --timeout 1800 "You are in a git worktree on branch orch/$label. …task… Commit your work on this branch. Do not push or switch branches."
+noa read "$pane"                         # a new directory may show a trust prompt first
+noa send "$pane" --enter --wait --timeout 540 "You are in a git worktree on branch orch/$label. …task… Commit your work on this branch. Do not push or switch branches."
 ```
+
+`spawn` refuses a `--cwd` that is not a directory and a command it cannot find
+on the worker's `PATH`, so a failed `worktree add` stops here instead of
+starting the worker somewhere else. `ls --children` shows each worker's `cwd`.
 
 - A worktree starts from a commit: your uncommitted changes are not in it.
   Commit them first, or tell the worker what is missing.
@@ -110,7 +121,8 @@ noa send "$pane" --enter --wait --timeout 1800 "You are in a git worktree on bra
 ```sh
 noa() { "$NOA_BIN" +ctl "$@"; }
 pane=$(noa spawn --label fix-tests --cwd "$PWD" -- claude | jq -r .paneId)
-noa send "$pane" --enter --wait --timeout 1800 "Fix the failing test in crates/foo. Report what you changed."
+noa read "$pane"
+noa send "$pane" --enter --wait --timeout 540 --tail 40 "Fix the failing test in crates/foo. Report what you changed."
 noa read "$pane" --scrollback --max-bytes 65536
 noa close "$pane"
 ```
@@ -121,10 +133,18 @@ noa close "$pane"
   be a trust or login prompt. Later, the input line may still hold text (a
   draft or a suggestion), and `send` types after it rather than replacing it.
   If the input line is not empty, do not send; tell the human what is there.
+  Claude Code shows a dim suggestion there (`❯ Try "…"`, or a proposed next
+  prompt) that `read` prints like typed text; it is replaced when you type, so
+  it does not count as a draft. A trust prompt on the first screen is the
+  human's to answer unless their instructions cover it.
+- `--tail N` adds the pane's last N output lines to each wait line as `tail`,
+  which often saves the `read` after a wait.
 - Give every wait a timeout that fits the task, and see "When no report comes"
   below if it runs out.
-- Your own shell tool has a time limit too. A wait it kills prints nothing, so
-  keep `--timeout` under that limit (or run the wait in the background) and
+- Your own shell tool has a time limit too (Claude Code's Bash: 2 minutes by
+  default, 10 at most). A wait it kills prints nothing, so keep `--timeout`
+  under that limit, or run the whole command with your tool's background mode
+  (not a shell `&` inside a foreground call, which the limit still kills), and
   carry on from the timeout line: it lists each pending pane's `baseline`, and
   `noa wait PANE --after PANE=SEQ --timeout …` continues without missing a
   report that arrived in between. It does not cover a notification
@@ -133,11 +153,13 @@ noa close "$pane"
 ## Several workers in parallel
 
 Run one `send --wait` per worker in the background and collect each result.
-Waiting on `--children` after separate sends has the same race as above.
+Waiting on `--children` after separate sends has the same race as above. Run
+this whole block with your tool's background mode, since it lasts as long as
+the slowest worker.
 
 ```sh
 for p in "$a" "$b"; do
-  noa send "$p" --enter --wait --timeout 1800 "$(cat "task-$p.txt")" > "result-$p.json" &
+  noa send "$p" --enter --wait --timeout 1800 --tail 40 - < "task-$p.txt" > "result-$p.json" &
 done
 wait   # the shell's wait: every worker's turn has ended
 ```
@@ -159,8 +181,9 @@ unbounded wait. When a wait times out:
 3. If the screen shows it still working, wait again with a new timeout, passing
    the timeout line's `baseline` as `--after PANE=SEQ`.
 
-Tell the human when a worker's reports are missing; its hooks may need setting
-up (see reference.md, "Which agents report turns").
+Tell the human when a worker's reports are missing: its agent may be older than
+the versions that report on their own (see reference.md, "Which agents report
+turns").
 
 ## Reading why a wait ended
 
@@ -169,13 +192,14 @@ Each line has `paneId` and `reason`:
 | reason | What to do |
 |---|---|
 | `finished` | Turn ended. `read` the pane and check the work yourself |
-| `permission` / `input` | The agent is blocked on a prompt. `read` it. Approve or answer only if the human's instructions already cover it; otherwise ask the human. `send` refuses a pane in `permission` unless you pass `--answer` |
-| `error` | The agent reported an error. `read` it, then retry, re-scope or report |
+| `permission` / `input` | The agent is blocked on a prompt, or (`input`) idle at its prompt. `read` it. Approve or answer only if the human's instructions already cover it; otherwise ask the human. `send` refuses a pane in `permission` unless you pass `--answer`. To accept the selected choice: `send P --answer --enter ""`; to type a choice's key or Esc: `send P --answer --raw 2` or `--raw $'\e'`. `read` again afterwards |
+| `error` | The agent reported an error. `read` it. A login, plan, quota or unavailable-model message goes to the human, not to a retry; otherwise retry, re-scope or report |
 | `attention` | A desktop notification arrived. Not proof the agent is blocked or done: `read` and decide |
 | `exit` | The worker's process ended (`exitCode` when known) or the pane is gone (`closed: true`). It will not report again |
 
 Exit status 2 means the timeout passed. The line `{"timeout":true,"pending":[…]}`
-lists the panes still running. Decide whether to wait longer, `read` them, or
+lists the panes still running, each with its `seq` and agent `state` under
+`baseline`; panes that had already exited are under `exited`. Decide whether to wait longer, `read` them, or
 close them.
 
 ## Rules
@@ -192,8 +216,11 @@ close them.
   list any you kept (with their branch) for the human.
 - Workers are always floats: `spawn` has no `--split` or `--tab`. Do not open
   workers in panes or tabs some other way.
-- `wait` can only see turns an agent reports. Claude Code reports through
-  Noa's hook adapter, and codex/agy through hooks that call `+ctl report`,
-  when the human has configured them. Without reports, a worker ends a wait
-  only with `exit` or `attention`. For plain commands, that is enough:
-  `spawn -- make test`, then `wait PANE --for exit`.
+- `wait` can only see turns an agent reports. Current Claude Code, Codex and
+  Antigravity CLI report on their own, with no hooks. Without reports, a worker
+  ends a wait only with `exit` or `attention`. For plain commands, that is
+  enough: `spawn -- make test`, then `wait PANE --for exit`.
+- Nesting goes one level deep. A worker may start workers of its own (tell it
+  so in its task when you want that); they appear under it on your board and
+  share its 20 slots. A worker's worker cannot start more. Closing a worker
+  also closes the workers it started.

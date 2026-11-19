@@ -10,7 +10,7 @@ use super::*;
 use crate::commands::FloatAction;
 use crate::floating::{
     FloatAnchor, FloatDragKind, FloatHit, FloatHitPart, FloatLayout, FloatMetrics, FloatState,
-    MAX_PER_ANCHOR, PlacedFloat, StripButton,
+    MAX_PER_ANCHOR, PlacedFloat, StripButton, max_on_anchor,
 };
 
 /// Whether a new float is a worker stowed on its orchestrator's board
@@ -91,6 +91,30 @@ fn orphaned_by<W: PartialEq>(
 ) -> bool {
     parent
         .is_some_and(|(tab, pane)| &tab == window && closing.is_none_or(|closing| closing == pane))
+}
+
+/// agent-orchestration D13: the worker floats among `workers` (each with
+/// its orchestrator's pane) that close because a float of `closing` does —
+/// their orchestrator, or its orchestrator in turn — leaving out those in
+/// `closing` already. A worker lives no longer than its orchestrator.
+pub(super) fn workers_closing_with<K: Copy + PartialEq>(
+    closing: &[K],
+    workers: &[(K, K)],
+) -> Vec<K> {
+    let mut gone = closing.to_vec();
+    let mut found = Vec::new();
+    loop {
+        let more: Vec<K> = workers
+            .iter()
+            .filter(|(worker, parent)| !gone.contains(worker) && gone.contains(parent))
+            .map(|(worker, _)| *worker)
+            .collect();
+        if more.is_empty() {
+            return found;
+        }
+        gone.extend(&more);
+        found.extend(more);
+    }
 }
 
 /// Whether a stowed worker's program ends when window group `closing`
@@ -739,8 +763,7 @@ impl App {
             self.show_float_limit_toast(window_id);
             return;
         }
-        if let Some(id) = self.create_float(window_id, anchor_pane, Stow::No, float_ipc_exposure())
-        {
+        if let Ok(id) = self.create_float(window_id, anchor_pane, Stow::No, float_ipc_exposure()) {
             self.focus_pane(window_id, id);
             self.after_float_change(window_id);
         }
@@ -748,8 +771,9 @@ impl App {
 
     /// A new float over `anchor_pane`, its pty spawned with `ipc` exposure
     /// (and any pending script overrides), stowed on a board when `stow`
-    /// says so (agent-orchestration D10); `None` when the window holds no
-    /// floats, the anchor is full, or the spawn failed. Focus and repaint are
+    /// says so (agent-orchestration D10); why not when the window holds no
+    /// floats, the anchor is full, or the spawn failed (the pty's error, so
+    /// an IPC spawn can say a command was not found). Focus and repaint are
     /// the caller's.
     pub(super) fn create_float(
         &mut self,
@@ -757,23 +781,30 @@ impl App {
         anchor_pane: PaneId,
         stow: Stow,
         ipc: IpcExposure,
-    ) -> Option<PaneId> {
+    ) -> Result<PaneId, String> {
         // REQ-021: the disposable windows hold no floats.
         if self.is_scratch_terminal_window(window_id) || self.is_quick_terminal_window(window_id) {
-            return None;
+            return Err("this window holds no floats".to_string());
         }
-        let geometry = self.window_float_geometry(window_id)?;
-        let gpu = self.gpu.as_ref()?;
-        let state = self.windows.get(&window_id)?;
-        if state.floats.count_on(FloatAnchor::Pane(anchor_pane)) >= MAX_PER_ANCHOR {
-            return None;
+        let not_ready = || "the window is not ready".to_string();
+        let geometry = self
+            .window_float_geometry(window_id)
+            .ok_or_else(not_ready)?;
+        let gpu = self.gpu.as_ref().ok_or_else(not_ready)?;
+        let state = self.windows.get(&window_id).ok_or_else(not_ready)?;
+        let most = max_on_anchor(stow != Stow::No);
+        if state.floats.count_on(FloatAnchor::Pane(anchor_pane)) >= most {
+            return Err(format!("the pane already holds {most} floats"));
         }
-        let rect = state.floats.default_content_rect(
-            anchor_pane,
-            stow != Stow::No,
-            &geometry.layout(),
-            geometry.metrics,
-        )?;
+        let rect = state
+            .floats
+            .default_content_rect(
+                anchor_pane,
+                stow != Stow::No,
+                &geometry.layout(),
+                geometry.metrics,
+            )
+            .ok_or_else(|| "there is no room for a float".to_string())?;
         let grid_size = grid_size_for_pane_rect(
             rect,
             gpu.fonts.get(self.window_font_px(window_id)).metrics(),
@@ -795,13 +826,13 @@ impl App {
             Ok(surface) => surface,
             Err(err) => {
                 log::warn!("failed to spawn floating pane pty: {err}");
-                return None;
+                return Err(format!("{err:#}"));
             }
         };
         let Some(state) = self.windows.get_mut(&window_id) else {
             let mut surface = surface;
             surface.shutdown();
-            return None;
+            return Err("the window closed".to_string());
         };
         let layout = geometry.layout();
         let created = match stow {
@@ -819,10 +850,10 @@ impl App {
         if created.is_err() {
             let mut surface = surface;
             surface.shutdown();
-            return None;
+            return Err(format!("the pane already holds {most} floats"));
         }
         state.surfaces.insert(id, surface);
-        Some(id)
+        Ok(id)
     }
 
     /// Relayout, repaint and persist after a float's geometry, state or
@@ -883,9 +914,38 @@ impl App {
         }
     }
 
-    /// Tear a float down: its pty, its strip, any drag on it. The caller
-    /// relayouts.
+    /// Tear a float down: first the worker floats it orchestrates, in any
+    /// tab (agent-orchestration D13: a worker's workers close with it,
+    /// whichever way it closes), then its pty, its strip, any drag on it.
+    /// The caller relayouts `window_id`.
     fn discard_float(&mut self, window_id: WindowId, id: PaneId) {
+        let workers = if self
+            .windows
+            .get(&window_id)
+            .is_some_and(|state| state.is_float(id))
+        {
+            self.float_workers_closing_with(&[(window_id, id)])
+        } else {
+            Vec::new()
+        };
+        let mut touched = Vec::new();
+        for (tab, worker) in workers {
+            self.discard_one_float(tab, worker);
+            touched.push(tab);
+        }
+        self.discard_one_float(window_id, id);
+        touched.sort_unstable();
+        touched.dedup();
+        for tab in touched {
+            if tab != window_id {
+                self.relayout_and_resize_window(tab);
+                self.request_window_redraw(tab);
+            }
+        }
+    }
+
+    /// [`Self::discard_float`] for the float alone.
+    fn discard_one_float(&mut self, window_id: WindowId, id: PaneId) {
         self.end_copy_mode_for_pane(window_id, id);
         if self
             .search_prompt
@@ -1454,6 +1514,31 @@ impl App {
             .collect()
     }
 
+    /// agent-orchestration D13: the worker floats, in any tab, that close
+    /// because the floats `closing` do (see [`workers_closing_with`]).
+    pub(super) fn float_workers_closing_with(
+        &self,
+        closing: &[(WindowId, PaneId)],
+    ) -> Vec<(WindowId, PaneId)> {
+        let workers: Vec<((WindowId, PaneId), (WindowId, PaneId))> = self
+            .windows
+            .iter()
+            .flat_map(|(tab, state)| {
+                state.floats.floats().iter().filter_map(move |float| {
+                    let parent = state
+                        .surfaces
+                        .get(&float.id)?
+                        .orchestration
+                        .as_ref()?
+                        .parent?;
+                    Some(((*tab, float.id), parent))
+                })
+            })
+            .filter_map(|(worker, parent)| Some((worker, self.resolve_ipc_pane(parent).ok()?)))
+            .collect();
+        workers_closing_with(closing, &workers)
+    }
+
     /// Close the stowed workers [`Self::stowed_orphans`] names, before
     /// their orchestrator goes. The caller relayouts `window_id`.
     pub(super) fn discard_stowed_orphans(&mut self, window_id: WindowId, closing: Option<PaneId>) {
@@ -1594,6 +1679,24 @@ impl FloatDraw {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // agent-orchestration D13: a worker's workers close with it. Root r has
+    // workers a and b, and a has c and d; e works for another root.
+    #[test]
+    fn a_workers_workers_close_with_it() {
+        let workers = [('a', 'r'), ('b', 'r'), ('c', 'a'), ('d', 'a'), ('e', 'q')];
+        assert_eq!(workers_closing_with(&['a'], &workers), vec!['c', 'd']);
+        assert!(workers_closing_with(&['b'], &workers).is_empty());
+        // The root's workers closing take theirs along, each once.
+        assert_eq!(workers_closing_with(&['a', 'b'], &workers), vec!['c', 'd']);
+        // Those closing already are not named again.
+        assert_eq!(workers_closing_with(&['a', 'c'], &workers), vec!['d']);
+        // Chains of any length close.
+        assert_eq!(
+            workers_closing_with(&['r'], &workers),
+            vec!['a', 'b', 'c', 'd']
+        );
+    }
 
     // Review finding: a window close planned each tab's heirs on its own, so
     // two boards of one orchestrator in two tabs both took the last free

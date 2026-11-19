@@ -480,6 +480,23 @@ fn tc_021_record_with_a_non_finite_or_out_of_range_field_is_invalid() {
     }
 }
 
+// agent-orchestration D12: a board holds 20 stowed workers, which draw no
+// strips, while an ordinary float there still stops at 8.
+#[test]
+fn a_board_holds_twenty_stowed_workers_but_eight_ordinary_floats() {
+    let mut set = FloatSet::default();
+    for raw in 1..=20 {
+        set.create_stowed(id(raw), A, false, &layout(&SINGLE), M)
+            .unwrap();
+    }
+    assert_eq!(
+        set.create_stowed(id(21), A, false, &layout(&SINGLE), M),
+        Err(AnchorFull)
+    );
+    assert_eq!(set.create(id(22), A, &layout(&SINGLE), M), Err(AnchorFull));
+    assert_eq!(set.count_on(FloatAnchor::Pane(A)), 20);
+}
+
 #[test]
 fn tc_022_ninth_float_and_a_switch_onto_a_full_anchor_are_refused() {
     let mut set = FloatSet::default();

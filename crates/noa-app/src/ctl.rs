@@ -27,8 +27,12 @@ pub(crate) const EXIT_TIMEOUT: i32 = 2;
 /// Exit status: the server is disabled, unreachable, or lacks a scope.
 pub(crate) const EXIT_UNAVAILABLE: i32 = 3;
 
-/// Default cap on live workers one orchestrator may hold (D4).
-const DEFAULT_MAX_CHILDREN: usize = 8;
+/// Default cap on live workers one orchestrator may hold (D4, D12): as many
+/// as its board holds.
+const DEFAULT_MAX_CHILDREN: usize = MOST_CHILDREN;
+/// The most `--max-children` accepts: every worker is a float stowed on the
+/// orchestrator's board, which holds this many (D12).
+const MOST_CHILDREN: usize = crate::floating::MAX_STOWED_PER_BOARD;
 /// Pause between a pasted prompt and the Enter that submits it, so a TUI
 /// that debounces paste sees them as two events.
 const SUBMIT_DELAY: Duration = Duration::from_millis(150);
@@ -56,21 +60,28 @@ Commands:
                                 where its row shows it until someone opens
                                 it; prints {\"paneId\":...}. With --no-board,
                                 or no board, it floats over this pane,
-                                collapsed to its title strip.
+                                collapsed to its title strip. A worker's
+                                workers go on its orchestrator's board (one
+                                level deep; no --no-board).
       --cwd DIR  --env KEY=VALUE  --label TEXT  --input TEXT
-      --no-wait-after  --focus  --no-board  --max-children N (default 8)
+      --no-wait-after  --focus  --no-board
+      --max-children N (default and most 20: the board holds 20 workers;
+                         with --no-board this pane holds 8 floats)
   send PANE [--enter] [--raw] [--wait [wait options]] [--answer] [--any-pane]
        [--] TEXT|-              Type TEXT (or stdin) into PANE; prints the
                                 report count to pass to `wait --after`. Refused
                                 while PANE waits for an approval, unless --answer.
   wait PANE...|--children [--after SEQ | --after PANE=SEQ ...] [--for LIST]
-       [--all] [--timeout SECS] Block until a worker stops. LIST is a comma list
+       [--all] [--timeout SECS] [--tail N]
+                                Block until a worker stops. LIST is a comma list
                                 of finished,permission,input,error,exit,attention
-                                (default: all of them). A timeout prints each
-                                pending pane's report count as `baseline`; pass
-                                it back as --after PANE=SEQ to wait on.
+                                (default: all of them). --tail adds each open
+                                pane's last N output lines as \"tail\". A timeout
+                                prints each pending pane's report count as
+                                `baseline`; pass it back as --after PANE=SEQ.
   read PANE [--scrollback] [--max-bytes N]
-                                Print PANE's screen (or retained output) text.
+                                Print PANE's screen (or retained output) text;
+                                a cut keeps the end and says so on stderr.
   close PANE...|--children [--any-pane]
                                 Close worker panes. One that is already gone
                                 prints \"gone\":true and is not an error.
@@ -80,7 +91,8 @@ Commands:
                                 (default: this pane's own orchestrator, else
                                 every worker). Keys are listed at the bottom.
   board --open [--split right|down | --tab]
-                                Open a board on this pane's workers next to it.
+                                Open a board on this pane's workers next to it
+                                (an open one is printed with \"existing\":true).
 
 Use `--` before a TEXT or DETAIL that starts with `--`. A pane that exits
 and stays open ends a wait whatever --for lists, as a closed pane does; one
@@ -88,6 +100,9 @@ that had exited before the wait began only ends it when no other pane is left.
 `send` and `close` only accept this pane's own workers unless --any-pane is
 given. Exit status: 0 ok, 1 error, 2 wait timed out, 3 server unavailable.
 ";
+
+/// What an argument error prints after its message, instead of [`USAGE`].
+const USAGE_HINT: &str = "run \"Noa +ctl --help\" for usage";
 
 // ---------------------------------------------------------------------------
 // Arguments
@@ -181,6 +196,8 @@ pub(crate) struct WaitOptions {
     pub(crate) reasons: Vec<Reason>,
     pub(crate) all: bool,
     pub(crate) timeout: Option<Duration>,
+    /// `--tail N`: add each still-open pane's last N output lines.
+    pub(crate) tail: Option<usize>,
 }
 
 impl Default for WaitOptions {
@@ -189,6 +206,7 @@ impl Default for WaitOptions {
             reasons: Reason::ALL.to_vec(),
             all: false,
             timeout: None,
+            tail: None,
         }
     }
 }
@@ -319,14 +337,14 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
                 _ => return Err("report takes STATE [DETAIL]".to_string()),
             };
             if !REPORT_STATES.contains(&state.as_str()) {
-                return Err(format!("unknown state: {state}"));
+                return Err(format!("unknown state: {state:?}"));
             }
             if state == "clear" && !detail.is_empty() {
                 return Err("clear takes no detail".to_string());
             }
             return Ok(Command::Report { state, detail });
         }
-        other => return Err(format!("unknown command: {other}")),
+        other => return Err(format!("unknown command: {other:?}")),
     };
     rest.finish()?;
     Ok(command)
@@ -361,7 +379,7 @@ fn parse_placement(rest: &mut Args) -> Result<Placement, String> {
         (false, None | Some("auto")) => Placement::Auto,
         (false, Some("right")) => Placement::Right,
         (false, Some("down")) => Placement::Down,
-        (false, Some(other)) => return Err(format!("unknown --split value: {other}")),
+        (false, Some(other)) => return Err(format!("unknown --split value: {other:?}")),
     })
 }
 
@@ -381,11 +399,20 @@ fn parse_spawn(rest: &mut Args) -> Result<SpawnArgs, String> {
         let (key, value) = assignment
             .split_once('=')
             .filter(|(key, _)| !key.is_empty())
-            .ok_or_else(|| format!("--env expects KEY=VALUE, got {assignment}"))?;
+            .ok_or_else(|| format!("--env expects KEY=VALUE, got {assignment:?}"))?;
         env.push((key.to_string(), value.to_string()));
     }
     let max_children = match rest.value("--max-children")? {
-        Some(value) => parse_u64("--max-children", &value)? as usize,
+        Some(value) => parse_u64("--max-children", &value)?
+            .try_into()
+            .ok()
+            .filter(|max| *max <= MOST_CHILDREN)
+            .ok_or_else(|| {
+                format!(
+                    "--max-children {value:?} is above {MOST_CHILDREN}: every worker is a \
+                     float on this pane's board, which holds {MOST_CHILDREN}"
+                )
+            })?,
         None => DEFAULT_MAX_CHILDREN,
     };
     Ok(SpawnArgs {
@@ -442,7 +469,9 @@ fn parse_wait_options(rest: &mut Args) -> Result<WaitOptions, String> {
     if let Some(list) = rest.value("--for")? {
         options.reasons = list
             .split(',')
-            .map(|name| Reason::parse(name.trim()).ok_or_else(|| format!("unknown reason: {name}")))
+            .map(|name| {
+                Reason::parse(name.trim()).ok_or_else(|| format!("unknown reason: {name:?}"))
+            })
             .collect::<Result<_, _>>()?;
     }
     if let Some(value) = rest.value("--timeout")? {
@@ -450,11 +479,14 @@ fn parse_wait_options(rest: &mut Args) -> Result<WaitOptions, String> {
             .parse()
             .ok()
             .filter(|seconds: &f64| seconds.is_finite() && *seconds >= 0.0)
-            .ok_or_else(|| format!("--timeout expects seconds, got {value}"))?;
+            .ok_or_else(|| format!("--timeout expects seconds, got {value:?}"))?;
         options.timeout = Some(
             Duration::try_from_secs_f64(seconds)
-                .map_err(|_| format!("--timeout is out of range: {value}"))?,
+                .map_err(|_| format!("--timeout is out of range: {value:?}"))?,
         );
+    }
+    if let Some(value) = rest.value("--tail")? {
+        options.tail = Some(parse_u64("--tail", &value)? as usize);
     }
     Ok(options)
 }
@@ -482,9 +514,16 @@ fn single_pane(rest: &mut Args) -> Result<u64, String> {
 }
 
 fn parse_u64(what: &str, value: &str) -> Result<u64, String> {
-    value
-        .parse()
-        .map_err(|_| format!("{what} expects a number, got {value}"))
+    value.parse().map_err(|_| {
+        // `jq -r .paneId` prints `null` for a spawn that failed, and an
+        // unset variable expands to nothing.
+        let hint = if what.contains("PANE") && matches!(value, "" | "null") {
+            " (did the previous spawn fail?)"
+        } else {
+            ""
+        };
+        format!("{what} expects a number, got {value:?}{hint}")
+    })
 }
 
 /// A small consuming argument cursor: flags and `--key VALUE` options are
@@ -550,7 +589,7 @@ impl Args {
             .iter()
             .find(|item| item.starts_with("--") && item.len() > 2)
         {
-            return Err(format!("unknown option: {unknown}"));
+            return Err(format!("unknown option: {unknown:?}"));
         }
         Ok(std::mem::take(&mut self.items))
     }
@@ -558,8 +597,8 @@ impl Args {
     fn finish(self) -> Result<(), String> {
         match self.items.first() {
             None => Ok(()),
-            Some(item) if item.starts_with("--") => Err(format!("unknown option: {item}")),
-            Some(item) => Err(format!("unexpected argument: {item}")),
+            Some(item) if item.starts_with("--") => Err(format!("unknown option: {item:?}")),
+            Some(item) => Err(format!("unexpected argument: {item:?}")),
         }
     }
 }
@@ -727,12 +766,27 @@ pub(crate) fn run(args: &[String]) -> i32 {
     let command = match parse_args(args) {
         Ok(command) => command,
         Err(message) => {
-            eprintln!("Noa +ctl: {message}\n\n{USAGE}");
+            eprintln!("Noa +ctl: {message}\n{USAGE_HINT}");
             return EXIT_ERROR;
         }
     };
     if let Command::Report { state, detail } = &command {
         return write_report(state, detail);
+    }
+    // A spawn that cannot start the worker it describes fails before it
+    // reaches Noa, which would otherwise fall back to another directory or
+    // report only that the float could not open.
+    if let Command::Spawn(spawn) = &command {
+        let cwd = std::env::current_dir().ok();
+        let env = worker_env(
+            spawn.env.clone(),
+            !spawn.command.is_empty(),
+            std::env::vars(),
+        );
+        if let Err(message) = check_spawn(spawn, cwd, env.get("PATH").map(String::as_str)) {
+            eprintln!("Noa +ctl: {message}");
+            return EXIT_ERROR;
+        }
     }
     match Session::connect().and_then(|mut session| session.execute(command)) {
         Ok(code) => code,
@@ -767,6 +821,11 @@ impl Failure {
 
 /// The server's JSON-RPC code for a request outside the client's scopes.
 const RPC_SCOPE_DENIED: i64 = -32003;
+/// The server's JSON-RPC code for a pane id it does not know.
+const RPC_UNKNOWN_PANE: i64 = -32002;
+/// The server's JSON-RPC code for a pane that takes no more requests: gone,
+/// or its process exited.
+const RPC_PANE_CLOSED: i64 = -32004;
 
 const SCOPES_HINT: &str = "enable it in Noa's config with `server-enable = true` and `server-scopes = read,control,input`";
 
@@ -777,7 +836,10 @@ impl From<ClientError> for Failure {
                 code: RPC_SCOPE_DENIED,
                 message,
             } => Failure::unavailable(format!("{message}; {SCOPES_HINT}")),
-            ClientError::Rpc { code: -32002, .. } => Failure::error("unknown pane"),
+            ClientError::Rpc {
+                code: RPC_UNKNOWN_PANE,
+                ..
+            } => Failure::error("unknown pane"),
             // The server went away mid-command (stopped or restarted).
             ClientError::Closed(_) | ClientError::Transport(_) => {
                 Failure::unavailable(format!("lost the connection to Noa: {error}"))
@@ -817,6 +879,104 @@ pub(crate) fn worker_env(
         }
     }
     env
+}
+
+/// Why connecting to `url` failed, with the likely cause when the socket
+/// error names one: a shell sandbox (Claude Code's, for one) refuses the
+/// loopback connect with `EPERM`, which looks like an unreachable Noa.
+pub(crate) fn connect_failure_message(url: &str, error: &ClientError) -> String {
+    let address = url.trim_start_matches("ws://").trim_end_matches('/');
+    // `std::io::Error`'s text, which the transport error carries.
+    let os_error = |code: i32| match error {
+        ClientError::Transport(text) => text.contains(&format!("(os error {code})")),
+        _ => false,
+    };
+    let cause = if os_error(libc::EPERM) {
+        format!(
+            "; this shell's sandbox likely blocks loopback connections to {address}: run \
+             `Noa +ctl` outside the sandbox (or allow that address)"
+        )
+    } else if os_error(libc::ECONNREFUSED) {
+        format!(
+            "; Noa's control server is not listening on {address} (is Noa running, with \
+             `server-enable = true`?)"
+        )
+    } else {
+        String::new()
+    };
+    format!("cannot reach Noa at {url}: {error}{cause}")
+}
+
+/// Check what a spawn asks for before any request: `--cwd` must be an
+/// existing directory (Noa would silently use another), and a command named
+/// without a slash must be on `path`, the `PATH` the worker gets (`None`:
+/// the worker gets Noa's own, which this process cannot see).
+pub(crate) fn check_spawn(
+    spawn: &SpawnArgs,
+    current: Option<std::path::PathBuf>,
+    path: Option<&str>,
+) -> Result<(), String> {
+    let cwd = spawn_cwd(spawn.cwd.clone(), current);
+    if let Some(given) = &spawn.cwd {
+        let resolved = cwd.as_deref().unwrap_or(given);
+        if !std::path::Path::new(resolved).is_dir() {
+            let resolved = if resolved == given {
+                String::new()
+            } else {
+                format!(" (resolved to {resolved:?})")
+            };
+            return Err(format!("--cwd {given:?}{resolved} is not a directory"));
+        }
+    }
+    if let (Some(program), Some(path)) = (spawn.command.first(), path)
+        && !program.contains('/')
+        && !on_path(program, path, cwd.as_deref().map(std::path::Path::new))
+    {
+        return Err(format!("command not found on PATH: {program:?}"));
+    }
+    Ok(())
+}
+
+/// Whether `program` names an executable file in a `PATH` entry; a relative
+/// entry (an empty one is `.`) is taken from the worker's `cwd`.
+fn on_path(program: &str, path: &str, cwd: Option<&std::path::Path>) -> bool {
+    std::env::split_paths(path).any(|dir| {
+        let dir = match cwd {
+            Some(cwd) if dir.is_relative() => cwd.join(dir),
+            _ => dir,
+        };
+        is_executable(&dir.join(program))
+    })
+}
+
+fn is_executable(file: &std::path::Path) -> bool {
+    let Ok(meta) = std::fs::metadata(file) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    meta.is_file()
+}
+
+/// Whether a spawn from this pane looks for its board first, opening it
+/// when none is (D9, D10): an orchestrator's does unless `--no-board`. A
+/// worker's does not: the server puts a worker's workers on the board the
+/// worker is stowed on (D13), so it has no board of its own, and
+/// `--no-board` is refused there.
+pub(crate) fn spawn_opens_board(is_worker: bool, board: bool) -> Result<bool, String> {
+    match (is_worker, board) {
+        (true, false) => Err(
+            "--no-board does not apply here: this pane is a worker, and a \
+             worker's workers always go on its orchestrator's board"
+                .to_string(),
+        ),
+        (true, true) => Ok(false),
+        (false, board) => Ok(board),
+    }
 }
 
 /// Before a spawn, the pane its worker goes over (D9, D10): `own`'s board,
@@ -915,8 +1075,8 @@ pub(crate) fn not_own_message(surface_id: Option<&str>, port: u16, lacks_ids: bo
         Some(surface_id) => format!(
             "this pane (NOA_SURFACE_ID={surface_id}) is not among the panes of the Noa \
              answering on port {port}. If another Noa holds that port, this one could \
-             not listen. {} Floating panes and the quick and scratch terminals cannot \
-             orchestrate.",
+             not listen. {} Floating panes that are not workers, and the quick and \
+             scratch terminals, cannot orchestrate.",
             port_owner_hint(port)
         ),
     }
@@ -984,7 +1144,7 @@ impl Session {
         )
         .map_err(|err| match err {
             ClientError::Rpc { .. } => Failure::unavailable(err.to_string()),
-            other => Failure::unavailable(format!("cannot reach Noa at {url}: {other}")),
+            other => Failure::unavailable(connect_failure_message(&url, &other)),
         })?;
         let mut session = Self {
             client,
@@ -1138,7 +1298,8 @@ impl Session {
                 if panes.is_empty() {
                     return Err(Failure::error("no panes to wait for"));
                 }
-                return self.wait(&panes, &args.after, &args.options);
+                let named = matches!(args.panes, PaneSet::Ids(_));
+                return self.wait(&panes, named, &args.after, &args.options);
             }
             Command::Read {
                 pane,
@@ -1151,10 +1312,19 @@ impl Session {
                     TextSource::Screen
                 };
                 let result = self.client.get_text(pane, source, max_bytes)?;
+                // The screen's rows below the output are blank, not output.
+                let text = if scrollback {
+                    result.text.as_str()
+                } else {
+                    trim_trailing_blank_lines(&result.text)
+                };
                 let mut stdout = std::io::stdout().lock();
-                let _ = stdout.write_all(result.text.as_bytes());
-                if !result.text.ends_with('\n') {
+                let _ = stdout.write_all(text.as_bytes());
+                if !text.ends_with('\n') {
                     let _ = stdout.write_all(b"\n");
+                }
+                if result.truncated {
+                    eprintln!("{}", truncated_message(result.text.len()));
                 }
             }
             Command::Close { panes, any_pane } => {
@@ -1187,6 +1357,10 @@ impl Session {
             return board::run(&mut self.client, of, self.own);
         };
         let own = self.require_own()?;
+        if let Some(board) = board_pane(&self.client.list_panels()?, own) {
+            print_json(&serde_json::json!({ "paneId": WireId(board), "existing": true }));
+            return Ok(EXIT_OK);
+        }
         let pane = self.open_board(own, placement)?;
         print_json(&serde_json::json!({ "paneId": WireId(pane) }));
         Ok(EXIT_OK)
@@ -1253,11 +1427,21 @@ impl Session {
 
     fn spawn(&mut self, args: SpawnArgs) -> Result<i32, Failure> {
         let own = self.require_own()?;
-        let live = self.children()?.len();
-        if live >= args.max_children {
-            return Err(Failure::error(format!(
-                "this pane already has {live} workers (limit {}; raise it with --max-children)",
-                args.max_children
+        let panels = self.client.list_panels()?;
+        let is_worker = panels
+            .iter()
+            .any(|panel| panel.pane_id.0 == own && panel.parent_pane_id.is_some());
+        let opens_board = spawn_opens_board(is_worker, args.board).map_err(Failure::error)?;
+        let children: Vec<Panel> = panels
+            .into_iter()
+            .filter(|panel| panel.parent_pane_id == Some(WireId(own)))
+            .collect();
+        if children.len() >= args.max_children {
+            let exited = children.iter().filter(|panel| panel.exit.is_some()).count();
+            return Err(Failure::error(max_children_message(
+                children.len(),
+                exited,
+                args.max_children,
             )));
         }
         let env = worker_env(args.env, !args.command.is_empty(), std::env::vars());
@@ -1275,8 +1459,9 @@ impl Session {
             focus: Some(args.focus),
         };
         // Workers are always floats (D9), stowed on the board when there is
-        // one (D10), so the board opens first.
-        let host = if args.board {
+        // one (D10), so the board opens first. A worker's go over the worker
+        // itself, and the server stows them on the board it is on (D13).
+        let host = if opens_board {
             let panels = self.client.list_panels().map_err(Failure::from);
             let (host, warning) =
                 board_before_spawn(|| panels, own, || self.open_board(own, Placement::Auto));
@@ -1313,11 +1498,14 @@ impl Session {
             .find(|panel| panel.pane_id.0 == args.pane)
             .ok_or_else(|| Failure::error("unknown pane"))?;
         let seq = before.agent.as_ref().map_or(0, |agent| agent.seq);
-        // Enter approves some prompts with their default choice (D7), so an
-        // approval is only answered on purpose.
-        if !args.answer && awaits_approval(&before) {
+        // Enter approves some prompts with their default choice, and picks
+        // the first choice of a question (D7), so either is only answered on
+        // purpose.
+        if !args.answer
+            && let Some(awaited) = awaits_answer(&before)
+        {
             return Err(Failure::error(format!(
-                "pane {} is waiting for an approval; nothing was sent. Read it, and pass \
+                "pane {} is waiting for {awaited}; nothing was sent. Read it, and pass \
                  --answer to answer it from here.",
                 args.pane
             )));
@@ -1328,7 +1516,7 @@ impl Session {
                 .subscribe(&[EventKind::StateChanged], Some(&[args.pane]))?;
         }
         if !text.is_empty() {
-            self.client.send_text(args.pane, &text, !args.raw)?;
+            self.send_input(args.pane, &text, !args.raw)?;
         }
         if args.enter {
             if !text.is_empty() {
@@ -1337,16 +1525,19 @@ impl Session {
                     .client
                     .list_panels()?
                     .iter()
-                    .any(|panel| panel.pane_id.0 == args.pane && awaits_approval(panel));
-                if !args.answer && asked {
+                    .find(|panel| panel.pane_id.0 == args.pane)
+                    .and_then(awaits_answer);
+                if !args.answer
+                    && let Some(awaited) = asked
+                {
                     return Err(Failure::error(format!(
-                        "pane {} began waiting for an approval after the text was typed; \
+                        "pane {} began waiting for {awaited} after the text was typed; \
                          Enter was not sent, so the text may still be in its input line.",
                         args.pane
                     )));
                 }
             }
-            self.client.send_text(args.pane, "\r", false)?;
+            self.send_input(args.pane, "\r", false)?;
         }
         match args.wait {
             Some(options) => {
@@ -1359,16 +1550,43 @@ impl Session {
         }
     }
 
+    /// `noa.sendText`, with a refusal of a pane whose process has exited
+    /// (held open, so still listed) said as such rather than "pane closed".
+    fn send_input(&mut self, pane: u64, text: &str, bracketed: bool) -> Result<(), Failure> {
+        match self.client.send_text(pane, text, bracketed) {
+            Err(ClientError::Rpc {
+                code: RPC_PANE_CLOSED,
+                message,
+            }) => {
+                let panels = self.client.list_panels()?;
+                let panel = panels.iter().find(|panel| panel.pane_id.0 == pane);
+                Err(exited_input_failure(pane, panel).unwrap_or_else(|| {
+                    Failure::from(ClientError::Rpc {
+                        code: RPC_PANE_CLOSED,
+                        message,
+                    })
+                }))
+            }
+            result => Ok(result?),
+        }
+    }
+
     fn wait(
         &mut self,
         panes: &[u64],
+        named: bool,
         after: &[(u64, u64)],
         options: &WaitOptions,
     ) -> Result<i32, Failure> {
         self.client
             .subscribe(&[EventKind::StateChanged], Some(panes))?;
         let after = wait_baselines(panes, after).map_err(Failure::error)?;
-        self.wait_subscribed(panes, WaitStart::Listed { after }, options)
+        let start = if named {
+            WaitStart::Named { after }
+        } else {
+            WaitStart::Listed { after }
+        };
+        self.wait_subscribed(panes, start, options)
     }
 
     fn wait_subscribed(
@@ -1394,6 +1612,10 @@ pub(crate) enum WaitStart {
     /// The first listing inside the wait; `after` overrides the report
     /// count of the panes it names.
     Listed { after: HashMap<u64, u64> },
+    /// As `Listed`, for panes named by id: one missing from that first
+    /// listing never existed (or is long gone), so the wait fails instead of
+    /// reporting it as just closed.
+    Named { after: HashMap<u64, u64> },
     /// Panels observed before input was sent (`send --wait`): a change that
     /// lands between sending and the first listing still ends the wait.
     Before {
@@ -1406,6 +1628,8 @@ pub(crate) enum WaitStart {
 pub(crate) trait WaitSource {
     fn list(&mut self) -> Result<Vec<Panel>, Failure>;
     fn next(&mut self, timeout: Duration) -> Result<Option<Notification>, Failure>;
+    /// `pane`'s retained output (`--tail`); `None` once the pane is gone.
+    fn scrollback(&mut self, pane: u64) -> Result<Option<String>, Failure>;
 }
 
 impl WaitSource for Client {
@@ -1415,6 +1639,18 @@ impl WaitSource for Client {
 
     fn next(&mut self, timeout: Duration) -> Result<Option<Notification>, Failure> {
         Ok(self.next_notification(timeout)?)
+    }
+
+    fn scrollback(&mut self, pane: u64) -> Result<Option<String>, Failure> {
+        match self.get_text(pane, TextSource::Scrollback, None) {
+            Ok(result) => Ok(Some(result.text)),
+            // It closed between its outcome and this request.
+            Err(ClientError::Rpc {
+                code: RPC_UNKNOWN_PANE | RPC_PANE_CLOSED,
+                ..
+            }) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
     }
 }
 
@@ -1451,8 +1687,25 @@ pub(crate) fn wait_loop(
         .and_then(|timeout| Instant::now().checked_add(timeout));
     let mut latest = watched(source.list()?, panes);
     let mut listed_at = Instant::now();
+    if let WaitStart::Named { .. } = start {
+        let missing: Vec<String> = panes
+            .iter()
+            .filter(|pane| !latest.contains_key(pane))
+            .map(u64::to_string)
+            .collect();
+        match missing.as_slice() {
+            [] => {}
+            [pane] => return Err(Failure::error(format!("pane {pane} is not listed"))),
+            panes => {
+                return Err(Failure::error(format!(
+                    "panes {} are not listed",
+                    panes.join(", ")
+                )));
+            }
+        }
+    }
     let mut watches: Vec<Watch> = match start {
-        WaitStart::Listed { after } => panes
+        WaitStart::Listed { after } | WaitStart::Named { after } => panes
             .iter()
             .map(|pane| Watch::new(*pane, latest.get(pane), after.get(pane).copied()))
             .collect(),
@@ -1477,7 +1730,14 @@ pub(crate) fn wait_loop(
             }
             let panel = latest.get(&watch.pane);
             if let Some(outcome) = evaluate(watch, panel, &options.reasons) {
-                emit(&outcome_json(watch.pane, &outcome, panel));
+                let mut line = outcome_json(watch.pane, &outcome, panel);
+                if let Some(lines) = options.tail
+                    && !outcome.closed
+                    && let Some(text) = source.scrollback(watch.pane)?
+                {
+                    line["tail"] = tail_lines(&text, lines).into();
+                }
+                emit(&line);
                 done.push(watch.pane);
             }
         }
@@ -1496,23 +1756,7 @@ pub(crate) fn wait_loop(
             Some(deadline) => {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    let pending: Vec<_> = watches
-                        .iter()
-                        .filter(|watch| !done.contains(&watch.pane))
-                        .collect();
-                    // The baselines let a later `wait --after` carry on
-                    // without missing a report that lands in between.
-                    emit(&serde_json::json!({
-                        "timeout": true,
-                        "pending": pending.iter().map(|watch| WireId(watch.pane)).collect::<Vec<_>>(),
-                        "baseline": pending
-                            .iter()
-                            .map(|watch| serde_json::json!({
-                                "paneId": WireId(watch.pane),
-                                "seq": watch.baseline_seq,
-                            }))
-                            .collect::<Vec<_>>(),
-                    }));
+                    emit(&timeout_json(&watches, &done, &latest));
                     return Ok(EXIT_TIMEOUT);
                 }
                 remaining.min(WAIT_RELIST_INTERVAL)
@@ -1541,6 +1785,52 @@ pub(crate) fn wait_loop(
     }
 }
 
+/// The line a timed-out wait prints. A pane that had exited before the wait
+/// (and so was never waited on) is under `exited`, not `pending`. The
+/// baselines, with each pane's agent state, let a later `wait --after`
+/// carry on without missing a report that lands in between.
+fn timeout_json(
+    watches: &[Watch],
+    done: &[u64],
+    latest: &HashMap<u64, Panel>,
+) -> serde_json::Value {
+    let left: Vec<&Watch> = watches
+        .iter()
+        .filter(|watch| !done.contains(&watch.pane))
+        .collect();
+    let ids = |exited: bool| {
+        left.iter()
+            .filter(|watch| watch.exited_before == exited)
+            .map(|watch| WireId(watch.pane))
+            .collect::<Vec<_>>()
+    };
+    let mut value = serde_json::json!({
+        "timeout": true,
+        "pending": ids(false),
+        "baseline": left
+            .iter()
+            .map(|watch| {
+                let mut entry = serde_json::json!({
+                    "paneId": WireId(watch.pane),
+                    "seq": watch.baseline_seq,
+                });
+                if let Some(state) = latest
+                    .get(&watch.pane)
+                    .and_then(|panel| panel.agent.as_ref()?.state.clone())
+                {
+                    entry["state"] = state.into();
+                }
+                entry
+            })
+            .collect::<Vec<_>>(),
+    });
+    let exited = ids(true);
+    if !exited.is_empty() {
+        value["exited"] = serde_json::json!(exited);
+    }
+    value
+}
+
 /// How `send --wait` starts its wait, given the panel it saw before typing
 /// and that panel's report count.
 pub(crate) fn send_wait_start(before: Panel, seq: u64) -> WaitStart {
@@ -1566,12 +1856,83 @@ fn not_worker_message(pane: u64) -> String {
     format!("pane {pane} is not a worker of this pane (pass --any-pane to target it)")
 }
 
-/// Whether `panel`'s agent reported that it waits for an approval.
-pub(crate) fn awaits_approval(panel: &Panel) -> bool {
-    panel
-        .agent
-        .as_ref()
-        .is_some_and(|agent| agent.state.as_deref() == Some("permission"))
+/// What `panel`'s agent reported it waits for, if it is an approval
+/// (`permission`), as the noun phrase a refusal names. `input` is not
+/// refused: it also stands for an agent idle at its prompt (the hook
+/// adapter's `idle_prompt`), where a follow-up send is the normal case.
+pub(crate) fn awaits_answer(panel: &Panel) -> Option<&'static str> {
+    match panel.agent.as_ref()?.state.as_deref()? {
+        "permission" => Some("an approval"),
+        _ => None,
+    }
+}
+
+/// The refusal of input to `pane` when its listed `panel` shows that its
+/// process has exited; `None` when it has not (the pane really is gone).
+pub(crate) fn exited_input_failure(pane: u64, panel: Option<&Panel>) -> Option<Failure> {
+    let exit = panel?.exit.as_ref()?;
+    let code = exit
+        .code
+        .map_or_else(String::new, |code| format!(" (code {code})"));
+    Some(Failure::error(format!(
+        "pane {pane}'s process has exited{code}; it takes no input — read it, then close it"
+    )))
+}
+
+/// Why a spawn is refused at the `--max-children` limit. Exited workers
+/// held open keep their slot until closed; the board's own cap means the
+/// limit can never be raised past [`MOST_CHILDREN`].
+pub(crate) fn max_children_message(live: usize, exited: usize, max: usize) -> String {
+    let exited = if exited > 0 {
+        format!(", {exited} of them exited")
+    } else {
+        String::new()
+    };
+    let raise = if max < MOST_CHILDREN {
+        format!(", or raise --max-children (at most {MOST_CHILDREN})")
+    } else {
+        String::new()
+    };
+    format!(
+        "this pane already has {live} workers{exited} (limit {max}); close finished ones \
+         after reading them{raise}"
+    )
+}
+
+/// `text` without the blank (empty or whitespace-only) lines at its end.
+pub(crate) fn trim_trailing_blank_lines(text: &str) -> &str {
+    let mut end = 0;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        offset += line.len();
+        if !line.trim().is_empty() {
+            end = offset;
+        }
+    }
+    &text[..end]
+}
+
+/// The last `lines` lines of `text`, trailing blank lines left out first.
+pub(crate) fn tail_lines(text: &str, lines: usize) -> String {
+    let mut all: Vec<&str> = text.lines().collect();
+    // Noa's own banner under an exited command, and the blank rows around
+    // it, are not the worker's output.
+    while all
+        .last()
+        .is_some_and(|line| line.trim().is_empty() || line.starts_with(HOLD_BANNER))
+    {
+        all.pop();
+    }
+    all[all.len().saturating_sub(lines)..].join("\n")
+}
+
+/// How Noa's `wait-after-command` banner under an exited command starts
+/// (`app/child_exited.rs`).
+pub(crate) const HOLD_BANNER: &str = "[Process exited.";
+
+/// The stderr line for a `getText` the server cut: it keeps the end.
+pub(crate) fn truncated_message(kept: usize) -> String {
+    format!("Noa +ctl: output truncated; kept the last {kept} bytes")
 }
 
 /// The panes `close` acts on, each once, with whether it is still listed
@@ -1802,6 +2163,7 @@ mod tests {
                     reasons: vec![Reason::Finished, Reason::Error],
                     all: false,
                     timeout: Some(Duration::from_secs(30)),
+                    tail: None,
                 }),
             })
         );
@@ -2030,6 +2392,21 @@ mod tests {
         assert!(warning.is_some_and(|w| w.contains("could not open the board")));
     }
 
+    // agent-orchestration D13: a worker spawning has no board of its own to
+    // find or open (the server stows its workers on the board it is on),
+    // and cannot opt out of that board.
+    #[test]
+    fn a_workers_spawn_opens_no_board_and_refuses_no_board() {
+        assert_eq!(spawn_opens_board(false, true), Ok(true));
+        assert_eq!(spawn_opens_board(false, false), Ok(false));
+        assert_eq!(spawn_opens_board(true, true), Ok(false));
+        let error = spawn_opens_board(true, false).unwrap_err();
+        assert!(
+            error.contains("a worker's workers always go on its orchestrator's board"),
+            "{error}"
+        );
+    }
+
     // D10: the worker is stowed on the board, which opens first when needed.
     #[test]
     fn a_worker_goes_over_its_orchestrators_board() {
@@ -2223,6 +2600,8 @@ mod tests {
         lists: Vec<Vec<Panel>>,
         notifications: std::collections::VecDeque<Notification>,
         list_calls: usize,
+        /// Each pane's scrollback; a pane missing here is gone.
+        texts: HashMap<u64, String>,
     }
 
     impl WaitSource for FakeSource {
@@ -2237,6 +2616,10 @@ mod tests {
                 Some(notification) => Ok(Some(notification)),
                 None => Err(Failure::error("fake source exhausted")),
             }
+        }
+
+        fn scrollback(&mut self, pane: u64) -> Result<Option<String>, Failure> {
+            Ok(self.texts.get(&pane).cloned())
         }
     }
 
@@ -2261,6 +2644,7 @@ mod tests {
                 })
                 .collect(),
             list_calls: 0,
+            texts: HashMap::new(),
         };
         let mut lines = Vec::new();
 
@@ -2297,6 +2681,7 @@ mod tests {
                 })
                 .collect(),
             list_calls: 0,
+            texts: HashMap::new(),
         };
         let mut lines = Vec::new();
 
@@ -2332,6 +2717,7 @@ mod tests {
                 })
                 .collect(),
             list_calls: 0,
+            texts: HashMap::new(),
         };
         let mut lines = Vec::new();
 
@@ -2361,6 +2747,7 @@ mod tests {
             lists: vec![vec![after]],
             notifications: Default::default(),
             list_calls: 0,
+            texts: HashMap::new(),
         };
         let mut lines = Vec::new();
 
@@ -2413,6 +2800,7 @@ mod tests {
             }]
             .into(),
             list_calls: 0,
+            texts: HashMap::new(),
         };
         let mut lines = Vec::new();
 
@@ -2443,6 +2831,7 @@ mod tests {
             lists: vec![vec![held]],
             notifications: Default::default(),
             list_calls: 0,
+            texts: HashMap::new(),
         };
         let mut lines = Vec::new();
 
@@ -2472,6 +2861,7 @@ mod tests {
             lists: vec![vec![finished]],
             notifications: Default::default(),
             list_calls: 0,
+            texts: HashMap::new(),
         };
         let mut lines = Vec::new();
 
@@ -2507,6 +2897,7 @@ mod tests {
             lists: vec![vec![with_pane(panel(2, Some("finished"), false), 8)]],
             notifications: Default::default(),
             list_calls: 0,
+            texts: HashMap::new(),
         };
         let code = wait_loop(
             &mut source,
@@ -2531,6 +2922,7 @@ mod tests {
             lists: vec![vec![running(8), running(9)]],
             notifications: Default::default(),
             list_calls: 0,
+            texts: HashMap::new(),
         };
         let mut lines = Vec::new();
         let code = wait_loop(
@@ -2553,7 +2945,10 @@ mod tests {
             vec![serde_json::json!({
                 "timeout": true,
                 "pending": ["8", "9"],
-                "baseline": [{"paneId": "8", "seq": 2}, {"paneId": "9", "seq": 3}],
+                "baseline": [
+                    {"paneId": "8", "seq": 2, "state": "running"},
+                    {"paneId": "9", "seq": 3, "state": "running"},
+                ],
             })]
         );
 
@@ -2565,6 +2960,7 @@ mod tests {
             ]],
             notifications: Default::default(),
             list_calls: 0,
+            texts: HashMap::new(),
         };
         let mut lines = Vec::new();
         let code = wait_loop(
@@ -2643,6 +3039,7 @@ mod tests {
             lists: vec![vec![with_pane(panel(3, None, true), 8)]],
             notifications: Default::default(),
             list_calls: 0,
+            texts: HashMap::new(),
         };
         let code = wait_loop(
             &mut source,
@@ -2683,12 +3080,18 @@ mod tests {
         );
     }
 
+    // Only `permission` is refused: `input` also means an agent idle at its
+    // prompt (`scripts/noa-agent-hook.py` maps `idle_prompt` to it).
     #[test]
-    fn only_a_reported_permission_state_awaits_approval() {
-        assert!(awaits_approval(&panel(2, Some("permission"), false)));
-        assert!(!awaits_approval(&panel(2, Some("input"), false)));
-        assert!(!awaits_approval(&panel(2, Some("running"), true)));
-        assert!(!awaits_approval(&panel(0, None, false)));
+    fn only_a_reported_permission_awaits_an_answer() {
+        assert_eq!(
+            awaits_answer(&panel(2, Some("permission"), false)),
+            Some("an approval")
+        );
+        assert_eq!(awaits_answer(&panel(2, Some("input"), false)), None);
+        assert_eq!(awaits_answer(&panel(2, Some("running"), true)), None);
+        assert_eq!(awaits_answer(&panel(2, Some("finished"), false)), None);
+        assert_eq!(awaits_answer(&panel(0, None, false)), None);
         assert!(matches!(
             parse_args(&args(&["send", "8", "--answer", "--enter", "y"])).unwrap(),
             Command::Send(SendArgs { answer: true, .. })
@@ -2759,6 +3162,410 @@ mod tests {
             Some("/abs")
         );
         assert_eq!(spawn_cwd(None, here).as_deref(), Some("/repo"));
+    }
+
+    fn transport(code: i32) -> ClientError {
+        ClientError::Transport(std::io::Error::from_raw_os_error(code).to_string())
+    }
+
+    // Review finding (F4/skill F2): a shell sandbox refuses the loopback
+    // connect with EPERM, and the message read like a disabled server.
+    #[test]
+    fn a_refused_connect_names_the_likely_cause() {
+        let url = "ws://127.0.0.1:61771/";
+        let sandboxed = connect_failure_message(url, &transport(libc::EPERM));
+        assert!(sandboxed.contains("sandbox"), "{sandboxed}");
+        assert!(sandboxed.contains("127.0.0.1:61771"), "{sandboxed}");
+        assert!(sandboxed.contains("outside the sandbox"), "{sandboxed}");
+
+        let refused = connect_failure_message(url, &transport(libc::ECONNREFUSED));
+        assert!(refused.contains("not listening"), "{refused}");
+        assert!(refused.contains("server-enable"), "{refused}");
+        assert!(!refused.contains("sandbox"), "{refused}");
+
+        let other = connect_failure_message(url, &transport(libc::ETIMEDOUT));
+        assert!(!other.contains("sandbox") && !other.contains("not listening"));
+    }
+
+    fn spawn_args(cwd: Option<&str>, command: &[&str]) -> SpawnArgs {
+        SpawnArgs {
+            board: true,
+            cwd: cwd.map(str::to_string),
+            env: Vec::new(),
+            label: None,
+            input: None,
+            wait_after: true,
+            focus: false,
+            max_children: DEFAULT_MAX_CHILDREN,
+            command: args(command),
+        }
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("noa-ctl-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // Review finding (F1): a `--cwd` that did not exist ran the worker in
+    // `$HOME` with exit 0.
+    #[test]
+    fn a_cwd_that_is_not_a_directory_is_refused_before_spawning() {
+        let here = temp_dir("cwd");
+        std::fs::create_dir(here.join("sub")).unwrap();
+        std::fs::write(here.join("file"), "").unwrap();
+
+        assert_eq!(
+            check_spawn(&spawn_args(Some("sub"), &[]), Some(here.clone()), None),
+            Ok(())
+        );
+        assert_eq!(
+            check_spawn(&spawn_args(None, &[]), Some(here.clone()), None),
+            Ok(())
+        );
+        let missing = check_spawn(
+            &spawn_args(Some("/nonexistent/dir"), &[]),
+            Some(here.clone()),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(missing, r#"--cwd "/nonexistent/dir" is not a directory"#);
+        let file =
+            check_spawn(&spawn_args(Some("file"), &[]), Some(here.clone()), None).unwrap_err();
+        assert!(file.starts_with(r#"--cwd "file" (resolved to "#), "{file}");
+        assert!(file.ends_with("is not a directory"), "{file}");
+        let _ = std::fs::remove_dir_all(here);
+    }
+
+    // Review finding (F4): a command missing from the worker's PATH came
+    // back as "internal error: the float could not open".
+    #[cfg(unix)]
+    #[test]
+    fn a_command_missing_from_the_workers_path_is_refused_before_spawning() {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = temp_dir("path");
+        let tool = bin.join("tool");
+        std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(bin.join("data"), "").unwrap();
+        let path = format!("/nonexistent:{}", bin.display());
+        let check = |command: &[&str], path: Option<&str>| {
+            check_spawn(&spawn_args(None, command), Some(bin.clone()), path)
+        };
+
+        assert_eq!(check(&["tool", "--flag"], Some(&path)), Ok(()));
+        assert_eq!(
+            check(&["definitely-not-a-cmd-xyz"], Some(&path)),
+            Err(r#"command not found on PATH: "definitely-not-a-cmd-xyz""#.to_string())
+        );
+        // Not executable.
+        assert!(check(&["data"], Some(&path)).is_err());
+        // A path is the worker's to resolve, and so is a PATH this process
+        // does not send (the worker gets Noa's own).
+        assert_eq!(check(&["./anything"], Some(&path)), Ok(()));
+        assert_eq!(check(&["definitely-not-a-cmd-xyz"], None), Ok(()));
+        // A relative PATH entry is taken from the worker's cwd.
+        assert_eq!(check(&["tool"], Some(".")), Ok(()));
+        // A shell worker has no command to look up.
+        assert_eq!(check(&[], Some("/nonexistent")), Ok(()));
+        let _ = std::fs::remove_dir_all(bin);
+    }
+
+    // Review finding (F7/skill F5): exited workers held open keep their slot,
+    // and the error suggested raising --max-children past the board's size
+    // (20 since D12).
+    #[test]
+    fn the_worker_limit_counts_exited_workers_and_stops_at_the_boards_size() {
+        let at_most = max_children_message(20, 5, 20);
+        assert!(
+            at_most.contains("20 workers, 5 of them exited"),
+            "{at_most}"
+        );
+        assert!(
+            at_most.contains("close finished ones after reading them"),
+            "{at_most}"
+        );
+        assert!(!at_most.contains("raise"), "{at_most}");
+
+        let lowered = max_children_message(2, 0, 2);
+        assert!(!lowered.contains("exited"), "{lowered}");
+        assert!(
+            lowered.contains("raise --max-children (at most 20)"),
+            "{lowered}"
+        );
+
+        let parsed = |value: &str| match parse_args(&args(&["spawn", "--max-children", value])) {
+            Ok(Command::Spawn(spawn)) => Ok(spawn.max_children),
+            Ok(_) => panic!("spawn expected"),
+            Err(error) => Err(error),
+        };
+        assert_eq!(parsed("20"), Ok(20));
+        assert_eq!(parsed("3"), Ok(3));
+        let above = parsed("21").unwrap_err();
+        assert!(above.contains("holds 20"), "{above}");
+    }
+
+    // Review finding (F8/skill F8): input to an exited, held-open worker was
+    // refused as "pane closed", though its output is still there to read.
+    #[test]
+    fn input_to_an_exited_pane_says_it_exited() {
+        let mut held = panel(0, None, false);
+        held.exit = Some(PanelExit { code: Some(3) });
+        let failure = exited_input_failure(8, Some(&held)).unwrap();
+        assert_eq!(failure.code, EXIT_ERROR);
+        assert_eq!(
+            failure.message,
+            "pane 8's process has exited (code 3); it takes no input — read it, then close it"
+        );
+        held.exit = Some(PanelExit { code: None });
+        assert!(
+            exited_input_failure(8, Some(&held))
+                .unwrap()
+                .message
+                .starts_with("pane 8's process has exited; ")
+        );
+        // Still running, or gone: the server's own answer stands.
+        assert!(exited_input_failure(8, Some(&panel(0, None, false))).is_none());
+        assert!(exited_input_failure(8, None).is_none());
+    }
+
+    // Review finding (F9/skill F11): `read` printed the screen's blank rows
+    // below the output.
+    #[test]
+    fn trailing_blank_lines_are_trimmed_and_a_tail_keeps_the_last_lines() {
+        assert_eq!(
+            trim_trailing_blank_lines("out\n\n[exited]\n   \n\n\n"),
+            "out\n\n[exited]\n"
+        );
+        assert_eq!(trim_trailing_blank_lines("a\nb"), "a\nb");
+        assert_eq!(trim_trailing_blank_lines("\n  \n"), "");
+        assert_eq!(tail_lines("1\n2\n3\n4\n\n  \n", 2), "3\n4");
+        assert_eq!(tail_lines("1\n2\n", 5), "1\n2");
+        assert_eq!(tail_lines("1\n2\n", 0), "");
+        assert_eq!(
+            tail_lines(
+                "one\ntwo\n\n[Process exited. Press any key to close the terminal.]\n",
+                2
+            ),
+            "one\ntwo"
+        );
+        assert_eq!(
+            truncated_message(65536),
+            "Noa +ctl: output truncated; kept the last 65536 bytes"
+        );
+    }
+
+    // Review finding (F10): an empty id (a failed spawn) printed `got ` and
+    // the whole usage, so the cause was invisible.
+    #[test]
+    fn argument_errors_quote_the_value_and_hint_at_a_failed_spawn() {
+        for empty in ["", "null"] {
+            let error = parse_args(&args(&["wait", empty, "--timeout", "5"])).unwrap_err();
+            assert_eq!(
+                error,
+                format!("PANE expects a number, got {empty:?} (did the previous spawn fail?)")
+            );
+        }
+        assert_eq!(
+            parse_args(&args(&["read", "x"])).unwrap_err(),
+            r#"PANE expects a number, got "x""#
+        );
+        assert_eq!(
+            parse_args(&args(&["wait", "8", "--timeout", "soon"])).unwrap_err(),
+            r#"--timeout expects seconds, got "soon""#
+        );
+        assert_eq!(
+            parse_args(&args(&["frob"])).unwrap_err(),
+            r#"unknown command: "frob""#
+        );
+        assert!(!USAGE_HINT.contains('\n'));
+        assert!(USAGE_HINT.contains("Noa +ctl --help"));
+    }
+
+    #[test]
+    fn wait_and_send_wait_take_a_tail() {
+        let Command::Wait(wait) = parse_args(&args(&["wait", "8", "--tail", "20"])).unwrap() else {
+            panic!("wait expected");
+        };
+        assert_eq!(wait.options.tail, Some(20));
+        let Command::Send(send) =
+            parse_args(&args(&["send", "8", "--wait", "--tail", "5", "go"])).unwrap()
+        else {
+            panic!("send expected");
+        };
+        assert_eq!(send.wait.and_then(|wait| wait.tail), Some(5));
+        assert!(parse_args(&args(&["send", "8", "--tail", "5", "go"])).is_err());
+        assert!(parse_args(&args(&["wait", "8", "--tail", "x"])).is_err());
+    }
+
+    // Review finding (F2): `wait 999999` returned at once with exit 0 and
+    // `reason:"exit"`, though the pane never existed.
+    #[test]
+    fn a_named_pane_missing_from_the_first_listing_fails_the_wait() {
+        let running = with_pane(panel(1, Some("running"), false), 8);
+        let source = || FakeSource {
+            lists: vec![vec![running.clone()]],
+            notifications: Default::default(),
+            list_calls: 0,
+            texts: HashMap::new(),
+        };
+        let mut lines = Vec::new();
+        let failure = wait_loop(
+            &mut source(),
+            &[8, 999999],
+            WaitStart::Named {
+                after: HashMap::new(),
+            },
+            &WaitOptions::default(),
+            WAIT_RELIST_INTERVAL,
+            &mut |line| lines.push(line.clone()),
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, EXIT_ERROR);
+        assert_eq!(failure.message, "pane 999999 is not listed");
+        assert!(lines.is_empty());
+
+        // `--children` resolved the pane from a listing just before, so one
+        // gone by the wait's first listing closed in between.
+        let code = wait_loop(
+            &mut source(),
+            &[8, 999999],
+            WaitStart::Listed {
+                after: HashMap::new(),
+            },
+            &WaitOptions::default(),
+            WAIT_RELIST_INTERVAL,
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        assert_eq!(lines[0]["closed"], true);
+    }
+
+    // A named pane that vanishes during the wait still ends it as closed.
+    #[test]
+    fn a_named_pane_that_vanishes_later_is_reported_closed() {
+        let running = with_pane(panel(1, Some("running"), false), 8);
+        let mut source = FakeSource {
+            lists: vec![vec![running], Vec::new()],
+            notifications: [Notification::Other {
+                method: "noa.other".to_string(),
+                dropped: true,
+            }]
+            .into(),
+            list_calls: 0,
+            texts: HashMap::new(),
+        };
+        let mut lines = Vec::new();
+        let code = wait_loop(
+            &mut source,
+            &[8],
+            WaitStart::Named {
+                after: HashMap::new(),
+            },
+            &WaitOptions::default(),
+            WAIT_RELIST_INTERVAL,
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        assert_eq!(lines[0]["reason"], "exit");
+        assert_eq!(lines[0]["closed"], true);
+    }
+
+    // Review finding (F11): a pane that had exited before the wait was
+    // listed as `pending`, and no entry said what state a pane was in.
+    #[test]
+    fn a_timeout_lists_panes_exited_before_the_wait_apart_with_each_state() {
+        let mut held = with_pane(panel(0, None, false), 151);
+        held.exit = Some(PanelExit { code: Some(0) });
+        let mut source = FakeSource {
+            lists: vec![vec![
+                with_pane(panel(1, Some("finished"), false), 149),
+                held,
+            ]],
+            notifications: Default::default(),
+            list_calls: 0,
+            texts: HashMap::new(),
+        };
+        let mut lines = Vec::new();
+        let code = wait_loop(
+            &mut source,
+            &[149, 151],
+            WaitStart::Listed {
+                after: HashMap::new(),
+            },
+            &WaitOptions {
+                timeout: Some(Duration::ZERO),
+                ..WaitOptions::default()
+            },
+            WAIT_RELIST_INTERVAL,
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_TIMEOUT));
+        assert_eq!(
+            lines,
+            vec![serde_json::json!({
+                "timeout": true,
+                "pending": ["149"],
+                "exited": ["151"],
+                "baseline": [
+                    {"paneId": "149", "seq": 1, "state": "finished"},
+                    {"paneId": "151", "seq": 0},
+                ],
+            })]
+        );
+    }
+
+    // Review finding (F8): every outcome needed a separate `read` to be
+    // useful; `--tail` adds the output on the same connection.
+    #[test]
+    fn a_tail_is_added_to_each_open_panes_outcome() {
+        let finished = with_pane(panel(2, Some("finished"), false), 8);
+        let mut source = FakeSource {
+            lists: vec![vec![finished.clone()], Vec::new()],
+            notifications: Default::default(),
+            list_calls: 0,
+            texts: HashMap::from([(8, "a\nb\nc\n\n\n".to_string())]),
+        };
+        let mut lines = Vec::new();
+        let options = WaitOptions {
+            tail: Some(2),
+            ..WaitOptions::default()
+        };
+        let code = wait_loop(
+            &mut source,
+            &[8],
+            WaitStart::Listed {
+                after: HashMap::from([(8, 1)]),
+            },
+            &options,
+            WAIT_RELIST_INTERVAL,
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        assert_eq!(lines[0]["tail"], "b\nc");
+
+        // A closed pane has nothing left to read.
+        let mut source = FakeSource {
+            lists: vec![Vec::new()],
+            notifications: Default::default(),
+            list_calls: 0,
+            texts: HashMap::from([(8, "stale".to_string())]),
+        };
+        let mut lines = Vec::new();
+        let code = wait_loop(
+            &mut source,
+            &[8],
+            WaitStart::Listed {
+                after: HashMap::new(),
+            },
+            &options,
+            WAIT_RELIST_INTERVAL,
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        assert_eq!(lines[0]["closed"], true);
+        assert!(lines[0].get("tail").is_none());
     }
 
     #[test]

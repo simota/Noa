@@ -1,5 +1,7 @@
 //! Glyph rasterization via swash.
 
+use std::cell::Cell;
+
 use swash::FontRef;
 use swash::scale::image::Content;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
@@ -61,12 +63,31 @@ pub struct GlyphSynthesis {
 /// would instead bleed coverage into black neighbours and blur the edges).
 ///
 /// `strength` (`font-thicken-strength`, `0..=255`) sets how aggressive the
-/// curve is; `0` is a no-op. Returns the mask unchanged when there is nothing
-/// to darken.
-fn thicken_mask(bitmap: &[u8], strength: u8) -> Vec<u8> {
+/// curve is; `0` is a no-op. Rewrites `bitmap` in place.
+fn thicken_mask(bitmap: &mut [u8], strength: u8) {
     if strength == 0 {
-        return bitmap.to_vec();
+        return;
     }
+    // The strength is a config value, so one remembered table per thread
+    // serves every glyph instead of 256 `powf`s each.
+    thread_local! {
+        static TABLE: Cell<Option<(u8, [u8; 256])>> = const { Cell::new(None) };
+    }
+    let lut = TABLE.with(|table| match table.get() {
+        Some((cached, lut)) if cached == strength => lut,
+        _ => {
+            let lut = thicken_table(strength);
+            table.set(Some((strength, lut)));
+            lut
+        }
+    });
+    for c in bitmap {
+        *c = lut[usize::from(*c)];
+    }
+}
+
+/// `coverage^gamma` for every coverage value at `strength` (non-zero).
+fn thicken_table(strength: u8) -> [u8; 256] {
     // gamma in (0.33 ..= 1.0): full strength → 0.33, tapering to 1.0 (identity)
     // at strength 0. The 0.33 endpoint is *measured*, not guessed: rendering a
     // screen full of Fira Code 16 white-on-dark text and comparing mean glyph
@@ -81,7 +102,26 @@ fn thicken_mask(bitmap: &[u8], strength: u8) -> Vec<u8> {
         let norm = c as f32 / 255.0;
         *slot = (norm.powf(gamma) * 255.0).round().clamp(0.0, 255.0) as u8;
     }
-    bitmap.iter().map(|&c| lut[c as usize]).collect()
+    lut
+}
+
+/// A face to rasterize from, plus the id a `ScaleContext` caches its scaler
+/// and hinting state under. `None` keys them by `font`'s own `CacheKey`,
+/// which `FontRef::from_index` mints fresh on every call, so only a
+/// caller-held stable id lets those caches hit.
+#[derive(Clone, Copy)]
+pub struct RasterFace<'a> {
+    pub font: FontRef<'a>,
+    pub scaler_id: Option<[u64; 2]>,
+}
+
+impl<'a> From<FontRef<'a>> for RasterFace<'a> {
+    fn from(font: FontRef<'a>) -> Self {
+        Self {
+            font,
+            scaler_id: None,
+        }
+    }
 }
 
 /// Render `glyph_id` at `px` pixels-per-em once, returning swash's raw image
@@ -90,19 +130,23 @@ fn thicken_mask(bitmap: &[u8], strength: u8) -> Vec<u8> {
 /// it at a smaller `px` without duplicating the scaler/render setup.
 fn render_glyph_once(
     ctx: &mut ScaleContext,
-    font: FontRef<'_>,
+    face: RasterFace<'_>,
     glyph_id: u16,
     px: f32,
     normalized_coords: &[swash::NormalizedCoord],
     synthesis: GlyphSynthesis,
 ) -> (Option<swash::scale::image::Image>, f32) {
+    let RasterFace { font, scaler_id } = face;
     let advance = font
         .glyph_metrics(normalized_coords)
         .scale(px)
         .advance_width(glyph_id);
 
-    let mut scaler = ctx
-        .builder(font)
+    let builder = match scaler_id {
+        Some(id) => ctx.builder_with_id(font, id),
+        None => ctx.builder(font),
+    };
+    let mut scaler = builder
         .size(px)
         .hint(true)
         .normalized_coords(normalized_coords.iter().copied())
@@ -165,7 +209,7 @@ fn mask_glyph_from_image(
     }
 
     if synthesis.thicken && expected_px > 0 {
-        bitmap = thicken_mask(&bitmap, synthesis.thicken_strength);
+        thicken_mask(&mut bitmap, synthesis.thicken_strength);
     }
     RasterizedGlyph {
         bitmap,
@@ -212,7 +256,7 @@ fn mask_glyph_from_image(
 /// outline coverage; callers can treat that as "nothing to blit".
 pub fn rasterize_with_variations(
     ctx: &mut ScaleContext,
-    font: FontRef<'_>,
+    face: RasterFace<'_>,
     glyph_id: u16,
     px: f32,
     variation_coords: &[(u32, f32)],
@@ -222,13 +266,14 @@ pub fn rasterize_with_variations(
     let normalized_coords: Vec<swash::NormalizedCoord> = if variation_coords.is_empty() {
         Vec::new()
     } else {
-        font.variations()
+        face.font
+            .variations()
             .normalized_coords(variation_coords.iter().copied())
             .collect()
     };
 
     let (image, advance) =
-        render_glyph_once(ctx, font, glyph_id, px, &normalized_coords, synthesis);
+        render_glyph_once(ctx, face, glyph_id, px, &normalized_coords, synthesis);
 
     let Some(img) = image else {
         return RasterizedGlyph {
@@ -269,7 +314,7 @@ pub fn rasterize_with_variations(
         let scaled_px = px * scale;
         let (scaled_image, scaled_advance) = render_glyph_once(
             ctx,
-            font,
+            face,
             glyph_id,
             scaled_px,
             &normalized_coords,
@@ -299,7 +344,41 @@ pub fn rasterize_with_variations(
 
 #[cfg(test)]
 mod tests {
-    use super::thicken_mask;
+    /// [`thicken_mask`] applied to a copy of `mask`.
+    fn thicken_mask(mask: &[u8], strength: u8) -> Vec<u8> {
+        let mut out = mask.to_vec();
+        super::thicken_mask(&mut out, strength);
+        out
+    }
+
+    /// The per-pixel formula the thicken table must reproduce exactly.
+    fn reference_thicken(coverage: u8, strength: u8) -> u8 {
+        if strength == 0 {
+            return coverage;
+        }
+        let gamma = 1.0 - 0.67 * (strength as f32 / 255.0);
+        let norm = coverage as f32 / 255.0;
+        (norm.powf(gamma) * 255.0).round().clamp(0.0, 255.0) as u8
+    }
+
+    #[test]
+    fn thicken_matches_the_gamma_formula_for_every_strength_and_coverage() {
+        let all: Vec<u8> = (0..=255).collect();
+        // Strengths repeat and alternate so a remembered table must follow
+        // the strength it is asked for.
+        let strengths = (0..=255u8).chain([255, 0, 128, 128, 1, 255, 64]);
+        for strength in strengths {
+            let expected: Vec<u8> = all
+                .iter()
+                .map(|&c| reference_thicken(c, strength))
+                .collect();
+            assert_eq!(
+                thicken_mask(&all, strength),
+                expected,
+                "strength={strength}"
+            );
+        }
+    }
 
     #[test]
     fn thicken_strength_zero_is_identity() {

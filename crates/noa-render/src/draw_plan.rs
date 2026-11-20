@@ -559,6 +559,45 @@ mod tests {
         });
     }
 
+    // An overlay group that names no layout pane and has no area changes
+    // nothing: the plan equals the overlay-free one for every zoom / focus /
+    // ring combination, including a zoomed or focused pane that is absent.
+    #[test]
+    fn inert_overlay_group_leaves_the_plan_unchanged() {
+        let layout = [
+            (PaneId::new(1), PaneRect::new(0, 0, 499, 299)),
+            (PaneId::new(2), PaneRect::new(500, 0, 500, 299)),
+            (PaneId::new(3), PaneRect::new(0, 300, 1000, 300)),
+        ];
+        let inert = [OverlayGroup {
+            outer: PaneRect::new(10, 10, 0, 0),
+            header: None,
+            panes: vec![PaneId::new(99)],
+            focused: true,
+        }];
+        let ids = [
+            None,
+            Some(PaneId::new(1)),
+            Some(PaneId::new(3)),
+            Some(PaneId::new(7)),
+        ];
+        for layout in [&layout[..0], &layout[..1], &layout[..]] {
+            for focused in ids {
+                for zoomed in ids {
+                    for force_ring in [false, true] {
+                        assert_eq!(
+                            build_draw_plan_with_overlays(
+                                layout, &inert, focused, zoomed, force_ring
+                            ),
+                            build_draw_plan_with_overlays(layout, &[], focused, zoomed, force_ring),
+                            "layout={layout:?} focused={focused:?} zoomed={zoomed:?} ring={force_ring}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn force_ring_draws_focus_indicator_for_a_single_visible_pane() {
         let layout = [(PaneId::new(1), PaneRect::new(0, 0, 50, 20))];

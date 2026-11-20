@@ -3994,6 +3994,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn row_text_matches_each_cells_full_text() {
+        let mut terminal = Terminal::new(noa_core::GridSize::new(40, 6));
+        let mut stream = noa_vt::Stream::new();
+        stream.feed(
+            "plain ascii   \r\ncafe\u{301} e\u{301}\u{302} 👍🏽 🇯🇵\r\n変更をステージ x\r\n\tTab\x1b[5Gmid\r\n\x1b[10C  \r\n"
+                .as_bytes(),
+            &mut terminal,
+        );
+        let mut grid_rows = 0;
+        for row in terminal.active().grid.iter() {
+            grid_rows += 1;
+            let cells = &row.cells[..row.occupied()];
+            let mut expected = String::new();
+            for cell in cells {
+                expected.push_str(&cell.text());
+            }
+            expected.truncate(expected.trim_end().len());
+            assert_eq!(row_text(cells), expected);
+        }
+        assert_eq!(grid_rows, 6);
+        assert_eq!(
+            live_rows_from_terminal(&terminal)[1],
+            // A wide glyph's spacer cell reads as a space.
+            "cafe\u{301} e\u{301}\u{302} 👍🏽  🇯🇵"
+        );
+    }
+
     /// Perf harness (auto-approve per-feed scan): the cost of one
     /// `find_prompt` pass over a 50-row viewport, for a screen of plain
     /// output (no prompt — the common feed), Claude Code's idle input frame,

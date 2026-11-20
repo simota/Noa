@@ -3909,4 +3909,73 @@ mod tests {
             Decision::Fire { signature, .. } if signature == AutoApproveSignature::AgySubagentApproval
         ));
     }
+
+    /// Perf harness (auto-approve per-feed scan): the cost of one
+    /// `find_prompt` pass over a 50-row viewport, for a screen of plain
+    /// output (no prompt — the common feed), Claude Code's idle input frame,
+    /// and every positive dialog fixture padded to 50 rows below output.
+    /// Each line prints a digest of the matches, so a before/after pair can
+    /// be checked for identical results. `#[ignore]`d so `cargo test` stays
+    /// fast; run explicitly with:
+    /// `cargo test -p noa-app --offline --release auto_approve::tests::bench_find_prompt -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_find_prompt() {
+        const ROWS: usize = 50;
+        const ITERS: u32 = 20_000;
+        let output_row = |i: usize| {
+            format!(
+                "   Compiling crate-{i:03} v0.{i}.0 (/work/crates/crate-{i:03})  warning: unused variable `x{i}`"
+            )
+        };
+        let pad = |screen: Vec<RowText>| {
+            let mut padded: Vec<RowText> = (0..ROWS.saturating_sub(screen.len()))
+                .map(output_row)
+                .collect();
+            padded.extend(screen);
+            padded
+        };
+        let mut idle = rows(&[
+            "⏺ Done. The build passes and the new test covers the empty case.",
+            "",
+            CLAUDE_RULE,
+            "❯ ",
+            CLAUDE_RULE,
+            "  ? for shortcuts                                  ◯ IDE connected",
+        ]);
+        idle = pad(idle);
+        let screens: Vec<(&str, Vec<RowText>)> = vec![
+            ("output", (0..ROWS).map(output_row).collect()),
+            ("claude_idle", idle),
+            ("claude_edit", pad(claude_edit_prompt())),
+            ("claude_create", pad(claude_create_prompt())),
+            ("claude_question", pad(claude_question_prompt())),
+            ("claude_bash", pad(claude_bash_prompt("ls /tmp"))),
+            ("codex_command", pad(codex_command_prompt())),
+            ("codex_edit", pad(codex_edit_prompt())),
+            ("agy_question", pad(agy_question_prompt())),
+            ("agy_command", pad(agy_command_prompt())),
+            ("agy_subagent", pad(agy_subagent_notice_prompt())),
+        ];
+        for (label, screen) in &screens {
+            let cursor = cursor((screen.len() - 1) as u16);
+            let mut digest = std::collections::hash_map::DefaultHasher::new();
+            format!("{:?}", find_prompt(screen, cursor, None, false)).hash(&mut digest);
+            let start = Instant::now();
+            for _ in 0..ITERS {
+                std::hint::black_box(find_prompt(
+                    std::hint::black_box(screen),
+                    cursor,
+                    None,
+                    false,
+                ));
+            }
+            let elapsed = start.elapsed();
+            eprintln!(
+                "bench_find_prompt[{label}]: {:.1} ns/op digest={:016x}",
+                elapsed.as_nanos() as f64 / f64::from(ITERS),
+                digest.finish()
+            );
+        }
+    }
 }

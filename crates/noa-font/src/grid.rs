@@ -1257,6 +1257,95 @@ mod tests {
     use crate::face::nerd_font_fallback_candidate_has_glyph;
     use crate::{FontFeature, FontVariation, SyntheticStyle};
 
+    /// Every mask glyph the grid packs is byte-identical to the same glyph
+    /// rasterized through a brand-new `ScaleContext`, whatever was rasterized
+    /// before it: faces, styles and sizes interleave, so any state the grid's
+    /// long-lived context carries between glyphs would show here.
+    #[test]
+    fn packed_masks_match_a_cold_scale_context() {
+        let mut grid = FontGrid::new(14.0, FontConfig::default()).expect("system font");
+        let (atlas_w, _) = grid.mask_atlas_size();
+        let text: Vec<char> = "Ag@~é①日本語한 fn main() -> != WM".chars().collect();
+        let mut checked = 0;
+        for round in 0..2 {
+            for scale in [1.0, 0.75] {
+                for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+                    let style = StyleKey { bold, italic };
+                    let cells: Vec<ShapeCell> = text
+                        .iter()
+                        .map(|&ch| ShapeCell {
+                            ch,
+                            combining: Vec::new(),
+                            style,
+                        })
+                        .collect();
+                    for glyph in grid.shape_run(&cells).iter() {
+                        if glyph.face_id == FaceId::BUILTIN {
+                            continue;
+                        }
+                        let span = span_for_char(text[glyph.cluster as usize]);
+                        let info = grid.raster_shaped_scaled(
+                            glyph.face_id,
+                            glyph.glyph_id,
+                            style,
+                            span,
+                            scale,
+                        );
+                        let face = glyph.face_id.0 as usize;
+                        let font_style = FontStyle::from_bold_italic(bold, italic);
+                        let cold = rasterize_with_variations(
+                            &mut ScaleContext::new(),
+                            grid.font_stack.faces()[face].font_ref().unwrap(),
+                            glyph.glyph_id,
+                            grid.px_size * scale,
+                            &shape::variation_coords_for(&grid.font_cfg, style),
+                            synthesis_for(
+                                &grid.font_cfg,
+                                style,
+                                grid.font_stack.is_native_style_face(face, font_style),
+                            ),
+                            Some(f32::from(span) * grid.metrics.cell_w),
+                        );
+                        if info.color || cold.color {
+                            continue;
+                        }
+                        let [x, y] = info.atlas_pos.map(usize::from);
+                        let [w, h] = info.atlas_size.map(usize::from);
+                        let atlas = grid.mask_atlas_data();
+                        let packed: Vec<u8> = (y..y + h)
+                            .flat_map(|row| {
+                                let start = row * atlas_w as usize + x;
+                                atlas[start..start + w].iter().copied()
+                            })
+                            .collect();
+                        assert_eq!(
+                            (
+                                w as u32,
+                                h as u32,
+                                info.bearing,
+                                info.advance.to_bits(),
+                                packed
+                            ),
+                            (
+                                cold.width,
+                                cold.height,
+                                [cold.bearing_x as i16, cold.bearing_y as i16],
+                                cold.advance.to_bits(),
+                                cold.bitmap
+                            ),
+                            "round={round} scale={scale} style={style:?} glyph={glyph:?}"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+            // Second round: every glyph is now a cache hit, so drop them to
+            // rasterize again after the context has seen everything.
+            grid.raster_shaped_cache.clear();
+        }
+        assert!(checked > 0, "no mask glyph was compared");
+    }
+
     /// Eviction takes runs oldest-first in a batch: what was used recently
     /// survives crossing the cap, and the cache never exceeds it.
     #[test]

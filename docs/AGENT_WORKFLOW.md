@@ -324,16 +324,24 @@ pane opens another (`--split down` or `--tab` to choose where). Run
 in a pane of its own, `+ctl board` follows that pane's orchestrator, or every
 worker when it has none; `--of PANE` picks one.
 
-The list puts workers that need you first (an approval prompt, an error or a
-command that exited with a non-zero code, then a question or an unread
-notification, the longest-waiting first within each), then those working, done, and
-exited. Each worker keeps its number from the time it first appears, so `1`–`9`
-always pick the same one. A working worker whose screen has not changed for 2
-minutes reads "出力なし N 分". Each card
-shows the worker's last report (or the last detail it gave), the last lines of
-its work (above an agent's input box and status line), its report count, and
-how long it has been in its state. Keys: `j`/`k`
-select, `Enter` opens a worker's live screen and the reports seen since the board
+The board has three parts. At the top, a queue of the workers that need you
+(an approval prompt, an error or a command that exited with a non-zero code,
+then a question or an unread notification, the longest-waiting first within
+each), whatever subtree they are in. Below it, the work under way, as a tree.
+Last, one line that counts the finished and exited workers (and those closed
+since the board opened); `Space` lists them. Each worker keeps its number from
+the time it first appears, so `1`–`9` always pick the same one. Each row shows
+a mark and a word for the state (`!` approval, `?` question, `×` error, `●`
+working, `✓` done, `·` exited or silent), how long the worker has waited, or,
+for a working worker, when its screen last moved ("8 秒前に出力"; "出力なし N
+分" after 2 minutes), and its last report. The selected worker's screen is
+previewed beside the list in a pane 110 columns or wider, under it from 70
+columns (and 18 rows), and not at all in a narrower pane, where `Enter` shows it.
+The board's labels are in Japanese when the locale is Japanese (`LC_ALL`,
+`LC_MESSAGES` or `LANG`, the first one set; with none, the system's preferred
+language) and in English otherwise.
+Keys: `j`/`k`
+select, `n` jumps to the next worker in the queue, `Enter` opens a worker's live screen and the reports seen since the board
 opened, `g` opens the worker over the lower part of the board, closing any
 other worker it had open (answer prompts there; ⌘⇧I, ctrl+shift+i off macOS,
 comes back to the board), `s` types a
@@ -343,8 +351,10 @@ waiting for an approval, `x` then `y` closes the worker, `Esc` goes back,
 connection it keeps the last list and retries for 30 seconds. Closing the board does not end its workers: they go back to the
 orchestrator's pane as collapsed floats with title strips, and return to the
 board when it opens again (except one that has focus). A worker may start workers of its own, one level deep: they are listed under
-it on the same board, indented, with its row counting them; `Space` folds a
-worker's subtree. Closing a worker closes the workers it started. The board pane is not a worker: it does not count toward
+it on the same board, indented, with its row counting them (one that needs you
+is in the queue too, named after its parent); `Space` on a subtree of the work
+under way folds it, and anywhere else lists the finished and exited workers or
+folds them again. Closing a worker closes the workers it started. The board pane is not a worker: it does not count toward
 `--max-children` and `close --children` leaves it alone.
 
 ### A skill for the orchestrating agent

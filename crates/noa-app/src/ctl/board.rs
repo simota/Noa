@@ -33,9 +33,18 @@ const SCREEN_EVERY: Duration = Duration::from_secs(1);
 const HISTORY_CAP: usize = 50;
 /// Screen lines kept per worker.
 const SCREEN_CAP: usize = 200;
-/// Screen lines shown under a worker's row, and under the selected one.
-const PREVIEW_ROWS: usize = 1;
-const SELECTED_PREVIEW_ROWS: usize = 3;
+/// From this width the selected worker's preview sits right of the list;
+/// from [`STACKED_COLS`], under it; narrower panes show the list alone
+/// (D15).
+const WIDE_COLS: usize = 110;
+const STACKED_COLS: usize = 70;
+/// The fewest rows a pane needs to give a preview under the list.
+const STACKED_ROWS: usize = 18;
+/// The most a parent's name takes before its worker's name in the queue.
+const CRUMB_WIDTH: usize = 10;
+/// The longest gap between two reads of a screen for a change between them
+/// to be dated: past it, when the screen moved is not known.
+const MOVED_GAP: Duration = Duration::from_secs(3);
 /// Closed workers kept at the end of the list.
 const GONE_CAP: usize = 5;
 /// Where a row's name starts, which its preview lines line up with.
@@ -59,6 +68,57 @@ const MIN_ROWS: usize = 6;
 // ---------------------------------------------------------------------------
 // Model
 
+/// The language the board speaks: Japanese where the person's locale is
+/// Japanese, English anywhere else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Lang {
+    Ja,
+    En,
+}
+
+impl Lang {
+    /// The locale variables in POSIX order (`LC_ALL`, `LC_MESSAGES`,
+    /// `LANG`: the first one set wins), else the system's preferred language
+    /// (`system`): a Noa started from the Dock has no locale variables.
+    pub(crate) fn from_locale(
+        var: impl Fn(&str) -> Option<String>,
+        system: impl FnOnce() -> Option<String>,
+    ) -> Self {
+        let tag = ["LC_ALL", "LC_MESSAGES", "LANG"]
+            .iter()
+            .find_map(|key| var(key).filter(|value| !value.is_empty()))
+            .or_else(system);
+        match tag {
+            Some(tag) if tag.starts_with("ja") => Self::Ja,
+            _ => Self::En,
+        }
+    }
+
+    pub(crate) fn detect() -> Self {
+        Self::from_locale(|key| std::env::var(key).ok(), system_language)
+    }
+
+    fn pick<T>(self, ja: T, en: T) -> T {
+        match self {
+            Self::Ja => ja,
+            Self::En => en,
+        }
+    }
+}
+
+/// The first of the person's preferred languages, as a BCP 47 tag (`ja-JP`).
+#[cfg(target_os = "macos")]
+fn system_language() -> Option<String> {
+    objc2_foundation::NSLocale::preferredLanguages()
+        .firstObject()
+        .map(|tag| tag.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_language() -> Option<String> {
+    None
+}
+
 /// What a worker is doing, as far as its panel says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Status {
@@ -74,7 +134,8 @@ pub(crate) enum Status {
     Quiet,
 }
 
-/// The sections of the list, in the order they are shown.
+/// What a worker's state asks of a person, in the order the header counts
+/// them; the list places workers by [`Zone`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Group {
     Needs,
@@ -121,31 +182,47 @@ impl Status {
         }
     }
 
-    fn label(self) -> String {
+    fn label(self, lang: Lang) -> String {
         match self {
-            Self::Permission => "承認待ち".to_string(),
-            Self::Input => "入力待ち".to_string(),
-            Self::Error => "エラー".to_string(),
-            Self::Attention => "通知あり".to_string(),
-            Self::Running => "作業中".to_string(),
-            Self::Finished => "完了".to_string(),
-            Self::Exited(Some(code)) if code != 0 => format!("失敗 {code}"),
-            Self::Exited(Some(code)) => format!("終了 {code}"),
-            Self::Exited(None) => "終了".to_string(),
-            Self::Quiet => "報告なし".to_string(),
+            Self::Permission => lang.pick("承認待ち", "approval").to_string(),
+            Self::Input => lang.pick("入力待ち", "question").to_string(),
+            Self::Error => lang.pick("エラー", "error").to_string(),
+            Self::Attention => lang.pick("通知あり", "notified").to_string(),
+            Self::Running => lang.pick("作業中", "working").to_string(),
+            Self::Finished => lang.pick("完了", "done").to_string(),
+            Self::Exited(Some(code)) if code != 0 => {
+                format!("{} {code}", lang.pick("失敗", "failed"))
+            }
+            Self::Exited(Some(code)) => format!("{} {code}", lang.pick("終了", "exited")),
+            Self::Exited(None) => lang.pick("終了", "exited").to_string(),
+            Self::Quiet => lang.pick("報告なし", "no report").to_string(),
         }
     }
 
     /// The label for a narrow pane: the states that share a colour keep a
     /// word each, so they stay apart without the full label.
-    fn short_label(self) -> String {
+    fn short_label(self, lang: Lang) -> String {
         match self {
-            Self::Permission => "承認".to_string(),
-            Self::Input => "入力".to_string(),
-            Self::Attention => "通知".to_string(),
-            Self::Error => "エラー".to_string(),
-            status if status.failed() => "失敗".to_string(),
-            status => status.label(),
+            Self::Permission => lang.pick("承認", "appr").to_string(),
+            Self::Input => lang.pick("入力", "ask").to_string(),
+            Self::Attention => lang.pick("通知", "note").to_string(),
+            Self::Error => lang.pick("エラー", "error").to_string(),
+            status if status.failed() => lang.pick("失敗", "fail").to_string(),
+            status => status.label(lang),
+        }
+    }
+
+    /// The mark drawn before a worker's name, so a state reads without its
+    /// colour (D15).
+    fn mark(self) -> &'static str {
+        match self {
+            Self::Permission | Self::Attention => "!",
+            Self::Input => "?",
+            Self::Error => "×",
+            status if status.failed() => "×",
+            Self::Running => "●",
+            Self::Finished => "✓",
+            Self::Exited(_) | Self::Quiet => "·",
         }
     }
 
@@ -164,12 +241,21 @@ impl Status {
 impl Group {
     const ALL: [Self; 4] = [Self::Needs, Self::Working, Self::Done, Self::Exited];
 
-    fn title(self) -> &'static str {
+    fn title(self, lang: Lang) -> &'static str {
         match self {
-            Self::Needs => "要対応",
-            Self::Working => "作業中",
-            Self::Done => "完了",
-            Self::Exited => "終了",
+            Self::Needs => lang.pick("要対応", "needs you"),
+            Self::Working => lang.pick("作業中", "working"),
+            Self::Done => lang.pick("完了", "done"),
+            Self::Exited => lang.pick("終了", "exited"),
+        }
+    }
+
+    fn mark(self) -> &'static str {
+        match self {
+            Self::Needs => "!",
+            Self::Working => "●",
+            Self::Done => "✓",
+            Self::Exited => "·",
         }
     }
 
@@ -268,14 +354,38 @@ enum Branch {
     Kid { parent: u64, last: bool },
 }
 
+/// Where the list draws a subtree (D15): what needs someone is lifted into
+/// the queue at the top, whatever subtree it is in; below it, the tree of
+/// work under way, then the folded section of finished and exited work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Zone {
+    /// A worker of the orchestrator that needs someone and has no workers
+    /// of its own: it is drawn in the queue only.
+    Queue,
+    /// A subtree with work under way, or a parent that needs someone over
+    /// its own workers.
+    Background,
+    /// A subtree whose every worker is finished or exited.
+    Settled,
+}
+
 /// A worker in the tree, in the order the list draws it.
 #[derive(Clone, Copy)]
 struct Node<'a> {
     panel: &'a Panel,
     branch: Branch,
-    /// The section it is drawn in: that of the most urgent worker in its
-    /// subtree (a worker's own workers share its section).
-    section: Group,
+    /// Where its subtree is drawn (a worker's own workers share it).
+    zone: Zone,
+}
+
+/// A row of the list: a worker in the queue or in the tree. A worker that
+/// needs someone is drawn in both; its tree row is an `echo`, pointing up
+/// at the queue, and is never selected.
+#[derive(Clone, Copy)]
+struct Entry<'a> {
+    node: Node<'a>,
+    queued: bool,
+    echo: bool,
 }
 
 /// How urgent a worker is (the least is the most urgent): its section, then within
@@ -337,6 +447,16 @@ pub(crate) struct Board {
     /// Workers whose own workers are folded away under their row (`Space`);
     /// every subtree starts open.
     collapsed: HashSet<u64>,
+    /// Whether the finished and exited workers are listed, not only counted
+    /// (D15); folded at first.
+    settled_open: bool,
+    /// When each worker's screen was last seen to change, since the board
+    /// first read it (the first read says nothing about when it last moved).
+    moved: HashMap<u64, Instant>,
+    /// When the pane list was last read.
+    synced: Option<Instant>,
+    /// The language of every label (see [`Lang::detect`]).
+    pub(crate) lang: Lang,
 }
 
 impl Board {
@@ -363,6 +483,10 @@ impl Board {
             help_reach: Cell::new(0),
             past: 0,
             collapsed: HashSet::new(),
+            settled_open: false,
+            moved: HashMap::new(),
+            synced: None,
+            lang: Lang::Ja,
         }
     }
 
@@ -393,12 +517,22 @@ impl Board {
                     .find(|detail| !detail.is_empty())
             })
             .or_else(|| {
-                panel
-                    .exit
-                    .as_ref()
-                    .map(|_| "プロセスが終了しました".to_string())
+                panel.exit.as_ref().map(|_| {
+                    self.lang
+                        .pick("プロセスが終了しました", "its process exited")
+                        .to_string()
+                })
             })
             .unwrap_or_default()
+    }
+
+    /// The last line of `pane`'s screen with text on it, rules aside.
+    fn last_screen_line(&self, pane: u64) -> Option<&str> {
+        self.screens
+            .get(&pane)?
+            .iter()
+            .map(|line| line.trim())
+            .rfind(|line| !line.is_empty() && !is_rule(line))
     }
 
     /// The last non-empty line of the work on `pane`'s screen.
@@ -414,6 +548,7 @@ impl Board {
     pub(crate) fn update(&mut self, panels: Vec<Panel>, now: Instant) {
         let first = !self.started;
         self.started = true;
+        self.synced = Some(now);
         let before: Vec<(u64, Gone)> = self
             .workers()
             .iter()
@@ -495,10 +630,35 @@ impl Board {
         self.since.retain(|pane, _| live.contains(pane));
         self.screens.retain(|pane, _| live.contains(pane));
         self.output.retain(|pane, _| live.contains(pane));
-        self.collapsed.retain(|pane| live.contains(pane));
+        self.moved.retain(|pane, _| live.contains(pane));
+        // Only the work under way folds: a subtree that finished is listed
+        // whole, and comes back open if it goes back to work.
+        let at_work: HashSet<u64> = self
+            .tree()
+            .iter()
+            .filter(|node| node.zone == Zone::Background)
+            .map(|node| node.panel.pane_id.0)
+            .collect();
+        self.collapsed.retain(|pane| at_work.contains(pane));
         if self.selected.is_none_or(|pane| !live.contains(&pane)) {
             self.past = 0;
-            self.selected = self.rows().first().map(|node| node.panel.pane_id.0);
+            self.selected = self.picks().first().copied();
+        }
+        // A selection that left the queue (it went back to work) is shown
+        // where it went: its subtree opens.
+        let hidden_parent = self.selected.and_then(|pane| {
+            self.tree()
+                .iter()
+                .find(|node| node.panel.pane_id.0 == pane)
+                .filter(|node| self.under_folded(node))
+                .filter(|node| Status::of(node.panel).group() != Group::Needs)
+                .and_then(|node| match node.branch {
+                    Branch::Kid { parent, .. } => Some(parent),
+                    Branch::Top { .. } => None,
+                })
+        });
+        if let Some(parent) = hidden_parent {
+            self.collapsed.remove(&parent);
         }
         if let View::Detail(pane) = self.view
             && !live.contains(&pane)
@@ -539,6 +699,23 @@ impl Board {
             .screens
             .get(&pane)
             .is_none_or(|old| content_lines(old) != content_lines(&lines));
+        // A change is dated only between two reads close together: one
+        // after a gap (the detail was open, or the worker was not at work)
+        // happened some time in it.
+        // ...and both in the current state: one read before it began says
+        // nothing about output since.
+        let began = self.since.get(&pane).and_then(|(_, at)| *at);
+        let read_just_before = self.output.get(&pane).is_some_and(|&(_, checked)| {
+            now.saturating_duration_since(checked) <= MOVED_GAP
+                && began.is_none_or(|began| checked >= began)
+        });
+        if changed && self.screens.contains_key(&pane) {
+            if read_just_before {
+                self.moved.insert(pane, now);
+            } else {
+                self.moved.remove(&pane);
+            }
+        }
         let entry = self.output.entry(pane).or_insert((now, now));
         if changed {
             entry.0 = now;
@@ -598,9 +775,9 @@ impl Board {
         (group, rank, began)
     }
 
-    /// Every worker shown, as a tree in list order (D13): the orchestrator's
-    /// workers by their subtree's most urgent worker, each followed by its
-    /// own workers by their urgency; ties go by number.
+    /// Every worker shown, as a tree (D13): the orchestrator's workers by
+    /// where their subtree is drawn (D15), then by its most urgent worker,
+    /// each followed by its own workers by their urgency; ties go by number.
     fn tree(&self) -> Vec<Node<'_>> {
         let listed: Vec<&Panel> = self.listed().collect();
         let ids: HashSet<u64> = listed.iter().map(|panel| panel.pane_id.0).collect();
@@ -638,18 +815,32 @@ impl Board {
                 .map(|kid| self.urgency(kid))
                 .fold(own, std::cmp::min)
         };
+        let zone = |top: &Panel| {
+            let mine = kids.get(&top.pane_id.0).map(Vec::as_slice).unwrap_or(&[]);
+            let group = |panel: &Panel| Status::of(panel).group();
+            if mine.is_empty() && group(top) == Group::Needs {
+                Zone::Queue
+            } else if std::iter::once(&top)
+                .chain(mine)
+                .all(|panel| matches!(group(panel), Group::Done | Group::Exited))
+            {
+                Zone::Settled
+            } else {
+                Zone::Background
+            }
+        };
         tops.sort_by_key(|top| {
             let pane = top.pane_id.0;
-            (subtree(top), self.number(pane), pane)
+            (zone(top), subtree(top), self.number(pane), pane)
         });
         let mut tree = Vec::new();
         for top in tops {
-            let section = subtree(top).0;
+            let zone = zone(top);
             let mine = kids.get(&top.pane_id.0).map(Vec::as_slice).unwrap_or(&[]);
             tree.push(Node {
                 panel: top,
                 branch: Branch::Top { kids: mine.len() },
-                section,
+                zone,
             });
             for (at, kid) in mine.iter().enumerate() {
                 tree.push(Node {
@@ -658,20 +849,80 @@ impl Board {
                         parent: top.pane_id.0,
                         last: at + 1 == mine.len(),
                     },
-                    section,
+                    zone,
                 });
             }
         }
         tree
     }
 
-    /// The rows drawn: the tree without the folded-away subtrees.
-    fn rows(&self) -> Vec<Node<'_>> {
-        let mut rows = self.tree();
-        rows.retain(|node| {
-            !matches!(node.branch, Branch::Kid { parent, .. } if self.collapsed.contains(&parent))
+    /// Every row of the list in order, folded away or not (D15): the queue
+    /// of workers needing someone, most urgent first, then the tree of the
+    /// rest, in which a worker needing someone is an echo of its queue row.
+    fn layout(&self) -> Vec<Entry<'_>> {
+        let tree = self.tree();
+        let needs = |node: &Node| Status::of(node.panel).group() == Group::Needs;
+        let mut queue: Vec<Node> = tree.iter().copied().filter(needs).collect();
+        queue.sort_by_key(|node| {
+            let pane = node.panel.pane_id.0;
+            (self.urgency(node.panel), self.number(pane), pane)
         });
+        let mut entries: Vec<Entry> = queue
+            .into_iter()
+            .map(|node| Entry {
+                node,
+                queued: true,
+                echo: false,
+            })
+            .collect();
+        entries.extend(
+            tree.iter()
+                .filter(|node| node.zone != Zone::Queue)
+                .map(|node| Entry {
+                    node: *node,
+                    queued: false,
+                    echo: needs(node),
+                }),
+        );
+        entries
+    }
+
+    /// Whether `entry` is folded away: under a folded parent, or among the
+    /// finished and exited workers while they are only counted.
+    fn folded(&self, entry: &Entry) -> bool {
+        if entry.queued {
+            return false;
+        }
+        self.under_folded(&entry.node) || (entry.node.zone == Zone::Settled && !self.settled_open)
+    }
+
+    /// Whether `node` is one of a parent's workers folded away under it.
+    /// Only the work under way folds: a finished subtree is listed whole.
+    fn under_folded(&self, node: &Node) -> bool {
+        node.zone == Zone::Background
+            && matches!(
+                node.branch,
+                Branch::Kid { parent, .. } if self.collapsed.contains(&parent)
+            )
+    }
+
+    /// The rows drawn.
+    fn rows(&self) -> Vec<Entry<'_>> {
+        let mut rows = self.layout();
+        rows.retain(|entry| !self.folded(entry));
         rows
+    }
+
+    /// The workers `j`/`k` step through, in list order: every row but the
+    /// echoes and the folded subtrees. The finished and exited ones count
+    /// while folded, so `j` past the last row opens them.
+    fn picks(&self) -> Vec<u64> {
+        self.layout()
+            .iter()
+            .filter(|entry| !entry.echo)
+            .filter(|entry| entry.queued || !self.under_folded(&entry.node))
+            .map(|entry| entry.node.panel.pane_id.0)
+            .collect()
     }
 
     /// Every worker shown, folded away or not, in list order (see
@@ -691,40 +942,81 @@ impl Board {
             })
     }
 
-    /// Whether the subtree the selected worker is in (as a parent or one of
-    /// its workers) is folded away; `None` outside a subtree.
-    fn selected_subtree_folded(&self) -> Option<bool> {
+    /// What `Space` acts on (D15): the subtree of the work under way the
+    /// selected worker is in (as a parent or one of its workers), by its
+    /// parent; else the finished and exited workers (`None`).
+    fn space_target(&self) -> Option<u64> {
         let pane = self.selected?;
-        let top = match self.tree_parent(pane) {
-            Some(parent) => parent,
-            None => {
-                let tree = self.tree();
-                let node = tree.iter().find(|node| node.panel.pane_id.0 == pane)?;
-                match node.branch {
-                    Branch::Top { kids } if kids > 0 => pane,
-                    _ => return None,
-                }
-            }
-        };
-        Some(self.collapsed.contains(&top))
+        let tree = self.tree();
+        let node = tree.iter().find(|node| node.panel.pane_id.0 == pane)?;
+        if node.zone != Zone::Background {
+            return None;
+        }
+        // A worker's worker needing someone is selected in the queue, not
+        // in its parent's subtree; a parent needing someone still holds
+        // its own workers.
+        let needs = Status::of(node.panel).group() == Group::Needs;
+        match node.branch {
+            Branch::Kid { .. } if needs => None,
+            Branch::Kid { parent, .. } => Some(parent),
+            Branch::Top { kids } if kids > 0 => Some(pane),
+            Branch::Top { .. } => None,
+        }
     }
 
-    /// `Space`: fold the selected worker's own workers away under its row,
-    /// or open them again; on one of them, its parent's.
-    fn toggle_subtree(&mut self) {
-        let Some(pane) = self.selected else { return };
-        let tree = self.tree();
-        let Some(node) = tree.iter().find(|node| node.panel.pane_id.0 == pane) else {
-            return;
-        };
-        let top = match node.branch {
-            Branch::Kid { parent, .. } => parent,
-            Branch::Top { kids: 0 } => {
-                let name = worker_name(node.panel);
-                self.message = Some(Notice::ok(format!("{name} にはワーカーがいません")));
+    /// Whether what `Space` acts on is folded; `None` when there is nothing
+    /// for it to fold.
+    fn space_folded(&self) -> Option<bool> {
+        // With no worker left, the closed ones are always listed.
+        if self.workers().is_empty() {
+            return None;
+        }
+        match self.space_target() {
+            Some(top) => Some(self.collapsed.contains(&top)),
+            None if self.tree().iter().any(|node| node.zone == Zone::Settled)
+                || !self.gone.is_empty() =>
+            {
+                Some(!self.settled_open)
+            }
+            None => None,
+        }
+    }
+
+    /// `Space`: fold the subtree the selected worker is in away under its
+    /// parent's row, or open it again; outside one, list the finished and
+    /// exited workers, or only count them again.
+    fn space(&mut self) {
+        let Some(top) = self.space_target() else {
+            if self.space_folded().is_none() {
+                let text = self.lang.pick("たたむものはありません", "nothing to fold");
+                self.message = Some(Notice::ok(text.to_string()));
                 return;
             }
-            Branch::Top { .. } => pane,
+            self.settled_open = !self.settled_open;
+            self.past = 0;
+            // A selection folded away moves to the last row left.
+            if !self.settled_open
+                && let Some(pane) = self.selected
+                && self
+                    .tree()
+                    .iter()
+                    .any(|node| node.panel.pane_id.0 == pane && node.zone == Zone::Settled)
+            {
+                let picks = self.picks();
+                let settled: HashSet<u64> = self
+                    .tree()
+                    .iter()
+                    .filter(|node| node.zone == Zone::Settled)
+                    .map(|node| node.panel.pane_id.0)
+                    .collect();
+                self.selected = picks
+                    .iter()
+                    .rev()
+                    .find(|pane| !settled.contains(pane))
+                    .or(picks.first())
+                    .copied();
+            }
+            return;
         };
         if !self.collapsed.remove(&top) {
             self.collapsed.insert(top);
@@ -739,15 +1031,15 @@ impl Board {
         self.numbers.get(&pane).copied().unwrap_or(usize::MAX)
     }
 
-    /// The panes whose screens the current view shows: in the list, the
-    /// workers whose rows preview their work (and whose output is watched),
-    /// and the selected one.
+    /// The panes whose screens the current view needs: in the list, the
+    /// workers that need someone or are at work (whose rows say when they
+    /// last showed output), and the selected one, which is previewed.
     pub(crate) fn wanted_screens(&self) -> Vec<u64> {
         match self.view {
             View::List => self
-                .rows()
+                .workers()
                 .iter()
-                .map(|node| node.panel.pane_id.0)
+                .map(|panel| panel.pane_id.0)
                 .filter(|&pane| {
                     Some(pane) == self.selected
                         || self.panel(pane).is_some_and(|panel| {
@@ -783,11 +1075,7 @@ impl Board {
     }
 
     fn move_selection(&mut self, step: isize) {
-        let workers: Vec<u64> = self
-            .rows()
-            .iter()
-            .map(|node| node.panel.pane_id.0)
-            .collect();
+        let workers = self.picks();
         if workers.is_empty() {
             // Nothing to select: j/k scroll the closed section, as far as
             // its title and entries go.
@@ -803,10 +1091,11 @@ impl Board {
             .unwrap_or(0) as isize;
         let last = at as usize + 1 == workers.len();
         if self.view == View::List {
-            // As far as the selected row and its preview, and the closed
-            // section's title and entries, can scroll.
-            let reach = SELECTED_PREVIEW_ROWS + 1 + self.gone.len();
+            // As far as the closed section's title and entries go, once
+            // the finished and exited workers are listed.
+            let reach = 1 + self.gone.len();
             if step > 0 && last && !self.gone.is_empty() {
+                self.settled_open = true;
                 self.past = (self.past + 1).min(reach);
                 return;
             }
@@ -819,10 +1108,22 @@ impl Board {
         self.select(workers[next]);
     }
 
-    /// Select `pane`, opening the subtree it is folded away in.
+    /// Select `pane`, opening the subtree or section it is folded away in
+    /// (one that needs someone is selected in the queue, never folded).
     fn select(&mut self, pane: u64) {
-        if let Some(parent) = self.tree_parent(pane) {
-            self.collapsed.remove(&parent);
+        let place = self
+            .tree()
+            .iter()
+            .find(|node| node.panel.pane_id.0 == pane)
+            .filter(|node| Status::of(node.panel).group() != Group::Needs)
+            .map(|node| (node.branch, node.zone));
+        if let Some((branch, zone)) = place {
+            if let Branch::Kid { parent, .. } = branch {
+                self.collapsed.remove(&parent);
+            }
+            if zone == Zone::Settled {
+                self.settled_open = true;
+            }
         }
         self.past = 0;
         self.selected = Some(pane);
@@ -860,20 +1161,30 @@ impl Board {
             .find(|&pane| self.number(pane) == number);
         match pane {
             Some(pane) => self.select(pane),
-            None => self.message = Some(Notice::warn(format!("{number} 番のワーカーはいません"))),
+            None => {
+                let text = self.lang.pick(
+                    format!("{number} 番のワーカーはいません"),
+                    format!("no worker {number}"),
+                );
+                self.message = Some(Notice::warn(text));
+            }
         }
     }
 
-    /// Select the next worker that needs someone, after the selected one.
+    /// Select the next worker that needs someone, after the selected one,
+    /// in the queue's order.
     fn select_next_needing(&mut self) {
         let needing: Vec<u64> = self
-            .workers()
+            .layout()
             .iter()
-            .filter(|panel| Status::of(panel).group() == Group::Needs)
-            .map(|panel| panel.pane_id.0)
+            .filter(|entry| entry.queued)
+            .map(|entry| entry.node.panel.pane_id.0)
             .collect();
         if needing.is_empty() {
-            self.message = Some(Notice::ok("要対応のワーカーはいません".to_string()));
+            let text = self
+                .lang
+                .pick("要対応のワーカーはいません", "no worker needs you");
+            self.message = Some(Notice::ok(text.to_string()));
             return;
         }
         let next = self
@@ -900,9 +1211,12 @@ impl Board {
     fn cannot_send(&self, pane: u64) -> Option<String> {
         let name = self.name(pane);
         if self.awaits_approval(pane) {
-            Some(approval_message(&name))
+            Some(approval_message(&name, self.lang))
         } else if self.has_exited(pane) {
-            Some(format!("{name} は終了しています。x で閉じる"))
+            Some(self.lang.pick(
+                format!("{name} は終了しています。x で閉じる"),
+                format!("{name} has exited. x closes it"),
+            ))
         } else {
             None
         }
@@ -988,7 +1302,7 @@ impl Board {
                         self.help_scroll = 0;
                     }
                     Key::Char('n') => self.select_next_needing(),
-                    Key::Char(' ') if self.view == View::List => self.toggle_subtree(),
+                    Key::Char(' ') if self.view == View::List => self.space(),
                     Key::Char(digit @ '0'..='9') => self.type_digit(digit as usize - '0' as usize),
                     Key::Char('j') | Key::Down => self.move_selection(1),
                     Key::Char('k') | Key::Up => self.move_selection(-1),
@@ -1022,8 +1336,11 @@ impl Board {
 
 // Labels and process names come from other processes: never let their
 // control characters reach this terminal.
-fn approval_message(name: &str) -> String {
-    format!("{name} は承認待ちです。g でペインへ移動して答えてください")
+fn approval_message(name: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("{name} は承認待ちです。g でペインへ移動して答えてください"),
+        Lang::En => format!("{name} awaits approval. g goes to its pane to answer it"),
+    }
 }
 
 /// A full-width rule, as agents draw around their input box.
@@ -1347,19 +1664,58 @@ struct Hidden {
 
 /// "↓ あと 3 件 · うち要対応 1 · 閉じた 2 件": what a scrolled list hides.
 /// Only parts with something in them are said.
-fn more_line(arrow: &str, (n, needs): (usize, usize), gone: usize, cols: usize) -> String {
+fn more_line(
+    arrow: &str,
+    (n, needs): (usize, usize),
+    gone: usize,
+    cols: usize,
+    lang: Lang,
+) -> String {
     let mut line = Line::default();
     line.plain("   ").fg(DIM, arrow);
     if n > 0 {
-        line.fg(DIM, &format!(" あと {n} 件"));
+        let more = lang.pick(format!(" あと {n} 件"), format!(" {n} more"));
+        line.fg(DIM, &more);
         if needs > 0 {
-            line.fg(DIM, " ·")
-                .fg(ORANGE, &format!(" うち要対応 {needs}"));
+            let needs = lang.pick(format!(" うち要対応 {needs}"), format!(" {needs} need you"));
+            line.fg(DIM, " ·").fg(ORANGE, &needs);
         }
     }
     if gone > 0 {
         let sep = if n > 0 { " ·" } else { "" };
-        line.fg(DIM, &format!("{sep} 閉じた {gone} 件"));
+        let gone = lang.pick(
+            format!("{sep} 閉じた {gone} 件"),
+            format!("{sep} {gone} closed"),
+        );
+        line.fg(DIM, &gone);
+    }
+    line.finish(cols)
+}
+
+/// A section's title rule, `─ title ─────── hint ─`, exactly `cols` wide;
+/// the hint goes first when it does not fit. A piece without a colour is
+/// bold.
+fn rule(cols: usize, title: &[(Option<Rgb>, String)], hint: Option<&str>) -> String {
+    let mut line = Line::default();
+    line.fg(BORDER, "─ ");
+    for (color, text) in title {
+        match color {
+            Some(color) => line.fg(*color, text),
+            None => line.bold(text),
+        };
+    }
+    line.plain(" ");
+    let hint = hint.map(|hint| format!(" {hint} ")).unwrap_or_default();
+    let hint = if line.width + hint.width() + 2 <= cols {
+        hint
+    } else {
+        String::new()
+    };
+    let tail = if hint.is_empty() { 0 } else { hint.width() + 1 };
+    let fill = cols.saturating_sub(line.width + tail);
+    line.fg(BORDER, &"─".repeat(fill));
+    if !hint.is_empty() {
+        line.fg(DIM, &hint).fg(BORDER, "─");
     }
     line.finish(cols)
 }
@@ -1486,22 +1842,28 @@ struct Tally {
 
 /// A tally as styled pieces: "▾ 子 3 · 要対応 1", "▾3 要対応1", or "▾" alone.
 /// Only parts with something in them are said.
-fn tally_pieces(tally: Tally, form: StateForm) -> Vec<(Rgb, String)> {
+fn tally_pieces(tally: Tally, form: StateForm, lang: Lang) -> Vec<(Rgb, String)> {
     let mark = if tally.collapsed { "▸" } else { "▾" };
     let Tally { kids, needs, .. } = tally;
     let mut pieces = Vec::new();
     match form {
         StateForm::Full => {
-            pieces.push((DIM, format!("{mark} 子 {kids}")));
+            let kids = lang.pick(
+                format!("{mark} 子 {kids}"),
+                format!("{mark} {kids} workers"),
+            );
+            pieces.push((DIM, kids));
             if needs > 0 {
                 pieces.push((DIM, " · ".to_string()));
-                pieces.push((ORANGE, format!("要対応 {needs}")));
+                let needs = lang.pick(format!("要対応 {needs}"), format!("{needs} need you"));
+                pieces.push((ORANGE, needs));
             }
         }
         StateForm::Short => {
             pieces.push((DIM, format!("{mark}{kids}")));
             if needs > 0 {
-                pieces.push((ORANGE, format!(" 要対応{needs}")));
+                let needs = lang.pick(format!(" 要対応{needs}"), format!(" !{needs}"));
+                pieces.push((ORANGE, needs));
             }
         }
         StateForm::Bare => pieces.push((DIM, mark.to_string())),
@@ -1509,8 +1871,8 @@ fn tally_pieces(tally: Tally, form: StateForm) -> Vec<(Rgb, String)> {
     pieces
 }
 
-fn tally_width(tally: Tally, form: StateForm) -> usize {
-    tally_pieces(tally, form)
+fn tally_width(tally: Tally, form: StateForm, lang: Lang) -> usize {
+    tally_pieces(tally, form, lang)
         .iter()
         .map(|(_, text)| text.width())
         .sum()
@@ -1549,26 +1911,24 @@ fn clean(s: &str) -> String {
     s.chars().filter(|ch| !ch.is_control()).collect()
 }
 
-/// "10 秒", "2 分", "3 時間".
-fn duration_text(span: Duration) -> String {
+/// "10 秒", "2 分", "3 時間" (in English "10s", "2m", "3h").
+fn duration_text(span: Duration, lang: Lang) -> String {
     let secs = span.as_secs();
-    match secs {
-        0..60 => format!("{secs} 秒"),
-        60..3600 => format!("{} 分", secs / 60),
-        _ => format!("{} 時間", secs / 3600),
-    }
+    let (n, ja, en) = match secs {
+        0..60 => (secs, "秒", "s"),
+        60..3600 => (secs / 60, "分", "m"),
+        _ => (secs / 3600, "時間", "h"),
+    };
+    lang.pick(format!("{n} {ja}"), format!("{n}{en}"))
 }
 
-fn ago(at: Option<Instant>, now: Instant) -> String {
+/// "10 秒前" ("10s ago"), or "開始時" for a time before the board opened.
+fn ago(at: Option<Instant>, now: Instant, lang: Lang) -> String {
     let Some(at) = at else {
-        return "開始時".to_string();
+        return lang.pick("開始時", "at start").to_string();
     };
-    let secs = now.saturating_duration_since(at).as_secs();
-    match secs {
-        0..60 => format!("{secs} 秒前"),
-        60..3600 => format!("{} 分前", secs / 60),
-        _ => format!("{} 時間前", secs / 3600),
-    }
+    let span = duration_text(now.saturating_duration_since(at), lang);
+    lang.pick(format!("{span}前"), format!("{span} ago"))
 }
 
 impl Board {
@@ -1576,7 +1936,10 @@ impl Board {
     pub(crate) fn render(&self, cols: usize, rows: usize, now: Instant) -> Vec<String> {
         // Drawing wider than the pane would wrap every line; say so instead.
         if cols < MIN_COLS || rows < MIN_ROWS {
-            let note = format!("{MIN_COLS}×{MIN_ROWS} 以上に広げてください");
+            let note = self.lang.pick(
+                format!("{MIN_COLS}×{MIN_ROWS} 以上に広げてください"),
+                format!("Widen to {MIN_COLS}×{MIN_ROWS} or more"),
+            );
             return (0..rows)
                 .map(|row| {
                     let mut line = Line::default();
@@ -1623,11 +1986,17 @@ impl Board {
         let needs = count(Group::Needs);
         let working = count(Group::Working);
         if needs > 0 {
-            format!("ボード · 要対応 {needs}")
+            self.lang.pick(
+                format!("ボード · 要対応 {needs}"),
+                format!("Board · {needs} need you"),
+            )
         } else if working > 0 {
-            format!("ボード · 作業中 {working}")
+            self.lang.pick(
+                format!("ボード · 作業中 {working}"),
+                format!("Board · {working} working"),
+            )
         } else {
-            "ボード".to_string()
+            self.lang.pick("ボード", "Board").to_string()
         }
     }
 
@@ -1642,7 +2011,13 @@ impl Board {
             Mode::Send(pane, text) => {
                 line.fg(
                     BLUE,
-                    &fit(&format!("{} に送る", self.name(*pane)), room / 2),
+                    &fit(
+                        &self.lang.pick(
+                            format!("{} に送る", self.name(*pane)),
+                            format!("to {}", self.name(*pane)),
+                        ),
+                        room / 2,
+                    ),
                 )
                 .fg(BLUE, " › ");
                 let room = cols.saturating_sub(line.width + 1);
@@ -1675,7 +2050,13 @@ impl Board {
                         !matches!(status, Status::Exited(_))
                             && matches!(status.group(), Group::Needs | Group::Working)
                     })
-                    .map(|status| format!("まだ{}です。", status.label()))
+                    .map(|status| {
+                        let label = status.label(self.lang);
+                        self.lang.pick(
+                            format!("まだ{label}です。"),
+                            format!("It is still {label}. "),
+                        )
+                    })
                     .unwrap_or_default();
                 // D13: its own workers close with it.
                 let kids = self
@@ -1683,13 +2064,17 @@ impl Board {
                     .filter(|panel| panel.parent_pane_id.is_some_and(|p| p.0 == *pane))
                     .count();
                 let kids = if kids > 0 {
-                    format!("ワーカーの子 {kids} 件も閉じます。")
+                    self.lang.pick(
+                        format!("ワーカーの子 {kids} 件も閉じます。"),
+                        format!("Its {kids} workers close too. "),
+                    )
                 } else {
                     String::new()
                 };
-                let ask = format!(
-                    "{} を閉じますか? {busy}{kids}出力は消えます。",
-                    self.name(*pane)
+                let name = self.name(*pane);
+                let ask = self.lang.pick(
+                    format!("{name} を閉じますか? {busy}{kids}出力は消えます。"),
+                    format!("Close {name}? {busy}{kids}Its output is lost."),
                 );
                 line.fg(RED, &fit(&ask, room));
             }
@@ -1704,17 +2089,29 @@ impl Board {
                 // a pane holds 8 of (floating-panes REQ-019). A worker's own
                 // workers close: their parent is a float then (D13).
                 let max = crate::floating::MAX_PER_ANCHOR;
-                let ask = match (live > max, kids > 0) {
-                    (true, true) => format!(
+                let ask = match (self.lang, live > max, kids > 0) {
+                    (Lang::En, true, true) => format!(
+                        "Press q again to quit (up to {max} of the {live} workers go back to the orchestrator; the rest, and {kids} workers' workers, close)"
+                    ),
+                    (Lang::En, true, false) => format!(
+                        "Press q again to quit (up to {max} of the {live} workers go back to the orchestrator; the rest close)"
+                    ),
+                    (Lang::En, false, true) => format!(
+                        "Press q again to quit ({live} workers go back to the orchestrator; {kids} workers' workers close)"
+                    ),
+                    (Lang::En, false, false) => format!(
+                        "Press q again to quit ({live} workers go back to the orchestrator)"
+                    ),
+                    (Lang::Ja, true, true) => format!(
                         "q をもう一度押すと終了します（ワーカー {live} 件のうち戻れる最大 {max} 件はオーケストレーターへ戻り、残りと、ワーカーの子 {kids} 件は閉じます）"
                     ),
-                    (true, false) => format!(
+                    (Lang::Ja, true, false) => format!(
                         "q をもう一度押すと終了します（ワーカー {live} 件のうち戻れる最大 {max} 件はオーケストレーターへ戻り、残りは閉じます）"
                     ),
-                    (false, true) => format!(
+                    (Lang::Ja, false, true) => format!(
                         "q をもう一度押すと終了します（ワーカー {live} 件はオーケストレーターへ戻り、ワーカーの子 {kids} 件は閉じます）"
                     ),
-                    (false, false) => format!(
+                    (Lang::Ja, false, false) => format!(
                         "q をもう一度押すと終了します（ワーカー {live} 件はオーケストレーターへ戻ります）"
                     ),
                 };
@@ -1724,7 +2121,10 @@ impl Board {
                 // The listing failed: what is shown is as of `since`.
                 (Some(since), _) => {
                     let secs = now.saturating_duration_since(*since).as_secs();
-                    let text = format!("接続できません · 再試行中 {secs} 秒");
+                    let text = self.lang.pick(
+                        format!("接続できません · 再試行中 {secs} 秒"),
+                        format!("Cannot connect · retrying for {secs}s"),
+                    );
                     line.fg(ORANGE, &fit(&text, room));
                 }
                 (None, Some(notice)) => {
@@ -1732,7 +2132,10 @@ impl Board {
                     line.fg(color, &fit(&clean(&notice.text), room));
                 }
                 (None, None) => {
-                    let hint = format!("{BACK_TO_BOARD} 開いたワーカーからボードへ  ·  ? キー一覧");
+                    let hint = self.lang.pick(
+                        format!("{BACK_TO_BOARD} 開いたワーカーからボードへ  ·  ? キー一覧"),
+                        format!("{BACK_TO_BOARD} back here from an opened worker  ·  ? keys"),
+                    );
                     line.fg(DIM, &fit(&hint, room));
                 }
             },
@@ -1746,28 +2149,83 @@ impl Board {
         let mut title = Line::default();
         title
             .plain(" ")
-            .bold("キー操作")
-            .fg(DIM, "  j/k 以外のキーで閉じます");
+            .bold(self.lang.pick("キー操作", "Keys"))
+            .fg(
+                DIM,
+                self.lang.pick(
+                    "  j/k 以外のキーで閉じます",
+                    "  any key but j/k closes this",
+                ),
+            );
         let mut lines = vec![Line::default().finish(cols)];
+        let l = |ja, en| self.lang.pick(ja, en);
         let keys: [(&str, &str); 15] = [
-            ("j k ↑ ↓", "ワーカーを選ぶ"),
-            ("1–20", "番号のワーカーを選ぶ(10 以上は 2 桁続けて)"),
-            ("n", "次の要対応のワーカーへ(たたんだ子も開いて選ぶ)"),
-            ("Space", "ワーカーの子をたたむ / 開く"),
-            ("Enter l →", "詳細(画面と報告の履歴)"),
-            ("Esc h ←", "一覧に戻る"),
-            ("g", "ワーカーをこの下に開く(承認はそこで答える)"),
-            (BACK_TO_BOARD, "開いたワーカーからボードへ戻る"),
+            ("j k ↑ ↓", l("ワーカーを選ぶ", "select a worker")),
+            (
+                "1–20",
+                l(
+                    "番号のワーカーを選ぶ(10 以上は 2 桁続けて)",
+                    "select by number (two digits in a row for 10 and up)",
+                ),
+            ),
+            (
+                "n",
+                l(
+                    "キューの次の要対応のワーカーへ",
+                    "the next worker in the queue",
+                ),
+            ),
+            (
+                "Space",
+                l(
+                    "作業中のワーカーの子をたたむ / 開く(それ以外では完了・終了を開く / たたむ)",
+                    "fold / open a subtree at work (elsewhere: list / fold done and exited)",
+                ),
+            ),
+            (
+                "Enter l →",
+                l("詳細(画面と報告の履歴)", "details (screen and reports)"),
+            ),
+            ("Esc h ←", l("一覧に戻る", "back to the list")),
+            (
+                "g",
+                l(
+                    "ワーカーをこの下に開く(承認はそこで答える)",
+                    "open the worker below (answer approvals there)",
+                ),
+            ),
+            (
+                BACK_TO_BOARD,
+                l(
+                    "開いたワーカーからボードへ戻る",
+                    "back to the board from an opened worker",
+                ),
+            ),
             (
                 "s",
-                "ワーカーに送る(承認待ち・終了したワーカーには送れません)",
+                l(
+                    "ワーカーに送る(承認待ち・終了したワーカーには送れません)",
+                    "send to the worker (not to one awaiting approval or exited)",
+                ),
             ),
-            ("x", "ワーカーを閉じる(確認あり。出力は消えます)"),
-            ("q ^C", "ボードを終える(ワーカーはオーケストレーターへ戻る)"),
+            (
+                "x",
+                l(
+                    "ワーカーを閉じる(確認あり。出力は消えます)",
+                    "close the worker (asks first; its output is lost)",
+                ),
+            ),
+            (
+                "q ^C",
+                l(
+                    "ボードを終える(ワーカーはオーケストレーターへ戻る)",
+                    "end the board (workers go back to the orchestrator)",
+                ),
+            ),
             ("", ""),
-            ("送信欄", ""),
-            ("Enter / Esc", "送る / 取り消す"),
-            ("^U / ^W", "全部消す / 1 語消す"),
+            (l("送信欄", "Send line"), ""),
+            ("Enter / Esc", l("送る / 取り消す", "send / cancel")),
+            ("^U / ^W", l("全部消す / 1 語消す", "clear / delete a word")),
         ];
         for (key, what) in keys {
             let mut line = Line::default();
@@ -1795,9 +2253,10 @@ impl Board {
         out.extend(lines.into_iter().skip(offset).take(view));
         let mut marker = Line::default();
         let text = if offset < reach {
-            "↓ 続き  j/k でスクロール"
+            self.lang
+                .pick("↓ 続き  j/k でスクロール", "↓ more  j/k to scroll")
         } else {
-            "↑ j/k でスクロール"
+            self.lang.pick("↑ j/k でスクロール", "↑ j/k to scroll")
         };
         marker
             .plain("   ")
@@ -1808,14 +2267,35 @@ impl Board {
 
     fn header(&self, cols: usize, now: Instant) -> Vec<String> {
         let workers = self.workers();
-        let count = format!("ワーカー {} ", workers.len());
+        // When the list was last read: a stale one says how stale (an
+        // unreachable server is said on the notice line too).
+        let synced = match self.synced {
+            Some(at) if now.saturating_duration_since(at) < Duration::from_secs(2) => {
+                self.lang.pick("いま", "now").to_string()
+            }
+            Some(at) => ago(Some(at), now, self.lang),
+            None => self.lang.pick("まだ", "never").to_string(),
+        };
+        let n = workers.len();
+        let count = self
+            .lang
+            .pick(format!("ワーカー {n} "), format!("workers {n} "));
+        let long_count = self.lang.pick(
+            format!("ワーカー {n} · 同期 {synced} "),
+            format!("workers {n} · synced {synced} "),
+        );
         // A narrow pane gets the short title before the count is cut.
-        const LONG: &str = "オーケストレーション";
+        const LONG: &str = "NOA / CONTROL";
         const SCOPE_ROOM: usize = 8;
         let name = if 1 + LONG.width() + 2 + SCOPE_ROOM + count.width() <= cols {
             LONG
         } else {
-            "ボード"
+            self.lang.pick("ボード", "Board")
+        };
+        let count = if 1 + name.width() + 2 + SCOPE_ROOM + long_count.width() <= cols {
+            long_count
+        } else {
+            count
         };
         let mut title = Line::default();
         title.plain(" ").bold(name).plain("  ");
@@ -1833,7 +2313,10 @@ impl Board {
                     None => name,
                 }
             }
-            None => "すべてのワーカー".to_string(),
+            None => self
+                .lang
+                .pick("すべてのワーカー", "all workers")
+                .to_string(),
         };
         let room = cols.saturating_sub(title.width + count.width() + 1);
         title.fg(DIM, &fit(&scope, room));
@@ -1847,21 +2330,18 @@ impl Board {
                 .iter()
                 .filter(|panel| Status::of(panel).group() == group)
                 .count();
+            let text = format!(" {} {n}", group.title(self.lang));
             // An empty section is dimmed, so the ones with workers stand out.
             if n == 0 {
-                chips
-                    .fg(BORDER, "●")
-                    .fg(DIM, &format!(" {} 0   ", group.title()));
+                chips.fg(BORDER, group.mark()).fg(BORDER, &text);
             } else if group == Group::Needs {
                 chips
-                    .fg(group.color(), "●")
-                    .fg(group.color(), &format!(" {} {n}", group.title()))
-                    .plain("   ");
+                    .fg(group.color(), group.mark())
+                    .fg(group.color(), &text);
             } else {
-                chips
-                    .fg(group.color(), "●")
-                    .plain(&format!(" {} {n}   ", group.title()));
+                chips.fg(group.color(), group.mark()).plain(&text);
             }
+            chips.plain("   ");
         }
         vec![
             title.finish(cols),
@@ -1870,70 +2350,118 @@ impl Board {
         ]
     }
 
+    /// The list (D15): the queue of workers needing someone, the tree of
+    /// the work under way, and the finished and exited workers; with the
+    /// selected worker's screen beside it in a wide pane, under it in a
+    /// tall enough one, and not at all in a narrow one (`Enter` shows it).
     fn render_list(&self, cols: usize, rows: usize, now: Instant) -> Vec<String> {
         let mut lines = self.header(cols, now);
-        let workers = self.workers();
-        if workers.is_empty() {
-            let mut empty = Line::default();
-            empty.plain(" ").fg(
-                DIM,
-                &fit(
-                    "ワーカーはまだいません。オーケストレーターが `+ctl spawn` すると、ここに並びます。",
-                    cols - 1,
-                ),
-            );
-            let mut body = vec![empty.finish(cols)];
-            body.extend(self.gone_lines(cols, now));
-            // The closed section scrolls by `past`; its entries start after
-            // the note and the section title.
-            let room = rows.saturating_sub(lines.len() + 1);
-            let marks = room >= 3;
-            let (mut above, mut below) = (false, false);
-            let mut offset = 0;
-            let gone_hidden = |offset: usize, avail: usize| {
-                let lines = 2..body.len();
-                let above = lines.clone().filter(|&line| line < offset).count();
-                let below = lines.filter(|&line| line >= offset + avail).count();
-                (above, below)
-            };
-            for _ in 0..3 {
-                let avail = room.saturating_sub(above as usize + below as usize).max(1);
-                offset = self.past.min(body.len().saturating_sub(avail));
-                let (up, down) = gone_hidden(offset, avail);
-                let now = (marks && up > 0, marks && down > 0);
-                if now == (above, below) {
-                    break;
-                }
-                (above, below) = now;
-            }
-            let avail = room.saturating_sub(above as usize + below as usize).max(1);
-            let (up, down) = gone_hidden(offset, avail);
-            if above {
-                lines.push(more_line("↑", (0, 0), up, cols));
-            }
-            lines.extend(body.iter().skip(offset).take(avail).cloned());
-            if below {
-                lines.push(more_line("↓", (0, 0), down, cols));
-            }
+        let room = rows.saturating_sub(lines.len() + 1);
+        if self.workers().is_empty() {
+            lines.extend(self.empty_lines(cols, room, now));
             return lines;
         }
+        let preview = self.selected.is_some();
+        if preview && cols >= WIDE_COLS {
+            let right = cols * 2 / 5;
+            let left = cols - right - 1;
+            let list = self.list_lines(left, room, now);
+            let side = self.preview_lines(right, room, now);
+            let mut bar = Line::default();
+            bar.fg(BORDER, "│");
+            let bar = bar.finish(1);
+            for (list, side) in list.into_iter().zip(side) {
+                lines.push(format!("{list}{bar}{side}"));
+            }
+        } else if preview && cols >= STACKED_COLS && rows >= STACKED_ROWS {
+            let height = (room / 3).clamp(3, 8);
+            lines.extend(self.list_lines(cols, room - height, now));
+            lines.extend(self.preview_lines(cols, height, now));
+        } else {
+            lines.extend(self.list_lines(cols, room, now));
+        }
+        lines
+    }
+
+    /// With no worker left: a note, and the closed section, which `j`/`k`
+    /// scroll by `past`.
+    fn empty_lines(&self, cols: usize, room: usize, now: Instant) -> Vec<String> {
+        let mut empty = Line::default();
+        empty.plain(" ").fg(
+            DIM,
+            &fit(
+                self.lang.pick(
+                    "ワーカーはまだいません。オーケストレーターが `+ctl spawn` すると、ここに並びます。",
+                    "No workers yet. They appear here once the orchestrator runs `+ctl spawn`.",
+                ),
+                cols - 1,
+            ),
+        );
+        let mut body = vec![empty.finish(cols)];
+        body.extend(self.gone_lines(cols, now));
+        // The closed section scrolls by `past`; its entries start after
+        // the note and the section title.
+        let marks = room >= 3;
+        let (mut above, mut below) = (false, false);
+        let mut offset = 0;
+        let gone_hidden = |offset: usize, avail: usize| {
+            let lines = 2..body.len();
+            let above = lines.clone().filter(|&line| line < offset).count();
+            let below = lines.filter(|&line| line >= offset + avail).count();
+            (above, below)
+        };
+        for _ in 0..3 {
+            let avail = room.saturating_sub(above as usize + below as usize).max(1);
+            offset = self.past.min(body.len().saturating_sub(avail));
+            let (up, down) = gone_hidden(offset, avail);
+            let now = (marks && up > 0, marks && down > 0);
+            if now == (above, below) {
+                break;
+            }
+            (above, below) = now;
+        }
+        let avail = room.saturating_sub(above as usize + below as usize).max(1);
+        let (up, down) = gone_hidden(offset, avail);
+        let mut lines = Vec::new();
+        if above {
+            lines.push(more_line("↑", (0, 0), up, cols, self.lang));
+        }
+        lines.extend(body.iter().skip(offset).take(avail).cloned());
+        if below {
+            lines.push(more_line("↓", (0, 0), down, cols, self.lang));
+        }
+        lines
+    }
+
+    /// The rows of the list in exactly `room` lines of `cols` columns,
+    /// scrolled to keep the selected worker in view.
+    fn list_lines(&self, cols: usize, room: usize, now: Instant) -> Vec<String> {
         let tree = self.tree();
         let shown = self.rows();
         let kid_indent = self.kid_indent();
-        let tally = |node: &Node| self.tally(&tree, node);
+        let tally = |entry: &Entry| {
+            (!entry.queued)
+                .then(|| self.tally(&tree, &entry.node))
+                .flatten()
+        };
         let widest_tally = |form: StateForm| {
             shown
                 .iter()
                 .filter_map(&tally)
-                .map(|tally| tally_width(tally, form))
+                .map(|tally| tally_width(tally, form, self.lang))
                 .max()
                 .unwrap_or(0)
         };
+        // A worker's worker in the queue is named after its parent too.
         let named: Vec<(&Panel, usize)> = shown
             .iter()
-            .map(|node| match node.branch {
-                Branch::Top { .. } => (node.panel, 0),
-                Branch::Kid { .. } => (node.panel, kid_indent),
+            .map(|entry| {
+                let panel = entry.node.panel;
+                match (entry.queued, entry.node.branch) {
+                    (_, Branch::Top { .. }) => (panel, 0),
+                    (true, Branch::Kid { parent, .. }) => (panel, self.crumb(parent).width()),
+                    (false, Branch::Kid { .. }) => (panel, kid_indent),
+                }
             })
             .collect();
         let tallies = [
@@ -1944,61 +2472,89 @@ impl Board {
         let columns = Columns::of(&named, tallies, cols, |panel, form| {
             self.state_text(panel.pane_id.0, Status::of(panel), form, now)
         });
+        let space_on_subtree = self.space_target().is_some();
         let mut body: Vec<String> = Vec::new();
-        // Each row's first and past-last line in `body`, and its worker's
-        // own group (a hidden worker needing someone is said as such
-        // whatever section its subtree is in).
-        let mut spans: Vec<(usize, usize, Group)> = Vec::new();
-        let mut selected_span = (0, 0);
+        // Each selectable row's line in `body`, and its worker's group.
+        let mut spans: Vec<(usize, Group)> = Vec::new();
+        let mut selected_line = None;
         let mut last_section = None;
-        for node in &shown {
-            let section = node.section;
+        for entry in &shown {
+            let section = if entry.queued {
+                Zone::Queue
+            } else {
+                entry.node.zone
+            };
+            if section == Zone::Settled {
+                break;
+            }
             if last_section != Some(section) {
                 last_section = Some(section);
-                // Every worker under the title, folded away or not.
-                let n = tree.iter().filter(|node| node.section == section).count();
-                let mut title = Line::default();
-                title
-                    .plain(" ")
-                    .fg(section.color(), section.title())
-                    .fg(DIM, &format!(" {n}"));
-                body.push(title.finish(cols));
+                body.push(self.section_rule(section, &tree, space_on_subtree, cols));
             }
-            let start = body.len();
-            body.extend(self.row(node, tally(node), &columns, cols, now));
-            spans.push((start, body.len(), Status::of(node.panel).group()));
-            if Some(node.panel.pane_id.0) == self.selected {
-                selected_span = (start, body.len());
+            if !entry.echo {
+                let pane = entry.node.panel.pane_id.0;
+                spans.push((body.len(), Status::of(entry.node.panel).group()));
+                if Some(pane) == self.selected {
+                    selected_line = Some(body.len());
+                }
+            }
+            body.push(self.row(entry, tally(entry), &columns, cols, now));
+        }
+        // The finished and exited workers: counted on one line, listed
+        // under it once opened, with the workers closed since the board
+        // opened.
+        let settled_line = body.len();
+        let settled = tree.iter().any(|node| node.zone == Zone::Settled);
+        if settled || !self.gone.is_empty() {
+            body.push(self.section_rule(Zone::Settled, &tree, space_on_subtree, cols));
+        }
+        let mut gone_start = None;
+        if self.settled_open {
+            for entry in shown
+                .iter()
+                .filter(|entry| !entry.queued && entry.node.zone == Zone::Settled)
+            {
+                let pane = entry.node.panel.pane_id.0;
+                spans.push((body.len(), Status::of(entry.node.panel).group()));
+                if Some(pane) == self.selected {
+                    selected_line = Some(body.len());
+                }
+                body.push(self.row(entry, tally(entry), &columns, cols, now));
+            }
+            let gone = self.gone_lines(cols, now);
+            if !gone.is_empty() {
+                gone_start = Some(body.len() + 1);
+                body.extend(gone);
             }
         }
-        body.extend(self.gone_lines(cols, now));
+        // A selection folded away is at the line that counts it.
+        let selected_line = selected_line.unwrap_or(if self.selected.is_some() {
+            settled_line.min(body.len().saturating_sub(1))
+        } else {
+            0
+        });
 
-        // Scroll so the selected worker is in view; when it is taller than
-        // the room, keep its first line (number, name, state) rather than its
-        // end. A clipped end says how many workers it hides, and how many of
-        // them need someone, on a line of its own.
-        // The last worker's range runs on through the closed section, so
-        // selecting it brings that section into view.
-        let workers_end = spans.last().map_or(0, |span| span.1);
-        let (sel_start, mut sel_end) = selected_span;
-        if sel_end == workers_end {
-            sel_end = body.len();
-        }
-        let room = rows.saturating_sub(lines.len() + 1);
-        // What a view from `offset` showing `avail` lines hides: a worker
-        // counts only when its row (number, name, state) is out of view, so
-        // a cut preview or section title is not a hidden worker.
+        // Scroll so the selected worker is in view, `past` lines further
+        // once `j` went on past the last one. A cut end says how many
+        // workers it hides, and how many of them need someone, on a line of
+        // its own.
+        let last_pick = spans.last().map(|span| span.0);
+        let sel_start = selected_line;
+        let sel_end = if Some(selected_line) == last_pick {
+            body.len()
+        } else {
+            selected_line + 1
+        };
         let hidden = |offset: usize, avail: usize| {
             let end = offset + avail;
             let above: Vec<_> = spans.iter().filter(|span| span.0 < offset).collect();
             let below: Vec<_> = spans.iter().filter(|span| span.0 >= end).collect();
-            let needs = |list: &[&(usize, usize, Group)]| {
-                list.iter().filter(|span| span.2 == Group::Needs).count()
+            let needs = |list: &[&(usize, Group)]| {
+                list.iter().filter(|span| span.1 == Group::Needs).count()
             };
-            // Closed entries follow the section title at `workers_end`.
-            let gone = (workers_end + 1..body.len())
-                .filter(|&line| line >= end)
-                .count();
+            let gone = gone_start.map_or(0, |start| {
+                (start..body.len()).filter(|&line| line >= end).count()
+            });
             Hidden {
                 above: (above.len(), needs(&above)),
                 below: (below.len(), needs(&below)),
@@ -2022,14 +2578,215 @@ impl Board {
         }
         let avail = room.saturating_sub(above as usize + below as usize).max(1);
         let seen = hidden(offset, avail);
+        let mut lines = Vec::new();
         if above {
-            lines.push(more_line("↑", seen.above, 0, cols));
+            lines.push(more_line("↑", seen.above, 0, cols, self.lang));
         }
         lines.extend(body.iter().skip(offset).take(avail).cloned());
         if below {
-            lines.push(more_line("↓", seen.below, seen.gone, cols));
+            lines.push(more_line("↓", seen.below, seen.gone, cols, self.lang));
+        }
+        lines.truncate(room);
+        while lines.len() < room {
+            lines.push(Line::default().finish(cols));
         }
         lines
+    }
+
+    /// "planner › ": the parent a worker's worker is named after in the
+    /// queue and the preview. The parent's name is cut short, so a long one never crowds out the
+    /// worker's own.
+    fn crumb(&self, parent: u64) -> String {
+        format!("{} › ", fit(&self.name(parent), CRUMB_WIDTH))
+    }
+
+    /// A section's title rule, with how many it holds and, where a key
+    /// acts on it, that key.
+    fn section_rule(
+        &self,
+        zone: Zone,
+        tree: &[Node],
+        space_on_subtree: bool,
+        cols: usize,
+    ) -> String {
+        let count = |group: Group| {
+            tree.iter()
+                .filter(|node| node.zone == zone && Status::of(node.panel).group() == group)
+                .count()
+        };
+        match zone {
+            Zone::Queue => {
+                let n = tree
+                    .iter()
+                    .filter(|node| Status::of(node.panel).group() == Group::Needs)
+                    .count();
+                rule(
+                    cols,
+                    &[
+                        (
+                            Some(ORANGE),
+                            self.lang
+                                .pick("! 人の対応が必要", "! Needs you")
+                                .to_string(),
+                        ),
+                        (Some(DIM), format!(" {n}")),
+                    ],
+                    Some(self.lang.pick("n 次の要対応", "n next")),
+                )
+            }
+            Zone::Background => {
+                let n = tree
+                    .iter()
+                    .filter(|node| node.zone == Zone::Background)
+                    .filter(|node| Status::of(node.panel).group() != Group::Needs)
+                    .count();
+                let hint = match (space_on_subtree, self.space_folded()) {
+                    (true, Some(true)) => Some(self.lang.pick("Space 開く", "Space open")),
+                    (true, _) => Some(self.lang.pick("Space たたむ", "Space fold")),
+                    (false, _) => None,
+                };
+                rule(
+                    cols,
+                    &[
+                        (
+                            Some(BLUE),
+                            self.lang
+                                .pick("● バックグラウンド", "● Background")
+                                .to_string(),
+                        ),
+                        (Some(DIM), format!(" {n}")),
+                    ],
+                    hint,
+                )
+            }
+            Zone::Settled => {
+                // A selection folded away in here is marked on this line.
+                let hidden_selection = !self.settled_open
+                    && self.selected.is_some_and(|pane| {
+                        tree.iter()
+                            .any(|node| node.panel.pane_id.0 == pane && node.zone == Zone::Settled)
+                    });
+                let mut title = Vec::new();
+                if hidden_selection {
+                    title.push((Some(GREEN), "▶ ".to_string()));
+                }
+                let l = |ja, en| self.lang.pick(ja, en);
+                let done = count(Group::Done);
+                let exited = count(Group::Exited);
+                title.push((Some(GREEN), format!("✓ {} {done}", l("完了", "done"))));
+                title.push((Some(GREY), format!("   · {} {exited}", l("終了", "exited"))));
+                if !self.gone.is_empty() {
+                    let gone = self.gone.len();
+                    title.push((Some(DIM), format!("   {} {gone}", l("閉じた", "closed"))));
+                }
+                let hint = match (space_on_subtree, self.settled_open) {
+                    (true, _) => None,
+                    (false, true) => Some(l("Space たたむ", "Space fold")),
+                    (false, false) => Some(l("Space 開く", "Space open")),
+                };
+                rule(cols, &title, hint)
+            }
+        }
+    }
+
+    /// The selected worker's screen in exactly `height` lines of `cols`
+    /// columns: a title, the end of its screen, and what it is.
+    fn preview_lines(&self, cols: usize, height: usize, now: Instant) -> Vec<String> {
+        let mut out = Vec::new();
+        let blank = || Line::default().finish(cols);
+        let Some((pane, panel)) = self
+            .selected
+            .and_then(|pane| self.panel(pane).map(|panel| (pane, panel)))
+        else {
+            return vec![blank(); height];
+        };
+        let status = Status::of(panel);
+        let mut name = worker_name(panel);
+        if let Some(parent) = self.tree_parent(pane) {
+            name = format!("{}{name}", self.crumb(parent));
+        }
+        out.push(rule(
+            cols,
+            &[
+                (Some(BLUE), self.lang.pick("選択中", "Selected").to_string()),
+                (Some(DIM), format!(" {} ", self.number(pane))),
+                (Some(status.color()), format!("{} ", status.mark())),
+                (None, name),
+            ],
+            Some(self.lang.pick("プレビュー", "preview")),
+        ));
+        // A worker waiting on someone asks at the bottom of its screen, in
+        // the agent's input box or a dialog in its place; one at work shows
+        // the work above that box.
+        let screen: Vec<&str> = self
+            .screens
+            .get(&pane)
+            .map(|lines| {
+                let lines = if status.group() == Group::Needs {
+                    &lines[..]
+                } else {
+                    content_lines(lines)
+                };
+                lines
+                    .iter()
+                    .map(|line| line.trim_end())
+                    .filter(|line| !line.trim().is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let room = height.saturating_sub(2);
+        let mut text: Vec<String> = screen
+            .iter()
+            .skip(screen.len().saturating_sub(room))
+            .map(|line| {
+                let mut out = Line::default();
+                out.plain(" ")
+                    .plain(&fit(&clean(line), cols.saturating_sub(2)));
+                out.finish(cols)
+            })
+            .collect();
+        if text.is_empty() && room > 0 {
+            let note = if self.screens.contains_key(&pane) {
+                self.lang
+                    .pick("画面に何も出ていません", "nothing on its screen")
+            } else {
+                self.lang.pick("画面を読んでいます…", "reading its screen…")
+            };
+            let mut line = Line::default();
+            line.plain(" ").fg(DIM, note);
+            text.push(line.finish(cols));
+        }
+        out.extend(text);
+        while out.len() + 1 < height {
+            out.push(blank());
+        }
+        // What it is: its program, state, report count and directory.
+        let mut meta = Line::default();
+        meta.plain(" ");
+        let kind = worker_kind(panel);
+        if !kind.is_empty() {
+            meta.fg(DIM, &format!("{kind} · "));
+        }
+        meta.fg(
+            status.color(),
+            &self.state_text(pane, status, StateForm::Full, now),
+        );
+        if let Some(agent) = &panel.agent {
+            let report = self.lang.pick("報告", "report");
+            meta.fg(DIM, &format!(" · {report} {}", agent.seq));
+        }
+        // The directory only where a few of its columns fit: a lone `…`
+        // or separator says nothing.
+        let cwd = clean(&panel.cwd);
+        let room = cols.saturating_sub(meta.width + 4);
+        if !cwd.is_empty() && room >= 4 {
+            meta.fg(DIM, &format!(" · {}", fit(&cwd, room)));
+        }
+        if height > 1 {
+            out.push(meta.finish(cols));
+        }
+        out.truncate(height);
+        out
     }
 
     /// The state column: "承認待ち 5 秒", "完了 3 分前", or shorter.
@@ -2041,8 +2798,9 @@ impl Board {
     }
 
     /// The state column in its two styles: the state and its age, and for a
-    /// working worker whose screen has not moved for a while, "出力なし 3 分"
-    /// (drawn dimmed, in place of the age).
+    /// working worker when it last showed output, "8 秒前に出力", or once
+    /// its screen has not moved for a while, "出力なし 3 分" (drawn dimmed,
+    /// in place of the age).
     fn state_parts(
         &self,
         pane: u64,
@@ -2051,14 +2809,35 @@ impl Board {
         now: Instant,
     ) -> (String, Option<String>) {
         let label = match form {
-            StateForm::Full => status.label(),
-            StateForm::Short | StateForm::Bare => status.short_label(),
+            StateForm::Full => status.label(self.lang),
+            StateForm::Short | StateForm::Bare => status.short_label(self.lang),
         };
         if form == StateForm::Bare {
             return (label, None);
         }
         if let Some(span) = self.quiet_for(pane, status) {
-            return (label, Some(format!("出力なし {}", duration_text(span))));
+            let span = duration_text(span, self.lang);
+            let quiet = self
+                .lang
+                .pick(format!("出力なし {span}"), format!("quiet {span}"));
+            return (label, Some(quiet));
+        }
+        // At work: how fresh its output is, not how long it has worked
+        // (D15), once its screen was seen to move in its current state.
+        if status.group() == Group::Working {
+            let began = self.since.get(&pane).and_then(|(_, at)| *at);
+            return match self.moved.get(&pane) {
+                Some(&at) if began.is_none_or(|began| at >= began) => {
+                    let ago = ago(Some(at), now, self.lang);
+                    let text = match (form, self.lang) {
+                        (StateForm::Full, Lang::Ja) => format!("{label} {ago}に出力"),
+                        (StateForm::Full, Lang::En) => format!("{label}, output {ago}"),
+                        _ => format!("{label} {ago}"),
+                    };
+                    (text, None)
+                }
+                _ => (label, None),
+            };
         }
         match self.state_age(pane, status, now) {
             Some(age) => (format!("{label} {age}"), None),
@@ -2074,22 +2853,26 @@ impl Board {
         let mut title = Line::default();
         title
             .plain(" ")
-            .fg(GREY, "閉じた")
-            .fg(DIM, "  このボードを開いてから");
+            .fg(GREY, self.lang.pick("閉じた", "Closed"))
+            .fg(
+                DIM,
+                self.lang
+                    .pick("  このボードを開いてから", "  since this board opened"),
+            );
         let mut lines = vec![title.finish(cols)];
         for gone in &self.gone {
             let mut line = Line::default();
             line.plain("   ")
                 .fg(GREY, "✕ ")
                 .plain(&fit(&gone.name, 20))
-                .fg(
-                    DIM,
-                    &format!(
-                        "  {}で閉じた · {}",
-                        gone.status.label(),
-                        ago(Some(gone.at), now)
-                    ),
-                );
+                .fg(DIM, &{
+                    let label = gone.status.label(self.lang);
+                    let ago = ago(Some(gone.at), now, self.lang);
+                    self.lang.pick(
+                        format!("  {label}で閉じた · {ago}"),
+                        format!("  closed while {label} · {ago}"),
+                    )
+                });
             if !gone.detail.is_empty() {
                 let room = cols.saturating_sub(line.width + 3);
                 line.plain("  ").fg(DIM, &fit(&clean(&gone.detail), room));
@@ -2106,11 +2889,14 @@ impl Board {
         let Some((_, Some(at))) = self.since.get(&pane) else {
             return None;
         };
-        let span = duration_text(now.saturating_duration_since(*at));
         // A failed process is listed with what needs someone, but it is
         // over: say when, like any other ended state.
         let over = matches!(status, Status::Exited(_)) || status.group() == Group::Done;
-        Some(if over { format!("{span}前") } else { span })
+        Some(if over {
+            ago(Some(*at), now, self.lang)
+        } else {
+            duration_text(now.saturating_duration_since(*at), self.lang)
+        })
     }
 
     /// Two columns for numbers once any worker's has two digits.
@@ -2149,26 +2935,23 @@ impl Board {
         })
     }
 
-    /// A worker's row, `▶ 1 ● name  kind  state age  tally  detail`, and the
-    /// end of its work under it: one line, or a few for the selected worker.
-    /// A finished or exited worker shows its work only when selected. A
-    /// worker's worker is drawn further in, on a tree line (`├`, `└`) that
-    /// hangs from its parent's dot and runs down past the work shown (`│`).
+    /// A worker's row, `▶ 1 ! name  kind  state age  tally  detail`. A
+    /// worker's worker is drawn further in on a tree line (`├`, `└`) that
+    /// hangs from its parent's mark, or in the queue after its parent's
+    /// name. An echo of a queue row is dimmed and points up at it.
     fn row(
         &self,
-        node: &Node,
+        entry: &Entry,
         tally: Option<Tally>,
         columns: &Columns,
         cols: usize,
         now: Instant,
-    ) -> Vec<String> {
-        let panel = node.panel;
+    ) -> String {
+        let panel = entry.node.panel;
         let pane = panel.pane_id.0;
         let status = Status::of(panel);
-        let selected = Some(pane) == self.selected;
+        let selected = Some(pane) == self.selected && !entry.echo;
         let width = self.number_width();
-        // The tree line's column, under the parent's dot.
-        let stem = 3 + width;
 
         let mut line = Line::default();
         line.plain(" ");
@@ -2177,39 +2960,28 @@ impl Board {
         } else {
             line.plain(" ");
         }
-        let (name_width, preview) = match node.branch {
-            Branch::Top { kids } => {
-                let open = kids > 0 && !self.collapsed.contains(&pane);
-                let mut preview = Line::default();
-                if open {
-                    preview.plain(&" ".repeat(stem)).fg(BORDER, "│").plain(" ");
-                } else {
-                    preview.plain(&" ".repeat(ROW_INDENT));
-                }
-                (columns.name, preview)
-            }
-            Branch::Kid { last, .. } => {
+        let (name_width, crumb) = match (entry.queued, entry.node.branch) {
+            (_, Branch::Top { .. }) => (columns.name, String::new()),
+            (true, Branch::Kid { parent, .. }) => (columns.name, self.crumb(parent)),
+            (false, Branch::Kid { last, .. }) => {
                 line.plain(&" ".repeat(width + 1))
                     .fg(BORDER, if last { "└" } else { "├" })
                     .plain(" ");
                 let indent = self.kid_indent();
-                let mut preview = Line::default();
-                preview
-                    .plain(&" ".repeat(stem))
-                    .fg(BORDER, if last { " " } else { "│" })
-                    .plain(&" ".repeat(indent + 1));
                 let name = columns.name.saturating_sub(indent).max(columns.name.min(4));
-                (name, preview)
+                (name, String::new())
             }
         };
         let number = format!("{:>width$}", self.number(pane));
         line.fg(DIM, &number)
             .plain(" ")
-            .fg(status.color(), "●")
+            .fg(status.color(), status.mark())
             .plain(" ");
-        let name = pad(&worker_name(panel), name_width);
+        let name = pad(&format!("{crumb}{}", worker_name(panel)), name_width);
         if selected {
             line.bold(&name);
+        } else if entry.echo {
+            line.fg(DIM, &name);
         } else {
             line.plain(&name);
         }
@@ -2231,7 +3003,7 @@ impl Board {
             line.plain("  ");
             let mut used = 0;
             for (color, text) in tally
-                .map(|tally| tally_pieces(tally, columns.tally_form))
+                .map(|tally| tally_pieces(tally, columns.tally_form, self.lang))
                 .unwrap_or_default()
             {
                 line.fg(color, &text);
@@ -2239,43 +3011,28 @@ impl Board {
             }
             line.plain(&" ".repeat(columns.tally.saturating_sub(used)));
         }
-        let detail = self.last_word(panel);
-        if !detail.is_empty() {
-            let room = cols.saturating_sub(line.width + 2);
-            line.plain("  ").plain(&fit(&clean(&detail), room));
+        let room = cols.saturating_sub(line.width + 2);
+        if entry.echo {
+            let echo = self.lang.pick("↑ 要対応に表示", "↑ in the queue above");
+            line.plain("  ").fg(DIM, &fit(echo, room));
+        } else {
+            // What it said, else, while it needs someone, the last line of
+            // its screen (its question is in the input box, under the work),
+            // and while it works, the last line of its work.
+            let mut detail = self.last_word(panel);
+            if detail.is_empty() {
+                let line = match status.group() {
+                    Group::Needs => self.last_screen_line(pane),
+                    Group::Working => self.last_output(pane),
+                    Group::Done | Group::Exited => None,
+                };
+                detail = line.unwrap_or_default().to_string();
+            }
+            if !detail.is_empty() {
+                line.plain("  ").fg(DIM, &fit(&clean(&detail), room));
+            }
         }
-        let mut out = vec![line.finish(cols)];
-
-        let rows = match (selected, status.group()) {
-            (true, _) => SELECTED_PREVIEW_ROWS,
-            (false, Group::Needs | Group::Working) => PREVIEW_ROWS,
-            (false, Group::Done | Group::Exited) => 0,
-        };
-        let lines: Vec<&String> = self
-            .screens
-            .get(&pane)
-            .map(|lines| {
-                content_lines(lines)
-                    .iter()
-                    .filter(|line| !line.trim().is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-        // A failed command's last line is already its detail.
-        let lines = match lines.split_last() {
-            Some((_, rest)) if status.failed() => rest,
-            _ => &lines[..],
-        };
-        for text in lines.iter().skip(lines.len().saturating_sub(rows)) {
-            let mut line = Line {
-                text: preview.text.clone(),
-                width: preview.width,
-            };
-            let room = cols.saturating_sub(line.width + 1);
-            line.fg(DIM, &fit(&clean(text.trim_end()), room));
-            out.push(line.finish(cols));
-        }
-        out
+        line.finish(cols)
     }
 
     fn render_detail(&self, pane: u64, cols: usize, rows: usize, now: Instant) -> Vec<String> {
@@ -2286,15 +3043,23 @@ impl Board {
         let status = Status::of(panel);
         let mut head = Line::default();
         head.plain(" ")
-            .fg(DIM, "← 一覧 (Esc)  /  ")
+            .fg(
+                DIM,
+                self.lang.pick("← 一覧 (Esc)  /  ", "← list (Esc)  /  "),
+            )
             .bold(&fit(&worker_name(panel), cols / 3));
         let kind = worker_kind(panel);
         if !kind.is_empty() {
             head.plain("  ").fg(DIM, &kind);
         }
-        head.plain("  ").fg(status.color(), &status.label());
+        head.plain("  ")
+            .fg(status.color(), &status.label(self.lang));
         let right = match &panel.agent {
-            Some(agent) => format!("pane {pane} · 報告 {} ", agent.seq),
+            Some(agent) => format!(
+                "pane {pane} · {} {} ",
+                self.lang.pick("報告", "report"),
+                agent.seq
+            ),
             None => format!("pane {pane} "),
         };
         if head.width + right.width() < cols {
@@ -2313,10 +3078,11 @@ impl Board {
             .max(3);
 
         let mut title = Line::default();
-        title
-            .plain(" ")
-            .bold("画面")
-            .fg(DIM, "  ライブ · 読み取り専用");
+        title.plain(" ").bold(self.lang.pick("画面", "Screen")).fg(
+            DIM,
+            self.lang
+                .pick("  ライブ · 読み取り専用", "  live · read-only"),
+        );
         lines.push(title.finish(cols));
         let border = if status.group() == Group::Needs {
             status.color()
@@ -2348,23 +3114,33 @@ impl Board {
         let mut title = Line::default();
         title
             .plain(" ")
-            .bold("報告の履歴")
-            .fg(DIM, "  このボードを開いてから");
+            .bold(self.lang.pick("報告の履歴", "Reports"))
+            .fg(
+                DIM,
+                self.lang
+                    .pick("  このボードを開いてから", "  since this board opened"),
+            );
         lines.push(title.finish(cols));
         if history.is_empty() {
             let mut line = Line::default();
-            line.plain("   ").fg(DIM, "報告はまだありません");
+            line.plain("   ").fg(
+                DIM,
+                self.lang.pick("報告はまだありません", "no reports yet"),
+            );
             lines.push(line.finish(cols));
         }
         for report in history.iter().take(history_rows) {
             let mut line = Line::default();
-            let when = ago(report.at, now);
+            let when = ago(report.at, now, self.lang);
             line.plain("   ")
-                .fg(DIM, &format!("報告 {:<4}", report.seq))
+                .fg(
+                    DIM,
+                    &format!("{} {:<4}", self.lang.pick("報告", "report"), report.seq),
+                )
                 .plain(" ")
                 .fg(
                     report.status.color(),
-                    &format!("{:<8}", report.status.label()),
+                    &pad(&report.status.label(self.lang), 8),
                 );
             let room = cols.saturating_sub(line.width + when.width() + 3);
             let detail = fit(&clean(&report.detail), room);
@@ -2378,24 +3154,39 @@ impl Board {
 
     fn footer(&self, cols: usize, help_cut: bool) -> String {
         let mut line = Line::default();
+        let l = |ja, en| self.lang.pick(ja, en);
         // (key, what, what when the line is tight), most important first.
         let keys: Vec<(&str, &str, &str)> = match &self.mode {
             Mode::Send(..) => vec![
-                ("Enter", "送信", "送信"),
-                ("Esc", "取り消し", "取消"),
-                ("^U", "全部消す", "全消"),
-                ("^W", "1 語消す", "語消"),
+                ("Enter", l("送信", "send"), l("送信", "send")),
+                ("Esc", l("取り消し", "cancel"), l("取消", "cancel")),
+                ("^U", l("全部消す", "clear"), l("全消", "clear")),
+                ("^W", l("1 語消す", "delete word"), l("語消", "word")),
             ],
             Mode::ConfirmClose(_) => vec![
-                ("y", "閉じる", "閉じる"),
-                ("ほかのキー", "取り消し", "取消"),
+                ("y", l("閉じる", "close"), l("閉じる", "close")),
+                (
+                    l("ほかのキー", "other keys"),
+                    l("取り消し", "cancel"),
+                    l("取消", "cancel"),
+                ),
             ],
-            Mode::ConfirmQuit => vec![("q", "終了", "終了"), ("ほかのキー", "取り消し", "取消")],
+            Mode::ConfirmQuit => vec![
+                ("q", l("終了", "quit"), l("終了", "quit")),
+                (
+                    l("ほかのキー", "other keys"),
+                    l("取り消し", "cancel"),
+                    l("取消", "cancel"),
+                ),
+            ],
             Mode::Normal if self.help => {
                 let text = if help_cut {
-                    " j/k スクロール   ほかのキーで閉じます"
+                    l(
+                        " j/k スクロール   ほかのキーで閉じます",
+                        " j/k scroll   other keys close",
+                    )
                 } else {
-                    " どのキーでもヘルプを閉じます"
+                    l(" どのキーでもヘルプを閉じます", " any key closes the help")
                 };
                 line.fg(DIM, text);
                 return line.finish(cols);
@@ -2403,39 +3194,50 @@ impl Board {
             Mode::Normal => {
                 let approval = self.target().is_some_and(|pane| self.awaits_approval(pane));
                 let go = if approval {
-                    "移動して答える"
+                    l("移動して答える", "go and answer")
                 } else {
-                    "移動"
+                    l("移動", "go")
                 };
                 // Nothing can be sent to an exited worker.
                 let exited = self.target().is_some_and(|pane| self.has_exited(pane));
-                let mut keys = vec![("g", go, "移動")];
+                let mut keys = vec![("g", go, l("移動", "go"))];
                 if !exited {
-                    keys.push(("s", "送る", "送る"));
+                    keys.push(("s", l("送る", "send"), l("送る", "send")));
                 }
-                keys.extend([("x", "閉じる", "閉じる"), ("q", "終了", "終了")]);
+                keys.extend([
+                    ("x", l("閉じる", "close"), l("閉じる", "close")),
+                    ("q", l("終了", "quit"), l("終了", "quit")),
+                ]);
                 match self.view {
                     View::List => {
                         keys.extend([
-                            ("Enter", "詳細", "詳細"),
-                            ("n", "次の要対応", "次"),
-                            ("j/k", "選択", "選択"),
+                            ("Enter", l("詳細", "details"), l("詳細", "details")),
+                            ("n", l("次の要対応", "next"), l("次", "next")),
+                            ("j/k", l("選択", "select"), l("選択", "select")),
                         ]);
-                        // On a subtree: what Space does to it.
-                        if let Some(folded) = self.selected_subtree_folded() {
-                            let what = if folded { "開く" } else { "たたむ" };
+                        // What Space does: to the subtree the selection is
+                        // in, else to the finished and exited workers.
+                        if let Some(folded) = self.space_folded() {
+                            let what = match (self.space_target().is_some(), folded) {
+                                (true, true) => l("開く", "open"),
+                                (true, false) => l("たたむ", "fold"),
+                                (false, true) => l("完了を開く", "open done"),
+                                (false, false) => l("完了をたたむ", "fold done"),
+                            };
                             keys.push(("Space", what, what));
                         }
                     }
-                    View::Detail(_) => {
-                        keys.extend([("Esc", "一覧", "一覧"), ("j/k", "前後", "前後")])
-                    }
+                    View::Detail(_) => keys.extend([
+                        ("Esc", l("一覧", "list"), l("一覧", "list")),
+                        ("j/k", l("前後", "prev/next"), l("前後", "prev/next")),
+                    ]),
                 }
                 keys
             }
         };
         let help = matches!(self.mode, Mode::Normal);
-        let more = if help { "? ヘルプ".width() } else { 0 };
+        let help_word = self.lang.pick(" ヘルプ", " help");
+        let more = if help { 1 + help_word.width() } else { 0 };
         // Every key in full, else every key short, else the most important
         // ones that fit (short).
         let width = |n: usize, short: bool| {
@@ -2464,7 +3266,7 @@ impl Board {
             line.plain(key).fg(DIM, &format!(" {what}{gap}"));
         }
         if help {
-            line.plain("?").fg(DIM, " ヘルプ");
+            line.plain("?").fg(DIM, help_word);
         }
         line.finish(cols)
     }
@@ -2596,6 +3398,7 @@ fn list(client: &mut Client, reconnect: &mut bool) -> Result<Vec<Panel>, Failure
 /// Run the board until `q`. The terminal is restored before returning.
 pub(crate) fn run(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Result<i32, Failure> {
     let mut board = Board::new(of, me);
+    board.lang = Lang::detect();
     let mut polling = Polling::default();
     let mut reconnect = false;
 
@@ -2725,10 +3528,19 @@ fn perform(server: &mut impl Server, board: &Board, action: Action) -> Notice {
             noa_ipc::ClientError::Rpc {
                 code: RPC_PANE_CLOSED,
                 ..
-            } => "そのワーカーは終了したか、閉じられています".to_string(),
+            } => board
+                .lang
+                .pick(
+                    "そのワーカーは終了したか、閉じられています",
+                    "that worker exited or was closed",
+                )
+                .to_string(),
             err => err.to_string(),
         };
-        Notice::warn(format!("できませんでした: {why}"))
+        Notice::warn(board.lang.pick(
+            format!("できませんでした: {why}"),
+            format!("could not: {why}"),
+        ))
     };
     // The board's listing can be up to `LIST_EVERY` old: look again right
     // before typing, so a worker that started waiting for an approval since
@@ -2739,7 +3551,7 @@ fn perform(server: &mut impl Server, board: &Board, action: Action) -> Notice {
                 if panels.iter().any(|panel| {
                     panel.pane_id.0 == *pane && Status::of(panel) == Status::Permission
                 }) {
-                    return Notice::warn(approval_message(&board.name(*pane)));
+                    return Notice::warn(approval_message(&board.name(*pane), board.lang));
                 }
             }
             Err(err) => return failed(err),
@@ -2759,9 +3571,14 @@ fn perform(server: &mut impl Server, board: &Board, action: Action) -> Notice {
                         panel.pane_id.0 == *pane && Status::of(panel) == Status::Permission
                     }) =>
                 {
-                    return Notice::warn(format!(
-                        "{} が承認待ちになったので Enter は送っていません。g でペインへ移動して答えてください",
-                        board.name(*pane)
+                    let name = board.name(*pane);
+                    return Notice::warn(board.lang.pick(
+                        format!(
+                            "{name} が承認待ちになったので Enter は送っていません。g でペインへ移動して答えてください"
+                        ),
+                        format!(
+                            "{name} now awaits approval, so Enter was not sent. g goes to its pane to answer it"
+                        ),
                     ));
                 }
                 Ok(_) => server.type_text(*pane, "\r", false),
@@ -2773,9 +3590,30 @@ fn perform(server: &mut impl Server, board: &Board, action: Action) -> Notice {
     };
     let name = |pane: &u64| board.name(*pane);
     match (action, result) {
-        (Action::Focus(pane), Ok(())) => Notice::ok(format!("{} へ移動しました", name(&pane))),
-        (Action::Send(pane, _), Ok(())) => Notice::ok(format!("{} に送りました", name(&pane))),
-        (Action::Close(pane), Ok(())) => Notice::ok(format!("{} を閉じました", name(&pane))),
+        (Action::Focus(pane), Ok(())) => {
+            let name = name(&pane);
+            Notice::ok(
+                board
+                    .lang
+                    .pick(format!("{name} へ移動しました"), format!("went to {name}")),
+            )
+        }
+        (Action::Send(pane, _), Ok(())) => {
+            let name = name(&pane);
+            Notice::ok(
+                board
+                    .lang
+                    .pick(format!("{name} に送りました"), format!("sent to {name}")),
+            )
+        }
+        (Action::Close(pane), Ok(())) => {
+            let name = name(&pane);
+            Notice::ok(
+                board
+                    .lang
+                    .pick(format!("{name} を閉じました"), format!("closed {name}")),
+            )
+        }
         (_, Err(err)) => failed(err),
         (Action::Quit, Ok(())) => Notice::ok(String::new()),
     }
@@ -2995,9 +3833,14 @@ mod tests {
         // Pane ids are for +ctl, not for a person: only the detail shows one.
         assert!(!all.contains("pane 3"), "{all}");
         assert!(all.contains("ui detail"));
+        // The selected worker's screen is previewed under the list (D15).
         assert!(all.contains("› 1. Yes   2. No"));
-        assert!(!all.contains("older line"));
-        assert!(all.contains("終了 0"));
+        // Finished and exited workers are counted until opened.
+        assert!(all.contains("✓ 完了 1   · 終了 1"), "{all}");
+        assert!(!all.contains("終了 0"), "{all}");
+        board.key(Key::Char(' '));
+        let all = rendered(&board, 80, 40, Instant::now());
+        assert!(all.contains("終了 0"), "{all}");
         assert!(!all.contains("board"));
     }
 
@@ -3341,8 +4184,9 @@ mod tests {
         let mut panels = sample();
         panels[2].agent.as_mut().unwrap().detail = None;
         quiet.update(panels, start);
+        quiet.key(Key::Char(' '));
         let all = rendered(&quiet, 80, 40, start);
-        assert!(all.contains("● docs   完了  "), "{all}");
+        assert!(all.contains("✓ docs   完了  "), "{all}");
         assert!(!all.contains("docs detail"), "{all}");
     }
 
@@ -3364,7 +4208,10 @@ mod tests {
         board.update(panels, start + Duration::from_secs(1));
         let all = rendered(&board, 80, 40, start + Duration::from_secs(2));
         assert!(!all.contains("wrote 3 files"), "{all}");
-        assert!(all.contains("● api    作業中 1 秒"), "{all}");
+        // At work, it says when it last showed output, not how long it
+        // has worked (D15): nothing yet.
+        assert!(all.contains("● api  作業中  "), "{all}");
+        assert!(!line_with(&all, "● api").contains("1 秒"), "{all}");
     }
 
     // Owner request 4: how long a worker has been in its state. Review
@@ -3375,7 +4222,7 @@ mod tests {
         let mut board = Board::new(Some(1), Some(8));
         board.update(sample(), start);
         let all = rendered(&board, 80, 40, start);
-        assert!(all.contains("● api    作業中    api detail"), "{all}");
+        assert!(all.contains("● api  作業中    api detail"), "{all}");
         assert!(!all.contains("開始時"), "{all}");
 
         let mut next = sample();
@@ -3384,6 +4231,7 @@ mod tests {
         let changed = start + Duration::from_secs(10);
         board.update(next.clone(), changed);
         board.update(next, changed + Duration::from_secs(30));
+        board.key(Key::Char(' '));
         let all = rendered(&board, 80, 40, changed + Duration::from_secs(180));
         assert!(all.contains("完了 3 分前"), "{all}");
     }
@@ -3551,8 +4399,11 @@ mod tests {
         board.update(sample(), start);
         let without_docs: Vec<Panel> = sample().into_iter().filter(|p| p.pane_id.0 != 4).collect();
         board.update(without_docs, start + Duration::from_secs(1));
+        // Counted with the finished and exited workers, listed once opened.
         let all = rendered(&board, 80, 40, start + Duration::from_secs(120));
-        assert!(all.contains("閉じた"), "{all}");
+        assert!(all.contains("閉じた 1"), "{all}");
+        board.key(Key::Char(' '));
+        let all = rendered(&board, 80, 40, start + Duration::from_secs(120));
         assert!(
             all.contains("✕ docs  完了で閉じた · 1 分前  docs detail"),
             "{all}"
@@ -3724,15 +4575,16 @@ mod tests {
     }
 
     #[test]
-    fn a_cut_preview_of_the_selected_worker_is_not_a_hidden_worker() {
+    fn a_short_pane_keeps_the_selected_row_and_drops_the_preview() {
         let mut board = Board::new(Some(1), None);
         let mut panels = vec![worker(2, 1, "w2", Some("permission"), 1)];
         panels.push(worker(3, 1, "w3", Some("running"), 1));
         board.update(panels, Instant::now());
         board.set_screen(2, "one\ntwo\nthree\n");
-        // Room for the section title, the row and one preview line only.
-        let all = rendered(&board, 60, 9, Instant::now());
-        assert!(all.contains("▶1 ● w2"), "{all}");
+        // Too short for a preview under the list: the rows keep the room.
+        let all = rendered(&board, 80, 9, Instant::now());
+        assert!(all.contains("▶1 ! w2"), "{all}");
+        assert!(!all.contains("three") && !all.contains("選択中"), "{all}");
         assert!(!all.contains("うち要対応"), "{all}");
     }
 
@@ -3747,8 +4599,10 @@ mod tests {
             start + Duration::from_secs(1),
         );
         assert_eq!(board.gone.len(), 5);
-        let view = |board: &Board| rendered(board, 60, 11, start + Duration::from_secs(2));
-        assert!(view(&board).contains("閉じた 4 件"), "{}", view(&board));
+        let view = |board: &Board| rendered(board, 60, 10, start + Duration::from_secs(2));
+        // Counted on the line of the finished and exited workers.
+        assert!(view(&board).contains("閉じた 5"), "{}", view(&board));
+        assert!(!view(&board).contains("✕ w3"), "{}", view(&board));
 
         for _ in 0..10 {
             board.key(Key::Char('j'));
@@ -3757,7 +4611,7 @@ mod tests {
         for pane in 3..8 {
             assert!(all.contains(&format!("✕ w{pane}")), "w{pane}:\n{all}");
         }
-        assert!(!all.contains("閉じた 4 件") && !all.contains("↓"), "{all}");
+        assert!(!all.contains("↓"), "{all}");
         // The selected row scrolled out of view, and the marker says so.
         assert!(
             !all.contains("▶1 ● w2") && all.contains("↑ あと 1 件"),
@@ -3829,7 +4683,7 @@ mod tests {
         let mut panels = sample();
         panels[0].agent.as_mut().unwrap().state = Some("input".to_string());
         board.update(panels, Instant::now());
-        let all = rendered(&board, 30, 20, Instant::now());
+        let all = rendered(&board, 26, 20, Instant::now());
         assert!(all.contains("承認 ") && all.contains("入力 "), "{all}");
         assert!(!all.contains("承認待ち"), "{all}");
         let wide = rendered(&board, 80, 20, Instant::now());
@@ -3951,7 +4805,7 @@ mod tests {
         let order: Vec<u64> = board.workers().iter().map(|p| p.pane_id.0).collect();
         assert_eq!(order, vec![4, 2, 3]);
         let all = rendered(&board, 80, 30, start + Duration::from_secs(1));
-        assert!(all.contains("3 ● w4") && all.contains("1 ● w2"), "{all}");
+        assert!(all.contains("3 ! w4") && all.contains("1 ● w2"), "{all}");
         board.key(Key::Char('2'));
         assert_eq!(board.selected(), Some(3));
 
@@ -4013,7 +4867,12 @@ mod tests {
         // Only the keys are at the bottom.
         let lines = board.render(80, 30, Instant::now());
         assert!(visible(&lines[29]).contains("Enter 送信"));
-        assert!(visible(&lines[28]).trim().is_empty());
+        assert!(
+            !lines[..29]
+                .iter()
+                .skip(3)
+                .any(|l| visible(l).contains("に送る"))
+        );
     }
 
     // Review B10: at about 80 columns the footer lost `x` and `q`, the help
@@ -4142,7 +5001,7 @@ mod tests {
         let at = t0 + Duration::from_secs(181);
         board.set_screen_at(2, &screen(3), at);
         let all = rendered(&board, 80, 40, at);
-        assert!(all.contains("● api    作業中 出力なし 3 分"), "{all}");
+        assert!(all.contains("● api  作業中 出力なし 3 分"), "{all}");
         let lines = board.render(80, 40, at);
         let row = lines.iter().find(|l| visible(l).contains("● api")).unwrap();
         let Rgb(r, g, b) = DIM;
@@ -4157,7 +5016,10 @@ mod tests {
             "⏺ Reading src\n⏺ Wrote lib.rs\n",
             at + Duration::from_secs(1),
         );
-        assert!(!rendered(&board, 80, 40, at).contains("出力なし"));
+        let all = rendered(&board, 80, 40, at + Duration::from_secs(9));
+        assert!(!all.contains("出力なし"), "{all}");
+        // It says when it last showed output instead (D15).
+        assert!(all.contains("● api  作業中 8 秒前に出力"), "{all}");
 
         // Only working workers, and not before the current state began.
         board.set_screen_at(4, "done\n", t0);
@@ -4225,30 +5087,15 @@ mod tests {
         let mut board = Board::new(Some(1), Some(8));
         board.update(nested(), Instant::now());
         assert_eq!(order(&board), vec![2, 10, 11, 3]);
-        for pane in [2, 3, 10, 11] {
-            board.set_screen(pane, &format!("work of {pane}\n"));
-        }
         let all = rendered(&board, 80, 30, Instant::now());
         assert!(!all.contains("other"), "{all}");
-        assert!(line_with(&all, "lead").starts_with(" ▶1 ● lead"), "{all}");
-        assert!(
-            line_with(&all, "work of 2 ").starts_with("    │ work of 2"),
-            "{all}"
-        );
+        assert!(line_with(&all, "lead ").starts_with(" ▶1 ● lead"), "{all}");
         assert!(
             line_with(&all, "sub-a").starts_with("    ├ 3 ● sub-a"),
             "{all}"
         );
         assert!(
-            line_with(&all, "work of 10").starts_with("    │     work of 10"),
-            "{all}"
-        );
-        assert!(
             line_with(&all, "sub-b").starts_with("    └ 4 ● sub-b"),
-            "{all}"
-        );
-        assert!(
-            line_with(&all, "work of 11").starts_with("          work of 11"),
             "{all}"
         );
         assert!(line_with(&all, "solo").starts_with("  2 ● solo"), "{all}");
@@ -4263,28 +5110,53 @@ mod tests {
     // D13: a subtree is placed by its most urgent worker, and a worker's
     // workers are ordered under it by D11's rules.
     #[test]
-    fn a_subtree_goes_where_its_most_urgent_worker_puts_it() {
+    fn a_worker_needing_someone_is_lifted_into_the_queue() {
         let start = Instant::now();
         let mut board = Board::new(Some(1), Some(8));
         let mut panels = nested();
         panels.push(worker(5, 1, "asks", Some("input"), 1));
         board.update(panels.clone(), start);
         assert_eq!(order(&board), vec![5, 2, 10, 11, 3]);
-        // sub-b waits for an approval: it holds work up, so lead's subtree
-        // goes before a question, and sub-b before sub-a.
+        assert_eq!(queue(&board), vec![5]);
+        // sub-b waits for an approval: it holds work up, so it goes before
+        // a question in the queue, named after its parent, while its row
+        // in the tree stays under lead and points up.
         panels[3].agent.as_mut().unwrap().state = Some("permission".to_string());
         panels[3].agent.as_mut().unwrap().seq = 2;
         board.update(panels.clone(), start + Duration::from_secs(1));
-        assert_eq!(order(&board), vec![2, 11, 10, 5, 3]);
+        assert_eq!(queue(&board), vec![11, 5]);
+        assert_eq!(order(&board), vec![5, 2, 11, 10, 3]);
         let all = rendered(&board, 80, 30, start + Duration::from_secs(1));
-        // Every worker drawn under 要対応 is counted there.
-        assert!(all.contains("\n 要対応 4 "), "{all}");
-        assert!(all.contains("\n 作業中 1 "), "{all}");
-        // An older approval (solo's, since 1 s) goes before a newer one.
+        assert!(all.contains("─ ! 人の対応が必要 2 "), "{all}");
+        assert!(all.contains("5 ! lead › sub-b"), "{all}");
+        assert!(
+            line_with(&all, "├ 5 ! sub-b").contains("↑ 要対応に表示"),
+            "{all}"
+        );
+        // lead and its other worker are at work, solo too; sub-b is not
+        // counted twice.
+        assert!(all.contains("─ ● バックグラウンド 3 "), "{all}");
+        // An older approval (sub-b's, since 1 s) goes before a newer error.
         panels[1].agent.as_mut().unwrap().state = Some("error".to_string());
         panels[1].agent.as_mut().unwrap().seq = 2;
         board.update(panels, start + Duration::from_secs(5));
-        assert_eq!(order(&board), vec![2, 11, 10, 3, 5]);
+        assert_eq!(queue(&board), vec![11, 3, 5]);
+        // The echo is never selected: j steps from the queue into the tree.
+        board.key(Key::Char('n'));
+        assert_eq!(board.selected(), Some(11));
+        for want in [3, 5, 2, 10] {
+            board.key(Key::Char('j'));
+            assert_eq!(board.selected(), Some(want));
+        }
+    }
+
+    fn queue(board: &Board) -> Vec<u64> {
+        board
+            .layout()
+            .iter()
+            .filter(|entry| entry.queued)
+            .map(|entry| entry.node.panel.pane_id.0)
+            .collect()
     }
 
     // D13: a parent's row tallies its workers and shows whether they are
@@ -4295,7 +5167,7 @@ mod tests {
         let mut panels = nested();
         board.update(panels.clone(), Instant::now());
         let all = rendered(&board, 100, 30, Instant::now());
-        let lead = line_with(&all, "lead");
+        let lead = line_with(&all, "● lead");
         assert!(
             lead.contains("▾ 子 2 ") && !lead.contains("要対応"),
             "{all}"
@@ -4306,7 +5178,7 @@ mod tests {
         board.update(panels, Instant::now());
         let all = rendered(&board, 100, 30, Instant::now());
         assert!(
-            line_with(&all, "lead").contains("▾ 子 2 · 要対応 1"),
+            line_with(&all, "● lead").contains("▾ 子 2 · 要対応 1"),
             "{all}"
         );
         let footer = visible(&board.render(120, 30, Instant::now()).pop().unwrap());
@@ -4317,10 +5189,10 @@ mod tests {
         board.key(Key::Char(' '));
         let all = rendered(&board, 100, 30, Instant::now());
         assert!(
-            line_with(&all, "lead").contains("▸ 子 2 · 要対応 1"),
+            line_with(&all, "● lead").contains("▸ 子 2 · 要対応 1"),
             "{all}"
         );
-        assert!(!all.contains("sub-"), "{all}");
+        assert!(!all.contains("sub-a") && !all.contains("├"), "{all}");
         let footer = visible(&board.render(120, 30, Instant::now()).pop().unwrap());
         assert!(footer.contains("Space 開く"), "{footer}");
         // j steps over what is folded away.
@@ -4356,28 +5228,31 @@ mod tests {
         board.update(panels, Instant::now());
         let all = rendered(&board, 80, 30, Instant::now());
         assert!(
-            line_with(&all, "オーケストレーション").contains("ワーカー 4"),
+            line_with(&all, "NOA / CONTROL").contains("ワーカー 4"),
             "{all}"
         );
-        assert!(all.contains("● 要対応 1   ● 作業中 3"), "{all}");
+        assert!(all.contains("! 要対応 1   ● 作業中 3"), "{all}");
         assert_eq!(board.title(), "ボード · 要対応 1");
 
+        // sub-b needs someone: it is selected in the queue, and its
+        // parent's subtree stays folded (D15).
         board.collapsed.insert(2);
         board.key(Key::Char('4'));
         assert_eq!(board.selected(), Some(11));
-        assert!(!board.collapsed.contains(&2), "a number opens the subtree");
-
-        board.collapsed.insert(2);
+        assert!(board.collapsed.contains(&2));
         board.key(Key::Char('2'));
         board.key(Key::Char('n'));
         assert_eq!(board.selected(), Some(11));
-        assert!(!board.collapsed.contains(&2), "n opens the subtree");
-        // Its screen is read once it is drawn again.
-        assert!(board.wanted_screens().contains(&11));
+        // A number opens the subtree a worker at work is folded away in.
+        board.key(Key::Char('3'));
+        assert_eq!(board.selected(), Some(10));
+        assert!(!board.collapsed.contains(&2), "a number opens the subtree");
+        // Folded or not, the screens of workers at work or needing someone
+        // are read: their rows say when they last showed output.
         board.collapsed.insert(2);
         board.key(Key::Char('2'));
-        assert!(!board.wanted_screens().contains(&11));
-        assert!(!board.wanted_screens().contains(&10));
+        assert!(board.wanted_screens().contains(&11));
+        assert!(board.wanted_screens().contains(&10));
 
         board.key(Key::Char('3'));
         assert_eq!(board.key(Key::Char('g')), Some(Action::Focus(10)));
@@ -4417,17 +5292,20 @@ mod tests {
                 }
                 let all: String = lines.iter().map(|l| visible(l) + "\n").collect();
                 let mark = if folded { "▸" } else { "▾" };
-                assert!(line_with(&all, "lead").contains(mark), "{cols}: {all}");
+                assert!(line_with(&all, "● lead").contains(mark), "{cols}: {all}");
             }
         }
         board.collapsed.clear();
         let full = rendered(&board, 100, 30, Instant::now());
         assert!(
-            line_with(&full, "lead").contains("▾ 子 2 · 要対応 1"),
+            line_with(&full, "● lead").contains("▾ 子 2 · 要対応 1"),
             "{full}"
         );
         let short = rendered(&board, 50, 30, Instant::now());
-        assert!(line_with(&short, "lead").contains("▾2 要対応1"), "{short}");
+        assert!(
+            line_with(&short, "● lead").contains("▾2 要対応1"),
+            "{short}"
+        );
     }
 
     #[test]
@@ -4478,5 +5356,481 @@ mod tests {
             top.contains("ワーカー 9 件のうち戻れる最大 8 件はオーケストレーターへ戻り、残りと、ワーカーの子 1 件は閉じます"),
             "{top}"
         );
+    }
+
+    // D15: the selected worker's screen sits beside the list in a wide
+    // pane, under it in a pane about 80 wide, and nowhere in a narrow one.
+    #[test]
+    fn the_preview_sits_beside_under_or_nowhere_by_width() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), Instant::now());
+        board.set_screen(3, "reading src\nAllow command? cargo test\n");
+        for cols in [24, 44, 45, 69, 70, 80, 109, 110, 140] {
+            let lines = board.render(cols, 24, Instant::now());
+            assert_eq!(lines.len(), 24);
+            for line in &lines {
+                assert_eq!(visible(line).width(), cols, "{cols}: {:?}", visible(line));
+            }
+            let all: String = lines.iter().map(|l| visible(l) + "\n").collect();
+            let title = all.lines().position(|line| line.contains("選択中"));
+            let queue = all.lines().position(|line| line.contains("人の対応が必要"));
+            match cols {
+                ..70 => assert_eq!(title, None, "{cols}: {all}"),
+                70..110 => assert!(title > queue, "{cols}: {all}"),
+                _ => {
+                    assert_eq!(title, queue, "{cols}: {all}");
+                    assert!(line_with(&all, "▶").contains("│"), "{cols}: {all}");
+                }
+            }
+            if title.is_some() {
+                assert!(all.contains("Allow command? cargo test"), "{cols}: {all}");
+                assert!(
+                    all.contains("claude · 承認待ち · 報告 5 · /repo"),
+                    "{cols}: {all}"
+                );
+            }
+        }
+        // Too short for it under the list: the rows keep the room.
+        let all = rendered(&board, 80, 17, Instant::now());
+        assert!(!all.contains("選択中"), "{all}");
+    }
+
+    // D15: a worker waiting on someone asks at the bottom of its screen,
+    // in the agent's input box; one at work shows the work above that box.
+    #[test]
+    fn the_preview_shows_a_question_whole_and_work_above_the_input_box() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), Instant::now());
+        let rule = "─".repeat(40);
+        let screen = format!(
+            "⏺ Read src\n{rule}\n> formatter を選んでください\n{rule}\n  ? for shortcuts\n"
+        );
+        board.set_screen(3, &screen);
+        board.set_screen(2, &screen);
+        let all = rendered(&board, 80, 30, Instant::now());
+        assert!(all.contains("> formatter を選んでください"), "{all}");
+        board.key(Key::Char('j'));
+        assert_eq!(board.selected(), Some(2));
+        let all = rendered(&board, 80, 30, Instant::now());
+        assert!(all.contains("⏺ Read src"), "{all}");
+        assert!(!all.contains("formatter"), "{all}");
+    }
+
+    // D15: Space folds the subtree the selection is in; elsewhere it lists
+    // the finished and exited workers, which are only counted at first.
+    #[test]
+    fn space_lists_the_finished_and_exited_workers_outside_a_subtree() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), Instant::now());
+        assert_eq!(board.selected(), Some(3));
+        let all = rendered(&board, 80, 30, Instant::now());
+        assert!(!all.contains("docs") && all.contains("Space 開く"), "{all}");
+        let footer = visible(&board.render(140, 30, Instant::now()).pop().unwrap());
+        assert!(footer.contains("Space 完了を開く"), "{footer}");
+        board.key(Key::Char(' '));
+        let all = rendered(&board, 80, 30, Instant::now());
+        assert!(all.contains("✓ docs") && all.contains("· tests"), "{all}");
+        assert!(all.contains("Space たたむ"), "{all}");
+
+        // A selection folded away moves to the last row left.
+        board.key(Key::Char('j'));
+        board.key(Key::Char('j'));
+        assert_eq!(board.selected(), Some(4));
+        board.key(Key::Char(' '));
+        assert_eq!(board.selected(), Some(2));
+        assert!(!rendered(&board, 80, 30, Instant::now()).contains("docs"));
+        // j past the last row opens them again.
+        board.key(Key::Char('j'));
+        assert_eq!(board.selected(), Some(4));
+        assert!(board.settled_open);
+    }
+
+    // D15: a working worker's row says how fresh its output is, from the
+    // second read on: the first read says nothing about when it moved.
+    #[test]
+    fn a_working_worker_says_when_it_last_showed_output() {
+        let t0 = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), t0);
+        board.set_screen_at(2, "one\n", t0);
+        let all = rendered(&board, 80, 30, t0 + Duration::from_secs(5));
+        assert!(!all.contains("前に出力"), "{all}");
+        board.set_screen_at(2, "one\ntwo\n", t0 + Duration::from_secs(1));
+        board.set_screen_at(2, "one\ntwo\n", t0 + Duration::from_secs(4));
+        let all = rendered(&board, 80, 30, t0 + Duration::from_secs(9));
+        assert!(all.contains("● api  作業中 8 秒前に出力"), "{all}");
+    }
+
+    // Review 1: a subtree folded while at work, then finished, stayed
+    // folded in the finished section, where Space cannot open it.
+    #[test]
+    fn a_subtree_folded_at_work_is_listed_whole_once_finished() {
+        let mut board = Board::new(Some(1), Some(8));
+        let mut panels = nested();
+        board.update(panels.clone(), Instant::now());
+        board.key(Key::Char('1'));
+        board.key(Key::Char(' '));
+        assert!(board.collapsed.contains(&2));
+        for at in [0, 2, 3] {
+            panels[at].agent.as_mut().unwrap().state = Some("finished".to_string());
+        }
+        board.update(panels, Instant::now());
+        board.key(Key::Char(' '));
+        assert!(board.settled_open);
+        let all = rendered(&board, 80, 30, Instant::now());
+        assert!(all.contains("sub-a") && all.contains("sub-b"), "{all}");
+        assert!(board.picks().contains(&10), "{:?}", board.picks());
+    }
+
+    // Review 2/4: a parent needing someone folded with Space could not be
+    // opened with Space again, nor its workers reached with j/k.
+    #[test]
+    fn space_opens_again_a_subtree_whose_parent_needs_someone() {
+        let mut board = Board::new(Some(1), Some(8));
+        let mut panels = nested();
+        panels[0].agent.as_mut().unwrap().state = Some("permission".to_string());
+        board.update(panels, Instant::now());
+        board.key(Key::Char('3'));
+        assert_eq!(board.selected(), Some(10));
+        board.key(Key::Char(' '));
+        assert!(board.collapsed.contains(&2));
+        board.key(Key::Char(' '));
+        assert!(!board.collapsed.contains(&2), "Space opens it again");
+        assert!(!board.settled_open);
+    }
+
+    // Review 3: a worker selected in the queue that went back to work was
+    // left selected inside its folded parent, with no row marked.
+    #[test]
+    fn a_selection_leaving_the_queue_opens_the_subtree_it_goes_back_to() {
+        let mut board = Board::new(Some(1), Some(8));
+        let mut panels = nested();
+        panels[3].agent.as_mut().unwrap().state = Some("permission".to_string());
+        board.update(panels.clone(), Instant::now());
+        board.collapsed.insert(2);
+        board.key(Key::Char('4'));
+        assert_eq!(board.selected(), Some(11));
+        panels[3].agent.as_mut().unwrap().state = Some("running".to_string());
+        panels[3].agent.as_mut().unwrap().seq = 2;
+        board.update(panels, Instant::now());
+        assert_eq!(board.selected(), Some(11));
+        let all = rendered(&board, 80, 30, Instant::now());
+        assert!(line_with(&all, "sub-b").contains("▶"), "{all}");
+    }
+
+    // Review 5: a long parent name widened the queue's name column until
+    // the state column was dropped from every row.
+    #[test]
+    fn a_long_parent_name_in_the_queue_keeps_the_state_column() {
+        let mut board = Board::new(Some(1), Some(8));
+        let mut panels = nested();
+        panels[0].label = Some("a-very-long-parent-worker-name".to_string());
+        panels[3].agent.as_mut().unwrap().state = Some("permission".to_string());
+        board.update(panels, Instant::now());
+        let all = rendered(&board, 40, 20, Instant::now());
+        // The queue row: the parent's name, then the worker's own.
+        let row = line_with(&all, "▶");
+        assert!(row.contains("sub-b") && row.contains("承認"), "{all}");
+        assert!(line_with(&all, "● solo").contains("作業"), "{all}");
+    }
+
+    // Review 6: a screen not read for a while (the detail was open, or the
+    // worker was not at work) that changed meanwhile said "0 秒前に出力".
+    #[test]
+    fn a_change_seen_after_a_gap_in_reading_has_no_time() {
+        let t0 = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), t0);
+        board.set_screen_at(2, "one\n", t0);
+        board.set_screen_at(2, "one\ntwo\n", t0 + Duration::from_secs(60));
+        let all = rendered(&board, 80, 30, t0 + Duration::from_secs(61));
+        assert!(!all.contains("前に出力"), "{all}");
+    }
+
+    // Review 7: a working worker whose screen was not yet seen to move
+    // showed how long it had worked instead of nothing.
+    #[test]
+    fn a_working_worker_without_seen_output_shows_no_time() {
+        let t0 = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        let mut panels = sample();
+        panels[0].agent.as_mut().unwrap().state = Some("finished".to_string());
+        board.update(panels.clone(), t0);
+        panels[0].agent.as_mut().unwrap().state = Some("running".to_string());
+        panels[0].agent.as_mut().unwrap().seq = 5;
+        board.update(panels, t0 + Duration::from_secs(1));
+        let all = rendered(&board, 80, 30, t0 + Duration::from_secs(5));
+        assert!(line_with(&all, "● api").contains("作業中  "), "{all}");
+        assert!(!line_with(&all, "● api").contains("秒"), "{all}");
+    }
+
+    // Review 8: output from a turn before the current one was said as the
+    // current turn's.
+    #[test]
+    fn output_from_an_earlier_turn_is_not_the_current_turns() {
+        let t0 = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        let mut panels = sample();
+        board.update(panels.clone(), t0);
+        board.set_screen_at(2, "one\n", t0);
+        board.set_screen_at(2, "one\ntwo\n", t0 + Duration::from_secs(1));
+        panels[0].agent.as_mut().unwrap().state = Some("finished".to_string());
+        panels[0].agent.as_mut().unwrap().seq = 5;
+        board.update(panels.clone(), t0 + Duration::from_secs(10));
+        panels[0].agent.as_mut().unwrap().state = Some("running".to_string());
+        panels[0].agent.as_mut().unwrap().seq = 6;
+        board.update(panels, t0 + Duration::from_secs(300));
+        let all = rendered(&board, 80, 30, t0 + Duration::from_secs(301));
+        assert!(!all.contains("前に出力"), "{all}");
+    }
+
+    // Review 2-1: a subtree folded at work kept its folded mark once
+    // finished, while its workers were listed, and came back folded.
+    #[test]
+    fn a_finished_subtree_drops_its_folded_mark() {
+        let mut board = Board::new(Some(1), Some(8));
+        let mut panels = nested();
+        board.update(panels.clone(), Instant::now());
+        board.key(Key::Char('1'));
+        board.key(Key::Char(' '));
+        for at in [0, 2, 3] {
+            panels[at].agent.as_mut().unwrap().state = Some("finished".to_string());
+        }
+        board.update(panels.clone(), Instant::now());
+        board.key(Key::Char(' '));
+        let all = rendered(&board, 100, 30, Instant::now());
+        assert!(line_with(&all, "✓ lead").contains("▾"), "{all}");
+        // Back at work, it is open.
+        panels[0].agent.as_mut().unwrap().state = Some("running".to_string());
+        board.update(panels, Instant::now());
+        assert!(!board.collapsed.contains(&2));
+    }
+
+    // Review 2-2: a change read across a change of state was dated as
+    // output in the new state.
+    #[test]
+    fn a_change_read_across_a_change_of_state_has_no_time() {
+        let t0 = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        let mut panels = sample();
+        board.update(panels.clone(), t0);
+        panels[0].agent.as_mut().unwrap().state = Some("permission".to_string());
+        panels[0].agent.as_mut().unwrap().seq = 5;
+        board.update(panels.clone(), t0 + Duration::from_secs(1));
+        board.set_screen_at(2, "one\n", t0 + Duration::from_secs(2));
+        panels[0].agent.as_mut().unwrap().state = Some("running".to_string());
+        panels[0].agent.as_mut().unwrap().seq = 6;
+        board.update(panels, t0 + Duration::from_secs(3));
+        board.set_screen_at(2, "one\ntwo\n", t0 + Duration::from_secs(4));
+        let all = rendered(&board, 80, 30, t0 + Duration::from_secs(5));
+        assert!(!all.contains("前に出力"), "{all}");
+    }
+
+    // Review 2-3: the help said n opens a folded subtree, which it no
+    // longer does: a worker needing someone is selected in the queue.
+    #[test]
+    fn the_help_says_what_n_does() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), Instant::now());
+        board.key(Key::Char('?'));
+        let all = rendered(&board, 100, 40, Instant::now());
+        assert!(line_with(&all, "次の要対応").contains("キュー"), "{all}");
+        assert!(!all.contains("たたんだ子も開いて"), "{all}");
+    }
+
+    // Review 2-4: before any listing was read, the header said it synced
+    // at the start.
+    #[test]
+    fn a_board_never_synced_says_so() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.offline = Some(Instant::now());
+        let all = rendered(&board, 80, 20, Instant::now());
+        assert!(!all.contains("開始時"), "{all}");
+        assert!(all.contains("同期 まだ"), "{all}");
+    }
+
+    // Review 2-5/2-6: with no worker left, the closed ones are always
+    // listed; Space offered to fold them and did nothing.
+    #[test]
+    fn with_no_worker_left_space_is_not_offered() {
+        let start = Instant::now();
+        let mut board = tall_board(3);
+        board.update(Vec::new(), start + Duration::from_secs(1));
+        assert!(!board.gone.is_empty());
+        let footer = visible(&board.render(140, 20, start).pop().unwrap());
+        assert!(!footer.contains("Space"), "{footer}");
+        // Space changes nothing but saying there is nothing to fold.
+        let list = |board: &Board| board.render(80, 20, start)[3..].to_vec();
+        let before = list(&board);
+        board.key(Key::Char(' '));
+        assert_eq!(list(&board), before);
+        assert!(!board.settled_open);
+    }
+
+    // A narrow pane says how fresh a working worker's output is briefly.
+    #[test]
+    fn a_narrow_pane_says_when_output_was_shown_briefly() {
+        let t0 = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), t0);
+        board.set_screen_at(2, "one\n", t0);
+        board.set_screen_at(2, "one\ntwo\n", t0 + Duration::from_secs(1));
+        let all = rendered(&board, 40, 20, t0 + Duration::from_secs(9));
+        assert!(line_with(&all, "● api").contains("作業中 8 秒前"), "{all}");
+        assert!(!all.contains("に出力"), "{all}");
+    }
+
+    // Review 3-1: a worker needing someone without a detail showed old
+    // work from above its input box, not the question in it.
+    #[test]
+    fn a_row_without_a_detail_shows_the_question_at_the_bottom() {
+        let mut board = Board::new(Some(1), Some(8));
+        let mut panels = sample();
+        panels[1].agent.as_mut().unwrap().detail = None;
+        board.update(panels, Instant::now());
+        let rule = "─".repeat(40);
+        board.set_screen(
+            3,
+            &format!("old work\n{rule}\n> formatter を選んでください\n{rule}\n"),
+        );
+        let all = rendered(&board, 60, 20, Instant::now());
+        let row = line_with(&all, "! ui");
+        assert!(row.contains("> formatter"), "{all}");
+        assert!(!row.contains("old work"), "{all}");
+    }
+
+    // Review 3-2: a preview too narrow for the directory still drew its
+    // separator at the end of the line.
+    #[test]
+    fn a_preview_without_room_for_the_directory_has_no_dangling_separator() {
+        let t0 = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        let mut panels = sample();
+        panels[0].agent.as_mut().unwrap().seq = 12;
+        board.update(panels, t0);
+        board.set_screen_at(2, "one\n", t0);
+        board.set_screen_at(2, "one\ntwo\n", t0 + Duration::from_secs(1));
+        board.key(Key::Char('j'));
+        assert_eq!(board.selected(), Some(2));
+        let all = rendered(&board, 110, 24, t0 + Duration::from_secs(11));
+        let meta = line_with(&all, "報告 12");
+        assert!(!meta.trim_end().ends_with('·'), "{all}");
+    }
+
+    // The board speaks Japanese where the locale is Japanese, English
+    // anywhere else: the locale variables in POSIX order, else the system's
+    // preferred language.
+    #[test]
+    fn the_language_follows_the_locale() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        let none = || None;
+        let ja = || Some("ja-JP".to_string());
+        assert_eq!(
+            Lang::from_locale(env(&[("LANG", "ja_JP.UTF-8")]), none),
+            Lang::Ja
+        );
+        assert_eq!(
+            Lang::from_locale(env(&[("LANG", "en_US.UTF-8")]), ja),
+            Lang::En
+        );
+        assert_eq!(
+            Lang::from_locale(env(&[("LC_ALL", "C"), ("LANG", "ja_JP.UTF-8")]), none),
+            Lang::En
+        );
+        assert_eq!(
+            Lang::from_locale(env(&[("LC_MESSAGES", "ja_JP"), ("LANG", "en_US")]), none),
+            Lang::Ja
+        );
+        // An empty variable is not set.
+        assert_eq!(
+            Lang::from_locale(env(&[("LC_ALL", ""), ("LANG", "ja_JP.UTF-8")]), none),
+            Lang::Ja
+        );
+        // No locale variables (a Noa started from the Dock): the system's.
+        assert_eq!(Lang::from_locale(env(&[]), ja), Lang::Ja);
+        assert_eq!(
+            Lang::from_locale(env(&[]), || Some("en-GB".to_string())),
+            Lang::En
+        );
+        assert_eq!(Lang::from_locale(env(&[]), none), Lang::En);
+    }
+
+    fn japanese(text: &str) -> bool {
+        text.chars()
+            .any(|ch| matches!(ch, '\u{3040}'..='\u{30ff}' | '\u{4e00}'..='\u{9fff}'))
+    }
+
+    // In English, no label is Japanese, in any view or prompt, at any width.
+    #[test]
+    fn an_english_board_has_no_japanese_label() {
+        let t0 = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        board.lang = Lang::En;
+        let mut panels = sample();
+        panels.extend(
+            nested()
+                .into_iter()
+                .filter(|p| p.pane_id.0 >= 10 && p.pane_id.0 < 12),
+        );
+        panels.push(failed_worker(6, 2));
+        board.update(panels.clone(), t0);
+        panels[0].agent.as_mut().unwrap().seq = 9;
+        board.update(panels[1..].to_vec(), t0 + Duration::from_secs(1));
+        board.update(panels, t0 + Duration::from_secs(2));
+        board.set_screen_at(2, "one\n", t0 + Duration::from_secs(3));
+        board.set_screen_at(2, "one\ntwo\n", t0 + Duration::from_secs(4));
+        let check = |board: &Board, what: &str| {
+            for cols in [24, 40, 60, 80, 120] {
+                let lines = board.render(cols, 30, t0 + Duration::from_secs(200));
+                for line in &lines {
+                    let line = visible(line);
+                    assert_eq!(line.width(), cols, "{what} {cols}: {line:?}");
+                    assert!(!japanese(&line), "{what} {cols}: {line:?}");
+                }
+            }
+        };
+        check(&board, "list");
+        let all = rendered(&board, 120, 30, t0 + Duration::from_secs(8));
+        assert!(
+            all.contains("! Needs you") && all.contains("approval"),
+            "{all}"
+        );
+        assert!(all.contains("working, output 4s ago"), "{all}");
+        board.key(Key::Char(' '));
+        check(&board, "settled");
+        board.key(Key::Char('?'));
+        check(&board, "help");
+        board.key(Key::Char('?'));
+        board.key(Key::Char('n'));
+        board.key(Key::Char('s'));
+        check(&board, "send");
+        board.key(Key::Esc);
+        board.key(Key::Char('x'));
+        check(&board, "close");
+        board.key(Key::Esc);
+        board.key(Key::Char('q'));
+        check(&board, "quit");
+        board.key(Key::Esc);
+        board.key(Key::Enter);
+        check(&board, "detail");
+        board.offline = Some(t0);
+        check(&board, "offline");
+        assert!(!japanese(&board.title()), "{}", board.title());
+        // A notice from an action, and from a key with nothing to do.
+        board.key(Key::Char('9'));
+        assert!(!japanese(&board.message.clone().unwrap().text));
+        let mut server = FakeServer {
+            listings: vec![sample()],
+            typed: Vec::new(),
+        };
+        let notice = perform(&mut server, &board, Action::Focus(2));
+        assert!(!japanese(&notice.text), "{}", notice.text);
     }
 }

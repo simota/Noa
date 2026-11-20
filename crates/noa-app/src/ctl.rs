@@ -1510,10 +1510,9 @@ impl Session {
     fn open_board(&mut self, own: u64, placement: Placement) -> Result<u64, Failure> {
         let exe = std::env::current_exe()
             .map_err(|err| Failure::error(format!("cannot find this Noa binary: {err}")))?;
-        let mut env = std::collections::BTreeMap::new();
-        if let Ok(path) = std::env::var("PATH") {
-            env.insert("PATH".to_string(), path);
-        }
+        // Its `PATH`, and its locale, which picks the board's language and
+        // which a Noa started from the Dock lacks.
+        let env = worker_env(Vec::new(), true, std::env::vars());
         let params = SpawnParams {
             config: Some(SpawnConfig {
                 command: Some(vec![

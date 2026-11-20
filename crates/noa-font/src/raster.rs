@@ -301,6 +301,35 @@ pub fn rasterize_with_variations(
 mod tests {
     use super::thicken_mask;
 
+    /// The per-pixel formula the thicken table must reproduce exactly.
+    fn reference_thicken(coverage: u8, strength: u8) -> u8 {
+        if strength == 0 {
+            return coverage;
+        }
+        let gamma = 1.0 - 0.67 * (strength as f32 / 255.0);
+        let norm = coverage as f32 / 255.0;
+        (norm.powf(gamma) * 255.0).round().clamp(0.0, 255.0) as u8
+    }
+
+    #[test]
+    fn thicken_matches_the_gamma_formula_for_every_strength_and_coverage() {
+        let all: Vec<u8> = (0..=255).collect();
+        // Strengths repeat and alternate so a remembered table must follow
+        // the strength it is asked for.
+        let strengths = (0..=255u8).chain([255, 0, 128, 128, 1, 255, 64]);
+        for strength in strengths {
+            let expected: Vec<u8> = all
+                .iter()
+                .map(|&c| reference_thicken(c, strength))
+                .collect();
+            assert_eq!(
+                thicken_mask(&all, strength),
+                expected,
+                "strength={strength}"
+            );
+        }
+    }
+
     #[test]
     fn thicken_strength_zero_is_identity() {
         let mask = [0u8, 128, 64, 255, 30, 200];

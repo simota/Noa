@@ -4,6 +4,8 @@
 //! layer supplies pane ids and already-computed pane rectangles; the renderer
 //! turns that into one ordered render-pass plan.
 
+use std::borrow::Cow;
+
 const DIVIDER_THICKNESS_PX: u32 = 1;
 
 /// Stable render-side identity for a pane.
@@ -114,11 +116,17 @@ pub fn build_draw_plan_with_overlays(
     force_ring: bool,
 ) -> Vec<DrawOp> {
     let is_overlay = |pane: &PaneId| overlays.iter().any(|group| group.panes.contains(pane));
-    let base: Vec<(PaneId, PaneRect)> = layout
-        .iter()
-        .filter(|(pane, _)| !is_overlay(pane))
-        .copied()
-        .collect();
+    // Without overlays (the common frame) the split layout is the whole
+    // layout, so it is borrowed rather than copied.
+    let base: Cow<'_, [(PaneId, PaneRect)]> = if overlays.is_empty() {
+        Cow::Borrowed(layout)
+    } else {
+        layout
+            .iter()
+            .filter(|(pane, _)| !is_overlay(pane))
+            .copied()
+            .collect()
+    };
     let zoomed = zoomed.filter(|pane| base.iter().any(|(candidate, _)| candidate == pane));
     let mut plan = Vec::with_capacity(layout.len() + overlays.len() + 3);
     plan.push(DrawOp::Clear);

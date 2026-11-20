@@ -82,13 +82,9 @@ fn trim_trailing_punctuation(run: &[char]) -> usize {
 /// dot-relative, or a bare relative path with an interior slash (so a plain
 /// word like `hello` never qualifies, but `src/main.rs` does).
 fn looks_like_path(token: &[char]) -> bool {
-    let s: String = token.iter().collect();
-    if s.starts_with('/') || s.starts_with("~/") || s.starts_with("./") || s.starts_with("../") {
-        return true;
-    }
-    // Bare relative: needs an interior '/' (not just a leading one, which
-    // is already covered above and would otherwise double-count "/foo").
-    s.contains('/')
+    // Every explicit prefix (`/`, `~/`, `./`, `../`) holds a slash, so the
+    // bare relative case's "has a '/'" test covers all of them.
+    token.contains(&'/')
 }
 
 /// A character that can legitimately continue a path token. Anything else

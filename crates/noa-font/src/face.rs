@@ -1202,7 +1202,8 @@ fn handle_to_data(handle: Handle) -> Result<FontData, FontError> {
 }
 
 /// Read the PostScript name of face `index` inside a font file/collection.
-#[cfg(target_os = "macos")]
+/// Tests on every platform use it to identify a resolved face.
+#[cfg(any(target_os = "macos", test))]
 fn postscript_name_in(data: &[u8], index: usize) -> Option<String> {
     let font = FontRef::from_index(data, index)?;
     let name = font

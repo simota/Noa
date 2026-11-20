@@ -5834,3 +5834,87 @@ mod tests {
         assert!(!japanese(&notice.text), "{}", notice.text);
     }
 }
+
+#[cfg(test)]
+mod perf {
+    use super::*;
+    use noa_ipc::{PanelAgent, WireId};
+
+    /// Twenty workers under orchestrator 1, as `+ctl board` lists them.
+    fn workers(count: u64, seq: u64) -> Vec<Panel> {
+        let states = ["running", "permission", "finished", "running", "idle"];
+        (2..2 + count)
+            .map(|pane| {
+                let mut panel: Panel = serde_json::from_value(serde_json::json!({
+                    "windowGroupId": "1", "windowId": "1", "paneId": pane.to_string(),
+                    "name": format!("claude · w{pane}"), "cwd": "/repo",
+                    "busy": true, "attention": false, "preview": [],
+                }))
+                .unwrap();
+                panel.parent_pane_id = Some(WireId(1));
+                panel.label = Some(format!("worker-{pane}"));
+                panel.agent = Some(PanelAgent {
+                    kind: Some("claude".to_string()),
+                    state: Some(states[pane as usize % states.len()].to_string()),
+                    detail: Some(format!("step {seq} of the work on worker {pane}")),
+                    seq,
+                });
+                panel
+            })
+            .collect()
+    }
+
+    fn screen(pane: u64) -> String {
+        (0..40)
+            .map(|row| format!("{row:>3} worker {pane} output line with some text in it\n"))
+            .collect()
+    }
+
+    /// What one idle board tick costs with twenty workers: a listing, the
+    /// screens it reads, and a full frame. Run with
+    /// `cargo test --release -p noa-app board::perf -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "release-mode measurement of the board's idle tick"]
+    fn idle_tick_cost_with_twenty_workers() {
+        let iters = 2000u32;
+        let t0 = Instant::now();
+        let mut board = Board::new(Some(1), Some(100));
+        board.lang = Lang::En;
+        board.update(workers(20, 1), t0);
+        let screens: Vec<(u64, String)> = (2..22).map(|pane| (pane, screen(pane))).collect();
+        let mut update = Duration::ZERO;
+        let mut set = Duration::ZERO;
+        let mut render = Duration::ZERO;
+        let mut bytes = 0usize;
+        let mut same = 0u32;
+        let mut last: Vec<String> = Vec::new();
+        for i in 0..iters {
+            let now = t0 + Duration::from_millis(500) * (i + 1);
+            let panels = workers(20, 1);
+            let at = Instant::now();
+            board.update(panels, now);
+            update += at.elapsed();
+            let at = Instant::now();
+            for pane in board.wanted_screens() {
+                let text = &screens.iter().find(|(p, _)| *p == pane).unwrap().1;
+                board.set_screen_at(pane, text, now);
+            }
+            set += at.elapsed();
+            let at = Instant::now();
+            let lines = board.render(120, 40, now);
+            render += at.elapsed();
+            bytes += lines.join("\r\n").len() + 3;
+            same += u32::from(lines == last);
+            last = lines;
+        }
+        let per = |d: Duration| d.as_secs_f64() * 1e6 / f64::from(iters);
+        println!(
+            "board tick: update {:.1}µs  screens {:.1}µs ({} read)  render {:.1}µs  frame {} B  identical frames {same}/{iters}",
+            per(update),
+            per(set),
+            board.wanted_screens().len(),
+            per(render),
+            bytes / iters as usize,
+        );
+    }
+}

@@ -312,6 +312,7 @@ impl App {
         // (F-5): a pane that disappeared from `panels` (closed) has no
         // removal event in v1 — the spec leaves that to the next
         // `noa.listPanels` poll, so it's simply absent from this diff.
+
         let changed = changed_panels(previous_panels, &panels);
         if !changed.is_empty() {
             self.ipc_broadcaster.broadcast_state_changed(changed);
@@ -1573,6 +1574,70 @@ mod diff_tests {
             ids(&changed_panels(twice, &[panel(2, "running", &["a"])])),
             [2]
         );
+    }
+}
+
+#[cfg(test)]
+mod diff_perf {
+    use super::diff_tests::panel;
+    use super::*;
+    use std::time::Instant;
+
+    /// The snapshot sync's publish step with twenty listed workers and
+    /// nothing changed (the idle case), as it was — a full copy for the
+    /// shared listing, then the diff — and as it is, with and without a
+    /// `stateChanged` subscriber. Run with
+    /// `cargo test --release -p noa-app diff_perf -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "release-mode measurement of the snapshot publish step"]
+    fn publish_cost_with_twenty_panels() {
+        let iters = 20_000u32;
+        let listing = || -> Vec<Panel> {
+            (2..22)
+                .map(|pane| {
+                    panel(
+                        pane,
+                        "running",
+                        &["● Running the test suite", "  cargo test"],
+                    )
+                })
+                .collect()
+        };
+        let shared = parking_lot::Mutex::new(listing());
+        let idle = noa_ipc::Broadcaster::new();
+        let watched = noa_ipc::Broadcaster::new();
+        let (conn, _queue) = watched.register_connection();
+        watched
+            .add_subscription(conn, noa_ipc::EventMask::STATE_CHANGED, None)
+            .unwrap();
+        let run = |name: &str, publish: &mut dyn FnMut(Vec<Panel>) -> usize| {
+            let batches: Vec<Vec<Panel>> = (0..iters).map(|_| listing()).collect();
+            let at = Instant::now();
+            let mut sent = 0;
+            for panels in batches {
+                sent += publish(panels);
+            }
+            let per = at.elapsed().as_secs_f64() * 1e6 / f64::from(iters);
+            println!("{name:<28} {per:>7.2}µs per sync, {sent} panels sent");
+        };
+        run("copy then diff (before)", &mut |panels| {
+            let previous = std::mem::replace(&mut *shared.lock(), panels.clone());
+            changed_panels(previous, &panels).len()
+        });
+        run("no subscriber", &mut |panels| {
+            let _previous = std::mem::replace(&mut *shared.lock(), panels);
+            if !idle.has_state_changed_subscribers() {
+                return 0;
+            }
+            unreachable!()
+        });
+        run("a subscriber", &mut |panels| {
+            let previous = std::mem::replace(&mut *shared.lock(), panels);
+            if !watched.has_state_changed_subscribers() {
+                return 0;
+            }
+            changed_panels(previous, &shared.lock()).len()
+        });
     }
 }
 

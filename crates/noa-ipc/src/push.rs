@@ -331,6 +331,19 @@ impl Broadcaster {
         self.output_subscribers.load(Ordering::Relaxed) > 0
     }
 
+    /// Whether any live subscription takes `noa.stateChanged`, i.e. whether
+    /// a [`Self::broadcast_state_changed`] now could reach anyone. Taken
+    /// under the registry lock, so a subscription acknowledged before this
+    /// call is seen.
+    pub fn has_state_changed_subscribers(&self) -> bool {
+        self.conns.lock().values().any(|entry| {
+            entry
+                .subs
+                .iter()
+                .any(|sub| sub.events.contains(EventMask::STATE_CHANGED))
+        })
+    }
+
     /// Whether at least one live subscription would receive `noa.output`
     /// notifications for `pane_id` specifically (R-3). `has_output_subscribers`
     /// is global — it forces every producing pane's io thread to pay for
@@ -825,6 +838,28 @@ mod tests {
     }
 
     // ---- R-3: has_output_subscribers() gate ----
+
+    #[test]
+    fn state_changed_subscribers_are_seen_on_any_connection_until_they_go() {
+        let b = Broadcaster::new();
+        assert!(!b.has_state_changed_subscribers());
+        let (output_only, _q1) = b.register_connection();
+        b.add_subscription(output_only, EventMask::OUTPUT, None)
+            .unwrap();
+        assert!(!b.has_state_changed_subscribers());
+        let (waiter, _q2) = b.register_connection();
+        let sub = b
+            .add_subscription(waiter, EventMask::STATE_CHANGED, Some(HashSet::from([3])))
+            .unwrap();
+        assert!(b.has_state_changed_subscribers());
+        b.remove_subscription(waiter, sub);
+        assert!(!b.has_state_changed_subscribers());
+        let both = EventMask::from_events(&[EventKind::StateChanged, EventKind::Output]);
+        b.add_subscription(waiter, both, None).unwrap();
+        assert!(b.has_state_changed_subscribers());
+        b.unregister_connection(waiter);
+        assert!(!b.has_state_changed_subscribers());
+    }
 
     #[test]
     fn has_output_subscribers_is_false_with_no_subscriptions_at_all() {

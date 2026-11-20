@@ -1081,17 +1081,30 @@ fn match_menu_at(
 fn wrapped_footer_end(rows: &[RowText], start: usize, expected: &str) -> Option<usize> {
     let mut remaining = expected;
     for (offset, row) in rows[start..].iter().enumerate() {
-        let text = row.split_whitespace().collect::<Vec<_>>().join(" ");
-        if text.is_empty() {
+        if row.trim().is_empty() {
             return None;
         }
         // Physical rows can split a word or shortcut as well as whitespace.
-        remaining = remaining.trim_start().strip_prefix(&text)?;
+        remaining = strip_squeezed_prefix(remaining.trim_start(), row)?;
         if remaining.is_empty() {
             return Some(start + offset);
         }
     }
     None
+}
+
+/// `text` without the prefix [`squeeze`]`(row)` would be, compared word by
+/// word so no squeezed copy of `row` is built: every feed checks the footer
+/// against dozens of rows that almost never match.
+fn strip_squeezed_prefix<'a>(text: &'a str, row: &str) -> Option<&'a str> {
+    let mut rest = text;
+    for (index, word) in row.split_whitespace().enumerate() {
+        if index > 0 {
+            rest = rest.strip_prefix(' ')?;
+        }
+        rest = rest.strip_prefix(word)?;
+    }
+    Some(rest)
 }
 
 /// Only blank rows, or for agy its status rows, may follow a live dialog's

@@ -293,7 +293,7 @@ impl App {
                 ));
                 terminals.insert(key, surface.terminal.clone());
             }
-            let previous = std::mem::replace(&mut shared.panels, panels.clone());
+            let previous = std::mem::replace(&mut shared.panels, panels);
             shared.terminals = terminals;
             let stale_attach_keys = stale_registry_keys(shared.attach_panes.keys(), &live_keys);
             for key in stale_attach_keys {
@@ -312,8 +312,14 @@ impl App {
         // (F-5): a pane that disappeared from `panels` (closed) has no
         // removal event in v1 — the spec leaves that to the next
         // `noa.listPanels` poll, so it's simply absent from this diff.
-
-        let changed = changed_panels(previous_panels, &panels);
+        //
+        // With nobody subscribed there is no one to tell. Asked after the new
+        // listing is in place: a waiter subscribing from here on lists it
+        // itself before it waits (`+ctl wait`, `send --wait`).
+        if !self.ipc_broadcaster.has_state_changed_subscribers() {
+            return;
+        }
+        let changed = changed_panels(previous_panels, &self.ipc_shared.lock().panels);
         if !changed.is_empty() {
             self.ipc_broadcaster.broadcast_state_changed(changed);
         }

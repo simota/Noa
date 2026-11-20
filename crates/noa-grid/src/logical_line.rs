@@ -171,8 +171,10 @@ impl LineText {
         cut_start: bool,
         cut_end: bool,
     ) -> Self {
-        let mut chars = Vec::new();
-        let mut cells = Vec::new();
+        // One char per cell is the common case; marks only add to it.
+        let len = bounds.iter().map(ExactSizeIterator::len).sum();
+        let mut chars = Vec::with_capacity(len);
+        let mut cells = Vec::with_capacity(len);
         for (y, (row, bounds)) in rows.iter().zip(bounds).enumerate() {
             let row: &Row = row.borrow();
             let pad_x = bounds.end.checked_sub(1).filter(|&x| {

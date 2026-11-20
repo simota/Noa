@@ -7,6 +7,7 @@
 //! ramp) plus a default foreground/background, mirroring Ghostty's default
 //! theme.
 
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use noa_core::{Color, DEFAULT_BG, DEFAULT_CURSOR, DEFAULT_FG, Rgb, xterm_palette};
@@ -312,15 +313,21 @@ fn contrast_candidate(fg: Rgb, bg: Rgb, endpoint: Rgb, minimum: f32) -> Rgb {
 }
 
 fn relative_luminance(c: Rgb) -> f32 {
-    let lin = |v: u8| {
-        let v = f32::from(v) / 255.0;
-        if v <= 0.04045 {
-            v / 12.92
-        } else {
-            ((v + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+    // `minimum-contrast` checks every inked cell and its adjustment search
+    // runs dozens of these, so the per-channel `powf` is tabled once: a channel
+    // is a `u8`, and each entry is the same formula's exact `f32`.
+    static LINEAR: OnceLock<[f32; 256]> = OnceLock::new();
+    let lin = LINEAR.get_or_init(|| {
+        std::array::from_fn(|v| {
+            let v = v as f32 / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        })
+    });
+    0.2126 * lin[usize::from(c.r)] + 0.7152 * lin[usize::from(c.g)] + 0.0722 * lin[usize::from(c.b)]
 }
 
 fn rgb_distance_sq(a: Rgb, b: Rgb) -> i32 {

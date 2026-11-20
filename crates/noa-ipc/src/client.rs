@@ -858,7 +858,7 @@ fn response_step<T: DeserializeOwned>(text: &str, id: u64) -> ResponseStep<T> {
     if let Some(notification) = parse_notification(&value) {
         return ResponseStep::Notification(notification);
     }
-    let Ok(response) = serde_json::from_value::<RpcResponse>(value) else {
+    let Ok(response) = RpcResponse::from_value(value) else {
         return protocol_error("control response is not valid JSON-RPC");
     };
     if response.id.as_u64() != Some(id) {
@@ -923,6 +923,27 @@ struct RpcResponse {
     result: Option<Value>,
     #[serde(default)]
     error: Option<RpcError>,
+}
+
+impl RpcResponse {
+    /// `serde_json::from_value`, with `result` moved out of the object
+    /// rather than rebuilt from it: the result is the bulk of a reply (a
+    /// pane listing), and is converted again into the caller's type.
+    fn from_value(value: Value) -> Result<Self, serde_json::Error> {
+        // A sequence is a struct too, by position; leave that to serde.
+        let Value::Object(mut object) = value else {
+            return serde_json::from_value(value);
+        };
+        let mut field = |key| object.remove(key).unwrap_or(Value::Null);
+        // Each field as its `#[serde(default)]` type reads it: `null` and
+        // absent are the same.
+        Ok(RpcResponse {
+            jsonrpc: serde_json::from_value(field("jsonrpc"))?,
+            id: field("id"),
+            result: Some(field("result")).filter(|result| !result.is_null()),
+            error: serde_json::from_value(field("error"))?,
+        })
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -1021,6 +1042,84 @@ mod tests {
 
     fn step_text<T: DeserializeOwned + std::fmt::Debug>(text: &str, id: u64) -> String {
         format!("{:?}", response_step::<T>(text, id))
+    }
+
+    /// [`response_step`] as it read every reply before the result was
+    /// moved out: the envelope through serde's derive.
+    fn response_step_by_derive<T: DeserializeOwned>(text: &str, id: u64) -> ResponseStep<T> {
+        let Ok(value) = serde_json::from_str::<Value>(text) else {
+            return protocol_error("control response is not valid JSON-RPC");
+        };
+        if let Some(notification) = parse_notification(&value) {
+            return ResponseStep::Notification(notification);
+        }
+        let Ok(response) = serde_json::from_value::<RpcResponse>(value) else {
+            return protocol_error("control response is not valid JSON-RPC");
+        };
+        if response.id.as_u64() != Some(id) {
+            return ResponseStep::Skip;
+        }
+        if response.jsonrpc.as_deref() != Some("2.0") {
+            return protocol_error("control response has an invalid jsonrpc version");
+        }
+        if let Some(error) = response.error {
+            return ResponseStep::Done(Err(ClientError::Rpc {
+                code: error.code,
+                message: error.message,
+            }));
+        }
+        let Some(result) = response.result else {
+            return protocol_error("control response has no result");
+        };
+        match serde_json::from_value(result) {
+            Ok(result) => ResponseStep::Done(Ok(result)),
+            Err(_) => protocol_error("control result has an invalid shape"),
+        }
+    }
+
+    #[test]
+    fn a_reply_reads_as_through_the_derived_envelope() {
+        let mut corpus = response_corpus();
+        // Envelopes serde's derive also reads by position, and odd fields.
+        corpus.extend(
+            [
+                r#"["2.0",5,{"panels":[]}]"#,
+                r#"["2.0",5,null,[-1,"m"]]"#,
+                r#"["2.0"]"#,
+                r#"{"id":5,"jsonrpc":"2.0","error":[-2,"seq"]}"#,
+                r#"{"id":5,"jsonrpc":"2.0","error":{"code":1,"message":"m","data":{}}}"#,
+                r#"{"id":5,"jsonrpc":"2.0","error":{"code":1}}"#,
+                r#"{"id":5,"jsonrpc":"2.0","error":7,"result":{"panels":[]}}"#,
+                r#"{"id":5,"jsonrpc":["2.0"],"result":{"panels":[]}}"#,
+                r#"{"id":{"n":5},"jsonrpc":"2.0","result":{"panels":[]}}"#,
+                r#"5"#,
+                r#"null"#,
+                r#""text""#,
+            ]
+            .map(String::from),
+        );
+        for id in [4, 5, u64::MAX] {
+            for text in &corpus {
+                assert_eq!(
+                    step_text::<ListPanelsResult>(text, id),
+                    format!(
+                        "{:?}",
+                        response_step_by_derive::<ListPanelsResult>(text, id)
+                    ),
+                    "{text}"
+                );
+                assert_eq!(
+                    step_text::<Value>(text, id),
+                    format!("{:?}", response_step_by_derive::<Value>(text, id)),
+                    "{text}"
+                );
+                assert_eq!(
+                    step_text::<OkResult>(text, id),
+                    format!("{:?}", response_step_by_derive::<OkResult>(text, id)),
+                    "{text}"
+                );
+            }
+        }
     }
 
     #[test]

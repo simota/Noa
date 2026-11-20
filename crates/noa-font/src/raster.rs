@@ -1,5 +1,7 @@
 //! Glyph rasterization via swash.
 
+use std::cell::Cell;
+
 use swash::FontRef;
 use swash::scale::image::Content;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
@@ -61,12 +63,31 @@ pub struct GlyphSynthesis {
 /// would instead bleed coverage into black neighbours and blur the edges).
 ///
 /// `strength` (`font-thicken-strength`, `0..=255`) sets how aggressive the
-/// curve is; `0` is a no-op. Returns the mask unchanged when there is nothing
-/// to darken.
-fn thicken_mask(bitmap: &[u8], strength: u8) -> Vec<u8> {
+/// curve is; `0` is a no-op. Rewrites `bitmap` in place.
+fn thicken_mask(bitmap: &mut [u8], strength: u8) {
     if strength == 0 {
-        return bitmap.to_vec();
+        return;
     }
+    // The strength is a config value, so one remembered table per thread
+    // serves every glyph instead of 256 `powf`s each.
+    thread_local! {
+        static TABLE: Cell<Option<(u8, [u8; 256])>> = const { Cell::new(None) };
+    }
+    let lut = TABLE.with(|table| match table.get() {
+        Some((cached, lut)) if cached == strength => lut,
+        _ => {
+            let lut = thicken_table(strength);
+            table.set(Some((strength, lut)));
+            lut
+        }
+    });
+    for c in bitmap {
+        *c = lut[usize::from(*c)];
+    }
+}
+
+/// `coverage^gamma` for every coverage value at `strength` (non-zero).
+fn thicken_table(strength: u8) -> [u8; 256] {
     // gamma in (0.33 ..= 1.0): full strength → 0.33, tapering to 1.0 (identity)
     // at strength 0. The 0.33 endpoint is *measured*, not guessed: rendering a
     // screen full of Fira Code 16 white-on-dark text and comparing mean glyph
@@ -81,7 +102,7 @@ fn thicken_mask(bitmap: &[u8], strength: u8) -> Vec<u8> {
         let norm = c as f32 / 255.0;
         *slot = (norm.powf(gamma) * 255.0).round().clamp(0.0, 255.0) as u8;
     }
-    bitmap.iter().map(|&c| lut[c as usize]).collect()
+    lut
 }
 
 /// Render `glyph_id` at `px` pixels-per-em once, returning swash's raw image
@@ -165,7 +186,7 @@ fn mask_glyph_from_image(
     }
 
     if synthesis.thicken && expected_px > 0 {
-        bitmap = thicken_mask(&bitmap, synthesis.thicken_strength);
+        thicken_mask(&mut bitmap, synthesis.thicken_strength);
     }
     RasterizedGlyph {
         bitmap,
@@ -299,7 +320,12 @@ pub fn rasterize_with_variations(
 
 #[cfg(test)]
 mod tests {
-    use super::thicken_mask;
+    /// [`thicken_mask`] applied to a copy of `mask`.
+    fn thicken_mask(mask: &[u8], strength: u8) -> Vec<u8> {
+        let mut out = mask.to_vec();
+        super::thicken_mask(&mut out, strength);
+        out
+    }
 
     /// The per-pixel formula the thicken table must reproduce exactly.
     fn reference_thicken(coverage: u8, strength: u8) -> u8 {

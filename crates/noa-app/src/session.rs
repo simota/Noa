@@ -871,6 +871,62 @@ mod tests {
         assert!(json::parse(&ok).is_some());
     }
 
+    /// Pins the JSON reader's edge cases — escapes, raw non-ASCII, invalid
+    /// escapes and hex digits, number shapes, literals, trailing garbage — so
+    /// a change to how it walks the source cannot change what it accepts.
+    #[test]
+    fn json_reader_edge_cases_are_pinned() {
+        use json::Value::{Array, Bool, Null, Number, Object, String as Str};
+        let s = |text: &str| Str(text.to_string());
+        let cases: Vec<(&str, Option<json::Value>)> = vec![
+            (r#""\u00e9\u65e5""#, Some(s("é日"))),
+            ("\"日本 🚀\"", Some(s("日本 🚀"))),
+            (r#""\ud83d\ude80""#, None),
+            (r#""\u12G4""#, None),
+            ("\"\\u12é4\"", None),
+            ("\"\\é\"", None),
+            (
+                r#""a\/b\b\f\n\r\t\"\\""#,
+                Some(s("a/b\u{8}\u{c}\n\r\t\"\\")),
+            ),
+            ("\"raw\u{1}ctl\"", Some(s("raw\u{1}ctl"))),
+            (r#""\u0000""#, Some(s("\0"))),
+            ("\"unterminated", None),
+            ("\"ends in escape\\", None),
+            (
+                "[1, -2.5e3, +1]",
+                Some(Array(vec![Number(1.0), Number(-2500.0), Number(1.0)])),
+            ),
+            ("[1.2.3]", None),
+            ("[1e]", None),
+            ("-", None),
+            ("tru", None),
+            ("nul", None),
+            ("truex", None),
+            (" true \n", Some(Bool(true))),
+            ("false", Some(Bool(false))),
+            ("null", Some(Null)),
+            ("{\"a\":1,}", None),
+            ("[1,]", None),
+            (" { } ", Some(Object(Vec::new()))),
+            ("[ ]", Some(Array(Vec::new()))),
+            ("\u{feff}{}", None),
+            ("é", None),
+            ("{}é", None),
+            (
+                "{\"日\" : [null , \"x\"]}",
+                Some(Object(vec![("日".to_string(), Array(vec![Null, s("x")]))])),
+            ),
+            ("{\"a\" 1}", None),
+            ("{1:2}", None),
+            ("", None),
+            ("   ", None),
+        ];
+        for (source, expected) in cases {
+            assert_eq!(json::parse(source), expected, "{source:?}");
+        }
+    }
+
     #[test]
     fn oversized_session_file_is_ignored() {
         let dir = std::env::temp_dir().join(format!("noa-session-oversize-{}", std::process::id()));

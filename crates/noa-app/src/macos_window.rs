@@ -66,6 +66,62 @@ pub(crate) fn commit_window_display(window: &Window) {
     }
 }
 
+/// Re-enable the 1 s timeout of `-[CAMetalLayer nextDrawable]` on the Metal
+/// layer wgpu renders `window` into. wgpu-hal sets `allowsNextDrawableTimeout`
+/// to NO on every `Surface::configure` and ignores the acquire timeout, so
+/// when Core Animation holds on to both drawables (a window that stopped
+/// being composited) `get_current_texture` blocks the main thread forever and
+/// the whole app hangs. With the timeout it returns `SurfaceError::Timeout`
+/// after a second instead. Must follow every `configure` of the surface. A
+/// no-op off macOS and when the lookups fail.
+#[allow(unused_variables)]
+pub(crate) fn allow_next_drawable_timeout(window: &Window) {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::msg_send;
+        use objc2::runtime::{AnyClass, AnyObject};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        let Some(metal_layer_class) = AnyClass::get(c"CAMetalLayer") else {
+            return;
+        };
+        // SAFETY: main (window-owning) thread; the NSView and its layers are
+        // live and owned by winit/wgpu; every pointer is nil-checked, and
+        // `setAllowsNextDrawableTimeout:` is only sent to `CAMetalLayer`s.
+        unsafe {
+            let Ok(handle) = window.window_handle() else {
+                return;
+            };
+            let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+                return;
+            };
+            let ns_view = appkit.ns_view.as_ptr().cast::<AnyObject>();
+            let root: *mut AnyObject = msg_send![ns_view, layer];
+            if root.is_null() {
+                return;
+            }
+            // wgpu renders into the root layer when it already is a
+            // CAMetalLayer, otherwise into a CAMetalLayer sublayer it adds.
+            let allow = |layer: *mut AnyObject| {
+                let is_metal: bool = msg_send![layer, isKindOfClass: metal_layer_class];
+                if is_metal {
+                    let _: () = msg_send![layer, setAllowsNextDrawableTimeout: true];
+                }
+            };
+            allow(root);
+            let sublayers: *mut AnyObject = msg_send![root, sublayers];
+            if sublayers.is_null() {
+                return;
+            }
+            let count: usize = msg_send![sublayers, count];
+            for index in 0..count {
+                let layer: *mut AnyObject = msg_send![sublayers, objectAtIndex: index];
+                allow(layer);
+            }
+        }
+    }
+}
+
 /// Push `title` onto the window's `NSWindowTab` so its tab-bar button repaints.
 /// AppKit caches a tab button's label from the window title at layout time, so
 /// a plain `NSWindow setTitle:` leaves an already-laid-out button frozen at its

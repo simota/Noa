@@ -6,6 +6,8 @@ use font_kit::handle::Handle;
 use font_kit::properties::{Properties, Style, Weight};
 use font_kit::source::Source;
 use font_kit::source::SystemSource;
+use std::sync::OnceLock;
+
 use swash::FontRef;
 
 use crate::{FontConfig, FontError};
@@ -25,6 +27,10 @@ pub enum FontBytes {
     /// `embedded_symbols_nerd_font_face`). Already resident and shared like a
     /// `Mapped` file, so unlike `Owned` it costs no heap copy.
     Static(&'static [u8]),
+    /// A process-wide cached face handed out to every [`crate::FontGrid`]
+    /// that needs it (see [`cjk_fallback_face_for`]); cloning is a refcount
+    /// bump, and equality short-circuits on pointer identity.
+    Shared(std::sync::Arc<FontBytes>),
 }
 
 impl std::ops::Deref for FontBytes {
@@ -35,12 +41,18 @@ impl std::ops::Deref for FontBytes {
             FontBytes::Owned(bytes) => bytes,
             FontBytes::Mapped(map) => map,
             FontBytes::Static(bytes) => bytes,
+            FontBytes::Shared(shared) => shared,
         }
     }
 }
 
 impl PartialEq for FontBytes {
     fn eq(&self, other: &Self) -> bool {
+        if let (FontBytes::Shared(a), FontBytes::Shared(b)) = (self, other)
+            && std::sync::Arc::ptr_eq(a, b)
+        {
+            return true;
+        }
         **self == **other
     }
 }
@@ -51,6 +63,7 @@ impl std::fmt::Debug for FontBytes {
             FontBytes::Owned(_) => "Owned",
             FontBytes::Mapped(_) => "Mapped",
             FontBytes::Static(_) => "Static",
+            FontBytes::Shared(_) => "Shared",
         };
         write!(f, "FontBytes::{kind}({} bytes)", self.len())
     }
@@ -901,11 +914,9 @@ pub(crate) fn cascade_fallback_face(ch: char) -> Option<FontData> {
     // Resolve the substitute to loadable bytes + face index. Prefer the
     // direct mmap path (no whole-file read); fall back to font-kit's
     // PostScript-name lookup for faces without an on-disk file.
-    let data = mapped_font_data_for_postscript_name(&postscript).or_else(|| {
-        let source = SystemSource::new();
-        let handle = Source::select_by_postscript_name(&source, &postscript).ok()?;
-        load_valid_handle(handle)
-    })?;
+    // Many codepoints share one substitute (all of Thai -> one font), so the
+    // resolved face is memoized per PostScript name for the process.
+    let data = cascade_substitute_face(&postscript)?;
     if data.font_ref().is_err() {
         return None;
     }
@@ -916,6 +927,30 @@ pub(crate) fn cascade_fallback_face(ch: char) -> Option<FontData> {
     // so its retry-after-push cannot loop re-probing CoreText every frame.
     let covers = data.font_ref().ok()?.charmap().map(ch) != 0;
     covers.then_some(data)
+}
+
+/// Resolve (once per process, per PostScript name) the face CoreText chose as
+/// a cascade substitute; later codepoints with the same substitute reuse it.
+#[cfg(target_os = "macos")]
+fn cascade_substitute_face(postscript: &str) -> Option<FontData> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<SharedFace>>>> = OnceLock::new();
+    let mut cache = CACHE.get_or_init(Default::default).lock().ok()?;
+    cache
+        .entry(postscript.to_string())
+        .or_insert_with(|| {
+            mapped_font_data_for_postscript_name(postscript)
+                .or_else(|| {
+                    let source = SystemSource::new();
+                    let handle = Source::select_by_postscript_name(&source, postscript).ok()?;
+                    load_valid_handle(handle)
+                })
+                .map(SharedFace::new)
+        })
+        .as_ref()
+        .map(SharedFace::to_font_data)
 }
 
 /// Ask fontconfig which installed font can render `ch` — the Linux/BSD
@@ -1034,15 +1069,59 @@ pub(crate) fn cascade_fallback_face(_ch: char) -> Option<FontData> {
 /// Returns `None` when no curated CJK font covers `ch` (the caller then tries
 /// the generic system cascade).
 pub(crate) fn cjk_fallback_face_for(ch: char) -> Option<FontData> {
-    let source = SystemSource::new();
-    cjk_fallback_postscript_names()
+    // Resolving a candidate (CoreText lookup + mmap) costs milliseconds, and
+    // the answer is a property of the installed fonts, not of `ch`, so each
+    // curated candidate is resolved at most once per process (lazily, in
+    // priority order, so the walk still stops at the first covering font).
+    static CANDIDATES: OnceLock<Vec<OnceLock<Option<SharedFace>>>> = OnceLock::new();
+    let candidates = CANDIDATES.get_or_init(|| {
+        let total = cjk_fallback_postscript_names().len() + cjk_fallback_family_names().len();
+        (0..total).map(|_| OnceLock::new()).collect()
+    });
+    let postscript = cjk_fallback_postscript_names();
+    let families = cjk_fallback_family_names();
+    postscript
         .iter()
-        .find_map(|name| face_covering(postscript_fallback_face(&source, name), ch))
-        .or_else(|| {
-            cjk_fallback_family_names()
-                .iter()
-                .find_map(|name| face_covering(family_fallback_face(&source, name), ch))
+        .map(|name| (true, *name))
+        .chain(families.iter().map(|name| (false, *name)))
+        .zip(candidates)
+        .find_map(|((is_postscript, name), slot)| {
+            let shared = slot
+                .get_or_init(|| {
+                    let source = SystemSource::new();
+                    let face = if is_postscript {
+                        postscript_fallback_face(&source, name)
+                    } else {
+                        family_fallback_face(&source, name)
+                    };
+                    face.map(SharedFace::new)
+                })
+                .as_ref()?;
+            face_covering(Some(shared.to_font_data()), ch)
         })
+}
+
+/// A resolved system face kept for the whole process and shared (by `Arc`)
+/// with every `FontGrid` that selects it.
+struct SharedFace {
+    bytes: std::sync::Arc<FontBytes>,
+    index: usize,
+}
+
+impl SharedFace {
+    fn new(face: FontData) -> Self {
+        Self {
+            bytes: std::sync::Arc::new(face.bytes),
+            index: face.index,
+        }
+    }
+
+    fn to_font_data(&self) -> FontData {
+        FontData {
+            bytes: FontBytes::Shared(self.bytes.clone()),
+            index: self.index,
+        }
+    }
 }
 
 /// Return `face` only if it maps `ch` to a real (non-notdef) glyph — the
@@ -1123,7 +1202,8 @@ fn handle_to_data(handle: Handle) -> Result<FontData, FontError> {
 }
 
 /// Read the PostScript name of face `index` inside a font file/collection.
-#[cfg(target_os = "macos")]
+/// Tests on every platform use it to identify a resolved face.
+#[cfg(any(target_os = "macos", test))]
 fn postscript_name_in(data: &[u8], index: usize) -> Option<String> {
     let font = FontRef::from_index(data, index)?;
     let name = font
@@ -1853,6 +1933,92 @@ mod tests {
             (face.bytes, face.index),
             (expected.bytes, expected.index),
             "lazy CJK resolution must select the same face the eager priority list would"
+        );
+    }
+
+    /// Identity of a resolved fallback face, comparable across resolvers.
+    fn face_identity(face: &Option<FontData>) -> Option<(Option<String>, usize, usize)> {
+        face.as_ref().map(|f| {
+            (
+                postscript_name_in(&f.bytes, f.index),
+                f.bytes.len(),
+                f.index,
+            )
+        })
+    }
+
+    /// The uncached resolver exactly as it was before the CJK list was
+    /// memoized: re-resolve every curated candidate through a fresh
+    /// `SystemSource`, then the system cascade.
+    fn reference_uncached_fallback(ch: char) -> Option<FontData> {
+        let source = SystemSource::new();
+        cjk_fallback_postscript_names()
+            .iter()
+            .find_map(|name| face_covering(postscript_fallback_face(&source, name), ch))
+            .or_else(|| {
+                cjk_fallback_family_names()
+                    .iter()
+                    .find_map(|name| face_covering(family_fallback_face(&source, name), ch))
+            })
+            .or_else(|| cascade_fallback_face(ch))
+    }
+
+    fn cached_fallback(ch: char) -> Option<FontData> {
+        cjk_fallback_face_for(ch).or_else(|| cascade_fallback_face(ch))
+    }
+
+    /// Memoizing the curated CJK list must not change which face any
+    /// character resolves to.
+    #[test]
+    fn cached_fallback_matches_uncached_reference() {
+        // CJK, Thai, Hangul, emoji, Arabic, Devanagari, math, unassigned.
+        for ch in [
+            '日',
+            '漢',
+            'あ',
+            'ก',
+            '한',
+            '😀',
+            'ع',
+            'अ',
+            '∑',
+            '\u{378}',
+            '\u{10FFFD}',
+        ] {
+            // Twice: the second call is served from the cache.
+            for _ in 0..2 {
+                assert_eq!(
+                    face_identity(&cached_fallback(ch)),
+                    face_identity(&reference_uncached_fallback(ch)),
+                    "fallback face changed for U+{:04X}",
+                    ch as u32
+                );
+            }
+        }
+    }
+
+    /// Timing probe (`cargo test -p noa-font --release --offline
+    /// fallback_timing -- --ignored --nocapture`): ~500 distinct BMP
+    /// characters, first-time resolution through the dynamic fallback path.
+    #[test]
+    #[ignore]
+    fn fallback_timing() {
+        let chars: Vec<char> = (0x100u32..0xFFFF)
+            .step_by(131)
+            .filter_map(char::from_u32)
+            .take(500)
+            .collect();
+        let start = std::time::Instant::now();
+        let hits = chars
+            .iter()
+            .filter(|&&c| cached_fallback(c).is_some())
+            .count();
+        let elapsed = start.elapsed();
+        eprintln!(
+            "fallback_timing: {} chars, {hits} resolved, {:.1} ms total, {:.3} ms/char",
+            chars.len(),
+            elapsed.as_secs_f64() * 1e3,
+            elapsed.as_secs_f64() * 1e3 / chars.len() as f64
         );
     }
 

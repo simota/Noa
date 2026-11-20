@@ -897,10 +897,20 @@ impl App {
         let frame = match state.surface.get_current_texture() {
             Ok(frame) => frame,
             // OutOfMemory is not recoverable by reconfiguring; anything else
-            // (Lost/Outdated/Timeout/Other) gets a reconfigure + retry so a
+            // but Timeout (Lost/Outdated/Other) gets a reconfigure + retry so a
             // transient error can't leave the window permanently frozen.
             Err(wgpu::SurfaceError::OutOfMemory) => {
                 log::error!("surface out of memory; skipping frame");
+                return;
+            }
+            // Core Animation kept every drawable for the 1 s
+            // `nextDrawable` timeout (see
+            // `macos_window::allow_next_drawable_timeout`): the window is not
+            // being composited. Drop the frame without asking for another, or
+            // each retry would block the main thread for another second; the
+            // next output, input or reveal redraws it.
+            Err(wgpu::SurfaceError::Timeout) => {
+                log::debug!("surface drawable timed out; skipping frame");
                 return;
             }
             Err(e) => {
@@ -912,6 +922,7 @@ impl App {
                     &gpu.device,
                     &state.surface_config,
                     state.occluded,
+                    &state.window,
                 );
                 state.window.request_redraw();
                 return;

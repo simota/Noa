@@ -330,6 +330,219 @@ impl Screen {
         }
     }
 
+    /// `REP` (`CSI n b`): print `c` `n` times, leaving state identical to `n`
+    /// calls of [`Self::print`] (or [`Self::print_with_insert`]).
+    ///
+    /// `n` reaches 65535 and is not capped (Ghostty), and this runs under
+    /// the terminal lock, so a per-scalar loop let a stream of `A CSI 65535 b`
+    /// freeze the app for seconds. With autowrap on and no insert mode the
+    /// outcome is fixed, so whole row segments are written at once and rows
+    /// that only repeat the grid skip the grid entirely
+    /// ([`Self::repeat_wrapping`]); every row still reaches scrollback with
+    /// its scroll bookkeeping. With autowrap off the cursor stops at the
+    /// right edge, after which a print changes nothing, so the loop stops
+    /// there. Anything else keeps the per-scalar loop.
+    pub(crate) fn repeat_char(
+        &mut self,
+        c: char,
+        n: usize,
+        autowrap: bool,
+        grapheme_clustering: bool,
+        insert_mode: bool,
+    ) {
+        // Under mode 2027 only plain scalars are known never to join each
+        // other; a combining mark (width 0) attaches on every print.
+        let width = if grapheme_clustering {
+            Self::plain_width(c)
+        } else {
+            Self::print_width_fast(c)
+        };
+        if width == 0 {
+            for _ in 0..n {
+                self.print_inner(c, autowrap, grapheme_clustering, insert_mode, None);
+            }
+            return;
+        }
+        let mut remaining = n;
+        if grapheme_clustering {
+            // Only a prefix can extend the cluster already at the cursor:
+            // once `c` is printed, the cell a later `c` would join is `c`.
+            while remaining > 0 && self.extend_cluster_at_cursor(c) {
+                remaining -= 1;
+            }
+        }
+        if !autowrap {
+            // The cursor only moves right and stops at the right edge (at
+            // most `cols - 1` advancing prints). Once it stops, one print
+            // settles the pending-wrap latch (a wide scalar that no longer
+            // fits clears the latch and the cell) and every later print
+            // repeats the same writes. `cols + 2` covers both.
+            remaining = remaining.min(usize::from(self.cols) + 2);
+        }
+        if !autowrap || insert_mode {
+            for _ in 0..remaining {
+                self.print_inner(c, autowrap, grapheme_clustering, insert_mode, None);
+            }
+            return;
+        }
+        self.repeat_wrapping(c, width, remaining, grapheme_clustering);
+    }
+
+    /// The autowrap, non-insert body of [`Self::repeat_char`]: `remaining`
+    /// prints of a scalar of `width` (1 or 2) that cannot join itself.
+    /// Each iteration is one row segment: the wrap [`Self::print_inner`]
+    /// would perform before its first scalar, then every scalar that fits
+    /// through the right margin, written with the same wide-pair cleanup as
+    /// a single print.
+    ///
+    /// Once every row of a full-width scroll region holds a full segment
+    /// written by this loop, each further full row leaves the grid exactly
+    /// as it found it: the top row (equal to every other wrapped row)
+    /// scrolls off, and the new bottom row is written to match the old one.
+    /// Those rows only seal into scrollback and run the per-scroll
+    /// bookkeeping ([`Self::scroll_up_unchanged_region`]); the grid is not
+    /// touched.
+    fn repeat_wrapping(
+        &mut self,
+        c: char,
+        width: usize,
+        mut remaining: usize,
+        grapheme_clustering: bool,
+    ) {
+        let blank = self.blank();
+        let narrow = Cell {
+            ch: c,
+            fg: self.cursor.fg,
+            bg: self.cursor.bg,
+            underline_color: self.cursor.underline_color,
+            hyperlink: self.cursor.hyperlink,
+            attrs: self.pen_attrs(),
+            grapheme: None,
+        };
+        let mut lead = narrow;
+        lead.attrs.insert(CellAttrs::WIDE);
+        let mut spacer = Cell { ch: ' ', ..narrow };
+        spacer.attrs.insert(CellAttrs::WIDE_SPACER);
+        let layout = CellAttrs::WIDE | CellAttrs::WIDE_SPACER;
+        let (left, right) = (self.left_margin(), self.right_margin());
+        let per_row = (usize::from(right) + 1).saturating_sub(usize::from(left)) / width;
+        // The sealed row is the region's top row, which must already carry
+        // its wrap (`wrapped`, wide pad): in a one-row region it is the
+        // bottom row itself, not yet wrapped.
+        let region_rows =
+            usize::from(self.region.bottom).saturating_sub(usize::from(self.region.top)) + 1;
+        let steady_capable = region_rows >= 2 && !self.has_narrow_horizontal_margins();
+        // Consecutive iterations that scrolled the region and then wrote a
+        // full segment from the left margin.
+        let mut full_rows = 0usize;
+        while remaining > 0 {
+            if self.cursor.x < left || self.cursor.x > right || (width == 2 && right <= left) {
+                // Outside DECSLRM each scalar re-picks its wrap boundary
+                // (text wraps at the screen edge until it enters the
+                // margins, then at the margin), and a wide scalar in a
+                // one-column margin never prints; leave both to `print`.
+                // The cursor enters the margins within two rows and stays.
+                self.print_inner(c, true, grapheme_clustering, false, None);
+                remaining -= 1;
+                full_rows = 0;
+                continue;
+            }
+            let scrolls = self.cursor.y == self.region.bottom;
+            let mut wrapped = false;
+            if self.cursor.pending_wrap {
+                if let Some(row) = self.grid.get_mut(self.cursor.y as usize) {
+                    row.wrapped = true;
+                }
+                self.index();
+                self.cursor.x = left;
+                self.cursor.pending_wrap = false;
+                wrapped = true;
+            }
+            if width == 2 && self.cursor.x.saturating_add(1) > right {
+                let x = self.cursor.x as usize;
+                if let Some(row) = self.grid.get_mut(self.cursor.y as usize) {
+                    Self::mark_wide_pad(row, x, &blank);
+                    row.wrapped = true;
+                    row.dirty = true;
+                }
+                self.index();
+                self.cursor.x = left;
+                self.cursor.pending_wrap = false;
+                wrapped = true;
+            }
+            let x = self.cursor.x as usize;
+            let count = remaining.min((right as usize + 1 - x) / width);
+            let end = x + count * width;
+            let row = match self.grid.get_mut(self.cursor.y as usize) {
+                Some(row) if end <= row.cells.len() => row,
+                // `print` writes nothing here and leaves the cursor put, so
+                // every remaining print is the same no-op.
+                _ => return,
+            };
+            if x >= row.occupied() {
+                // Past the watermark every cell is default, so no wide pair
+                // needs clearing (a row fresh from a scroll always is).
+                if width == 1 {
+                    row.cells[x..end].fill(narrow);
+                } else {
+                    for pair in row.cells[x..end].chunks_exact_mut(2) {
+                        pair[0] = lead;
+                        pair[1] = spacer;
+                    }
+                }
+            } else if width == 1 {
+                for cx in x..end {
+                    if row.cells[cx].attrs.intersects(layout) {
+                        Self::clear_wide_at(row, cx, &blank);
+                    }
+                    row.cells[cx] = narrow;
+                }
+            } else {
+                for cx in (x..end).step_by(2) {
+                    for cell_x in [cx, cx + 1] {
+                        if row.cells[cell_x].attrs.intersects(layout) {
+                            Self::clear_wide_at(row, cell_x, &blank);
+                        }
+                    }
+                    row.cells[cx] = lead;
+                    row.cells[cx + 1] = spacer;
+                }
+            }
+            row.dirty = true;
+            row.mark_occupied(end);
+            self.last_printed = Some(c);
+            if end > right as usize {
+                self.cursor.x = right;
+                self.cursor.pending_wrap = true; // latch; stay in the last column
+            } else {
+                self.cursor.x = end as u16;
+            }
+            remaining -= count;
+
+            if steady_capable && scrolls && wrapped && x == usize::from(left) && count == per_row {
+                full_rows += 1;
+            } else {
+                full_rows = 0;
+            }
+            // After one such iteration per region row, every region row was
+            // written by one of them from the left margin, and every row but
+            // the bottom was wrapped by its successor, which started from
+            // the cursor state a full segment leaves. The next full row
+            // would therefore reproduce the grid. Keep the last row
+            // (possibly partial) for the loop.
+            if full_rows >= region_rows && remaining > per_row {
+                let skipped = (remaining - 1) / per_row;
+                // A narrow full-width row of printable ASCII seals as a
+                // byte span, like the line batch's rows.
+                let text = (' '..='~').contains(&c).then(|| vec![c as u8; per_row]);
+                for _ in 0..skipped {
+                    self.scroll_up_unchanged_region(text.as_deref().map(|t| (t, &narrow)));
+                }
+                remaining -= skipped * per_row;
+            }
+        }
+    }
+
     /// The column count of a scalar [`Self::print_plain_text`] can write
     /// without cluster handling, or `0` if it must take the per-scalar path.
     /// Memoized per scalar for planes 0-1: deriving it probes the segmenter

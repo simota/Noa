@@ -198,7 +198,7 @@ params: `{"subscriptionId":"1"}` / result: `{"ok":true}`
 
 ### Mutation execution semantics
 
-`sendText` / `focusPane` / `newTab` / `split` / `closePane` / `resizePane` execute via a round trip to the UI thread, and return `-32603` (internal) if they time out after 2 seconds. **The operation may still execute later, even after the timeout (at-least-once).** Blindly retrying on a failure response can result in double execution.
+`sendText` / `focusPane` / `newTab` / `split` / `closePane` / `resizePane` execute via a round trip to the UI thread, and return `-32009` (outcome unknown) if they time out after 2 seconds. **The operation may still execute later, even after the timeout (at-least-once).** Blindly retrying on a failure response can result in double execution.
 
 ## 6. Raw attach channel
 
@@ -305,6 +305,7 @@ Changes to `agent.seq`, `process`, and `exit` are pushed in `noa.stateChanged` w
 | `-32006` | protocolVersion major mismatch |
 | `-32007` | attach conflict (the pane already has a reserved or active attach) |
 | `-32008` | attach handshake failure |
+| `-32009` | outcome unknown: a request handed to the UI thread got no result within 2 seconds; it may still execute |
 
 ## 10. Full session example
 

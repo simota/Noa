@@ -18,6 +18,10 @@ pub enum ErrorCode {
     VersionMismatch,
     AttachConflict,
     AttachHandshakeFailure,
+    /// The request was handed to the app but no result came back in time:
+    /// it may still be carried out (or already was), so the caller cannot
+    /// treat it as refused.
+    OutcomeUnknown,
     Internal,
 }
 
@@ -37,6 +41,7 @@ impl ErrorCode {
             ErrorCode::VersionMismatch => -32006,
             ErrorCode::AttachConflict => -32007,
             ErrorCode::AttachHandshakeFailure => -32008,
+            ErrorCode::OutcomeUnknown => -32009,
         }
     }
 }
@@ -75,6 +80,10 @@ pub enum IpcError {
     /// params), with the reason as the message.
     #[error("{0}")]
     InvalidParams(String),
+    /// The request was dispatched but its result did not arrive in time; it
+    /// may still take effect.
+    #[error("outcome unknown: {0}")]
+    OutcomeUnknown(String),
 }
 
 impl IpcError {
@@ -86,6 +95,7 @@ impl IpcError {
             IpcError::Unsupported(_) => ErrorCode::Internal,
             IpcError::Internal(_) => ErrorCode::Internal,
             IpcError::InvalidParams(_) => ErrorCode::InvalidParams,
+            IpcError::OutcomeUnknown(_) => ErrorCode::OutcomeUnknown,
         }
     }
 }
@@ -102,5 +112,16 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::InvalidParams);
         assert_eq!(error.code().code(), -32602);
         assert_eq!(error.to_string(), "nesting goes one level deep");
+    }
+
+    // Review finding: a request the app had not answered in time came back
+    // as -32603, which `+ctl spawn --worktree` read as refused. It has its
+    // own code.
+    #[test]
+    fn an_unanswered_request_has_its_own_code() {
+        let error = IpcError::OutcomeUnknown("request timed out".to_string());
+        assert_eq!(error.code(), ErrorCode::OutcomeUnknown);
+        assert_eq!(error.code().code(), -32009);
+        assert_ne!(error.code().code(), ErrorCode::Internal.code());
     }
 }

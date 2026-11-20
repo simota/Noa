@@ -67,11 +67,16 @@ impl<'a> LogicalLine<'a> {
         {
             rows.push(row);
         }
-        let cut_above = storage_y
-            .checked_sub(index + 1)
-            .and_then(&row_at)
-            .is_some_and(|row| row.wrapped);
-        let cut_below = rows.last().is_some_and(|row| row.wrapped)
+        // Short of the window's reach, each loop above stopped on a row it
+        // already read (absent, or not wrapped): the chain ends there, so
+        // only a full reach needs another row to tell.
+        let cut_above = index == MAX_ROWS_EACH_WAY
+            && storage_y
+                .checked_sub(index + 1)
+                .and_then(&row_at)
+                .is_some_and(|row| row.wrapped);
+        let cut_below = rows.len() - index > MAX_ROWS_EACH_WAY
+            && rows.last().is_some_and(|row| row.wrapped)
             && row_at(storage_y + rows.len() - index).is_some();
 
         // A row wrapped at the right margin was written exactly up to it

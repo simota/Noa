@@ -1480,7 +1480,12 @@ fn region_hash(rows: &[RowText], region: RangeInclusive<usize>) -> u64 {
 fn row_text(cells: &[Cell]) -> String {
     let mut text = String::with_capacity(cells.len());
     for cell in cells {
-        cell.push_text_to(&mut text);
+        // Most cells carry no combining tail; pushing the scalar alone skips
+        // the interner lookup `push_text_to` makes for every cell.
+        match cell.grapheme {
+            None => text.push(cell.ch),
+            Some(_) => cell.push_text_to(&mut text),
+        }
     }
     text.truncate(text.trim_end().len());
     text

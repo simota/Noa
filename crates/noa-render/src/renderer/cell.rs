@@ -185,6 +185,9 @@ pub(super) fn rebuild_row_instances(
         row.cells.len()
     };
 
+    // `minimum-contrast` adjustment is a pure function of (fg, bg), and a run
+    // of cells shares both, so the row reuses the last pair's answer.
+    let mut last_contrast: Option<(noa_core::Rgb, noa_core::Rgb, noa_core::Rgb)> = None;
     for (col_idx, cell) in row.cells[..walked].iter().enumerate() {
         let x = col_idx as u16;
         let highlight = row_highlights.get(col_idx);
@@ -274,7 +277,14 @@ pub(super) fn rebuild_row_instances(
             });
         }
 
-        let mut text_rgb = theme.contrast_adjusted_fg(text_base_rgb, bg_rgb);
+        let mut text_rgb = match last_contrast {
+            Some((fg, bg, adjusted)) if fg == text_base_rgb && bg == bg_rgb => adjusted,
+            _ => {
+                let adjusted = theme.contrast_adjusted_fg(text_base_rgb, bg_rgb);
+                last_contrast = Some((text_base_rgb, bg_rgb, adjusted));
+                adjusted
+            }
+        };
         // SGR 2 (faint/dim): render the ink at half opacity over its own
         // background, i.e. `(fg + bg) / 2`. This matches Ghostty's `native`
         // dim — measured against Ghostty on the same display, a faint white

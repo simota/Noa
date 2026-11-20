@@ -4,9 +4,12 @@
 
 Noa is a GPU-accelerated terminal emulator for macOS and Linux, implemented independently
 in Rust with `winit` and `wgpu`. It is built to be the fastest terminal at
-swallowing output floods (`cat huge.log`, build logs, CI streams) and aims
-for observable compatibility with [Ghostty](https://ghostty.org) while keeping
-the core terminal model reusable and testable.
+swallowing output floods (`cat huge.log`, build logs, CI streams), runs
+coding agents (Claude Code, Codex, agy) in worker panes it can orchestrate,
+and aims for observable compatibility with [Ghostty](https://ghostty.org)
+while keeping the core terminal model reusable and testable.
+
+Website: <https://simota.github.io/Noa/>
 
 Noa is under active development. It builds from source and installs with
 Homebrew on Apple Silicon Macs (see below). The macOS app bundle targets macOS 13 or later. Fixture-based regression tests cover
@@ -143,13 +146,34 @@ Every number is reproducible with the bundled benchmark harness
 ## Key features
 
 - GPU-rendered terminal grid with Kitty graphics support
-- Tabs, splits, multiple windows, session restore, and a quick terminal
+- Tabs, splits, floating panes, multiple windows, session restore, and quick and scratch terminals
+- Agent workflows: attention tracking, pane-scoped notifications, and `Noa +ctl` orchestration of worker panes with a live board
 - DEC/ANSI VT handling, Kitty keyboard protocol, shell integration, and search
 - Font fallback, ligatures, background images, opacity, and blur
 - Ghostty-compatible configuration, live reload, and 575 bundled themes (574 from Ghostty plus `Noa`)
-- macOS menus, command palette, notifications, and secure keyboard entry
+- macOS menus, command palette, notifications, Ember menu-bar status, and secure keyboard entry
 
 See [Features](docs/FEATURES.md) for the complete feature inventory.
+
+## Agent orchestration
+
+An agent or script in one pane can drive worker panes with `Noa +ctl`: spawn
+Claude Code, Codex, agy, or any command, send prompts, wait on each worker's
+reported state, read its output, and close it. Every command prints one JSON
+object per line. The first spawn opens `Noa +ctl board` beside the
+orchestrator: a queue of workers that need a person above the tree of work in
+progress, with a preview of the selected worker's screen. Workers live in
+floating panes stowed on the board.
+
+Enable the control server first:
+
+```conf
+server-enable = true
+server-scopes = read,control,input
+```
+
+See [Agent workflows](docs/AGENT_WORKFLOW.md#orchestrating-worker-panes) for
+the commands and a full round.
 
 ## Configuration
 

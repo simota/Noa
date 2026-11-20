@@ -3429,16 +3429,65 @@ impl Polling {
     }
 }
 
+/// Why a listing failed: worth trying again, or the board must end.
+enum ListFailure {
+    Retry(Failure),
+    End(Failure),
+}
+
+/// Whether a connection opened again reached the Noa the board started on
+/// (`first`, its instance id; empty when that server predates the field,
+/// and then it cannot be told). Pane ids are only meaningful within one
+/// instance: another Noa's pane under the same id is not this worker.
+fn same_instance(first: &str, now: &str) -> bool {
+    first.is_empty() || first == now
+}
+
 /// One pane listing. A connection that was lost is opened again first.
-fn list(client: &mut Client, reconnect: &mut bool) -> Result<Vec<Panel>, Failure> {
+fn list(
+    client: &mut Client,
+    reconnect: &mut bool,
+    instance: &str,
+) -> Result<Vec<Panel>, ListFailure> {
     if *reconnect {
-        *client = super::Session::connect()?.client;
+        *client = super::Session::connect()
+            .map_err(ListFailure::Retry)?
+            .client;
         *reconnect = false;
+        if !same_instance(instance, client.server_instance_id()) {
+            return Err(ListFailure::End(Failure::error(
+                "the Noa that answered after a reconnect is not the one the board started on; its panes are not these workers",
+            )));
+        }
     }
     client.list_panels().map_err(|err| {
-        *reconnect = matches!(err, ClientError::Transport(_) | ClientError::Closed(_));
-        Failure::from(err)
+        *reconnect = lost(&err);
+        ListFailure::Retry(Failure::from(err))
     })
+}
+
+/// Whether `err` means the connection is gone and must be opened again.
+fn lost(err: &ClientError) -> bool {
+    matches!(err, ClientError::Transport(_) | ClientError::Closed(_))
+}
+
+/// Read the screens the board wants through `get`. The first lost
+/// connection ends the pass: every later read would wait out its own
+/// timeout. Returns whether the connection was lost.
+fn fetch_screens(
+    board: &mut Board,
+    now: Instant,
+    mut get: impl FnMut(u64) -> Result<String, ClientError>,
+) -> bool {
+    for pane in board.wanted_screens() {
+        match get(pane) {
+            Ok(text) => board.set_screen_at(pane, &text, now),
+            Err(err) if lost(&err) => return true,
+            // A pane that closed meanwhile is dropped at the next listing.
+            Err(_) => {}
+        }
+    }
+    false
 }
 
 /// Run the board until `q`. The terminal is restored before returning.
@@ -3447,6 +3496,7 @@ pub(crate) fn run(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
     board.lang = Lang::detect();
     let mut polling = Polling::default();
     let mut reconnect = false;
+    let instance = client.server_instance_id().to_string();
 
     let (keys_tx, keys_rx) = std::sync::mpsc::channel::<(Instant, Vec<u8>)>();
     std::thread::spawn(move || {
@@ -3474,13 +3524,14 @@ pub(crate) fn run(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
     loop {
         let now = Instant::now();
         if polling.due(now) {
-            match list(client, &mut reconnect) {
+            match list(client, &mut reconnect, &instance) {
                 Ok(panels) => {
                     board.update(panels, now);
                     polling.succeeded(now);
                 }
-                Err(failure) if !polling.failed(now) => return Err(failure),
-                Err(_) => {}
+                Err(ListFailure::End(failure)) => return Err(failure),
+                Err(ListFailure::Retry(failure)) if !polling.failed(now) => return Err(failure),
+                Err(ListFailure::Retry(_)) => {}
             }
             board.offline = polling.failing_since();
             dirty = true;
@@ -3488,14 +3539,16 @@ pub(crate) fn run(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
         // While offline the notice counts the seconds.
         dirty |= board.offline.is_some();
         if board.offline.is_none()
+            && !reconnect
             && screens_at.is_none_or(|at| now.duration_since(at) >= SCREEN_EVERY)
         {
-            for pane in board.wanted_screens() {
-                // A pane that closed meanwhile is dropped at the next listing.
-                if let Ok(text) = client.get_text(pane, TextSource::Screen, None) {
-                    board.set_screen_at(pane, &text.text, now);
-                }
-            }
+            // A lost connection is opened again by the next listing, on
+            // its usual schedule.
+            reconnect = fetch_screens(&mut board, now, |pane| {
+                client
+                    .get_text(pane, TextSource::Screen, None)
+                    .map(|text| text.text)
+            });
             screens_at = Some(now);
             dirty = true;
         }
@@ -5898,6 +5951,17 @@ mod tests {
         assert!(!japanese(&notice.text), "{}", notice.text);
     }
 
+    // Review finding: a reconnect adopted whatever Noa answered, whose
+    // panes can share ids with this one's workers.
+    #[test]
+    fn a_reconnect_must_reach_the_same_noa() {
+        assert!(same_instance("a1", "a1"));
+        assert!(!same_instance("a1", "b2"));
+        assert!(!same_instance("a1", ""));
+        // A server from before the id cannot be told apart.
+        assert!(same_instance("", "b2"));
+    }
+
     // Review finding: a worker closing under the send line or the close
     // prompt dropped back to normal keys, so the `x` and `y` typed next
     // closed the worker selected in its place.
@@ -5948,6 +6012,35 @@ mod tests {
         let mut empty = Board::new(Some(1), Some(8));
         empty.update(Vec::new(), t0);
         assert_eq!(empty.key(Key::Char('q')), Some(Action::Quit));
+    }
+
+    // Review finding: with the server stopped, each screen read waited out
+    // its timeout, one worker after another.
+    #[test]
+    fn a_lost_connection_ends_the_screen_pass() {
+        let t0 = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), t0);
+        assert!(board.wanted_screens().len() > 1);
+        let mut reads = 0;
+        let lost = fetch_screens(&mut board, t0, |_| {
+            reads += 1;
+            Err(ClientError::Transport("deadline exceeded".to_string()))
+        });
+        assert!(lost);
+        assert_eq!(reads, 1);
+
+        // A pane that closed is skipped; the pass goes on.
+        let mut reads = 0;
+        let lost = fetch_screens(&mut board, t0, |_| {
+            reads += 1;
+            Err(ClientError::Rpc {
+                code: RPC_PANE_CLOSED,
+                message: "closed".to_string(),
+            })
+        });
+        assert!(!lost);
+        assert_eq!(reads, board.wanted_screens().len());
     }
 
     // Review finding: once the orchestrator's pane closed, the board went

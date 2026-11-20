@@ -99,3 +99,4 @@ include!("occupancy_watermark.rs");
 include!("scrollback_snapshot.rs");
 
 include!("line_batch.rs");
+include!("repeat_char.rs");

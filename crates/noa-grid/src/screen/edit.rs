@@ -680,6 +680,54 @@ impl Screen {
         self.scroll_shift = self.scroll_shift.saturating_add(1);
     }
 
+    /// [`Self::scroll_up_region`]`(1)` when the scroll leaves the grid
+    /// unchanged: the region spans every column (no narrow DECSLRM), every
+    /// row in it equals the top row, and the caller will write the new
+    /// bottom row to equal the old one (REP's steady state, see
+    /// `Screen::repeat_wrapping`). Only the seal of the top row and the
+    /// per-scroll bookkeeping remain, in the order each `scroll_up_region`
+    /// branch runs them; the region rows those branches mark dirty already
+    /// are.
+    ///
+    /// `ascii_row` is the top row as one printable-ASCII span from column 0
+    /// with its cell template, sealed straight from the bytes as the line
+    /// batch does (`push_span_immediate`); otherwise the top row is packed
+    /// inline from the grid (`push_row`), with no copy into a carcass. For a
+    /// long run of identical rows both measured several times faster than
+    /// the deferred worker path, and both leave the same history.
+    pub(super) fn scroll_up_unchanged_region(&mut self, ascii_row: Option<(&[u8], &Cell)>) {
+        let (top, bottom) = (self.region.top as usize, self.region.bottom as usize);
+        debug_assert!(top < bottom && !self.has_narrow_horizontal_margins());
+        let full_height = top == 0 && bottom + 1 == self.rows as usize;
+        let recorded = self.records_scrollback_for_region(top, bottom);
+        if recorded {
+            let old_scrollback_len = self.scrollback.len();
+            let evicted = match ascii_row {
+                Some((text, template)) => {
+                    let blank = self.blank();
+                    self.scrollback
+                        .push_span_immediate(text, 0, self.cols, template, &blank, true)
+                }
+                None => self.scrollback.push_row(&self.grid[top]),
+            };
+            if !full_height {
+                self.shift_tracked_points_down_from(
+                    old_scrollback_len.saturating_add(bottom + 1),
+                    1,
+                );
+            }
+            self.note_scrollback_evictions(evicted);
+            self.pin_viewport_for_scrollback_push(1, full_height);
+            if full_height {
+                self.scroll_shift = self.scroll_shift.saturating_add(1);
+                // `scroll_up_one_full_recorded` skips `track_scroll_up`: it
+                // is a no-op for a recorded full-height scroll.
+                return;
+            }
+        }
+        self.track_scroll_up(top, bottom, 1, recorded);
+    }
+
     /// Scroll the scroll region down by `n` rows (bottom rows discarded).
     pub fn scroll_down_region(&mut self, n: u16) {
         let (top, bottom) = (self.region.top as usize, self.region.bottom as usize);
@@ -708,7 +756,7 @@ impl Screen {
         self.track_scroll_down(top, bottom, n);
     }
 
-    fn has_narrow_horizontal_margins(&self) -> bool {
+    pub(super) fn has_narrow_horizontal_margins(&self) -> bool {
         self.horizontal_margins.is_some_and(|margins| {
             margins.left != 0 || margins.right != self.cols.saturating_sub(1)
         })
@@ -1193,6 +1241,27 @@ impl Screen {
     }
 
     pub fn repeat_preceding_char(
+        &mut self,
+        n: u16,
+        autowrap: bool,
+        grapheme_clustering: bool,
+        insert_mode: bool,
+    ) {
+        if let Some(c) = self.last_printed {
+            self.repeat_char(
+                c,
+                usize::from(n.max(1)),
+                autowrap,
+                grapheme_clustering,
+                insert_mode,
+            );
+        }
+    }
+
+    /// The reference `REP`: one full print per repetition. The differential
+    /// tests pin [`Self::repeat_preceding_char`] to it.
+    #[cfg(test)]
+    pub(crate) fn repeat_preceding_char_per_scalar(
         &mut self,
         n: u16,
         autowrap: bool,

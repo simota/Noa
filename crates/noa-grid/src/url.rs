@@ -1948,4 +1948,83 @@ mod tests {
         assert_eq!((found.start_row, found.start_x), (0, 0));
         assert_eq!((found.end_row, found.end_x), (1, 2));
     }
+
+    /// Every column of a deterministic corpus of quote-, comment-, SQL- and
+    /// bracket-heavy lines with several URLs each, digested. Pins the exact
+    /// matches (spans and URIs) so a change to the scan's mechanics cannot
+    /// move a single one.
+    #[test]
+    fn corpus_matches_are_pinned() {
+        const TOKENS: [&str; 44] = [
+            "https://e.co/a",
+            "http://x.io",
+            "HTTPS://Q.org/p?q=1",
+            "https://h/x'y",
+            "'",
+            "\"",
+            "`",
+            "'''",
+            "\"\"\"",
+            "/*",
+            "*/",
+            "\\",
+            " ",
+            "  ",
+            "a",
+            "it's",
+            "don't",
+            "(",
+            ")",
+            "[",
+            "]",
+            "{",
+            "}",
+            ",",
+            ";",
+            ":",
+            "?",
+            "#",
+            "=",
+            "select ",
+            " in ",
+            "x.y",
+            "return ",
+            "r'",
+            "f\"",
+            "@",
+            "$ ",
+            "-",
+            ".",
+            "→",
+            "（",
+            "）",
+            "||",
+            "rock'n'roll",
+        ];
+        let mut state = 0x9e37_79b9u32;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        };
+        let mut digest = 0xcbf2_9ce4_8422_2325u64;
+        let mut found = 0;
+        for _ in 0..400 {
+            let len = 4 + next() as usize % 40;
+            let text: String = (0..len)
+                .map(|_| TOKENS[next() as usize % TOKENS.len()])
+                .collect();
+            let row = row_from_str(&text);
+            for column in 0..row.cells.len() as u16 {
+                let m = detect_url_at_column(&row, column);
+                found += usize::from(m.is_some());
+                for b in format!("{column}{m:?}").bytes() {
+                    digest ^= u64::from(b);
+                    digest = digest.wrapping_mul(0x100_0000_01b3);
+                }
+            }
+        }
+        assert_eq!((found, digest), (13935, 8104785941210323752));
+    }
 }

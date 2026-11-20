@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-11-20
+
+Orchestration that runs without the human, and a board that shows first what
+needs a person.
+
+### Added
+
+- `Noa +ctl spawn --worktree` starts a worker in its own git worktree on branch
+  `orch/<label>`; `close --prune` removes that worktree and branch afterwards
+  (never forced).
+- `Noa +ctl spawn --tier light|standard|deep` picks the model and effort of a
+  `claude`, `codex` or `agy` worker.
+- `Noa +ctl send --replace` clears the worker's input line before typing.
+- `Noa +ctl wait --stall S` ends the wait with `stalled` for a pane whose screen
+  has not changed for S seconds.
+- Workers handed back when a board closes are stowed again when that board
+  reopens.
+
+### Changed
+
+- The board lists every worker that needs a person in a queue at the top,
+  above the tree of work under way; finished and exited workers fold into one
+  line. The selected worker's screen is previewed beside or under the list, and
+  each state has a mark that reads without colour.
+- The board speaks English outside a Japanese locale.
+
 ## [0.9.3] - 2026-11-20
 
 Orchestration that explains its failures and scales to 20 workers, with one

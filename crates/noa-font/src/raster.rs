@@ -105,25 +105,48 @@ fn thicken_table(strength: u8) -> [u8; 256] {
     lut
 }
 
+/// A face to rasterize from, plus the id a `ScaleContext` caches its scaler
+/// and hinting state under. `None` keys them by `font`'s own `CacheKey`,
+/// which `FontRef::from_index` mints fresh on every call, so only a
+/// caller-held stable id lets those caches hit.
+#[derive(Clone, Copy)]
+pub struct RasterFace<'a> {
+    pub font: FontRef<'a>,
+    pub scaler_id: Option<[u64; 2]>,
+}
+
+impl<'a> From<FontRef<'a>> for RasterFace<'a> {
+    fn from(font: FontRef<'a>) -> Self {
+        Self {
+            font,
+            scaler_id: None,
+        }
+    }
+}
+
 /// Render `glyph_id` at `px` pixels-per-em once, returning swash's raw image
 /// (if any) plus the font's pen advance at that size. Factored out of
 /// [`rasterize_with_variations`] so the fit-to-cell path below can re-invoke
 /// it at a smaller `px` without duplicating the scaler/render setup.
 fn render_glyph_once(
     ctx: &mut ScaleContext,
-    font: FontRef<'_>,
+    face: RasterFace<'_>,
     glyph_id: u16,
     px: f32,
     normalized_coords: &[swash::NormalizedCoord],
     synthesis: GlyphSynthesis,
 ) -> (Option<swash::scale::image::Image>, f32) {
+    let RasterFace { font, scaler_id } = face;
     let advance = font
         .glyph_metrics(normalized_coords)
         .scale(px)
         .advance_width(glyph_id);
 
-    let mut scaler = ctx
-        .builder(font)
+    let builder = match scaler_id {
+        Some(id) => ctx.builder_with_id(font, id),
+        None => ctx.builder(font),
+    };
+    let mut scaler = builder
         .size(px)
         .hint(true)
         .normalized_coords(normalized_coords.iter().copied())
@@ -233,7 +256,7 @@ fn mask_glyph_from_image(
 /// outline coverage; callers can treat that as "nothing to blit".
 pub fn rasterize_with_variations(
     ctx: &mut ScaleContext,
-    font: FontRef<'_>,
+    face: RasterFace<'_>,
     glyph_id: u16,
     px: f32,
     variation_coords: &[(u32, f32)],
@@ -243,13 +266,14 @@ pub fn rasterize_with_variations(
     let normalized_coords: Vec<swash::NormalizedCoord> = if variation_coords.is_empty() {
         Vec::new()
     } else {
-        font.variations()
+        face.font
+            .variations()
             .normalized_coords(variation_coords.iter().copied())
             .collect()
     };
 
     let (image, advance) =
-        render_glyph_once(ctx, font, glyph_id, px, &normalized_coords, synthesis);
+        render_glyph_once(ctx, face, glyph_id, px, &normalized_coords, synthesis);
 
     let Some(img) = image else {
         return RasterizedGlyph {
@@ -290,7 +314,7 @@ pub fn rasterize_with_variations(
         let scaled_px = px * scale;
         let (scaled_image, scaled_advance) = render_glyph_once(
             ctx,
-            font,
+            face,
             glyph_id,
             scaled_px,
             &normalized_coords,

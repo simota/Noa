@@ -17,7 +17,7 @@ use crate::boxdraw::{self, is_builtin_glyph};
 use crate::face::{
     FontStack, FontStyle, Metrics, cascade_fallback_face, cjk_fallback_face_for, load_font_stack,
 };
-use crate::raster::{GlyphSynthesis, RasterizedGlyph, rasterize_with_variations};
+use crate::raster::{GlyphSynthesis, RasterFace, RasterizedGlyph, rasterize_with_variations};
 use crate::shape::{self, FaceId, ShapeCell, ShapeRunEntry, ShapedGlyph, StyleKey};
 use crate::{FontConfig, FontError, GlyphInfo, GlyphKey};
 
@@ -380,7 +380,10 @@ impl FontGrid {
         let fit_width = Some(f32::from(span_for_char(ch)) * self.metrics.cell_w);
         let glyph = rasterize_with_variations(
             &mut self.ctx,
-            font,
+            RasterFace {
+                font,
+                scaler_id: scaler_id(font_index),
+            },
             glyph_id,
             self.px_size,
             &[],
@@ -539,7 +542,10 @@ impl FontGrid {
             }
             let raster = rasterize_with_variations(
                 &mut self.ctx,
-                font,
+                RasterFace {
+                    font,
+                    scaler_id: scaler_id(index),
+                },
                 glyph.glyph_id,
                 self.px_size,
                 &coords,
@@ -843,7 +849,10 @@ impl FontGrid {
         let fit_width = Some(f32::from(span) * self.metrics.cell_w);
         let glyph = rasterize_with_variations(
             &mut self.ctx,
-            font,
+            RasterFace {
+                font,
+                scaler_id: scaler_id(face_id.0 as usize),
+            },
             glyph_id,
             self.px_size * scale,
             &variation_coords,
@@ -901,7 +910,10 @@ impl FontGrid {
             let coords = self.variation_coords(style);
             glyph = rasterize_with_variations(
                 &mut self.ctx,
-                font,
+                RasterFace {
+                    font,
+                    scaler_id: scaler_id(face_index),
+                },
                 glyph_id,
                 px_size * scale,
                 &coords,
@@ -1239,6 +1251,16 @@ fn builtin_rasterized(ch: char, metrics: &Metrics) -> RasterizedGlyph {
     }
 }
 
+/// The id `FontGrid::ctx` knows face `face_index` by. swash keys its scaler
+/// and hinting caches by font identity, and the `CacheKey` a fresh `FontRef`
+/// carries is new on every call — so without this every glyph re-ran its
+/// face's hinting programs. A face index names one face for the grid's whole
+/// life (the stack only appends), which is exactly `ctx`'s life; the second
+/// word keeps it apart from swash's own `[key, u64::MAX]` ids.
+fn scaler_id(face_index: usize) -> Option<[u64; 2]> {
+    Some([face_index as u64, 0])
+}
+
 /// Build a [`GlyphInfo`] from a rasterized glyph and its packed atlas
 /// placement (`[0, 0]`/`[0, 0]` when there is nothing to draw).
 fn glyph_info(glyph: &RasterizedGlyph, atlas_pos: [u16; 2], atlas_size: [u16; 2]) -> GlyphInfo {
@@ -1295,7 +1317,7 @@ mod tests {
                         let font_style = FontStyle::from_bold_italic(bold, italic);
                         let cold = rasterize_with_variations(
                             &mut ScaleContext::new(),
-                            grid.font_stack.faces()[face].font_ref().unwrap(),
+                            grid.font_stack.faces()[face].font_ref().unwrap().into(),
                             glyph.glyph_id,
                             grid.px_size * scale,
                             &shape::variation_coords_for(&grid.font_cfg, style),
@@ -1626,7 +1648,7 @@ mod tests {
         let font = font_data.font_ref().expect("resolved face must parse");
         let natural = rasterize_with_variations(
             &mut ScaleContext::new(),
-            font,
+            font.into(),
             glyph_id,
             grid.px_size,
             &[],
@@ -2471,7 +2493,7 @@ mod tests {
         let font = font_data.font_ref().expect("resolved face must parse");
         let natural = rasterize_with_variations(
             &mut ScaleContext::new(),
-            font,
+            font.into(),
             glyph_id,
             grid.px_size,
             &[],
@@ -2524,7 +2546,7 @@ mod tests {
         let font = font_data.font_ref().expect("resolved face must parse");
         let natural = rasterize_with_variations(
             &mut ScaleContext::new(),
-            font,
+            font.into(),
             glyph_id,
             grid.px_size,
             &[],

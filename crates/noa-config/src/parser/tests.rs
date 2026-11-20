@@ -2147,6 +2147,55 @@ fn config_file_include_detects_a_direct_cycle() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Cycle detection keys on the canonical path, so the including file is
+/// caught however an include spells it: `./`, a `..` detour or a symlink.
+#[cfg(unix)]
+#[test]
+fn config_file_include_detects_cycles_through_other_spellings() {
+    let dir = unique_temp_dir("config-file-cycle-spelling");
+    let sub_dir = dir.join("sub");
+    fs::create_dir_all(&sub_dir).unwrap();
+    let main_path = dir.join("config");
+    std::os::unix::fs::symlink(&main_path, dir.join("alias")).unwrap();
+    fs::write(
+        sub_dir.join("child"),
+        "config-file = ../config\nfont-size = 7",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "config-file = ./config\nconfig-file = alias\nconfig-file = sub/../config\n\
+         config-file = sub/child\nfont-size = 5",
+    )
+    .unwrap();
+
+    let source = fs::read_to_string(&main_path).unwrap();
+    let (overrides, diagnostics) = parse_overrides(&main_path, &source);
+
+    assert_eq!(overrides.font_size, Some(5.0));
+    let messages: Vec<_> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(messages.len(), 4, "{messages:?}");
+    assert!(messages.iter().all(|m| m.contains("cycle")), "{messages:?}");
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A top-level path with no file behind it (the source came from elsewhere)
+/// still keys the cycle check, by its own spelling.
+#[test]
+fn config_file_include_detects_a_cycle_back_to_an_unreadable_top_level_path() {
+    let dir = unique_temp_dir("config-file-cycle-absent");
+    fs::create_dir_all(&dir).unwrap();
+    let main_path = dir.join("not-on-disk");
+
+    let (overrides, diagnostics) =
+        parse_overrides(&main_path, "config-file = not-on-disk\nfont-size = 6");
+
+    assert_eq!(overrides.font_size, Some(6.0));
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert!(diagnostics[0].message.contains("cycle"));
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn config_file_include_caps_total_included_files() {
     // Regression (Critical DoS): the visited set only blocks a file from

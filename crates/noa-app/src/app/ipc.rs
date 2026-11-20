@@ -312,15 +312,7 @@ impl App {
         // (F-5): a pane that disappeared from `panels` (closed) has no
         // removal event in v1 — the spec leaves that to the next
         // `noa.listPanels` poll, so it's simply absent from this diff.
-        let previous_by_id: HashMap<u64, Panel> = previous_panels
-            .into_iter()
-            .map(|panel| (panel.pane_id.0, panel))
-            .collect();
-        let changed: Vec<Panel> = panels
-            .iter()
-            .filter(|panel| previous_by_id.get(&panel.pane_id.0) != Some(*panel))
-            .cloned()
-            .collect();
+        let changed = changed_panels(previous_panels, &panels);
         if !changed.is_empty() {
             self.ipc_broadcaster.broadcast_state_changed(changed);
         }
@@ -1035,6 +1027,20 @@ fn focus_to_restore(
     restores
 }
 
+/// The panels of `current` that are new or differ from `previous`, in
+/// `current`'s order: the `noa.stateChanged` diff (F-5).
+fn changed_panels(previous: Vec<Panel>, current: &[Panel]) -> Vec<Panel> {
+    let previous_by_id: HashMap<u64, Panel> = previous
+        .into_iter()
+        .map(|panel| (panel.pane_id.0, panel))
+        .collect();
+    current
+        .iter()
+        .filter(|panel| previous_by_id.get(&panel.pane_id.0) != Some(*panel))
+        .cloned()
+        .collect()
+}
+
 /// What `sync_ipc_snapshot` rebuilds on as soon as it changes: each card's
 /// listed facts, and each live pane `((window, pane), exited)`, sorted.
 fn structural_signature(
@@ -1512,6 +1518,60 @@ mod focus_restore_tests {
                 Some(w(1))
             ),
             vec![(w(3), p(30), false)]
+        );
+    }
+}
+
+#[cfg(test)]
+mod diff_tests {
+    use super::*;
+
+    pub(super) fn panel(pane: u64, state: &str, preview: &[&str]) -> Panel {
+        let mut panel: Panel = serde_json::from_value(serde_json::json!({
+            "windowGroupId": "1", "windowId": "1", "paneId": pane.to_string(),
+            "name": format!("claude · w{pane}"), "cwd": format!("/repo/wt/w{pane}"),
+            "busy": true, "attention": false,
+            "preview": preview.iter().enumerate().map(|(row, text)| serde_json::json!({
+                "row": row, "spans": [{ "text": text, "fg": "#5fc4a0" }, { "text": " (12s)" }],
+            })).collect::<Vec<_>>(),
+            "parentPaneId": "1", "label": format!("w{pane}"),
+            "agent": { "kind": "claude", "state": state, "detail": "running tests", "seq": 3 },
+        }))
+        .unwrap();
+        panel.surface_id = Some(format!("0x{pane:016x}"));
+        panel
+    }
+
+    fn ids(panels: &[Panel]) -> Vec<u64> {
+        panels.iter().map(|panel| panel.pane_id.0).collect()
+    }
+
+    #[test]
+    fn the_diff_holds_new_and_changed_panels_in_listing_order() {
+        let previous = vec![
+            panel(2, "running", &["a"]),
+            panel(3, "running", &["b"]),
+            panel(4, "finished", &[]),
+            panel(9, "running", &[]),
+        ];
+        let current = vec![
+            panel(7, "running", &[]),
+            panel(4, "finished", &[]),
+            panel(3, "running", &["b", "c"]),
+            panel(2, "running", &["a"]),
+            panel(5, "permission", &[]),
+        ];
+        let changed = changed_panels(previous.clone(), &current);
+        assert_eq!(ids(&changed), [7, 3, 5]);
+        assert_eq!(changed[1], current[2]);
+        assert!(changed_panels(current.clone(), &current).is_empty());
+        assert_eq!(ids(&changed_panels(Vec::new(), &current)), ids(&current));
+        assert!(changed_panels(previous, &[]).is_empty());
+        // A pane listed twice is compared against the last of its ids.
+        let twice = vec![panel(2, "running", &["a"]), panel(2, "finished", &[])];
+        assert_eq!(
+            ids(&changed_panels(twice, &[panel(2, "running", &["a"])])),
+            [2]
         );
     }
 }

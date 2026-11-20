@@ -31,6 +31,11 @@ const TRAILING_PUNCTUATION: [char; 6] = ['.', ',', ';', ':', '!', '?'];
 const RUN_BOUNDARIES: &str = "\"<>`|｜（）「」『』【】［］｛｝〈〉《》“”‘’、。！？：；…‥→←⇒⇐↔";
 
 fn is_run_boundary(c: char) -> bool {
+    // Answer ASCII without searching the UTF-8 list: this runs per char of
+    // every scanned line.
+    if c.is_ascii() {
+        return c.is_whitespace() || matches!(c, '"' | '<' | '>' | '`' | '|');
+    }
     c.is_whitespace() || RUN_BOUNDARIES.contains(c)
 }
 

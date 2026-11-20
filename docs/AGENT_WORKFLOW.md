@@ -322,7 +322,8 @@ The orchestrator's first `spawn` opens one to its right (a new tab when there is
 no room). If it was closed, `"$NOA_BIN" +ctl board --open` from the orchestrator's
 pane opens another (`--split down` or `--tab` to choose where). Run
 in a pane of its own, `+ctl board` follows that pane's orchestrator, or every
-worker when it has none; `--of PANE` picks one.
+worker when it has none; `--of PANE` picks one. It needs a terminal on stdin
+and stdout and exits 1 without one: from a script, use `board --open`.
 
 The board has three parts. At the top, a queue of the workers that need you
 (an approval prompt, an error or a command that exited with a non-zero code,

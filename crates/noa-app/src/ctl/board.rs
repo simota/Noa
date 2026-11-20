@@ -3490,8 +3490,58 @@ fn fetch_screens(
     false
 }
 
-/// Run the board until `q`. The terminal is restored before returning.
+/// Why the board cannot run here, if so: it reads keys from stdin and
+/// draws on stdout, and in a pipe it would write escape sequences into it
+/// and wait for keys no one sees prompts for.
+fn terminal_problem(stdin_tty: bool, stdout_tty: bool) -> Option<Failure> {
+    (!(stdin_tty && stdout_tty)).then(|| {
+        Failure::error(
+            "board needs a terminal on stdin and stdout; from a script use `board --open`",
+        )
+    })
+}
+
+/// The terminating signal [`run`] caught, or 0.
+static SIGNALED: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+extern "C" fn on_signal(signal: libc::c_int) {
+    SIGNALED.store(signal, std::sync::atomic::Ordering::Relaxed);
+}
+
+const TERMINATING_SIGNALS: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGHUP, libc::SIGINT];
+
+/// Run the board until `q`. The terminal is restored before returning; a
+/// terminating signal restores it too, then ends the process as that
+/// signal would.
 pub(crate) fn run(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Result<i32, Failure> {
+    // SAFETY: isatty only inspects the descriptors.
+    let ttys = unsafe { (libc::isatty(0) == 1, libc::isatty(1) == 1) };
+    if let Some(failure) = terminal_problem(ttys.0, ttys.1) {
+        return Err(failure);
+    }
+    for signal in TERMINATING_SIGNALS {
+        // SAFETY: the handler only stores to an atomic.
+        unsafe {
+            libc::signal(
+                signal,
+                on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t,
+            )
+        };
+    }
+    let result = run_until_quit(client, of, me);
+    let signal = SIGNALED.load(std::sync::atomic::Ordering::Relaxed);
+    for signal in TERMINATING_SIGNALS {
+        // SAFETY: back to the default disposition.
+        unsafe { libc::signal(signal, libc::SIG_DFL) };
+    }
+    if signal != 0 {
+        // SAFETY: re-raises the caught signal with its default action.
+        unsafe { libc::raise(signal) };
+    }
+    result
+}
+
+fn run_until_quit(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Result<i32, Failure> {
     let mut board = Board::new(of, me);
     board.lang = Lang::detect();
     let mut polling = Polling::default();
@@ -3522,6 +3572,9 @@ pub(crate) fn run(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
     let mut title = String::new();
     let mut reader = KeyReader::default();
     loop {
+        if SIGNALED.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+            return Ok(EXIT_OK);
+        }
         let now = Instant::now();
         if polling.due(now) {
             match list(client, &mut reconnect, &instance) {
@@ -5949,6 +6002,19 @@ mod tests {
         };
         let notice = perform(&mut server, &board, Action::Focus(2));
         assert!(!japanese(&notice.text), "{}", notice.text);
+    }
+
+    // Review finding: run from a tool shell the board wrote escape
+    // sequences into a pipe and waited for keys; with stdout elsewhere it
+    // took confirmations no one saw.
+    #[test]
+    fn the_board_needs_a_terminal_on_stdin_and_stdout() {
+        assert!(terminal_problem(true, true).is_none());
+        for (stdin, stdout) in [(false, true), (true, false), (false, false)] {
+            let failure = terminal_problem(stdin, stdout).expect("refused");
+            assert_eq!(failure.code, super::super::EXIT_ERROR);
+            assert!(failure.message.contains("board --open"), "{failure:?}");
+        }
     }
 
     // Review finding: a reconnect adopted whatever Noa answered, whose

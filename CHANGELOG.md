@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-11-20
+
+No more frozen windows: the main-thread hangs and multi-second stalls are gone,
+and hover links, glyph rasterization and minimum-contrast got faster.
+
+### Fixed
+
+- A window that Core Animation stops compositing no longer hangs the main
+  thread: the wait for a Metal drawable is bounded and the frame is dropped on
+  timeout.
+- A large `REP` (`CSI n b`) no longer freezes the app for seconds. It writes
+  whole row segments instead of one character at a time (64 KiB chunk at 80x24,
+  ASCII: 5.02 s -> 0.32 s on the primary screen, 4.76 s -> 31 ms on the
+  alternate screen).
+
+### Changed
+
+- Curated CJK and cascade fallback faces are cached per process.
+- Cmd+hover link detection does less work per pointer move.
+- `minimum-contrast` above 1 rebuilds frames faster (`rebuild_contrast` -85%
+  in `bench_frame`); the default of 1 is unchanged.
+- `font-thicken` reuses its gamma table, and glyph rasterization reuses hinting
+  state per face.
+- Auto-approve prompt scans, session JSON parsing, startup config loading and
+  `+ctl` replies and notifications do less work.
+
+### Added
+
+- A Noa landing page on GitHub Pages.
+- The README covers agent orchestration, floating panes and the website.
+
 ## [0.9.4] - 2026-11-20
 
 Orchestration that runs without the human, and a board that shows first what

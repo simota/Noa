@@ -40,6 +40,13 @@ fn is_run_boundary(c: char) -> bool {
 }
 
 fn scheme_len_at(chars: &[char], start: usize) -> Option<usize> {
+    // Both schemes start with `h`; this runs at every char of a scanned line.
+    if !chars
+        .get(start)
+        .is_some_and(|c| c.eq_ignore_ascii_case(&'h'))
+    {
+        return None;
+    }
     URL_SCHEMES.iter().find_map(|scheme| {
         let candidate = chars.get(start..start + scheme.len())?;
         candidate

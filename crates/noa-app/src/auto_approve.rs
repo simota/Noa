@@ -1081,17 +1081,30 @@ fn match_menu_at(
 fn wrapped_footer_end(rows: &[RowText], start: usize, expected: &str) -> Option<usize> {
     let mut remaining = expected;
     for (offset, row) in rows[start..].iter().enumerate() {
-        let text = row.split_whitespace().collect::<Vec<_>>().join(" ");
-        if text.is_empty() {
+        if row.trim().is_empty() {
             return None;
         }
         // Physical rows can split a word or shortcut as well as whitespace.
-        remaining = remaining.trim_start().strip_prefix(&text)?;
+        remaining = strip_squeezed_prefix(remaining.trim_start(), row)?;
         if remaining.is_empty() {
             return Some(start + offset);
         }
     }
     None
+}
+
+/// `text` without the prefix [`squeeze`]`(row)` would be, compared word by
+/// word so no squeezed copy of `row` is built: every feed checks the footer
+/// against dozens of rows that almost never match.
+fn strip_squeezed_prefix<'a>(text: &'a str, row: &str) -> Option<&'a str> {
+    let mut rest = text;
+    for (index, word) in row.split_whitespace().enumerate() {
+        if index > 0 {
+            rest = rest.strip_prefix(' ')?;
+        }
+        rest = rest.strip_prefix(word)?;
+    }
+    Some(rest)
 }
 
 /// Only blank rows, or for agy its status rows, may follow a live dialog's
@@ -1467,7 +1480,12 @@ fn region_hash(rows: &[RowText], region: RangeInclusive<usize>) -> u64 {
 fn row_text(cells: &[Cell]) -> String {
     let mut text = String::with_capacity(cells.len());
     for cell in cells {
-        cell.push_text_to(&mut text);
+        // Most cells carry no combining tail; pushing the scalar alone skips
+        // the interner lookup `push_text_to` makes for every cell.
+        match cell.grapheme {
+            None => text.push(cell.ch),
+            Some(_) => cell.push_text_to(&mut text),
+        }
     }
     text.truncate(text.trim_end().len());
     text
@@ -3908,5 +3926,215 @@ mod tests {
             detect_and_update_any_agent(&screen, cursor, settled(ctx), &mut state),
             Decision::Fire { signature, .. } if signature == AutoApproveSignature::AgySubagentApproval
         ));
+    }
+
+    /// `wrapped_footer_end` as it was written before it stopped building a
+    /// squeezed copy of every row it compares: the reference the
+    /// allocation-free version must agree with.
+    fn wrapped_footer_end_reference(
+        rows: &[RowText],
+        start: usize,
+        expected: &str,
+    ) -> Option<usize> {
+        let mut remaining = expected;
+        for (offset, row) in rows[start..].iter().enumerate() {
+            let text = row.split_whitespace().collect::<Vec<_>>().join(" ");
+            if text.is_empty() {
+                return None;
+            }
+            remaining = remaining.trim_start().strip_prefix(&text)?;
+            if remaining.is_empty() {
+                return Some(start + offset);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn wrapped_footer_end_matches_the_squeezing_reference() {
+        let footers = [
+            CLAUDE_PERMISSION_FOOTER,
+            CLAUDE_QUESTION_FOOTER,
+            "Press enter to confirm or esc to cancel",
+            "↑/↓ Navigate · tab Amend · ctrl+g edit/expand command · ctrl+r Review",
+            "a  b",
+            " a",
+            "",
+        ];
+        let screens: Vec<Vec<RowText>> = vec![
+            rows(&[" Esc to cancel · Tab to amend"]),
+            rows(&["Esc   to\tcancel ·  Tab to amend  "]),
+            rows(&["Esc to can", "cel · Tab to amend"]),
+            rows(&["Esc to cancel ·", " Tab to", "amend"]),
+            rows(&["Esc to cancel ·", "", "Tab to amend"]),
+            rows(&["Esc to cancel · Tab to amend extra"]),
+            rows(&["Esc\u{3000}to cancel · Tab to amend"]),
+            rows(&["Esc\u{a0}to cancel · Tab to amend"]),
+            rows(&["Enter to select · ↑/↓ to navigate", " · Esc to cancel"]),
+            rows(&["Enter to select · ↑/↓ to navigate ·", "Esc to cancel", "x"]),
+            rows(&["Press enter to confirm", "or esc to cancel"]),
+            rows(&[
+                "↑/↓ Navigate · tab Amend · ctrl+g edit/expand",
+                "command · ctrl+r Review",
+            ]),
+            rows(&["a", "b"]),
+            rows(&["a b"]),
+            rows(&["a  b"]),
+            rows(&["   ", "a"]),
+            rows(&["", ""]),
+            rows(&["Esc", "to", "cancel", "·", "Tab", "to", "amend"]),
+            rows(&["Esc to cancel · Tab to amendd"]),
+            rows(&["sc to cancel · Tab to amend"]),
+        ];
+        for screen in &screens {
+            for footer in footers {
+                for start in 0..screen.len() {
+                    assert_eq!(
+                        wrapped_footer_end(screen, start, footer),
+                        wrapped_footer_end_reference(screen, start, footer),
+                        "{screen:?} from {start} against {footer:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn row_text_matches_each_cells_full_text() {
+        let mut terminal = Terminal::new(noa_core::GridSize::new(40, 6));
+        let mut stream = noa_vt::Stream::new();
+        stream.feed(
+            "plain ascii   \r\ncafe\u{301} e\u{301}\u{302} 👍🏽 🇯🇵\r\n変更をステージ x\r\n\tTab\x1b[5Gmid\r\n\x1b[10C  \r\n"
+                .as_bytes(),
+            &mut terminal,
+        );
+        let mut grid_rows = 0;
+        for row in terminal.active().grid.iter() {
+            grid_rows += 1;
+            let cells = &row.cells[..row.occupied()];
+            let mut expected = String::new();
+            for cell in cells {
+                expected.push_str(&cell.text());
+            }
+            expected.truncate(expected.trim_end().len());
+            assert_eq!(row_text(cells), expected);
+        }
+        assert_eq!(grid_rows, 6);
+        assert_eq!(
+            live_rows_from_terminal(&terminal)[1],
+            // A wide glyph's spacer cell reads as a space.
+            "cafe\u{301} e\u{301}\u{302} 👍🏽  🇯🇵"
+        );
+    }
+
+    /// Perf harness (auto-approve per-feed scan): the cost of one
+    /// `find_prompt` pass over a 50-row viewport, for a screen of plain
+    /// output (no prompt — the common feed), Claude Code's idle input frame,
+    /// and every positive dialog fixture padded to 50 rows below output.
+    /// Each line prints a digest of the matches, so a before/after pair can
+    /// be checked for identical results. `#[ignore]`d so `cargo test` stays
+    /// fast; run explicitly with:
+    /// `cargo test -p noa-app --offline --release auto_approve::tests::bench_find_prompt -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_find_prompt() {
+        const ROWS: usize = 50;
+        const ITERS: u32 = 20_000;
+        let output_row = |i: usize| {
+            format!(
+                "   Compiling crate-{i:03} v0.{i}.0 (/work/crates/crate-{i:03})  warning: unused variable `x{i}`"
+            )
+        };
+        let pad = |screen: Vec<RowText>| {
+            let mut padded: Vec<RowText> = (0..ROWS.saturating_sub(screen.len()))
+                .map(output_row)
+                .collect();
+            padded.extend(screen);
+            padded
+        };
+        let mut idle = rows(&[
+            "⏺ Done. The build passes and the new test covers the empty case.",
+            "",
+            CLAUDE_RULE,
+            "❯ ",
+            CLAUDE_RULE,
+            "  ? for shortcuts                                  ◯ IDE connected",
+        ]);
+        idle = pad(idle);
+        let screens: Vec<(&str, Vec<RowText>)> = vec![
+            ("output", (0..ROWS).map(output_row).collect()),
+            ("claude_idle", idle),
+            ("claude_edit", pad(claude_edit_prompt())),
+            ("claude_create", pad(claude_create_prompt())),
+            ("claude_question", pad(claude_question_prompt())),
+            ("claude_bash", pad(claude_bash_prompt("ls /tmp"))),
+            ("codex_command", pad(codex_command_prompt())),
+            ("codex_edit", pad(codex_edit_prompt())),
+            ("agy_question", pad(agy_question_prompt())),
+            ("agy_command", pad(agy_command_prompt())),
+            ("agy_subagent", pad(agy_subagent_notice_prompt())),
+        ];
+        for (label, screen) in &screens {
+            let cursor = cursor((screen.len() - 1) as u16);
+            let mut digest = std::collections::hash_map::DefaultHasher::new();
+            format!("{:?}", find_prompt(screen, cursor, None, false)).hash(&mut digest);
+            let start = Instant::now();
+            for _ in 0..ITERS {
+                std::hint::black_box(find_prompt(
+                    std::hint::black_box(screen),
+                    cursor,
+                    None,
+                    false,
+                ));
+            }
+            let elapsed = start.elapsed();
+            eprintln!(
+                "bench_find_prompt[{label}]: {:.1} ns/op digest={:016x}",
+                elapsed.as_nanos() as f64 / f64::from(ITERS),
+                digest.finish()
+            );
+        }
+    }
+
+    /// Perf harness (auto-approve per-feed row capture): one
+    /// `live_rows_from_terminal` pass over a 120x50 grid of build-log text,
+    /// and of text mixing CJK, emoji and combining marks. Prints a digest of
+    /// the rows so a before/after pair can be checked for identical text.
+    /// `#[ignore]`d so `cargo test` stays fast; run explicitly with:
+    /// `cargo test -p noa-app --offline --release auto_approve::tests::bench_live_rows -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_live_rows() {
+        const ITERS: u32 = 20_000;
+        let ascii = |i: usize| {
+            format!(
+                "   Compiling crate-{i:03} v0.{i}.0 (/work/crates/crate-{i:03})  warning: unused variable `x{i}`"
+            )
+        };
+        let mixed = |i: usize| {
+            format!("{i:03} 変更をステージしてよいですか？ cafe\u{301} 👍🏽 e\u{301}\u{302} done   ")
+        };
+        for (label, line) in [
+            ("ascii", &ascii as &dyn Fn(usize) -> String),
+            ("mixed", &mixed),
+        ] {
+            let mut terminal = Terminal::new(noa_core::GridSize::new(120, 50));
+            let mut stream = noa_vt::Stream::new();
+            for i in 0..60 {
+                stream.feed(format!("{}\r\n", line(i)).as_bytes(), &mut terminal);
+            }
+            let mut digest = std::collections::hash_map::DefaultHasher::new();
+            live_rows_from_terminal(&terminal).hash(&mut digest);
+            let start = Instant::now();
+            for _ in 0..ITERS {
+                std::hint::black_box(live_rows_from_terminal(std::hint::black_box(&terminal)));
+            }
+            let elapsed = start.elapsed();
+            eprintln!(
+                "bench_live_rows[{label}]: {:.1} ns/op digest={:016x}",
+                elapsed.as_nanos() as f64 / f64::from(ITERS),
+                digest.finish()
+            );
+        }
     }
 }

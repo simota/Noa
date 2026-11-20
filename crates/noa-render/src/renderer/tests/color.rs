@@ -121,6 +121,56 @@ fn minimum_contrast_adjusts_low_contrast_glyph_color() {
     );
 }
 
+// Each glyph's color is its own (fg, bg) pair's adjustment, however the
+// pairs repeat or alternate along the row — runs, a fg-only change, a
+// bg-only change, and a pair that returns after another.
+#[test]
+fn minimum_contrast_adjusts_each_cell_for_its_own_colors() {
+    let Some(mut font) = font_with_rasterized_m() else {
+        return;
+    };
+
+    let dim = Rgb::new(0x22, 0x22, 0x22);
+    let blue = Rgb::new(0x00, 0x00, 0xee);
+    let black = Rgb::new(0x00, 0x00, 0x00);
+    let white = Rgb::new(0xff, 0xff, 0xff);
+    let pairs = [
+        (dim, black),
+        (dim, black),
+        (blue, black),
+        (blue, white),
+        (dim, black),
+        (dim, white),
+        (white, white),
+        (dim, black),
+    ];
+    let mut terminal = Terminal::new(GridSize::new(pairs.len() as u16, 1));
+    terminal.primary.cursor.visible = false;
+    for (cell, (fg, bg)) in terminal.primary.grid[0].cells.iter_mut().zip(pairs) {
+        cell.ch = 'M';
+        cell.fg = Color::Rgb(fg);
+        cell.bg = Color::Rgb(bg);
+    }
+    let snap = FrameSnapshot::from_terminal(&mut terminal);
+    let mut theme = Theme::new();
+    theme.minimum_contrast = 4.5;
+
+    let mut instances = Vec::new();
+    rebuild_cell_instances(&mut instances, &snap, &mut font, &theme, false);
+
+    for (x, (fg, bg)) in pairs.into_iter().enumerate() {
+        let glyph = instances
+            .iter()
+            .find(|i| i.flags & CellInstance::FLAG_GLYPH != 0 && i.grid_pos == [x as u16, 0])
+            .expect("glyph must be drawn");
+        assert_eq!(
+            rgb_from_instance(glyph),
+            theme.contrast_adjusted_fg(fg, bg),
+            "x={x}"
+        );
+    }
+}
+
 #[test]
 fn minimum_contrast_keeps_cursor_visible_against_cell_background() {
     let Some(mut font) = font_with_rasterized_m() else {

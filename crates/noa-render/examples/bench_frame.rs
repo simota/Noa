@@ -207,6 +207,35 @@ fn main() {
         report(label, samples);
     }
 
+    // `minimum-contrast` above 1 runs a WCAG contrast check on every inked
+    // cell; colored rows (SGR 30..37 on the default bg) make some of them
+    // fall below the floor and take the adjustment path too.
+    if on("rebuild_contrast") {
+        let contrast_theme = Theme {
+            minimum_contrast: 3.0,
+            ..Theme::new()
+        };
+        let mut samples = Vec::new();
+        for frame in 0..reps {
+            let mut script = Vec::new();
+            for (row, line) in screenful(frame, usize::from(COLS))
+                .split(|&b| b == 0x1b)
+                .filter(|chunk| !chunk.is_empty())
+                .enumerate()
+            {
+                script.extend_from_slice(format!("\x1b[{}m\x1b", 30 + row % 8).as_bytes());
+                script.extend_from_slice(line);
+            }
+            script.extend_from_slice(b"\x1b[0m");
+            stream.feed(&script, &mut terminal);
+            let snap = FrameSnapshot::from_terminal(&mut terminal);
+            let start = Instant::now();
+            renderer.rebuild_cells(&snap, &mut font, &contrast_theme);
+            samples.push(start.elapsed().as_secs_f64() * 1e6);
+        }
+        report("rebuild_contrast", samples);
+    }
+
     if on("selection_drag") {
         stream.feed(&screenful(0, usize::from(COLS)), &mut terminal);
         let snap = FrameSnapshot::from_terminal(&mut terminal);

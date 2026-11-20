@@ -659,7 +659,7 @@ mod json {
 
     pub fn parse(source: &str) -> Option<Value> {
         let mut parser = Parser {
-            chars: source.chars().collect(),
+            source,
             pos: 0,
             depth: 0,
         };
@@ -667,7 +667,7 @@ mod json {
         let value = parser.parse_value()?;
         parser.skip_whitespace();
         // Trailing non-whitespace means the document is malformed.
-        if parser.pos != parser.chars.len() {
+        if parser.pos != source.len() {
             return None;
         }
         Some(value)
@@ -680,25 +680,28 @@ mod json {
     /// would take the whole launch down).
     const MAX_DEPTH: usize = 128;
 
-    struct Parser {
-        chars: Vec<char>,
+    /// Walks the source's bytes in place. Every byte the grammar matches is
+    /// ASCII, so a non-ASCII byte only ever lands inside a string (copied
+    /// through whole) or fails the parse, exactly as its char would.
+    struct Parser<'a> {
+        source: &'a str,
         pos: usize,
         depth: usize,
     }
 
-    impl Parser {
-        fn peek(&self) -> Option<char> {
-            self.chars.get(self.pos).copied()
+    impl Parser<'_> {
+        fn peek(&self) -> Option<u8> {
+            self.source.as_bytes().get(self.pos).copied()
         }
 
-        fn bump(&mut self) -> Option<char> {
-            let ch = self.peek()?;
+        fn bump(&mut self) -> Option<u8> {
+            let byte = self.peek()?;
             self.pos += 1;
-            Some(ch)
+            Some(byte)
         }
 
         fn skip_whitespace(&mut self) {
-            while matches!(self.peek(), Some(' ' | '\t' | '\n' | '\r')) {
+            while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
                 self.pos += 1;
             }
         }
@@ -706,11 +709,11 @@ mod json {
         fn parse_value(&mut self) -> Option<Value> {
             self.skip_whitespace();
             match self.peek()? {
-                '{' => self.nested(Self::parse_object),
-                '[' => self.nested(Self::parse_array),
-                '"' => self.parse_string().map(Value::String),
-                't' | 'f' => self.parse_bool(),
-                'n' => self.parse_null(),
+                b'{' => self.nested(Self::parse_object),
+                b'[' => self.nested(Self::parse_array),
+                b'"' => self.parse_string().map(Value::String),
+                b't' | b'f' => self.parse_bool(),
+                b'n' => self.parse_null(),
                 _ => self.parse_number(),
             }
         }
@@ -726,10 +729,10 @@ mod json {
         }
 
         fn parse_object(&mut self) -> Option<Value> {
-            self.expect('{')?;
+            self.expect(b'{')?;
             let mut entries = Vec::new();
             self.skip_whitespace();
-            if self.peek() == Some('}') {
+            if self.peek() == Some(b'}') {
                 self.pos += 1;
                 return Some(Value::Object(entries));
             }
@@ -737,13 +740,13 @@ mod json {
                 self.skip_whitespace();
                 let key = self.parse_string()?;
                 self.skip_whitespace();
-                self.expect(':')?;
+                self.expect(b':')?;
                 let value = self.parse_value()?;
                 entries.push((key, value));
                 self.skip_whitespace();
                 match self.bump()? {
-                    ',' => continue,
-                    '}' => break,
+                    b',' => continue,
+                    b'}' => break,
                     _ => return None,
                 }
             }
@@ -751,10 +754,10 @@ mod json {
         }
 
         fn parse_array(&mut self) -> Option<Value> {
-            self.expect('[')?;
+            self.expect(b'[')?;
             let mut items = Vec::new();
             self.skip_whitespace();
-            if self.peek() == Some(']') {
+            if self.peek() == Some(b']') {
                 self.pos += 1;
                 return Some(Value::Array(items));
             }
@@ -763,8 +766,8 @@ mod json {
                 items.push(value);
                 self.skip_whitespace();
                 match self.bump()? {
-                    ',' => continue,
-                    ']' => break,
+                    b',' => continue,
+                    b']' => break,
                     _ => return None,
                 }
             }
@@ -772,27 +775,33 @@ mod json {
         }
 
         fn parse_string(&mut self) -> Option<String> {
-            self.expect('"')?;
+            self.expect(b'"')?;
             let mut out = String::new();
             loop {
+                // Copy the run up to the next quote or escape whole: both are
+                // ASCII, so the run ends on a char boundary.
+                let run = self.source.as_bytes()[self.pos..]
+                    .iter()
+                    .position(|&byte| byte == b'"' || byte == b'\\')?;
+                out.push_str(&self.source[self.pos..self.pos + run]);
+                self.pos += run;
+                if self.bump()? == b'"' {
+                    break;
+                }
                 match self.bump()? {
-                    '"' => break,
-                    '\\' => match self.bump()? {
-                        '"' => out.push('"'),
-                        '\\' => out.push('\\'),
-                        '/' => out.push('/'),
-                        'n' => out.push('\n'),
-                        'r' => out.push('\r'),
-                        't' => out.push('\t'),
-                        'b' => out.push('\u{0008}'),
-                        'f' => out.push('\u{000c}'),
-                        'u' => {
-                            let code = self.parse_hex4()?;
-                            out.push(char::from_u32(u32::from(code))?);
-                        }
-                        _ => return None,
-                    },
-                    ch => out.push(ch),
+                    b'"' => out.push('"'),
+                    b'\\' => out.push('\\'),
+                    b'/' => out.push('/'),
+                    b'n' => out.push('\n'),
+                    b'r' => out.push('\r'),
+                    b't' => out.push('\t'),
+                    b'b' => out.push('\u{0008}'),
+                    b'f' => out.push('\u{000c}'),
+                    b'u' => {
+                        let code = self.parse_hex4()?;
+                        out.push(char::from_u32(u32::from(code))?);
+                    }
+                    _ => return None,
                 }
             }
             Some(out)
@@ -801,7 +810,7 @@ mod json {
         fn parse_hex4(&mut self) -> Option<u16> {
             let mut value: u16 = 0;
             for _ in 0..4 {
-                let digit = self.bump()?.to_digit(16)?;
+                let digit = char::from(self.bump()?).to_digit(16)?;
                 value = value * 16 + digit as u16;
             }
             Some(value)
@@ -823,29 +832,28 @@ mod json {
 
         fn parse_number(&mut self) -> Option<Value> {
             let start = self.pos;
-            while matches!(self.peek(), Some('0'..='9' | '-' | '+' | '.' | 'e' | 'E')) {
+            while matches!(
+                self.peek(),
+                Some(b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
+            ) {
                 self.pos += 1;
             }
             if self.pos == start {
                 return None;
             }
-            let text: String = self.chars[start..self.pos].iter().collect();
-            text.parse::<f64>().ok().map(Value::Number)
+            self.source[start..self.pos]
+                .parse::<f64>()
+                .ok()
+                .map(Value::Number)
         }
 
-        fn expect(&mut self, expected: char) -> Option<()> {
+        fn expect(&mut self, expected: u8) -> Option<()> {
             (self.bump()? == expected).then_some(())
         }
 
         fn consume(&mut self, literal: &str) -> bool {
-            let end = self.pos + literal.chars().count();
-            if end <= self.chars.len()
-                && self.chars[self.pos..end]
-                    .iter()
-                    .copied()
-                    .eq(literal.chars())
-            {
-                self.pos = end;
+            if self.source.as_bytes()[self.pos..].starts_with(literal.as_bytes()) {
+                self.pos += literal.len();
                 true
             } else {
                 false
@@ -869,6 +877,62 @@ mod tests {
         // Realistic nesting still parses.
         let ok = format!("{}1{}", "[".repeat(50), "]".repeat(50));
         assert!(json::parse(&ok).is_some());
+    }
+
+    /// Pins the JSON reader's edge cases — escapes, raw non-ASCII, invalid
+    /// escapes and hex digits, number shapes, literals, trailing garbage — so
+    /// a change to how it walks the source cannot change what it accepts.
+    #[test]
+    fn json_reader_edge_cases_are_pinned() {
+        use json::Value::{Array, Bool, Null, Number, Object, String as Str};
+        let s = |text: &str| Str(text.to_string());
+        let cases: Vec<(&str, Option<json::Value>)> = vec![
+            (r#""\u00e9\u65e5""#, Some(s("é日"))),
+            ("\"日本 🚀\"", Some(s("日本 🚀"))),
+            (r#""\ud83d\ude80""#, None),
+            (r#""\u12G4""#, None),
+            ("\"\\u12é4\"", None),
+            ("\"\\é\"", None),
+            (
+                r#""a\/b\b\f\n\r\t\"\\""#,
+                Some(s("a/b\u{8}\u{c}\n\r\t\"\\")),
+            ),
+            ("\"raw\u{1}ctl\"", Some(s("raw\u{1}ctl"))),
+            (r#""\u0000""#, Some(s("\0"))),
+            ("\"unterminated", None),
+            ("\"ends in escape\\", None),
+            (
+                "[1, -2.5e3, +1]",
+                Some(Array(vec![Number(1.0), Number(-2500.0), Number(1.0)])),
+            ),
+            ("[1.2.3]", None),
+            ("[1e]", None),
+            ("-", None),
+            ("tru", None),
+            ("nul", None),
+            ("truex", None),
+            (" true \n", Some(Bool(true))),
+            ("false", Some(Bool(false))),
+            ("null", Some(Null)),
+            ("{\"a\":1,}", None),
+            ("[1,]", None),
+            (" { } ", Some(Object(Vec::new()))),
+            ("[ ]", Some(Array(Vec::new()))),
+            ("\u{feff}{}", None),
+            ("é", None),
+            ("{}é", None),
+            (
+                "{\"日\" : [null , \"x\"]}",
+                Some(Object(vec![("日".to_string(), Array(vec![Null, s("x")]))])),
+            ),
+            ("{\"a\" 1}", None),
+            ("{1:2}", None),
+            ("", None),
+            ("   ", None),
+        ];
+        for (source, expected) in cases {
+            assert_eq!(json::parse(source), expected, "{source:?}");
+        }
     }
 
     #[test]
@@ -1344,5 +1408,110 @@ mod tests {
         assert!(dir.join(".session.json.1.0.tmp").exists());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A restore-sized session: `windows` windows of `tabs` tabs, each tab a
+    /// three-pane split with long cwds, a titled tab every third, and a
+    /// float on every fourth.
+    fn large_sample(windows: usize, tabs: usize) -> SessionState {
+        let leaf = |w: usize, t: usize, p: usize| PaneNode::Leaf {
+            cwd: Some(format!(
+                "/Users/someone/src/github.com/org/project-{w}-{t}/crates/part-{p}"
+            )),
+            remote: None,
+            scrollback: (p == 0).then(|| format!("{w:04x}{t:04x}{p:04x}deadbeefcafef00d")),
+            floats: Vec::new(),
+        };
+        let float = |w: usize, t: usize| FloatRecord {
+            origin: (0.125, 0.5),
+            size: (0.333_333_333_333_333_3, 0.25),
+            collapsed: t.is_multiple_of(2),
+            seq: (w * 100 + t) as u64,
+            z: (w * 1000 + t) as u64,
+            cwd: Some(format!("/tmp/float-{w}-{t}")),
+            strip_moved: false,
+        };
+        SessionState {
+            focused_window: Some(0),
+            windows: (0..windows)
+                .map(|w| WindowSession {
+                    frame: Some(WindowFrame {
+                        position: Some((12.5 * w as f64, 40.0)),
+                        width: 1440.0,
+                        height: 900.0,
+                    }),
+                    focused_tab: tabs / 2,
+                    floats: Vec::new(),
+                    tabs: (0..tabs)
+                        .map(|t| TabSession {
+                            focused_leaf: t % 3,
+                            title: t
+                                .is_multiple_of(3)
+                                .then(|| format!("build \"{t}\" \u{65e5}\u{672c} \u{1f680}")),
+                            floats: if t.is_multiple_of(4) {
+                                vec![float(w, t)]
+                            } else {
+                                Vec::new()
+                            },
+                            split: PaneNode::Split {
+                                orientation: Orientation::Horizontal,
+                                ratio: 0.618,
+                                first: Box::new(leaf(w, t, 0)),
+                                second: Box::new(PaneNode::Split {
+                                    orientation: Orientation::Vertical,
+                                    ratio: 0.5,
+                                    first: Box::new(leaf(w, t, 1)),
+                                    second: Box::new(leaf(w, t, 2)),
+                                }),
+                            },
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Perf harness (session save/restore): `serialize` (the persist
+    /// worker's per-topology-change cost) and `parse` (the launch-time
+    /// restore cost) of a 3-window x 8-tab session, printing a digest of the
+    /// text and of the parsed state so a before/after pair can be checked
+    /// for identical results. `#[ignore]`d so `cargo test` stays fast; run
+    /// explicitly with:
+    /// `cargo test -p noa-app --offline --release session::tests::bench_session_json -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_session_json() {
+        use std::hash::{Hash, Hasher};
+        use std::time::Instant;
+        const ITERS: u32 = 5_000;
+        let state = large_sample(3, 8);
+        let text = serialize(&state);
+        let parsed = parse(&text).expect("the sample parses");
+        assert_eq!(parsed, state);
+        let mut digest = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut digest);
+        format!("{parsed:?}").hash(&mut digest);
+        let digest = digest.finish();
+
+        let start = Instant::now();
+        for _ in 0..ITERS {
+            std::hint::black_box(serialize(std::hint::black_box(&state)));
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "bench_session_json[serialize]: {:.1} ns/op bytes={} digest={digest:016x}",
+            elapsed.as_nanos() as f64 / f64::from(ITERS),
+            text.len()
+        );
+        let start = Instant::now();
+        for _ in 0..ITERS {
+            std::hint::black_box(parse(std::hint::black_box(&text)));
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "bench_session_json[parse]: {:.1} ns/op bytes={} digest={digest:016x}",
+            elapsed.as_nanos() as f64 / f64::from(ITERS),
+            text.len()
+        );
     }
 }

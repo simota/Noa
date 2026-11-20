@@ -7,6 +7,7 @@
 //! ramp) plus a default foreground/background, mirroring Ghostty's default
 //! theme.
 
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use noa_core::{Color, DEFAULT_BG, DEFAULT_CURSOR, DEFAULT_FG, Rgb, xterm_palette};
@@ -159,6 +160,14 @@ impl Theme {
         ensure_minimum_contrast(fg, bg, self.minimum_contrast)
     }
 
+    /// Whether [`Self::contrast_adjusted_fg`] can return anything but `fg`:
+    /// false exactly when `ensure_minimum_contrast` takes its `minimum <= 1`
+    /// early return (the default), so callers may skip it.
+    pub(crate) fn contrast_floor_active(&self) -> bool {
+        let floor = self.minimum_contrast.clamp(1.0, 21.0);
+        floor > 1.0 || floor.is_nan()
+    }
+
     /// Left-gutter accent for a restored-record row range
     /// (`FrameSnapshot::record_rows` — scrollback rehydrated from a
     /// persisted snapshot rather than live pty output, `scrollback-persist`
@@ -257,9 +266,21 @@ pub fn contrast_ratio(a: Rgb, b: Rgb) -> f32 {
 /// `minimum` contrast against `bg`, preserving the original color when it
 /// already passes. If a very high target is physically impossible for that
 /// background, use the better endpoint.
+#[inline]
 pub fn ensure_minimum_contrast(fg: Rgb, bg: Rgb, minimum: f32) -> Rgb {
     let minimum = minimum.clamp(1.0, 21.0);
-    if minimum <= 1.0 || contrast_ratio(fg, bg) >= minimum {
+    if minimum <= 1.0 {
+        return fg;
+    }
+    raise_to_minimum_contrast(fg, bg, minimum)
+}
+
+/// The search behind [`ensure_minimum_contrast`] once a floor above 1 is
+/// set. Kept out of line so the default floor's early return stays a
+/// compare in the renderer's per-cell loop.
+#[inline(never)]
+fn raise_to_minimum_contrast(fg: Rgb, bg: Rgb, minimum: f32) -> Rgb {
+    if contrast_ratio(fg, bg) >= minimum {
         return fg;
     }
 
@@ -312,15 +333,21 @@ fn contrast_candidate(fg: Rgb, bg: Rgb, endpoint: Rgb, minimum: f32) -> Rgb {
 }
 
 fn relative_luminance(c: Rgb) -> f32 {
-    let lin = |v: u8| {
-        let v = f32::from(v) / 255.0;
-        if v <= 0.04045 {
-            v / 12.92
-        } else {
-            ((v + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+    // `minimum-contrast` checks every inked cell and its adjustment search
+    // runs dozens of these, so the per-channel `powf` is tabled once: a channel
+    // is a `u8`, and each entry is the same formula's exact `f32`.
+    static LINEAR: OnceLock<[f32; 256]> = OnceLock::new();
+    let lin = LINEAR.get_or_init(|| {
+        std::array::from_fn(|v| {
+            let v = v as f32 / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        })
+    });
+    0.2126 * lin[usize::from(c.r)] + 0.7152 * lin[usize::from(c.g)] + 0.0722 * lin[usize::from(c.b)]
 }
 
 fn rgb_distance_sq(a: Rgb, b: Rgb) -> i32 {
@@ -551,6 +578,124 @@ mod tests {
         assert_eq!(blend(a, b, 2.0), b);
     }
 
+    /// The straight-line WCAG luminance (a `powf` per channel), kept as the
+    /// reference the production path must reproduce bit for bit.
+    fn reference_relative_luminance(c: Rgb) -> f32 {
+        let lin = |v: u8| {
+            let v = f32::from(v) / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+    }
+
+    #[test]
+    fn relative_luminance_is_bit_identical_to_the_powf_formula() {
+        for v in 0..=255u8 {
+            for other in [0u8, 1, 10, 11, 127, 128, 254, 255] {
+                for c in [
+                    Rgb::new(v, other, other),
+                    Rgb::new(other, v, other),
+                    Rgb::new(other, other, v),
+                    Rgb::new(v, v, v),
+                ] {
+                    assert_eq!(
+                        relative_luminance(c).to_bits(),
+                        reference_relative_luminance(c).to_bits(),
+                        "{c:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ensure_minimum_contrast_matches_the_powf_formula_path() {
+        fn reference_ratio(a: Rgb, b: Rgb) -> f32 {
+            let (la, lb) = (
+                reference_relative_luminance(a),
+                reference_relative_luminance(b),
+            );
+            let (lighter, darker) = if la >= lb { (la, lb) } else { (lb, la) };
+            (lighter + 0.05) / (darker + 0.05)
+        }
+        fn reference_candidate(fg: Rgb, bg: Rgb, endpoint: Rgb, minimum: f32) -> Rgb {
+            if reference_ratio(endpoint, bg) < minimum {
+                return endpoint;
+            }
+            let (mut lo, mut hi) = (0.0, 1.0);
+            for _ in 0..10 {
+                let mid = (lo + hi) * 0.5;
+                if reference_ratio(blend(fg, endpoint, mid), bg) >= minimum {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            blend(fg, endpoint, hi)
+        }
+        fn reference(fg: Rgb, bg: Rgb, minimum: f32) -> Rgb {
+            let minimum = minimum.clamp(1.0, 21.0);
+            if minimum <= 1.0 || reference_ratio(fg, bg) >= minimum {
+                return fg;
+            }
+            let (black, white) = (Rgb::new(0, 0, 0), Rgb::new(255, 255, 255));
+            let dark = reference_candidate(fg, bg, black, minimum);
+            let light = reference_candidate(fg, bg, white, minimum);
+            let (dark_ratio, light_ratio) = (reference_ratio(dark, bg), reference_ratio(light, bg));
+            match (dark_ratio >= minimum, light_ratio >= minimum) {
+                (true, true) => {
+                    if rgb_distance_sq(fg, dark) <= rgb_distance_sq(fg, light) {
+                        dark
+                    } else {
+                        light
+                    }
+                }
+                (true, false) => dark,
+                (false, true) => light,
+                (false, false) => {
+                    if dark_ratio >= light_ratio {
+                        dark
+                    } else {
+                        light
+                    }
+                }
+            }
+        }
+
+        let steps = [0u8, 1, 0x22, 0x55, 0x77, 0x80, 0xaa, 0xcd, 0xee, 0xfe, 0xff];
+        let mut colors = Vec::new();
+        for &r in &steps {
+            for &g in &steps {
+                for &b in &steps {
+                    colors.push(Rgb::new(r, g, b));
+                }
+            }
+        }
+        let backgrounds = [
+            Rgb::new(0, 0, 0),
+            Rgb::new(0xff, 0xff, 0xff),
+            Rgb::new(0x1b, 0x1d, 0x21),
+            Rgb::new(0x77, 0x77, 0x77),
+            Rgb::new(0xf7, 0xf7, 0xf7),
+            Rgb::new(0x00, 0x00, 0xee),
+        ];
+        for &bg in &backgrounds {
+            for &fg in &colors {
+                for minimum in [0.5, 1.0, 1.1, 3.0, 4.5, 7.0, 15.0, 21.0, 30.0] {
+                    assert_eq!(
+                        ensure_minimum_contrast(fg, bg, minimum),
+                        reference(fg, bg, minimum),
+                        "fg={fg:?} bg={bg:?} minimum={minimum}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn contrast_ratio_matches_wcag_endpoints() {
         assert!((contrast_ratio(Rgb::new(0, 0, 0), Rgb::new(255, 255, 255)) - 21.0).abs() < 0.01);
@@ -558,6 +703,34 @@ mod tests {
             (contrast_ratio(Rgb::new(0x77, 0x77, 0x77), Rgb::new(0x77, 0x77, 0x77)) - 1.0).abs()
                 < 0.01
         );
+    }
+
+    /// The renderer skips `contrast_adjusted_fg` when the floor is inactive,
+    /// so "inactive" must mean exactly "the adjustment returns `fg` for every
+    /// pair": the default 1, anything clamped to 1, and not NaN.
+    #[test]
+    fn contrast_floor_is_inactive_exactly_when_the_adjustment_is_the_identity() {
+        let low = Rgb::new(0x30, 0x30, 0x30);
+        let bg = Rgb::new(0x20, 0x20, 0x20);
+        for floor in [f32::NEG_INFINITY, -5.0, 0.0, 0.5, 1.0] {
+            let theme = Theme {
+                minimum_contrast: floor,
+                ..Theme::default()
+            };
+            assert!(!theme.contrast_floor_active(), "{floor}");
+            for fg in [low, bg, Rgb::new(0xff, 0, 0)] {
+                assert_eq!(theme.contrast_adjusted_fg(fg, bg), fg, "{floor}");
+            }
+        }
+        for floor in [1.0001, 3.0, 21.0, 50.0, f32::INFINITY, f32::NAN] {
+            let theme = Theme {
+                minimum_contrast: floor,
+                ..Theme::default()
+            };
+            assert!(theme.contrast_floor_active(), "{floor}");
+            // fg == bg has ratio 1, below every active floor.
+            assert_ne!(theme.contrast_adjusted_fg(bg, bg), bg, "{floor}");
+        }
     }
 
     #[test]

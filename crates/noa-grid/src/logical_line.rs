@@ -4,6 +4,7 @@
 //! margin is matched whole.
 
 use std::borrow::{Borrow, Cow};
+use std::cell::OnceCell;
 use std::ops::Range;
 
 use crate::cell::Row;
@@ -33,6 +34,9 @@ pub struct LogicalLine<'a> {
     cut_below: bool,
     viewport_y: u16,
     viewport_rows: u16,
+    /// The flattened text, built by the first detector that needs it: a
+    /// hover off any URL runs the path detector over the same text.
+    text: OnceCell<LineText>,
 }
 
 impl<'a> LogicalLine<'a> {
@@ -63,11 +67,16 @@ impl<'a> LogicalLine<'a> {
         {
             rows.push(row);
         }
-        let cut_above = storage_y
-            .checked_sub(index + 1)
-            .and_then(&row_at)
-            .is_some_and(|row| row.wrapped);
-        let cut_below = rows.last().is_some_and(|row| row.wrapped)
+        // Short of the window's reach, each loop above stopped on a row it
+        // already read (absent, or not wrapped): the chain ends there, so
+        // only a full reach needs another row to tell.
+        let cut_above = index == MAX_ROWS_EACH_WAY
+            && storage_y
+                .checked_sub(index + 1)
+                .and_then(&row_at)
+                .is_some_and(|row| row.wrapped);
+        let cut_below = rows.len() - index > MAX_ROWS_EACH_WAY
+            && rows.last().is_some_and(|row| row.wrapped)
             && row_at(storage_y + rows.len() - index).is_some();
 
         // A row wrapped at the right margin was written exactly up to it
@@ -97,6 +106,7 @@ impl<'a> LogicalLine<'a> {
             cut_below,
             viewport_y,
             viewport_rows,
+            text: OnceCell::new(),
         })
     }
 
@@ -107,19 +117,23 @@ impl<'a> LogicalLine<'a> {
 
     /// The `https?://` run covering `column` of the looked-up row, if any.
     pub fn url_at(&self, column: u16) -> Option<UrlMatch> {
-        crate::url::url_in(&self.text(column)?, &self.rows, (self.index, column))
+        crate::url::url_in(self.text(column)?, &self.rows, (self.index, column))
     }
 
     /// The path run covering `column` of the looked-up row, if any.
     pub fn path_at(&self, column: u16) -> Option<PathMatch> {
-        crate::path::path_in(&self.text(column)?, &self.rows, (self.index, column))
+        crate::path::path_in(self.text(column)?, &self.rows, (self.index, column))
     }
 
     /// The line's text, when `column` of the looked-up row is part of it.
-    fn text(&self, column: u16) -> Option<LineText> {
+    fn text(&self, column: u16) -> Option<&LineText> {
         self.bounds[self.index]
             .contains(&usize::from(column))
-            .then(|| LineText::bounded(&self.rows, &self.bounds, self.cut_above, self.cut_below))
+            .then(|| {
+                self.text.get_or_init(|| {
+                    LineText::bounded(&self.rows, &self.bounds, self.cut_above, self.cut_below)
+                })
+            })
     }
 
     /// Map a match's `(row index, x)` corners to viewport `(y, x)` corners.
@@ -171,8 +185,10 @@ impl LineText {
         cut_start: bool,
         cut_end: bool,
     ) -> Self {
-        let mut chars = Vec::new();
-        let mut cells = Vec::new();
+        // One char per cell is the common case; marks only add to it.
+        let len = bounds.iter().map(ExactSizeIterator::len).sum();
+        let mut chars = Vec::with_capacity(len);
+        let mut cells = Vec::with_capacity(len);
         for (y, (row, bounds)) in rows.iter().zip(bounds).enumerate() {
             let row: &Row = row.borrow();
             let pad_x = bounds.end.checked_sub(1).filter(|&x| {
@@ -183,6 +199,12 @@ impl LineText {
             for x in bounds.clone() {
                 let cell = &row.cells[x];
                 if cell.attrs.contains(CellAttrs::WIDE_SPACER) || pad_x == Some(x) {
+                    continue;
+                }
+                // Most cells carry no mark: skip the interner lookup.
+                if cell.grapheme.is_none() {
+                    chars.push(cell.ch);
+                    cells.push((y, x as u16));
                     continue;
                 }
                 for ch in cell.text_chars() {
@@ -390,6 +412,90 @@ mod tests {
         let terminal = feed(4, 200, text.as_bytes());
         let line = terminal.primary.visible_logical_line(1).unwrap();
         assert_eq!(line.url_at(0).map(|m| m.uri), Some("https://e.co/x".into()));
+    }
+
+    #[test]
+    fn flattens_marks_wide_glyphs_and_the_wrap_pad() {
+        // The second 界 cannot fit in the last column: it wraps, leaving the
+        // pad cell behind; spacer halves are skipped, marks keep their cell.
+        let terminal = feed(6, 3, "ae\u{301}界x界y".as_bytes());
+        let rows = &terminal.primary.grid;
+        assert!(rows[0].ends_with_wide_pad());
+        let text = super::LineText::new(&[&rows[0], &rows[1]]);
+        assert_eq!(
+            text.chars,
+            ['a', 'e', '\u{301}', '界', 'x', '界', 'y', ' ', ' ', ' '].to_vec()
+        );
+        assert_eq!(
+            text.cells,
+            [
+                (0, 0),
+                (0, 1),
+                (0, 1),
+                (0, 2),
+                (0, 4),
+                (1, 0),
+                (1, 2),
+                (1, 3),
+                (1, 4),
+                (1, 5)
+            ]
+            .to_vec()
+        );
+        let line = terminal.primary.visible_logical_line(1).unwrap();
+        let bounded = line.text(0).expect("column 0 is part of the line");
+        assert_eq!((&bounded.chars, &bounded.cells), (&text.chars, &text.cells));
+    }
+
+    /// The window's cut flags say exactly whether a wrapped row lies just
+    /// outside it, for chains shorter than, at and past the window's reach
+    /// in each direction, and at both ends of storage.
+    #[test]
+    fn cut_flags_mark_a_chain_running_past_the_window() {
+        use crate::cell::Row;
+        use std::borrow::Cow;
+        const MAX: usize = super::MAX_ROWS_EACH_WAY;
+        for chain in [
+            1,
+            2,
+            MAX,
+            MAX + 1,
+            MAX + 2,
+            2 * MAX,
+            2 * MAX + 1,
+            2 * MAX + 3,
+        ] {
+            for (pad_before, pad_after) in [(0, 0), (0, 2), (2, 0), (3, 3)] {
+                let len = pad_before + chain + pad_after;
+                // `chain` rows from `pad_before` on, each wrapped but the last.
+                let rows: Vec<Row> = (0..len)
+                    .map(|y| {
+                        let mut row = Row::new(4);
+                        row.wrapped = y >= pad_before && y + 1 < pad_before + chain;
+                        row
+                    })
+                    .collect();
+                for y in 0..len {
+                    let line = super::LogicalLine::collect(
+                        |y| rows.get(y).map(Cow::Borrowed),
+                        y,
+                        None,
+                        0,
+                        1,
+                    )
+                    .unwrap();
+                    let first = y - line.index;
+                    let after = first + line.rows.len();
+                    let above = first.checked_sub(1).is_some_and(|y| rows[y].wrapped);
+                    let below = rows[after - 1].wrapped && after < len;
+                    assert_eq!(
+                        (line.cut_above, line.cut_below),
+                        (above, below),
+                        "chain {chain}, pad {pad_before}/{pad_after}, row {y}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

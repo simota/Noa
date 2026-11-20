@@ -1336,6 +1336,35 @@ fn broadcaster_survives_a_server_restart_and_leaves_no_stale_connections() {
     let _ = sock_b.close(None);
 }
 
+/// An authenticated connection waiting for notifications is closed by the
+/// server going away (a config-reload restart), not left open until its
+/// client next writes.
+#[test]
+fn stopping_the_server_closes_an_idle_subscribed_connection() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
+    let mut sock = connect_plain(handle.port());
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
+    send_rpc(
+        &mut sock,
+        2,
+        "noa.subscribe",
+        json!({ "events": ["state_changed"] }),
+    );
+    assert!(recv_json(&mut sock).get("result").is_some());
+    // Long enough for the connection thread to be waiting, not reading.
+    std::thread::sleep(Duration::from_millis(200));
+
+    let stopped = std::time::Instant::now();
+    drop(handle);
+    assert_connection_closed(&mut sock);
+    assert!(
+        stopped.elapsed() < Duration::from_millis(500),
+        "closed after {:?}",
+        stopped.elapsed()
+    );
+}
+
 // ---- F-3: bounded WS message size ----
 
 #[test]

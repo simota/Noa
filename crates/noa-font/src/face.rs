@@ -1818,11 +1818,18 @@ mod tests {
                     "{style:?} '{ch}': glyph id must match across selection paths"
                 );
                 let syn = GlyphSynthesis::default();
-                let a =
-                    rasterize_with_variations(&mut ctx, mmap_font, mmap_gid, 24.0, &[], syn, None);
+                let a = rasterize_with_variations(
+                    &mut ctx,
+                    mmap_font.into(),
+                    mmap_gid,
+                    24.0,
+                    &[],
+                    syn,
+                    None,
+                );
                 let b = rasterize_with_variations(
                     &mut ctx,
-                    fontkit_font,
+                    fontkit_font.into(),
                     fontkit_gid,
                     24.0,
                     &[],

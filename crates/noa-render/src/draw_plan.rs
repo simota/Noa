@@ -4,6 +4,8 @@
 //! layer supplies pane ids and already-computed pane rectangles; the renderer
 //! turns that into one ordered render-pass plan.
 
+use std::borrow::Cow;
+
 const DIVIDER_THICKNESS_PX: u32 = 1;
 
 /// Stable render-side identity for a pane.
@@ -114,11 +116,17 @@ pub fn build_draw_plan_with_overlays(
     force_ring: bool,
 ) -> Vec<DrawOp> {
     let is_overlay = |pane: &PaneId| overlays.iter().any(|group| group.panes.contains(pane));
-    let base: Vec<(PaneId, PaneRect)> = layout
-        .iter()
-        .filter(|(pane, _)| !is_overlay(pane))
-        .copied()
-        .collect();
+    // Without overlays (the common frame) the split layout is the whole
+    // layout, so it is borrowed rather than copied.
+    let base: Cow<'_, [(PaneId, PaneRect)]> = if overlays.is_empty() {
+        Cow::Borrowed(layout)
+    } else {
+        layout
+            .iter()
+            .filter(|(pane, _)| !is_overlay(pane))
+            .copied()
+            .collect()
+    };
     let zoomed = zoomed.filter(|pane| base.iter().any(|(candidate, _)| candidate == pane));
     let mut plan = Vec::with_capacity(layout.len() + overlays.len() + 3);
     plan.push(DrawOp::Clear);
@@ -557,6 +565,45 @@ mod tests {
             base.truncate(5);
             base
         });
+    }
+
+    // An overlay group that names no layout pane and has no area changes
+    // nothing: the plan equals the overlay-free one for every zoom / focus /
+    // ring combination, including a zoomed or focused pane that is absent.
+    #[test]
+    fn inert_overlay_group_leaves_the_plan_unchanged() {
+        let layout = [
+            (PaneId::new(1), PaneRect::new(0, 0, 499, 299)),
+            (PaneId::new(2), PaneRect::new(500, 0, 500, 299)),
+            (PaneId::new(3), PaneRect::new(0, 300, 1000, 300)),
+        ];
+        let inert = [OverlayGroup {
+            outer: PaneRect::new(10, 10, 0, 0),
+            header: None,
+            panes: vec![PaneId::new(99)],
+            focused: true,
+        }];
+        let ids = [
+            None,
+            Some(PaneId::new(1)),
+            Some(PaneId::new(3)),
+            Some(PaneId::new(7)),
+        ];
+        for layout in [&layout[..0], &layout[..1], &layout[..]] {
+            for focused in ids {
+                for zoomed in ids {
+                    for force_ring in [false, true] {
+                        assert_eq!(
+                            build_draw_plan_with_overlays(
+                                layout, &inert, focused, zoomed, force_ring
+                            ),
+                            build_draw_plan_with_overlays(layout, &[], focused, zoomed, force_ring),
+                            "layout={layout:?} focused={focused:?} zoomed={zoomed:?} ring={force_ring}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

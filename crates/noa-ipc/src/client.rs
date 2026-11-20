@@ -292,7 +292,7 @@ impl Client {
                     })?;
                     // A late response to a request that already gave up has
                     // no owner left; skip it.
-                    if let Some(notification) = parse_notification(&value) {
+                    if let Ok(notification) = parse_notification(value) {
                         self.push_notification(notification);
                         return Ok(self.pop_notification());
                     }
@@ -423,40 +423,15 @@ impl Client {
         loop {
             set_socket_read_timeout(&mut self.socket, remaining_until(deadline)?)?;
             match self.socket.read().map_err(ClientError::transport)? {
-                Message::Text(text) => {
-                    let value: Value = serde_json::from_str(&text).map_err(|_| {
-                        ClientError::Protocol("control response is not valid JSON-RPC".to_string())
-                    })?;
-                    if let Some(notification) = parse_notification(&value) {
+                Message::Text(text) => match response_step(&text, id) {
+                    ResponseStep::Notification(notification) => {
                         self.push_notification(notification);
-                        continue;
                     }
-                    let response: RpcResponse = serde_json::from_value(value).map_err(|_| {
-                        ClientError::Protocol("control response is not valid JSON-RPC".to_string())
-                    })?;
-                    if response.id.as_u64() != Some(id) {
-                        // Notifications and responses for a different owner are
-                        // outside this request's contract.
-                        continue;
-                    }
-                    if response.jsonrpc.as_deref() != Some("2.0") {
-                        return Err(ClientError::Protocol(
-                            "control response has an invalid jsonrpc version".to_string(),
-                        ));
-                    }
-                    if let Some(error) = response.error {
-                        return Err(ClientError::Rpc {
-                            code: error.code,
-                            message: error.message,
-                        });
-                    }
-                    let result = response.result.ok_or_else(|| {
-                        ClientError::Protocol("control response has no result".to_string())
-                    })?;
-                    return serde_json::from_value(result).map_err(|_| {
-                        ClientError::Protocol("control result has an invalid shape".to_string())
-                    });
-                }
+                    // Notifications and responses for a different owner are
+                    // outside this request's contract.
+                    ResponseStep::Skip => {}
+                    ResponseStep::Done(result) => return result,
+                },
                 Message::Ping(payload) => self
                     .socket
                     .send(Message::Pong(payload))
@@ -861,24 +836,79 @@ where
     }
 }
 
-/// A JSON-RPC notification (a `method` and no `id`), or `None` for a response.
-fn parse_notification(value: &Value) -> Option<Notification> {
-    if value.get("id").is_some_and(|id| !id.is_null()) {
-        return None;
+/// What one text message means to a request waiting for response `id`.
+#[derive(Debug)]
+enum ResponseStep<T> {
+    /// A notification, kept for [`Client::next_notification`].
+    Notification(Notification),
+    /// A response for another request; keep reading.
+    Skip,
+    /// The request's outcome.
+    Done(Result<T, ClientError>),
+}
+
+fn protocol_error<T>(message: &str) -> ResponseStep<T> {
+    ResponseStep::Done(Err(ClientError::Protocol(message.to_string())))
+}
+
+fn response_step<T: DeserializeOwned>(text: &str, id: u64) -> ResponseStep<T> {
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return protocol_error("control response is not valid JSON-RPC");
+    };
+    let value = match parse_notification(value) {
+        Ok(notification) => return ResponseStep::Notification(notification),
+        Err(value) => value,
+    };
+    let Ok(response) = RpcResponse::from_value(value) else {
+        return protocol_error("control response is not valid JSON-RPC");
+    };
+    if response.id.as_u64() != Some(id) {
+        return ResponseStep::Skip;
     }
-    let method = value.get("method")?.as_str()?;
-    let params = value.get("params");
+    if response.jsonrpc.as_deref() != Some("2.0") {
+        return protocol_error("control response has an invalid jsonrpc version");
+    }
+    if let Some(error) = response.error {
+        return ResponseStep::Done(Err(ClientError::Rpc {
+            code: error.code,
+            message: error.message,
+        }));
+    }
+    let Some(result) = response.result else {
+        return protocol_error("control response has no result");
+    };
+    match serde_json::from_value(result) {
+        Ok(result) => ResponseStep::Done(Ok(result)),
+        Err(_) => protocol_error("control result has an invalid shape"),
+    }
+}
+
+/// A JSON-RPC notification (a `method` and no `id`), or the value back for
+/// a response. A notification's panels are moved out of it, not copied.
+fn parse_notification(mut value: Value) -> Result<Notification, Value> {
+    if value.get("id").is_some_and(|id| !id.is_null()) {
+        return Err(value);
+    }
+    let Some(state_changed) = value
+        .get("method")
+        .and_then(Value::as_str)
+        .map(|method| method == "noa.stateChanged")
+    else {
+        return Err(value);
+    };
+    let params = value.get_mut("params");
     let dropped = params
+        .as_ref()
         .and_then(|params| params.get("dropped"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if method == "noa.stateChanged" {
+    if state_changed {
         let panels = params
-            .and_then(|params| params.get("panels"))
-            .and_then(|panels| serde_json::from_value::<Vec<Panel>>(panels.clone()).ok());
+            .and_then(|params| params.get_mut("panels"))
+            .and_then(|panels| serde_json::from_value::<Vec<Panel>>(panels.take()).ok());
         // A panel list this client cannot read is reported as a loss, so the
         // caller re-reads state instead of missing a change.
-        return Some(match panels {
+        return Ok(match panels {
             Some(panels) => Notification::StateChanged { panels, dropped },
             None => Notification::StateChanged {
                 panels: Vec::new(),
@@ -886,10 +916,8 @@ fn parse_notification(value: &Value) -> Option<Notification> {
             },
         });
     }
-    Some(Notification::Other {
-        method: method.to_string(),
-        dropped,
-    })
+    let method = value["method"].as_str().unwrap_or_default().to_string();
+    Ok(Notification::Other { method, dropped })
 }
 
 #[derive(serde::Deserialize)]
@@ -902,6 +930,27 @@ struct RpcResponse {
     result: Option<Value>,
     #[serde(default)]
     error: Option<RpcError>,
+}
+
+impl RpcResponse {
+    /// `serde_json::from_value`, with `result` moved out of the object
+    /// rather than rebuilt from it: the result is the bulk of a reply (a
+    /// pane listing), and is converted again into the caller's type.
+    fn from_value(value: Value) -> Result<Self, serde_json::Error> {
+        // A sequence is a struct too, by position; leave that to serde.
+        let Value::Object(mut object) = value else {
+            return serde_json::from_value(value);
+        };
+        let mut field = |key| object.remove(key).unwrap_or(Value::Null);
+        // Each field as its `#[serde(default)]` type reads it: `null` and
+        // absent are the same.
+        Ok(RpcResponse {
+            jsonrpc: serde_json::from_value(field("jsonrpc"))?,
+            id: field("id"),
+            result: Some(field("result")).filter(|result| !result.is_null()),
+            error: serde_json::from_value(field("error"))?,
+        })
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -947,6 +996,277 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
     use std::thread;
+
+    const PANEL: &str = r##"{"windowGroupId":"1","windowId":"1","paneId":"7","name":"w","cwd":"/r","busy":false,"attention":true,"preview":[{"row":0,"spans":[{"text":"a","fg":"#5fc4a0"},{"text":"b","fg":3}]}],"agent":{"kind":"claude","state":"running","seq":4},"parentPaneId":"1","label":"x"}"##;
+
+    /// Messages a request can receive, each an edge of `response_step`.
+    fn response_corpus() -> Vec<String> {
+        let ok = format!(r#"{{"panels":[{PANEL}]}}"#);
+        let mut dup_field = PANEL.replacen(r#""name":"w""#, r#""name":"w","name":"v""#, 1);
+        dup_field = format!(r#"{{"panels":[{dup_field}]}}"#);
+        [
+            format!(r#"{{"id":5,"jsonrpc":"2.0","result":{ok}}}"#),
+            format!(r#"{{"jsonrpc":"2.0","result":{ok},"id":5}}"#),
+            format!(r#"{{"id":5,"result":{ok}}}"#),
+            format!(r#"{{"id":5,"jsonrpc":"1.0","result":{ok}}}"#),
+            format!(r#"{{"id":5,"jsonrpc":2,"result":{ok}}}"#),
+            format!(r#"{{"id":5,"jsonrpc":null,"result":{ok}}}"#),
+            r#"{"error":{"code":-32004,"message":"pane closed"},"id":5,"jsonrpc":"2.0"}"#.into(),
+            format!(r#"{{"error":{{"code":-1,"message":"m"}},"id":5,"jsonrpc":"2.0","result":{ok}}}"#),
+            r#"{"error":{"code":-1,"message":"m"},"id":5,"jsonrpc":"2.0","result":7}"#.into(),
+            r#"{"error":{"code":"x","message":"m"},"id":5,"jsonrpc":"2.0"}"#.into(),
+            format!(r#"{{"error":null,"id":5,"jsonrpc":"2.0","result":{ok}}}"#),
+            r#"{"id":5,"jsonrpc":"2.0","result":null}"#.into(),
+            r#"{"id":5,"jsonrpc":"2.0"}"#.into(),
+            r#"{"id":5,"jsonrpc":"2.0","result":{"panels":7}}"#.into(),
+            r#"{"id":5,"jsonrpc":"2.0","result":[]}"#.into(),
+            format!(r#"{{"id":4,"jsonrpc":"2.0","result":{ok}}}"#),
+            format!(r#"{{"id":"5","jsonrpc":"2.0","result":{ok}}}"#),
+            format!(r#"{{"id":5.0,"jsonrpc":"2.0","result":{ok}}}"#),
+            format!(r#"{{"id":-5,"jsonrpc":"2.0","result":{ok}}}"#),
+            format!(r#"{{"jsonrpc":"2.0","result":{ok}}}"#),
+            format!(r#"{{"id":null,"jsonrpc":"2.0","result":{ok}}}"#),
+            format!(r#"{{"id":5,"jsonrpc":"2.0","method":"noa.x","result":{ok}}}"#),
+            format!(r#"{{"id":5,"jsonrpc":"2.0","result":{ok},"extra":[1,{{"a":2}}]}}"#),
+            format!(r#"{{"id":5,"jsonrpc":"2.0","result":{{"panels":[],"more":1}},"result":{ok}}}"#),
+            format!(r#"{{"id":5,"id":4,"jsonrpc":"2.0","result":{ok}}}"#),
+            format!(r#"{{"id":5,"jsonrpc":"2.0","result":{dup_field}}}"#),
+            format!(r#"{{"jsonrpc":"2.0","method":"noa.stateChanged","params":{{"panels":[{PANEL}]}}}}"#),
+            r#"{"jsonrpc":"2.0","method":"noa.stateChanged","params":{"dropped":true,"panels":[]}}"#.into(),
+            r#"{"jsonrpc":"2.0","method":"noa.stateChanged","params":{"panels":[{"bad":1}]}}"#.into(),
+            r#"{"jsonrpc":"2.0","method":"noa.output","params":{"dropped":true}}"#.into(),
+            r#"{"id":null,"method":"noa.output"}"#.into(),
+            r#"{"method":7,"id":5,"jsonrpc":"2.0","result":{"panels":[]}}"#.into(),
+            format!(r#"{{"id":5,"jsonrpc":"2.0","result":{ok}}} trailing"#),
+            format!(r#"  {{"id":5,"jsonrpc":"2.0","result":{ok}}}  "#),
+            r#"[{"id":5,"jsonrpc":"2.0","result":{"panels":[]}}]"#.into(),
+            r#"{"id":18446744073709551615,"jsonrpc":"2.0","result":{"panels":[]}}"#.into(),
+            "not json".into(),
+            String::new(),
+        ]
+        .into()
+    }
+
+    fn step_text<T: DeserializeOwned + std::fmt::Debug>(text: &str, id: u64) -> String {
+        format!("{:?}", response_step::<T>(text, id))
+    }
+
+    /// [`response_step`] as it read every reply before the result was
+    /// moved out: the envelope through serde's derive.
+    fn response_step_by_derive<T: DeserializeOwned>(text: &str, id: u64) -> ResponseStep<T> {
+        let Ok(value) = serde_json::from_str::<Value>(text) else {
+            return protocol_error("control response is not valid JSON-RPC");
+        };
+        if let Some(notification) = parse_notification_by_ref(&value) {
+            return ResponseStep::Notification(notification);
+        }
+        let Ok(response) = serde_json::from_value::<RpcResponse>(value) else {
+            return protocol_error("control response is not valid JSON-RPC");
+        };
+        if response.id.as_u64() != Some(id) {
+            return ResponseStep::Skip;
+        }
+        if response.jsonrpc.as_deref() != Some("2.0") {
+            return protocol_error("control response has an invalid jsonrpc version");
+        }
+        if let Some(error) = response.error {
+            return ResponseStep::Done(Err(ClientError::Rpc {
+                code: error.code,
+                message: error.message,
+            }));
+        }
+        let Some(result) = response.result else {
+            return protocol_error("control response has no result");
+        };
+        match serde_json::from_value(result) {
+            Ok(result) => ResponseStep::Done(Ok(result)),
+            Err(_) => protocol_error("control result has an invalid shape"),
+        }
+    }
+
+    /// [`parse_notification`] as it was, reading a copy of the panels.
+    fn parse_notification_by_ref(value: &Value) -> Option<Notification> {
+        if value.get("id").is_some_and(|id| !id.is_null()) {
+            return None;
+        }
+        let method = value.get("method")?.as_str()?;
+        let params = value.get("params");
+        let dropped = params
+            .and_then(|params| params.get("dropped"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if method == "noa.stateChanged" {
+            let panels = params
+                .and_then(|params| params.get("panels"))
+                .and_then(|panels| serde_json::from_value::<Vec<Panel>>(panels.clone()).ok());
+            return Some(match panels {
+                Some(panels) => Notification::StateChanged { panels, dropped },
+                None => Notification::StateChanged {
+                    panels: Vec::new(),
+                    dropped: true,
+                },
+            });
+        }
+        Some(Notification::Other {
+            method: method.to_string(),
+            dropped,
+        })
+    }
+
+    #[test]
+    fn a_notification_reads_as_from_a_copy_of_its_panels() {
+        let mut corpus = response_corpus();
+        corpus.extend(
+            [
+                r#"{"method":"noa.stateChanged"}"#,
+                r#"{"method":"noa.stateChanged","params":7}"#,
+                r#"{"method":"noa.stateChanged","params":[{"panels":[]}]}"#,
+                r#"{"method":"noa.stateChanged","params":{"dropped":"yes","panels":[]}}"#,
+                r#"{"method":"noa.stateChanged","params":{"dropped":false,"panels":null}}"#,
+                r#"{"method":"noa.stateChanged","params":{"panels":[],"dropped":true},"id":null}"#,
+                r#"{"method":"noa.output","params":{"dropped":true,"panels":[]},"id":0}"#,
+                r#"{"method":"","params":{}}"#,
+                r#"{"method":["noa.stateChanged"]}"#,
+                r#"[{"method":"noa.stateChanged"}]"#,
+            ]
+            .map(String::from),
+        );
+        for text in &corpus {
+            let Ok(value) = serde_json::from_str::<Value>(text) else {
+                continue;
+            };
+            let old = parse_notification_by_ref(&value);
+            match parse_notification(value.clone()) {
+                Ok(notification) => {
+                    assert_eq!(
+                        format!("{old:?}"),
+                        format!("{:?}", Some(notification)),
+                        "{text}"
+                    );
+                }
+                Err(back) => {
+                    assert!(old.is_none(), "{text}");
+                    assert_eq!(back, value, "a response comes back untouched: {text}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_reply_reads_as_through_the_derived_envelope() {
+        let mut corpus = response_corpus();
+        // Envelopes serde's derive also reads by position, and odd fields.
+        corpus.extend(
+            [
+                r#"["2.0",5,{"panels":[]}]"#,
+                r#"["2.0",5,null,[-1,"m"]]"#,
+                r#"["2.0"]"#,
+                r#"{"id":5,"jsonrpc":"2.0","error":[-2,"seq"]}"#,
+                r#"{"id":5,"jsonrpc":"2.0","error":{"code":1,"message":"m","data":{}}}"#,
+                r#"{"id":5,"jsonrpc":"2.0","error":{"code":1}}"#,
+                r#"{"id":5,"jsonrpc":"2.0","error":7,"result":{"panels":[]}}"#,
+                r#"{"id":5,"jsonrpc":["2.0"],"result":{"panels":[]}}"#,
+                r#"{"id":{"n":5},"jsonrpc":"2.0","result":{"panels":[]}}"#,
+                r#"5"#,
+                r#"null"#,
+                r#""text""#,
+            ]
+            .map(String::from),
+        );
+        for id in [4, 5, u64::MAX] {
+            for text in &corpus {
+                assert_eq!(
+                    step_text::<ListPanelsResult>(text, id),
+                    format!(
+                        "{:?}",
+                        response_step_by_derive::<ListPanelsResult>(text, id)
+                    ),
+                    "{text}"
+                );
+                assert_eq!(
+                    step_text::<Value>(text, id),
+                    format!("{:?}", response_step_by_derive::<Value>(text, id)),
+                    "{text}"
+                );
+                assert_eq!(
+                    step_text::<OkResult>(text, id),
+                    format!("{:?}", response_step_by_derive::<OkResult>(text, id)),
+                    "{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn response_steps_are_pinned() {
+        let corpus = response_corpus();
+        let steps: Vec<String> = corpus
+            .iter()
+            .map(|text| step_text::<ListPanelsResult>(text, 5))
+            .collect();
+        fn kind(step: &str) -> &str {
+            if step.starts_with("Done(Ok") {
+                "ok"
+            } else if step.starts_with("Done(Err(Rpc") {
+                "rpc"
+            } else if step.starts_with("Done(Err(Protocol") {
+                "protocol"
+            } else if step.starts_with("Notification") {
+                "notification"
+            } else {
+                step
+            }
+        }
+        let kinds: Vec<&str> = steps.iter().map(|step| kind(step)).collect();
+        assert_eq!(
+            kinds,
+            [
+                "ok",
+                "ok",
+                "protocol",
+                "protocol",
+                "protocol",
+                "protocol",
+                "rpc",
+                "rpc",
+                "rpc",
+                "protocol",
+                "ok",
+                "protocol",
+                "protocol",
+                "protocol",
+                "protocol",
+                "Skip",
+                "Skip",
+                "Skip",
+                "Skip",
+                "Skip",
+                "Skip",
+                "ok",
+                "ok",
+                "ok",
+                "Skip",
+                "ok",
+                "notification",
+                "notification",
+                "notification",
+                "notification",
+                "notification",
+                "ok",
+                "protocol",
+                "ok",
+                "protocol",
+                "Skip",
+                "protocol",
+                "protocol",
+            ]
+        );
+        // The last of duplicated keys wins, as a `Value` keeps it.
+        assert!(steps[23].contains(r#"name: "w""#), "{}", steps[23]);
+        assert!(steps[25].contains(r#"name: "v""#), "{}", steps[25]);
+        assert!(steps[6].contains("-32004") && steps[6].contains("pane closed"));
+        assert!(steps[29].contains("dropped: true"), "{}", steps[29]);
+    }
 
     #[test]
     fn control_hello_has_a_bounded_response_deadline() {

@@ -4,6 +4,7 @@
 //! margin is matched whole.
 
 use std::borrow::{Borrow, Cow};
+use std::cell::OnceCell;
 use std::ops::Range;
 
 use crate::cell::Row;
@@ -33,6 +34,9 @@ pub struct LogicalLine<'a> {
     cut_below: bool,
     viewport_y: u16,
     viewport_rows: u16,
+    /// The flattened text, built by the first detector that needs it: a
+    /// hover off any URL runs the path detector over the same text.
+    text: OnceCell<LineText>,
 }
 
 impl<'a> LogicalLine<'a> {
@@ -97,6 +101,7 @@ impl<'a> LogicalLine<'a> {
             cut_below,
             viewport_y,
             viewport_rows,
+            text: OnceCell::new(),
         })
     }
 
@@ -107,19 +112,23 @@ impl<'a> LogicalLine<'a> {
 
     /// The `https?://` run covering `column` of the looked-up row, if any.
     pub fn url_at(&self, column: u16) -> Option<UrlMatch> {
-        crate::url::url_in(&self.text(column)?, &self.rows, (self.index, column))
+        crate::url::url_in(self.text(column)?, &self.rows, (self.index, column))
     }
 
     /// The path run covering `column` of the looked-up row, if any.
     pub fn path_at(&self, column: u16) -> Option<PathMatch> {
-        crate::path::path_in(&self.text(column)?, &self.rows, (self.index, column))
+        crate::path::path_in(self.text(column)?, &self.rows, (self.index, column))
     }
 
     /// The line's text, when `column` of the looked-up row is part of it.
-    fn text(&self, column: u16) -> Option<LineText> {
+    fn text(&self, column: u16) -> Option<&LineText> {
         self.bounds[self.index]
             .contains(&usize::from(column))
-            .then(|| LineText::bounded(&self.rows, &self.bounds, self.cut_above, self.cut_below))
+            .then(|| {
+                self.text.get_or_init(|| {
+                    LineText::bounded(&self.rows, &self.bounds, self.cut_above, self.cut_below)
+                })
+            })
     }
 
     /// Map a match's `(row index, x)` corners to viewport `(y, x)` corners.
@@ -424,7 +433,7 @@ mod tests {
         );
         let line = terminal.primary.visible_logical_line(1).unwrap();
         let bounded = line.text(0).expect("column 0 is part of the line");
-        assert_eq!((bounded.chars, bounded.cells), (text.chars, text.cells));
+        assert_eq!((&bounded.chars, &bounded.cells), (&text.chars, &text.cells));
     }
 
     #[test]

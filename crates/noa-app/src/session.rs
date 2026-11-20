@@ -1345,4 +1345,109 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    /// A restore-sized session: `windows` windows of `tabs` tabs, each tab a
+    /// three-pane split with long cwds, a titled tab every third, and a
+    /// float on every fourth.
+    fn large_sample(windows: usize, tabs: usize) -> SessionState {
+        let leaf = |w: usize, t: usize, p: usize| PaneNode::Leaf {
+            cwd: Some(format!(
+                "/Users/someone/src/github.com/org/project-{w}-{t}/crates/part-{p}"
+            )),
+            remote: None,
+            scrollback: (p == 0).then(|| format!("{w:04x}{t:04x}{p:04x}deadbeefcafef00d")),
+            floats: Vec::new(),
+        };
+        let float = |w: usize, t: usize| FloatRecord {
+            origin: (0.125, 0.5),
+            size: (0.333_333_333_333_333_3, 0.25),
+            collapsed: t.is_multiple_of(2),
+            seq: (w * 100 + t) as u64,
+            z: (w * 1000 + t) as u64,
+            cwd: Some(format!("/tmp/float-{w}-{t}")),
+            strip_moved: false,
+        };
+        SessionState {
+            focused_window: Some(0),
+            windows: (0..windows)
+                .map(|w| WindowSession {
+                    frame: Some(WindowFrame {
+                        position: Some((12.5 * w as f64, 40.0)),
+                        width: 1440.0,
+                        height: 900.0,
+                    }),
+                    focused_tab: tabs / 2,
+                    floats: Vec::new(),
+                    tabs: (0..tabs)
+                        .map(|t| TabSession {
+                            focused_leaf: t % 3,
+                            title: t
+                                .is_multiple_of(3)
+                                .then(|| format!("build \"{t}\" \u{65e5}\u{672c} \u{1f680}")),
+                            floats: if t.is_multiple_of(4) {
+                                vec![float(w, t)]
+                            } else {
+                                Vec::new()
+                            },
+                            split: PaneNode::Split {
+                                orientation: Orientation::Horizontal,
+                                ratio: 0.618,
+                                first: Box::new(leaf(w, t, 0)),
+                                second: Box::new(PaneNode::Split {
+                                    orientation: Orientation::Vertical,
+                                    ratio: 0.5,
+                                    first: Box::new(leaf(w, t, 1)),
+                                    second: Box::new(leaf(w, t, 2)),
+                                }),
+                            },
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Perf harness (session save/restore): `serialize` (the persist
+    /// worker's per-topology-change cost) and `parse` (the launch-time
+    /// restore cost) of a 3-window x 8-tab session, printing a digest of the
+    /// text and of the parsed state so a before/after pair can be checked
+    /// for identical results. `#[ignore]`d so `cargo test` stays fast; run
+    /// explicitly with:
+    /// `cargo test -p noa-app --offline --release session::tests::bench_session_json -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_session_json() {
+        use std::hash::{Hash, Hasher};
+        use std::time::Instant;
+        const ITERS: u32 = 5_000;
+        let state = large_sample(3, 8);
+        let text = serialize(&state);
+        let parsed = parse(&text).expect("the sample parses");
+        assert_eq!(parsed, state);
+        let mut digest = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut digest);
+        format!("{parsed:?}").hash(&mut digest);
+        let digest = digest.finish();
+
+        let start = Instant::now();
+        for _ in 0..ITERS {
+            std::hint::black_box(serialize(std::hint::black_box(&state)));
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "bench_session_json[serialize]: {:.1} ns/op bytes={} digest={digest:016x}",
+            elapsed.as_nanos() as f64 / f64::from(ITERS),
+            text.len()
+        );
+        let start = Instant::now();
+        for _ in 0..ITERS {
+            std::hint::black_box(parse(std::hint::black_box(&text)));
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "bench_session_json[parse]: {:.1} ns/op bytes={} digest={digest:016x}",
+            elapsed.as_nanos() as f64 / f64::from(ITERS),
+            text.len()
+        );
+    }
 }

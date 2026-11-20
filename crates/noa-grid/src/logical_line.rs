@@ -201,6 +201,12 @@ impl LineText {
                 if cell.attrs.contains(CellAttrs::WIDE_SPACER) || pad_x == Some(x) {
                     continue;
                 }
+                // Most cells carry no mark: skip the interner lookup.
+                if cell.grapheme.is_none() {
+                    chars.push(cell.ch);
+                    cells.push((y, x as u16));
+                    continue;
+                }
                 for ch in cell.text_chars() {
                     chars.push(ch);
                     cells.push((y, x as u16));

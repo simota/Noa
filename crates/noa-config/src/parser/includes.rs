@@ -41,8 +41,7 @@ pub(super) fn expand_directives(
     source: &str,
 ) -> (Vec<SourcedDirective>, Vec<Diagnostic>) {
     let mut diagnostics = Vec::new();
-    let mut visited = HashSet::new();
-    visited.insert(canonical_or_self(path));
+    let mut visited = IncludeChain::new(path);
     let mut included_count = 0usize;
     let mut included_paths = Vec::new();
     let directives = expand(
@@ -63,8 +62,7 @@ pub(super) fn expand_directives(
 /// are discarded; this is the dependency list for live reload, not a parse.
 pub(crate) fn included_file_paths(path: &Path, source: &str) -> Vec<PathBuf> {
     let mut diagnostics = Vec::new();
-    let mut visited = HashSet::new();
-    visited.insert(canonical_or_self(path));
+    let mut visited = IncludeChain::new(path);
     let mut included_count = 0usize;
     let mut included_paths = Vec::new();
     let _ = expand(
@@ -83,7 +81,7 @@ fn expand(
     path: &Path,
     source: &str,
     depth: usize,
-    visited: &mut HashSet<PathBuf>,
+    visited: &mut IncludeChain<'_>,
     included_count: &mut usize,
     included_paths: &mut Vec<PathBuf>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -122,7 +120,7 @@ fn expand(
 
         let resolved = resolve_include_path(path, raw);
         let canonical = canonical_or_self(&resolved);
-        if visited.contains(&canonical) {
+        if visited.files().contains(&canonical) {
             diagnostics.push(config_file_diagnostic(
                 path,
                 raw,
@@ -151,7 +149,7 @@ fn expand(
             }
         };
 
-        visited.insert(canonical.clone());
+        visited.files().insert(canonical.clone());
         out.extend(expand(
             &resolved,
             &included_source,
@@ -161,9 +159,31 @@ fn expand(
             included_paths,
             diagnostics,
         ));
-        visited.remove(&canonical);
+        visited.files().remove(&canonical);
     }
     out
+}
+
+/// The canonical paths of the files on the include chain being expanded, for
+/// cycle detection. The top-level file's own entry is resolved on first use,
+/// so a config with no `config-file` directive pays no `realpath`.
+struct IncludeChain<'a> {
+    top_level: &'a Path,
+    files: Option<HashSet<PathBuf>>,
+}
+
+impl<'a> IncludeChain<'a> {
+    fn new(top_level: &'a Path) -> Self {
+        Self {
+            top_level,
+            files: None,
+        }
+    }
+
+    fn files(&mut self) -> &mut HashSet<PathBuf> {
+        self.files
+            .get_or_insert_with(|| HashSet::from([canonical_or_self(self.top_level)]))
+    }
 }
 
 /// Resolve an include path: absolute paths pass through, `~/...` expands

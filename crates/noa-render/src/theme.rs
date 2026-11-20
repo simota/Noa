@@ -160,6 +160,14 @@ impl Theme {
         ensure_minimum_contrast(fg, bg, self.minimum_contrast)
     }
 
+    /// Whether [`Self::contrast_adjusted_fg`] can return anything but `fg`:
+    /// false exactly when `ensure_minimum_contrast` takes its `minimum <= 1`
+    /// early return (the default), so callers may skip it.
+    pub(crate) fn contrast_floor_active(&self) -> bool {
+        let floor = self.minimum_contrast.clamp(1.0, 21.0);
+        floor > 1.0 || floor.is_nan()
+    }
+
     /// Left-gutter accent for a restored-record row range
     /// (`FrameSnapshot::record_rows` — scrollback rehydrated from a
     /// persisted snapshot rather than live pty output, `scrollback-persist`
@@ -258,9 +266,21 @@ pub fn contrast_ratio(a: Rgb, b: Rgb) -> f32 {
 /// `minimum` contrast against `bg`, preserving the original color when it
 /// already passes. If a very high target is physically impossible for that
 /// background, use the better endpoint.
+#[inline]
 pub fn ensure_minimum_contrast(fg: Rgb, bg: Rgb, minimum: f32) -> Rgb {
     let minimum = minimum.clamp(1.0, 21.0);
-    if minimum <= 1.0 || contrast_ratio(fg, bg) >= minimum {
+    if minimum <= 1.0 {
+        return fg;
+    }
+    raise_to_minimum_contrast(fg, bg, minimum)
+}
+
+/// The search behind [`ensure_minimum_contrast`] once a floor above 1 is
+/// set. Kept out of line so the default floor's early return stays a
+/// compare in the renderer's per-cell loop.
+#[inline(never)]
+fn raise_to_minimum_contrast(fg: Rgb, bg: Rgb, minimum: f32) -> Rgb {
+    if contrast_ratio(fg, bg) >= minimum {
         return fg;
     }
 
@@ -683,6 +703,34 @@ mod tests {
             (contrast_ratio(Rgb::new(0x77, 0x77, 0x77), Rgb::new(0x77, 0x77, 0x77)) - 1.0).abs()
                 < 0.01
         );
+    }
+
+    /// The renderer skips `contrast_adjusted_fg` when the floor is inactive,
+    /// so "inactive" must mean exactly "the adjustment returns `fg` for every
+    /// pair": the default 1, anything clamped to 1, and not NaN.
+    #[test]
+    fn contrast_floor_is_inactive_exactly_when_the_adjustment_is_the_identity() {
+        let low = Rgb::new(0x30, 0x30, 0x30);
+        let bg = Rgb::new(0x20, 0x20, 0x20);
+        for floor in [f32::NEG_INFINITY, -5.0, 0.0, 0.5, 1.0] {
+            let theme = Theme {
+                minimum_contrast: floor,
+                ..Theme::default()
+            };
+            assert!(!theme.contrast_floor_active(), "{floor}");
+            for fg in [low, bg, Rgb::new(0xff, 0, 0)] {
+                assert_eq!(theme.contrast_adjusted_fg(fg, bg), fg, "{floor}");
+            }
+        }
+        for floor in [1.0001, 3.0, 21.0, 50.0, f32::INFINITY, f32::NAN] {
+            let theme = Theme {
+                minimum_contrast: floor,
+                ..Theme::default()
+            };
+            assert!(theme.contrast_floor_active(), "{floor}");
+            // fg == bg has ratio 1, below every active floor.
+            assert_ne!(theme.contrast_adjusted_fg(bg, bg), bg, "{floor}");
+        }
     }
 
     #[test]

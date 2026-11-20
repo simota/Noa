@@ -186,7 +186,9 @@ pub(super) fn rebuild_row_instances(
     };
 
     // `minimum-contrast` adjustment is a pure function of (fg, bg), and a run
-    // of cells shares both, so the row reuses the last pair's answer.
+    // of cells shares both, so the row reuses the last pair's answer. At the
+    // default floor the adjustment is the identity, so it is skipped outright.
+    let contrast_active = theme.contrast_floor_active();
     let mut last_contrast: Option<(noa_core::Rgb, noa_core::Rgb, noa_core::Rgb)> = None;
     for (col_idx, cell) in row.cells[..walked].iter().enumerate() {
         let x = col_idx as u16;
@@ -278,6 +280,7 @@ pub(super) fn rebuild_row_instances(
         }
 
         let mut text_rgb = match last_contrast {
+            _ if !contrast_active => text_base_rgb,
             Some((fg, bg, adjusted)) if fg == text_base_rgb && bg == bg_rgb => adjusted,
             _ => {
                 let adjusted = theme.contrast_adjusted_fg(text_base_rgb, bg_rgb);

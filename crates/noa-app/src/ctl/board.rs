@@ -68,6 +68,57 @@ const MIN_ROWS: usize = 6;
 // ---------------------------------------------------------------------------
 // Model
 
+/// The language the board speaks: Japanese where the person's locale is
+/// Japanese, English anywhere else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Lang {
+    Ja,
+    En,
+}
+
+impl Lang {
+    /// The locale variables in POSIX order (`LC_ALL`, `LC_MESSAGES`,
+    /// `LANG`: the first one set wins), else the system's preferred language
+    /// (`system`): a Noa started from the Dock has no locale variables.
+    pub(crate) fn from_locale(
+        var: impl Fn(&str) -> Option<String>,
+        system: impl FnOnce() -> Option<String>,
+    ) -> Self {
+        let tag = ["LC_ALL", "LC_MESSAGES", "LANG"]
+            .iter()
+            .find_map(|key| var(key).filter(|value| !value.is_empty()))
+            .or_else(system);
+        match tag {
+            Some(tag) if tag.starts_with("ja") => Self::Ja,
+            _ => Self::En,
+        }
+    }
+
+    pub(crate) fn detect() -> Self {
+        Self::from_locale(|key| std::env::var(key).ok(), system_language)
+    }
+
+    fn pick<T>(self, ja: T, en: T) -> T {
+        match self {
+            Self::Ja => ja,
+            Self::En => en,
+        }
+    }
+}
+
+/// The first of the person's preferred languages, as a BCP 47 tag (`ja-JP`).
+#[cfg(target_os = "macos")]
+fn system_language() -> Option<String> {
+    objc2_foundation::NSLocale::preferredLanguages()
+        .firstObject()
+        .map(|tag| tag.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_language() -> Option<String> {
+    None
+}
+
 /// What a worker is doing, as far as its panel says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Status {
@@ -131,31 +182,33 @@ impl Status {
         }
     }
 
-    fn label(self) -> String {
+    fn label(self, lang: Lang) -> String {
         match self {
-            Self::Permission => "承認待ち".to_string(),
-            Self::Input => "入力待ち".to_string(),
-            Self::Error => "エラー".to_string(),
-            Self::Attention => "通知あり".to_string(),
-            Self::Running => "作業中".to_string(),
-            Self::Finished => "完了".to_string(),
-            Self::Exited(Some(code)) if code != 0 => format!("失敗 {code}"),
-            Self::Exited(Some(code)) => format!("終了 {code}"),
-            Self::Exited(None) => "終了".to_string(),
-            Self::Quiet => "報告なし".to_string(),
+            Self::Permission => lang.pick("承認待ち", "approval").to_string(),
+            Self::Input => lang.pick("入力待ち", "question").to_string(),
+            Self::Error => lang.pick("エラー", "error").to_string(),
+            Self::Attention => lang.pick("通知あり", "notified").to_string(),
+            Self::Running => lang.pick("作業中", "working").to_string(),
+            Self::Finished => lang.pick("完了", "done").to_string(),
+            Self::Exited(Some(code)) if code != 0 => {
+                format!("{} {code}", lang.pick("失敗", "failed"))
+            }
+            Self::Exited(Some(code)) => format!("{} {code}", lang.pick("終了", "exited")),
+            Self::Exited(None) => lang.pick("終了", "exited").to_string(),
+            Self::Quiet => lang.pick("報告なし", "no report").to_string(),
         }
     }
 
     /// The label for a narrow pane: the states that share a colour keep a
     /// word each, so they stay apart without the full label.
-    fn short_label(self) -> String {
+    fn short_label(self, lang: Lang) -> String {
         match self {
-            Self::Permission => "承認".to_string(),
-            Self::Input => "入力".to_string(),
-            Self::Attention => "通知".to_string(),
-            Self::Error => "エラー".to_string(),
-            status if status.failed() => "失敗".to_string(),
-            status => status.label(),
+            Self::Permission => lang.pick("承認", "appr").to_string(),
+            Self::Input => lang.pick("入力", "ask").to_string(),
+            Self::Attention => lang.pick("通知", "note").to_string(),
+            Self::Error => lang.pick("エラー", "error").to_string(),
+            status if status.failed() => lang.pick("失敗", "fail").to_string(),
+            status => status.label(lang),
         }
     }
 
@@ -188,12 +241,12 @@ impl Status {
 impl Group {
     const ALL: [Self; 4] = [Self::Needs, Self::Working, Self::Done, Self::Exited];
 
-    fn title(self) -> &'static str {
+    fn title(self, lang: Lang) -> &'static str {
         match self {
-            Self::Needs => "要対応",
-            Self::Working => "作業中",
-            Self::Done => "完了",
-            Self::Exited => "終了",
+            Self::Needs => lang.pick("要対応", "needs you"),
+            Self::Working => lang.pick("作業中", "working"),
+            Self::Done => lang.pick("完了", "done"),
+            Self::Exited => lang.pick("終了", "exited"),
         }
     }
 
@@ -402,6 +455,8 @@ pub(crate) struct Board {
     moved: HashMap<u64, Instant>,
     /// When the pane list was last read.
     synced: Option<Instant>,
+    /// The language of every label (see [`Lang::detect`]).
+    pub(crate) lang: Lang,
 }
 
 impl Board {
@@ -431,6 +486,7 @@ impl Board {
             settled_open: false,
             moved: HashMap::new(),
             synced: None,
+            lang: Lang::Ja,
         }
     }
 
@@ -461,10 +517,11 @@ impl Board {
                     .find(|detail| !detail.is_empty())
             })
             .or_else(|| {
-                panel
-                    .exit
-                    .as_ref()
-                    .map(|_| "プロセスが終了しました".to_string())
+                panel.exit.as_ref().map(|_| {
+                    self.lang
+                        .pick("プロセスが終了しました", "its process exited")
+                        .to_string()
+                })
             })
             .unwrap_or_default()
     }
@@ -931,7 +988,8 @@ impl Board {
     fn space(&mut self) {
         let Some(top) = self.space_target() else {
             if self.space_folded().is_none() {
-                self.message = Some(Notice::ok("たたむものはありません".to_string()));
+                let text = self.lang.pick("たたむものはありません", "nothing to fold");
+                self.message = Some(Notice::ok(text.to_string()));
                 return;
             }
             self.settled_open = !self.settled_open;
@@ -1103,7 +1161,13 @@ impl Board {
             .find(|&pane| self.number(pane) == number);
         match pane {
             Some(pane) => self.select(pane),
-            None => self.message = Some(Notice::warn(format!("{number} 番のワーカーはいません"))),
+            None => {
+                let text = self.lang.pick(
+                    format!("{number} 番のワーカーはいません"),
+                    format!("no worker {number}"),
+                );
+                self.message = Some(Notice::warn(text));
+            }
         }
     }
 
@@ -1117,7 +1181,10 @@ impl Board {
             .map(|entry| entry.node.panel.pane_id.0)
             .collect();
         if needing.is_empty() {
-            self.message = Some(Notice::ok("要対応のワーカーはいません".to_string()));
+            let text = self
+                .lang
+                .pick("要対応のワーカーはいません", "no worker needs you");
+            self.message = Some(Notice::ok(text.to_string()));
             return;
         }
         let next = self
@@ -1144,9 +1211,12 @@ impl Board {
     fn cannot_send(&self, pane: u64) -> Option<String> {
         let name = self.name(pane);
         if self.awaits_approval(pane) {
-            Some(approval_message(&name))
+            Some(approval_message(&name, self.lang))
         } else if self.has_exited(pane) {
-            Some(format!("{name} は終了しています。x で閉じる"))
+            Some(self.lang.pick(
+                format!("{name} は終了しています。x で閉じる"),
+                format!("{name} has exited. x closes it"),
+            ))
         } else {
             None
         }
@@ -1266,8 +1336,11 @@ impl Board {
 
 // Labels and process names come from other processes: never let their
 // control characters reach this terminal.
-fn approval_message(name: &str) -> String {
-    format!("{name} は承認待ちです。g でペインへ移動して答えてください")
+fn approval_message(name: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("{name} は承認待ちです。g でペインへ移動して答えてください"),
+        Lang::En => format!("{name} awaits approval. g goes to its pane to answer it"),
+    }
 }
 
 /// A full-width rule, as agents draw around their input box.
@@ -1591,19 +1664,30 @@ struct Hidden {
 
 /// "↓ あと 3 件 · うち要対応 1 · 閉じた 2 件": what a scrolled list hides.
 /// Only parts with something in them are said.
-fn more_line(arrow: &str, (n, needs): (usize, usize), gone: usize, cols: usize) -> String {
+fn more_line(
+    arrow: &str,
+    (n, needs): (usize, usize),
+    gone: usize,
+    cols: usize,
+    lang: Lang,
+) -> String {
     let mut line = Line::default();
     line.plain("   ").fg(DIM, arrow);
     if n > 0 {
-        line.fg(DIM, &format!(" あと {n} 件"));
+        let more = lang.pick(format!(" あと {n} 件"), format!(" {n} more"));
+        line.fg(DIM, &more);
         if needs > 0 {
-            line.fg(DIM, " ·")
-                .fg(ORANGE, &format!(" うち要対応 {needs}"));
+            let needs = lang.pick(format!(" うち要対応 {needs}"), format!(" {needs} need you"));
+            line.fg(DIM, " ·").fg(ORANGE, &needs);
         }
     }
     if gone > 0 {
         let sep = if n > 0 { " ·" } else { "" };
-        line.fg(DIM, &format!("{sep} 閉じた {gone} 件"));
+        let gone = lang.pick(
+            format!("{sep} 閉じた {gone} 件"),
+            format!("{sep} {gone} closed"),
+        );
+        line.fg(DIM, &gone);
     }
     line.finish(cols)
 }
@@ -1758,22 +1842,28 @@ struct Tally {
 
 /// A tally as styled pieces: "▾ 子 3 · 要対応 1", "▾3 要対応1", or "▾" alone.
 /// Only parts with something in them are said.
-fn tally_pieces(tally: Tally, form: StateForm) -> Vec<(Rgb, String)> {
+fn tally_pieces(tally: Tally, form: StateForm, lang: Lang) -> Vec<(Rgb, String)> {
     let mark = if tally.collapsed { "▸" } else { "▾" };
     let Tally { kids, needs, .. } = tally;
     let mut pieces = Vec::new();
     match form {
         StateForm::Full => {
-            pieces.push((DIM, format!("{mark} 子 {kids}")));
+            let kids = lang.pick(
+                format!("{mark} 子 {kids}"),
+                format!("{mark} {kids} workers"),
+            );
+            pieces.push((DIM, kids));
             if needs > 0 {
                 pieces.push((DIM, " · ".to_string()));
-                pieces.push((ORANGE, format!("要対応 {needs}")));
+                let needs = lang.pick(format!("要対応 {needs}"), format!("{needs} need you"));
+                pieces.push((ORANGE, needs));
             }
         }
         StateForm::Short => {
             pieces.push((DIM, format!("{mark}{kids}")));
             if needs > 0 {
-                pieces.push((ORANGE, format!(" 要対応{needs}")));
+                let needs = lang.pick(format!(" 要対応{needs}"), format!(" !{needs}"));
+                pieces.push((ORANGE, needs));
             }
         }
         StateForm::Bare => pieces.push((DIM, mark.to_string())),
@@ -1781,8 +1871,8 @@ fn tally_pieces(tally: Tally, form: StateForm) -> Vec<(Rgb, String)> {
     pieces
 }
 
-fn tally_width(tally: Tally, form: StateForm) -> usize {
-    tally_pieces(tally, form)
+fn tally_width(tally: Tally, form: StateForm, lang: Lang) -> usize {
+    tally_pieces(tally, form, lang)
         .iter()
         .map(|(_, text)| text.width())
         .sum()
@@ -1821,26 +1911,24 @@ fn clean(s: &str) -> String {
     s.chars().filter(|ch| !ch.is_control()).collect()
 }
 
-/// "10 秒", "2 分", "3 時間".
-fn duration_text(span: Duration) -> String {
+/// "10 秒", "2 分", "3 時間" (in English "10s", "2m", "3h").
+fn duration_text(span: Duration, lang: Lang) -> String {
     let secs = span.as_secs();
-    match secs {
-        0..60 => format!("{secs} 秒"),
-        60..3600 => format!("{} 分", secs / 60),
-        _ => format!("{} 時間", secs / 3600),
-    }
+    let (n, ja, en) = match secs {
+        0..60 => (secs, "秒", "s"),
+        60..3600 => (secs / 60, "分", "m"),
+        _ => (secs / 3600, "時間", "h"),
+    };
+    lang.pick(format!("{n} {ja}"), format!("{n}{en}"))
 }
 
-fn ago(at: Option<Instant>, now: Instant) -> String {
+/// "10 秒前" ("10s ago"), or "開始時" for a time before the board opened.
+fn ago(at: Option<Instant>, now: Instant, lang: Lang) -> String {
     let Some(at) = at else {
-        return "開始時".to_string();
+        return lang.pick("開始時", "at start").to_string();
     };
-    let secs = now.saturating_duration_since(at).as_secs();
-    match secs {
-        0..60 => format!("{secs} 秒前"),
-        60..3600 => format!("{} 分前", secs / 60),
-        _ => format!("{} 時間前", secs / 3600),
-    }
+    let span = duration_text(now.saturating_duration_since(at), lang);
+    lang.pick(format!("{span}前"), format!("{span} ago"))
 }
 
 impl Board {
@@ -1848,7 +1936,10 @@ impl Board {
     pub(crate) fn render(&self, cols: usize, rows: usize, now: Instant) -> Vec<String> {
         // Drawing wider than the pane would wrap every line; say so instead.
         if cols < MIN_COLS || rows < MIN_ROWS {
-            let note = format!("{MIN_COLS}×{MIN_ROWS} 以上に広げてください");
+            let note = self.lang.pick(
+                format!("{MIN_COLS}×{MIN_ROWS} 以上に広げてください"),
+                format!("Widen to {MIN_COLS}×{MIN_ROWS} or more"),
+            );
             return (0..rows)
                 .map(|row| {
                     let mut line = Line::default();
@@ -1895,11 +1986,17 @@ impl Board {
         let needs = count(Group::Needs);
         let working = count(Group::Working);
         if needs > 0 {
-            format!("ボード · 要対応 {needs}")
+            self.lang.pick(
+                format!("ボード · 要対応 {needs}"),
+                format!("Board · {needs} need you"),
+            )
         } else if working > 0 {
-            format!("ボード · 作業中 {working}")
+            self.lang.pick(
+                format!("ボード · 作業中 {working}"),
+                format!("Board · {working} working"),
+            )
         } else {
-            "ボード".to_string()
+            self.lang.pick("ボード", "Board").to_string()
         }
     }
 
@@ -1914,7 +2011,13 @@ impl Board {
             Mode::Send(pane, text) => {
                 line.fg(
                     BLUE,
-                    &fit(&format!("{} に送る", self.name(*pane)), room / 2),
+                    &fit(
+                        &self.lang.pick(
+                            format!("{} に送る", self.name(*pane)),
+                            format!("to {}", self.name(*pane)),
+                        ),
+                        room / 2,
+                    ),
                 )
                 .fg(BLUE, " › ");
                 let room = cols.saturating_sub(line.width + 1);
@@ -1947,7 +2050,13 @@ impl Board {
                         !matches!(status, Status::Exited(_))
                             && matches!(status.group(), Group::Needs | Group::Working)
                     })
-                    .map(|status| format!("まだ{}です。", status.label()))
+                    .map(|status| {
+                        let label = status.label(self.lang);
+                        self.lang.pick(
+                            format!("まだ{label}です。"),
+                            format!("It is still {label}. "),
+                        )
+                    })
                     .unwrap_or_default();
                 // D13: its own workers close with it.
                 let kids = self
@@ -1955,13 +2064,17 @@ impl Board {
                     .filter(|panel| panel.parent_pane_id.is_some_and(|p| p.0 == *pane))
                     .count();
                 let kids = if kids > 0 {
-                    format!("ワーカーの子 {kids} 件も閉じます。")
+                    self.lang.pick(
+                        format!("ワーカーの子 {kids} 件も閉じます。"),
+                        format!("Its {kids} workers close too. "),
+                    )
                 } else {
                     String::new()
                 };
-                let ask = format!(
-                    "{} を閉じますか? {busy}{kids}出力は消えます。",
-                    self.name(*pane)
+                let name = self.name(*pane);
+                let ask = self.lang.pick(
+                    format!("{name} を閉じますか? {busy}{kids}出力は消えます。"),
+                    format!("Close {name}? {busy}{kids}Its output is lost."),
                 );
                 line.fg(RED, &fit(&ask, room));
             }
@@ -1976,17 +2089,29 @@ impl Board {
                 // a pane holds 8 of (floating-panes REQ-019). A worker's own
                 // workers close: their parent is a float then (D13).
                 let max = crate::floating::MAX_PER_ANCHOR;
-                let ask = match (live > max, kids > 0) {
-                    (true, true) => format!(
+                let ask = match (self.lang, live > max, kids > 0) {
+                    (Lang::En, true, true) => format!(
+                        "Press q again to quit (up to {max} of the {live} workers go back to the orchestrator; the rest, and {kids} workers' workers, close)"
+                    ),
+                    (Lang::En, true, false) => format!(
+                        "Press q again to quit (up to {max} of the {live} workers go back to the orchestrator; the rest close)"
+                    ),
+                    (Lang::En, false, true) => format!(
+                        "Press q again to quit ({live} workers go back to the orchestrator; {kids} workers' workers close)"
+                    ),
+                    (Lang::En, false, false) => format!(
+                        "Press q again to quit ({live} workers go back to the orchestrator)"
+                    ),
+                    (Lang::Ja, true, true) => format!(
                         "q をもう一度押すと終了します（ワーカー {live} 件のうち戻れる最大 {max} 件はオーケストレーターへ戻り、残りと、ワーカーの子 {kids} 件は閉じます）"
                     ),
-                    (true, false) => format!(
+                    (Lang::Ja, true, false) => format!(
                         "q をもう一度押すと終了します（ワーカー {live} 件のうち戻れる最大 {max} 件はオーケストレーターへ戻り、残りは閉じます）"
                     ),
-                    (false, true) => format!(
+                    (Lang::Ja, false, true) => format!(
                         "q をもう一度押すと終了します（ワーカー {live} 件はオーケストレーターへ戻り、ワーカーの子 {kids} 件は閉じます）"
                     ),
-                    (false, false) => format!(
+                    (Lang::Ja, false, false) => format!(
                         "q をもう一度押すと終了します（ワーカー {live} 件はオーケストレーターへ戻ります）"
                     ),
                 };
@@ -1996,7 +2121,10 @@ impl Board {
                 // The listing failed: what is shown is as of `since`.
                 (Some(since), _) => {
                     let secs = now.saturating_duration_since(*since).as_secs();
-                    let text = format!("接続できません · 再試行中 {secs} 秒");
+                    let text = self.lang.pick(
+                        format!("接続できません · 再試行中 {secs} 秒"),
+                        format!("Cannot connect · retrying for {secs}s"),
+                    );
                     line.fg(ORANGE, &fit(&text, room));
                 }
                 (None, Some(notice)) => {
@@ -2004,7 +2132,10 @@ impl Board {
                     line.fg(color, &fit(&clean(&notice.text), room));
                 }
                 (None, None) => {
-                    let hint = format!("{BACK_TO_BOARD} 開いたワーカーからボードへ  ·  ? キー一覧");
+                    let hint = self.lang.pick(
+                        format!("{BACK_TO_BOARD} 開いたワーカーからボードへ  ·  ? キー一覧"),
+                        format!("{BACK_TO_BOARD} back here from an opened worker  ·  ? keys"),
+                    );
                     line.fg(DIM, &fit(&hint, room));
                 }
             },
@@ -2018,31 +2149,83 @@ impl Board {
         let mut title = Line::default();
         title
             .plain(" ")
-            .bold("キー操作")
-            .fg(DIM, "  j/k 以外のキーで閉じます");
+            .bold(self.lang.pick("キー操作", "Keys"))
+            .fg(
+                DIM,
+                self.lang.pick(
+                    "  j/k 以外のキーで閉じます",
+                    "  any key but j/k closes this",
+                ),
+            );
         let mut lines = vec![Line::default().finish(cols)];
+        let l = |ja, en| self.lang.pick(ja, en);
         let keys: [(&str, &str); 15] = [
-            ("j k ↑ ↓", "ワーカーを選ぶ"),
-            ("1–20", "番号のワーカーを選ぶ(10 以上は 2 桁続けて)"),
-            ("n", "キューの次の要対応のワーカーへ"),
+            ("j k ↑ ↓", l("ワーカーを選ぶ", "select a worker")),
+            (
+                "1–20",
+                l(
+                    "番号のワーカーを選ぶ(10 以上は 2 桁続けて)",
+                    "select by number (two digits in a row for 10 and up)",
+                ),
+            ),
+            (
+                "n",
+                l(
+                    "キューの次の要対応のワーカーへ",
+                    "the next worker in the queue",
+                ),
+            ),
             (
                 "Space",
-                "作業中のワーカーの子をたたむ / 開く(それ以外では完了・終了を開く / たたむ)",
+                l(
+                    "作業中のワーカーの子をたたむ / 開く(それ以外では完了・終了を開く / たたむ)",
+                    "fold / open a subtree at work (elsewhere: list / fold done and exited)",
+                ),
             ),
-            ("Enter l →", "詳細(画面と報告の履歴)"),
-            ("Esc h ←", "一覧に戻る"),
-            ("g", "ワーカーをこの下に開く(承認はそこで答える)"),
-            (BACK_TO_BOARD, "開いたワーカーからボードへ戻る"),
+            (
+                "Enter l →",
+                l("詳細(画面と報告の履歴)", "details (screen and reports)"),
+            ),
+            ("Esc h ←", l("一覧に戻る", "back to the list")),
+            (
+                "g",
+                l(
+                    "ワーカーをこの下に開く(承認はそこで答える)",
+                    "open the worker below (answer approvals there)",
+                ),
+            ),
+            (
+                BACK_TO_BOARD,
+                l(
+                    "開いたワーカーからボードへ戻る",
+                    "back to the board from an opened worker",
+                ),
+            ),
             (
                 "s",
-                "ワーカーに送る(承認待ち・終了したワーカーには送れません)",
+                l(
+                    "ワーカーに送る(承認待ち・終了したワーカーには送れません)",
+                    "send to the worker (not to one awaiting approval or exited)",
+                ),
             ),
-            ("x", "ワーカーを閉じる(確認あり。出力は消えます)"),
-            ("q ^C", "ボードを終える(ワーカーはオーケストレーターへ戻る)"),
+            (
+                "x",
+                l(
+                    "ワーカーを閉じる(確認あり。出力は消えます)",
+                    "close the worker (asks first; its output is lost)",
+                ),
+            ),
+            (
+                "q ^C",
+                l(
+                    "ボードを終える(ワーカーはオーケストレーターへ戻る)",
+                    "end the board (workers go back to the orchestrator)",
+                ),
+            ),
             ("", ""),
-            ("送信欄", ""),
-            ("Enter / Esc", "送る / 取り消す"),
-            ("^U / ^W", "全部消す / 1 語消す"),
+            (l("送信欄", "Send line"), ""),
+            ("Enter / Esc", l("送る / 取り消す", "send / cancel")),
+            ("^U / ^W", l("全部消す / 1 語消す", "clear / delete a word")),
         ];
         for (key, what) in keys {
             let mut line = Line::default();
@@ -2070,9 +2253,10 @@ impl Board {
         out.extend(lines.into_iter().skip(offset).take(view));
         let mut marker = Line::default();
         let text = if offset < reach {
-            "↓ 続き  j/k でスクロール"
+            self.lang
+                .pick("↓ 続き  j/k でスクロール", "↓ more  j/k to scroll")
         } else {
-            "↑ j/k でスクロール"
+            self.lang.pick("↑ j/k でスクロール", "↑ j/k to scroll")
         };
         marker
             .plain("   ")
@@ -2087,20 +2271,26 @@ impl Board {
         // unreachable server is said on the notice line too).
         let synced = match self.synced {
             Some(at) if now.saturating_duration_since(at) < Duration::from_secs(2) => {
-                "いま".to_string()
+                self.lang.pick("いま", "now").to_string()
             }
-            Some(at) => ago(Some(at), now),
-            None => "まだ".to_string(),
+            Some(at) => ago(Some(at), now, self.lang),
+            None => self.lang.pick("まだ", "never").to_string(),
         };
-        let count = format!("ワーカー {} ", workers.len());
-        let long_count = format!("ワーカー {} · 同期 {synced} ", workers.len());
+        let n = workers.len();
+        let count = self
+            .lang
+            .pick(format!("ワーカー {n} "), format!("workers {n} "));
+        let long_count = self.lang.pick(
+            format!("ワーカー {n} · 同期 {synced} "),
+            format!("workers {n} · synced {synced} "),
+        );
         // A narrow pane gets the short title before the count is cut.
         const LONG: &str = "NOA / CONTROL";
         const SCOPE_ROOM: usize = 8;
         let name = if 1 + LONG.width() + 2 + SCOPE_ROOM + count.width() <= cols {
             LONG
         } else {
-            "ボード"
+            self.lang.pick("ボード", "Board")
         };
         let count = if 1 + name.width() + 2 + SCOPE_ROOM + long_count.width() <= cols {
             long_count
@@ -2123,7 +2313,10 @@ impl Board {
                     None => name,
                 }
             }
-            None => "すべてのワーカー".to_string(),
+            None => self
+                .lang
+                .pick("すべてのワーカー", "all workers")
+                .to_string(),
         };
         let room = cols.saturating_sub(title.width + count.width() + 1);
         title.fg(DIM, &fit(&scope, room));
@@ -2137,7 +2330,7 @@ impl Board {
                 .iter()
                 .filter(|panel| Status::of(panel).group() == group)
                 .count();
-            let text = format!(" {} {n}", group.title());
+            let text = format!(" {} {n}", group.title(self.lang));
             // An empty section is dimmed, so the ones with workers stand out.
             if n == 0 {
                 chips.fg(BORDER, group.mark()).fg(BORDER, &text);
@@ -2197,7 +2390,10 @@ impl Board {
         empty.plain(" ").fg(
             DIM,
             &fit(
-                "ワーカーはまだいません。オーケストレーターが `+ctl spawn` すると、ここに並びます。",
+                self.lang.pick(
+                    "ワーカーはまだいません。オーケストレーターが `+ctl spawn` すると、ここに並びます。",
+                    "No workers yet. They appear here once the orchestrator runs `+ctl spawn`.",
+                ),
                 cols - 1,
             ),
         );
@@ -2228,11 +2424,11 @@ impl Board {
         let (up, down) = gone_hidden(offset, avail);
         let mut lines = Vec::new();
         if above {
-            lines.push(more_line("↑", (0, 0), up, cols));
+            lines.push(more_line("↑", (0, 0), up, cols, self.lang));
         }
         lines.extend(body.iter().skip(offset).take(avail).cloned());
         if below {
-            lines.push(more_line("↓", (0, 0), down, cols));
+            lines.push(more_line("↓", (0, 0), down, cols, self.lang));
         }
         lines
     }
@@ -2252,7 +2448,7 @@ impl Board {
             shown
                 .iter()
                 .filter_map(&tally)
-                .map(|tally| tally_width(tally, form))
+                .map(|tally| tally_width(tally, form, self.lang))
                 .max()
                 .unwrap_or(0)
         };
@@ -2384,11 +2580,11 @@ impl Board {
         let seen = hidden(offset, avail);
         let mut lines = Vec::new();
         if above {
-            lines.push(more_line("↑", seen.above, 0, cols));
+            lines.push(more_line("↑", seen.above, 0, cols, self.lang));
         }
         lines.extend(body.iter().skip(offset).take(avail).cloned());
         if below {
-            lines.push(more_line("↓", seen.below, seen.gone, cols));
+            lines.push(more_line("↓", seen.below, seen.gone, cols, self.lang));
         }
         lines.truncate(room);
         while lines.len() < room {
@@ -2427,10 +2623,15 @@ impl Board {
                 rule(
                     cols,
                     &[
-                        (Some(ORANGE), "! 人の対応が必要".to_string()),
+                        (
+                            Some(ORANGE),
+                            self.lang
+                                .pick("! 人の対応が必要", "! Needs you")
+                                .to_string(),
+                        ),
                         (Some(DIM), format!(" {n}")),
                     ],
-                    Some("n 次の要対応"),
+                    Some(self.lang.pick("n 次の要対応", "n next")),
                 )
             }
             Zone::Background => {
@@ -2440,14 +2641,19 @@ impl Board {
                     .filter(|node| Status::of(node.panel).group() != Group::Needs)
                     .count();
                 let hint = match (space_on_subtree, self.space_folded()) {
-                    (true, Some(true)) => Some("Space 開く"),
-                    (true, _) => Some("Space たたむ"),
+                    (true, Some(true)) => Some(self.lang.pick("Space 開く", "Space open")),
+                    (true, _) => Some(self.lang.pick("Space たたむ", "Space fold")),
                     (false, _) => None,
                 };
                 rule(
                     cols,
                     &[
-                        (Some(BLUE), "● バックグラウンド".to_string()),
+                        (
+                            Some(BLUE),
+                            self.lang
+                                .pick("● バックグラウンド", "● Background")
+                                .to_string(),
+                        ),
                         (Some(DIM), format!(" {n}")),
                     ],
                     hint,
@@ -2464,15 +2670,19 @@ impl Board {
                 if hidden_selection {
                     title.push((Some(GREEN), "▶ ".to_string()));
                 }
-                title.push((Some(GREEN), format!("✓ 完了 {}", count(Group::Done))));
-                title.push((Some(GREY), format!("   · 終了 {}", count(Group::Exited))));
+                let l = |ja, en| self.lang.pick(ja, en);
+                let done = count(Group::Done);
+                let exited = count(Group::Exited);
+                title.push((Some(GREEN), format!("✓ {} {done}", l("完了", "done"))));
+                title.push((Some(GREY), format!("   · {} {exited}", l("終了", "exited"))));
                 if !self.gone.is_empty() {
-                    title.push((Some(DIM), format!("   閉じた {}", self.gone.len())));
+                    let gone = self.gone.len();
+                    title.push((Some(DIM), format!("   {} {gone}", l("閉じた", "closed"))));
                 }
                 let hint = match (space_on_subtree, self.settled_open) {
                     (true, _) => None,
-                    (false, true) => Some("Space たたむ"),
-                    (false, false) => Some("Space 開く"),
+                    (false, true) => Some(l("Space たたむ", "Space fold")),
+                    (false, false) => Some(l("Space 開く", "Space open")),
                 };
                 rule(cols, &title, hint)
             }
@@ -2498,12 +2708,12 @@ impl Board {
         out.push(rule(
             cols,
             &[
-                (Some(BLUE), "選択中".to_string()),
+                (Some(BLUE), self.lang.pick("選択中", "Selected").to_string()),
                 (Some(DIM), format!(" {} ", self.number(pane))),
                 (Some(status.color()), format!("{} ", status.mark())),
                 (None, name),
             ],
-            Some("プレビュー"),
+            Some(self.lang.pick("プレビュー", "preview")),
         ));
         // A worker waiting on someone asks at the bottom of its screen, in
         // the agent's input box or a dialog in its place; one at work shows
@@ -2537,9 +2747,10 @@ impl Board {
             .collect();
         if text.is_empty() && room > 0 {
             let note = if self.screens.contains_key(&pane) {
-                "画面に何も出ていません"
+                self.lang
+                    .pick("画面に何も出ていません", "nothing on its screen")
             } else {
-                "画面を読んでいます…"
+                self.lang.pick("画面を読んでいます…", "reading its screen…")
             };
             let mut line = Line::default();
             line.plain(" ").fg(DIM, note);
@@ -2561,7 +2772,8 @@ impl Board {
             &self.state_text(pane, status, StateForm::Full, now),
         );
         if let Some(agent) = &panel.agent {
-            meta.fg(DIM, &format!(" · 報告 {}", agent.seq));
+            let report = self.lang.pick("報告", "report");
+            meta.fg(DIM, &format!(" · {report} {}", agent.seq));
         }
         // The directory only where a few of its columns fit: a lone `…`
         // or separator says nothing.
@@ -2597,14 +2809,18 @@ impl Board {
         now: Instant,
     ) -> (String, Option<String>) {
         let label = match form {
-            StateForm::Full => status.label(),
-            StateForm::Short | StateForm::Bare => status.short_label(),
+            StateForm::Full => status.label(self.lang),
+            StateForm::Short | StateForm::Bare => status.short_label(self.lang),
         };
         if form == StateForm::Bare {
             return (label, None);
         }
         if let Some(span) = self.quiet_for(pane, status) {
-            return (label, Some(format!("出力なし {}", duration_text(span))));
+            let span = duration_text(span, self.lang);
+            let quiet = self
+                .lang
+                .pick(format!("出力なし {span}"), format!("quiet {span}"));
+            return (label, Some(quiet));
         }
         // At work: how fresh its output is, not how long it has worked
         // (D15), once its screen was seen to move in its current state.
@@ -2612,9 +2828,10 @@ impl Board {
             let began = self.since.get(&pane).and_then(|(_, at)| *at);
             return match self.moved.get(&pane) {
                 Some(&at) if began.is_none_or(|began| at >= began) => {
-                    let ago = ago(Some(at), now);
-                    let text = match form {
-                        StateForm::Full => format!("{label} {ago}に出力"),
+                    let ago = ago(Some(at), now, self.lang);
+                    let text = match (form, self.lang) {
+                        (StateForm::Full, Lang::Ja) => format!("{label} {ago}に出力"),
+                        (StateForm::Full, Lang::En) => format!("{label}, output {ago}"),
                         _ => format!("{label} {ago}"),
                     };
                     (text, None)
@@ -2636,22 +2853,26 @@ impl Board {
         let mut title = Line::default();
         title
             .plain(" ")
-            .fg(GREY, "閉じた")
-            .fg(DIM, "  このボードを開いてから");
+            .fg(GREY, self.lang.pick("閉じた", "Closed"))
+            .fg(
+                DIM,
+                self.lang
+                    .pick("  このボードを開いてから", "  since this board opened"),
+            );
         let mut lines = vec![title.finish(cols)];
         for gone in &self.gone {
             let mut line = Line::default();
             line.plain("   ")
                 .fg(GREY, "✕ ")
                 .plain(&fit(&gone.name, 20))
-                .fg(
-                    DIM,
-                    &format!(
-                        "  {}で閉じた · {}",
-                        gone.status.label(),
-                        ago(Some(gone.at), now)
-                    ),
-                );
+                .fg(DIM, &{
+                    let label = gone.status.label(self.lang);
+                    let ago = ago(Some(gone.at), now, self.lang);
+                    self.lang.pick(
+                        format!("  {label}で閉じた · {ago}"),
+                        format!("  closed while {label} · {ago}"),
+                    )
+                });
             if !gone.detail.is_empty() {
                 let room = cols.saturating_sub(line.width + 3);
                 line.plain("  ").fg(DIM, &fit(&clean(&gone.detail), room));
@@ -2668,11 +2889,14 @@ impl Board {
         let Some((_, Some(at))) = self.since.get(&pane) else {
             return None;
         };
-        let span = duration_text(now.saturating_duration_since(*at));
         // A failed process is listed with what needs someone, but it is
         // over: say when, like any other ended state.
         let over = matches!(status, Status::Exited(_)) || status.group() == Group::Done;
-        Some(if over { format!("{span}前") } else { span })
+        Some(if over {
+            ago(Some(*at), now, self.lang)
+        } else {
+            duration_text(now.saturating_duration_since(*at), self.lang)
+        })
     }
 
     /// Two columns for numbers once any worker's has two digits.
@@ -2779,7 +3003,7 @@ impl Board {
             line.plain("  ");
             let mut used = 0;
             for (color, text) in tally
-                .map(|tally| tally_pieces(tally, columns.tally_form))
+                .map(|tally| tally_pieces(tally, columns.tally_form, self.lang))
                 .unwrap_or_default()
             {
                 line.fg(color, &text);
@@ -2789,7 +3013,8 @@ impl Board {
         }
         let room = cols.saturating_sub(line.width + 2);
         if entry.echo {
-            line.plain("  ").fg(DIM, &fit("↑ 要対応に表示", room));
+            let echo = self.lang.pick("↑ 要対応に表示", "↑ in the queue above");
+            line.plain("  ").fg(DIM, &fit(echo, room));
         } else {
             // What it said, else, while it needs someone, the last line of
             // its screen (its question is in the input box, under the work),
@@ -2818,15 +3043,23 @@ impl Board {
         let status = Status::of(panel);
         let mut head = Line::default();
         head.plain(" ")
-            .fg(DIM, "← 一覧 (Esc)  /  ")
+            .fg(
+                DIM,
+                self.lang.pick("← 一覧 (Esc)  /  ", "← list (Esc)  /  "),
+            )
             .bold(&fit(&worker_name(panel), cols / 3));
         let kind = worker_kind(panel);
         if !kind.is_empty() {
             head.plain("  ").fg(DIM, &kind);
         }
-        head.plain("  ").fg(status.color(), &status.label());
+        head.plain("  ")
+            .fg(status.color(), &status.label(self.lang));
         let right = match &panel.agent {
-            Some(agent) => format!("pane {pane} · 報告 {} ", agent.seq),
+            Some(agent) => format!(
+                "pane {pane} · {} {} ",
+                self.lang.pick("報告", "report"),
+                agent.seq
+            ),
             None => format!("pane {pane} "),
         };
         if head.width + right.width() < cols {
@@ -2845,10 +3078,11 @@ impl Board {
             .max(3);
 
         let mut title = Line::default();
-        title
-            .plain(" ")
-            .bold("画面")
-            .fg(DIM, "  ライブ · 読み取り専用");
+        title.plain(" ").bold(self.lang.pick("画面", "Screen")).fg(
+            DIM,
+            self.lang
+                .pick("  ライブ · 読み取り専用", "  live · read-only"),
+        );
         lines.push(title.finish(cols));
         let border = if status.group() == Group::Needs {
             status.color()
@@ -2880,23 +3114,33 @@ impl Board {
         let mut title = Line::default();
         title
             .plain(" ")
-            .bold("報告の履歴")
-            .fg(DIM, "  このボードを開いてから");
+            .bold(self.lang.pick("報告の履歴", "Reports"))
+            .fg(
+                DIM,
+                self.lang
+                    .pick("  このボードを開いてから", "  since this board opened"),
+            );
         lines.push(title.finish(cols));
         if history.is_empty() {
             let mut line = Line::default();
-            line.plain("   ").fg(DIM, "報告はまだありません");
+            line.plain("   ").fg(
+                DIM,
+                self.lang.pick("報告はまだありません", "no reports yet"),
+            );
             lines.push(line.finish(cols));
         }
         for report in history.iter().take(history_rows) {
             let mut line = Line::default();
-            let when = ago(report.at, now);
+            let when = ago(report.at, now, self.lang);
             line.plain("   ")
-                .fg(DIM, &format!("報告 {:<4}", report.seq))
+                .fg(
+                    DIM,
+                    &format!("{} {:<4}", self.lang.pick("報告", "report"), report.seq),
+                )
                 .plain(" ")
                 .fg(
                     report.status.color(),
-                    &format!("{:<8}", report.status.label()),
+                    &pad(&report.status.label(self.lang), 8),
                 );
             let room = cols.saturating_sub(line.width + when.width() + 3);
             let detail = fit(&clean(&report.detail), room);
@@ -2910,24 +3154,39 @@ impl Board {
 
     fn footer(&self, cols: usize, help_cut: bool) -> String {
         let mut line = Line::default();
+        let l = |ja, en| self.lang.pick(ja, en);
         // (key, what, what when the line is tight), most important first.
         let keys: Vec<(&str, &str, &str)> = match &self.mode {
             Mode::Send(..) => vec![
-                ("Enter", "送信", "送信"),
-                ("Esc", "取り消し", "取消"),
-                ("^U", "全部消す", "全消"),
-                ("^W", "1 語消す", "語消"),
+                ("Enter", l("送信", "send"), l("送信", "send")),
+                ("Esc", l("取り消し", "cancel"), l("取消", "cancel")),
+                ("^U", l("全部消す", "clear"), l("全消", "clear")),
+                ("^W", l("1 語消す", "delete word"), l("語消", "word")),
             ],
             Mode::ConfirmClose(_) => vec![
-                ("y", "閉じる", "閉じる"),
-                ("ほかのキー", "取り消し", "取消"),
+                ("y", l("閉じる", "close"), l("閉じる", "close")),
+                (
+                    l("ほかのキー", "other keys"),
+                    l("取り消し", "cancel"),
+                    l("取消", "cancel"),
+                ),
             ],
-            Mode::ConfirmQuit => vec![("q", "終了", "終了"), ("ほかのキー", "取り消し", "取消")],
+            Mode::ConfirmQuit => vec![
+                ("q", l("終了", "quit"), l("終了", "quit")),
+                (
+                    l("ほかのキー", "other keys"),
+                    l("取り消し", "cancel"),
+                    l("取消", "cancel"),
+                ),
+            ],
             Mode::Normal if self.help => {
                 let text = if help_cut {
-                    " j/k スクロール   ほかのキーで閉じます"
+                    l(
+                        " j/k スクロール   ほかのキーで閉じます",
+                        " j/k scroll   other keys close",
+                    )
                 } else {
-                    " どのキーでもヘルプを閉じます"
+                    l(" どのキーでもヘルプを閉じます", " any key closes the help")
                 };
                 line.fg(DIM, text);
                 return line.finish(cols);
@@ -2935,45 +3194,50 @@ impl Board {
             Mode::Normal => {
                 let approval = self.target().is_some_and(|pane| self.awaits_approval(pane));
                 let go = if approval {
-                    "移動して答える"
+                    l("移動して答える", "go and answer")
                 } else {
-                    "移動"
+                    l("移動", "go")
                 };
                 // Nothing can be sent to an exited worker.
                 let exited = self.target().is_some_and(|pane| self.has_exited(pane));
-                let mut keys = vec![("g", go, "移動")];
+                let mut keys = vec![("g", go, l("移動", "go"))];
                 if !exited {
-                    keys.push(("s", "送る", "送る"));
+                    keys.push(("s", l("送る", "send"), l("送る", "send")));
                 }
-                keys.extend([("x", "閉じる", "閉じる"), ("q", "終了", "終了")]);
+                keys.extend([
+                    ("x", l("閉じる", "close"), l("閉じる", "close")),
+                    ("q", l("終了", "quit"), l("終了", "quit")),
+                ]);
                 match self.view {
                     View::List => {
                         keys.extend([
-                            ("Enter", "詳細", "詳細"),
-                            ("n", "次の要対応", "次"),
-                            ("j/k", "選択", "選択"),
+                            ("Enter", l("詳細", "details"), l("詳細", "details")),
+                            ("n", l("次の要対応", "next"), l("次", "next")),
+                            ("j/k", l("選択", "select"), l("選択", "select")),
                         ]);
                         // What Space does: to the subtree the selection is
                         // in, else to the finished and exited workers.
                         if let Some(folded) = self.space_folded() {
                             let what = match (self.space_target().is_some(), folded) {
-                                (true, true) => "開く",
-                                (true, false) => "たたむ",
-                                (false, true) => "完了を開く",
-                                (false, false) => "完了をたたむ",
+                                (true, true) => l("開く", "open"),
+                                (true, false) => l("たたむ", "fold"),
+                                (false, true) => l("完了を開く", "open done"),
+                                (false, false) => l("完了をたたむ", "fold done"),
                             };
                             keys.push(("Space", what, what));
                         }
                     }
-                    View::Detail(_) => {
-                        keys.extend([("Esc", "一覧", "一覧"), ("j/k", "前後", "前後")])
-                    }
+                    View::Detail(_) => keys.extend([
+                        ("Esc", l("一覧", "list"), l("一覧", "list")),
+                        ("j/k", l("前後", "prev/next"), l("前後", "prev/next")),
+                    ]),
                 }
                 keys
             }
         };
         let help = matches!(self.mode, Mode::Normal);
-        let more = if help { "? ヘルプ".width() } else { 0 };
+        let help_word = self.lang.pick(" ヘルプ", " help");
+        let more = if help { 1 + help_word.width() } else { 0 };
         // Every key in full, else every key short, else the most important
         // ones that fit (short).
         let width = |n: usize, short: bool| {
@@ -3002,7 +3266,7 @@ impl Board {
             line.plain(key).fg(DIM, &format!(" {what}{gap}"));
         }
         if help {
-            line.plain("?").fg(DIM, " ヘルプ");
+            line.plain("?").fg(DIM, help_word);
         }
         line.finish(cols)
     }
@@ -3134,6 +3398,7 @@ fn list(client: &mut Client, reconnect: &mut bool) -> Result<Vec<Panel>, Failure
 /// Run the board until `q`. The terminal is restored before returning.
 pub(crate) fn run(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Result<i32, Failure> {
     let mut board = Board::new(of, me);
+    board.lang = Lang::detect();
     let mut polling = Polling::default();
     let mut reconnect = false;
 
@@ -3263,10 +3528,19 @@ fn perform(server: &mut impl Server, board: &Board, action: Action) -> Notice {
             noa_ipc::ClientError::Rpc {
                 code: RPC_PANE_CLOSED,
                 ..
-            } => "そのワーカーは終了したか、閉じられています".to_string(),
+            } => board
+                .lang
+                .pick(
+                    "そのワーカーは終了したか、閉じられています",
+                    "that worker exited or was closed",
+                )
+                .to_string(),
             err => err.to_string(),
         };
-        Notice::warn(format!("できませんでした: {why}"))
+        Notice::warn(board.lang.pick(
+            format!("できませんでした: {why}"),
+            format!("could not: {why}"),
+        ))
     };
     // The board's listing can be up to `LIST_EVERY` old: look again right
     // before typing, so a worker that started waiting for an approval since
@@ -3277,7 +3551,7 @@ fn perform(server: &mut impl Server, board: &Board, action: Action) -> Notice {
                 if panels.iter().any(|panel| {
                     panel.pane_id.0 == *pane && Status::of(panel) == Status::Permission
                 }) {
-                    return Notice::warn(approval_message(&board.name(*pane)));
+                    return Notice::warn(approval_message(&board.name(*pane), board.lang));
                 }
             }
             Err(err) => return failed(err),
@@ -3297,9 +3571,14 @@ fn perform(server: &mut impl Server, board: &Board, action: Action) -> Notice {
                         panel.pane_id.0 == *pane && Status::of(panel) == Status::Permission
                     }) =>
                 {
-                    return Notice::warn(format!(
-                        "{} が承認待ちになったので Enter は送っていません。g でペインへ移動して答えてください",
-                        board.name(*pane)
+                    let name = board.name(*pane);
+                    return Notice::warn(board.lang.pick(
+                        format!(
+                            "{name} が承認待ちになったので Enter は送っていません。g でペインへ移動して答えてください"
+                        ),
+                        format!(
+                            "{name} now awaits approval, so Enter was not sent. g goes to its pane to answer it"
+                        ),
                     ));
                 }
                 Ok(_) => server.type_text(*pane, "\r", false),
@@ -3311,9 +3590,30 @@ fn perform(server: &mut impl Server, board: &Board, action: Action) -> Notice {
     };
     let name = |pane: &u64| board.name(*pane);
     match (action, result) {
-        (Action::Focus(pane), Ok(())) => Notice::ok(format!("{} へ移動しました", name(&pane))),
-        (Action::Send(pane, _), Ok(())) => Notice::ok(format!("{} に送りました", name(&pane))),
-        (Action::Close(pane), Ok(())) => Notice::ok(format!("{} を閉じました", name(&pane))),
+        (Action::Focus(pane), Ok(())) => {
+            let name = name(&pane);
+            Notice::ok(
+                board
+                    .lang
+                    .pick(format!("{name} へ移動しました"), format!("went to {name}")),
+            )
+        }
+        (Action::Send(pane, _), Ok(())) => {
+            let name = name(&pane);
+            Notice::ok(
+                board
+                    .lang
+                    .pick(format!("{name} に送りました"), format!("sent to {name}")),
+            )
+        }
+        (Action::Close(pane), Ok(())) => {
+            let name = name(&pane);
+            Notice::ok(
+                board
+                    .lang
+                    .pick(format!("{name} を閉じました"), format!("closed {name}")),
+            )
+        }
         (_, Err(err)) => failed(err),
         (Action::Quit, Ok(())) => Notice::ok(String::new()),
     }
@@ -5415,5 +5715,122 @@ mod tests {
         let all = rendered(&board, 110, 24, t0 + Duration::from_secs(11));
         let meta = line_with(&all, "報告 12");
         assert!(!meta.trim_end().ends_with('·'), "{all}");
+    }
+
+    // The board speaks Japanese where the locale is Japanese, English
+    // anywhere else: the locale variables in POSIX order, else the system's
+    // preferred language.
+    #[test]
+    fn the_language_follows_the_locale() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        let none = || None;
+        let ja = || Some("ja-JP".to_string());
+        assert_eq!(
+            Lang::from_locale(env(&[("LANG", "ja_JP.UTF-8")]), none),
+            Lang::Ja
+        );
+        assert_eq!(
+            Lang::from_locale(env(&[("LANG", "en_US.UTF-8")]), ja),
+            Lang::En
+        );
+        assert_eq!(
+            Lang::from_locale(env(&[("LC_ALL", "C"), ("LANG", "ja_JP.UTF-8")]), none),
+            Lang::En
+        );
+        assert_eq!(
+            Lang::from_locale(env(&[("LC_MESSAGES", "ja_JP"), ("LANG", "en_US")]), none),
+            Lang::Ja
+        );
+        // An empty variable is not set.
+        assert_eq!(
+            Lang::from_locale(env(&[("LC_ALL", ""), ("LANG", "ja_JP.UTF-8")]), none),
+            Lang::Ja
+        );
+        // No locale variables (a Noa started from the Dock): the system's.
+        assert_eq!(Lang::from_locale(env(&[]), ja), Lang::Ja);
+        assert_eq!(
+            Lang::from_locale(env(&[]), || Some("en-GB".to_string())),
+            Lang::En
+        );
+        assert_eq!(Lang::from_locale(env(&[]), none), Lang::En);
+    }
+
+    fn japanese(text: &str) -> bool {
+        text.chars()
+            .any(|ch| matches!(ch, '\u{3040}'..='\u{30ff}' | '\u{4e00}'..='\u{9fff}'))
+    }
+
+    // In English, no label is Japanese, in any view or prompt, at any width.
+    #[test]
+    fn an_english_board_has_no_japanese_label() {
+        let t0 = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        board.lang = Lang::En;
+        let mut panels = sample();
+        panels.extend(
+            nested()
+                .into_iter()
+                .filter(|p| p.pane_id.0 >= 10 && p.pane_id.0 < 12),
+        );
+        panels.push(failed_worker(6, 2));
+        board.update(panels.clone(), t0);
+        panels[0].agent.as_mut().unwrap().seq = 9;
+        board.update(panels[1..].to_vec(), t0 + Duration::from_secs(1));
+        board.update(panels, t0 + Duration::from_secs(2));
+        board.set_screen_at(2, "one\n", t0 + Duration::from_secs(3));
+        board.set_screen_at(2, "one\ntwo\n", t0 + Duration::from_secs(4));
+        let check = |board: &Board, what: &str| {
+            for cols in [24, 40, 60, 80, 120] {
+                let lines = board.render(cols, 30, t0 + Duration::from_secs(200));
+                for line in &lines {
+                    let line = visible(line);
+                    assert_eq!(line.width(), cols, "{what} {cols}: {line:?}");
+                    assert!(!japanese(&line), "{what} {cols}: {line:?}");
+                }
+            }
+        };
+        check(&board, "list");
+        let all = rendered(&board, 120, 30, t0 + Duration::from_secs(8));
+        assert!(
+            all.contains("! Needs you") && all.contains("approval"),
+            "{all}"
+        );
+        assert!(all.contains("working, output 4s ago"), "{all}");
+        board.key(Key::Char(' '));
+        check(&board, "settled");
+        board.key(Key::Char('?'));
+        check(&board, "help");
+        board.key(Key::Char('?'));
+        board.key(Key::Char('n'));
+        board.key(Key::Char('s'));
+        check(&board, "send");
+        board.key(Key::Esc);
+        board.key(Key::Char('x'));
+        check(&board, "close");
+        board.key(Key::Esc);
+        board.key(Key::Char('q'));
+        check(&board, "quit");
+        board.key(Key::Esc);
+        board.key(Key::Enter);
+        check(&board, "detail");
+        board.offline = Some(t0);
+        check(&board, "offline");
+        assert!(!japanese(&board.title()), "{}", board.title());
+        // A notice from an action, and from a key with nothing to do.
+        board.key(Key::Char('9'));
+        assert!(!japanese(&board.message.clone().unwrap().text));
+        let mut server = FakeServer {
+            listings: vec![sample()],
+            typed: Vec::new(),
+        };
+        let notice = perform(&mut server, &board, Action::Focus(2));
+        assert!(!japanese(&notice.text), "{}", notice.text);
     }
 }

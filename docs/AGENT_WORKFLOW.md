@@ -337,6 +337,9 @@ for a working worker, when its screen last moved ("8 秒前に出力"; "出力�
 分" after 2 minutes), and its last report. The selected worker's screen is
 previewed beside the list in a pane 110 columns or wider, under it from 70
 columns (and 18 rows), and not at all in a narrower pane, where `Enter` shows it.
+The board's labels are in Japanese when the locale is Japanese (`LC_ALL`,
+`LC_MESSAGES` or `LANG`, the first one set; with none, the system's preferred
+language) and in English otherwise.
 Keys: `j`/`k`
 select, `n` jumps to the next worker in the queue, `Enter` opens a worker's live screen and the reports seen since the board
 opened, `g` opens the worker over the lower part of the board, closing any

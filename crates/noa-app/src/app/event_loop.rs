@@ -964,6 +964,7 @@ impl App {
                             &gpu.device,
                             &state.surface_config,
                             state.occluded,
+                            &state.window,
                         );
                         crate::tab_switch_trace::on_surface_configured(trace_configure_start);
                     }
@@ -1541,6 +1542,7 @@ impl App {
                 &gpu.device,
                 &state.surface_config,
                 state.occluded,
+                &state.window,
             );
         }
         state.renderer.resize(PixelSize {

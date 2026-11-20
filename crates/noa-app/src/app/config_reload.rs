@@ -668,6 +668,7 @@ impl App {
                         &gpu.device,
                         &state.surface_config,
                         state.occluded,
+                        &state.window,
                     );
                 }
             }

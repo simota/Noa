@@ -929,7 +929,7 @@ impl App {
                 ),
                 view_formats: vec![],
             };
-            surface.configure(&gpu.device, &surface_config);
+            crate::app::helpers::configure_surface(&surface, &gpu.device, &surface_config, &window);
             let pipelines = gpu.pipelines.get(&gpu.device, surface_format);
             let font_px = font_pixel_size(self.runtime_font_size, window.scale_factor());
             gpu.fonts.ensure(font_px);

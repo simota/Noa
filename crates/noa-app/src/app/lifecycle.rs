@@ -364,7 +364,7 @@ impl App {
                 configure_size.unwrap_or_else(|| window.inner_size()),
                 self.shown_background_opacity() < 1.0,
             );
-            surface.configure(&device, &surface_config);
+            crate::app::helpers::configure_surface(&surface, &device, &surface_config, &window);
 
             // W1 pre-render-then-show: put the native chrome backdrop in
             // place, paint the startup background (theme clear + background
@@ -521,7 +521,7 @@ impl App {
                         window.inner_size(),
                         background_opacity < 1.0,
                     );
-                    surface.configure(&gpu.device, &config);
+                    crate::app::helpers::configure_surface(&surface, &gpu.device, &config, &window);
                     config
                 }
             };
@@ -910,7 +910,7 @@ impl App {
             );
             return;
         }
-        surface.configure(&gpu.device, &config);
+        crate::app::helpers::configure_surface(&surface, &gpu.device, &config, &window);
 
         // Hand the shared window to the next tab (else the previous), as
         // closing the front tab does.

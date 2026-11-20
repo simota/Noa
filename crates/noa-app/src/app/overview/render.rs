@@ -878,6 +878,7 @@ impl App {
                     &gpu.device,
                     &host_state.surface_config,
                     host_state.occluded,
+                    &host_state.window,
                 );
                 host_state.window.request_redraw();
                 return;

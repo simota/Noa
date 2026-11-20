@@ -146,6 +146,10 @@ noa close "$pane"
   seen to keep working after reporting it (the cause, possibly a hook, is not
   confirmed). If `read` shows the agent still working, wait again with
   `--after` the `seq` from the line.
+- An answer longer than the worker's screen cannot be read back in full:
+  `read --scrollback` on an agent returned only about the last screen (seen
+  with Claude Code 2.1.329 and Codex 0.171.0). When you need the whole
+  report, say in the task which file to write it to, and read that file.
 - `--tail N` adds the pane's last N output lines to each wait line as `tail`,
   which often saves the `read` after a wait.
 - Give every wait a timeout that fits the task, and see "When no report comes"

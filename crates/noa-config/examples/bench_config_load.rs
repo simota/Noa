@@ -8,7 +8,9 @@
 //! before/after pair of binaries can be diffed for identical results as
 //! well as compared for time.
 //!
-//!   cargo run --release -p noa-config --example bench_config_load -- [iters] [keybinds]
+//!   cargo run --release -p noa-config --example bench_config_load -- [iters] [keybinds] [section]
+//!
+//! `section` keeps only the sections whose name contains it (for profiling).
 
 use std::fmt::Write as _;
 use std::hint::black_box;
@@ -115,6 +117,8 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let iters: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(5000);
     let keybinds: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(40);
+    let section = args.next().unwrap_or_default();
+    let wanted = |label: &str| label.contains(section.as_str());
 
     let dir = std::env::temp_dir().join("noa-bench-config");
     std::fs::create_dir_all(&dir).expect("temp dir");
@@ -125,10 +129,18 @@ fn main() {
     let config_noinc = dir.join("config-noinc");
     std::fs::write(&config_noinc, without_includes(&main_config(keybinds))).expect("write config");
 
-    bench_parse(&config, &main_config(keybinds), iters);
-    bench_load("load_startup_config", &config, &legacy, iters);
-    bench_load("load_startup_config_noinc", &config_noinc, &legacy, iters);
-    bench_include_paths(&config, iters);
+    bench_parse(&config, &main_config(keybinds), iters, &wanted);
+    for (label, path) in [
+        ("load_startup_config", &config),
+        ("load_startup_config_noinc", &config_noinc),
+    ] {
+        if wanted(label) {
+            bench_load(label, path, &legacy, iters);
+        }
+    }
+    if wanted("config_include_paths") {
+        bench_include_paths(&config, iters);
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -145,12 +157,15 @@ fn without_includes(source: &str) -> String {
 
 /// The in-memory parse alone: directive split, include expansion (the
 /// includes still read from disk) and override building, no top-level read.
-fn bench_parse(config: &Path, source: &str, iters: usize) {
+fn bench_parse(config: &Path, source: &str, iters: usize, wanted: &dyn Fn(&str) -> bool) {
     let without_includes = without_includes(source);
     for (label, source) in [
         ("parse_overrides", source),
         ("parse_overrides_noinc", &*without_includes),
     ] {
+        if !wanted(label) {
+            continue;
+        }
         let mut samples = Vec::with_capacity(iters);
         let mut digest = FNV_BASIS;
         for i in 0..iters {

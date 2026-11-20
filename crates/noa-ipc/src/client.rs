@@ -292,7 +292,7 @@ impl Client {
                     })?;
                     // A late response to a request that already gave up has
                     // no owner left; skip it.
-                    if let Some(notification) = parse_notification(&value) {
+                    if let Ok(notification) = parse_notification(value) {
                         self.push_notification(notification);
                         return Ok(self.pop_notification());
                     }
@@ -855,9 +855,10 @@ fn response_step<T: DeserializeOwned>(text: &str, id: u64) -> ResponseStep<T> {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
         return protocol_error("control response is not valid JSON-RPC");
     };
-    if let Some(notification) = parse_notification(&value) {
-        return ResponseStep::Notification(notification);
-    }
+    let value = match parse_notification(value) {
+        Ok(notification) => return ResponseStep::Notification(notification),
+        Err(value) => value,
+    };
     let Ok(response) = RpcResponse::from_value(value) else {
         return protocol_error("control response is not valid JSON-RPC");
     };
@@ -882,24 +883,32 @@ fn response_step<T: DeserializeOwned>(text: &str, id: u64) -> ResponseStep<T> {
     }
 }
 
-/// A JSON-RPC notification (a `method` and no `id`), or `None` for a response.
-fn parse_notification(value: &Value) -> Option<Notification> {
+/// A JSON-RPC notification (a `method` and no `id`), or the value back for
+/// a response. A notification's panels are moved out of it, not copied.
+fn parse_notification(mut value: Value) -> Result<Notification, Value> {
     if value.get("id").is_some_and(|id| !id.is_null()) {
-        return None;
+        return Err(value);
     }
-    let method = value.get("method")?.as_str()?;
-    let params = value.get("params");
+    let Some(state_changed) = value
+        .get("method")
+        .and_then(Value::as_str)
+        .map(|method| method == "noa.stateChanged")
+    else {
+        return Err(value);
+    };
+    let params = value.get_mut("params");
     let dropped = params
+        .as_ref()
         .and_then(|params| params.get("dropped"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if method == "noa.stateChanged" {
+    if state_changed {
         let panels = params
-            .and_then(|params| params.get("panels"))
-            .and_then(|panels| serde_json::from_value::<Vec<Panel>>(panels.clone()).ok());
+            .and_then(|params| params.get_mut("panels"))
+            .and_then(|panels| serde_json::from_value::<Vec<Panel>>(panels.take()).ok());
         // A panel list this client cannot read is reported as a loss, so the
         // caller re-reads state instead of missing a change.
-        return Some(match panels {
+        return Ok(match panels {
             Some(panels) => Notification::StateChanged { panels, dropped },
             None => Notification::StateChanged {
                 panels: Vec::new(),
@@ -907,10 +916,8 @@ fn parse_notification(value: &Value) -> Option<Notification> {
             },
         });
     }
-    Some(Notification::Other {
-        method: method.to_string(),
-        dropped,
-    })
+    let method = value["method"].as_str().unwrap_or_default().to_string();
+    Ok(Notification::Other { method, dropped })
 }
 
 #[derive(serde::Deserialize)]
@@ -1050,7 +1057,7 @@ mod tests {
         let Ok(value) = serde_json::from_str::<Value>(text) else {
             return protocol_error("control response is not valid JSON-RPC");
         };
-        if let Some(notification) = parse_notification(&value) {
+        if let Some(notification) = parse_notification_by_ref(&value) {
             return ResponseStep::Notification(notification);
         }
         let Ok(response) = serde_json::from_value::<RpcResponse>(value) else {
@@ -1074,6 +1081,74 @@ mod tests {
         match serde_json::from_value(result) {
             Ok(result) => ResponseStep::Done(Ok(result)),
             Err(_) => protocol_error("control result has an invalid shape"),
+        }
+    }
+
+    /// [`parse_notification`] as it was, reading a copy of the panels.
+    fn parse_notification_by_ref(value: &Value) -> Option<Notification> {
+        if value.get("id").is_some_and(|id| !id.is_null()) {
+            return None;
+        }
+        let method = value.get("method")?.as_str()?;
+        let params = value.get("params");
+        let dropped = params
+            .and_then(|params| params.get("dropped"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if method == "noa.stateChanged" {
+            let panels = params
+                .and_then(|params| params.get("panels"))
+                .and_then(|panels| serde_json::from_value::<Vec<Panel>>(panels.clone()).ok());
+            return Some(match panels {
+                Some(panels) => Notification::StateChanged { panels, dropped },
+                None => Notification::StateChanged {
+                    panels: Vec::new(),
+                    dropped: true,
+                },
+            });
+        }
+        Some(Notification::Other {
+            method: method.to_string(),
+            dropped,
+        })
+    }
+
+    #[test]
+    fn a_notification_reads_as_from_a_copy_of_its_panels() {
+        let mut corpus = response_corpus();
+        corpus.extend(
+            [
+                r#"{"method":"noa.stateChanged"}"#,
+                r#"{"method":"noa.stateChanged","params":7}"#,
+                r#"{"method":"noa.stateChanged","params":[{"panels":[]}]}"#,
+                r#"{"method":"noa.stateChanged","params":{"dropped":"yes","panels":[]}}"#,
+                r#"{"method":"noa.stateChanged","params":{"dropped":false,"panels":null}}"#,
+                r#"{"method":"noa.stateChanged","params":{"panels":[],"dropped":true},"id":null}"#,
+                r#"{"method":"noa.output","params":{"dropped":true,"panels":[]},"id":0}"#,
+                r#"{"method":"","params":{}}"#,
+                r#"{"method":["noa.stateChanged"]}"#,
+                r#"[{"method":"noa.stateChanged"}]"#,
+            ]
+            .map(String::from),
+        );
+        for text in &corpus {
+            let Ok(value) = serde_json::from_str::<Value>(text) else {
+                continue;
+            };
+            let old = parse_notification_by_ref(&value);
+            match parse_notification(value.clone()) {
+                Ok(notification) => {
+                    assert_eq!(
+                        format!("{old:?}"),
+                        format!("{:?}", Some(notification)),
+                        "{text}"
+                    );
+                }
+                Err(back) => {
+                    assert!(old.is_none(), "{text}");
+                    assert_eq!(back, value, "a response comes back untouched: {text}");
+                }
+            }
         }
     }
 

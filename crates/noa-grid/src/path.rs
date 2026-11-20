@@ -569,4 +569,74 @@ mod tests {
         assert_eq!(detect_path_at(&rows, 1, 18), None);
         assert_eq!(detect_path_at(&rows, 2, 0), None);
     }
+
+    /// Every column of a deterministic corpus of path-, quote- and
+    /// punctuation-heavy lines, digested. Pins the exact matches (spans,
+    /// paths, line/column suffixes).
+    #[test]
+    fn corpus_matches_are_pinned() {
+        const TOKENS: [&str; 36] = [
+            "/usr/lib",
+            "~/x",
+            "./a",
+            "../b",
+            "src/main.rs",
+            ":12",
+            ":3:4",
+            "/",
+            ".",
+            "..",
+            "'",
+            "\"",
+            "`",
+            "\\ ",
+            " ",
+            "a",
+            "(",
+            ")",
+            "[",
+            "]",
+            "{",
+            "}",
+            ",",
+            ";",
+            ":",
+            "=",
+            "<",
+            ">",
+            "https://e.co/a",
+            "-",
+            "_",
+            "~",
+            "界",
+            "!",
+            "?",
+            "x.y",
+        ];
+        let mut state = 0x2545_f491u32;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        };
+        let mut digest = 0xcbf2_9ce4_8422_2325u64;
+        let mut found = 0;
+        for _ in 0..400 {
+            let len = 4 + next() as usize % 30;
+            let text: String = (0..len)
+                .map(|_| TOKENS[next() as usize % TOKENS.len()])
+                .collect();
+            let row = row_from_str(&text);
+            for column in 0..row.cells.len() as u16 {
+                let m = detect_path_at_column(&row, column);
+                found += usize::from(m.is_some());
+                for b in format!("{column}{m:?}").bytes() {
+                    digest ^= u64::from(b);
+                    digest = digest.wrapping_mul(0x100_0000_01b3);
+                }
+            }
+        }
+        assert_eq!((found, digest), (5712, 14269119718606266846));
+    }
 }

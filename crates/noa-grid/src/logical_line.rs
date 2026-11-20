@@ -393,6 +393,39 @@ mod tests {
     }
 
     #[test]
+    fn flattens_marks_wide_glyphs_and_the_wrap_pad() {
+        // The second 界 cannot fit in the last column: it wraps, leaving the
+        // pad cell behind; spacer halves are skipped, marks keep their cell.
+        let terminal = feed(6, 3, "ae\u{301}界x界y".as_bytes());
+        let rows = &terminal.primary.grid;
+        assert!(rows[0].ends_with_wide_pad());
+        let text = super::LineText::new(&[&rows[0], &rows[1]]);
+        assert_eq!(
+            text.chars,
+            ['a', 'e', '\u{301}', '界', 'x', '界', 'y', ' ', ' ', ' '].to_vec()
+        );
+        assert_eq!(
+            text.cells,
+            [
+                (0, 0),
+                (0, 1),
+                (0, 1),
+                (0, 2),
+                (0, 4),
+                (1, 0),
+                (1, 2),
+                (1, 3),
+                (1, 4),
+                (1, 5)
+            ]
+            .to_vec()
+        );
+        let line = terminal.primary.visible_logical_line(1).unwrap();
+        let bounded = line.text(0).expect("column 0 is part of the line");
+        assert_eq!((bounded.chars, bounded.cells), (text.chars, text.cells));
+    }
+
+    #[test]
     fn follows_a_long_line_only_a_bounded_distance() {
         let mut terminal = Terminal::new(GridSize::new(4, 200));
         Stream::new().feed("x".repeat(4 * 150).as_bytes(), &mut terminal);

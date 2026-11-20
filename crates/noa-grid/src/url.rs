@@ -1982,6 +1982,17 @@ mod tests {
         assert_eq!((found.end_row, found.end_x), (1, 2));
     }
 
+    #[test]
+    fn run_boundaries_are_whitespace_and_the_listed_delimiters() {
+        for c in (0..=u32::from(char::MAX)).filter_map(char::from_u32) {
+            assert_eq!(
+                is_run_boundary(c),
+                c.is_whitespace() || RUN_BOUNDARIES.contains(c),
+                "{c:?}"
+            );
+        }
+    }
+
     /// A scan resumed from one URL start to the next answers every URL start
     /// exactly as a fresh scan from the row's beginning does, including
     /// where a bounded lookahead meets the scheme (`'''https`, `*https`).

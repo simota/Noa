@@ -83,6 +83,17 @@ const ATTACH_READ_POLL: Duration = Duration::from_millis(1);
 /// Bound one output-drain turn so a continuously refilled PTY queue cannot
 /// starve client input waiting on the same WebSocket.
 const ATTACH_OUTPUT_BYTES_PER_POLL: usize = 64 * 1024;
+/// Longest a parked control connection sleeps before rechecking shutdown
+/// when the server has no [`StopWake`] pair to wake it: the read-poll it
+/// replaces, so shutdown is seen on the same schedule.
+#[cfg(unix)]
+const CONTROL_PARK_POLL: Duration = Duration::from_millis(50);
+
+/// Readable once the server stops: written once and never read, so every
+/// connection parked on it, now or later, wakes to see the shutdown flag.
+#[cfg(unix)]
+type StopWake = Arc<Option<crate::attach::OutputWake>>;
+
 /// Longest a parked raw connection sleeps before rechecking shutdown and its
 /// lease; output and client input wake it immediately.
 const ATTACH_PARK_POLL: Duration = Duration::from_millis(50);
@@ -161,6 +172,8 @@ pub struct ServerHandle {
     /// can't have been dropped (and its number reused) while this `Arc` is
     /// alive.
     listener: Arc<TcpListener>,
+    #[cfg(unix)]
+    stop_wake: StopWake,
 }
 
 impl ServerHandle {
@@ -193,6 +206,12 @@ impl ServerHandle {
     /// `wake_addr`.
     fn stop_accept_thread(&mut self, wake_addr: std::net::SocketAddr) -> bool {
         self.shutdown.store(true, Ordering::SeqCst);
+        // After the flag: a connection woken by this sees it set.
+        #[cfg(unix)]
+        if let Some(stop) = self.stop_wake.as_ref() {
+            use std::io::Write as _;
+            let _ = (&stop.tx).write(&[1]);
+        }
         let Some(handle) = self.accept_thread.take() else {
             return true;
         };
@@ -345,6 +364,10 @@ impl Server {
             Arc::new(Mutex::new(HashMap::new()));
 
         let shutdown_loop = shutdown.clone();
+        #[cfg(unix)]
+        let stop_wake: StopWake = Arc::new(crate::attach::OutputWake::new());
+        #[cfg(unix)]
+        let stop_wake_loop = stop_wake.clone();
         let broadcaster_loop = broadcaster.clone();
         let listener_loop = listener.clone();
         let accept_thread = thread::spawn(move || {
@@ -386,6 +409,8 @@ impl Server {
                         let token = token.clone();
                         let broadcaster = broadcaster_loop.clone();
                         let shutdown_conn = shutdown_loop.clone();
+                        #[cfg(unix)]
+                        let stop_wake = stop_wake_loop.clone();
                         let connection_count = connection_count.clone();
                         let per_ip_counts = per_ip_counts.clone();
                         let attach_registry = attach_registry.clone();
@@ -407,6 +432,8 @@ impl Server {
                                 handshake_timeout,
                                 broadcaster,
                                 shutdown_conn,
+                                #[cfg(unix)]
+                                stop_wake,
                                 connection_count,
                                 per_ip_counts,
                                 ip_slot,
@@ -443,6 +470,8 @@ impl Server {
             connection_count: connection_count_handle,
             accept_thread: Some(accept_thread),
             listener,
+            #[cfg(unix)]
+            stop_wake,
         })
     }
 }
@@ -530,6 +559,12 @@ enum StreamMode {
         deadline: Instant,
     },
     Connected,
+    /// Connected, and the caller waits for the socket itself
+    /// ([`PushQueue::park`]): a read takes what has arrived and never waits,
+    /// failing `WouldBlock` when nothing has. Writes still block, bounded by
+    /// `WRITE_TIMEOUT`.
+    #[cfg(unix)]
+    Polled,
 }
 
 /// Wraps the raw `TcpStream` so every read/write during the WS handshake is
@@ -592,6 +627,14 @@ impl DeadlineStream {
         Ok(())
     }
 
+    /// Switches an authenticated connection's reads to [`StreamMode::Polled`].
+    #[cfg(unix)]
+    fn mark_polled(&mut self) {
+        if matches!(self.mode, StreamMode::Connected) {
+            self.mode = StreamMode::Polled;
+        }
+    }
+
     /// Lifts the hello deadline once the session is authenticated.
     fn mark_hello_done(&mut self) {
         if matches!(self.mode, StreamMode::AwaitingHello { .. }) {
@@ -627,6 +670,24 @@ impl io::Read for DeadlineStream {
                 ));
             }
             StreamMode::AwaitingHello { .. } | StreamMode::Connected => {}
+            #[cfg(unix)]
+            StreamMode::Polled => {
+                use std::os::fd::AsRawFd as _;
+                // SAFETY: receives into `buf`, valid for its whole length.
+                let n = unsafe {
+                    libc::recv(
+                        self.inner.as_raw_fd(),
+                        buf.as_mut_ptr().cast(),
+                        buf.len(),
+                        libc::MSG_DONTWAIT,
+                    )
+                };
+                return if n < 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(n as usize)
+                };
+            }
         }
         self.inner.read(buf)
     }
@@ -734,6 +795,7 @@ fn handle_connection(
     handshake_timeout: Duration,
     broadcaster: Broadcaster,
     shutdown: Arc<AtomicBool>,
+    #[cfg(unix)] stop_wake: StopWake,
     connection_count: Arc<AtomicUsize>,
     per_ip_counts: Arc<Mutex<HashMap<IpAddr, usize>>>,
     ip_slot: Option<IpAddr>,
@@ -825,6 +887,8 @@ fn handle_connection(
                 &queue,
                 &mut session,
                 &shutdown,
+                #[cfg(unix)]
+                &stop_wake,
                 connected_at,
                 hello_deadline,
             );
@@ -865,9 +929,24 @@ fn run_connection_loop(
     queue: &Arc<PushQueue>,
     session: &mut Session,
     shutdown: &Arc<AtomicBool>,
+    #[cfg(unix)] stop_wake: &StopWake,
     connected_at: Instant,
     hello_deadline: Duration,
 ) -> io::Result<()> {
+    // Once authenticated, the thread sleeps on its socket, its push queue and
+    // the server's stop together, so a notification goes out when it is
+    // pushed rather than at the next read-poll, and an idle connection costs
+    // no wake-ups. A read returning `WouldBlock` proves tungstenite holds no
+    // buffered frame, so only then is it safe to sleep on the socket.
+    #[cfg(unix)]
+    let (stop, park_timeout) = match stop_wake.as_ref() {
+        Some(wake) => (Some(std::os::fd::AsRawFd::as_raw_fd(&wake.rx)), None),
+        None => (None, Some(CONTROL_PARK_POLL)),
+    };
+    #[cfg(unix)]
+    let mut parking = false;
+    #[cfg(unix)]
+    let mut socket_ready = true;
     loop {
         if shutdown.load(Ordering::SeqCst) {
             return Ok(());
@@ -885,6 +964,12 @@ fn run_connection_loop(
         for item in queue.drain() {
             let text = serde_json::to_string(&to_notification(item)).unwrap_or_default();
             ws.send(Message::Text(text)).map_err(ws_err_to_io)?;
+        }
+
+        #[cfg(unix)]
+        if parking && !socket_ready {
+            socket_ready = queue.park(ws.get_ref().park_handle(), stop, park_timeout);
+            continue;
         }
 
         match ws.read() {
@@ -906,6 +991,11 @@ fn run_connection_loop(
                 }
                 if session.hello_done {
                     ws.get_mut().mark_hello_done();
+                    #[cfg(unix)]
+                    if !parking && queue.can_park() {
+                        ws.get_mut().mark_polled();
+                        parking = true;
+                    }
                 }
             }
             Ok(Message::Ping(payload)) => {
@@ -919,7 +1009,12 @@ fn run_connection_loop(
             {
                 // Plain 50ms read-poll timeout (or a write timing out, R-4) —
                 // the hello-deadline check now lives at the top of the loop,
-                // so this arm only needs to keep polling.
+                // so this arm only needs to keep polling. A polled read finds
+                // nothing here at once, and the next pass parks.
+                #[cfg(unix)]
+                {
+                    socket_ready = false;
+                }
                 continue;
             }
             Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
@@ -1877,6 +1972,55 @@ mod tests {
         let client = TcpStream::connect(addr).unwrap();
         let (server, _) = listener.accept().unwrap();
         (client, server)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_polled_stream_reads_what_arrived_and_never_waits() {
+        use std::io::Write as _;
+        let (mut client, server) = tcp_pair();
+        let mut stream = DeadlineStream::new_handshake(server, Duration::from_secs(5));
+        stream
+            .mark_connected(Instant::now() + Duration::from_secs(10))
+            .unwrap();
+        stream.mark_hello_done();
+        stream.mark_polled();
+        let mut buf = [0u8; 8];
+        let started = Instant::now();
+        let err = io::Read::read(&mut stream, &mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        assert!(started.elapsed() < Duration::from_millis(40));
+        client.write_all(b"abc").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let n = loop {
+            match io::Read::read(&mut stream, &mut buf) {
+                Ok(n) => break n,
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline);
+                    std::thread::yield_now();
+                }
+                Err(err) => panic!("{err}"),
+            }
+        };
+        assert_eq!(&buf[..n], b"abc");
+        // Writes still go through the blocking socket.
+        io::Write::write_all(&mut stream, b"ok").unwrap();
+        let mut reply = [0u8; 2];
+        io::Read::read_exact(&mut client, &mut reply).unwrap();
+        assert_eq!(&reply, b"ok");
+        // Closed with nothing unread, so the peer sees a FIN, not a reset.
+        drop(client);
+        let n = loop {
+            match io::Read::read(&mut stream, &mut buf) {
+                Ok(n) => break n,
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline);
+                    std::thread::yield_now();
+                }
+                Err(err) => panic!("{err}"),
+            }
+        };
+        assert_eq!(n, 0, "a closed peer reads as end of stream");
     }
 
     // ---- R-2: DeadlineStream enforces an absolute handshake deadline ----

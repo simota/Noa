@@ -10,6 +10,8 @@ use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+#[cfg(unix)]
+use std::time::Duration;
 
 use crate::attach::AttachRegistry;
 use crate::protocol::{EventKind, Panel, Row};
@@ -70,6 +72,9 @@ struct QueueInner {
     /// the client. Carried forward across `drain()` calls until an `Output`
     /// notification is available to tag (FR-17).
     dropped_pending: bool,
+    /// The connection thread sleeps in [`PushQueue::park`] and must be woken.
+    #[cfg(unix)]
+    parked: bool,
 }
 
 /// A bounded, wait-free (mutex-protected, uncontended-fast) per-connection
@@ -78,6 +83,11 @@ struct QueueInner {
 pub struct PushQueue {
     inner: Mutex<QueueInner>,
     cap: usize,
+    /// Wakes the connection thread parked on its socket when an item comes
+    /// in. `None` if the pair couldn't be created (fd exhaustion): the
+    /// thread then polls its socket on the read timeout, as before.
+    #[cfg(unix)]
+    wake: Option<crate::attach::OutputWake>,
 }
 
 impl PushQueue {
@@ -86,8 +96,12 @@ impl PushQueue {
             inner: Mutex::new(QueueInner {
                 items: VecDeque::with_capacity(cap),
                 dropped_pending: false,
+                #[cfg(unix)]
+                parked: false,
             }),
             cap,
+            #[cfg(unix)]
+            wake: crate::attach::OutputWake::new(),
         }
     }
 
@@ -98,6 +112,69 @@ impl PushQueue {
             guard.dropped_pending = true;
         }
         guard.items.push_back(item);
+        // The lock orders this against `park`'s check, so a wake can't be
+        // lost; one that lands just as `park` times out only makes the next
+        // `park` return at once.
+        #[cfg(unix)]
+        if std::mem::take(&mut guard.parked)
+            && let Some(wake) = &self.wake
+        {
+            use std::io::Write as _;
+            let _ = (&wake.tx).write(&[1]);
+        }
+    }
+
+    /// Whether [`Self::park`] can wake on a push (it can't without a wake
+    /// pair, and then returns at once).
+    #[cfg(unix)]
+    pub(crate) fn can_park(&self) -> bool {
+        self.wake.is_some()
+    }
+
+    /// Sleep until `socket` or `stop` is readable, an item is pushed, or
+    /// `timeout` passes (`None`: no timeout), whichever is first; at once if
+    /// items are already queued. Returns whether the socket may have data to
+    /// read.
+    #[cfg(unix)]
+    pub(crate) fn park(
+        &self,
+        socket: std::os::fd::RawFd,
+        stop: Option<std::os::fd::RawFd>,
+        timeout: Option<Duration>,
+    ) -> bool {
+        use std::io::Read as _;
+        use std::os::fd::AsRawFd as _;
+
+        let Some(wake) = &self.wake else {
+            return true;
+        };
+        let timeout_ms = {
+            let mut guard = self.inner.lock();
+            if guard.items.is_empty() {
+                guard.parked = true;
+                timeout.map_or(-1, |timeout| timeout.as_millis() as libc::c_int)
+            } else {
+                0
+            }
+        };
+        let poll_in = |fd| libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let mut fds = [
+            poll_in(socket),
+            poll_in(wake.rx.as_raw_fd()),
+            poll_in(stop.unwrap_or(-1)),
+        ];
+        let count = if stop.is_some() { 3 } else { 2 };
+        // SAFETY: `fds` holds `count` valid `pollfd`s for the whole call.
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), count, timeout_ms) };
+        self.inner.lock().parked = false;
+        if fds[1].revents != 0 {
+            let _ = (&wake.rx).read(&mut [0u8; 8]);
+        }
+        ready < 0 || fds[0].revents != 0
     }
 
     /// Drains all queued notifications, tagging the most recent `Output` or
@@ -254,6 +331,19 @@ impl Broadcaster {
         self.output_subscribers.load(Ordering::Relaxed) > 0
     }
 
+    /// Whether any live subscription takes `noa.stateChanged`, i.e. whether
+    /// a [`Self::broadcast_state_changed`] now could reach anyone. Taken
+    /// under the registry lock, so a subscription acknowledged before this
+    /// call is seen.
+    pub fn has_state_changed_subscribers(&self) -> bool {
+        self.conns.lock().values().any(|entry| {
+            entry
+                .subs
+                .iter()
+                .any(|sub| sub.events.contains(EventMask::STATE_CHANGED))
+        })
+    }
+
     /// Whether at least one live subscription would receive `noa.output`
     /// notifications for `pane_id` specifically (R-3). `has_output_subscribers`
     /// is global — it forces every producing pane's io thread to pay for
@@ -387,6 +477,98 @@ impl Broadcaster {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    mod park {
+        use super::*;
+        use std::io::Write as _;
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::net::UnixStream;
+        use std::time::{Duration, Instant};
+
+        const LONG: Duration = Duration::from_secs(5);
+
+        fn state_changed() -> QueuedNotification {
+            QueuedNotification::StateChanged {
+                panels: Vec::new(),
+                dropped: false,
+            }
+        }
+
+        /// Parks with `stop` and `timeout` on a second thread, runs `wake`,
+        /// and returns what the park reported and how long it slept.
+        fn park_then(
+            stop: Option<&UnixStream>,
+            timeout: Option<Duration>,
+            wake: impl FnOnce(&PushQueue, &mut UnixStream),
+        ) -> (bool, Duration) {
+            let queue = Arc::new(PushQueue::new(4));
+            assert!(queue.can_park());
+            let (mut peer, socket) = UnixStream::pair().unwrap();
+            let fd = socket.as_raw_fd();
+            let stop = stop.map(|stop| stop.as_raw_fd());
+            let parked = {
+                let queue = queue.clone();
+                std::thread::spawn(move || {
+                    let started = Instant::now();
+                    let ready = queue.park(fd, stop, timeout);
+                    (ready, started.elapsed())
+                })
+            };
+            std::thread::sleep(Duration::from_millis(50));
+            wake(&queue, &mut peer);
+            let result = parked.join().unwrap();
+            drop(socket);
+            result
+        }
+
+        #[test]
+        fn a_push_wakes_a_parked_connection_without_its_socket() {
+            let (ready, slept) = park_then(None, None, |queue, _| queue.push(state_changed()));
+            assert!(!ready);
+            assert!(slept < LONG / 2, "{slept:?}");
+        }
+
+        #[test]
+        fn a_request_wakes_a_parked_connection_for_its_socket() {
+            let (ready, slept) = park_then(None, Some(LONG), |_, peer| {
+                peer.write_all(b"x").unwrap();
+            });
+            assert!(ready);
+            assert!(slept < LONG / 2, "{slept:?}");
+        }
+
+        #[test]
+        fn a_stop_wakes_every_parked_connection() {
+            let (tx, rx) = UnixStream::pair().unwrap();
+            let (ready, slept) = park_then(Some(&rx), None, |_, _| {
+                (&tx).write_all(&[1]).unwrap();
+            });
+            assert!(!ready);
+            assert!(slept < LONG / 2, "{slept:?}");
+            // It is never read: a later park returns at once too.
+            let (_, slept) = park_then(Some(&rx), None, |_, _| {});
+            assert!(slept < LONG / 2, "{slept:?}");
+        }
+
+        #[test]
+        fn a_park_times_out_with_nothing_to_do() {
+            let (ready, slept) = park_then(None, Some(Duration::from_millis(100)), |_, _| {});
+            assert!(!ready);
+            assert!(slept >= Duration::from_millis(90), "{slept:?}");
+        }
+
+        #[test]
+        fn queued_items_keep_a_connection_from_parking() {
+            let queue = PushQueue::new(4);
+            queue.push(state_changed());
+            let (_peer, socket) = UnixStream::pair().unwrap();
+            let started = Instant::now();
+            assert!(!queue.park(socket.as_raw_fd(), None, None));
+            assert!(started.elapsed() < LONG / 2);
+            assert_eq!(queue.drain().len(), 1);
+        }
+    }
 
     #[test]
     fn push_never_blocks_and_drops_oldest() {
@@ -656,6 +838,28 @@ mod tests {
     }
 
     // ---- R-3: has_output_subscribers() gate ----
+
+    #[test]
+    fn state_changed_subscribers_are_seen_on_any_connection_until_they_go() {
+        let b = Broadcaster::new();
+        assert!(!b.has_state_changed_subscribers());
+        let (output_only, _q1) = b.register_connection();
+        b.add_subscription(output_only, EventMask::OUTPUT, None)
+            .unwrap();
+        assert!(!b.has_state_changed_subscribers());
+        let (waiter, _q2) = b.register_connection();
+        let sub = b
+            .add_subscription(waiter, EventMask::STATE_CHANGED, Some(HashSet::from([3])))
+            .unwrap();
+        assert!(b.has_state_changed_subscribers());
+        b.remove_subscription(waiter, sub);
+        assert!(!b.has_state_changed_subscribers());
+        let both = EventMask::from_events(&[EventKind::StateChanged, EventKind::Output]);
+        b.add_subscription(waiter, both, None).unwrap();
+        assert!(b.has_state_changed_subscribers());
+        b.unregister_connection(waiter);
+        assert!(!b.has_state_changed_subscribers());
+    }
 
     #[test]
     fn has_output_subscribers_is_false_with_no_subscriptions_at_all() {

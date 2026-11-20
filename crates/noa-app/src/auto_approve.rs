@@ -3910,6 +3910,77 @@ mod tests {
         ));
     }
 
+    /// `wrapped_footer_end` as it was written before it stopped building a
+    /// squeezed copy of every row it compares: the reference the
+    /// allocation-free version must agree with.
+    fn wrapped_footer_end_reference(
+        rows: &[RowText],
+        start: usize,
+        expected: &str,
+    ) -> Option<usize> {
+        let mut remaining = expected;
+        for (offset, row) in rows[start..].iter().enumerate() {
+            let text = row.split_whitespace().collect::<Vec<_>>().join(" ");
+            if text.is_empty() {
+                return None;
+            }
+            remaining = remaining.trim_start().strip_prefix(&text)?;
+            if remaining.is_empty() {
+                return Some(start + offset);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn wrapped_footer_end_matches_the_squeezing_reference() {
+        let footers = [
+            CLAUDE_PERMISSION_FOOTER,
+            CLAUDE_QUESTION_FOOTER,
+            "Press enter to confirm or esc to cancel",
+            "↑/↓ Navigate · tab Amend · ctrl+g edit/expand command · ctrl+r Review",
+            "a  b",
+            " a",
+            "",
+        ];
+        let screens: Vec<Vec<RowText>> = vec![
+            rows(&[" Esc to cancel · Tab to amend"]),
+            rows(&["Esc   to\tcancel ·  Tab to amend  "]),
+            rows(&["Esc to can", "cel · Tab to amend"]),
+            rows(&["Esc to cancel ·", " Tab to", "amend"]),
+            rows(&["Esc to cancel ·", "", "Tab to amend"]),
+            rows(&["Esc to cancel · Tab to amend extra"]),
+            rows(&["Esc\u{3000}to cancel · Tab to amend"]),
+            rows(&["Esc\u{a0}to cancel · Tab to amend"]),
+            rows(&["Enter to select · ↑/↓ to navigate", " · Esc to cancel"]),
+            rows(&["Enter to select · ↑/↓ to navigate ·", "Esc to cancel", "x"]),
+            rows(&["Press enter to confirm", "or esc to cancel"]),
+            rows(&[
+                "↑/↓ Navigate · tab Amend · ctrl+g edit/expand",
+                "command · ctrl+r Review",
+            ]),
+            rows(&["a", "b"]),
+            rows(&["a b"]),
+            rows(&["a  b"]),
+            rows(&["   ", "a"]),
+            rows(&["", ""]),
+            rows(&["Esc", "to", "cancel", "·", "Tab", "to", "amend"]),
+            rows(&["Esc to cancel · Tab to amendd"]),
+            rows(&["sc to cancel · Tab to amend"]),
+        ];
+        for screen in &screens {
+            for footer in footers {
+                for start in 0..screen.len() {
+                    assert_eq!(
+                        wrapped_footer_end(screen, start, footer),
+                        wrapped_footer_end_reference(screen, start, footer),
+                        "{screen:?} from {start} against {footer:?}"
+                    );
+                }
+            }
+        }
+    }
+
     /// Perf harness (auto-approve per-feed scan): the cost of one
     /// `find_prompt` pass over a 50-row viewport, for a screen of plain
     /// output (no prompt — the common feed), Claude Code's idle input frame,

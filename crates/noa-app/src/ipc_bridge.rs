@@ -287,7 +287,7 @@ pub(crate) type IpcPendingTable = Arc<Mutex<HashMap<u64, PendingIpcAction>>>;
 /// later — the main thread keeps executing the already-dispatched
 /// `UserEvent::IpcAction` regardless of whether anyone is still waiting on
 /// `rx`, it just fails to deliver a reply. Callers observe this as an
-/// `Internal` error even though the action succeeds; v1 accepts
+/// `OutcomeUnknown` error (-32009), since the action may succeed; v1 accepts
 /// at-least-once/timeout-may-still-execute semantics for `control`/`input`
 /// mutations rather than adding a cancellation path (spec F-7).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -368,7 +368,7 @@ impl AppIpcBackend {
 
     /// Submit a mutation to the main thread and block for its reply
     /// (DEC-C). A dropped reply sender (main thread tore the pane down
-    /// mid-flight) surfaces as `PaneClosed`; a timeout as `Internal`.
+    /// mid-flight) surfaces as `PaneClosed`; a timeout as `OutcomeUnknown`.
     fn submit(&self, action: IpcActionKind) -> Result<IpcActionReply, IpcError> {
         let request_id = self.next_request.fetch_add(1, Ordering::SeqCst);
         let (tx, rx): (Sender<Result<IpcActionReply, IpcError>>, Receiver<_>) = bounded(1);
@@ -387,7 +387,8 @@ impl AppIpcBackend {
             Ok(result) => result,
             Err(_) => {
                 self.pending.lock().remove(&request_id);
-                Err(IpcError::Internal("request timed out".to_string()))
+                // Already dispatched: the main thread may still carry it out.
+                Err(IpcError::OutcomeUnknown("request timed out".to_string()))
             }
         }
     }

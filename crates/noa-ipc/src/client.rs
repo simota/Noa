@@ -421,8 +421,25 @@ impl Client {
 
         let deadline = Instant::now() + timeout;
         loop {
-            set_socket_read_timeout(&mut self.socket, remaining_until(deadline)?)?;
-            match self.socket.read().map_err(ClientError::transport)? {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ClientError::request_timeout(method));
+            }
+            set_socket_read_timeout(&mut self.socket, remaining)?;
+            let message = match self.socket.read() {
+                Ok(message) => message,
+                // The deadline passed with the connection still open: the
+                // server is slow, not gone. A late response is skipped by
+                // the next request (its id is not that request's).
+                Err(tungstenite::Error::Io(error))
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        || error.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    return Err(ClientError::request_timeout(method));
+                }
+                Err(error) => return Err(ClientError::transport(error)),
+            };
+            match message {
                 Message::Text(text) => match response_step(&text, id) {
                     ResponseStep::Notification(notification) => {
                         self.push_notification(notification);
@@ -965,6 +982,11 @@ pub enum ClientError {
     InvalidInput(String),
     #[error("websocket transport error: {0}")]
     Transport(String),
+    /// A request's response did not arrive within its deadline while the
+    /// connection stayed open: the server may still answer (late), so this
+    /// is not a lost connection.
+    #[error("request timed out: {0}")]
+    Timeout(String),
     #[error("protocol error: {0}")]
     Protocol(String),
     #[error("rpc error {code}: {message}")]
@@ -978,6 +1000,12 @@ pub enum ClientError {
 impl ClientError {
     fn transport(error: tungstenite::Error) -> Self {
         ClientError::Transport(error.to_string())
+    }
+
+    fn request_timeout(method: &str) -> Self {
+        ClientError::Timeout(format!(
+            "no response to {method} within the request deadline"
+        ))
     }
 
     fn closed(frame: Option<tungstenite::protocol::CloseFrame<'static>>) -> Self {
@@ -1287,8 +1315,76 @@ mod tests {
             Duration::from_millis(100),
             Duration::from_millis(50),
         );
-        assert!(matches!(result, Err(ClientError::Transport(_))));
+        assert!(matches!(result, Err(ClientError::Timeout(_))));
         assert!(started.elapsed() < Duration::from_secs(1));
+        server.join().unwrap();
+    }
+
+    // Review finding: a request past its deadline on a live connection read
+    // as a lost connection (`Transport`), which ended a long `+ctl wait`.
+    // It is its own error, and the connection keeps working afterwards: the
+    // late response is skipped by the next request.
+    #[test]
+    fn a_request_past_its_deadline_is_a_timeout_and_the_connection_survives() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            let id = |message: Message| -> u64 {
+                let Message::Text(text) = message else {
+                    panic!("text request expected");
+                };
+                serde_json::from_str::<Value>(&text).unwrap()["id"]
+                    .as_u64()
+                    .unwrap()
+            };
+            let hello = id(socket.read().unwrap());
+            let reply = |id: u64, result: Value| {
+                Message::Text(
+                    serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string(),
+                )
+            };
+            socket
+                .send(reply(
+                    hello,
+                    serde_json::json!({
+                        "protocolVersion": crate::protocol::PROTOCOL_VERSION,
+                        "grantedScopes": [],
+                        "serverVersion": "t",
+                    }),
+                ))
+                .unwrap();
+            // The first listing is answered only after the client gave up.
+            let slow = id(socket.read().unwrap());
+            thread::sleep(Duration::from_millis(150));
+            socket
+                .send(reply(slow, serde_json::json!({ "panels": [] })))
+                .unwrap();
+            let next = id(socket.read().unwrap());
+            socket
+                .send(reply(next, serde_json::json!({ "panels": [] })))
+                .unwrap();
+            let _ = socket.read();
+        });
+
+        let mut client = Client::connect_with_timeouts(
+            &url,
+            "token",
+            ScopeSet::empty(),
+            Duration::from_secs(2),
+            Duration::from_millis(50),
+        )
+        .unwrap();
+        let first: Result<ListPanelsResult, _> = client.request_with_timeout(
+            "noa.listPanels",
+            serde_json::json!({}),
+            Duration::from_millis(50),
+        );
+        assert!(matches!(first, Err(ClientError::Timeout(_))), "{first:?}");
+        thread::sleep(Duration::from_millis(200));
+        assert!(client.list_panels().unwrap().is_empty());
+        drop(client);
         server.join().unwrap();
     }
 

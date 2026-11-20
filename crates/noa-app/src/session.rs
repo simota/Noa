@@ -659,7 +659,7 @@ mod json {
 
     pub fn parse(source: &str) -> Option<Value> {
         let mut parser = Parser {
-            chars: source.chars().collect(),
+            source,
             pos: 0,
             depth: 0,
         };
@@ -667,7 +667,7 @@ mod json {
         let value = parser.parse_value()?;
         parser.skip_whitespace();
         // Trailing non-whitespace means the document is malformed.
-        if parser.pos != parser.chars.len() {
+        if parser.pos != source.len() {
             return None;
         }
         Some(value)
@@ -680,25 +680,28 @@ mod json {
     /// would take the whole launch down).
     const MAX_DEPTH: usize = 128;
 
-    struct Parser {
-        chars: Vec<char>,
+    /// Walks the source's bytes in place. Every byte the grammar matches is
+    /// ASCII, so a non-ASCII byte only ever lands inside a string (copied
+    /// through whole) or fails the parse, exactly as its char would.
+    struct Parser<'a> {
+        source: &'a str,
         pos: usize,
         depth: usize,
     }
 
-    impl Parser {
-        fn peek(&self) -> Option<char> {
-            self.chars.get(self.pos).copied()
+    impl Parser<'_> {
+        fn peek(&self) -> Option<u8> {
+            self.source.as_bytes().get(self.pos).copied()
         }
 
-        fn bump(&mut self) -> Option<char> {
-            let ch = self.peek()?;
+        fn bump(&mut self) -> Option<u8> {
+            let byte = self.peek()?;
             self.pos += 1;
-            Some(ch)
+            Some(byte)
         }
 
         fn skip_whitespace(&mut self) {
-            while matches!(self.peek(), Some(' ' | '\t' | '\n' | '\r')) {
+            while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
                 self.pos += 1;
             }
         }
@@ -706,11 +709,11 @@ mod json {
         fn parse_value(&mut self) -> Option<Value> {
             self.skip_whitespace();
             match self.peek()? {
-                '{' => self.nested(Self::parse_object),
-                '[' => self.nested(Self::parse_array),
-                '"' => self.parse_string().map(Value::String),
-                't' | 'f' => self.parse_bool(),
-                'n' => self.parse_null(),
+                b'{' => self.nested(Self::parse_object),
+                b'[' => self.nested(Self::parse_array),
+                b'"' => self.parse_string().map(Value::String),
+                b't' | b'f' => self.parse_bool(),
+                b'n' => self.parse_null(),
                 _ => self.parse_number(),
             }
         }
@@ -726,10 +729,10 @@ mod json {
         }
 
         fn parse_object(&mut self) -> Option<Value> {
-            self.expect('{')?;
+            self.expect(b'{')?;
             let mut entries = Vec::new();
             self.skip_whitespace();
-            if self.peek() == Some('}') {
+            if self.peek() == Some(b'}') {
                 self.pos += 1;
                 return Some(Value::Object(entries));
             }
@@ -737,13 +740,13 @@ mod json {
                 self.skip_whitespace();
                 let key = self.parse_string()?;
                 self.skip_whitespace();
-                self.expect(':')?;
+                self.expect(b':')?;
                 let value = self.parse_value()?;
                 entries.push((key, value));
                 self.skip_whitespace();
                 match self.bump()? {
-                    ',' => continue,
-                    '}' => break,
+                    b',' => continue,
+                    b'}' => break,
                     _ => return None,
                 }
             }
@@ -751,10 +754,10 @@ mod json {
         }
 
         fn parse_array(&mut self) -> Option<Value> {
-            self.expect('[')?;
+            self.expect(b'[')?;
             let mut items = Vec::new();
             self.skip_whitespace();
-            if self.peek() == Some(']') {
+            if self.peek() == Some(b']') {
                 self.pos += 1;
                 return Some(Value::Array(items));
             }
@@ -763,8 +766,8 @@ mod json {
                 items.push(value);
                 self.skip_whitespace();
                 match self.bump()? {
-                    ',' => continue,
-                    ']' => break,
+                    b',' => continue,
+                    b']' => break,
                     _ => return None,
                 }
             }
@@ -772,27 +775,33 @@ mod json {
         }
 
         fn parse_string(&mut self) -> Option<String> {
-            self.expect('"')?;
+            self.expect(b'"')?;
             let mut out = String::new();
             loop {
+                // Copy the run up to the next quote or escape whole: both are
+                // ASCII, so the run ends on a char boundary.
+                let run = self.source.as_bytes()[self.pos..]
+                    .iter()
+                    .position(|&byte| byte == b'"' || byte == b'\\')?;
+                out.push_str(&self.source[self.pos..self.pos + run]);
+                self.pos += run;
+                if self.bump()? == b'"' {
+                    break;
+                }
                 match self.bump()? {
-                    '"' => break,
-                    '\\' => match self.bump()? {
-                        '"' => out.push('"'),
-                        '\\' => out.push('\\'),
-                        '/' => out.push('/'),
-                        'n' => out.push('\n'),
-                        'r' => out.push('\r'),
-                        't' => out.push('\t'),
-                        'b' => out.push('\u{0008}'),
-                        'f' => out.push('\u{000c}'),
-                        'u' => {
-                            let code = self.parse_hex4()?;
-                            out.push(char::from_u32(u32::from(code))?);
-                        }
-                        _ => return None,
-                    },
-                    ch => out.push(ch),
+                    b'"' => out.push('"'),
+                    b'\\' => out.push('\\'),
+                    b'/' => out.push('/'),
+                    b'n' => out.push('\n'),
+                    b'r' => out.push('\r'),
+                    b't' => out.push('\t'),
+                    b'b' => out.push('\u{0008}'),
+                    b'f' => out.push('\u{000c}'),
+                    b'u' => {
+                        let code = self.parse_hex4()?;
+                        out.push(char::from_u32(u32::from(code))?);
+                    }
+                    _ => return None,
                 }
             }
             Some(out)
@@ -801,7 +810,7 @@ mod json {
         fn parse_hex4(&mut self) -> Option<u16> {
             let mut value: u16 = 0;
             for _ in 0..4 {
-                let digit = self.bump()?.to_digit(16)?;
+                let digit = char::from(self.bump()?).to_digit(16)?;
                 value = value * 16 + digit as u16;
             }
             Some(value)
@@ -823,29 +832,28 @@ mod json {
 
         fn parse_number(&mut self) -> Option<Value> {
             let start = self.pos;
-            while matches!(self.peek(), Some('0'..='9' | '-' | '+' | '.' | 'e' | 'E')) {
+            while matches!(
+                self.peek(),
+                Some(b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
+            ) {
                 self.pos += 1;
             }
             if self.pos == start {
                 return None;
             }
-            let text: String = self.chars[start..self.pos].iter().collect();
-            text.parse::<f64>().ok().map(Value::Number)
+            self.source[start..self.pos]
+                .parse::<f64>()
+                .ok()
+                .map(Value::Number)
         }
 
-        fn expect(&mut self, expected: char) -> Option<()> {
+        fn expect(&mut self, expected: u8) -> Option<()> {
             (self.bump()? == expected).then_some(())
         }
 
         fn consume(&mut self, literal: &str) -> bool {
-            let end = self.pos + literal.chars().count();
-            if end <= self.chars.len()
-                && self.chars[self.pos..end]
-                    .iter()
-                    .copied()
-                    .eq(literal.chars())
-            {
-                self.pos = end;
+            if self.source.as_bytes()[self.pos..].starts_with(literal.as_bytes()) {
+                self.pos += literal.len();
                 true
             } else {
                 false

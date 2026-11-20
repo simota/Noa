@@ -71,13 +71,13 @@ accepted and changes nothing.
 | Option | Meaning |
 |---|---|
 | `--no-board` | Do not open the board; the worker floats over this pane |
-| `--worktree` | Start the worker in a new git worktree of this process's repository: `git worktree add -b orch/LABEL <repo>-wt/LABEL HEAD`. Needs `--label` (letters, digits, `.`, `_`, `-`; not starting with `.` or `-`) and refuses `--cwd`. Prints `"worktree"` and `"branch"` too. A git failure (branch or path exists, not a repository) is exit 1 and starts nothing; uncommitted changes in your checkout are not in the worktree, and a stderr warning says so. If Noa then refuses to start the worker, the fresh worktree and branch are removed again; if the answer is lost (a connection error), they are kept, since the worker may be running there, and stderr says so. The board, when this spawn would open it, opens only after the worktree was made |
+| `--worktree` | Start the worker in a new git worktree of this process's repository: `git worktree add -b orch/LABEL <repo>-wt/LABEL HEAD`. Needs `--label` (letters, digits, `.`, `_`, `-`; not starting with `.` or `-`) and refuses `--cwd`. Prints `"worktree"` and `"branch"` too. A git failure (branch or path exists, not a repository) is exit 1 and starts nothing; uncommitted changes in your checkout are not in the worktree, and a stderr warning says so. If Noa then refuses to start the worker, the fresh worktree and branch are removed again; if the answer is lost (a connection error, or Noa answering `-32009`: it did not carry out the spawn in time and may still do so), they are kept, since the worker may be running there, and stderr says so. The board, when this spawn would open it, opens only after the worktree was made |
 | `--tier light\|standard\|deep` | Add the tier's model and effort flags ("Model tiers" below) right after the program of a `claude`, `codex` or `agy` command. Refused for any other command, and for a command that already picks a model or effort, so a model the human named is never overridden. Prints `"tier"` too |
 | `--cwd DIR` | Working directory. Relative paths are taken from this process's cwd. Default: this process's cwd. One that is not a directory is refused (exit 1) before anything starts; `ls` shows it as the worker's `cwd` until the worker's shell reports its own |
 | `--env KEY=VALUE` | Repeatable. `PATH` defaults to this process's `PATH` when a command is given, and `LANG` and `LC_*` to this process's, so a worker keeps your locale even when Noa itself has none |
 | `--label TEXT` | Shown in the panel's `label` |
 | `--input TEXT` | Typed into the worker once it starts |
-| `--no-wait-after` | Close the pane when its command exits. By default it stays open with `exit.code` readable |
+| `--no-wait-after` | Close the pane when its command exits. By default it stays open with `exit.code` readable. A command that fails right after it starts (any exit other than code 0 within `abnormal-command-exit-runtime`, default 250 ms) stays open anyway, showing the failure |
 | `--focus` | Open the worker's float and move keyboard focus to it. By default it stays collapsed and focus stays where it was |
 | `--max-children N` | Refuse when this pane already has N workers (default and maximum 20, the workers a board holds). Exited workers count until closed; the refusal says how many have exited. Checked before each spawn, so parallel spawns can exceed it |
 
@@ -98,7 +98,8 @@ as keystrokes instead of a bracketed paste.
 - With `--wait`: subscribes first, sends, then behaves like `wait PANE` with the
   given wait options, and prints its lines. This is the safe default.
 - Refuses a pane this pane did not spawn unless `--any-pane` is given. That guards
-  against a wrong id; it is not a security boundary.
+  against a wrong id; it is not a security boundary. A pane that is not listed at
+  all is refused with "pane N is not listed" (exit 1).
 - Refuses a pane whose agent reported `permission` (it waits for an approval),
   because Enter approves some prompts with their default choice. It checks before
   typing and again before Enter; if the approval appeared in between, Enter is not
@@ -134,6 +135,14 @@ pane that stopped:
 - A pane named by id that is not listed when the wait starts is an error
   (exit 1, "pane N is not listed"), so a stale or mistyped id does not pass for
   a finished worker. One that goes away during the wait ends it with `exit`.
+- With `--children`, a pane `--after` names that is no longer listed (a worker
+  that closed since the timeout line that gave its baseline) is reported as
+  `{"paneId":"…","reason":"exit","closed":true}`, like a worker that goes away
+  during the wait. One that is listed but is not this pane's worker is an error
+  (exit 1, "not waited on").
+- A request Noa does not answer within the client's 5 s deadline is retried on
+  the next tick until the wait's `--timeout`; a lost connection still ends the
+  wait with exit 3.
 - `--tail N` adds `"tail"`: the pane's last N lines of retained output, for each
   line whose pane is still open.
 - `--for` takes a comma list of `finished,permission,input,error,exit,attention`
@@ -163,7 +172,7 @@ pane that stopped:
   `{"timeout":true,"pending":["7"],"baseline":[{"paneId":"7","seq":5,"state":"running"}]}`
   and exits 2 (`state` only for a pane with an agent state). A pane that had
   already exited when the wait began is listed under `"exited"`, not
-  `"pending"`. `baseline` is the report count each pending pane was waited from
+  `"pending"`, and has no `baseline` entry. `baseline` is the report count each pending pane was waited from
   (with `send --wait`, the count before sending). Pass it back as
   `--after PANE=SEQ` and the next wait also sees a report that landed in
   between. Without `--timeout`, it waits indefinitely.
@@ -192,7 +201,11 @@ repository is the one this process runs in), run `git worktree remove` and then
 `git branch -d`, never forced. The line gains
 `"worktree":{"path":…,"removed":true,"branchDeleted":true}`. When git refuses
 (uncommitted changes, a branch not merged into your `HEAD`), the work stays,
-`"kept"` gives git's reason, and the exit status is unchanged. Merge the
+`"kept"` gives git's reason, and the exit status is unchanged. When the worktree
+and branch exist but the pane's cwd was not in it, nothing is removed and the line
+gains `"worktree":{"path":…,"removed":false,"branchDeleted":false,"kept":"the pane's cwd is not in this worktree"}`.
+A pane that went away between the listing and its close (`"gone":true`) is pruned
+the same way. Merge the
 branch first, or read what would be lost before removing it by hand.
 
 ### `board [--of PANE]`, `board --open [--split right|down | --tab]`

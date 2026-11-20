@@ -298,8 +298,9 @@ pub(crate) fn remove(cwd: &Path, path: &Path, branch: &str) -> Removal {
 
 /// `close --prune` for one closed pane labelled `label`: remove its worktree
 /// and branch when `cwd`'s repository has them and the pane's own cwd
-/// (`pane_cwd`) is in that worktree. `None` when there is no label, no
-/// matching worktree, or the pane was not in it.
+/// (`pane_cwd`) is in that worktree. `None` when there is no label or no
+/// matching worktree; a worktree the pane was not in is kept, and the result
+/// says why.
 pub(crate) fn prune(cwd: &Path, label: &str, pane_cwd: &Path) -> Option<serde_json::Value> {
     check_label(label).ok()?;
     let top = top_level(cwd).ok()?;
@@ -308,7 +309,12 @@ pub(crate) fn prune(cwd: &Path, label: &str, pane_cwd: &Path) -> Option<serde_js
     // Labels are not unique: only the pane that worked in the worktree
     // prunes it, not another pane that happens to share the label.
     if !within(pane_cwd, &entry.path) {
-        return None;
+        return Some(serde_json::json!({
+            "path": entry.path.to_string_lossy(),
+            "removed": false,
+            "branchDeleted": false,
+            "kept": NOT_IN_WORKTREE,
+        }));
     }
     let removal = remove(cwd, &entry.path, &branch_name(label));
     let mut info = serde_json::json!({
@@ -321,6 +327,10 @@ pub(crate) fn prune(cwd: &Path, label: &str, pane_cwd: &Path) -> Option<serde_js
     }
     Some(info)
 }
+
+/// Why `close --prune` kept the worktree of a pane's label: the pane did not
+/// work in it.
+pub(crate) const NOT_IN_WORKTREE: &str = "the pane's cwd is not in this worktree";
 
 /// Whether `path` is `dir` or inside it, compared resolved when they exist
 /// (`/var` and `/private/var` are one directory on macOS).
@@ -613,9 +623,26 @@ detached
         let (base, repo) = repo("shared-label");
         let made = add(&repo, "job").unwrap();
 
-        assert!(prune(&repo, "job", &repo).is_none());
+        // Review finding: a skipped prune printed nothing, so the caller
+        // could not tell it from a label without a worktree.
+        let kept = prune(&repo, "job", &repo).unwrap();
+        assert_eq!(
+            kept,
+            serde_json::json!({
+                "path": made.path.to_string_lossy(),
+                "removed": false,
+                "branchDeleted": false,
+                "kept": NOT_IN_WORKTREE,
+            })
+        );
         assert!(made.path.exists());
-        assert!(prune(&repo, "job", &made.path.join("src")).is_some());
+        assert!(
+            !run_git(&repo, &["branch", "--list", "orch/job"])
+                .trim()
+                .is_empty()
+        );
+        let removed = prune(&repo, "job", &made.path.join("src")).unwrap();
+        assert_eq!(removed["removed"], true);
         let _ = std::fs::remove_dir_all(&base);
     }
 }

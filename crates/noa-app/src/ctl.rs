@@ -921,6 +921,9 @@ pub(crate) fn run(args: &[String]) -> i32 {
 pub(crate) struct Failure {
     code: i32,
     message: String,
+    /// A request ran past the client's deadline on a connection that is
+    /// still open; a long `wait` retries it instead of giving up.
+    transient: bool,
 }
 
 impl Failure {
@@ -928,6 +931,7 @@ impl Failure {
         Self {
             code: EXIT_ERROR,
             message: message.into(),
+            transient: false,
         }
     }
 
@@ -935,6 +939,7 @@ impl Failure {
         Self {
             code: EXIT_UNAVAILABLE,
             message: message.into(),
+            transient: false,
         }
     }
 }
@@ -946,6 +951,9 @@ const RPC_UNKNOWN_PANE: i64 = -32002;
 /// The server's JSON-RPC code for a pane that takes no more requests: gone,
 /// or its process exited.
 const RPC_PANE_CLOSED: i64 = -32004;
+/// The server's JSON-RPC code for a request the app did not answer in time:
+/// it may still have been carried out.
+const RPC_OUTCOME_UNKNOWN: i64 = -32009;
 
 const SCOPES_HINT: &str = "enable it in Noa's config with `server-enable = true` and `server-scopes = read,control,input`";
 
@@ -964,6 +972,12 @@ impl From<ClientError> for Failure {
             ClientError::Closed(_) | ClientError::Transport(_) => {
                 Failure::unavailable(format!("lost the connection to Noa: {error}"))
             }
+            // Outside a wait, a request that timed out ends the command as
+            // before; only the wait loop retries it.
+            ClientError::Timeout(_) => Failure {
+                transient: true,
+                ..Failure::unavailable(format!("lost the connection to Noa: {error}"))
+            },
             other => Failure::error(other.to_string()),
         }
     }
@@ -1179,6 +1193,17 @@ pub(crate) fn wait_for_own(
     Ok((None, lacks))
 }
 
+/// The failure of a command that needs this process's own pane when the
+/// server does not list it: a server that names no surface ids is probably
+/// another Noa (exit 3), otherwise the pane is just not there (exit 1).
+pub(crate) fn own_missing_failure(message: String, lacks_ids: bool) -> Failure {
+    if lacks_ids {
+        Failure::unavailable(message)
+    } else {
+        Failure::error(message)
+    }
+}
+
 /// Why a command that needs this process's own pane cannot run.
 /// `lacks_ids`: the server's listing named no surface ids.
 pub(crate) fn not_own_message(surface_id: Option<&str>, port: u16, lacks_ids: bool) -> String {
@@ -1313,12 +1338,7 @@ impl Session {
                 self.port,
                 self.lacks_surface_ids,
             );
-            // A server that names no surface ids is probably another Noa.
-            if self.lacks_surface_ids {
-                Failure::unavailable(message)
-            } else {
-                Failure::error(message)
-            }
+            own_missing_failure(message, self.lacks_surface_ids)
         })
     }
 
@@ -1353,21 +1373,13 @@ impl Session {
         }
         let own = self.guard_own()?;
         let panels = self.client.list_panels()?;
-        for pane in panes {
-            let child = panels
-                .iter()
-                .any(|panel| panel.pane_id.0 == *pane && panel.parent_pane_id == Some(WireId(own)));
-            if !child {
-                return Err(Failure::error(not_worker_message(*pane)));
-            }
-        }
-        Ok(())
+        guard_targets(&panels, panes, own).map_err(Failure::error)
     }
 
     /// This pane, for a command that only targets its own workers.
     fn guard_own(&mut self) -> Result<u64, Failure> {
         self.own_now()?.ok_or_else(|| {
-            Failure::error(format!(
+            let message = format!(
                 "{} Without a pane of its own there are no workers to target; pass \
                  --any-pane to target a pane anyway.",
                 not_own_message(
@@ -1375,7 +1387,8 @@ impl Session {
                     self.port,
                     self.lacks_surface_ids
                 )
-            ))
+            );
+            own_missing_failure(message, self.lacks_surface_ids)
         })
     }
 
@@ -1774,13 +1787,23 @@ impl Session {
     ) -> Result<i32, Failure> {
         self.client
             .subscribe(&[EventKind::StateChanged], Some(panes))?;
-        let after = wait_baselines(panes, after).map_err(Failure::error)?;
+        let mut panes = panes.to_vec();
+        if !named && after.iter().any(|(pane, _)| !panes.contains(pane)) {
+            let listed: Vec<u64> = self
+                .client
+                .list_panels()?
+                .iter()
+                .map(|panel| panel.pane_id.0)
+                .collect();
+            panes.extend(closed_after_panes(&panes, after, &listed));
+        }
+        let after = wait_baselines(&panes, after).map_err(Failure::error)?;
         let start = if named {
             WaitStart::Named { after }
         } else {
             WaitStart::Listed { after }
         };
-        self.wait_subscribed(panes, start, options)
+        self.wait_subscribed(&panes, start, options)
     }
 
     fn wait_subscribed(
@@ -1822,7 +1845,11 @@ pub(crate) fn spawn_steps<S, W>(
         Ok(pane) => Ok((pane, made)),
         Err(err) => {
             if let Some(made) = &made {
-                undo(session, made, matches!(err, ClientError::Rpc { .. }));
+                // A request the app did not answer in time may still have
+                // started the worker: like a lost answer, not a refusal.
+                let refused =
+                    matches!(err, ClientError::Rpc { code, .. } if code != RPC_OUTCOME_UNKNOWN);
+                undo(session, made, refused);
             }
             Err(err.into())
         }
@@ -1951,7 +1978,16 @@ pub(crate) fn wait_loop_with_clock(
     let deadline = options
         .timeout
         .and_then(|timeout| Instant::now().checked_add(timeout));
-    let mut latest = watched(source.list()?, panes);
+    // A request past the client's deadline on a live connection is retried
+    // until the wait's own deadline; a lost connection still ends the wait.
+    let before_deadline = || deadline.is_none_or(|deadline| Instant::now() < deadline);
+    let first = loop {
+        match source.list() {
+            Err(failure) if failure.transient && before_deadline() => {}
+            result => break result?,
+        }
+    };
+    let mut latest = watched(first, panes);
     let mut listed_at = Instant::now();
     if let WaitStart::Named { .. } = start {
         let missing: Vec<String> = panes
@@ -2018,8 +2054,12 @@ pub(crate) fn wait_loop_with_clock(
                     if done.contains(&watch.pane) || (skip_exited_before && watch.exited_before) {
                         continue;
                     }
-                    let Some(text) = source.screen(watch.pane)? else {
-                        continue;
+                    // A screen read that timed out is taken on the next poll.
+                    let text = match source.screen(watch.pane) {
+                        Ok(Some(text)) => text,
+                        Ok(None) => continue,
+                        Err(failure) if failure.transient => continue,
+                        Err(failure) => return Err(failure),
                     };
                     let entry = quiet.entry(watch.pane).or_insert(Quiet {
                         text: None,
@@ -2043,8 +2083,19 @@ pub(crate) fn wait_loop_with_clock(
                         relist |= apply_notification(&mut latest, notification, panes);
                     }
                     if relist {
-                        latest = watched(source.list()?, panes);
-                        listed_at = Instant::now();
+                        match source.list() {
+                            Ok(panels) => {
+                                latest = watched(panels, panes);
+                                listed_at = Instant::now();
+                            }
+                            // Judged only on a fresh listing: the stalled
+                            // panes are taken again on the next poll.
+                            Err(failure) if failure.transient => {
+                                relist_pending = true;
+                                stalled.clear();
+                            }
+                            Err(failure) => return Err(failure),
+                        }
                     }
                     for (pane, quiet_for) in stalled {
                         let Some(watch) = watches.iter_mut().find(|watch| watch.pane == pane)
@@ -2074,10 +2125,18 @@ pub(crate) fn wait_loop_with_clock(
         // Re-list only after the pushed state above was evaluated, so a
         // listing never overwrites a transition before it was seen.
         if relist_pending {
-            latest = watched(source.list()?, panes);
-            listed_at = Instant::now();
-            relist_pending = false;
-            continue;
+            match source.list() {
+                Ok(panels) => {
+                    latest = watched(panels, panes);
+                    listed_at = Instant::now();
+                    relist_pending = false;
+                    continue;
+                }
+                // Still pending: re-listed on the next tick, or the wait
+                // times out below.
+                Err(failure) if failure.transient => {}
+                Err(failure) => return Err(failure),
+            }
         }
         let remaining = match deadline {
             Some(deadline) => {
@@ -2098,7 +2157,8 @@ pub(crate) fn wait_loop_with_clock(
         // `stateChanged` has no removal event, so a closed pane is only
         // noticed by listing: re-list on schedule even while other panes keep
         // notifying.
-        relist_pending = relist || listed_at.elapsed() >= relist_every;
+        // Still set here only when a re-list above timed out: keep it.
+        relist_pending |= relist || listed_at.elapsed() >= relist_every;
     }
 }
 
@@ -2145,9 +2205,10 @@ fn emit_outcome(
 }
 
 /// The line a timed-out wait prints. A pane that had exited before the wait
-/// (and so was never waited on) is under `exited`, not `pending`. The
-/// baselines, with each pane's agent state, let a later `wait --after`
-/// carry on without missing a report that lands in between.
+/// (and so was never waited on) is under `exited`, not `pending`, and has no
+/// baseline. The baselines of the pending panes, with each one's agent
+/// state, let a later `wait --after` carry on without missing a report that
+/// lands in between.
 fn timeout_json(
     watches: &[Watch],
     done: &[u64],
@@ -2168,6 +2229,7 @@ fn timeout_json(
         "pending": ids(false),
         "baseline": left
             .iter()
+            .filter(|watch| !watch.exited_before)
             .map(|watch| {
                 let mut entry = serde_json::json!({
                     "paneId": WireId(watch.pane),
@@ -2199,6 +2261,25 @@ pub(crate) fn send_wait_start(before: Panel, seq: u64) -> WaitStart {
     }
 }
 
+/// Under `--children`, the panes `--after` names that are no longer listed
+/// at all: workers that closed since the timeout line that gave their
+/// baseline. They are waited on too, so they are reported like a worker
+/// that goes away during the wait (`exit`, `closed`); a pane that is still
+/// listed but is not a worker stays an error.
+pub(crate) fn closed_after_panes(
+    children: &[u64],
+    after: &[(u64, u64)],
+    listed: &[u64],
+) -> Vec<u64> {
+    let mut closed = Vec::new();
+    for (pane, _) in after {
+        if !children.contains(pane) && !listed.contains(pane) && !closed.contains(pane) {
+            closed.push(*pane);
+        }
+    }
+    closed
+}
+
 /// The `--after` baselines of a wait on `panes` (already resolved, so
 /// `--children` is checked too).
 pub(crate) fn wait_baselines(
@@ -2213,6 +2294,22 @@ pub(crate) fn wait_baselines(
 
 fn not_worker_message(pane: u64) -> String {
     format!("pane {pane} is not a worker of this pane (pass --any-pane to target it)")
+}
+
+/// Refuse input to a pane that is not one of `own`'s workers. One that is
+/// not listed at all is said as such: `--any-pane` would not help a
+/// mistyped id.
+pub(crate) fn guard_targets(panels: &[Panel], panes: &[u64], own: u64) -> Result<(), String> {
+    for pane in panes {
+        match panels.iter().find(|panel| panel.pane_id.0 == *pane) {
+            None => return Err(format!("pane {pane} is not listed")),
+            Some(panel) if panel.parent_pane_id != Some(WireId(own)) => {
+                return Err(not_worker_message(*pane));
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
 }
 
 /// What `panel`'s agent reported it waits for, if it is an approval
@@ -2371,12 +2468,14 @@ pub(crate) fn close_panes(
         let mut line = serde_json::json!({ "paneId": WireId(pane), "closed": true });
         if gone {
             line["gone"] = true.into();
-        } else if let Some((label, pane_cwd)) = label {
-            // Only after the pane is closed, so its process no longer
-            // holds the worktree; a refusal keeps it and does not fail.
-            if let Some(info) = prune(&label, &pane_cwd) {
-                line["worktree"] = info;
-            }
+        }
+        // Only after the pane is closed (or went away since the listing, its
+        // label and cwd already read), so its process no longer holds the
+        // worktree; a refusal keeps it and does not fail.
+        if let Some((label, pane_cwd)) = label
+            && let Some(info) = prune(&label, &pane_cwd)
+        {
+            line["worktree"] = info;
         }
         emit(&line);
     }
@@ -2405,7 +2504,17 @@ fn print_panel(mut panel: Panel) {
 }
 
 fn print_json(value: &serde_json::Value) {
-    println!("{value}");
+    write_json_line(&mut std::io::stdout().lock(), value);
+}
+
+/// One JSON line on `out`. A reader that went away (`close --children |
+/// head -1`) is not a reason to stop: the command still does all its work.
+pub(crate) fn write_json_line(out: &mut impl Write, value: &serde_json::Value) {
+    if let Err(err) = writeln!(out, "{value}")
+        && err.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        panic!("failed printing to stdout: {err}");
+    }
 }
 
 #[cfg(test)]
@@ -4096,7 +4205,6 @@ mod tests {
                 "exited": ["151"],
                 "baseline": [
                     {"paneId": "149", "seq": 1, "state": "finished"},
-                    {"paneId": "151", "seq": 0},
                 ],
             })]
         );
@@ -4479,5 +4587,327 @@ mod tests {
             panic!("send --wait --stall should parse");
         };
         assert_eq!(send.wait.unwrap().stall, Some(Duration::from_secs(4)));
+    }
+
+    // Review finding: `wait --children --after 3=1,4=2` failed ("not waited
+    // on") when worker 4 closed since the timeout line that gave its
+    // baseline, breaking the resume loop. A closed one is reported closed;
+    // a listed pane that is not a worker is still refused.
+    #[test]
+    fn a_children_wait_reports_an_after_pane_that_closed_since() {
+        assert_eq!(closed_after_panes(&[3], &[(3, 1), (4, 2)], &[3]), [4]);
+        assert!(closed_after_panes(&[3], &[(3, 1), (4, 2)], &[3, 4]).is_empty());
+        assert!(wait_baselines(&[3], &[(3, 1), (4, 2)]).is_err());
+
+        let panes = [3, 4];
+        let after = wait_baselines(&panes, &[(3, 1), (4, 2)]).unwrap();
+        let mut source = FakeSource {
+            lists: vec![vec![with_pane(panel(1, Some("running"), false), 3)]],
+            notifications: Default::default(),
+            list_calls: 0,
+            texts: HashMap::new(),
+        };
+        let mut lines = Vec::new();
+        let code = wait_loop(
+            &mut source,
+            &panes,
+            WaitStart::Listed { after },
+            &WaitOptions::default(),
+            WAIT_RELIST_INTERVAL,
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        assert_eq!(
+            lines,
+            vec![serde_json::json!({"paneId": "4", "reason": "exit", "closed": true})]
+        );
+    }
+
+    /// A [`FakeSource`] whose listings at the given call indexes fail with
+    /// `error`, and whose screen reads time out when `screen_times_out`.
+    struct FlakySource {
+        inner: FakeSource,
+        calls: usize,
+        fail_at: Vec<usize>,
+        error: fn() -> ClientError,
+        screen_times_out: bool,
+    }
+
+    impl WaitSource for FlakySource {
+        fn list(&mut self) -> Result<Vec<Panel>, Failure> {
+            let call = self.calls;
+            self.calls += 1;
+            if self.fail_at.contains(&call) {
+                return Err(Failure::from((self.error)()));
+            }
+            self.inner.list()
+        }
+
+        fn next(&mut self, timeout: Duration) -> Result<Option<Notification>, Failure> {
+            self.inner.next(timeout)
+        }
+
+        fn scrollback(&mut self, pane: u64) -> Result<Option<String>, Failure> {
+            self.inner.scrollback(pane)
+        }
+
+        fn screen(&mut self, pane: u64) -> Result<Option<String>, Failure> {
+            if self.screen_times_out {
+                return Err(Failure::from(ClientError::Timeout(
+                    "noa.getText".to_string(),
+                )));
+            }
+            self.inner.screen(pane)
+        }
+    }
+
+    /// Pane 8 runs, then finishes; listings `fail_at` fail with `error`.
+    fn run_flaky_wait(
+        fail_at: Vec<usize>,
+        error: fn() -> ClientError,
+        screen_times_out: bool,
+        options: WaitOptions,
+    ) -> (Result<i32, Failure>, Vec<serde_json::Value>) {
+        let running = with_pane(panel(1, Some("running"), false), 8);
+        let mut source = FlakySource {
+            inner: FakeSource {
+                lists: vec![
+                    vec![running.clone()],
+                    vec![with_pane(panel(2, Some("finished"), false), 8)],
+                ],
+                notifications: (0..4)
+                    .map(|_| Notification::StateChanged {
+                        panels: vec![running.clone()],
+                        dropped: false,
+                    })
+                    .collect(),
+                list_calls: 0,
+                texts: HashMap::new(),
+            },
+            calls: 0,
+            fail_at,
+            error,
+            screen_times_out,
+        };
+        let mut lines = Vec::new();
+        let code = wait_loop(
+            &mut source,
+            &[8],
+            WaitStart::Listed {
+                after: HashMap::new(),
+            },
+            &options,
+            Duration::ZERO,
+            &mut |line| lines.push(line.clone()),
+        );
+        (code, lines)
+    }
+
+    // Review finding: one request past the client's 5 s deadline ended a
+    // long `wait` with exit 3 "lost the connection" and no timeout line,
+    // though the connection was alive. It is retried on the next tick; a
+    // lost connection still ends the wait.
+    #[test]
+    fn a_wait_retries_a_listing_that_timed_out() {
+        let timeout = || ClientError::Timeout("noa.listPanels".to_string());
+        // The first listing, and a re-list inside the wait.
+        let (code, lines) = run_flaky_wait(vec![0, 2], timeout, false, WaitOptions::default());
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        assert_eq!(lines[0]["reason"], "finished");
+
+        let lost = || ClientError::Transport("connection reset".to_string());
+        let (code, lines) = run_flaky_wait(vec![1], lost, false, WaitOptions::default());
+        assert_eq!(
+            code.err().map(|failure| failure.code),
+            Some(EXIT_UNAVAILABLE)
+        );
+        assert!(lines.is_empty());
+
+        // Outside the wait loop a timeout still ends a command with exit 3.
+        let failure = Failure::from(timeout());
+        assert_eq!(failure.code, EXIT_UNAVAILABLE);
+        assert!(failure.transient);
+        assert!(!Failure::from(lost()).transient);
+    }
+
+    #[test]
+    fn a_stall_check_skips_a_screen_read_that_timed_out() {
+        let options = WaitOptions {
+            reasons: vec![Reason::Finished, Reason::Stalled],
+            stall: Some(Duration::ZERO),
+            ..WaitOptions::default()
+        };
+        let timeout = || ClientError::Timeout("noa.listPanels".to_string());
+        let (code, lines) = run_flaky_wait(Vec::new(), timeout, true, options);
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        assert_eq!(lines[0]["reason"], "finished");
+    }
+
+    // Review finding: a timed-out wait's `baseline` also listed panes it
+    // reported under `exited`; it covers the pending panes only.
+    #[test]
+    fn a_timeout_baseline_leaves_out_exited_panes() {
+        let mut exited = with_pane(panel(0, None, false), 6);
+        exited.exit = Some(PanelExit { code: Some(0) });
+        let mut source = FakeSource {
+            lists: vec![vec![exited, with_pane(panel(4, Some("running"), false), 3)]],
+            notifications: Default::default(),
+            list_calls: 0,
+            texts: HashMap::new(),
+        };
+        let mut lines = Vec::new();
+        let code = wait_loop(
+            &mut source,
+            &[6, 3],
+            WaitStart::Listed {
+                after: HashMap::new(),
+            },
+            &WaitOptions {
+                timeout: Some(Duration::ZERO),
+                ..WaitOptions::default()
+            },
+            WAIT_RELIST_INTERVAL,
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_TIMEOUT));
+        assert_eq!(
+            lines,
+            vec![serde_json::json!({
+                "timeout": true,
+                "pending": ["3"],
+                "exited": ["6"],
+                "baseline": [{"paneId": "3", "seq": 4, "state": "running"}],
+            })]
+        );
+    }
+
+    /// Refuses every close as `PaneClosed`; listings after the first show
+    /// none of the panes, as when they went away in between.
+    struct VanishingCloser {
+        panels: Vec<Panel>,
+        lists: usize,
+    }
+
+    impl PaneCloser for VanishingCloser {
+        fn list(&mut self) -> Result<Vec<Panel>, ClientError> {
+            self.lists += 1;
+            Ok(if self.lists == 1 {
+                self.panels.clone()
+            } else {
+                Vec::new()
+            })
+        }
+
+        fn close(&mut self, _pane: u64) -> Result<(), ClientError> {
+            Err(ClientError::Rpc {
+                code: RPC_PANE_CLOSED,
+                message: "pane closed".to_string(),
+            })
+        }
+    }
+
+    // Review finding: a worker that went away between the listing and the
+    // close was reported gone but its worktree was not pruned, though its
+    // label and cwd were already read.
+    #[test]
+    fn a_worker_gone_before_its_close_is_still_pruned() {
+        let mut labelled = worker(8, 1);
+        labelled.label = Some("job".to_string());
+        let mut source = VanishingCloser {
+            panels: vec![labelled],
+            lists: 0,
+        };
+        let mut asked = Vec::new();
+        let mut lines = Vec::new();
+        let code = close_panes(
+            &mut source,
+            &[8],
+            Some(1),
+            &mut |label, cwd| {
+                asked.push((label.to_string(), cwd.to_string()));
+                Some(serde_json::json!({ "path": "/r-wt/job", "removed": true }))
+            },
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        assert_eq!(asked, [("job".to_string(), "/repo".to_string())]);
+        assert_eq!(lines[0]["gone"], true);
+        assert_eq!(lines[0]["worktree"]["removed"], true);
+    }
+
+    /// A writer whose reader went away.
+    struct ClosedPipe(usize);
+
+    impl Write for ClosedPipe {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            self.0 += 1;
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    // Review finding: `println!` panicked on EPIPE, so `close --children |
+    // head -1` stopped after the first line and left workers open.
+    #[test]
+    fn a_closed_stdout_does_not_stop_the_command() {
+        let mut pipe = ClosedPipe(0);
+        write_json_line(&mut pipe, &serde_json::json!({ "paneId": "8" }));
+        write_json_line(&mut pipe, &serde_json::json!({ "paneId": "9" }));
+        assert_eq!(pipe.0, 2);
+
+        let mut out = Vec::new();
+        write_json_line(&mut out, &serde_json::json!({ "paneId": "8" }));
+        assert_eq!(out, b"{\"paneId\":\"8\"}\n");
+    }
+
+    // Review finding: a Noa that reports no surface ids failed a command
+    // that targets workers (`guard_own`) with exit 1, while `require_own`
+    // and the reference give exit 3 for it.
+    #[test]
+    fn a_noa_without_surface_ids_is_unavailable_for_every_own_pane_check() {
+        assert_eq!(
+            own_missing_failure("m".to_string(), true).code,
+            EXIT_UNAVAILABLE
+        );
+        assert_eq!(own_missing_failure("m".to_string(), false).code, EXIT_ERROR);
+    }
+
+    // Review finding: a mistyped id was "not a worker of this pane (pass
+    // --any-pane …)", inviting `--any-pane` for a pane that does not exist.
+    #[test]
+    fn input_to_an_unlisted_pane_says_it_is_not_listed() {
+        let panels = vec![worker(8, 1), worker(5, 2)];
+        assert_eq!(
+            guard_targets(&panels, &[9999], 1),
+            Err("pane 9999 is not listed".to_string())
+        );
+        assert_eq!(guard_targets(&panels, &[5], 1), Err(not_worker_message(5)));
+        assert_eq!(guard_targets(&panels, &[8], 1), Ok(()));
+        // `close` of an unlisted pane still counts it as gone.
+        assert_eq!(
+            close_targets(&panels, &[9999], Some(1)),
+            Ok(vec![(9999, false)])
+        );
+    }
+
+    // Review finding: the app answering a spawn late (-32009) was read as a
+    // refusal, and the worktree of a worker that was starting was removed.
+    #[test]
+    fn a_spawn_whose_outcome_is_unknown_keeps_its_worktree() {
+        let (result, log) = run_spawn_steps(
+            false,
+            Some(ClientError::Rpc {
+                code: RPC_OUTCOME_UNKNOWN,
+                message: "outcome unknown: request timed out".to_string(),
+            }),
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            log.last().map(String::as_str),
+            Some("undo wt refused=false")
+        );
     }
 }

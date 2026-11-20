@@ -4062,4 +4062,46 @@ mod tests {
             );
         }
     }
+
+    /// Perf harness (auto-approve per-feed row capture): one
+    /// `live_rows_from_terminal` pass over a 120x50 grid of build-log text,
+    /// and of text mixing CJK, emoji and combining marks. Prints a digest of
+    /// the rows so a before/after pair can be checked for identical text.
+    /// `#[ignore]`d so `cargo test` stays fast; run explicitly with:
+    /// `cargo test -p noa-app --offline --release auto_approve::tests::bench_live_rows -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_live_rows() {
+        const ITERS: u32 = 20_000;
+        let ascii = |i: usize| {
+            format!(
+                "   Compiling crate-{i:03} v0.{i}.0 (/work/crates/crate-{i:03})  warning: unused variable `x{i}`"
+            )
+        };
+        let mixed = |i: usize| {
+            format!("{i:03} 変更をステージしてよいですか？ cafe\u{301} 👍🏽 e\u{301}\u{302} done   ")
+        };
+        for (label, line) in [
+            ("ascii", &ascii as &dyn Fn(usize) -> String),
+            ("mixed", &mixed),
+        ] {
+            let mut terminal = Terminal::new(noa_core::GridSize::new(120, 50));
+            let mut stream = noa_vt::Stream::new();
+            for i in 0..60 {
+                stream.feed(format!("{}\r\n", line(i)).as_bytes(), &mut terminal);
+            }
+            let mut digest = std::collections::hash_map::DefaultHasher::new();
+            live_rows_from_terminal(&terminal).hash(&mut digest);
+            let start = Instant::now();
+            for _ in 0..ITERS {
+                std::hint::black_box(live_rows_from_terminal(std::hint::black_box(&terminal)));
+            }
+            let elapsed = start.elapsed();
+            eprintln!(
+                "bench_live_rows[{label}]: {:.1} ns/op digest={:016x}",
+                elapsed.as_nanos() as f64 / f64::from(ITERS),
+                digest.finish()
+            );
+        }
+    }
 }

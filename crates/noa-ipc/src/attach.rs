@@ -302,14 +302,14 @@ struct OutputInner {
 /// condvar and the socket at once. Both ends are non-blocking and close-on-exec
 /// (pty children must not inherit them).
 #[cfg(unix)]
-pub(crate) struct OutputWake {
-    pub(crate) tx: std::os::unix::net::UnixStream,
-    pub(crate) rx: std::os::unix::net::UnixStream,
+struct OutputWake {
+    tx: std::os::unix::net::UnixStream,
+    rx: std::os::unix::net::UnixStream,
 }
 
 #[cfg(unix)]
 impl OutputWake {
-    pub(crate) fn new() -> Option<Self> {
+    fn new() -> Option<Self> {
         let (tx, rx) = std::os::unix::net::UnixStream::pair().ok()?;
         tx.set_nonblocking(true).ok()?;
         rx.set_nonblocking(true).ok()?;

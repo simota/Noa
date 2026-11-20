@@ -436,6 +436,57 @@ mod tests {
         assert_eq!((&bounded.chars, &bounded.cells), (&text.chars, &text.cells));
     }
 
+    /// The window's cut flags say exactly whether a wrapped row lies just
+    /// outside it, for chains shorter than, at and past the window's reach
+    /// in each direction, and at both ends of storage.
+    #[test]
+    fn cut_flags_mark_a_chain_running_past_the_window() {
+        use crate::cell::Row;
+        use std::borrow::Cow;
+        const MAX: usize = super::MAX_ROWS_EACH_WAY;
+        for chain in [
+            1,
+            2,
+            MAX,
+            MAX + 1,
+            MAX + 2,
+            2 * MAX,
+            2 * MAX + 1,
+            2 * MAX + 3,
+        ] {
+            for (pad_before, pad_after) in [(0, 0), (0, 2), (2, 0), (3, 3)] {
+                let len = pad_before + chain + pad_after;
+                // `chain` rows from `pad_before` on, each wrapped but the last.
+                let rows: Vec<Row> = (0..len)
+                    .map(|y| {
+                        let mut row = Row::new(4);
+                        row.wrapped = y >= pad_before && y + 1 < pad_before + chain;
+                        row
+                    })
+                    .collect();
+                for y in 0..len {
+                    let line = super::LogicalLine::collect(
+                        |y| rows.get(y).map(Cow::Borrowed),
+                        y,
+                        None,
+                        0,
+                        1,
+                    )
+                    .unwrap();
+                    let first = y - line.index;
+                    let after = first + line.rows.len();
+                    let above = first.checked_sub(1).is_some_and(|y| rows[y].wrapped);
+                    let below = rows[after - 1].wrapped && after < len;
+                    assert_eq!(
+                        (line.cut_above, line.cut_below),
+                        (above, below),
+                        "chain {chain}, pad {pad_before}/{pad_after}, row {y}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn follows_a_long_line_only_a_bounded_distance() {
         let mut terminal = Terminal::new(GridSize::new(4, 200));

@@ -3,13 +3,15 @@
 //! messages are, and how much CPU idle connections burn.
 //!
 //! ```text
-//! cargo run --release -p noa-ipc --example bench_rpc -- rtt [panels] [iters]
+//! cargo run --release -p noa-ipc --example bench_rpc -- rtt [panels] [iters] [gap_ms]
 //! cargo run --release -p noa-ipc --example bench_rpc -- idle [conns] [secs]
 //! cargo run --release -p noa-ipc --example bench_rpc -- notify [panels] [iters]
 //! ```
 //!
-//! `rtt` prints the median/p99 round trip of each call and the response
-//! size; `idle` opens `conns` authenticated connections (each subscribed to
+//! `rtt` prints the median/p99 round trip of each call, the response size
+//! and the process's CPU time and context switches per iteration (with
+//! `gap_ms`, the client pauses that long between iterations, as `+ctl`
+//! callers do); `idle` opens `conns` authenticated connections (each subscribed to
 //! `stateChanged`, as `+ctl wait` is), leaves them idle for `secs` and prints
 //! the process's CPU time and context switches over that span; `notify`
 //! times one `stateChanged` of `panels` panels from broadcast to its arrival
@@ -180,7 +182,7 @@ fn stats(name: &str, mut samples: Vec<Duration>) {
     );
 }
 
-fn rtt(panels: usize, iters: usize) {
+fn rtt(panels: usize, iters: usize, gap: Duration) {
     let handle = start(panels);
     let mut client = connect(&handle);
     let listed = client.list_panels().unwrap();
@@ -198,7 +200,11 @@ fn rtt(panels: usize, iters: usize) {
     }
     let mut list = Vec::with_capacity(iters);
     let mut text = Vec::with_capacity(iters);
+    let (cpu0, switches0) = usage();
     for _ in 0..iters {
+        if !gap.is_zero() {
+            std::thread::sleep(gap);
+        }
         let at = Instant::now();
         std::hint::black_box(client.list_panels().unwrap());
         list.push(at.elapsed());
@@ -210,8 +216,14 @@ fn rtt(panels: usize, iters: usize) {
         );
         text.push(at.elapsed());
     }
+    let (cpu1, switches1) = usage();
     stats("listPanels", list);
     stats("getText", text);
+    println!(
+        "per iteration: cpu {:.1}µs, {:.2} context switches",
+        (cpu1 - cpu0).as_secs_f64() * 1e6 / iters as f64,
+        (switches1 - switches0) as f64 / iters as f64,
+    );
 }
 
 fn usage() -> (Duration, i64) {
@@ -291,6 +303,10 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("idle") => idle(num(1, 20), num(2, 5) as u64),
         Some("notify") => notify(num(1, 20), num(2, 2000)),
-        _ => rtt(num(1, 20), num(2, 2000)),
+        _ => rtt(
+            num(1, 20),
+            num(2, 2000),
+            Duration::from_millis(num(3, 0) as u64),
+        ),
     }
 }

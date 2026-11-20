@@ -3483,6 +3483,9 @@ fn fetch_screens(
         match get(pane) {
             Ok(text) => board.set_screen_at(pane, &text, now),
             Err(err) if lost(&err) => return true,
+            // Noa is slow but connected: the other reads would each wait
+            // out the deadline too. The next pass tries again.
+            Err(ClientError::Timeout(_)) => return false,
             // A pane that closed meanwhile is dropped at the next listing.
             Err(_) => {}
         }
@@ -6094,6 +6097,16 @@ mod tests {
             Err(ClientError::Transport("deadline exceeded".to_string()))
         });
         assert!(lost);
+        assert_eq!(reads, 1);
+
+        // A read Noa did not answer in time ends the pass too, on the
+        // connection it has.
+        let mut reads = 0;
+        let lost = fetch_screens(&mut board, t0, |_| {
+            reads += 1;
+            Err(ClientError::Timeout("noa.getText".to_string()))
+        });
+        assert!(!lost);
         assert_eq!(reads, 1);
 
         // A pane that closed is skipped; the pass goes on.

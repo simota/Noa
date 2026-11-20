@@ -976,7 +976,7 @@ impl From<ClientError> for Failure {
             // before; only the wait loop retries it.
             ClientError::Timeout(_) => Failure {
                 transient: true,
-                ..Failure::unavailable(format!("lost the connection to Noa: {error}"))
+                ..Failure::unavailable(format!("Noa did not answer in time: {error}"))
             },
             other => Failure::error(other.to_string()),
         }
@@ -1560,7 +1560,11 @@ impl Session {
                     .spawn_split(own, SplitPlacement::Horizontal, &params)
                 {
                     Ok(pane) => pane,
-                    Err(ClientError::Rpc { .. }) => self.client.spawn_tab(window, &params)?,
+                    // Not when the split's outcome is unknown: it may
+                    // still open, and a tab would be a second board.
+                    Err(ClientError::Rpc { code, .. }) if code != RPC_OUTCOME_UNKNOWN => {
+                        self.client.spawn_tab(window, &params)?
+                    }
                     Err(err) => return Err(err.into()),
                 }
             }

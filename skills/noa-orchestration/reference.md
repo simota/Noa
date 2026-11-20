@@ -214,7 +214,8 @@ A live view for people, not for scripts. The first `spawn` opens one by itself.
 `board --open` starts a board pane next to this pane (a new tab when there is no room) and prints its `{"paneId":"…"}`;
 when this pane's board is already open it opens nothing and prints
 `{"paneId":"…","existing":true}`. The board is not one of this pane's workers. `board` without `--open` takes over the
-pane it runs in until `q`. Workers that went back to this pane when its
+pane it runs in until `q`, and is refused (exit 1) unless stdin and stdout are
+a terminal, so a script or an agent's tool shell cannot start it by mistake. Workers that went back to this pane when its
 board closed return to the board that `board --open` (or the next `spawn`)
 opens, up to its 20 slots; one that has keyboard focus stays where it is.
 
@@ -233,7 +234,7 @@ succeeds.
 | 0 | Done |
 | 1 | Error: bad arguments, unknown pane, refused input, a pane that is not yours. An argument error prints only its message and a pointer to `--help` |
 | 2 | `wait` timed out |
-| 3 | Server disabled, unreachable, missing a scope, or gone mid-command. stderr says which: "sandbox likely blocks loopback" (your shell's sandbox refused the connection; run `+ctl` outside it), "not listening" (Noa's server is off), or a message naming the config to add |
+| 3 | Server disabled, unreachable, missing a scope, gone mid-command, or not answering a request within 5 s ("did not answer in time"; the request may still have taken effect). stderr says which: "sandbox likely blocks loopback" (your shell's sandbox refused the connection; run `+ctl` outside it), "not listening" (Noa's server is off), or a message naming the config to add |
 
 When `+ctl` reaches a Noa that does not list this pane (stderr says "does not
 report surface ids", exit 3, or "is not among the panes", exit 1), the control

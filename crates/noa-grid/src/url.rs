@@ -208,118 +208,150 @@ fn is_literal_prefix_keyword(word: &[char], sql_quotes: bool) -> bool {
             .any(|keyword| word.iter().copied().eq(keyword.chars())))
 }
 
-fn open_single_quote_width(chars: &[char], end: usize, sql_quotes: bool) -> Option<usize> {
+/// The quote state of a row read left to right, resumable: [`url_in`] asks
+/// for it at each URL start in turn, and the scan carries on from where the
+/// previous answer left off instead of rereading the row from its start.
+/// Each lookahead bounded by `end` can reach at most the URL's scheme
+/// (`h`/`H`), which none of the bounded patterns (quotes, `/*`, `*/`) can
+/// match, so a resumed scan takes exactly the steps a fresh one to the same
+/// `end` would.
+#[derive(Clone, Copy, Default)]
+struct QuoteScan {
+    i: usize,
     // Track outer delimiters separately from single-quoted messages inside
     // log strings, so inner quotes cannot change the outer string's state.
-    let mut quote = None;
-    let mut nested_single_quote = false;
-    let mut block_comment = false;
-    let mut i = 0;
-    while i < end {
-        let c = chars[i];
-        if block_comment {
-            if chars[i..end].starts_with(&['*', '/']) {
-                block_comment = false;
-                i += 2;
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-        if c == '\\' {
-            i += 2;
-            continue;
-        }
-        // Use the same URL boundaries as detection, including quotes adjacent
-        // to word operators. Reclassifying them as contractions shifts every
-        // later string on this row.
-        if let Some(scheme_len) = scheme_len_at(chars, i) {
-            let single_width = match quote {
-                Some(('\'', width)) => Some(width),
-                _ if nested_single_quote => Some(1),
-                _ => None,
-            };
-            i = url_end(chars, i, scheme_len, single_width, sql_quotes);
-            if nested_single_quote && chars.get(i) == Some(&'\'') {
-                nested_single_quote = false;
-                i += 1;
-            } else if let Some((delimiter, width)) = quote {
-                if chars[i..].starts_with(&[delimiter; 3][..width]) {
-                    quote = None;
-                    nested_single_quote = false;
-                    i += width;
+    quote: Option<(char, usize)>,
+    nested_single_quote: bool,
+    block_comment: bool,
+}
+
+impl QuoteScan {
+    /// The width of the single quote open at `end` (a URL scheme's position,
+    /// at or after the previous call's), if any.
+    fn open_single_quote_width(
+        &mut self,
+        chars: &[char],
+        end: usize,
+        sql_quotes: bool,
+    ) -> Option<usize> {
+        let QuoteScan {
+            mut i,
+            mut quote,
+            mut nested_single_quote,
+            mut block_comment,
+        } = *self;
+        while i < end {
+            let c = chars[i];
+            if block_comment {
+                if chars[i..end].starts_with(&['*', '/']) {
+                    block_comment = false;
+                    i += 2;
+                } else {
+                    i += 1;
                 }
-            } else if chars.get(i) == Some(&'\'') {
-                i += 1;
-            }
-            continue;
-        }
-        if let Some((delimiter, width)) = quote {
-            // Logs can contain shell strings with prose before the URL.
-            // A possessive apostrophe does not open an inner string.
-            if delimiter != '\'' && c == '\'' && !is_word_apostrophe(chars, i) {
-                if nested_single_quote {
-                    nested_single_quote = false;
-                } else if i == 0 || !chars[i - 1].is_alphanumeric() {
-                    nested_single_quote = true;
-                }
-            }
-            if c != delimiter || !chars[i..end].starts_with(&[delimiter; 3][..width]) {
-                i += 1;
                 continue;
             }
-            // Preserve contractions/apostrophes in single-quoted messages.
-            if delimiter != '\''
-                || width > 1
-                || !is_word_apostrophe(chars, i)
-                || starts_keyword_expression(&chars[i + 1..], sql_quotes)
-            {
-                quote = None;
-                nested_single_quote = false;
+            if c == '\\' {
+                i += 2;
+                continue;
             }
-            i += width;
-            continue;
-        }
-        if chars[i..end].starts_with(&['/', '*']) {
-            block_comment = true;
-            i += 2;
-            continue;
-        }
-        if matches!(c, '\'' | '"' | '`') {
-            // Contractions in a message do not open or close its quotes.
-            let string_prefix = string_prefix_len(chars, i) > 0;
-            let word_start = chars[..i]
-                .iter()
-                .rposition(|c| !c.is_alphanumeric() && *c != '_')
-                .map_or(0, |offset| offset + 1);
-            if c != '\''
-                || !is_word_apostrophe(chars, i)
-                || string_prefix
-                || is_literal_prefix_keyword(&chars[word_start..i], sql_quotes)
-            {
-                // SQL uses doubled quote escapes. Python triples need a
-                // matching delimiter on this row to establish triple context.
-                let triple = [c; 3];
-                let width = if !sql_quotes
-                    && c != '`'
-                    && chars[i..end].starts_with(&triple)
-                    && chars[i + 3..].windows(3).any(|window| window == triple)
-                {
-                    3
-                } else {
-                    1
+            // Use the same URL boundaries as detection, including quotes adjacent
+            // to word operators. Reclassifying them as contractions shifts every
+            // later string on this row.
+            if let Some(scheme_len) = scheme_len_at(chars, i) {
+                let single_width = match quote {
+                    Some(('\'', width)) => Some(width),
+                    _ if nested_single_quote => Some(1),
+                    _ => None,
                 };
-                quote = Some((c, width));
+                i = url_end(chars, i, scheme_len, single_width, sql_quotes);
+                if nested_single_quote && chars.get(i) == Some(&'\'') {
+                    nested_single_quote = false;
+                    i += 1;
+                } else if let Some((delimiter, width)) = quote {
+                    if chars[i..].starts_with(&[delimiter; 3][..width]) {
+                        quote = None;
+                        nested_single_quote = false;
+                        i += width;
+                    }
+                } else if chars.get(i) == Some(&'\'') {
+                    i += 1;
+                }
+                continue;
+            }
+            if let Some((delimiter, width)) = quote {
+                // Logs can contain shell strings with prose before the URL.
+                // A possessive apostrophe does not open an inner string.
+                if delimiter != '\'' && c == '\'' && !is_word_apostrophe(chars, i) {
+                    if nested_single_quote {
+                        nested_single_quote = false;
+                    } else if i == 0 || !chars[i - 1].is_alphanumeric() {
+                        nested_single_quote = true;
+                    }
+                }
+                if c != delimiter || !chars[i..end].starts_with(&[delimiter; 3][..width]) {
+                    i += 1;
+                    continue;
+                }
+                // Preserve contractions/apostrophes in single-quoted messages.
+                if delimiter != '\''
+                    || width > 1
+                    || !is_word_apostrophe(chars, i)
+                    || starts_keyword_expression(&chars[i + 1..], sql_quotes)
+                {
+                    quote = None;
+                    nested_single_quote = false;
+                }
                 i += width;
                 continue;
             }
+            if chars[i..end].starts_with(&['/', '*']) {
+                block_comment = true;
+                i += 2;
+                continue;
+            }
+            if matches!(c, '\'' | '"' | '`') {
+                // Contractions in a message do not open or close its quotes.
+                let string_prefix = string_prefix_len(chars, i) > 0;
+                let word_start = chars[..i]
+                    .iter()
+                    .rposition(|c| !c.is_alphanumeric() && *c != '_')
+                    .map_or(0, |offset| offset + 1);
+                if c != '\''
+                    || !is_word_apostrophe(chars, i)
+                    || string_prefix
+                    || is_literal_prefix_keyword(&chars[word_start..i], sql_quotes)
+                {
+                    // SQL uses doubled quote escapes. Python triples need a
+                    // matching delimiter on this row to establish triple context.
+                    let triple = [c; 3];
+                    let width = if !sql_quotes
+                        && c != '`'
+                        && chars[i..end].starts_with(&triple)
+                        && chars[i + 3..].windows(3).any(|window| window == triple)
+                    {
+                        3
+                    } else {
+                        1
+                    };
+                    quote = Some((c, width));
+                    i += width;
+                    continue;
+                }
+            }
+            i += 1;
         }
-        i += 1;
-    }
-    match quote {
-        Some(('\'', width)) => Some(width),
-        _ if nested_single_quote => Some(1),
-        _ => None,
+        *self = QuoteScan {
+            i,
+            quote,
+            nested_single_quote,
+            block_comment,
+        };
+        match quote {
+            Some(('\'', width)) => Some(width),
+            _ if nested_single_quote => Some(1),
+            _ => None,
+        }
     }
 }
 
@@ -781,6 +813,7 @@ pub(crate) fn url_in<R: Borrow<Row>>(
 ) -> Option<UrlMatch> {
     let chars = &line.chars;
     let sql_quotes = starts_sql_statement(chars);
+    let mut quote_scan = QuoteScan::default();
 
     // Visit URLs in text order and skip their contents, so a redirect URL
     // embedded in a query cannot override the surrounding link on hover.
@@ -790,7 +823,7 @@ pub(crate) fn url_in<R: Borrow<Row>>(
             char_start += 1;
             continue;
         };
-        let quote_width = open_single_quote_width(chars, char_start, sql_quotes);
+        let quote_width = quote_scan.open_single_quote_width(chars, char_start, sql_quotes);
         let end = url_end(chars, char_start, scheme_len, quote_width, sql_quotes);
         if end > char_start + scheme_len {
             let (start, last) = line.span(rows, char_start, end);
@@ -1947,6 +1980,34 @@ mod tests {
         assert_eq!(found.uri, "https://a/界x");
         assert_eq!((found.start_row, found.start_x), (0, 0));
         assert_eq!((found.end_row, found.end_x), (1, 2));
+    }
+
+    /// A scan resumed from one URL start to the next answers every URL start
+    /// exactly as a fresh scan from the row's beginning does, including
+    /// where a bounded lookahead meets the scheme (`'''https`, `*https`).
+    #[test]
+    fn resumed_quote_scan_matches_a_fresh_one() {
+        let lines = [
+            "'''https://a ''' https://b",
+            "\"\"https://a\" 'x' https://b/*https://c*/https://d",
+            "/*https://a*/ 'it's https://b' r'https://c' \\'https://d",
+            "SELECT 'a''b' in 'https://x' ,'https://y'; https://z",
+            "`https://a` \"\"\"https://b\"\"\" 'https://c'x' https://d",
+            "$ cmd 'https://a'b' https://c 'don't https://d' https://e",
+        ];
+        for sql_quotes in [false, true] {
+            for line in lines {
+                let chars: Vec<char> = line.chars().collect();
+                let mut resumed = QuoteScan::default();
+                for end in (0..chars.len()).filter(|&i| scheme_len_at(&chars, i).is_some()) {
+                    assert_eq!(
+                        resumed.open_single_quote_width(&chars, end, sql_quotes),
+                        QuoteScan::default().open_single_quote_width(&chars, end, sql_quotes),
+                        "{line:?} at {end}",
+                    );
+                }
+            }
+        }
     }
 
     /// Every column of a deterministic corpus of quote-, comment-, SQL- and

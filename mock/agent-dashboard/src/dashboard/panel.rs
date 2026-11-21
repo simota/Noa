@@ -1,7 +1,7 @@
 use noa_gpui_core::style::{
     AlignItems, FlexDirection, Position, Rect as LayoutRect, Size as LayoutSize, auto, length,
 };
-use noa_gpui_core::widgets::{Badge, Container, EmptyState, Kbd, Label, ScrollView, Tone};
+use noa_gpui_core::widgets::{Badge, Container, EmptyState, Kbd, Label, Tone};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
 use crate::live::Link;
@@ -159,15 +159,19 @@ pub(super) fn panel_title(
     row
 }
 
-/// A panel list, `gap` between its items.
+/// A panel list, `gap` between its items: a clipped column, not a scroll
+/// view, so that it shows whole items only (`pager::fit` hides those that
+/// would be cut). Its items are its direct children (the queue reorders its
+/// cards by child index).
 pub(super) fn card_list(tree: &mut UiTree, parent: WidgetId, gap_px: f32) -> WidgetId {
     tree.insert(
         Some(parent),
-        ScrollView::new(Style {
+        Container::new(Style {
             flex_direction: FlexDirection::Column,
             gap: gap(gap_px),
             ..fill_remaining()
-        }),
+        })
+        .clip(true),
     )
 }
 

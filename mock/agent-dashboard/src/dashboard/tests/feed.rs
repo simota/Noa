@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::fleet::{Phase, State};
-use noa_gpui_core::widgets::{Label, ScrollView};
+use noa_gpui_core::widgets::Label;
 
 use super::*;
 
@@ -38,13 +38,16 @@ fn a_volatile_snapshot_updates_in_place() {
     let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet.clone(), 1));
     let mut text = TextStore::new(Default::default());
     dashboard.prepare(window(), &mut text);
-    let list = list_of(&dashboard);
-    dashboard
-        .tree
-        .update::<ScrollView, _>(list, |s, cx| s.set_offset(cx, 40.0));
-    dashboard.prepare(window(), &mut text);
-    let offset = |d: &Dashboard| d.tree.get::<ScrollView>(list).map(ScrollView::offset);
-    assert_eq!(offset(&dashboard), Some(40.0), "the running list scrolls");
+    // One wheel step down over the running list, then the next frame.
+    let page_down = |dashboard: &mut Dashboard, text: &mut TextStore| {
+        let pos = center(&dashboard.tree, list_of(dashboard));
+        let delta = Point::new(0.0, -40.0);
+        dashboard.dispatch(Event::Wheel { pos, delta }, text);
+        dashboard.prepare(window(), text);
+    };
+    page_down(&mut dashboard, &mut text);
+    let first = |d: &Dashboard| d.view.first[Panel::Running as usize];
+    assert_eq!(first(&dashboard), 1, "the running list pages");
     let chart = pulse_id(&dashboard, |p| matches!(p, Pulse::Output(11)));
     let since = pulse_id(&dashboard, |p| matches!(p, Pulse::QueueSince(14)));
 
@@ -52,11 +55,7 @@ fn a_volatile_snapshot_updates_in_place() {
     dashboard.apply(live(later.clone(), 4), &mut text);
     dashboard.prepare(window(), &mut text);
 
-    assert_eq!(
-        offset(&dashboard),
-        Some(40.0),
-        "the running list was rebuilt"
-    );
+    assert_eq!(first(&dashboard), 1, "the running list was rebuilt");
     let values = &dashboard.tree.get::<Chart>(chart).unwrap().series_list()[0].values;
     assert_eq!(values, &later.worker(11).unwrap().lines_per_tick);
     let since = dashboard.tree.get::<Label>(since).unwrap();
@@ -64,15 +63,13 @@ fn a_volatile_snapshot_updates_in_place() {
     let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
     assert!(status.text().contains("同期 4 秒前"), "{}", status.text());
     // The lanes were made again and the old ones' text layouts released:
-    // the screen shows and owns what one built for the later fleet does.
+    // the screen shows and owns what one built for the later fleet, paged
+    // the same way, does.
     let mut fresh = Dashboard::of_snapshot(Grouping::Orchestrator, live(later, 4));
     let mut fresh_text = TextStore::new(Default::default());
     fresh.prepare(window(), &mut fresh_text);
-    let fresh_list = list_of(&fresh);
-    fresh
-        .tree
-        .update::<ScrollView, _>(fresh_list, |s, cx| s.set_offset(cx, 40.0));
-    fresh.prepare(window(), &mut fresh_text);
+    page_down(&mut fresh, &mut fresh_text);
+    assert_eq!(first(&fresh), 1);
     assert_eq!(
         frame_of(dashboard.display_list(), &text),
         frame_of(fresh.display_list(), &fresh_text)

@@ -202,6 +202,12 @@ pub(crate) fn read(
     }
 }
 
+/// `+ctl result --path`: the path and a newline. Touches no file, so an
+/// existing, empty or missing file all give the same line.
+pub(crate) fn write_path(out: &mut impl std::io::Write, path: &Path) -> std::io::Result<()> {
+    writeln!(out, "{}", path.display())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,5 +375,25 @@ mod tests {
         assert!(read(1, &first, None).unwrap_err().contains("no result yet"));
         std::fs::write(&first, "done\n").unwrap();
         assert!(written_since(&first, long_ago).is_some());
+    }
+
+    #[test]
+    fn the_path_is_printed_whether_the_file_exists_is_empty_or_is_missing() {
+        let dir = temp_dir("write-path");
+        let full = dir.join("full.md");
+        std::fs::write(&full, "done\n").unwrap();
+        let empty = prepare(&dir, Some("empty")).unwrap();
+        let missing = dir.join("never-created.md");
+        for path in [&full, &empty, &missing] {
+            let mut out = Vec::new();
+            write_path(&mut out, path).unwrap();
+            assert_eq!(
+                String::from_utf8(out).unwrap(),
+                format!("{}\n", path.display())
+            );
+        }
+        assert!(!missing.exists());
+        assert_eq!(std::fs::read_to_string(&full).unwrap(), "done\n");
+        assert_eq!(std::fs::read(&empty).unwrap(), b"");
     }
 }

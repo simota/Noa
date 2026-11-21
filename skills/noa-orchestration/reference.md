@@ -282,7 +282,7 @@ with `--scrollback` its retained output. `--max-bytes` bounds the output
 pane on the alternate screen (most agents' TUIs) keeps no history:
 `--scrollback` then says on stderr that only its screen came back.
 
-### `result PANE [--max-bytes N]`
+### `result PANE [--max-bytes N | --path]`
 
 Prints the pane's result file (spawn, "Result file"), with a newline added if
 it lacks one. The path is the one this pane's journal recorded at the spawn (or
@@ -293,6 +293,16 @@ where `close --prune` moved it), else `<its cwd>/.noa/result-LABEL.md` for a lis
 $NOA_RESULT)`, `pane N has no result yet: <path> is empty (…)` for a worker that
 has not written its report, `cannot read pane N's result <path>: …`, or `pane N has no
 known result file: …`. Works on closed workers the journal knows.
+
+`--path` prints only the path of the result file and a newline, without opening
+the result file. It exits 0 whenever a path is known, whether the file exists, is
+empty or is missing, so a path can name a file that is not written yet. When no
+path is known it exits 1 with `pane N has no known result file: …`. Other
+failures keep the exit codes of "Exit status" below. `--path` with `--max-bytes` is an
+argument error (also exit 1):
+`--path and --max-bytes conflict: --path reads no file`. Use it to follow a
+command worker's log, which `--max-bytes` cannot show the end of:
+`tail -f "$("$NOA_BIN" +ctl result PANE --path)"`.
 
 ### `status [--answers]`
 

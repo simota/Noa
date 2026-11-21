@@ -7,9 +7,9 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use noa_ipc::{Client, ClientError, Panel, TextSource};
+use noa_ipc::{Client, ClientError, Panel, PanelSpawn, TextSource};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{EXIT_OK, Failure, HOLD_BANNER, SUBMIT_DELAY};
@@ -46,6 +46,9 @@ const CRUMB_WIDTH: usize = 10;
 const MOVED_GAP: Duration = Duration::from_secs(3);
 /// Closed workers kept at the end of the list.
 const GONE_CAP: usize = 5;
+/// The worker numbers a board gives out before it takes freed ones again
+/// (U14): the digit keys reach 1-20 (D12).
+const NUMBERS: usize = 20;
 /// Where a row's name starts, which its preview lines line up with.
 const ROW_INDENT: usize = 6;
 /// How long a lone ESC waits for the rest of a sequence before it counts
@@ -122,6 +125,10 @@ fn system_language() -> Option<String> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Status {
     Permission,
+    /// A question dialog (`OSC 7501` blocked, `Panel.agent.blocked:
+    /// "question"`): Enter would answer it with its first choice.
+    Question,
+    /// Waiting for input, reported without a dialog (a hook, `OSC 777`).
     Input,
     Error,
     /// An unread notification, with no blocking report.
@@ -157,6 +164,14 @@ impl Status {
             .and_then(|agent| agent.state.as_deref())
         {
             Some("permission") => Self::Permission,
+            Some("input")
+                if panel
+                    .agent
+                    .as_ref()
+                    .is_some_and(|agent| agent.blocked.as_deref() == Some("question")) =>
+            {
+                Self::Question
+            }
             Some("input") => Self::Input,
             Some("error") => Self::Error,
             // A finished turn usually raises a notification too; it is done,
@@ -177,7 +192,9 @@ impl Status {
 
     pub(crate) fn group(self) -> Group {
         match self {
-            Self::Permission | Self::Input | Self::Error | Self::Attention => Group::Needs,
+            Self::Permission | Self::Question | Self::Input | Self::Error | Self::Attention => {
+                Group::Needs
+            }
             status if status.failed() => Group::Needs,
             Self::Running | Self::Quiet | Self::Command => Group::Working,
             Self::Finished => Group::Done,
@@ -188,7 +205,8 @@ impl Status {
     fn label(self, lang: Lang) -> String {
         match self {
             Self::Permission => lang.pick("承認待ち", "approval").to_string(),
-            Self::Input => lang.pick("入力待ち", "question").to_string(),
+            Self::Question => lang.pick("質問", "question").to_string(),
+            Self::Input => lang.pick("入力待ち", "input").to_string(),
             Self::Error => lang.pick("エラー", "error").to_string(),
             Self::Attention => lang.pick("通知あり", "notified").to_string(),
             Self::Running => lang.pick("作業中", "working").to_string(),
@@ -208,6 +226,10 @@ impl Status {
     fn still(self, lang: Lang) -> Option<&'static str> {
         Some(match self {
             Self::Permission => lang.pick("まだ承認待ちです。", "It still awaits approval. "),
+            Self::Question => lang.pick(
+                "まだ質問の答えを待っています。",
+                "It still awaits an answer to its question. ",
+            ),
             Self::Input => lang.pick("まだ答えを待っています。", "It still awaits an answer. "),
             Self::Error => lang.pick("エラーを報告しています。", "It reported an error. "),
             Self::Attention => {
@@ -224,6 +246,10 @@ impl Status {
     fn closed_as(self, lang: Lang) -> String {
         match self {
             Self::Permission => lang.pick("承認待ちのまま閉じた", "closed awaiting approval"),
+            Self::Question => lang.pick(
+                "質問に答えないまま閉じた",
+                "closed with its question unanswered",
+            ),
             Self::Input => lang.pick("答えを待ったまま閉じた", "closed awaiting an answer"),
             Self::Error => lang.pick("エラーのまま閉じた", "closed after an error"),
             Self::Attention => lang.pick("通知を残して閉じた", "closed with a notification unread"),
@@ -247,7 +273,8 @@ impl Status {
     fn short_label(self, lang: Lang) -> String {
         match self {
             Self::Permission => lang.pick("承認", "appr").to_string(),
-            Self::Input => lang.pick("入力", "ask").to_string(),
+            Self::Question => lang.pick("質問", "ask").to_string(),
+            Self::Input => lang.pick("入力", "input").to_string(),
             Self::Attention => lang.pick("通知", "note").to_string(),
             Self::Error => lang.pick("エラー", "error").to_string(),
             status if status.failed() => lang.pick("失敗", "fail").to_string(),
@@ -260,7 +287,7 @@ impl Status {
     fn mark(self) -> &'static str {
         match self {
             Self::Permission | Self::Attention => "!",
-            Self::Input => "?",
+            Self::Question | Self::Input => "?",
             Self::Error => "×",
             status if status.failed() => "×",
             Self::Running | Self::Command => "●",
@@ -271,7 +298,7 @@ impl Status {
 
     fn color(self) -> Rgb {
         match self {
-            Self::Permission | Self::Input | Self::Attention => ORANGE,
+            Self::Permission | Self::Question | Self::Input | Self::Attention => ORANGE,
             Self::Error => RED,
             status if status.failed() => RED,
             Self::Running | Self::Command => BLUE,
@@ -443,6 +470,7 @@ type Urgency = (Group, u8, Option<Instant>);
 /// A worker that was closed while the board watched: what it last said.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Gone {
+    number: Option<usize>,
     name: String,
     status: Status,
     detail: String,
@@ -467,8 +495,13 @@ pub(crate) struct Board {
     since: HashMap<u64, (Status, Option<Instant>)>,
     /// Each worker's number, given once when it is first listed and kept
     /// while it lives, so `3` means the same worker however the list is
-    /// sorted. A closed worker's number goes to the next one that appears.
+    /// sorted, and not given to another while the board is open (U14).
     numbers: HashMap<u64, usize>,
+    /// The highest number given yet, and the numbers of closed workers,
+    /// oldest first: one is given again only once all of 1-[`NUMBERS`]
+    /// were.
+    issued: usize,
+    freed: Vec<usize>,
     /// The digit just typed and when, so a second digit soon after picks
     /// a two-digit number (a board holds up to 20 workers, D12).
     digit: Option<(usize, Instant)>,
@@ -518,6 +551,9 @@ pub(crate) struct Board {
     needs_seen: HashSet<u64>,
     /// The language of every label (see [`Lang::detect`]).
     pub(crate) lang: Lang,
+    /// The Unix time at the last listing, and when it was read: what
+    /// `Panel.spawn.startedAt` is told against (U9).
+    wall: Option<(u64, Instant)>,
 }
 
 impl Board {
@@ -532,6 +568,8 @@ impl Board {
             history: HashMap::new(),
             since: HashMap::new(),
             numbers: HashMap::new(),
+            issued: 0,
+            freed: Vec::new(),
             digit: None,
             selected: None,
             view: View::List,
@@ -553,6 +591,7 @@ impl Board {
             of_gone: false,
             needs_seen: HashSet::new(),
             lang: Lang::Ja,
+            wall: None,
         }
     }
 
@@ -619,11 +658,16 @@ impl Board {
         let first = !self.started;
         self.started = true;
         self.synced = Some(now);
+        let unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        self.wall = Some((unix, now));
         let before: Vec<(u64, Gone)> = self
             .workers()
             .iter()
             .map(|panel| {
                 let gone = Gone {
+                    number: self.numbers.get(&panel.pane_id.0).copied(),
                     name: worker_name(panel),
                     status: Status::of(panel),
                     detail: self.last_word(panel),
@@ -700,17 +744,25 @@ impl Board {
         }
         let mut live: Vec<u64> = self.listed().map(|panel| panel.pane_id.0).collect();
         live.sort_unstable();
+        let mut freed: Vec<usize> = self
+            .numbers
+            .iter()
+            .filter(|(pane, _)| !live.contains(pane))
+            .map(|(_, number)| *number)
+            .collect();
+        freed.sort_unstable();
+        self.freed.extend(freed);
         self.numbers.retain(|pane, _| live.contains(pane));
-        // New workers in spawn order (pane ids grow), each the lowest free
-        // number.
+        // New workers in spawn order (pane ids grow), each the next number
+        // never given, or once 1-20 all were, the one freed longest ago.
         for &pane in &live {
             if !self.numbers.contains_key(&pane) {
-                let taken: std::collections::HashSet<usize> =
-                    self.numbers.values().copied().collect();
-                let mut number = 1;
-                while taken.contains(&number) {
-                    number += 1;
-                }
+                let number = if self.issued < NUMBERS || self.freed.is_empty() {
+                    self.issued += 1;
+                    self.issued
+                } else {
+                    self.freed.remove(0)
+                };
                 self.numbers.insert(pane, number);
             }
         }
@@ -894,7 +946,10 @@ impl Board {
         if group != Group::Needs {
             return (group, 0, None);
         }
-        let rank = u8::from(matches!(status, Status::Input | Status::Attention));
+        let rank = u8::from(matches!(
+            status,
+            Status::Question | Status::Input | Status::Attention
+        ));
         // `None` (already so when the board opened) is the oldest.
         let began = self.since.get(&panel.pane_id.0).and_then(|(_, at)| *at);
         (group, rank, began)
@@ -1199,6 +1254,18 @@ impl Board {
         self.panels.iter().find(|panel| panel.pane_id.0 == pane)
     }
 
+    /// [`spawn_facts`] of `panel` at `now`; none for a pane no IPC spawn
+    /// started with a command, or from a server that predates `spawn`.
+    fn spawn_facts(&self, panel: &Panel, now: Instant) -> Vec<String> {
+        let Some(spawn) = &panel.spawn else {
+            return Vec::new();
+        };
+        let unix_now = self
+            .wall
+            .map(|(unix, at)| unix + now.saturating_duration_since(at).as_secs());
+        spawn_facts(spawn, unix_now, self.lang)
+    }
+
     fn name(&self, pane: u64) -> String {
         if Some(pane) == self.of {
             return self
@@ -1330,11 +1397,12 @@ impl Board {
         self.select(needing[next]);
     }
 
-    /// Whether `pane` waits for an approval, which is answered in its own
-    /// pane, never from the board (spec D7).
-    fn awaits_approval(&self, pane: u64) -> bool {
+    /// Whether `pane` waits for an approval or on a question dialog, which
+    /// is answered in its own pane, never from the board (spec D7): the
+    /// Enter that submits a send line would pick the first choice.
+    fn awaits_answer(&self, pane: u64) -> bool {
         self.panel(pane)
-            .is_some_and(|panel| Status::of(panel) == Status::Permission)
+            .is_some_and(|panel| answered_in_pane(Status::of(panel)))
     }
 
     /// Whether `pane`'s process has ended: nothing typed reaches it.
@@ -1376,8 +1444,11 @@ impl Board {
     /// Why nothing can be sent to `pane`, if so.
     fn cannot_send(&self, pane: u64) -> Option<String> {
         let name = self.name(pane);
-        if self.awaits_approval(pane) {
-            Some(approval_message(&name, self.lang))
+        if let Some(why) = self
+            .panel(pane)
+            .and_then(|panel| answer_message(Status::of(panel), &name, self.lang))
+        {
+            Some(why)
         } else if self.has_exited(pane) {
             Some(self.lang.pick(
                 format!("{name} は終了しています。x で閉じる"),
@@ -1549,11 +1620,27 @@ fn draft_kept(lang: Lang) -> &'static str {
 
 // Labels and process names come from other processes: never let their
 // control characters reach this terminal.
-fn approval_message(name: &str, lang: Lang) -> String {
-    match lang {
-        Lang::Ja => format!("{name} は承認待ちです。g でペインへ移動して答えてください"),
-        Lang::En => format!("{name} awaits approval. g goes to its pane to answer it"),
-    }
+fn answer_message(status: Status, name: &str, lang: Lang) -> Option<String> {
+    Some(match (status, lang) {
+        (Status::Permission, Lang::Ja) => {
+            format!("{name} は承認待ちです。g でペインへ移動して答えてください")
+        }
+        (Status::Permission, Lang::En) => {
+            format!("{name} awaits approval. g goes to its pane to answer it")
+        }
+        (Status::Question, Lang::Ja) => format!(
+            "{name} は質問の答えを待っています。Enter は最初の選択肢を選ぶので、g でペインへ移動して答えてください"
+        ),
+        (Status::Question, Lang::En) => format!(
+            "{name} asks a question, and Enter would pick its first choice. g goes to its pane to answer it"
+        ),
+        _ => return None,
+    })
+}
+
+/// Whether a worker in `status` is answered only in its own pane (D7).
+fn answered_in_pane(status: Status) -> bool {
+    matches!(status, Status::Permission | Status::Question)
 }
 
 /// A full-width rule, as agents draw around their input box.
@@ -1622,6 +1709,51 @@ fn worker_kind(panel: &Panel) -> String {
         .or_else(|| panel.process.clone())
         .map(|kind| clean(&kind))
         .unwrap_or_default()
+}
+
+/// The model and the effort a worker's argv picks (U9): `--model X` or
+/// `-m X` (`--model=X`), and `--effort X` (`--effort=X`) or codex's
+/// `-c model_reasoning_effort=X`; the last one given wins, as with the
+/// agents' own parsing.
+fn model_and_effort(argv: &[String]) -> (Option<String>, Option<String>) {
+    let (mut model, mut effort) = (None, None);
+    let mut args = argv.iter().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--model" || arg == "-m" {
+            model = args.next().cloned();
+        } else if let Some(value) = arg.strip_prefix("--model=") {
+            model = Some(value.to_string());
+        } else if arg == "--effort" {
+            effort = args.next().cloned();
+        } else if let Some(value) = arg.strip_prefix("--effort=") {
+            effort = Some(value.to_string());
+        } else if let Some(value) = arg
+            .strip_prefix("--config=")
+            .unwrap_or(arg)
+            .strip_prefix("model_reasoning_effort=")
+        {
+            // A TOML value: `"high"` is `high`.
+            effort = Some(value.trim_matches('"').to_string());
+        }
+    }
+    let shown = |value: Option<String>| value.map(|value| clean(&value)).filter(|v| !v.is_empty());
+    (shown(model), shown(effort))
+}
+
+/// What `spawn` says of a worker, as the preview and the detail show it:
+/// "opus", "推論量 high", "12 分前に起動", each only when it is known.
+fn spawn_facts(spawn: &PanelSpawn, unix_now: Option<u64>, lang: Lang) -> Vec<String> {
+    let (model, effort) = model_and_effort(&spawn.argv);
+    let effort =
+        effort.map(|effort| lang.pick(format!("推論量 {effort}"), format!("effort {effort}")));
+    let started = unix_now.map(|unix_now| {
+        let span = duration_text(
+            Duration::from_secs(unix_now.saturating_sub(spawn.started_at)),
+            lang,
+        );
+        lang.pick(format!("{span}前に起動"), format!("started {span} ago"))
+    });
+    model.into_iter().chain(effort).chain(started).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -2497,8 +2629,8 @@ impl Board {
             (
                 "g",
                 l(
-                    "ワーカーをこの下に開く(承認はそこで答える)",
-                    "open the worker below (answer approvals there)",
+                    "ワーカーをこの下に開く(承認や質問はそこで答える)",
+                    "open the worker below (answer approvals and questions there)",
                 ),
             ),
             (
@@ -2511,8 +2643,8 @@ impl Board {
             (
                 "s",
                 l(
-                    "ワーカーに送る(承認待ち・終了したワーカーには送れません)",
-                    "send to the worker (not to one awaiting approval or exited)",
+                    "ワーカーに送る(承認待ち・質問中・終了したワーカーには送れません)",
+                    "send to the worker (not to one awaiting approval, asking a question or exited)",
                 ),
             ),
             (
@@ -3119,6 +3251,12 @@ impl Board {
             let report = self.lang.pick("報告", "report");
             meta.fg(DIM, &format!(" · {report} {}", agent.seq));
         }
+        // Its model, effort and start (U9), each whole where it fits.
+        for fact in self.spawn_facts(panel, now) {
+            if meta.width + 3 + fact.width() < cols {
+                meta.fg(DIM, &format!(" · {fact}"));
+            }
+        }
         // Its branch, whole where it fits (U6).
         if let Some(branch) = branch_of(panel)
             && meta.width + 3 + branch.width() < cols
@@ -3212,13 +3350,15 @@ impl Board {
         let mut lines = vec![title.finish(cols)];
         for gone in &self.gone {
             let mut line = Line::default();
-            line.plain("   ")
-                .fg(GREY, "✕ ")
-                .plain(&fit(&gone.name, 20))
-                .fg(DIM, &{
-                    let closed = gone.status.closed_as(self.lang);
-                    format!("  {closed} · {}", ago(Some(gone.at), now, self.lang))
-                });
+            line.plain("   ").fg(GREY, "✕ ");
+            // Its number, which no other worker takes meanwhile (U14).
+            if let Some(number) = gone.number {
+                line.fg(DIM, &format!("#{number} "));
+            }
+            line.plain(&fit(&gone.name, 20)).fg(DIM, &{
+                let closed = gone.status.closed_as(self.lang);
+                format!("  {closed} · {}", ago(Some(gone.at), now, self.lang))
+            });
             if !gone.detail.is_empty() {
                 let room = cols.saturating_sub(line.width + 3);
                 line.plain("  ").fg(DIM, &fit(&clean(&gone.detail), room));
@@ -3434,6 +3574,15 @@ impl Board {
                 lines.push(line.finish(cols));
             }
         }
+        // What it runs on and since when (U9).
+        let facts = self.spawn_facts(panel, now).join(" · ");
+        if !facts.is_empty() {
+            for part in wrap(&facts, cols - 2) {
+                let mut line = Line::default();
+                line.plain(" ").fg(DIM, &part);
+                lines.push(line.finish(cols));
+            }
+        }
 
         let history: &[Report] = self.history.get(&pane).map(Vec::as_slice).unwrap_or(&[]);
         let history_rows = history.len().clamp(1, 6);
@@ -3563,7 +3712,7 @@ impl Board {
                 return line.finish(cols);
             }
             Mode::Normal => {
-                let approval = self.target().is_some_and(|pane| self.awaits_approval(pane));
+                let approval = self.target().is_some_and(|pane| self.awaits_answer(pane));
                 let go = if approval {
                     l("移動して答える", "go and answer")
                 } else {
@@ -4095,16 +4244,19 @@ fn perform(
         (notice, Some((pane, text.to_string())))
     };
     // The board's listing can be up to `LIST_EVERY` old: look again right
-    // before typing, so a worker that started waiting for an approval since
-    // is never answered from here (spec D7).
+    // before typing, so a worker that started waiting for an approval or on
+    // a question since is never answered from here (spec D7).
     if let Action::Send(pane, text) = &action {
         match server.panels() {
             Ok(panels) => {
-                if panels.iter().any(|panel| {
-                    panel.pane_id.0 == *pane && Status::of(panel) == Status::Permission
-                }) {
-                    let why = Notice::warn(approval_message(&board.name(*pane), board.lang));
-                    return kept(why, *pane, text);
+                if let Some(why) = panels
+                    .iter()
+                    .find(|panel| panel.pane_id.0 == *pane)
+                    .and_then(|panel| {
+                        answer_message(Status::of(panel), &board.name(*pane), board.lang)
+                    })
+                {
+                    return kept(Notice::warn(why), *pane, text);
                 }
             }
             Err(err) => return kept(failed(err), *pane, text),
@@ -4118,25 +4270,39 @@ fn perform(
             }
             std::thread::sleep(SUBMIT_DELAY);
             // The Enter could answer a prompt that appeared in the pause.
-            match server.panels() {
-                Ok(panels)
-                    if panels.iter().any(|panel| {
-                        panel.pane_id.0 == *pane && Status::of(panel) == Status::Permission
-                    }) =>
-                {
+            let asking = server.panels().map(|panels| {
+                panels
+                    .iter()
+                    .find(|panel| panel.pane_id.0 == *pane)
+                    .map(Status::of)
+                    .filter(|status| answered_in_pane(*status))
+            });
+            match asking {
+                Ok(Some(status)) => {
                     // The text is in the worker's input box already: no
                     // draft, or sending it again would type it twice.
                     let name = board.name(*pane);
-                    return (Notice::warn(board.lang.pick(
-                        format!(
-                            "{name} が承認待ちになったので Enter は送っていません。g でペインへ移動して答えてください"
+                    let why = match status {
+                        Status::Question => board.lang.pick(
+                            format!(
+                                "{name} が質問を出したので Enter は送っていません (最初の選択肢を選ぶため)。g でペインへ移動して答えてください"
+                            ),
+                            format!(
+                                "{name} now asks a question, so Enter was not sent (it would pick the first choice). g goes to its pane to answer it"
+                            ),
                         ),
-                        format!(
-                            "{name} now awaits approval, so Enter was not sent. g goes to its pane to answer it"
+                        _ => board.lang.pick(
+                            format!(
+                                "{name} が承認待ちになったので Enter は送っていません。g でペインへ移動して答えてください"
+                            ),
+                            format!(
+                                "{name} now awaits approval, so Enter was not sent. g goes to its pane to answer it"
+                            ),
                         ),
-                    )), None);
+                    };
+                    return (Notice::warn(why), None);
                 }
-                Ok(_) => server.type_text(*pane, "\r", false),
+                Ok(None) => server.type_text(*pane, "\r", false),
                 Err(err) => Err(err),
             }
         }
@@ -4701,6 +4867,228 @@ mod tests {
         assert_eq!(board.key(Key::Enter), None);
     }
 
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    // U9: the argv the tiers pass (ctl/worktree.rs), and the joined forms.
+    #[test]
+    fn the_model_and_effort_are_read_from_the_argv() {
+        let read = |args: &[&str]| model_and_effort(&argv(args));
+        let some = |model: &str, effort: Option<&str>| {
+            (Some(model.to_string()), effort.map(str::to_string))
+        };
+        assert_eq!(
+            read(&["claude", "--model", "opus", "--effort", "high"]),
+            some("opus", Some("high"))
+        );
+        assert_eq!(
+            read(&[
+                "codex",
+                "-m",
+                "gpt-6-luna",
+                "-c",
+                "model_reasoning_effort=low"
+            ]),
+            some("gpt-6-luna", Some("low"))
+        );
+        assert_eq!(
+            read(&[
+                "codex",
+                "--config=model_reasoning_effort=\"medium\"",
+                "--model=o"
+            ]),
+            some("o", Some("medium"))
+        );
+        assert_eq!(
+            read(&["agy", "--model", "gemini-4-neon-high"]),
+            some("gemini-4-neon-high", None)
+        );
+        assert_eq!(
+            read(&["claude", "--effort=low"]),
+            (None, Some("low".to_string()))
+        );
+        assert_eq!(read(&["cargo", "test"]), (None, None));
+        // The program itself is no flag, and a flag at the end has no value.
+        assert_eq!(read(&["-m", "--model"]), (None, None));
+    }
+
+    #[test]
+    fn the_spawn_facts_say_model_effort_and_start_in_both_languages() {
+        let spawn = PanelSpawn {
+            argv: argv(&["claude", "--model", "opus", "--effort", "high"]),
+            started_at: 1_000,
+        };
+        assert_eq!(
+            spawn_facts(&spawn, Some(1_720), Lang::Ja),
+            vec!["opus", "推論量 high", "12 分前に起動"]
+        );
+        assert_eq!(
+            spawn_facts(&spawn, Some(1_720), Lang::En),
+            vec!["opus", "effort high", "started 12m ago"]
+        );
+        let bare = PanelSpawn {
+            argv: argv(&["cargo", "test"]),
+            started_at: 1_000,
+        };
+        assert_eq!(
+            spawn_facts(&bare, Some(1_030), Lang::En),
+            vec!["started 30s ago"]
+        );
+        assert!(spawn_facts(&bare, None, Lang::En).is_empty());
+    }
+
+    // U9: the preview's last line and the detail say what a worker runs on
+    // and since when, and every line keeps the pane's width.
+    #[test]
+    fn the_preview_and_the_detail_say_the_model_and_since_when() {
+        let t0 = Instant::now();
+        let mut panel = worker(2, 1, "w2", Some("running"), 1);
+        panel.spawn = Some(PanelSpawn {
+            argv: argv(&["claude", "--model", "opus", "--effort", "high"]),
+            started_at: 1_000,
+        });
+        // A pane from an older server, with no spawn.
+        let plain = worker(3, 1, "w3", Some("running"), 1);
+        for lang in [Lang::Ja, Lang::En] {
+            let mut board = Board::new(Some(1), None);
+            board.lang = lang;
+            board.update(vec![panel.clone(), plain.clone()], t0);
+            board.wall = Some((1_000 + 12 * 60, t0));
+            let facts = lang.pick(
+                "opus · 推論量 high · 13 分前に起動",
+                "opus · effort high · started 13m ago",
+            );
+            let at = t0 + Duration::from_secs(60);
+            board.select(2);
+            let all = rendered(&board, 200, 30, at);
+            assert!(
+                line_with(&all, lang.pick("報告 1", "report 1")).contains(facts),
+                "{all}"
+            );
+            board.view = View::Detail(2);
+            let all = rendered(&board, 80, 30, at);
+            assert!(all.contains(facts), "{all}");
+            board.view = View::List;
+            board.select(3);
+            let all = rendered(&board, 120, 30, at);
+            assert!(!all.contains("opus"), "{all}");
+
+            board.select(2);
+            for cols in [24, 40, 41, 60, 80, 120] {
+                for view in [View::List, View::Detail(2)] {
+                    board.view = view;
+                    for line in board.render(cols, 30, at) {
+                        let line = visible(&line);
+                        assert_eq!(line.width(), cols, "{view:?} {cols}: {line:?}");
+                    }
+                }
+            }
+            board.view = View::List;
+        }
+    }
+
+    /// `panel` asking a question dialog, as an `OSC 7501` blocked report
+    /// lists it (AU-01).
+    fn asking(mut panel: Panel) -> Panel {
+        let agent = panel.agent.as_mut().unwrap();
+        agent.state = Some("input".to_string());
+        agent.blocked = Some("question".to_string());
+        panel
+    }
+
+    // A question dialog is answered in its pane like an approval: the Enter
+    // that submits a send line would pick its first choice. An input
+    // reported without a dialog (a hook) still takes a message.
+    #[test]
+    fn a_question_dialog_reads_as_a_question_and_is_answered_in_its_pane() {
+        let t0 = Instant::now();
+        let question = asking(worker(2, 1, "ask", Some("running"), 2));
+        assert_eq!(Status::of(&question), Status::Question);
+        let hook = worker(3, 1, "hook", Some("input"), 2);
+        assert_eq!(Status::of(&hook), Status::Input);
+        for lang in [Lang::Ja, Lang::En] {
+            let mut board = Board::new(Some(1), None);
+            board.lang = lang;
+            board.update(vec![question.clone(), hook.clone()], t0);
+            let all = rendered(&board, 80, 30, t0);
+            let row = line_with(&all, "? ask");
+            assert!(row.contains(lang.pick("質問", "question")), "{all}");
+            let row = line_with(&all, "? hook");
+            assert!(row.contains(lang.pick("入力待ち", "input")), "{all}");
+            assert!(!row.contains("question"), "{all}");
+
+            board.select(2);
+            assert_eq!(board.key(Key::Char('s')), None);
+            assert_eq!(board.mode, Mode::Normal);
+            let notice = board.message.clone().unwrap();
+            assert!(notice.warn);
+            assert!(
+                notice
+                    .text
+                    .contains(lang.pick("最初の選択肢", "first choice")),
+                "{notice:?}"
+            );
+            let footer = visible(&board.render(120, 20, t0).pop().unwrap());
+            assert!(
+                footer.contains(lang.pick("移動して答える", "go and answer")),
+                "{footer}"
+            );
+            board.view = View::Detail(2);
+            let detail = rendered(&board, 80, 30, t0);
+            assert!(
+                line_with(&detail, "ask").contains(lang.pick("質問", "question")),
+                "{detail}"
+            );
+            board.view = View::List;
+
+            board.select(3);
+            board.key(Key::Char('s'));
+            assert!(matches!(board.mode, Mode::Send(3, _)));
+            // It opened a dialog while the message was being typed.
+            board.mode = Mode::Send(2, "yes".to_string());
+            assert_eq!(board.key(Key::Enter), None);
+            assert_eq!(board.drafts.get(&2).map(String::as_str), Some("yes"));
+        }
+    }
+
+    // The listing right before typing, and the one after the pause before
+    // Enter, refuse a question dialog as they do an approval.
+    #[test]
+    fn sending_never_answers_a_question_dialog_that_opened_since() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), Instant::now());
+        let mut now_asking = sample();
+        now_asking[0] = asking(now_asking[0].clone());
+        let mut server = FakeServer {
+            listings: vec![now_asking.clone()],
+            typed: Vec::new(),
+        };
+        let (message, draft) = perform(&mut server, &board, Action::Send(2, "go".to_string()));
+        assert!(server.typed.is_empty());
+        assert!(
+            message.warn && message.text.contains("最初の選択肢"),
+            "{message:?}"
+        );
+        assert_eq!(draft, Some((2, "go".to_string())));
+
+        let mut server = FakeServer {
+            listings: vec![sample(), now_asking],
+            typed: Vec::new(),
+        };
+        board.lang = Lang::En;
+        let (message, draft) = perform(&mut server, &board, Action::Send(2, "go".to_string()));
+        assert_eq!(server.typed, vec![(2, "go".to_string())]);
+        assert!(
+            message.warn
+                && message
+                    .text
+                    .contains("asks a question, so Enter was not sent"),
+            "{message:?}"
+        );
+        assert_eq!(draft, None);
+    }
+
     // Review finding: a label is not cleaned like screen text, so an escape
     // sequence in it ran on the board's terminal at every redraw.
     #[test]
@@ -5034,7 +5422,7 @@ mod tests {
         board.key(Key::Char(' '));
         let all = rendered(&board, 80, 40, start + Duration::from_secs(120));
         assert!(
-            all.contains("✕ docs  完了後に閉じた · 1 分前  docs detail"),
+            all.contains("✕ #3 docs  完了後に閉じた · 1 分前  docs detail"),
             "{all}"
         );
         // The first listing is the state found, not a closing.
@@ -5231,7 +5619,7 @@ mod tests {
         }
         assert_eq!(board.selected(), Some(4));
         let all = rendered(&board, 60, 12, start + Duration::from_secs(2));
-        assert!(all.contains("✕ w5"), "{all}");
+        assert!(all.contains("✕ #4 w5"), "{all}");
         assert!(all.contains("▶3 ● w4"), "{all}");
     }
 
@@ -5295,14 +5683,17 @@ mod tests {
         let view = |board: &Board| rendered(board, 60, 10, start + Duration::from_secs(2));
         // Counted on the line of the finished and exited workers.
         assert!(view(&board).contains("閉じた 5"), "{}", view(&board));
-        assert!(!view(&board).contains("✕ w3"), "{}", view(&board));
+        assert!(!view(&board).contains("w3"), "{}", view(&board));
 
         for _ in 0..10 {
             board.key(Key::Char('j'));
         }
         let all = view(&board);
         for pane in 3..8 {
-            assert!(all.contains(&format!("✕ w{pane}")), "w{pane}:\n{all}");
+            assert!(
+                all.contains(&format!("✕ #{} w{pane}", pane - 1)),
+                "w{pane}:\n{all}"
+            );
         }
         assert!(!all.contains("↓"), "{all}");
         // The selected row scrolled out of view, and the marker says so.
@@ -5337,7 +5728,7 @@ mod tests {
             let all = view(&board);
             assert!(!all.contains("あと 0 件"), "{all}");
             for pane in 2..7 {
-                if all.contains(&format!("✕ w{pane}")) {
+                if all.contains(&format!("✕ #{} w{pane}", pane - 1)) {
                     seen.insert(pane);
                 }
             }
@@ -5356,7 +5747,8 @@ mod tests {
             "{all}"
         );
 
-        // A worker that starts while the section is scrolled is in view.
+        // A worker that starts while the section is scrolled is in view,
+        // with a number none of the closed ones had (U14).
         for _ in 0..10 {
             board.key(Key::Char('j'));
         }
@@ -5365,7 +5757,7 @@ mod tests {
             start + Duration::from_secs(3),
         );
         let all = view(&board);
-        assert!(all.contains("▶1 ● w9"), "{all}");
+        assert!(all.contains("▶6 ● w9"), "{all}");
     }
 
     // Review B09: at 30 columns the state column was dropped, so 承認待ち,
@@ -5502,14 +5894,45 @@ mod tests {
         board.key(Key::Char('2'));
         assert_eq!(board.selected(), Some(3));
 
-        // A closed worker's number goes to the next one spawned.
+        // A closed worker's number is not the next one's (U14).
         panels.remove(0);
         panels.push(worker(7, 1, "w7", Some("running"), 1));
         board.update(panels, start + Duration::from_secs(2));
-        board.key(Key::Char('1'));
+        board.key(Key::Char('4'));
         assert_eq!(board.selected(), Some(7));
+        board.key(Key::Char('1'));
+        assert_eq!(board.selected(), Some(7), "1 is w2's, which closed");
         board.key(Key::Char('3'));
         assert_eq!(board.selected(), Some(4));
+    }
+
+    // U14: "3 awaits approval" must not come to mean another worker while
+    // the board is open; numbers come back only once 1-20 were all given.
+    #[test]
+    fn a_closed_workers_number_is_given_again_only_after_twenty() {
+        let start = Instant::now();
+        let mut board = Board::new(Some(1), None);
+        let mut panels: Vec<Panel> = (2..22)
+            .map(|pane| worker(pane, 1, &format!("w{pane}"), Some("running"), 1))
+            .collect();
+        board.update(panels.clone(), start);
+        assert_eq!(board.number(21), 20);
+        // w5 (#4) closes, then w3 (#2).
+        panels.retain(|panel| panel.pane_id.0 != 5);
+        board.update(panels.clone(), start + Duration::from_secs(1));
+        panels.retain(|panel| panel.pane_id.0 != 3);
+        board.update(panels.clone(), start + Duration::from_secs(2));
+        // All of 1-20 were given: the next takes the number freed first.
+        panels.push(worker(30, 1, "w30", Some("running"), 1));
+        board.update(panels.clone(), start + Duration::from_secs(3));
+        assert_eq!(board.number(30), 4);
+        panels.push(worker(31, 1, "w31", Some("running"), 1));
+        board.update(panels.clone(), start + Duration::from_secs(4));
+        assert_eq!(board.number(31), 2);
+        // None freed is left: the numbers go on past 20.
+        panels.push(worker(32, 1, "w32", Some("running"), 1));
+        board.update(panels, start + Duration::from_secs(5));
+        assert_eq!(board.number(32), 21);
     }
 
     // Review B08: within 要対応 workers were in pane order, so an approval
@@ -6804,8 +7227,12 @@ mod tests {
         board.offline = Some(t0);
         check(&board, "offline");
         assert!(!japanese(&board.title()), "{}", board.title());
-        // A notice from an action, and from a key with nothing to do.
-        board.key(Key::Char('9'));
+        // A notice from an action, and from a key with nothing to do: a
+        // number no live worker has.
+        let unused = (1..10)
+            .find(|n| !board.numbers.values().any(|v| v == n))
+            .unwrap();
+        board.key(Key::Char(char::from_digit(unused as u32, 10).unwrap()));
         assert!(!japanese(&board.message.clone().unwrap().text));
         let mut server = FakeServer {
             listings: vec![sample()],

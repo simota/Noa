@@ -100,12 +100,23 @@ fn the_selection_shows_in_card_lane_and_node() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
     select(&mut dashboard, &mut text, 11);
     let card = running_card(&dashboard, 12);
+    // A rebuild makes the status label again: the mark shows there was none
+    // (a new tree hands out the same widget ids again).
+    let status = dashboard.status;
+    let mark = |d: &mut Dashboard| {
+        d.tree
+            .update::<Label, _>(status, |l, cx| l.set_text(cx, "mark"));
+    };
+    let marked = |d: &Dashboard| d.tree.get::<Label>(status).unwrap().text() == "mark";
+    mark(&mut dashboard);
     key(&mut dashboard, &mut text, Key::Char('j'));
     assert_eq!(dashboard.view.selected, Some(12));
+    assert!(marked(&dashboard), "the screen was rebuilt");
     assert_eq!(running_card(&dashboard, 12), card, "the screen was rebuilt");
     assert_eq!(assert_marks(&dashboard, 12), ["bar", "lane", "node"]);
     key(&mut dashboard, &mut text, Key::Char('j'));
     assert_eq!(dashboard.view.selected, Some(17));
+    assert!(marked(&dashboard), "the screen was rebuilt");
     assert_eq!(running_card(&dashboard, 12), card, "the screen was rebuilt");
     assert_eq!(assert_marks(&dashboard, 17), ["bar", "lane", "node"]);
 }

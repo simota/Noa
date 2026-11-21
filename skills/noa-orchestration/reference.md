@@ -294,10 +294,11 @@ $NOA_RESULT)`, `pane N has no result yet: <path> is empty (…)` for a worker th
 has not written its report, `cannot read pane N's result <path>: …`, or `pane N has no
 known result file: …`. Works on closed workers the journal knows.
 
-`--path` prints only the path of the result file and a newline, and reads no
-file. It exits 0 whether the file exists, is empty or is missing, so a path can
-name a file that is not written yet. Exit 1 only with `pane N has no known
-result file: …`. `--path` with `--max-bytes` is an argument error:
+`--path` prints only the path of the result file and a newline, without opening
+the result file. It exits 0 whether the file exists, is empty or is missing, so a
+path can name a file that is not written yet. With valid arguments, exit 1 only
+with `pane N has no known result file: …`. `--path` with `--max-bytes` is an
+argument error (also exit 1):
 `--path and --max-bytes conflict: --path reads no file`. Use it to follow a
 command worker's log, which `--max-bytes` cannot show the end of:
 `tail -f "$("$NOA_BIN" +ctl result PANE --path)"`.

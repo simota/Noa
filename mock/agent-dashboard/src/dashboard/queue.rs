@@ -14,6 +14,7 @@ use super::header::waited_text;
 use super::pager::ListParts;
 use super::panel::{Panel, card_list, indicator, mark_card, nothing_matches, panel_title};
 use super::style::{HINT_STRIP_SHRINK, fill_remaining, gap, joined, need_color, spacer};
+use super::urgency;
 use super::{Pulse, Registry};
 
 #[derive(Default)]
@@ -112,8 +113,15 @@ pub(super) fn queue(
 }
 
 /// Brings a queue card's look up to its worker's urgency step
-/// (`Pulse::QueueCard`); U5 fills this in.
-pub(super) fn refresh_card(_tree: &mut UiTree, _id: WidgetId, _worker: &Worker) {}
+/// (`Pulse::QueueCard`), in place: only the card's border and fill change.
+pub(super) fn refresh_card(tree: &mut UiTree, id: WidgetId, worker: &Worker) {
+    let Some(need) = worker.need() else { return };
+    let step = urgency::step(worker, need);
+    tree.update::<Container, _>(id, |card, cx| {
+        card.set_border(cx, Some(urgency::border(need, step)));
+        card.set_background(cx, Some(urgency::fill(need, step)));
+    });
+}
 
 pub(super) fn queue_card(
     tree: &mut UiTree,
@@ -123,6 +131,7 @@ pub(super) fn queue_card(
     reg: &mut Registry,
 ) -> WidgetId {
     let color = need_color(need);
+    let step = urgency::step(worker, need);
     let card = tree.insert(
         Some(list),
         Container::new(Style {
@@ -132,8 +141,8 @@ pub(super) fn queue_card(
             flex_shrink: 0.0,
             ..Default::default()
         })
-        .background(Role::SurfaceAlt)
-        .border(1.0, color)
+        .background(urgency::fill(need, step))
+        .border(urgency::border(need, step).0, color)
         .radius(8.0),
     );
     let head = tree.insert(

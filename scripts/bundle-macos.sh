@@ -91,7 +91,9 @@ mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Helpers" "$CONTENTS/Resources"
 cp "$BIN" "$CONTENTS/MacOS/Noa"
 # Helpers, not MacOS: an executable in Contents/MacOS takes Noa.app as its
 # main bundle (com.simota.noa, its Dock icon and AppleScript dictionary).
-cp "$DASHBOARD_BIN" "$CONTENTS/Helpers/agent-dashboard-mock"
+# Named for the product: macOS shows a bare executable's file name as the app
+# name in the menu bar and Dock (crates/noa-app/src/agent_dashboard.rs looks for it).
+cp "$DASHBOARD_BIN" "$CONTENTS/Helpers/Noa Agent Dashboard"
 cp -RX "$ROOT/assets/wallpapers" "$CONTENTS/Resources/wallpapers"
 
 ICON_KEY=""
@@ -155,7 +157,7 @@ if [ -n "${NOA_SIGN_IDENTITY:-}" ]; then
   # seals an already-signed executable.
   codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/assets/macos.entitlements.plist" \
-    --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/Helpers/agent-dashboard-mock"
+    --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/Helpers/Noa Agent Dashboard"
   codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/assets/macos.entitlements.plist" \
     --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/MacOS/Noa"

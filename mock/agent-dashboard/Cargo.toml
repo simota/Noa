@@ -8,7 +8,7 @@ publish = false
 [workspace]
 
 [dependencies]
-noa-gpui-platform = { path = "../../../noa-gpui/crates/ui-platform", features = ["native"] }
-noa-gpui-core = { path = "../../../noa-gpui/crates/ui-core" }
-noa-gpui-scene = { path = "../../../noa-gpui/crates/ui-scene" }
-noa-gpui-text = { path = "../../../noa-gpui/crates/ui-text" }
+noa-gpui-platform = { version = "0.2.0", features = ["native"] }
+noa-gpui-core = "0.2.0"
+noa-gpui-scene = "0.2.0"
+noa-gpui-text = "0.2.0"

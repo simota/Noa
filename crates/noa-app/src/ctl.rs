@@ -15,8 +15,8 @@ use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
 use noa_ipc::{
-    Client, ClientError, EventKind, Notification, Panel, ScopeSet, SpawnConfig, SpawnParams,
-    SplitPlacement, TextSource, WireId,
+    Client, ClientError, EventKind, MAX_SEND_TEXT_BYTES, Notification, Panel, ScopeSet,
+    SpawnConfig, SpawnParams, SplitPlacement, TextSource, WireId,
 };
 
 /// Exit status: the request succeeded (or the wait condition held).
@@ -1051,6 +1051,44 @@ const RPC_OUTCOME_UNKNOWN: i64 = -32009;
 
 const SCOPES_HINT: &str = "enable it in Noa's config with `server-enable = true` and `server-scopes = read,control,input`";
 
+/// Said when the server closed a connection at its connection limit (1013).
+const TOO_MANY_CONNECTIONS: &str = "Noa has too many control connections open (each running \
+     `wait`, `send --wait`, board and attach holds one); end some, or try again later";
+
+/// The pauses between connects that the server refused at its connection
+/// limit: 100 ms, doubling, 3 s in all.
+pub(crate) fn connect_retry_pauses() -> Vec<Duration> {
+    const TOTAL: Duration = Duration::from_secs(3);
+    let mut pauses = Vec::new();
+    let (mut next, mut spent) = (Duration::from_millis(100), Duration::ZERO);
+    while spent < TOTAL {
+        let pause = next.min(TOTAL - spent);
+        pauses.push(pause);
+        spent += pause;
+        next *= 2;
+    }
+    pauses
+}
+
+/// `connect`, tried again after each of [`connect_retry_pauses`] while the
+/// server refuses it at its connection limit: a slot frees up as soon as
+/// another command ends.
+pub(crate) fn connect_retrying<T>(
+    mut connect: impl FnMut() -> Result<T, ClientError>,
+    mut pause: impl FnMut(Duration),
+) -> Result<T, ClientError> {
+    let mut pauses = connect_retry_pauses().into_iter();
+    loop {
+        match connect() {
+            Err(ClientError::TooManyConnections(reason)) => match pauses.next() {
+                Some(duration) => pause(duration),
+                None => return Err(ClientError::TooManyConnections(reason)),
+            },
+            result => return result,
+        }
+    }
+}
+
 impl From<ClientError> for Failure {
     fn from(error: ClientError) -> Self {
         match error {
@@ -1066,6 +1104,14 @@ impl From<ClientError> for Failure {
             ClientError::Closed(_) | ClientError::Transport(_) => {
                 Failure::unavailable(format!("lost the connection to Noa: {error}"))
             }
+            ClientError::TooManyConnections(_) => {
+                Failure::unavailable(format!("{TOO_MANY_CONNECTIONS} ({error})"))
+            }
+            // A request over the server's size bound: not a Noa gone away.
+            ClientError::MessageTooBig(_) => Failure::error(format!(
+                "Noa closed the connection because a request was over its size limit ({error}); \
+                 for a long text, write it to a file and send its path"
+            )),
             // Outside a wait, a request that timed out ends the command as
             // before; only the wait loop retries it.
             // The app took too long, so the server gave up waiting: the
@@ -1138,6 +1184,8 @@ pub(crate) fn connect_failure_message(url: &str, error: &ClientError) -> String 
             "; Noa's control server is not listening on {address} (is Noa running, with \
              `server-enable = true`?)"
         )
+    } else if matches!(error, ClientError::TooManyConnections(_)) {
+        format!("; {TOO_MANY_CONNECTIONS} (tried again for 3 s)")
     } else {
         String::new()
     };
@@ -1388,10 +1436,15 @@ impl Session {
             }
         };
         let url = control_url(&config.server_bind, config.server_port);
-        let client = Client::connect(
-            &url,
-            &token,
-            ScopeSet::from_strings(["read", "control", "input"]),
+        let client = connect_retrying(
+            || {
+                Client::connect(
+                    &url,
+                    &token,
+                    ScopeSet::from_strings(["read", "control", "input"]),
+                )
+            },
+            std::thread::sleep,
         )
         .map_err(|err| match err {
             ClientError::Rpc { .. } => Failure::unavailable(err.to_string()),
@@ -1990,12 +2043,6 @@ pub(crate) trait SendTarget {
     fn type_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), Failure>;
     fn pause(&mut self, duration: Duration);
 }
-
-/// The most a `send` takes, measured as its text JSON-encodes. The server
-/// reads a request as one WebSocket frame of at most 256 KiB, and one that
-/// is larger drops the connection, which would read as Noa gone (exit 3);
-/// this leaves room for the rest of the request.
-const MAX_SEND_TEXT_BYTES: usize = 250 * 1024;
 
 /// Refuse a text too large for one request, before anything is typed.
 pub(crate) fn check_send_size(text: &str) -> Result<(), String> {
@@ -4699,6 +4746,66 @@ mod tests {
             })
             .code,
             EXIT_ERROR
+        );
+    }
+
+    // Audit findings (REL-10, REL-04): a server at its connection limit, or
+    // a request over its frame bound, closed the connection, and both read
+    // as "lost the connection to Noa".
+    #[test]
+    fn a_full_server_is_retried_for_3_s_and_a_large_request_is_an_error() {
+        let pauses = connect_retry_pauses();
+        assert_eq!(pauses[0], Duration::from_millis(100));
+        assert_eq!(pauses[1], Duration::from_millis(200));
+        assert_eq!(pauses.iter().sum::<Duration>(), Duration::from_secs(3));
+
+        let full = || ClientError::TooManyConnections("1013 too many connections".to_string());
+        let (mut tries, mut slept) = (0, Vec::new());
+        let result = connect_retrying(
+            || {
+                tries += 1;
+                if tries < 3 { Err(full()) } else { Ok(tries) }
+            },
+            |pause| slept.push(pause),
+        );
+        assert_eq!(result.ok(), Some(3));
+        assert_eq!(slept, pauses[..2]);
+
+        let (mut tries, mut slept) = (0, Vec::new());
+        let result: Result<(), _> = connect_retrying(
+            || {
+                tries += 1;
+                Err(full())
+            },
+            |pause| slept.push(pause),
+        );
+        assert!(matches!(result, Err(ClientError::TooManyConnections(_))));
+        assert_eq!(tries, pauses.len() + 1);
+        // Any other failure is not retried.
+        let mut tries = 0;
+        let _: Result<(), _> = connect_retrying(
+            || {
+                tries += 1;
+                Err(transport(libc::ECONNREFUSED))
+            },
+            |_| {},
+        );
+        assert_eq!(tries, 1);
+
+        let message = connect_failure_message("ws://127.0.0.1:1/", &full());
+        assert!(
+            message.contains("too many control connections"),
+            "{message}"
+        );
+        let failure = Failure::from(full());
+        assert_eq!(failure.code, EXIT_UNAVAILABLE);
+        assert!(failure.message.contains("too many control connections"));
+        let failure = Failure::from(ClientError::MessageTooBig("1009 frame".to_string()));
+        assert_eq!(failure.code, EXIT_ERROR);
+        assert!(
+            failure.message.contains("size limit"),
+            "{}",
+            failure.message
         );
     }
 

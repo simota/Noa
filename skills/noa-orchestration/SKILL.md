@@ -32,7 +32,9 @@ output shapes and exit codes: [reference.md](reference.md).
 2. Decide what each worker gets: which agent (or command), which model tier
    (see "Matching the worker to the task"), which directory or worktree (see
    "Giving a worker its own worktree"), and a task that stands on its own. A
-   worker sees nothing of your conversation.
+   worker sees nothing of your conversation. End every task with "Write your
+   final report to the file named by $NOA_RESULT." Write task texts and other
+   scratch files under `d=$(mktemp -d)`, never in the repository.
 3. Keep the number of workers small (20 at most: the board holds 20; a
    worker keeps its slot until you `close` it, also after it exits) and
    tell the human what you are about to start, with each worker's tier, and
@@ -87,20 +89,24 @@ Let `spawn --worktree` create it, so you know its path and branch. Do not use
 an agent's own worktree flag: you would not know where it put the work.
 
 ```sh
-noa() { "$NOA_BIN" +ctl "$@"; }
-out=$(noa spawn --worktree --label "$label" --tier standard -- claude) || exit 1
-pane=$(echo "$out" | jq -r .paneId)      # $out also has "worktree" and "branch"
-noa read "$pane"                         # a new directory may show a trust prompt first
-noa send "$pane" --enter --wait --timeout 540 "You are in a git worktree on branch orch/$label. …task… Commit your work on this branch. Do not push or switch branches."
+# $d/$label.txt: "You are in a git worktree on branch orch/$label. …task…
+# Commit your work on this branch. Do not push or switch branches.
+# Write your final report to the file named by $NOA_RESULT."
+noa spawn --worktree --label "$label" --tier standard --task-file "$d/$label.txt" \
+  --settle 10 --stall 300 --timeout 80 -- claude   # first line also has "worktree" and "branch"
 ```
 
-It runs `git worktree add -b orch/$label <repo>-wt/$label HEAD` from your
-checkout, and a git failure (the branch or directory already exists) starts
-nothing. `ls --children` shows each worker's `cwd`.
+It runs `git worktree add -b orch/$label <main>-wt/$label HEAD`: next to the
+main worktree wherever you run it, branching from your checkout's `HEAD`. A git
+failure (the branch or directory already exists) starts nothing. A new
+directory may show a trust prompt, and the spawn line then has `"sent":false`
+(see "One worker, one round").
 
-- A worktree starts from a commit: your uncommitted changes are not in it
-  (`spawn --worktree` warns on stderr). Commit them first, or tell the worker
-  what is missing.
+- A worktree starts from a commit: your uncommitted changes to tracked files are
+  not in it (`spawn --worktree` warns on stderr). Commit them first, or tell the
+  worker what is missing. Untracked files are warned about on a line of their
+  own; with your scratch files outside the repository, that line means files
+  the worker may need.
 - A worktree has no build outputs, installed dependencies or ignored files
   (`.env`, local config). Its first build is cold; budget the timeout for it,
   and keep the number of worktrees that build at once small.
@@ -108,12 +114,20 @@ nothing. `ls --children` shows each worker's `cwd`.
   (`git log -p HEAD..orch/$label`, then build and test it) before you merge.
   Merge branches one at a time and run the checks after each. A conflict goes
   to you or to a `deep` worker, not back to the worker that wrote one side.
-- Clean up with `noa close --prune PANE` from your checkout once the branch is
-  merged (or dropped): it closes the pane, then runs `git worktree remove` and
-  `git branch -d`, never forced. When git refuses (uncommitted changes, branch
-  not merged), the line says so under `worktree.kept` and the work stays. Do
-  not remove it with `--force` or `-D` without reading what would be lost; keep
-  it and tell the human instead.
+- Clean up with `noa close --prune PANE` once the branch is merged (or
+  dropped): it closes the pane, finds the worktree from the pane's cwd, then
+  runs `git worktree remove` and `git branch -d`, never forced. When git refuses
+  (uncommitted changes, branch not merged), or no worktree is found, the line
+  says why under `worktree.kept` and the work stays. Do not remove it with
+  `--force` or `-D` without reading what would be lost; keep it and tell the
+  human instead.
+- To retry a worktree worker, `close` it without `--prune`, then
+  `spawn --cwd <its worktree> --label <same label> --tier <one up>`: the new
+  worker carries on in the same worktree and branch, and `--prune` still finds
+  it later. Say in the task that the previous attempt's changes are there.
+  Its `$NOA_RESULT` is the same file, so trust it only once a wait line names
+  it as `result`. Discarding the changes (`git reset --hard`) is the human's
+  call. A new label with `--worktree` would split the work over two branches.
 - If `spawn --worktree` fails with a permission error, your own shell may be
   sandboxed away from `.git/worktrees`; say so rather than working around it.
 
@@ -121,64 +135,93 @@ nothing. `ls --children` shows each worker's `cwd`.
 
 ```sh
 noa() { "$NOA_BIN" +ctl "$@"; }
-pane=$(noa spawn --label fix-tests --cwd "$PWD" -- claude | jq -r .paneId)
-noa read "$pane"
-noa send "$pane" --enter --wait --timeout 540 --tail 40 "Fix the failing test in crates/foo. Report what you changed."
-noa read "$pane" --scrollback --max-bytes 65536
-noa close "$pane"
+d=$(mktemp -d)
+printf '%s\n' "Fix the failing test in crates/foo. Write your final report to the file named by \$NOA_RESULT." > "$d/fix-tests.txt"
+noa spawn --label fix-tests --task-file "$d/fix-tests.txt" --settle 10 --stall 300 --timeout 80 -- claude
+noa result PANE            # PANE: "paneId" of the first line
+noa close PANE
 ```
 
-- Always `send … --wait`. It subscribes before typing, so a fast reply cannot be
-  missed. A separate `send` then `wait` can miss a turn that ends in between.
-- `read` the pane before every `send`, not only the first. The first screen may
-  be a trust or login prompt. Later, the input line may still hold text (a
-  draft or a suggestion), and `send` types after it rather than replacing it.
-  When the text there is yours (a `send` whose Enter did not go through), send
-  again with `--replace`, which clears the input line first. When someone else
-  typed it (the human, in an opened worker), do not send; tell the human what
-  is there. Claude Code shows a dim suggestion there (`❯ Try "…"`, or a
-  proposed next prompt) that `read` prints like typed text; it is replaced when
-  you type, so it does not count as a draft. A trust prompt on the first screen
-  is the human's to answer unless their instructions cover it, or the
-  directory is a worktree you made with `spawn --worktree` (see "Running
-  without the human").
-- A `finished` does not always end the work: Claude Code workers have been
-  seen to keep working after reporting it (the cause, possibly a hook, is not
-  confirmed). If `read` shows the agent still working, wait again with
-  `--after` the `seq` from the line.
-- An answer longer than the worker's screen cannot be read back in full:
-  `read --scrollback` on an agent returned only about the last screen (seen
-  with Claude Code 2.1.329 and Codex 0.171.0). When you need the whole
-  report, say in the task which file to write it to, and read that file.
-- `--tail N` adds the pane's last N output lines to each wait line as `tail`,
-  which often saves the `read` after a wait.
-- Give every wait a timeout that fits the task, and see "When no report comes"
-  below if it runs out.
-- Your own shell tool has a time limit too (Claude Code's Bash: 2 minutes by
-  default, 10 at most). A wait it kills prints nothing, so keep `--timeout`
-  under that limit, or run the whole command with your tool's background mode
-  (not a shell `&` inside a foreground call, which the limit still kills), and
-  carry on from the timeout line: it lists each pending pane's `baseline`, and
-  `noa wait PANE --after PANE=SEQ --timeout …` continues without missing a
-  report that arrived in between. It does not cover a notification
-  (`attention`): for a worker that only notifies, `read` it after a timeout.
+`spawn --task-file` waits for the agent to be ready, types the task, and waits
+for the turn like `send --enter --wait`. The first line is the spawn's
+(`paneId`, `result`, `ready`, `screen`, `sent`), the rest are wait lines.
+
+- `"sent":false`: nothing was typed (the screen was not an agent's input box
+  in time). Read `screen`. A trust prompt is the human's to answer unless their
+  instructions cover it, or the directory is a worktree you made with
+  `spawn --worktree` (see "Running without the human"); a login prompt is the
+  human's. Then send the task yourself:
+  `noa send PANE --enter --wait --settle 10 --stall 300 --timeout 100 - < "$d/fix-tests.txt"`.
+- `--settle 10` holds a `finished` until the work above the input box has
+  stayed still for 10 s: Claude Code workers have been seen to keep working
+  after reporting `finished`.
+- Read the report with `noa result PANE`, not the screen: `read --scrollback`
+  on an agent returns only about its last screen. A wait line has
+  `"result":{"path","bytes"}` once the worker wrote it during that wait; without
+  it, the file is missing or left from an earlier task.
+- For a later task, `send PANE --enter --wait …`. It subscribes before typing,
+  so a fast reply cannot be missed; a separate `send` then `wait` can miss a
+  turn that ends in between (except with `--after`, "Several workers").
+- `read` the pane before every later `send`. `send` itself refuses a pane whose
+  agent is working (wait for its turn to end; `--queue` only when you mean to
+  queue, and then the wait may end with the turn already running) and one
+  waiting for an approval or a question (`--answer`, see "Reading why a wait
+  ended"). What it cannot see is the input line: it may still hold text, and
+  `send` types after it. When the text there is yours (a `send` whose Enter did
+  not go through), send again with `--replace`, which clears the input line
+  first. When someone else typed it (the human, in an opened worker), do not
+  send; tell the human what is there. Claude Code shows a dim suggestion there
+  (`❯ Try "…"`, or a proposed next prompt) that `read` prints like typed text;
+  it is replaced when you type, so it does not count as a draft.
+- `--tail N` adds the last N lines above an agent's input box to each wait line
+  as `tail`; a `permission` or `input` line carries the dialog as `prompt`
+  anyway.
+- Give every wait a timeout, and see "When no report comes" below if it runs
+  out.
+- Your shell tool has a time limit (Claude Code's Bash: 2 minutes by default).
+  Keep every foreground wait under it: `--timeout 100`, or 80 with `--task`,
+  whose ready wait (up to 30 s) comes first. Carry on from the timeout line in
+  a new call: `noa wait PANE --after PANE=SEQ --timeout 100` with each pane's
+  `baseline`. A wait the tool kills with SIGTERM still prints that line, with
+  `"interrupted":true`; `send --wait` also prints `resume with: wait N --after
+  SEQ` on stderr once the text is in. A notification (`attention`) is not
+  carried over: for a worker that only notifies, `read` it after a timeout.
+
+## After your context was compacted
+
+Run `noa status` before anything else: one line per worker with its state,
+`lastTask`, `lastSentSeq`, `lastOutcome`, `result`, and for a worktree worker
+`ahead` and `dirty`; workers that are gone come last. A worker whose
+`lastOutcome.seq` is above its `lastSentSeq` already ended the turn of your
+last send: take its `result` before anything else. Otherwise wait with
+`--after PANE=<lastSentSeq>`.
 
 ## Several workers in parallel
 
-Run one `send --wait` per worker in the background and collect each result.
-Waiting on `--children` after separate sends has the same race as above. Run
-this whole block with your tool's background mode, since it lasts as long as
-the slowest worker.
+Handle whichever worker stops first, so one stuck on a prompt does not wait
+for the slowest:
 
 ```sh
-for p in "$a" "$b"; do
-  noa send "$p" --enter --wait --timeout 1800 --tail 40 - < "task-$p.txt" > "result-$p.json" &
-done
-wait   # the shell's wait: every worker's turn has ended
+noa spawn --label api --ready 30 -- claude   # "paneId" A; check "ready" and "screen" as above
+noa spawn --label ui --ready 30 -- codex     # B
+noa send A --enter - < "$d/api.txt"          # {"paneId":"A","seq":SA}
+noa send B --enter - < "$d/ui.txt"           # SB
+noa wait --children --after A=SA --after B=SB --settle 10 --stall 300 --timeout 100
 ```
 
-For "whichever stops first", use `noa wait --children` only for panes whose
-current turn started before the wait (for example, the next time round a loop).
+Repeat the `wait`, one tool call each time. Handle the lines it printed (take a
+`finished` worker's `result` and check it; answer or ask about a prompt), then
+pass every pane's newest base: the `seq` your latest `send` to it printed, else
+the `seq` of the line you handled, else its `baseline` from the timeout line.
+Leave out panes you closed. `--after` covers reports only, so for workers that
+never report (an agent too old, or one that only notifies), run one
+`send --wait` per worker with your tool's background mode instead:
+
+```sh
+noa send A --enter --wait --timeout 1800 - < "$d/api.txt" > "$d/api.json" &
+noa send B --enter --wait --timeout 1800 - < "$d/ui.txt" > "$d/ui.json" &
+wait
+```
 
 ## When no report comes
 
@@ -210,11 +253,13 @@ Each line has `paneId` and `reason`:
 
 | reason | What to do |
 |---|---|
-| `finished` | Turn ended. `read` the pane and check the work yourself |
-| `permission` / `input` | The agent is blocked on a prompt, or (`input`) idle at its prompt. `read` it. Approve or answer only if the human's instructions already cover it, or under "Running without the human"; otherwise ask the human. `send` refuses a pane in `permission` unless you pass `--answer`. To accept the selected choice: `send P --answer --enter ""`; to type a choice's key or Esc: `send P --answer --raw 2` or `--raw $'\e'`. `read` again afterwards |
+| `finished` | Turn ended (and held still for `settledSecs` with `--settle`). `noa result P` when the line has `result`, else `read` it; check the work yourself |
+| `permission` | Waiting for an approval, shown in `prompt` (`read` the pane if it looks cut). Approve or answer only if the human's instructions already cover it, or under "Running without the human"; otherwise ask the human. To accept the selected choice: `send P --answer --enter ""`; to type a choice's key or Esc: `send P --answer --raw 2` or `--raw $'\e'`. `read` again afterwards |
+| `input` with `"blocked":"question"` | A question dialog, in `prompt`. Enter picks its first choice, so answer with its key (`--answer --raw 2`), under the same rules as an approval |
+| `input` without `blocked` | Idle at its prompt (or a Noa too old to say `blocked`): `read` it before sending |
 | `error` | The agent reported an error. `read` it. A login, plan, quota or unavailable-model message goes to the human, not to a retry; otherwise retry, re-scope or report |
 | `attention` | A desktop notification arrived. Not proof the agent is blocked or done: `read` and decide |
-| `exit` | The worker's process ended (`exitCode` when known) or the pane is gone (`closed: true`). It will not report again |
+| `exit` | The worker's process ended (`exitCode` when known) or the pane is gone (`closed: true`). It will not report again. With `agentLeft: true` the agent quit to its shell and the pane is open: `read` why, then close it or start a new worker |
 | `stalled` | Only with `--stall`: the screen has not changed for `quietSecs`. `read` it; see "When no report comes" |
 
 Exit status 2 means the timeout passed. The line `{"timeout":true,"pending":[…]}`
@@ -230,7 +275,8 @@ stopping at each one, within these limits:
 
 - Approve what stays inside the worker's own worktree and its task: reading
   files, editing files in the worktree, building, testing, linting,
-  formatting, and committing on its `orch/…` branch.
+  formatting, committing on its `orch/…` branch, and writing its
+  `$NOA_RESULT`.
 - Refuse (Esc, or the prompt's "no" choice) anything that pushes, publishes or
   deploys, deletes or writes outside the worktree, installs or downloads,
   changes the human's config, credentials or agent settings, or acts on other
@@ -243,14 +289,17 @@ stopping at each one, within these limits:
   workers going, and ask the human when they are back.
 - Workers in the shared checkout get none of this: their prompts are the
   human's.
-- Keep a list of every prompt you answered and how, and give it to the human
-  with your report.
+- Give the human `noa status --answers` with your report: every prompt you
+  answered, with its screen and your answer.
 
 This is not leave to pass auto-approve flags or to enable Noa's auto-approve
 (see "Rules"); you still read each prompt before answering it.
 
 ## Rules
 
+- Exit 3 from `spawn`, `send` or `close` can mean Noa did it without confirming
+  in time. `ls --children` or `read` before retrying, or you start a worker or
+  type a task twice.
 - Only `send` to and `close` your own workers. `--any-pane` exists for a pane the
   human pointed you at, never to drive panes you found in `ls`.
 - Do not pass auto-approve flags to a worker agent or enable Noa's auto-approve

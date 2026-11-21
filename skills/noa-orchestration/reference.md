@@ -40,19 +40,27 @@ Panel fields that matter for orchestration:
   "busy": true,                  // a shell reported a running command (OSC 133);
                                  // always false for a command spawned without one
   "attention": false,            // an unread notification (OSC 9 and the like)
-  "agent": {"kind": "claude", "state": "finished", "detail": "", "seq": 7},
+  "agent": {"kind": "claude", "state": "input", "detail": "", "seq": 7, "blocked": "question"},
                                  // omitted for no known agent and no report;
-                                 // state/detail only after a report
-  "exit": {"code": 0}            // only when the child exited and the pane stays open
+                                 // state/detail only after a report; blocked
+                                 // ("permission" or "question") only while the
+                                 // last report was an OSC 7501 blocked report
+  "exit": {"code": 0},           // only when the child exited and the pane stays open
+  "spawn": {"argv": ["claude", "--model", "sonnet"], "startedAt": 1763700000}
+                                 // only for a pane a spawn started with a command
 }
 ```
+
+`blocked` and `spawn` come from Noa itself; a Noa older than them omits both,
+and `send` then refuses only `permission`.
 
 `agent.seq` counts reports for that pane and only grows. A report newer than the
 `seq` you saw belongs to a later turn.
 
 ### `spawn [options] [-- COMMAND...]`
 
-Starts a worker whose parent is this pane and prints `{"paneId":"…"}`. A worker
+Starts a worker whose parent is this pane and prints
+`{"paneId":"…","result":"…"}` (plus the fields of the options below). A worker
 is always a floating pane. When this pane has no board open, the spawn first
 opens one next to it (a new tab when there is no room), and the worker is
 stowed on the board: collapsed, it shows only as the board's row; the board's
@@ -71,22 +79,44 @@ accepted and changes nothing.
 | Option | Meaning |
 |---|---|
 | `--no-board` | Do not open the board; the worker floats over this pane |
-| `--worktree` | Start the worker in a new git worktree of this process's repository: `git worktree add -b orch/LABEL <repo>-wt/LABEL HEAD`. Needs `--label` (letters, digits, `.`, `_`, `-`; not starting with `.` or `-`) and refuses `--cwd`. Prints `"worktree"` and `"branch"` too. A git failure (branch or path exists, not a repository) is exit 1 and starts nothing; uncommitted changes in your checkout are not in the worktree, and a stderr warning says so. If Noa then refuses to start the worker, the fresh worktree and branch are removed again; if the answer is lost (a connection error, or Noa answering `-32009`: it did not carry out the spawn in time and may still do so), they are kept, since the worker may be running there, and stderr says so. The board, when this spawn would open it, opens only after the worktree was made |
+| `--worktree` | Start the worker in a new git worktree: `git worktree add -b orch/LABEL <main>-wt/LABEL HEAD`, where `<main>` is the repository's main worktree (the same path from any worktree or subdirectory) and `HEAD` is your checkout's. Needs `--label` (letters, digits, `.`, `_`, `-`; not starting with `.` or `-`) and refuses `--cwd`. Prints `"worktree"` and `"branch"` too. A git failure (branch or path exists, not a repository) is exit 1 and starts nothing. What your checkout has that the commit lacks is warned on stderr, apart: `this checkout has uncommitted changes to N tracked files; they are not in the worktree` and `N untracked files are not in the worktree`. If Noa then refuses to start the worker, the fresh worktree and branch are removed again; if the answer is lost and the worker is not found ("Lost answer" below), they are kept, since the worker may be running there, and stderr says so. The board, when this spawn would open it, opens only after the worktree was made |
 | `--tier light\|standard\|deep` | Add the tier's model and effort flags ("Model tiers" below) right after the program of a `claude`, `codex` or `agy` command. Refused for any other command, and for a command that already picks a model or effort, so a model the human named is never overridden. Prints `"tier"` too |
 | `--cwd DIR` | Working directory. Relative paths are taken from this process's cwd. Default: this process's cwd. One that is not a directory is refused (exit 1) before anything starts; `ls` shows it as the worker's `cwd` until the worker's shell reports its own |
 | `--env KEY=VALUE` | Repeatable. `PATH` defaults to this process's `PATH` when a command is given, and `LANG` and `LC_*` to this process's, so a worker keeps your locale even when Noa itself has none |
-| `--label TEXT` | Shown in the panel's `label` |
-| `--input TEXT` | Typed into the worker once it starts |
+| `--label TEXT` | Shown in the panel's `label`; a plain one (as for `--worktree`) also names the result file. One starting with `board:` is refused (exit 1): that names a board |
+| `--input TEXT` | Written as raw keys right after the worker starts, so each newline is Enter. Refused (exit 1) for a `claude`, `codex` or `agy` command: use `--task`, or `send` once the agent is up |
 | `--no-wait-after` | Close the pane when its command exits. By default it stays open with `exit.code` readable. A command that fails right after it starts (any exit other than code 0 within `abnormal-command-exit-runtime`, default 250 ms) stays open anyway, showing the failure |
 | `--focus` | Open the worker's float and move keyboard focus to it. By default it stays collapsed and focus stays where it was |
-| `--max-children N` | Refuse when this pane already has N workers (default and maximum 20, the workers a board holds). Exited workers count until closed; the refusal says how many have exited. Checked before each spawn, so parallel spawns can exceed it |
+| `--max-children N` | Refuse when this pane already has N workers (default and maximum 20, the workers a board holds). Exited workers count until closed. Sent to Noa as `maxChildren`, which counts one spawn at a time, so parallel spawns stay under it; a Noa older than that ignores it and only `+ctl`'s own count before the spawn applies. Refusal (exit 1): `this pane already has N workers[, M of them exited] (limit L); close finished ones after reading them[, or raise --max-children (at most 20)]` |
+| `--ready SECS` | After the spawn, look every 250 ms, for at most SECS seconds, until the worker's agent sends its first report (`"ready":"report"`) or its screen shows something and stays the same for 1.5 s (`"quiet"`); else `"timeout"`, or `"gone"` at once when the pane is no longer listed. Adds `"screen"`: the last 20 non-blank lines of the last screen read (`""` when none was). If a request fails meanwhile, the spawn line is printed without `ready` and the command exits with that failure's status |
+| `--task TEXT` \| `--task-file F` | Only with a `claude`, `codex` or `agy` command (exit 1 otherwise); exclusive. Implies `--ready 30` unless `--ready` is given, and takes the wait options `--for`, `--all`, `--timeout`, `--tail`, `--stall`, `--settle` (refused without `--task`). The file is read and its size checked before anything starts. When ready is `report` or `quiet` and the screen ends in an agent's input box (lines between full-width rules), types the task as `send --enter --wait` does (same refusals, paste-mode gate, journal and resume line) and prints the spawn line with `"sent":true`, then the wait lines. Otherwise types nothing: `"sent":false`, exit 0; read `screen` and send yourself. A send that is refused or fails prints `"sent":false` and exits with the send's status |
+
+**Result file.** Every spawn whose cwd is known creates `<cwd>/.noa/` with a
+`.gitignore` of `*` (an existing one is left alone) and gives the worker
+`NOA_RESULT=<cwd>/.noa/result-LABEL.md` (a plain `--label`; otherwise
+`result-<8 random hex digits>.md`), so no two workers share one. The line gains
+`"result":"<path>"`. With `--worktree` the cwd is the worktree. `.noa/` never
+shows in `git status` and does not stop `git worktree remove`. `--env
+NOA_RESULT=…` wins and makes no directory. When `.noa` cannot be written, stderr
+says `warning: the worker gets no $NOA_RESULT: cannot write <dir>/.noa: …`, the
+line has no `result`, and the spawn goes on.
+
+**Lost answer.** When Noa answers `-32009` or the client's 5 s deadline passes,
+the spawn lists the panes up to 30 times, 100 ms apart. If exactly one new
+worker of this pane appeared (with the same label, given `--label`), it prints
+`{"paneId":"N","recovered":true,…}` and exits 0. Otherwise it exits 3 ("Noa did
+not confirm the request in time (…); it may still have taken effect: check with
+`ls` or `read` before retrying", or "Noa did not answer in time"). Another
+unlabelled spawn of yours in the same seconds can be taken for it. When Noa
+refused the spawn and this spawn had opened the board, the board is closed
+again if this pane has no worker.
 
 `COMMAND` runs without a shell (argv, looked up on `PATH`). A command without a
 `/` that is not on the worker's `PATH` is refused (exit 1, "command not found on
 PATH"). Without one, the worker gets the user's shell. For a shell pipeline,
 use `-- sh -c '…'`.
 
-### `send PANE [--enter] [--raw] [--replace] [--wait [wait options]] [--answer] [--any-pane] [--] TEXT|-`
+### `send PANE [--enter] [--raw] [--replace] [--wait [wait options]] [--answer] [--queue] [--any-pane] [--] TEXT|-`
 
 Types `TEXT` (or stdin with `-`) into the pane as a paste. `--enter` then sends
 Enter 150 ms later, which submits a prompt in agent TUIs. `--raw` types the text
@@ -100,14 +130,42 @@ as keystrokes instead of a bracketed paste.
 - Refuses a pane this pane did not spawn unless `--any-pane` is given. That guards
   against a wrong id; it is not a security boundary. A pane that is not listed at
   all is refused with "pane N is not listed" (exit 1).
-- Refuses a pane whose agent reported `permission` (it waits for an approval),
-  because Enter approves some prompts with their default choice. It checks before
-  typing and again before Enter; if the approval appeared in between, Enter is not
-  sent and the text stays in the input line. `--answer` sends anyway. Only agents
-  that report `permission` are covered (see "Which agents report turns").
-- Only `permission` is refused. `input` is not: it also means an agent idle at
-  its prompt (Claude Code's hook adapter reports `idle_prompt` as `input`), so
-  `read` an `input` pane before sending to it.
+- Refused before anything is typed (exit 1):
+  - A text over 250 KiB once JSON-encoded: `the text is N bytes after JSON
+    encoding; one send takes at most 250 KiB. Nothing was sent: write the text
+    to a file and send its path`.
+  - A pane waiting for an approval (`agent.state` `permission`, or `blocked`
+    `permission`): `pane N is waiting for an approval; read it and pass
+    --answer. Nothing was sent.` Enter approves some prompts with their default
+    choice.
+  - A pane asking a question (`blocked` `question`, state `input`): `pane N is
+    waiting for an answer to a question; read it and pass --answer. Nothing was
+    sent.` A question dialog takes Enter as its first choice.
+  - A pane whose agent is `running`, for pasted text or a bare Enter: `pane N is
+    working; wait for its turn to end, or pass --queue (the wait may then end
+    with the current turn)`. `--raw` keys with text (Esc, Ctrl-C) always go.
+- `--answer` lifts the approval and question refusals, `--queue` the working
+  one. With `--queue --wait`, every line the wait prints has `"queued":true`:
+  the wait may end with the turn that was already running.
+- An `input` without `blocked` is not refused: it also means an agent idle at its
+  prompt (Claude Code's hook adapter reports `idle_prompt` as `input`, and an
+  older Noa sends no `blocked`), so `read` an `input` pane before sending to it.
+- The checks run again after `--replace` cleared the line (`pane N began waiting
+  for an approval while its input line was cleared; the text was not typed.`)
+  and before Enter (`… after the text was typed; Enter was not sent, so the text
+  may still be in its input line.`), both exit 1.
+- Pasted text (not `--raw`, not empty) into an agent's pane (`agent.kind` set),
+  or one whose `process` is not listed yet, first waits for the pane to enable
+  bracketed paste: Noa is asked every 200 ms, for up to 15 s, before any key
+  (also before `--replace`'s). Still off: exit 1, `pane N has not enabled
+  bracketed paste yet (its program may still be starting); nothing was sent`. A
+  Noa without `requirePasteMode` lets it through at once.
+- `--wait` prints `Noa +ctl: sent to pane N; resume with: wait N --after SEQ`
+  on stderr once the text (and Enter) is in, before waiting: the way back if
+  your shell tool kills the command.
+- Noa answering `-32009` while typing: exit 3, "Noa did not confirm the input to
+  pane N in time (…); it may already be typed: `read` the pane before sending
+  again".
 - `--replace` clears the input line before typing: Ctrl-E, then Ctrl-U in
   writes of 16 (Claude Code takes a longer burst as a paste and keeps the
   draft), enough for a 32-line draft. Checked on Claude Code 2.1.329, Codex
@@ -121,16 +179,32 @@ as keystrokes instead of a bracketed paste.
 - Input to a pane whose process has exited is refused with "pane N's process
   has exited (code C)"; `read` it, then `close` it.
 
-### `wait PANE...|--children [--after SEQ | --after PANE=SEQ ...] [--for LIST] [--all] [--timeout SECS] [--tail N] [--stall SECS]`
+### `wait PANE...|--children [--after SEQ | --after PANE=SEQ ...] [--for LIST] [--all] [--timeout SECS] [--tail N] [--stall SECS] [--settle SECS] [--any-pane]`
 
 Blocks until one pane (every pane with `--all`) stops, then prints one line per
 pane that stopped:
 
 ```json
-{"paneId":"7","reason":"finished","seq":8,"state":"finished","detail":"…"}
+{"paneId":"7","reason":"finished","label":"api","seq":8,"state":"finished","detail":"…","result":{"path":"/repo/.noa/result-api.md","bytes":812}}
+{"paneId":"8","reason":"input","label":"ui","seq":4,"state":"input","blocked":"question","prompt":"Which file?\n1. a.rs\n2. b.rs"}
 {"paneId":"6","reason":"exit","exitCode":3}
 {"paneId":"5","reason":"exit","closed":true}
+{"paneId":"4","reason":"exit","agentLeft":true,"seq":9}
 ```
+
+- `label`: the pane's label, also once it has closed (the one seen when the
+  wait began). `blocked`: what the agent reported it is blocked on.
+- `prompt`, on every `permission` or `input` line with or without `--tail`: the
+  screen's block below the work (the dialog or input box), rules and blank lines
+  removed, at most 20 lines. Absent when the screen has no rule-delimited box.
+- `result`: the pane's result file (spawn, "Result file") once it was written
+  after the wait began (with `send --wait`, after just before typing). Timeout
+  lines have none.
+- `agentLeft`: a pane that had an agent when the wait began now has none (the
+  agent quit to its shell); like any `exit`, whatever `--for` lists.
+- `wait PANE` (named, not `--children`) refuses a listed pane that is neither
+  this pane nor one of its workers: `pane N is not a worker of this pane (pass
+  --any-pane to target it)`. Outside a listed Noa pane the check is skipped.
 
 - A pane named by id that is not listed when the wait starts is an error
   (exit 1, "pane N is not listed"), so a stale or mistyped id does not pass for
@@ -143,8 +217,17 @@ pane that stopped:
 - A request Noa does not answer within the client's 5 s deadline is retried on
   the next tick until the wait's `--timeout`; a lost connection still ends the
   wait with exit 3.
-- `--tail N` adds `"tail"`: the pane's last N lines of retained output, for each
-  line whose pane is still open.
+- `--tail N` adds `"tail"` for each line whose pane is still open: on an agent's
+  pane, except for `permission` and `input`, the last N lines above its input
+  box; otherwise the last N lines of retained output. A read that fails keeps
+  the line, with `"tailError":"<message>"` instead. A pane on the alternate
+  screen gets `Noa +ctl: pane N is on the alternate screen; its program keeps no
+  history here: only the screen is returned` on stderr.
+- `--settle SECS` (also on `send --wait` and `spawn --task`) holds a `finished`
+  for SECS seconds. A newer report, or a change in the work above the input box,
+  drops the hold and the wait goes on; a `permission` that arrives meanwhile
+  still ends it. One that held is printed with `"settledSecs":SECS`. A timeout
+  during a hold gives the baseline from before that `finished`.
 - `--for` takes a comma list of `finished,permission,input,error,exit,attention`
   (default: all of them), and `stalled` with `--stall`.
 - `--stall SECS` also ends the wait for a pane whose visible screen has not
@@ -169,20 +252,61 @@ pane that stopped:
   a pane that had already exited when the wait began is skipped while other panes
   are still running.
 - Timeout: prints
-  `{"timeout":true,"pending":["7"],"baseline":[{"paneId":"7","seq":5,"state":"running"}]}`
-  and exits 2 (`state` only for a pane with an agent state). A pane that had
+  `{"timeout":true,"pending":["7"],"baseline":[{"paneId":"7","seq":5,"label":"api","state":"running"}]}`
+  and exits 2 (`label` and `state` only when the pane has them). A pane that had
   already exited when the wait began is listed under `"exited"`, not
   `"pending"`, and has no `baseline` entry. `baseline` is the report count each pending pane was waited from
   (with `send --wait`, the count before sending). Pass it back as
   `--after PANE=SEQ` and the next wait also sees a report that landed in
   between. Without `--timeout`, it waits indefinitely.
+- SIGTERM, SIGINT or SIGHUP during `wait` or `send --wait` prints the same line
+  with `"interrupted":true` (and `"queued":true` under `--queue`) and exits 2,
+  up to about a second later. SIGKILL prints nothing.
 
 ### `read PANE [--scrollback] [--max-bytes N]`
 
 Prints the pane's visible screen as text (without the blank rows below it), or
 with `--scrollback` its retained output. `--max-bytes` bounds the output
 (default 256 KiB, at most 1 MiB); a cut keeps the end and prints
-`output truncated` on stderr. Works on exited panes that are still open.
+`output truncated` on stderr. Works on exited panes that are still open. A
+pane on the alternate screen (most agents' TUIs) keeps no history:
+`--scrollback` then says on stderr that only its screen came back.
+
+### `result PANE [--max-bytes N]`
+
+Prints the pane's result file (spawn, "Result file"), with a newline added if
+it lacks one. The path is the one this pane's journal recorded at the spawn,
+else `<its cwd>/.noa/result-LABEL.md` for a listed pane with a plain label.
+`--max-bytes` keeps the **start** (a report's summary is at its top) and says
+`Noa +ctl: result cut; printed the first N bytes of <path>` on stderr. Exit 1:
+`pane N has no result: <path> does not exist (the worker writes its report to
+$NOA_RESULT)`, `cannot read pane N's result <path>: …`, or `pane N has no
+known result file: …`. Works on closed workers the journal knows.
+
+### `status [--answers]`
+
+One line per live worker of this pane, in listing order: `paneId`, `cwd`, and
+when known `label`, `state`, `seq`, `blocked`, `exit`, `branch`; from the
+journal `tier`, `argv` (else Noa's `spawn.argv`), `lastTask` (the last text sent
+that was not an answer), `lastSentSeq` (the `seq` before the last send),
+`lastOutcome` (`{reason,seq,ts}`), `answers` (a count), `result`, `worktree`.
+A worktree worker also gets `ahead` (commits on its branch that your `HEAD`
+lacks) and `dirty` (uncommitted changes in its worktree), each left out when
+git cannot say. Then the journal's workers that are no longer listed:
+`{"paneId":"…","gone":true,"label"?,"closed"?:true,"cwd"?,…}`.
+
+`--answers` prints every prompt answered from this pane (`send --answer`),
+oldest first: `{"ts":…,"paneId":"…","label"?:…,"text":…,"screen":…}`, where
+`screen` is the prompt's last 20 lines as read just before answering.
+
+**Journal.** Each `+ctl` command run in a Noa pane appends to
+`<data-dir>/noa/ctl/<NOA_SURFACE_ID>.jsonl` (`~/Library/Application
+Support/noa/ctl/` on macOS), one line per event: `spawn`, `send` (written only
+once typed; its first 200 characters), `outcome` (each wait line with a
+`reason`), `close`. Over 4 MiB it loses its oldest half. A journal that cannot
+be written warns once (`warning: cannot write the journal …; carrying on
+without it`) and never fails the command. Without `NOA_SURFACE_ID` nothing is
+kept.
 
 ### `close PANE...|--children [--any-pane] [--prune]`
 
@@ -195,15 +319,26 @@ mistyped id also shows up as `gone`. A pane that could not be closed is named on
 stderr; the rest are still closed and the exit status is 1. A live pane that is
 not this pane's worker is refused before anything is closed.
 
+Noa answering `-32009` for a pane that is still listed afterwards: no line for
+it, stderr "Noa did not confirm closing pane N in time (…); it may still close:
+check with `ls` before retrying", the rest are still closed, and the exit
+status is 3.
+
 `--prune`: for each closed worker whose label `L` has a worktree
-`<repo>-wt/L` on branch `orch/L`, and whose cwd is in it (as `spawn --worktree` made it; the
-repository is the one this process runs in), run `git worktree remove` and then
-`git branch -d`, never forced. The line gains
+`<main>-wt/L` on branch `orch/L`, and whose cwd is in it (as `spawn --worktree` made it; the
+repository is found from the pane's cwd, or its nearest existing parent, not
+from yours), run `git worktree remove` and then `git branch -d` in the main
+worktree, never forced. The line gains
 `"worktree":{"path":…,"removed":true,"branchDeleted":true}`. When git refuses
 (uncommitted changes, a branch not merged into your `HEAD`), the work stays,
 `"kept"` gives git's reason, and the exit status is unchanged. When the worktree
 and branch exist but the pane's cwd was not in it, nothing is removed and the line
 gains `"worktree":{"path":…,"removed":false,"branchDeleted":false,"kept":"the pane's cwd is not in this worktree"}`.
+A labelled pane (a label `--worktree` takes) with no such worktree gets
+`"worktree":{"removed":false,"branchDeleted":false,"kept":"<reason>"}`:
+`no worktree <main>-wt/L on orch/L in this repository`, or `no orch/L worktree
+found from the pane's cwd <cwd>: <git's error>`. A worktree an older `+ctl` made
+inside another worktree (`<repo>-wt/A-wt/L`) is not found this way.
 A pane that went away between the listing and its close (`"gone":true`) is pruned
 the same way. Merge the
 branch first, or read what would be lost before removing it by hand.
@@ -232,9 +367,16 @@ succeeds.
 | Code | Meaning |
 |---|---|
 | 0 | Done |
-| 1 | Error: bad arguments, unknown pane, refused input, a pane that is not yours. An argument error prints only its message and a pointer to `--help` |
-| 2 | `wait` timed out |
-| 3 | Server disabled, unreachable, missing a scope, gone mid-command, or not answering a request within 5 s ("did not answer in time"; the request may still have taken effect). stderr says which: "sandbox likely blocks loopback" (your shell's sandbox refused the connection; run `+ctl` outside it), "not listening" (Noa's server is off), or a message naming the config to add |
+| 1 | Error: bad arguments, unknown pane, refused input, a pane that is not yours, a spawn over `--max-children`, a request over Noa's size limit ("Noa closed the connection because a request was over its size limit"). An argument error prints only its message and a pointer to `--help` |
+| 2 | `wait` timed out, or was interrupted (`"interrupted":true`) |
+| 3 | Server disabled, unreachable, missing a scope, gone mid-command, full, or not answering a request within 5 s ("did not answer in time"), or a request Noa did not confirm in time (`-32009`, "it may still have taken effect"). After either of the last two, check with `ls` or `read` before retrying. stderr says which: "sandbox likely blocks loopback" (your shell's sandbox refused the connection; run `+ctl` outside it), "not listening" (Noa's server is off), "too many control connections open" (see below), or a message naming the config to add |
+
+Noa holds 32 connections at once; each running `wait`, `send --wait`, board and
+attach holds one. A connect refused at that limit is retried for 3 s (100 ms,
+doubling), then exits 3 with "Noa has too many control connections open (each
+running `wait`, `send --wait`, board and attach holds one); end some, or try
+again later". A Noa older than that drops such a connection unanswered, which
+reads as "lost the connection".
 
 When `+ctl` reaches a Noa that does not list this pane (stderr says "does not
 report surface ids", exit 3, or "is not among the panes", exit 1), the control
@@ -304,41 +446,40 @@ are described in SKILL.md, "Matching the worker to the task".
 
 ## Patterns
 
-Several workers, each with a race-free wait:
+Several workers, handling whichever stops first (workers that report turns):
 
 ```sh
 noa() { "$NOA_BIN" +ctl "$@"; }
-a=$(noa spawn --label api -- claude | jq -r .paneId)
-b=$(noa spawn --label ui -- codex | jq -r .paneId)
-noa send "$a" --enter --wait --timeout 1800 "…task A…" > a.json &
-noa send "$b" --enter --wait --timeout 1800 "…task B…" > b.json &
-wait   # run the whole block with your tool's background mode
+a=$(noa spawn --label api --ready 30 -- claude | jq -r .paneId)   # check "ready" and "screen"
+b=$(noa spawn --label ui --ready 30 -- codex | jq -r .paneId)
+sa=$(noa send "$a" --enter - < "$d/task-api.txt" | jq -r .seq)
+sb=$(noa send "$b" --enter - < "$d/task-ui.txt" | jq -r .seq)
+noa wait --children --after "$a=$sa" --after "$b=$sb" --settle 10 --stall 300 --timeout 100
 ```
 
-The same without background jobs, only for workers that report turns (see the
-table above): keep each `seq` and wait per pane. `--after` covers reports only. A
-worker that only raises `attention` and finishes before its `wait` starts is
-never seen, and that wait runs until its timeout. Use the background
-`send --wait` form for such workers.
+Run the `wait` as its own tool call and repeat it. Each time, handle the lines
+it printed, then pass every pane's newest base: the `seq` a line or a later
+`send` printed for a pane you dealt with, the timeout line's `baseline` for the
+rest. Drop panes you closed. `--after` covers reports only: a worker that only
+raises `attention` and finishes before a `wait` starts is never seen. For such
+workers run one `send --wait` each with your tool's background mode:
 
 ```sh
-sa=$(noa send "$a" --enter "…" | jq -r .seq)
-sb=$(noa send "$b" --enter "…" | jq -r .seq)
-noa wait "$a" --after "$sa" --timeout 540
-noa wait "$b" --after "$sb" --timeout 540
+noa send "$a" --enter --wait --timeout 1800 - < "$d/task-a.txt" > "$d/a.json" &
+noa send "$b" --enter --wait --timeout 1800 - < "$d/task-b.txt" > "$d/b.json" &
+wait
 ```
 
-A wait longer than your shell tool allows: keep each wait short and carry on
-from the timeout line. A report that arrives between the waits is not missed.
-A notification is: `--after` covers reports only, so use this only for workers
-that report turns (see the table above). For a worker that only raises
-`attention`, `read` it after each timeout instead.
+A wait longer than your shell tool allows: one `--timeout 100` call per tool
+call, carrying the timeout line's `baseline` into the next. A loop inside one
+call is only for your tool's background mode, since the tool's limit covers the
+whole call:
 
 ```sh
-out=$(noa send "$a" --enter --wait --timeout 540 "…task…")
+out=$(noa send "$a" --enter --wait --timeout 100 "…task…")
 while [ $? -eq 2 ]; do
   seq=$(echo "$out" | jq -r '.baseline[0].seq')
-  out=$(noa wait "$a" --after "$a=$seq" --timeout 540)
+  out=$(noa wait "$a" --after "$a=$seq" --timeout 100)
 done
 ```
 
@@ -359,5 +500,7 @@ noa close --children
 
 ## Known limits
 
-- Parallel spawns from one orchestrator can exceed `--max-children`.
-- A spawn retried after a timeout can start the worker twice.
+- With a Noa older than `maxChildren`, parallel spawns from one orchestrator can
+  exceed `--max-children`.
+- A spawn or send that exits 3 may still have taken effect: `ls --children` or
+  `read` before retrying, or the worker starts (or the text is typed) twice.

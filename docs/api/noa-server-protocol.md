@@ -6,9 +6,9 @@ For operational procedures (enabling, tokens, troubleshooting) see `docs/runbook
 ## 1. Transport
 
 - **WebSocket over TCP**: `ws://<server-bind>:<server-port>/` (default bind `127.0.0.1`, default port `61771`). No TLS. The default is a loopback-only bind: setting `server-bind` (e.g. `0.0.0.0`) opts in to a bind address reachable directly from other hosts on the LAN (v2). Since there's still no TLS, a LAN bind should only be used on a trusted network. On untrusted networks, remote access should still go through a protected tunnel endpoint such as SSH or Tailscale. When using a tunnel, the network between endpoints is assumed to be protected by the tunnel.
-- The control endpoint at `/` uses **JSON-RPC 2.0** over WS text frames. Messages are ≤ 1 MiB and individual frames are ≤ 256 KiB (exceeding either closes the connection).
+- The control endpoint at `/` uses **JSON-RPC 2.0** over WS text frames. Messages are ≤ 1 MiB and individual frames are ≤ 256 KiB. Exceeding either closes the connection with close code **1009** and reason `message too big`; the server reads and discards the rest of the frame for up to 2 seconds first, so the client can read the close frame. `noa_ipc::MAX_SEND_TEXT_BYTES` (250 KiB of JSON-encoded `text`) is the largest `noa.sendText` text that fits one frame.
 - The attach endpoint at `/attach` is a separate raw binary channel described in [§6](#6-raw-attach-channel). It never carries JSON-RPC or base64-wrapped payloads.
-- Max 32 concurrent connections, counting both control and raw attach WebSockets (accepting beyond that immediately closes the connection).
+- Max 32 concurrent connections, counting both control and raw attach WebSockets. A connection beyond that completes the WebSocket handshake and is closed with close code **1013** (Try Again Later) and reason `too many connections`; retrying later can succeed. At most 4 such refusals run at once; past that, and for the per-address cap of a LAN bind, the connection is dropped unanswered. Older servers dropped every refused connection unanswered.
 - **Connection deadlines**: the WS handshake must complete within 5 seconds of connecting (an absolute deadline; even a connection trickling bytes slowly to dodge per-read timeouts cannot exceed this), and `noa.hello` must succeed within 10 seconds of connecting. Connections that exceed these are closed server-side.
 
 ## 2. JSON-RPC conventions
@@ -78,7 +78,7 @@ params: `{}` / result: `{"panels":[Panel]}` (all panels across all window groups
 | `source` | `"screen"` \| `"scrollback"` | ✓ | screen = visible screen only / scrollback = scrollback + visible screen combined |
 | `maxBytes` | number | — (default 262144) | UTF-8 byte limit. Server-side **clamped to 1 MiB (1048576 bytes)** (requesting more isn't rejected, just clamped) |
 
-result: `{"paneId":"1","text":"..."}`; when truncated, the **tail is kept in preference** and `"truncated":true` is added (only appears when true).
+result: `{"paneId":"1","text":"..."}`; when truncated, the **tail is kept in preference** and `"truncated":true` is added (only appears when true). `"alternateScreen":true` (only appears when true) means the pane's active screen was the alternate screen at the time of the read: it keeps no scrollback, so a `scrollback` read returns only what the screen shows.
 
 ### noa.getGrid (requires read)
 
@@ -103,6 +103,7 @@ params: `{"paneId":"1","text":"ls\n","paste":true}` / result: `{"ok":true}`
 Injects UTF-8 text into the target panel's pty. Include `\n` to send a newline.
 
 - `paste` (optional, default `true`): if the panel is in bracketed paste mode, this is automatically wrapped as a paste (existing behavior).
+- `requirePasteMode` (optional, default `false`): with `paste` true, a panel that has not enabled bracketed paste (DECSET 2004) gets nothing written, and the request fails with **`-32010`** (`pane N has not enabled bracketed paste yet (its program may still be starting); nothing was sent`). The check and the write happen in one step on the UI thread. An empty `text` with this flag writes nothing either way, so it probes whether a just-started program is ready for a multi-line paste. Ignored with `paste:false`, and by servers older than the flag (which then send as usual).
 - `paste:false`: raw injection with no bracketed-paste wrapping. The `text`'s UTF-8 byte sequence is written to the pty as-is. To send a bare Enter, use `{"text":"\r","paste":false}` (useful for emulating keypresses into TUI apps).
 - Sending non-empty text that the panel accepts acknowledges its notification, as focusing it does (refused input, such as to an exited panel, leaves it unread): its `attention` (and unread bell) drops, and a subscriber receives that `stateChanged` before the text reaches the pty. A client answering an agent can then wait for its next `attention`.
 
@@ -140,8 +141,9 @@ Optional fields for an orchestrator that starts worker panes (see [Agent workflo
 | `label` | string | free text shown as `Panel.label` (at most 128 bytes) |
 | `parentPaneId` | string | the orchestrator's pane; shown as `Panel.parentPaneId` and used by `direction:"auto"` |
 | `focus` | boolean | `false` puts keyboard focus back where it was after the spawn. Omitted means `true`. A spawn that fails (no room to split) always puts focus back |
+| `maxChildren` | number | with `parentPaneId`: refuse the spawn with **`-32011`** when that pane already has this many children (`pane P already has N children (L live, E exited); maxChildren is M`). It counts every pane in every window whose parent is `parentPaneId`, exited panes held open included, on the UI thread before the pane is created, so concurrent spawns cannot pass it. Ignored without `parentPaneId`, and by servers older than the field |
 
-A `config` with `command`, `initialInput`, or `env` also needs the `input` scope (`-32003` otherwise). An empty `command`, an `env` key that is empty or contains `=`, or an over-long `label` is `-32602`. An unknown `parentPaneId` is `-32002`.
+A `config` with `command`, `initialInput`, or `env` also needs the `input` scope (`-32003` otherwise). An empty `command`, an `env` key that is empty or contains `=`, or an over-long `label` is `-32602`, and so is a `label` starting with `board:` together with `parentPaneId` (that label names an orchestrator's board, which has no parent). An unknown `parentPaneId` is `-32002`.
 
 ### noa.closePane (requires control)
 
@@ -258,18 +260,20 @@ When the subscription queue overflows, the oldest notifications are dropped and 
   "attachable": true,
   "preview": [Row],
   "surfaceId": "0x2f9c0e5a7b1d4c33",
-  "agent": { "kind": "claude", "state": "finished", "detail": "", "seq": 7 },
+  "agent": { "kind": "claude", "state": "input", "detail": "", "seq": 7, "blocked": "question" },
   "exit": { "code": 0 },
-  "parentPaneId": "1", "label": "fix-tests"
+  "parentPaneId": "1", "label": "fix-tests",
+  "spawn": { "argv": ["claude", "--model", "sonnet"], "startedAt": 1763700000 }
 }
 ```
 
-The last five keys are optional and omitted when they do not apply:
+The last six keys are optional and omitted when they do not apply:
 
 - `surfaceId`: the value of `NOA_SURFACE_ID` in the pane's child environment, so a process inside a pane can find its own panel.
-- `agent`: present when the foreground process is a recognized coding agent (`kind` is `claude`, `codex`, or `agy`) or when an `OSC 777;noa-agent` report arrived. `state`/`detail` mirror the last report (`running`, `permission`, `input`, `finished`, `error`; absent after `clear`). `seq` counts reports for this pane, every report including `clear` adding one, so a client that sends input can ignore a report that predates it.
+- `agent`: present when the foreground process is a recognized coding agent (`kind` is `claude`, `codex`, or `agy`) or when an `OSC 777;noa-agent` report arrived. `state`/`detail` mirror the last report (`running`, `permission`, `input`, `finished`, `error`; absent after `clear`). `seq` counts reports for this pane, every report including `clear` adding one, so a client that sends input can ignore a report that predates it. `blocked` is `"permission"` or `"question"`, present only while the last report was an `OSC 7501` blocked report: `kind=permission` gives state `permission` with `blocked:"permission"`; any other kind (or none) gives state `input` with `blocked:"question"`, a dialog where Enter picks the first choice; `kind=auth` gives state `error` and no `blocked`. Any later report clears it, so a `state:"input"` without `blocked` is an agent idle at its prompt (or a hook report). When the foreground process is not known yet, `kind` comes from the report's `app=` or from `spawn.argv[0]`.
 - `exit`: present only while a pane whose child exited is held open (`config.waitAfterCommand`, or an abnormal exit). `code` is omitted when the platform reported none.
 - `parentPaneId` / `label`: as given to the spawn extensions.
+- `spawn`: for a pane a spawn extension started with `config.command`: the `argv` it ran and `startedAt`, Unix seconds when the pane was created. Absent for a pane started with a shell or any other way, and not kept across a relaunch.
 
 A pane is listed even before its first output (a pane spawned with `parentPaneId` or `label` from the moment the spawn returns); until then its `name` and `cwd` are empty and it has no `agent`.
 
@@ -306,6 +310,10 @@ Changes to `agent.seq`, `process`, and `exit` are pushed in `noa.stateChanged` w
 | `-32007` | attach conflict (the pane already has a reserved or active attach) |
 | `-32008` | attach handshake failure |
 | `-32009` | outcome unknown: a request handed to the UI thread got no result within 2 seconds; it may still execute |
+| `-32010` | not ready: `noa.sendText` with `requirePasteMode` to a pane that has not enabled bracketed paste; nothing was written |
+| `-32011` | limit reached: a spawn over its `maxChildren` |
+
+WebSocket close codes: `1008` (an `Origin` that is not allowed, or an attach handshake failure), `1009` (a frame or message over the size limit), `1013` (the connection limit).
 
 ## 10. Full session example
 

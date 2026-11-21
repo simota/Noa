@@ -2722,8 +2722,11 @@ impl Board {
     /// scroll by `past`.
     fn empty_lines(&self, cols: usize, room: usize, now: Instant) -> Vec<String> {
         let mut empty = Line::default();
-        // No worker can come any more once the orchestrator closed.
-        let note = if self.of_gone {
+        // No worker can come any more once the orchestrator closed; before
+        // the first listing none is known not to be there (U12).
+        let note = if !self.started {
+            self.lang.pick("読み込み中…", "Loading…")
+        } else if self.of_gone {
             self.lang.pick(
                 "オーケストレーターのペインは閉じられました。q でボードを終えます。",
                 "The orchestrator pane closed. q ends the board.",
@@ -3295,11 +3298,17 @@ impl Board {
         let status = Status::of(panel);
         let selected = Some(pane) == self.selected && !entry.echo;
         let width = self.number_width();
+        // While the list cannot be read, its states are as of then: dimmed
+        // and marked as not known now (U12).
+        let (color, mark) = match self.offline {
+            Some(_) => (DIM, format!("{}?", status.mark())),
+            None => (status.color(), status.mark().to_string()),
+        };
 
         let mut line = Line::default();
         line.plain(" ");
         if selected {
-            line.fg(status.color(), "▶");
+            line.fg(color, "▶");
         } else {
             line.plain(" ");
         }
@@ -3320,10 +3329,7 @@ impl Board {
             Some(number) => format!("{number:>width$}"),
             None => " ".repeat(width),
         };
-        line.fg(DIM, &number)
-            .plain(" ")
-            .fg(status.color(), status.mark())
-            .plain(" ");
+        line.fg(DIM, &number).plain(" ").fg(color, &mark).plain(" ");
         let name = pad(&format!("{crumb}{}", self.name(pane)), name_width);
         if selected {
             line.bold(&name);
@@ -3338,7 +3344,7 @@ impl Board {
         }
         if columns.state > 0 {
             let (state, quiet) = self.state_parts(pane, status, columns.form, now);
-            line.plain("  ").fg(status.color(), &state);
+            line.plain("  ").fg(color, &state);
             let mut used = state.width();
             if let Some(quiet) = quiet {
                 line.fg(DIM, &format!(" {quiet}"));
@@ -5661,6 +5667,43 @@ mod tests {
         assert_eq!(polling.failing_since(), None);
         polling.failed(t0 + Duration::from_secs(40));
         assert_eq!(polling.failing_since(), Some(t0 + Duration::from_secs(40)));
+    }
+
+    // U12: before the first listing the board said there were no workers,
+    // and while offline its rows looked as current as ever.
+    #[test]
+    fn what_is_not_known_now_does_not_look_known() {
+        let t0 = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        assert!(rendered(&board, 80, 20, t0).contains("読み込み中…"));
+        board.update(Vec::new(), t0);
+        assert!(rendered(&board, 80, 20, t0).contains("ワーカーはまだいません"));
+        board.update(sample(), t0);
+        let row = |board: &Board| {
+            board
+                .render(80, 30, t0)
+                .into_iter()
+                .find(|line| visible(line).contains(" api "))
+                .unwrap()
+        };
+        let Rgb(r, g, b) = BLUE;
+        assert!(
+            row(&board).contains(&format!("38;2;{r};{g};{b}m●")),
+            "{:?}",
+            row(&board)
+        );
+        board.offline = Some(t0);
+        let Rgb(r, g, b) = DIM;
+        assert!(
+            row(&board).contains(&format!("38;2;{r};{g};{b}m●?")),
+            "{:?}",
+            row(&board)
+        );
+        assert!(
+            row(&board).contains(&format!("38;2;{r};{g};{b}m作業中")),
+            "{:?}",
+            row(&board)
+        );
     }
 
     #[test]

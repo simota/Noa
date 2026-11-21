@@ -1892,6 +1892,8 @@ mod tests {
         let status = noa_grid::AgentStatus {
             state: noa_grid::AgentState::Permission,
             detail: "Edit".into(),
+            blocked: None,
+            app: None,
         };
         store.apply(SessionDelta::AgentStatus {
             id,
@@ -1925,6 +1927,8 @@ mod tests {
         let finished = Some(noa_grid::AgentStatus {
             state: noa_grid::AgentState::Finished,
             detail: String::new(),
+            blocked: None,
+            app: None,
         });
         for status in [finished.clone(), finished, None] {
             store.apply(SessionDelta::AgentStatus {
@@ -1971,6 +1975,8 @@ mod tests {
             status: Some(noa_grid::AgentStatus {
                 state,
                 detail: String::new(),
+                blocked: None,
+                app: None,
             }),
             at: wall(10, 0),
             reports: 1,

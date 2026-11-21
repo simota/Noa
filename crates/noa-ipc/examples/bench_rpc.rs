@@ -48,6 +48,7 @@ impl IpcBackend for Mock {
             Ok(TextResult {
                 text: self.screen.clone(),
                 truncated: false,
+                alternate_screen: false,
             })
         } else {
             Err(IpcError::UnknownPane)
@@ -58,7 +59,7 @@ impl IpcBackend for Mock {
         Err(IpcError::UnknownPane)
     }
 
-    fn send_text(&self, _: PaneRef, _: &str, _: bool) -> Result<(), IpcError> {
+    fn send_text(&self, _: PaneRef, _: &str, _: bool, _: bool) -> Result<(), IpcError> {
         Ok(())
     }
 
@@ -125,10 +126,12 @@ fn worker(pane: u64) -> Panel {
             state: Some("working".to_string()),
             detail: Some("running cargo test --workspace".to_string()),
             seq: 3,
+            blocked: None,
         }),
         exit: None,
         parent_pane_id: Some(WireId(1)),
         label: Some(format!("worker-{pane}")),
+        spawn: None,
     }
 }
 

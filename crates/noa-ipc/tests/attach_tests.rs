@@ -94,6 +94,7 @@ impl IpcBackend for TestBackend {
             exit: None,
             parent_pane_id: None,
             label: None,
+            spawn: None,
         }]
     }
 
@@ -111,6 +112,7 @@ impl IpcBackend for TestBackend {
         Ok(TextResult {
             text: "typed-scrollback".to_string(),
             truncated: false,
+            alternate_screen: false,
         })
     }
 
@@ -123,7 +125,13 @@ impl IpcBackend for TestBackend {
         Err(IpcError::Unsupported("get_grid"))
     }
 
-    fn send_text(&self, _pane: PaneRef, _text: &str, _paste: bool) -> Result<(), IpcError> {
+    fn send_text(
+        &self,
+        _pane: PaneRef,
+        _text: &str,
+        _paste: bool,
+        _require_paste_mode: bool,
+    ) -> Result<(), IpcError> {
         Err(IpcError::Unsupported("send_text"))
     }
 
@@ -973,10 +981,16 @@ fn attach_connection_counts_toward_the_existing_32_connection_cap() {
     }
     wait_for_connection_count(&handle, 32);
 
-    assert!(
-        tungstenite::connect(&second_url).is_err(),
-        "the 33rd WebSocket must be refused before its attach handshake"
-    );
+    // REL-10: the 33rd WebSocket completes its handshake only to be closed
+    // with 1013 Try Again Later; it never reaches the attach handshake.
+    let (mut refused, _) = tungstenite::connect(&second_url).unwrap();
+    match refused.read() {
+        Ok(Message::Close(Some(frame))) => {
+            assert_eq!(frame.code, CloseCode::Again);
+            assert_eq!(frame.reason, noa_ipc::TOO_MANY_CONNECTIONS_REASON);
+        }
+        other => panic!("expected a 1013 close, got {other:?}"),
+    }
     assert_eq!(handle.active_connection_count(), 32);
 }
 

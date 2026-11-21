@@ -11,15 +11,21 @@ use noa_ipc::protocol::{
     EventKind, Panel, PanelAgent, SpawnConfig, SpawnParams, SplitDirection, SplitPlacement,
     TextSource, WireId,
 };
-use noa_ipc::{Broadcaster, Client, ClientError, Notification, ScopeSet, Server, ServerConfig};
+use noa_ipc::{
+    Broadcaster, Client, ClientError, Notification, ScopeSet, SendTextOptions, Server, ServerConfig,
+};
 
 const TOKEN: &str = "orchestration-token";
+/// A pane whose program has not enabled bracketed paste yet.
+const STARTING_PANE: PaneRef = 4;
+/// A pane on the alternate screen.
+const ALT_SCREEN_PANE: PaneRef = 5;
 
 #[derive(Default)]
 struct SpawnBackend {
     spawns: Mutex<Vec<(SpawnTarget, SpawnParams)>>,
     legacy_splits: Mutex<Vec<(PaneRef, SplitDirection)>>,
-    sent: Mutex<Vec<(PaneRef, String, bool)>>,
+    sent: Mutex<Vec<(PaneRef, String, bool, bool)>>,
 }
 
 impl IpcBackend for SpawnBackend {
@@ -27,19 +33,35 @@ impl IpcBackend for SpawnBackend {
         vec![panel(1, 0)]
     }
 
-    fn get_text(&self, _: PaneRef, _: TextSource, _: usize) -> Result<TextResult, IpcError> {
-        Err(IpcError::UnknownPane)
+    fn get_text(&self, pane: PaneRef, _: TextSource, _: usize) -> Result<TextResult, IpcError> {
+        match pane {
+            ALT_SCREEN_PANE => Ok(TextResult {
+                text: "tui".to_string(),
+                truncated: false,
+                alternate_screen: true,
+            }),
+            _ => Err(IpcError::UnknownPane),
+        }
     }
 
     fn get_grid(&self, _: PaneRef, _: u64, _: u64) -> Result<GridResult, IpcError> {
         Err(IpcError::UnknownPane)
     }
 
-    fn send_text(&self, pane: PaneRef, text: &str, paste: bool) -> Result<(), IpcError> {
+    fn send_text(
+        &self,
+        pane: PaneRef,
+        text: &str,
+        paste: bool,
+        require_paste_mode: bool,
+    ) -> Result<(), IpcError> {
+        if pane == STARTING_PANE && paste && require_paste_mode {
+            return Err(IpcError::NotReady("not in paste mode yet".to_string()));
+        }
         self.sent
             .lock()
             .unwrap()
-            .push((pane, text.to_string(), paste));
+            .push((pane, text.to_string(), paste, require_paste_mode));
         Ok(())
     }
 
@@ -61,6 +83,10 @@ impl IpcBackend for SpawnBackend {
     }
 
     fn spawn(&self, target: SpawnTarget, params: SpawnParams) -> Result<PaneRef, IpcError> {
+        // The app counts children; this stands in for its refusal.
+        if params.max_children == Some(0) {
+            return Err(IpcError::LimitReached("0 children allowed".to_string()));
+        }
         self.spawns.lock().unwrap().push((target, params));
         Ok(700)
     }
@@ -85,10 +111,12 @@ fn panel(pane: u64, seq: u64) -> Panel {
             state: Some("finished".to_string()),
             detail: None,
             seq,
+            blocked: None,
         }),
         exit: None,
         parent_pane_id: Some(WireId(9)),
         label: Some("fix-tests".to_string()),
+        spawn: None,
     }
 }
 
@@ -155,6 +183,7 @@ fn auto_split_with_a_command_reaches_spawn_with_every_field() {
         label: Some("review".to_string()),
         parent_pane_id: Some(WireId(1)),
         focus: Some(false),
+        max_children: Some(3),
     };
 
     let pane = client
@@ -184,6 +213,7 @@ fn a_float_placement_reaches_spawn_as_a_float_on_the_pane() {
         label: Some("review".to_string()),
         parent_pane_id: Some(WireId(1)),
         focus: Some(false),
+        max_children: None,
     };
 
     client
@@ -207,6 +237,7 @@ fn a_float_may_go_over_a_pane_other_than_its_parent() {
         label: None,
         parent_pane_id: Some(WireId(1)),
         focus: Some(false),
+        max_children: None,
     };
 
     client
@@ -320,11 +351,145 @@ fn send_text_passes_the_paste_flag_through() {
 
     client.send_text(1, "hello", true).unwrap();
     client.send_text(1, "\r", false).unwrap();
+    client
+        .send_text_with(
+            1,
+            "gated",
+            SendTextOptions {
+                paste: true,
+                require_paste_mode: true,
+            },
+        )
+        .unwrap();
 
     assert_eq!(
         *backend.sent.lock().unwrap(),
-        vec![(1, "hello".to_string(), true), (1, "\r".to_string(), false)]
+        vec![
+            (1, "hello".to_string(), true, false),
+            (1, "\r".to_string(), false, false),
+            (1, "gated".to_string(), true, true),
+        ]
     );
+}
+
+// REL-01: a send that requires paste mode to a pane that has not enabled
+// it comes back as -32010 and nothing is written.
+#[test]
+fn a_send_requiring_paste_mode_is_refused_as_not_ready() {
+    let (backend, _broadcaster, handle) = start(&["read", "input"]);
+    let mut client = connect(&handle, &["read", "input"]);
+
+    let refused = client.send_text_with(
+        STARTING_PANE,
+        "line one\nline two",
+        SendTextOptions {
+            paste: true,
+            require_paste_mode: true,
+        },
+    );
+
+    assert!(matches!(
+        refused,
+        Err(ClientError::Rpc { code: -32010, .. })
+    ));
+    assert!(backend.sent.lock().unwrap().is_empty());
+}
+
+// REL-07: getText says when the pane is on the alternate screen; absent
+// means false.
+#[test]
+fn get_text_reports_the_alternate_screen() {
+    let (_backend, _broadcaster, handle) = start(&["read"]);
+    let mut client = connect(&handle, &["read"]);
+
+    let result = client
+        .get_text(ALT_SCREEN_PANE, TextSource::Scrollback, None)
+        .unwrap();
+
+    assert!(result.alternate_screen);
+    assert_eq!(result.text, "tui");
+}
+
+// REL-02: a backend refusal over `maxChildren` reaches the client as -32011.
+#[test]
+fn a_spawn_over_max_children_is_refused_as_limit_reached() {
+    let (backend, _broadcaster, handle) = start(&["read", "control", "input"]);
+    let mut client = connect(&handle, &["read", "control", "input"]);
+    let params = SpawnParams {
+        config: Some(command_config()),
+        parent_pane_id: Some(WireId(1)),
+        max_children: Some(0),
+        ..SpawnParams::default()
+    };
+
+    let refused = client.spawn_split(1, SplitPlacement::Auto, &params);
+
+    assert!(matches!(
+        refused,
+        Err(ClientError::Rpc { code: -32011, .. })
+    ));
+    assert!(backend.spawns.lock().unwrap().is_empty());
+}
+
+// REL-14: a worker cannot take a `board:` label; the board (no parent) can.
+#[test]
+fn a_worker_with_a_board_label_is_refused() {
+    let (backend, _broadcaster, handle) = start(&["read", "control", "input"]);
+    let mut client = connect(&handle, &["read", "control", "input"]);
+    let board = SpawnParams {
+        config: Some(command_config()),
+        label: Some("board:1".to_string()),
+        focus: Some(false),
+        ..SpawnParams::default()
+    };
+    let worker = SpawnParams {
+        parent_pane_id: Some(WireId(1)),
+        ..board.clone()
+    };
+
+    assert!(matches!(
+        client.spawn_split(1, SplitPlacement::Float, &worker),
+        Err(ClientError::Rpc { code: -32602, .. })
+    ));
+    client.spawn_tab(None, &board).unwrap();
+    assert_eq!(backend.spawns.lock().unwrap().len(), 1);
+}
+
+// REL-10: past the connection limit the server answers with a 1013 close,
+// which the client reports as its own error rather than a lost connection.
+#[test]
+fn a_connection_over_the_limit_is_closed_as_busy() {
+    let (_backend, _broadcaster, handle) = start(&["read"]);
+    let held: Vec<Client> = (0..32).map(|_| connect(&handle, &["read"])).collect();
+
+    let refused = Client::connect(
+        &format!("ws://127.0.0.1:{}/", handle.port()),
+        TOKEN,
+        ScopeSet::from_strings(["read"]),
+    );
+
+    assert!(
+        matches!(refused, Err(ClientError::TooManyConnections(_))),
+        "{:?}",
+        refused.err()
+    );
+    drop(held);
+}
+
+// REL-04: a request frame over the server's bound closes the connection with
+// 1009, which the client reports as its own error.
+#[test]
+fn an_oversized_send_is_closed_as_too_big() {
+    let (backend, _broadcaster, handle) = start(&["read", "input"]);
+    let mut client = connect(&handle, &["read", "input"]);
+
+    let refused = client.send_text(1, &"x".repeat(300 * 1024), true);
+
+    assert!(
+        matches!(refused, Err(ClientError::MessageTooBig(_))),
+        "{refused:?}"
+    );
+    assert!(backend.sent.lock().unwrap().is_empty());
 }
 
 #[test]

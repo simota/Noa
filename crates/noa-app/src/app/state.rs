@@ -1162,6 +1162,15 @@ pub(super) struct Orchestration {
     pub(super) cwd: Option<String>,
 }
 
+/// What an IPC spawn started a pane with (`Panel.spawn`, finding U9): set
+/// only for a spawn that named a command.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct IpcSpawn {
+    pub(super) argv: Vec<String>,
+    /// Unix time in seconds.
+    pub(super) started_at: u64,
+}
+
 /// Terminal-owned state for one split leaf. `split_tree` leaves store the
 /// `PaneId`; this map owns the corresponding live surface payload.
 pub(super) struct Surface {
@@ -1288,6 +1297,8 @@ pub(super) struct Surface {
     /// Who spawned this pane over IPC and under what label
     /// (agent-orchestration D2/D5).
     pub(super) orchestration: Option<Orchestration>,
+    /// The command an IPC spawn ran in this pane, if it named one.
+    pub(super) ipc_spawn: Option<IpcSpawn>,
     /// The pty child's argv, for the child-exited notice. `None` for remote
     /// panes.
     pub(super) child_command: Option<String>,
@@ -1486,6 +1497,7 @@ impl Surface {
             exit_status: None,
             surface_id: None,
             orchestration: None,
+            ipc_spawn: None,
             child_command: None,
             child_exited: None,
             script_pointer: None,

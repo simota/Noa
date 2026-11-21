@@ -3792,6 +3792,7 @@ mod tests {
             state: state.map(str::to_string),
             detail: Some(format!("{label} detail")),
             seq,
+            blocked: None,
         });
         panel
     }
@@ -6226,6 +6227,7 @@ mod perf {
                     state: Some(states[pane as usize % states.len()].to_string()),
                     detail: Some(format!("step {seq} of the work on worker {pane}")),
                     seq,
+                    blocked: None,
                 });
                 panel
             })

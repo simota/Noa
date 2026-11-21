@@ -5,6 +5,7 @@
 //! and times.
 
 use noa_gpui_core::style::{AlignItems, Rect as LayoutRect, Size as LayoutSize, auto, length};
+use noa_gpui_core::text_edit::TextEditor;
 use noa_gpui_core::widget::{MeasureCx, PaintCx, Widget};
 use noa_gpui_core::widgets::{
     Button, Container, ControlSize, Label, ScrollView, Tag, TagStyle, Tone, Truncation,
@@ -81,27 +82,61 @@ const KIND_SHRINK: f32 = 1000.0;
 /// width, and draws it as the tag draws itself. The full text stays its
 /// tooltip and accessibility label.
 pub(super) struct FitTag {
+    /// The whole text, as given.
     text: String,
+    /// `text` on one line, which is what is drawn: a tag is one line tall,
+    /// so the lines of a text with line breaks (live input) would be drawn
+    /// over each other.
+    line: String,
+    /// Where each grapheme cluster of `line` ends: a cut keeps whole
+    /// clusters, so that an emoji sequence or a combining mark is never
+    /// split.
+    ends: Vec<usize>,
     tone: Tone,
     look: TagStyle,
     /// Never cut narrower than this (the full text, when it is narrower).
     floor: f32,
     shrink: f32,
-    /// The tag that is drawn: `text`, or a cut of it.
-    tag: Tag,
-    /// The full text's width as a tag.
+    /// The tag that is drawn: `line`, or a cut of it; none when not even an
+    /// ellipsis fits the width.
+    tag: Option<Tag>,
+    /// The full line's width as a tag.
     full: Option<f32>,
     /// What fits a width, for the widths asked for so far: layout measures
     /// several times per pass.
-    fits: Vec<(f32, String)>,
+    fits: Vec<(f32, Option<String>)>,
+}
+
+/// `text` on one line as a single-line text field takes it (line breaks and
+/// tabs become spaces, other control characters are left out), and where
+/// each of its grapheme clusters ends. The editor keeps its caret on
+/// cluster boundaries: moved to the end of a character, it stops at the
+/// end of the cluster that character ends, or else at that cluster's start.
+fn one_line(text: &str) -> (String, Vec<usize>) {
+    let mut editor = TextEditor::single_line();
+    editor.set_text(text);
+    let line = editor.text().to_owned();
+    let mut ends: Vec<usize> = line
+        .char_indices()
+        .map(|(i, c)| {
+            editor.move_to(i + c.len_utf8(), false);
+            editor.caret()
+        })
+        .filter(|end| *end > 0)
+        .collect();
+    ends.dedup();
+    (line, ends)
 }
 
 impl FitTag {
     pub(super) fn new(text: impl Into<String>) -> Self {
         let text = text.into();
+        let (line, ends) = one_line(&text);
         Self {
-            tag: Tag::new(text.as_str()),
+            tag: Some(Tag::new(line.as_str())),
             text,
+            line,
+            ends,
             tone: Tone::Neutral,
             look: TagStyle::Pill,
             floor: 0.0,
@@ -113,13 +148,13 @@ impl FitTag {
 
     pub(super) fn tone(mut self, tone: Tone) -> Self {
         self.tone = tone;
-        self.tag = self.make(&self.text);
+        self.tag = Some(self.make(&self.line));
         self
     }
 
     pub(super) fn style(mut self, look: TagStyle) -> Self {
         self.look = look;
-        self.tag = self.make(&self.text);
+        self.tag = Some(self.make(&self.line));
         self
     }
 
@@ -133,14 +168,15 @@ impl FitTag {
         self
     }
 
-    /// The whole text.
+    /// The whole text, as given.
     pub(super) fn text(&self) -> &str {
         &self.text
     }
 
-    /// The text as drawn: the whole text, or its start and an ellipsis.
+    /// The text as drawn: the whole text on one line, its start and an
+    /// ellipsis, or nothing.
     pub(super) fn shown_text(&self) -> &str {
-        self.tag.text()
+        self.tag.as_ref().map_or("", Tag::text)
     }
 
     fn make(&self, text: &str) -> Tag {
@@ -155,39 +191,42 @@ impl FitTag {
         width
     }
 
-    /// The longest start of the text that fits `width` with an ellipsis
-    /// (the ellipsis alone when nothing does), or the whole text if it fits.
-    fn fit(&mut self, cx: &mut MeasureCx, input: MeasureInput, width: f32) -> String {
+    /// The whole line if it fits `width`, else its longest start that fits
+    /// with an ellipsis, or `None` when not even the ellipsis does.
+    fn fit(&mut self, cx: &mut MeasureCx, input: MeasureInput, width: f32) -> Option<String> {
         if let Some((_, fit)) = self.fits.iter().find(|(w, _)| *w == width) {
             return fit.clone();
         }
         let full = match self.full {
             Some(full) => full,
-            None => *self.full.insert(self.width_of(cx, input, &self.text)),
+            None => *self.full.insert(self.width_of(cx, input, &self.line)),
+        };
+        let fits = |this: &Self, cx: &mut MeasureCx, text: &str| {
+            this.width_of(cx, input, text) <= width + 0.01
         };
         let fit = if full <= width + 0.01 {
-            self.text.clone()
+            Some(self.line.clone())
         } else {
-            // The first `n` characters and an ellipsis.
+            // The first `n` grapheme clusters and an ellipsis.
             let cut = |n: usize| {
-                let end = self
-                    .text
-                    .char_indices()
-                    .nth(n)
-                    .map_or(self.text.len(), |(i, _)| i);
-                format!("{}{ELLIPSIS}", self.text[..end].trim_end())
+                let end = n.checked_sub(1).map_or(0, |last| self.ends[last]);
+                format!("{}{ELLIPSIS}", self.line[..end].trim_end())
             };
-            // `lo` characters fit; `hi` do not (the whole text does not).
-            let (mut lo, mut hi) = (0, self.text.chars().count());
-            while hi - lo > 1 {
-                let mid = (lo + hi) / 2;
-                if self.width_of(cx, input, &cut(mid)) <= width + 0.01 {
-                    lo = mid;
-                } else {
-                    hi = mid;
+            if fits(self, cx, &cut(0)) {
+                // `lo` clusters fit; `hi` do not (the whole line does not).
+                let (mut lo, mut hi) = (0, self.ends.len());
+                while hi - lo > 1 {
+                    let mid = (lo + hi) / 2;
+                    if fits(self, cx, &cut(mid)) {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
                 }
+                Some(cut(lo))
+            } else {
+                None
             }
-            cut(lo)
         };
         if self.fits.len() == 8 {
             self.fits.remove(0);
@@ -213,17 +252,24 @@ impl Widget for FitTag {
         // As `Label` reads the width it may take.
         let shown = match input.known.width.or(input.wrap_width()) {
             Some(width) => self.fit(cx, input, width.max(self.floor)),
-            None => self.text.clone(),
+            None => Some(self.line.clone()),
         };
-        if shown != self.tag.text() {
-            self.tag.removed(cx.text);
-            self.tag = self.make(&shown);
+        if shown.as_deref() != self.tag.as_ref().map(Tag::text) {
+            if let Some(tag) = &mut self.tag {
+                tag.removed(cx.text);
+            }
+            self.tag = shown.map(|shown| self.make(&shown));
         }
-        self.tag.measure(cx, input)
+        // Nothing fits: nothing is drawn, and it takes no room.
+        self.tag
+            .as_mut()
+            .map_or(Size::new(0.0, 0.0), |tag| tag.measure(cx, input))
     }
 
     fn paint(&mut self, cx: &mut PaintCx) {
-        self.tag.paint(cx);
+        if let Some(tag) = &mut self.tag {
+            tag.paint(cx);
+        }
     }
 
     fn tooltip(&self, _local: Point) -> Option<String> {
@@ -239,7 +285,9 @@ impl Widget for FitTag {
     }
 
     fn removed(&mut self, text: &mut TextStore) {
-        self.tag.removed(text);
+        if let Some(tag) = &mut self.tag {
+            tag.removed(text);
+        }
     }
 }
 

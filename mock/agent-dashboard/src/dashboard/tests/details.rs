@@ -1,5 +1,6 @@
-use noa_gpui_core::Role;
-use noa_gpui_core::widgets::Label;
+use noa_gpui_core::widget::Widget;
+use noa_gpui_core::widgets::{Container, Label};
+use noa_gpui_core::{Role, accesskit};
 use noa_gpui_scene::Color;
 use noa_gpui_text::TextStyle;
 
@@ -510,11 +511,13 @@ fn long_tags_stay_inside_the_drawer() {
                 }
             }
             // Each long text is cut with an ellipsis, short ones are whole.
-            let cut: Vec<(String, String)> = rows
+            let cut: Vec<(WidgetId, String, String)> = rows
                 .iter()
                 .flat_map(|row| shown_under(tree, *row))
-                .filter_map(|id| tree.get::<drawer::FitTag>(id))
-                .map(|tag| (tag.text().to_owned(), tag.shown_text().to_owned()))
+                .filter_map(|id| {
+                    let tag = tree.get::<drawer::FitTag>(id)?;
+                    Some((id, tag.text().to_owned(), tag.shown_text().to_owned()))
+                })
                 .collect();
             let worker = dashboard.feed.fleet.worker(pane).unwrap();
             let mut long = vec![worker.kind.clone(), worker.branch.clone()];
@@ -522,9 +525,9 @@ fn long_tags_stay_inside_the_drawer() {
                 long.push(worker.model_line());
             }
             for text in long {
-                let (_, shown) = cut
+                let (id, _, shown) = cut
                     .iter()
-                    .find(|(full, _)| *full == text)
+                    .find(|(_, full, _)| *full == text)
                     .unwrap_or_else(|| panic!("{text} is a tag: {cut:?}"));
                 let whole = text.len() < 20;
                 let start = shown.trim_end_matches('\u{2026}');
@@ -535,6 +538,13 @@ fn long_tags_stay_inside_the_drawer() {
                         shown.ends_with('\u{2026}') && text.starts_with(start) && !start.is_empty()
                     },
                     "{size:?} pane {pane}: {text:?} shown as {shown:?}"
+                );
+                // The tag draws that text, inside itself.
+                let (drawn, _) = drawn_text(&dashboard, *id);
+                let area = rect(tree, *id);
+                assert!(
+                    inside(drawn, area),
+                    "{size:?} pane {pane}: {shown:?} drawn at {drawn:?} outside {area:?}"
                 );
             }
             let label = label_of(&dashboard, pane);
@@ -555,5 +565,114 @@ fn long_tags_stay_inside_the_drawer() {
                 assert_eq!(shown, label, "{size:?}: the label is not cut");
             }
         }
+    }
+}
+
+/// D1: a model name with line breaks (live input) is drawn on one line,
+/// inside its tag; its accessibility label keeps the text as it came.
+#[test]
+fn a_tag_with_line_breaks_is_drawn_on_one_line() {
+    let model = "a\nb\r\nc";
+    let mut fleet = fleet::canned();
+    let worker = fleet.workers.iter_mut().find(|w| w.pane == 11).unwrap();
+    worker.model = model.to_owned();
+    worker.effort.clear();
+    let (mut dashboard, mut text) = live_of(fleet);
+    select(&mut dashboard, &mut text, 11);
+    key(&mut dashboard, &mut text, Key::Space);
+    let tree = &dashboard.tree;
+    let id = shown_under(tree, drawer(&dashboard).unwrap())
+        .into_iter()
+        .find(|id| {
+            tree.get::<drawer::FitTag>(*id)
+                .is_some_and(|tag| tag.text() == model)
+        })
+        .expect("the model is a tag");
+    let tag = tree.get::<drawer::FitTag>(id).unwrap();
+    assert_eq!(tag.shown_text(), "a b c");
+    let (drawn, _) = drawn_text(&dashboard, id);
+    let area = rect(tree, id);
+    assert!(inside(drawn, area), "drawn at {drawn:?} outside {area:?}");
+    let mut node = accesskit::Node::new(accesskit::Role::Label);
+    tag.accessibility(&mut node);
+    assert_eq!(node.label(), Some(model));
+}
+
+/// A [`drawer::FitTag`] saying `says`, alone in a column `width` wide that
+/// stretches it to that width, laid out and drawn.
+fn fit_tag_in(text: &mut TextStore, says: &str, width: f32) -> (UiTree, WidgetId) {
+    let mut tree = UiTree::new();
+    let column = tree.insert(None, Container::column().width(width));
+    let tag = tree.insert(Some(column), drawer::FitTag::new(says));
+    tree.prepare(Size::new(400.0, 100.0), text);
+    (tree, tag)
+}
+
+/// The rects of the quads and texts `tree` draws.
+fn drawn_rects(tree: &UiTree) -> Vec<[f32; 4]> {
+    tree.display_list()
+        .commands()
+        .iter()
+        .filter_map(|command| match command {
+            DrawCommand::Quad { rect: r, .. } | DrawCommand::Text { rect: r, .. } => {
+                Some([r.x, r.y, r.width, r.height])
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// D2: a tag given less room than an ellipsis needs draws nothing; at any
+/// width, what it draws lies inside the room it is given.
+#[test]
+fn a_tag_draws_nothing_outside_its_room() {
+    let mut text = TextStore::new(Default::default());
+    let (tree, tag) = fit_tag_in(&mut text, "main", 0.0);
+    assert_eq!(tree.get::<drawer::FitTag>(tag).unwrap().shown_text(), "");
+    assert_eq!(drawn_rects(&tree), Vec::<[f32; 4]>::new(), "nothing drawn");
+    for width in 0..=80 {
+        let (tree, tag) = fit_tag_in(&mut text, "main", width as f32);
+        let area = rect(&tree, tag);
+        for drawn in drawn_rects(&tree) {
+            assert!(
+                inside(drawn, area),
+                "{width}: {:?} drawn at {drawn:?} outside {area:?}",
+                tree.get::<drawer::FitTag>(tag).unwrap().shown_text()
+            );
+        }
+    }
+    let (tree, tag) = fit_tag_in(&mut text, "main", 80.0);
+    assert_eq!(
+        tree.get::<drawer::FitTag>(tag).unwrap().shown_text(),
+        "main"
+    );
+}
+
+/// D3: a cut keeps whole grapheme clusters: a keycap emoji (1, U+FE0F,
+/// U+20E3) is kept whole or left out, never cut down to its "1".
+#[test]
+fn a_cut_keeps_whole_grapheme_clusters() {
+    let keycap = "1\u{FE0F}\u{20E3}";
+    let rest = "c".repeat(20);
+    let full = format!("ab{keycap}{rest}");
+    // Where a start of `full` may end: before or after a, b, the whole
+    // keycap and each c.
+    let mut ends = vec![0, 1, 2];
+    ends.extend((0..=rest.len()).map(|n| 2 + keycap.len() + n));
+    let mut text = TextStore::new(Default::default());
+    let mut seen = Vec::new();
+    for width in 0..=200 {
+        let (tree, tag) = fit_tag_in(&mut text, &full, width as f32);
+        let shown = tree.get::<drawer::FitTag>(tag).unwrap().shown_text();
+        let start = shown.strip_suffix('\u{2026}').unwrap_or(shown);
+        assert!(
+            full.starts_with(start) && ends.contains(&start.len()),
+            "{width}: {shown:?}"
+        );
+        seen.push(start.to_owned());
+    }
+    // The widths tried cut both before and after the keycap.
+    for start in ["ab".to_owned(), format!("ab{keycap}")] {
+        assert!(seen.contains(&start), "{start:?} in {seen:?}");
     }
 }

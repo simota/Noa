@@ -782,11 +782,15 @@ fn a_card_its_list_can_hold_is_not_pushed_out_by_its_title() {
         titles.next().expect("the agent's group has a title")
     };
     let low = grouped(&[0]);
-    let line = card(&grouped(&[1]))[3] - card(&low)[3];
     // The title, and the gap below it, above the card.
     let above = card(&low)[1] - rect(&low.tree, title(&low))[1];
     let room = list(&low)[3];
-    let lines = ((room - card(&low)[3]) / line).floor() as usize;
+    // The most caption lines whose card the list holds, each card measured:
+    // a card does not grow by one line per line, as the first lines only
+    // fill the caption row up to its 詳細 button's height.
+    let lines = (0..)
+        .take_while(|&n| card(&grouped(&[n + 1]))[3] <= room)
+        .count();
 
     let mut dashboard = grouped(&[lines]);
     let height = card(&dashboard)[3];

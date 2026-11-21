@@ -159,9 +159,21 @@ impl Dashboard {
     }
 
     /// Builds the same screen again for a changed view, keeping the theme (the
-    /// appearance the OS last set) the screen has now.
-    fn rebuilt(&mut self, view: View) {
-        *self = Self::build(view, self.tree.theme().clone());
+    /// appearance the OS last set) the screen has now. The old tree's widgets
+    /// go through `UiTree::remove` first: that is what releases their text
+    /// layouts in the `TextStore`.
+    fn rebuilt(&mut self, view: View, text: &mut TextStore) {
+        let theme = self.tree.theme().clone();
+        let roots: Vec<WidgetId> = self
+            .tree
+            .root()
+            .into_iter()
+            .chain(self.tree.overlays())
+            .collect();
+        for root in roots {
+            self.tree.remove(root, text);
+        }
+        *self = Self::build(view, theme);
     }
 
     fn build(view: View, theme: Theme) -> Self {
@@ -256,32 +268,38 @@ impl Screen for Dashboard {
         &mut self.tree
     }
 
-    fn handle(&mut self, message: Message, _text: &mut TextStore) {
+    fn handle(&mut self, message: Message, text: &mut TextStore) {
         if let Some(ShortcutPressed(pressed)) = message.downcast_ref::<ShortcutPressed>() {
             if let Some(panel) = Panel::ALL.into_iter().find(|p| p.shortcut() == *pressed) {
                 let mut shown = self.view.shown;
                 shown[panel as usize] = !shown[panel as usize];
-                self.rebuilt(View { shown, ..self.view });
+                self.rebuilt(View { shown, ..self.view }, text);
             }
             return;
         }
         if let Some(SelectionChanged(index)) = message.downcast_ref::<SelectionChanged>()
             && message.source == self.grouping_control
         {
-            self.rebuilt(View {
-                grouping: Grouping::ALL[*index],
-                ..self.view
-            });
+            self.rebuilt(
+                View {
+                    grouping: Grouping::ALL[*index],
+                    ..self.view
+                },
+                text,
+            );
             return;
         }
         if message.downcast_ref::<ButtonClicked>().is_none() {
             return;
         }
         if let Some(label) = QueueButtons::worker(&self.queue_buttons.details, message.source) {
-            self.rebuilt(View {
-                expanded: Some(label),
-                ..self.view
-            });
+            self.rebuilt(
+                View {
+                    expanded: Some(label),
+                    ..self.view
+                },
+                text,
+            );
         } else if let Some(label) = QueueButtons::worker(&self.queue_buttons.open, message.source) {
             let status = format!("モック: {label} のペインへ移動します");
             self.tree
@@ -1244,6 +1262,28 @@ mod tests {
             assert_row_spans(&dashboard, &Panel::NOW);
             assert_row_spans(&dashboard, &Panel::HISTORY);
         }
+        // Without its grower a row splits its free width equally over the
+        // remaining panels, on top of each one's fixed width: the 1416 px row
+        // less 12 px gap less 670 px fixed leaves 734 px, 367 px each.
+        let row = window().width - 2.0 * GUTTER;
+        let width_of = |dashboard: &Dashboard, panel: Panel| {
+            rect(&dashboard.tree, dashboard.panels[panel as usize].unwrap())[2]
+        };
+        let (dashboard, _text) = showing(Grouping::Orchestrator, shown_only(&[Panel::Running]));
+        let free = row - GUTTER - QUEUE_WIDTH - DONE_WIDTH;
+        for (panel, fixed) in [(Panel::Queue, QUEUE_WIDTH), (Panel::Done, DONE_WIDTH)] {
+            let width = width_of(&dashboard, panel);
+            assert!(
+                (width - (fixed + free / 2.0)).abs() <= 0.5,
+                "{panel:?} is {width} px with running off"
+            );
+        }
+        let (dashboard, _text) = showing(Grouping::Orchestrator, shown_only(&[Panel::Timeline]));
+        let width = width_of(&dashboard, Panel::Graph);
+        assert!(
+            (width - row).abs() <= 0.5,
+            "graph is {width} px with timeline off"
+        );
         let body_height = window().height - HEADER_HEIGHT - 2.0 * GUTTER;
         let (dashboard, _text) = showing(Grouping::Orchestrator, shown_only(&Panel::NOW));
         assert_row_spans(&dashboard, &Panel::HISTORY);
@@ -1346,6 +1386,44 @@ mod tests {
         }
     }
 
+    /// Width of one hint item, worked out from its parts and not read back from
+    /// the layout: a 20 px keycap, the 3 px item gap, the title (full-width
+    /// characters are one em, 11 px, wide) and 2 px padding on each side.
+    fn expected_item_width(panel: Panel) -> f32 {
+        20.0 + 3.0 + 11.0 * panel.title().chars().count() as f32 + 4.0
+    }
+
+    /// The strip is the five items and four 8 px gaps: 332 px.
+    fn expected_strip_width() -> f32 {
+        Panel::ALL.map(expected_item_width).iter().sum::<f32>() + 4.0 * 8.0
+    }
+
+    fn assert_strip_holds_its_items(dashboard: &Dashboard, what: &str) {
+        let tree = &dashboard.tree;
+        let strip = rect(tree, hint_strip_of(dashboard));
+        let items = tree.children(hint_strip_of(dashboard));
+        assert_eq!(items.len(), 5, "{what}");
+        for (panel, item) in Panel::ALL.into_iter().zip(items) {
+            let item = rect(tree, *item);
+            assert!(
+                (item[2] - expected_item_width(panel)).abs() <= 0.5,
+                "{what}: {panel:?} item is {} px, expected {}",
+                item[2],
+                expected_item_width(panel)
+            );
+            assert!(
+                item[0] >= strip[0] - 0.5 && item[0] + item[2] <= strip[0] + strip[2] + 0.5,
+                "{what}: {panel:?} item {item:?} is not inside the strip {strip:?}"
+            );
+        }
+        assert!(
+            (strip[2] - expected_strip_width()).abs() <= 0.5,
+            "{what}: strip is {} px, expected {}",
+            strip[2],
+            expected_strip_width()
+        );
+    }
+
     #[test]
     fn the_hint_strip_fits_the_header() {
         let open = |dashboard: &mut Dashboard, text: &mut TextStore| {
@@ -1365,7 +1443,6 @@ mod tests {
             .update::<Label, _>(status, |l, cx| l.set_text(cx, long));
         narrow.prepare(window(), &mut narrow_text);
         let (off, _off_text) = showing(Grouping::Orchestrator, [false; 5]);
-        let strip_width = rect(&default.tree, hint_strip_of(&default))[2];
         let default_widths: Vec<f32> = {
             let tree = &default.tree;
             let bar = tree.parent(hint_strip_of(&default)).unwrap();
@@ -1390,8 +1467,7 @@ mod tests {
                 last[0] + last[2] <= window().width - 16.0 + 0.5,
                 "{rects:?}"
             );
-            let width = rect(tree, strip)[2];
-            assert!((width - strip_width).abs() <= 0.5, "strip is {width} px");
+            assert_strip_holds_its_items(dashboard, "header state");
         }
         let (default_tree, default_strip) = (&default.tree, hint_strip_of(&default));
         let default_rect = rect(default_tree, default_strip);
@@ -1404,6 +1480,55 @@ mod tests {
             let actual = rect(&dashboard.tree, hint_strip_of(&dashboard));
             assert_rect(actual, default_rect, &format!("hint strip, {name}"));
         }
+    }
+
+    fn layout_count(view: View) -> usize {
+        let mut dashboard = Dashboard::showing(view);
+        let mut text = TextStore::new(Default::default());
+        dashboard.prepare(window(), &mut text);
+        text.layouts().len()
+    }
+
+    fn view_of(dashboard: &Dashboard) -> View {
+        dashboard.view
+    }
+
+    #[test]
+    fn hide_and_restore_cycles_release_the_old_text_layouts() {
+        let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+        let fresh = layout_count(view_of(&dashboard));
+        assert_eq!(text.layouts().len(), fresh);
+        for _ in 0..3 {
+            press(&mut dashboard, &mut text, '1', Modifiers::default());
+            press(&mut dashboard, &mut text, '1', Modifiers::default());
+        }
+        assert_eq!(text.layouts().len(), fresh, "after hide/restore cycles");
+        // A screen with a panel off owns fewer layouts than one with all on.
+        press(&mut dashboard, &mut text, '2', Modifiers::default());
+        assert_eq!(text.layouts().len(), layout_count(view_of(&dashboard)));
+        assert!(text.layouts().len() < fresh);
+    }
+
+    #[test]
+    fn a_grouping_change_releases_the_old_text_layouts() {
+        let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+        let control = dashboard.grouping_control;
+        let origin = dashboard.tree.window_origin(control).unwrap();
+        let rect = dashboard.tree.layout(control).unwrap().rect;
+        let pos = Point::new(origin.x + rect.width - 12.0, origin.y + rect.height / 2.0);
+        click(&mut dashboard, &mut text, pos);
+        assert_eq!(dashboard.view.grouping, Grouping::Flat);
+        assert_eq!(text.layouts().len(), layout_count(view_of(&dashboard)));
+    }
+
+    #[test]
+    fn a_details_click_releases_the_old_text_layouts() {
+        let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+        let (button, label) = dashboard.queue_buttons.details[1];
+        let pos = center(&dashboard.tree, button);
+        click(&mut dashboard, &mut text, pos);
+        assert_eq!(dashboard.view.expanded, Some(label));
+        assert_eq!(text.layouts().len(), layout_count(view_of(&dashboard)));
     }
 
     #[test]

@@ -16,6 +16,9 @@ const NOTIFY_WAIT: Duration = Duration::from_secs(1);
 const RELIST_EVERY: Duration = Duration::from_secs(2);
 const SCREEN_EVERY: Duration = Duration::from_secs(2);
 const PULSE_EVERY: Duration = Duration::from_secs(5);
+/// The feed wakes the window at least this often while it runs, so the
+/// header's time since the last sync ticks between snapshots.
+const HEARTBEAT: Duration = Duration::from_secs(1);
 const SCREEN_MAX_BYTES: usize = 4000;
 const SCREEN_TAIL_LINES: usize = 6;
 /// A running pane whose preview has not changed for this long is quiet, as
@@ -45,8 +48,9 @@ pub struct Snapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    /// The queue card now expanded, whose screen tail the feed fetches.
-    Expand(Option<u64>),
+    /// The panes whose screen tails the feed fetches: the expanded queue
+    /// card and the worker in the details drawer.
+    Watch(Vec<u64>),
     Focus(u64),
 }
 
@@ -83,7 +87,8 @@ impl Channel {
     }
 }
 
-/// Starts the feed thread. `wake` is called after each snapshot it sends.
+/// Starts the feed thread. `wake` is called after each snapshot it sends,
+/// and at least every `HEARTBEAT` while the thread runs.
 pub fn start(wake: impl Fn() + Send + 'static) -> Channel {
     let (snapshot_tx, snapshots) = mpsc::channel();
     let (commands, command_rx) = mpsc::channel();
@@ -94,8 +99,9 @@ pub fn start(wake: impl Fn() + Send + 'static) -> Channel {
         commands: command_rx,
         wake: Box::new(wake),
         tracker: Tracker::default(),
-        expanded: None,
-        screen: None,
+        watched: Vec::new(),
+        screens: HashMap::new(),
+        last_wake: Instant::now(),
         last_list: Instant::now(),
         last_contact: Instant::now(),
     };
@@ -128,9 +134,10 @@ struct Feed {
     commands: Receiver<Command>,
     wake: Box<dyn Fn() + Send>,
     tracker: Tracker,
-    expanded: Option<u64>,
-    /// The expanded pane's screen tail and when it was fetched.
-    screen: Option<(u64, Instant, Vec<String>)>,
+    watched: Vec<u64>,
+    /// Each watched pane's screen tail and when it was fetched.
+    screens: HashMap<u64, (Instant, Vec<String>)>,
+    last_wake: Instant,
     last_list: Instant,
     last_contact: Instant,
 }
@@ -163,18 +170,28 @@ impl Feed {
         }
     }
 
-    /// Waits `backoff` while keeping up with the dashboard's commands; false
-    /// once the dashboard is gone.
+    /// Waits `backoff` while keeping up with the dashboard's commands and
+    /// the heartbeat; false once the dashboard is gone.
     fn pause(&mut self, backoff: Duration) -> bool {
         let until = Instant::now() + backoff;
         loop {
             let left = until.saturating_duration_since(Instant::now());
-            match self.commands.recv_timeout(left) {
-                Ok(Command::Expand(pane)) => self.expand(pane),
+            match self.commands.recv_timeout(left.min(HEARTBEAT)) {
+                Ok(Command::Watch(panes)) => self.watch(panes),
                 Ok(Command::Focus(_)) => {}
-                Err(RecvTimeoutError::Timeout) => return true,
+                Err(RecvTimeoutError::Timeout) if left <= HEARTBEAT => return true,
+                Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return false,
             }
+            self.heartbeat();
+        }
+    }
+
+    /// Wakes the window when it has not been woken for `HEARTBEAT`.
+    fn heartbeat(&mut self) {
+        if self.last_wake.elapsed() >= HEARTBEAT {
+            (self.wake)();
+            self.last_wake = Instant::now();
         }
     }
 
@@ -199,8 +216,9 @@ impl Feed {
                 }
             }
             self.tracker.advance(unix_now());
-            self.fetch_screen(client)?;
+            self.fetch_screens(client)?;
             self.send_if_due(client, &mut sent)?;
+            self.heartbeat();
         }
     }
 
@@ -217,7 +235,7 @@ impl Feed {
     fn take_commands(&mut self, client: &mut Client) -> Result<(), Stop> {
         loop {
             match self.commands.try_recv() {
-                Ok(Command::Expand(pane)) => self.expand(pane),
+                Ok(Command::Watch(panes)) => self.watch(panes),
                 Ok(Command::Focus(pane)) => match client.focus_pane(pane) {
                     Err(ClientError::Rpc { message, .. }) => {
                         self.notice(format!("ペインへ移動できません: {message}"));
@@ -230,32 +248,30 @@ impl Feed {
         }
     }
 
-    fn expand(&mut self, pane: Option<u64>) {
-        if self.expanded != pane {
-            self.expanded = pane;
-            self.screen = None;
-        }
+    fn watch(&mut self, panes: Vec<u64>) {
+        self.screens.retain(|pane, _| panes.contains(pane));
+        self.watched = panes;
     }
 
-    fn fetch_screen(&mut self, client: &mut Client) -> Result<(), Stop> {
-        let Some(pane) = self.expanded else {
-            return Ok(());
-        };
-        if !self.tracker.is_worker(pane)
-            || self
-                .screen
-                .as_ref()
-                .is_some_and(|(_, at, _)| at.elapsed() < SCREEN_EVERY)
-        {
-            return Ok(());
+    /// Fetches each watched worker's screen tail at most every `SCREEN_EVERY`.
+    fn fetch_screens(&mut self, client: &mut Client) -> Result<(), Stop> {
+        for &pane in &self.watched {
+            if !self.tracker.is_worker(pane)
+                || self
+                    .screens
+                    .get(&pane)
+                    .is_some_and(|(at, _)| at.elapsed() < SCREEN_EVERY)
+            {
+                continue;
+            }
+            let tail = match client.get_text(pane, TextSource::Screen, Some(SCREEN_MAX_BYTES)) {
+                Ok(result) => screen_tail(&result.text),
+                // The pane closed since the last list: the next list drops it.
+                Err(ClientError::Rpc { .. }) => Vec::new(),
+                Err(err) => return Err(err.into()),
+            };
+            self.screens.insert(pane, (Instant::now(), tail));
         }
-        let tail = match client.get_text(pane, TextSource::Screen, Some(SCREEN_MAX_BYTES)) {
-            Ok(result) => screen_tail(&result.text),
-            // The pane closed since the last list: the next list drops it.
-            Err(ClientError::Rpc { .. }) => Vec::new(),
-            Err(err) => return Err(err.into()),
-        };
-        self.screen = Some((pane, Instant::now(), tail));
         Ok(())
     }
 
@@ -264,11 +280,12 @@ impl Feed {
         client: &Client,
         sent: &mut Option<(Fleet, Instant)>,
     ) -> Result<(), Stop> {
-        let tail = self
-            .screen
-            .as_ref()
-            .map(|(pane, _, tail)| (*pane, tail.as_slice()));
-        let fleet = self.tracker.fleet(unix_now(), tail);
+        let tails: HashMap<u64, Vec<String>> = self
+            .screens
+            .iter()
+            .map(|(pane, (_, tail))| (*pane, tail.clone()))
+            .collect();
+        let fleet = self.tracker.fleet(unix_now(), Some(&tails));
         let due = sent
             .as_ref()
             .is_none_or(|(last, at)| !last.same_structure(&fleet) || at.elapsed() >= PULSE_EVERY);
@@ -567,7 +584,8 @@ impl Tracker {
             .unwrap_or_default()
     }
 
-    fn fleet(&self, now: f64, screen: Option<(u64, &[String])>) -> Fleet {
+    /// The workers now; each pane in `screens` gets its screen tail.
+    fn fleet(&self, now: f64, screens: Option<&HashMap<u64, Vec<String>>>) -> Fleet {
         let mut panes: Vec<u64> = self
             .panels
             .values()
@@ -579,9 +597,9 @@ impl Tracker {
             .into_iter()
             .filter_map(|pane| {
                 let panel = self.panels.get(&pane)?;
-                let tail = screen
-                    .filter(|(expanded, _)| *expanded == pane)
-                    .map_or(&[][..], |(_, tail)| tail);
+                let tail = screens
+                    .and_then(|screens| screens.get(&pane))
+                    .map_or(&[][..], Vec::as_slice);
                 Some(worker_of(
                     panel,
                     self.seen.get(&pane)?,
@@ -1539,7 +1557,8 @@ pub(crate) mod tests {
         tracker.merge(vec![orchestrator, running_agent("2", "1", "a")], 1000.0);
         tracker.merge(vec![running_agent("2", "1", "b")], 1003.0);
         let tail = ["$ cargo test".to_owned()];
-        let fleet = tracker.fleet(1010.0, Some((2, &tail[..])));
+        let tails = HashMap::from([(2, tail.to_vec())]);
+        let fleet = tracker.fleet(1010.0, Some(&tails));
         assert_eq!(fleet.orchestrators.len(), 1);
         assert_eq!(fleet.orchestrators[0].name, "release");
         let worker = &fleet.workers[0];
@@ -1561,6 +1580,32 @@ pub(crate) mod tests {
         assert_eq!(worker.started_minutes, Some(10.0));
         assert_eq!(worker.phases, [(Phase::Running, 10.0 / 60.0)]);
         assert_eq!(worker.task, "");
+    }
+
+    #[test]
+    fn two_watched_panes_get_their_tails() {
+        let orchestrator =
+            panel(serde_json::json!({ "paneId": "1", "label": "release", "surfaceId": "s1" }));
+        let mut tracker = Tracker::default();
+        tracker.merge(
+            vec![
+                orchestrator,
+                running_agent("2", "1", "a"),
+                running_agent("3", "1", "b"),
+                running_agent("4", "1", "c"),
+            ],
+            1000.0,
+        );
+        let tails = HashMap::from([
+            (2, vec!["$ make".to_owned()]),
+            (3, vec!["$ cargo test".to_owned(), "ok".to_owned()]),
+        ]);
+        let fleet = tracker.fleet(1010.0, Some(&tails));
+        assert_eq!(fleet.workers.len(), 3);
+        for worker in &fleet.workers {
+            let expected = tails.get(&worker.pane).cloned().unwrap_or_default();
+            assert_eq!(worker.screen_tail, expected, "pane {}", worker.pane);
+        }
     }
 
     #[test]

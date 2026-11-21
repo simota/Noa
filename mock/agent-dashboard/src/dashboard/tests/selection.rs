@@ -1,0 +1,219 @@
+use crate::dashboard::Mark;
+use noa_gpui_core::widgets::Label;
+
+use super::*;
+
+/// Presses J until `pane` is selected.
+fn select(dashboard: &mut Dashboard, text: &mut TextStore, pane: u64) {
+    for _ in 0..20 {
+        if dashboard.view.selected == Some(pane) {
+            return;
+        }
+        key(dashboard, text, Key::Char('j'));
+    }
+    panic!("J never selects {pane}");
+}
+
+fn walk(dashboard: &mut Dashboard, text: &mut TextStore, key_: Key, n: usize) -> Vec<u64> {
+    (0..n)
+        .map(|_| {
+            key(dashboard, text, key_);
+            dashboard.view.selected.unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn j_and_k_walk_the_panel_order() {
+    let order = [14, 19, 15, 16, 13, 11, 12, 17, 18];
+    let mut back: Vec<u64> = order.iter().rev().copied().skip(1).collect();
+    back.push(14);
+    for (next, prev) in [
+        (Key::Char('j'), Key::Char('k')),
+        (Key::ArrowDown, Key::ArrowUp),
+    ] {
+        let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+        assert_eq!(walk(&mut dashboard, &mut text, next, 9), order);
+        assert_eq!(walk(&mut dashboard, &mut text, next, 1), [18], "no wrap");
+        assert_eq!(walk(&mut dashboard, &mut text, prev, 9), back);
+    }
+}
+
+fn running_card(dashboard: &Dashboard, pane: u64) -> WidgetId {
+    let list = dashboard.registry.lists[Panel::Running as usize]
+        .as_ref()
+        .unwrap();
+    let (card, _) = list.items.iter().find(|(_, p)| *p == Some(pane)).unwrap();
+    *card
+}
+
+/// Every mark shows whether its worker is `selected`; returns the kinds of
+/// mark the selected worker has.
+fn assert_marks(dashboard: &Dashboard, selected: u64) -> Vec<&'static str> {
+    let theme = dashboard.tree.theme();
+    let (accent, fill) = (theme.color(Role::Accent), theme.color(Role::Selection));
+    let tree = &dashboard.tree;
+    let mut kinds = Vec::new();
+    for &(id, pane, mark) in &dashboard.registry.marks {
+        let on = pane == selected;
+        match mark {
+            Mark::Bar => {
+                assert_eq!(!tree.is_hidden(id), on, "bar of {pane}");
+                if on {
+                    let (color, _) = quad_at(dashboard, rect(tree, id)).unwrap();
+                    assert_eq!(color, accent, "bar of {pane}");
+                    kinds.push("bar");
+                }
+            }
+            Mark::Lane => {
+                let quad = quad_at(dashboard, rect(tree, id));
+                if on {
+                    assert_eq!(quad.map(|(c, _)| c), Some(fill), "lane of {pane}");
+                    kinds.push("lane");
+                } else {
+                    assert!(quad.is_none_or(|(c, _)| c != fill), "lane of {pane}");
+                }
+            }
+            Mark::Node { normal } => {
+                let (_, border) = quad_at(dashboard, rect(tree, id)).unwrap();
+                let expected = if on {
+                    kinds.push("node");
+                    Border {
+                        width: 2.0,
+                        color: accent,
+                    }
+                } else {
+                    Border {
+                        width: 1.0,
+                        color: normal,
+                    }
+                };
+                assert_eq!(border, expected, "node of {pane}");
+            }
+        }
+    }
+    kinds
+}
+
+#[test]
+fn the_selection_shows_in_card_lane_and_node() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    select(&mut dashboard, &mut text, 11);
+    let card = running_card(&dashboard, 12);
+    key(&mut dashboard, &mut text, Key::Char('j'));
+    assert_eq!(dashboard.view.selected, Some(12));
+    assert_eq!(running_card(&dashboard, 12), card, "the screen was rebuilt");
+    assert_eq!(assert_marks(&dashboard, 12), ["bar", "lane", "node"]);
+    key(&mut dashboard, &mut text, Key::Char('j'));
+    assert_eq!(dashboard.view.selected, Some(17));
+    assert_eq!(running_card(&dashboard, 12), card, "the screen was rebuilt");
+    assert_eq!(assert_marks(&dashboard, 17), ["bar", "lane", "node"]);
+}
+
+#[test]
+fn selecting_a_queue_worker_expands_its_card() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    select(&mut dashboard, &mut text, 19);
+    assert_eq!(dashboard.view.expanded, Some(19));
+    let open: Vec<u64> = dashboard
+        .queue_buttons
+        .open
+        .iter()
+        .map(|(_, pane)| *pane)
+        .collect();
+    assert_eq!(open, [19]);
+}
+
+fn live_with(snapshot: Snapshot) -> (Dashboard, TextStore, std::sync::mpsc::Receiver<Command>) {
+    let (channel, snapshots, _notices, commands) = Channel::detached();
+    let mut dashboard = Dashboard::live(Grouping::Orchestrator, channel);
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(window(), &mut text);
+    snapshots.send(snapshot).unwrap();
+    dashboard.before_frame(&mut text);
+    dashboard.prepare(window(), &mut text);
+    // What the screen asked for until now (the screen tails to fetch).
+    commands.try_iter().for_each(drop);
+    (dashboard, text, commands)
+}
+
+fn status_of(dashboard: &Dashboard) -> String {
+    let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
+    status.text().to_owned()
+}
+
+fn focused_panes(commands: &std::sync::mpsc::Receiver<Command>) -> Vec<u64> {
+    commands
+        .try_iter()
+        .filter_map(|c| match c {
+            Command::Focus(pane) => Some(pane),
+            Command::Watch(_) => None,
+        })
+        .collect()
+}
+
+#[test]
+fn enter_opens_the_selected_worker_like_the_open_button() {
+    let (mut dashboard, mut text, commands) = live_with(live(fleet::canned(), 0));
+    key(&mut dashboard, &mut text, Key::Char('j'));
+    key(&mut dashboard, &mut text, Key::Enter);
+    assert_eq!(focused_panes(&commands), [14]);
+    assert_eq!(status_of(&dashboard), "fix-tests のペインへ移動します");
+
+    let read_only = Snapshot {
+        can_focus: false,
+        ..live(fleet::canned(), 0)
+    };
+    let (mut dashboard, mut text, commands) = live_with(read_only);
+    key(&mut dashboard, &mut text, Key::Char('j'));
+    key(&mut dashboard, &mut text, Key::Enter);
+    assert!(focused_panes(&commands).is_empty());
+    assert_eq!(
+        status_of(&dashboard),
+        "ペインへ移動できません: Noa の server-scopes に control がありません"
+    );
+
+    let (mut dashboard, mut text, commands) = live_with(live(fleet::canned(), 0));
+    key(&mut dashboard, &mut text, Key::Enter);
+    assert_eq!(commands.try_iter().count(), 0, "something was sent");
+    assert_eq!(
+        status_of(&dashboard),
+        "ワーカーが選ばれていません（J / K で選ぶ）"
+    );
+}
+
+#[test]
+fn a_vanished_selection_moves_to_its_neighbour() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    select(&mut dashboard, &mut text, 13);
+    let mut fleet = fleet::canned();
+    fleet.workers.retain(|w| w.pane != 13);
+    dashboard.apply(live(fleet, 0), &mut text);
+    dashboard.prepare(window(), &mut text);
+    // perf-probe was fifth: 14, 19, 15, 16, then api-refactor.
+    assert_eq!(dashboard.view.selected, Some(11));
+}
+
+#[test]
+fn escape_backs_out_one_step_at_a_time() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    key(&mut dashboard, &mut text, Key::Char('j'));
+    key(&mut dashboard, &mut text, Key::Char('/'));
+    typed(&mut dashboard, &mut text, "/");
+    typed(&mut dashboard, &mut text, "a");
+    key(&mut dashboard, &mut text, Key::Enter);
+    key(&mut dashboard, &mut text, Key::Space);
+    assert_eq!(dashboard.view.detail, Some(14));
+    assert_eq!(dashboard.tree.overlays().count(), 1);
+    assert_eq!(dashboard.filter.query, "a");
+
+    key(&mut dashboard, &mut text, Key::Escape);
+    assert_eq!(dashboard.view.detail, None);
+    assert_eq!(dashboard.tree.overlays().count(), 0);
+    assert_eq!(dashboard.filter.query, "a");
+    key(&mut dashboard, &mut text, Key::Escape);
+    assert_eq!(dashboard.filter.query, "");
+    assert_eq!(dashboard.view.selected, Some(14));
+    key(&mut dashboard, &mut text, Key::Escape);
+    assert_eq!(dashboard.view.selected, None);
+}

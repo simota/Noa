@@ -1,15 +1,19 @@
 use noa_gpui_core::style::{
     AlignItems, FlexDirection, Rect as LayoutRect, Size as LayoutSize, auto, length,
 };
-use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, Tag, Tone, Truncation};
+use noa_gpui_core::widgets::{
+    Button, Container, ControlSize, Label, Tag, TagStyle, Tone, Truncation,
+};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
 use crate::fleet::{Need, Worker};
 
-use super::Pulse;
 use super::cards::{branch_tag, model_tag, task_line};
-use super::panel::{card_list, panel_title};
+use super::header::waited_text;
+use super::pager::ListParts;
+use super::panel::{Panel, card_list, indicator, mark_card, nothing_matches, panel_title};
 use super::style::{HINT_STRIP_SHRINK, fill_remaining, gap, joined, need_color, spacer};
+use super::{Pulse, Registry};
 
 #[derive(Default)]
 pub(super) struct QueueButtons {
@@ -32,15 +36,13 @@ pub(super) fn queue_since(worker: &Worker, need: Need) -> String {
     joined(&[need.title(), &worker.since], " ")
 }
 
-pub(super) fn queue(
-    tree: &mut UiTree,
-    rail: WidgetId,
-    workers: &[Worker],
-    expanded: Option<u64>,
-    pulses: &mut Vec<(WidgetId, Pulse)>,
-) -> QueueButtons {
+/// The workers waiting on a person, in the queue's order: the most urgent
+/// need first, then the longest wait.
+pub(super) fn waiting<'a>(
+    workers: impl IntoIterator<Item = &'a Worker>,
+) -> Vec<(&'a Worker, Need)> {
     let mut waiting: Vec<(&Worker, Need)> = workers
-        .iter()
+        .into_iter()
         .filter_map(|w| w.need().map(|need| (w, need)))
         .collect();
     waiting.sort_by(|(a, a_need), (b, b_need)| {
@@ -49,18 +51,43 @@ pub(super) fn queue(
             .cmp(&b_need.rank())
             .then(b.wait_minutes.total_cmp(&a.wait_minutes))
     });
+    waiting
+}
+
+/// The queue panel over `workers` (those the filter lets through); the
+/// waited total in its title counts `all` workers.
+pub(super) fn queue(
+    tree: &mut UiTree,
+    rail: WidgetId,
+    workers: &[&Worker],
+    all: &[Worker],
+    expanded: Option<u64>,
+    filtering: bool,
+    reg: &mut Registry,
+) -> QueueButtons {
+    let waiting = waiting(workers.iter().copied());
     let expanded = expanded
         .filter(|pane| waiting.iter().any(|(w, _)| w.pane == *pane))
         .or(waiting.first().map(|(worker, _)| worker.pane));
 
-    panel_title(tree, rail, "要対応", waiting.len(), Tone::Warning);
-    let list = card_list(tree, rail);
+    let title = panel_title(tree, rail, Panel::Queue, waiting.len(), Tone::Warning);
+    let waited = tree.insert(
+        Some(title),
+        Tag::new(waited_text(all)).style(TagStyle::Outlined),
+    );
+    reg.pulses.push((waited, Pulse::Waited));
+    let indicator = indicator(tree, title);
+    let list = card_list(tree, rail, 8.0);
+    if filtering && waiting.is_empty() {
+        nothing_matches(tree, list);
+    }
     let mut buttons = QueueButtons {
         expanded,
         ..QueueButtons::default()
     };
+    let mut items = Vec::new();
     for (worker, need) in waiting {
-        let card = queue_card(tree, list, worker, need, pulses);
+        let card = queue_card(tree, list, worker, need, reg);
         if expanded == Some(worker.pane) {
             buttons
                 .open
@@ -70,16 +97,28 @@ pub(super) fn queue(
                 .details
                 .push((queue_card_summary(tree, card, worker), worker.pane));
         }
+        mark_card(tree, card, worker.pane, reg);
+        items.push((card, Some(worker.pane)));
     }
+    reg.lists[Panel::Queue as usize] = Some(ListParts {
+        list,
+        items,
+        headers: Vec::new(),
+        indicator,
+    });
     buttons
 }
+
+/// Brings a queue card's look up to its worker's urgency step
+/// (`Pulse::QueueCard`); U5 fills this in.
+pub(super) fn refresh_card(_tree: &mut UiTree, _id: WidgetId, _worker: &Worker) {}
 
 pub(super) fn queue_card(
     tree: &mut UiTree,
     list: WidgetId,
     worker: &Worker,
     need: Need,
-    pulses: &mut Vec<(WidgetId, Pulse)>,
+    reg: &mut Registry,
 ) -> WidgetId {
     let color = need_color(need);
     let card = tree.insert(
@@ -126,7 +165,8 @@ pub(super) fn queue_card(
             .weight(700)
             .color(color),
     );
-    pulses.push((since, Pulse::QueueSince(worker.pane)));
+    reg.pulses.push((since, Pulse::QueueSince(worker.pane)));
+    reg.pulses.push((card, Pulse::QueueCard(worker.pane)));
     card
 }
 

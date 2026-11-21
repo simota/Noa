@@ -136,7 +136,7 @@ fn a_live_screen_follows_its_feed() {
     let mut dashboard = Dashboard::live(Grouping::Orchestrator, channel);
     let mut text = TextStore::new(Default::default());
     dashboard.prepare(window(), &mut text);
-    assert_eq!(commands.try_recv(), Ok(Command::Expand(None)));
+    assert_eq!(commands.try_recv(), Ok(Command::Watch(vec![])));
     let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
     assert_eq!(status.text(), "接続中…");
 
@@ -144,7 +144,7 @@ fn a_live_screen_follows_its_feed() {
     snapshots.send(live(fleet::canned(), 2)).unwrap();
     dashboard.before_frame(&mut text);
     dashboard.prepare(window(), &mut text);
-    assert_eq!(commands.try_recv(), Ok(Command::Expand(Some(14))));
+    assert_eq!(commands.try_recv(), Ok(Command::Watch(vec![14])));
     let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
     assert_eq!(status.text(), "ワーカー 9 · 同期 2 秒前");
 
@@ -264,4 +264,25 @@ fn a_focus_the_server_refused_replaces_the_promise_in_the_header() {
     dashboard.before_frame(&mut text);
     let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
     assert_eq!(status.text(), "ペインへ移動できません: no such pane");
+}
+
+#[test]
+fn the_drawer_worker_is_watched_too() {
+    let (channel, snapshots, _notices, commands) = Channel::detached();
+    let mut dashboard = Dashboard::live(Grouping::Orchestrator, channel);
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(window(), &mut text);
+    snapshots.send(live(fleet::canned(), 0)).unwrap();
+    dashboard.before_frame(&mut text);
+    dashboard.prepare(window(), &mut text);
+    // From the end of the order: changelog, lint-pass, docs-sync; no queue
+    // worker on the way, so fix-tests stays expanded.
+    for _ in 0..3 {
+        key(&mut dashboard, &mut text, Key::Char('k'));
+    }
+    assert_eq!(dashboard.view.selected, Some(12));
+    key(&mut dashboard, &mut text, Key::Space);
+    assert_eq!(dashboard.view.detail, Some(12));
+    let last = commands.try_iter().last();
+    assert_eq!(last, Some(Command::Watch(vec![14, 12])));
 }

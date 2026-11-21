@@ -1,17 +1,27 @@
 use noa_gpui_core::Key;
 use noa_gpui_core::widgets::{Label, Tag};
 use noa_gpui_core::{Event, Modifiers, PointerButton};
-use noa_gpui_scene::{DisplayList, DrawCommand, Point, Size};
+use noa_gpui_scene::{Border, DisplayList, DrawCommand, Point, Size};
 
 use super::*;
 
+mod details;
 mod feed;
+mod filtering;
+mod header_fit;
+mod health;
+mod help_overlay;
 mod hints;
+mod keys;
 mod lanes;
 mod layout;
+mod paging;
 mod queue_cards;
 mod rebuild;
 mod relations;
+mod selection;
+mod urgency_steps;
+mod window_sizes;
 
 fn window() -> Size {
     Size::new(1440.0, 900.0)
@@ -22,10 +32,6 @@ fn laid_out(grouping: Grouping) -> (Dashboard, TextStore) {
     let mut text = TextStore::new(Default::default());
     dashboard.prepare(window(), &mut text);
     (dashboard, text)
-}
-
-fn bottom(tree: &UiTree, id: WidgetId) -> f32 {
-    tree.window_origin(id).unwrap().y + tree.layout(id).unwrap().rect.height
 }
 
 fn click(dashboard: &mut Dashboard, text: &mut TextStore, pos: Point) {
@@ -56,9 +62,8 @@ fn shown_only(hidden: &[Panel]) -> [bool; 5] {
 
 fn showing(grouping: Grouping, shown: [bool; 5]) -> (Dashboard, TextStore) {
     let mut dashboard = Dashboard::showing(View {
-        grouping,
-        expanded: None,
         shown,
+        ..View::of(grouping)
     });
     let mut text = TextStore::new(Default::default());
     dashboard.prepare(window(), &mut text);
@@ -163,3 +168,56 @@ fn inside(inner: [f32; 4], outer: [f32; 4]) -> bool {
 }
 
 const LONG_LABEL: &str = "noa-gpui ウィジェットによるUI拡張案とその検証作業のまとめ";
+
+/// A key pressed with no modifier, then the next frame's layout.
+fn key(dashboard: &mut Dashboard, text: &mut TextStore, key: Key) {
+    let modifiers = Modifiers::default();
+    dashboard.dispatch(Event::KeyDown { key, modifiers }, text);
+    dashboard.prepare(window(), text);
+}
+
+/// Committed text, as the platform sends it after the key that typed it.
+fn typed(dashboard: &mut Dashboard, text: &mut TextStore, typed: &str) {
+    dashboard.dispatch(Event::Text(typed.to_owned()), text);
+    dashboard.prepare(window(), text);
+}
+
+/// The fill and border of the last quad drawn at `rect` (window
+/// coordinates, ±0.5).
+fn quad_at(dashboard: &Dashboard, rect: [f32; 4]) -> Option<(Color, Border)> {
+    dashboard
+        .display_list()
+        .commands()
+        .iter()
+        .rev()
+        .find_map(|command| match command {
+            DrawCommand::Quad {
+                rect: r,
+                color,
+                border,
+                ..
+            } if [r.x, r.y, r.width, r.height]
+                .iter()
+                .zip(rect)
+                .all(|(a, b)| (a - b).abs() <= 0.5) =>
+            {
+                Some((*color, *border))
+            }
+            _ => None,
+        })
+}
+
+/// The items a panel's list shows now (the pager hides the others).
+fn visible_items(dashboard: &Dashboard, panel: Panel) -> Vec<WidgetId> {
+    dashboard.registry.lists[panel as usize]
+        .as_ref()
+        .map(|parts| {
+            parts
+                .items
+                .iter()
+                .map(|(id, _)| *id)
+                .filter(|id| !dashboard.tree.is_hidden(*id))
+                .collect()
+        })
+        .unwrap_or_default()
+}

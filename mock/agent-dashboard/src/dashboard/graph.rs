@@ -1,11 +1,15 @@
 use noa_gpui_core::style::{AlignItems, FlexDirection, Rect as LayoutRect, length};
 use noa_gpui_core::widgets::{Container, Label};
-use noa_gpui_core::{Role, Style, UiTree, WidgetId};
+use noa_gpui_core::{Paint, Role, Style, UiTree, WidgetId};
 use noa_gpui_scene::Color;
 
 use crate::fleet::{Fleet, State, Worker};
 
+use super::filter::Filter;
+use super::pager::ListParts;
+use super::panel::{Panel, card_list, indicator, nothing_matches, title_row};
 use super::style::{BLUE, GRAY, GREEN, caption, fixed_width, gap, need_color};
+use super::{Mark, Registry};
 
 pub(super) fn mark(worker: &Worker) -> (&'static str, Color) {
     match (worker.need(), worker.state) {
@@ -15,33 +19,75 @@ pub(super) fn mark(worker: &Worker) -> (&'static str, Color) {
     }
 }
 
-pub(super) fn graph(tree: &mut UiTree, section: WidgetId, fleet: &Fleet) {
+/// What the graph draws of the fleet under a filter: a node is kept when it
+/// or one of its descendants matches, and muted when it does not match
+/// itself (it only leads to a match).
+struct Pruned<'a> {
+    workers: &'a [Worker],
+    filter: &'a Filter,
+}
+
+impl Pruned<'_> {
+    fn children(&self, pane: u64) -> impl Iterator<Item = &Worker> {
+        self.workers.iter().filter(move |w| w.parent == Some(pane))
+    }
+
+    fn keeps(&self, worker: &Worker) -> bool {
+        self.filter.matches(worker) || self.children(worker.pane).any(|c| self.keeps(c))
+    }
+}
+
+pub(super) fn graph(
+    tree: &mut UiTree,
+    section: WidgetId,
+    fleet: &Fleet,
+    filter: &Filter,
+    reg: &mut Registry,
+) {
     let workers = &fleet.workers;
-    tree.insert(
-        Some(section),
-        Label::new("関連（親 → ワーカー → 孫）")
-            .font_size(12.0)
-            .weight(700)
-            .color(Role::Muted),
-    );
-    let roots = tree.insert(Some(section), Container::column().gap(12.0));
+    let pruned = Pruned { workers, filter };
+    let title = title_row(tree, section, Panel::Graph, 8.0);
+    caption(tree, title, "（親 → ワーカー → 孫）");
+    let indicator = indicator(tree, title);
+    let roots = card_list(tree, section, 12.0);
+    let mut items = Vec::new();
     for orchestrator in &fleet.orchestrators {
-        let row = tree.insert(
-            Some(roots),
-            Container::row().align_items(AlignItems::CENTER),
-        );
         // An orchestrator that is a worker itself is the root, not a child.
         let own = orchestrator.pane.and_then(|pane| fleet.worker(pane));
-        let (symbol, color) = own.map_or(("◆", BLUE), mark);
-        node(tree, row, symbol, &orchestrator.name, color);
         let children: Vec<&Worker> = workers
             .iter()
             .filter(|w| w.orchestrator == orchestrator.name && w.parent.is_none())
             .filter(|w| w.orchestrator_pane == orchestrator.pane)
             .filter(|w| Some(w.pane) != orchestrator.pane)
+            .filter(|w| pruned.keeps(w))
             .collect();
-        connect(tree, row, workers, &children);
+        let own_matches = own.is_some_and(|w| filter.matches(w));
+        if filter.active() && children.is_empty() && !own_matches {
+            continue;
+        }
+        let row = tree.insert(
+            Some(roots),
+            Container::row().align_items(AlignItems::CENTER),
+        );
+        let (symbol, color) = own.map_or(("◆", BLUE), mark);
+        let muted = filter.active() && !own_matches;
+        let pill = node(tree, row, symbol, &orchestrator.name, color, muted);
+        if let Some(own) = own.filter(|_| !muted) {
+            reg.marks
+                .push((pill, own.pane, Mark::Node { normal: color }));
+        }
+        connect(tree, row, &pruned, &children, reg);
+        items.push((row, own.map(|w| w.pane)));
     }
+    if items.is_empty() && filter.active() {
+        nothing_matches(tree, roots);
+    }
+    reg.lists[Panel::Graph as usize] = Some(ListParts {
+        list: roots,
+        items,
+        headers: Vec::new(),
+        indicator,
+    });
     caption(
         tree,
         section,
@@ -49,7 +95,21 @@ pub(super) fn graph(tree: &mut UiTree, section: WidgetId, fleet: &Fleet) {
     );
 }
 
-pub(super) fn node(tree: &mut UiTree, row: WidgetId, symbol: &str, label: &str, color: Color) {
+/// A node pill; a muted one (on the way to a match) has a muted label and
+/// an outline border. Returns the pill, whose border the selection changes.
+pub(super) fn node(
+    tree: &mut UiTree,
+    row: WidgetId,
+    symbol: &str,
+    label: &str,
+    color: Color,
+    muted: bool,
+) -> WidgetId {
+    let border: Paint = if muted {
+        Role::Outline.into()
+    } else {
+        color.into()
+    };
     let pill = tree.insert(
         Some(row),
         Container::new(Style {
@@ -66,14 +126,23 @@ pub(super) fn node(tree: &mut UiTree, row: WidgetId, symbol: &str, label: &str, 
             ..Default::default()
         })
         .background(Role::SurfaceAlt)
-        .border(1.0, color)
+        .border(1.0, border)
         .radius(9.0),
     );
     tree.insert(
         Some(pill),
         Label::new(symbol).font_size(10.0).weight(700).color(color),
     );
-    tree.insert(Some(pill), Label::new(label).font_size(11.0));
+    let label = Label::new(label).font_size(11.0);
+    tree.insert(
+        Some(pill),
+        if muted {
+            label.color(Role::Muted)
+        } else {
+            label
+        },
+    );
+    pill
 }
 
 pub(super) fn edge(tree: &mut UiTree, row: WidgetId, length_px: f32) {
@@ -85,7 +154,13 @@ pub(super) fn edge(tree: &mut UiTree, row: WidgetId, length_px: f32) {
     );
 }
 
-pub(super) fn connect(tree: &mut UiTree, row: WidgetId, workers: &[Worker], children: &[&Worker]) {
+fn connect(
+    tree: &mut UiTree,
+    row: WidgetId,
+    pruned: &Pruned,
+    children: &[&Worker],
+    reg: &mut Registry,
+) {
     if children.is_empty() {
         return;
     }
@@ -106,11 +181,16 @@ pub(super) fn connect(tree: &mut UiTree, row: WidgetId, workers: &[Worker], chil
         );
         edge(tree, child_row, 8.0);
         let (symbol, color) = mark(child);
-        node(tree, child_row, symbol, &child.label, color);
-        let grandchildren: Vec<&Worker> = workers
-            .iter()
-            .filter(|w| w.parent == Some(child.pane))
+        let muted = !pruned.filter.matches(child);
+        let pill = node(tree, child_row, symbol, &child.label, color, muted);
+        if !muted {
+            reg.marks
+                .push((pill, child.pane, Mark::Node { normal: color }));
+        }
+        let grandchildren: Vec<&Worker> = pruned
+            .children(child.pane)
+            .filter(|w| pruned.keeps(w))
             .collect();
-        connect(tree, child_row, workers, &grandchildren);
+        connect(tree, child_row, pruned, &grandchildren, reg);
     }
 }

@@ -3,114 +3,87 @@ use noa_gpui_core::widgets::{Kbd, Label, Tag};
 
 use super::*;
 
-fn hint_strip_of(dashboard: &Dashboard) -> WidgetId {
-    let tree = &dashboard.tree;
-    let slot = tree.parent(dashboard.status).unwrap();
-    let bar = tree.parent(slot).unwrap();
-    let at = tree.children(bar).iter().position(|c| *c == slot).unwrap();
-    tree.children(bar)[at - 1]
-}
-
 #[test]
-fn the_header_shows_each_shortcut() {
-    for shown in [[true; 5], [false; 5]] {
+fn each_panel_title_shows_its_shortcut() {
+    let some_hidden = shown_only(&[Panel::Running, Panel::Graph]);
+    for shown in [[true; 5], some_hidden] {
         let (dashboard, _text) = showing(Grouping::Orchestrator, shown);
         let tree = &dashboard.tree;
-        let items = tree.children(hint_strip_of(&dashboard));
-        assert_eq!(items.len(), 5);
-        for ((digit, _, title), item) in KEYS.into_iter().zip(items) {
-            let parts = tree.children(*item);
+        for (digit, panel, title) in KEYS {
+            let Some(id) = dashboard.panels[panel as usize] else {
+                assert!(!shown[panel as usize], "{panel:?} is missing");
+                continue;
+            };
+            let row = tree.children(id)[0];
+            let parts = tree.children(row);
             let kbd = tree.get::<Kbd>(parts[0]).unwrap();
-            assert_eq!(kbd.keys(), [digit.to_string()].as_slice());
+            assert_eq!(kbd.keys(), [digit.to_string()].as_slice(), "{panel:?}");
             let label = tree.get::<Label>(parts[1]).unwrap();
+            assert_eq!(label.text(), panel.title());
             assert_eq!(label.text(), title);
         }
     }
 }
 
-/// Width of one hint item, worked out from its parts and not read back from
-/// the layout: a 20 px keycap, the 3 px item gap, the title (full-width
-/// characters are one em, 11 px, wide) and 2 px padding on each side.
-fn expected_item_width(panel: Panel) -> f32 {
-    20.0 + 3.0 + 11.0 * panel.title().chars().count() as f32 + 4.0
-}
-
-/// The strip is the five items and four 8 px gaps: 332 px.
-fn expected_strip_width() -> f32 {
-    Panel::ALL.map(expected_item_width).iter().sum::<f32>() + 4.0 * 8.0
-}
-
-fn assert_strip_holds_its_items(dashboard: &Dashboard, what: &str) {
+fn chips_of(dashboard: &Dashboard) -> Vec<(Vec<String>, String)> {
     let tree = &dashboard.tree;
-    let strip = rect(tree, hint_strip_of(dashboard));
-    let items = tree.children(hint_strip_of(dashboard));
-    assert_eq!(items.len(), 5, "{what}");
-    for (panel, item) in Panel::ALL.into_iter().zip(items) {
-        let item = rect(tree, *item);
-        assert!(
-            (item[2] - expected_item_width(panel)).abs() <= 0.5,
-            "{what}: {panel:?} item is {} px, expected {}",
-            item[2],
-            expected_item_width(panel)
-        );
-        assert!(
-            item[0] >= strip[0] - 0.5 && item[0] + item[2] <= strip[0] + strip[2] + 0.5,
-            "{what}: {panel:?} item {item:?} is not inside the strip {strip:?}"
-        );
-    }
-    assert!(
-        (strip[2] - expected_strip_width()).abs() <= 0.5,
-        "{what}: strip is {} px, expected {}",
-        strip[2],
-        expected_strip_width()
-    );
+    dashboard
+        .header
+        .chips
+        .iter()
+        .map(|chip| {
+            assert_eq!(tree.parent(*chip), Some(dashboard.header.bar));
+            let parts = tree.children(*chip);
+            let keys = tree.get::<Kbd>(parts[0]).unwrap().keys().to_vec();
+            let title = tree.get::<Label>(parts[1]).unwrap().text().to_owned();
+            (keys, title)
+        })
+        .collect()
 }
 
 #[test]
-fn the_hint_strip_fits_the_header() {
-    let open = |dashboard: &mut Dashboard, text: &mut TextStore| {
-        let (button, _) = dashboard.queue_buttons.open[0];
-        let pos = center(&dashboard.tree, button);
-        click(dashboard, text, pos);
-    };
+fn hidden_panels_show_as_chips_in_the_header() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    assert!(chips_of(&dashboard).is_empty());
+    press(&mut dashboard, &mut text, '4', Modifiers::default());
+    press(&mut dashboard, &mut text, '2', Modifiers::default());
+    assert_eq!(
+        chips_of(&dashboard),
+        [
+            (vec!["2".to_owned()], "作業中".to_owned()),
+            (vec!["4".to_owned()], "状態の推移".to_owned()),
+        ]
+    );
+    let tree = &dashboard.tree;
+    let bar = rect(tree, dashboard.header.bar);
+    for chip in &dashboard.header.chips {
+        assert!(inside(rect(tree, *chip), bar), "a chip leaves the header");
+    }
+    press(&mut dashboard, &mut text, '2', Modifiers::default());
+    press(&mut dashboard, &mut text, '4', Modifiers::default());
+    assert!(chips_of(&dashboard).is_empty());
+}
+
+#[test]
+fn the_status_label_is_cut_inside_its_slot() {
     let (default, _default_text) = laid_out(Grouping::Orchestrator);
+    let (off, _off_text) = showing(Grouping::Orchestrator, [false; 5]);
     let (mut opened, mut opened_text) = laid_out(Grouping::Orchestrator);
-    open(&mut opened, &mut opened_text);
+    let (button, _) = opened.queue_buttons.open[0];
+    let pos = center(&opened.tree, button);
+    click(&mut opened, &mut opened_text, pos);
     let queue_only = shown_only(&[Panel::Running, Panel::Done, Panel::Timeline, Panel::Graph]);
     let (mut narrow, mut narrow_text) = showing(Grouping::Orchestrator, queue_only);
-    let long = "モック: とても長いワーカー名のペインへ移動します ".repeat(6);
+    let long: String = "モック: とても長いワーカー名のペインへ移動します "
+        .chars()
+        .cycle()
+        .take(300)
+        .collect();
     let status = narrow.status;
     narrow
         .tree
         .update::<Label, _>(status, |l, cx| l.set_text(cx, long));
     narrow.prepare(window(), &mut narrow_text);
-    let (off, _off_text) = showing(Grouping::Orchestrator, [false; 5]);
-    let default_widths: Vec<f32> = {
-        let tree = &default.tree;
-        let bar = tree.parent(hint_strip_of(&default)).unwrap();
-        tree.children(bar)[..6]
-            .iter()
-            .map(|c| rect(tree, *c)[2])
-            .collect()
-    };
-    for dashboard in [&default, &off, &opened, &narrow] {
-        let tree = &dashboard.tree;
-        let strip = hint_strip_of(dashboard);
-        let bar = tree.parent(strip).unwrap();
-        let rects: Vec<[f32; 4]> = tree.children(bar).iter().map(|c| rect(tree, *c)).collect();
-        for pair in rects.windows(2) {
-            assert!(pair[0][0] + pair[0][2] <= pair[1][0] + 0.5, "{rects:?}");
-        }
-        for (rect, expected) in rects.iter().zip(&default_widths) {
-            assert!((rect[2] - expected).abs() <= 0.5, "{rects:?}");
-        }
-        let last = rects.last().unwrap();
-        assert!(
-            last[0] + last[2] <= window().width - 16.0 + 0.5,
-            "{rects:?}"
-        );
-        assert_strip_holds_its_items(dashboard, "header state");
-    }
     // The status label lives inside its own container; it must stay inside
     // it, and where its text is longer than the container it is cut short.
     for (name, dashboard, cut) in [
@@ -134,17 +107,6 @@ fn the_hint_strip_fits_the_header() {
             status.shown_text(),
             status.text()
         );
-    }
-    let (default_tree, default_strip) = (&default.tree, hint_strip_of(&default));
-    let default_rect = rect(default_tree, default_strip);
-    let mut states: Vec<(String, [bool; 5])> = Panel::ALL
-        .map(|p| (format!("{p:?} off"), shown_only(&[p])))
-        .into();
-    states.push(("all off".into(), [false; 5]));
-    for (name, shown) in states {
-        let (dashboard, _text) = showing(Grouping::Orchestrator, shown);
-        let actual = rect(&dashboard.tree, hint_strip_of(&dashboard));
-        assert_rect(actual, default_rect, &format!("hint strip, {name}"));
     }
 }
 

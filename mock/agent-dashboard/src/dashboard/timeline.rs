@@ -1,13 +1,15 @@
 use noa_gpui_core::style::{
     AlignItems, FlexDirection, JustifyContent, Size as LayoutSize, auto, length, percent,
 };
-use noa_gpui_core::widgets::{Container, Label, ScrollView, Truncation};
+use noa_gpui_core::widgets::{Container, Label, Truncation};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
 use crate::fleet::{Grouping, Phase, Worker, minutes_text};
 
-use super::panel::group_header;
-use super::style::{caption, fill_remaining, gap, phase_color, spacer};
+use super::pager::ListParts;
+use super::panel::{Panel, card_list, group_header, indicator, nothing_matches, title_row};
+use super::style::{caption, fill_remaining, phase_color, spacer};
+use super::{Mark, Registry};
 
 pub(super) const LANE_LABEL_WIDTH: f32 = 104.0;
 pub(super) const LANE_TOTAL_WIDTH: f32 = 44.0;
@@ -20,38 +22,33 @@ pub(super) const LANE_SHARES: f64 = 1000.0;
 pub(super) struct TimelineParts {
     pub(super) span: WidgetId,
     pub(super) lanes: WidgetId,
+    pub(super) indicator: WidgetId,
 }
 
 pub(super) fn span_text(span: f64) -> String {
     format!("← {}前　　いま →", minutes_text(span))
 }
 
-pub(super) fn timeline_span(workers: &[Worker]) -> f64 {
+pub(super) fn timeline_span(workers: &[&Worker]) -> f64 {
     workers
         .iter()
-        .map(Worker::total_minutes)
+        .map(|w| w.total_minutes())
         .fold(0.0, f64::max)
 }
 
+/// The timeline panel over `workers` (those the filter lets through); its
+/// span is the longest of theirs.
 pub(super) fn timeline(
     tree: &mut UiTree,
     section: WidgetId,
-    workers: &[Worker],
+    workers: &[&Worker],
     grouping: Grouping,
-) -> TimelineParts {
+    filtering: bool,
+    reg: &mut Registry,
+) {
     let span = timeline_span(workers);
 
-    let title = tree.insert(
-        Some(section),
-        Container::row().align_items(AlignItems::CENTER).gap(12.0),
-    );
-    tree.insert(
-        Some(title),
-        Label::new("状態の推移")
-            .font_size(12.0)
-            .weight(700)
-            .color(Role::Muted),
-    );
+    let title = title_row(tree, section, Panel::Timeline, 12.0);
     for phase in Phase::LEGEND {
         let item = tree.insert(
             Some(title),
@@ -69,43 +66,61 @@ pub(super) fn timeline(
     }
     spacer(tree, title);
     let span_caption = caption(tree, title, span_text(span));
+    let indicator = indicator(tree, title);
 
-    let lanes = tree.insert(
-        Some(section),
-        ScrollView::new(Style {
-            flex_direction: FlexDirection::Column,
-            gap: gap(5.0),
-            ..fill_remaining()
-        }),
-    );
-    fill_lanes(tree, lanes, workers, grouping, span);
-    TimelineParts {
+    let lanes = card_list(tree, section, 5.0);
+    let parts = TimelineParts {
         span: span_caption,
         lanes,
-    }
+        indicator,
+    };
+    fill_lanes(tree, &parts, workers, grouping, filtering, span, reg);
+    reg.timeline = Some(parts);
 }
 
+/// Makes the lanes and registers them (pager items, selection marks);
+/// says so when the filter (on when `filtering`) leaves none.
 pub(super) fn fill_lanes(
     tree: &mut UiTree,
-    lanes: WidgetId,
-    workers: &[Worker],
+    parts: &TimelineParts,
+    workers: &[&Worker],
     grouping: Grouping,
+    filtering: bool,
     span: f64,
+    reg: &mut Registry,
 ) {
-    for (name, group) in grouping.split(workers) {
+    if filtering && workers.is_empty() {
+        nothing_matches(tree, parts.lanes);
+    }
+    let mut items = Vec::new();
+    let mut headers = Vec::new();
+    for (name, group) in grouping.split(workers.iter().copied()) {
         if let Some(name) = name {
-            group_header(tree, lanes, name, group.len());
+            let header = group_header(tree, parts.lanes, name, group.len());
+            headers.push((header, (items.len()..items.len() + group.len()).collect()));
         }
         for worker in group {
-            lane(tree, lanes, worker, span);
+            let row = lane(tree, parts.lanes, worker, span);
+            reg.marks.push((row, worker.pane, Mark::Lane));
+            items.push((row, Some(worker.pane)));
         }
     }
+    reg.lists[Panel::Timeline as usize] = Some(ListParts {
+        list: parts.lanes,
+        items,
+        headers,
+        indicator: parts.indicator,
+    });
 }
 
-pub(super) fn lane(tree: &mut UiTree, lanes: WidgetId, worker: &Worker, span: f64) {
+/// One lane; returns its row, which the selection fills.
+pub(super) fn lane(tree: &mut UiTree, lanes: WidgetId, worker: &Worker, span: f64) -> WidgetId {
     let row = tree.insert(
         Some(lanes),
-        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(8.0)
+            .radius(3.0),
     );
     let name = tree.insert(Some(row), Container::row().width(LANE_LABEL_WIDTH));
     tree.insert(
@@ -157,4 +172,5 @@ pub(super) fn lane(tree: &mut UiTree, lanes: WidgetId, worker: &Worker, span: f6
             .justify_content(JustifyContent::END),
     );
     caption(tree, total, minutes_text(worker.total_minutes()));
+    row
 }

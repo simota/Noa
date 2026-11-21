@@ -1,12 +1,13 @@
 use noa_gpui_core::style::{
-    AlignItems, FlexDirection, Rect as LayoutRect, Size as LayoutSize, auto, length,
+    AlignItems, FlexDirection, Position, Rect as LayoutRect, Size as LayoutSize, auto, length,
 };
-use noa_gpui_core::widgets::{Badge, Container, EmptyState, Label, ScrollView, Tone};
-use noa_gpui_core::{Key, Role, Shortcut, Style, UiTree, WidgetId};
+use noa_gpui_core::widgets::{Badge, Container, EmptyState, Kbd, Label, ScrollView, Tone};
+use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
 use crate::live::Link;
 
-use super::style::{fill_remaining, fixed_width, gap};
+use super::style::{caption, fill_remaining, fixed_width, gap};
+use super::{Mark, Registry};
 
 pub(super) const QUEUE_WIDTH: f32 = 400.0;
 pub(super) const DONE_WIDTH: f32 = 270.0;
@@ -44,9 +45,9 @@ impl Panel {
         }
     }
 
-    pub(super) fn shortcut(self) -> Shortcut {
-        let digit = ['1', '2', '3', '4', '5'][self as usize];
-        Shortcut::key(Key::Char(digit))
+    /// The digit key that shows and hides the panel.
+    pub(super) fn digit(self) -> &'static str {
+        ["1", "2", "3", "4", "5"][self as usize]
     }
 
     pub(super) fn grows(self) -> bool {
@@ -118,40 +119,71 @@ pub(super) fn panel(tree: &mut UiTree, parent: WidgetId, style: Style) -> Widget
     )
 }
 
-pub(super) fn panel_title(tree: &mut UiTree, parent: WidgetId, title: &str, n: usize, tone: Tone) {
+/// A panel's title row: its shortcut keycap, then its title. Returns the
+/// row for the caller to add to.
+pub(super) fn title_row(tree: &mut UiTree, parent: WidgetId, panel: Panel, gap: f32) -> WidgetId {
     let row = tree.insert(
         Some(parent),
-        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+        Container::row().align_items(AlignItems::CENTER).gap(gap),
     );
+    tree.insert(Some(row), Kbd::new([panel.digit()]));
     tree.insert(
         Some(row),
-        Label::new(title)
+        Label::new(panel.title())
             .font_size(12.0)
             .weight(700)
             .color(Role::Muted),
     );
-    tree.insert(Some(row), Badge::count(n as u32).tone(tone));
+    row
 }
 
-pub(super) fn card_list(tree: &mut UiTree, parent: WidgetId) -> WidgetId {
+/// The pager's "上に N 件 · 下に M 件" label, hidden until something is
+/// hidden.
+pub(super) fn indicator(tree: &mut UiTree, row: WidgetId) -> WidgetId {
+    let id = caption(tree, row, "");
+    tree.set_hidden(id, true);
+    id
+}
+
+/// The title row of a card panel: keycap, title and count badge. Returns
+/// the row.
+pub(super) fn panel_title(
+    tree: &mut UiTree,
+    parent: WidgetId,
+    panel: Panel,
+    n: usize,
+    tone: Tone,
+) -> WidgetId {
+    let row = title_row(tree, parent, panel, 8.0);
+    tree.insert(Some(row), Badge::count(n as u32).tone(tone));
+    row
+}
+
+/// A panel list, `gap` between its items.
+pub(super) fn card_list(tree: &mut UiTree, parent: WidgetId, gap_px: f32) -> WidgetId {
     tree.insert(
         Some(parent),
         ScrollView::new(Style {
             flex_direction: FlexDirection::Column,
-            gap: gap(8.0),
+            gap: gap(gap_px),
             ..fill_remaining()
         }),
     )
 }
 
-pub(super) fn group_header(tree: &mut UiTree, parent: WidgetId, name: &str, n: usize) {
+/// What a panel shows when the filter leaves it nothing.
+pub(super) fn nothing_matches(tree: &mut UiTree, list: WidgetId) {
+    caption(tree, list, "該当なし");
+}
+
+pub(super) fn group_header(tree: &mut UiTree, parent: WidgetId, name: &str, n: usize) -> WidgetId {
     tree.insert(
         Some(parent),
         Label::new(format!("{name} · {n}"))
             .font_size(11.0)
             .weight(700)
             .color(Role::Muted),
-    );
+    )
 }
 
 pub(super) fn empty(tree: &mut UiTree, body: WidgetId, link: &Link) {
@@ -164,4 +196,31 @@ pub(super) fn empty(tree: &mut UiTree, body: WidgetId, link: &Link) {
             .message(format!("Noa に接続できません: {reason}")),
     };
     state.width(560.0).insert(tree, body);
+}
+
+/// Adds the selection bar to `card` as its last child: absolutely placed at
+/// its left edge, so it changes no layout, and hidden until `pane` is
+/// selected (`Dashboard::paint_selection`).
+pub(super) fn mark_card(tree: &mut UiTree, card: WidgetId, pane: u64, reg: &mut Registry) {
+    let bar = tree.insert(
+        Some(card),
+        Container::new(Style {
+            position: Position::Absolute,
+            inset: LayoutRect {
+                left: length(0.0),
+                right: auto(),
+                top: length(8.0),
+                bottom: length(8.0),
+            },
+            size: LayoutSize {
+                width: length(4.0),
+                height: auto(),
+            },
+            ..Default::default()
+        })
+        .background(Role::Accent)
+        .radius(2.0),
+    );
+    tree.set_hidden(bar, true);
+    reg.marks.push((bar, pane, Mark::Bar));
 }

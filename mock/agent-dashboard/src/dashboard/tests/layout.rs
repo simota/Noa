@@ -184,3 +184,7 @@ fn the_grouping_control_stays_reachable_at_1140() {
     dashboard.dispatch(Event::PointerUp { pos, button }, &mut text);
     assert_eq!(dashboard.view.grouping, Grouping::Flat);
 }
+
+fn bottom(tree: &UiTree, id: WidgetId) -> f32 {
+    tree.window_origin(id).unwrap().y + tree.layout(id).unwrap().rect.height
+}

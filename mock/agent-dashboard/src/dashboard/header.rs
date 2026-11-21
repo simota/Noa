@@ -2,79 +2,50 @@ use noa_gpui_core::style::{
     AlignItems, FlexDirection, Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
 };
 use noa_gpui_core::widgets::{
-    Container, ControlSize, Kbd, Label, SegmentMode, SegmentedControl, Tag, TagStyle, Tone,
-    Truncation,
+    Container, ControlSize, Kbd, Label, SegmentMode, SegmentedControl, Tag, TagStyle, TextField,
+    Tone, Truncation,
 };
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
+use noa_gpui_scene::Size;
+use noa_gpui_text::TextStore;
 
-use crate::fleet::{Grouping, Need, Phase, State, Worker, minutes_text};
+use crate::fleet::{Grouping, Need, Phase, Worker, minutes_text};
 
+use super::filter::Filter;
+use super::health::{HealthParts, status};
 use super::panel::Panel;
-use super::style::{HEADER_HEIGHT, HINT_STRIP_SHRINK, caption, gap, joined, spacer};
-use super::{Feed, Pulse};
+use super::style::{GRAY, HEADER_HEIGHT, caption, fixed_width, gap, joined, spacer};
+use super::{Feed, Pulse, Registry, View};
 
-pub(super) struct Header {
-    pub(super) status: WidgetId,
+/// The status label is cut beyond this width, so a long notice cannot
+/// push the rest of the header around.
+pub(super) const STATUS_MAX_WIDTH: f32 = 200.0;
+
+/// The header's widgets, for `fit` and `health::tick`. `Dashboard` reads
+/// only `health`, `filter_field`, `match_count` and `grouping_control`.
+pub(super) struct HeaderParts {
+    pub(super) bar: WidgetId,
+    pub(super) title: WidgetId,
+    pub(super) health: HealthParts,
+    pub(super) longest: Option<WidgetId>,
+    /// One chip per hidden panel, in `Panel::ALL` order: its keycap and
+    /// title.
+    pub(super) chips: Vec<WidgetId>,
+    pub(super) filter_field: WidgetId,
+    pub(super) match_count: WidgetId,
+    pub(super) help_key: WidgetId,
+    pub(super) group_caption: WidgetId,
     pub(super) grouping_control: WidgetId,
-    pub(super) hints: [WidgetId; 5],
-}
-
-pub(super) fn hint_strip(tree: &mut UiTree, bar: WidgetId, shown: &[bool; 5]) -> [WidgetId; 5] {
-    let strip = tree.insert(
-        Some(bar),
-        Container::new(Style {
-            flex_direction: FlexDirection::Row,
-            align_items: AlignItems::CENTER,
-            gap: gap(8.0),
-            // Next to the status label it is the last to give way: the status
-            // label takes the whole deficit while it can, and the strip only
-            // the rest (clipped), so the left-hand items and the grouping
-            // control are never pushed off screen.
-            flex_shrink: HINT_STRIP_SHRINK,
-            min_size: LayoutSize {
-                width: length(0.0),
-                height: auto(),
-            },
-            ..Default::default()
-        })
-        .clip(true),
-    );
-    Panel::ALL.map(|panel| {
-        // On and off share the label's font, size and padding, so the strip is
-        // the same size in either state; on is told apart by a filled pill and
-        // the text colour.
-        let on = shown[panel as usize];
-        let item = Container::row()
-            .align_items(AlignItems::CENTER)
-            .gap(3.0)
-            .padding(2.0)
-            .radius(4.0);
-        let item = tree.insert(
-            Some(strip),
-            if on {
-                item.background(Role::SurfaceAlt)
-            } else {
-                item
-            },
-        );
-        tree.insert(Some(item), Kbd::shortcut(panel.shortcut()));
-        let label = Label::new(panel.title()).font_size(11.0);
-        tree.insert(
-            Some(item),
-            if on { label } else { label.color(Role::Muted) },
-        );
-        item
-    })
 }
 
 pub(super) fn header(
     tree: &mut UiTree,
     root: WidgetId,
     feed: &Feed,
-    grouping: Grouping,
-    shown: &[bool; 5],
-    pulses: &mut Vec<(WidgetId, Pulse)>,
-) -> Header {
+    view: &View,
+    filter: &Filter,
+    reg: &mut Registry,
+) -> HeaderParts {
     let workers = &feed.fleet.workers;
     let bar = tree.insert(
         Some(root),
@@ -98,45 +69,18 @@ pub(super) fn header(
         .background(Role::Surface)
         .border(1.0, Role::Separator),
     );
-    tree.insert(
+    let title = tree.insert(
         Some(bar),
         Label::new("NOA / AGENTS").font_size(16.0).weight(700),
     );
-    let count = |matches: &dyn Fn(&Worker) -> bool| workers.iter().filter(|w| matches(w)).count();
-    let tallies = [
-        (
-            "作業中",
-            count(&|w| w.state == State::Running),
-            Tone::Success,
-        ),
-        ("要対応", count(&|w| w.need().is_some()), Tone::Warning),
-        (
-            "完了",
-            count(&|w| w.state == State::Finished),
-            Tone::Neutral,
-        ),
-    ];
-    for (name, n, tone) in tallies {
-        tree.insert(Some(bar), Tag::new(format!("{name} {n}")).tone(tone));
-    }
 
-    let waited = tree.insert(
+    let dot = tree.insert(
         Some(bar),
-        Tag::new(waited_text(workers)).style(TagStyle::Outlined),
+        Container::new(fixed_width(8.0))
+            .height(8.0)
+            .radius(4.0)
+            .background(GRAY),
     );
-    pulses.push((waited, Pulse::Waited));
-    if let Some(worker) = longest(workers) {
-        let id = tree.insert(
-            Some(bar),
-            Tag::new(longest_text(worker))
-                .style(TagStyle::Outlined)
-                .tone(Tone::Warning),
-        );
-        pulses.push((id, Pulse::Longest));
-    }
-
-    spacer(tree, bar);
-    let hints = hint_strip(tree, bar, shown);
     let status_slot = tree.insert(
         Some(bar),
         Container::new(Style {
@@ -145,33 +89,119 @@ pub(super) fn header(
                 width: length(0.0),
                 height: auto(),
             },
+            max_size: LayoutSize {
+                width: length(STATUS_MAX_WIDTH),
+                height: auto(),
+            },
             ..Default::default()
         }),
     );
     let status = tree.insert(
         Some(status_slot),
-        Label::new(feed.status())
+        Label::new(status(feed, std::time::Instant::now()))
             .font_size(12.0)
             .color(Role::Muted)
             .truncation(Truncation::Tail),
     );
-    pulses.push((status, Pulse::Status));
-    caption(tree, bar, "グループ");
+
+    let longest = longest(workers).map(|worker| {
+        let id = tree.insert(
+            Some(bar),
+            Tag::new(longest_text(worker))
+                .style(TagStyle::Outlined)
+                .tone(Tone::Warning),
+        );
+        reg.pulses.push((id, Pulse::Longest));
+        id
+    });
+
+    let chips = Panel::ALL
+        .into_iter()
+        .filter(|panel| !view.shown[*panel as usize])
+        .map(|panel| chip(tree, bar, panel))
+        .collect();
+
+    spacer(tree, bar);
+    let filter_field = tree.insert(Some(bar), TextField::new("絞り込み（/）", 160.0));
+    let caret = filter.caret.min(filter.query.len());
+    tree.update::<TextField, _>(filter_field, |field, cx| {
+        field.set_text(cx, filter.query.as_str());
+        field.select(cx, caret..caret);
+    });
+    let match_count = tree.insert(
+        Some(bar),
+        Label::new(match_text(workers, filter))
+            .font_size(12.0)
+            .color(Role::Muted),
+    );
+    tree.set_hidden(match_count, !filter.active());
+    let help_key = tree.insert(Some(bar), Kbd::new(["?"]));
+    let group_caption = caption(tree, bar, "グループ");
     let selected = Grouping::ALL
         .iter()
-        .position(|candidate| *candidate == grouping)
+        .position(|candidate| *candidate == view.grouping)
         .unwrap_or(0);
-    let control = tree.insert(
+    let grouping_control = tree.insert(
         Some(bar),
         SegmentedControl::new(Grouping::ALL.map(Grouping::title), SegmentMode::SelectOne)
             .with_selected(&[selected])
             .control_size(ControlSize::Small),
     );
-    Header {
-        status,
-        grouping_control: control,
-        hints,
+    HeaderParts {
+        bar,
+        title,
+        health: HealthParts { dot, status },
+        longest,
+        chips,
+        filter_field,
+        match_count,
+        help_key,
+        group_caption,
+        grouping_control,
     }
+}
+
+/// A hidden panel in the header: its keycap and its title, muted, no fill.
+fn chip(tree: &mut UiTree, bar: WidgetId, panel: Panel) -> WidgetId {
+    let chip = tree.insert(
+        Some(bar),
+        Container::row().align_items(AlignItems::CENTER).gap(3.0),
+    );
+    tree.insert(Some(chip), Kbd::new([panel.digit()]));
+    tree.insert(
+        Some(chip),
+        Label::new(panel.title()).font_size(11.0).color(Role::Muted),
+    );
+    chip
+}
+
+/// "{matching} / {total} 件".
+pub(super) fn match_text(workers: &[Worker], filter: &Filter) -> String {
+    let matching = workers.iter().filter(|w| filter.matches(w)).count();
+    format!("{matching} / {} 件", workers.len())
+}
+
+/// Drops header items by priority until the header fits `viewport`; true
+/// when it changed the tree. U2 fills this in; in U1 everything fits the
+/// sizes the tests use.
+pub(super) fn fit(
+    tree: &mut UiTree,
+    _text: &mut TextStore,
+    _viewport: Size,
+    parts: &HeaderParts,
+) -> bool {
+    let shown = [parts.bar, parts.title, parts.help_key, parts.group_caption]
+        .into_iter()
+        .chain(parts.longest)
+        .chain(parts.chips.iter().copied());
+    let mut changed = false;
+    for id in shown {
+        if tree.is_hidden(id) {
+            tree.set_hidden(id, false);
+            changed = true;
+        }
+    }
+    changed
 }
 
 pub(super) fn waited_text(workers: &[Worker]) -> String {

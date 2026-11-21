@@ -170,8 +170,8 @@ only reads `panels` still parses it.
   not on the structural signature (`ipc_structural_signature`). A `fields`
   filter does not make them faster.
 - `fields` is new, so it is parsed strictly wherever it appears
-  (`noa.subscribe` and `noa.updateSubscription`, by name or by position):
-  each element is a field-name string. An unknown name or any other JSON
+  (`noa.subscribe`, by name or by position, and `noa.updateSubscription`, by
+  name only): each element is a field-name string. An unknown name or any other JSON
   value, serde's map form `{"agent":null}` included, is -32602. The rest of
   `noa.subscribe` parses exactly as it did before this spec (see the
   compatibility rule in AC-3).
@@ -456,10 +456,13 @@ failures. Checks that already fail on the base are listed, not fixed.
 - **R-2: queue overflow and `removedPaneIds`.** `PushQueue` evicts the oldest
   entry. It never merges entries, and this spec keeps it that way. An evicted
   `stateChanged` can carry the only notice of a removal. The existing contract
-  covers that loss: the next drained `output` or `stateChanged` entry carries
+  covers that loss: after an eviction, one notification carries
   `dropped: true`, and the client must list panels again and diff the result
-  against its cache. The client-side buffer (`MAX_BUFFERED_NOTIFICATIONS`)
-  follows the same rule. Merging queued `stateChanged` entries to save removals
+  against its cache. Which one differs by side. The server `PushQueue`
+  marks the last `output` or `stateChanged` entry of the next drain (so with
+  capacity 2, after queueing removal A, update B and update C, C carries the
+  mark and B does not). The client buffer (`MAX_BUFFERED_NOTIFICATIONS`)
+  marks the first notification popped after an eviction. Merging queued `stateChanged` entries to save removals
   was rejected for two reasons. It would reorder `panels` relative to
   `noa.output`. It would also need the queue to understand R-5 union
   semantics. When a burst both changes a pane and removes it, both facts stay

@@ -1886,7 +1886,6 @@ fn only_update_subscription_rejects_params_by_position() {
             json!({ "paneId": "1", "text": "x" }),
         ),
         ("noa.focusPane", json!(["1"]), json!({ "paneId": "1" })),
-        ("noa.closePane", json!(["2"]), json!({ "paneId": "2" })),
     ];
     for (id, (method, by_position, by_name)) in (2..).step_by(2).zip(calls) {
         send_rpc(&mut sock, id, method, by_name);
@@ -1905,6 +1904,27 @@ fn only_update_subscription_rejects_params_by_position() {
     assert_eq!(backend.requested_max_bytes.lock().unwrap().len(), 2);
     assert_eq!(backend.sent_text.lock().unwrap().len(), 2);
     assert_eq!(*backend.focused.lock().unwrap(), vec![1, 1]);
+
+    // `noa.closePane` by position targets a different open pane than the call
+    // by name, so a no-op that only answers success is caught: the pane must
+    // be newly added to the backend's closed set.
+    send_rpc(&mut sock, 12, "noa.closePane", json!({ "paneId": "2" }));
+    let by_name = without_id(recv_json(&mut sock));
+    assert_eq!(by_name["result"], json!({ "ok": true }), "got {by_name:?}");
+    assert_eq!(
+        *backend.closed_panes.lock().unwrap(),
+        std::collections::HashSet::from([2])
+    );
+    send_rpc(&mut sock, 13, "noa.closePane", json!(["3"]));
+    assert_eq!(
+        without_id(recv_json(&mut sock)),
+        by_name,
+        "closePane by position"
+    );
+    assert_eq!(
+        *backend.closed_panes.lock().unwrap(),
+        std::collections::HashSet::from([2, 3])
+    );
 
     // `noa.attach`, `noa.resizePane` and `noa.detach` hold a lease between
     // calls, so each form runs the whole cycle: attach, resize under the
@@ -1932,6 +1952,17 @@ fn only_update_subscription_rejects_params_by_position() {
         send_rpc(&mut sock, id + 2, "noa.detach", detach.clone());
         let resp = recv_json(&mut sock);
         assert_eq!(resp["result"], json!({ "ok": true }), "{detach}: {resp:?}");
+        // The lease is free again right after this form's detach: attaching
+        // pane 1 on the same open connection succeeds.
+        send_rpc(&mut sock, id + 100, "noa.attach", json!({ "paneId": "1" }));
+        let resp = recv_json(&mut sock);
+        assert!(
+            resp["result"]["attachToken"].is_string(),
+            "attach after {detach}: {resp:?}"
+        );
+        send_rpc(&mut sock, id + 101, "noa.detach", json!({ "paneId": "1" }));
+        let resp = recv_json(&mut sock);
+        assert_eq!(resp["result"], json!({ "ok": true }), "{resp:?}");
     }
     assert_eq!(
         *backend.resized.lock().unwrap(),

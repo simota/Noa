@@ -8,7 +8,10 @@ use std::time::Duration;
 use noa_ipc::backend::{GridResult, IpcBackend, PaneRef, TextResult, WindowRef};
 use noa_ipc::error::IpcError;
 use noa_ipc::protocol::{Panel, Row, SplitDirection, TextSource, WireId};
-use noa_ipc::{Broadcaster, PROTOCOL_VERSION, ScopeSet, Server, ServerConfig};
+use noa_ipc::{
+    Broadcaster, ChangedPanel, FieldMask, PROTOCOL_VERSION, PanelField, ScopeSet, Server,
+    ServerConfig,
+};
 use serde_json::{Value, json};
 use tungstenite::client::IntoClientRequest;
 use tungstenite::protocol::frame::coding::CloseCode;
@@ -243,6 +246,41 @@ fn recv_json(sock: &mut Sock) -> Value {
             Message::Ping(_) | Message::Pong(_) => continue,
             other => panic!("unexpected message: {other:?}"),
         }
+    }
+}
+
+/// How long [`recv_notification`] waits for a pushed frame. Generous next to
+/// the 50ms drain poll so a slow CI host does not flake.
+const NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// [`recv_json`] for a frame the server pushes on its own: fails the test if
+/// none arrives within [`NOTIFICATION_TIMEOUT`] instead of blocking forever
+/// when the server never sends it.
+fn recv_notification(sock: &mut Sock) -> Value {
+    set_read_timeout(sock, Some(NOTIFICATION_TIMEOUT));
+    let frame = loop {
+        match sock.read() {
+            Ok(Message::Text(text)) => break serde_json::from_str(&text).unwrap(),
+            Ok(Message::Ping(_) | Message::Pong(_)) => continue,
+            Err(tungstenite::Error::Io(err))
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                panic!("no notification arrived within {NOTIFICATION_TIMEOUT:?}")
+            }
+            other => panic!("expected a notification, got {other:?}"),
+        }
+    };
+    set_read_timeout(sock, None);
+    frame
+}
+
+fn set_read_timeout(sock: &mut Sock, timeout: Option<Duration>) {
+    match sock.get_mut() {
+        MaybeTlsStream::Plain(stream) => stream.set_read_timeout(timeout).unwrap(),
+        _ => panic!("server_tests connect over plain TCP"),
     }
 }
 
@@ -1179,7 +1217,7 @@ fn subscribe_delivers_state_changed_and_unsubscribe_stops_it() {
 
     // wait past the connection's 50ms read-timeout poll interval.
     std::thread::sleep(Duration::from_millis(150));
-    let notif = recv_json(&mut sock);
+    let notif = recv_notification(&mut sock);
     assert_eq!(notif["method"], "noa.stateChanged");
 
     send_rpc(
@@ -1273,7 +1311,7 @@ fn a_removal_only_delta_reaches_a_subscriber_over_the_wire() {
 
     broadcaster.broadcast_state_delta(vec![], vec![1]);
     let_the_connection_drain();
-    let notif = recv_json(&mut sock);
+    let notif = recv_notification(&mut sock);
     assert_eq!(notif["method"], "noa.stateChanged");
     assert_eq!(
         notif["params"],
@@ -1306,6 +1344,75 @@ fn subscribe_with_an_unknown_field_is_invalid_params_and_creates_no_subscription
 }
 
 #[test]
+fn subscribe_with_a_non_string_field_is_invalid_params_and_creates_no_subscription() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
+    let broadcaster = handle.broadcaster();
+    let mut sock = connect_plain(handle.port());
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
+
+    // serde's map form of the `agent` variant.
+    send_rpc(
+        &mut sock,
+        2,
+        "noa.subscribe",
+        json!({ "events": ["state_changed"], "fields": [{ "agent": null }] }),
+    );
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["error"]["code"], -32602, "got {resp:?}");
+
+    assert!(!broadcaster.has_state_changed_subscribers());
+    broadcaster.broadcast_state_changed(vec![test_panel(1)]);
+    assert_no_notification(&mut sock, 3);
+    let _ = sock.close(None);
+}
+
+#[test]
+fn update_subscription_with_a_non_string_field_is_invalid_params_and_keeps_the_filter() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
+    let broadcaster = handle.broadcaster();
+    let mut sock = connect_plain(handle.port());
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
+    let sub_id = subscribe(
+        &mut sock,
+        2,
+        json!({ "events": ["state_changed"], "fields": ["preview"] }),
+    );
+
+    send_rpc(
+        &mut sock,
+        3,
+        "noa.updateSubscription",
+        json!({ "subscriptionId": sub_id, "fields": [{ "agent": null }] }),
+    );
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["error"]["code"], -32602, "got {resp:?}");
+
+    // Still `fields: ["preview"]`: an accepted `{"agent": null}` would have
+    // turned it into `["agent"]` and delivered pane 2 instead.
+    broadcaster.broadcast_state_delta(
+        vec![
+            ChangedPanel {
+                panel: test_panel(1),
+                fields: FieldMask::from_fields(&[PanelField::Preview]),
+            },
+            ChangedPanel {
+                panel: test_panel(2),
+                fields: FieldMask::from_fields(&[PanelField::Agent]),
+            },
+        ],
+        vec![],
+    );
+    let_the_connection_drain();
+    assert_eq!(
+        state_changed_pane_ids(&recv_notification(&mut sock)),
+        vec!["1"]
+    );
+    let _ = sock.close(None);
+}
+
+#[test]
 fn update_subscription_returns_ok_and_the_next_broadcast_uses_the_new_filter() {
     let backend = Arc::new(MockBackend::default());
     let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
@@ -1332,20 +1439,54 @@ fn update_subscription_returns_ok_and_the_next_broadcast_uses_the_new_filter() {
     broadcaster.broadcast_state_changed(vec![test_panel(1)]);
     broadcaster.broadcast_state_changed(vec![test_panel(1), test_panel(2)]);
     let_the_connection_drain();
-    assert_eq!(state_changed_pane_ids(&recv_json(&mut sock)), vec!["2"]);
+    assert_eq!(
+        state_changed_pane_ids(&recv_notification(&mut sock)),
+        vec!["2"]
+    );
 
-    // `null` clears the filter.
+    // One delta: pane 1 changed only `preview`, pane 2 changed `agent`.
+    let delta = || {
+        vec![
+            ChangedPanel {
+                panel: test_panel(1),
+                fields: FieldMask::from_fields(&[PanelField::Preview]),
+            },
+            ChangedPanel {
+                panel: test_panel(2),
+                fields: FieldMask::from_fields(&[PanelField::Agent]),
+            },
+        ]
+    };
+
+    // `paneIds: null` clears the scope and `fields: ["agent"]` narrows the
+    // changes: pane 1's preview-only change is filtered out. A server that
+    // ignored the `fields` update would deliver both panes.
     send_rpc(
         &mut sock,
         4,
         "noa.updateSubscription",
-        json!({ "subscriptionId": sub_id, "paneIds": null, "fields": null }),
+        json!({ "subscriptionId": sub_id, "paneIds": null, "fields": ["agent"] }),
     );
     assert_eq!(recv_json(&mut sock)["result"]["ok"], true);
-    broadcaster.broadcast_state_changed(vec![test_panel(1), test_panel(2)]);
+    broadcaster.broadcast_state_delta(delta(), vec![]);
     let_the_connection_drain();
     assert_eq!(
-        state_changed_pane_ids(&recv_json(&mut sock)),
+        state_changed_pane_ids(&recv_notification(&mut sock)),
+        vec!["2"]
+    );
+
+    // `fields: null` clears the field filter: the same delta delivers both.
+    send_rpc(
+        &mut sock,
+        5,
+        "noa.updateSubscription",
+        json!({ "subscriptionId": sub_id, "fields": null }),
+    );
+    assert_eq!(recv_json(&mut sock)["result"]["ok"], true);
+    broadcaster.broadcast_state_delta(delta(), vec![]);
+    let_the_connection_drain();
+    assert_eq!(
+        state_changed_pane_ids(&recv_notification(&mut sock)),
         vec!["1", "2"]
     );
     let _ = sock.close(None);
@@ -1399,7 +1540,10 @@ fn update_subscription_with_another_connections_id_is_invalid_params_and_leaves_
     broadcaster.broadcast_state_changed(vec![test_panel(2)]);
     broadcaster.broadcast_state_changed(vec![test_panel(1), test_panel(2)]);
     let_the_connection_drain();
-    assert_eq!(state_changed_pane_ids(&recv_json(&mut owner)), vec!["1"]);
+    assert_eq!(
+        state_changed_pane_ids(&recv_notification(&mut owner)),
+        vec!["1"]
+    );
     let _ = owner.close(None);
     let _ = other.close(None);
 }
@@ -1429,7 +1573,10 @@ fn update_subscription_with_too_many_pane_ids_is_invalid_params_and_keeps_the_fi
     broadcaster.broadcast_state_changed(vec![test_panel(2)]);
     broadcaster.broadcast_state_changed(vec![test_panel(1), test_panel(2)]);
     let_the_connection_drain();
-    assert_eq!(state_changed_pane_ids(&recv_json(&mut sock)), vec!["1"]);
+    assert_eq!(
+        state_changed_pane_ids(&recv_notification(&mut sock)),
+        vec!["1"]
+    );
     let _ = sock.close(None);
 }
 
@@ -1607,7 +1754,7 @@ fn broadcaster_survives_a_server_restart_and_leaves_no_stale_connections() {
     // same broadcaster the new server's connections are registered on.
     broadcaster.broadcast_output(7, 0, vec![]);
     std::thread::sleep(Duration::from_millis(150));
-    let notif = recv_json(&mut sock_b);
+    let notif = recv_notification(&mut sock_b);
     assert_eq!(notif["method"], "noa.output");
     assert_eq!(notif["params"]["paneId"], "7");
     assert_eq!(notif["params"]["coordinateGeneration"], 0);

@@ -248,9 +248,11 @@ const fn default_attachable() -> bool {
 }
 
 /// One [`Panel`] key, as serialized, for a `noa.subscribe` /
-/// `noa.updateSubscription` `fields` filter. An unknown name fails to
-/// deserialize, which the server answers with -32602.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// `noa.updateSubscription` `fields` filter. Only a string deserializes:
+/// an unknown name, or any other JSON value (including serde's `{"agent":
+/// null}` map form of a variant), fails, which the server answers with
+/// -32602.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PanelField {
     WindowGroupId,
@@ -270,6 +272,40 @@ pub enum PanelField {
     ParentPaneId,
     Label,
     Spawn,
+}
+
+/// The derived name → [`PanelField`] mapping, kept private so the only
+/// public way in is [`PanelField`]'s string-only `Deserialize` (a derived
+/// enum would also accept serde's map form of a variant). Its variants must
+/// match `PanelField`'s; `panel_field_names_are_exactly_the_serialized_panel_keys`
+/// parses every name through it.
+#[derive(Deserialize)]
+#[serde(remote = "PanelField", rename_all = "camelCase")]
+enum PanelFieldName {
+    WindowGroupId,
+    WindowId,
+    PaneId,
+    Name,
+    Cwd,
+    Branch,
+    Process,
+    Busy,
+    Attention,
+    Attachable,
+    Preview,
+    SurfaceId,
+    Agent,
+    Exit,
+    ParentPaneId,
+    Label,
+    Spawn,
+}
+
+impl<'de> Deserialize<'de> for PanelField {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        PanelFieldName::deserialize(de::IntoDeserializer::<D::Error>::into_deserializer(name))
+    }
 }
 
 impl PanelField {
@@ -1130,6 +1166,34 @@ mod subscription_tests {
         assert!(serde_json::from_value::<PanelField>(serde_json::json!("agnt")).is_err());
         let params = serde_json::json!({ "events": ["state_changed"], "fields": ["agnt"] });
         assert!(serde_json::from_value::<SubscribeParams>(params).is_err());
+    }
+
+    #[test]
+    fn a_field_name_must_be_a_string() {
+        // serde's externally tagged map form of a unit variant.
+        for value in [
+            serde_json::json!({ "agent": null }),
+            serde_json::json!({ "agent": [] }),
+            serde_json::json!(12),
+            serde_json::json!(null),
+        ] {
+            assert!(
+                serde_json::from_value::<PanelField>(value.clone()).is_err(),
+                "{value}"
+            );
+            let subscribe = serde_json::json!({ "events": ["state_changed"], "fields": [value] });
+            assert!(serde_json::from_value::<SubscribeParams>(subscribe).is_err());
+            let update = serde_json::json!({ "subscriptionId": "4", "fields": [value] });
+            assert!(serde_json::from_value::<UpdateSubscriptionParams>(update).is_err());
+        }
+        assert_eq!(
+            serde_json::from_value::<PanelField>(serde_json::json!("agent")).unwrap(),
+            PanelField::Agent
+        );
+        assert_eq!(
+            serde_json::to_value(PanelField::ParentPaneId).unwrap(),
+            serde_json::json!("parentPaneId")
+        );
     }
 
     #[test]

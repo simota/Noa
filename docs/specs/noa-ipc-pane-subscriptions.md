@@ -392,8 +392,13 @@ failures. Checks that already fail on the base are listed, not fixed.
   On the app side, `state_delta` runs under `ipc_shared` (for `registry.resolve`),
   and the guard must be dropped before `broadcast_state_delta`. Today nothing
   takes `ipc_shared` while holding `conns`, so nesting them would not deadlock
-  yet. Not nesting them keeps it that way. Both `output_subscribers` updates
-  happen after `conns` is released, as they do now.
+  yet. Not nesting them keeps it that way. Every `output_subscribers` update
+  (`add_subscription`, `update_subscription`, `remove_subscription`,
+  `unregister_connection`) happens while `conns` is still held. The counter is
+  an atomic, not a lock, so this adds no lock edge. Adjusting after release
+  would let two racing updates of one subscription apply their `+1`/`-1` in
+  the wrong order and pass through `0` while another connection still
+  subscribes to `output`.
 - **R-2: queue overflow and `removedPaneIds`.** `PushQueue` evicts the oldest
   entry. It never merges entries, and this spec keeps it that way. An evicted
   `stateChanged` can carry the only notice of a removal. The existing contract

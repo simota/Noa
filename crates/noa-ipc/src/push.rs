@@ -222,7 +222,10 @@ pub struct Broadcaster {
     /// Count of live subscriptions (across every connection) whose
     /// `events` include `OUTPUT` (R-3). Maintained on every
     /// `add_subscription`/`update_subscription`/`remove_subscription`/
-    /// `unregister_connection` call — a pane's io thread hot path reads only this atomic
+    /// `unregister_connection` call, always while `conns` is held: every
+    /// change is then serialized with the registry edit it reflects, so a
+    /// load sees a count that was true at some point (two racing updates
+    /// can't pass through a spurious `0`). A pane's io thread hot path reads only this atomic
     /// (`has_output_subscribers`) instead of walking `conns`, so "server
     /// running but nobody subscribed to output" costs one relaxed load, the
     /// same as "server not running" used to. `Relaxed` because this is a
@@ -273,7 +276,8 @@ impl Broadcaster {
         // without this, a subscriber that disconnects without explicitly
         // unsubscribing would leave the gate permanently open (or, on a
         // shared count, over-counted forever).
-        if let Some(entry) = self.conns.lock().remove(&conn_id) {
+        let mut conns = self.conns.lock();
+        if let Some(entry) = conns.remove(&conn_id) {
             let removed_output_subs = entry
                 .subs
                 .iter()
@@ -380,7 +384,8 @@ impl Broadcaster {
             pane_ids,
             fields,
         });
-        drop(conns);
+        // Adjusted while `conns` is held, so the count only ever moves
+        // between values that match the registry (see `output_subscribers`).
         if events.contains(EventMask::OUTPUT) {
             self.output_subscribers.fetch_add(1, Ordering::Relaxed);
         }
@@ -397,7 +402,6 @@ impl Broadcaster {
             .iter()
             .any(|s| s.subscription_id == subscription_id && s.events.contains(EventMask::OUTPUT));
         entry.subs.retain(|s| s.subscription_id != subscription_id);
-        drop(conns);
         if had_output {
             self.output_subscribers.fetch_sub(1, Ordering::Relaxed);
         }
@@ -406,7 +410,9 @@ impl Broadcaster {
     /// Applies `update` to subscription `subscription_id` of `conn_id` in
     /// place, keeping its id and position. Everything happens under one
     /// `conns` acquisition, so a broadcast sees the old filter or the new one,
-    /// never a mix. No push queue is touched (lock order `conns` → queue).
+    /// never a mix, and the `output_subscribers` adjustment cannot interleave
+    /// with another update's. No push queue is touched (lock order `conns` →
+    /// queue).
     pub fn update_subscription(
         &self,
         conn_id: u64,
@@ -433,7 +439,6 @@ impl Broadcaster {
             sub.fields = fields;
         }
         let has_output = sub.events.contains(EventMask::OUTPUT);
-        drop(conns);
         match (had_output, has_output) {
             (false, true) => {
                 self.output_subscribers.fetch_add(1, Ordering::Relaxed);
@@ -1359,6 +1364,66 @@ mod tests {
         .unwrap();
         assert!(b.has_state_changed_subscribers());
         assert!(!b.has_output_subscribers());
+    }
+
+    #[test]
+    fn racing_updates_never_hide_another_connections_output_subscription() {
+        // Connection A keeps an output subscription for pane 1 throughout;
+        // two threads keep toggling connection B's subscription in and out
+        // of OUTPUT. The counter must never pass through 0 while A holds its
+        // subscription (it did when the adjustment ran after `conns` was
+        // released: a `-1` could land before the racing `+1`).
+        const ROUNDS: usize = 20_000;
+        let b = Broadcaster::new();
+        let (a, _a_queue) = b.register_connection();
+        let sub_a = b
+            .add_subscription(a, EventMask::OUTPUT, Some(HashSet::from([1])))
+            .unwrap();
+        let (conn_b, _b_queue) = b.register_connection();
+        let sub_b = b
+            .add_subscription(conn_b, EventMask::STATE_CHANGED, None)
+            .unwrap();
+        let done = AtomicUsize::new(0);
+        let toggle = |first: EventMask, second: EventMask| {
+            for _ in 0..ROUNDS {
+                for events in [first, second] {
+                    b.update_subscription(
+                        conn_b,
+                        sub_b,
+                        SubscriptionUpdate {
+                            events: Some(events),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                }
+            }
+            done.fetch_add(1, Ordering::SeqCst);
+        };
+        std::thread::scope(|scope| {
+            scope.spawn(|| toggle(EventMask::OUTPUT, EventMask::STATE_CHANGED));
+            scope.spawn(|| toggle(EventMask::STATE_CHANGED, EventMask::OUTPUT));
+            while done.load(Ordering::SeqCst) < 2 {
+                assert!(
+                    b.has_output_subscriber_for(1),
+                    "A's output subscription vanished mid-race"
+                );
+            }
+        });
+        b.update_subscription(
+            conn_b,
+            sub_b,
+            SubscriptionUpdate {
+                events: Some(EventMask::STATE_CHANGED),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        b.remove_subscription(a, sub_a);
+        assert!(
+            !b.has_output_subscribers(),
+            "the output counter must not drift"
+        );
     }
 
     #[test]

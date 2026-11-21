@@ -3635,6 +3635,9 @@ pub(crate) fn status_lines(
         if worker.closed {
             line["closed"] = true.into();
         }
+        if let Some(cwd) = &worker.cwd {
+            line["cwd"] = cwd.clone().into();
+        }
         worker.add_to(&mut line);
         lines.push(line);
     }
@@ -5865,7 +5868,7 @@ mod tests {
             "\n",
             r#"{"ev":"send","ts":2,"pane":4,"seqBefore":0,"text":"do it","answer":false}"#,
             "\n",
-            r#"{"ev":"spawn","ts":3,"pane":6,"label":"old","argv":["codex"]}"#,
+            r#"{"ev":"spawn","ts":3,"pane":6,"label":"old","argv":["codex"],"cwd":"/r"}"#,
             "\n",
             r#"{"ev":"close","ts":4,"pane":6}"#,
             "\n",
@@ -5902,6 +5905,7 @@ mod tests {
         assert_eq!(lines[2]["gone"], true);
         assert_eq!(lines[2]["closed"], true);
         assert_eq!(lines[2]["label"], "old");
+        assert_eq!(lines[2]["cwd"], "/r");
 
         assert_eq!(
             parse_args(&args(&["status", "--answers"])).unwrap(),

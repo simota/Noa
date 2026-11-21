@@ -62,7 +62,8 @@ and `send` then refuses only `permission`.
 ### `spawn [options] [-- COMMAND...]`
 
 Starts a worker whose parent is this pane and prints
-`{"paneId":"…","result":"…"}` (plus the fields of the options below). A worker
+`{"paneId":"…","cwd":"…","result":"…"}` (plus the fields of the options below);
+`cwd` is the worker's directory, printed resolved. A worker
 is always a floating pane. When this pane has no board open, the spawn first
 opens one next to it (a new tab when there is no room), and the worker is
 stowed on the board: collapsed, it shows only as the board's row; the board's
@@ -83,7 +84,7 @@ accepted and changes nothing.
 | `--no-board` | Do not open the board; the worker floats over this pane |
 | `--worktree` | Start the worker in a new git worktree: `git worktree add -b orch/LABEL <main>-wt/LABEL HEAD`, where `<main>` is the repository's main worktree (the same path from any worktree or subdirectory) and `HEAD` is your checkout's. Needs `--label` (letters, digits, `.`, `_`, `-`; not starting with `.` or `-`) and refuses `--cwd`. Prints `"worktree"` and `"branch"` too. A git failure (branch or path exists, not a repository) is exit 1 and starts nothing. What your checkout has that the commit lacks is warned on stderr, apart: `this checkout has uncommitted changes to N tracked files; they are not in the worktree` and `N untracked files are not in the worktree`. If Noa then refuses to start the worker, the fresh worktree and branch are removed again; if the answer is lost and the worker is not found ("Lost answer" below), they are kept, since the worker may be running there, and stderr says so. The board, when this spawn would open it, opens only after the worktree was made |
 | `--tier light\|standard\|deep` | Add the tier's model and effort flags ("Model tiers" below) right after the program of a `claude`, `codex` or `agy` command. Refused for any other command, and for a command that already picks a model or effort, so a model the human named is never overridden. Prints `"tier"` too |
-| `--cwd DIR` | Working directory. Relative paths are taken from this process's cwd. Default: this process's cwd. One that is not a directory is refused (exit 1) before anything starts; `ls` shows it as the worker's `cwd` until the worker's shell reports its own |
+| `--cwd DIR` | Working directory. Relative paths are taken from this process's cwd and resolved: `.` and `..` are removed; an absolute path without them is used as given; symlinks are kept except one followed by `..`, which is resolved. Default: this process's cwd. One that is not a directory is refused (exit 1) before anything starts; `ls` shows it as the worker's `cwd` until the worker's shell reports its own |
 | `--env KEY=VALUE` | Repeatable. `PATH` defaults to this process's `PATH` when a command is given, and `LANG` and `LC_*` to this process's, so a worker keeps your locale even when Noa itself has none |
 | `--label TEXT` | Shown in the panel's `label`; a plain one (as for `--worktree`) also names the result file. One starting with `board:` is refused (exit 1): that names a board |
 | `--input TEXT` | Written as raw keys right after the worker starts, so each newline is Enter. Refused (exit 1) for a `claude`, `codex` or `agy` command: use `--task`, or `send` once the agent is up |

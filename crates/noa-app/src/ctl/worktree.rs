@@ -352,7 +352,16 @@ pub(crate) fn remove(cwd: &Path, path: &Path, branch: &str) -> Removal {
 /// from `pane_cwd`, not the caller's cwd, and git runs in its main worktree.
 /// `None` only for a label `spawn --worktree` could not have given; for any
 /// other the result says what was done, or why nothing was.
-pub(crate) fn prune(label: &str, pane_cwd: &Path) -> Option<serde_json::Value> {
+///
+/// The worktree's result files are first moved into `<main>/.noa/`
+/// ([`super::result::move_out`]); `"result"` is where the pane's own
+/// (`result`, its path in the worktree) went. When a file cannot be moved,
+/// the worktree is kept and `"kept"` says why.
+pub(crate) fn prune(
+    label: &str,
+    pane_cwd: &Path,
+    result: Option<&Path>,
+) -> Option<serde_json::Value> {
     check_label(label).ok()?;
     let branch = branch_name(label);
     let kept = |reason: String| {
@@ -394,7 +403,31 @@ pub(crate) fn prune(label: &str, pane_cwd: &Path) -> Option<serde_json::Value> {
             "kept": NOT_IN_WORKTREE,
         }));
     }
-    let removal = remove(&main, &entry.path, &branch);
+    // The pane's own file, by name, when it is in this worktree's `.noa/`
+    // (compared resolved, before the move takes it away).
+    let own_name = result.and_then(|result| {
+        let dir = result.parent()?;
+        (dir.canonicalize().ok()? == entry.path.join(".noa").canonicalize().ok()?)
+            .then(|| result.file_name())
+            .flatten()
+            .map(std::ffi::OsStr::to_os_string)
+    });
+    let mut moved = Vec::new();
+    let not_moved = super::result::move_out(&entry.path, &main, &mut moved).err();
+    let own_result = own_name.and_then(|name| {
+        moved
+            .iter()
+            .find(|(from, _)| from.file_name() == Some(name.as_os_str()))
+            .map(|(_, to)| to.to_string_lossy().into_owned())
+    });
+    let removal = match not_moved {
+        Some(message) => Removal {
+            removed: false,
+            branch_deleted: false,
+            kept: Some(message),
+        },
+        None => remove(&main, &entry.path, &branch),
+    };
     let mut info = serde_json::json!({
         "path": entry.path.to_string_lossy(),
         "removed": removal.removed,
@@ -402,6 +435,9 @@ pub(crate) fn prune(label: &str, pane_cwd: &Path) -> Option<serde_json::Value> {
     });
     if let Some(kept) = removal.kept {
         info["kept"] = kept.into();
+    }
+    if let Some(result) = own_result {
+        info["result"] = result.into();
     }
     Some(info)
 }
@@ -634,7 +670,7 @@ detached
         assert_eq!(made.branch, "orch/job");
         assert!(made.path.join("a.txt").is_file());
 
-        let info = prune("job", &made.path).unwrap();
+        let info = prune("job", &made.path, None).unwrap();
         assert_eq!(info["removed"], true);
         assert_eq!(info["branchDeleted"], true);
         assert!(info.get("kept").is_none());
@@ -644,6 +680,61 @@ detached
                 .trim()
                 .is_empty()
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // Review finding #2: `close --prune` removed the worker's report with
+    // its worktree, so `result PANE` found nothing.
+    #[test]
+    fn prune_moves_the_result_files_into_the_main_worktree_first() {
+        let (base, repo) = repo("result");
+        let made = add(&repo, "job").unwrap();
+        let own = super::super::result::prepare(&made.path, Some("job")).unwrap();
+        std::fs::write(&own, "report\n").unwrap();
+        let other = made.path.join(".noa").join("result-0000abcd.md");
+        std::fs::write(&other, "other\n").unwrap();
+        // The main worktree already has a file of that name: not overwritten.
+        let taken = super::super::result::prepare(&repo, Some("job")).unwrap();
+        std::fs::write(&taken, "main's own\n").unwrap();
+
+        let info = prune("job", &made.path, Some(&own)).unwrap();
+        assert_eq!(info["removed"], true, "{info}");
+        assert!(!made.path.exists());
+        let moved = PathBuf::from(info["result"].as_str().unwrap());
+        assert_eq!(moved.parent(), Some(repo.join(".noa").as_path()));
+        assert_ne!(moved, taken);
+        let name = moved.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("result-job-") && name.ends_with(".md"),
+            "{name}"
+        );
+        assert_eq!(std::fs::read_to_string(&moved).unwrap(), "report\n");
+        assert_eq!(std::fs::read_to_string(&taken).unwrap(), "main's own\n");
+        let kept = repo.join(".noa").join("result-0000abcd.md");
+        assert_eq!(std::fs::read_to_string(kept).unwrap(), "other\n");
+        // Still ignored in the main worktree.
+        assert!(run_git(&repo, &["status", "--porcelain", "--untracked-files=all"]).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn prune_keeps_the_worktree_when_its_result_cannot_be_moved() {
+        let (base, repo) = repo("unmovable");
+        let made = add(&repo, "job").unwrap();
+        let own = super::super::result::prepare(&made.path, Some("job")).unwrap();
+        std::fs::write(&own, "report\n").unwrap();
+        // `<main>/.noa` is a file, so nothing can be moved there.
+        std::fs::write(repo.join(".noa"), "").unwrap();
+        run_git(&repo, &["add", ".noa"]);
+        run_git(&repo, &["commit", "-q", "-m", "noa file"]);
+
+        let info = prune("job", &made.path, Some(&own)).unwrap();
+        assert_eq!(info["removed"], false);
+        assert_eq!(info["branchDeleted"], false);
+        let kept = info["kept"].as_str().unwrap();
+        assert!(kept.contains(".noa"), "{kept}");
+        assert!(info.get("result").is_none());
+        assert_eq!(std::fs::read_to_string(&own).unwrap(), "report\n");
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -688,7 +779,7 @@ detached
         let made = add(&repo, "job").unwrap();
         std::fs::write(made.path.join("new.txt"), "x").unwrap();
 
-        let info = prune("job", &made.path).unwrap();
+        let info = prune("job", &made.path, None).unwrap();
         assert_eq!(info["removed"], false);
         assert_eq!(info["branchDeleted"], false);
         assert!(info["kept"].as_str().is_some_and(|k| !k.is_empty()));
@@ -704,7 +795,7 @@ detached
         run_git(&made.path, &["add", "."]);
         run_git(&made.path, &["commit", "-q", "-m", "work"]);
 
-        let info = prune("job", &made.path).unwrap();
+        let info = prune("job", &made.path, None).unwrap();
         assert_eq!(info["removed"], true);
         assert_eq!(info["branchDeleted"], false);
         assert!(info["kept"].as_str().is_some_and(|k| !k.is_empty()));
@@ -723,7 +814,7 @@ detached
     #[test]
     fn prune_says_why_when_no_worktree_matches_the_label() {
         let (base, repo) = repo("none");
-        let missing = prune("nothing", &repo).unwrap();
+        let missing = prune("nothing", &repo, None).unwrap();
         assert_eq!(missing["removed"], false);
         assert_eq!(missing["branchDeleted"], false);
         let reason = missing["kept"].as_str().unwrap();
@@ -732,21 +823,21 @@ detached
             "{reason}"
         );
         // Not a label `spawn --worktree` could have given.
-        assert!(prune("../escape", &repo).is_none());
+        assert!(prune("../escape", &repo, None).is_none());
         // A plain branch of the same name at the same path is not ours.
         let path = worktree_path(&repo, "other");
         run_git(
             &repo,
             &["worktree", "add", "-b", "feature", path.to_str().unwrap()],
         );
-        let other = prune("other", &path).unwrap();
+        let other = prune("other", &path, None).unwrap();
         assert_eq!(other["removed"], false);
         assert!(path.exists());
         // A pane whose cwd is in no repository.
         let outside = base.join("plain");
         std::fs::create_dir_all(&outside).unwrap();
         if main_worktree(&outside).is_err() {
-            let lost = prune("job", &outside).unwrap();
+            let lost = prune("job", &outside, None).unwrap();
             assert!(
                 lost["kept"]
                     .as_str()
@@ -770,7 +861,7 @@ detached
         assert_eq!(second.path, base.join("repo-wt").join("b"));
 
         // The pane's cwd finds the worktree whatever the caller's cwd is.
-        let info = prune("b", &second.path.join(".")).unwrap();
+        let info = prune("b", &second.path.join("."), None).unwrap();
         assert_eq!(info["removed"], true, "{info}");
         assert_eq!(info["branchDeleted"], true, "{info}");
         assert!(!second.path.exists());
@@ -818,7 +909,7 @@ detached
 
         // Review finding: a skipped prune printed nothing, so the caller
         // could not tell it from a label without a worktree.
-        let kept = prune("job", &repo).unwrap();
+        let kept = prune("job", &repo, None).unwrap();
         assert_eq!(
             kept,
             serde_json::json!({
@@ -834,7 +925,7 @@ detached
                 .trim()
                 .is_empty()
         );
-        let removed = prune("job", &made.path.join("src")).unwrap();
+        let removed = prune("job", &made.path.join("src"), None).unwrap();
         assert_eq!(removed["removed"], true);
         let _ = std::fs::remove_dir_all(&base);
     }

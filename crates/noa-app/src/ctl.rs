@@ -163,7 +163,8 @@ Commands:
                                 --scrollback (and wait --tail) then says on
                                 stderr that only its screen came back.
   result PANE [--max-bytes N]   Print PANE's result file: its spawn's
-                                NOA_RESULT from this pane's journal, else
+                                NOA_RESULT from this pane's journal (or where
+                                close --prune moved it), else
                                 <its cwd>/.noa/result-LABEL.md for a pane with a
                                 plain label; exit 1 when there is none or no
                                 file is known. --max-bytes keeps the start and
@@ -185,6 +186,12 @@ Commands:
                                 under \"worktree\":{\"kept\":...}), found
                                 from the pane's cwd; a labelled pane with no
                                 such worktree also gets \"kept\" saying why.
+                                Its .noa/result-*.md files first move to the
+                                main worktree's .noa/ (a taken name gets
+                                -<8 hex>); \"worktree\":{\"result\"} is where
+                                the worker's went, and result and status read
+                                it there. One that cannot move keeps the
+                                worktree, with \"kept\" saying why.
   report STATE [[--] DETAIL]    Write an agent-state report (running, permission,
                                 input, finished, error, clear) to this terminal.
   board [--of PANE]             Show an orchestrator's workers in this pane
@@ -1744,12 +1751,20 @@ impl Session {
         };
         // The worktree is found from the pane's cwd, so this command's own
         // cwd (another worktree, or outside the repository) does not matter.
-        let mut prune_label = |label: &str, pane_cwd: &str| {
-            if prune {
-                worktree::prune(label, std::path::Path::new(pane_cwd))
-            } else {
-                None
+        // The pane's result file is moved out of it first ([`result_path`]).
+        let workers = journal::workers(&self.journal.events());
+        let mut prune_label = |pane: u64, label: &str, pane_cwd: &str| {
+            if !prune {
+                return None;
             }
+            let pane_cwd = Path::new(pane_cwd);
+            let result = workers
+                .iter()
+                .find(|worker| worker.pane == pane)
+                .and_then(|worker| worker.result.as_ref())
+                .map(PathBuf::from)
+                .or_else(|| result::labelled_path(pane_cwd, Some(label)));
+            worktree::prune(label, pane_cwd, result.as_deref())
         };
         let journal = &mut self.journal;
         close_panes(
@@ -3770,7 +3785,7 @@ pub(crate) fn close_panes(
     source: &mut impl PaneCloser,
     panes: &[u64],
     own: Option<u64>,
-    prune: &mut dyn FnMut(&str, &str) -> Option<serde_json::Value>,
+    prune: &mut dyn FnMut(u64, &str, &str) -> Option<serde_json::Value>,
     emit: &mut dyn FnMut(&serde_json::Value),
 ) -> Result<i32, Failure> {
     let panels = source.list()?;
@@ -3819,7 +3834,7 @@ pub(crate) fn close_panes(
         // label and cwd already read), so its process no longer holds the
         // worktree; a refusal keeps it and does not fail.
         if let Some((label, pane_cwd)) = label
-            && let Some(info) = prune(&label, &pane_cwd)
+            && let Some(info) = prune(pane, &label, &pane_cwd)
         {
             line["worktree"] = info;
         }
@@ -4325,7 +4340,7 @@ mod tests {
             &mut source,
             &[8, 9, 7],
             Some(1),
-            &mut |label, _cwd| {
+            &mut |_pane, label, _cwd| {
                 asked.push(label.to_string());
                 Some(serde_json::json!({ "path": "/r-wt/job", "removed": true }))
             },
@@ -5235,15 +5250,19 @@ mod tests {
             refuse_code: -32003,
         };
         let failure =
-            close_panes(&mut source, &[8], Some(1), &mut |_, _| None, &mut |_| {}).unwrap_err();
+            close_panes(&mut source, &[8], Some(1), &mut |_, _, _| None, &mut |_| {}).unwrap_err();
         assert_eq!(failure.code, EXIT_UNAVAILABLE);
 
         // Any other refusal of a pane that is still listed fails that pane only.
         source.refuse_code = -32000;
         let mut lines = Vec::new();
-        let code = close_panes(&mut source, &[8], Some(1), &mut |_, _| None, &mut |line| {
-            lines.push(line.clone())
-        });
+        let code = close_panes(
+            &mut source,
+            &[8],
+            Some(1),
+            &mut |_, _, _| None,
+            &mut |line| lines.push(line.clone()),
+        );
         assert_eq!(code.ok(), Some(EXIT_ERROR));
         assert!(lines.is_empty());
     }
@@ -5261,7 +5280,7 @@ mod tests {
             &mut source,
             &[8, 9],
             Some(1),
-            &mut |_, _| None,
+            &mut |_, _, _| None,
             &mut |line| lines.push(line.clone()),
         );
         assert_eq!(code.ok(), Some(EXIT_UNAVAILABLE));
@@ -5276,9 +5295,13 @@ mod tests {
             code: RPC_OUTCOME_UNKNOWN,
         };
         let mut lines = Vec::new();
-        let code = close_panes(&mut source, &[8], Some(1), &mut |_, _| None, &mut |line| {
-            lines.push(line.clone())
-        });
+        let code = close_panes(
+            &mut source,
+            &[8],
+            Some(1),
+            &mut |_, _, _| None,
+            &mut |line| lines.push(line.clone()),
+        );
         assert_eq!(code.ok(), Some(EXIT_OK));
         assert_eq!(lines, [serde_json::json!({"paneId": "8", "closed": true})]);
     }
@@ -7457,7 +7480,7 @@ mod tests {
             &mut source,
             &[8],
             Some(1),
-            &mut |label, cwd| {
+            &mut |_pane, label, cwd| {
                 asked.push((label.to_string(), cwd.to_string()));
                 Some(serde_json::json!({ "path": "/r-wt/job", "removed": true }))
             },

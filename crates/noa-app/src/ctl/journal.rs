@@ -220,7 +220,13 @@ pub(crate) fn workers(events: &[serde_json::Value]) -> Vec<Worker> {
                     worker.label = text_field(event, "label");
                 }
             }
-            Some("close") => worker.closed = true,
+            Some("close") => {
+                worker.closed = true;
+                // `close --prune` moved the result out of the worktree.
+                if let Some(result) = event["worktree"]["result"].as_str() {
+                    worker.result = Some(result.to_string());
+                }
+            }
             _ => {}
         }
     }
@@ -404,6 +410,25 @@ mod tests {
         assert_eq!(again.label.as_deref(), Some("again"));
         assert_eq!(again.answers, 0);
         assert_eq!(again.last_task, None);
+    }
+
+    // Review finding #2: `close --prune` moves the result into the main
+    // worktree; the close event's `worktree.result` is where it now is.
+    #[test]
+    fn a_pruned_workers_result_is_where_the_close_moved_it() {
+        let mut events = sample();
+        events.extend(parse_events(concat!(
+            r#"{"ev":"close","ts":7,"pane":4,"worktree":{"path":"/r-wt/fix","removed":true,"branchDeleted":true,"result":"/r/.noa/result-fix.md"}}"#,
+            "\n",
+            r#"{"ev":"close","ts":8,"pane":9,"worktree":{"removed":false,"kept":"x","result":"/r/.noa/result-y.md"}}"#,
+            "\n",
+        )));
+        let workers = workers(&events);
+        assert!(workers[0].closed);
+        assert_eq!(workers[0].result.as_deref(), Some("/r/.noa/result-fix.md"));
+        assert_eq!(workers[1].result, None);
+        assert_eq!(workers[2].pane, 9);
+        assert_eq!(workers[2].result.as_deref(), Some("/r/.noa/result-y.md"));
     }
 
     #[test]

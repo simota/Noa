@@ -29,10 +29,9 @@ pub(crate) fn path_for(cwd: &Path, label: Option<&str>) -> PathBuf {
     })
 }
 
-/// Make `<cwd>/.noa/` with its self-ignoring `.gitignore`, and return the
-/// result path of a worker labelled `label` ([`path_for`]). An existing
-/// `.gitignore` there is left as it is.
-pub(crate) fn prepare(cwd: &Path, label: Option<&str>) -> std::io::Result<PathBuf> {
+/// Make `<cwd>/.noa/` with its self-ignoring `.gitignore` and return it. An
+/// existing `.gitignore` there is left as it is.
+pub(crate) fn prepare_dir(cwd: &Path) -> std::io::Result<PathBuf> {
     let dir = cwd.join(".noa");
     std::fs::create_dir_all(&dir)?;
     match std::fs::OpenOptions::new()
@@ -44,7 +43,80 @@ pub(crate) fn prepare(cwd: &Path, label: Option<&str>) -> std::io::Result<PathBu
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(err) => return Err(err),
     }
+    Ok(dir)
+}
+
+/// Make `<cwd>/.noa/` ([`prepare_dir`]), and return the result path of a
+/// worker labelled `label` ([`path_for`]).
+pub(crate) fn prepare(cwd: &Path, label: Option<&str>) -> std::io::Result<PathBuf> {
+    prepare_dir(cwd)?;
     Ok(path_for(cwd, label))
+}
+
+/// `<dir>/<stem>.md`, or `<dir>/<stem>-<8 random hex digits>.md` when that
+/// is taken.
+fn unused_path(dir: &Path, stem: &str) -> PathBuf {
+    let plain = dir.join(format!("{stem}.md"));
+    if !plain.exists() {
+        return plain;
+    }
+    loop {
+        let path = dir.join(format!("{stem}-{:08x}.md", rand::random::<u32>()));
+        if !path.exists() {
+            return path;
+        }
+    }
+}
+
+/// `close --prune`, before `git worktree remove`: move every
+/// `<worktree>/.noa/result-*.md` into `<main>/.noa/` (made the same
+/// self-ignoring way), so a worker's report outlives its worktree. A name
+/// already taken there gets `-<8 hex>` ([`unused_path`]). Each move made
+/// is pushed onto `moved` as `(from, to)`; `Err` says which file could not
+/// be moved (those before it were).
+pub(crate) fn move_out(
+    worktree: &Path,
+    main: &Path,
+    moved: &mut Vec<(PathBuf, PathBuf)>,
+) -> Result<(), String> {
+    let from_dir = worktree.join(".noa");
+    let entries = match std::fs::read_dir(&from_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("cannot read {}: {err}", from_dir.display())),
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("result-") && name.ends_with(".md"))
+        })
+        .collect();
+    if files.is_empty() {
+        return Ok(());
+    }
+    files.sort();
+    let to_dir = prepare_dir(main)
+        .map_err(|err| format!("cannot make {}: {err}", main.join(".noa").display()))?;
+    for from in files {
+        let stem = from
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .expect("filtered to UTF-8 names");
+        let to = unused_path(&to_dir, stem);
+        std::fs::rename(&from, &to).map_err(|err| {
+            format!(
+                "cannot move the result file {} to {}: {err}",
+                from.display(),
+                to.display()
+            )
+        })?;
+        moved.push((from, to));
+    }
+    Ok(())
 }
 
 /// `{"path":…,"bytes":N}` when the file at `path` was written at or after

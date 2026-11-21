@@ -181,6 +181,7 @@ pub(super) fn running(
     reg.lists[Panel::Running as usize] = Some(ListParts {
         list: scroll,
         items,
+        nested: Vec::new(),
         headers,
         indicator,
     });
@@ -283,6 +284,7 @@ pub(super) fn done(
     reg.lists[Panel::Done as usize] = Some(ListParts {
         list,
         items,
+        nested: Vec::new(),
         headers,
         indicator,
     });

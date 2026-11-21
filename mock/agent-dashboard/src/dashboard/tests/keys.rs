@@ -91,3 +91,24 @@ fn no_tree_shortcuts_are_registered() {
     key(&mut dashboard, &mut text, Key::Char('1'));
     assert!(dashboard.panels.iter().all(Option::is_some));
 }
+
+#[test]
+fn a_wheel_page_change_reaches_the_next_frame() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    // What the window does after a frame: nothing is left to draw.
+    dashboard.prepare(window(), &mut text);
+    assert!(!dashboard.needs_update(window()));
+    // A page the pager must change: a running card it hid stands for the
+    // page the wheel left behind.
+    let list = dashboard.registry.lists[Panel::Running as usize]
+        .as_ref()
+        .unwrap();
+    let (card, _) = list.items[0];
+    dashboard.tree.set_hidden(card, true);
+    dashboard.paged(&mut text);
+    assert!(!dashboard.tree.is_hidden(card), "paged");
+    assert!(
+        dashboard.needs_update(window()),
+        "the window would keep the old page until the next input"
+    );
+}

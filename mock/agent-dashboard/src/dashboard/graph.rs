@@ -51,6 +51,7 @@ pub(super) fn graph(
     let indicator = indicator(tree, title);
     let roots = card_list(tree, section, 12.0);
     let mut items = Vec::new();
+    let mut nested = Vec::new();
     for orchestrator in &fleet.orchestrators {
         // An orchestrator that is a worker itself is the root, not a child.
         let own = orchestrator.pane.and_then(|pane| fleet.worker(pane));
@@ -76,7 +77,9 @@ pub(super) fn graph(
             reg.marks
                 .push((pill, own.pane, Mark::Node { normal: color }));
         }
-        connect(tree, row, &pruned, &children, reg);
+        let mut held = Vec::new();
+        connect(tree, row, &pruned, &children, reg, &mut held);
+        nested.extend(held.into_iter().map(|pane| (pane, items.len())));
         items.push((row, own.map(|w| w.pane)));
     }
     if items.is_empty() && filter.active() {
@@ -85,6 +88,7 @@ pub(super) fn graph(
     reg.lists[Panel::Graph as usize] = Some(ListParts {
         list: roots,
         items,
+        nested,
         headers: Vec::new(),
         indicator,
     });
@@ -154,12 +158,15 @@ pub(super) fn edge(tree: &mut UiTree, row: WidgetId, length_px: f32) {
     );
 }
 
+/// Draws `children` (and theirs) beside `row`; `held` gets every pane
+/// drawn, so the pager knows which root row shows it.
 fn connect(
     tree: &mut UiTree,
     row: WidgetId,
     pruned: &Pruned,
     children: &[&Worker],
     reg: &mut Registry,
+    held: &mut Vec<u64>,
 ) {
     if children.is_empty() {
         return;
@@ -183,6 +190,7 @@ fn connect(
         let (symbol, color) = mark(child);
         let muted = !pruned.filter.matches(child);
         let pill = node(tree, child_row, symbol, &child.label, color, muted);
+        held.push(child.pane);
         if !muted {
             reg.marks
                 .push((pill, child.pane, Mark::Node { normal: color }));
@@ -191,6 +199,6 @@ fn connect(
             .children(child.pane)
             .filter(|w| pruned.keeps(w))
             .collect();
-        connect(tree, child_row, pruned, &grandchildren, reg);
+        connect(tree, child_row, pruned, &grandchildren, reg, held);
     }
 }

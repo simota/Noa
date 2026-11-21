@@ -107,11 +107,13 @@ impl Feed {
     }
 
     /// Takes a snapshot's link state and `fleet` (the snapshot's, or what
-    /// `health::keep_on_down` kept).
-    fn accept(&mut self, fleet: Fleet, snapshot: Snapshot) {
+    /// `health::keep_on_down` kept). Its `synced_secs` count back from
+    /// `received`, when it came in, not from now: one held back while an
+    /// IME composed is as old as it was then plus the wait.
+    fn accept(&mut self, fleet: Fleet, snapshot: Snapshot, received: Instant) {
         self.fleet = fleet;
         self.synced_at = (snapshot.link == Link::Live)
-            .then(|| Instant::now().checked_sub(Duration::from_secs(snapshot.synced_secs)))
+            .then(|| received.checked_sub(Duration::from_secs(snapshot.synced_secs)))
             .flatten()
             .or(self.synced_at);
         self.link = Some(snapshot.link);
@@ -216,8 +218,8 @@ pub struct Dashboard {
     /// Wheel travel not yet turned into pages, per panel (the pager).
     wheel_accum: [f32; 5],
     /// A structural snapshot held back while an IME composes in the filter
-    /// field: a rebuild would end the composition.
-    pending: Option<Snapshot>,
+    /// field (a rebuild would end the composition), with when it came.
+    pending: Option<(Snapshot, Instant)>,
     /// The filter field had the focus when the input being handled began:
     /// a rebuild that input causes focuses the new field. For a release,
     /// what counts is the press: a press moves the focus to what it hits
@@ -274,24 +276,54 @@ impl Dashboard {
     fn from_snapshot(view: View, snapshot: Snapshot) -> Self {
         let mut feed = Feed::default();
         let fleet = snapshot.fleet.clone();
-        feed.accept(fleet, snapshot);
+        feed.accept(fleet, snapshot, Instant::now());
         Self::start(view, feed)
     }
 
-    /// Takes a snapshot in. One that changes only what time changes (texts,
-    /// meters, lanes) updates those widgets in place, so the scroll positions
-    /// and the hover survive; any other change rebuilds the screen.
+    /// Takes a snapshot in that has just come.
+    #[cfg(test)]
     fn apply(&mut self, snapshot: Snapshot, text: &mut TextStore) {
+        self.apply_received(snapshot, Instant::now(), text);
+    }
+
+    /// Takes a snapshot in that came at `received`. One that changes only
+    /// what time changes (texts, meters, lanes, the queue's order) updates
+    /// those widgets in place, so the scroll positions and the hover
+    /// survive; any other change rebuilds the screen.
+    fn apply_received(&mut self, snapshot: Snapshot, received: Instant, text: &mut TextStore) {
         let old = self.order();
         let fleet = health::keep_on_down(&self.feed.fleet, snapshot.fleet.clone(), &snapshot.link);
         let structural = self.feed.link.as_ref() != Some(&snapshot.link)
             || !self.feed.fleet.same_structure(&fleet);
-        self.feed.accept(fleet, snapshot);
+        self.feed.accept(fleet, snapshot, received);
+        // What the filter matches is structure: only a structural snapshot
+        // can move the selection or the drawer, and its rebuild shows that.
         self.reselect(&old);
         if structural {
             self.rebuilt(self.view, text);
         } else {
             self.refresh(text);
+        }
+    }
+
+    /// Takes in what the feed sent since the last frame, as of `now`. A
+    /// structural snapshot waits while an IME composes in the filter field
+    /// (a rebuild would end the composition), keeping when it came.
+    fn take_snapshots(&mut self, now: Instant, text: &mut TextStore) {
+        let latest = self
+            .feed
+            .channel
+            .as_ref()
+            .and_then(|channel| channel.snapshots.try_iter().last());
+        if let Some(snapshot) = latest {
+            self.pending = Some((snapshot, now));
+        }
+        if let Some((snapshot, received)) = self.pending.take() {
+            if self.composing() && self.feed.structural(&snapshot) {
+                self.pending = Some((snapshot, received));
+            } else {
+                self.apply_received(snapshot, received, text);
+            }
         }
     }
 
@@ -301,12 +333,14 @@ impl Dashboard {
     }
 
     /// After the order changed from `old`: a selected pane that left it is
-    /// replaced by its neighbour (expanding its queue card), and a drawer
-    /// whose worker left the fleet or the filter closes (by the caller's
-    /// rebuild or refill).
+    /// replaced by its neighbour (expanding its queue card). The drawer
+    /// closes when its worker left the fleet or the filter; else it follows
+    /// a selection that moved, as it does on J / K. The caller's rebuild,
+    /// refill or `reopen_drawer` shows that, and `watch` asks for its tail.
     fn reselect(&mut self, old: &[u64]) {
         let selected = select::reselect(old, &self.order(), self.view.selected);
-        if selected != self.view.selected {
+        let moved = selected != self.view.selected;
+        if moved {
             self.view.selected = selected;
             self.view.reveal = selected;
             if let Some(pane) = selected.filter(|pane| self.waits(*pane)) {
@@ -321,6 +355,8 @@ impl Dashboard {
         };
         if self.view.detail.is_some_and(gone) {
             self.view.detail = None;
+        } else if moved && self.view.detail.is_some() && selected.is_some() {
+            self.view.detail = selected;
         }
     }
 
@@ -402,8 +438,34 @@ impl Dashboard {
             );
             registry.timeline = Some(parts);
         }
+        self.reorder_queue();
         self.paint_selection();
         self.tick(Instant::now());
+    }
+
+    /// Puts the queue's cards (and its pager items) in the queue's order
+    /// again, which waits change: the cards show the order J / K walk.
+    fn reorder_queue(&mut self) {
+        let Some(parts) = self.registry.lists[Panel::Queue as usize].as_mut() else {
+            return;
+        };
+        let matching = self
+            .feed
+            .fleet
+            .workers
+            .iter()
+            .filter(|w| self.filter.matches(w));
+        let order: Vec<u64> = queue::waiting(matching)
+            .into_iter()
+            .map(|(w, _)| w.pane)
+            .collect();
+        let at = |pane: &Option<u64>| pane.and_then(|pane| order.iter().position(|p| *p == pane));
+        parts.items.sort_by_key(|(_, pane)| at(pane));
+        // The cards are the list's only children (a list without cards
+        // has its "該当なし" caption instead).
+        for (index, (card, _)) in parts.items.iter().enumerate() {
+            self.tree.move_child(*card, index);
+        }
     }
 
     /// Builds the same screen again for a changed view, keeping the theme (the
@@ -540,7 +602,7 @@ impl Dashboard {
         ];
         let nobody = feed.link.as_ref().filter(|_| workers.is_empty());
         if let Some(link) = nobody {
-            empty(tree, body, link);
+            empty(tree, body, link, &view.shown);
         }
         // The demo's numbers stand for lines; the live ones count preview
         // updates.
@@ -750,6 +812,7 @@ impl Dashboard {
         self.close_drawer(text);
         self.open_drawer();
         self.lay_out_again(text);
+        self.watch();
     }
 
     /// Shows the drawer on `pane` (selecting it), or closes it.
@@ -821,6 +884,7 @@ impl Dashboard {
         self.reselect(&old);
         if self.view.detail != detail {
             self.close_drawer(text);
+            self.open_drawer();
         }
         self.refill_body(text);
         let count = self.header.match_count;
@@ -829,7 +893,8 @@ impl Dashboard {
             count,
             match_text(&self.feed.fleet.workers, &self.filter),
         );
-        self.tree.set_hidden(count, !self.filter.active());
+        // Shown for any query, one of blanks too (it matches everyone).
+        self.tree.set_hidden(count, self.filter.query.is_empty());
         self.watch();
     }
 
@@ -924,19 +989,18 @@ impl Dashboard {
             &mut self.wheel_accum,
             event,
         );
-        if taken && let Some(viewport) = self.viewport {
-            let pages = pager::fit(
-                &mut self.tree,
-                text,
-                viewport,
-                &self.registry.lists,
-                &mut self.view,
-            );
-            if pages {
-                self.tree.prepare(viewport, text);
-            }
+        if taken {
+            self.paged(text);
         }
         taken
+    }
+
+    /// After the wheel changed a page: pages and lays out at once (input
+    /// may follow before the next frame), and leaves the root marked for
+    /// compositing, since that layout is not a frame the window presented
+    /// and would otherwise take the change from it (see `rebuilt`).
+    fn paged(&mut self, text: &mut TextStore) {
+        self.lay_out_again(text);
     }
 }
 
@@ -1008,21 +1072,7 @@ impl Screen for Dashboard {
     }
 
     fn before_frame(&mut self, text: &mut TextStore) {
-        let latest = self
-            .feed
-            .channel
-            .as_ref()
-            .and_then(|channel| channel.snapshots.try_iter().last());
-        if latest.is_some() {
-            self.pending = latest;
-        }
-        if let Some(snapshot) = self.pending.take() {
-            if self.composing() && self.feed.structural(&snapshot) {
-                self.pending = Some(snapshot);
-            } else {
-                self.apply(snapshot, text);
-            }
-        }
+        self.take_snapshots(Instant::now(), text);
         let notice = self
             .feed
             .channel

@@ -1,7 +1,7 @@
 use noa_gpui_core::style::{
     AlignItems, FlexDirection, JustifyContent, Size as LayoutSize, auto, length, percent,
 };
-use noa_gpui_core::widgets::{Container, Label, Truncation};
+use noa_gpui_core::widgets::{Badge, Container, Label, Tone, Truncation};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
 use crate::fleet::{Grouping, Phase, Worker, minutes_text};
@@ -49,6 +49,11 @@ pub(super) fn timeline(
     let span = timeline_span(workers);
 
     let title = title_row(tree, section, Panel::Timeline, 12.0);
+    // One lane per worker shown, counted like the other panels' cards.
+    tree.insert(
+        Some(title),
+        Badge::count(workers.len() as u32).tone(Tone::Neutral),
+    );
     for phase in Phase::LEGEND {
         let item = tree.insert(
             Some(title),
@@ -108,6 +113,7 @@ pub(super) fn fill_lanes(
     reg.lists[Panel::Timeline as usize] = Some(ListParts {
         list: parts.lanes,
         items,
+        nested: Vec::new(),
         headers,
         indicator: parts.indicator,
     });

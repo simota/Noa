@@ -153,3 +153,58 @@ fn a_long_longest_label_leaves_room_for_the_link_status() {
     let longest = dashboard.tree.get::<Tag>(longest).unwrap().text();
     assert!(longest.contains('…'), "{longest}");
 }
+
+/// Each panel key under `id`: the keycap's keys and the label after it.
+fn panel_keys_under(tree: &UiTree, id: WidgetId) -> Vec<(Vec<String>, String)> {
+    let own = tree.get::<Kbd>(id).and_then(|kbd| {
+        let parent = tree.parent(id)?;
+        let next = tree.children(parent).get(1)?;
+        let label = tree.get::<Label>(*next)?.text().to_owned();
+        Some((kbd.keys().to_vec(), label))
+    });
+    own.into_iter()
+        .chain(
+            tree.children(id)
+                .iter()
+                .flat_map(|child| panel_keys_under(tree, *child)),
+        )
+        .collect()
+}
+
+#[test]
+fn with_nothing_to_show_the_panel_keys_stay_on_screen() {
+    let (channel, _snapshots, _notices, _commands) = Channel::detached();
+    let mut dashboard = Dashboard::live(Grouping::Orchestrator, channel);
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(window(), &mut text);
+    assert!(dashboard.panels.iter().all(Option::is_none), "connecting");
+    let keys = |d: &Dashboard| panel_keys_under(&d.tree, d.body);
+    let expected = |hidden: &[&str]| -> Vec<(Vec<String>, String)> {
+        KEYS.iter()
+            .map(|(digit, _, title)| {
+                let label = if hidden.contains(title) {
+                    format!("{title}（非表示）")
+                } else {
+                    (*title).to_owned()
+                };
+                (vec![digit.to_string()], label)
+            })
+            .collect()
+    };
+    assert_eq!(keys(&dashboard), expected(&[]));
+    press(&mut dashboard, &mut text, '2', Modifiers::default());
+    assert_eq!(keys(&dashboard), expected(&["作業中"]));
+    let tree = &dashboard.tree;
+    let screen = [0.0, 0.0, window().width, window().height];
+    let mut under = vec![dashboard.body];
+    while let Some(id) = under.pop() {
+        if tree.get::<Kbd>(id).is_some() {
+            let at = rect(tree, id);
+            assert!(
+                at[2] > 0.0 && inside(at, screen),
+                "a key off screen: {at:?}"
+            );
+        }
+        under.extend(tree.children(id));
+    }
+}

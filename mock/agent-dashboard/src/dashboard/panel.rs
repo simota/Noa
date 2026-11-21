@@ -186,7 +186,10 @@ pub(super) fn group_header(tree: &mut UiTree, parent: WidgetId, name: &str, n: u
     )
 }
 
-pub(super) fn empty(tree: &mut UiTree, body: WidgetId, link: &Link) {
+/// The body with no workers: why, and each panel's shortcut and whether it
+/// is shown (no panel title is on screen to say so, and the header's chips
+/// name only the hidden panels).
+pub(super) fn empty(tree: &mut UiTree, body: WidgetId, link: &Link, shown: &[bool; 5]) {
     let state = match link {
         Link::Connecting => EmptyState::new("Noa に接続しています…"),
         Link::Live => EmptyState::new("エージェントのペインが見つかりません").message(
@@ -195,7 +198,24 @@ pub(super) fn empty(tree: &mut UiTree, body: WidgetId, link: &Link) {
         Link::Down(reason) => EmptyState::new("エージェントのペインが見つかりません")
             .message(format!("Noa に接続できません: {reason}")),
     };
-    state.width(560.0).insert(tree, body);
+    let parts = state.width(560.0).insert(tree, body);
+    let keys = tree.insert(
+        Some(parts.root),
+        Container::row().align_items(AlignItems::CENTER).gap(12.0),
+    );
+    for panel in Panel::ALL {
+        let key = tree.insert(
+            Some(keys),
+            Container::row().align_items(AlignItems::CENTER).gap(3.0),
+        );
+        tree.insert(Some(key), Kbd::new([panel.digit()]));
+        let label = if shown[panel as usize] {
+            Label::new(panel.title())
+        } else {
+            Label::new(format!("{}（非表示）", panel.title())).color(Role::Muted)
+        };
+        tree.insert(Some(key), label.font_size(11.0));
+    }
 }
 
 /// Adds the selection bar to `card` as its last child: absolutely placed at

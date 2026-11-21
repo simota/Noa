@@ -3,7 +3,9 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use noa_ipc::{Client, ClientError, EventKind, Notification, Panel, Scope, ScopeSet, TextSource};
@@ -16,7 +18,7 @@ const NOTIFY_WAIT: Duration = Duration::from_secs(1);
 const RELIST_EVERY: Duration = Duration::from_secs(2);
 const SCREEN_EVERY: Duration = Duration::from_secs(2);
 const PULSE_EVERY: Duration = Duration::from_secs(5);
-/// The feed wakes the window at least this often while it runs, so the
+/// The window is woken at least this often while the feed runs, so the
 /// header's time since the last sync ticks between snapshots.
 const HEARTBEAT: Duration = Duration::from_secs(1);
 const SCREEN_MAX_BYTES: usize = 4000;
@@ -60,6 +62,8 @@ pub struct Channel {
     /// Why a command failed, for the header to show.
     pub notices: Receiver<String>,
     commands: Sender<Command>,
+    /// Dropped with this end, which ends the heartbeat thread.
+    _heartbeat: Sender<()>,
 }
 
 impl Channel {
@@ -79,6 +83,7 @@ impl Channel {
                 snapshots,
                 notices,
                 commands,
+                _heartbeat: mpsc::channel().0,
             },
             snapshot_tx,
             notice_tx,
@@ -88,20 +93,21 @@ impl Channel {
 }
 
 /// Starts the feed thread. `wake` is called after each snapshot it sends,
-/// and at least every `HEARTBEAT` while the thread runs.
-pub fn start(wake: impl Fn() + Send + 'static) -> Channel {
+/// and every `HEARTBEAT` until the channel is dropped.
+pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Channel {
     let (snapshot_tx, snapshots) = mpsc::channel();
     let (commands, command_rx) = mpsc::channel();
     let (notice_tx, notices) = mpsc::channel();
+    let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
+    let (heartbeat, _thread) = heartbeat(HEARTBEAT, Arc::clone(&wake));
     let feed = Feed {
         snapshots: snapshot_tx,
         notices: notice_tx,
         commands: command_rx,
-        wake: Box::new(wake),
+        wake,
         tracker: Tracker::default(),
         watched: Vec::new(),
         screens: HashMap::new(),
-        last_wake: Instant::now(),
         last_list: Instant::now(),
         last_contact: Instant::now(),
     };
@@ -113,7 +119,25 @@ pub fn start(wake: impl Fn() + Send + 'static) -> Channel {
         snapshots,
         notices,
         commands,
+        _heartbeat: heartbeat,
     }
+}
+
+/// Calls `wake` every `every` on a thread of its own: the feed thread can
+/// wait seconds on Noa (connecting, or a request near its 5 s timeout), and
+/// the header's time since the last sync must tick meanwhile. The thread
+/// ends once the returned sender is dropped.
+fn heartbeat(every: Duration, wake: Arc<dyn Fn() + Send + Sync>) -> (Sender<()>, JoinHandle<()>) {
+    let (stop, stopped) = mpsc::channel::<()>();
+    let thread = std::thread::Builder::new()
+        .name("live-heartbeat".into())
+        .spawn(move || {
+            while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(every) {
+                wake();
+            }
+        })
+        .expect("the heartbeat thread starts");
+    (stop, thread)
 }
 
 enum Stop {
@@ -132,12 +156,11 @@ struct Feed {
     snapshots: Sender<Snapshot>,
     notices: Sender<String>,
     commands: Receiver<Command>,
-    wake: Box<dyn Fn() + Send>,
+    wake: Arc<dyn Fn() + Send + Sync>,
     tracker: Tracker,
     watched: Vec<u64>,
     /// Each watched pane's screen tail and when it was fetched.
     screens: HashMap<u64, (Instant, Vec<String>)>,
-    last_wake: Instant,
     last_list: Instant,
     last_contact: Instant,
 }
@@ -170,33 +193,33 @@ impl Feed {
         }
     }
 
-    /// Waits `backoff` while keeping up with the dashboard's commands and
-    /// the heartbeat; false once the dashboard is gone.
+    /// Waits `backoff` while keeping up with the dashboard's commands; false
+    /// once the dashboard is gone.
     fn pause(&mut self, backoff: Duration) -> bool {
         let until = Instant::now() + backoff;
         loop {
             let left = until.saturating_duration_since(Instant::now());
-            match self.commands.recv_timeout(left.min(HEARTBEAT)) {
+            match self.commands.recv_timeout(left) {
                 Ok(Command::Watch(panes)) => self.watch(panes),
                 Ok(Command::Focus(_)) => {}
-                Err(RecvTimeoutError::Timeout) if left <= HEARTBEAT => return true,
-                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Timeout) => return true,
                 Err(RecvTimeoutError::Disconnected) => return false,
             }
-            self.heartbeat();
         }
     }
 
-    /// Wakes the window when it has not been woken for `HEARTBEAT`.
-    fn heartbeat(&mut self) {
-        if self.last_wake.elapsed() >= HEARTBEAT {
-            (self.wake)();
-            self.last_wake = Instant::now();
+    /// Follows the server instance `instance`. Pane ids mean something only
+    /// within one instance, so another one drops the screen tails fetched
+    /// so far with what the tracker saw: a new pane with an old id must not
+    /// show the old pane's screen.
+    fn serve(&mut self, instance: &str) {
+        if self.tracker.serve(instance) {
+            self.screens.clear();
         }
     }
 
     fn follow(&mut self, client: &mut Client) -> Result<(), Stop> {
-        self.tracker.serve(client.server_instance_id());
+        self.serve(client.server_instance_id());
         self.relist(client)?;
         client.subscribe(&[EventKind::StateChanged], None)?;
         let mut sent: Option<(Fleet, Instant)> = None;
@@ -218,7 +241,6 @@ impl Feed {
             self.tracker.advance(unix_now());
             self.fetch_screens(client)?;
             self.send_if_due(client, &mut sent)?;
-            self.heartbeat();
         }
     }
 
@@ -476,14 +498,16 @@ struct Spawned {
 
 impl Tracker {
     /// Pane ids mean something only within one server instance: another
-    /// one (Noa restarted) starts the observations over.
-    fn serve(&mut self, instance: &str) {
-        if self.instance != instance {
+    /// one (Noa restarted) starts the observations over. True when it did.
+    fn serve(&mut self, instance: &str) -> bool {
+        let other = self.instance != instance;
+        if other {
             *self = Tracker {
                 instance: instance.to_owned(),
                 ..Tracker::default()
             };
         }
+        other
     }
 
     fn is_worker(&self, pane: u64) -> bool {
@@ -1709,5 +1733,67 @@ pub(crate) mod tests {
         assert_eq!(tracker.seen.len(), 1);
         tracker.serve("b");
         assert!(tracker.seen.is_empty() && tracker.panels.is_empty());
+    }
+
+    /// A feed with nobody at the dashboard's end.
+    fn idle_feed() -> Feed {
+        Feed {
+            snapshots: mpsc::channel().0,
+            notices: mpsc::channel().0,
+            commands: mpsc::channel().1,
+            wake: Arc::new(|| {}),
+            tracker: Tracker::default(),
+            watched: Vec::new(),
+            screens: HashMap::new(),
+            last_list: Instant::now(),
+            last_contact: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn another_server_instance_drops_the_screen_tails() {
+        let mut feed = idle_feed();
+        feed.serve("a");
+        feed.watch(vec![2]);
+        let fetched = Instant::now();
+        feed.screens.insert(2, (fetched, vec!["$ old".into()]));
+        feed.serve("a");
+        assert!(feed.screens.contains_key(&2), "the same server");
+        feed.serve("b");
+        assert!(feed.screens.is_empty(), "pane 2 of the old server");
+        assert_eq!(feed.watched, [2], "still watched: fetched from the new one");
+    }
+
+    /// Waits up to a second for `thread` to end.
+    fn ends(thread: &JoinHandle<()>) -> bool {
+        let until = Instant::now() + Duration::from_secs(1);
+        while !thread.is_finished() && Instant::now() < until {
+            std::thread::yield_now();
+        }
+        thread.is_finished()
+    }
+
+    #[test]
+    fn the_heartbeat_wakes_on_its_own_until_the_channel_goes() {
+        let (woken, wakes) = mpsc::channel();
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            let _ = woken.send(());
+        });
+        let (stop, thread) = heartbeat(Duration::from_millis(5), wake);
+        // No feed loop turns here, as when it waits on Noa: the wakes come
+        // anyway.
+        for n in 0..3 {
+            let wait = Duration::from_secs(1);
+            assert!(wakes.recv_timeout(wait).is_ok(), "wake {n}");
+        }
+        let channel = Channel {
+            snapshots: mpsc::channel().1,
+            notices: mpsc::channel().1,
+            commands: mpsc::channel().0,
+            _heartbeat: stop,
+        };
+        assert!(!thread.is_finished(), "the channel is still there");
+        drop(channel);
+        assert!(ends(&thread), "the heartbeat outlives its channel");
     }
 }

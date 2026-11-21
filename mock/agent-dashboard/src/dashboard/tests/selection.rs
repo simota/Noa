@@ -228,3 +228,138 @@ fn escape_backs_out_one_step_at_a_time() {
     key(&mut dashboard, &mut text, Key::Escape);
     assert_eq!(dashboard.view.selected, None);
 }
+
+/// The labels in the drawer, if it is open.
+fn drawer_labels(dashboard: &Dashboard) -> Option<Vec<String>> {
+    let (root, _) = dashboard.registry.drawer?;
+    Some(labels_under(&dashboard.tree, root))
+}
+
+#[test]
+fn the_drawer_follows_any_reselection() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    key(&mut dashboard, &mut text, Key::Char('j'));
+    key(&mut dashboard, &mut text, Key::Space);
+    assert_eq!(dashboard.view.detail, Some(14));
+    // Hiding the queue takes fix-tests out of the order: the selection
+    // moves to the pane now at its place, and the drawer with it.
+    key(&mut dashboard, &mut text, Key::Char('1'));
+    let selected = dashboard.view.selected.unwrap();
+    assert_ne!(selected, 14);
+    assert_eq!(dashboard.view.detail, Some(selected));
+    let label = label_of(&dashboard, selected).to_owned();
+    let labels = drawer_labels(&dashboard).expect("the drawer is open");
+    assert!(labels.contains(&label), "{label} not in {labels:?}");
+    assert!(!labels.iter().any(|l| l == "fix-tests"), "{labels:?}");
+    let (_, pane) = dashboard.registry.open_buttons[0];
+    assert_eq!(pane, selected, "the drawer's 開く");
+    key(&mut dashboard, &mut text, Key::Enter);
+    let status = status_of(&dashboard);
+    assert_eq!(status, format!("モック: {label} のペインへ移動します"));
+}
+
+#[test]
+fn a_filtered_out_drawer_worker_closes_the_drawer() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    key(&mut dashboard, &mut text, Key::Char('j'));
+    key(&mut dashboard, &mut text, Key::Space);
+    assert_eq!(dashboard.view.detail, Some(14));
+    key(&mut dashboard, &mut text, Key::Char('/'));
+    typed(&mut dashboard, &mut text, "/");
+    typed(&mut dashboard, &mut text, "codex");
+    assert_eq!(dashboard.view.detail, None);
+    assert!(drawer_labels(&dashboard).is_none());
+    assert_eq!(dashboard.tree.overlays().count(), 0);
+    assert_eq!(dashboard.view.selected, Some(19), "fix-tests' place");
+}
+
+#[test]
+fn a_live_drawer_watches_the_worker_it_moved_to() {
+    let (mut dashboard, mut text, commands) = live_with(live(fleet::canned(), 0));
+    key(&mut dashboard, &mut text, Key::Char('j'));
+    key(&mut dashboard, &mut text, Key::Space);
+    commands.try_iter().for_each(drop);
+    key(&mut dashboard, &mut text, Key::Char('1'));
+    let selected = dashboard.view.selected.unwrap();
+    let watched: Vec<Command> = commands.try_iter().collect();
+    assert_eq!(watched.last(), Some(&Command::Watch(vec![selected])));
+}
+
+/// The queue's cards from top to bottom on screen.
+fn queue_on_screen(dashboard: &Dashboard) -> Vec<u64> {
+    let list = dashboard.registry.lists[Panel::Queue as usize]
+        .as_ref()
+        .unwrap();
+    let mut cards: Vec<(f32, u64)> = list
+        .items
+        .iter()
+        .map(|(id, pane)| (rect(&dashboard.tree, *id)[1], pane.unwrap()))
+        .collect();
+    cards.sort_by(|a, b| a.0.total_cmp(&b.0));
+    cards.into_iter().map(|(_, pane)| pane).collect()
+}
+
+#[test]
+fn the_queue_cards_keep_the_order_j_walks() {
+    let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet::canned(), 0));
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(window(), &mut text);
+    assert_eq!(queue_on_screen(&dashboard), [14, 19, 15, 16, 13]);
+    let card = |d: &Dashboard, pane: u64| {
+        let list = d.registry.lists[Panel::Queue as usize].as_ref().unwrap();
+        list.items.iter().find(|(_, p)| *p == Some(pane)).unwrap().0
+    };
+    let smoke = card(&dashboard, 19);
+
+    // Only e2e-smoke's wait grows, past fix-tests' (the same need rank).
+    let mut fleet = fleet::canned();
+    fleet
+        .workers
+        .iter_mut()
+        .find(|w| w.pane == 19)
+        .unwrap()
+        .wait_minutes = 3.0;
+    dashboard.apply(live(fleet, 0), &mut text);
+    dashboard.prepare(window(), &mut text);
+    assert_eq!(card(&dashboard, 19), smoke, "updated in place");
+    let shown = queue_on_screen(&dashboard);
+    assert_eq!(shown, [19, 14, 15, 16, 13]);
+    assert_eq!(dashboard.order()[..5], shown);
+    key(&mut dashboard, &mut text, Key::Char('j'));
+    assert_eq!(
+        dashboard.view.selected,
+        Some(shown[0]),
+        "J takes the top card"
+    );
+}
+
+#[test]
+fn every_graph_node_names_its_root_row() {
+    let (dashboard, _text) = laid_out(Grouping::Orchestrator);
+    let tree = &dashboard.tree;
+    let graph = dashboard.registry.lists[Panel::Graph as usize]
+        .as_ref()
+        .unwrap();
+    for worker in &dashboard.feed.fleet.workers {
+        let item = graph.item_of(worker.pane).unwrap_or_else(|| {
+            panic!("no root row shows {}", worker.label);
+        });
+        let (row, _) = graph.items[item];
+        let (pill, _, _) = dashboard
+            .registry
+            .marks
+            .iter()
+            .find(|(_, pane, mark)| *pane == worker.pane && matches!(mark, Mark::Node { .. }))
+            .unwrap();
+        let mut up = Some(*pill);
+        while up.is_some() && up != Some(row) {
+            up = up.and_then(|id| tree.parent(id));
+        }
+        assert_eq!(up, Some(row), "{}'s node is not in its row", worker.label);
+    }
+    // perf-wish has no pane of its own: its row holds perf-probe (a child)
+    // and e2e-smoke (a grandchild).
+    let perf_wish = graph.item_of(13).unwrap();
+    assert_eq!(graph.items[perf_wish].1, None);
+    assert_eq!(graph.item_of(19), Some(perf_wish));
+}

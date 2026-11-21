@@ -103,6 +103,7 @@ pub(super) fn queue(
     reg.lists[Panel::Queue as usize] = Some(ListParts {
         list,
         items,
+        nested: Vec::new(),
         headers: Vec::new(),
         indicator,
     });

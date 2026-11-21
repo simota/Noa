@@ -67,7 +67,7 @@ fn read_pixels(
     let slice = buf.slice(..);
     slice.map_async(wgpu::MapMode::Read, |_| {});
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-    let data = slice.get_mapped_range().to_vec();
+    let data = slice.get_mapped_range().unwrap().to_vec();
     let mut out = Vec::with_capacity((w * h * 4) as usize);
     for y in 0..h {
         let start = (y * bytes_per_row) as usize;

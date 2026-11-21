@@ -36,7 +36,7 @@ fn report(label: &str, mut samples_us: Vec<f64>) {
 }
 
 fn device_queue() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter =
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
             .ok()?;
@@ -69,7 +69,7 @@ fn pixel_digest(device: &wgpu::Device, queue: &wgpu::Queue, target: &wgpu::Textu
     queue.submit([encoder.finish()]);
     buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
     let _ = device.poll(wgpu::PollType::wait_indefinitely());
-    let pixels = buffer.slice(..).get_mapped_range();
+    let pixels = buffer.slice(..).get_mapped_range().unwrap();
     pixels
         .chunks_exact(row_bytes as usize)
         .flat_map(|row| &row[..width as usize * 4])

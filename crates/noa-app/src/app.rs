@@ -638,7 +638,14 @@ pub(crate) struct StartupTasks {
 }
 
 impl StartupTasks {
-    pub(crate) fn spawn(config: &AppConfig) -> Self {
+    /// `display` is the event loop's display connection. wgpu's GLES backend
+    /// needs it on the instance to present (notably on Wayland); Metal and
+    /// Vulkan ignore it, so macOS passes `None` and spawns before the event
+    /// loop exists.
+    pub(crate) fn spawn(
+        config: &AppConfig,
+        display: Option<winit::event_loop::OwnedDisplayHandle>,
+    ) -> Self {
         let font_cfg = font_config_from_noa_config(&config.font);
         let (terminal_px_tx, px_rx) = crossbeam_channel::bounded(1);
         let (metrics_tx, terminal_metrics_rx) = crossbeam_channel::bounded(1);
@@ -663,13 +670,19 @@ impl StartupTasks {
         let sidebar = std::thread::spawn(move || {
             noa_font::load_font_stack(&font_cfg).map(|stack| (stack, font_cfg))
         });
-        let gpu = std::thread::spawn(|| {
-            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let gpu = std::thread::spawn(move || {
+            let instance = wgpu::Instance::new(match display {
+                Some(display) => {
+                    wgpu::InstanceDescriptor::new_with_display_handle(Box::new(display))
+                }
+                None => wgpu::InstanceDescriptor::new_without_display_handle(),
+            });
             let adapter =
                 pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                     power_preference: wgpu::PowerPreference::default(),
                     compatible_surface: None,
                     force_fallback_adapter: false,
+                    apply_limit_buckets: false,
                 }))
                 .map_err(|e| format!("no compatible GPU adapter found ({e})"))?;
             crate::startup_trace::mark("gpu-adapter-ready");

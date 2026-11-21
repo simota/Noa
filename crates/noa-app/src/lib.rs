@@ -118,7 +118,10 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
     // items on the first window's critical path; start them on workers
     // before anything else so they overlap event-loop construction,
     // `App::new`, and window creation (startup W1). See `StartupTasks`.
-    let startup_tasks = app::StartupTasks::spawn(&config);
+    // Elsewhere the GPU instance needs the event loop's display handle, so
+    // the workers start right after the loop is built instead.
+    #[cfg(target_os = "macos")]
+    let startup_tasks = app::StartupTasks::spawn(&config, None);
     let mut builder = EventLoop::<UserEvent>::with_user_event();
 
     // Present as a real foreground macOS app even when launched from a plain
@@ -133,6 +136,8 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
     }
 
     let event_loop = builder.build()?;
+    #[cfg(not(target_os = "macos"))]
+    let startup_tasks = app::StartupTasks::spawn(&config, Some(event_loop.owned_display_handle()));
     startup_trace::mark("event-loop-built");
     let proxy = event_loop.create_proxy();
     let mut app = app::App::new(config, proxy, startup_tasks);

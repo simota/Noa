@@ -99,6 +99,7 @@ pub fn paint_startup_frame(
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         if let Some(layer) = &image_layer {
             layer.draw(&mut pass, image_draws.as_ref());
@@ -181,7 +182,7 @@ fn backdrop_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu
         primitive: wgpu::PrimitiveState::default(),
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
-        multiview: None,
+        multiview_mask: None,
         cache: None,
     })
 }
@@ -1161,6 +1162,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             // The scissor set here also confines the background image below

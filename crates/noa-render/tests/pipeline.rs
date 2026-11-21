@@ -37,7 +37,7 @@ fn idle_ember_overlay_reupload_two_sizes_preserves_destination_alpha() {
         eprintln!("no wgpu adapter available — skipping idle Ember overlay test");
         return;
     };
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let pipeline = CardPipeline::new(
         &device,
         wgpu::TextureFormat::Bgra8UnormSrgb,
@@ -76,6 +76,7 @@ fn idle_ember_overlay_reupload_two_sizes_preserves_destination_alpha() {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
         }
         queue.submit(Some(encoder.finish()));
@@ -171,5 +172,5 @@ fn idle_ember_overlay_reupload_two_sizes_preserves_destination_alpha() {
     device
         .poll(wgpu::PollType::wait_indefinitely())
         .expect("poll idle Ember draw");
-    assert!(pollster::block_on(device.pop_error_scope()).is_none());
+    assert!(pollster::block_on(error_scope.pop()).is_none());
 }

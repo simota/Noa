@@ -398,7 +398,8 @@ impl App {
                     }
                 }
                 match surface.get_current_texture() {
-                    Ok(frame) => {
+                    wgpu::CurrentSurfaceTexture::Success(frame)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
                         let view = frame
                             .texture
                             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -415,13 +416,13 @@ impl App {
                             self.shown_background_opacity(),
                             self.background_image.current_image(),
                         );
-                        frame.present();
+                        queue.present(frame);
                         crate::startup_trace::mark("bg-frame-presented");
                     }
                     // The window still shows the NSWindow background color
                     // set above (the same theme bg), so showing it unpainted
                     // is safe — just unexpected enough to log.
-                    Err(e) => log::warn!("startup pre-paint skipped: {e}"),
+                    other => log::warn!("startup pre-paint skipped: {other:?}"),
                 }
                 window.set_visible(true);
                 // Push the show to the screen now: the event loop won't turn

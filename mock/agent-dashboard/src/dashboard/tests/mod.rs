@@ -8,6 +8,7 @@ use super::*;
 mod details;
 mod feed;
 mod filtering;
+mod hardening;
 mod header_fit;
 mod health;
 mod help_overlay;

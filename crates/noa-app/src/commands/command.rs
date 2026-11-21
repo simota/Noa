@@ -94,6 +94,9 @@ pub enum AppCommand {
     /// Show or hide Ember, the pane list in the macOS menu bar, for this
     /// session (`ember` sets the launch state).
     ToggleEmber,
+    /// Start the agent dashboard (`mock/agent-dashboard`) as a program of
+    /// its own beside Noa.
+    OpenAgentDashboard,
     /// Open the "Theme" picker half of the split theme-settings overlay
     /// (theme-settings-ui R-1, later split into two overlays). Reachable
     /// only from the command palette — deliberately unbound in
@@ -272,6 +275,7 @@ impl AppCommand {
     pub(crate) const TOGGLE_SIDEBAR_MENU_ID: &'static str = "noa.view.toggle-sidebar";
     pub(crate) const TOGGLE_AUTO_APPROVE_MENU_ID: &'static str = "noa.view.toggle-auto-approve";
     pub(crate) const TOGGLE_EMBER_MENU_ID: &'static str = "noa.view.toggle-ember";
+    pub(crate) const OPEN_AGENT_DASHBOARD_MENU_ID: &'static str = "noa.view.open-agent-dashboard";
     pub(crate) const OPEN_SETTINGS_MENU_ID: &'static str = "noa.view.open-settings";
 
     pub(crate) fn menu_id(self) -> &'static str {
@@ -354,6 +358,7 @@ impl AppCommand {
             AppCommand::ToggleSidebar => Self::TOGGLE_SIDEBAR_MENU_ID,
             AppCommand::ToggleAutoApprove => Self::TOGGLE_AUTO_APPROVE_MENU_ID,
             AppCommand::ToggleEmber => Self::TOGGLE_EMBER_MENU_ID,
+            AppCommand::OpenAgentDashboard => Self::OPEN_AGENT_DASHBOARD_MENU_ID,
         }
     }
 
@@ -425,6 +430,7 @@ impl AppCommand {
             Self::TOGGLE_SIDEBAR_MENU_ID => Some(Self::ToggleSidebar),
             Self::TOGGLE_AUTO_APPROVE_MENU_ID => Some(Self::ToggleAutoApprove),
             Self::TOGGLE_EMBER_MENU_ID => Some(Self::ToggleEmber),
+            Self::OPEN_AGENT_DASHBOARD_MENU_ID => Some(Self::OpenAgentDashboard),
             Self::OPEN_SETTINGS_MENU_ID => Some(Self::OpenSettings),
             _ => None,
         }
@@ -550,6 +556,7 @@ impl AppCommand {
             Self::ToggleSidebar => "sidebar.toggle",
             Self::ToggleAutoApprove => "auto-approve.toggle",
             Self::ToggleEmber => "ember.toggle",
+            Self::OpenAgentDashboard => "agent-dashboard.open",
             Self::OpenThemePicker => "theme.open",
             Self::OpenSettings => "settings.open",
             Self::ToggleProcessMonitor => "process-monitor.toggle",
@@ -643,6 +650,7 @@ impl AppCommand {
             "sidebar.toggle" => Some(Self::ToggleSidebar),
             "auto-approve.toggle" => Some(Self::ToggleAutoApprove),
             "ember.toggle" => Some(Self::ToggleEmber),
+            "agent-dashboard.open" => Some(Self::OpenAgentDashboard),
             "theme.open" | "theme-settings.open" => Some(Self::OpenThemePicker),
             "settings.open" => Some(Self::OpenSettings),
             "process-monitor.toggle" => Some(Self::ToggleProcessMonitor),

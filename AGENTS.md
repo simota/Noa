@@ -59,7 +59,10 @@ when no GPU adapter is available.
   `.github/` or the script itself runs everything.
 - Before a pull request: `scripts/verify.sh --full`. CI runs exactly this on
   macOS and Linux; clippy (`-D warnings`) and desktop-file validation run only
-  on Linux, as before.
+  on Linux, as before. It also builds `mock/agent-dashboard`, a crate outside
+  the workspace, with its tests; the tests run only on macOS (some expect the
+  widths of macOS's system fonts). `scripts/verify.sh` runs the same check when
+  a change reaches that crate or the Noa crates it uses by path.
 - A failing check is named in the output; its full log is
   `.verify/<check>.log`, and timings are in `.verify/timings`.
 - The script pins the CI toolchain (`RUSTUP_TOOLCHAIN=1.92.0`). In a sandbox,

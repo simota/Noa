@@ -61,6 +61,21 @@ for dep, pkg in bad:
 sys.exit(1 if bad else 0)'
 }
 
+# mock/agent-dashboard is a crate of its own, outside the workspace. It is built
+# with its tests everywhere; the tests run on macOS only, because some expect
+# the text widths of macOS's system fonts.
+dashboard=mock/agent-dashboard/Cargo.toml
+dashboard_check() {
+  cargo build --manifest-path "$dashboard" --locked --all-targets || return
+  [ "$os" = Darwin ] || return 0
+  cargo test --manifest-path "$dashboard" --locked
+}
+# The packages the dashboard is built from by path: itself and the Noa crates it uses.
+dashboard_uses() {
+  cargo tree --manifest-path "$dashboard" --locked -e normal --prefix none -f '{p}' |
+    awk '/ \(\// {print $1}' | sort -u
+}
+
 full=0 changed=(); [ "${1:-}" = "--full" ] && full=1
 [ "$full" = 0 ] && while IFS= read -r path; do
   if [ ! -e "$path" ] || [[ $path =~ $widens ]]; then echo "verify: $path widens the change"; full=1; break; fi
@@ -77,6 +92,7 @@ if [ "$full" = 1 ]; then
   [ "$os" = Linux ] && run clippy cargo clippy --workspace --all-targets --locked -- -D warnings
   run build cargo build --workspace --locked
   run test cargo test --workspace --locked
+  run dashboard dashboard_check
   run hook-test python3 -I -B scripts/test_noa_agent_hook.py
   run skill-install-test python3 -I -B scripts/test_install_agent_skill.py
   if [ "$os" = Linux ]; then
@@ -84,9 +100,10 @@ if [ "$full" = 1 ]; then
       appstreamcli validate --no-net dist/linux/com.simota.noa.metainfo.xml'
   fi
 elif [ "${#changed[@]}" -gt 0 ]; then
-  pkgs=() hook=0 skill=0
+  pkgs=() hook=0 skill=0 dash=0
   for path in "${changed[@]}"; do
     p=$(package_of "$path"); [ -n "$p" ] && pkgs+=("$p")
+    case $path in mock/agent-dashboard/*) dash=1 ;; esac
     case $path in scripts/noa-agent-hook.py | scripts/test_noa_agent_hook.py) hook=1 ;; esac
     case $path in scripts/install-agent-skill.sh | scripts/test_install_agent_skill.py | skills/*) skill=1 ;; esac
   done
@@ -99,7 +116,15 @@ elif [ "${#changed[@]}" -gt 0 ]; then
     echo "verify: related packages: $(echo $related)"
     [ "$os" = Linux ] && run clippy cargo clippy --locked --all-targets "${args[@]}" -- -D warnings
     run test cargo test --locked "${args[@]}"
+    # Without the dashboard's package list, run its check rather than skip it.
+    if uses=$(dashboard_uses); then
+      for p in "${pkgs[@]}"; do grep -qx "$p" <<<"$uses" && dash=1; done
+    else
+      echo "verify: cannot list the dashboard's packages; checking it anyway"
+      dash=1
+    fi
   fi
+  [ "$dash" = 1 ] && run dashboard dashboard_check
   [ "$hook" = 1 ] && run hook-test python3 -I -B scripts/test_noa_agent_hook.py
   [ "$skill" = 1 ] && run skill-install-test python3 -I -B scripts/test_install_agent_skill.py
 fi
@@ -108,6 +133,7 @@ summary="verify: ok"; [ "${#failed[@]}" -gt 0 ] && summary="verify: FAILED: ${fa
 [ "$full" = 1 ] && [ -z "$(git status --porcelain)" ] && echo "$summary" >".verify/baseline-$(git rev-parse HEAD)"
 not_covered="GUI behaviour and visual parity (by hand), GPU tests when no adapter is present (they skip)"
 [ "$os" = Linux ] || not_covered="clippy and desktop-file validation (Linux only, as in CI), $not_covered"
+[ "$os" = Darwin ] || not_covered="the dashboard's tests (macOS only; it is built), $not_covered"
 echo "not covered: $not_covered"
 echo "$summary"
 [ "${#failed[@]}" -eq 0 ]

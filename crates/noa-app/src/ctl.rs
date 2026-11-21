@@ -1763,12 +1763,27 @@ impl Session {
     /// pane ids are given out again, and a remembered id can name another
     /// pane. Outside a listed pane there are no workers to check against,
     /// and the wait runs as before.
-    fn guard_wait(&mut self, panes: &[u64]) -> Result<(), Failure> {
+    ///
+    /// Its listing is taken as the wait's first ([`list_before_wait`]):
+    /// `false` when a caught signal ended the wait there.
+    fn guard_wait(
+        &mut self,
+        panes: &[u64],
+        known: &WaitStart,
+        deadline: Option<Instant>,
+    ) -> Result<bool, Failure> {
         let Some(own) = self.own_now()? else {
-            return Ok(());
+            return Ok(true);
         };
-        let panels = self.client.list_panels()?;
-        wait_guard(&panels, panes, own).map_err(Failure::error)
+        let Some(panels) =
+            list_before_wait(&mut self.client, known, panes, deadline, &mut |line| {
+                print_json(line)
+            })?
+        else {
+            return Ok(false);
+        };
+        wait_guard(&panels, panes, own).map_err(Failure::error)?;
+        Ok(true)
     }
 
     /// This pane, for a command that only targets its own workers.
@@ -1860,10 +1875,8 @@ impl Session {
                     return Err(Failure::error("no panes to wait for"));
                 }
                 let named = matches!(args.panes, PaneSet::Ids(_));
-                if named && !args.any_pane {
-                    self.guard_wait(&panes)?;
-                }
-                return self.wait(&panes, named, &args.after, &args.options);
+                let guard = named && !args.any_pane;
+                return self.wait(&panes, named, guard, &args.after, &args.options);
             }
             Command::Read {
                 pane,
@@ -2370,36 +2383,64 @@ impl Session {
         }
     }
 
+    /// `wait`, with `guard` for [`Self::guard_wait`]. Its listings before
+    /// the loop are taken as the loop's first one is, with the terminating
+    /// signals already caught and within the same `--timeout`.
     fn wait(
         &mut self,
         panes: &[u64],
         named: bool,
+        guard: bool,
         after: &[(u64, u64)],
         options: &WaitOptions,
     ) -> Result<i32, Failure> {
-        self.client
-            .subscribe(&[EventKind::StateChanged], Some(panes))?;
-        let mut panes = panes.to_vec();
-        if !named && after.iter().any(|(pane, _)| !panes.contains(pane)) {
-            let listed: Vec<u64> = self
-                .client
-                .list_panels()?
-                .iter()
-                .map(|panel| panel.pane_id.0)
-                .collect();
-            panes.extend(closed_after_panes(&panes, after, &listed));
-        }
-        let after = wait_baselines(&panes, after).map_err(Failure::error)?;
-        let resumed = resumed_since(&self.journal.events(), &after);
-        let start = if named {
-            WaitStart::Named { after }
-        } else {
-            WaitStart::Listed { after }
+        let deadline = options
+            .timeout
+            .and_then(|timeout| Instant::now().checked_add(timeout));
+        // What an interrupted line can say before the wait has a listing.
+        let known = WaitStart::Listed {
+            after: after.iter().copied().collect(),
         };
-        let since = SystemTime::now();
-        let panels = self.client.list_panels()?;
-        let results = self.result_paths(&panels);
-        self.wait_subscribed(&panes, start, options, (since, resumed, results))
+        let print = &mut |line: &serde_json::Value| print_json(line);
+        with_signals_caught(|| {
+            if guard && !self.guard_wait(panes, &known, deadline)? {
+                return Ok(EXIT_TIMEOUT);
+            }
+            self.client
+                .subscribe(&[EventKind::StateChanged], Some(panes))?;
+            let mut panes = panes.to_vec();
+            if !named && after.iter().any(|(pane, _)| !panes.contains(pane)) {
+                let mut pending = panes.clone();
+                pending.extend(closed_after_panes(&panes, after, &[]));
+                let Some(listed) =
+                    list_before_wait(&mut self.client, &known, &pending, deadline, print)?
+                else {
+                    return Ok(EXIT_TIMEOUT);
+                };
+                let listed: Vec<u64> = listed.iter().map(|panel| panel.pane_id.0).collect();
+                panes.extend(closed_after_panes(&panes, after, &listed));
+            }
+            let after = wait_baselines(&panes, after).map_err(Failure::error)?;
+            let resumed = resumed_since(&self.journal.events(), &after);
+            let start = if named {
+                WaitStart::Named { after }
+            } else {
+                WaitStart::Listed { after }
+            };
+            let since = SystemTime::now();
+            let Some(panels) = list_before_wait(&mut self.client, &start, &panes, deadline, print)?
+            else {
+                return Ok(EXIT_TIMEOUT);
+            };
+            let results = self.result_paths(&panels);
+            // The loop's `--timeout` is what is left of the wait's.
+            let options = WaitOptions {
+                timeout: deadline
+                    .map(|deadline| deadline.saturating_duration_since(Instant::now())),
+                ..options.clone()
+            };
+            self.wait_subscribed(&panes, start, &options, (since, resumed, results))
+        })
     }
 
     /// Each pane's known result file ([`result_path`]).
@@ -2998,21 +3039,8 @@ pub(crate) fn wait_loop_with_clock(
     let deadline = options
         .timeout
         .and_then(|timeout| Instant::now().checked_add(timeout));
-    // A request past the client's deadline on a live connection is retried
-    // until the wait's own deadline; a lost connection still ends the wait.
-    let before_deadline = || deadline.is_none_or(|deadline| Instant::now() < deadline);
-    let first = loop {
-        match source.list() {
-            Err(failure) if failure.transient && before_deadline() => {
-                // A caught signal ends a wait still without its first
-                // listing too (a wedged Noa keeps the socket open).
-                if source.interrupted() {
-                    emit(&interrupted_before_listing(&start, panes));
-                    return Ok(EXIT_TIMEOUT);
-                }
-            }
-            result => break result?,
-        }
+    let Some(first) = list_before_wait(source, &start, panes, deadline, emit)? else {
+        return Ok(EXIT_TIMEOUT);
     };
     let mut latest = watched(first, panes);
     let mut listed_at = Instant::now();
@@ -3307,6 +3335,34 @@ pub(crate) fn wait_loop_with_clock(
         // notifying.
         // Still set here only when a re-list above timed out: keep it.
         relist_pending |= relist || listed_at.elapsed() >= relist_every;
+    }
+}
+
+/// A listing a wait takes before it has one (its first, the named wait's
+/// guard, the result paths). A request past the client's deadline on a live
+/// connection is retried until the wait's own `deadline`; a lost connection
+/// still ends the wait. `None` when a caught signal ended the wait first
+/// (a wedged Noa keeps the socket open), after its line went to `emit`.
+pub(crate) fn list_before_wait(
+    source: &mut impl WaitSource,
+    start: &WaitStart,
+    panes: &[u64],
+    deadline: Option<Instant>,
+    emit: &mut dyn FnMut(&serde_json::Value),
+) -> Result<Option<Vec<Panel>>, Failure> {
+    loop {
+        match source.list() {
+            Err(failure)
+                if failure.transient
+                    && deadline.is_none_or(|deadline| Instant::now() < deadline) =>
+            {
+                if source.interrupted() {
+                    emit(&interrupted_before_listing(start, panes));
+                    return Ok(None);
+                }
+            }
+            result => return result.map(Some),
+        }
     }
 }
 
@@ -6954,6 +7010,90 @@ mod tests {
                 "baseline": [{"paneId": "8", "seq": 4}],
             })]
         );
+    }
+
+    // Review finding: a wait's listings before its loop (the named wait's
+    // guard, the result paths) neither retried a timed-out listing nor
+    // looked at a caught signal: a timeout exited 3 and a signal ended the
+    // process without the interrupted line.
+    #[test]
+    fn a_listing_before_the_wait_loop_retries_and_honours_a_signal() {
+        let start = WaitStart::Named {
+            after: HashMap::from([(8, 4)]),
+        };
+        let mut source = ListingTimesOut { lists: 0, after: 3 };
+        let mut lines = Vec::new();
+        let listed = list_before_wait(&mut source, &start, &[8, 9], None, &mut |line| {
+            lines.push(line.clone())
+        });
+        assert!(
+            matches!(listed, Ok(None)),
+            "{:?}",
+            listed.map_err(|f| f.message)
+        );
+        assert_eq!(source.lists, 3);
+        assert_eq!(
+            lines,
+            vec![serde_json::json!({
+                "timeout": true,
+                "interrupted": true,
+                "pending": ["8", "9"],
+                "baseline": [{"paneId": "8", "seq": 4}],
+            })]
+        );
+
+        // A timeout is retried until a listing comes back.
+        let mut source = FakeSource {
+            lists: vec![vec![panel(1, Some("running"), false)]],
+            notifications: Default::default(),
+            list_calls: 0,
+            texts: HashMap::new(),
+        };
+        let mut flaky = Flaky {
+            inner: &mut source,
+            fail: 2,
+        };
+        let listed = list_before_wait(&mut flaky, &start, &[8], None, &mut |_| {}).unwrap();
+        assert_eq!(listed.map(|panels| panels.len()), Some(1));
+
+        // Past the wait's deadline it ends as the first listing does.
+        let mut flaky = Flaky {
+            inner: &mut source,
+            fail: usize::MAX,
+        };
+        let failure = list_before_wait(&mut flaky, &start, &[8], Some(Instant::now()), &mut |_| {})
+            .unwrap_err();
+        assert_eq!(failure.code, EXIT_UNAVAILABLE);
+    }
+
+    /// A source whose first `fail` listings time out.
+    struct Flaky<'a> {
+        inner: &'a mut FakeSource,
+        fail: usize,
+    }
+
+    impl WaitSource for Flaky<'_> {
+        fn list(&mut self) -> Result<Vec<Panel>, Failure> {
+            if self.fail > 0 {
+                self.fail -= 1;
+                return Err(Failure::from(ClientError::Timeout(
+                    "noa.listPanels".to_string(),
+                )));
+            }
+            self.inner.list()
+        }
+
+        fn next(&mut self, timeout: Duration) -> Result<Option<Notification>, Failure> {
+            self.inner.next(timeout)
+        }
+
+        fn scrollback(&mut self, pane: u64) -> Result<Option<String>, Failure> {
+            self.inner.scrollback(pane)
+        }
+
+        fn screen(&mut self, pane: u64) -> Result<Option<String>, Failure> {
+            self.inner.screen(pane)
+        }
     }
 
     // Audit finding (REL-09): `wait PANE` checked no parent, so after a

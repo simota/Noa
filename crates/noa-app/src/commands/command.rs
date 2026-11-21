@@ -1,3 +1,4 @@
+use super::SpawnCommand;
 #[cfg(test)]
 use super::keybind::KeybindEngine;
 use crate::split_tree::Direction;
@@ -113,6 +114,9 @@ pub enum AppCommand {
     NextNotification,
     ComposePrompt,
     ReadOutput,
+    /// `spawn:<command line>` (a Noa extension): run the command line in the
+    /// background. Reachable from `keybind` and `command-palette-entry` only.
+    Spawn(SpawnCommand),
 }
 
 /// Config-addressable copy-mode entry actions. `CursorOnly` implements the
@@ -332,7 +336,7 @@ impl AppCommand {
             AppCommand::OpenSettings => Self::OPEN_SETTINGS_MENU_ID,
             AppCommand::ToggleProcessMonitor => "",
             AppCommand::NextNotification => "",
-            AppCommand::ComposePrompt | AppCommand::ReadOutput => "",
+            AppCommand::ComposePrompt | AppCommand::ReadOutput | AppCommand::Spawn(_) => "",
             AppCommand::NextTab => Self::NEXT_TAB_MENU_ID,
             AppCommand::PrevTab => Self::PREV_TAB_MENU_ID,
             AppCommand::MoveTabToNewWindow
@@ -449,12 +453,13 @@ impl AppCommand {
     /// the keybind diagnostics print it; [`Self::from_action_name`] reads
     /// it back.
     pub fn action_name(self) -> std::borrow::Cow<'static, str> {
-        if let Self::MoveTab(amount) = self
-            && !matches!(amount, -1 | 1)
-        {
-            return format!("tab.move:{amount}").into();
+        match self {
+            Self::MoveTab(amount) if !matches!(amount, -1 | 1) => {
+                format!("tab.move:{amount}").into()
+            }
+            Self::Spawn(command) => format!("spawn:{}", command.text()).into(),
+            _ => self.fixed_action_name().into(),
         }
-        self.fixed_action_name().into()
     }
 
     fn fixed_action_name(self) -> &'static str {
@@ -551,6 +556,8 @@ impl AppCommand {
             Self::NextNotification => "session.next-notification",
             Self::ComposePrompt => "agent.compose-prompt",
             Self::ReadOutput => "terminal.read-output",
+            // The command line is named in `action_name`.
+            Self::Spawn(_) => "spawn",
         }
     }
 
@@ -650,6 +657,11 @@ impl AppCommand {
                     name.strip_prefix("tab.move:")
                         .and_then(|amount| amount.parse::<isize>().ok())
                         .map(Self::MoveTab)
+                })
+                .or_else(|| {
+                    name.strip_prefix("spawn:")
+                        .and_then(SpawnCommand::new)
+                        .map(Self::Spawn)
                 }),
         }
     }

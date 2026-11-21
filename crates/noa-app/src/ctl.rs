@@ -167,13 +167,16 @@ Commands:
                                 pane on the alternate screen keeps no history:
                                 --scrollback (and wait --tail) then says on
                                 stderr that only its screen came back.
-  result PANE [--max-bytes N]   Print PANE's result file: its spawn's
+  result PANE [--max-bytes N | --path]
+                                Print PANE's result file: its spawn's
                                 NOA_RESULT from this pane's journal (or where
                                 close --prune moved it), else
                                 <its cwd>/.noa/result-LABEL.md for a pane with a
                                 plain label; exit 1 when there is none or no
                                 file is known. --max-bytes keeps the start and
-                                says so on stderr.
+                                says so on stderr. --path prints only the file's
+                                path (whether it exists or not), e.g. to tail a
+                                command's log; it does not go with --max-bytes.
   status [--answers]            One line per worker of this pane: its panel's
                                 state with what this pane's journal knows
                                 (tier, argv, lastTask, lastSentSeq, lastOutcome,
@@ -258,10 +261,12 @@ pub(crate) enum Command {
     Status {
         answers: bool,
     },
-    /// `result PANE [--max-bytes N]`: print a worker's result file.
+    /// `result PANE [--max-bytes N | --path]`: print a worker's result file,
+    /// or only its path.
     Result {
         pane: u64,
         max_bytes: Option<usize>,
+        path: bool,
     },
 }
 
@@ -506,9 +511,14 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
                 .value("--max-bytes")?
                 .map(|v| parse_u64("--max-bytes", &v).map(|n| n as usize))
                 .transpose()?;
+            let path = rest.flag("--path");
+            if path && max_bytes.is_some() {
+                return Err("--path and --max-bytes conflict: --path reads no file".to_string());
+            }
             Command::Result {
                 pane: single_pane(&mut rest)?,
                 max_bytes,
+                path,
             }
         }
         "close" => {
@@ -1925,7 +1935,11 @@ impl Session {
             }
             Command::Board { of, open } => return self.board(of, open),
             Command::Status { answers } => return self.status(answers),
-            Command::Result { pane, max_bytes } => return self.result(pane, max_bytes),
+            Command::Result {
+                pane,
+                max_bytes,
+                path,
+            } => return self.result(pane, max_bytes, path),
             Command::Report { .. } => unreachable!("handled before connecting"),
         }
         Ok(EXIT_OK)
@@ -2507,24 +2521,40 @@ impl Session {
         Ok(EXIT_OK)
     }
 
-    /// `result PANE`: print the worker's result file.
-    fn result(&mut self, pane: u64, max_bytes: Option<usize>) -> Result<i32, Failure> {
+    /// Where `result PANE` reads: the journal's path for the pane's spawn,
+    /// else the labelled file of a pane `ls` lists.
+    fn result_file(&mut self, pane: u64) -> Result<PathBuf, Failure> {
         let workers = journal::workers(&self.journal.events());
         let given = workers
             .iter()
             .find(|worker| worker.pane == pane)
             .and_then(|worker| worker.result.clone());
-        let path = match given {
-            Some(path) => PathBuf::from(path),
+        match given {
+            Some(path) => Ok(PathBuf::from(path)),
             None => {
                 let panels = self.client.list_panels()?;
                 panels
                     .iter()
                     .find(|panel| panel.pane_id.0 == pane)
                     .and_then(|panel| result_path(&workers, panel))
-                    .ok_or_else(|| Failure::error(no_known_result(pane)))?
+                    .ok_or_else(|| Failure::error(no_known_result(pane)))
             }
-        };
+        }
+    }
+
+    /// `result PANE`: print the worker's result file, or with `path_only`
+    /// just its path.
+    fn result(
+        &mut self,
+        pane: u64,
+        max_bytes: Option<usize>,
+        path_only: bool,
+    ) -> Result<i32, Failure> {
+        let path = self.result_file(pane)?;
+        if path_only {
+            let _ = result::write_path(&mut std::io::stdout().lock(), &path);
+            return Ok(EXIT_OK);
+        }
         let (text, cut) = result::read(pane, &path, max_bytes).map_err(Failure::error)?;
         let mut stdout = std::io::stdout().lock();
         let _ = stdout.write_all(text.as_bytes());
@@ -6270,6 +6300,34 @@ mod tests {
     // Audit finding (AU-04): after its context was cut, an orchestrator
     // could not tell which task, tier or answer went to which worker.
     #[test]
+    fn result_parses_path_and_refuses_it_with_max_bytes() {
+        let plain = Command::Result {
+            pane: 4,
+            max_bytes: None,
+            path: false,
+        };
+        assert_eq!(parse_args(&args(&["result", "4"])).unwrap(), plain);
+        let only = Command::Result {
+            pane: 4,
+            max_bytes: None,
+            path: true,
+        };
+        assert_eq!(parse_args(&args(&["result", "4", "--path"])).unwrap(), only);
+        assert_eq!(parse_args(&args(&["result", "--path", "4"])).unwrap(), only);
+        for both in [
+            ["result", "4", "--path", "--max-bytes", "10"],
+            ["result", "4", "--max-bytes", "10", "--path"],
+        ] {
+            let err = parse_args(&args(&both)).unwrap_err();
+            assert!(
+                err.contains("--path") && err.contains("--max-bytes"),
+                "{err}"
+            );
+        }
+        assert!(parse_args(&args(&["result", "--path"])).is_err());
+    }
+
+    #[test]
     fn status_joins_each_worker_with_its_journal_and_lists_gone_ones_last() {
         let events = journal::parse_events(concat!(
             r#"{"ev":"spawn","ts":1,"pane":4,"label":"fix","argv":["claude"],"tier":"light","worktree":"/r-wt/fix","branch":"orch/fix","result":"/r-wt/fix/.noa/result-fix.md"}"#,
@@ -6323,7 +6381,8 @@ mod tests {
             parse_args(&args(&["result", "4", "--max-bytes", "10"])).unwrap(),
             Command::Result {
                 pane: 4,
-                max_bytes: Some(10)
+                max_bytes: Some(10),
+                path: false
             }
         );
         assert!(parse_args(&args(&["result"])).is_err());

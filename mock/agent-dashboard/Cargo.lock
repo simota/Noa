@@ -1846,9 +1846,9 @@ dependencies = [
 
 [[package]]
 name = "noa-gpui-core"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32b03c997c075bbf8e82c8d836a8ebb90a4da541158581ffbdab96a85ae837b0"
+checksum = "15c4a2832795597889d0748dc7946c51a8d8976fb316a77eae3dce9672d5f836"
 dependencies = [
  "accesskit",
  "noa-gpui-layout",
@@ -1860,9 +1860,9 @@ dependencies = [
 
 [[package]]
 name = "noa-gpui-layout"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bf4390cbc2b6b7a8b7923890f609e7da17def48b7c9a1d841d5a39583a0fa47"
+checksum = "84b02a3c97e06ec984354a08d44758ec3a293f51fe0e63c6ef6ff83faaf9f849"
 dependencies = [
  "noa-gpui-scene",
  "taffy",
@@ -1870,9 +1870,9 @@ dependencies = [
 
 [[package]]
 name = "noa-gpui-platform"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "683ccc18012142a41a7f82dd12a93c0b2a46a1051b0869c8c77c2947309ff507"
+checksum = "1aecd290eaa64721d1ee5f19efb4b313dec979eb3923b20faa628f46d088e4d3"
 dependencies = [
  "accesskit_winit",
  "arboard",
@@ -1895,9 +1895,9 @@ dependencies = [
 
 [[package]]
 name = "noa-gpui-render-wgpu"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cda685eb7df1ba6f9ae3839c1aeec746fb04e14cd57fd30f723ae51b7b90100"
+checksum = "375143cf339299631f3381109ce284b2ebf2548bd0cd7a361c56cf35473ec1d9"
 dependencies = [
  "bytemuck",
  "glyphon",
@@ -1909,15 +1909,15 @@ dependencies = [
 
 [[package]]
 name = "noa-gpui-scene"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71b1766d72b1a4d4ff03bc354ad3f399d460ae9258e0cb424ab5c21a57954fca"
+checksum = "45e29686e8a1034e6a4e306fa7f3955e685ecb8e5a6ce290ced672329f581dc2"
 
 [[package]]
 name = "noa-gpui-text"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76d4e1204f7c5d63c44cee5cfd3392f98ec0b6e04e79ab873313353c6ad321b8"
+checksum = "88f4fc446c7f375555e7e1f38d09cc9a5370595083ce3143aa7c413de0f1d688"
 dependencies = [
  "cosmic-text",
  "noa-gpui-scene",

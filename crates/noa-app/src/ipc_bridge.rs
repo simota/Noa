@@ -116,6 +116,10 @@ pub(crate) struct IpcShared {
     /// eagerly at pane spawn so an attach does not wait for the coarse read
     /// snapshot refresh.
     pub(crate) attach_panes: HashMap<(u64, u64), IpcAttachPane>,
+    /// Ipc ids of panes that left `panels` while their Surface lived on.
+    /// `App::sync_ipc_snapshot` reports one in `removedPaneIds` if its Surface
+    /// closes before it is listed again; it is in neither listing by then.
+    pub(crate) unlisted_live: std::collections::HashSet<u64>,
 }
 
 impl IpcShared {

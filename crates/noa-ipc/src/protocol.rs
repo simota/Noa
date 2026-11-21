@@ -28,7 +28,7 @@ pub const DEFAULT_GRID_CAP_BYTES: usize = 256 * 1024;
 
 /// A `windowGroupId` / `windowId` / `paneId` / `subscriptionId`: u64
 /// internally, decimal string on the wire.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct WireId(pub u64);
 
 impl From<u64> for WireId {
@@ -247,6 +247,193 @@ const fn default_attachable() -> bool {
     true
 }
 
+/// One [`Panel`] key, as serialized, for a `noa.subscribe` /
+/// `noa.updateSubscription` `fields` filter. Only a string deserializes:
+/// an unknown name, or any other JSON value (including serde's `{"agent":
+/// null}` map form of a variant), fails, which the server answers with
+/// -32602.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PanelField {
+    WindowGroupId,
+    WindowId,
+    PaneId,
+    Name,
+    Cwd,
+    Branch,
+    Process,
+    Busy,
+    Attention,
+    Attachable,
+    Preview,
+    SurfaceId,
+    Agent,
+    Exit,
+    ParentPaneId,
+    Label,
+    Spawn,
+}
+
+/// The derived name → [`PanelField`] mapping, kept private so the only
+/// public way in is [`PanelField`]'s string-only `Deserialize` (a derived
+/// enum would also accept serde's map form of a variant). Its variants must
+/// match `PanelField`'s; `panel_field_names_are_exactly_the_serialized_panel_keys`
+/// parses every name through it.
+#[derive(Deserialize)]
+#[serde(remote = "PanelField", rename_all = "camelCase")]
+enum PanelFieldName {
+    WindowGroupId,
+    WindowId,
+    PaneId,
+    Name,
+    Cwd,
+    Branch,
+    Process,
+    Busy,
+    Attention,
+    Attachable,
+    Preview,
+    SurfaceId,
+    Agent,
+    Exit,
+    ParentPaneId,
+    Label,
+    Spawn,
+}
+
+impl<'de> Deserialize<'de> for PanelField {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        PanelFieldName::deserialize(de::IntoDeserializer::<D::Error>::into_deserializer(name))
+    }
+}
+
+impl PanelField {
+    /// Every field, in discriminant order.
+    const ALL_FIELDS: [PanelField; 17] = [
+        PanelField::WindowGroupId,
+        PanelField::WindowId,
+        PanelField::PaneId,
+        PanelField::Name,
+        PanelField::Cwd,
+        PanelField::Branch,
+        PanelField::Process,
+        PanelField::Busy,
+        PanelField::Attention,
+        PanelField::Attachable,
+        PanelField::Preview,
+        PanelField::SurfaceId,
+        PanelField::Agent,
+        PanelField::Exit,
+        PanelField::ParentPaneId,
+        PanelField::Label,
+        PanelField::Spawn,
+    ];
+
+    const fn bit(self) -> u32 {
+        1 << (self as u32)
+    }
+}
+
+/// A set of [`PanelField`]s, one bit per field.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct FieldMask(u32);
+
+impl FieldMask {
+    pub const EMPTY: FieldMask = FieldMask(0);
+    /// Every field. A panel added since the previous listing carries this.
+    pub const ALL: FieldMask = FieldMask((1 << PanelField::ALL_FIELDS.len()) - 1);
+
+    pub fn from_fields(fields: &[PanelField]) -> FieldMask {
+        FieldMask(fields.iter().fold(0, |mask, field| mask | field.bit()))
+    }
+
+    pub fn intersects(self, other: FieldMask) -> bool {
+        self.0 & other.0 != 0
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl Panel {
+    /// The fields of `self` that differ from `previous`. Both panels are
+    /// destructured without `..`, so a new `Panel` field does not compile
+    /// until it is mapped to a [`PanelField`].
+    pub fn changed_fields(&self, previous: &Panel) -> FieldMask {
+        let Panel {
+            window_group_id,
+            window_id,
+            pane_id,
+            name,
+            cwd,
+            branch,
+            process,
+            busy,
+            attention,
+            attachable,
+            preview,
+            surface_id,
+            agent,
+            exit,
+            parent_pane_id,
+            label,
+            spawn,
+        } = self;
+        let Panel {
+            window_group_id: prev_window_group_id,
+            window_id: prev_window_id,
+            pane_id: prev_pane_id,
+            name: prev_name,
+            cwd: prev_cwd,
+            branch: prev_branch,
+            process: prev_process,
+            busy: prev_busy,
+            attention: prev_attention,
+            attachable: prev_attachable,
+            preview: prev_preview,
+            surface_id: prev_surface_id,
+            agent: prev_agent,
+            exit: prev_exit,
+            parent_pane_id: prev_parent_pane_id,
+            label: prev_label,
+            spawn: prev_spawn,
+        } = previous;
+        let diffs = [
+            (
+                window_group_id != prev_window_group_id,
+                PanelField::WindowGroupId,
+            ),
+            (window_id != prev_window_id, PanelField::WindowId),
+            (pane_id != prev_pane_id, PanelField::PaneId),
+            (name != prev_name, PanelField::Name),
+            (cwd != prev_cwd, PanelField::Cwd),
+            (branch != prev_branch, PanelField::Branch),
+            (process != prev_process, PanelField::Process),
+            (busy != prev_busy, PanelField::Busy),
+            (attention != prev_attention, PanelField::Attention),
+            (attachable != prev_attachable, PanelField::Attachable),
+            (preview != prev_preview, PanelField::Preview),
+            (surface_id != prev_surface_id, PanelField::SurfaceId),
+            (agent != prev_agent, PanelField::Agent),
+            (exit != prev_exit, PanelField::Exit),
+            (
+                parent_pane_id != prev_parent_pane_id,
+                PanelField::ParentPaneId,
+            ),
+            (label != prev_label, PanelField::Label),
+            (spawn != prev_spawn, PanelField::Spawn),
+        ];
+        FieldMask(
+            diffs
+                .iter()
+                .filter(|(changed, _)| *changed)
+                .fold(0, |mask, (_, field)| mask | field.bit()),
+        )
+    }
+}
+
 #[cfg(test)]
 mod panel_tests {
     use super::Panel;
@@ -286,11 +473,30 @@ pub enum SplitDirection {
 }
 
 /// Subscribable event kinds for `noa.subscribe`.
+///
+/// The derived `Deserialize` also accepts serde's map form of a variant
+/// (`{"output": null}`). `noa.subscribe` has always accepted it and keeps
+/// doing so (FR-19). `noa.updateSubscription` is newer and reads its
+/// `events` through the private `EventKindName`, which takes only the strings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
     StateChanged,
     Output,
+}
+
+/// One `noa.updateSubscription` `events` element: an [`EventKind`] given as
+/// the string `"state_changed"` or `"output"`. Any other JSON value fails,
+/// including the map form that [`EventKind`]'s own `Deserialize` accepts,
+/// and the server answers that with -32602.
+struct EventKindName(EventKind);
+
+impl<'de> Deserialize<'de> for EventKindName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        EventKind::deserialize(de::IntoDeserializer::<D::Error>::into_deserializer(name))
+            .map(EventKindName)
+    }
 }
 
 // ---- noa.hello ----
@@ -573,12 +779,21 @@ impl SplitPlacement {
 
 // ---- noa.subscribe / noa.unsubscribe ----
 
+/// `noa.subscribe` params, parsed with plain `serde_json::from_value` as
+/// before `fields` existed (FR-19). By position, serde binds an array to the
+/// fields in declaration order, `[events, paneIds, fields]`, so the order is
+/// part of the wire format and `fields` is an optional third element.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubscribeParams {
     pub events: Vec<EventKind>,
     #[serde(default)]
     pub pane_ids: Option<Vec<WireId>>,
+    /// `state_changed` only: deliver a changed panel only when one of these
+    /// fields changed. Added panels and removals are always delivered.
+    /// Field-name strings only, by name or by position (see [`PanelField`]).
+    #[serde(default)]
+    pub fields: Option<Vec<PanelField>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -593,11 +808,68 @@ pub struct UnsubscribeParams {
     pub subscription_id: WireId,
 }
 
+/// `noa.updateSubscription` params. For each optional key the outer `Option`
+/// means "key present": absent keeps the current value, an array replaces it,
+/// and `null` (`paneIds` / `fields` only, as `Some(None)`) clears the filter.
+/// `events: null` fails to deserialize, and so does an `events` element that
+/// is not one of the strings (see `EventKindName`). The server takes these
+/// params as an object only (`parse_named_params` in `server.rs`).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSubscriptionParams {
+    pub subscription_id: WireId,
+    #[serde(
+        default,
+        deserialize_with = "present_event_names",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub events: Option<Vec<EventKind>>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pane_ids: Option<Option<Vec<WireId>>>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub fields: Option<Option<Vec<PanelField>>>,
+}
+
+/// Deserializes a key that is present: wraps its value in `Some`, so with
+/// `#[serde(default)]` an absent key stays `None`. For `T = Option<_>` a
+/// `null` becomes `Some(None)`; for any other `T` a `null` is an error.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+/// [`present`] for `UpdateSubscriptionParams::events`, reading each element
+/// through the string-only [`EventKindName`].
+fn present_event_names<'de, D>(deserializer: D) -> Result<Option<Vec<EventKind>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let names = Vec::<EventKindName>::deserialize(deserializer)?;
+    let kinds = names.into_iter().map(|EventKindName(kind)| kind).collect();
+    Ok(Some(kinds))
+}
+
 // ---- notifications ----
 
 #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StateChangedParams {
     pub panels: Vec<Panel>,
+    /// Panes whose Surface closed since the previous notification, in scope
+    /// for this connection. Omitted when empty (additive per FR-19).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub removed_pane_ids: Vec<WireId>,
     /// Set when a subscriber's push queue overflowed and dropped an older
     /// `stateChanged` before this one was sent (F-5, mirrors `noa.output`'s
     /// `dropped` — additive per FR-19, so older clients ignoring the field
@@ -786,5 +1058,392 @@ mod hex_color_tests {
         )
         .unwrap();
         assert_eq!(result.server_instance_id, "");
+    }
+}
+
+#[cfg(test)]
+mod subscription_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn base_panel() -> Panel {
+        Panel {
+            window_group_id: WireId(1),
+            window_id: WireId(2),
+            pane_id: WireId(3),
+            name: "shell".into(),
+            cwd: "/tmp".into(),
+            branch: None,
+            process: None,
+            busy: false,
+            attention: false,
+            attachable: true,
+            preview: vec![],
+            surface_id: None,
+            agent: None,
+            exit: None,
+            parent_pane_id: None,
+            label: None,
+            spawn: None,
+        }
+    }
+
+    /// Changes exactly `field` on `panel`. The exhaustive match means a new
+    /// `PanelField` needs a mutation here before this compiles.
+    fn mutate(panel: &mut Panel, field: PanelField) {
+        match field {
+            PanelField::WindowGroupId => panel.window_group_id = WireId(100),
+            PanelField::WindowId => panel.window_id = WireId(100),
+            PanelField::PaneId => panel.pane_id = WireId(100),
+            PanelField::Name => panel.name = "other".into(),
+            PanelField::Cwd => panel.cwd = "/other".into(),
+            PanelField::Branch => panel.branch = Some("main".into()),
+            PanelField::Process => panel.process = Some("vim".into()),
+            PanelField::Busy => panel.busy = !panel.busy,
+            PanelField::Attention => panel.attention = !panel.attention,
+            PanelField::Attachable => panel.attachable = !panel.attachable,
+            PanelField::Preview => {
+                panel.preview = vec![Row {
+                    row: 0,
+                    spans: vec![],
+                }]
+            }
+            PanelField::SurfaceId => panel.surface_id = Some("s".into()),
+            PanelField::Agent => {
+                panel.agent = Some(PanelAgent {
+                    kind: None,
+                    state: None,
+                    detail: None,
+                    seq: 1,
+                    blocked: None,
+                })
+            }
+            PanelField::Exit => panel.exit = Some(PanelExit { code: Some(0) }),
+            PanelField::ParentPaneId => panel.parent_pane_id = Some(WireId(7)),
+            PanelField::Label => panel.label = Some("w".into()),
+            PanelField::Spawn => {
+                panel.spawn = Some(PanelSpawn {
+                    argv: vec!["true".into()],
+                    started_at: 1,
+                })
+            }
+        }
+    }
+
+    fn field_name(field: PanelField) -> String {
+        serde_json::to_value(field)
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn state_changed_params_omit_removed_pane_ids_when_empty() {
+        let params = StateChangedParams {
+            panels: vec![],
+            removed_pane_ids: vec![],
+            dropped: false,
+        };
+        assert_eq!(
+            serde_json::to_value(&params).unwrap(),
+            serde_json::json!({ "panels": [] })
+        );
+    }
+
+    #[test]
+    fn state_changed_params_serialize_removed_pane_ids_as_decimal_strings() {
+        let params = StateChangedParams {
+            panels: vec![],
+            removed_pane_ids: vec![WireId(13), WireId(14)],
+            dropped: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&params).unwrap(),
+            serde_json::json!({ "panels": [], "removedPaneIds": ["13", "14"], "dropped": true })
+        );
+    }
+
+    /// A `Panel` with every optional field `Some`, written out without
+    /// [`PanelField::ALL_FIELDS`], so each `Panel` key is serialized whether
+    /// or not that list names it. The struct literal has no `..`, so a new
+    /// `Panel` field does not compile until it is set here.
+    fn panel_with_every_field_set() -> Panel {
+        Panel {
+            window_group_id: WireId(1),
+            window_id: WireId(2),
+            pane_id: WireId(3),
+            name: "shell".into(),
+            cwd: "/tmp".into(),
+            branch: Some("main".into()),
+            process: Some("vim".into()),
+            busy: false,
+            attention: false,
+            attachable: true,
+            preview: vec![],
+            surface_id: Some("s".into()),
+            agent: Some(PanelAgent {
+                kind: None,
+                state: None,
+                detail: None,
+                seq: 1,
+                blocked: None,
+            }),
+            exit: Some(PanelExit { code: Some(0) }),
+            parent_pane_id: Some(WireId(7)),
+            label: Some("w".into()),
+            spawn: Some(PanelSpawn {
+                argv: vec!["true".into()],
+                started_at: 1,
+            }),
+        }
+    }
+
+    #[test]
+    fn panel_field_names_are_exactly_the_serialized_panel_keys() {
+        let value = serde_json::to_value(panel_with_every_field_set()).unwrap();
+        let keys: HashSet<String> = value.as_object().unwrap().keys().cloned().collect();
+        let names: HashSet<String> = PanelField::ALL_FIELDS.into_iter().map(field_name).collect();
+        assert_eq!(
+            names, keys,
+            "PanelField::ALL_FIELDS vs the serialized Panel keys"
+        );
+        for name in &names {
+            let parsed: PanelField = serde_json::from_value(serde_json::json!(name)).unwrap();
+            assert_eq!(&field_name(parsed), name);
+        }
+    }
+
+    #[test]
+    fn each_panel_field_has_a_distinct_bit() {
+        let mut seen = 0u32;
+        for field in PanelField::ALL_FIELDS {
+            let bit = FieldMask::from_fields(&[field]);
+            assert_eq!(bit.0.count_ones(), 1, "{field:?}");
+            assert!(seen & bit.0 == 0, "{field:?} shares a bit");
+            seen |= bit.0;
+        }
+        assert_eq!(FieldMask(seen), FieldMask::ALL);
+        assert_eq!(
+            FieldMask::from_fields(&PanelField::ALL_FIELDS),
+            FieldMask::ALL
+        );
+        assert!(FieldMask::EMPTY.is_empty());
+        assert!(FieldMask::from_fields(&[]).is_empty());
+    }
+
+    #[test]
+    fn an_unknown_field_name_fails_to_deserialize() {
+        assert!(serde_json::from_value::<PanelField>(serde_json::json!("agnt")).is_err());
+        let params = serde_json::json!({ "events": ["state_changed"], "fields": ["agnt"] });
+        assert!(serde_json::from_value::<SubscribeParams>(params).is_err());
+    }
+
+    #[test]
+    fn a_field_name_must_be_a_string() {
+        // serde's externally tagged map form of a unit variant.
+        for value in [
+            serde_json::json!({ "agent": null }),
+            serde_json::json!({ "agent": [] }),
+            serde_json::json!(12),
+            serde_json::json!(null),
+        ] {
+            assert!(
+                serde_json::from_value::<PanelField>(value.clone()).is_err(),
+                "{value}"
+            );
+            let subscribe = serde_json::json!({ "events": ["state_changed"], "fields": [value] });
+            assert!(serde_json::from_value::<SubscribeParams>(subscribe).is_err());
+            let update = serde_json::json!({ "subscriptionId": "4", "fields": [value] });
+            assert!(serde_json::from_value::<UpdateSubscriptionParams>(update).is_err());
+        }
+        assert_eq!(
+            serde_json::from_value::<PanelField>(serde_json::json!("agent")).unwrap(),
+            PanelField::Agent
+        );
+        assert_eq!(
+            serde_json::to_value(PanelField::ParentPaneId).unwrap(),
+            serde_json::json!("parentPaneId")
+        );
+    }
+
+    #[test]
+    fn subscribe_params_take_an_event_kind_as_a_string_or_in_map_form_as_before() {
+        assert_eq!(
+            serde_json::to_value([EventKind::StateChanged, EventKind::Output]).unwrap(),
+            serde_json::json!(["state_changed", "output"])
+        );
+        for (value, kind) in [
+            (serde_json::json!("state_changed"), EventKind::StateChanged),
+            (serde_json::json!("output"), EventKind::Output),
+            // serde's externally tagged map form of a unit variant, which
+            // `noa.subscribe` has always accepted.
+            (
+                serde_json::json!({ "state_changed": null }),
+                EventKind::StateChanged,
+            ),
+            (serde_json::json!({ "output": null }), EventKind::Output),
+        ] {
+            assert_eq!(
+                serde_json::from_value::<EventKind>(value.clone()).unwrap(),
+                kind,
+                "{value}"
+            );
+            let subscribe = serde_json::json!({ "events": [value] });
+            let params: SubscribeParams = serde_json::from_value(subscribe).unwrap();
+            assert_eq!(params.events, vec![kind], "{value}");
+        }
+        for value in [
+            serde_json::json!("stateChanged"),
+            serde_json::json!(1),
+            serde_json::json!(null),
+        ] {
+            let subscribe = serde_json::json!({ "events": [value] });
+            assert!(
+                serde_json::from_value::<SubscribeParams>(subscribe).is_err(),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_subscription_events_must_be_one_of_the_strings() {
+        let params: UpdateSubscriptionParams = serde_json::from_value(
+            serde_json::json!({ "subscriptionId": "4", "events": ["state_changed", "output"] }),
+        )
+        .unwrap();
+        assert_eq!(
+            params.events,
+            Some(vec![EventKind::StateChanged, EventKind::Output])
+        );
+        for value in [
+            // The map form that `noa.subscribe` still accepts.
+            serde_json::json!({ "output": null }),
+            serde_json::json!({ "state_changed": null }),
+            serde_json::json!("stateChanged"),
+            serde_json::json!(1),
+            serde_json::json!(null),
+        ] {
+            let update = serde_json::json!({ "subscriptionId": "4", "events": [value] });
+            assert!(
+                serde_json::from_value::<UpdateSubscriptionParams>(update).is_err(),
+                "{value}"
+            );
+        }
+    }
+
+    /// By position `SubscribeParams` binds as serde binds any struct, in
+    /// declaration order: `[events]` and `[events, paneIds]` as before
+    /// `fields` existed, and `fields` as an optional third element under the
+    /// same string-only rule as by name.
+    #[test]
+    fn subscribe_params_by_position_take_fields_as_an_optional_third_element() {
+        let params: SubscribeParams =
+            serde_json::from_value(serde_json::json!([["state_changed"]])).unwrap();
+        assert_eq!(params.events, vec![EventKind::StateChanged]);
+        assert_eq!(params.pane_ids, None);
+        assert_eq!(params.fields, None);
+
+        let params: SubscribeParams =
+            serde_json::from_value(serde_json::json!([["output"], ["12"]])).unwrap();
+        assert_eq!(params.events, vec![EventKind::Output]);
+        assert_eq!(params.pane_ids, Some(vec![WireId(12)]));
+        assert_eq!(params.fields, None);
+
+        let params: SubscribeParams =
+            serde_json::from_value(serde_json::json!([["state_changed"], null, ["agent"]]))
+                .unwrap();
+        assert_eq!(params.pane_ids, None);
+        assert_eq!(params.fields, Some(vec![PanelField::Agent]));
+
+        let params: SubscribeParams =
+            serde_json::from_value(serde_json::json!([["state_changed"], ["12"], null])).unwrap();
+        assert_eq!(params.pane_ids, Some(vec![WireId(12)]));
+        assert_eq!(params.fields, None);
+
+        for params in [
+            serde_json::json!([["state_changed"], null, [{ "agent": null }]]),
+            serde_json::json!([["state_changed"], null, ["agnt"]]),
+            // More elements than fields.
+            serde_json::json!([["state_changed"], null, null, null]),
+        ] {
+            assert!(
+                serde_json::from_value::<SubscribeParams>(params.clone()).is_err(),
+                "{params}"
+            );
+        }
+    }
+
+    #[test]
+    fn changed_fields_reports_exactly_the_mutated_field() {
+        for field in PanelField::ALL_FIELDS {
+            let previous = base_panel();
+            let mut current = base_panel();
+            mutate(&mut current, field);
+            assert_eq!(
+                current.changed_fields(&previous),
+                FieldMask::from_fields(&[field]),
+                "{field:?}"
+            );
+        }
+
+        // Two fields at once: both bits, not just the first difference.
+        let previous = base_panel();
+        let mut current = base_panel();
+        mutate(&mut current, PanelField::Busy);
+        mutate(&mut current, PanelField::Agent);
+        assert_eq!(
+            current.changed_fields(&previous),
+            FieldMask::from_fields(&[PanelField::Busy, PanelField::Agent])
+        );
+    }
+
+    #[test]
+    fn changed_fields_of_equal_panels_is_empty() {
+        let mut panel = base_panel();
+        for field in PanelField::ALL_FIELDS {
+            mutate(&mut panel, field);
+        }
+        assert_eq!(panel.changed_fields(&panel.clone()), FieldMask::EMPTY);
+        assert_eq!(base_panel().changed_fields(&base_panel()), FieldMask::EMPTY);
+    }
+
+    #[test]
+    fn update_subscription_params_tell_absent_null_and_array_apart() {
+        let absent: UpdateSubscriptionParams =
+            serde_json::from_value(serde_json::json!({ "subscriptionId": "4" })).unwrap();
+        assert_eq!(absent.subscription_id, WireId(4));
+        assert!(absent.events.is_none() && absent.pane_ids.is_none() && absent.fields.is_none());
+
+        let cleared: UpdateSubscriptionParams = serde_json::from_value(
+            serde_json::json!({ "subscriptionId": "4", "paneIds": null, "fields": null }),
+        )
+        .unwrap();
+        assert_eq!(cleared.pane_ids, Some(None));
+        assert_eq!(cleared.fields, Some(None));
+
+        let replaced: UpdateSubscriptionParams = serde_json::from_value(serde_json::json!({
+            "subscriptionId": "4", "events": [], "paneIds": ["12"], "fields": ["agent"]
+        }))
+        .unwrap();
+        assert_eq!(replaced.events, Some(vec![]));
+        assert_eq!(replaced.pane_ids, Some(Some(vec![WireId(12)])));
+        assert_eq!(replaced.fields, Some(Some(vec![PanelField::Agent])));
+
+        assert!(
+            serde_json::from_value::<UpdateSubscriptionParams>(
+                serde_json::json!({ "subscriptionId": "4", "events": null })
+            )
+            .is_err()
+        );
+
+        assert_eq!(
+            serde_json::to_value(&cleared).unwrap(),
+            serde_json::json!({ "subscriptionId": "4", "paneIds": null, "fields": null })
+        );
+        assert_eq!(
+            serde_json::to_value(&absent).unwrap(),
+            serde_json::json!({ "subscriptionId": "4" })
+        );
     }
 }

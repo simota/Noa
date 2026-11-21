@@ -110,9 +110,10 @@ Assumptions: iOS reaches the server via a tunnel / loopback bind is possible eve
 | `noa.newTab` | control | `{ windowId? }` | `{ paneId }` |
 | `noa.split` | control | `{ paneId, direction:"horizontal"|"vertical" }` | `{ paneId }` |
 | `noa.closePane` | control | `{ paneId }` | `{ ok:true }` |
-| `noa.subscribe` | read | `{ events:["state_changed","output"], paneIds?:[…] }` | `{ subscriptionId }` |
+| `noa.subscribe` | read | `{ events:["state_changed","output"], paneIds?:[…], fields?:[…] }` | `{ subscriptionId }` |
+| `noa.updateSubscription` | read | `{ subscriptionId, events?, paneIds?, fields? }` | `{ ok:true }` |
 | `noa.unsubscribe` | read | `{ subscriptionId }` | `{ ok:true }` |
-| notification `noa.stateChanged` | — | `{ panels:[Panel] }` (delta) | (notification, no response) |
+| notification `noa.stateChanged` | — | `{ panels:[Panel], removedPaneIds?:[id], dropped?:bool }` (delta) | (notification, no response) |
 | notification `noa.output` | — | `{ paneId, coordinateGeneration, lines:[Row], dropped?:true }` | (notification, no response) |
 
 ### ID model & Panel metadata
@@ -202,7 +203,7 @@ Out-of-scope (v1):
 - OQ-1 (sandbox bind): whether loopback TCP bind is permitted under sandbox execution is unverified (Omen ⑦). If not possible, the degrade path (e.g. UDS fallback) will be confirmed/decided during the implementation phase.
 - OQ-2 (token revocation/rotation): the token rotation/revocation flow (handling of a regeneration CLI/config reload) is undecided for v1. Operation begins with just initial generation + `server-token` override; rotation is deferred to v2 consideration.
 - OQ-3 (response size limit): the per-response limit for `getGrid`/`getText` (tentatively 256KB) needs tuning based on measurement. Whether the `-32005` threshold becomes configurable is undecided.
-- OQ-4 (subscribe authorization granularity): subscriptions start with a blanket `read` grant. Per-panel fine-grained subscription policy is out-of-scope (a future opt-in).
+- OQ-4 (subscribe authorization granularity): resolved by `docs/specs/noa-ipc-pane-subscriptions.md` (removal notices, field filters, `noa.updateSubscription`). Authorization stays a blanket `read`; no per-pane ACL.
 
 (Resolved: ASSUME-1/ASSUME-2 were settled by the CHALLENGE decision as loopback TCP + iOS tunnel termination, and promoted to FR-2/FR-5/NFR-1.)
 

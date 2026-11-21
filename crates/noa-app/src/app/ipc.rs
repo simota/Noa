@@ -14,7 +14,7 @@ use crate::ipc_bridge::{
     registry_key,
 };
 use crate::session_store::SessionCardId;
-use noa_ipc::Panel;
+use noa_ipc::{ChangedPanel, FieldMask, Panel};
 
 /// Coarse refresh interval for the IPC snapshot's lock-bearing fields
 /// (mirrors `APPLESCRIPT_SNAPSHOT_REFRESH` in `app/applescript.rs`).
@@ -308,20 +308,36 @@ impl App {
             previous
         };
 
-        // Diff by pane id and broadcast only what changed or was added
-        // (F-5): a pane that disappeared from `panels` (closed) has no
-        // removal event in v1 — the spec leaves that to the next
-        // `noa.listPanels` poll, so it's simply absent from this diff.
+        // Diff by pane id and broadcast what changed, was added, or was
+        // removed (F-5): a pane that left `panels` because its Surface closed
+        // (its registry entry was pruned above) is a `removedPaneIds` entry.
+        // One that left the listing while its Surface lives on is not
+        // reported then; it is reported when its Surface closes later
+        // (`unlisted_live`), or seen again as an addition when it comes back.
         //
         // With nobody subscribed there is no one to tell. Asked after the new
         // listing is in place: a waiter subscribing from here on lists it
         // itself before it waits (`+ctl wait`, `send --wait`).
         if !self.ipc_broadcaster.has_state_changed_subscribers() {
+            // Nobody holds a cached panel to retire; a later subscriber lists
+            // the panes itself.
+            self.ipc_shared.lock().unlisted_live.clear();
             return;
         }
-        let changed = changed_panels(previous_panels, &self.ipc_shared.lock().panels);
-        if !changed.is_empty() {
-            self.ipc_broadcaster.broadcast_state_changed(changed);
+        let delta = {
+            let mut guard = self.ipc_shared.lock();
+            let shared = &mut *guard;
+            let registry = &shared.registry;
+            state_delta(
+                previous_panels,
+                &shared.panels,
+                &mut shared.unlisted_live,
+                |id| registry.resolve(id).is_some(),
+            )
+        }; // `ipc_shared` guard dropped here, before any Broadcaster lock.
+        if !delta.is_empty() {
+            self.ipc_broadcaster
+                .broadcast_state_delta(delta.changed, delta.removed);
         }
     }
 
@@ -1066,18 +1082,77 @@ fn focus_to_restore(
     restores
 }
 
-/// The panels of `current` that are new or differ from `previous`, in
-/// `current`'s order: the `noa.stateChanged` diff (F-5).
-fn changed_panels(previous: Vec<Panel>, current: &[Panel]) -> Vec<Panel> {
+/// One `noa.stateChanged` diff (F-5): the panels to publish and the pane ids
+/// whose Surface closed.
+struct StateDelta {
+    changed: Vec<ChangedPanel>,
+    removed: Vec<u64>,
+}
+
+impl StateDelta {
+    fn is_empty(&self) -> bool {
+        self.changed.is_empty() && self.removed.is_empty()
+    }
+}
+
+/// The `noa.stateChanged` diff between two listings (F-5).
+///
+/// `changed` holds the panels of `current` that are new (`FieldMask::ALL`) or
+/// differ from `previous` (the fields that differ), in `current`'s order.
+/// `removed` holds the ids listed in `previous`, absent from `current`, and
+/// no longer `live` (their registry entry was pruned because the Surface
+/// closed), in `previous`'s order without duplicates. An id that leaves the
+/// listing while still `live` goes into `unlisted_live`; it is removed, in
+/// ascending id order after the others, on the first diff where it is no
+/// longer `live`, and dropped from the set if it is listed again.
+fn state_delta(
+    previous: Vec<Panel>,
+    current: &[Panel],
+    unlisted_live: &mut HashSet<u64>,
+    live: impl Fn(u64) -> bool,
+) -> StateDelta {
+    let current_ids: HashSet<u64> = current.iter().map(|panel| panel.pane_id.0).collect();
+    let mut reported = HashSet::new();
+    let mut removed = Vec::new();
+    for id in previous.iter().map(|panel| panel.pane_id.0) {
+        if current_ids.contains(&id) {
+            continue;
+        }
+        if live(id) {
+            unlisted_live.insert(id);
+        } else if reported.insert(id) {
+            removed.push(id);
+        }
+    }
+    // A pane that left the listing earlier and has closed since is in
+    // neither listing; it is removed now. One listed again is an addition.
+    unlisted_live.retain(|id| !current_ids.contains(id));
+    let mut closed_unlisted: Vec<u64> = unlisted_live
+        .iter()
+        .copied()
+        .filter(|&id| !live(id) && !reported.contains(&id))
+        .collect();
+    closed_unlisted.sort_unstable();
+    unlisted_live.retain(|&id| live(id));
+    removed.extend(closed_unlisted);
     let previous_by_id: HashMap<u64, Panel> = previous
         .into_iter()
         .map(|panel| (panel.pane_id.0, panel))
         .collect();
-    current
+    let changed = current
         .iter()
-        .filter(|panel| previous_by_id.get(&panel.pane_id.0) != Some(*panel))
-        .cloned()
-        .collect()
+        .filter_map(|panel| {
+            let fields = match previous_by_id.get(&panel.pane_id.0) {
+                Some(previous) => panel.changed_fields(previous),
+                None => FieldMask::ALL,
+            };
+            (!fields.is_empty()).then(|| ChangedPanel {
+                panel: panel.clone(),
+                fields,
+            })
+        })
+        .collect();
+    StateDelta { changed, removed }
 }
 
 /// What `sync_ipc_snapshot` rebuilds on as soon as it changes: each card's
@@ -1628,8 +1703,16 @@ mod diff_tests {
         panel
     }
 
-    fn ids(panels: &[Panel]) -> Vec<u64> {
-        panels.iter().map(|panel| panel.pane_id.0).collect()
+    fn ids(changed: &[ChangedPanel]) -> Vec<u64> {
+        changed
+            .iter()
+            .map(|changed| changed.panel.pane_id.0)
+            .collect()
+    }
+
+    /// Every id outside `current` counts as closed.
+    fn closed(_: u64) -> bool {
+        false
     }
 
     #[test]
@@ -1647,18 +1730,118 @@ mod diff_tests {
             panel(2, "running", &["a"]),
             panel(5, "permission", &[]),
         ];
-        let changed = changed_panels(previous.clone(), &current);
-        assert_eq!(ids(&changed), [7, 3, 5]);
-        assert_eq!(changed[1], current[2]);
-        assert!(changed_panels(current.clone(), &current).is_empty());
-        assert_eq!(ids(&changed_panels(Vec::new(), &current)), ids(&current));
-        assert!(changed_panels(previous, &[]).is_empty());
+        let delta = state_delta(previous.clone(), &current, &mut HashSet::new(), closed);
+        assert_eq!(ids(&delta.changed), [7, 3, 5]);
+        assert_eq!(delta.changed[1].panel, current[2]);
+        // An added panel carries every field; a changed one only what moved.
+        assert_eq!(delta.changed[0].fields, FieldMask::ALL);
+        assert_eq!(
+            delta.changed[1].fields,
+            FieldMask::from_fields(&[noa_ipc::PanelField::Preview])
+        );
+        assert_eq!(delta.changed[2].fields, FieldMask::ALL);
+        assert_eq!(delta.removed, [9]);
+        assert!(state_delta(current.clone(), &current, &mut HashSet::new(), closed).is_empty());
+        let added = state_delta(Vec::new(), &current, &mut HashSet::new(), closed);
+        assert_eq!(ids(&added.changed), [7, 4, 3, 2, 5]);
+        assert!(added.changed.iter().all(|c| c.fields == FieldMask::ALL));
+        assert!(added.removed.is_empty());
+        let emptied = state_delta(previous, &[], &mut HashSet::new(), closed);
+        assert!(emptied.changed.is_empty());
+        assert_eq!(emptied.removed, [2, 3, 4, 9]);
         // A pane listed twice is compared against the last of its ids.
         let twice = vec![panel(2, "running", &["a"]), panel(2, "finished", &[])];
-        assert_eq!(
-            ids(&changed_panels(twice, &[panel(2, "running", &["a"])])),
-            [2]
+        let delta = state_delta(
+            twice,
+            &[panel(2, "running", &["a"])],
+            &mut HashSet::new(),
+            closed,
         );
+        assert_eq!(ids(&delta.changed), [2]);
+        assert_eq!(
+            delta.changed[0].fields,
+            FieldMask::from_fields(&[noa_ipc::PanelField::Preview, noa_ipc::PanelField::Agent])
+        );
+    }
+
+    #[test]
+    fn the_diff_reports_a_closed_pane_and_not_a_live_unlisted_one() {
+        let previous = vec![
+            panel(2, "running", &[]),
+            panel(3, "running", &[]),
+            panel(4, "running", &[]),
+        ];
+        let current = vec![panel(2, "running", &[])];
+        // 3 left the listing with its Surface alive; 4 closed.
+        let delta = state_delta(previous, &current, &mut HashSet::new(), |id| id == 3);
+        assert!(delta.changed.is_empty());
+        assert_eq!(delta.removed, [4]);
+        assert!(!delta.is_empty(), "a removal-only delta is still sent");
+    }
+
+    #[test]
+    fn a_pane_that_closes_after_leaving_the_listing_is_removed_then() {
+        let mut unlisted = HashSet::new();
+        // Sync 1: 3 leaves the listing while its Surface lives on.
+        let delta = state_delta(
+            vec![panel(2, "running", &[]), panel(3, "running", &[])],
+            &[panel(2, "running", &[])],
+            &mut unlisted,
+            |id| id == 3,
+        );
+        assert!(delta.removed.is_empty());
+        // Sync 2: still alive and unlisted: nothing to report yet.
+        let delta = state_delta(
+            vec![panel(2, "running", &[])],
+            &[panel(2, "running", &[])],
+            &mut unlisted,
+            |id| id == 3,
+        );
+        assert!(delta.is_empty());
+        // Sync 3: 3 closes while unlisted. Neither listing holds it.
+        let delta = state_delta(
+            vec![panel(2, "running", &[])],
+            &[panel(2, "running", &[])],
+            &mut unlisted,
+            closed,
+        );
+        assert_eq!(delta.removed, [3]);
+        assert!(unlisted.is_empty(), "a reported pane is forgotten");
+    }
+
+    #[test]
+    fn an_unlisted_pane_listed_again_is_an_addition_and_not_removed_later() {
+        let mut unlisted = HashSet::new();
+        state_delta(vec![panel(3, "running", &[])], &[], &mut unlisted, |_| true);
+        let back = state_delta(
+            Vec::new(),
+            &[panel(3, "running", &[])],
+            &mut unlisted,
+            |_| true,
+        );
+        assert_eq!(ids(&back.changed), [3]);
+        assert!(unlisted.is_empty());
+        // Its later close is a plain previous-listing removal, reported once.
+        let gone = state_delta(vec![panel(3, "running", &[])], &[], &mut unlisted, closed);
+        assert_eq!(gone.removed, [3]);
+    }
+
+    #[test]
+    fn a_closed_pane_listed_twice_is_removed_once() {
+        let previous = vec![
+            panel(5, "running", &[]),
+            panel(2, "running", &[]),
+            panel(5, "finished", &[]),
+            panel(6, "running", &[]),
+        ];
+        let delta = state_delta(
+            previous,
+            &[panel(2, "running", &[])],
+            &mut HashSet::new(),
+            closed,
+        );
+        assert!(delta.changed.is_empty());
+        assert_eq!(delta.removed, [5, 6]);
     }
 }
 
@@ -1707,7 +1890,9 @@ mod diff_perf {
         };
         run("copy then diff (before)", &mut |panels| {
             let previous = std::mem::replace(&mut *shared.lock(), panels.clone());
-            changed_panels(previous, &panels).len()
+            state_delta(previous, &panels, &mut HashSet::new(), |_| true)
+                .changed
+                .len()
         });
         run("no subscriber", &mut |panels| {
             let _previous = std::mem::replace(&mut *shared.lock(), panels);
@@ -1721,7 +1906,11 @@ mod diff_perf {
             if !watched.has_state_changed_subscribers() {
                 return 0;
             }
-            changed_panels(previous, &shared.lock()).len()
+            let delta = {
+                let shared = shared.lock();
+                state_delta(previous, &shared, &mut HashSet::new(), |_| true)
+            };
+            delta.changed.len()
         });
     }
 }

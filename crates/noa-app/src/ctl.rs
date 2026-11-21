@@ -10,6 +10,7 @@
 mod board;
 mod journal;
 mod prompt;
+mod ready;
 mod result;
 mod worktree;
 
@@ -86,6 +87,22 @@ Commands:
                         Pick the model tier of a claude, codex or agy
                         COMMAND (refused when it already picks a model
                         or effort). Prints \"tier\" too.
+      --ready SECS      After the spawn, wait (at most SECS) for the worker
+                        to be ready: its agent's first report, or a screen
+                        that showed something and stayed the same for 1.5 s.
+                        Prints \"ready\":\"report\"|\"quiet\"|\"timeout\"
+                        (\"gone\" when the pane closed) and \"screen\" (its
+                        last 20 non-blank lines).
+      --task TEXT | --task-file F  [--timeout SECS] [--stall SECS] [--tail N]
+                        [--settle SECS] [--for LIST]
+                        For claude, codex or agy: once ready (--ready 30
+                        unless given), type the task as send --enter --wait
+                        does and print the wait lines after the spawn line,
+                        which has \"sent\":true. Only when ready is report or
+                        quiet and the screen ends in an agent's input box;
+                        otherwise nothing is typed: the line has
+                        \"sent\":false (exit 0), so read \"screen\" (a trust
+                        prompt, a login) and send yourself.
                         Every worker gets NOA_RESULT=<its cwd>/.noa/result.md
                         to write its final report to (.noa/ holds a
                         .gitignore of *, so git never sees it); prints
@@ -258,7 +275,25 @@ pub(crate) struct SpawnArgs {
     pub(crate) worktree: bool,
     /// `--tier`: the model tier flags to put on the agent command.
     pub(crate) tier: Option<worktree::Tier>,
+    /// `--ready SECS`: wait this long at most for the worker to be ready.
+    pub(crate) ready: Option<Duration>,
+    /// `--task`/`--task-file`: type a task once the worker is ready.
+    pub(crate) task: Option<Task>,
     pub(crate) command: Vec<String>,
+}
+
+/// `spawn --task TEXT` or `--task-file F`, with the options of the wait
+/// that follows it (as `send --enter --wait`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Task {
+    pub(crate) text: TaskText,
+    pub(crate) wait: WaitOptions,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TaskText {
+    Literal(String),
+    File(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -591,6 +626,39 @@ fn parse_spawn(rest: &mut Args) -> Result<SpawnArgs, String> {
     if tier.is_some() {
         worktree::check_tier_command(&command)?;
     }
+    let ready = rest
+        .value("--ready")?
+        .map(|value| {
+            value
+                .parse::<f64>()
+                .ok()
+                .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+                .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
+                .ok_or_else(|| format!("--ready expects seconds, got {value:?}"))
+        })
+        .transpose()?;
+    let text = match (rest.value("--task")?, rest.value("--task-file")?) {
+        (Some(_), Some(_)) => return Err("--task and --task-file are exclusive".to_string()),
+        (Some(text), None) => Some(TaskText::Literal(text)),
+        (None, Some(file)) => Some(TaskText::File(file)),
+        (None, None) => None,
+    };
+    let task = match text {
+        Some(text) => {
+            if !worktree::is_agent_command(&command) {
+                return Err(
+                    "--task types the task into claude, codex or agy once it is ready: give one \
+                     of them as COMMAND after `--`"
+                        .to_string(),
+                );
+            }
+            Some(Task {
+                text,
+                wait: parse_wait_options(rest)?,
+            })
+        }
+        None => None,
+    };
     Ok(SpawnArgs {
         board,
         cwd,
@@ -602,6 +670,8 @@ fn parse_spawn(rest: &mut Args) -> Result<SpawnArgs, String> {
         max_children,
         worktree,
         tier,
+        ready,
+        task,
         command,
     })
 }
@@ -1867,6 +1937,20 @@ impl Session {
     }
 
     fn spawn(&mut self, args: SpawnArgs) -> Result<i32, Failure> {
+        // Read and checked before anything starts.
+        let task = match &args.task {
+            Some(task) => {
+                let text = match &task.text {
+                    TaskText::Literal(text) => text.clone(),
+                    TaskText::File(file) => std::fs::read_to_string(file).map_err(|err| {
+                        Failure::error(format!("cannot read --task-file {file:?}: {err}"))
+                    })?,
+                };
+                check_send_size(&text).map_err(Failure::error)?;
+                Some((text, task.wait.clone()))
+            }
+            None => None,
+        };
         let own = self.require_own()?;
         let panels = self.client.list_panels()?;
         let is_worker = panels
@@ -2060,8 +2144,55 @@ impl Session {
                 "result": result_path,
             }),
         );
-        print_json(&line);
-        Ok(EXIT_OK)
+        let Some(limit) = args.ready.or(task.is_some().then_some(ready::TASK_READY)) else {
+            print_json(&line);
+            return Ok(EXIT_OK);
+        };
+        let pane = spawned.pane;
+        // The worker runs whatever happens next: its line is printed.
+        let (ready, screen) = match ready::wait_ready(self, pane, limit) {
+            Ok(seen) => seen,
+            Err(failure) => {
+                print_json(&line);
+                return Err(failure);
+            }
+        };
+        line["ready"] = ready.name().into();
+        line["screen"] = screen
+            .as_deref()
+            .map_or_else(String::new, |screen| last_lines(screen, PROMPT_LINES))
+            .into();
+        let Some((text, wait)) = task else {
+            print_json(&line);
+            return Ok(EXIT_OK);
+        };
+        if !ready::takes_task(ready, screen.as_deref()) {
+            line["sent"] = false.into();
+            print_json(&line);
+            return Ok(EXIT_OK);
+        }
+        let send = SendArgs {
+            pane,
+            text: TextArg::Literal(text.clone()),
+            enter: true,
+            raw: false,
+            any_pane: false,
+            answer: false,
+            replace: false,
+            queue: false,
+            wait: Some(wait),
+        };
+        let mut sent = false;
+        let delivered = self.deliver(&send, &text, || {
+            line["sent"] = true.into();
+            print_json(&line);
+            sent = true;
+        });
+        if !sent {
+            line["sent"] = false.into();
+            print_json(&line);
+        }
+        delivered
     }
 
     fn send(&mut self, args: SendArgs) -> Result<i32, Failure> {
@@ -2076,6 +2207,18 @@ impl Session {
                 text
             }
         };
+        self.deliver(&args, &text, || {})
+    }
+
+    /// `send`'s typing and what follows it: journal the send, then wait
+    /// (`--wait`) or print the report count. `typed` runs once the text is
+    /// in, before any wait line.
+    fn deliver(
+        &mut self,
+        args: &SendArgs,
+        text: &str,
+        typed: impl FnOnce(),
+    ) -> Result<i32, Failure> {
         // What an answer answered, for `status --answers`.
         let screen = if args.answer {
             client_text(&mut self.client, args.pane, TextSource::Screen)
@@ -2086,7 +2229,7 @@ impl Session {
             None
         };
         let since = SystemTime::now();
-        let before = send_steps(self, &args, &text)?;
+        let before = send_steps(self, args, text)?;
         let seq = before.agent.as_ref().map_or(0, |agent| agent.seq);
         let mut event = serde_json::json!({
             "pane": args.pane,
@@ -2101,7 +2244,8 @@ impl Session {
             event["screen"] = screen.into();
         }
         self.journal.append("send", event);
-        match args.wait {
+        typed();
+        match &args.wait {
             Some(options) => {
                 // Said before the wait, so a wait its shell tool kills
                 // without a timeout line still leaves the way back.
@@ -2110,7 +2254,7 @@ impl Session {
                 self.wait_subscribed(
                     &[args.pane],
                     send_wait_start(before, seq),
-                    &options,
+                    options,
                     (since, results),
                 )
             }
@@ -2283,6 +2427,24 @@ impl Session {
             );
         }
         Ok(EXIT_OK)
+    }
+}
+
+impl ready::ReadySource for Session {
+    fn panel(&mut self, pane: u64) -> Result<Option<Panel>, Failure> {
+        SendTarget::panel(self, pane)
+    }
+
+    fn screen(&mut self, pane: u64) -> Result<Option<String>, Failure> {
+        client_text(&mut self.client, pane, TextSource::Screen)
+    }
+
+    fn now(&mut self) -> Instant {
+        Instant::now()
+    }
+
+    fn pause(&mut self, duration: Duration) {
+        std::thread::sleep(duration);
     }
 }
 
@@ -3765,6 +3927,8 @@ mod tests {
                 max_children: DEFAULT_MAX_CHILDREN,
                 worktree: false,
                 tier: None,
+                ready: None,
+                task: None,
                 command: args(&["codex", "--label", "x"]),
             })
         );
@@ -3845,6 +4009,61 @@ mod tests {
             &["spawn", "--tier", "light", "--", "agy", "--model", "x"],
         ] {
             assert!(parse_args(&args(bad)).is_err(), "{bad:?} must be rejected");
+        }
+    }
+
+    // Audit finding (AU-02): a send right after a spawn raced the worker's
+    // start; `--ready` waits for it, and `--task` types once it is ready.
+    #[test]
+    fn spawn_ready_and_task_parse_with_the_tasks_wait_options() {
+        let spawn = |items: &[&str]| match parse_args(&args(items)) {
+            Ok(Command::Spawn(spawn)) => Ok(spawn),
+            Ok(other) => panic!("spawn expected, got {other:?}"),
+            Err(error) => Err(error),
+        };
+        let ready = spawn(&["spawn", "--ready", "20", "--", "make"]).unwrap();
+        assert_eq!(ready.ready, Some(Duration::from_secs(20)));
+        assert_eq!(ready.task, None);
+
+        let task = spawn(&[
+            "spawn",
+            "--task",
+            "fix it",
+            "--timeout",
+            "500",
+            "--settle",
+            "10",
+            "--",
+            "claude",
+        ])
+        .unwrap();
+        assert_eq!(task.ready, None);
+        let given = task.task.unwrap();
+        assert_eq!(given.text, TaskText::Literal("fix it".to_string()));
+        assert_eq!(given.wait.timeout, Some(Duration::from_secs(500)));
+        assert_eq!(given.wait.settle, Some(Duration::from_secs(10)));
+        let file = spawn(&[
+            "spawn",
+            "--task-file",
+            "t.md",
+            "--ready",
+            "5",
+            "--",
+            "codex",
+        ])
+        .unwrap();
+        assert_eq!(file.task.unwrap().text, TaskText::File("t.md".to_string()));
+        assert_eq!(file.ready, Some(Duration::from_secs(5)));
+
+        for bad in [
+            &["spawn", "--task", "x", "--", "make"][..],
+            &["spawn", "--task", "x"],
+            &["spawn", "--task", "x", "--task-file", "f", "--", "claude"],
+            &["spawn", "--ready", "soon", "--", "claude"],
+            // Wait options go with --task only.
+            &["spawn", "--timeout", "5", "--", "claude"],
+        ] {
+            assert!(spawn(bad).is_err(), "{bad:?} must be rejected");
         }
     }
 
@@ -5752,6 +5971,8 @@ mod tests {
             max_children: DEFAULT_MAX_CHILDREN,
             worktree: false,
             tier: None,
+            ready: None,
+            task: None,
             command: args(command),
         }
     }

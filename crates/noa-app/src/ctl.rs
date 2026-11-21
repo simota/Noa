@@ -2576,12 +2576,19 @@ const PASTE_MODE_TRIES: usize = 75;
 /// "starting" for want of a process name: a shell-less spawn never gets one
 /// (see `panel_agent`), and a shell-less agent already has its `kind` from
 /// argv0. Gating it would refuse `send` to a script or REPL that never
-/// enables bracketed paste.
+/// enables bracketed paste. A spawn whose argv names an agent is gated
+/// even when the panel has no `agent` (a pane listed before its first
+/// output by a server that did not derive the kind for it).
 pub(crate) fn needs_paste_mode(panel: &Panel) -> bool {
     panel
         .agent
         .as_ref()
         .is_some_and(|agent| agent.kind.is_some())
+        || panel
+            .spawn
+            .as_ref()
+            .and_then(|spawn| spawn.argv.first())
+            .is_some_and(|argv0| crate::ipc_bridge::spawn_agent_kind(argv0).is_some())
         || (panel.process.as_deref().is_none_or(str::is_empty) && panel.spawn.is_none())
 }
 
@@ -5842,6 +5849,30 @@ mod tests {
             blocked: None,
         });
         assert!(needs_paste_mode(&agent));
+    }
+
+    // Review finding (REL-01): right after `spawn -- claude`, before the
+    // pane's first output, the pane is listed bare: no agent, no process,
+    // and the spawn's argv. `send` typed into the starting agent without
+    // bracketed paste.
+    #[test]
+    fn a_bare_spawned_agent_without_a_kind_is_still_gated() {
+        let mut starting = panel(0, None, false);
+        starting.agent = None;
+        starting.process = None;
+        starting.spawn = Some(noa_ipc::PanelSpawn {
+            argv: vec![
+                "/opt/homebrew/bin/claude".to_string(),
+                "--model".to_string(),
+            ],
+            started_at: 0,
+        });
+        assert!(needs_paste_mode(&starting));
+        let mut target = FakeTarget::new(vec![starting]);
+        target.paste_ready_after = Some(usize::MAX);
+        send_steps(&mut target, &send_args(&["--enter", "go"]), "go").unwrap_err();
+        assert!(target.paste_asks > 0);
+        assert!(target.log.iter().all(|entry| !entry.starts_with("type")));
     }
 
     // Audit finding (REL-16): `--replace` spends about 0.35 s clearing the

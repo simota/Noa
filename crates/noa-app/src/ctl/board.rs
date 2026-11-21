@@ -1219,12 +1219,14 @@ impl Board {
 
     /// The panes whose screens the current view needs: in the list, the
     /// workers that need someone or are at work (whose rows say when they
-    /// last showed output), and the selected one, which is previewed.
+    /// last showed output), the orchestrator while it needs someone (it
+    /// heads the queue), and the selected one, which is previewed.
     pub(crate) fn wanted_screens(&self) -> Vec<u64> {
         match self.view {
             View::List => self
-                .workers()
-                .iter()
+                .lead()
+                .into_iter()
+                .chain(self.workers())
                 .map(|panel| panel.pane_id.0)
                 .filter(|&pane| {
                     Some(pane) == self.selected
@@ -5662,6 +5664,19 @@ mod tests {
         );
         assert!(all.contains("Allow Bash: +ctl wait?"), "{all}");
         assert!(!all.contains("ワーカーはまだいません"), "{all}");
+    }
+
+    // Review finding: the list view fetched only the workers' screens, so
+    // the orchestrator's preview stayed at "reading the screen…".
+    #[test]
+    fn the_list_fetches_the_orchestrators_screen_while_it_needs_someone() {
+        let board = lone_orchestrator();
+        assert_eq!(board.wanted_screens(), vec![1]);
+        let mut panels = sample();
+        panels.extend(lone_orchestrator().panels);
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(panels, Instant::now());
+        assert!(board.wanted_screens().contains(&1));
     }
 
     /// The number in a "あと N 件" marker line with `arrow`, if drawn.

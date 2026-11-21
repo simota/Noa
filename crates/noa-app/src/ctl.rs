@@ -84,10 +84,12 @@ Commands:
        [--queue] [--any-pane] [--] TEXT|-
                                 Type TEXT (or stdin) into PANE; prints the
                                 report count to pass to `wait --after`. Refused
-                                while PANE waits for an approval, unless --answer,
-                                and while its agent is running, unless --queue
-                                (then every --wait line has \"queued\":true: the
-                                wait may end with the turn already running).
+                                while PANE waits for an approval or for the
+                                answer to a question, unless --answer, and while
+                                its agent is running, unless --queue (then every
+                                --wait line has \"queued\":true: the wait may end
+                                with the turn already running); --raw keys (Esc,
+                                Ctrl-C) still go to a running agent.
                                 A TEXT over 250 KiB (JSON-encoded) is refused:
                                 send a file's path instead. --replace first
                                 clears what the input line holds (Ctrl-E, then
@@ -906,6 +908,9 @@ fn outcome_json(
         }
         if let Some(detail) = &agent.detail {
             object.insert("detail".into(), detail.clone().into());
+        }
+        if let Some(blocked) = &agent.blocked {
+            object.insert("blocked".into(), blocked.clone().into());
         }
     }
     if let Some(code) = panel
@@ -2010,16 +2015,16 @@ pub(crate) fn check_send_size(text: &str) -> Result<(), String> {
 /// Why `send` refuses `panel` before typing, if it does. Enter approves some
 /// prompts with their default choice, and picks the first choice of a
 /// question (D7), so either is only answered on purpose (`--answer`). A
-/// working agent would queue the text, and a `--wait` could end with the
-/// turn already running (`--queue` takes that).
-pub(crate) fn send_refusal(panel: &Panel, args: &SendArgs) -> Option<String> {
+/// working agent would queue pasted text or a bare Enter, and a `--wait`
+/// could end with the turn already running (`--queue` takes that); `--raw`
+/// keys (Esc, Ctrl-C) are how it is interrupted, so they always go.
+pub(crate) fn send_refusal(panel: &Panel, args: &SendArgs, text: &str) -> Option<String> {
     if args.answer {
         return None;
     }
     if let Some(awaited) = awaits_answer(panel) {
         return Some(format!(
-            "pane {} is waiting for {awaited}; nothing was sent. Read it, and pass --answer to \
-             answer it from here.",
+            "pane {} is waiting for {awaited}; read it and pass --answer. Nothing was sent.",
             args.pane
         ));
     }
@@ -2027,7 +2032,8 @@ pub(crate) fn send_refusal(panel: &Panel, args: &SendArgs) -> Option<String> {
         .agent
         .as_ref()
         .is_some_and(|agent| agent.state.as_deref() == Some("running"));
-    if working && !args.queue {
+    let keys = args.raw && !text.is_empty();
+    if working && !args.queue && !keys {
         return Some(format!(
             "pane {} is working; wait for its turn to end, or pass --queue (the wait may then \
              end with the current turn)",
@@ -2056,7 +2062,7 @@ pub(crate) fn send_steps(
     let before = target
         .panel(args.pane)?
         .ok_or_else(|| Failure::error("unknown pane"))?;
-    if let Some(refusal) = send_refusal(&before, args) {
+    if let Some(refusal) = send_refusal(&before, args, text) {
         return Err(Failure::error(refusal));
     }
     // Subscribe before typing, so the reply cannot arrive unobserved.
@@ -2730,13 +2736,17 @@ pub(crate) fn wait_guard(panels: &[Panel], panes: &[u64], own: u64) -> Result<()
     Ok(())
 }
 
-/// What `panel`'s agent reported it waits for, if it is an approval
-/// (`permission`), as the noun phrase a refusal names. `input` is not
-/// refused: it also stands for an agent idle at its prompt (the hook
-/// adapter's `idle_prompt`), where a follow-up send is the normal case.
+/// What `panel`'s agent waits for, if it is an answer, as the noun phrase a
+/// refusal names: an approval (`permission`), or whatever an `OSC 7501`
+/// blocked report names (`agent.blocked`: a question's dialog takes Enter
+/// as its first choice). A plain `input` is not refused: from a hook
+/// adapter's `idle_prompt`, or from a server that predates `blocked`, it
+/// stands for an agent idle at its prompt, where a follow-up send is normal.
 pub(crate) fn awaits_answer(panel: &Panel) -> Option<&'static str> {
-    match panel.agent.as_ref()?.state.as_deref()? {
-        "permission" => Some("an approval"),
+    let agent = panel.agent.as_ref()?;
+    match (agent.blocked.as_deref(), agent.state.as_deref()) {
+        (Some("question"), _) => Some("an answer to a question"),
+        (Some(_), _) | (None, Some("permission")) => Some("an approval"),
         _ => None,
     }
 }
@@ -4381,6 +4391,65 @@ mod tests {
         ));
     }
 
+    fn blocked(seq: u64, state: &str, on: &str) -> Panel {
+        let mut panel = panel(seq, Some(state), false);
+        panel.agent.as_mut().unwrap().blocked = Some(on.to_string());
+        panel
+    }
+
+    // Audit finding (AU-01): an `OSC 7501` question shows as `input`, and
+    // `send --enter` picked its first choice. Only a reported block is
+    // refused; a plain `input` (hook adapter, older server) still takes it.
+    #[test]
+    fn a_blocked_agent_takes_a_send_only_with_answer() {
+        assert_eq!(
+            awaits_answer(&blocked(2, "input", "question")),
+            Some("an answer to a question")
+        );
+        assert_eq!(
+            awaits_answer(&blocked(2, "permission", "permission")),
+            Some("an approval")
+        );
+        let mut target = FakeTarget::new(vec![blocked(2, "input", "question")]);
+        let failure = send_steps(&mut target, &send_args(&["--enter", "go"]), "go").unwrap_err();
+        assert_eq!(failure.code, EXIT_ERROR);
+        assert!(
+            failure.message.starts_with(
+                "pane 8 is waiting for an answer to a question; read it and pass --answer"
+            ),
+            "{}",
+            failure.message
+        );
+        assert!(target.log.is_empty());
+
+        let mut target = FakeTarget::new(vec![blocked(2, "input", "question")]);
+        assert!(send_steps(&mut target, &send_args(&["--answer", "--enter", "2"]), "2").is_ok());
+        let mut target = FakeTarget::new(vec![panel(2, Some("input"), false)]);
+        assert!(send_steps(&mut target, &send_args(&["--enter", "go"]), "go").is_ok());
+
+        // The wait line names what the agent is blocked on.
+        let watch = Watch::new(8, None, None);
+        let outcome = Outcome {
+            reason: Reason::Input,
+            closed: false,
+            agent_left: false,
+        };
+        let line = outcome_json(
+            &watch,
+            &outcome,
+            Some(&blocked(2, "input", "question")),
+            None,
+        );
+        assert_eq!(line["blocked"], "question");
+        let line = outcome_json(
+            &watch,
+            &outcome,
+            Some(&panel(2, Some("input"), false)),
+            None,
+        );
+        assert!(line.get("blocked").is_none());
+    }
+
     /// A scripted pane for [`send_steps`]: `panels` are answered in order
     /// (the last one repeats); every write is logged.
     struct FakeTarget {
@@ -4468,6 +4537,18 @@ mod tests {
         // Not working: no flag needed.
         let mut target = FakeTarget::new(vec![panel(3, Some("finished"), false)]);
         assert!(send_steps(&mut target, &send_args(&["more"]), "more").is_ok());
+
+        // Raw keys interrupt a working agent (Esc, Ctrl-C), so they go; a
+        // bare Enter is refused like pasted text.
+        let mut target = FakeTarget::new(vec![running.clone()]);
+        assert!(send_steps(&mut target, &send_args(&["--raw", "\x1b"]), "\x1b").is_ok());
+        assert_eq!(target.log, vec!["type \"\\u{1b}\" paste=false".to_string()]);
+        for (flags, text) in [(&["--enter", ""][..], ""), (&["--raw", "--enter", ""], "")] {
+            let mut target = FakeTarget::new(vec![running.clone()]);
+            let failure = send_steps(&mut target, &send_args(flags), text).unwrap_err();
+            assert!(failure.message.contains("--queue"), "{flags:?}");
+            assert!(target.log.is_empty(), "{flags:?}");
+        }
 
         // `--queue --wait` marks every wait line.
         let send = send_args(&["--queue", "--wait", "--timeout", "0", "more"]);

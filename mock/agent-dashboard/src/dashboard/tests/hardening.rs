@@ -84,6 +84,22 @@ fn assistive(dashboard: &mut Dashboard, text: &mut TextStore, node: u64, action:
     dashboard.prepare(window(), text);
 }
 
+/// Selects `pane` with J as a person would: at most once per pane J walks,
+/// failing where J never reaches it.
+fn select_with_j(dashboard: &mut Dashboard, text: &mut TextStore, pane: u64) {
+    for _ in 0..dashboard.order().len() {
+        if dashboard.view.selected == Some(pane) {
+            break;
+        }
+        key(dashboard, text, Key::Char('j'));
+    }
+    assert_eq!(
+        dashboard.view.selected,
+        Some(pane),
+        "J never reached {pane}"
+    );
+}
+
 fn node_of(id: WidgetId) -> u64 {
     access_id(id).0
 }
@@ -103,9 +119,7 @@ fn disabled_for_assistive(dashboard: &Dashboard, id: WidgetId) -> bool {
 fn assistive_technology_cannot_reach_under_the_help() {
     let (mut dashboard, mut text, _snapshots, commands) = live_canned();
     // The drawer on 12 (docs-sync) puts a second 開く on screen.
-    while dashboard.view.selected != Some(12) {
-        key(&mut dashboard, &mut text, Key::Char('j'));
-    }
+    select_with_j(&mut dashboard, &mut text, 12);
     key(&mut dashboard, &mut text, Key::Space);
     assert_eq!(dashboard.view.detail, Some(12));
     commands.try_iter().for_each(drop);
@@ -224,12 +238,93 @@ fn the_help_cancels_a_left_press_whatever_else_is_held() {
 }
 
 #[test]
+fn a_cancelled_release_leaves_a_press_begun_since_alone() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    let control = dashboard.grouping_control;
+    let [x, y, width, height] = rect(&dashboard.tree, control);
+    let last = Point::new(x + width - 12.0, y + height / 2.0);
+    let (left, middle) = (PointerButton::Primary, PointerButton::Middle);
+    dashboard.dispatch(Event::PointerMove { pos: last }, &mut text);
+    let down = |button| Event::PointerDown { pos: last, button };
+    let up = |button| Event::PointerUp { pos: last, button };
+    // The help opens and closes with the middle button held: its press is
+    // cancelled.
+    dashboard.dispatch(down(middle), &mut text);
+    question_mark(&mut dashboard, &mut text);
+    key(&mut dashboard, &mut text, Key::Escape);
+    assert!(!dashboard.view.help);
+
+    // A click on the last segment, with the middle button let go during it.
+    dashboard.dispatch(down(left), &mut text);
+    dashboard.dispatch(up(middle), &mut text);
+    dashboard.dispatch(up(left), &mut text);
+    dashboard.prepare(window(), &mut text);
+    assert_eq!(
+        dashboard.view.grouping,
+        Grouping::ALL[Grouping::ALL.len() - 1]
+    );
+}
+
+#[test]
+fn closing_the_help_with_its_button_gives_the_focus_back() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    let (open, _) = dashboard.queue_buttons.open[0];
+    // Tab reaches the top card's 開く long before it has gone round the
+    // screen's controls.
+    for _ in 0..100 {
+        if dashboard.tree.focused() == Some(open) {
+            break;
+        }
+        key(&mut dashboard, &mut text, Key::Tab);
+    }
+    assert_eq!(
+        dashboard.tree.focused(),
+        Some(open),
+        "Tab never reached 開く"
+    );
+
+    question_mark(&mut dashboard, &mut text);
+    let (_, close) = dashboard.registry.help.expect("the help is open");
+    let pos = center(&dashboard.tree, close);
+    click(&mut dashboard, &mut text, pos);
+    assert!(!dashboard.view.help);
+    assert_eq!(
+        dashboard.tree.focused(),
+        Some(open),
+        "where Tab goes on from"
+    );
+}
+
+#[test]
+fn the_help_leaves_disabled_what_it_found_disabled() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    key(&mut dashboard, &mut text, Key::Char('j'));
+    key(&mut dashboard, &mut text, Key::Space);
+    let (drawer, _) = dashboard.registry.drawer.expect("the drawer is open");
+    let screen = dashboard.tree.root().unwrap();
+    dashboard.tree.set_enabled(drawer, false);
+
+    question_mark(&mut dashboard, &mut text);
+    assert!(
+        !dashboard.tree.is_enabled(screen),
+        "the screen under the help"
+    );
+    key(&mut dashboard, &mut text, Key::Escape);
+    assert!(!dashboard.view.help);
+    assert!(dashboard.tree.is_enabled(screen), "the screen");
+    assert!(
+        !dashboard.tree.is_enabled(drawer),
+        "the drawer was disabled"
+    );
+}
+
+#[test]
 fn another_server_instance_is_watched_afresh() {
     let (mut dashboard, mut text, snapshots, commands) = live_canned();
     assert_eq!(dashboard.watched, Some(vec![14]), "the top card");
 
-    // Noa restarted and gave every pane id out again; the feed dropped
-    // what it watched on the old server. The new server's top card has
+    // Noa restarted and gave every pane id out again; the feed took the
+    // last watch as the old server's panes. The new server's top card has
     // the same id, and it is asked for again.
     let restarted = |instance: &str| Snapshot {
         instance: Some(instance.to_owned()),
@@ -241,9 +336,7 @@ fn another_server_instance_is_watched_afresh() {
 
     // What is open on the new server is what is watched: the drawer's
     // worker until another restart closes the drawer.
-    while dashboard.view.selected != Some(15) {
-        key(&mut dashboard, &mut text, Key::Char('j'));
-    }
+    select_with_j(&mut dashboard, &mut text, 15);
     key(&mut dashboard, &mut text, Key::Space);
     assert_eq!(last_watch(&commands), Some(vec![15]));
     snapshots.send(restarted("again")).unwrap();

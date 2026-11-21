@@ -245,6 +245,9 @@ pub struct Dashboard {
     /// The pointer buttons held down since presses the screen passed on,
     /// in the order pressed (`track_press`, `cancel_press`).
     held: Vec<PointerButton>,
+    /// What the open help disabled under it, to enable again when it
+    /// closes (`open_help`).
+    shielded: Vec<WidgetId>,
     /// The filter field had the focus when the input being handled began:
     /// a rebuild that input causes focuses the new field. For a release,
     /// what counts is the press: a press moves the focus to what it hits
@@ -358,8 +361,9 @@ impl Dashboard {
     /// since the new instance may give those ids to other panes: Enter or
     /// the drawer's 開く would then reach a worker nobody chose. The rebuild
     /// that follows shows the new server's workers from the top. The feed
-    /// dropped what it watched on the old instance, so what that rebuild
-    /// shows is asked for again even where the ids are the same.
+    /// takes a `Watch` as naming the newest instance it sent, so what that
+    /// rebuild shows is asked for again even where the ids are the same:
+    /// the ids asked for before were the old instance's panes.
     fn forget_panes(&mut self) {
         self.view.selected = None;
         self.view.reveal = None;
@@ -697,6 +701,7 @@ impl Dashboard {
             wheel_accum: [0.0; 5],
             pending: None,
             held: Vec::new(),
+            shielded: Vec::new(),
             filter_had_focus: false,
             pressed_in_filter: false,
             #[cfg(test)]
@@ -980,29 +985,33 @@ impl Dashboard {
         );
         let close = help::build(&mut self.tree, root);
         self.registry.help = Some((root, close));
-        self.shield_background();
-    }
-
-    fn close_help(&mut self, text: &mut TextStore) {
-        self.view.help = false;
-        if let Some((root, _)) = self.registry.help.take() {
-            self.tree.close_overlay(root, text);
-        }
-        self.shield_background();
-    }
-
-    /// Disables what lies under the help — the screen and the drawer —
-    /// while it is open, and enables it again when it closes. The modal
-    /// overlay keeps pointer and keys from it, but assistive technology
-    /// acts on a widget directly (`UiTree::accessibility_action`, not
-    /// `dispatch`), and the tree refuses that only for a disabled widget,
-    /// which it also offers as disabled. Disabled controls are drawn
-    /// dimmed under the help.
-    fn shield_background(&mut self) {
-        let enabled = !self.view.help;
+        // What lies under the help — the screen and the drawer — is
+        // disabled while it is open. The modal overlay keeps pointer and
+        // keys from it, but assistive technology acts on a widget directly
+        // (`UiTree::accessibility_action`, not `dispatch`), and the tree
+        // refuses that only for a disabled widget, which it also offers as
+        // disabled. Disabled controls are drawn dimmed under the help. Only
+        // what is enabled now is disabled (`shielded`), so closing the help
+        // leaves the rest as it was.
         let drawer = self.registry.drawer.map(|(root, _)| root);
         for root in self.tree.root().into_iter().chain(drawer) {
-            self.tree.set_enabled(root, enabled);
+            if self.tree.is_enabled(root) {
+                self.tree.set_enabled(root, false);
+                self.shielded.push(root);
+            }
+        }
+    }
+
+    /// Enables what the help disabled before it closes the overlay: the
+    /// tree then gives the focus back to where it was when the help opened
+    /// (a 閉じる clicked took it), and a disabled widget would refuse it.
+    fn close_help(&mut self, text: &mut TextStore) {
+        self.view.help = false;
+        for root in std::mem::take(&mut self.shielded) {
+            self.tree.set_enabled(root, true);
+        }
+        if let Some((root, _)) = self.registry.help.take() {
+            self.tree.close_overlay(root, text);
         }
     }
 
@@ -1169,9 +1178,9 @@ impl Dashboard {
     /// button's release goes first: it is the one a button acts on, and
     /// the tree ends its hold on the pointer at any button's release, after
     /// which the left one would reach nothing. The real releases that
-    /// follow are sent away from everything too (`track_press`). The tree
-    /// uses the pointer position only for the cursor, which the next
-    /// pointer event sets again.
+    /// follow reach nothing (`track_press`). The tree uses the pointer
+    /// position only for the cursor, which the next pointer event sets
+    /// again.
     fn cancel_press(&mut self, text: &mut TextStore) {
         let mut held = std::mem::take(&mut self.held);
         held.sort_by_key(|button| *button != PointerButton::Primary);
@@ -1184,33 +1193,27 @@ impl Dashboard {
         drop(self.tree.take_messages());
     }
 
-    /// Keeps `held` up to date with `event`. A release whose press is not
-    /// held — `cancel_press` ended it — is sent away from everything, as
-    /// the cancelled release was: a button whose press lost the pointer's
-    /// hold before the cancel (another button's release ends it) still
-    /// counts itself pressed, and would fire on a release over it.
-    fn track_press(&mut self, event: Event) -> Event {
+    /// Keeps `held` up to date with `event`, and drops the release of a
+    /// press that is not held — `cancel_press` ended it and sent its
+    /// release already. Passed on, the tree would give it to whatever holds
+    /// the pointer now, a press begun since (which any button's release
+    /// ends: a segmented control lets go of its segment), or else to what
+    /// is under it (a button whose press lost the pointer's hold before the
+    /// cancel still counts itself pressed, and would fire).
+    fn track_press(&mut self, event: Event) -> Option<Event> {
         match event {
             Event::PointerDown { button, .. } => {
                 if !self.held.contains(&button) {
                     self.held.push(button);
                 }
-                event
             }
-            Event::PointerUp { pos, button } => {
-                match self.held.iter().position(|held| *held == button) {
-                    Some(at) => {
-                        self.held.remove(at);
-                        Event::PointerUp { pos, button }
-                    }
-                    None => Event::PointerUp {
-                        pos: OUTSIDE,
-                        button,
-                    },
-                }
+            Event::PointerUp { button, .. } => {
+                let at = self.held.iter().position(|held| *held == button)?;
+                self.held.remove(at);
             }
-            event => event,
+            _ => {}
         }
+        Some(event)
     }
 }
 
@@ -1227,6 +1230,9 @@ impl Screen for Dashboard {
     /// has no shortcuts, so a digit typed into the filter field never
     /// toggles a panel.
     fn dispatch(&mut self, event: Event, text: &mut TextStore) {
+        let Some(event) = self.track_press(event) else {
+            return;
+        };
         let mode = self.mode();
         let in_filter = mode == Mode::Filter;
         let (press, release) = match event {
@@ -1237,7 +1243,6 @@ impl Screen for Dashboard {
         if press {
             self.pressed_in_filter = in_filter;
         }
-        let event = self.track_press(event);
         self.filter_had_focus = in_filter || (release && self.pressed_in_filter);
         match keymap::route(mode, self.composing(), &event) {
             Route::Act(action) => {

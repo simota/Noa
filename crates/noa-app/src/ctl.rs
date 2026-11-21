@@ -88,8 +88,10 @@ Commands:
                         COMMAND (refused when it already picks a model
                         or effort). Prints \"tier\" too.
       --ready SECS      After the spawn, wait (at most SECS) for the worker
-                        to be ready: its agent's first report, or a screen
-                        that showed something and stayed the same for 1.5 s.
+                        to be ready: a report from its agent other than
+                        running, or (while no running report is held) a
+                        screen that showed something and stayed the same
+                        for 1.5 s.
                         Prints \"ready\":\"report\"|\"quiet\"|\"timeout\"
                         (\"gone\" when the pane closed) and \"screen\" (its
                         last 20 non-blank lines).

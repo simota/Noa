@@ -46,6 +46,25 @@ pub(crate) fn has_input_box(screen: &str) -> bool {
     content_lines(&lines).len() < lines.len()
 }
 
+/// Whether the bottom of a screen shows Codex's input line: Codex (0.171)
+/// draws no rules around it, only `› ` and its placeholder or draft, with
+/// a status line or two below. A numbered `› 1. …` is a selected choice
+/// of a dialog, not the input line.
+pub(crate) fn has_codex_input_line(screen: &str) -> bool {
+    const REACH: usize = 4;
+    lines_of(screen)
+        .iter()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(REACH)
+        .filter_map(|line| line.trim_start().strip_prefix('›'))
+        .any(|rest| {
+            let rest = rest.trim_start();
+            let digits = rest.chars().take_while(char::is_ascii_digit).count();
+            !(digits > 0 && rest[digits..].starts_with('.'))
+        })
+}
+
 /// The work above an agent's input box, as one text (what `--settle`
 /// compares: the box and the status line below it can tick on their own).
 pub(crate) fn work(screen: &str) -> String {

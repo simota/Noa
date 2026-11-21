@@ -18,7 +18,7 @@ pub(crate) const TASK_READY: Duration = Duration::from_secs(30);
 /// Why a ready wait ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Ready {
-    /// The worker's agent sent its first report.
+    /// The worker's agent sent a report other than `running`.
     Report,
     /// The screen showed something and stayed the same for [`QUIET_FOR`].
     Quiet,
@@ -61,10 +61,19 @@ pub(crate) fn wait_ready(
     let mut screen: Option<String> = None;
     loop {
         let now = source.now();
-        let reported = match source.panel(pane) {
+        // A `running` report is not ready: Codex reports a turn while it
+        // starts up, and `send` refuses a working agent. Its screen does
+        // not count as quiet either.
+        let (reported, working) = match source.panel(pane) {
             Ok(None) => return Ok((Ready::Gone, screen)),
-            Ok(Some(panel)) => panel.agent.as_ref().is_some_and(|agent| agent.seq > 0),
-            Err(failure) if failure.transient => false,
+            Ok(Some(panel)) => panel.agent.as_ref().map_or((false, false), |agent| {
+                let reported = agent.seq > 0;
+                (
+                    reported,
+                    reported && agent.state.as_deref() == Some("running"),
+                )
+            }),
+            Err(failure) if failure.transient => (false, false),
             Err(failure) => return Err(failure),
         };
         match source.screen(pane) {
@@ -73,10 +82,12 @@ pub(crate) fn wait_ready(
             Err(failure) if failure.transient => {}
             Err(failure) => return Err(failure),
         }
-        if reported {
+        if reported && !working {
             return Ok((Ready::Report, screen));
         }
-        if let Some(text) = screen.as_ref().filter(|text| !text.trim().is_empty()) {
+        if working {
+            seen = None;
+        } else if let Some(text) = screen.as_ref().filter(|text| !text.trim().is_empty()) {
             match &seen {
                 Some((before, since)) if before == text => {
                     if now.saturating_duration_since(*since) >= QUIET_FOR {
@@ -94,12 +105,14 @@ pub(crate) fn wait_ready(
 }
 
 /// Whether `spawn --task` types its task: the worker is ready (reported,
-/// or quiet) and the bottom of its screen shows an agent's input box. A
-/// trust prompt or a login is left to the orchestrator, which sees it under
-/// `"screen"`.
+/// or quiet) and the bottom of its screen shows an agent's input box (or
+/// Codex's input line, which has no rules around it). A trust prompt or a
+/// login is left to the orchestrator, which sees it under `"screen"`.
 pub(crate) fn takes_task(ready: Ready, screen: Option<&str>) -> bool {
     matches!(ready, Ready::Report | Ready::Quiet)
-        && screen.is_some_and(super::prompt::has_input_box)
+        && screen.is_some_and(|screen| {
+            super::prompt::has_input_box(screen) || super::prompt::has_codex_input_line(screen)
+        })
 }
 
 #[cfg(test)]
@@ -142,6 +155,37 @@ mod tests {
             "agent": { "kind": "claude", "seq": seq },
         }))
         .unwrap()
+    }
+
+    fn worker_in(seq: u64, state: &str) -> Panel {
+        let mut panel = worker(seq);
+        panel.agent.as_mut().unwrap().state = Some(state.to_string());
+        panel
+    }
+
+    // Codex 0.171 reports `running` and then `finished` while it starts up;
+    // taking the `running` report as ready had `spawn --task` type into a
+    // working agent, which `send` refused.
+    #[test]
+    fn a_running_report_is_not_ready_and_its_screen_not_quiet() {
+        let ((ready, _), step) = run(
+            vec![
+                Some(worker(0)),
+                Some(worker_in(1, "running")),
+                Some(worker_in(1, "running")),
+                Some(worker_in(1, "running")),
+                Some(worker_in(1, "running")),
+                Some(worker_in(1, "running")),
+                Some(worker_in(1, "running")),
+                Some(worker_in(1, "running")),
+                Some(worker_in(1, "running")),
+                Some(worker_in(2, "finished")),
+            ],
+            vec!["\u{203a} Ask Codex to do anything"],
+            Duration::from_secs(30),
+        );
+        assert_eq!(ready, Ready::Report);
+        assert_eq!(step, 9);
     }
 
     fn run(
@@ -209,5 +253,25 @@ mod tests {
         let trust = "Do you trust the files in this folder?\n❯ 1. Yes, proceed\n  2. No, exit\n";
         assert!(!takes_task(Ready::Quiet, Some(trust)));
         assert!(!takes_task(Ready::Report, None));
+    }
+
+    // Codex 0.171 draws its input line without rules, so `spawn --task --
+    // codex` typed nothing ("sent":false) every time. Screen as read from
+    // a fresh Codex 0.171.0 pane.
+    #[test]
+    fn a_task_is_typed_into_codexs_input_line() {
+        let codex = "\n  >_ OpenAI Codex (v0.171.0)\n     /tmp/x\n\n\n\
+                     \u{203a} Ask Codex to do anything\n\n\
+                     \u{20}\u{20}GPT-6.2-Sol medium \u{b7} Standard \u{b7} Context 100% left\n\
+                     \u{20}\u{20}\u{2190} for agents \u{b7} ? for shortcuts\n\n\n";
+        assert!(takes_task(Ready::Report, Some(codex)));
+        assert!(takes_task(Ready::Quiet, Some(codex)));
+        assert!(!takes_task(Ready::Timeout, Some(codex)));
+        // A dialog's selected choice is not the input line.
+        let dialog = "Allow command?\n\u{203a} 1. Yes, proceed (y)\n  2. No (esc)\n";
+        assert!(!takes_task(Ready::Report, Some(dialog)));
+        // The input line scrolled far above the bottom is not at the prompt.
+        let far = "\u{203a} hi\nline 1\nline 2\nline 3\nline 4\n";
+        assert!(!takes_task(Ready::Report, Some(far)));
     }
 }

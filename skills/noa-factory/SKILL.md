@@ -132,6 +132,17 @@ tends to confirm it.
 It writes findings in two groups: defects, each with the input or state that
 produces the wrong result, and preferences. Only defects send a unit back.
 
+Judge each defect yourself before sending it back; a `deep` reviewer finds
+ever smaller edge cases each round. A defect breaks an acceptance criterion,
+or gives a wrong result on input a real caller would plausibly give. Treat as
+a preference: malformed input that already fails with an error that names the
+real problem, behaviour the change copies from the code around it, and wording
+that is accurate but could be tighter. Record each finding you overrule and
+why, for the final report. In later review rounds of that unit, list the
+overruled findings in the reviewer's task as decided and out of scope (the
+finding only, not your view of the rest of the change), or it reports them
+again.
+
 ### 4. Verify
 
 A command worker with no agent runs the check command in the unit's worktree:
@@ -206,8 +217,8 @@ as `noa-orchestration` describes. Then report, in this order:
 3. The check commands you ran and their results, including what was already
    red at the start.
 4. Every worker prompt you answered and how.
-5. Choices you made on the human's behalf, and anything that still needs their
-   decision.
+5. Choices you made on the human's behalf, including every review finding you
+   overruled and why, and anything that still needs their decision.
 6. Worktrees and branches you kept, and why, and the path of the run
    directory.
 

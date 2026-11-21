@@ -1413,14 +1413,18 @@ pub(crate) fn check_spawn(
     current: Option<std::path::PathBuf>,
     path: Option<&str>,
 ) -> Result<(), String> {
-    let cwd = spawn_cwd(spawn.cwd.clone(), current);
+    let cwd = spawn_cwd(spawn.cwd.clone(), current.clone());
     if let Some(given) = &spawn.cwd {
-        let resolved = cwd.as_deref().unwrap_or(given);
-        if !std::path::Path::new(resolved).is_dir() {
-            let resolved = if resolved == given {
+        // The path as given, not the normalized one: dropping a `..` can
+        // turn a path the kernel refuses (`file/../dir`, `locked/.`) into
+        // a directory.
+        let joined = joined_cwd(Some(given.clone()), current);
+        let joined = joined.as_deref().unwrap_or(std::path::Path::new(given));
+        if !joined.is_dir() {
+            let resolved = if joined == std::path::Path::new(given) {
                 String::new()
             } else {
-                format!(" (resolved to {resolved:?})")
+                format!(" (resolved to {joined:?})")
             };
             return Err(format!("--cwd {given:?}{resolved} is not a directory"));
         }
@@ -2226,23 +2230,17 @@ impl Session {
                 }
             },
         )?;
-        let mut line = serde_json::json!({ "paneId": WireId(spawned.pane) });
-        if spawned.recovered {
-            line["recovered"] = true.into();
-        }
-        if let Some((_, made)) = &spawned.made {
-            line["worktree"] = made.path.to_string_lossy().into_owned().into();
-            line["branch"] = made.branch.clone().into();
-        }
-        if let Some(tier) = args.tier {
-            line["tier"] = tier.name().into();
-        }
-        if let Some(path) = &result_path {
-            line["result"] = path.clone().into();
-        }
-        if let Some(dir) = &started_in {
-            line["cwd"] = dir.clone().into();
-        }
+        let mut line = spawn_line(
+            spawned.pane,
+            spawned.recovered,
+            spawned
+                .made
+                .as_ref()
+                .map(|(_, made)| (made.path.as_path(), made.branch.as_str())),
+            args.tier.map(worktree::Tier::name),
+            result_path.as_deref(),
+            started_in.as_deref(),
+        );
         self.journal.append(
             "spawn",
             serde_json::json!({
@@ -4074,20 +4072,60 @@ pub(crate) fn close_panes(
     })
 }
 
-/// The worker's cwd: `--cwd` (a relative one taken from this process's
-/// cwd, since Noa resolves the path in its own process), or this process's
-/// cwd. An absolute result has no `.` or `..` component (see
-/// [`remove_dot_segments`]); one with none comes out byte-for-byte unchanged.
+/// The line `spawn` prints: the new pane, and whatever is known of where and
+/// how it started (`worktree` is the worktree's path and branch).
+fn spawn_line(
+    pane: u64,
+    recovered: bool,
+    worktree: Option<(&std::path::Path, &str)>,
+    tier: Option<&str>,
+    result: Option<&str>,
+    cwd: Option<&str>,
+) -> serde_json::Value {
+    let mut line = serde_json::json!({ "paneId": WireId(pane) });
+    if recovered {
+        line["recovered"] = true.into();
+    }
+    if let Some((path, branch)) = worktree {
+        line["worktree"] = path.to_string_lossy().into_owned().into();
+        line["branch"] = branch.into();
+    }
+    if let Some(tier) = tier {
+        line["tier"] = tier.into();
+    }
+    if let Some(path) = result {
+        line["result"] = path.into();
+    }
+    if let Some(dir) = cwd {
+        line["cwd"] = dir.into();
+    }
+    line
+}
+
+/// `--cwd` joined onto this process's cwd (a relative one is taken from it,
+/// since Noa resolves the path in its own process), or this process's cwd;
+/// not normalized, so it is the path as the caller gave it.
+fn joined_cwd(
+    requested: Option<String>,
+    current: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    match (requested, current) {
+        (Some(dir), Some(current)) => Some(current.join(dir)),
+        (Some(dir), None) => Some(std::path::PathBuf::from(dir)),
+        (None, current) => current,
+    }
+}
+
+/// The worker's cwd: [`joined_cwd`], normalized by [`remove_dot_segments`].
+/// An absolute result has no `.` or `..` component, except a path with a
+/// `..` whose directory does not exist: that one is returned unchanged (for
+/// `check_spawn` to refuse). A path with no such segment comes out
+/// byte-for-byte unchanged.
 pub(crate) fn spawn_cwd(
     requested: Option<String>,
     current: Option<std::path::PathBuf>,
 ) -> Option<String> {
-    let path = match (requested, current) {
-        (Some(dir), Some(current)) => current.join(dir),
-        (Some(dir), None) => std::path::PathBuf::from(dir),
-        (None, current) => current?,
-    };
-    remove_dot_segments(path)
+    remove_dot_segments(joined_cwd(requested, current)?)
         .into_os_string()
         .into_string()
         .ok()
@@ -6548,6 +6586,87 @@ mod tests {
         .unwrap_err();
         assert!(err.ends_with("is not a directory"), "{err}");
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    // Review finding: `check_spawn` judged the normalized path, so
+    // `file/../dir` (refused by the kernel with ENOTDIR) passed as `dir`.
+    #[test]
+    fn a_dotdot_through_a_file_is_refused_though_it_normalizes_to_a_directory() {
+        let base = real_dirs("throughfile");
+        std::fs::write(base.join("file"), "").unwrap();
+
+        let given = "file/../other";
+        assert_eq!(
+            spawn_cwd(Some(given.to_string()), Some(base.clone())).as_deref(),
+            base.join("other").to_str(),
+            "it does normalize to a directory"
+        );
+        let err = check_spawn(&spawn_args(Some(given), &[]), Some(base.clone()), None).unwrap_err();
+        assert!(
+            err.starts_with(r#"--cwd "file/../other" (resolved to "#),
+            "{err}"
+        );
+        assert!(err.ends_with("is not a directory"), "{err}");
+        // The same path through a directory is still accepted.
+        assert_eq!(
+            check_spawn(
+                &spawn_args(Some("sub/../other"), &[]),
+                Some(base.clone()),
+                None
+            ),
+            Ok(())
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    // As above for `locked/.`: no search permission on `locked`, so the
+    // kernel refuses the path though `locked` itself is a directory.
+    #[cfg(unix)]
+    #[test]
+    fn a_dot_inside_a_directory_without_search_permission_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = real_dirs("locked");
+        let locked = base.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let args = spawn_args(Some("locked/."), &[]);
+        let refused = check_spawn(&args, Some(base.clone()), None);
+        let reachable = std::fs::metadata(locked.join(".")).is_ok();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+        if reachable {
+            // Running as root (or a filesystem ignoring modes): the
+            // permission cannot be taken away here.
+            return;
+        }
+        let err = refused.unwrap_err();
+        assert!(err.ends_with("is not a directory"), "{err}");
+    }
+
+    // Acceptance criterion 1: the spawn line carries the resolved cwd.
+    #[test]
+    fn the_spawn_line_carries_the_cwd() {
+        let line = spawn_line(7, false, None, None, None, Some("/repo/sub"));
+        assert_eq!(line["cwd"], "/repo/sub");
+        assert_eq!(line["paneId"], "7");
+
+        let bare = spawn_line(7, false, None, None, None, None);
+        assert!(bare.get("cwd").is_none(), "{bare}");
+
+        let full = spawn_line(
+            8,
+            true,
+            Some((std::path::Path::new("/wt"), "b")),
+            Some("light"),
+            Some("/wt/.noa/result-x.md"),
+            Some("/wt"),
+        );
+        assert_eq!(full["cwd"], "/wt");
+        assert_eq!(full["worktree"], "/wt");
+        assert_eq!(full["branch"], "b");
+        assert_eq!(full["tier"], "light");
+        assert_eq!(full["result"], "/wt/.noa/result-x.md");
+        assert_eq!(full["recovered"], true);
     }
 
     #[test]

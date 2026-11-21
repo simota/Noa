@@ -129,8 +129,11 @@ pub(crate) enum Status {
     Running,
     Finished,
     Exited(Option<i32>),
-    /// Alive, but it never reported a state.
+    /// An agent, alive, that never reported a state.
     Quiet,
+    /// A command that is no agent (`spawn -- cargo test`), still running:
+    /// it has nothing to report (U8).
+    Command,
 }
 
 /// What a worker's state asks of a person, in the order the header counts
@@ -161,6 +164,7 @@ impl Status {
             Some("finished") => Self::Finished,
             _ if panel.attention => Self::Attention,
             Some("running") => Self::Running,
+            _ if panel.agent.is_none() => Self::Command,
             _ => Self::Quiet,
         }
     }
@@ -175,7 +179,7 @@ impl Status {
         match self {
             Self::Permission | Self::Input | Self::Error | Self::Attention => Group::Needs,
             status if status.failed() => Group::Needs,
-            Self::Running | Self::Quiet => Group::Working,
+            Self::Running | Self::Quiet | Self::Command => Group::Working,
             Self::Finished => Group::Done,
             Self::Exited(_) => Group::Exited,
         }
@@ -195,6 +199,7 @@ impl Status {
             Self::Exited(Some(code)) => format!("{} {code}", lang.pick("終了", "exited")),
             Self::Exited(None) => lang.pick("終了", "exited").to_string(),
             Self::Quiet => lang.pick("報告なし", "no report").to_string(),
+            Self::Command => lang.pick("実行中", "running").to_string(),
         }
     }
 
@@ -219,7 +224,7 @@ impl Status {
             Self::Input => "?",
             Self::Error => "×",
             status if status.failed() => "×",
-            Self::Running => "●",
+            Self::Running | Self::Command => "●",
             Self::Finished => "✓",
             Self::Exited(_) | Self::Quiet => "·",
         }
@@ -230,7 +235,7 @@ impl Status {
             Self::Permission | Self::Input | Self::Attention => ORANGE,
             Self::Error => RED,
             status if status.failed() => RED,
-            Self::Running => BLUE,
+            Self::Running | Self::Command => BLUE,
             Self::Finished => GREEN,
             Self::Exited(_) | Self::Quiet => GREY,
         }
@@ -4089,6 +4094,30 @@ mod tests {
         let mut all = Board::new(None, Some(8));
         all.update(sample(), Instant::now());
         assert!(all.workers().iter().any(|p| p.pane_id.0 == 9));
+    }
+
+    // U8: a long command run in a worker looked stopped: grey "· 報告なし",
+    // as an exited one.
+    #[test]
+    fn a_command_that_is_no_agent_is_running() {
+        let mut command = worker(2, 1, "tests", None, 0);
+        command.agent = None;
+        assert_eq!(Status::of(&command), Status::Command);
+        assert_eq!(Status::Command.group(), Group::Working);
+        let mut board = Board::new(Some(1), None);
+        board.update(vec![command.clone()], Instant::now());
+        let all = rendered(&board, 80, 30, Instant::now());
+        assert!(
+            line_with(&all, "tests").contains("● tests  実行中"),
+            "{all}"
+        );
+        // An agent that never reported stays "no report".
+        let mut silent = worker(2, 1, "tests", None, 0);
+        silent.agent.as_mut().unwrap().detail = None;
+        assert_eq!(Status::of(&silent), Status::Quiet);
+        // A command that rang the bell needs someone.
+        command.attention = true;
+        assert_eq!(Status::of(&command), Status::Attention);
     }
 
     #[test]

@@ -516,7 +516,7 @@ A command instead of an agent:
 
 ```sh
 t=$(noa spawn --label tests -- cargo test --workspace | jq -r .paneId)
-noa wait "$t" --for exit --timeout 3600 | jq .exitCode
+noa wait "$t" --for exit --timeout 100 | jq .exitCode   # exit 2: run it again in a new tool call
 noa read "$t" --scrollback --max-bytes 65536 | tail -50
 noa close "$t"
 ```

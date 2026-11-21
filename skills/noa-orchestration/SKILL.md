@@ -14,7 +14,9 @@ output shapes and exit codes: [reference.md](reference.md).
 
 ## Before starting
 
-1. Check that you can: `"$NOA_BIN" +ctl self`.
+1. Check that you can: `"$NOA_BIN" +ctl self`. The examples below write
+   `noa` for `"$NOA_BIN" +ctl`; define `noa() { "$NOA_BIN" +ctl "$@"; }` in
+   each shell call that uses it (a tool shell does not keep functions).
    - `NOA_BIN` unset: you are not in a Noa pane. Stop; this skill does not apply.
    - Exit status 3 with "sandbox likely blocks loopback" (`Operation not
      permitted`): your own shell's sandbox refuses the connection, not Noa. Run
@@ -323,7 +325,8 @@ This is not leave to pass auto-approve flags or to enable Noa's auto-approve
 - `wait` can only see turns an agent reports. Current Claude Code, Codex and
   Antigravity CLI report on their own, with no hooks. Without reports, a worker
   ends a wait only with `exit`, `attention`, or `stalled` (with `--stall`). For plain commands, that is
-  enough: `spawn -- make test`, then `wait PANE --for exit`.
+  enough: `spawn -- make test`, then `wait PANE --for exit --timeout 100`,
+  repeated in a new tool call while it exits 2.
 - Nesting goes one level deep. A worker may start workers of its own (tell it
   so in its task when you want that); they appear under it on your board and
   share its 20 slots. A worker's worker cannot start more. Closing a worker

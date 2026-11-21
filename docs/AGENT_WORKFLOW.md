@@ -284,7 +284,8 @@ noa close PANE
 to end. When the agent's input box is not on screen in time (a trust or login
 prompt), it types nothing and prints `"sent":false` with the `screen`; answer
 the prompt and `send` the task yourself. Every worker gets its own report file
-in `NOA_RESULT` (`<cwd>/.noa/result-LABEL.md`; `.noa/` ignores itself, so git
+in `NOA_RESULT` (`<cwd>/.noa/result-LABEL.md`, with a random suffix when that
+name is taken; `.noa/` ignores itself, so git
 never sees it), which `result` prints.
 
 | Command | What it does |
@@ -295,7 +296,7 @@ never sees it), which `result` prints.
 | `read PANE [--scrollback] [--max-bytes N]` | Prints the screen, or the retained output tail; a cut says so on stderr, and so does a pane on the alternate screen, which keeps no history |
 | `result PANE [--max-bytes N]` | Prints the worker's report file (`NOA_RESULT`); a cut keeps the start |
 | `status [--answers]` | One line per worker with its state and what this pane's journal (`<data-dir>/noa/ctl/`) recorded: tier, last task, last outcome, answers, report file, and commits ahead and uncommitted changes for a worktree worker. `--answers` lists every prompt answered from this pane |
-| `close PANE...\|--children [--prune]` | Closes workers without a confirmation dialog. A pane that is already gone prints `"gone":true` and is not an error; one failure does not stop the rest. `--prune` then removes the `spawn --worktree` worktree of each closed worker whose cwd is in it, found from that cwd, and deletes its branch (`git worktree remove`, `git branch -d`, never forced); what git refuses stays, named under `worktree.kept`, which also says why when no worktree was found |
+| `close PANE...\|--children [--prune]` | Closes workers without a confirmation dialog. A pane that is already gone prints `"gone":true` and is not an error; one failure does not stop the rest. `--prune` then removes the `spawn --worktree` worktree of each closed worker whose cwd is in it, found from that cwd (or from this pane's journal for a worker already gone), after moving its report files to the main worktree's `.noa/`, and deletes its branch (`git worktree remove`, `git branch -d`, never forced); what git refuses stays, named under `worktree.kept`, which also says why when no worktree was found |
 | `ls [--children]` / `self` | Lists panels / prints this pane's panel |
 
 Put `--` before a `send` text (or `report` detail) that starts with `--`.

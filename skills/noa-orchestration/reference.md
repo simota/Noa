@@ -93,7 +93,8 @@ accepted and changes nothing.
 
 **Result file.** Every spawn whose cwd is known creates `<cwd>/.noa/` with a
 `.gitignore` of `*` (an existing one is left alone) and gives the worker
-`NOA_RESULT=<cwd>/.noa/result-LABEL.md` (a plain `--label`; otherwise
+`NOA_RESULT=<cwd>/.noa/result-LABEL.md` (a plain `--label`;
+`result-LABEL-<8 hex>.md` when that file already exists; otherwise
 `result-<8 random hex digits>.md`), so no two workers share one. The line gains
 `"result":"<path>"`. With `--worktree` the cwd is the worktree. `.noa/` never
 shows in `git status` and does not stop `git worktree remove`. `--env
@@ -155,7 +156,9 @@ as keystrokes instead of a bracketed paste.
   and before Enter (`… after the text was typed; Enter was not sent, so the text
   may still be in its input line.`), both exit 1.
 - Pasted text (not `--raw`, not empty) into an agent's pane (`agent.kind` set),
-  or one whose `process` is not listed yet, first waits for the pane to enable
+  or one whose `process` is not listed yet and that no spawn started with a
+  command (no `spawn` in its panel; a Noa too old to send `spawn` still holds
+  those), first waits for the pane to enable
   bracketed paste: Noa is asked every 200 ms, for up to 15 s, before any key
   (also before `--replace`'s). Still off: exit 1, `pane N has not enabled
   bracketed paste yet (its program may still be starting); nothing was sent`. A
@@ -198,8 +201,9 @@ pane that stopped:
   screen's block below the work (the dialog or input box), rules and blank lines
   removed, at most 20 lines. Absent when the screen has no rule-delimited box.
 - `result`: the pane's result file (spawn, "Result file") once it was written
-  after the wait began (with `send --wait`, after just before typing). Timeout
-  lines have none.
+  after the wait began (with `send --wait`, after just before typing; for a pane
+  given `--after PANE=SEQ`, after the journal's send with that `seq` before it,
+  in whole seconds). Timeout lines have none.
 - `agentLeft`: a pane that had an agent when the wait began now has none (the
   agent quit to its shell); like any `exit`, whatever `--for` lists.
 - `wait PANE` (named, not `--children`) refuses a listed pane that is neither
@@ -224,9 +228,9 @@ pane that stopped:
   screen gets `Noa +ctl: pane N is on the alternate screen; its program keeps no
   history here: only the screen is returned` on stderr.
 - `--settle SECS` (also on `send --wait` and `spawn --task`) holds a `finished`
-  for SECS seconds. A newer report, or a change in the work above the input box,
-  drops the hold and the wait goes on; a `permission` that arrives meanwhile
-  still ends it. One that held is printed with `"settledSecs":SECS`. A timeout
+  for SECS seconds. A newer report drops the hold and the wait goes on; a
+  change in the work above the input box starts the SECS again; a `permission`
+  that arrives meanwhile still ends it. One that held is printed with `"settledSecs":SECS`. A timeout
   during a hold gives the baseline from before that `finished`.
 - `--for` takes a comma list of `finished,permission,input,error,exit,attention`
   (default: all of them), and `stalled` with `--stall`.
@@ -261,7 +265,10 @@ pane that stopped:
   between. Without `--timeout`, it waits indefinitely.
 - SIGTERM, SIGINT or SIGHUP during `wait` or `send --wait` prints the same line
   with `"interrupted":true` (and `"queued":true` under `--queue`) and exits 2,
-  up to about a second later. SIGKILL prints nothing.
+  up to about a second later. SIGKILL prints nothing. A signal before the
+  wait's first listing came back lists every pane under `pending`, and
+  `baseline` only the `seq`s already known (from `--after`, or what
+  `send --wait` saw before typing).
 
 ### `read PANE [--scrollback] [--max-bytes N]`
 
@@ -275,8 +282,8 @@ pane on the alternate screen (most agents' TUIs) keeps no history:
 ### `result PANE [--max-bytes N]`
 
 Prints the pane's result file (spawn, "Result file"), with a newline added if
-it lacks one. The path is the one this pane's journal recorded at the spawn,
-else `<its cwd>/.noa/result-LABEL.md` for a listed pane with a plain label.
+it lacks one. The path is the one this pane's journal recorded at the spawn (or
+where `close --prune` moved it), else `<its cwd>/.noa/result-LABEL.md` for a listed pane with a plain label.
 `--max-bytes` keeps the **start** (a report's summary is at its top) and says
 `Noa +ctl: result cut; printed the first N bytes of <path>` on stderr. Exit 1:
 `pane N has no result: <path> does not exist (the worker writes its report to
@@ -289,7 +296,8 @@ One line per live worker of this pane, in listing order: `paneId`, `cwd`, and
 when known `label`, `state`, `seq`, `blocked`, `exit`, `branch`; from the
 journal `tier`, `argv` (else Noa's `spawn.argv`), `lastTask` (the last text sent
 that was not an answer), `lastSentSeq` (the `seq` before the last send),
-`lastOutcome` (`{reason,seq,ts}`), `answers` (a count), `result`, `worktree`.
+`lastOutcome` (`{reason,seq,ts}`), `answers` (a count), `result` (where
+`close --prune` moved it, after a prune), `worktree`.
 A worktree worker also gets `ahead` (commits on its branch that your `HEAD`
 lacks) and `dirty` (uncommitted changes in its worktree), each left out when
 git cannot say. Then the journal's workers that are no longer listed:
@@ -303,8 +311,10 @@ oldest first: `{"ts":…,"paneId":"…","label"?:…,"text":…,"screen":…}`, 
 `<data-dir>/noa/ctl/<NOA_SURFACE_ID>.jsonl` (`~/Library/Application
 Support/noa/ctl/` on macOS), one line per event: `spawn`, `send` (written only
 once typed; its first 200 characters), `outcome` (each wait line with a
-`reason`), `close`. Over 4 MiB it loses its oldest half. A journal that cannot
-be written warns once (`warning: cannot write the journal …; carrying on
+`reason`), `close`. Over 4 MiB it loses its oldest half. A new journal is
+0600, in a 0700 `ctl/` when that is new too (existing ones are not chmod-ed);
+appends and the halving hold a lock on `<NOA_SURFACE_ID>.jsonl.lock` beside it.
+A journal that cannot be written warns once (`warning: cannot write the journal …; carrying on
 without it`) and never fails the command. Without `NOA_SURFACE_ID` nothing is
 kept.
 
@@ -327,9 +337,17 @@ status is 3.
 `--prune`: for each closed worker whose label `L` has a worktree
 `<main>-wt/L` on branch `orch/L`, and whose cwd is in it (as `spawn --worktree` made it; the
 repository is found from the pane's cwd, or its nearest existing parent, not
-from yours), run `git worktree remove` and then `git branch -d` in the main
-worktree, never forced. The line gains
-`"worktree":{"path":…,"removed":true,"branchDeleted":true}`. When git refuses
+from yours), first move every `.noa/result-*.md` of the worktree into
+`<main>/.noa/` (a name taken there gets `-<8 hex>`), then run
+`git worktree remove` and `git branch -d` in the main worktree, never forced. A
+worker that is already gone is pruned too when this pane's journal recorded its
+label and worktree (the worktree is then its cwd). The line gains
+`"worktree":{"path":…,"removed":true,"branchDeleted":true,"result":…}`, where
+`result` is the new path of this worker's own report; `result PANE` and
+`status` read it there. A result file that cannot be moved keeps the worktree
+and branch, with `kept` saying why (`cannot move the result file <from> to
+<to>: …`, `cannot make <main>/.noa: …`, `cannot read <wt>/.noa: …`); the files
+are moved even when git then refuses. When git refuses
 (uncommitted changes, a branch not merged into your `HEAD`), the work stays,
 `"kept"` gives git's reason, and the exit status is unchanged. When the worktree
 and branch exist but the pane's cwd was not in it, nothing is removed and the line
@@ -372,11 +390,14 @@ succeeds.
 | 3 | Server disabled, unreachable, missing a scope, gone mid-command, full, or not answering a request within 5 s ("did not answer in time"), or a request Noa did not confirm in time (`-32009`, "it may still have taken effect"). After either of the last two, check with `ls` or `read` before retrying. stderr says which: "sandbox likely blocks loopback" (your shell's sandbox refused the connection; run `+ctl` outside it), "not listening" (Noa's server is off), "too many control connections open" (see below), or a message naming the config to add |
 
 Noa holds 32 connections at once; each running `wait`, `send --wait`, board and
-attach holds one. A connect refused at that limit is retried for 3 s (100 ms,
-doubling), then exits 3 with "Noa has too many control connections open (each
+attach holds one. A connect refused at that limit, or one Noa drops during the
+WebSocket handshake (it does so past 4 refusals at once), is retried for 3 s
+(100 ms, doubling), then exits 3 with "Noa has too many control connections open (each
 running `wait`, `send --wait`, board and attach holds one); end some, or try
-again later". A Noa older than that drops such a connection unanswered, which
-reads as "lost the connection".
+again later", or for a dropped handshake "cannot reach Noa at <url>: the
+server dropped the connection during the websocket handshake: …; Noa may be at
+its connection limit: …". A Noa older than 1013 drops every such connection
+unanswered, which is retried the same way.
 
 When `+ctl` reaches a Noa that does not list this pane (stderr says "does not
 report surface ids", exit 3, or "is not among the panes", exit 1), the control

@@ -115,8 +115,10 @@ directory may show a trust prompt, and the spawn line then has `"sent":false`
   Merge branches one at a time and run the checks after each. A conflict goes
   to you or to a `deep` worker, not back to the worker that wrote one side.
 - Clean up with `noa close --prune PANE` once the branch is merged (or
-  dropped): it closes the pane, finds the worktree from the pane's cwd, then
-  runs `git worktree remove` and `git branch -d`, never forced. When git refuses
+  dropped): it closes the pane, finds the worktree from the pane's cwd (from
+  the journal for a worker already gone), moves the worktree's result files to
+  `<main>/.noa/` (`worktree.result`; `noa result PANE` still prints the
+  report), then runs `git worktree remove` and `git branch -d`, never forced. When git refuses
   (uncommitted changes, branch not merged), or no worktree is found, the line
   says why under `worktree.kept` and the work stays. Do not remove it with
   `--force` or `-D` without reading what would be lost; keep it and tell the
@@ -125,8 +127,8 @@ directory may show a trust prompt, and the spawn line then has `"sent":false`
   `spawn --cwd <its worktree> --label <same label> --tier <one up>`: the new
   worker carries on in the same worktree and branch, and `--prune` still finds
   it later. Say in the task that the previous attempt's changes are there.
-  Its `$NOA_RESULT` is the same file, so trust it only once a wait line names
-  it as `result`. Discarding the changes (`git reset --hard`) is the human's
+  The new worker gets a result file of its own (`result-<label>-<8 hex>.md`,
+  the spawn line's `result`), so the old report stays apart. Discarding the changes (`git reset --hard`) is the human's
   call. A new label with `--worktree` would split the work over two branches.
 - If `spawn --worktree` fails with a permission error, your own shell may be
   sandboxed away from `.git/worktrees`; say so rather than working around it.
@@ -157,8 +159,9 @@ for the turn like `send --enter --wait`. The first line is the spawn's
   after reporting `finished`.
 - Read the report with `noa result PANE`, not the screen: `read --scrollback`
   on an agent returns only about its last screen. A wait line has
-  `"result":{"path","bytes"}` once the worker wrote it during that wait; without
-  it, the file is missing or left from an earlier task.
+  `"result":{"path","bytes"}` once the worker wrote it during that wait (or,
+  with `--after SEQ`, since the send that SEQ came from); without it, the file
+  is missing or left from an earlier task.
 - For a later task, `send PANE --enter --wait …`. It subscribes before typing,
   so a fast reply cannot be missed; a separate `send` then `wait` can miss a
   turn that ends in between (except with `--after`, "Several workers").

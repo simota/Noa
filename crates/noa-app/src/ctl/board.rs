@@ -2534,16 +2534,20 @@ impl Board {
             ("Enter / Esc", l("送る / 取り消す", "send / cancel")),
             ("^U / ^W", l("全部消す / 1 語消す", "clear / delete a word")),
         ];
+        // A description too long for the pane goes on under itself (U11).
         for (key, what) in keys {
-            let mut line = Line::default();
             if what.is_empty() {
+                let mut line = Line::default();
                 line.plain(" ").bold(key);
-            } else {
-                line.plain("   ")
-                    .plain(&pad(key, 12))
-                    .fg(DIM, &fit(what, cols.saturating_sub(16)));
+                lines.push(line.finish(cols));
+                continue;
             }
-            lines.push(line.finish(cols));
+            for (at, part) in wrap(what, cols.saturating_sub(16)).iter().enumerate() {
+                let mut line = Line::default();
+                let key = if at == 0 { key } else { "" };
+                line.plain("   ").plain(&pad(key, 12)).fg(DIM, part);
+                lines.push(line.finish(cols));
+            }
         }
         let room = rows.saturating_sub(1);
         let mut out = vec![title.finish(cols)];
@@ -6026,6 +6030,33 @@ mod tests {
             line_with(&all, "Space").contains("ワーカーの子をたたむ / 開く"),
             "{all}"
         );
+    }
+
+    // U11: help descriptions were cut at 80 columns, and at 60 several more.
+    #[test]
+    fn the_help_wraps_what_does_not_fit() {
+        for lang in [Lang::Ja, Lang::En] {
+            let mut board = Board::new(Some(1), Some(8));
+            board.lang = lang;
+            board.update(sample(), Instant::now());
+            board.key(Key::Char('?'));
+            for cols in [60, 80] {
+                let lines = board.render(cols, 60, Instant::now());
+                let text: String = lines
+                    .iter()
+                    .map(|line| visible(line).replace(' ', ""))
+                    .collect();
+                let space = lang.pick(
+                    "作業中のワーカーの子をたたむ / 開く(それ以外では完了・終了を開く / たたむ)",
+                    "fold / open a subtree at work (elsewhere: list / fold done and exited)",
+                );
+                assert!(text.contains(&space.replace(' ', "")), "{cols}: {text}");
+                assert!(!text.contains('…'), "{cols}: {text}");
+                for line in &lines {
+                    assert_eq!(visible(line).width(), cols);
+                }
+            }
+        }
     }
 
     // D13 with D12: ending the board closes the workers of workers, whose

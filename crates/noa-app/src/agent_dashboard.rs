@@ -7,7 +7,12 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 
-const PROGRAM: &str = "agent-dashboard-mock";
+/// The dashboard's file name in `Noa.app`'s Helpers. macOS names a bare
+/// executable's process after its file in the menu bar and Dock, so the
+/// bundle ships it under the product name, not the crate's binary name.
+const BUNDLED_PROGRAM: &str = "Noa Agent Dashboard";
+/// The binary `cargo build` makes in `mock/agent-dashboard/target`.
+const DEV_PROGRAM: &str = "agent-dashboard-mock";
 
 /// How much of the dashboard's stderr is kept to say why it exited.
 const STDERR_TAIL: usize = 4096;
@@ -23,7 +28,8 @@ pub(crate) fn open(on_failure: impl FnOnce(String) + Send + 'static) -> Result<(
     let Some(program) = locate(helpers.as_deref(), &dev_build_dirs()) else {
         let message = "Agent Dashboard is not installed (build mock/agent-dashboard)".to_owned();
         log::error!(
-            "agent dashboard: no {PROGRAM} in Noa.app's Helpers or in mock/agent-dashboard/target \
+            "agent dashboard: no {BUNDLED_PROGRAM:?} in Noa.app's Helpers or {DEV_PROGRAM} in \
+             mock/agent-dashboard/target \
              (build it with `cargo build --manifest-path mock/agent-dashboard/Cargo.toml`)"
         );
         return Err(message);
@@ -108,9 +114,9 @@ fn exit_message(status: ExitStatus, stderr_tail: &[u8]) -> Option<String> {
 /// `Noa.app`), else the first of `dev_dirs` that holds one.
 fn locate(helpers: Option<&Path>, dev_dirs: &[PathBuf]) -> Option<PathBuf> {
     helpers
+        .map(|dir| dir.join(BUNDLED_PROGRAM))
         .into_iter()
-        .chain(dev_dirs.iter().map(PathBuf::as_path))
-        .map(|dir| dir.join(PROGRAM))
+        .chain(dev_dirs.iter().map(|dir| dir.join(DEV_PROGRAM)))
         .find(|path| path.is_file())
 }
 
@@ -144,11 +150,11 @@ mod tests {
     fn the_bundled_dashboard_wins_over_a_dev_build() {
         let exe_dir = scratch_dir("exe");
         let dev = scratch_dir("dev");
-        std::fs::write(exe_dir.join(PROGRAM), "").unwrap();
-        std::fs::write(dev.join(PROGRAM), "").unwrap();
+        std::fs::write(exe_dir.join(BUNDLED_PROGRAM), "").unwrap();
+        std::fs::write(dev.join(DEV_PROGRAM), "").unwrap();
         assert_eq!(
             locate(Some(&exe_dir), std::slice::from_ref(&dev)),
-            Some(exe_dir.join(PROGRAM))
+            Some(exe_dir.join(BUNDLED_PROGRAM))
         );
         let _ = std::fs::remove_dir_all(&exe_dir);
         let _ = std::fs::remove_dir_all(&dev);
@@ -159,10 +165,10 @@ mod tests {
         let exe_dir = scratch_dir("bare-exe");
         let missing = scratch_dir("missing");
         let dev = scratch_dir("dev-only");
-        std::fs::write(dev.join(PROGRAM), "").unwrap();
+        std::fs::write(dev.join(DEV_PROGRAM), "").unwrap();
         assert_eq!(
             locate(Some(&exe_dir), &[missing.clone(), dev.clone()]),
-            Some(dev.join(PROGRAM))
+            Some(dev.join(DEV_PROGRAM))
         );
         assert_eq!(locate(Some(&exe_dir), std::slice::from_ref(&missing)), None);
         assert_eq!(locate(None, &[]), None);

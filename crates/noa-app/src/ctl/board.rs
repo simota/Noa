@@ -1219,12 +1219,14 @@ impl Board {
 
     /// The panes whose screens the current view needs: in the list, the
     /// workers that need someone or are at work (whose rows say when they
-    /// last showed output), and the selected one, which is previewed.
+    /// last showed output), the orchestrator while it needs someone (it
+    /// heads the queue), and the selected one, which is previewed.
     pub(crate) fn wanted_screens(&self) -> Vec<u64> {
         match self.view {
             View::List => self
-                .workers()
-                .iter()
+                .lead()
+                .into_iter()
+                .chain(self.workers())
                 .map(|panel| panel.pane_id.0)
                 .filter(|&pane| {
                     Some(pane) == self.selected
@@ -2824,7 +2826,9 @@ impl Board {
     fn render_list(&self, cols: usize, rows: usize, now: Instant) -> Vec<String> {
         let mut lines = self.header(cols, now);
         let room = rows.saturating_sub(lines.len() + 1);
-        if self.workers().is_empty() {
+        // The orchestrator needing someone is listed (and selectable) with
+        // no worker too.
+        if self.workers().is_empty() && self.lead().is_none() {
             lines.extend(self.empty_lines(cols, room, now));
             return lines;
         }
@@ -4190,8 +4194,7 @@ fn run_until_quit(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
             if action == Action::Quit {
                 return Ok(EXIT_OK);
             }
-            if let Some(notice) = held_elsewhere(&board) {
-                board.message = Some(notice);
+            if hold_elsewhere(&mut board, &action) {
                 continue;
             }
             let (notice, draft) = perform(client, &board, action);
@@ -4215,6 +4218,21 @@ fn held_elsewhere(board: &Board) -> Option<Notice> {
                 .to_string(),
         )
     })
+}
+
+/// Hold `action` while another Noa answers, saying so on the board; a
+/// send's text stays as the worker's draft. Returns whether it was held.
+fn hold_elsewhere(board: &mut Board, action: &Action) -> bool {
+    let Some(mut notice) = held_elsewhere(board) else {
+        return false;
+    };
+    if let Action::Send(pane, text) = action
+        && board.keep_draft(*pane, text.clone())
+    {
+        notice.text = format!("{} · {}", notice.text, draft_kept(board.lang));
+    }
+    board.message = Some(notice);
+    true
 }
 
 /// The server calls an action makes, so they can be faked in tests.
@@ -5617,6 +5635,48 @@ mod tests {
         assert!(!board.update(with("running"), at));
         assert_eq!(queue(&board), vec![3]);
         assert_eq!(board.selected(), Some(3));
+    }
+
+    /// Orchestrator 1 waiting for an approval, with no worker yet.
+    fn lone_orchestrator() -> Board {
+        let mut me = worker(1, 0, "", Some("permission"), 3);
+        me.parent_pane_id = None;
+        me.label = None;
+        me.name = "fix the flaky suite".to_string();
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(vec![me], Instant::now());
+        board
+    }
+
+    // Review finding: with no worker, the orchestrator needing someone was
+    // counted in the header and selected, but the list drew only the
+    // empty note: neither its queue row nor its preview.
+    #[test]
+    fn an_orchestrator_needing_someone_is_drawn_with_no_workers() {
+        let mut board = lone_orchestrator();
+        board.set_screen(1, "Allow Bash: +ctl wait?");
+        assert_eq!(board.title(), "ボード · 要対応 1");
+        assert_eq!(board.selected(), Some(1));
+        let all = rendered(&board, 120, 30, Instant::now());
+        assert!(
+            line_with(&all, "▶  ! オーケストレーター").contains("承認待ち"),
+            "{all}"
+        );
+        assert!(all.contains("Allow Bash: +ctl wait?"), "{all}");
+        assert!(!all.contains("ワーカーはまだいません"), "{all}");
+    }
+
+    // Review finding: the list view fetched only the workers' screens, so
+    // the orchestrator's preview stayed at "reading the screen…".
+    #[test]
+    fn the_list_fetches_the_orchestrators_screen_while_it_needs_someone() {
+        let board = lone_orchestrator();
+        assert_eq!(board.wanted_screens(), vec![1]);
+        let mut panels = sample();
+        panels.extend(lone_orchestrator().panels);
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(panels, Instant::now());
+        assert!(board.wanted_screens().contains(&1));
     }
 
     /// The number in a "あと N 件" marker line with `arrow`, if drawn.
@@ -7331,6 +7391,35 @@ mod tests {
         board.elsewhere = true;
         let notice = held_elsewhere(&board).expect("actions are held");
         assert!(notice.warn);
+    }
+
+    // Review finding: while another Noa answered, `s` still opened the send
+    // line and Enter's text was dropped: neither sent nor kept as a draft
+    // (`s` had taken the old draft out).
+    #[test]
+    fn a_send_held_while_another_noa_answers_keeps_its_text() {
+        let t0 = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), t0);
+        board.select(2);
+        board.elsewhere = true;
+        board.key(Key::Char('s'));
+        board.key(Key::Paste("look at the tests".to_string()));
+        let action = board.key(Key::Enter).expect("Enter sends");
+        assert!(hold_elsewhere(&mut board, &action));
+        assert_eq!(
+            board.drafts.get(&2).map(String::as_str),
+            Some("look at the tests")
+        );
+        let message = board.message.clone().unwrap();
+        assert!(
+            message.warn && message.text.ends_with("下書きを残しました (s で再開)"),
+            "{message:?}"
+        );
+        // Anything else is held without a draft.
+        board.drafts.clear();
+        assert!(hold_elsewhere(&mut board, &Action::Focus(2)));
+        assert!(board.drafts.is_empty());
     }
 
     #[test]

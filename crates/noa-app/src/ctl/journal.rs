@@ -221,11 +221,20 @@ fn pane_of(event: &serde_json::Value) -> Option<u64> {
     event.get("pane")?.as_u64()
 }
 
+/// A pane id as the wire writes it (`"9"`).
+fn pane_field(value: &serde_json::Value) -> Option<u64> {
+    value.as_str()?.parse().ok()
+}
+
 fn text_field(event: &serde_json::Value, key: &str) -> Option<String> {
     event.get(key)?.as_str().map(str::to_string)
 }
 
-/// The workers the events name, in the order they were first named.
+/// The workers the events name, in the order they were first spawned. Only
+/// a `spawn` (a recovered one is journaled as one too) makes a worker;
+/// another event attaches to the worker spawned under its pane, and one for
+/// any other pane (`send --any-pane`, `wait` on this pane, a mistyped
+/// `close`) names no worker.
 pub(crate) fn workers(events: &[serde_json::Value]) -> Vec<Worker> {
     let mut order: Vec<u64> = Vec::new();
     let mut known: HashMap<u64, Worker> = HashMap::new();
@@ -233,13 +242,16 @@ pub(crate) fn workers(events: &[serde_json::Value]) -> Vec<Worker> {
         let Some(pane) = pane_of(event) else {
             continue;
         };
-        let worker = known.entry(pane).or_insert_with(|| {
-            order.push(pane);
-            Worker {
-                pane,
-                ..Worker::default()
-            }
-        });
+        if event["ev"] == "spawn" {
+            known.entry(pane).or_insert_with(|| {
+                order.push(pane);
+                Worker::default()
+            });
+        }
+        let Some(worker) = known.get_mut(&pane) else {
+            moved_results(&mut known, event);
+            continue;
+        };
         match event["ev"].as_str() {
             Some("spawn") => {
                 // A pane id given out again (after Noa restarted) is a new
@@ -283,11 +295,24 @@ pub(crate) fn workers(events: &[serde_json::Value]) -> Vec<Worker> {
             }
             _ => {}
         }
+        moved_results(&mut known, event);
     }
     order
         .into_iter()
         .filter_map(|pane| known.remove(&pane))
         .collect()
+}
+
+/// A `close --prune`'s moves of other workers' results out of the worktree
+/// it removed (`worktree.moved`).
+fn moved_results(known: &mut HashMap<u64, Worker>, event: &serde_json::Value) {
+    for moved in event["worktree"]["moved"].as_array().into_iter().flatten() {
+        if let (Some(pane), Some(to)) = (pane_field(&moved["paneId"]), moved["to"].as_str())
+            && let Some(worker) = known.get_mut(&pane)
+        {
+            worker.result = Some(to.to_string());
+        }
+    }
 }
 
 /// When the last `send` to `pane` with report count `seq` before it was
@@ -564,6 +589,8 @@ mod tests {
         events.extend(parse_events(concat!(
             r#"{"ev":"close","ts":7,"pane":4,"worktree":{"path":"/r-wt/fix","removed":true,"branchDeleted":true,"result":"/r/.noa/result-fix.md"}}"#,
             "\n",
+            r#"{"ev":"spawn","ts":8,"pane":9,"label":"y"}"#,
+            "\n",
             r#"{"ev":"close","ts":8,"pane":9,"worktree":{"removed":false,"kept":"x","result":"/r/.noa/result-y.md"}}"#,
             "\n",
         )));
@@ -573,6 +600,24 @@ mod tests {
         assert_eq!(workers[1].result, None);
         assert_eq!(workers[2].pane, 9);
         assert_eq!(workers[2].result.as_deref(), Some("/r/.noa/result-y.md"));
+    }
+
+    // Review finding: any event with a pane made a worker, so a pane sent
+    // to with `--any-pane`, this pane after `wait <own pane>`, and a
+    // mistyped `close 9999` were listed by `status` as gone workers.
+    #[test]
+    fn only_a_spawn_makes_a_worker() {
+        let mut events = sample();
+        events.extend(parse_events(concat!(
+            r#"{"ev":"send","ts":7,"pane":12,"seqBefore":0,"text":"hi","answer":false}"#,
+            "\n",
+            r#"{"ev":"outcome","ts":8,"pane":1,"reason":"finished","seq":3}"#,
+            "\n",
+            r#"{"ev":"close","ts":9,"pane":9999,"worktree":null}"#,
+            "\n",
+        )));
+        let panes: Vec<u64> = workers(&events).iter().map(|worker| worker.pane).collect();
+        assert_eq!(panes, vec![4, 6]);
     }
 
     #[test]

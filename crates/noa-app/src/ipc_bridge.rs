@@ -690,7 +690,9 @@ pub(crate) fn card_to_panel(
 }
 
 /// A `Panel` for a live pane with no session card yet (an orchestrator's
-/// worker before its first output): no name, cwd, or preview to show.
+/// worker before its first output): no name, cwd, or preview to show. An
+/// agent spawned straight from argv still lists its `agent.kind`, as
+/// `card_to_panel` does, so `send` waits for its bracketed paste.
 pub(crate) fn bare_panel(
     ipc_id: u64,
     window_group_id: u64,
@@ -711,7 +713,18 @@ pub(crate) fn bare_panel(
         attachable,
         preview: Vec::new(),
         surface_id: facts.surface_id,
-        agent: None,
+        agent: facts
+            .spawn
+            .as_ref()
+            .and_then(|spawn| spawn.argv.first())
+            .and_then(|argv0| spawn_agent_kind(argv0))
+            .map(|kind| PanelAgent {
+                kind: Some(kind.to_string()),
+                state: None,
+                detail: None,
+                seq: 0,
+                blocked: None,
+            }),
         exit: facts.exit.map(|exit| PanelExit {
             code: exit.exit_code,
         }),
@@ -741,7 +754,7 @@ fn panel_agent(card: &SessionCard, spawn_argv0: Option<&str>) -> Option<PanelAge
         .as_deref()
         .and_then(|process| agent_wire_kind(classify_agent(process)))
         .or_else(|| reported_app.and_then(|app| agent_wire_kind(app_agent_kind(app))))
-        .or_else(|| spawn_argv0.and_then(|argv0| agent_wire_kind(classify_agent(argv0))));
+        .or_else(|| spawn_argv0.and_then(spawn_agent_kind));
     if kind.is_none() && card.agent_status.is_none() && card.agent_seq == 0 {
         return None;
     }
@@ -763,6 +776,11 @@ fn panel_agent(card: &SessionCard, spawn_argv0: Option<&str>) -> Option<PanelAge
             .and_then(|status| status.blocked)
             .map(|blocked| blocked.wire_name().to_string()),
     })
+}
+
+/// The wire kind of the agent a spawn's `argv[0]` runs, if it is one.
+pub(crate) fn spawn_agent_kind(argv0: &str) -> Option<&'static str> {
+    agent_wire_kind(crate::sidebar::classify_agent(argv0))
 }
 
 /// The agent an `OSC 7501` `app=` names: `claude-code` and `codex` read
@@ -935,6 +953,31 @@ mod tests {
         assert_eq!(
             card_to_panel(8, 1, 2, &card, true, facts).cwd,
             "/repo-wt/fix/crates"
+        );
+    }
+
+    // Review finding (REL-01): a worker spawned into an agent is listed
+    // bare until its first output; its argv already names the agent.
+    #[test]
+    fn a_bare_panel_takes_its_agent_kind_from_the_spawn_argv() {
+        let spawn = |argv0: &str| PanelSurfaceFacts {
+            spawn: Some(noa_ipc::PanelSpawn {
+                argv: vec![argv0.to_string()],
+                started_at: 0,
+            }),
+            ..PanelSurfaceFacts::default()
+        };
+        let agent = bare_panel(8, 1, 2, true, spawn("/usr/local/bin/codex")).agent;
+        assert_eq!(agent.and_then(|agent| agent.kind).as_deref(), Some("codex"));
+        assert!(
+            bare_panel(8, 1, 2, true, spawn("./deploy.sh"))
+                .agent
+                .is_none()
+        );
+        assert!(
+            bare_panel(8, 1, 2, true, PanelSurfaceFacts::default())
+                .agent
+                .is_none()
         );
     }
 

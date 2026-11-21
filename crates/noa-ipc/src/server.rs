@@ -1323,12 +1323,15 @@ impl RpcFail {
     }
 }
 
-/// Parses a method's `params`. Every method takes its params by name (the
-/// method tables in `docs/specs/noa-server.md` and
-/// `docs/api/noa-server-protocol.md` give each as an object), so anything
-/// but a JSON object is -32602. That includes a by-position array, which
-/// serde would otherwise bind to the struct's fields in declaration order.
-fn parse_params<T: serde::de::DeserializeOwned>(params: Value) -> Result<T, RpcFail> {
+/// Parses the `params` of a subscription RPC (`noa.subscribe`,
+/// `noa.updateSubscription`, `noa.unsubscribe`), which take them by name
+/// only: anything but a JSON object is -32602. That includes a by-position
+/// array, which serde would otherwise bind to the struct's fields in
+/// declaration order, so `[id, [], null, null]` would stop a subscription
+/// and `[id]` would remove one. The other methods keep plain
+/// `serde_json::from_value` and answer such an array as they always have,
+/// so existing v3 clients that send one keep working.
+fn parse_named_params<T: serde::de::DeserializeOwned>(params: Value) -> Result<T, RpcFail> {
     if !params.is_object() {
         return Err(RpcFail::invalid_params());
     }
@@ -1590,9 +1593,9 @@ fn handle_hello(
     allowed_scopes: ScopeSet,
     session: &mut Session,
 ) -> String {
-    let hello: HelloParams = match parse_params(params) {
+    let hello: HelloParams = match serde_json::from_value(params) {
         Ok(p) => p,
-        Err(fail) => return error_response(id, fail.code, &fail.message),
+        Err(_) => return error_response(id, ErrorCode::InvalidParams, "invalid params"),
     };
 
     if hello.protocol_version != PROTOCOL_VERSION {
@@ -1623,7 +1626,7 @@ fn handle_hello(
 }
 
 fn handle_get_text(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value, RpcFail> {
-    let p: GetTextParams = parse_params(params)?;
+    let p: GetTextParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
     // R-1: clamp, don't reject — an over-large maxBytes is capped to
     // MAX_TEXT_MAX_BYTES before it ever reaches the backend, so an
     // authenticated client can't force an unbounded scrollback walk under
@@ -1652,7 +1655,7 @@ fn handle_get_text(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value
 }
 
 fn handle_get_grid(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value, RpcFail> {
-    let p: GetGridParams = parse_params(params)?;
+    let p: GetGridParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
     let backend_result = backend.get_grid(p.pane_id.0, p.start_row, p.row_count)?;
     let backend_has_more = backend_result.has_more;
     let (rows, has_more) =
@@ -1674,7 +1677,8 @@ fn handle_get_grid(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value
 }
 
 fn handle_send_text(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value, RpcFail> {
-    let p: SendTextParams = parse_params(params)?;
+    let p: SendTextParams =
+        serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
     backend.send_text(
         p.pane_id.0,
         &p.text,
@@ -1685,7 +1689,7 @@ fn handle_send_text(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Valu
 }
 
 fn handle_focus_pane(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value, RpcFail> {
-    let p: PaneIdParams = parse_params(params)?;
+    let p: PaneIdParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
     backend.focus_pane(p.pane_id.0)?;
     Ok(serde_json::to_value(OkResult::ok()).unwrap())
 }
@@ -1695,7 +1699,7 @@ fn handle_new_tab(
     session: &Session,
     params: Value,
 ) -> Result<Value, RpcFail> {
-    let p: NewTabParams = parse_params(params)?;
+    let p: NewTabParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
     let window = p.window_id.map(|w| w.0);
     let pane_id = if p.spawn.is_extended() {
         check_spawn_params(session, &p.spawn)?;
@@ -1714,7 +1718,7 @@ fn handle_split(
     session: &Session,
     params: Value,
 ) -> Result<Value, RpcFail> {
-    let p: SplitParams = parse_params(params)?;
+    let p: SplitParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
     let direction = p.direction.direction();
     let pane_id = match direction {
         Some(direction) if !p.spawn.is_extended() => backend.split(p.pane_id.0, direction)?,
@@ -1805,7 +1809,7 @@ fn handle_close_pane(
     attach_registry: &AttachRegistry,
     params: Value,
 ) -> Result<Value, RpcFail> {
-    let p: PaneIdParams = parse_params(params)?;
+    let p: PaneIdParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
     backend.close_pane(p.pane_id.0)?;
     if let Some(identity) = attach_registry.release_pane(p.pane_id.0) {
         let _ = backend.detach_attach(identity.pane, identity.generation);
@@ -1819,7 +1823,7 @@ fn handle_attach(
     session: &mut Session,
     params: Value,
 ) -> Result<Value, RpcFail> {
-    let p: AttachParams = parse_params(params)?;
+    let p: AttachParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
     backend.validate_attach(p.pane_id.0)?;
     let reservation = attach_registry
         .reserve(p.pane_id.0)
@@ -1846,7 +1850,7 @@ fn handle_detach(
     session: &mut Session,
     params: Value,
 ) -> Result<Value, RpcFail> {
-    let p: DetachParams = parse_params(params)?;
+    let p: DetachParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
     if let Some(identity) = session.attach_leases.remove(&p.pane_id.0)
         && attach_registry.release_generation(identity)
     {
@@ -1861,7 +1865,8 @@ fn handle_resize_pane(
     session: &Session,
     params: Value,
 ) -> Result<Value, RpcFail> {
-    let p: ResizePaneParams = parse_params(params)?;
+    let p: ResizePaneParams =
+        serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
     if p.cols == 0
         || p.rows == 0
         || p.cols > MAX_RESIZE_COLS
@@ -1900,7 +1905,7 @@ fn handle_subscribe(
     conn_id: u64,
     params: Value,
 ) -> Result<Value, RpcFail> {
-    let p: SubscribeParams = parse_params(params)?;
+    let p: SubscribeParams = parse_named_params(params)?;
     if p.pane_ids
         .as_ref()
         .is_some_and(|ids| ids.len() > MAX_SUBSCRIBE_PANE_IDS)
@@ -1938,7 +1943,7 @@ fn handle_update_subscription(
     conn_id: u64,
     params: Value,
 ) -> Result<Value, RpcFail> {
-    let p: UpdateSubscriptionParams = parse_params(params)?;
+    let p: UpdateSubscriptionParams = parse_named_params(params)?;
     if p.pane_ids
         .as_ref()
         .and_then(Option::as_ref)
@@ -1973,7 +1978,7 @@ fn handle_unsubscribe(
     conn_id: u64,
     params: Value,
 ) -> Result<Value, RpcFail> {
-    let p: UnsubscribeParams = parse_params(params)?;
+    let p: UnsubscribeParams = parse_named_params(params)?;
     broadcaster.remove_subscription(conn_id, p.subscription_id.0);
     Ok(serde_json::to_value(OkResult::ok()).unwrap())
 }
@@ -2422,16 +2427,16 @@ mod tests {
         assert_eq!(id_a, server_instance_id());
     }
 
-    /// Asserts `params` is -32602 from [`parse_params`].
+    /// Asserts `params` is -32602 from [`parse_named_params`].
     fn assert_invalid_params<T: serde::de::DeserializeOwned>(params: Value) {
-        match parse_params::<T>(params.clone()) {
+        match parse_named_params::<T>(params.clone()) {
             Ok(_) => panic!("{params} was accepted"),
             Err(fail) => assert_eq!(fail.code, ErrorCode::InvalidParams, "{params}"),
         }
     }
 
     /// Asserts serde alone binds the array `params` to `T` by position, and
-    /// [`parse_params`] still rejects it.
+    /// [`parse_named_params`] still rejects it.
     fn assert_by_position_rejected<T: serde::de::DeserializeOwned>(params: Value) {
         assert!(
             serde_json::from_value::<T>(params.clone()).is_ok(),
@@ -2440,8 +2445,12 @@ mod tests {
         assert_invalid_params::<T>(params);
     }
 
+    /// Only the subscription RPCs parse with [`parse_named_params`]; the
+    /// other methods' by-position behaviour is pinned over the wire by
+    /// `only_the_subscription_rpcs_reject_params_by_position` in
+    /// `tests/server_tests.rs`.
     #[test]
-    fn params_given_by_position_are_invalid_params() {
+    fn subscription_params_given_by_position_are_invalid_params() {
         use serde_json::json;
         assert_by_position_rejected::<SubscribeParams>(json!([
             ["state_changed"],
@@ -2450,32 +2459,21 @@ mod tests {
         ]));
         assert_by_position_rejected::<UpdateSubscriptionParams>(json!(["1", [], null, null]));
         assert_by_position_rejected::<UnsubscribeParams>(json!(["1"]));
-        assert_by_position_rejected::<HelloParams>(json!([PROTOCOL_VERSION, "tok", ["read"]]));
-        assert_by_position_rejected::<GetTextParams>(json!(["1", "screen"]));
-        assert_by_position_rejected::<GetGridParams>(json!(["1", 0, 10]));
-        assert_by_position_rejected::<SendTextParams>(json!(["1", "x"]));
-        assert_by_position_rejected::<PaneIdParams>(json!(["1"]));
-        assert_by_position_rejected::<AttachParams>(json!(["1"]));
-        assert_by_position_rejected::<DetachParams>(json!(["1"]));
-        assert_by_position_rejected::<ResizePaneParams>(json!(["1", 80, 24]));
-        // `#[serde(flatten)]` already refused a sequence for these two.
-        assert_invalid_params::<NewTabParams>(json!([]));
-        assert_invalid_params::<SplitParams>(json!(["1", "horizontal"]));
         for scalar in [json!(null), json!("1"), json!(1), json!(true)] {
-            assert_invalid_params::<PaneIdParams>(scalar);
+            assert_invalid_params::<UnsubscribeParams>(scalar);
         }
     }
 
     #[test]
-    fn params_given_by_name_still_parse() {
+    fn subscription_params_given_by_name_still_parse() {
         use serde_json::json;
         let update: UpdateSubscriptionParams =
-            parse_params(json!({ "subscriptionId": "1", "events": [], "paneIds": null }))
+            parse_named_params(json!({ "subscriptionId": "1", "events": [], "paneIds": null }))
                 .unwrap_or_else(|_| panic!("by-name params were rejected"));
         assert_eq!(update.subscription_id, WireId(1));
         assert_eq!(update.events, Some(vec![]));
         assert_eq!(update.pane_ids, Some(None));
-        assert!(parse_params::<NewTabParams>(json!({})).is_ok());
-        assert!(parse_params::<UnsubscribeParams>(json!({ "subscriptionId": "1" })).is_ok());
+        assert!(parse_named_params::<SubscribeParams>(json!({ "events": ["output"] })).is_ok());
+        assert!(parse_named_params::<UnsubscribeParams>(json!({ "subscriptionId": "1" })).is_ok());
     }
 }

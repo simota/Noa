@@ -1146,16 +1146,50 @@ mod subscription_tests {
         );
     }
 
+    /// A `Panel` with every optional field `Some`, written out without
+    /// [`PanelField::ALL_FIELDS`], so each `Panel` key is serialized whether
+    /// or not that list names it. The struct literal has no `..`, so a new
+    /// `Panel` field does not compile until it is set here.
+    fn panel_with_every_field_set() -> Panel {
+        Panel {
+            window_group_id: WireId(1),
+            window_id: WireId(2),
+            pane_id: WireId(3),
+            name: "shell".into(),
+            cwd: "/tmp".into(),
+            branch: Some("main".into()),
+            process: Some("vim".into()),
+            busy: false,
+            attention: false,
+            attachable: true,
+            preview: vec![],
+            surface_id: Some("s".into()),
+            agent: Some(PanelAgent {
+                kind: None,
+                state: None,
+                detail: None,
+                seq: 1,
+                blocked: None,
+            }),
+            exit: Some(PanelExit { code: Some(0) }),
+            parent_pane_id: Some(WireId(7)),
+            label: Some("w".into()),
+            spawn: Some(PanelSpawn {
+                argv: vec!["true".into()],
+                started_at: 1,
+            }),
+        }
+    }
+
     #[test]
     fn panel_field_names_are_exactly_the_serialized_panel_keys() {
-        let mut panel = base_panel();
-        for field in PanelField::ALL_FIELDS {
-            mutate(&mut panel, field);
-        }
-        let value = serde_json::to_value(&panel).unwrap();
+        let value = serde_json::to_value(panel_with_every_field_set()).unwrap();
         let keys: HashSet<String> = value.as_object().unwrap().keys().cloned().collect();
         let names: HashSet<String> = PanelField::ALL_FIELDS.into_iter().map(field_name).collect();
-        assert_eq!(keys, names);
+        assert_eq!(
+            names, keys,
+            "PanelField::ALL_FIELDS vs the serialized Panel keys"
+        );
         for name in &names {
             let parsed: PanelField = serde_json::from_value(serde_json::json!(name)).unwrap();
             assert_eq!(&field_name(parsed), name);

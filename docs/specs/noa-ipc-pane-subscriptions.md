@@ -281,6 +281,18 @@ Each optional key works the same way:
   `"state_changed"` / `"output"`, and `fields` elements are field-name strings.
   A by-position `params` array (which serde would bind to the struct fields in
   order) and serde's map form of an enum variant (`{"output":null}`) are -32602.
+- Only these three subscription RPCs reject a by-position `params` array.
+  Every other method parses its params as before: an array binds to them in
+  field order, so a v3 client that sends `noa.hello` with `[3,"tok",["read"]]`
+  still authenticates. The exceptions, also as before, are `noa.newTab` and
+  `noa.split`, which answer an array with -32602 because their params flatten
+  the spawn keys and a flattened struct does not deserialize from an array.
+- `noa.subscribe` and `noa.unsubscribe` predate this spec, so for them the
+  rejection is a deliberate behaviour change: before it, `noa.subscribe` with
+  `[["state_changed"]]` subscribed and `noa.unsubscribe` with `["4"]` removed
+  subscription 4. The change stays because a by-position binding in a
+  subscription RPC can silently remove a subscription: `noa.unsubscribe`
+  answers `{ ok:true }` for any id, so the caller cannot tell what was removed.
 - The update is applied under one `conns` lock acquisition, so any broadcast
   sees either the old filter or the new one, never a mix.
 - Notifications enqueued before the update stay queued.

@@ -1213,7 +1213,7 @@ fn subscribe_delivers_state_changed_and_unsubscribe_stops_it() {
         label: None,
         spawn: None,
     };
-    broadcaster.broadcast_state_changed(vec![panel]);
+    broadcaster.broadcast_state_changed(vec![panel.clone()]);
 
     // wait past the connection's 50ms read-timeout poll interval.
     std::thread::sleep(Duration::from_millis(150));
@@ -1229,12 +1229,10 @@ fn subscribe_delivers_state_changed_and_unsubscribe_stops_it() {
     let resp = recv_json(&mut sock);
     assert_eq!(resp["result"]["ok"], true);
 
-    broadcaster.broadcast_state_changed(vec![]);
-    // nothing further should arrive; probe with a subsequent request/response
-    // round-trip instead of a fixed sleep+assert-silence race.
-    send_rpc(&mut sock, 4, "noa.listPanels", json!({}));
-    let resp = recv_json(&mut sock);
-    assert!(resp.get("result").is_some());
+    // The same panel was delivered while subscribed, so a subscription that
+    // survived the unsubscribe would push it again.
+    broadcaster.broadcast_state_changed(vec![panel]);
+    assert_no_notification(&mut sock, 4);
     let _ = sock.close(None);
 }
 
@@ -1270,12 +1268,6 @@ fn subscribe(sock: &mut Sock, id: i64, params: Value) -> String {
         .as_str()
         .unwrap_or_else(|| panic!("subscribe should succeed, got {resp:?}"))
         .to_string()
-}
-
-/// Waits past the connection's 50ms read-timeout poll so a queued
-/// notification is written before anything sent afterwards is answered.
-fn let_the_connection_drain() {
-    std::thread::sleep(Duration::from_millis(150));
 }
 
 /// Asserts nothing was pushed by anything enqueued before the call: the next
@@ -1315,7 +1307,6 @@ fn a_removal_only_delta_reaches_a_subscriber_over_the_wire() {
     subscribe(&mut sock, 2, json!({ "events": ["state_changed"] }));
 
     broadcaster.broadcast_state_delta(vec![], vec![1]);
-    let_the_connection_drain();
     let notif = recv_notification(&mut sock);
     assert_eq!(notif["method"], "noa.stateChanged");
     assert_eq!(
@@ -1409,7 +1400,6 @@ fn update_subscription_with_a_non_string_field_is_invalid_params_and_keeps_the_f
         ],
         vec![],
     );
-    let_the_connection_drain();
     assert_eq!(
         state_changed_pane_ids(&recv_notification(&mut sock)),
         vec!["1"]
@@ -1443,7 +1433,6 @@ fn update_subscription_returns_ok_and_the_next_broadcast_uses_the_new_filter() {
     // pane-2 notification, not a pane-1 one.
     broadcaster.broadcast_state_changed(vec![test_panel(1)]);
     broadcaster.broadcast_state_changed(vec![test_panel(1), test_panel(2)]);
-    let_the_connection_drain();
     assert_eq!(
         state_changed_pane_ids(&recv_notification(&mut sock)),
         vec!["2"]
@@ -1474,7 +1463,6 @@ fn update_subscription_returns_ok_and_the_next_broadcast_uses_the_new_filter() {
     );
     assert_eq!(recv_json(&mut sock)["result"]["ok"], true);
     broadcaster.broadcast_state_delta(delta(), vec![]);
-    let_the_connection_drain();
     assert_eq!(
         state_changed_pane_ids(&recv_notification(&mut sock)),
         vec!["2"]
@@ -1489,7 +1477,6 @@ fn update_subscription_returns_ok_and_the_next_broadcast_uses_the_new_filter() {
     );
     assert_eq!(recv_json(&mut sock)["result"]["ok"], true);
     broadcaster.broadcast_state_delta(delta(), vec![]);
-    let_the_connection_drain();
     assert_eq!(
         state_changed_pane_ids(&recv_notification(&mut sock)),
         vec!["1", "2"]
@@ -1544,7 +1531,6 @@ fn update_subscription_with_another_connections_id_is_invalid_params_and_leaves_
     // The owner's filter is still `paneIds: ["1"]`.
     broadcaster.broadcast_state_changed(vec![test_panel(2)]);
     broadcaster.broadcast_state_changed(vec![test_panel(1), test_panel(2)]);
-    let_the_connection_drain();
     assert_eq!(
         state_changed_pane_ids(&recv_notification(&mut owner)),
         vec!["1"]
@@ -1577,7 +1563,6 @@ fn update_subscription_with_too_many_pane_ids_is_invalid_params_and_keeps_the_fi
 
     broadcaster.broadcast_state_changed(vec![test_panel(2)]);
     broadcaster.broadcast_state_changed(vec![test_panel(1), test_panel(2)]);
-    let_the_connection_drain();
     assert_eq!(
         state_changed_pane_ids(&recv_notification(&mut sock)),
         vec!["1"]
@@ -1748,65 +1733,115 @@ fn unsubscribe_with_params_by_position_is_invalid_params_and_keeps_the_subscript
     let _ = sock.close(None);
 }
 
-#[test]
-fn every_method_rejects_params_by_position_before_reaching_the_backend() {
-    let backend = Arc::new(MockBackend::default());
-    let handle = start_test_server(
-        backend.clone(),
-        "tok",
-        ScopeSet::from_strings(["read", "control", "input", "attach"]),
-    );
-    let mut sock = connect_plain(handle.port());
+/// A response without its `id`, to compare the answers to two requests.
+fn without_id(mut resp: Value) -> Value {
+    resp.as_object_mut()
+        .expect("a response is a JSON object")
+        .remove("id");
+    resp
+}
 
-    // `noa.hello` too: the connection stays open and a by-name hello works.
+/// Only the subscription RPCs reject `params` given by position (AC-3). Every
+/// other method answers a by-position array as it did before them: bound to
+/// its params in field order, so a v3 client that sends one gets the answer it
+/// would get by name, or -32602 for `noa.newTab` / `noa.split`, which never
+/// took one.
+#[test]
+fn only_the_subscription_rpcs_reject_params_by_position() {
+    let backend = Arc::new(MockBackend::default());
+    backend.text.lock().unwrap().insert(1, "hello".to_string());
+    backend.grid_rows.lock().unwrap().insert(
+        1,
+        vec![Row {
+            row: 0,
+            spans: vec![],
+        }],
+    );
+    let scopes = ["read", "control", "input", "attach"];
+    let handle = start_test_server(backend.clone(), "tok", ScopeSet::from_strings(scopes));
+
+    // `noa.hello` by position authenticates, with the same answer as by name.
+    let mut by_name = connect_plain(handle.port());
+    let expected = hello(&mut by_name, 1, PROTOCOL_VERSION, Some("tok"), &scopes);
+    assert_eq!(expected["result"]["grantedScopes"], json!(scopes));
+    let _ = by_name.close(None);
+    let mut sock = connect_plain(handle.port());
     send_rpc(
         &mut sock,
         1,
         "noa.hello",
-        json!([PROTOCOL_VERSION, "tok", ["read"]]),
+        json!([PROTOCOL_VERSION, "tok", scopes]),
     );
-    let resp = recv_json(&mut sock);
-    assert_eq!(resp["error"]["code"], -32602, "got {resp:?}");
-    let resp = hello(
-        &mut sock,
-        2,
-        PROTOCOL_VERSION,
-        Some("tok"),
-        &["read", "control", "input", "attach"],
-    );
-    assert!(resp.get("result").is_some(), "got {resp:?}");
+    assert_eq!(recv_json(&mut sock), expected);
 
-    let by_position = [
-        ("noa.getText", json!(["1", "screen"])),
-        ("noa.getGrid", json!(["1", 0, 10])),
-        ("noa.sendText", json!(["1", "x"])),
-        ("noa.focusPane", json!(["1"])),
+    // Each call by position gets the answer of the same call by name, so
+    // both reached the handler with the same params.
+    let calls = [
+        (
+            "noa.getText",
+            json!(["1", "screen"]),
+            json!({ "paneId": "1", "source": "screen" }),
+        ),
+        (
+            "noa.getGrid",
+            json!(["1", 0, 10]),
+            json!({ "paneId": "1", "startRow": 0, "rowCount": 10 }),
+        ),
+        (
+            "noa.sendText",
+            json!(["1", "x"]),
+            json!({ "paneId": "1", "text": "x" }),
+        ),
+        ("noa.focusPane", json!(["1"]), json!({ "paneId": "1" })),
+        ("noa.attach", json!(["1"]), json!({ "paneId": "1" })),
+        ("noa.detach", json!(["1"]), json!({ "paneId": "1" })),
+        (
+            "noa.resizePane",
+            json!(["1", 80, 24]),
+            json!({ "paneId": "1", "cols": 80, "rows": 24 }),
+        ),
+        ("noa.closePane", json!(["2"]), json!({ "paneId": "2" })),
+    ];
+    for (id, (method, by_position, by_name)) in (2..).step_by(2).zip(calls) {
+        send_rpc(&mut sock, id, method, by_name);
+        let expected = without_id(recv_json(&mut sock));
+        assert_ne!(
+            expected["error"]["code"], -32602,
+            "{method} by name must be valid for the comparison to mean anything"
+        );
+        send_rpc(&mut sock, id + 1, method, by_position);
+        assert_eq!(
+            without_id(recv_json(&mut sock)),
+            expected,
+            "{method} by position"
+        );
+    }
+    assert_eq!(backend.requested_max_bytes.lock().unwrap().len(), 2);
+    assert_eq!(backend.sent_text.lock().unwrap().len(), 2);
+    assert_eq!(*backend.focused.lock().unwrap(), vec![1, 1]);
+
+    // `noa.newTab` and `noa.split` flatten their spawn params, and a struct
+    // with a flattened field never deserialized from an array: still -32602.
+    for (id, (method, params)) in (30..).zip([
         ("noa.newTab", json!([])),
         ("noa.split", json!(["1", "horizontal"])),
-        ("noa.closePane", json!(["1"])),
-        ("noa.attach", json!(["1"])),
-        ("noa.detach", json!(["1"])),
-        ("noa.resizePane", json!(["1", 80, 24])),
-    ];
-    for (id, (method, params)) in (3..).zip(by_position) {
+    ]) {
         send_rpc(&mut sock, id, method, params);
         let resp = recv_json(&mut sock);
         assert_eq!(resp["error"]["code"], -32602, "{method}: got {resp:?}");
     }
-    assert!(backend.requested_max_bytes.lock().unwrap().is_empty());
-    assert!(backend.sent_text.lock().unwrap().is_empty());
-    assert!(backend.focused.lock().unwrap().is_empty());
-    assert!(backend.closed_panes.lock().unwrap().is_empty());
 
-    // The same call by name still goes through.
-    send_rpc(
-        &mut sock,
-        100,
-        "noa.sendText",
-        json!({ "paneId": "1", "text": "x" }),
-    );
-    assert_eq!(recv_json(&mut sock)["result"]["ok"], true);
-    assert_eq!(backend.sent_text.lock().unwrap().len(), 1);
+    // The subscription RPCs take their params by name only.
+    let sub_id = subscribe(&mut sock, 40, json!({ "events": ["state_changed"] }));
+    for (id, (method, params)) in (41..).zip([
+        ("noa.subscribe", json!([["state_changed"]])),
+        ("noa.updateSubscription", json!([&sub_id, [], null, null])),
+        ("noa.unsubscribe", json!([&sub_id])),
+    ]) {
+        send_rpc(&mut sock, id, method, params);
+        let resp = recv_json(&mut sock);
+        assert_eq!(resp["error"]["code"], -32602, "{method}: got {resp:?}");
+    }
     let _ = sock.close(None);
 }
 

@@ -7,9 +7,9 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use noa_ipc::{Client, ClientError, Panel, TextSource};
+use noa_ipc::{Client, ClientError, Panel, PanelSpawn, TextSource};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{EXIT_OK, Failure, HOLD_BANNER, SUBMIT_DELAY};
@@ -551,6 +551,9 @@ pub(crate) struct Board {
     needs_seen: HashSet<u64>,
     /// The language of every label (see [`Lang::detect`]).
     pub(crate) lang: Lang,
+    /// The Unix time at the last listing, and when it was read: what
+    /// `Panel.spawn.startedAt` is told against (U9).
+    wall: Option<(u64, Instant)>,
 }
 
 impl Board {
@@ -588,6 +591,7 @@ impl Board {
             of_gone: false,
             needs_seen: HashSet::new(),
             lang: Lang::Ja,
+            wall: None,
         }
     }
 
@@ -654,6 +658,10 @@ impl Board {
         let first = !self.started;
         self.started = true;
         self.synced = Some(now);
+        let unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        self.wall = Some((unix, now));
         let before: Vec<(u64, Gone)> = self
             .workers()
             .iter()
@@ -1246,6 +1254,18 @@ impl Board {
         self.panels.iter().find(|panel| panel.pane_id.0 == pane)
     }
 
+    /// [`spawn_facts`] of `panel` at `now`; none for a pane no IPC spawn
+    /// started with a command, or from a server that predates `spawn`.
+    fn spawn_facts(&self, panel: &Panel, now: Instant) -> Vec<String> {
+        let Some(spawn) = &panel.spawn else {
+            return Vec::new();
+        };
+        let unix_now = self
+            .wall
+            .map(|(unix, at)| unix + now.saturating_duration_since(at).as_secs());
+        spawn_facts(spawn, unix_now, self.lang)
+    }
+
     fn name(&self, pane: u64) -> String {
         if Some(pane) == self.of {
             return self
@@ -1689,6 +1709,51 @@ fn worker_kind(panel: &Panel) -> String {
         .or_else(|| panel.process.clone())
         .map(|kind| clean(&kind))
         .unwrap_or_default()
+}
+
+/// The model and the effort a worker's argv picks (U9): `--model X` or
+/// `-m X` (`--model=X`), and `--effort X` (`--effort=X`) or codex's
+/// `-c model_reasoning_effort=X`; the last one given wins, as with the
+/// agents' own parsing.
+fn model_and_effort(argv: &[String]) -> (Option<String>, Option<String>) {
+    let (mut model, mut effort) = (None, None);
+    let mut args = argv.iter().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--model" || arg == "-m" {
+            model = args.next().cloned();
+        } else if let Some(value) = arg.strip_prefix("--model=") {
+            model = Some(value.to_string());
+        } else if arg == "--effort" {
+            effort = args.next().cloned();
+        } else if let Some(value) = arg.strip_prefix("--effort=") {
+            effort = Some(value.to_string());
+        } else if let Some(value) = arg
+            .strip_prefix("--config=")
+            .unwrap_or(arg)
+            .strip_prefix("model_reasoning_effort=")
+        {
+            // A TOML value: `"high"` is `high`.
+            effort = Some(value.trim_matches('"').to_string());
+        }
+    }
+    let shown = |value: Option<String>| value.map(|value| clean(&value)).filter(|v| !v.is_empty());
+    (shown(model), shown(effort))
+}
+
+/// What `spawn` says of a worker, as the preview and the detail show it:
+/// "opus", "推論量 high", "12 分前に起動", each only when it is known.
+fn spawn_facts(spawn: &PanelSpawn, unix_now: Option<u64>, lang: Lang) -> Vec<String> {
+    let (model, effort) = model_and_effort(&spawn.argv);
+    let effort =
+        effort.map(|effort| lang.pick(format!("推論量 {effort}"), format!("effort {effort}")));
+    let started = unix_now.map(|unix_now| {
+        let span = duration_text(
+            Duration::from_secs(unix_now.saturating_sub(spawn.started_at)),
+            lang,
+        );
+        lang.pick(format!("{span}前に起動"), format!("started {span} ago"))
+    });
+    model.into_iter().chain(effort).chain(started).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -3186,6 +3251,12 @@ impl Board {
             let report = self.lang.pick("報告", "report");
             meta.fg(DIM, &format!(" · {report} {}", agent.seq));
         }
+        // Its model, effort and start (U9), each whole where it fits.
+        for fact in self.spawn_facts(panel, now) {
+            if meta.width + 3 + fact.width() < cols {
+                meta.fg(DIM, &format!(" · {fact}"));
+            }
+        }
         // Its branch, whole where it fits (U6).
         if let Some(branch) = branch_of(panel)
             && meta.width + 3 + branch.width() < cols
@@ -3498,6 +3569,15 @@ impl Board {
         };
         if !place.is_empty() {
             for part in wrap(&place, cols - 2) {
+                let mut line = Line::default();
+                line.plain(" ").fg(DIM, &part);
+                lines.push(line.finish(cols));
+            }
+        }
+        // What it runs on and since when (U9).
+        let facts = self.spawn_facts(panel, now).join(" · ");
+        if !facts.is_empty() {
+            for part in wrap(&facts, cols - 2) {
                 let mut line = Line::default();
                 line.plain(" ").fg(DIM, &part);
                 lines.push(line.finish(cols));
@@ -4785,6 +4865,127 @@ mod tests {
         panels[0].agent.as_mut().unwrap().state = Some("permission".to_string());
         board.update(panels, Instant::now());
         assert_eq!(board.key(Key::Enter), None);
+    }
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    // U9: the argv the tiers pass (ctl/worktree.rs), and the joined forms.
+    #[test]
+    fn the_model_and_effort_are_read_from_the_argv() {
+        let read = |args: &[&str]| model_and_effort(&argv(args));
+        let some = |model: &str, effort: Option<&str>| {
+            (Some(model.to_string()), effort.map(str::to_string))
+        };
+        assert_eq!(
+            read(&["claude", "--model", "opus", "--effort", "high"]),
+            some("opus", Some("high"))
+        );
+        assert_eq!(
+            read(&[
+                "codex",
+                "-m",
+                "gpt-6-luna",
+                "-c",
+                "model_reasoning_effort=low"
+            ]),
+            some("gpt-6-luna", Some("low"))
+        );
+        assert_eq!(
+            read(&[
+                "codex",
+                "--config=model_reasoning_effort=\"medium\"",
+                "--model=o"
+            ]),
+            some("o", Some("medium"))
+        );
+        assert_eq!(
+            read(&["agy", "--model", "gemini-4-neon-high"]),
+            some("gemini-4-neon-high", None)
+        );
+        assert_eq!(
+            read(&["claude", "--effort=low"]),
+            (None, Some("low".to_string()))
+        );
+        assert_eq!(read(&["cargo", "test"]), (None, None));
+        // The program itself is no flag, and a flag at the end has no value.
+        assert_eq!(read(&["-m", "--model"]), (None, None));
+    }
+
+    #[test]
+    fn the_spawn_facts_say_model_effort_and_start_in_both_languages() {
+        let spawn = PanelSpawn {
+            argv: argv(&["claude", "--model", "opus", "--effort", "high"]),
+            started_at: 1_000,
+        };
+        assert_eq!(
+            spawn_facts(&spawn, Some(1_720), Lang::Ja),
+            vec!["opus", "推論量 high", "12 分前に起動"]
+        );
+        assert_eq!(
+            spawn_facts(&spawn, Some(1_720), Lang::En),
+            vec!["opus", "effort high", "started 12m ago"]
+        );
+        let bare = PanelSpawn {
+            argv: argv(&["cargo", "test"]),
+            started_at: 1_000,
+        };
+        assert_eq!(
+            spawn_facts(&bare, Some(1_030), Lang::En),
+            vec!["started 30s ago"]
+        );
+        assert!(spawn_facts(&bare, None, Lang::En).is_empty());
+    }
+
+    // U9: the preview's last line and the detail say what a worker runs on
+    // and since when, and every line keeps the pane's width.
+    #[test]
+    fn the_preview_and_the_detail_say_the_model_and_since_when() {
+        let t0 = Instant::now();
+        let mut panel = worker(2, 1, "w2", Some("running"), 1);
+        panel.spawn = Some(PanelSpawn {
+            argv: argv(&["claude", "--model", "opus", "--effort", "high"]),
+            started_at: 1_000,
+        });
+        // A pane from an older server, with no spawn.
+        let plain = worker(3, 1, "w3", Some("running"), 1);
+        for lang in [Lang::Ja, Lang::En] {
+            let mut board = Board::new(Some(1), None);
+            board.lang = lang;
+            board.update(vec![panel.clone(), plain.clone()], t0);
+            board.wall = Some((1_000 + 12 * 60, t0));
+            let facts = lang.pick(
+                "opus · 推論量 high · 13 分前に起動",
+                "opus · effort high · started 13m ago",
+            );
+            let at = t0 + Duration::from_secs(60);
+            board.select(2);
+            let all = rendered(&board, 200, 30, at);
+            assert!(
+                line_with(&all, lang.pick("報告 1", "report 1")).contains(facts),
+                "{all}"
+            );
+            board.view = View::Detail(2);
+            let all = rendered(&board, 80, 30, at);
+            assert!(all.contains(facts), "{all}");
+            board.view = View::List;
+            board.select(3);
+            let all = rendered(&board, 120, 30, at);
+            assert!(!all.contains("opus"), "{all}");
+
+            board.select(2);
+            for cols in [24, 40, 41, 60, 80, 120] {
+                for view in [View::List, View::Detail(2)] {
+                    board.view = view;
+                    for line in board.render(cols, 30, at) {
+                        let line = visible(&line);
+                        assert_eq!(line.width(), cols, "{view:?} {cols}: {line:?}");
+                    }
+                }
+            }
+            board.view = View::List;
+        }
     }
 
     /// `panel` asking a question dialog, as an `OSC 7501` blocked report

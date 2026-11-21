@@ -384,6 +384,38 @@ fn a_lost_link_keeps_its_age_readable_at_every_width() {
     }
 }
 
+#[test]
+fn a_stale_link_keeps_its_age_readable_at_every_width() {
+    // What must show however the slot is squeezed: the stale mark and the
+    // data's age, from seconds to many minutes. The worker count may be
+    // cut.
+    let ages = [
+        (10, "10 秒"),
+        (59, "59 秒"),
+        (59 * 60, "59 分"),
+        (999 * 60, "999 分"),
+    ];
+    let now = Instant::now();
+    for state in LAYOUTS {
+        for width in (1100..=1920).step_by(20) {
+            let (mut dashboard, mut text) = at(width as f32, state);
+            for (synced, age) in ages {
+                dashboard.apply_received(live(fleet::canned(), synced), now, &mut text);
+                dashboard.tick(now);
+                dashboard.prepare(size(width as f32), &mut text);
+                let label = dashboard.tree.get::<Label>(dashboard.status).unwrap();
+                let fixed = format!("古いデータ（同期 {age}前）");
+                assert_eq!(label.text(), format!("{fixed}· ワーカー 9"));
+                let shown = label.shown_text();
+                assert!(
+                    shown.starts_with(&fixed),
+                    "{width} px, {state:?}, {age}: {shown:?} cuts the age"
+                );
+            }
+        }
+    }
+}
+
 /// The longest wait, rewritten in place to a far longer text: every
 /// worker's `since` (non-structural: the screen is not rebuilt).
 fn longer_waits(dashboard: &mut Dashboard, text: &mut TextStore, now: Instant) {
@@ -403,9 +435,11 @@ fn a_hidden_item_comes_back_at_its_current_width() {
     let (mut dashboard, mut text) = at(1920.0, State::HiddenAndFiltering);
     dashboard.apply_received(live(fleet::canned(), 0), now, &mut text);
     dashboard.tick(now);
-    // Narrow until the 最長 tag goes.
+    // Narrow until the 最長 tag goes: by 1000 px at the latest, which is
+    // narrower than any window AC4 names.
     let mut width = 1920;
     while !dropped(&dashboard)[2] {
+        assert!(width > 1000, "the 最長 tag is still shown at {width} px");
         width -= 1;
         dashboard.prepare(size(width as f32), &mut text);
     }
@@ -456,11 +490,21 @@ fn the_status_keeps_its_width_until_everything_else_is_dropped() {
                 .unwrap();
             let wanted = status_natural(&dashboard, &mut text).min(STATUS_MAX_WIDTH);
             if width_of(&dashboard, slot) < wanted - 0.5 {
-                assert_eq!(
-                    dropped(&dashboard),
-                    [true, true, dashboard.header.longest.is_some(), true],
-                    "{what}: the status shrank to {} before the rest went",
-                    width_of(&dashboard, slot)
+                // Every droppable item there is has gone: with every panel
+                // shown there are no chips, so no chip title is shown.
+                let header = &dashboard.header;
+                let all_gone = !shown(&dashboard, header.group_caption)
+                    && header
+                        .chip_parts
+                        .iter()
+                        .all(|chip| !shown(&dashboard, chip.title))
+                    && header.longest.is_none_or(|id| !shown(&dashboard, id))
+                    && !shown(&dashboard, header.title);
+                assert!(
+                    all_gone,
+                    "{what}: the status shrank to {} before the rest went: {:?}",
+                    width_of(&dashboard, slot),
+                    dropped(&dashboard)
                 );
             }
         }

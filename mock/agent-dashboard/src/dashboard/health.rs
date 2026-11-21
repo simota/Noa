@@ -78,9 +78,24 @@ pub(super) fn status(feed: &Feed, now: Instant) -> String {
     if let Some((notice, at)) = &feed.notice
         && now.saturating_duration_since(*at) < NOTICE_FOR
     {
-        return notice.clone();
+        return one_line(notice);
     }
     link_text(feed, Some(now))
+}
+
+/// `s` on one line: line breaks and other control characters become
+/// spaces. The status label draws a line break as one, and a few lines
+/// of 12 px text are taller than the 48 px header.
+fn one_line(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// The status text for a screen that is just being built: what `status`
@@ -118,19 +133,21 @@ fn link_text(feed: &Feed, now: Option<Instant>) -> String {
     let age = age(feed, now);
     let ago = minutes_text(age.as_secs_f64() / 60.0);
     let reason = match &feed.link {
-        Some(Link::Down(reason)) => reason.as_str(),
-        _ => "",
+        Some(Link::Down(reason)) => one_line(reason),
+        _ => String::new(),
     };
     match health(feed, now) {
         Health::Demo => format!("ワーカー {n} · ダミーデータ"),
         Health::Connecting => "接続中…".to_owned(),
         Health::Live => format!("ワーカー {n} · 同期 {ago}前"),
-        Health::Stale => format!("ワーカー {n} · 同期 {ago}前 · 古いデータ"),
-        Health::Down { had_data: false } => format!("切断: {reason}"),
-        // The reason can be any length and the label cuts its tail, so
+        // The label cuts its tail (the slot is at most 200 px wide), so
         // what must stay readable comes first: the stale mark and the
-        // data's age (164 px for "59 分", in a slot of up to 200 px, which
-        // leaves room for the reason's first characters).
+        // data's age; the worker count may be cut.
+        Health::Stale => format!("古いデータ（同期 {ago}前）· ワーカー {n}"),
+        Health::Down { had_data: false } => format!("切断: {reason}"),
+        // The reason can be any length: here too the stale mark and the
+        // data's age come first (164 px for "59 分", in a slot of up to
+        // 200 px, which leaves room for the reason's first characters).
         Health::Down { had_data: true } => {
             format!("切断: 古いデータ（{ago}前）· {reason}")
         }
@@ -139,11 +156,7 @@ fn link_text(feed: &Feed, now: Option<Instant>) -> String {
 
 /// The feed's health at `now`.
 fn health(feed: &Feed, now: Option<Instant>) -> Health {
-    of(
-        feed.link.as_ref(),
-        age(feed, now),
-        !feed.fleet.workers.is_empty(),
-    )
+    of(feed.link.as_ref(), age(feed, now), feed.had_data)
 }
 
 /// How long ago the server last answered, as of `now`; the last
@@ -157,6 +170,8 @@ fn age(feed: &Feed, now: Option<Instant>) -> Duration {
 
 /// Brings the dot and the status label up to `now`. The setters change
 /// nothing when the value is the same, so this runs on every frame.
+/// A rebuild ticks again at the last tick's `now`, so a header rebuilt
+/// between frames shows what the last frame drew.
 pub(super) fn tick(tree: &mut UiTree, parts: &HeaderParts, feed: &Feed, now: Instant) {
     show(tree, parts.health, feed, Some(now));
 }

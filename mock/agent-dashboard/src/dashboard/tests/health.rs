@@ -108,13 +108,13 @@ fn the_status_texts_follow_the_table() {
     dashboard.tick(base + secs(10));
     assert_eq!(
         status_text(&dashboard),
-        "ワーカー 9 · 同期 10 秒前 · 古いデータ"
+        "古いデータ（同期 10 秒前）· ワーカー 9"
     );
     // Minutes once a minute has passed.
     dashboard.tick(base + secs(125));
     assert_eq!(
         status_text(&dashboard),
-        "ワーカー 9 · 同期 2 分前 · 古いデータ"
+        "古いデータ（同期 2 分前）· ワーカー 9"
     );
     // Down with no data ever shown says only why.
     let mut empty = Dashboard::new(Grouping::Orchestrator);
@@ -138,8 +138,8 @@ fn the_status_ticks_without_a_snapshot() {
 
     dashboard.tick(base + secs(12));
     let stale = status_text(&dashboard);
-    assert!(stale.ends_with("· 古いデータ"), "{stale}");
-    assert_eq!(stale, "ワーカー 9 · 同期 13 秒前 · 古いデータ");
+    assert!(stale.starts_with("古いデータ"), "{stale}");
+    assert_eq!(stale, "古いデータ（同期 13 秒前）· ワーカー 9");
     assert_eq!(dot_color(&mut dashboard, &mut text), ORANGE);
 
     // A fresh snapshot makes it live again.
@@ -242,10 +242,10 @@ fn a_notice_replaces_the_text_but_not_the_dot() {
 #[test]
 fn a_rebuilt_header_starts_on_the_text_tick_will_set() {
     let base = Instant::now();
-    for (synced, ending) in [
-        (2, "同期 2 秒前"),
-        (14, "同期 14 秒前 · 古いデータ"),
-        (130, "同期 2 分前 · 古いデータ"),
+    for (synced, whole) in [
+        (2, "ワーカー 9 · 同期 2 秒前"),
+        (14, "古いデータ（同期 14 秒前）· ワーカー 9"),
+        (130, "古いデータ（同期 2 分前）· ワーカー 9"),
     ] {
         let (dashboard, _) = live_at(base, synced);
         let feed = &dashboard.feed;
@@ -253,7 +253,7 @@ fn a_rebuilt_header_starts_on_the_text_tick_will_set() {
         // when the snapshot came, which is when the frame's `tick` is.
         let initial = health::initial_status(feed);
         assert_eq!(initial, health::status(feed, base), "{synced}");
-        assert!(initial.ends_with(ending), "{initial}");
+        assert_eq!(initial, whole, "{synced}");
     }
     // The header a rebuild made, before any tick, carries that text.
     let (mut dashboard, mut text) = live_at(base, 2);
@@ -302,7 +302,7 @@ fn a_rebuilt_header_draws_the_health_it_had() {
     assert_eq!(
         before,
         (
-            "ワーカー 9 · 同期 14 秒前 · 古いデータ".to_owned(),
+            "古いデータ（同期 14 秒前）· ワーカー 9".to_owned(),
             ORANGE,
             ORANGE
         )
@@ -313,8 +313,6 @@ fn a_rebuilt_header_draws_the_health_it_had() {
     assert_eq!(drawn(&mut stale, &mut text), before, "stale");
 
     // A lost link with its data: red text and dot after the rebuild too.
-    // (Its age is counted from the last live snapshot: the header cannot
-    // know the last tick's time, see `health::built_at`.)
     let (mut lost, mut text) = live_at(base, 0);
     let at = base + secs(30);
     lost.apply_received(down("接続が切れました"), at, &mut text);
@@ -325,4 +323,92 @@ fn a_rebuilt_header_draws_the_health_it_had() {
     let (status, color, dot) = drawn(&mut lost, &mut text);
     assert_eq!((color, dot), (RED, RED), "down");
     assert!(status.starts_with("切断: 古いデータ"), "{status}");
+}
+
+#[test]
+fn a_fleet_that_emptied_still_had_data() {
+    let base = Instant::now();
+    let (mut dashboard, mut text) = live_at(base, 0);
+    // Every worker closes, then the link is lost.
+    let emptied = base + secs(5);
+    dashboard.apply_received(live(Fleet::default(), 0), emptied, &mut text);
+    dashboard.tick(emptied);
+    let lost = base + secs(35);
+    dashboard.apply_received(down("終了"), lost, &mut text);
+    dashboard.tick(lost);
+    assert!(
+        dashboard.feed.fleet.workers.is_empty(),
+        "the list stays empty"
+    );
+    assert_eq!(status_text(&dashboard), "切断: 古いデータ（30 秒前）· 終了");
+    // A rebuild does not forget it.
+    dashboard.rebuilt(dashboard.view, &mut text);
+    assert_eq!(status_text(&dashboard), "切断: 古いデータ（30 秒前）· 終了");
+    assert_eq!(dot_color(&mut dashboard, &mut text), RED);
+}
+
+#[test]
+fn a_rebuild_between_frames_keeps_the_age() {
+    let base = Instant::now();
+    // Live, 30 s after the last answer: stale, as the last frame drew it.
+    let (mut dashboard, mut text) = live_at(base, 0);
+    dashboard.tick(base + secs(30));
+    let before = drawn(&mut dashboard, &mut text);
+    assert_eq!(
+        before,
+        (
+            "古いデータ（同期 30 秒前）· ワーカー 9".to_owned(),
+            ORANGE,
+            ORANGE
+        )
+    );
+    dashboard.rebuilt(dashboard.view, &mut text);
+    assert_eq!(drawn(&mut dashboard, &mut text), before, "stale");
+
+    // Down with its data, a minute after the link was lost.
+    let lost = base + secs(40);
+    dashboard.apply_received(down("接続が切れました"), lost, &mut text);
+    dashboard.tick(lost + secs(60));
+    let before = drawn(&mut dashboard, &mut text);
+    assert_eq!(before.0, "切断: 古いデータ（2 分前）· 接続が切れました");
+    dashboard.rebuilt(dashboard.view, &mut text);
+    assert_eq!(drawn(&mut dashboard, &mut text), before, "down");
+}
+
+#[test]
+fn a_reason_with_line_breaks_shows_on_one_line() {
+    let base = Instant::now();
+    let (mut dashboard, mut text) = live_at(base, 0);
+    let lost = base + secs(30);
+    dashboard.apply_received(down("A\nB\r\nC\tD\u{2028}E\nF"), lost, &mut text);
+    dashboard.tick(lost);
+    assert_eq!(
+        status_text(&dashboard),
+        "切断: 古いデータ（30 秒前）· A B  C D E F"
+    );
+    // Drawn as one 12 px line, inside the 48 px header.
+    dashboard.prepare(window(), &mut text);
+    let [_, y, _, h] = rect(&dashboard.tree, dashboard.status);
+    let [_, bar_y, _, bar_h] = rect(&dashboard.tree, dashboard.header.bar);
+    assert!(h < 24.0, "{h} px tall");
+    assert!(
+        y >= bar_y && y + h <= bar_y + bar_h,
+        "{y} + {h} leaves the bar"
+    );
+
+    // With no data ever shown, the reason alone is on one line too.
+    let mut empty = Dashboard::new(Grouping::Orchestrator);
+    empty.prepare(window(), &mut text);
+    empty.apply_received(live(Fleet::default(), 0), base, &mut text);
+    empty.apply_received(down("接続\nできません"), base, &mut text);
+    empty.tick(base);
+    assert_eq!(status_text(&empty), "切断: 接続 できません");
+}
+
+#[test]
+fn a_notice_with_line_breaks_shows_on_one_line() {
+    let base = Instant::now();
+    let (mut dashboard, _text) = live_at(base, 0);
+    dashboard.show_notice_at("移動できません:\nno such pane".to_owned(), base);
+    assert_eq!(status_text(&dashboard), "移動できません: no such pane");
 }

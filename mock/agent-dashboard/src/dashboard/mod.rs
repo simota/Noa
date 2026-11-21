@@ -94,6 +94,9 @@ struct Feed {
     /// header instead of the link state for `NOTICE_FOR`.
     notice: Option<(String, Instant)>,
     channel: Option<Channel>,
+    /// Workers were shown at some point (AC6: a lost link then says how
+    /// old the data is, even when the fleet emptied before it was lost).
+    had_data: bool,
 }
 
 const NOTICE_FOR: Duration = Duration::from_secs(8);
@@ -118,6 +121,7 @@ impl Feed {
     /// IME composed is as old as it was then plus the wait.
     fn accept(&mut self, fleet: Fleet, snapshot: Snapshot, received: Instant) {
         self.fleet = fleet;
+        self.had_data |= !self.fleet.workers.is_empty();
         self.synced_at = (snapshot.link == Link::Live)
             .then(|| received.checked_sub(Duration::from_secs(snapshot.synced_secs)))
             .flatten()
@@ -243,6 +247,9 @@ pub struct Dashboard {
     /// A structural snapshot held back while an IME composes in the filter
     /// field (a rebuild would end the composition), with when it came.
     pending: Option<(Snapshot, Instant)>,
+    /// The `now` of the last `tick`: a rebuild between frames shows the
+    /// header's health as of it.
+    ticked: Option<Instant>,
     /// The pointer buttons held down since presses the screen passed on,
     /// in the order pressed (`track_press`, `cancel_press`).
     held: Vec<PointerButton>,
@@ -486,6 +493,7 @@ impl Dashboard {
     /// Brings the link health in the header up to `now`; `before_frame`
     /// calls it on every frame (the live feed wakes the window every second).
     fn tick(&mut self, now: Instant) {
+        self.ticked = Some(now);
         health::tick(&mut self.tree, &self.header, &self.feed, now);
     }
 
@@ -658,6 +666,9 @@ impl Dashboard {
         self.watched = old.watched;
         self.wheel_accum = old.wheel_accum;
         self.pending = old.pending;
+        if let Some(now) = old.ticked {
+            self.tick(now);
+        }
         self.held = old.held;
         self.filter_had_focus = old.filter_had_focus;
         self.pressed_in_filter = old.pressed_in_filter;
@@ -720,6 +731,7 @@ impl Dashboard {
             watched: None,
             wheel_accum: [0.0; 5],
             pending: None,
+            ticked: None,
             held: Vec::new(),
             shielded: Vec::new(),
             filter_had_focus: false,

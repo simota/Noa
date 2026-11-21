@@ -29,7 +29,7 @@ fn skip_font() -> Option<FontGrid> {
 /// Acquire a real device+queue, or `None` when no adapter exists (skip).
 /// Mirrors `noa-render/tests/pipeline.rs`'s headless-GPU skip pattern.
 fn device_queue() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter =
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
             .ok()?;

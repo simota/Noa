@@ -895,27 +895,33 @@ impl App {
             .sync_atlas(&gpu.device, &gpu.queue, gpu.fonts.get_mut(state.font_px));
 
         let frame = match state.surface.get_current_texture() {
-            Ok(frame) => frame,
-            // OutOfMemory is not recoverable by reconfiguring; anything else
-            // but Timeout (Lost/Outdated/Other) gets a reconfigure + retry so a
-            // transient error can't leave the window permanently frozen.
-            Err(wgpu::SurfaceError::OutOfMemory) => {
-                log::error!("surface out of memory; skipping frame");
-                return;
-            }
+            wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            // Anything but Timeout/Occluded (Lost/Outdated/Validation) gets a
+            // reconfigure + retry so a transient error can't leave the window
+            // permanently frozen.
             // Core Animation kept every drawable for the 1 s
             // `nextDrawable` timeout (see
-            // `macos_window::allow_next_drawable_timeout`): the window is not
+            // `macos_window::prepare_metal_layers`): the window is not
             // being composited. Drop the frame without asking for another, or
             // each retry would block the main thread for another second; the
             // next output, input or reveal redraws it.
-            Err(wgpu::SurfaceError::Timeout) => {
+            wgpu::CurrentSurfaceTexture::Timeout => {
                 log::debug!("surface drawable timed out; skipping frame");
                 return;
             }
-            Err(e) => {
-                if !matches!(e, wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) {
-                    log::warn!("surface error: {e}; reconfiguring");
+            // wgpu skips `nextDrawable` itself while AppKit reports the
+            // window as not visible; same handling as the timeout above.
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                log::debug!("surface occluded; skipping frame");
+                return;
+            }
+            other => {
+                if !matches!(
+                    other,
+                    wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated
+                ) {
+                    log::warn!("surface error: {other:?}; reconfiguring");
                 }
                 configure_wgpu_surface(
                     &state.surface,
@@ -1397,7 +1403,7 @@ impl App {
                 window_card_area(surface_size, overlay_panel),
             );
         }
-        frame.present();
+        gpu.queue.present(frame);
         // NOA_LATENCY_TRACE t2: the echo frame has been handed to the
         // compositor (present-call proxy; see `latency_trace` module docs).
         crate::latency_trace::on_present(trace_frame_start);

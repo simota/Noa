@@ -72,10 +72,19 @@ pub(crate) fn commit_window_display(window: &Window) {
 /// when Core Animation holds on to both drawables (a window that stopped
 /// being composited) `get_current_texture` blocks the main thread forever and
 /// the whole app hangs. With the timeout it returns `SurfaceError::Timeout`
-/// after a second instead. Must follow every `configure` of the surface. A
-/// no-op off macOS and when the lookups fail.
+/// after a second instead.
+///
+/// Also keeps wgpu-hal (29+) from refusing a drawable for a window AppKit
+/// does not report as visible (`CurrentSurfaceTexture::Occluded`): Noa paints
+/// a window *before* showing it (startup pre-paint, quick terminal reveal) and
+/// already skips occluded windows itself. wgpu-hal reads the window through
+/// the delegate of the nearest layer that has one, so the Metal sublayer gets
+/// a delegate whose `window` is nil; the timeout above still bounds the wait.
+///
+/// Must follow every `configure` of the surface. A no-op off macOS and when
+/// the lookups fail.
 #[allow(unused_variables)]
-pub(crate) fn allow_next_drawable_timeout(window: &Window) {
+pub(crate) fn prepare_metal_layers(window: &Window) {
     #[cfg(target_os = "macos")]
     {
         use objc2::msg_send;
@@ -117,9 +126,50 @@ pub(crate) fn allow_next_drawable_timeout(window: &Window) {
             for index in 0..count {
                 let layer: *mut AnyObject = msg_send![sublayers, objectAtIndex: index];
                 allow(layer);
+                // Only the sublayer: the root layer's delegate is the NSView.
+                let is_metal: bool = msg_send![layer, isKindOfClass: metal_layer_class];
+                let delegate: *mut AnyObject = msg_send![layer, delegate];
+                if is_metal && delegate.is_null() {
+                    let _: () = msg_send![layer, setDelegate: windowless_layer_delegate()];
+                }
             }
         }
     }
+}
+
+/// The delegate [`prepare_metal_layers`] gives wgpu's Metal sublayer: its
+/// `window` is nil, and it implements no `CALayerDelegate` method, so the
+/// layer behaves as it does with no delegate. One leaked instance, because a
+/// layer does not retain its delegate.
+#[cfg(target_os = "macos")]
+fn windowless_layer_delegate() -> *mut objc2::runtime::AnyObject {
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyObject, NSObject};
+    use objc2::{ClassType, define_class, msg_send};
+    use std::sync::OnceLock;
+
+    define_class!(
+        // SAFETY: NSObject has no subclassing requirements; the class has no
+        // state and its one method touches nothing.
+        #[unsafe(super(NSObject))]
+        #[name = "NoaWindowlessLayerDelegate"]
+        struct WindowlessLayerDelegate;
+
+        impl WindowlessLayerDelegate {
+            #[unsafe(method(window))]
+            fn window(&self) -> *mut AnyObject {
+                std::ptr::null_mut()
+            }
+        }
+    );
+
+    static DELEGATE: OnceLock<usize> = OnceLock::new();
+    *DELEGATE.get_or_init(|| {
+        // SAFETY: plain `+new` on an NSObject subclass with no ivars.
+        let delegate: Retained<WindowlessLayerDelegate> =
+            unsafe { msg_send![WindowlessLayerDelegate::class(), new] };
+        Retained::into_raw(delegate) as usize
+    }) as *mut AnyObject
 }
 
 /// Push `title` onto the window's `NSWindowTab` so its tab-bar button repaints.

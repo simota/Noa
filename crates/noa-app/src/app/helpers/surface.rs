@@ -113,6 +113,7 @@ pub(crate) fn build_surface_config(
     wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format: preferred_surface_format(&caps.formats, alpha_blending),
+        color_space: wgpu::SurfaceColorSpace::Auto,
         width: size.width.max(1),
         height: size.height.max(1),
         present_mode: wgpu::PresentMode::Fifo,
@@ -148,7 +149,7 @@ pub(crate) fn configure_wgpu_surface(
 }
 
 /// `Surface::configure`, then bound the drawable wait it just made unbounded
-/// (see [`crate::macos_window::allow_next_drawable_timeout`]). Every surface
+/// (see [`crate::macos_window::prepare_metal_layers`]). Every surface
 /// configure goes through here, so no configure leaves a window able to hang
 /// the main thread in `get_current_texture`.
 pub(crate) fn configure_surface(
@@ -158,7 +159,7 @@ pub(crate) fn configure_surface(
     window: &winit::window::Window,
 ) {
     surface.configure(device, config);
-    crate::macos_window::allow_next_drawable_timeout(window);
+    crate::macos_window::prepare_metal_layers(window);
 }
 
 pub(crate) fn focus_report_bytes(focused: bool, focus_reporting: bool) -> Option<&'static [u8]> {

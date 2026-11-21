@@ -33,7 +33,7 @@ noa-ipc    = { path = "crates/noa-ipc" }
 
 # ── windowing + gpu (only noa-app / noa-render may use these) ───────
 winit             = "0.30"
-wgpu              = "27"
+wgpu              = "30"
 pollster          = "0.4"
 raw-window-handle = "0.6"
 

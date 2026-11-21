@@ -133,7 +133,7 @@ fn cell_pipeline_builds_without_validation_error() {
     let mut font =
         FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
 
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let renderer = Renderer::new(
         &device,
         &queue,
@@ -141,7 +141,7 @@ fn cell_pipeline_builds_without_validation_error() {
         &mut font,
         DEFAULT_GRID_PADDING,
     );
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
 
     assert!(
         renderer.is_ok(),
@@ -172,7 +172,7 @@ fn two_renderers_sharing_pipelines_draw_without_validation_error() {
     let mut font =
         FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
 
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     for text in ["first tab", "second tab"] {
         let atlases = atlas_cache.get(&device, &queue, format, &font);
         let mut renderer = Renderer::with_pipelines(
@@ -189,7 +189,7 @@ fn two_renderers_sharing_pipelines_draw_without_validation_error() {
         let (_target, view) = render_target(&device, 64, 32);
         renderer.draw(&device, &queue, &view);
     }
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
     assert!(
         err.is_none(),
         "wgpu validation error drawing via shared pipelines: {err:?}"
@@ -292,9 +292,9 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
     });
     let view = target.create_view(&wgpu::TextureViewDescriptor::default());
 
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     renderer.draw(&device, &queue, &view);
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
 
     assert!(
         err.is_none(),
@@ -385,9 +385,9 @@ fn command_palette_overlay_draws_one_frame_without_validation_error() {
     renderer.sync_atlas(&device, &queue, &mut font);
 
     let (_target, view) = render_target(&device, 320, 160);
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     renderer.draw(&device, &queue, &view);
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
 
     assert!(
         err.is_none(),
@@ -529,9 +529,9 @@ fn command_palette_surface_alpha_is_uniform_across_plain_and_selected_rows() {
     renderer.sync_atlas(&device, &queue, &mut font);
 
     let (target_tex, view) = render_target(&device, surface_size.w, surface_size.h);
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     renderer.draw(&device, &queue, &view);
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
     // Always restore, even on assertion failure below, so a failing run
     // doesn't leak a translucent surface alpha into whatever test runs next
     // in this process.
@@ -682,9 +682,9 @@ fn cell_pipeline_draws_full_then_dirty_patched_frame_without_validation_error() 
     renderer.rebuild_cells(&snap1, &mut font, &theme);
     renderer.sync_atlas(&device, &queue, &mut font);
 
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     renderer.draw(&device, &queue, &view);
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
     assert!(
         err.is_none(),
         "wgpu validation error during the full-rebuild draw: {err:?}"
@@ -701,9 +701,9 @@ fn cell_pipeline_draws_full_then_dirty_patched_frame_without_validation_error() 
     );
     renderer.sync_atlas(&device, &queue, &mut font);
 
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     renderer.draw(&device, &queue, &view);
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
     assert!(
         err.is_none(),
         "wgpu validation error during the dirty-row-patch draw: {err:?}"
@@ -792,9 +792,9 @@ fn cell_pipeline_draws_color_glyph_without_validation_error_and_samples_passthro
 
     let (target, view) = render_target(&device, 64, 64);
 
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     renderer.draw(&device, &queue, &view);
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
     assert!(
         err.is_none(),
         "wgpu validation error drawing a FLAG_COLOR_GLYPH instance: {err:?}"
@@ -845,9 +845,9 @@ fn backdrop_rect_leaves_the_rest_of_the_surface_transparent() {
     let mut draw = |backdrop: Option<PaneRect>| {
         renderer.set_backdrop_rect(backdrop);
         let (target, view) = render_target(&device, size.w, size.h);
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         renderer.draw(&device, &queue, &view);
-        let err = pollster::block_on(device.pop_error_scope());
+        let err = pollster::block_on(error_scope.pop());
         assert!(err.is_none(), "wgpu validation error: {err:?}");
         read_rgba_pixels(&device, &queue, &target, size.w, size.h)
     };

@@ -17,7 +17,7 @@ fn main() {
         sleep_forever();
     }
 
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     if stage == "instance" {
         sleep_forever();
     }
@@ -26,6 +26,7 @@ fn main() {
         power_preference: wgpu::PowerPreference::default(),
         compatible_surface: None,
         force_fallback_adapter: false,
+        apply_limit_buckets: false,
     }))
     .expect("adapter");
     if stage == "adapter" {
@@ -86,6 +87,7 @@ fn main() {
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
     }
     queue.submit(Some(encoder.finish()));

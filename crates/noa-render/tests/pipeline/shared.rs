@@ -12,7 +12,7 @@ pub(crate) const TEST_CARD_COLOR: [f32; 4] = [0.078, 0.091, 0.127, 1.0];
 
 /// Acquire a real device+queue, or `None` when no adapter exists (skip).
 pub(crate) fn device_queue() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter =
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
             .ok()?;
@@ -158,7 +158,7 @@ pub(crate) fn read_rgba_pixels(
         .expect("map_async callback never fired")
         .expect("map readback buffer");
 
-    let data = slice.get_mapped_range();
+    let data = slice.get_mapped_range().unwrap();
     let mut out = Vec::with_capacity((width * height * 4) as usize);
     for row in 0..height as usize {
         let start = row * padded_bytes_per_row as usize;
@@ -309,6 +309,7 @@ pub(crate) fn clear_view(
         depth_stencil_attachment: None,
         timestamp_writes: None,
         occlusion_query_set: None,
+        multiview_mask: None,
     });
     queue.submit(Some(encoder.finish()));
 }

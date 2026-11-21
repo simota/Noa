@@ -43,9 +43,9 @@ fn image_layer_draws_image_and_text_without_validation_error() {
     renderer.sync_atlas(&device, &queue, &mut font);
 
     let (_target, view) = render_target(&device, 96, 64);
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     renderer.draw(&device, &queue, &view);
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
 
     assert!(
         err.is_none(),
@@ -243,9 +243,9 @@ fn unicode_placeholder_resolves_and_draws_over_text() {
     renderer.rebuild_cells(&snap, &mut font, &Theme::new());
     renderer.sync_atlas(&device, &queue, &mut font);
     let (target, view) = render_target(&device, width, height);
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     renderer.draw(&device, &queue, &view);
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
     assert!(
         err.is_none(),
         "placeholder draw hit a wgpu validation error: {err:?}"
@@ -340,9 +340,9 @@ fn background_image_draws_below_cells_with_independent_opacity() {
     renderer.sync_atlas(&device, &queue, &mut font);
 
     let (target, view) = render_target(&device, w, h);
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     renderer.draw(&device, &queue, &view);
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
     assert!(
         err.is_none(),
         "wgpu validation error drawing the background image: {err:?}"
@@ -414,9 +414,9 @@ fn background_image_transition_draws_without_validation_error() {
     assert!(renderer.has_background_image());
 
     let (_target, view) = render_target(&device, w, h);
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     renderer.draw(&device, &queue, &view);
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
     assert!(
         err.is_none(),
         "wgpu validation error drawing background-image transition: {err:?}"
@@ -466,9 +466,9 @@ fn background_image_is_placed_within_the_backdrop_rect() {
     renderer.sync_atlas(&device, &queue, &mut font);
 
     let (target, view) = render_target(&device, w, h);
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     renderer.draw(&device, &queue, &view);
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
     assert!(err.is_none(), "wgpu validation error: {err:?}");
 
     let pixels = read_rgba_pixels(&device, &queue, &target, w, h);

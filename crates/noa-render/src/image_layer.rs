@@ -226,8 +226,8 @@ impl ImagePipeline {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("noa-image-pipeline-layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -260,7 +260,7 @@ impl ImagePipeline {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -271,7 +271,7 @@ impl ImagePipeline {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -541,7 +541,7 @@ mod tests {
 
     #[test]
     fn gpu_limits_and_cached_placement_resources() {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let Ok(adapter) =
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
         else {
@@ -550,7 +550,7 @@ mod tests {
         };
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let pipeline = Arc::new(ImagePipeline::new(
             &device,
             wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -607,7 +607,7 @@ mod tests {
             !layer.cache.contains_key(&(pane.get(), 1)),
             "oversized replacement must not retain stale pixels"
         );
-        assert!(pollster::block_on(device.pop_error_scope()).is_none());
+        assert!(pollster::block_on(error_scope.pop()).is_none());
         layer.begin_frame();
         layer.evict();
         assert!(layer.draws.is_empty());

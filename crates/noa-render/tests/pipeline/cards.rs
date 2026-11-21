@@ -83,7 +83,7 @@ fn overview_card_pipeline_composites_tiles_without_validation_error() {
         },
     ];
 
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     overview.composite_cards(
         &device,
         &queue,
@@ -95,7 +95,7 @@ fn overview_card_pipeline_composites_tiles_without_validation_error() {
     device
         .poll(wgpu::PollType::wait_indefinitely())
         .expect("poll device after card composite");
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
 
     assert!(
         err.is_none(),
@@ -155,7 +155,7 @@ fn overview_card_pipeline_pools_repeated_texture_views() {
         }
     }
 
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     for _ in 0..3 {
         card.overlay_texture_cards(
             &device,
@@ -189,7 +189,7 @@ fn overview_card_pipeline_pools_repeated_texture_views() {
     device
         .poll(wgpu::PollType::wait_indefinitely())
         .expect("poll device after pooled card composite");
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
     assert!(
         err.is_none(),
         "wgpu validation error while exercising the card pool: {err:?}"
@@ -258,6 +258,7 @@ fn card_pipeline_draws_repeated_view_placements_beyond_pool_cap() {
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
     }
     queue.submit(Some(encoder.finish()));
@@ -364,7 +365,7 @@ fn sidebar_band_overlay_composites_without_validation_error() {
         focus_glow_width: 0.0,
     };
 
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     card.overlay_texture_cards(
         &device,
         &queue,
@@ -383,7 +384,7 @@ fn sidebar_band_overlay_composites_without_validation_error() {
     device
         .poll(wgpu::PollType::wait_indefinitely())
         .expect("poll device after sidebar band overlay");
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
     assert!(
         err.is_none(),
         "wgpu validation error during sidebar band overlay: {err:?}"
@@ -490,7 +491,7 @@ fn pane_drag_visuals_composite_without_validation_error() {
         focus_glow_width: 0.0,
     };
 
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     card.overlay_texture_cards(
         &device,
         &queue,
@@ -525,7 +526,7 @@ fn pane_drag_visuals_composite_without_validation_error() {
     device
         .poll(wgpu::PollType::wait_indefinitely())
         .expect("poll device after pane-drag visuals composite");
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
     assert!(
         err.is_none(),
         "wgpu validation error during pane-drag visuals composite: {err:?}"
@@ -673,7 +674,7 @@ fn command_palette_card_composites_without_validation_error() {
         focus_glow_width: 0.0,
     };
 
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     card.overlay_texture_cards(
         &device,
         &queue,
@@ -693,7 +694,7 @@ fn command_palette_card_composites_without_validation_error() {
     device
         .poll(wgpu::PollType::wait_indefinitely())
         .expect("poll device after palette card composite");
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
     assert!(
         err.is_none(),
         "wgpu validation error during command-palette card composite: {err:?}"
@@ -888,7 +889,7 @@ fn card_glow_preserves_destination_alpha_under_alpha_replace() {
         selected: true,
     };
 
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     card.overlay_texture_cards(
         &device,
         &queue,
@@ -900,7 +901,7 @@ fn card_glow_preserves_destination_alpha_under_alpha_replace() {
     device
         .poll(wgpu::PollType::wait_indefinitely())
         .expect("poll device after card glow composite");
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
     assert!(
         err.is_none(),
         "wgpu validation error during card glow composite: {err:?}"

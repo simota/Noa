@@ -35,11 +35,11 @@ fn overview_blit_pipeline_draws_tile_without_validation_error() {
     assert_eq!(overview.tile_size(), tile_size);
     assert_eq!(overview.tile_count(), 1);
 
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     overview
         .render_existing_renderer_to_tile(&device, &queue, &mut renderer, scratch_size, 0)
         .expect("blit existing renderer to overview tile");
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
 
     assert!(
         err.is_none(),
@@ -77,11 +77,11 @@ fn overview_blit_scratch_resizes_to_source_frame_without_validation_error() {
     );
     assert_eq!(overview.scratch_size(), initial_scratch_size);
 
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     overview
         .render_existing_renderer_to_tile(&device, &queue, &mut renderer, source_size, 0)
         .expect("blit source-sized renderer to overview tile");
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
 
     assert_eq!(overview.scratch_size(), source_size);
     assert!(
@@ -263,7 +263,7 @@ fn overview_pane_subrect_composition_places_panes_in_distinct_regions() {
         ))
     };
 
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
     let cleared = {
         overview.clear_tile(&device, &queue, 0);
@@ -294,7 +294,7 @@ fn overview_pane_subrect_composition_places_panes_in_distinct_regions() {
         .expect("composite right pane (swapped)");
     let arrangement_2 = hash_tile(&overview);
 
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
     assert!(
         err.is_none(),
         "wgpu validation error during overview sub-rect composition: {err:?}"
@@ -322,7 +322,7 @@ fn overview_blit_resources_drop_before_renderer_without_validation_error() {
     let mut font =
         FontGrid::new(18.0, noa_font::FontConfig::default()).expect("load a system monospace font");
 
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     {
         let mut renderer = Renderer::new(&device, &queue, format, &mut font, DEFAULT_GRID_PADDING)
             .expect("build renderer");
@@ -350,7 +350,7 @@ fn overview_blit_resources_drop_before_renderer_without_validation_error() {
     device
         .poll(wgpu::PollType::wait_indefinitely())
         .expect("poll device after overview teardown");
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
 
     assert!(
         err.is_none(),

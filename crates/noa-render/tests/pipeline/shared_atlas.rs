@@ -55,14 +55,14 @@ fn two_renderers_sharing_glyph_atlas_draw_without_validation_error() {
     first.resize(PixelSize { w: 96, h: 40 });
     second.resize(PixelSize { w: 96, h: 40 });
 
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let (_first_target, first_view) = render_target(&device, 96, 40);
     rebuild_text_frame(&mut first, &mut font, &device, &queue, "first tab");
     first.draw(&device, &queue, &first_view);
     let (_second_target, second_view) = render_target(&device, 96, 40);
     rebuild_text_frame(&mut second, &mut font, &device, &queue, "second tab");
     second.draw(&device, &queue, &second_view);
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
 
     assert!(
         err.is_none(),
@@ -124,13 +124,13 @@ fn shared_glyph_atlas_reallocation_refreshes_both_renderers_before_draw() {
         return;
     }
 
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     first.sync_atlas(&device, &queue, &mut font);
     let (_first_target, first_view) = render_target(&device, 512, 256);
     first.draw(&device, &queue, &first_view);
     let (_second_target, second_view) = render_target(&device, 512, 256);
     second.draw(&device, &queue, &second_view);
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
     let after_first = first.pane_bind_group_rebuild_counts();
     let after_second = second.pane_bind_group_rebuild_counts();
 
@@ -204,11 +204,11 @@ fn glyph_renders_identically_after_atlas_growth() {
 
     // Re-draw the same glyph after the grow: same absolute texels, larger
     // texture, refreshed bind groups. The output must be identical.
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     rebuild_text_frame(&mut renderer, &mut font, &device, &queue, "W");
     let (after_target, after_view) = render_target(&device, w, h);
     renderer.draw(&device, &queue, &after_view);
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
     let after = read_rgba_pixels(&device, &queue, &after_target, w, h);
 
     assert!(
@@ -324,10 +324,10 @@ fn a_second_font_size_does_not_corrupt_the_first_renderers_atlas() {
     let _ = read_rgba_pixels(&device, &queue, &large_target, w, h);
 
     // Bare redraw of the untouched first renderer.
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let (again_target, again_view) = render_target(&device, w, h);
     small_renderer.draw(&device, &queue, &again_view);
-    let err = pollster::block_on(device.pop_error_scope());
+    let err = pollster::block_on(error_scope.pop());
     let again = read_rgba_pixels(&device, &queue, &again_target, w, h);
 
     assert!(err.is_none(), "wgpu validation error on redraw: {err:?}");

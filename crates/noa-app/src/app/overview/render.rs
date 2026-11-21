@@ -871,8 +871,9 @@ impl App {
         // The overlay presents into the host window's own surface — the same
         // one the terminal frame uses when the Overview is hidden.
         let frame = match host_state.surface.get_current_texture() {
-            Ok(frame) => frame,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+            wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
                 configure_wgpu_surface(
                     &host_state.surface,
                     &gpu.device,
@@ -883,8 +884,8 @@ impl App {
                 host_state.window.request_redraw();
                 return;
             }
-            Err(e) => {
-                log::warn!("overview surface error: {e}");
+            other => {
+                log::warn!("overview surface error: {other:?}");
                 return;
             }
         };
@@ -1168,7 +1169,7 @@ impl App {
             }
         }
 
-        frame.present();
+        gpu.queue.present(frame);
 
         // Drive the quick-look zoom transition: repaint until it settles,
         // then drop the tween so the steady state draws without it.

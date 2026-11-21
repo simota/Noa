@@ -57,7 +57,7 @@ To make ⌘↑ / ⌘↓ scroll to the top / bottom as in Ghostty 1.3, set
 | Window | `window.new`, `window.close`, `fullscreen.toggle` |
 | Split | `split.new-left`, `split.new-right`, `split.new-up`, `split.new-down`, `split.focus-left`, `split.focus-right`, `split.focus-up`, `split.focus-down`, `split.resize-left`, `split.resize-right`, `split.resize-up`, `split.resize-down`, `split.equalize`, `split.toggle-zoom` |
 | Floating pane | `float.new`, `float.toggle-focus`, `float.focus-next`, `float.focus-previous`, `float.toggle-collapse`, `float.toggle-maximize`, `float.cycle-anchor` (only `float.new` and `float.toggle-focus` have default chords: `cmd+shift+y` / `cmd+shift+i` on macOS, `ctrl+shift+y` / `ctrl+shift+i` elsewhere) |
-| UI | `session-overview.toggle`, `command-palette.toggle`, `quick-terminal.toggle`, `secure-keyboard-entry.toggle`, `background-opacity.toggle` (macOS; Ghostty's `toggle_background_opacity` also works; holds every window opaque until toggled again, and does nothing when `background-opacity` is 1 or the focused window is fullscreen), `sidebar.toggle`, `auto-approve.toggle`, `ember.toggle`, `theme-settings.open` |
+| UI | `session-overview.toggle`, `command-palette.toggle`, `quick-terminal.toggle`, `secure-keyboard-entry.toggle`, `background-opacity.toggle` (macOS; Ghostty's `toggle_background_opacity` also works; holds every window opaque until toggled again, and does nothing when `background-opacity` is 1 or the focused window is fullscreen), `sidebar.toggle`, `auto-approve.toggle`, `ember.toggle`, `agent-dashboard.open`, `theme-settings.open` |
 | Agent workflows | `session.next-notification`, `agent.compose-prompt`, `terminal.read-output` |
 
 `tab-overview.toggle` is also accepted as a compatible name for

@@ -389,6 +389,12 @@ impl MacosMenu {
                 &scratch_terminal,
                 &sidebar,
                 &ember,
+                &MenuItem::with_id(
+                    AppCommand::OpenAgentDashboard.menu_id(),
+                    "Agent Dashboard",
+                    true,
+                    None,
+                ),
                 &auto_approve,
                 &PredefinedMenuItem::separator(),
                 &MenuItem::with_id(

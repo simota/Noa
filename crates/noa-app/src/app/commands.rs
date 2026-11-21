@@ -234,6 +234,7 @@ impl App {
                 #[cfg(target_os = "macos")]
                 self.toggle_ember();
             }
+            AppCommand::OpenAgentDashboard => crate::agent_dashboard::open(),
             AppCommand::Spawn(command) => crate::commands::spawn_in_background(
                 command,
                 self.focused_pane_cwd().as_deref().map(std::path::Path::new),

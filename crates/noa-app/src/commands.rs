@@ -21,4 +21,4 @@ pub(crate) use keybind::command_from_applescript_action;
 pub(crate) use keybind::command_from_keybind_action;
 pub(crate) use keybind::is_valid_keybind_chord;
 pub use spawn::SpawnCommand;
-pub(crate) use spawn::spawn_in_background;
+pub(crate) use spawn::{spawn_in_background, start_detached};

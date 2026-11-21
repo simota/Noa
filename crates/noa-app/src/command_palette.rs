@@ -127,6 +127,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::ToggleSidebar => "Toggle Sidebar",
         AppCommand::ToggleAutoApprove => "Toggle Auto Approve",
         AppCommand::ToggleEmber => "Toggle Ember in Menu Bar",
+        AppCommand::OpenAgentDashboard => "Open Agent Dashboard",
         // Deviation: the locked spec's literal label is Japanese
         // ("テーマ・設定を開く"), but every existing palette title is English
         // (this whole `match`) — following that established convention
@@ -259,6 +260,9 @@ pub(crate) fn command_palette_description(command: AppCommand) -> &'static str {
         AppCommand::ToggleSidebar => "Show or hide the session list beside the terminal.",
         AppCommand::ToggleAutoApprove => "Toggle agent CLI auto approval for the current tab.",
         AppCommand::ToggleEmber => "Show or hide Ember, the pane list in the menu bar.",
+        AppCommand::OpenAgentDashboard => {
+            "Show the agents working in Noa in a window of their own."
+        }
         AppCommand::OpenThemePicker => "Choose a color theme.",
         AppCommand::ToggleProcessMonitor => "Show the processes running in each terminal.",
         AppCommand::NextNotification => "Go to the next session with an unread notification.",
@@ -356,6 +360,7 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::ToggleSidebar,
         AppCommand::ToggleAutoApprove,
         AppCommand::ToggleEmber,
+        AppCommand::OpenAgentDashboard,
         AppCommand::SetTabTitle,
         AppCommand::CloseTab,
         AppCommand::NextTab,
@@ -652,7 +657,8 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         | AppCommand::Terminal(TerminalAction::ClearScrollback)
         | AppCommand::FontSize(_)
         | AppCommand::ToggleFullscreen
-        | AppCommand::ToggleProcessMonitor => CommandCategory::View,
+        | AppCommand::ToggleProcessMonitor
+        | AppCommand::OpenAgentDashboard => CommandCategory::View,
         AppCommand::Search(_) => CommandCategory::Search,
         AppCommand::ScrollViewport(_) => CommandCategory::Scroll,
         AppCommand::CopyMode(_) => CommandCategory::Clipboard,
@@ -1016,6 +1022,7 @@ mod tests {
             AppCommand::ToggleSidebar,
             AppCommand::ToggleAutoApprove,
             AppCommand::ToggleEmber,
+            AppCommand::OpenAgentDashboard,
         ];
         commands.extend((1..=9).map(AppCommand::SelectTab));
         commands

@@ -1551,6 +1551,30 @@ fn worker_name(panel: &Panel) -> String {
         .unwrap_or_else(|| format!("pane {}", panel.pane_id.0))
 }
 
+/// `panel`'s git branch, if it has one.
+fn branch_of(panel: &Panel) -> Option<String> {
+    panel
+        .branch
+        .as_deref()
+        .map(clean)
+        .filter(|branch| !branch.is_empty())
+}
+
+/// Whether `cwd` is in the worktree `+ctl spawn --worktree` makes for
+/// `label`, `<top>-wt/<label>` (see `worktree::worktree_path`).
+fn in_label_worktree(cwd: &str, label: &str) -> bool {
+    if super::worktree::check_label(label).is_err() {
+        return false;
+    }
+    let parts: Vec<_> = std::path::Path::new(cwd)
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect();
+    parts
+        .windows(2)
+        .any(|pair| pair[0].len() > "-wt".len() && pair[0].ends_with("-wt") && pair[1] == label)
+}
+
 fn worker_kind(panel: &Panel) -> String {
     panel
         .agent
@@ -1819,6 +1843,32 @@ fn fit(s: &str, width: usize) -> String {
     }
     out.push('…');
     out
+}
+
+/// `s` over lines of at most `width` columns, each broken after its last
+/// space when that leaves it at least half full, else where it is full.
+fn wrap(s: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for ch in s.chars() {
+        if line.width() + ch.width().unwrap_or(0) > width && !line.is_empty() {
+            let rest = match line.rfind(' ') {
+                Some(at) if line[..at].width() * 2 >= width => {
+                    let rest = line[at + 1..].to_string();
+                    line.truncate(at);
+                    rest
+                }
+                _ => String::new(),
+            };
+            lines.push(std::mem::replace(&mut line, rest));
+            if ch == ' ' && line.is_empty() {
+                continue;
+            }
+        }
+        line.push(ch);
+    }
+    lines.push(line);
+    lines
 }
 
 /// `s` fitted to exactly `width` columns: cut with `…`, or padded.
@@ -2246,14 +2296,31 @@ impl Board {
                 } else {
                     String::new()
                 };
+                // The board only closes the pane: the worktree `spawn
+                // --worktree` made for it stays, and its branch (U6).
+                let worktree = self
+                    .panel(*pane)
+                    .and_then(|panel| {
+                        let label = panel.label.as_deref()?;
+                        in_label_worktree(&panel.cwd, label).then(|| clean(label))
+                    })
+                    .map(|label| {
+                        self.lang.pick(
+                            format!("worktree とブランチ orch/{label} は残ります。"),
+                            format!("Its worktree and branch orch/{label} stay. "),
+                        )
+                    })
+                    .unwrap_or_default();
                 let name = self.name(*pane);
                 // The keys are in the prompt: an opened worker covers the
                 // footer that lists them (D10).
                 let ask = self.lang.pick(
                     format!(
-                        "{name} を閉じますか? y で閉じる · ほかのキーで取り消し · {busy}{kids}出力は消えます。"
+                        "{name} を閉じますか? y で閉じる · ほかのキーで取り消し · {busy}{kids}{worktree}出力は消えます。"
                     ),
-                    format!("Close {name}? y closes · other keys cancel · {busy}{kids}Its output is lost."),
+                    format!(
+                        "Close {name}? y closes · other keys cancel · {busy}{kids}{worktree}Its output is lost."
+                    ),
                 );
                 line.fg(RED, &fit(&ask, room));
             }
@@ -3019,6 +3086,12 @@ impl Board {
             let report = self.lang.pick("報告", "report");
             meta.fg(DIM, &format!(" · {report} {}", agent.seq));
         }
+        // Its branch, whole where it fits (U6).
+        if let Some(branch) = branch_of(panel)
+            && meta.width + 3 + branch.width() < cols
+        {
+            meta.fg(DIM, &format!(" · {branch}"));
+        }
         // The directory only where a few of its columns fit: a lone `…`
         // or separator says nothing.
         let cwd = clean(&panel.cwd);
@@ -3316,6 +3389,19 @@ impl Board {
         }
         lines.push(head.finish(cols));
         lines.push(self.notice_line(cols, now));
+        // Where it works, whole (U6): its branch and directory, on as many
+        // lines as they take.
+        let place = match branch_of(panel) {
+            Some(branch) => format!("{branch} · {}", clean(&panel.cwd)),
+            None => clean(&panel.cwd),
+        };
+        if !place.is_empty() {
+            for part in wrap(&place, cols - 2) {
+                let mut line = Line::default();
+                line.plain(" ").fg(DIM, &part);
+                lines.push(line.finish(cols));
+            }
+        }
 
         let history: &[Report] = self.history.get(&pane).map(Vec::as_slice).unwrap_or(&[]);
         let history_rows = history.len().clamp(1, 6);
@@ -6344,6 +6430,62 @@ mod tests {
 
     // Review 3-2: a preview too narrow for the directory still drew its
     // separator at the end of the line.
+    // U6: which branch a worker is on was nowhere, nor its whole directory,
+    // nor that closing it leaves its worktree and branch.
+    #[test]
+    fn the_branch_and_the_worktree_that_stays_are_said() {
+        let t0 = Instant::now();
+        let mut panels = sample();
+        let path = "/Users/me/src/project/noa-wt/api/crates/noa-app/src/ctl";
+        panels[0].cwd = path.to_string();
+        panels[0].branch = Some("orch/api".to_string());
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(panels, t0);
+        board.select(2);
+        let all = rendered(&board, 200, 30, t0);
+        assert!(
+            line_with(&all, "報告 4").contains("報告 4 · orch/api · /Users/me"),
+            "{all}"
+        );
+        board.key(Key::Enter);
+        for cols in [24, 40, 60, 80] {
+            let lines = board.render(cols, 30, t0);
+            let place: String = lines[2..]
+                .iter()
+                .map(|line| visible(line))
+                .take_while(|line| !line.contains("画面"))
+                .map(|line| line.replace(' ', ""))
+                .collect();
+            assert_eq!(place, format!("orch/api·{path}"), "{cols}");
+            for line in &lines {
+                assert_eq!(visible(line).width(), cols, "{cols}: {:?}", visible(line));
+            }
+        }
+        board.key(Key::Char('x'));
+        let top = visible(&board.render(200, 30, t0)[1]);
+        assert!(
+            top.contains("worktree とブランチ orch/api は残ります。"),
+            "{top}"
+        );
+        // Only a worker in its label's worktree.
+        assert!(!in_label_worktree("/src/noa-wt/ui", "api"));
+        assert!(!in_label_worktree("/src/-wt/api", "api"));
+        assert!(!in_label_worktree("/src/noa/api", "api"));
+        assert!(in_label_worktree("/src/noa-wt/api", "api"));
+    }
+
+    // U11: help lines wrapped, a path broken where it is full.
+    #[test]
+    fn wrap_breaks_at_a_space_or_where_full() {
+        assert_eq!(
+            wrap("fold / open a subtree", 12),
+            ["fold / open", "a subtree"]
+        );
+        assert_eq!(wrap("/a/b/c/d", 3), ["/a/", "b/c", "/d"]);
+        assert_eq!(wrap("作業中のワーカー", 6), ["作業中", "のワー", "カー"]);
+        assert_eq!(wrap("short", 10), ["short"]);
+    }
+
     #[test]
     fn a_preview_without_room_for_the_directory_has_no_dangling_separator() {
         let t0 = Instant::now();

@@ -144,10 +144,56 @@ pub(super) fn one_line(text: &str) -> String {
 /// again in twice as many.
 const CLUSTER_PIECE: usize = 64;
 
+/// A single-line editor that charges `scanned`, at every call, with the
+/// bytes of text it holds: any call may look at all of them, so the count
+/// bounds the work whatever the calls are — a caret moved along a long
+/// text is charged that text at every move.
+pub(super) struct CountingEditor<'a> {
+    editor: TextEditor,
+    clipboard: MemoryClipboard,
+    scanned: &'a mut usize,
+}
+
+impl<'a> CountingEditor<'a> {
+    pub(super) fn new(scanned: &'a mut usize) -> Self {
+        Self {
+            editor: TextEditor::single_line(),
+            clipboard: MemoryClipboard::default(),
+            scanned,
+        }
+    }
+
+    fn charge(&mut self) {
+        *self.scanned += self.editor.text().len();
+    }
+
+    pub(super) fn set_text(&mut self, text: &str) {
+        self.editor.set_text(text);
+        self.charge();
+    }
+
+    pub(super) fn move_to(&mut self, index: usize) {
+        self.charge();
+        self.editor.move_to(index, false);
+    }
+
+    /// The caret one grapheme cluster on.
+    pub(super) fn right(&mut self) {
+        self.charge();
+        let modifiers = Modifiers::default();
+        self.editor
+            .handle_key(Key::ArrowRight, modifiers, &mut self.clipboard);
+    }
+
+    pub(super) fn caret(&self) -> usize {
+        self.editor.caret()
+    }
+}
+
 /// Where each grapheme cluster of `line` (a [`one_line`] text) ends, in
-/// time proportional to the line's length. `scanned` counts the bytes
-/// handed to the editor: each step works only inside the piece it is
-/// given, so that count bounds the work.
+/// time proportional to the line's length. `scanned` counts what the
+/// editor holds at each call ([`CountingEditor`]): each step works only
+/// inside the piece it is given, so that count bounds the work.
 ///
 /// Each step gives the editor the piece of the line from the last cluster
 /// end and moves its caret one cluster on. A cluster end is a boundary
@@ -159,8 +205,7 @@ const CLUSTER_PIECE: usize = 64;
 /// time in the square of a cluster's length: each move goes back to the
 /// start of the cluster it lands in.
 pub(super) fn cluster_ends(line: &str, scanned: &mut usize) -> Vec<usize> {
-    let mut editor = TextEditor::single_line();
-    let mut clipboard = MemoryClipboard::default();
+    let mut editor = CountingEditor::new(scanned);
     let mut ends = Vec::new();
     let mut start = 0;
     let mut piece_len = CLUSTER_PIECE;
@@ -173,9 +218,8 @@ pub(super) fn cluster_ends(line: &str, scanned: &mut usize) -> Vec<usize> {
         // A one-line text has no control characters: the editor takes the
         // piece as it is, so its offsets are the piece's.
         editor.set_text(piece);
-        editor.move_to(0, false);
-        editor.handle_key(Key::ArrowRight, Modifiers::default(), &mut clipboard);
-        *scanned += piece.len();
+        editor.move_to(0);
+        editor.right();
         let end = editor.caret();
         if end == piece.len() && stop < line.len() {
             piece_len *= 2;

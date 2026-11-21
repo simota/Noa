@@ -6,7 +6,7 @@ use noa_gpui_core::widgets::{Button, Container, ControlSize, Kbd, Label};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
 use super::keymap::{BINDINGS, Mode};
-use super::style::gap;
+use super::style::{gap, spacer};
 
 /// Width of the keycaps column.
 const KEYS_WIDTH: f32 = 96.0;
@@ -77,14 +77,20 @@ pub(super) fn build(tree: &mut UiTree, root: WidgetId) -> WidgetId {
             tree.insert(Some(line), Label::new(row.title).font_size(12.0));
         }
     }
-    tree.insert(
+    // The footer: the note on the mouse, and 閉じる at the row's end.
+    let footer = tree.insert(
         Some(root),
+        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+    );
+    tree.insert(
+        Some(footer),
         Label::new("マウス: 詳細・開く・グループはクリックでも操作できます")
             .font_size(11.0)
             .color(Role::Muted),
     );
+    spacer(tree, footer);
     tree.insert(
-        Some(root),
+        Some(footer),
         Button::new("閉じる").control_size(ControlSize::Small),
     )
 }

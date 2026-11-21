@@ -36,6 +36,8 @@ pub struct TextResult {
     /// [`crate::protocol::truncate_tail`] with the requested `maxBytes` and
     /// ORs the two flags — see that function's doc comment.
     pub truncated: bool,
+    /// The pane is on the alternate screen (`GetTextResult.alternateScreen`).
+    pub alternate_screen: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -79,7 +81,15 @@ pub trait IpcBackend: Send + Sync + 'static {
     /// `paste`: `true` sends `text` through the bracketed-paste-aware
     /// encoding (the default); `false` writes `text`'s UTF-8 bytes to the
     /// pty as-is (see [`crate::protocol::SendTextParams::paste`]).
-    fn send_text(&self, pane: PaneRef, text: &str, paste: bool) -> Result<(), IpcError>;
+    /// `require_paste_mode` with `paste`: refuse with [`IpcError::NotReady`],
+    /// writing nothing, while the pane has not enabled bracketed paste.
+    fn send_text(
+        &self,
+        pane: PaneRef,
+        text: &str,
+        paste: bool,
+        require_paste_mode: bool,
+    ) -> Result<(), IpcError>;
 
     fn focus_pane(&self, pane: PaneRef) -> Result<(), IpcError>;
 

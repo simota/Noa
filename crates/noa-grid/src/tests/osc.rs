@@ -1088,6 +1088,55 @@ fn program_status_reports_map_onto_agent_state() {
     assert!(t.take_pending_notifications().is_empty());
 }
 
+// AU-01: an `OSC 7501` blocked report says whether it is a permission
+// prompt or a question; `kind=auth` stays an error and is neither. Hook
+// reports (`OSC 777`) never say.
+#[test]
+fn program_status_blocked_says_what_it_waits_on() {
+    let blocked = |bytes: &[u8]| run(bytes).take_pending_agent_status().unwrap().unwrap();
+
+    let report = blocked(b"\x1b]7501;state=blocked:app=claude-code:kind=permission\x1b\\");
+    assert_eq!(report.blocked, Some(crate::AgentBlock::Permission));
+    let report = blocked(b"\x1b]7501;state=blocked:app=codex:kind=question\x1b\\");
+    assert_eq!(report.state, crate::AgentState::Input);
+    assert_eq!(report.blocked, Some(crate::AgentBlock::Question));
+    let report = blocked(b"\x1b]7501;state=blocked:app=codex\x1b\\");
+    assert_eq!(report.blocked, Some(crate::AgentBlock::Question));
+    let report = blocked(b"\x1b]7501;state=blocked:app=claude-code:kind=auth\x1b\\");
+    assert_eq!(report.state, crate::AgentState::Error);
+    assert_eq!(report.blocked, None);
+
+    assert_eq!(
+        blocked(b"\x1b]7501;state=working:app=codex\x1b\\").blocked,
+        None
+    );
+    let hook = blocked(b"\x1b]777;noa-agent;input;\x1b\\");
+    assert_eq!((hook.blocked, hook.app), (None, None));
+}
+
+// The board needs to know which agent a pane runs even when no foreground
+// process was sampled: the report names its app.
+#[test]
+fn program_status_carries_the_reporting_app() {
+    let app = |bytes: &[u8]| run(bytes).take_pending_agent_status().unwrap().unwrap().app;
+
+    assert_eq!(
+        app(b"\x1b]7501;state=working:app=claude-code\x1b\\").as_deref(),
+        Some("claude-code")
+    );
+    assert_eq!(
+        app(b"\x1b]7501;state=blocked:kind=permission:app=antigravity\x07").as_deref(),
+        Some("antigravity")
+    );
+    assert_eq!(
+        app(b"\x1b]7501;state=working:app=codex\x1b\\\x1b]7501;state=idle:app=codex\x1b\\")
+            .as_deref(),
+        Some("codex")
+    );
+    assert_eq!(app(b"\x1b]7501;state=working\x1b\\"), None);
+    assert_eq!(app(b"\x1b]7501;state=working:app=a b\x1b\\"), None);
+}
+
 #[test]
 fn program_status_idle_is_finished_only_after_activity() {
     let mut fresh = run(b"\x1b]7501;state=idle:app=codex\x1b\\");

@@ -49,6 +49,27 @@ fn admit_heirs<K: Copy + PartialEq>(
         .collect()
 }
 
+/// What `float.toggle-focus` does from a focused float.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FocusBack {
+    /// Collapse it, which gives focus back to its board.
+    Collapse(PaneId),
+    /// Focus this split pane.
+    Focus(PaneId),
+}
+
+/// `float.toggle-focus` from the focused `float`: a worker stowed on its
+/// board, whose place is the board's row, collapses there, so the list it
+/// covered shows again (agent-orchestration D10); any other float stays as it
+/// is and focus goes to `split`.
+fn focus_back(float: PaneId, stowed: bool, split: PaneId) -> FocusBack {
+    if stowed {
+        FocusBack::Collapse(float)
+    } else {
+        FocusBack::Focus(split)
+    }
+}
+
 /// The return pane once `target` takes focus: a split pane becomes it, a
 /// worker stowed on a board makes that board it, so leaving the worker goes
 /// back to the board however it was reached (agent-orchestration D10), and
@@ -703,7 +724,16 @@ impl App {
             FloatAction::New => {}
             FloatAction::ToggleFocus => {
                 let target = match focused_float {
-                    Some(_) => Some(state.split_focus()),
+                    Some(id) => {
+                        let stowed = state.floats.get(id).is_some_and(|float| float.is_stowed());
+                        match focus_back(id, stowed, state.split_focus()) {
+                            FocusBack::Collapse(id) => {
+                                self.toggle_float_collapse(window_id, id);
+                                return;
+                            }
+                            FocusBack::Focus(split) => Some(split),
+                        }
+                    }
                     None => state.floats.toggle_focus_target(&layout, metrics),
                 };
                 if let Some(target) = target {
@@ -1800,6 +1830,15 @@ mod tests {
             return_pane_after_focus(board, false, None, orchestrator),
             board
         );
+    }
+
+    // U4: ⌘⇧I from an opened worker went back to the board but left the
+    // worker open over the lower part of it, hiding the list and its keys.
+    #[test]
+    fn going_back_from_a_stowed_worker_collapses_it() {
+        let (float, split) = (PaneId::new(3), PaneId::new(2));
+        assert_eq!(focus_back(float, true, split), FocusBack::Collapse(float));
+        assert_eq!(focus_back(float, false, split), FocusBack::Focus(split));
     }
 
     // Review finding: closing a whole window counted every stowed worker as

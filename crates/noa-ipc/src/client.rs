@@ -12,6 +12,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tungstenite::client::IntoClientRequest;
 use tungstenite::protocol::WebSocketConfig;
+use tungstenite::protocol::frame::coding::CloseCode;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
 
@@ -40,6 +41,13 @@ const MAX_WS_MESSAGE_SIZE: usize = 1024 * 1024;
 // rejected on receipt.
 pub(crate) const MAX_WS_FRAME_SIZE: usize = MAX_WS_MESSAGE_SIZE;
 const ATTACH_PATH: &str = "/attach";
+
+/// Largest `text` one `noa.sendText` may carry, measured as its JSON-encoded
+/// string (`serde_json::to_string(text)`, quotes and escapes included). The
+/// server reads one request frame of at most 256 KiB and closes the
+/// connection with 1009 on a larger one; this leaves room for the rest of
+/// the request around the text.
+pub const MAX_SEND_TEXT_BYTES: usize = 250 * 1024;
 /// Notifications kept while no one reads them; older ones are dropped first
 /// and the next [`Client::next_notification`] reports the loss.
 const MAX_BUFFERED_NOTIFICATIONS: usize = 1024;
@@ -239,10 +247,32 @@ impl Client {
 
     /// `noa.sendText`. `paste: false` writes the UTF-8 bytes raw.
     pub fn send_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), ClientError> {
-        let _: OkResult = self.request(
-            "noa.sendText",
-            serde_json::json!({ "paneId": WireId(pane), "text": text, "paste": paste }),
-        )?;
+        self.send_text_with(
+            pane,
+            text,
+            SendTextOptions {
+                paste,
+                require_paste_mode: false,
+            },
+        )
+    }
+
+    /// `noa.sendText` with every option. With `require_paste_mode` (and
+    /// `paste`), a pane that has not enabled bracketed paste yet is refused
+    /// with `ClientError::Rpc { code: -32010, .. }` and nothing is written;
+    /// a server that predates the option ignores it and sends as usual.
+    pub fn send_text_with(
+        &mut self,
+        pane: u64,
+        text: &str,
+        options: SendTextOptions,
+    ) -> Result<(), ClientError> {
+        let mut params =
+            serde_json::json!({ "paneId": WireId(pane), "text": text, "paste": options.paste });
+        if options.require_paste_mode {
+            params["requirePasteMode"] = Value::Bool(true);
+        }
+        let _: OkResult = self.request("noa.sendText", params)?;
         Ok(())
     }
 
@@ -814,8 +844,40 @@ fn connect_websocket(url: &str, timeout: Duration) -> Result<Socket, ClientError
     let stream = MaybeTlsStream::Plain(stream);
     let (socket, _) =
         tungstenite::client::client_with_config(request, stream, Some(client_ws_config()))
-            .map_err(|error| ClientError::Transport(error.to_string()))?;
+            .map_err(handshake_error)?;
     Ok(socket)
+}
+
+/// A failed websocket handshake: [`ClientError::HandshakeDropped`] when the
+/// server ended the connection under it (EOF or reset after the TCP
+/// connect), as one at its connection limit does past the few refusals it
+/// answers with 1013; anything else (a timeout, an HTTP refusal) is
+/// [`ClientError::Transport`].
+fn handshake_error<Role: tungstenite::handshake::HandshakeRole>(
+    error: tungstenite::HandshakeError<Role>,
+) -> ClientError {
+    use std::io::ErrorKind;
+    use tungstenite::error::{Error, ProtocolError};
+    let dropped = match &error {
+        tungstenite::HandshakeError::Failure(
+            Error::ConnectionClosed
+            | Error::AlreadyClosed
+            | Error::Protocol(ProtocolError::HandshakeIncomplete),
+        ) => true,
+        tungstenite::HandshakeError::Failure(Error::Io(io)) => matches!(
+            io.kind(),
+            ErrorKind::ConnectionReset
+                | ErrorKind::ConnectionAborted
+                | ErrorKind::BrokenPipe
+                | ErrorKind::UnexpectedEof
+        ),
+        _ => false,
+    };
+    if dropped {
+        ClientError::HandshakeDropped(error.to_string())
+    } else {
+        ClientError::Transport(error.to_string())
+    }
 }
 
 fn resolve_socket_addrs_with_deadline<F>(
@@ -970,6 +1032,16 @@ impl RpcResponse {
     }
 }
 
+/// Options of [`Client::send_text_with`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SendTextOptions {
+    /// Send through the bracketed-paste-aware encoding (`false`: raw bytes).
+    pub paste: bool,
+    /// Refuse (`-32010`) instead of sending while the pane has not enabled
+    /// bracketed paste. Only meaningful with `paste`.
+    pub require_paste_mode: bool,
+}
+
 #[derive(serde::Deserialize)]
 struct RpcError {
     code: i64,
@@ -982,6 +1054,12 @@ pub enum ClientError {
     InvalidInput(String),
     #[error("websocket transport error: {0}")]
     Transport(String),
+    /// The server ended the connection during the websocket handshake,
+    /// after the TCP connect succeeded: a server at its connection limit
+    /// drops the refusals past the few it closes with 1013, so retrying
+    /// later can succeed.
+    #[error("the server dropped the connection during the websocket handshake: {0}")]
+    HandshakeDropped(String),
     /// A request's response did not arrive within its deadline while the
     /// connection stayed open: the server may still answer (late), so this
     /// is not a lost connection.
@@ -993,6 +1071,14 @@ pub enum ClientError {
     Rpc { code: i64, message: String },
     #[error("{ATTACH_HANDSHAKE_CLOSE_REASON}")]
     AttachHandshakeFailure,
+    /// The server is at its connection limit and closed this connection
+    /// with 1013 (Try Again Later); retrying later can succeed.
+    #[error("the server has too many connections open (websocket closed: {0})")]
+    TooManyConnections(String),
+    /// The server closed the connection with 1009 (Message Too Big): a
+    /// request was over its frame or message size bound.
+    #[error("a request was too large for the server (websocket closed: {0})")]
+    MessageTooBig(String),
     #[error("websocket closed: {0}")]
     Closed(String),
 }
@@ -1012,6 +1098,12 @@ impl ClientError {
         match frame {
             Some(frame) if frame.reason.starts_with("-32008") => {
                 ClientError::AttachHandshakeFailure
+            }
+            Some(frame) if frame.code == CloseCode::Again => {
+                ClientError::TooManyConnections(format!("{} {}", frame.code, frame.reason))
+            }
+            Some(frame) if frame.code == CloseCode::Size => {
+                ClientError::MessageTooBig(format!("{} {}", frame.code, frame.reason))
             }
             Some(frame) => ClientError::Closed(format!("{} {}", frame.code, frame.reason)),
             None => ClientError::Closed("without close frame".to_string()),
@@ -1139,6 +1231,54 @@ mod tests {
             method: method.to_string(),
             dropped,
         })
+    }
+
+    // REL-10/REL-04: the server's "busy" (1013) and "too big" (1009)
+    // closes each have their own error, so a caller can tell them from the
+    // server going away.
+    #[test]
+    fn busy_and_too_big_closes_are_their_own_errors() {
+        use std::borrow::Cow;
+        use tungstenite::protocol::CloseFrame;
+        let close = |code, reason: &'static str| {
+            ClientError::closed(Some(CloseFrame {
+                code,
+                reason: Cow::Borrowed(reason),
+            }))
+        };
+        assert!(matches!(
+            close(CloseCode::Again, crate::server::TOO_MANY_CONNECTIONS_REASON),
+            ClientError::TooManyConnections(_)
+        ));
+        assert!(matches!(
+            close(CloseCode::Size, crate::server::MESSAGE_TOO_BIG_REASON),
+            ClientError::MessageTooBig(_)
+        ));
+        assert!(matches!(
+            close(CloseCode::Away, "server shutdown"),
+            ClientError::Closed(_)
+        ));
+    }
+
+    // The limit leaves room for the request around the text inside the
+    // server's 256 KiB frame bound.
+    #[test]
+    fn the_largest_send_text_fits_one_server_frame() {
+        let text = "\"".repeat(MAX_SEND_TEXT_BYTES / 2 - 1);
+        let encoded = serde_json::to_string(&text).unwrap();
+        assert!(encoded.len() <= MAX_SEND_TEXT_BYTES);
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": u64::MAX,
+            "method": "noa.sendText",
+            "params": {
+                "paneId": WireId(u64::MAX),
+                "text": text,
+                "paste": true,
+                "requirePasteMode": true,
+            },
+        });
+        assert!(request.to_string().len() <= crate::server::MAX_WS_FRAME_SIZE);
     }
 
     #[test]
@@ -1294,6 +1434,61 @@ mod tests {
         assert!(steps[25].contains(r#"name: "v""#), "{}", steps[25]);
         assert!(steps[6].contains("-32004") && steps[6].contains("pane closed"));
         assert!(steps[29].contains("dropped: true"), "{}", steps[29]);
+    }
+
+    // Review finding #6: only a connection the server ended under the
+    // handshake is retried by `+ctl`; a timeout or an HTTP refusal is not.
+    #[test]
+    fn a_dropped_handshake_is_told_from_other_failures() {
+        use tungstenite::error::{Error, ProtocolError};
+        type Failed = tungstenite::HandshakeError<
+            tungstenite::handshake::client::ClientHandshake<std::io::Cursor<Vec<u8>>>,
+        >;
+        for error in [
+            Error::Protocol(ProtocolError::HandshakeIncomplete),
+            Error::ConnectionClosed,
+            Error::Io(std::io::ErrorKind::ConnectionReset.into()),
+            Error::Io(std::io::ErrorKind::BrokenPipe.into()),
+        ] {
+            let mapped = handshake_error(Failed::Failure(error));
+            assert!(
+                matches!(mapped, ClientError::HandshakeDropped(_)),
+                "{mapped:?}"
+            );
+        }
+        for error in [
+            Error::Io(std::io::ErrorKind::TimedOut.into()),
+            Error::Io(std::io::ErrorKind::WouldBlock.into()),
+            Error::Protocol(ProtocolError::WrongHttpMethod),
+        ] {
+            let mapped = handshake_error(Failed::Failure(error));
+            assert!(matches!(mapped, ClientError::Transport(_)), "{mapped:?}");
+        }
+    }
+
+    // Review finding #6: past its few 1013 refusals, a full server drops a
+    // connection during the handshake; that read as an unreachable Noa.
+    #[test]
+    fn a_connection_dropped_during_the_handshake_is_handshake_dropped() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            drop(stream);
+        });
+        let result = Client::connect_with_timeouts(
+            &url,
+            "token",
+            ScopeSet::empty(),
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        );
+        assert!(
+            matches!(result, Err(ClientError::HandshakeDropped(_))),
+            "{:?}",
+            result.err()
+        );
+        server.join().unwrap();
     }
 
     #[test]

@@ -15,27 +15,48 @@ impl Terminal {
                 return;
             }
             ProgramStatusOsc::Ignored => return,
-            ProgramStatusOsc::Working(detail) => (
+            ProgramStatusOsc::Working { detail, app } => (
                 Some(AgentStatus {
                     state: AgentState::Running,
                     detail,
+                    blocked: None,
+                    app,
                 }),
                 true,
             ),
-            ProgramStatusOsc::Blocked { state, detail } => {
-                (Some(AgentStatus { state, detail }), true)
-            }
-            ProgramStatusOsc::Ended { state, detail } => {
-                (Some(AgentStatus { state, detail }), false)
-            }
-            ProgramStatusOsc::Idle if self.program_status_active => (
+            ProgramStatusOsc::Blocked {
+                state,
+                detail,
+                blocked,
+                app,
+            } => (
                 Some(AgentStatus {
-                    state: AgentState::Finished,
-                    detail: String::new(),
+                    state,
+                    detail,
+                    blocked,
+                    app,
+                }),
+                true,
+            ),
+            ProgramStatusOsc::Ended { state, detail, app } => (
+                Some(AgentStatus {
+                    state,
+                    detail,
+                    blocked: None,
+                    app,
                 }),
                 false,
             ),
-            ProgramStatusOsc::Idle | ProgramStatusOsc::Clear => (None, false),
+            ProgramStatusOsc::Idle { app } if self.program_status_active => (
+                Some(AgentStatus {
+                    state: AgentState::Finished,
+                    detail: String::new(),
+                    blocked: None,
+                    app,
+                }),
+                false,
+            ),
+            ProgramStatusOsc::Idle { .. } | ProgramStatusOsc::Clear => (None, false),
         };
         self.program_status_active = active;
         self.set_pending_agent_status(status);

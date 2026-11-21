@@ -53,6 +53,7 @@ impl IpcBackend for MockBackend {
             Some(text) => Ok(TextResult {
                 text: text.clone(),
                 truncated: false,
+                alternate_screen: false,
             }),
             None => Err(IpcError::UnknownPane),
         }
@@ -87,7 +88,13 @@ impl IpcBackend for MockBackend {
         })
     }
 
-    fn send_text(&self, pane: PaneRef, text: &str, paste: bool) -> Result<(), IpcError> {
+    fn send_text(
+        &self,
+        pane: PaneRef,
+        text: &str,
+        paste: bool,
+        _require_paste_mode: bool,
+    ) -> Result<(), IpcError> {
         if self.closed_panes.lock().unwrap().contains(&pane) {
             return Err(IpcError::PaneClosed);
         }
@@ -1166,6 +1173,7 @@ fn subscribe_delivers_state_changed_and_unsubscribe_stops_it() {
         exit: None,
         parent_pane_id: None,
         label: None,
+        spawn: None,
     };
     broadcaster.broadcast_state_changed(vec![panel]);
 
@@ -1387,10 +1395,15 @@ fn f3_oversized_message_closes_the_connection() {
             other => break other,
         }
     };
-    assert!(
-        result.is_err(),
-        "oversized message should close the connection, got {result:?}"
-    );
+    // REL-04: the teardown starts with a 1009 Message Too Big close, so the
+    // client can say why it lost the connection.
+    match result {
+        Ok(Message::Close(Some(frame))) => {
+            assert_eq!(frame.code, CloseCode::Size);
+            assert_eq!(frame.reason, noa_ipc::MESSAGE_TOO_BIG_REASON);
+        }
+        other => panic!("oversized message should close with 1009, got {other:?}"),
+    }
 }
 
 // ---- sendText paste param: omitted/true means the existing bracketed-paste

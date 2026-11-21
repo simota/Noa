@@ -260,6 +260,7 @@ pub(crate) enum IpcActionKind {
         pane: PaneRef,
         text: String,
         paste: bool,
+        require_paste_mode: bool,
     },
     ResizePane {
         pane: PaneRef,
@@ -414,7 +415,11 @@ impl IpcBackend for AppIpcBackend {
             // after the fact (F-1 / NFR-4).
             TextSource::Scrollback => terminal.scrollback_text_tail(max_bytes).unwrap_or_default(),
         };
-        Ok(TextResult { text, truncated })
+        Ok(TextResult {
+            text,
+            truncated,
+            alternate_screen: terminal.active_is_alt,
+        })
     }
 
     fn get_grid(
@@ -428,11 +433,18 @@ impl IpcBackend for AppIpcBackend {
         Ok(terminal_grid_result(&terminal, start_row, row_count))
     }
 
-    fn send_text(&self, pane: PaneRef, text: &str, paste: bool) -> Result<(), IpcError> {
+    fn send_text(
+        &self,
+        pane: PaneRef,
+        text: &str,
+        paste: bool,
+        require_paste_mode: bool,
+    ) -> Result<(), IpcError> {
         match self.submit(IpcActionKind::SendText {
             pane,
             text: text.to_string(),
             paste,
+            require_paste_mode,
         })? {
             IpcActionReply::Ok => Ok(()),
             IpcActionReply::NewPane(_) => Ok(()),
@@ -622,6 +634,9 @@ pub(crate) struct PanelSurfaceFacts {
     /// The directory the pane was spawned in, for `Panel.cwd` until shell
     /// integration (OSC 7) reports one.
     pub(crate) cwd: Option<String>,
+    /// What an IPC spawn ran here (`Panel.spawn`); its `argv[0]` also names
+    /// the agent when no foreground process was sampled.
+    pub(crate) spawn: Option<noa_ipc::PanelSpawn>,
 }
 
 /// `SessionCard` -> wire `Panel` (spec §L2 "ID モデル & Panel メタデータ":
@@ -657,17 +672,27 @@ pub(crate) fn card_to_panel(
             .map(|(row, line)| preview_line_to_row(row as u64, line))
             .collect(),
         surface_id: facts.surface_id,
-        agent: panel_agent(card),
+        agent: panel_agent(
+            card,
+            facts
+                .spawn
+                .as_ref()
+                .and_then(|spawn| spawn.argv.first())
+                .map(String::as_str),
+        ),
         exit: facts.exit.map(|exit| PanelExit {
             code: exit.exit_code,
         }),
         parent_pane_id: facts.parent_pane_id.map(WireId),
         label: facts.label,
+        spawn: facts.spawn,
     }
 }
 
 /// A `Panel` for a live pane with no session card yet (an orchestrator's
-/// worker before its first output): no name, cwd, or preview to show.
+/// worker before its first output): no name, cwd, or preview to show. An
+/// agent spawned straight from argv still lists its `agent.kind`, as
+/// `card_to_panel` does, so `send` waits for its bracketed paste.
 pub(crate) fn bare_panel(
     ipc_id: u64,
     window_group_id: u64,
@@ -688,23 +713,48 @@ pub(crate) fn bare_panel(
         attachable,
         preview: Vec::new(),
         surface_id: facts.surface_id,
-        agent: None,
+        agent: facts
+            .spawn
+            .as_ref()
+            .and_then(|spawn| spawn.argv.first())
+            .and_then(|argv0| spawn_agent_kind(argv0))
+            .map(|kind| PanelAgent {
+                kind: Some(kind.to_string()),
+                state: None,
+                detail: None,
+                seq: 0,
+                blocked: None,
+            }),
         exit: facts.exit.map(|exit| PanelExit {
             code: exit.exit_code,
         }),
         parent_pane_id: facts.parent_pane_id.map(WireId),
         label: facts.label,
+        spawn: facts.spawn,
     }
 }
 
-/// `Panel.agent`: present when the foreground process is a recognized agent
-/// or any report has arrived (a report survives its agent leaving only until
-/// the session store clears it).
-fn panel_agent(card: &SessionCard) -> Option<PanelAgent> {
+/// `Panel.agent`: present when the pane runs a recognized agent or any
+/// report has arrived (a report survives its agent leaving only until the
+/// session store clears it).
+///
+/// The kind comes from the foreground process, else the `app=` of the last
+/// `OSC 7501` report, else the argv an IPC spawn ran (`spawn_argv0`). A pane
+/// spawned straight into an agent (no shell) can have no process name: the
+/// one sample taken at spawn lands before the pane's card exists, so the
+/// store drops it, and a name that never changes is not posted again.
+fn panel_agent(card: &SessionCard, spawn_argv0: Option<&str>) -> Option<PanelAgent> {
+    use crate::sidebar::classify_agent;
+    let reported_app = card
+        .agent_status
+        .as_ref()
+        .and_then(|status| status.app.as_deref());
     let kind = card
         .process
         .as_deref()
-        .and_then(|process| agent_wire_kind(crate::sidebar::classify_agent(process)));
+        .and_then(|process| agent_wire_kind(classify_agent(process)))
+        .or_else(|| reported_app.and_then(|app| agent_wire_kind(app_agent_kind(app))))
+        .or_else(|| spawn_argv0.and_then(spawn_agent_kind));
     if kind.is_none() && card.agent_status.is_none() && card.agent_seq == 0 {
         return None;
     }
@@ -720,7 +770,26 @@ fn panel_agent(card: &SessionCard) -> Option<PanelAgent> {
             .map(|status| status.detail.clone())
             .filter(|detail| !detail.is_empty()),
         seq: card.agent_seq,
+        blocked: card
+            .agent_status
+            .as_ref()
+            .and_then(|status| status.blocked)
+            .map(|blocked| blocked.wire_name().to_string()),
     })
+}
+
+/// The wire kind of the agent a spawn's `argv[0]` runs, if it is one.
+pub(crate) fn spawn_agent_kind(argv0: &str) -> Option<&'static str> {
+    agent_wire_kind(crate::sidebar::classify_agent(argv0))
+}
+
+/// The agent an `OSC 7501` `app=` names: `claude-code` and `codex` read
+/// like their executables; agy reports itself as `antigravity`.
+fn app_agent_kind(app: &str) -> crate::sidebar::AgentKind {
+    match app {
+        "antigravity" => crate::sidebar::AgentKind::Agy,
+        app => crate::sidebar::classify_agent(app),
+    }
 }
 
 fn agent_wire_kind(kind: crate::sidebar::AgentKind) -> Option<&'static str> {
@@ -804,6 +873,8 @@ mod tests {
         card.agent_status = Some(noa_grid::AgentStatus {
             state: noa_grid::AgentState::Permission,
             detail: "Bash".to_string(),
+            blocked: Some(noa_grid::AgentBlock::Permission),
+            app: Some("codex".to_string()),
         });
         card.agent_seq = 4;
         let facts = PanelSurfaceFacts {
@@ -815,6 +886,10 @@ mod tests {
             parent_pane_id: Some(3),
             label: Some("review".to_string()),
             cwd: None,
+            spawn: Some(noa_ipc::PanelSpawn {
+                argv: vec!["codex".to_string(), "--yolo".to_string()],
+                started_at: 1_700_000_000,
+            }),
         };
 
         let panel = card_to_panel(8, 1, 2, &card, true, facts);
@@ -826,6 +901,14 @@ mod tests {
                 state: Some("permission".to_string()),
                 detail: Some("Bash".to_string()),
                 seq: 4,
+                blocked: Some("permission".to_string()),
+            })
+        );
+        assert_eq!(
+            panel.spawn,
+            Some(noa_ipc::PanelSpawn {
+                argv: vec!["codex".to_string(), "--yolo".to_string()],
+                started_at: 1_700_000_000,
             })
         );
         assert_eq!(panel.exit, Some(PanelExit { code: Some(1) }));
@@ -873,6 +956,31 @@ mod tests {
         );
     }
 
+    // Review finding (REL-01): a worker spawned into an agent is listed
+    // bare until its first output; its argv already names the agent.
+    #[test]
+    fn a_bare_panel_takes_its_agent_kind_from_the_spawn_argv() {
+        let spawn = |argv0: &str| PanelSurfaceFacts {
+            spawn: Some(noa_ipc::PanelSpawn {
+                argv: vec![argv0.to_string()],
+                started_at: 0,
+            }),
+            ..PanelSurfaceFacts::default()
+        };
+        let agent = bare_panel(8, 1, 2, true, spawn("/usr/local/bin/codex")).agent;
+        assert_eq!(agent.and_then(|agent| agent.kind).as_deref(), Some("codex"));
+        assert!(
+            bare_panel(8, 1, 2, true, spawn("./deploy.sh"))
+                .agent
+                .is_none()
+        );
+        assert!(
+            bare_panel(8, 1, 2, true, PanelSurfaceFacts::default())
+                .agent
+                .is_none()
+        );
+    }
+
     #[test]
     fn a_recognized_agent_without_reports_still_has_its_kind() {
         let panel = card_to_panel(
@@ -891,8 +999,73 @@ mod tests {
                 state: None,
                 detail: None,
                 seq: 0,
+                blocked: None,
             })
         );
+    }
+
+    // Observed live: a worker spawned as `spawn -- claude` (no shell) listed
+    // `agent: {seq, state}` without a kind, since no foreground process was
+    // ever recorded for it. The report's app names it, else the spawn argv.
+    #[test]
+    fn a_pane_without_a_process_takes_its_kind_from_the_report_or_the_spawn() {
+        let mut card = agent_card(None);
+        card.agent_seq = 2;
+        card.agent_status = Some(noa_grid::AgentStatus {
+            state: noa_grid::AgentState::Running,
+            detail: String::new(),
+            blocked: None,
+            app: Some("antigravity".to_string()),
+        });
+        let spawned = |argv0: &str| PanelSurfaceFacts {
+            spawn: Some(noa_ipc::PanelSpawn {
+                argv: vec![argv0.to_string()],
+                started_at: 0,
+            }),
+            ..PanelSurfaceFacts::default()
+        };
+        let kind = |card: &SessionCard, facts| {
+            card_to_panel(8, 1, 2, card, true, facts)
+                .agent
+                .and_then(|agent| agent.kind)
+        };
+
+        assert_eq!(kind(&card, spawned("claude")).as_deref(), Some("agy"));
+
+        card.agent_status.as_mut().unwrap().app = None;
+        assert_eq!(
+            kind(&card, spawned("/opt/bin/claude")).as_deref(),
+            Some("claude")
+        );
+        assert_eq!(kind(&card, PanelSurfaceFacts::default()), None);
+        assert_eq!(kind(&card, spawned("make")), None);
+    }
+
+    // AU-01: `blocked` comes only from an `OSC 7501` blocked report, so a
+    // hook's `input` (no `blocked`) is told apart from a question dialog.
+    #[test]
+    fn only_a_blocked_report_sets_blocked() {
+        let mut card = agent_card(Some("claude"));
+        let blocked = |card: &SessionCard| {
+            card_to_panel(8, 1, 2, card, true, PanelSurfaceFacts::default())
+                .agent
+                .and_then(|agent| agent.blocked)
+        };
+        card.agent_status = Some(noa_grid::AgentStatus {
+            state: noa_grid::AgentState::Input,
+            detail: String::new(),
+            blocked: Some(noa_grid::AgentBlock::Question),
+            app: Some("claude-code".to_string()),
+        });
+        assert_eq!(blocked(&card).as_deref(), Some("question"));
+
+        card.agent_status = Some(noa_grid::AgentStatus {
+            state: noa_grid::AgentState::Input,
+            detail: String::new(),
+            blocked: None,
+            app: None,
+        });
+        assert_eq!(blocked(&card), None);
     }
 
     #[test]

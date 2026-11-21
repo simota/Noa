@@ -395,6 +395,33 @@ impl AgentState {
 pub struct AgentStatus {
     pub state: AgentState,
     pub detail: String,
+    /// What the agent waits on. Set only from an `OSC 7501` blocked report;
+    /// `None` for every `OSC 777;noa-agent` (hook) report, so an `Input`
+    /// without it is not known to be a question dialog.
+    pub blocked: Option<AgentBlock>,
+    /// The `app=` of the `OSC 7501` report this came from (`claude-code`,
+    /// `codex`, `antigravity`, …); `None` for `OSC 777` reports.
+    pub app: Option<String>,
+}
+
+/// What an `OSC 7501` blocked report says the agent waits on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentBlock {
+    /// `kind=permission`: an approval prompt.
+    Permission,
+    /// Any other blocked report except `kind=auth` (`kind=question`, or no
+    /// kind): a question that Enter would answer with its first choice.
+    Question,
+}
+
+impl AgentBlock {
+    /// The `Panel.agent.blocked` wire name.
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Permission => "permission",
+            Self::Question => "question",
+        }
+    }
 }
 
 /// Noa extension: `OSC 777;noa-agent;<state>;<detail> ST`.
@@ -416,7 +443,12 @@ pub(crate) fn parse_agent_status_osc(data: &[u8]) -> Option<Option<AgentStatus>>
         .filter(|c| !c.is_control())
         .take(160)
         .collect();
-    Some(Some(AgentStatus { state, detail }))
+    Some(Some(AgentStatus {
+        state,
+        detail,
+        blocked: None,
+        app: None,
+    }))
 }
 
 /// One `OSC 7501` (Program Status Protocol) report, as emitted by Claude Code
@@ -425,17 +457,26 @@ pub(crate) fn parse_agent_status_osc(data: &[u8]) -> Option<Option<AgentStatus>>
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ProgramStatusOsc {
     Query,
-    Working(String),
+    Working {
+        detail: String,
+        app: Option<String>,
+    },
     Blocked {
         state: AgentState,
         detail: String,
+        /// `None` for `kind=auth`, which reads as an error, not a prompt.
+        blocked: Option<AgentBlock>,
+        app: Option<String>,
     },
     /// The turn ended: `done` (completed) or `error` (failed).
     Ended {
         state: AgentState,
         detail: String,
+        app: Option<String>,
     },
-    Idle,
+    Idle {
+        app: Option<String>,
+    },
     Clear,
     /// Malformed, an unknown state, or a per-subagent (`id=`) entry: the
     /// session card tracks only the program's own status.
@@ -450,11 +491,12 @@ pub(crate) fn parse_program_status_osc(data: &[u8]) -> Option<ProgramStatusOsc> 
     let Ok(rest) = std::str::from_utf8(rest) else {
         return Some(ProgramStatusOsc::Ignored);
     };
-    let (mut state, mut kind, mut title, mut msg) = (None, None, None, None);
+    let (mut state, mut kind, mut title, mut msg, mut app) = (None, None, None, None, None);
     for field in rest.split(':') {
         let (key, value) = field.split_once('=').unwrap_or((field, ""));
         match key {
             "state" => state = Some(value),
+            "app" => app = program_app(value),
             "kind" => kind = Some(value),
             "title" => title = Some(value),
             "msg" => msg = Some(value),
@@ -476,27 +518,47 @@ pub(crate) fn parse_program_status_osc(data: &[u8]) -> Option<ProgramStatusOsc> 
             .unwrap_or_default()
     };
     Some(match state {
-        Some("working") => ProgramStatusOsc::Working(detail()),
-        Some("blocked") => ProgramStatusOsc::Blocked {
-            state: match kind {
-                Some("permission") => AgentState::Permission,
-                Some("auth") => AgentState::Error,
-                _ => AgentState::Input,
-            },
+        Some("working") => ProgramStatusOsc::Working {
             detail: detail(),
+            app,
         },
+        Some("blocked") => {
+            let (state, blocked) = match kind {
+                Some("permission") => (AgentState::Permission, Some(AgentBlock::Permission)),
+                Some("auth") => (AgentState::Error, None),
+                _ => (AgentState::Input, Some(AgentBlock::Question)),
+            };
+            ProgramStatusOsc::Blocked {
+                state,
+                detail: detail(),
+                blocked,
+                app,
+            }
+        }
         Some("done") => ProgramStatusOsc::Ended {
             state: AgentState::Finished,
             detail: detail(),
+            app,
         },
         Some("error") => ProgramStatusOsc::Ended {
             state: AgentState::Error,
             detail: detail(),
+            app,
         },
-        Some("idle") => ProgramStatusOsc::Idle,
+        Some("idle") => ProgramStatusOsc::Idle { app },
         Some("clear") => ProgramStatusOsc::Clear,
         _ => ProgramStatusOsc::Ignored,
     })
+}
+
+/// A usable `app=` value: a short name of letters, digits, `.`, `_` and `-`.
+fn program_app(value: &str) -> Option<String> {
+    (!value.is_empty()
+        && value.len() <= 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')))
+    .then(|| value.to_string())
 }
 
 /// A validated determinate progress percentage reported by `OSC 9;4`.

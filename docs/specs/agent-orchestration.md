@@ -1,51 +1,51 @@
-# エージェント・オーケストレーション
+# Agent orchestration
 
 | | |
 |---|---|
 | slug | agent-orchestration |
-| status | implemented（API/CLI フェーズ、2026-11-16）。owner 未サインオフ。実機での受け入れは未実施（A1・A2・A6） |
+| status | implemented (API/CLI phase, 2026-11-16; D7–D17 add the UI and improvements). No owner sign-off. Not accepted on a real machine (A1, A2, A6) |
 | owner | simota |
-| as-of | 2026-11-16（HEAD 1d316c7） |
-| scope decision | 「エージェント駆動 API」と「人間向け内蔵 UI」の両方。API を先に固定し、UI は後段フェーズ（elicited 2026-11-16） |
+| as-of | 2026-11-21 (HEAD 39d8d89, D17) |
+| scope decision | Both an "agent-driven API" and a "built-in UI for humans". The API is fixed first; the UI is a later phase (elicited 2026-11-16) |
 
-## L0：Vision
+## L0: Vision
 
-- Problem：1 つのペインで動く親エージェントが、ほかのペインで動くエージェントを束ねる手段がない。部品はほぼ揃っているが、つながっていない。
-  - ワーカーの状態（`running`/`permission`/`input`/`finished`/`error`）は `SessionCard.agent_status` にあるが（`crates/noa-app/src/session_store.rs:140`）、`card_to_panel` が落とすので外から見えない（`crates/noa-app/src/ipc_bridge.rs:604-627`、`docs/AGENT_WORKFLOW.md` 末尾「remote client metadata is unchanged」）。
-  - `noa.newTab`/`noa.split` はコマンドも cwd も env も受け取れない（`crates/noa-ipc/src/backend.rs:74-76`）。AppleScript 側には `SurfaceConfig` がある（`crates/noa-app/src/macos_applescript.rs:297`）。
-  - ペインの中のプロセスが自分の paneId を知る手段がない。`NOA_SURFACE_ID` は env に入るだけで（`crates/noa-app/src/app.rs:762-777`）、API のどこにも出てこない。
-  - シェルから叩けるクライアントがない。`noa_ipc::Client` には `send_text` も `subscribe` もない（`crates/noa-ipc/src/client.rs:120-221`）。
-- Job to be done：オーケストレーターがシェルコマンドだけで複数のペインを追加・操作・削除し、タスクの内容に応じて claude / codex / agy を使い分けて遂行できること（elicited 2026-11-16）。1 つのワーカーについては「起動 → 指示を送る → ターンの終わり（または承認待ち）を待つ → 出力を読む → 閉じる」を回す。どのタスクにどのエージェントを使うかはオーケストレーターが決め、Noa は決めない。人間はその全体を Noa の中で一覧し、止まっているワーカーに介入できること。
-- Success definition：`Noa +ctl spawn` → `send` → `wait` → `read` → `close` が 1 本のシェルスクリプトとして完走する（`scripts/agent-orchestration-smoke.sh`）。
+- Problem: a parent agent running in one pane has no way to coordinate agents running in other panes. Almost all the parts exist, but they are not connected.
+  - A worker's state (`running`/`permission`/`input`/`finished`/`error`) is in `SessionCard.agent_status` (`crates/noa-app/src/session_store.rs:140`), but `card_to_panel` drops it, so it is not visible from outside (`crates/noa-app/src/ipc_bridge.rs:604-627`; the end of `docs/AGENT_WORKFLOW.md`, "remote client metadata is unchanged").
+  - `noa.newTab`/`noa.split` accept no command, cwd or env (`crates/noa-ipc/src/backend.rs:74-76`). The AppleScript side has `SurfaceConfig` (`crates/noa-app/src/macos_applescript.rs:297`).
+  - A process inside a pane has no way to learn its own paneId. `NOA_SURFACE_ID` only goes into the env (`crates/noa-app/src/app.rs:762-777`) and appears nowhere in the API.
+  - There is no client that can be called from a shell. `noa_ipc::Client` has neither `send_text` nor `subscribe` (`crates/noa-ipc/src/client.rs:120-221`).
+- Job to be done: an orchestrator adds, drives and removes several panes with shell commands alone, and gets the work done by choosing claude / codex / agy according to the task (elicited 2026-11-16). For one worker it runs the cycle "start → send an instruction → wait for the end of the turn (or for an approval prompt) → read the output → close". The orchestrator decides which agent to use for which task; Noa does not. A human can see the whole of it inside Noa and step in on a worker that has stopped.
+- Success definition: `Noa +ctl spawn` → `send` → `wait` → `read` → `close` runs to completion as one shell script (`scripts/agent-orchestration-smoke.sh`).
 
 ## Glossary
 
 | Term | Definition | Code identifier |
 |---|---|---|
-| orchestrator | `Noa +ctl` を実行しているプロセスが属するペイン | `parentPaneId` の指す先 |
-| worker | `parentPaneId` を持つペイン | `Surface.orchestration.parent` |
-| turn | エージェント状態が 1 回報告されるごとの区切り。`seq` が 1 進む | `SessionCard.agent_seq` |
-| terminal state | 待機が解ける状態：`finished`、`permission`、`input`、`error`、プロセス終了 | — |
+| orchestrator | The pane that the process running `Noa +ctl` belongs to | What `parentPaneId` points to |
+| worker | A pane that has a `parentPaneId` | `Surface.orchestration.parent` |
+| turn | The unit between agent state reports. `seq` advances by 1 per report | `SessionCard.agent_seq` |
+| terminal state | A state that ends a wait: `finished`, `permission`, `input`, `error`, process exit | — |
 
-## 決定
+## Decisions
 
-### D1：Panel に 5 フィールドを足す（追加のみ、`PROTOCOL_VERSION` は 3 のまま）
+### D1: Add 5 fields to Panel (additive only; `PROTOCOL_VERSION` stays 3)
 
 ```jsonc
 {
-  "surfaceId": "0x00c0ffee00c0ffee",          // NOA_SURFACE_ID と同じ値
-  "agent": { "kind": "claude", "state": "finished", "detail": "", "seq": 7 },  // kind は claude|codex|agy。既知のエージェントでなく報告もなければキーごと省略。state/detail は報告があるときだけ
-  "exit": { "code": 0 },                       // 子が終了しペインが残っているときだけ
-  "parentPaneId": "3", "label": "fix-tests"    // spawn 時に指定されたときだけ
+  "surfaceId": "0x00c0ffee00c0ffee",          // same value as NOA_SURFACE_ID
+  "agent": { "kind": "claude", "state": "finished", "detail": "", "seq": 7 },  // kind is claude|codex|agy. The whole key is omitted when the process is no known agent and nothing was reported. state/detail only when there is a report
+  "exit": { "code": 0 },                       // only when the child exited and the pane remains
+  "parentPaneId": "3", "label": "fix-tests"    // only when given at spawn
 }
 ```
 
-- `kind` は前面プロセス名から決まる（`classify_agent`、`crates/noa-app/src/sidebar.rs:740`）ので、フックを設定していないエージェントでも出る。
-- `seq` はペインごとの単調増加カウンタで、OSC 777 の報告（`clear` を含む）が届くたびに 1 進む。前のターンの `finished` が残っていても、「`seq` が N より大きい terminal state」を待てば取り違えない。`agent_status_at` は時刻であって順序の保証がないので使わない。
-- バージョンを上げない理由：hello は厳密一致で弾く（`crates/noa-ipc/src/server.rs:1478`）ので、上げると既存の v3 クライアントが全滅する。`Panel` は未知フィールドを拒否しない。
-- `noa.stateChanged` は `Panel` の `PartialEq` 差分で配信される（`crates/noa-ipc/src/protocol.rs:163-165`）ので、フィールドを足せば状態変化はそのまま push される。
+- `kind` comes from the foreground process name (`classify_agent`, `crates/noa-app/src/sidebar.rs:740`), so it appears even for an agent with no hooks configured.
+- `seq` is a per-pane monotonic counter that advances by 1 on every OSC 777 report (including `clear`). Even if the previous turn's `finished` is still there, waiting for "a terminal state with `seq` greater than N" does not confuse the two. `agent_status_at` is a time and does not guarantee order, so it is not used.
+- Why the version is not raised: hello rejects anything but an exact match (`crates/noa-ipc/src/server.rs:1478`), so raising it would break every existing v3 client. `Panel` does not reject unknown fields.
+- `noa.stateChanged` is delivered on a `PartialEq` diff of `Panel` (`crates/noa-ipc/src/protocol.rs:163-165`), so once the fields are added, state changes are pushed as they are.
 
-### D2：`noa.newTab`/`noa.split` に `config` を足す（新メソッドは作らない）
+### D2: Add `config` to `noa.newTab`/`noa.split` (no new method)
 
 ```jsonc
 {"paneId":"1","direction":"horizontal",
@@ -53,309 +53,400 @@
  "label":"fix-tests","parentPaneId":"1","focus":false}
 ```
 
-- AppleScript v2 の `with configuration` と同じ spawn 経路（`ScriptSpawn`）を使う。`macos_applescript` は macOS 外でも no-op shim としてコンパイルされるので、型を移す必要はなかった。
-- `config.command` は文字列ではなく argv。シェルを通さずに起動し、`argv[0]` は `config.env.PATH` で引く（portable-pty が子の env の `PATH` を使う）。`+ctl spawn` はオーケストレーター自身の `PATH` を渡すので、GUI アプリの最小 `PATH` で見つからない問題が起きない。
-- `config.command`/`initialInput`/`env` のどれかがあれば `control` に加えて `input` スコープも要る。コマンド実行は入力と同じ権限だからである。
-- 自動配置は新パラメータではなく `noa.split` の `direction:"auto"` にした（既存の `direction` と排他になるため）。`paneId` を親とする最初の worker は親の右に分割し、2 つ目以降は同じ親を持つ worker のうち最も大きいペインを長辺方向に分割する。どれにも余地がなければ同じウィンドウの新しいタブに開く。`Panel` に寸法がなく、クライアントでは決められないのでアプリ側で選ぶ。
-- 拡張を何も含まない要求は従来の `IpcBackend::new_tab`/`split` に流し、拡張付きだけを既定実装つきの `IpcBackend::spawn` に流す。既存のバックエンド実装はソース互換のまま。
-- `focus:false` のときは、生成後に元の focus へ戻す。今の IPC split は対象ペインに focus を移してから分割する（`crates/noa-app/src/app/ipc.rs:349-356`）ので、何もしないと人間が打っているペインから focus を奪う。
+- It uses the same spawn path (`ScriptSpawn`) as AppleScript v2's `with configuration`. `macos_applescript` compiles as a no-op shim outside macOS, so the types did not need to move.
+- `config.command` is an argv, not a string. It starts without a shell, and `argv[0]` is looked up in `config.env.PATH` (portable-pty uses the `PATH` in the child's env). `+ctl spawn` passes the orchestrator's own `PATH`, so a command is never missing because of the GUI app's minimal `PATH`.
+- If any of `config.command`/`initialInput`/`env` is present, the `input` scope is needed in addition to `control`, because running a command carries the same authority as input.
+- Automatic placement is `direction:"auto"` on `noa.split` rather than a new parameter (it is exclusive with the existing `direction`). The first worker whose parent is `paneId` splits to the right of the parent; each later one splits the largest pane among the workers with the same parent along its long side. If none has room, it opens in a new tab of the same window. `Panel` has no dimensions, so the client cannot decide; the app chooses.
+- A request with no extensions goes to the existing `IpcBackend::new_tab`/`split`; only one with extensions goes to `IpcBackend::spawn`, which has a default implementation. Existing backend implementations stay source compatible.
+- With `focus:false`, focus returns to where it was after creation. The current IPC split moves focus to the target pane before splitting (`crates/noa-app/src/app/ipc.rs:349-356`), so doing nothing would take focus away from the pane a human is typing in.
 
-### D3：待機はサーバーに作らず、クライアントが subscribe で組む
+### D3: No wait on the server; the client builds it with subscribe
 
-手順は「`subscribe(state_changed, paneIds)` → `listPanels` → 条件判定 → 通知ごとに再判定」。dropped マーカーを受けたら、その通知の状態を判定してから `listPanels` をやり直す（dropped は前の通知が欠けた印で、その通知自体は有効）。`noa_ipc::Client` に `send_text`、`subscribe`、通知の受信を足した。応答待ちの間に届いた通知は捨てずにバッファする（上限 1024、溢れたら次の通知に dropped を立てる）。
+The procedure is "`subscribe(state_changed, paneIds)` → `listPanels` → check the condition → recheck on each notification". On a dropped marker, check the state in that notification, then redo `listPanels` (dropped marks that earlier notifications were lost; the notification itself is valid). `send_text`, `subscribe` and notification receipt were added to `noa_ipc::Client`. Notifications that arrive while a response is awaited are buffered, not dropped (limit 1024; on overflow, dropped is set on the next notification).
 
-- `stateChanged` には削除イベントがないので、閉じたペインは通知では分からない。そのため待機中に通知が 1 秒来なければ `listPanels` で読み直す。完全なポーリングなしという当初の成功条件からはこの点だけ外れる。
-- `attention` は、待機中に一度 `false` を観測してから `true` になったときだけ解ける。前のターンの通知が残っているだけでは解けない。`send --wait` は送信前に取ったパネルを基準にするので、送信直後に立った `attention` も取りこぼさない。IPC の `sendText` は、入力が受け付けられたときだけそのペインの通知を既読にする（focus と同じ扱い。終了済みのペインなどで入力が拒まれたら未読のまま）。フックのないエージェントでも、送るたびに `attention` が一度下がるので、2 ターン目以降の `send --wait` も `attention` で解ける。
-- 一覧の読み直しは、通知が来ていても前回から 1 秒経てば行う（ほかのペインの通知が続いていても、消えたペインを見落とさないため）。
-- `Panel` はセッションカード（最初の出力で作られる）から作るので、そのままでは出力前のワーカーが一覧に出ず、`wait` が閉じたと誤判定する。カードがなくても一覧に載せる（`parentPaneId` か `label` 付きのワーカーに加え、出力前のオーケストレーター自身が `NOA_SURFACE_ID` で自分を見つけられるよう、カードを持てるウィンドウの通常ペインも。quick terminal と scratch ポップアップ、float は除く）。spawn は応答の前に一覧を作り直す。
-- `seq` は出力バッチではなく報告の数を数える（同じバッチに 2 回報告が入っても 2 進む）。
-- 終了して残されたペイン（`Panel.exit` あり）は、消えたペインと同じく二度と報告しないので、`--for` に関係なく `exit` で待機を解く。ただし待機の開始時点ですでに終了していたペインは、`--all` なしの待機ではほかに待つペインが残っている限り待機を解かない（そうしないと、残された 1 つが以降の `wait --children` をすべて即座に終わらせる）。
-- 同じペインを重ねて指定しても 1 つとして待つ。巨大な `--timeout` は引数エラーか「期限なし」として扱い、panic しない。
-- 生成に失敗した spawn（分割の余地がない固定方向など）は、`focus` の指定にかかわらず元の focus に戻す。分割は余地を確かめる前に対象へ focus を移すため。
-- spawn が focused pane を動かしたタブ（spawn 先や、余地のなかった `auto` の候補。OS フォーカスのあるタブも含む）は、新しいペインに focus を渡すタブを除いてすべて元のペインに戻す。新しいペインに focus を渡すとき、そのペインが背面のタブにできたらそのタブを前に出す。macOS で別の OS ウィンドウのグループに新しいタブを作った場合、そのグループで選択中のタブは戻さない（未対応）。
-- `auto` の候補は、親と同じタブに限らず、親が起動したすべてのワーカー（新しいタブに溢れたものを含む）から選ぶ。
-- `--cwd` の相対パスは CLI 側でオーケストレーターの cwd を基準に絶対パスにしてから送る（Noa は自分のプロセスの cwd で解決するため）。
-- 待機中、通知で受け取った状態は一覧の読み直しより先に判定する（読み直しが遷移を上書きしないように）。
-- 未対応：ワーカー数の上限は CLI が spawn の前に一覧で数えるだけなので、同じ親から並行して spawn すると超えうる。サーバー側で親ごとに直列化すれば防げるが、GUI なしでは再現できず、まだ入れていない。
-- spawn の配置で focus が動いても、未読通知（`attention` とベル）は既読にしない。分割の候補に focus を移すと `focus_pane` が通知を消すため、spawn の前の未読フラグを spawn の後に戻す。
-- focus を戻すときにタブを前に出しても、アプリは activate しない（AppleScript 経路の ASSUME-6 と同じく、別のアプリで作業中のユーザーから focus を奪わない）。
+- `stateChanged` has no removal event, so a closed pane is not seen through notifications. For that reason, if no notification arrives for 1 second during a wait, the client rereads with `listPanels`. Only on this point does it depart from the original success condition of no polling at all.
+- `attention` ends a wait only when it becomes `true` after `false` was observed once during the wait. A notification left over from the previous turn does not end it. `send --wait` takes the panel captured before sending as its baseline, so it does not miss an `attention` raised right after sending. IPC `sendText` marks that pane's notification read only when the input was accepted (the same as focus; if input is refused, as for an exited pane, it stays unread). Even for an agent with no hooks, `attention` drops once on every send, so `send --wait` from the second turn on also ends on `attention`.
+- The list is reread once 1 second has passed since the last read, even if notifications are arriving (so that a vanished pane is not missed while another pane's notifications keep coming).
+- `Panel` is built from the session card (created on first output), so on its own a worker that has not printed yet is not listed, and `wait` wrongly judges it closed. It is listed without a card: workers with a `parentPaneId` or `label`, and also normal panes in windows that can hold cards, so that an orchestrator itself, before any output, can find itself through `NOA_SURFACE_ID` (quick terminal, scratch popups and floats excluded). Spawn rebuilds the list before it responds.
+- `seq` counts reports, not output batches (two reports in the same batch advance it by 2).
+- A pane that exited and was kept (`Panel.exit` present) never reports again, like a vanished pane, so it ends the wait as `exit` regardless of `--for`. However, a pane that had already exited when the wait began does not end a wait without `--all` while other panes remain to wait for (otherwise one kept pane would end every later `wait --children` at once).
+- The same pane given more than once is waited for as one. A huge `--timeout` is treated as an argument error or as "no deadline", and does not panic.
+- A spawn that failed to create (such as a fixed direction with no room to split) returns focus to where it was, whatever `focus` says, because the split moves focus to the target before it checks for room.
+- Every tab in which the spawn moved the focused pane (the spawn's target, and `auto` candidates that had no room, including the tab with OS focus) is returned to its original pane, except the tab that hands focus to the new pane. When focus goes to the new pane and that pane was created in a background tab, that tab is brought to the front. On macOS, when a new tab is created in the group of another OS window, the tab selected in that group is not restored (not supported).
+- `auto` candidates are chosen from all the workers the parent started (including those that overflowed into a new tab), not only those in the parent's tab.
+- A relative `--cwd` is made absolute against the orchestrator's cwd on the CLI side before it is sent (Noa would resolve it against its own process's cwd).
+- During a wait, a state received in a notification is checked before the list is reread (so that the reread does not overwrite a transition).
+- Not supported: the worker limit is only counted by the CLI in a listing before the spawn, so parallel spawns from the same parent can exceed it. Serializing per parent on the server would prevent it, but it cannot be reproduced without a GUI and is not in yet. (Resolved in D17: spawn sends `maxChildren`, and Noa counts per parent on the UI thread and refuses with `-32011`. A Noa without support behaves as before.)
+- Even when the spawn's placement moves focus, unread notifications (`attention` and bell) are not marked read. Moving focus to a split candidate makes `focus_pane` clear notifications, so the unread flags from before the spawn are restored after it.
+- Bringing a tab to the front while restoring focus does not activate the app (like ASSUME-6 on the AppleScript path, it does not take focus from a user working in another app).
 
-### D4：CLI は `Noa +ctl`（既存の `+action` 機構に載せる）
+### D4: The CLI is `Noa +ctl` (on the existing `+action` mechanism)
 
-当初は `noa ctl` と書いていたが、バイナリには Ghostty 互換の `Noa +<action>` 機構（`crates/noa-app/src/cli.rs`）が既にあるので、それに合わせた。
+It was first written as `noa ctl`, but the binary already has Ghostty's compatible `Noa +<action>` mechanism (`crates/noa-app/src/cli.rs`), so it follows that.
 
-| コマンド | 動作 |
+| Command | Behavior |
 |---|---|
-| `self` | `NOA_SURFACE_ID` と一致する `surfaceId` のペインを返す |
-| `ls [--children]` | Panel 一覧（`--children` は自分が親のものだけ） |
-| `spawn [--cwd D] [--env K=V] [--label L] [--input T] [--no-wait-after] [--focus] [--no-board] [--max-children N] [-- CMD…]` | D2 の `direction:"float"` を呼ぶ（D8・D9。ワーカーは常に float）。`parentPaneId` は自分、`focus` は false、cwd は自分の cwd。終了した worker は既定で残す（exit code を読めるように。`--no-wait-after` で無効）。自分の worker が 8 以上なら拒否する（`--max-children N` で変更）。ボードがなければ先に開き、ワーカーをボードに収納する（D10。`--no-board` で開かず、自分の上に置く）。`--split`/`--tab` は拒否 |
-| `send PANE [--enter] [--raw] [--wait …] [--answer] [--any-pane] TEXT\|-` | `noa.sendText`。承認待ち（`permission`）のペインには送らない。送る直前と Enter の直前に確かめる（ボードと同じ理由、D7）。`--answer` で送る。`--enter` は貼り付けの 150 ms 後に `\r` を `paste:false` で送る。送信前の `seq` を出力する。`--wait` は購読してから送信し、そのまま待つ（取りこぼしがない推奨経路） |
-| `wait PANE…\|--children [--for finished,permission,input,error,exit,attention] [--after SEQ \| --after PANE=SEQ …] [--all] [--timeout S]` | D3。`--after` を省くと待機開始時点の `seq` を基準にする（別プロセスの `send` 直前の値は知りようがないため。取りこぼしたくなければ `send --wait` か `--after`）。`--after SEQ` は単一ペインのときだけで、複数ペインには `--after PANE=SEQ` を繰り返す。タイムアウト行は待機中の各ペインの基準を `baseline` に出すので、それを `--after` に渡せば、間に届いた報告を取りこぼさずに待ち直せる。消えたペインは `exit`（`closed:true`）として必ず返す |
+| `self` | Returns the pane whose `surfaceId` matches `NOA_SURFACE_ID` |
+| `ls [--children]` | Panel list (`--children`: only those whose parent is the caller) |
+| `spawn [--cwd D \| --worktree] [--tier T] [--env K=V] [--label L] [--input T] [--no-wait-after] [--focus] [--no-board] [--max-children N] [--ready S] [--task T \| --task-file F [wait options]] [-- CMD…]` | Calls D2's `direction:"float"` (D8, D9: a worker is always a float). `parentPaneId` is the caller, `focus` is false, cwd is the caller's cwd. An exited worker is kept by default (so its exit code can be read; `--no-wait-after` disables this). Refuses if the caller has 8 or more workers (`--max-children N` changes this). If there is no board, opens one first and stows the worker on it (D10; `--no-board` does not open one and places the worker on the caller). `--split`/`--tab` are refused. (Revised in D12, D14, D17: the limit is 20 both by default and at most, and Noa also counts with `maxChildren`. `--worktree`/`--tier` are D14. `--ready` waits until the worker is ready and prints `ready` and `screen`; `--task` then sends the work and waits. `NOA_RESULT` is put in the worker's env. A `--label` starting with `board:` and `--input` to an agent are refused) |
+| `send PANE [--enter] [--raw] [--replace] [--wait …] [--answer] [--queue] [--any-pane] TEXT\|-` | `noa.sendText`. Does not send to a pane awaiting approval (`permission`). Checks right before sending and right before Enter (for the same reason as the board, D7). `--answer` sends anyway. `--enter` sends `\r` with `paste:false` 150 ms after the paste. Prints the `seq` from before the send. `--wait` subscribes, then sends, then waits (the recommended path that misses nothing). (Revised in D17: a question dialog (`agent.blocked:"question"`) is also refused without `--answer`, and a paste or an Enter-only send to an agent at work (`running`) is refused without `--queue`. A paste to an agent waits until bracketed paste is enabled, and text over 250 KiB is refused. `--wait` prints a resume line on stderr) |
+| `wait PANE…\|--children [--for finished,permission,input,error,exit,attention] [--after SEQ \| --after PANE=SEQ …] [--all] [--timeout S] [--tail N] [--stall S] [--settle S] [--any-pane]` | D3. Without `--after`, the baseline is the `seq` when the wait starts (the value right before another process's `send` cannot be known; to miss nothing, use `send --wait` or `--after`). `--after SEQ` is for a single pane only; for several panes, repeat `--after PANE=SEQ`. The timeout line prints each waited pane's baseline in `baseline`, so passing that to `--after` waits again without missing reports that arrived in between. A vanished pane is always returned as `exit` (`closed:true`). (Added in D11, D14, D17: `--tail`, `--stall`, `--settle`. A `wait` that names panes refuses a pane that is not the caller's worker; `--any-pane` lifts this. Ending on a signal also prints a timeout line with `interrupted:true`) |
 | `read PANE [--scrollback] [--max-bytes N]` | `noa.getText` |
-| `close PANE…\|--children [--any-pane]` | `noa.closePane`。一覧にないペインは `gone:true` をつけて成功とし、1 つ失敗しても残りを閉じる（失敗があれば exit 1）。自分の worker でない生存ペインは、何も閉じる前に拒否する |
-| `report STATE [DETAIL]` | 制御端末に `OSC 777;noa-agent` を書く。各エージェントのフックから呼ぶ（D6） |
+| `close PANE…\|--children [--any-pane] [--prune]` | `noa.closePane`. A pane not in the list succeeds with `gone:true`, and one failure does not stop the rest from closing (exit 1 if any failed). A live pane that is not the caller's worker is refused before anything is closed. (`--prune` added in D14. Revised in D17 to look up the worktree from the closed pane's cwd) |
+| `result PANE [--max-bytes N]` | (Added in D17) Prints the worker's result file (`NOA_RESULT`). `--max-bytes` keeps the beginning |
+| `status [--answers]` | (Added in D17) One line per worker of the caller, combining the listed state and the journal (records of `spawn`, `send`, `outcome`, `close`). `--answers` prints the prompts answered, oldest first |
+| `report STATE [DETAIL]` | Writes `OSC 777;noa-agent` to the controlling terminal. Called from each agent's hooks (D6) |
 
-- 出力は 1 行 1 JSON（`read` だけはテキスト）。終了コードは 0（成立）、1（引数・未知のペインなど）、2（タイムアウト）、3（サーバー無効・接続不可・スコープ不足。直し方の設定行を stderr に出す）。
-- 接続先は `noa-config` の `server-bind`/`server-port`（未指定アドレスは同じアドレス族の loopback に読み替え。`0.0.0.0` は `127.0.0.1`、`::` は `::1`。v6only の `::` は IPv4 を受けないため）と、`server-token` またはトークンファイル（`noa_config::server_token_path()`）から引く。トークンファイルは読むだけで作らない。
-- 自分のペインが要るコマンド（`self`、`spawn`、`--children`、`send`/`close` の確認）は、自分のペインが一覧にまだなければ最長 3 秒（100 ms 間隔で 30 回）読み直して待つ。`Noa -e` で起動したスクリプトは、ペインが最初に一覧に載る前に走りうるため。一覧に載らないペイン（float など）からの `ls`/`read` は待たない。
-- `send`/`close` は、`parentPaneId` が自分でないペインを既定で拒否する（`--any-pane` で解除）。これは誤爆防止であって、セキュリティ境界ではない（下記「採らなかった案」）。
-- 子の PATH に `noa` を入れるコードは見つかっていない（`crates/noa-pty/src`、`crates/noa-app/src/app.rs`、`shell-integration/`、`scripts/bundle-macos.sh` を grep して 0 件。実機では未確認、A4）。そのため `NOA_SURFACE_ID` と同じ場所で `NOA_BIN`（実行ファイルの絶対パス）を子に渡す。
+- Output is one JSON object per line (only `read` prints text). Exit codes are 0 (success), 1 (arguments, unknown pane, and so on), 2 (timeout), 3 (server disabled, cannot connect, missing scope; a config line that fixes it is printed on stderr). (Revised in D17: a request with an unknown outcome (`-32009`) and a server full at its connection limit are also 3. On `-32009` it says the request "may have been carried out")
+- The connection target comes from `noa-config`'s `server-bind`/`server-port` (an unspecified address is read as the loopback of the same address family: `0.0.0.0` becomes `127.0.0.1`, `::` becomes `::1`, because a v6only `::` does not accept IPv4) and from `server-token` or the token file (`noa_config::server_token_path()`). The token file is only read, never created.
+- Commands that need the caller's own pane (`self`, `spawn`, `--children`, the checks in `send`/`close`) wait for it if it is not yet in the list, rereading for up to 3 seconds (30 times at 100 ms intervals), because a script started with `Noa -e` can run before its pane is first listed. `ls`/`read` from a pane that is never listed (such as a float) do not wait.
+- `send`/`close` refuse by default a pane whose `parentPaneId` is not the caller (`--any-pane` lifts this; D17 made a `wait` that names panes do the same). This prevents mistakes; it is not a security boundary (see "Considered but rejected" below).
+- No code that puts `noa` on the child's PATH has been found (0 hits from grepping `crates/noa-pty/src`, `crates/noa-app/src/app.rs`, `shell-integration/`, `scripts/bundle-macos.sh`; not checked on a real machine, A4). So `NOA_BIN` (the absolute path of the executable) is passed to the child in the same place as `NOA_SURFACE_ID`.
 
-### D5：UI フェーズとの継ぎ目は `Surface` と `SessionCard`
+### D5: The seam with the UI phase is `Surface` and `SessionCard`
 
-当初は 3 つとも `SessionCard` に置く予定だったが、`SessionCard` は io スレッドの delta でしか更新されない。spawn 時に main スレッドで決まる `parent`/`label`（と surface id・終了情報）は `Surface.orchestration` などに置き、報告ごとに増える `agent_seq` だけを `SessionCard` に置いた。`Panel` はどちらも写すだけで、UI フェーズも同じ 2 か所を読む。UI の中身は別 spec（`docs/specs/orchestration-board.md`）で決めるが、前提にする範囲は次のとおり。
+The plan was first to put all three on `SessionCard`, but `SessionCard` is updated only by io-thread deltas. `parent`/`label` (and the surface id and exit information), which are decided on the main thread at spawn, live in `Surface.orchestration` and similar places, and only `agent_seq`, which grows with each report, lives on `SessionCard`. `Panel` only copies both, and the UI phase reads the same two places. The UI itself is decided in a separate spec (`docs/specs/orchestration-board.md`), but it assumes the following.
 
-- ~~サイドバーで worker カードを orchestrator カードの下に入れ子にし、親に集計（running / 要対応 / 完了 / error）を出す。新しいウィンドウやボードは作らない。~~ D7 で専用ペインに改めた（2026-11-17）。
-- Compose Prompt の宛先に「この orchestrator の worker 全部」を足す。送信経路は `+ctl send` と同じ。
-- 親が閉じた worker は最上位に戻す。ipc id は再利用されない（`crates/noa-app/src/ipc_bridge.rs:51-60`）ので、古い `parentPaneId` が別のペインを指すことはない。
+- ~~Nest worker cards under the orchestrator card in the sidebar, and show a tally on the parent (running / needs you / done / error). No new window or board.~~ Changed in D7 to a dedicated pane (2026-11-17).
+- Add "all workers of this orchestrator" as a destination of Compose Prompt. The send path is the same as `+ctl send`.
+- A worker whose parent closed returns to the top level. ipc ids are not reused (`crates/noa-app/src/ipc_bridge.rs:51-60`), so a stale `parentPaneId` never points at a different pane.
 
-### D7：UI は専用ペインの TUI `+ctl board`（2026-11-17）
+### D7: The UI is a TUI in a dedicated pane, `+ctl board` (2026-11-17)
 
-人間向けの UI は、サイドバーの入れ子（D5 の当初案）ではなく、オーケストレーターの横に置く専用ペインにした。画面モックを見たうえで owner が決めた。
+The UI for humans is a dedicated pane placed beside the orchestrator, not nesting in the sidebar (the original plan in D5). The owner decided after seeing screen mockups.
 
-- Noa のペインはすべて `Terminal` を持つ `Surface` で、ターミナル以外のペインはない。新しい種類のペインを足すと、レイアウト・入力・描画・セッション保存のすべてに手が入る。float のタイトル帯がすでに UI をセルで描いているのにならい、`Noa +ctl board` という TUI を普通のペインで動かす（owner が TUI 案を選んだ）。
-- データは `+ctl` と同じサーバーから読む。0.5 秒ごとに `listPanels`、1 秒ごとに表示中のワーカーの `getText`。購読はしない（描画中に読まれない通知がたまるため）。
-- 並びは要対応（permission / input / error / 未読通知）→ 作業中（running と報告なし）→ 完了 → 終了。finished は通知を伴うことが多いので、未読通知より finished を優先する（実機で、完了したワーカーが要対応に出た）。
-- 操作は移動（`noa.focusPane`）、送信（`+ctl send --enter` と同じ貼り付け + `\r`）、閉じる（確認つき）。承認はボードからはせず、ペインへ移動して人が答える。承認待ち（permission）のワーカーには送信欄を開かず、入力中に承認待ちになったら送らない。送る直前と、貼り付けから 150 ms 後の Enter の直前にも一覧を取り直して確かめる（Enter が既定の選択肢で承認するプロンプトがあるため）。貼り付けは bracketed paste で受け、改行を含めて送信欄に入れる（改行を Enter として読むと、残りの文字が操作キーとして実行されるため）。
-- `--open` で開くボードは `parentPaneId` を持たない。ワーカーとして数えず、`close --children` でも閉じない。
-- カードのプレビューは、画面の下部にある行幅いっぱいの区切り線のまとまり（エージェントの入力欄）より上の行を使う。入力欄とステータスラインは作業の中身ではないため。区切り線がなければ画面全体。detail のない報告は、直前の detail か、状態と経過時間を出す。`seq` は報告の数でターン数ではないので「報告 N」と出す。状態が変わった時刻を覚え、「作業中 2 分」「完了 3 分前」と出す（開いた時点の状態は「開始時から」）。
-- 報告の履歴は、ボードを開いてから見た報告だけで、ボードの中にしかない。開いた時点の状態は「開始時」と表示する（時刻が分からないため）。
-- 未対応：ワーカーの入力欄の書きかけの検出（画面から推定する方法を確かめていない）、GUI のキーバインドやメニューからの起動、履歴の永続化。
-- UI 改善（2026-11-17、owner がボードに範囲を絞って依頼）：枠つきカード（1 件 5 行で、8 ワーカーが 1 画面に収まらなかった）を、1 件 1 行の行と、その下に作業の末尾を出す形に改めた（作業の末尾は通常 1 行、選択中は 3 行、完了と終了は選択中のときだけ出す）。名前・種別・状態の列幅はワーカー間で揃え、種別の列は異なるプログラムが混ざるときだけ出す。`pane N` と「報告 N」は詳細画面だけに出す。ヘッダはオーケストレーターをペイン名で出す。キーに `1`〜`9`（番号で選ぶ）、`n`（次の要対応）、`?`（ヘルプ）を足し、フッターは幅に入るだけのキーと `? ヘルプ` を出す。スクロールで隠れたワーカー（行の先頭が見えないものだけを数える）は「↑/↓ あと N 件 · うち要対応 M」と出し、隠れた閉じた欄は「閉じた K 件」と出す。0 件の部分は出さない。最後のワーカーを選ぶと閉じた欄まで見え、入りきらなければ最後のワーカーでさらに `j` を押すと閉じた欄の先までスクロールする（`k` はまずスクロールを戻す。選択は最後のワーカーのまま）。ワーカーが 0 件になったら `j`/`k` で閉じた欄をスクロールする。ボードを開いてから閉じたワーカーは、最後の状態と detail を「閉じた」欄に 5 件まで残す。送信欄は ^U（全消去）と ^W（1 語消去）を受け、宛先と操作を 1 行上に出す。作業中のワーカーを閉じる確認ではそのことを告げる。ペインのタイトル（OSC 2）を「ボード · 要対応 N」にし、終了時に `CSI 22/23 t` で元に戻す。
+- Every Noa pane is a `Surface` with a `Terminal`; there are no non-terminal panes. A new kind of pane would touch layout, input, drawing and session saving. Following the float title band, which already draws UI in cells, a TUI called `Noa +ctl board` runs in an ordinary pane (the owner chose the TUI option).
+- Data is read from the same server as `+ctl`: `listPanels` every 0.5 seconds, and `getText` for the shown workers every 1 second. It does not subscribe (unread notifications would pile up while it draws).
+- The order is needs you (permission / input / error / unread notification) → working (running and no report) → done → exited. finished often comes with a notification, so finished takes priority over an unread notification (on a real machine, a finished worker appeared under needs you).
+- Actions are go to (`noa.focusPane`), send (the same paste + `\r` as `+ctl send --enter`) and close (with confirmation). The board does not approve; you move to the pane and a person answers. The send line does not open for a worker awaiting approval (permission), and if it starts awaiting approval while you type, the text is not sent (revised in D17: the same for a question dialog). Right before sending, and right before the Enter 150 ms after the paste, the list is taken again and checked (some prompts approve their default choice on Enter). Pastes are received as bracketed paste and go into the send line with their newlines (reading a newline as Enter would run the remaining characters as action keys).
+- A board opened with `--open` has no `parentPaneId`. It is not counted as a worker and `close --children` does not close it.
+- A card's preview uses the lines above the group of full-width rule lines at the bottom of the screen (the agent's input box), because the input box and status line are not the work itself. With no rule lines, the whole screen. A report with no detail shows the previous detail, or the state and elapsed time. `seq` counts reports, not turns, so it is shown as 「報告 N」 (`report N`). The time a state changed is remembered and shown as 「作業中 2 分」 (`working 2m`) or 「完了 3 分前」 (`done 3m ago`) (a state already present when the board opened is 「開始時から」 ("since the start"; the code prints 「開始時」, `at start`)).
+- The report history holds only reports seen since the board opened, and exists only inside the board. A state already present when it opened is shown as 「開始時」 (`at start`), because its time is unknown.
+- Not supported: detecting a half-written draft in a worker's input box (no method of inferring it from the screen has been checked), starting from a GUI keybinding or menu, persisting the history.
+- UI improvements (2026-11-17, requested by the owner with the scope narrowed to the board): framed cards (5 lines each; 8 workers did not fit on one screen) became one line per worker with the tail of its work below it (the tail is normally 1 line, 3 lines when selected; for done and exited only when selected). The name, kind and state columns are aligned across workers, and the kind column appears only when different programs are mixed. `pane N` and 「報告 N」 (`report N`) appear only in the detail view. The header shows the orchestrator by pane name. Keys `1`–`9` (select by number), `n` (next needing you) and `?` (help) were added, and the footer shows as many keys as fit plus `? ヘルプ` (`? help`). Workers hidden by scrolling (counting only those whose first line is not visible) are shown as 「↑/↓ あと N 件 · うち要対応 M」 (`↑/↓ N more · M need you`), and a hidden closed section as 「閉じた K 件」 (`K closed`). A part with 0 is not shown. Selecting the last worker shows the closed section too; if it does not fit, pressing `j` again on the last worker scrolls past the closed section (`k` first scrolls back; the selection stays on the last worker). When there are 0 workers, `j`/`k` scroll the closed section. Workers that closed after the board opened keep their last state and detail, up to 5, in the 「閉じた」 (`Closed`) section. The send line accepts ^U (clear all) and ^W (delete one word), and shows the destination and action one line above. The confirmation for closing a worker at work says so. The pane title (OSC 2) becomes 「ボード · 要対応 N」 (`Board · N need you`) and is restored with `CSI 22/23 t` on exit.
 
-### D8：ワーカーを float に置ける（2026-11-17）
+### D8: Workers can be placed in floats (2026-11-17)
 
-ボードを見ているあいだワーカーのペインを隠したい、という owner の求めで、`spawn --float`（`noa.split` の `direction:"float"`）を足した。
+At the owner's request to hide the worker panes while watching the board, `spawn --float` (`direction:"float"` on `noa.split`) was added.
 
-- （D10 で改定：アンカーは原則ボード）ワーカーはオーケストレーターのペインにアンカーした float として開き、`focus:false`（`+ctl spawn` の既定）ならタイトル帯だけにたたんだ状態で、`focus:true`（`--focus`）なら開いてフォーカスを持った状態で始まる。`direction:"float"` は `parentPaneId` を必須にする（ないと invalid params）。一覧に載るのはワーカーの float だけなので、親のない float を IPC から作れないようにした。タイトル帯はエージェントの状態と要対応の色を出すので、たたんだままでも止まったワーカーが分かる。開くのはタイトル帯か、ボードの `g`（`focus_pane` がたたんだ float を開く）。
-- floating-panes の REQ-023 を改め、IPC は `parentPaneId` を持つ float（ワーカー）だけを列挙する。AppleScript、AX、Overview はこれまでどおりすべての float を出さない。ワーカーでない float は IPC からも見えない。
-- `auto` の分割候補から float のワーカーを外す（分割レイアウトにないため）。
-- 1 つのペインに置ける float は 8 つ（`MAX_PER_ANCHOR`）で、超えると spawn はエラーになる（D10 以降はボードのペインに掛かる）。`--max-children` の既定と同じ数。
-- セッション復元では orchestration の情報を戻さないので、復元した float はワーカーでなくなり、IPC からは見えなくなる。
+- (Revised in D10: the anchor is normally the board) A worker opens as a float anchored to the orchestrator's pane. With `focus:false` (the `+ctl spawn` default) it starts folded to its title band; with `focus:true` (`--focus`) it starts open with focus. `direction:"float"` requires `parentPaneId` (invalid params without it). Only worker floats are listed, so a float without a parent cannot be created over IPC. The title band shows the agent's state and the needs-you color, so a stopped worker is visible even while folded. It opens from the title band or from the board's `g` (`focus_pane` opens a folded float).
+- floating-panes REQ-023 is revised: IPC lists only floats that have a `parentPaneId` (workers). AppleScript, AX and Overview still show no floats at all. A float that is not a worker is not visible over IPC either.
+- Float workers are removed from the `auto` split candidates (they are not in the split layout).
+- A pane can hold 8 floats (`MAX_PER_ANCHOR`); beyond that, spawn fails (from D10 on, this applies to the board's pane). This is the same number as the `--max-children` default.
+- Session restore does not restore orchestration information, so a restored float is no longer a worker and is not visible over IPC. (Revised in D17: floats of workers started over IPC are not saved in the session)
 
-### D9：ワーカーは常に float、最初の spawn でボードを開く（2026-11-17）
+### D9: Workers are always floats; the first spawn opens the board (2026-11-17)
 
-owner の指示で、`+ctl spawn` はワーカーを必ず float として起動し、`--split` と `--tab` を拒否する（`--float` は互換のため受け付けて何もしない）。オーケストレーションを始めたら、ボードも開く。
+On the owner's instruction, `+ctl spawn` always starts the worker as a float and refuses `--split` and `--tab` (`--float` is accepted for compatibility and does nothing). Once orchestration starts, the board opens too.
 
-- 強制するのは `+ctl` の層である。サーバーの `noa.split`（`horizontal`/`vertical`/`auto`）と `noa.newTab` の拡張は、ほかの API クライアントのために残す。
-- （D10 で改定：ボードは spawn の前に開く）spawn の後、そのオーケストレーターのボードがなければ `board --open` と同じ配置（右に分割、余地がなければ新しいタブ）で開く。ボードは `board:<オーケストレーターの pane id>` というラベルで見分け、すでにあれば開かない。開けなくても、警告を出すだけで spawn は成功させる。`--no-board` で開かない。
-- ボードはワーカーではない（`parentPaneId` なし）ので、`close --children` では閉じない。閉じるのは人。閉じたとき、収納していたワーカーはオーケストレーターへ戻る（D10）。
-- ワーカーが分割しなくなったので、分割に伴うズームの解除（未再現の既知の制約）はオーケストレーションでは起きない。
-- `--max-children` の既定 8 は、1 つのペインに置ける float の数（8）と同じ。（D12 で 20 に改定）
+- This is enforced in the `+ctl` layer. The server's `noa.split` (`horizontal`/`vertical`/`auto`) and the `noa.newTab` extensions remain for other API clients.
+- (Revised in D10: the board opens before the spawn) After the spawn, if that orchestrator has no board, one opens with the same placement as `board --open` (split to the right, or a new tab if there is no room). The board is identified by the label `board:<orchestrator's pane id>`, and is not opened if it already exists. If it cannot open, a warning is printed and the spawn still succeeds. `--no-board` does not open it.
+- The board is not a worker (no `parentPaneId`), so `close --children` does not close it. A person closes it. When it closes, the workers stowed on it return to the orchestrator (D10).
+- Workers no longer split, so un-zooming caused by a split (a known limitation, not reproduced) does not happen in orchestration.
+- The `--max-children` default of 8 is the same as the number of floats a pane can hold (8). (Revised to 20 in D12)
 
-### D10：ワーカーはボードに収納する（2026-11-18）
+### D10: Workers are stowed on the board (2026-11-18)
 
-たたんだワーカーの帯（80 列幅）がオーケストレーターのペインの右下から左上へ階段状に積み重なり、オーケストレーターの出力を隠していた。状態も帯とボードの 2 か所に分かれていた。owner が「ボードに統合」を選んだ。
+The bands of folded workers (80 columns wide) stacked like stairs from the bottom right to the top left of the orchestrator's pane and hid its output. State was also split between two places, the bands and the board. The owner chose "merge into the board".
 
-- `+ctl spawn` は、オーケストレーターのボードを先に探すか開き、そのペインを `noa.split` の `paneId`（float のアンカー）に渡す。`parentPaneId` は従来どおりオーケストレーター。IPC は変えていない（サーバーはもともとアンカーを `paneId` から、所有を `parentPaneId` から取る）。`--no-board` のときは従来どおりオーケストレーターの上に置く。ボードを確かめられない、または開けないときも、警告を出したうえでそうする。
-- アンカーのペインのラベルが `board:<parentPaneId>` のワーカーは「収納」される（`Float.stowed`）。収納したワーカーはたたむと帯も出さず、描画・ヒットテスト・巡回のどれにも現れない。状態はボードの行だけに出す。
-- 開いた収納ワーカーは、ボードの幅いっぱいで上 35% を空けた位置に置く。ずらして重ねることはせず、ボードの一覧の上部が見えたまま、その下に開く。ボードの `g`（`focus_pane` → `reveal_float`）で開き、そのとき同じボードで開いていたほかの収納ワーカーをたたむ（ボードで開くのは一度に 1 つ）。戻るのは `float.toggle-focus`（⌘⇧I）、たたむボタン、またはダブルクリック。フォーカスは復帰先（ボード）に戻る。
-- ボードのペインやタブが閉じるとき（`q` や ⌘W を含む）、収納したワーカーは、親のペインが残り空きがあれば、親へ付け替える（たたんだ普通の float、帯つき）。floating-panes REQ-013 の例外である。付け替えるワーカーは、閉じる確認の実行中プログラム数に含めない。親が同じタブで一緒に閉じるとき、親が float のとき、または親が満杯のときは、従来どおり閉じる。
-- 収納したワーカーは、オーケストレーターより長く生きない。オーケストレーターの分割ペインやそのタブが閉じるとき、ボードがどこにあっても一緒に閉じ、閉じる確認の実行中プログラム数に含める（D10 以前に、オーケストレーターの上の float として REQ-013 で閉じていたのと同じ）。オーケストレーターが float のときは、閉じない（D8 以前と同じく、ワーカーは下の分割ペインに属する）。
-- 収納したワーカーにフォーカスが移ると、どの経路でも（`g`、`spawn --focus`）復帰先はそのボードになる。
-- ウィンドウごと閉じるとき、別のウィンドウのオーケストレーターへ戻るワーカーは、確認の実行中プログラム数に含めない。
-- アンカーの循環（REQ-006）で手でボードから外したワーカーは、普通の float になる。
-- 既知の制限：ボードを `board --open` で開き直しても、すでに親へ戻ったワーカーはボードへ移らない（それ以降の spawn からボードに置く）（D14 で解消）。セッション復元では orchestration が戻らないので、復元した float は収納されない（D8 と同じ）。
+- `+ctl spawn` first finds or opens the orchestrator's board and passes that pane as `noa.split`'s `paneId` (the float's anchor). `parentPaneId` is the orchestrator as before. IPC is unchanged (the server already took the anchor from `paneId` and ownership from `parentPaneId`). With `--no-board`, the worker goes on the orchestrator as before. It does the same, after a warning, when the board cannot be checked or cannot be opened.
+- A worker whose anchor pane is labelled `board:<parentPaneId>` is "stowed" (`Float.stowed`). A stowed worker shows no band when folded, and appears in no drawing, hit testing or cycling. Its state appears only in the board's row.
+- An open stowed worker is placed across the full width of the board with the top 35% left free. It is not offset or stacked; it opens below the top of the board's list, which stays visible. It opens with the board's `g` (`focus_pane` → `reveal_float`), which folds any other stowed worker open on the same board (one open at a time per board). It returns with `float.toggle-focus` (⌘⇧I), the fold button, or a double click. Focus returns to the return target (the board). (Revised in D17: ⌘⇧I folds the open stowed worker before returning. Before, the worker stayed open)
+- When the board's pane or tab closes (including `q` and ⌘W), stowed workers are reattached to the parent if the parent pane remains and has room (as ordinary folded floats, with bands). This is an exception to floating-panes REQ-013. Workers that are reattached are not counted in the close confirmation's count of running programs. If the parent closes with it in the same tab, the parent is a float, or the parent is full, they close as before.
+- Stowed workers do not outlive the orchestrator. When the orchestrator's split pane or its tab closes, they close with it wherever the board is, and are counted in the close confirmation's count of running programs (the same as when, before D10, they closed under REQ-013 as floats on the orchestrator). When the orchestrator is a float, they do not close (as before D8, the workers belong to the split pane below).
+- When focus moves to a stowed worker by any path (`g`, `spawn --focus`), its return target is that board.
+- When a whole window closes, workers that return to an orchestrator in another window are not counted in the confirmation's count of running programs.
+- A worker taken off the board by hand through anchor cycling (REQ-006) becomes an ordinary float.
+- Known limitation: reopening the board with `board --open` does not move workers that already returned to the parent onto the board (spawns from then on go on the board) (resolved in D14). Session restore does not restore orchestration, so a restored float is not stowed (as in D8; in D17 worker floats are no longer saved).
 
-### D11：実際に使って見つかった摩擦を直す（2026-11-20）
+### D11: Fix the friction found in real use (2026-11-20)
 
-owner の依頼（「さらに賢く・使いやすく・見やすく」）を受け、オーケストレーターがワーカー 3 体（board・CLI・スキル担当）を実際に動かして摩擦を洗い出し、根拠（再現手順か `file:line`）のある項目を直した。
+At the owner's request ("smarter, easier to use, easier to read"), an orchestrator actually ran 3 workers (board, CLI and skill) to find friction, and items with evidence (repro steps or `file:line`) were fixed.
 
-- CLI：
-  - 接続エラーは原因を言う（EPERM なら呼び出し側シェルのサンドボックス、ECONNREFUSED ならサーバーが聞いていない）。
-  - `spawn` は、ディレクトリでない `--cwd` と、ワーカーの `PATH` にないコマンドを RPC の前に拒否する。前者はこれまで黙って別のディレクトリで起動していた。float が開かなかった理由（pty のエラー）を RPC のエラーに載せる。
-  - `Panel.cwd` は、シェルが OSC 7 で報告するまで spawn の cwd を出す。
-  - `wait` は、最初の一覧にない id を名指しされたらエラーにする。古い id が「終了した」と読まれないようにするため。
-  - `--max-children` の上限は 8（ボードの float 数）とし、拒否のメッセージに終了済みワーカーの数を出す。
-  - `read` は画面下の空行を落とし、切り詰めたら stderr で知らせる。
-  - 引数エラーは使い方の全文を出さず、値を引用符で囲む。
-  - タイムアウト行は、待つ前に終了していたペインを `exited` に分け、`baseline` に `state` を足す。
-  - `board --open` は、ボードがすでにあれば開かず `existing:true` を返す。
-  - `wait`/`send --wait` に `--tail N` を足す。
-  - 終了したペインへの送信は「プロセスが終了した」と言う。
-- `send` が拒否するのは、引き続き `permission` だけにした。`input` も拒否する案は採らなかった。`input` はフックアダプタの `idle_prompt`（プロンプトで待機中）にも使われており（`scripts/noa-agent-hook.py`）、拒否すると普通の追送が止まるため。
-- ボード：
-  - 一覧の取得に失敗しても終わらない。最後の一覧を保ったまま 30 秒まで再試行する。
-  - 番号は最初に現れた順に固定する。
-  - 0 以外の終了コードは「失敗」として赤で要対応に出す。
-  - 要対応の中は、承認・エラー・失敗を先にし、そのあと待った時間の長い順に並べる。
-  - 前の状態の detail は流用しない。時刻の分からない経過は出さない。狭い幅では状態を省略形にする。
-  - 通知行を上部に置き、開いた収納ワーカーに隠れないようにした。
-  - 終了したワーカーへの `s` を拒否する。ワーカーが残っているときの `q` は確認する。
-  - 2 分以上画面が変わらない作業中のワーカーに「出力なし N 分」を出す。
-  - 画面を取得するのは、要対応と作業中のワーカーと、選択中のワーカーだけにした。
-- 未対応（判断待ち）：
-  - 入れ子のオーケストレーション。float のワーカーが spawn すると、ワーカーは親のボードに載って 8 枠を共有する。スキルでは「ワーカーにワーカーを持たせない」とした。
-  - `send --replace`（Ctrl-U で入力欄を消す）。各エージェントで効くかを確かめていない。→ D14 で実装。
-  - `spawn --worktree` と `--tier`。git やモデル名を `+ctl` に持たせるかどうかの設計判断が要る。→ D14 で持たせた。
-  - ボードを開き直したときにワーカーを再び収納すること（D10 の既知の制限）。→ D14 で実装。
-- GUI での目視は未実施：通知行が収納ワーカーに隠れないか、色、狭い幅での見え方。
+- CLI:
+  - A connection error states its cause (EPERM: the calling shell's sandbox; ECONNREFUSED: the server is not listening).
+  - `spawn` refuses, before the RPC, a `--cwd` that is not a directory and a command that is not on the worker's `PATH`. The former used to start silently in a different directory. The reason a float did not open (the pty error) is carried in the RPC error.
+  - `Panel.cwd` shows the spawn's cwd until the shell reports one with OSC 7.
+  - `wait` fails when it is given an id that is not in the first listing, so that a stale id is not read as "exited".
+  - The `--max-children` limit is 8 (the board's float count), and the refusal message gives the number of exited workers.
+  - `read` drops blank lines at the bottom of the screen, and says on stderr when it truncated.
+  - Argument errors do not print the full usage, and quote the value.
+  - The timeout line separates panes that had exited before the wait into `exited`, and adds `state` to `baseline`.
+  - `board --open` does not open a board when one already exists, and returns `existing:true`.
+  - `--tail N` is added to `wait`/`send --wait`.
+  - A send to an exited pane says that its process has exited.
+- `send` still refuses only `permission` (revised in D17: it also refuses an `input` whose OSC 7501 `blocked` indicates a question, and an agent at work; an `input` without `blocked` is still not refused). Refusing `input` too was not adopted. `input` is also used for the hook adapter's `idle_prompt` (waiting at the prompt) (`scripts/noa-agent-hook.py`), and refusing it would stop ordinary follow-up sends.
+- Board:
+  - It does not quit when fetching the list fails. It keeps the last list and retries for up to 30 seconds. (Revised in D17: it does not stop at 30 seconds and keeps retrying until `q` is pressed)
+  - Numbers are fixed in order of first appearance.
+  - A non-zero exit code is shown under needs you in red as 「失敗」 (`failed`).
+  - Within needs you, approvals, errors and failures come first, then the rest by longest wait.
+  - The previous state's detail is not reused. Elapsed time with an unknown start is not shown. In narrow widths the state is abbreviated.
+  - The notice line is placed at the top so that an open stowed worker does not hide it.
+  - `s` on an exited worker is refused. `q` asks for confirmation while workers remain. (Revised in D17: during the confirmation, every key other than the quit key, ^C included, cancels, and when quitting always closes workers it asks for `y`)
+  - A worker at work whose screen has not changed for 2 minutes or more shows 「出力なし N 分」 (`quiet Nm`).
+  - Screens are fetched only for workers needing you, workers at work, and the selected worker.
+- Not supported (awaiting decision):
+  - Nested orchestration. When a float worker spawns, its worker goes on the parent's board and shares the 8 slots. The skill says "do not give a worker workers of its own".
+  - `send --replace` (clear the input box with Ctrl-U). Whether it works in each agent is not checked. → Implemented in D14.
+  - `spawn --worktree` and `--tier`. Whether `+ctl` should know about git and model names is a design decision. → D14 gave it that knowledge.
+  - Stowing workers again when the board is reopened (D10's known limitation). → Implemented in D14.
+- Not checked visually in the GUI: whether the notice line is hidden by stowed workers, colors, appearance at narrow widths.
 
-### D12：ボードに置けるワーカーは 20（2026-11-20）
+### D12: A board holds 20 workers (2026-11-20)
 
-owner の指示で、ボード 1 枚に収納できるワーカーを 8 から 20 に増やした。ボードの一覧はもともとスクロールできる。
+On the owner's instruction, the number of workers one board can stow went from 8 to 20. The board's list already scrolls.
 
-- 収納したワーカーはタイトル帯を描かない（D10）。REQ-019 の 8 枚は帯が階段状に重なるのを抑えるための上限なので、収納ワーカーには掛けない。ボードのペインに収納ワーカーを足すときの上限を 20 にする（`MAX_STOWED_PER_BOARD`）。収納しない float は、ボードの上でも従来どおり 8 枚まで。
-- `--max-children` は、既定値も最大値も 20 とする。`--no-board` のときはオーケストレーターのペインに置くので、サーバー側の 8 枚の上限が先に効く。
-- ボードの番号は 2 桁になる。数字キーを 1 秒以内に 2 つ続けて打つと 10〜20 番を選ぶ。そうした番号がなければ、2 つ目の数字だけで選び直す。`0` は 2 桁目にだけ使う。
-- ボードを閉じると、収納ワーカーは親のペインへ戻る。戻れるのは普通の float として空いている分（最大 8）だけで、残りは閉じる（D10 の「親が満杯のとき」と同じ）。`q` の確認でそのことを告げる。閉じる確認の実行中プログラム数には、戻れずに閉じる分も含まれる（D10 以前からの挙動）。
-- 未確認：
-  - 20 体のエージェントを同時に動かしたときの負荷（pty と `Terminal` が 20 組になる。ボードが画面を取得するのは要対応と作業中のワーカーだけ）。
-  - GUI での見え方。
+- Stowed workers draw no title band (D10). REQ-019's 8 floats is a limit to keep bands from stacking like stairs, so it does not apply to stowed workers. The limit for adding stowed workers to a board pane is 20 (`MAX_STOWED_PER_BOARD`). Floats that are not stowed are still limited to 8, even on the board.
+- `--max-children` is 20 both by default and at most. With `--no-board`, workers go on the orchestrator's pane, so the server's limit of 8 applies first.
+- Board numbers become two digits. Typing two digits within 1 second selects 10–20. If no such number exists, the second digit alone selects instead. `0` is used only as the second digit.
+- When the board closes, stowed workers return to the parent pane. Only as many as there are free ordinary float slots (at most 8) can return; the rest close (the same as D10's "the parent is full"). The `q` confirmation says so. The close confirmation's count of running programs includes those that close because they cannot return (behavior from before D10).
+- Not checked:
+  - Load with 20 agents running at once (20 pairs of pty and `Terminal`; the board fetches screens only for workers needing you and workers at work).
+  - Appearance in the GUI.
 
-### D13：入れ子のオーケストレーションは 1 段まで、ルートのボードに木で出す（2026-11-20）
+### D13: Nested orchestration goes one level deep, shown as a tree on the root's board (2026-11-20)
 
-表示案 A（ルートのボードに木で出す）を owner が選んだ。入れ子の深さを 1 段に限るのは、owner が回答しなかったので、提示した既定を採った。
+The owner chose display option A (show a tree on the root's board). The owner did not answer on limiting nesting to one level, so the proposed default was taken.
 
-用語：
-- ルート：分割ペインのオーケストレーター。
-- 子：ルートのワーカー。
-- 孫：子が spawn したワーカー。
+Terms:
+- Root: an orchestrator in a split pane.
+- Child: a worker of the root.
+- Grandchild: a worker spawned by a child.
 
-これまでの挙動：
-- 子（収納された float）が spawn すると、`float_host`（`crates/noa-app/src/app/ipc.rs:1040`）がアンカーをルートのボードに置き換える。ただし `stows_on` は `board:<parent>` としか照合しないので、孫は収納されず、帯つきの float としてボードの上に出ていた。
-- `--no-board` を付けないと、子のためのボードが別のタブに開いていた。
-- 子を閉じても、孫は閉じなかった。float を閉じる `discard_float`（`crates/noa-app/src/app/floating.rs:895`）は、収納ワーカーの後始末をしない。
+Behavior so far:
+- When a child (a stowed float) spawns, `float_host` (`crates/noa-app/src/app/ipc.rs:1040`) replaces the anchor with the root's board. But `stows_on` matches only `board:<parent>`, so the grandchild was not stowed and appeared on the board as a float with a band.
+- Without `--no-board`, a board for the child opened in another tab.
+- Closing a child did not close its grandchildren. `discard_float` (`crates/noa-app/src/app/floating.rs:895`), which closes a float, does not clean up stowed workers.
 
-決定：
-- 配置（サーバー）：`parentPaneId` が子（ルートのボードに収納された float）を指す spawn は、そのボードに収納する。`stows_on` は「アンカーのラベルが `board:<parent>`」に加えて「`board:<parent の parent>`」も収納とみなす。孫が spawn しようとしたら（parent の parent がワーカーなら）invalid params で拒否する。メッセージは「入れ子は 1 段まで」。
-- `+ctl spawn`（クライアント）：自分がワーカー（`parentPaneId` を持つ）なら、自分のボードを探さず、開かない。`paneId` に自分を渡し、配置はサーバーに任せる。ワーカーが `--no-board` を付けたらエラーにする（ワーカーのワーカーは必ずルートのボードに載るため）。
-- 枠：ボードの 20 枠（D12）は、子と孫で共有する。`--max-children` は、spawn した本人の直接のワーカーを数える。
-- 閉じる：
-  - 子が閉じると、その孫も閉じる。経路（手で閉じる、`close`、プロセス終了で閉じる）は問わない。
-  - ルートが閉じると、子が閉じ、その孫も閉じる。
-  - ボードが閉じると、子は D10 のとおりルートへ戻る。孫は親が float なので閉じる（D10 の「親が float のとき」）。`q` の確認でそのことを告げる。
-- `ls --children` と `close --children` は、直接のワーカーだけを対象にする。ルートの `close --children` は子を閉じ、そこから孫も閉じる。
-- ボード：
-  - `--of R` の一覧には、R の子と孫を出す。孫は親の行のすぐ下に、字下げして木の線（`│`、`└`）つきで出す。
-  - 並び順：子は部分木の中でいちばん急ぐもの（自分と孫を合わせて）で節に入る。節の中は D11 の規則で並べる。孫は親の下で同じ規則で並べる。
-  - 孫を持つ子の行には、孫の数と要対応の数を集計して出す（「子 3 · 要対応 1」）。
-  - `Space` で部分木をたたむ・開く。既定は開く。たたんだ行は `▸`、開いた行は `▾` で示す。`←`/`→` は D7 で一覧と詳細の移動に使っているので使わない。
-  - 番号（1〜20）、`n`、`g`/`s`/`x`、ヘッダの集計は、孫を含めて扱う。たたんだ部分木の要対応は、`n` で開いて選ぶ。
-- 未確認：GUI での見え方。
+Decisions:
+- Placement (server): a spawn whose `parentPaneId` points at a child (a float stowed on the root's board) is stowed on that board. `stows_on` treats as stowed not only "the anchor's label is `board:<parent>`" but also "`board:<parent's parent>`". If a grandchild tries to spawn (the parent's parent is a worker), it is refused with invalid params. The message is "nesting goes one level deep".
+- `+ctl spawn` (client): if the caller is a worker (has a `parentPaneId`), it neither looks for nor opens its own board. It passes itself as `paneId` and leaves placement to the server. A worker that gives `--no-board` gets an error (a worker's worker always goes on the root's board).
+- Slots: the board's 20 slots (D12) are shared by children and grandchildren. `--max-children` counts the direct workers of the one spawning.
+- Closing:
+  - When a child closes, its grandchildren close too, whatever the path (closed by hand, `close`, closed on process exit).
+  - When the root closes, the children close, and their grandchildren too.
+  - When the board closes, children return to the root as in D10. Grandchildren close because their parent is a float (D10's "the parent is a float"). The `q` confirmation says so.
+- `ls --children` and `close --children` apply only to direct workers. The root's `close --children` closes the children, and through them the grandchildren.
+- Board:
+  - The `--of R` list shows R's children and grandchildren. A grandchild appears right below its parent's row, indented, with tree lines (`│`, `└`).
+  - Order: a child goes into a section by the most urgent member of its subtree (itself and its grandchildren together). Within a section, D11's rules apply. Grandchildren are ordered under their parent by the same rules.
+  - The row of a child with grandchildren shows a tally of the grandchildren and of those needing you (「子 3 · 要対応 1」, `3 workers · 1 need you`).
+  - `Space` folds and unfolds a subtree. The default is unfolded. A folded row is marked `▸`, an unfolded one `▾`. `←`/`→` are not used, because D7 uses them to move between the list and the detail view.
+  - Numbers (1–20), `n`, `g`/`s`/`x` and the header tally include grandchildren. Needs-you items in a folded subtree are unfolded and selected with `n`.
+- Not checked: appearance in the GUI.
 
-### D14：人がいなくても回し切れるようにする（2026-11-20）
+### D14: Let it run to the end without a person (2026-11-20)
 
-owner の依頼「オーケストレーション機能の自律性を向上させたい」を、3 つの軸すべてとして受けた（elicited 2026-11-20）：A 承認待ちを人なしで抜ける、B 段取りを `+ctl` に持たせる、C 長時間を無人で回し切る。D11 で判断待ちだった 3 件は、この依頼で owner が B と C を選んだことにより決着した。
+The owner's request, "I want to improve the autonomy of the orchestration feature", was taken as all three axes (elicited 2026-11-20): A, get past approval prompts without a person; B, give `+ctl` the setup steps; C, run long jobs unattended to the end. The three items awaiting decision in D11 were settled by the owner choosing B and C in this request.
 
-- A：
-  - `send --replace`：入力の前に入力欄を消す。Ctrl-E のあと Ctrl-U を、1 回 16 個までに分け 50 ms おきに計 64 個送る（32 行分）。3 種とも Ctrl-U は今いる行だけを消し、行頭ではもう 1 回で前の行とつながる。Claude Code は 65 バイトを一度に受けると貼り付けとみなして下書きを残す（33 バイトまでは消えた）ので、分けて送る。確認した版：Claude Code 2.1.329、Codex 0.170.0、agy 1.5.13。手入力、複数行の貼り付け、Claude Code の `[Pasted text]` 表示、空の入力欄で確かめた。カーソルより後ろの行にある下書きは残りうる。`--answer` とは併用できない（プロンプトには入力欄がない）。
-  - 人がいないときの承認はスキル（`skills/noa-orchestration/SKILL.md`「Running without the human」）で決める。ワーカー自身の worktree の中で完結する読み取り・編集・ビルド・テスト・そのブランチへのコミットは承認し、push・公開・worktree の外への書き込みや削除・インストール・人の設定や認証情報への変更は拒否する。どちらにも当てはまらないものは待たせておき、人に聞く。`spawn --worktree` で作った worktree の信頼プロンプトには、オーケストレーターが答えてよい。自動承認フラグや Noa の auto-approve は、従来どおり人が頼んだときだけ使う。Noa 本体の振る舞いは変えない。
-- B：
-  - `spawn --worktree`：`--label L` を必須とし、`--cwd` とは併用できない。このプロセスの cwd のリポジトリで `git worktree add -b orch/L <top>-wt/L HEAD` を実行し、そこでワーカーを起動する。出力に `worktree` と `branch` を足す。git が失敗したら何も起動しない。上限などの確認を先に済ませ、ボードを開く前に worktree を作る（git が拒否したらボードも開かない）。サーバーが起動を拒否したら（RPC エラー）、作ったばかりの worktree とブランチを消す。応答が届かなかったとき（接続の失敗）は、ワーカーが起動しているかもしれないので消さず、stderr で知らせる。未コミットの変更が worktree に入らないことは stderr で警告する。
-  - `close --prune`：閉じたワーカーのラベル L について、`<top>-wt/L` に `orch/L` の worktree があり、そのペインの cwd がその中にあれば、`git worktree remove` と `git branch -d` を実行する。どちらも強制しない。拒否されたときは作業を残し、行の `worktree.kept` に git の理由を出す。終了ステータスは変えない。
-  - `spawn --tier light|standard|deep`：`claude` / `codex` / `agy` のコマンドで、プログラム名の直後にその段のモデルと effort のフラグを入れる。コマンドがすでにモデルか effort を指定していたら拒否する（人が指定したものを黙って上書きしない）。Claude Code の `light` は、コードを編集する欄の `sonnet` / `low` にした。読むだけなら `haiku` を自分で書く。Codex と agy のモデル名は版によって変わるので、`+ctl` の表（`crates/noa-app/src/ctl/worktree.rs`）とスキルの reference.md を一緒に更新する。
-  - 「採らなかった案」のエージェント別起動プロファイルは、別名を作らずフラグを足すだけの形で一部を採った。モデルの選び方はオーケストレーターが決め、Noa は表を引くだけにする。
-- C：
-  - `wait --stall SECS`（`send --wait` も同じ）：開いているペインの画面の文字列が SECS 秒変わらなければ、`stalled` で待機を解く（`quietSecs` を付ける）。画面を取得するのは `--stall` を指定したときだけで、間隔は 1 秒以上空ける。同じ回に報告や終了があればそちらを優先する。Claude Code は作業中スピナーに経過秒が出て画面が変わり続けるので、`stalled` になるのは、報告せずにプロンプトへ戻ったときか、報告しないプロンプトで止まったときである。Codex と agy が作業中も画面を変え続けるかは確かめていない（作業中でも `stalled` になりうる）ので、スキルでは `stalled` のあと `read` で確かめるようにした。
-  - ボードの開き直し（D10 の既知の制限）：`board:<P>` というラベルのペインが IPC の spawn 経路で作られたら、以前のボードから P へ戻されたワーカー（戻したときに `Float` に印を付ける）を、たたんで収納した状態で新しいボードへ移す。surface とプロセスはそのまま引き継ぐ。別のウィンドウへ移すときは、D10 の付け替えを逆向きに使う。`--no-board` で起動した float と、フォーカス中のもの、20 枠を超える分は動かさない。手で動かした float は印が消える。
-- 実際に動かして分かったこと：ワーカーの Claude Code 3 体が `finished` を報告したあとも、作業を続けていた（`--tail` にはコミットを実行中の行が出ていた）。原因は確かめていない（利用者の Stop フックかもしれない）。スキルには、`read` してまだ作業中なら `--after` で待ち直すよう書いた。
-- 確かめたこと：単体テスト（引数、tier の挿入、porcelain の解析、実際の git での add と remove、`branch -d` が未マージのブランチを拒否すること、stall の判定、再収納の対象の選び方）。実機（Noa 0.9.3 のサーバーと、このブランチでビルドした `+ctl`）では、`spawn --worktree --tier light -- claude` → 下書きを入れてから `send --replace --enter --wait` → `wait --stall 4` → `close --prune` の流れで、worktree とブランチが消えるところまで確かめた。
-- 確かめていないこと：再収納の GUI での見え方（アプリの再ビルドが要る）、20 体での `--stall` の負荷。
+- A:
+  - `send --replace`: clears the input box before typing. It sends Ctrl-E then Ctrl-U, 64 in all (32 lines' worth), in chunks of at most 16 every 50 ms. In all three, Ctrl-U clears only the current line, and at the start of a line one more joins it to the previous line. Claude Code treats 65 bytes received at once as a paste and keeps the draft (up to 33 bytes cleared), so they are sent in chunks. Versions checked: Claude Code 2.1.329, Codex 0.170.0, agy 1.5.13. Checked with hand-typed input, a multi-line paste, Claude Code's `[Pasted text]` display, and an empty input box. A draft on lines after the cursor can remain. It cannot be combined with `--answer` (a prompt has no input box).
+  - Approval without a person is decided in the skill (`skills/noa-orchestration/SKILL.md`, "Running without the human"). Reads, edits, builds, tests and commits to that branch that stay inside the worker's own worktree are approved; push, publishing, writes or deletes outside the worktree, installs, and changes to the person's settings or credentials are refused. Anything that fits neither is left waiting and the person is asked. The orchestrator may answer the trust prompt for a worktree made with `spawn --worktree`. Auto-approve flags and Noa's auto-approve are used, as before, only when the person asks. Noa's own behavior is unchanged.
+- B:
+  - `spawn --worktree`: requires `--label L` and cannot be combined with `--cwd`. It runs `git worktree add -b orch/L <top>-wt/L HEAD` in the repository of this process's cwd and starts the worker there (revised in D17: the location is `<main>-wt/L` beside the main worktree). `worktree` and `branch` are added to the output. If git fails, nothing starts. Checks such as the limit are done first, and the worktree is created before the board opens (if git refuses, the board does not open either). If the server refuses the start (RPC error), the just-created worktree and branch are removed. If no response arrived (connection failure), the worker may have started, so they are not removed and stderr says so. A warning on stderr says that uncommitted changes do not go into the worktree.
+  - `close --prune`: for the label L of a closed worker, if `<top>-wt/L` holds a worktree on `orch/L` and the pane's cwd is inside it, it runs `git worktree remove` and `git branch -d`. Neither is forced. If refused, the work is kept and git's reason appears in the line's `worktree.kept`. The exit status does not change. (Revised in D17: the worktree is looked up from the closed pane's cwd, and if none is found that too is reported in `kept`)
+  - `spawn --tier light|standard|deep`: for `claude` / `codex` / `agy` commands, inserts that tier's model and effort flags right after the program name. It refuses if the command already specifies a model or effort (it does not silently override what a person specified). Claude Code's `light` is the code-editing column's `sonnet` / `low`; for read-only work, write `haiku` yourself. Codex and agy model names change between versions, so the `+ctl` table (`crates/noa-app/src/ctl/worktree.rs`) and the skill's reference.md are updated together.
+  - The per-agent launch profiles in "Considered but rejected" were partly adopted, in the form of adding flags without creating aliases. The orchestrator decides how to pick a model; Noa only looks up the table.
+- C:
+  - `wait --stall SECS` (`send --wait` too): if the text of an open pane's screen does not change for SECS seconds, the wait ends with `stalled` (with `quietSecs`). Screens are fetched only when `--stall` is given, at least 1 second apart. A report or exit in the same round takes priority. Claude Code shows elapsed seconds on its working spinner, so its screen keeps changing; it becomes `stalled` only when it returns to the prompt without reporting, or stops at a prompt that does not report. Whether Codex and agy keep changing their screens while working is not checked (they could become `stalled` while working), so the skill says to check with `read` after `stalled`.
+  - Reopening the board (D10's known limitation): when a pane labelled `board:<P>` is created through the IPC spawn path, workers that an earlier board returned to P (a mark is put on the `Float` when it is returned) are moved to the new board, folded and stowed. The surface and process carry over as they are. Moving to another window uses D10's reattachment in reverse. Floats started with `--no-board`, floats with focus, and any beyond the 20 slots are not moved. A float moved by hand loses the mark.
+- Found in real use: 3 Claude Code workers kept working after reporting `finished` (`--tail` showed a line running a commit). The cause is not confirmed (possibly the user's Stop hook). The skill says to `read`, and if the worker is still working, wait again with `--after`. (`wait --settle` was added in D17)
+- Checked: unit tests (arguments, tier insertion, porcelain parsing, add and remove with real git, `branch -d` refusing an unmerged branch, stall detection, choosing what to restow). On a real machine (Noa 0.9.3's server and `+ctl` built from this branch), the flow `spawn --worktree --tier light -- claude` → `send --replace --enter --wait` after typing a draft → `wait --stall 4` → `close --prune` was checked through to the worktree and branch being removed.
+- Not checked: how restowing looks in the GUI (needs the app rebuilt), the load of `--stall` with 20 workers.
 
-### D15：ボードを「要対応キュー＋作業中ツリー＋プレビュー」にする（2026-11-20）
+### D15: Make the board "needs-you queue + working tree + preview" (2026-11-20)
 
-owner が持ち込んだ提案「Noa Mission Control」（人の判断が要る瞬間だけを目立たせる司令塔）を、ボードの表示層だけの変更として採った。プロトコル、`+ctl`、画面の取得間隔（一覧 500 ms・画面 1 秒）、再接続は変えない。未決だった 4 点は、owner が「確定して実装まで」と委ねたので、次の既定を採った。
+The proposal the owner brought in, "Noa Mission Control" (a control tower that highlights only the moments that need a person's judgment), was adopted as a change to the board's display layer only. The protocol, `+ctl`, the fetch intervals (list 500 ms, screens 1 second) and reconnection are unchanged. The owner left the 4 open points with "settle them and implement", so the following defaults were taken.
 
-- 区分（D13 の「子は部分木の中でいちばん急ぐもので節に入る」を改める）：
-  - 要対応（`Group::Needs`）のワーカーは、子でも孫でも、上段の **キュー** に平たく並べる。並びは D11 の規則（承認・エラー・失敗が先、そのあと待った時間の長い順）。孫は「親 › 名前」と書く。
-  - それ以外は下段の **ツリー**（「バックグラウンド」）に出す。子は、部分木に作業中か報告なしのものがあるか、自分が要対応で孫を持つなら、ここに入る。要対応の孫は親の下にも出すが、薄く描いて「↑ 要対応に表示」とだけ書き、選べない（`j`/`k` は飛ばす）。孫を持たない要対応の子はキューにだけ出す。
-  - 部分木がすべて完了か終了の子は、最後の 1 行で数だけ出す（「✓ 完了 N · 終了 N · 閉じた N」）。開くと、その子と孫、閉じたワーカーを並べる。既定はたたむ。
-- 孫：D13 の「入れ子は 1 段まで」をそのまま使う。`--of R` の一覧はもともと子と孫しか出さないので、多階層化は不要。
-- `Space`：選択中のワーカーがツリーの部分木（親か、作業中の孫。要対応の親も含む）にあればその部分木を、そうでなければ完了・終了の行を開く・たたむ。足もとのキー一覧と節の罫線に、何が起きるかを出す。完了・終了をたたむとき選択がその中にあれば、残った最後の行へ移す。`j` で最後の行を越えると開く。番号で完了のワーカーを選んでも開く。たたむのは作業中のツリーだけで、部分木が完了・終了へ移るとたたんだ印も消える（完了・終了の一覧では孫まで並べ、作業に戻れば開いて現れる）。ワーカーが 1 体も残っていないときは閉じたワーカーを常に並べ、`Space` は勧めない。キューで選んでいた孫が作業中へ戻ると、親の部分木を開いて選択を見せる。孫の行のキューでの親名は 10 列で切る。
-- キューに入れる状態：現行の要対応のまま（承認待ち・入力待ち・エラー・0 以外の終了・通知あり）。提案の 3 種に絞らない。失敗を要対応に出すのは D11 の決定で、通知ありを外すと D1 の attention が見えなくなるため。
-- 状態の記号：`!` 承認待ち・通知あり、`?` 入力待ち、`×` エラー・失敗、`●` 作業中、`✓` 完了、`·` 終了・報告なし。色だけで区別させない。
-- 作業中の行は、状態に入ってからの時間の代わりに、画面が最後に動いた時刻を出す（「8 秒前に出力」）。最初の読み取りは「いつ動いたか」を言わないので、今の状態に入ってから 3 秒以内に続いた 2 回の読み取りの間で変化を見たときだけ出す（詳細画面を開いていた間や、作業中でなかった間を挟んだ変化は時刻が分からないので消す）。今の状態に入る前の変化は出さない。分からないときは時間を何も出さない（作業時間にも戻さない。D11 の「時刻の分からない経過は出さない」）。狭い幅では「作業中 8 秒前」。2 分動かなければ従来どおり「出力なし N 分」。
-- プレビュー：選択中のワーカーの画面の末尾を、110 列以上では一覧の右（幅の 2/5）に、70〜109 列かつ 18 行以上では一覧の下（本体の 1/3、3〜8 行）に出し、それより狭いと出さない（`Enter` の詳細で見る）。要対応のワーカーは問いが入力欄やダイアログにあるので画面の下端まで、作業中のものは入力欄より上（`content_lines`）を出す。下端に「種類 · 状態 · 報告 N · cwd」。これに伴い、行の下に画面の末尾を 1〜3 行出すのをやめた。行の detail が空なら、要対応は画面の最終行（罫線を除く。問いは入力欄にあるため）を、作業中は入力欄より上の作業の最終行を出す。
-- 画面を読むのは、要対応と作業中のすべてのワーカーと、選択中のワーカー（たたんだ部分木の中も読む。行に鮮度を出すため）。
-- 言語（owner の追加依頼）：ボードのラベルは、ロケールが日本語なら日本語、それ以外は英語にする。判定は POSIX の順（`LC_ALL`、`LC_MESSAGES`、`LANG` のうち最初に値のあるもの）で、`ja` で始まれば日本語。どれもなければ macOS の優先言語（`NSLocale.preferredLanguages` の先頭）を見る。Dock から起動した Noa はロケール変数を持たず、ボードはシェルを介さず起動するため。`board --open` は、ワーカーと同じくオーケストレーターの `LANG`・`LC_*` をボードのペインに渡す（これまでは `PATH` だけ）。Noa のほかの UI と `+ctl` の出力はもともと英語。
-- ヘッダ：「NOA / CONTROL」、右に「ワーカー N · 同期 いま」（一覧を一度も読めていなければ「同期 まだ」）。狭い幅では「ボード」と数だけ。
-- 採らなかったもの：
-  - モックアップの外枠（左右の `│`）。各行で 2 列を使うので、罫線は節の区切りだけにした。
-  - 選択肢をボタン風に囲む表示と、背景色のバッジ。エージェントの画面を解析することになり、版ごとに壊れる。プレビューは画面の文字をそのまま出す。
-  - プレビュー内の操作ヒント行（「g 実画面へ移動して回答」）。足もとのキー一覧と重複する。
-  - 44 列以下の専用レイアウト。キューが常に上にあり、列は既存の縮退（状態の省略形、種類と集計の省略）で詰まるので、45〜69 列と同じ描画にした。
-- 確かめたこと：単体テスト（幅ごとの配置と全行の幅、キューとエコー、`Space` の対象、鮮度、プレビューの切り出し）。
-- 確かめていないこと：GUI での見え方（色、罫線、開いたワーカーに隠れる下段プレビュー）。
+- Sections (revising D13's "a child goes into a section by the most urgent member of its subtree"):
+  - Workers needing you (`Group::Needs`), children or grandchildren, are listed flat in the **queue** at the top. The order follows D11's rules (approvals, errors and failures first, then by longest wait). A grandchild is written "parent › name".
+  - Everything else is in the **tree** at the bottom (「バックグラウンド」, "background"). A child goes here if its subtree has a member at work or with no report, or if it needs you itself and has grandchildren. A grandchild needing you is also shown under its parent, but drawn dim, says only 「↑ 要対応に表示」 (`↑ in the queue above`), and cannot be selected (`j`/`k` skip it). A child needing you that has no grandchildren appears only in the queue.
+  - A child whose whole subtree is done or exited is counted only, on the last line (「✓ 完了 N · 終了 N · 閉じた N」, `✓ done N · exited N · closed N`). Unfolding it lists that child and its grandchildren, and the closed workers. The default is folded.
+- Grandchildren: D13's "nesting goes one level deep" is used as is. The `--of R` list already shows only children and grandchildren, so more levels are not needed.
+- `Space`: if the selected worker is in a subtree of the tree (a parent, or a grandchild at work; parents needing you included), it folds or unfolds that subtree; otherwise the done/exited line. The key list at the bottom and the section's rule line say what will happen. When done/exited is folded with the selection inside it, the selection moves to the last remaining row. `j` past the last row unfolds it. Selecting a done worker by number also unfolds it. Only the working tree folds; when a subtree moves to done/exited, its folded mark is cleared too (the done/exited list shows the grandchildren too, and if it goes back to work it reappears unfolded). When no worker remains, the closed workers are always listed and `Space` is not suggested. When a grandchild selected in the queue goes back to work, its parent's subtree is unfolded to show the selection. The parent's name in a grandchild's queue row is cut at 10 columns.
+- States that go into the queue: the current needs-you set as is (awaiting approval, awaiting input, error, non-zero exit, notified). Not narrowed to the proposal's 3 kinds. Showing failures under needs you is D11's decision, and dropping notified would hide D1's attention.
+- State symbols: `!` awaiting approval / notified, `?` awaiting input, `×` error / failure, `●` working, `✓` done, `·` exited / no report. Color is never the only distinction.
+- A working row shows the time the screen last moved instead of the time since it entered the state (「8 秒前に出力」, English `working, output 8s ago`). The first read says nothing about when it moved, so the time is shown only when a change was seen between two consecutive reads less than 3 seconds apart since it entered its current state (a change spanning a time when the detail view was open, or when it was not at work, has no known time and is cleared). Changes from before the current state are not shown. When unknown, no time at all is shown (it does not fall back to the working time either; D11's "elapsed time with an unknown start is not shown"). In narrow widths, 「作業中 8 秒前」 (`working 8s ago`). After 2 minutes without movement, 「出力なし N 分」 (`quiet Nm`) as before.
+- Preview: the tail of the selected worker's screen is shown to the right of the list (2/5 of the width) at 110 columns or more, below the list (1/3 of the body, 3–8 lines) at 70–109 columns and 18 rows or more, and not at all when narrower (see it in the `Enter` detail view). For a worker needing you, the question is in the input box or a dialog, so the preview goes to the bottom of the screen; for a worker at work, it shows what is above the input box (`content_lines`). At the bottom: "kind · state · report N · cwd". With this, the 1–3 lines of screen tail under each row were removed. When a row's detail is empty, a worker needing you shows the last line of the screen (excluding rules; the question is in the input box), and a worker at work shows the last line of work above the input box.
+- Screens are read for every worker needing you or at work, and for the selected worker (including those inside folded subtrees, to show freshness on the row).
+- Language (an additional request from the owner): board labels are in Japanese when the locale is Japanese, otherwise in English. The check follows POSIX order (the first of `LC_ALL`, `LC_MESSAGES`, `LANG` that has a value); Japanese if it starts with `ja`. If none is set, macOS's preferred language (the first of `NSLocale.preferredLanguages`) is used, because Noa started from the Dock has no locale variables and the board starts without a shell. `board --open` passes the orchestrator's `LANG` and `LC_*` to the board's pane, as for workers (before, only `PATH`). Noa's other UI and `+ctl`'s output were already in English.
+- Header: 「NOA / CONTROL」, with 「ワーカー N · 同期 いま」 (`workers N · synced now`) on the right (「同期 まだ」, `synced never`, if the list has never been read). In narrow widths, only 「ボード」 (`Board`) and the count.
+- Not adopted:
+  - The mockup's outer frame (`│` on the left and right). It uses 2 columns on every row, so rules are used only between sections.
+  - Button-like boxes around choices, and badges with background colors. They would mean parsing the agent's screen, which breaks with each version. The preview shows the screen's text as it is.
+  - A hint line inside the preview (「g 実画面へ移動して回答」, "g: go to the real screen and answer"). It duplicates the key list at the bottom.
+  - A dedicated layout for 44 columns or fewer. The queue is always on top and columns shrink by the existing fallbacks (abbreviated states, kind and tally abbreviated), so it draws the same as 45–69 columns.
+- Checked: unit tests (placement and full-row widths per width, queue and echo, the target of `Space`, freshness, preview slicing).
+- Not checked: appearance in the GUI (colors, rules, the bottom preview hidden by an open worker).
 
-### D16：レビューと実機確認で見つけた不安定さを直す（2026-11-20）
+### D16: Fix the instability found by review and on a real machine (2026-11-20)
 
-`+ctl` でレビュー担当 3 体（`ctl.rs`、`board.rs`、サーバー側）を走らせ、並行して境界ケースを実機で叩いた。レビューの指摘 21 件のうち 19 件と、実機で見つけた 2 件（一覧にないペインへの `send` の文言、`baseline` に終了済みペインが入る）を直した。新しい機能は足していない。
+Three reviewers were run with `+ctl` (`ctl.rs`, `board.rs`, the server side), and boundary cases were tried on a real machine in parallel. Of the reviews' 21 findings, 19 were fixed, plus 2 found on the real machine (the wording of `send` to a pane not in the list, and exited panes appearing in `baseline`). No new features were added.
 
-- 待機：
-  - `wait --children --after PANE=SEQ` は、タイムアウト行のあとに閉じた子を `--after` に含むと exit 1 で失敗し、再開ループが壊れた。一覧にないペインは `{"reason":"exit","closed":true}` として報告する。一覧にあるが自分のワーカーでないペインは従来どおりエラー。
-  - 1 回の要求が 5 秒の期限を越えると「接続が切れた」（exit 3）として待機が終わり、タイムアウト行も出なかった。期限切れを `ClientError::Timeout` として接続断と分け、待機ループの中だけ次の tick で再試行する。待機の外では従来どおり exit 3 だが、文言は「did not answer in time」。
-  - タイムアウト行の `baseline` から、`exited` に出したペインを除いた。
-- サーバー：UI スレッドが 2 秒以内に結果を返さない要求は `-32603` ではなく `-32009`（結果不明）で答える。`spawn --worktree` はこれを「拒否」と読まず、worktree を残す（これまでは動いているワーカーの足もとを消しえた）。ボードの自動オープンも、この場合はタブへ逃げない（2 枚目のボードを作らない）。
-- `close`：出力先が閉じても（`close --children | head -1`）panic せず全ペインを閉じる。`--prune` は、一覧と close の間に消えたペインにも行い、cwd が worktree の外で見送ったときは `kept` に理由を出す。
-- ガード：一覧にないペインへの `send` は「pane N is not listed」と言う（`--any-pane` を勧めない）。surface id を返さない Noa に当たったときの exit を `send`/`close` でも 3 にそろえた。
-- ボード：
-  - 端末でない stdin/stdout では起動しない（exit 1）。エージェントのツールシェルから `board` を実行すると、パイプにエスケープを書いたまま止まった（実機で発生）。
-  - 送信欄や閉じる確認の宛先が消えたら、Esc を押すまでキーを捨てる。これまでは通常モードへ黙って戻り、続きのキーが別のワーカーに効いた。
-  - 再接続先が別の Noa（`serverInstanceId` が違う）なら終了する。ペイン id が偶然一致した別インスタンスのワーカーを閉じないため。
-  - `q` の確認を省くのは、直近の一覧取得が成功して 0 体だったときだけ。確認文は閉じるものを先に書き、戻れる数を約束しない（親の float 枠 8 には既存の float も数えるので、ボードからは分からない）。80 列で全文が入る。
-  - 画面の取得は、接続断か期限切れの最初の 1 件でその回を打ち切る（20 体で最大 100 秒、キーが止まりえた）。
-  - 親ペインが閉じたら、その旨を出す。SIGTERM・SIGHUP・SIGINT で端末を復元してから終わる。数字の 2 桁入力は、数字以外のキーで 1 桁目を捨て、キーの到着時刻で 1 秒を測る。一度も報告していないエージェントに履歴行を作らない。
-- 採らなかったもの：
-  - `finished` の直後に `running` が同じ tick に入ると、待機側には `running` しか見えない（最後の停止状態を `Panel` に残す案）。次のターンが終われば待機は解けるので、プロトコルを足すほどではないと判断した。困る事例が出たら再検討する。
-  - ボードの送信で、貼り付けと Enter の間に `permission` へ移る競合をサーバー側で閉じる案。`send` と同じくクライアント側の再確認のままにした。
-- スキル：エージェントの `read --scrollback` は最後の 1 画面ほどしか返さなかった（Claude Code 2.1.329、Codex 0.171.0 で観測）。長い報告はファイルに書かせる、と SKILL.md に足した。
-- 確かめたこと：単体テスト（各修正に 1 件以上）、`scripts/verify.sh`。実機（0.9.5 のサーバーに対し、このブランチの `+ctl`）で、端末なしの `board` の拒否、一覧にないペインへの `send`、`baseline`、閉じた子を含む `--after`、閉じたパイプへの `close`、80 列での `q` の確認文、SIGTERM 後に代替画面から戻ること。
-- 確かめていないこと：`-32009` の経路（サーバー側の変更で、走っている Noa は旧版）、再接続先が別インスタンスの場合、宛先が消えたときの表示（単体テストのみ）。
+- Waiting:
+  - `wait --children --after PANE=SEQ` failed with exit 1 when `--after` included a child that closed after the timeout line, which broke the resume loop. A pane not in the list is reported as `{"reason":"exit","closed":true}`. A pane in the list that is not the caller's worker is still an error.
+  - When one request went past its 5-second deadline, the wait ended as "connection lost" (exit 3) and no timeout line was printed. An expired deadline is now `ClientError::Timeout`, separate from a lost connection, and only inside the wait loop is it retried on the next tick. Outside a wait it is still exit 3, but the wording is "did not answer in time".
+  - Panes printed in `exited` were removed from the timeout line's `baseline`.
+- Server: a request for which the UI thread returns no result within 2 seconds is answered with `-32009` (outcome unknown) instead of `-32603`. `spawn --worktree` does not read this as a refusal and keeps the worktree (before, it could remove the ground under a running worker). The board's automatic open does not fall back to a tab in this case either (it does not make a second board).
+- `close`: when its output closes (`close --children | head -1`), it does not panic and closes every pane. `--prune` also runs for panes that vanished between the listing and the close, and when it skips because the cwd is outside the worktree it gives the reason in `kept`.
+- Guards: a `send` to a pane not in the list says "pane N is not listed" (it does not suggest `--any-pane`). The exit on hitting a Noa that returns no surface id is now 3 for `send`/`close` too.
+- Board:
+  - It does not start on a stdin/stdout that is not a terminal (exit 1). Running `board` from an agent's tool shell left it stuck after writing escapes to a pipe (seen on a real machine).
+  - When the destination of the send line or the close confirmation vanishes, keys are discarded until Esc is pressed. Before, it silently returned to normal mode and the following keys acted on a different worker.
+  - If the reconnection target is a different Noa (different `serverInstanceId`), it quits. (Revised in D17: it does not quit, and keeps reconnecting until the original Noa answers) This is so that it does not close a worker of another instance whose pane id happens to match.
+  - The `q` confirmation is skipped only when the latest list fetch succeeded and showed 0 workers. The confirmation text puts what will close first (revised in D17: puts the keys first), and does not promise how many can return (the parent's 8 float slots also count existing floats, which the board cannot know). The full text fits in 80 columns.
+  - Screen fetching stops for that round at the first lost connection or expired deadline (with 20 workers, keys could stall for up to 100 seconds).
+  - When the parent pane closes, it says so. On SIGTERM, SIGHUP and SIGINT it restores the terminal before quitting. Two-digit number input discards the first digit on a non-digit key, and measures the 1 second by key arrival time. No history line is made for an agent that has never reported.
+- Not adopted:
+  - When `running` comes in the same tick right after `finished`, the waiter sees only `running` (the option of keeping the last stopped state in `Panel`). The wait ends when the next turn ends, so it was judged not worth adding to the protocol. To be reconsidered if a case where it matters appears.
+  - Closing on the server side the race where the state moves to `permission` between the board's paste and Enter. It stays a client-side recheck, as in `send`.
+- Skill: an agent's `read --scrollback` returned only about the last screen (seen with Claude Code 2.1.329 and Codex 0.171.0). SKILL.md now says to have long reports written to a file. (Revised in D17: spawn hands over the file in `NOA_RESULT`. On the alternate screen, `alternateScreen` tells you so)
+- Checked: unit tests (at least 1 per fix), `scripts/verify.sh`. On a real machine (this branch's `+ctl` against a 0.9.5 server): refusing `board` without a terminal, `send` to a pane not in the list, `baseline`, `--after` including a closed child, `close` to a closed pipe, the `q` confirmation text at 80 columns, returning from the alternate screen after SIGTERM.
+- Not checked: the `-32009` path (a server-side change; the running Noa is the old version), a reconnection target that is a different instance, the display when a destination vanishes (unit tests only).
 
-### D6：エージェントごとの差はフックの設定だけに閉じ込める
+### D17: Fixes from 3 audits (UI/UX, reliability, autonomy) (2026-11-21)
 
-> 2026-11-18 追記：3 種とも OSC 7501 で状態を自分で報告するようになった（Claude Code 2.1.295+、Codex 0.163+ の `app=codex`、agy 1.4+ の `app=antigravity`。いずれも `blocked:kind=permission|question` を含む）。そのため下の表のフック経路は不要になった。加えて Claude Code と Codex はフックを新しいセッション（setsid）で起動するので、フックからの `+ctl report` は `/dev/tty` を開けず何も届かない。Codex の手順は最初から機能していなかった。Claude Code 用の `scripts/noa-agent-hook.py` は、フックの `terminalSequence` 出力で報告するよう改めた。A6 は「フックは要らない」という形で解消した。agy のフックは `PreInvocation` がモデル呼び出しのたびに発火し、`.agents/hooks.json` の最上位はフック名で区切る形式である（`docs/AGENT_WORKFLOW.md` からは記述を外した）。
+After D16, code-reading audits were run on 3 axes (HEAD 118c12c): the UI/UX of the board and stowed workers (U1–U14), the reliability of the control path (REL-01–REL-17), and the autonomy to run to the end without a person (AU-01–AU-16). Findings with evidence (`file:line` or a scenario) were fixed on 5 branches across the server, CLI and board. The protocol is additive only, and `PROTOCOL_VERSION` stays 3.
 
-状態の報告経路は 3 種とも `OSC 777;noa-agent` に揃える。各エージェントのフックが `"$NOA_BIN" +ctl report` を呼ぶだけにし、Noa 本体と `+ctl wait` には種別ごとの分岐を持たせない。`scripts/noa-agent-hook.py` は既存の利用者の設定を壊さないよう残し、`+ctl report` は同じ処理（制御端末へ書く、端末がなければ何もせず成功）を持つ。
+- Waiting and sending:
+  - `send` refuses a question dialog (`agent.blocked:"question"`) as well as an approval prompt (`--answer` sends anyway; AU-01). Claude Code's question dialog is `input` in OSC 7501, and Enter selects the first choice. It checks 3 times: before sending, after clearing with `--replace`, and right before Enter. D11's reason for not refusing `input` (the hook adapter's `idle_prompt`) still holds, so only an `input` with `blocked` is refused. An `input` without `blocked`, and old servers that return no `blocked`, are sent to as before.
+  - A paste, or an Enter-only send, to an agent at work (`running`) is refused; `--queue` sends anyway (AU-05), because `--wait` would take the end of the current turn for the reply to the text sent. Every line of `--queue --wait` carries `"queued":true`. `--raw` keys with text (Esc, Ctrl-C) are always sent, because they are the way to stop an agent at work.
+  - A paste to an agent's pane (`agent.kind` present), or to a pane whose process is not listed yet (except a pane with `Panel.spawn`, which spawn started with a command), waits until that pane enables bracketed paste (every 200 ms, up to 15 seconds; REL-01). A program still starting read newlines as Enter, and a turn began with only the first part of the instruction. An empty paste with `requirePasteMode:true` asks, and once `-32010` stops coming back, the `--replace` keys and the text are sent. Old servers ignore this field, so the question passes at once. If it is not enabled within 15 seconds, nothing is sent and it exits 1.
+  - Text over 250 KiB as JSON (`noa_ipc::MAX_SEND_TEXT_BYTES`) is refused with exit 1 before anything is typed (REL-04). Before, the 256 KiB frame limit cut the whole connection and it was reported as "cannot reach Noa" (exit 3).
+  - `--replace` checks again for an approval prompt and a question after clearing the input box (REL-16).
+  - `send --wait` prints `sent to pane N; resume with: wait N --after SEQ` on stderr once the text is in (REL-11). `wait` and `send --wait` on SIGTERM, SIGINT or SIGHUP print the timeout line with `"interrupted":true` and exit 2 (AU-08). Even when killed by a shell tool's time limit, the `baseline` for waiting again remains. Signals are checked between requests, so they can be up to about 1 second late (or, in the middle of a request, until that request ends). If one arrives before the first listing returns, every pane is printed as `pending`, and only the known `seq` values (from `--after`, or seen by `send --wait` before typing) go into `baseline`. Signals ignored at startup stay ignored. SIGKILL cannot be caught.
+  - `wait --settle SECS` (also `send --wait` and `spawn --task`): `finished` is not printed at once but held for SECS seconds. If a new report arrives in that time, the hold is dropped and the wait goes on; if the text of the work above the input box changes, SECS seconds are counted again from there. If it holds, it is printed with `"settledSecs"` (AU-12; addresses D14's "keeps working after `finished`"). When the hold is dropped, the baseline is the `seq` of the held `finished`, so a `permission` that arrived during the hold ends the wait as before.
+  - Added to wait lines: `label` for a pane with a label (also in each entry of the timeout line's `baseline`), `blocked` for what it is stopped on, and `prompt` on `permission`/`input` lines (with or without `--tail`; up to 20 lines from the group of the input box or dialog, rules and blank lines removed; AU-11). For an agent's pane, `--tail` on lines for other reasons is the last N lines above the input box. If fetching `--tail` fails, the result line that succeeded is not discarded; it gets `tailError` instead of `tail` (REL-05). If a pane that was an agent when the wait began returns to a shell, the wait ends as `exit` with `"agentLeft":true` (REL-12).
+  - A `wait PANE` that names panes refuses a listed pane that is neither the caller nor the caller's worker (`--any-pane` lifts this; the second half of REL-09). A wait from outside a Noa pane (no `NOA_SURFACE_ID`, or not found in the list) is not checked, so as not to break waits from hooks or outside scripts.
+  - `-32009` (outcome unknown) is exit 3, and the message says it may still have taken effect: check with `ls` or `read` before retrying (AU-06). Before, it was exit 1, read as a refusal, and resent. `send` says the text may already have been typed, `close` says the pane may still close, and `close` goes on closing the other panes.
+- spawn:
+  - `spawn --ready SECS`: after starting, waits up to SECS seconds for the agent's first report (`"ready":"report"`) or for a screen that shows something to stay unchanged for 1.5 seconds (`"quiet"`) (`"timeout"` past that, `"gone"` if the pane vanishes). The last screen's 20 non-empty lines are added to the line as `"screen"` (AU-02). The model sequence `spawn → read → send` raced with trust prompts and logins drawn late.
+  - `spawn --task TEXT | --task-file F` (only for claude, codex and agy commands): without `--ready`, waits 30 seconds. If ready is `report` or `quiet` and the bottom of the screen is the agent's input box (a group enclosed by rules), it sends the work by the same path as `send --enter --wait`, and prints the wait lines after the spawn line (`"sent":true`). Otherwise it types nothing and exits 0 with `"sent":false`; the orchestrator reads `screen` and sends it itself. It takes the wait options (`--for --all --timeout --tail --stall --settle`). The file is read and its size checked before the start.
+  - Result file (AU-03): every spawn whose cwd is known creates `<cwd>/.noa/` and a `.noa/.gitignore` containing only `*` (left alone if they exist). The worker's env gets `NOA_RESULT=<cwd>/.noa/result-<label>.md` (for a plain label; if that file already exists, `result-<label>-<8 hex digits>.md`; with no label, `result-<8 random hex digits>.md`). It is one file per worker so that workers sharing a cwd do not write to the same file. The name is reserved by creating an empty file at spawn time (reports are written last, so checking existence alone handed the same path to a worker with the same label started while the earlier one was still working; pointed out in the PR #210 review). A file that is still empty is not treated as a report: `result` says it has not been written yet, and `close --prune` does not move it. `.noa/` ignores itself, so it does not show in `git status` and does not block `git worktree remove` (`close --prune`). As is, the report would be removed with the worktree, so `close --prune` moves it first (see the worktree item). If the caller passes `--env NOA_RESULT=…`, that is used. If it cannot be written, a warning is printed and the spawn goes on. With D16's "have long reports written to a file", the orchestrator chose the file's location, which conflicted both with `close --prune` and with the unattended rule (do not write outside the worktree).
+  - `--input` to an agent's command is refused (AU-14). `--input` is written as raw keys right after the start, so every newline becomes Enter. `--label board:…` is refused too (REL-14; the server also refuses a `board:` label with a `parentPaneId` with `-32602`).
+  - `--max-children` is also sent to the server as `maxChildren`. The server counts children per parent on the UI thread and refuses with `-32011` (REL-02; closes D3's unsupported item). The client's precheck stays for old servers, and the wording of `-32011` matches the client's.
+  - A spawn that got `-32009` or a client deadline rereads the list every 100 ms for up to about 3 seconds. If exactly one new child of its own (with the same label, if `--label` was given) is found, it succeeds with `"recovered":true` (AU-06). If not, exit 3.
+  - If a spawn the server refused had opened a board on the spot, that board is closed only when this pane has no workers at all (REL-13). A new board takes over workers returned from an earlier board (D14), so existing workers may be on it.
+- Results and journal:
+  - A wait line (`wait`, `send --wait`, `spawn --task`) has `"result":{"path","bytes"}` if the pane's result file was written after the wait began (for `send --wait`, from just before typing), so that a previous job's result is not read as the new one. For a pane waited on again with `--after PANE=SEQ`, it counts from the time of the journal's `send` taken before that `seq` was typed (in seconds, rounded down).
+  - `+ctl result PANE [--max-bytes N]`: prints the result file. Unlike `read`, `--max-bytes` keeps the beginning (a report's summary is usually at the top).
+  - Journal (AU-04): for each orchestrator pane, `spawn`, `send`, `outcome` and `close` are appended one per line to `<data-dir>/noa/ctl/<surface id>.jsonl` (the same `noa/` as `session.json`). The client writes it, not the server, so that an orchestrator whose context was compacted can recover what it started, what it sent, what it saw and what it answered. If it cannot be written, a warning is printed once and the command does not fail. If it is over 4 MiB when opened, the older half is dropped. Appending and dropping the half are done after taking an exclusive lock on the neighboring `<surface id>.jsonl.lock`. A newly created journal is 0600 and a newly created `noa/ctl` is 0700 (existing permissions are not changed), because it holds the text sent and the screens answered.
+  - `+ctl status`: one line per worker of the caller with the listed state and the journal's contents (`tier`, `argv`, `lastTask`, `lastSentSeq`, `lastOutcome`, `answers`, `result`, `worktree`). A worktree worker gets `ahead` (the number of commits in `HEAD..<branch>`) and `dirty`. Workers in the journal but not in the list are printed last with `"gone":true`. `status --answers` prints the prompts answered from here, with the screen just before each answer, oldest first. D14's "hand the answered prompts to the person" had been only a promise in the skill.
+- worktree (REL-08, AU-07, AU-15):
+  - The location of `spawn --worktree` is beside the main worktree (`<main>-wt/<label>`), not beside the caller's worktree. When the orchestrator's cwd was inside a worker's worktree, it created a nested location. The branch is still cut from the caller's HEAD.
+  - `close --prune` looks up the worktree from the closed pane's cwd (or, if gone, its nearest existing ancestor), not from the caller's cwd, and runs git in the main worktree. If the label passes `--worktree`'s rules but no worktree is found, it does not stay silent but gives the reason in `worktree.kept` (exit unchanged). A worktree that an old `+ctl` created in a nested location is not found and becomes `kept`. Before removing, every `.noa/result-*.md` in the worktree is moved to `<main>/.noa/` (with `-<8 hex digits>` added if the name exists), and where that worker's own report went is given in `worktree.result`. `result` and `status` read it from the journal's `close`. If they cannot be moved, the worktree and branch are kept and the reason is given in `kept`. A worker already gone from the list is cleaned up the same way, using the label and worktree in the journal as its cwd.
+  - The warning about uncommitted changes is split into changes to tracked files and untracked files (AU-15).
+- Server and protocol (additive only):
+  - `Panel.agent.blocked`: `"permission"` or `"question"`. Present only when the latest report is an OSC 7501 blocked.
+  - `Panel.spawn`: `{argv, startedAt}`. Present only on a pane that an IPC spawn started with a command (used for the board's model, effort and start time).
+  - `requirePasteMode` and `-32010` on `noa.sendText`, `maxChildren` and `-32011` on spawn, `alternateScreen` on `noa.getText`. `read --scrollback` and `wait --tail` say on stderr that a pane on the alternate screen returns only the screen (REL-07. The cause of D16's observed "returns only about one screen" is either the alternate screen or history erased by `CSI 3 J`, and which one applies to each agent is not checked. Only the former can be told by this).
+  - A connection over the connection limit (32) is closed with close 1013 (`too many connections`) instead of being dropped silently. A frame or message that is too big is closed with 1009 (`message too big`) (REL-10, REL-04). `+ctl` retries 1013, and connections cut during the handshake (such as when more than 4 are refused at once), for up to 3 seconds; if still full, it exits 3 and says that each running `wait`, `send --wait`, board and attach holds one. 1009 is exit 1.
+  - The cause of `agent.kind` missing with `spawn -- claude` was traced to the first process notification, arriving before the card, being discarded (from reading the code only; not observed on a real machine). When there is no process name, the kind is taken from OSC 7501's `app=`, then from `Panel.spawn.argv[0]`. `Panel.process` stays missing.
+  - The sidebar's branch is fetched again also when a command or an agent's turn ends (REL-06).
+  - Floats of workers started over IPC are not saved for session restore (REL-09). Before, up to 20 came back as plain shells.
+- Board:
+  - It does not quit on its own when the connection is lost (U1). It keeps retrying with the interval growing from 0.5 to 4 seconds, and the notice line says 「接続できません N 秒 · 表示は M 秒前のもの」 (`Cannot reach Noa for Ns · as of Ms ago`). When a different Noa answers, it does not quit either and keeps waiting for the original Noa. Meanwhile it holds no connection to the other Noa, and does not run `g`, `x` or sends (they would reach a pane of another instance with a matching pane id; pointed out in the PR #210 review). It ends only on `q` (and when stdin closes). Before the list is read it says 「読み込み中…」 (`Loading…`), and while the connection is lost each row's mark and state are dimmed with a `?` added (U12).
+  - When a worker newly needs you, it emits one BEL (U2). Noa marks a BEL from a pane without focus as unread in the tab and the sidebar (what the audit read from the code; not seen on a real machine).
+  - The orchestrator's own state is shown in the header, and when it needs you it appears at the top of the queue as an unnumbered row (U3). That row is not closed with `x` (closing it would close every worker).
+  - Pressing ⌘⇧I (`float.toggle-focus`) on an open stowed worker folds that worker and returns to the board (U4). Before, the worker stayed open and covered the bottom 65% of the board. The close confirmation puts the keys right after the question.
+  - Text in the send line that could not be sent is kept as a draft per worker and comes back on the next `s` (U5).
+  - In the `q` confirmation, every key other than the quit key, ^C included, cancels (U7; pressing ^C twice used to quit). When quitting always closes workers (there are workers' workers, or more than 8 top-level workers), it asks for `y` instead of `q`. The confirmation text puts the keys first, and the full text fits in 80 columns.
+  - A worker running a command that is not an agent is 「実行中」 (`running`; blue `●`, in the working section) (U8). 「報告なし」 (`no report`) now applies only to an agent that has never reported.
+  - The branch is shown at the bottom of the preview and in the detail view. The confirmation for closing a worker running inside its label's worktree says 「worktree とブランチ orch/L は残ります」 (`Its worktree and branch orch/L stay.`) (part of U6).
+  - The wording that inserts a state into a sentence is written separately for each state, and the section name 「バックグラウンド」 ("background") became 「作業中」 (`Working`) (U10). Help descriptions wrap instead of being cut (U11).
+  - Frames are wrapped in synchronized output (DEC 2026), and unchanged frames are not written (U13).
+  - A question dialog (`blocked:"question"`) is shown as 「質問」 (`question`; `?`, orange), separate from awaiting input. As with awaiting approval, the send line does not open, it checks right before sending and right before Enter, and it says to go to the pane with `g` and answer. In English, awaiting input without `blocked` is written `input` (Japanese stays 「入力待ち」 as before).
+  - When `Panel.spawn` is present, the bottom of the preview and the detail view show the model and effort read from argv and the time since start (U9). The text of the work handed over is not on the wire, so it is not shown.
+  - While the board is open, the numbers of closed workers are not reused (first half of U14). When 1–20 are used up, the number that became free earliest is used first. Rows in the closed section also show numbers.
+- Found and fixed by an independent review (a review reading the `crates/` diff; each item above describes the behavior after these fixes):
+  1. A worker started with a command (`spawn -- ./deploy.sh`) never shows a process name, so `send` waited 15 seconds and refused. A pane with `Panel.spawn` does not wait for paste mode.
+  2. `close --prune` removed the report file too with `git worktree remove`. It is moved to `<main>/.noa/` first.
+  3. A single redraw during a `--settle` hold consumed the `finished`, and a wait without `--timeout` never ended. A changed screen restarts the count.
+  4. Waiting again with `wait --after` gave no `result` for a report written before the wait. It counts from the time of the `send` being waited on again.
+  5. Workers with the same label in the same cwd shared one report file. If it already exists, `-<8 hex digits>` is added.
+  6. When more than 4 were refused at once at the connection limit, the rest were cut during the handshake and exited 3 at once. These are also retried for up to 3 seconds.
+  7. `close --prune` on a worker gone from the list kept the worktree without a word. It is looked up from the journal and cleaned up.
+  8. When the first listing kept hitting its deadline, the wait did not end on SIGINT or SIGTERM. Signals are checked during that time too.
+  9. While at the connection limit, the board's reconnection stopped keys and drawing each time with its 3-second retry. The board connects once and leaves the interval to its own retry.
+  10. Dropping the journal's half could lose a concurrent append by another command. A lock file serializes appending and dropping the half.
+  11. The journal was created with umask permissions. It is created 0600 and 0700.
+- Found and fixed in the PR #210 review (claude, codex, agy). For each, a test reproducing the failure was written first and seen to fail before the fix:
+  1. An agent right after start (before its first output) is listed as a bare Panel without `agent`, so `send` skipped the bracketed paste wait (REL-01 had no effect). The bare Panel also gets `agent.kind` from the spawn's argv, and `send` gates when the spawn's argv is an agent.
+  2. Pressing Enter in the board's send line while a different Noa was answering lost the text, neither sent nor kept as a draft. It is kept as a draft.
+  3. The listings `wait` takes before its loop (the parent check, the result file path) were outside signal handling and did not retry a 5-second deadline either. They are handled like the loop's first listing.
+  4. When several workers used one worktree, of the reports `close --prune` moved, only the closed worker's was kept in the journal. Everything moved is given in `worktree.moved`, so each worker's report can be found from the journal.
+  5. With 0 workers, the row of an orchestrator needing you was not drawn (the heading said 1 item, and keys acted on an invisible selection).
+  6. In the list view, the orchestrator's screen was not fetched (the preview stayed loading).
+  7. `status` showed the target of `send --any-pane`, the caller itself, and mistyped ids as "gone workers". Only panes with a spawn record are workers.
+- Not adopted:
+  - REL-03 (an idempotency key for spawn): no protocol or server state was added; `-32009` became exit 3, and spawn recovers from the listing (above). Recovery cannot tell this spawn from an unlabelled spawn made by the same orchestrator in the same 3 seconds. Scope's Out (no idempotency key, at-least-once) stands.
+  - From U6, prune from the board (`worktree::prune` after closing) and an OSC 52 copy of the cwd. The board only says that the worktree and branch stay; cleanup is left to `close --prune`.
+  - The second half of U14 (filtering with `/`, and the mouse).
+  - AU-13 (detecting a worker a person opened, and a draft in the input box). It would need focus in `Panel` and `getGrid` in `Client`, and the premise that Claude Code draws its suggestions in faint is not checked on a real machine. A `read` before sending stays in the skill.
+  - AU-09 (`wait --unread`). The parallel model became a `wait --children` loop that carries `--after` along (AU-10, skill only). Notifications (`attention`) are still lost across a timeout.
+  - REL-15 (a running `wait` reconnecting when a `server-*` config change restarts the server). The wait still ends with exit 3 without printing `baseline`. `send --wait`'s resume line and `status`'s `lastSentSeq` and `lastOutcome` are the clues for waiting again.
+  - Grandchildren's worktrees from REL-08. The root's `close --prune` handles only the children's labels, so a grandchild's worktree that a child made with `--worktree` remains.
+  - REL-17 (unit tests for risky branches) was not taken as separate work. The `send` steps were extracted this time into `send_steps` (through `SendTarget`), and the size check, the refusal while at work, the paste-mode wait and the recheck after `--replace` are checked with mocks. The recheck right before Enter, and `open_board` not falling back to a tab on `-32009`, still have no unit tests.
+- Checked: unit tests (at least 1 per item; with real git, that the result file does not show in `git status` and does not block `git worktree remove`, `ahead` and `dirty`), `scripts/verify.sh --full`. On a real machine (this branch's `+ctl` against a 0.9.5 server): refusing `send` to a pane at work, refusing a `board:` label, refusing `--input` to an agent, the `interrupted` line on SIGTERM, refusing 250 KiB.
+- Not checked:
+  - None of the server-side changes can be checked on a real machine until the app is rebuilt: `blocked`, `requirePasteMode`, `maxChildren`, `alternateScreen`, `Panel.spawn`, close 1013/1009, refetching the branch, session restore.
+  - GUI: the unread mark from BEL, folding with ⌘⇧I, DEC 2026 drawing, colors.
+  - `--task`'s input box detection and `prompt` extraction rely on agents enclosing the input box in full-width rules, and are not checked with real agents. Work could be typed into a trust prompt drawn between rules, and a dialog without rules gets no `prompt`. Whether agents report at startup (whether `ready` becomes `report`) is not checked either.
 
-| kind | `running`/`finished` の出どころ | 承認・回答待ちの出どころ | 裏付け |
+### D6: Confine per-agent differences to hook configuration
+
+> Added 2026-11-18: all three now report their own state with OSC 7501 (Claude Code 2.1.295+, Codex 0.163+ with `app=codex`, agy 1.4+ with `app=antigravity`; all include `blocked:kind=permission|question`). So the hook paths in the table below are no longer needed. In addition, Claude Code and Codex start hooks in a new session (setsid), so `+ctl report` from a hook cannot open `/dev/tty` and nothing arrives. The Codex procedure never worked from the start. `scripts/noa-agent-hook.py` for Claude Code was changed to report through the hook's `terminalSequence` output. A6 was resolved in the form "hooks are not needed". agy's `PreInvocation` hook fires on every model call, and the top level of `.agents/hooks.json` is keyed by hook name (the description was removed from `docs/AGENT_WORKFLOW.md`).
+
+All three report state through `OSC 777;noa-agent`. Each agent's hooks only call `"$NOA_BIN" +ctl report`, and neither Noa itself nor `+ctl wait` branches by kind. `scripts/noa-agent-hook.py` is kept so as not to break existing users' configuration, and `+ctl report` does the same thing (write to the controlling terminal; with no terminal, do nothing and succeed).
+
+| kind | Source of `running`/`finished` | Source of approval/answer waits | Evidence |
 |---|---|---|---|
-| claude | フック（`UserPromptSubmit`、`Stop` ほか） | フック（`PermissionRequest`、`Notification`） | リポジトリ内に実装あり（`scripts/noa-agent-hook.py`、`docs/AGENT_WORKFLOW.md`） |
-| codex | フック（`UserPromptSubmit`、`Stop`） | 対応するフックは確認できていない。TUI の通知（OSC 9）が `attention` になるので、それで代用する | 外部記事のみ。有効化の方法と設定場所は版によって違う。未検証（A6） |
-| agy | フック（`PreInvocation`、`Stop`。`.agents/hooks.json`） | 確認できていない。`attention` で代用する | 公式 docs の検索結果のみ。`Stop` をターン終了とみなすのは推測。未検証（A6） |
+| claude | Hooks (`UserPromptSubmit`, `Stop` and others) | Hooks (`PermissionRequest`, `Notification`) | Implemented in the repository (`scripts/noa-agent-hook.py`, `docs/AGENT_WORKFLOW.md`) |
+| codex | Hooks (`UserPromptSubmit`, `Stop`) | No matching hook confirmed. The TUI's notification (OSC 9) becomes `attention`, which stands in | External articles only. How to enable it and where it is configured differ by version. Not verified (A6) |
+| agy | Hooks (`PreInvocation`, `Stop`; `.agents/hooks.json`) | Not confirmed. `attention` stands in | Search results from the official docs only. Treating `Stop` as the end of a turn is a guess. Not verified (A6) |
 
-- `attention` は「通知が出た」であって「承認待ち」の証明ではない（`docs/specs/agent-attention.md` L0）。codex と agy では、wait が `attention` で解けたら、オーケストレーターが `read` で画面を見て判断する。
-- 承認待ちで止まらないようにする手段は 2 つあり、どちらも使うかどうかは人間が決める：各エージェント自身の自動承認フラグを `spawn` の引数で渡す。Noa の auto-approve モードを worker のタブで有効にする。この spec はどちらも既定では有効にしない。
-- 送信の作法（貼り付けの後に `\r`）が 3 種で同じかは未検証（A1）。違った場合は `+ctl send` が `agent.kind` を見て切り替える。分岐を置くのはここだけにする。
-- codex と agy のフックの設定書式はドキュメントに載せていない（版ごとに違い、確認できていないため）。`docs/AGENT_WORKFLOW.md` には「どのイベントで何を呼ぶか」だけを書いた。
+- `attention` means "a notification was shown", not proof of "awaiting approval" (`docs/specs/agent-attention.md` L0). For codex and agy, when a wait ends on `attention`, the orchestrator looks at the screen with `read` and decides.
+- There are two ways to avoid stopping at approval prompts, and a human decides whether to use either: pass each agent's own auto-approve flag in the `spawn` arguments, or enable Noa's auto-approve mode in the worker's tab. This spec enables neither by default.
+- Whether the way of sending (`\r` after the paste) is the same for all three is not verified (A1). If it differs, `+ctl send` switches on `agent.kind`. This is the only place a branch goes.
+- The hook configuration format for codex and agy is not documented (it differs by version and is not confirmed). `docs/AGENT_WORKFLOW.md` says only "which event calls what".
 
-## 採らなかった案
+## Considered but rejected
 
-- サーバー側の `noa.waitFor`：接続ごとに 1 スレッドの同期サーバーで（`crates/noa-ipc/src/lib.rs` の NFR-3）、待機中その接続が塞がる。subscribe と同じことを二重に持つことにもなる。
-- 新メソッド `noa.spawn`：`newTab`/`split` と配置の指定が重複する。AppleScript と形が分かれる。
-- ペイン単位のトークンで「自分の子孫しか触れない」ように閉じ込める：同じユーザーのプロセスは、トークンなしの `osascript` で任意のペインに入力できる（`docs/specs/agent-automation.md` L0）。境界にならないものに `auth.rs` の変更を払わない。この判断が成り立つのは macOS で `macos-applescript` が既定の `true` のときだけである（`docs/CONFIGURATION.md:264`、`crates/noa-app/src/app/applescript.rs:189`）。`false` にした環境と Linux ではトークンが唯一の関門になるので、そこを守りたくなったら再検討する（A5）。
-- サーバー側の run/task オブジェクト（タスクキュー、依存関係、再試行）：呼び出し側は 1 つで、順序はそのシェルスクリプトが持てる。
-- AppleScript を土台にする：macOS 限定で、イベント購読がなくポーリングになる。`wait for` は既に却下済み（`docs/specs/agent-automation.md`「Considered but rejected」）。
-- MCP サーバー：シェルを持つエージェントなら CLI で足りる。
-- 画面の文言から承認待ちを推定する（auto-approve の検出器 `crates/noa-app/src/auto_approve.rs:45-54` には codex と agy のシグネチャがある）：今は auto-approve が有効なタブでしか走らない（`crates/noa-app/src/io_thread/auto_approve.rs:54`）。全 worker で走らせると pty の feed ごとに画面を走査することになり、出力スループットの保証（`docs/positioning.md` Guardrails）に触れる。`attention` で足りないと分かってから検討する。
-- Noa がタスクに合うエージェントを選ぶ：選ぶ基準を持っているのはオーケストレーターで、Noa ではない。
-- エージェントごとの起動プロファイル（`--agent codex` のような別名）：`-- codex …` と書けば済む。
+- A server-side `noa.waitFor`: in a synchronous server with one thread per connection (NFR-3 in `crates/noa-ipc/src/lib.rs`), that connection is blocked while waiting. It would also duplicate what subscribe does.
+- A new method `noa.spawn`: its placement arguments overlap with `newTab`/`split`. Its shape would diverge from AppleScript.
+- Confining with per-pane tokens so that "only your own descendants can be touched": a process of the same user can type into any pane with `osascript` and no token (`docs/specs/agent-automation.md` L0). Changes to `auth.rs` are not worth paying for something that is not a boundary. This judgment holds only on macOS with `macos-applescript` at its default `true` (`docs/CONFIGURATION.md:264`, `crates/noa-app/src/app/applescript.rs:189`). In environments set to `false`, and on Linux, the token is the only gate, so reconsider if that needs protecting (A5).
+- Server-side run/task objects (task queue, dependencies, retries): there is one caller, and the shell script can hold the order.
+- Building on AppleScript: macOS only, and with no event subscription it would poll. `wait for` was already rejected (`docs/specs/agent-automation.md`, "Considered but rejected").
+- An MCP server: for an agent with a shell, the CLI is enough.
+- Inferring approval prompts from screen text (auto-approve's detector `crates/noa-app/src/auto_approve.rs:45-54` has signatures for codex and agy): today it runs only in tabs with auto-approve enabled (`crates/noa-app/src/io_thread/auto_approve.rs:54`). Running it for every worker would scan the screen on every pty feed, which touches the output throughput guarantee (`docs/positioning.md` Guardrails). Consider it once `attention` proves insufficient.
+- Noa choosing the agent that fits a task: the orchestrator holds the criteria for choosing, not Noa.
+- Per-agent launch profiles (aliases such as `--agent codex`): writing `-- codex …` is enough.
 
 ## Scope
 
-- In：D1〜D4 と D6、`docs/api/noa-server-protocol.md` と `docs/AGENT_WORKFLOW.md` の更新、smoke スクリプト。
-- Out：UI（D5 の別 spec）、codex と agy のフック設定の自動書き込み（設定例をドキュメントに載せるだけ）、worker の自動承認の既定有効化、`parent`/`label` のセッション復元、LAN 越しのオーケストレーション、`server-enable` の既定値の変更、mutation の冪等キー（at-least-once のまま。`spawn` をタイムアウト後に再送すると二重起動しうる）。
+- In: D1–D4 and D6, updates to `docs/api/noa-server-protocol.md` and `docs/AGENT_WORKFLOW.md`, the smoke script.
+- Out: the UI (D5's separate spec), automatically writing hook configuration for codex and agy (configuration examples only go in the docs), enabling auto-approve for workers by default, session restore of `parent`/`label`, orchestration over a LAN, changing the default of `server-enable`, idempotency keys for mutations (stays at-least-once; resending `spawn` after a timeout can start two).
 
-## 前提と反証
+## Assumptions and falsification
 
-| ID | 前提 | 安く確かめる方法 | 外れたら |
+| ID | Assumption | Cheap way to check | If it fails |
 |---|---|---|---|
-| A1（要） | claude / codex / agy のそれぞれで、フックが毎ターン `running`→`finished` を出し、`sendText` の貼り付け + `\r` でプロンプトが送信される | 今の main で各エージェントのペインに `noa.sendText` を 2 回送り、サイドバーの状態が 2 往復するか見る（codex と agy はフックから `printf` で OSC 777 を出す仮設定で試す） | そのエージェントでは D3 の `seq` 待機が成り立たない。出力の静止検出を足すか、対象から外す |
-| A2 | `focus:false` で元の focus に戻しても、IME の変換中や分割アニメーションを壊さない | 変換中に `noa.split` を送る | `focus` を外し、focus を奪わない分割経路を別に作る |
-| A3 | `agent`/`exit` の変化だけでも `stateChanged` が遅延なく出る | `card_to_panel` の差分テストに 1 ケース足す | 配信の間引き条件を直す |
-| A4 | ペインの子プロセスの PATH に `noa` が入っていない | 実機のペインで `command -v noa` | 入っていれば `NOA_BIN` は要らない |
-| A5 | トークンなしの `osascript` で任意ペインに入力できる（spec とゲートのコードを読んだだけで、実行はしていない） | `osascript -e 'tell application "Noa" to input text …'` を別ペインに向けて実行 | 閉じ込め案を再検討する |
-| A6 | codex と agy に、プロンプト送信時とターン終了時に外部コマンドを呼ぶフックがある | 手元の版で公式 docs と `/hooks` を確認する | そのエージェントは `exit` と `attention` でしか待てない |
+| A1 (key) | For each of claude / codex / agy, the hooks emit `running`→`finished` every turn, and a `sendText` paste + `\r` submits the prompt | On current main, send `noa.sendText` twice to each agent's pane and see whether the sidebar state goes back and forth twice (try codex and agy with a temporary configuration whose hook emits OSC 777 with `printf`) | D3's `seq` wait does not hold for that agent. Add output-idle detection, or drop it from scope |
+| A2 | Restoring the original focus with `focus:false` does not break an IME composition or the split animation | Send `noa.split` during a composition | Drop `focus`, and build a separate split path that does not take focus |
+| A3 | `stateChanged` is sent without delay even when only `agent`/`exit` change | Add one case to the `card_to_panel` diff test | Fix the delivery's throttling condition |
+| A4 | `noa` is not on the PATH of a pane's child process | `command -v noa` in a pane on a real machine | If it is, `NOA_BIN` is not needed |
+| A5 | `osascript` with no token can type into any pane (from reading the spec and the gate's code only; not run) | Run `osascript -e 'tell application "Noa" to input text …'` aimed at another pane | Reconsider the confinement option |
+| A6 | codex and agy have hooks that call an external command when a prompt is submitted and when a turn ends | Check the official docs and `/hooks` for the installed version | That agent can be waited on only through `exit` and `attention` |
 
-A1 と A6 は未検証。この設計全体がこの 2 つに乗っている。
+A1 and A6 are not verified. The whole design rests on these two.
 
-## 実装記録（2026-11-16）
+## Implementation record (2026-11-16)
 
-- `noa-ipc`：`Panel` の 5 フィールド、`SpawnConfig`/`SpawnParams`/`SplitPlacement`、`IpcBackend::spawn`、`Client` の `spawn_tab`/`spawn_split`/`send_text`/`subscribe`/`next_notification`。テストは `crates/noa-ipc/tests/orchestration_tests.rs`。
-- `noa-app`：`execute_ipc_spawn` と自動配置（`crates/noa-app/src/app/ipc.rs`）、`Panel` への写像（`crates/noa-app/src/ipc_bridge.rs`）、`SessionCard.agent_seq`、`NOA_BIN`、`Noa +ctl`（`crates/noa-app/src/ctl.rs`）。
-- `noa-pty`：`Pty::spawn_env`（surface id を `Surface` に残すため）。
-- 自動テストで確かめたこと：引数解析、待機条件（古い報告で解けない、`--after`、attention、exit・消滅）、自動配置の順序、`Panel` への写像、サーバーの振り分けとスコープ、通知のバッファ。
-- 確かめていないこと：GUI 上での実際の分割・focus 復元（A2）、各エージェントでの送信と報告（A1・A6）。`scripts/agent-orchestration-smoke.sh` を Noa のペインで実行すると、エージェントなしで spawn → exit 待ち → read → report 待ち → close → ガードまでを確かめられる。
+- `noa-ipc`: `Panel`'s 5 fields, `SpawnConfig`/`SpawnParams`/`SplitPlacement`, `IpcBackend::spawn`, `Client`'s `spawn_tab`/`spawn_split`/`send_text`/`subscribe`/`next_notification`. Tests are in `crates/noa-ipc/tests/orchestration_tests.rs`.
+- `noa-app`: `execute_ipc_spawn` and automatic placement (`crates/noa-app/src/app/ipc.rs`), the mapping to `Panel` (`crates/noa-app/src/ipc_bridge.rs`), `SessionCard.agent_seq`, `NOA_BIN`, `Noa +ctl` (`crates/noa-app/src/ctl.rs`).
+- `noa-pty`: `Pty::spawn_env` (to keep the surface id on the `Surface`).
+- Checked by automated tests: argument parsing, wait conditions (not ended by an old report, `--after`, attention, exit and vanishing), the order of automatic placement, the mapping to `Panel`, the server's routing and scopes, notification buffering.
+- Not checked: actual splitting and focus restore in the GUI (A2), sending and reporting with each agent (A1, A6). Running `scripts/agent-orchestration-smoke.sh` in a Noa pane checks, without agents, spawn → wait for exit → read → wait for a report → close → guards.
 
-次のフェーズ：UI（D5）の spec を起こす。
+Next phase: write the spec for the UI (D5).

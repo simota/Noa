@@ -285,6 +285,8 @@ mod tests {
         card.agent_status = Some(noa_grid::AgentStatus {
             state: noa_grid::AgentState::Permission,
             detail: String::new(),
+            blocked: None,
+            app: None,
         });
         let pane = Pane::from_card(id, &card);
         assert!(pane.attention);

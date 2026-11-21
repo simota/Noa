@@ -1,95 +1,95 @@
-# フローティングペイン
+# Floating panes
 
 | | |
 |---|---|
 | slug | floating-panes |
 | status | locked |
 | owner | simota |
-| reader | 実装者（何を作り、何を作らないか、どう受け入れ判定するかを決める） |
+| reader | The implementer (decides what to build, what not to build, and how acceptance is judged) |
 | as-of | 2026-11-10 |
-| review trigger | `SplitTree`、レンダラの描画計画、セッションスキーマ、`AgentState` のいずれかが変わったとき |
+| review trigger | When any of `SplitTree`, the renderer's draw plan, the session schema or `AgentState` changes |
 | depth | standard |
 
 ## L0: Vision
 
-- Problem: 分割ペインは画面を等分に切るため、エージェントを脇で走らせたり出力を横目で見たりするだけの端末のために、レイアウト全体を崩す必要がある。Scratch Terminal は重ねて出せるが、フォーカスを外すと pty ごと破棄され、位置は固定、サイズは実行中に変えられず、アプリ全体で1枚きり（`docs/specs/scratch-terminal.md` R4/R5、`crates/noa-app/src/app.rs:396`）。
-- Audience: noa で複数のエージェント CLI（Claude Code、codex）を並走させる利用者。
+- Problem: Split panes cut the screen into equal parts, so a terminal that only needs to run an agent on the side or be watched out of the corner of the eye forces the whole layout to be rearranged. The Scratch Terminal can be shown on top, but when it loses focus it is discarded together with its pty, its position is fixed, its size cannot be changed while it runs, and there is only one for the whole app (`docs/specs/scratch-terminal.md` R4/R5, `crates/noa-app/src/app.rs:396`).
+- Audience: Users who run several agent CLIs (Claude Code, codex) side by side in noa.
 - Job to be done
-  - 主: 分割レイアウトを変えずにエージェントを小窓で走らせ、進捗を見守り、必要なときだけ広げる。
-  - 副: `htop` やログを流しっぱなしにして横目で監視する。
-- Success definition: 分割レイアウトを一切変更せずにエージェントを起動でき（AC-001）、畳んだ状態のままエージェントの承認待ちに気づけ（AC-016）、1操作で全面表示と元の配置を往復できる（AC-013）。
-- Existing assets & constraints: as-of main `c079459`。パスは `crates/` 起点。
-  - Scratch Terminal は別 OS ウィンドウ実装（`noa-app/src/app/scratch_terminal.rs:245`）。流用できるのは pty 生成 `spawn_pane_surface`（`noa-app/src/app/lifecycle.rs:1069`）のみ。
-  - 描画は1ウィンドウ1サーフェスで、ペインはシザー分割（`noa-render/src/renderer/mod.rs:900`、`noa-render/src/draw_plan.rs:74`）。重ね描きと z順の仕組みはない。
-  - macOS ではネイティブタブ1枚が `WindowState` 1つと描画面1つを持つ（`noa-app/src/app/state.rs:271`）。ウィンドウアンカーのフロートは表示中のタブの描画面に描くことになる。
-  - ペインごとのタイトル帯は存在しない。ウィンドウ内クロームは macOS=AppKit カード（`noa-app/src/macos_overlay/`、表示専用）、それ以外=wgpu カード（`noa-app/src/app/sidebar/palette.rs`）。
-  - 汎用ドラッグ機構はない。`SplitResizeDrag`（`noa-app/src/split_tree/tree/resize.rs:11`）と `SidebarDrag` が個別にある。
-  - `PaneId` はプロセス内でのみ一意で、再起動をまたがない。`MAX_PANES_PER_TAB`、`DIVIDER_HIT_ZONE_PX` は `noa-app/src/split_tree/tree/types.rs`。
-  - ヒットテスト `hit_test`（`noa-app/src/split_tree/tree/hit_test.rs:11`）は `Pane` / `Divider` を返す。
-  - セッションスキーマは `noa-app/src/session.rs`（`SESSION_VERSION = 3`）。`parse` は対応範囲外のバージョンに `None` を返し、セッションなしで起動する（`session.rs:331`）。
-  - サイドバーのカードは分割ペイン1枚につき1枚（`session_card_id(window_id, pane_id)`、`noa-app/src/app/sidebar/state.rs:40`）。
-  - ペイン列挙は2系統: `window_order` 経由（セッション、scrollback、サイドバー、Overview、AppleScript）と全 `windows` 経由（AX、IPC、タイマー）。
-  - コマンドは `AppCommand`（`noa-app/src/commands/command.rs:10`）、アクション名はドット区切り、`keybind =` で再割り当て可能（`noa-config/src/parser/overrides.rs:520`）。`cmd+shift+f` は既存テストが予約済みとして未割り当てを検証している（`noa-app/src/commands/tests.rs:170`）。
-  - 実行中プログラムがあるときの閉じる確認は、`noa-app/src/app/helpers/lifecycle.rs:30` の `close_confirm_message`。
-  - エージェント状態は `noa-grid/src/osc.rs:370` の `AgentState { Running, Permission, Input, Finished, Error }`。OSC 7501 では `state=blocked:kind=permission` が `Permission`、`state=blocked` が `Input` になる（`noa-grid/src/osc.rs:475`）。
+  - Primary: Run an agent in a small window without changing the split layout, watch its progress, and enlarge it only when needed.
+  - Secondary: Leave `htop` or a log running and monitor it out of the corner of the eye.
+- Success definition: An agent can be started without changing the split layout at all (AC-001), the agent's wait for approval can be noticed while the float stays collapsed (AC-016), and one operation switches between full-screen display and the original arrangement (AC-013).
+- Existing assets & constraints: as-of main `c079459`. Paths start from `crates/`.
+  - The Scratch Terminal is implemented as a separate OS window (`noa-app/src/app/scratch_terminal.rs:245`). The only thing that can be reused is the pty creation `spawn_pane_surface` (`noa-app/src/app/lifecycle.rs:1069`).
+  - Drawing is one surface per window, and panes are scissor-split (`noa-render/src/renderer/mod.rs:900`, `noa-render/src/draw_plan.rs:74`). There is no mechanism for overdraw or z-order.
+  - On macOS, one native tab owns one `WindowState` and one drawing surface (`noa-app/src/app/state.rs:271`). A window-anchored float will be drawn on the drawing surface of the visible tab.
+  - There is no per-pane title band. In-window chrome is an AppKit card on macOS (`noa-app/src/macos_overlay/`, display only) and a wgpu card elsewhere (`noa-app/src/app/sidebar/palette.rs`).
+  - There is no general drag mechanism. `SplitResizeDrag` (`noa-app/src/split_tree/tree/resize.rs:11`) and `SidebarDrag` exist separately.
+  - `PaneId` is unique only within a process and does not span restarts. `MAX_PANES_PER_TAB` and `DIVIDER_HIT_ZONE_PX` are in `noa-app/src/split_tree/tree/types.rs`.
+  - The hit test `hit_test` (`noa-app/src/split_tree/tree/hit_test.rs:11`) returns `Pane` / `Divider`.
+  - The session schema is `noa-app/src/session.rs` (`SESSION_VERSION = 3`). `parse` returns `None` for a version outside the supported range and starts without a session (`session.rs:331`).
+  - Sidebar cards are one per split pane (`session_card_id(window_id, pane_id)`, `noa-app/src/app/sidebar/state.rs:40`).
+  - Pane enumeration has two routes: via `window_order` (session, scrollback, sidebar, Overview, AppleScript) and via all `windows` (AX, IPC, timers).
+  - Commands are `AppCommand` (`noa-app/src/commands/command.rs:10`); action names are dot-separated and can be reassigned with `keybind =` (`noa-config/src/parser/overrides.rs:520`). An existing test verifies that `cmd+shift+f` is reserved and unassigned (`noa-app/src/commands/tests.rs:170`).
+  - The close confirmation when a program is running is `close_confirm_message` in `noa-app/src/app/helpers/lifecycle.rs:30`.
+  - Agent state is `AgentState { Running, Permission, Input, Finished, Error }` at `noa-grid/src/osc.rs:370`. In OSC 7501, `state=blocked:kind=permission` becomes `Permission` and `state=blocked` becomes `Input` (`noa-grid/src/osc.rs:475`).
 
 ## Glossary
 
 | Term | Definition | Not to be called | Code identifier |
 |------|-----------|------------------|-----------------|
-| フロート | 分割レイアウトの上に重ねて置く、独自の pty を持つ端末ペイン | ポップアップ、scratch、オーバーレイ | TBD(実装者)、OQ-1 |
-| 分割ペイン | `SplitTree` の葉である既存のペイン | 通常ペイン、下のペイン | `PaneId` / `SplitTree` |
-| アンカー | フロートが所属し、可動範囲・表示条件・寿命を決める対象。ペイン／タブ／ウィンドウの3種 | 親、スコープ | TBD(実装者)、OQ-1 |
-| アンカー矩形 | アンカーが画面上に占めるピクセル矩形。ペイン=その分割ペインの矩形、タブ=そのタブの分割領域全体、ウィンドウ=端末領域全体（タブバーとサイドバーを除く） | 親領域 | — |
-| 復帰先ペイン | そのウィンドウで表示中のタブの、最後にフォーカスを持っていた分割ペイン | 直近のペイン、下のペイン | `WindowState.focused_pane` |
-| タイトル帯 | フロート上端の、高さセル1行分の帯 | ヘッダ、タイトルバー | — |
-| 内容領域 | フロートからタイトル帯を除いた、端末を描く部分 | 本体 | — |
-| 折りたたみ | フロートがタイトル帯だけになった状態 | 最小化、隠す | — |
-| 最大化 | フロートがアンカー矩形いっぱいに広がった状態 | ズーム、フルスクリーン | — |
-| 非表示 | 表示条件（L2.3）を満たさず描かれていない状態。フロートは存在し pty は動く | 折りたたみ、破棄 | — |
-| attention 表示 | タイトル帯の背景が、同じ `AgentState` の分割ペインのサイドバーカードが attention 時に使う色になること。消える条件もそのカードと同じ | 通知、バッジ | — |
+| Float | A terminal pane with its own pty, placed on top of the split layout | popup, scratch, overlay | TBD(implementer), OQ-1 |
+| Split pane | An existing pane that is a leaf of `SplitTree` | normal pane, underlying pane | `PaneId` / `SplitTree` |
+| Anchor | The target a float belongs to, which determines its movable range, display condition and lifetime. Three kinds: pane / tab / window | parent, scope | TBD(implementer), OQ-1 |
+| Anchor rect | The pixel rectangle the anchor occupies on screen. Pane = that split pane's rectangle; tab = the whole split area of that tab; window = the whole terminal area (excluding the tab bar and sidebar) | parent area | — |
+| Return pane | The split pane in the window's visible tab that last had focus | most recent pane, underlying pane | `WindowState.focused_pane` |
+| Title band | The band at the top edge of a float, one cell row high | header, title bar | — |
+| Content area | The part of a float other than the title band, where the terminal is drawn | body | — |
+| Collapse | The state where a float is only a title band | minimize, hide | — |
+| Maximize | The state where a float fills the anchor rect | zoom, full screen | — |
+| Hidden | The state of not being drawn because the display condition (L2.3) is not met. The float exists and its pty runs | collapse, discard | — |
+| Attention display | The title band's background takes the colour that the sidebar card of a split pane with the same `AgentState` uses when in attention. It is cleared under the same conditions as that card | notification, badge | — |
 
 ## L1: Requirements
 
-`Source` の `T-n` は末尾「対話の記録」の行を指す。
+`T-n` in `Source` points to a row in the "Dialogue record" at the end.
 
 ### Functional (`REQ-n`)
 
 | ID | Requirement | Priority | Source |
 |----|-------------|----------|--------|
-| REQ-001 | `float.new` は復帰先ペインをアンカーとするフロートを1枚作り、フォーカスを移す（フロートにフォーカスがあるときも同じ）。フロート全体（タイトル帯を含む）の大きさは「内容領域 80×24 セル＋タイトル帯」で、アンカー矩形の各辺 90% を超える辺はそこまで縮め、グリッドは内容領域に収まる最大の列数×行数にする。位置は、アンカー矩形の右下隅に接する位置から、左と上へ「タイトル帯の高さ×アンカー矩形と重なって表示されているフロートの数（アンカーの種別を問わない）」ずらし、クランプする。cwd はアンカーの分割ペインから継承する | CRITICAL | elicited T-3, T-11 / ratified T-6 (ASSUME-1, 3, 7), T-8 (ASSUME-18) / ASSUME-21, 28 |
-| REQ-002 | フロートは常にタイトル帯を表示する。左から: アンカー種別アイコン、タイトル（分割ペインと同じタイトル規則）、エージェント状態、最大化ボタン、折りたたみボタン、閉じるボタン | CRITICAL | elicited T-3 / T-6 (最大化ボタン) |
-| REQ-003 | タイトル帯のドラッグでフロートを移動する。フロート全体がアンカー矩形の内側に収まる位置へ、4辺すべてでクランプする。折りたたみ中はタイトル帯の矩形でクランプする | CRITICAL | elicited T-3 / ASSUME-22 |
-| REQ-004 | フロートの4辺と4隅（内外 `DIVIDER_HIT_ZONE_PX`）のドラッグでリサイズする。下限は内容領域 20×3 セル、上限はアンカー矩形。グリッドは内容領域に収まる最大の列数×行数とし、グリッドが変わったら pty にウィンドウサイズを通知する。フロートのヒット領域（外側のヒットゾーンを含む）は、分割線と、より背面のフロートに優先する。折りたたみ中と最大化中はリサイズを受け付けない | CRITICAL | elicited T-3 / ratified T-6 (ASSUME-9) / ASSUME-22, 26 |
-| REQ-005 | アンカー種別ごとの可動範囲・表示条件・寿命・追従は L2.3 の表に従う。非表示の間も pty の読み取りと端末状態の更新は続く | CRITICAL | elicited T-3 |
-| REQ-006 | アンカー種別アイコンのクリックまたは `float.cycle-anchor` で、ペイン→タブ→ウィンドウ→ペインの順に切り替える。切替時は画面上の位置とサイズを保ち、新しいアンカー矩形に収まらない分はサイズを縮めてからクランプする。ペインへ切り替えるときのアンカーは、通常状態の矩形の中心点の下にある分割ペイン（折りたたみ中・最大化中も通常状態の矩形で判定する）。切り替えたフロートは新しい層の最前面になる。最大化中に切り替えると最大化を保って新しいアンカー矩形いっぱいになり、保持している通常状態の矩形にも同じ「画面上の位置を保ち、縮めてからクランプ」を適用する | CRITICAL | elicited T-3 / ratified T-8 (ASSUME-12) / ASSUME-23, 25 |
-| REQ-007 | 位置とサイズはアンカー矩形に対する比率で保持する。アンカー矩形が変わったら比率から再計算し、下限（REQ-004）を適用してからクランプする。この再計算は保持している比率を書き換えない（比率を変えるのは利用者の移動・リサイズ・アンカー切替だけ）。アンカー矩形が下限サイズのフロートを収められない間、そのフロートは非表示になる | CRITICAL | elicited T-3 / ratified T-8 (ASSUME-13) / ASSUME-27 |
-| REQ-008 | 重なり順は層で固定する（上から: ウィンドウアンカー、タブアンカー、ペインアンカー）。同じ層の中では、最後にクリックまたはフォーカスしたフロートが最前面。コマンドパレット、確認ダイアログ、Overview はすべてのフロートより上に出る | CRITICAL | elicited T-3 |
-| REQ-009 | 折りたたみボタン、タイトル帯のダブルクリック、`float.toggle-collapse` のそれぞれで折りたたみと展開を切り替える。折りたたむとタイトル帯だけが左上を固定して残り、幅は直前の幅を保つ。折りたたんだフロートはキー入力を受けない。フォーカスを持つフロートを折りたたむとフォーカスは復帰先ペインへ移り、フォーカスを持たないフロートを折りたたんでもフォーカスは動かない。展開すると折りたたむ直前の状態（通常または最大化）に戻り、フォーカスを得る。展開後の矩形がアンカー矩形に収まらなければクランプする | CRITICAL | elicited T-5 / ratified T-6 (ASSUME-6), T-8 (ASSUME-14) / ASSUME-22, 24 |
-| REQ-010 | 最大化ボタンまたは `float.toggle-maximize` で、フロートをアンカー矩形いっぱいに広げる。タイトル帯は残り、内容領域はその下の全域になる。もう一度実行すると最大化前の位置とサイズに戻る。最大化中は移動とリサイズを受け付けない。折りたたみ中は最大化操作を受け付けない | HIGH | elicited T-6 (B1) / ratified T-8 (ASSUME-14) / ASSUME-22 |
-| REQ-011 | フロートの内容領域またはタイトル帯をクリックすると、そのフロートが層の最前面になりフォーカスを得る（折りたたみ中のタイトル帯クリックは最前面にするだけ）。フロートの外をクリックするとその位置の分割ペインにフォーカスが移る。巡回の対象は「表示中で折りたたまれていないフロート」で、順序は作成順。`float.focus-next` / `float.focus-previous` は対象を循環し、分割ペインから実行すると最初／最後の対象へ移る。`float.toggle-focus` は、分割ペインにフォーカスがあれば対象のうち最後にフォーカスしたもの（フォーカス履歴がなければ最後に作成したもの）へ、フロートにフォーカスがあれば復帰先ペインへ移す。フロートのヒット領域で起きたマウスイベント（クリック、ホイール、移動）は下の分割ペインへ届かない | CRITICAL | ratified T-6 (ASSUME-7) / ASSUME-24, 26 |
-| REQ-012 | 閉じるボタン、またはフロートにフォーカスがある状態の `tab.close` は、そのフロートだけを閉じる。実行中のプログラムがあれば分割ペインを閉じるときと同じ確認を出す。シェルが終了したフロートは、設定を含め分割ペインと同じ扱いをする。閉じたあとのフォーカスは復帰先ペイン | CRITICAL | ratified T-6 (ASSUME-4) |
-| REQ-013 | アンカーが閉じられると、そこに属するフロートも閉じ、pty を解放する。分割ペイン・タブ・ウィンドウ・アプリを閉じる確認の「実行中プログラム数」には、一緒に閉じるフロートの分を含める。例外：ボードに収納したワーカー（agent-orchestration D10）は、親のペインが残れば親へ付け替え、確認の数にも含めない | CRITICAL | elicited T-3 / ratified T-8 (ASSUME-20) |
-| REQ-014 | タイトル帯は、フロート内のエージェントの `AgentState` を `AgentState::label` の文字列で表示する。`AgentState::needs_attention` が真の状態（`Permission`、`Input`、`Error`）ではタイトル帯を attention 表示にする。折りたたまれていても自動では展開しない | CRITICAL | elicited T-5, T-6 (A1) / ASSUME-29 |
-| REQ-015 | 自動承認モードは、フロートを分割ペインと同じ条件で対象にし、承認入力をそのフロートの pty へ書く | HIGH | elicited T-5（範囲案）→ T-6 (C1) で承認 |
-| REQ-016 | フロート1枚につきサイドバーのカードを1枚持ち、フロートであることを示す印が付く。カードの選択と `NextNotification` は、そのフロートを表示できる状態にして（ウィンドウを前面にする、タブを切り替える、他の分割ペインのズームを解除する、折りたたみを展開する）フォーカスする。アンカー矩形が下限未満でフロートが非表示のままのときは、アンカーの分割ペイン（タブ・ウィンドウアンカーでは復帰先ペイン）にフォーカスする | HIGH | elicited T-5（範囲案）→ T-6 (C1) で承認 / ratified T-8 (ASSUME-15) / ASSUME-30 |
-| REQ-017 | `window-save-state` が有効なとき、フロートごとに比率での位置とサイズ、折りたたみ状態、cwd を保存し、起動時に復元する。記録の置き場所でアンカーを表す（ペインアンカーはその分割ペインの葉、タブアンカーはタブ、ウィンドウアンカーはウィンドウの下）。各記録はウィンドウ内での作成順の通し番号と重なり順を持ち、復元後の作成順（巡回の順序）と重なり順は保存前と同じになる。最大化中のフロートは最大化前の位置とサイズを通常状態として保存し、最大化から折りたたんだフロートは「折りたたみ、展開先は通常」として保存する。復元後のフォーカスは分割ペインにある。シェルは新規起動。`scrollback-persist = tail` でもフロートの内容は書かない | HIGH | ratified T-6 (ASSUME-8) / ASSUME-31 |
-| REQ-018 | L2.2 の7アクションを `AppCommand` として追加し、`keybind =` で割り当て可能にする。既定のコードは L2.2 の表のとおりで、既存の既定および予約済みコードと衝突しない | HIGH | ratified T-6 (ASSUME-5) / ASSUME-32 |
-| REQ-019 | 1つのアンカーに属するフロートは最大 8 枚（例外：ボードに収納するワーカーはボード 1 枚に 20 まで。agent-orchestration D12）。上限に達したアンカーへの `float.new` は何も作らず、ウィンドウ内トーストで上限到達を伝える。切替先のアンカーが上限に達している `float.cycle-anchor` は種別を変えず、同じトーストを出す。フロートは `MAX_PANES_PER_TAB` に数えず、分割ペインの作成可否に影響しない | HIGH | ratified T-6 (ASSUME-2), T-8 (ASSUME-10) |
-| REQ-020 | フロートにフォーカスがある間、アクション名が `split.` で始まるすべてのアクションは何もしない | MEDIUM | ratified T-8 (ASSUME-17) |
-| REQ-021 | Scratch Terminal と Quick Terminal のウィンドウでは `float.new` は何もしない | MEDIUM | ratified T-8 (ASSUME-17) |
-| REQ-022 | フロートの背景は、ウィンドウの透過設定にかかわらず、下にある分割ペインや他のフロートの内容を透かさない | HIGH | ratified T-8 (ASSUME-19) |
-| REQ-023 | フロートは AppleScript、AX のペイン列挙と Overview のタイルに現れない。IPC のペイン列挙と出力にも現れない。ただしオーケストレーターが spawn したワーカーの float（`parentPaneId` あり）だけは IPC で列挙し、読み取れる（2026-11-17 改定、agent-orchestration D8）。アンカー（`paneId`）と親（`parentPaneId`）は違ってよい（D10：ボードに収納） | MEDIUM | ratified T-8 (ASSUME-16)、owner により改定 2026-11-17 |
-| REQ-024 | フォーカスを持つフロートが非表示になると（タブ切替、アンカー矩形が下限未満）、フォーカスは復帰先ペインへ移る。再び表示されても自動ではフォーカスを戻さない | HIGH | ASSUME-24 |
+| REQ-001 | `float.new` creates one float anchored to the return pane and moves focus to it (the same when a float has focus). The size of the whole float (including the title band) is "content area 80×24 cells + title band"; any side that exceeds 90% of the matching side of the anchor rect is shrunk to that, and the grid is the largest columns × rows that fit in the content area. The position starts at the point touching the bottom-right corner of the anchor rect and is shifted left and up by "the title band height × the number of floats shown overlapping the anchor rect (regardless of anchor kind)", then clamped. The cwd is inherited from the anchor's split pane | CRITICAL | elicited T-3, T-11 / ratified T-6 (ASSUME-1, 3, 7), T-8 (ASSUME-18) / ASSUME-21, 28 |
+| REQ-002 | A float always shows a title band. From the left: anchor kind icon, title (same title rules as split panes), agent state, maximize button, collapse button, close button | CRITICAL | elicited T-3 / T-6 (maximize button) |
+| REQ-003 | Dragging the title band moves the float. It is clamped on all four sides to a position where the whole float fits inside the anchor rect. While collapsed, it is clamped by the title band's rectangle | CRITICAL | elicited T-3 / ASSUME-22 |
+| REQ-004 | Dragging the four edges and four corners of a float (`DIVIDER_HIT_ZONE_PX` inside and outside) resizes it. The lower limit is a content area of 20×3 cells and the upper limit is the anchor rect. The grid is the largest columns × rows that fit in the content area, and when the grid changes the pty is notified of the window size. A float's hit area (including the outer hit zone) takes priority over dividers and over floats further back. Resizing is not accepted while collapsed or maximized | CRITICAL | elicited T-3 / ratified T-6 (ASSUME-9) / ASSUME-22, 26 |
+| REQ-005 | Movable range, display condition, lifetime and following for each anchor kind follow the table in L2.3. While hidden, pty reading and terminal state updates continue | CRITICAL | elicited T-3 |
+| REQ-006 | Clicking the anchor kind icon or running `float.cycle-anchor` switches in the order pane → tab → window → pane. On switching, the on-screen position and size are kept, and any part that does not fit in the new anchor rect is shrunk first and then clamped. When switching to pane, the anchor is the split pane under the centre point of the normal-state rectangle (collapsed and maximized floats are also judged by the normal-state rectangle). The switched float becomes the front-most of the new layer. Switching while maximized keeps the maximized state and fills the new anchor rect, and the same "keep the on-screen position, shrink, then clamp" is also applied to the retained normal-state rectangle | CRITICAL | elicited T-3 / ratified T-8 (ASSUME-12) / ASSUME-23, 25 |
+| REQ-007 | Position and size are held as ratios to the anchor rect. When the anchor rect changes, they are recomputed from the ratios, the lower limit (REQ-004) is applied, and then they are clamped. This recomputation does not rewrite the held ratios (only the user's move, resize or anchor switch changes the ratios). While the anchor rect cannot hold a float of the lower-limit size, that float is hidden | CRITICAL | elicited T-3 / ratified T-8 (ASSUME-13) / ASSUME-27 |
+| REQ-008 | Stacking order is fixed by layer (from top: window anchor, tab anchor, pane anchor). Within the same layer, the float last clicked or focused is front-most. The command palette, confirmation dialogs and Overview all appear above every float | CRITICAL | elicited T-3 |
+| REQ-009 | The collapse button, a double-click on the title band, and `float.toggle-collapse` each toggle collapse and expand. On collapse only the title band remains with its top-left fixed, and the width keeps the previous width. A collapsed float receives no key input. Collapsing the float that has focus moves focus to the return pane, and collapsing a float that does not have focus does not move focus. Expanding returns to the state just before collapse (normal or maximized) and gains focus. If the rectangle after expansion does not fit in the anchor rect, it is clamped | CRITICAL | elicited T-5 / ratified T-6 (ASSUME-6), T-8 (ASSUME-14) / ASSUME-22, 24 |
+| REQ-010 | The maximize button or `float.toggle-maximize` expands the float to fill the anchor rect. The title band remains, and the content area is the whole area beneath it. Running it again returns to the position and size before maximizing. Move and resize are not accepted while maximized. The maximize operation is not accepted while collapsed | HIGH | elicited T-6 (B1) / ratified T-8 (ASSUME-14) / ASSUME-22 |
+| REQ-011 | Clicking a float's content area or title band brings that float to the front of its layer and gives it focus (clicking the title band of a collapsed float only brings it to the front). Clicking outside a float moves focus to the split pane at that position. The cycle targets are "floats that are shown and not collapsed", in creation order. `float.focus-next` / `float.focus-previous` cycle through the targets, and when run from a split pane they move to the first / last target. `float.toggle-focus` moves to the most recently focused target when a split pane has focus (the most recently created one if there is no focus history), and to the return pane when a float has focus. Mouse events (click, wheel, move) that occur in a float's hit area do not reach the split pane underneath | CRITICAL | ratified T-6 (ASSUME-7) / ASSUME-24, 26 |
+| REQ-012 | The close button, or `tab.close` while a float has focus, closes only that float. If a program is running, the same confirmation as when closing a split pane is shown. A float whose shell has exited is handled the same as a split pane, including the settings. Focus after closing is the return pane | CRITICAL | ratified T-6 (ASSUME-4) |
+| REQ-013 | When an anchor is closed, the floats belonging to it are also closed and their ptys are released. The "number of running programs" in the confirmation for closing a split pane, tab, window or the app includes the floats that will be closed together. Exception: a worker stowed on the board (agent-orchestration D10) is re-attached to its parent if the parent pane remains, and is not counted in the confirmation either | CRITICAL | elicited T-3 / ratified T-8 (ASSUME-20) |
+| REQ-014 | The title band shows the `AgentState` of the agent inside the float as the string from `AgentState::label`. For states where `AgentState::needs_attention` is true (`Permission`, `Input`, `Error`), the title band is put in attention display. It does not expand automatically even when collapsed | CRITICAL | elicited T-5, T-6 (A1) / ASSUME-29 |
+| REQ-015 | Auto-approve mode targets floats under the same conditions as split panes, and writes the approval input to that float's pty | HIGH | elicited T-5 (scope proposal) → approved at T-6 (C1) |
+| REQ-016 | Each float has one sidebar card, marked as a float. Selecting the card and `NextNotification` make that float displayable (bring the window to the front, switch the tab, release the zoom of other split panes, expand the collapse) and focus it. When the anchor rect is below the lower limit and the float stays hidden, focus goes to the anchor's split pane (the return pane for tab and window anchors) | HIGH | elicited T-5 (scope proposal) → approved at T-6 (C1) / ratified T-8 (ASSUME-15) / ASSUME-30 |
+| REQ-017 | When `window-save-state` is enabled, each float's ratio-based position and size, collapsed state and cwd are saved and restored at startup. The place a record is stored represents the anchor (a pane anchor is the leaf of that split pane, a tab anchor is the tab, a window anchor is under the window). Each record carries a serial number for creation order within the window and a stacking order, and after restore the creation order (cycle order) and stacking order are the same as before saving. A maximized float is saved with its pre-maximize position and size as the normal state, and a float collapsed from maximized is saved as "collapsed, expands to normal". Focus after restore is on a split pane. The shell is started fresh. Float content is not written even when `scrollback-persist = tail` | HIGH | ratified T-6 (ASSUME-8) / ASSUME-31 |
+| REQ-018 | The seven actions in L2.2 are added as `AppCommand` and can be assigned with `keybind =`. The default codes are as in the L2.2 table and do not collide with existing default or reserved codes | HIGH | ratified T-6 (ASSUME-5) / ASSUME-32 |
+| REQ-019 | A single anchor can have at most 8 floats (exception: workers stowed on the board are up to 20 per board, agent-orchestration D12). `float.new` on an anchor that has reached the limit creates nothing and tells the user of the limit through an in-window toast. `float.cycle-anchor` whose destination anchor has reached the limit does not change the kind and shows the same toast. Floats are not counted in `MAX_PANES_PER_TAB` and do not affect whether a split pane can be created | HIGH | ratified T-6 (ASSUME-2), T-8 (ASSUME-10) |
+| REQ-020 | While a float has focus, every action whose name starts with `split.` does nothing | MEDIUM | ratified T-8 (ASSUME-17) |
+| REQ-021 | In Scratch Terminal and Quick Terminal windows, `float.new` does nothing | MEDIUM | ratified T-8 (ASSUME-17) |
+| REQ-022 | A float's background does not show through the content of split panes or other floats beneath it, regardless of the window's transparency settings | HIGH | ratified T-8 (ASSUME-19) |
+| REQ-023 | Floats do not appear in AppleScript, in AX pane enumeration, or in Overview tiles. They also do not appear in IPC pane enumeration and output. Only floats of workers spawned by the orchestrator (those with `parentPaneId`) are enumerated and readable over IPC (revised 2026-11-17, agent-orchestration D8). The anchor (`paneId`) and the parent (`parentPaneId`) may differ (D10: stowed on the board) | MEDIUM | ratified T-8 (ASSUME-16), revised by the owner 2026-11-17 |
+| REQ-024 | When the float that has focus becomes hidden (tab switch, anchor rect below the lower limit), focus moves to the return pane. Focus is not automatically given back when it is shown again | HIGH | ASSUME-24 |
 
 ### Cross-functional (`CFR-n`)
 
 | ID | Requirement | Measure / criterion | Target / required outcome | Verified how | Priority | Source |
 |----|-------------|---------------------|---------------------------|--------------|----------|--------|
-| CFR-001 | 既存のテストと静的検査を壊さない | 既存の自動テスト | `cargo test --workspace` 全通過、`cargo clippy --workspace` 警告なし | コマンドの終了コード | CRITICAL | grounded: `CLAUDE.md` Commands |
-| CFR-002 | 折りたたみと展開は端末の内容を乱さない | pty に送るウィンドウサイズ通知の回数 | 通常⇄折りたたみの往復で 0 回 | 通知回数を数える単体テスト | CRITICAL | elicited T-5 |
-| CFR-003 | 非表示のフロートに描画コストを払わない | 1フレームの描画計画に含まれるフロート数 | 非表示のフロートは 0 | 描画計画を検査する単体テスト | HIGH | ASSUME-33 |
-| CFR-004 | macOS と Linux で同じ挙動 | L3 の must-have AC | 両 OS で全 PASS | 受け入れテスト仕様を OS ごとに実行 | HIGH | elicited T-5（範囲案）→ T-6 (C1) で承認 |
+| CFR-001 | Do not break existing tests and static checks | Existing automated tests | `cargo test --workspace` all pass, `cargo clippy --workspace` no warnings | Exit code of the commands | CRITICAL | grounded: `CLAUDE.md` Commands |
+| CFR-002 | Collapse and expand do not disturb terminal content | Number of window-size notifications sent to the pty | 0 for a normal ⇄ collapsed round trip | Unit test that counts notifications | CRITICAL | elicited T-5 |
+| CFR-003 | No drawing cost is paid for hidden floats | Number of floats included in one frame's draw plan | 0 for hidden floats | Unit test that inspects the draw plan | HIGH | ASSUME-33 |
+| CFR-004 | Same behaviour on macOS and Linux | The must-have ACs of L3 | All PASS on both OSes | Run the acceptance test spec on each OS | HIGH | elicited T-5 (scope proposal) → approved at T-6 (C1) |
 
 ## L2: Detail
 
@@ -97,225 +97,225 @@
 
 | Entity | Field | Type | Constraints | Default | Nullable | Owned by |
 |--------|-------|------|-------------|---------|----------|----------|
-| フロート | id | `PaneId` | プロセス内で一意 | `PaneId::alloc()` | no | noa-app |
-| フロート | anchor | ペイン(`PaneId`) \| タブ \| ウィンドウ | ペインの場合は存在する分割ペイン | ペイン | no | noa-app |
-| フロート | origin | (x, y) 比率 | 有限で各 0.0〜1.0。アンカー矩形の左上からフロート左上まで | REQ-001 | no | noa-app |
-| フロート | size | (w, h) 比率 | 有限で各 0.0 より大きく 1.0 以下。タイトル帯を含む通常状態の大きさ | REQ-001 | no | noa-app |
-| フロート | state | 通常 \| 折りたたみ \| 最大化 | — | 通常 | no | noa-app |
-| フロート | state_before_collapse | 通常 \| 最大化 | state=折りたたみ のときのみ意味を持つ | 通常 | no | noa-app |
-| フロート | z | 単調増加の整数 | 同じ層の中で大きいほど前面。最前面にするたびに採番し直す | 作成時に採番 | no | noa-app |
-| セッション | フロート記録 | origin, size, 折りたたみか否か, cwd, 重なり順 | REQ-017。置き場所がアンカーを表す | — | — | `noa-app/src/session.rs` |
+| Float | id | `PaneId` | Unique within the process | `PaneId::alloc()` | no | noa-app |
+| Float | anchor | pane (`PaneId`) \| tab \| window | For pane, an existing split pane | pane | no | noa-app |
+| Float | origin | (x, y) ratio | Finite, each 0.0–1.0. From the anchor rect's top-left to the float's top-left | REQ-001 | no | noa-app |
+| Float | size | (w, h) ratio | Finite, each greater than 0.0 and at most 1.0. The size in the normal state, including the title band | REQ-001 | no | noa-app |
+| Float | state | normal \| collapsed \| maximized | — | normal | no | noa-app |
+| Float | state_before_collapse | normal \| maximized | Meaningful only when state = collapsed | normal | no | noa-app |
+| Float | z | Monotonically increasing integer | Larger is nearer the front within the same layer. Renumbered each time it is brought to the front | Numbered at creation | no | noa-app |
+| Session | float record | origin, size, collapsed or not, cwd, stacking order | REQ-017. The place stored represents the anchor | — | — | `noa-app/src/session.rs` |
 
 ### L2.2 Interface contract
 
 | Operation | Trigger | Input | Output | Errors | Idempotent | Auth |
 |-----------|---------|-------|--------|--------|------------|------|
-| `float.new` | 既定 macOS `cmd+shift+y` / Linux `ctrl+shift+y` | — | REQ-001 | 上限（REQ-019）、pty 生成失敗（Behavior matrix）、対象外ウィンドウ（REQ-021） | no | N/A（ローカル操作） |
-| `float.toggle-focus` | 既定 macOS `cmd+shift+i` / Linux `ctrl+shift+i` | — | REQ-011 | 巡回の対象なし → 何もしない | no | 同上 |
-| `float.focus-next` | 既定なし | — | REQ-011 | 同上 | no | 同上 |
-| `float.focus-previous` | 既定なし | — | REQ-011 | 同上 | no | 同上 |
-| `float.toggle-collapse` | 既定なし、折りたたみボタン、帯ダブルクリック | ボタンと帯はそのフロート。アクションはフォーカス中のフロート、なければそのウィンドウで最後にフォーカスした表示中のフロート | REQ-009 | 対象なし → 何もしない | no | 同上 |
-| `float.toggle-maximize` | 既定なし、最大化ボタン | `float.toggle-collapse` と同じ | REQ-010 | 対象なし、または折りたたみ中 → 何もしない | no | 同上 |
-| `float.cycle-anchor` | 既定なし、アンカー種別アイコン | `float.toggle-collapse` と同じ（ボタンをアイコンと読み替える） | REQ-006 | 対象なし → 何もしない。切替先が上限 → REQ-019 | no | 同上 |
+| `float.new` | Default macOS `cmd+shift+y` / Linux `ctrl+shift+y` | — | REQ-001 | Limit (REQ-019), pty creation failure (Behavior matrix), excluded window (REQ-021) | no | N/A (local operation) |
+| `float.toggle-focus` | Default macOS `cmd+shift+i` / Linux `ctrl+shift+i` | — | REQ-011 | No cycle target → does nothing | no | Same |
+| `float.focus-next` | No default | — | REQ-011 | Same | no | Same |
+| `float.focus-previous` | No default | — | REQ-011 | Same | no | Same |
+| `float.toggle-collapse` | No default, collapse button, band double-click | For the button and the band, that float. For the action, the focused float, or if none, the visible float last focused in that window | REQ-009 | No target → does nothing | no | Same |
+| `float.toggle-maximize` | No default, maximize button | Same as `float.toggle-collapse` | REQ-010 | No target, or collapsed → does nothing | no | Same |
+| `float.cycle-anchor` | No default, anchor kind icon | Same as `float.toggle-collapse` (read "button" as "icon") | REQ-006 | No target → does nothing. Destination at limit → REQ-019 | no | Same |
 
 ### L2.3 State & transitions
 
-アンカー種別ごとの挙動（REQ-005）:
+Behaviour per anchor kind (REQ-005):
 
-| アンカー | アンカー矩形 | 表示条件 | フロートが閉じる契機 | アンカーの移動 |
+| Anchor | Anchor rect | Display condition | Event that closes the float | Anchor movement |
 |---------|-------------|---------|--------------------|---------------|
-| ペイン | その分割ペインの矩形 | 分割ペインが画面に描かれている（タブが表示中、かつ他の分割ペインがズームされていない） | その分割ペインが閉じる | 分割ペインが別のタブやウィンドウへ移ると、比率を保って一緒に移る |
-| タブ | そのタブの分割領域全体 | タブが表示中 | タブが閉じる | タブが別のウィンドウへ移ると一緒に移る |
-| ウィンドウ | 端末領域全体 | 常に（表示中のタブの上） | ウィンドウの最後のタブが閉じる | 移らない |
+| Pane | That split pane's rectangle | The split pane is drawn on screen (the tab is visible and no other split pane is zoomed) | That split pane closes | When the split pane moves to another tab or window, the float moves with it, keeping its ratio |
+| Tab | The whole split area of that tab | The tab is visible | The tab closes | When the tab moves to another window, the float moves with it |
+| Window | The whole terminal area | Always (on top of the visible tab) | The window's last tab closes | Does not move |
 
-どの種別も、加えて REQ-007 の下限条件を満たすときだけ表示される。
+Every kind is shown only when, in addition, the lower-limit condition of REQ-007 is met.
 
-表示状態の遷移:
+Display state transitions:
 
 | From | Event | To | Guard | Side effect |
 |------|-------|----|-------|-------------|
-| 通常 | 折りたたみ操作 | 折りたたみ | — | state_before_collapse=通常。pty サイズ通知なし。フォーカスは REQ-009 |
-| 最大化 | 折りたたみ操作 | 折りたたみ | — | state_before_collapse=最大化。同上 |
-| 折りたたみ | 展開操作 | state_before_collapse | — | フォーカスをフロートへ。pty サイズ通知なし |
-| 通常 | 最大化操作 | 最大化 | — | origin と size は保持したまま。グリッドを再計算し pty に通知 |
-| 最大化 | 最大化操作 | 通常 | — | 保持している origin と size で描く。グリッドを再計算し pty に通知 |
-| 折りたたみ | 最大化操作 | 折りたたみ | — | 何もしない |
-| 任意 | アンカー切替 | 同じ状態 | 切替先が上限未満 | REQ-006 |
-| 任意 | 閉じる操作・シェル終了による破棄・アンカー消滅 | （破棄） | 実行中プログラムがあれば確認（REQ-012, REQ-013） | 進行中のドラッグを中止 |
+| normal | collapse operation | collapsed | — | state_before_collapse = normal. No pty size notification. Focus per REQ-009 |
+| maximized | collapse operation | collapsed | — | state_before_collapse = maximized. Same as above |
+| collapsed | expand operation | state_before_collapse | — | Focus goes to the float. No pty size notification |
+| normal | maximize operation | maximized | — | origin and size are kept as they are. Recompute the grid and notify the pty |
+| maximized | maximize operation | normal | — | Drawn with the retained origin and size. Recompute the grid and notify the pty |
+| collapsed | maximize operation | collapsed | — | Does nothing |
+| any | anchor switch | same state | Destination is under the limit | REQ-006 |
+| any | close operation, discard by shell exit, anchor disappearance | (discarded) | Confirm if a program is running (REQ-012, REQ-013) | Abort any drag in progress |
 
 ### L2.4 Validation rules
 
 | Field | Rule | On violation | Message source |
 |-------|------|--------------|----------------|
-| セッションのフロート記録 origin / size | L2.1 の制約 | そのフロートだけ復元しない。残りは復元する | ログのみ |
-| `keybind =` の `float.*` | 既存のキーバインド検証 | 既存の診断 | 既存の設定診断 |
+| Session float record origin / size | The constraints of L2.1 | Only that float is not restored. The rest are restored | Log only |
+| `float.*` in `keybind =` | Existing keybind validation | Existing diagnostic | Existing config diagnostics |
 
 ## Behavior matrix
 
 | Condition | Applies to | Expected behavior | User-visible | Verifies |
 |-----------|-----------|-------------------|--------------|----------|
-| Empty state（フロート0枚） | REQ-018 | `float.new` 以外の `float.*` は何もしない | 変化なし | AC-023 |
-| Invalid input（壊れたセッション記録） | REQ-017 | L2.4 のとおり該当フロートだけ捨てる | そのフロートが現れない | AC-021 |
-| Unauthorized | — | N/A（ローカル単一利用者の操作で、権限境界がない） | — | — |
-| Dependency unavailable（pty 生成失敗） | REQ-001 | フロートを作らず、フォーカスを変えず、エラーをログに書く | 変化なし | AC-024 |
-| Concurrent modification（ドラッグ中にフロートが破棄される: アンカー消滅またはシェル終了） | REQ-012, REQ-013 | ドラッグを中止する | フロートが消える | AC-025 |
-| Concurrent modification（ドラッグ中にアンカー矩形が変わる） | REQ-007 | ドラッグを続け、新しいアンカー矩形へクランプする | フロートがアンカー内に留まる | AC-009 |
-| Limit exceeded | REQ-019 | 作成・切替を行わずトーストを出す | トースト | AC-022 |
-| 折りたたみ・展開で TUI が再描画される | CFR-002 | pty サイズ通知を出さない | 画面が乱れない | AC-012 |
-| ネイティブタブ切替（macOS） | REQ-005 | ウィンドウアンカーのフロートは切替先のタブの上に同じ位置で出る | 位置が変わらない | AC-006 |
-| フォントサイズ変更 | REQ-007 | フロートのピクセル矩形は変えず、グリッドだけ再計算して pty に通知する | 文字の大きさだけ変わる | AC-044 |
-| アンカー矩形が下限より小さい | REQ-007 | 非表示。広がれば再表示 | フロートが一時的に消える | AC-010 |
-| フォーカス中のフロートが非表示になる | REQ-024 | フォーカスを復帰先ペインへ | 打鍵が分割ペインに入る | AC-038 |
+| Empty state (0 floats) | REQ-018 | `float.*` other than `float.new` do nothing | No change | AC-023 |
+| Invalid input (corrupt session record) | REQ-017 | Discard only the matching float, per L2.4 | That float does not appear | AC-021 |
+| Unauthorized | — | N/A (a local single-user operation; there is no permission boundary) | — | — |
+| Dependency unavailable (pty creation failure) | REQ-001 | Create no float, do not change focus, write the error to the log | No change | AC-024 |
+| Concurrent modification (the float is discarded during a drag: anchor disappears or shell exits) | REQ-012, REQ-013 | Abort the drag | The float disappears | AC-025 |
+| Concurrent modification (the anchor rect changes during a drag) | REQ-007 | Continue the drag and clamp to the new anchor rect | The float stays inside the anchor | AC-009 |
+| Limit exceeded | REQ-019 | Do not create or switch; show a toast | Toast | AC-022 |
+| A TUI redraws on collapse / expand | CFR-002 | Send no pty size notification | The screen is not disturbed | AC-012 |
+| Native tab switch (macOS) | REQ-005 | A window-anchored float appears at the same position on top of the destination tab | The position does not change | AC-006 |
+| Font size change | REQ-007 | Do not change the float's pixel rectangle; recompute only the grid and notify the pty | Only the character size changes | AC-044 |
+| Anchor rect is below the lower limit | REQ-007 | Hidden. Shown again when it widens | The float disappears temporarily | AC-010 |
+| The focused float becomes hidden | REQ-024 | Focus goes to the return pane | Keystrokes go into the split pane | AC-038 |
 
 ## Dependencies & integration points
 
 | Dependency | Kind | We control? | Contract / version | Failure mode | Fallback |
 |------------|------|-------------|--------------------|--------------|----------|
-| `spawn_pane_surface` | 内部 | yes | main `c079459` | pty 生成失敗 | Behavior matrix |
-| レンダラの描画計画 | 内部 | yes | 同上。重ね描きは新設 | wgpu 検証エラーは実行時に中断する | `noa-render/tests/pipeline.rs` に重ね描きのフレームを追加して検出 |
-| セッションファイル | 内部 | yes | `SESSION_VERSION` | 壊れた記録 | L2.4 |
+| `spawn_pane_surface` | Internal | yes | main `c079459` | pty creation failure | Behavior matrix |
+| Renderer's draw plan | Internal | yes | Same. Overdraw is new | A wgpu validation error aborts at runtime | Detect by adding an overdraw frame to `noa-render/tests/pipeline.rs` |
+| Session file | Internal | yes | `SESSION_VERSION` | Corrupt record | L2.4 |
 
 ## Migration & rollout
 
-- Existing data: 後方互換。`SESSION_VERSION` を 4 に上げ、バージョン 3 のファイルはフロート0枚として読む（AC-021）。
-- Staged release: フラグなし。フロートを作らない限り既存の画面と操作は変わらない。
-- Rollback: この機能より前のビルドは、バージョン 4 のファイルを既存の挙動どおりセッションなしとして扱う（`session.rs:331`）。失われるのはウィンドウ配置の復元だけで、不可逆な変更はない。
+- Existing data: Backward compatible. `SESSION_VERSION` is raised to 4, and a version-3 file is read as 0 floats (AC-021).
+- Staged release: No flag. Unless a float is created, existing screens and operations do not change.
+- Rollback: A build from before this feature treats a version-4 file as no session, per existing behaviour (`session.rs:331`). Only the restore of window layout is lost; there is no irreversible change.
 
 ## L3: Acceptance Criteria
 
-共通の前提 F-1: タブの分割領域 1000×600 px（左上が原点）、セル 10×20 px、タイトル帯 20 px。A や B に触れない AC では分割ペインは1枚で、それがアンカー矩形になる。A と B に触れる AC では左右2分割で、A は x=0〜500、B は x=500〜1000。座標はすべて分割領域内の px。タブアンカーとウィンドウアンカーのアンカー矩形は、この分割領域と同じ 1000×600 px とする。
+Common premise F-1: the tab's split area is 1000×600 px (origin at top-left), cells are 10×20 px, and the title band is 20 px. In an AC that does not mention A or B, there is one split pane, and it is the anchor rect. In an AC that mentions A and B, the area is split left and right in two, with A at x=0–500 and B at x=500–1000. All coordinates are px within the split area. The anchor rect of tab and window anchors is the same 1000×600 px as this split area.
 
 | ID | Given | When | Then | Verifies | Mode | Oracle | Must-have |
 |----|-------|------|------|----------|------|--------|-----------|
-| AC-001 | F-1（アンカーはタブ1枚の分割ペイン。別タブに分割ペイン2枚）、フロート0枚 | `float.new` | すべての分割ペインの矩形は不変。フロートの矩形は (200,100)-(1000,600)、グリッド 80×24、フォーカスあり、cwd はアンカーと同じ | REQ-001 | machine | noa-app 単体テストの assert | yes |
-| AC-002 | AC-001 の直後 | 同じアンカーで `float.new` を2回 | 2枚目 (180,80)-(980,580)、3枚目 (160,60)-(960,560)。別に、1枚目をタブアンカーへ切り替えてから `float.new` すると、新しいフロートは (180,80)-(980,580)（1枚目の裏に隠れない）。A/B 分割で B の上にだけフロートがあるとき、A での `float.new` はずれない | REQ-001 | machine | 同上 | yes |
-| AC-003 | アンカー矩形 600×300 px | `float.new` | フロートは 540×270 px、グリッド 54×12 | REQ-001 | machine | 同上 | yes |
-| AC-004 | フロート1枚（通常） | 画面を見る | タイトル帯に REQ-002 の6要素がその順で見える | REQ-002 | human | 実装者がスクリーンショットを REQ-002 の列挙と照合し、欠けや順序違いがあれば FAIL | yes |
-| AC-005 | F-1、フロート 400×300 px が (100,100) | タイトル帯を (+900,+900) px ドラッグ。別に、同じ初期状態から (−900,−900) px ドラッグ | 前者の左上は (600,300)、後者は (0,0) | REQ-003 | machine | 単体テストの assert | yes |
-| AC-006 | タブ2枚、3種のアンカーのフロートが各1枚、ペインアンカーの分割ペインはタブ1 | タブ2へ切り替え、非表示の2枚の pty に `x` を1バイト届ける | 表示されるのはウィンドウアンカーのフロートだけで、位置は切替前と同じ。非表示の2枚の端末のカーソル位置の文字が `x` になっている | REQ-005 | machine | 表示判定と端末状態の単体テストの assert | yes |
-| AC-007 | F-1、A にペインアンカーのフロート | B をズームする | フロートは非表示。ズーム解除で元の位置に表示される | REQ-005 | machine | 同上 | yes |
-| AC-008 | F-1、ペインアンカー（A）のフロート 300×200 px が (100,100) | `float.cycle-anchor` → タイトル帯を (+500,0) ドラッグ → `float.cycle-anchor` → アンカー種別アイコンをクリック | 種別は順にタブ、ウィンドウ、ペイン(B)。切替の各回で画面上の矩形は不変。各切替の直後、そのフロートは新しい層の最前面 | REQ-006 | machine | 単体テストの assert | yes |
-| AC-009 | F-1、フロート origin (0.1,0.1) size (0.2,0.2)、タイトル帯をドラッグ中 | アンカー矩形を 500×300 px にし、その後 1000×600 px に戻す | 縮小時は (50,30) から 200×80 px（下限が適用される）。戻すと (100,60) から 200×120 px。ドラッグ状態は続いている | REQ-007 | machine | 同上 | yes |
-| AC-010 | フロート1枚 | アンカー矩形を 150×60 px にし、その後 1000×600 px に戻す | 縮小中は非表示で、破棄されない。戻すと元の比率で表示される | REQ-007 | machine | 同上 | yes |
-| AC-011 | 重なり合うフロートを P1, P2（ペイン）、T1（タブ）、W1（ウィンドウ）の順に作成。フォーカスは分割ペイン | P1 をクリック。次に `float.focus-next` | クリック後は前面から W1, T1, P1, P2。`float.focus-next` 後は W1, T1, P2, P1 | REQ-008 | machine | 描画順の単体テストの assert | yes |
-| AC-012 | F-1、グリッド 80×24 でフォーカスを持つ通常フロート | 折りたたんで展開する。これを折りたたみボタン、タイトル帯のダブルクリック、`float.toggle-collapse` のそれぞれで行う | どの方法でも: 折りたたみ中の矩形は幅不変・高さ 20 px・左上不変、フォーカスは復帰先ペイン。展開後はフォーカスがフロートに戻る。往復で pty サイズ通知 0 回、グリッド 80×24 のまま。別に、フォーカスが分割ペインにある状態でフロートの折りたたみボタンを押すと、フォーカスは分割ペインのまま | REQ-009, CFR-002 | machine | 単体テストの assert | yes |
-| AC-013 | F-1、フロート (200,100) 400×300 px | `float.toggle-maximize`、次に最大化ボタン | 1回目で (0,0) 1000×600 px、グリッド 100×29、タイトル帯あり、pty サイズ通知 1 回。2回目で (200,100) 400×300 px | REQ-010 | machine | 同上 | yes |
-| AC-014 | 最大化したフロート | (a) 折りたたんで展開 (b) タイトル帯を (+50,+50) ドラッグ (c) 右辺を (−50,0) ドラッグ (d) 通常状態のフロートを折りたたみ、最大化ボタンを押し、`float.toggle-maximize` を実行してから展開 | (a) 最大化に戻る (b)(c) 矩形不変 (d) 折りたたみのままで、展開すると通常状態 | REQ-009, REQ-010 | machine | 同上 | yes |
-| AC-015 | F-1、B のペインアンカーのフロート F1, F2, F3 を順に作成し F3 を折りたたむ（「B をクリック」はフロートに覆われていない位置）。F1 をクリックしてから分割ペイン A をクリック | 順に: `float.toggle-focus`、`float.focus-next`、`float.focus-next`、`float.focus-previous`、`float.toggle-focus`、B をクリック、`float.focus-next`、B をクリック、`float.focus-previous`、B をクリック、F1 の内容領域をクリック、F1 の上でホイールとマウス移動 | フォーカスは順に F1、F2、F1、F2、A、B、F1、B、F2、B、F1。F1 へのクリック、ホイール、マウス移動は B に届かず、ホイールは F1 をスクロールする | REQ-011 | machine | 同上 | yes |
-| AC-016 | 折りたたんだフロート内のエージェントが `Permission` になる。別に `Input`、`Error` になる | 画面を見る | どの状態でもフロートは折りたたまれたまま。タイトル帯が attention 表示になり、状態ラベルはそれぞれ `approval needed`、`reply needed`、`error` | REQ-014 | human | 実装者が折りたたみ状態のスクリーンショットで、状態ごとに3点（折りたたみのまま、帯の背景色がサイドバーカードの attention 色と一致、ラベル文字列）を確認し、1点でも欠ければ FAIL | yes |
-| AC-017 | 実行中プログラムを持つフロートと、実行中プログラムを持つその分割ペイン | (a) フロートの閉じるボタン (b) フロートにフォーカスして `tab.close` (c) 分割ペインを閉じる | (a)(b) 確認が出て、承認するとフロートだけが閉じ、フォーカスは復帰先ペイン (c) 実行中プログラム数 2 の確認が出て、承認すると両方が閉じる | REQ-012, REQ-013 | machine | 単体テストの assert | yes |
-| AC-018 | 自動承認モードが有効、同じ承認待ち画面を分割ペインとフロートに用意 | 自動承認が走る | 判定結果が等しく、承認入力のバイト列がフロートの pty に書かれる | REQ-015 | machine | `auto_approve` の単体テストの assert | yes |
-| AC-019 | タブ1に折りたたんだフロート（attention 中）、表示中はタブ2、サイドバー表示 | そのフロートのカードを選択する。初期状態に戻して `NextNotification` を実行する | カードにフロートの印がある。どちらの操作でもタブ1へ切り替わり、フロートが展開されフォーカスを持つ | REQ-016 | human | 実装者が操作ごとに画面で確認し（印、タブ、展開、打鍵がフロートに入る）、1点でも欠ければ FAIL | yes |
-| AC-020 | 3種のアンカーのフロートを ペイン(B)、タブ、ウィンドウの順に各1枚作成（タブアンカーは (300,200) 300×200 px から最大化して折りたたみ、ウィンドウアンカーは (200,100) 400×300 px から最大化）、`window-save-state` 有効、`scrollback-persist = tail` | 保存して読み戻す | 3枚とも origin、size、cwd、重なり順が保存前と一致。ペインアンカーは復元後のツリーで B と同じ位置の分割ペインに付く。タブアンカーは折りたたみで復元され、展開すると通常状態で (300,200) 300×200 px。ウィンドウアンカーは通常状態で (200,100) 400×300 px。フォーカスは分割ペイン。復元直後の `float.toggle-focus` はウィンドウアンカーのフロート（最後に作成した対象）へ移る。scrollback ディレクトリにフロートのファイルがない | REQ-017 | machine | セッション往復の単体テストの assert | yes |
-| AC-021 | (a) フロート記録2件のうち1件の origin が `NaN` のファイル (b) バージョン 3 のファイル (c) `window-save-state` 無効でフロート1枚 | (a)(b) 読み込む (c) 保存処理を走らせる | (a) 正常な1件だけ復元 (b) フロート0枚で正常に読める (c) フロートは書かれない。書き出すファイルのバージョンは 4 | REQ-017 | machine | 同上 | yes |
-| AC-022 | (a) 同じ分割ペインにフロート 8 枚 (b) タブアンカーのフロート 8 枚のタブにペインアンカーのフロート1枚 (c) フロート 8 枚、分割ペイン 8 枚のタブ | (a) `float.new` (b) ペインアンカーのフロートで `float.cycle-anchor` (c) 分割ペインを1枚追加 | (a) 9枚目は作られずトースト (b) 種別はペインのままでトースト (c) 分割ペインが 9 枚になる | REQ-019 | machine | 単体テストの assert | yes |
-| AC-023 | フロート0枚 | `float.new` 以外の6アクションを順に実行 | 状態もフォーカスも変わらない | REQ-018 | machine | 同上 | yes |
-| AC-024 | pty 生成が失敗する状態 | `float.new` | フロートは増えず、フォーカスは変わらず、エラーログが1件出る | REQ-001 | machine | 同上 | yes |
-| AC-025 | フロートをドラッグ中 | (a) アンカーの分割ペインを閉じる (b) フロートのシェル終了でフロートが破棄される | どちらもドラッグ状態が解除され、フロートが消える | REQ-012, REQ-013 | machine | 同上 | yes |
-| AC-026 | F-1、フロート (300,100) 400×300 px | (a) 右下隅を (−2000,−2000) (b) 右下隅を (+2000,+2000) (c) 左辺を (−50,0) (d) 8つのハンドルそれぞれを外向きに 10 px (e) A/B 分割でタブアンカーのフロート (500,100) 400×300 px の左辺の外側 3 px（x=497）を押して (−50,0) (f) 同じ分割ペインのフロート F1（背面）と F2（前面）があり、フォーカスが分割ペインにある状態で、F2 の内容領域のうち F1 の右辺ヒットゾーンと重なる点を押して (+50,0) | (a) 内容領域 200×60 px (b) 右下がアンカー右下 (1000,600) で止まる (c) 幅 450 px、列数 +5、pty サイズ通知の最後の値が新しいグリッド (d) 対応する辺だけが 10 px 動く (e) フロート幅 450 px、分割線は x=500 のまま (f) F1 の矩形は不変で、F2 がフォーカスを得る | REQ-004 | machine | 同上 | yes |
-| AC-027 | (a) 既定のキーバインド (b) 7アクションそれぞれに未使用のコードを割り当てる `keybind =` | エンジンを構築し、(b) では各コードを引く | (a) 既定は L2.2 の2アクションのみで、既存の既定と衝突せず、`cmd+shift+f` は未割り当てのまま (b) 7つとも対応する `AppCommand` に解決される | REQ-018 | machine | `keybind` の単体テストの assert | yes |
-| AC-028 | フロートにフォーカス | アクション名が `split.` で始まる全アクションを順に実行 | 分割ツリー、ズーム状態、フォーカスがどれも変わらない | REQ-020 | machine | 単体テストの assert（アクション一覧から機械的に列挙） | yes |
-| AC-029 | (a) Scratch Terminal (b) Quick Terminal のウィンドウにフォーカス | `float.new` | どちらでもフロートは増えない | REQ-021 | machine | 同上 | yes |
-| AC-030 | `background-opacity = 0.5`、文字で埋まった分割ペインの上にフロート | 画面を見る | フロートの矩形内に下の分割ペインの文字が見えない | REQ-022 | human | 実装者がスクリーンショットを拡大し、下の文字が判読できれば FAIL | yes |
-| AC-031 | フロート1枚（ワーカーでない） | AppleScript、IPC、AX のスナップショットと Overview のレイアウトを生成 | どれにもフロートの `PaneId` がない。ワーカーの float は IPC にだけ現れる | REQ-023 | machine | 各スナップショット生成の単体テストの assert | yes |
-| AC-032 | この機能を含むビルド | at build | `cargo test --workspace` 全通過、`cargo clippy --workspace` 警告なし | CFR-001 | machine | コマンドの終了コード | yes |
-| AC-033 | (a) 別タブのフロート (b) 他の分割ペインがズームされたペインアンカーのフロート (c) アンカー矩形が下限未満のフロート | 描画計画を作る | どの場合も計画にそのフロートが含まれない | CFR-003 | machine | 描画計画の単体テストの assert | yes |
-| AC-034 | macOS と Linux のビルド | 受け入れテスト仕様を実行 | must-have の TC が両方で全 PASS | CFR-004 | human | 受け入れテスト仕様 §9 の実行記録2行 | yes |
-| AC-035 | フロートが画面中央にある | コマンドパレット、閉じる確認ダイアログ、Overview をそれぞれ開く | 3つとも、フロートと重なる部分が欠けずに見える | REQ-008 | human | 実装者が3枚のスクリーンショットで、各オーバーレイの上にフロートの画素が1つでも乗っていれば FAIL | yes |
-| AC-036 | フロートと分割ペイン、既定設定 | それぞれで `exit` を実行 | フロートの結果（閉じる／終了後の表示）が分割ペインの結果と同じ | REQ-012 | machine | 単体テストの assert | yes |
-| AC-037 | (a) ペインアンカーのフロートを持つ分割ペイン (b) タブアンカーのフロートを持つタブ (c) タブ2枚のウィンドウ。タブ1に実行中の分割ペイン1枚と実行中のタブアンカーのフロート1枚、ウィンドウに実行中のウィンドウアンカーのフロート1枚、タブ2は実行中プログラムなし | (a) 分割ペインを別タブへ移す (b) タブを別ウィンドウへ移す (c) 3通りを別々に: タブ1を閉じる／ウィンドウを閉じる／アプリを終了する | (a) フロートは移動先で同じ比率のまま同じ分割ペインに付く (b) フロートはタブと一緒に移る (c) 確認の実行中プログラム数はそれぞれ 2、3、3。承認後、閉じた範囲のフロートは破棄され pty が解放される | REQ-005, REQ-013 | machine | 同上 | yes |
-| AC-038 | (a) タブ1の分割ペイン A のフロートにフォーカス、タブ2に分割ペイン C (b) 分割ペイン A のフロートにフォーカス | (a) タブ2へ切り替え、タブ1へ戻る (b) アンカー矩形を 150×60 px にし、1000×600 px に戻す | (a) タブ2では C にフォーカス。戻るとフォーカスは A で、フロートではない (b) 縮小時にフォーカスは A へ移り、戻してもフォーカスは A のまま | REQ-024 | machine | 同上 | yes |
-| AC-039 | F-1、フロート (500,250) 400×300 px を折りたたむ | (a) タイトル帯を (+900,+900) ドラッグ (b) その位置で右辺をドラッグ (c) `float.cycle-anchor`（対象は最後にフォーカスしたこのフロート） (d) 展開 | (a) 帯の左上は (600,580) (b) 矩形不変 (c) 種別がタブになる (d) 展開後の矩形はアンカー内へクランプされ左上 (600,300) | REQ-003, REQ-004, REQ-009 | machine | 同上 | yes |
-| AC-040 | F-1、ウィンドウアンカーで最大化したフロート（通常時 (0,100) 800×500 px、中心 (400,350) は A の上） | `float.cycle-anchor`（→ペイン A）、次に `float.toggle-maximize` | 切替後は A いっぱい (0,0) 500×600 px で最大化のまま（アンカーは通常状態の矩形の中心で決まる）。解除後は (0,100) 500×500 px | REQ-006 | machine | 同上 | yes |
-| AC-041 | F-1、A のフロートにフォーカス（復帰先ペインは A） | `float.new` | 新しいフロートのアンカーは A | REQ-001 | machine | 同上 | yes |
-| AC-042 | フロート F1（背面）、F2（前面、折りたたみ）、フォーカスは分割ペイン | F1 のタイトル帯をクリック、次に F2 のタイトル帯をクリック | 1回目で F1 が最前面になりフォーカスを得る。2回目で F2 が最前面になるが、フォーカスは F1 のまま | REQ-011 | machine | 同上 | yes |
-| AC-043 | (a) B がズーム中の A のペインアンカーのフロート (b) 別ウィンドウのフロート (c) アンカー矩形が下限未満のペインアンカーのフロート | それぞれのサイドバーカードを選択 | (a) ズームが解除されフロートにフォーカス (b) そのウィンドウが前面になりフロートにフォーカス (c) アンカーの分割ペインにフォーカス | REQ-016 | machine | 同上 | yes |
-| AC-044 | F-1、フロート (200,100) 400×300 px、グリッド 40×14 | フォントサイズを変えてセルを 20×40 px にする | フロートの矩形は不変。タイトル帯は 40 px になり、グリッドは 20×6、pty サイズ通知の最後の値が 20×6 | REQ-007 | machine | 同上 | yes |
+| AC-001 | F-1 (the anchor is the split pane of one tab; another tab has 2 split panes), 0 floats | `float.new` | The rectangles of all split panes are unchanged. The float's rectangle is (200,100)-(1000,600), grid 80×24, has focus, cwd is the same as the anchor's | REQ-001 | machine | assert in a noa-app unit test | yes |
+| AC-002 | Right after AC-001 | `float.new` twice on the same anchor | The 2nd is (180,80)-(980,580), the 3rd is (160,60)-(960,560). Separately, after switching the 1st to a tab anchor and running `float.new`, the new float is (180,80)-(980,580) (not hidden behind the 1st). With an A/B split and a float only above B, `float.new` on A does not shift | REQ-001 | machine | Same | yes |
+| AC-003 | Anchor rect 600×300 px | `float.new` | The float is 540×270 px, grid 54×12 | REQ-001 | machine | Same | yes |
+| AC-004 | One float (normal) | Look at the screen | The 6 elements of REQ-002 are visible in the title band in that order | REQ-002 | human | The implementer checks the screenshot against the list in REQ-002, and FAILs if any is missing or out of order | yes |
+| AC-005 | F-1, a 400×300 px float at (100,100) | Drag the title band by (+900,+900) px. Separately, from the same initial state, drag by (−900,−900) px | The former's top-left is (600,300), the latter's is (0,0) | REQ-003 | machine | assert in a unit test | yes |
+| AC-006 | 2 tabs, one float of each of the 3 anchor kinds, the pane anchor's split pane is in tab 1 | Switch to tab 2 and deliver the 1 byte `x` to the pty of each of the 2 hidden floats | Only the window-anchored float is shown, at the same position as before switching. The character at the cursor position of both hidden floats' terminals is `x` | REQ-005 | machine | assert in unit tests of the display decision and the terminal state | yes |
+| AC-007 | F-1, a pane-anchored float on A | Zoom B | The float is hidden. Releasing the zoom shows it at its original position | REQ-005 | machine | Same | yes |
+| AC-008 | F-1, a 300×200 px float anchored to pane (A) at (100,100) | `float.cycle-anchor` → drag the title band by (+500,0) → `float.cycle-anchor` → click the anchor kind icon | The kinds are, in order, tab, window, pane (B). At each switch, the on-screen rectangle is unchanged. Right after each switch, the float is front-most in the new layer | REQ-006 | machine | assert in a unit test | yes |
+| AC-009 | F-1, a float with origin (0.1,0.1) size (0.2,0.2), the title band being dragged | Make the anchor rect 500×300 px, then return it to 1000×600 px | When shrunk, 200×80 px from (50,30) (the lower limit is applied). Back again, 200×120 px from (100,60). The drag state continues | REQ-007 | machine | Same | yes |
+| AC-010 | One float | Make the anchor rect 150×60 px, then return it to 1000×600 px | While shrunk it is hidden and not discarded. Returned, it is shown at its original ratio | REQ-007 | machine | Same | yes |
+| AC-011 | Overlapping floats created in the order P1, P2 (pane), T1 (tab), W1 (window). Focus is on a split pane | Click P1. Then `float.focus-next` | After the click, from the front: W1, T1, P1, P2. After `float.focus-next`: W1, T1, P2, P1 | REQ-008 | machine | assert in a draw-order unit test | yes |
+| AC-012 | F-1, a normal float with focus and a grid of 80×24 | Collapse and expand it. Do this with each of the collapse button, a double-click on the title band, and `float.toggle-collapse` | By every method: the collapsed rectangle has unchanged width, a height of 20 px and an unchanged top-left, and focus is on the return pane. After expanding, focus returns to the float. A round trip sends 0 pty size notifications and the grid stays 80×24. Separately, pressing a float's collapse button while focus is on a split pane leaves focus on the split pane | REQ-009, CFR-002 | machine | assert in a unit test | yes |
+| AC-013 | F-1, a float at (200,100) 400×300 px | `float.toggle-maximize`, then the maximize button | The 1st gives (0,0) 1000×600 px, grid 100×29, title band present, 1 pty size notification. The 2nd gives (200,100) 400×300 px | REQ-010 | machine | Same | yes |
+| AC-014 | A maximized float | (a) collapse and expand (b) drag the title band by (+50,+50) (c) drag the right edge by (−50,0) (d) collapse a normal-state float, press the maximize button, run `float.toggle-maximize`, then expand | (a) returns to maximized (b)(c) rectangle unchanged (d) stays collapsed, and on expanding is in the normal state | REQ-009, REQ-010 | machine | Same | yes |
+| AC-015 | F-1, create pane-anchored floats F1, F2, F3 on B in order and collapse F3 ("click B" is at a position not covered by a float). Click F1, then click split pane A | In order: `float.toggle-focus`, `float.focus-next`, `float.focus-next`, `float.focus-previous`, `float.toggle-focus`, click B, `float.focus-next`, click B, `float.focus-previous`, click B, click F1's content area, wheel and mouse move over F1 | Focus is, in order, F1, F2, F1, F2, A, B, F1, B, F2, B, F1. The click, wheel and mouse move on F1 do not reach B, and the wheel scrolls F1 | REQ-011 | machine | Same | yes |
+| AC-016 | The agent inside a collapsed float becomes `Permission`. Separately, `Input` and `Error` | Look at the screen | In every state the float stays collapsed. The title band is in attention display, and the state labels are `approval needed`, `reply needed` and `error` respectively | REQ-014 | human | For each state, the implementer checks 3 points on a screenshot of the collapsed state (stays collapsed, the band's background colour matches the sidebar card's attention colour, the label string), and FAILs if even one is missing | yes |
+| AC-017 | A float with a running program, and its split pane with a running program | (a) the float's close button (b) focus the float and `tab.close` (c) close the split pane | (a)(b) a confirmation appears, and on approval only the float closes and focus goes to the return pane (c) a confirmation with 2 running programs appears, and on approval both close | REQ-012, REQ-013 | machine | assert in a unit test | yes |
+| AC-018 | Auto-approve mode is enabled, and the same approval-wait screen is prepared in a split pane and a float | Auto-approve runs | The decision results are equal, and the approval input bytes are written to the float's pty | REQ-015 | machine | assert in a unit test of `auto_approve` | yes |
+| AC-019 | Tab 1 has a collapsed float (in attention), tab 2 is displayed, the sidebar is shown | Select that float's card. Reset to the initial state and run `NextNotification` | The card carries the float mark. Either operation switches to tab 1, and the float is expanded and has focus | REQ-016 | human | The implementer checks each operation on screen (mark, tab, expanded, keystrokes go into the float), and FAILs if even one is missing | yes |
+| AC-020 | Create one float of each of the 3 anchor kinds in the order pane (B), tab, window (the tab anchor is maximized from (300,200) 300×200 px and then collapsed; the window anchor is maximized from (200,100) 400×300 px), `window-save-state` enabled, `scrollback-persist = tail` | Save and read back | For all 3, origin, size, cwd and stacking order match those before saving. The pane anchor attaches to the split pane at the same position as B in the restored tree. The tab anchor is restored collapsed, and when expanded is in the normal state at (300,200) 300×200 px. The window anchor is in the normal state at (200,100) 400×300 px. Focus is on a split pane. `float.toggle-focus` right after restore moves to the window-anchored float (the most recently created target). There is no float file in the scrollback directory | REQ-017 | machine | assert in a session round-trip unit test | yes |
+| AC-021 | (a) a file where one of 2 float records has origin `NaN` (b) a version-3 file (c) 1 float with `window-save-state` disabled | (a)(b) read it (c) run the save process | (a) only the 1 valid record is restored (b) reads normally with 0 floats (c) no float is written. The version of the file written is 4 | REQ-017 | machine | Same | yes |
+| AC-022 | (a) 8 floats on the same split pane (b) a tab with 8 tab-anchored floats and 1 pane-anchored float (c) a tab with 8 floats and 8 split panes | (a) `float.new` (b) `float.cycle-anchor` on the pane-anchored float (c) add one split pane | (a) a 9th is not created and a toast is shown (b) the kind stays pane and a toast is shown (c) there are 9 split panes | REQ-019 | machine | assert in a unit test | yes |
+| AC-023 | 0 floats | Run the 6 actions other than `float.new` in turn | Neither state nor focus changes | REQ-018 | machine | Same | yes |
+| AC-024 | pty creation fails | `float.new` | The float count does not increase, focus does not change, and 1 error log line is written | REQ-001 | machine | Same | yes |
+| AC-025 | A float is being dragged | (a) close the anchor's split pane (b) the float is discarded by its shell exiting | In both, the drag state is cleared and the float disappears | REQ-012, REQ-013 | machine | Same | yes |
+| AC-026 | F-1, a float at (300,100) 400×300 px | (a) bottom-right corner by (−2000,−2000) (b) bottom-right corner by (+2000,+2000) (c) left edge by (−50,0) (d) each of the 8 handles outward by 10 px (e) with an A/B split, press 3 px outside the left edge (x=497) of a tab-anchored float at (500,100) 400×300 px and drag by (−50,0) (f) with floats F1 (back) and F2 (front) on the same split pane and focus on the split pane, press a point of F2's content area that overlaps F1's right-edge hit zone and drag by (+50,0) | (a) content area 200×60 px (b) the bottom-right stops at the anchor's bottom-right (1000,600) (c) width 450 px, columns +5, the last pty size notification is the new grid (d) only the matching edge moves, by 10 px (e) float width 450 px, the divider stays at x=500 (f) F1's rectangle is unchanged, and F2 gains focus | REQ-004 | machine | Same | yes |
+| AC-027 | (a) default keybinds (b) `keybind =` that assigns an unused code to each of the 7 actions | Build the engine and, in (b), look up each code | (a) the defaults are only the 2 actions in L2.2, do not collide with existing defaults, and `cmd+shift+f` stays unassigned (b) all 7 resolve to the matching `AppCommand` | REQ-018 | machine | assert in a `keybind` unit test | yes |
+| AC-028 | A float has focus | Run, in turn, every action whose name starts with `split.` | The split tree, zoom state and focus all stay unchanged | REQ-020 | machine | assert in a unit test (enumerated mechanically from the action list) | yes |
+| AC-029 | (a) a Scratch Terminal (b) a Quick Terminal window has focus | `float.new` | In neither is a float added | REQ-021 | machine | Same | yes |
+| AC-030 | `background-opacity = 0.5`, a float above a split pane filled with text | Look at the screen | The text of the split pane underneath cannot be seen inside the float's rectangle | REQ-022 | human | The implementer magnifies the screenshot, and FAILs if the text underneath is legible | yes |
+| AC-031 | One float (not a worker) | Generate the AppleScript, IPC and AX snapshots and the Overview layout | None of them contains the float's `PaneId`. A worker's float appears only in IPC | REQ-023 | machine | assert in unit tests that generate each snapshot | yes |
+| AC-032 | A build that includes this feature | at build | `cargo test --workspace` all pass, `cargo clippy --workspace` no warnings | CFR-001 | machine | Exit code of the commands | yes |
+| AC-033 | (a) a float in another tab (b) a pane-anchored float whose pane has another split pane zoomed (c) a float whose anchor rect is below the lower limit | Build the draw plan | In every case the plan does not include that float | CFR-003 | machine | assert in a draw-plan unit test | yes |
+| AC-034 | macOS and Linux builds | Run the acceptance test spec | The must-have TCs all PASS on both | CFR-004 | human | The 2 execution-record rows in §9 of the acceptance test spec | yes |
+| AC-035 | A float is in the centre of the screen | Open each of the command palette, the close confirmation dialog and Overview | In all three, the part that overlaps the float is visible without being cut off | REQ-008 | human | On 3 screenshots, the implementer FAILs if even one pixel of the float lies on top of any overlay | yes |
+| AC-036 | A float and a split pane, default settings | Run `exit` in each | The float's result (closing / display after exit) is the same as the split pane's result | REQ-012 | machine | assert in a unit test | yes |
+| AC-037 | (a) a split pane that has a pane-anchored float (b) a tab that has a tab-anchored float (c) a window with 2 tabs. Tab 1 has 1 running split pane and 1 running tab-anchored float, the window has 1 running window-anchored float, and tab 2 has no running program | (a) move the split pane to another tab (b) move the tab to another window (c) three cases separately: close tab 1 / close the window / quit the app | (a) the float attaches to the same split pane at the destination, with the same ratio (b) the float moves with the tab (c) the running-program counts in the confirmation are 2, 3 and 3 respectively. After approval, the floats in the closed scope are discarded and their ptys are released | REQ-005, REQ-013 | machine | Same | yes |
+| AC-038 | (a) the float of split pane A in tab 1 has focus, and tab 2 has split pane C (b) the float of split pane A has focus | (a) switch to tab 2 and return to tab 1 (b) make the anchor rect 150×60 px and return it to 1000×600 px | (a) in tab 2, C has focus. On returning, focus is on A, not on the float (b) when shrunk, focus moves to A, and after restoring, focus stays on A | REQ-024 | machine | Same | yes |
+| AC-039 | F-1, collapse the float at (500,250) 400×300 px | (a) drag the title band by (+900,+900) (b) drag the right edge at that position (c) `float.cycle-anchor` (the target is this float, last focused) (d) expand | (a) the band's top-left is (600,580) (b) rectangle unchanged (c) the kind becomes tab (d) the rectangle after expanding is clamped into the anchor, top-left (600,300) | REQ-003, REQ-004, REQ-009 | machine | Same | yes |
+| AC-040 | F-1, a window-anchored float that is maximized (normal-state (0,100) 800×500 px, centre (400,350) is over A) | `float.cycle-anchor` (→ pane A), then `float.toggle-maximize` | After switching it fills A at (0,0) 500×600 px and stays maximized (the anchor is decided by the centre of the normal-state rectangle). After unmaximizing, (0,100) 500×500 px | REQ-006 | machine | Same | yes |
+| AC-041 | F-1, A's float has focus (the return pane is A) | `float.new` | The new float's anchor is A | REQ-001 | machine | Same | yes |
+| AC-042 | Float F1 (back), F2 (front, collapsed), focus is on a split pane | Click F1's title band, then click F2's title band | The 1st brings F1 to the front and gives it focus. The 2nd brings F2 to the front, but focus stays on F1 | REQ-011 | machine | Same | yes |
+| AC-043 | (a) a pane-anchored float of A while B is zoomed (b) a float in another window (c) a pane-anchored float whose anchor rect is below the lower limit | Select each one's sidebar card | (a) the zoom is released and the float gets focus (b) that window comes to the front and the float gets focus (c) the anchor's split pane gets focus | REQ-016 | machine | Same | yes |
+| AC-044 | F-1, a float at (200,100) 400×300 px, grid 40×14 | Change the font size so cells are 20×40 px | The float's rectangle is unchanged. The title band becomes 40 px, the grid is 20×6, and the last pty size notification is 20×6 | REQ-007 | machine | Same | yes |
 
 ## Scope
 
 - In scope
-  - 作成、閉じる、移動、リサイズ、アンカー切替、z順、折りたたみ、最大化（elicited T-3, T-5, T-6）
-  - フォーカス移動とキーバインド（ratified T-6）
-  - タイトル帯のエージェント状態と attention、自動承認の対象化（elicited T-4〜T-6）
-  - サイドバー掲載（ratified T-6）
-  - セッション保存と復元（ratified T-6）
-  - macOS と Linux（ratified T-6）
-  - アンカーごとの枚数上限、Scratch / Quick Terminal での作成不可、背景の不透過（ratified T-8）
+  - Create, close, move, resize, anchor switch, z-order, collapse, maximize (elicited T-3, T-5, T-6)
+  - Focus movement and key bindings (ratified T-6)
+  - Agent state and attention in the title band, making auto-approve target floats (elicited T-4 to T-6)
+  - Listing in the sidebar (ratified T-6)
+  - Session save and restore (ratified T-6)
+  - macOS and Linux (ratified T-6)
+  - Per-anchor count limit, no creation in Scratch / Quick Terminal, opaque background (ratified T-8)
 - Out of scope
-  - フロート内の分割（ratified T-6）
-  - フロートと分割ペインの相互変換（ratified T-6）
-  - ウィンドウ外への切り離し（ratified T-6）
-  - スナップ・整列（ratified T-6）
-  - キーボードでの移動とリサイズ（ratified T-6）
-  - scrollback の永続化（ratified T-6）
-  - AppleScript・IPC・AX からの列挙、作成、操作（ratified T-6, T-8）
-  - Overview のタイル表示（ratified T-6）
-  - 既定サイズや上限を変える設定キー（ratified T-8）
+  - Splitting inside a float (ratified T-6)
+  - Converting between floats and split panes (ratified T-6)
+  - Detaching outside the window (ratified T-6)
+  - Snapping and alignment (ratified T-6)
+  - Move and resize from the keyboard (ratified T-6)
+  - Persisting scrollback (ratified T-6)
+  - Enumeration, creation and operation from AppleScript, IPC and AX (ratified T-6, T-8)
+  - Tile display in Overview (ratified T-6)
+  - Config keys that change the default size or limit (ratified T-8)
 
 ## Considered but rejected
 
-選択した方向: 1種類のフロートがアンカー属性（ペイン／タブ／ウィンドウ）を持ち、作成後に切り替えられる（elicited T-2, T-3）。
+Chosen direction: one kind of float has an anchor attribute (pane / tab / window) that can be switched after creation (elicited T-2, T-3).
 
-- アンカー種別ごとに別機能を3つ作る。利用者は3種すべてを求めており、属性1つで表せる。操作と実装が3重になる。
-- アンカーをどれか1種に固定する。利用者が3種すべてを要求（T-2）。
-- Scratch Terminal を拡張する。別 OS ウィンドウ実装で、ペイン内クリップもタブ追従もできない。
-- Quick Terminal を `quick-terminal-autohide = false` で代用する。pty は隠しても生きるが、1枚きりで、画面に対して配置され、ドラッグでリサイズできず、サイドバーと自動承認の対象外（`crates/noa-app/src/app/sidebar/state.rs:399`）。
-- 折りたたみをアンカー下端への整列にする／完全に隠す。利用者がその場で帯に畳む形を選択（T-5）。
-- 入力待ちで自動展開する。作業中の画面が動くため不採用（T-6: A1）。
+- Build three separate features, one per anchor kind. The user wants all three, and one attribute can express them. Operation and implementation would be tripled.
+- Fix the anchor to a single kind. The user asked for all three (T-2).
+- Extend the Scratch Terminal. It is implemented as a separate OS window and can neither clip inside a pane nor follow a tab.
+- Substitute Quick Terminal with `quick-terminal-autohide = false`. The pty stays alive when hidden, but there is only one, it is placed relative to the screen, it cannot be resized by dragging, and it is outside the sidebar and auto-approve (`crates/noa-app/src/app/sidebar/state.rs:399`).
+- Make collapse an alignment to the anchor's bottom edge, or hide completely. The user chose folding into a band in place (T-5).
+- Auto-expand on waiting for input. Rejected because the screen being worked on would move (T-6: A1).
 
 ## Assumption Ledger
 
-ASSUME-1〜20 の既定値は、表の右から2列目に挙げた要件が正本。
+For the defaults of ASSUME-1 to 20, the requirement named in the second column from the right of the table is the source of truth.
 
 | ID | Assumption | Default chosen | Why | Status |
 |----|-----------|----------------|-----|--------|
-| ASSUME-1〜9 | 初期サイズと位置、ペイン上限との関係、cwd、シェル終了、キー操作の範囲、折りたたみの形、フォーカスモデル、復元の中身、最小サイズ | REQ-001, 004, 009, 011, 012, 017, 019 | T-5, T-6 で提示 | ratified (T-6) |
-| ASSUME-10 | 上限の値、超過時の伝え方、設定キーなし | REQ-019、Scope | 1フロート=1 pty であり無制限にしない | ratified (T-8) |
-| ASSUME-11 | 既定のコード | ASSUME-32 が置き換え | — | superseded (ASSUME-32) |
-| ASSUME-12〜20 | アンカー切替の順序、下限未満で隠す、最大化の細部、サイドバーからのジャンプ、外部面に出さない、使えない場面、フロートからの新規作成、背景、閉じる確認の合算 | REQ-006, 007, 009, 010, 013, 016, 020〜023 | T-7 で提示 | ratified (T-8) |
-| ASSUME-21 | 「直近の分割ペイン」の意味 | 復帰先ペイン（Glossary） | 既存の `focused_pane` と一致し、ウィンドウアンカーでも一意 | ratified (T-10) |
-| ASSUME-22 | 折りたたみ中にできること、対象の選び方 | 移動とアンカー切替は可、リサイズと最大化は不可。展開時に収まらなければクランプ。折りたたみ・最大化・アンカー切替のアクションは、フォーカス中のフロートがなければ最後にフォーカスした表示中のフロートを対象にする | 帯だけの状態で意味を持つ操作に限る | ratified (T-10) |
-| ASSUME-23 | 最大化中のアンカー切替 | 最大化を保ち新しいアンカーいっぱいにする | 見た目の状態を保つ | ratified (T-10) |
-| ASSUME-24 | フォーカスの細部 | 非表示になったら復帰先ペインへ、再表示では戻さない。フォーカスのないフロートを畳んでもフォーカスは動かない。展開したフロートはフォーカスを得る。巡回は作成順で、分割ペインからは最初／最後へ。履歴がなければ最後に作成したものへ | 打鍵の行き先が勝手に変わらない | ratified (T-10) |
-| ASSUME-25 | アンカー切替後の重なり | 新しい層の最前面 | 操作した対象が隠れない | ratified (T-10) |
-| ASSUME-26 | クリックとヒットの優先 | タイトル帯クリックは最前面＋フォーカス（折りたたみ中は最前面のみ）。フロートのヒット領域は分割線と背面のフロートに優先 | 手前に見えるものが反応する | ratified (T-10) |
-| ASSUME-27 | アンカー変化時の比率 | 再計算で比率を書き換えない | アンカーを元に戻せば元の配置に戻る | ratified (T-10) |
-| ASSUME-28 | 初期サイズの細部 | 90% はタイトル帯を含む全体に適用。ずらし量はアンカー矩形と重なる表示中のフロート数で決める（T-11 で「同じアンカーの現存枚数」から変更） | 上の層のフロートの裏に新しいフロートが隠れない | ratified (T-10) |
-| ASSUME-29 | attention 表示の定義、対象状態、ラベル | Glossary の定義。対象は `AgentState::needs_attention`（`Error` を含む）。ラベルは `AgentState::label` | 既存のサイドバーと見た目を揃える | ratified (T-10) |
-| ASSUME-30 | サイドバーからのジャンプの細部 | ウィンドウ前面化、ズーム解除、展開まで行う。下限未満で非表示ならアンカーの分割ペインへ | 明示的な操作なので見える状態まで持っていく | ratified (T-10) |
-| ASSUME-31 | セッションの細部 | 置き場所でアンカーを表す。作成順の通し番号と重なり順を保存、フォーカスは保存しない。最大化は最大化前の矩形で保存。`SESSION_VERSION` を 4 に上げる | `PaneId` は再起動をまたがない。古いビルドは新ファイルをセッションなしとして扱える | ratified (T-10) |
-| ASSUME-32 | 既定のコード（ASSUME-11 の置き換え） | `float.new` = macOS `cmd+shift+y` / Linux `ctrl+shift+y`、`float.toggle-focus` = `cmd+shift+i` / `ctrl+shift+i`。残り5つは既定なし | `cmd+shift+f` は既存テストが予約済みとして検証している。両 OS で同じ文字に揃う。Ghostty の GTK 版は `ctrl+shift+i` をインスペクタに使うが、noa にインスペクタはなく衝突しない | ratified (T-10) |
-| ASSUME-33 | 非表示のフロートは描画計画に入れない | CFR-003 | 隠れた端末に GPU 時間を使わない | ratified (T-10) |
+| ASSUME-1 to 9 | Initial size and position, relation to the pane limit, cwd, shell exit, scope of key operations, collapsed form, focus model, what is restored, minimum size | REQ-001, 004, 009, 011, 012, 017, 019 | Presented at T-5, T-6 | ratified (T-6) |
+| ASSUME-10 | Limit value, how to tell on excess, no config key | REQ-019, Scope | 1 float = 1 pty, so it is not unlimited | ratified (T-8) |
+| ASSUME-11 | Default codes | Replaced by ASSUME-32 | — | superseded (ASSUME-32) |
+| ASSUME-12 to 20 | Order of anchor switching, hiding below the lower limit, details of maximize, jump from the sidebar, not exposed on external surfaces, scenes where unusable, creating a new one from a float, background, summing in the close confirmation | REQ-006, 007, 009, 010, 013, 016, 020 to 023 | Presented at T-7 | ratified (T-8) |
+| ASSUME-21 | Meaning of "the most recent split pane" | The return pane (Glossary) | Matches the existing `focused_pane` and is unique even for window anchors | ratified (T-10) |
+| ASSUME-22 | What can be done while collapsed, how the target is chosen | Move and anchor switch are allowed; resize and maximize are not. Clamp on expand if it does not fit. The collapse, maximize and anchor switch actions target the last focused visible float if there is no focused float | Limited to operations that mean something in the band-only state | ratified (T-10) |
+| ASSUME-23 | Anchor switch while maximized | Keep maximized and fill the new anchor | Keeps the visible state | ratified (T-10) |
+| ASSUME-24 | Focus details | On becoming hidden, go to the return pane; do not go back when shown again. Collapsing a float without focus does not move focus. An expanded float gains focus. Cycling is in creation order, and from a split pane goes to the first / last. With no history, go to the most recently created one | The destination of keystrokes does not change on its own | ratified (T-10) |
+| ASSUME-25 | Stacking after anchor switch | Front-most of the new layer | The operated target is not hidden | ratified (T-10) |
+| ASSUME-26 | Click and hit priority | A title band click is bring-to-front + focus (bring-to-front only while collapsed). A float's hit area takes priority over dividers and floats behind | What looks nearest responds | ratified (T-10) |
+| ASSUME-27 | Ratios when the anchor changes | Recomputation does not rewrite the ratios | Restoring the anchor restores the original arrangement | ratified (T-10) |
+| ASSUME-28 | Details of initial size | 90% applies to the whole including the title band. The shift is decided by the number of visible floats overlapping the anchor rect (changed at T-11 from "the number of existing floats of the same anchor") | A new float is not hidden behind a float in an upper layer | ratified (T-10) |
+| ASSUME-29 | Definition of attention display, target states, label | The definition in the Glossary. The targets are `AgentState::needs_attention` (including `Error`). The label is `AgentState::label` | Matches the look of the existing sidebar | ratified (T-10) |
+| ASSUME-30 | Details of jumping from the sidebar | Brings the window to the front, releases zoom and expands. If hidden below the lower limit, go to the anchor's split pane | It is an explicit operation, so it takes things to a visible state | ratified (T-10) |
+| ASSUME-31 | Session details | The place stored represents the anchor. Save the creation-order serial number and stacking order; do not save focus. Maximized is saved with the pre-maximize rectangle. Raise `SESSION_VERSION` to 4 | `PaneId` does not span restarts. Old builds can treat a new file as no session | ratified (T-10) |
+| ASSUME-32 | Default codes (replacing ASSUME-11) | `float.new` = macOS `cmd+shift+y` / Linux `ctrl+shift+y`, `float.toggle-focus` = `cmd+shift+i` / `ctrl+shift+i`. The remaining 5 have no default | An existing test verifies `cmd+shift+f` as reserved. The same characters on both OSes. Ghostty's GTK version uses `ctrl+shift+i` for the inspector, but noa has no inspector, so there is no collision | ratified (T-10) |
+| ASSUME-33 | Hidden floats are not put in the draw plan | CFR-003 | No GPU time is spent on a hidden terminal | ratified (T-10) |
 
 ## Open Questions / Deferred Decisions
 
 | ID | Question | Blocks | Owner | Resolve by | Impact if wrong |
 |----|----------|--------|-------|-----------|-----------------|
-| OQ-1 | フロートとアンカーの型名 | nothing（命名のみで、挙動と受け入れ基準に影響しない） | 実装者 | before-ship | 用語のずれ |
-| OQ-2 | machine モードの TC を実装する自動テストのファイルパス | nothing（判定内容は各 AC と TC で確定済み。束縛するのは実行時の場所だけ） | 実装者 | before-ship | 実行記録からテストを辿れない |
-| OQ-3 | 受け入れを実行する Linux 環境の具体的な構成 | nothing（必要な能力は受け入れテスト仕様 §3 で確定済み） | simota | before-ship | Linux の結果を再現できない |
+| OQ-1 | Type names for the float and the anchor | nothing (naming only; does not affect behaviour or acceptance criteria) | Implementer | before-ship | Terminology drift |
+| OQ-2 | File paths of the automated tests that implement the machine-mode TCs | nothing (what is judged is fixed by each AC and TC; only the place of execution is bound) | Implementer | before-ship | Tests cannot be traced from the execution record |
+| OQ-3 | The concrete configuration of the Linux environment where acceptance is run | nothing (the required capabilities are fixed in §3 of the acceptance test spec) | simota | before-ship | Linux results cannot be reproduced |
 
 Refutation record:
-- 問題は本物か（根拠: リポジトリの既存機能）の判定は `survived`。Scratch Terminal、Quick Terminal、ズーム、サイドバーのいずれも主用途を満たさない。L0 の記述2点を正確化し、Quick Terminal を不採用案に追加した。
-- AC は要件を証明するか（根拠: 仕様書のみ）の判定は `refuted-on-evidence`。must-have 要件の節のうち AC が触れないものが 20 件超あり、SPECIFY へ戻した。AC-005, 006, 008, 009, 011〜022, 024〜029, 033 を強化し、AC-035〜044 を追加。独立した再検証を3回行い、2回目までの指摘（到達できない前提、対象の選び方、数値、未検証の節）を修正して、3回目で残件なし（`GATE: PASS`）。
+- The verdict on "is the problem real (basis: the repository's existing features)" is `survived`. None of Scratch Terminal, Quick Terminal, zoom or the sidebar meets the primary use. Two statements in L0 were made accurate, and Quick Terminal was added to the rejected options.
+- The verdict on "do the ACs prove the requirements (basis: the spec only)" is `refuted-on-evidence`. More than 20 must-have requirement clauses were not touched by any AC, and it was sent back to SPECIFY. AC-005, 006, 008, 009, 011 to 022, 024 to 029 and 033 were strengthened, and AC-035 to 044 were added. Independent re-verification was done 3 times; the findings up to the 2nd (unreachable preconditions, how targets are chosen, numeric values, unverified clauses) were fixed, and the 3rd had nothing left (`GATE: PASS`).
 
 ## Build-path decision
 
-一括の自律実装（elicited T-8）。範囲が1機能に収まり、目視の受け入れ基準が6件あるため、利用者が立ち会える連続作業で設計・実装・検証まで進める。L3 の must-have AC が出荷判定になる。
+Batch autonomous implementation (elicited T-8). The scope fits in one feature and there are 6 visual acceptance criteria, so design, implementation and verification proceed in continuous work that the user can attend. The L3 must-have ACs are the ship decision.
 
-## 対話の記録
+## Dialogue record
 
-| ID | 利用者の発言の要旨 |
+| ID | Gist of the user's statement |
 |----|-------------------|
-| T-1 | 各ペインの上に、任意の大きさと位置で常駐するフローティングの端末ペインがほしい |
-| T-2 | 所属範囲はペイン・タブ・ウィンドウの3パターンすべてがほしい |
-| T-3 | アンカー属性1つにまとめる案（既定ペイン、複数枚と層つき重なり順、タイトル帯常時表示、比率保持、Scratch Terminal と別機能）を承認。折りたたみを追加 |
-| T-4 | 主用途はエージェント並走、副用途は監視 |
-| T-5 | 折りたたみは「その場で帯だけに畳む」を選択（範囲案と ASSUME-1〜5 を提示） |
-| T-6 | A1（入力待ちでも自動展開しない）、B1（最大化トグルを持つ）、C1（範囲案と ASSUME-1〜9 を承認） |
-| T-7 | （ASSUME-10〜20 と実装方法の選択肢を提示） |
-| T-8 | D1（ASSUME-10〜20 を承認）、E1（一括の自律実装） |
-| T-9 | （既定キーの変更と ASSUME-21〜33 を提示。attention に `Error` を含めること、アクションの対象の選び方、作成順の保存を追加で提示） |
-| T-10 | F1（T-9 の内容をすべて承認）、ロックを承認 |
-| T-11 | 実装後の実機確認を受けて改訂: 新規フロートの初期位置は、見えている全フロートを対象にずらす |
+| T-1 | Wants floating terminal panes that stay resident above each pane, at any size and position |
+| T-2 | Wants all three belonging scopes: pane, tab and window |
+| T-3 | Approved the proposal to unify them into one anchor attribute (default pane, multiple floats with layered stacking, title band always shown, ratio retention, separate from Scratch Terminal). Added collapse |
+| T-4 | Primary use is running agents side by side, secondary use is monitoring |
+| T-5 | Chose collapse as "fold into only a band in place" (the scope proposal and ASSUME-1 to 5 were presented) |
+| T-6 | A1 (do not auto-expand even when waiting for input), B1 (have a maximize toggle), C1 (approved the scope proposal and ASSUME-1 to 9) |
+| T-7 | (Presented ASSUME-10 to 20 and options for the implementation method) |
+| T-8 | D1 (approved ASSUME-10 to 20), E1 (batch autonomous implementation) |
+| T-9 | (Presented the change of default keys and ASSUME-21 to 33. Additionally presented: including `Error` in attention, how an action chooses its target, saving creation order) |
+| T-10 | F1 (approved everything in T-9), approved the lock |
+| T-11 | Revised after checking on a real machine post-implementation: the initial position of a new float shifts for all visible floats |

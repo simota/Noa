@@ -4190,8 +4190,7 @@ fn run_until_quit(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
             if action == Action::Quit {
                 return Ok(EXIT_OK);
             }
-            if let Some(notice) = held_elsewhere(&board) {
-                board.message = Some(notice);
+            if hold_elsewhere(&mut board, &action) {
                 continue;
             }
             let (notice, draft) = perform(client, &board, action);
@@ -4215,6 +4214,21 @@ fn held_elsewhere(board: &Board) -> Option<Notice> {
                 .to_string(),
         )
     })
+}
+
+/// Hold `action` while another Noa answers, saying so on the board; a
+/// send's text stays as the worker's draft. Returns whether it was held.
+fn hold_elsewhere(board: &mut Board, action: &Action) -> bool {
+    let Some(mut notice) = held_elsewhere(board) else {
+        return false;
+    };
+    if let Action::Send(pane, text) = action
+        && board.keep_draft(*pane, text.clone())
+    {
+        notice.text = format!("{} · {}", notice.text, draft_kept(board.lang));
+    }
+    board.message = Some(notice);
+    true
 }
 
 /// The server calls an action makes, so they can be faked in tests.
@@ -7331,6 +7345,35 @@ mod tests {
         board.elsewhere = true;
         let notice = held_elsewhere(&board).expect("actions are held");
         assert!(notice.warn);
+    }
+
+    // Review finding: while another Noa answered, `s` still opened the send
+    // line and Enter's text was dropped: neither sent nor kept as a draft
+    // (`s` had taken the old draft out).
+    #[test]
+    fn a_send_held_while_another_noa_answers_keeps_its_text() {
+        let t0 = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), t0);
+        board.select(2);
+        board.elsewhere = true;
+        board.key(Key::Char('s'));
+        board.key(Key::Paste("look at the tests".to_string()));
+        let action = board.key(Key::Enter).expect("Enter sends");
+        assert!(hold_elsewhere(&mut board, &action));
+        assert_eq!(
+            board.drafts.get(&2).map(String::as_str),
+            Some("look at the tests")
+        );
+        let message = board.message.clone().unwrap();
+        assert!(
+            message.warn && message.text.ends_with("下書きを残しました (s で再開)"),
+            "{message:?}"
+        );
+        // Anything else is held without a draft.
+        board.drafts.clear();
+        assert!(hold_elsewhere(&mut board, &Action::Focus(2)));
+        assert!(board.drafts.is_empty());
     }
 
     #[test]

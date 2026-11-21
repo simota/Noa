@@ -206,6 +206,8 @@ pub(crate) struct SendArgs {
     pub(crate) answer: bool,
     /// `--replace`: clear the input line before typing.
     pub(crate) replace: bool,
+    /// `--queue`: type into a pane whose agent is still working.
+    pub(crate) queue: bool,
     /// `--wait`: block like `wait PANE --after <seq before sending>`.
     pub(crate) wait: Option<WaitOptions>,
 }
@@ -230,6 +232,9 @@ pub(crate) struct WaitOptions {
     /// `--stall SECS`: also end the wait for a pane whose screen text has not
     /// changed for this long (`Reason::Stalled`).
     pub(crate) stall: Option<Duration>,
+    /// Set by `send --queue`: the text went to a working agent, so the turn
+    /// that ends the wait may be the one already running. Every line says so.
+    pub(crate) queued: bool,
 }
 
 impl Default for WaitOptions {
@@ -240,6 +245,7 @@ impl Default for WaitOptions {
             timeout: None,
             tail: None,
             stall: None,
+            queued: false,
         }
     }
 }
@@ -520,12 +526,16 @@ fn parse_send(rest: &mut Args) -> Result<SendArgs, String> {
     let any_pane = rest.flag("--any-pane");
     let answer = rest.flag("--answer");
     let replace = rest.flag("--replace");
+    let queue = rest.flag("--queue");
     if replace && answer {
         // The keys that clear an input line would land in the prompt.
         return Err("--replace does not go with --answer: a prompt has no input line".to_string());
     }
     let wait = if rest.flag("--wait") {
-        Some(parse_wait_options(rest)?)
+        Some(WaitOptions {
+            queued: queue,
+            ..parse_wait_options(rest)?
+        })
     } else {
         None
     };
@@ -546,6 +556,7 @@ fn parse_send(rest: &mut Args) -> Result<SendArgs, String> {
         any_pane,
         answer,
         replace,
+        queue,
         wait,
     })
 }
@@ -1035,6 +1046,15 @@ impl From<ClientError> for Failure {
             }
             // Outside a wait, a request that timed out ends the command as
             // before; only the wait loop retries it.
+            // The app took too long, so the server gave up waiting: the
+            // request may still have been carried out (D16).
+            ClientError::Rpc {
+                code: RPC_OUTCOME_UNKNOWN,
+                message,
+            } => Failure::unavailable(format!(
+                "Noa did not confirm the request in time ({message}); it may still have taken \
+                 effect: check with `ls` or `read` before retrying"
+            )),
             ClientError::Timeout(_) => Failure {
                 transient: true,
                 ..Failure::unavailable(format!("Noa did not answer in time: {error}"))
@@ -1765,8 +1785,8 @@ impl Session {
 
     fn send(&mut self, args: SendArgs) -> Result<i32, Failure> {
         self.guard(&[args.pane], args.any_pane)?;
-        let text = match args.text {
-            TextArg::Literal(text) => text,
+        let text = match &args.text {
+            TextArg::Literal(text) => text.clone(),
             TextArg::Stdin => {
                 let mut text = String::new();
                 std::io::stdin()
@@ -1775,64 +1795,13 @@ impl Session {
                 text
             }
         };
-        let before = self
-            .client
-            .list_panels()?
-            .into_iter()
-            .find(|panel| panel.pane_id.0 == args.pane)
-            .ok_or_else(|| Failure::error("unknown pane"))?;
+        let before = send_steps(self, &args, &text)?;
         let seq = before.agent.as_ref().map_or(0, |agent| agent.seq);
-        // Enter approves some prompts with their default choice, and picks
-        // the first choice of a question (D7), so either is only answered on
-        // purpose.
-        if !args.answer
-            && let Some(awaited) = awaits_answer(&before)
-        {
-            return Err(Failure::error(format!(
-                "pane {} is waiting for {awaited}; nothing was sent. Read it, and pass \
-                 --answer to answer it from here.",
-                args.pane
-            )));
-        }
-        // Subscribe before typing, so the reply cannot arrive unobserved.
-        if args.wait.is_some() {
-            self.client
-                .subscribe(&[EventKind::StateChanged], Some(&[args.pane]))?;
-        }
-        if args.replace {
-            for keys in replace_keys() {
-                self.send_input(args.pane, &keys, false)?;
-                std::thread::sleep(REPLACE_PAUSE);
-            }
-            // Let the TUI take the keys before a paste arrives.
-            std::thread::sleep(SUBMIT_DELAY);
-        }
-        if !text.is_empty() {
-            self.send_input(args.pane, &text, !args.raw)?;
-        }
-        if args.enter {
-            if !text.is_empty() {
-                std::thread::sleep(SUBMIT_DELAY);
-                let asked = self
-                    .client
-                    .list_panels()?
-                    .iter()
-                    .find(|panel| panel.pane_id.0 == args.pane)
-                    .and_then(awaits_answer);
-                if !args.answer
-                    && let Some(awaited) = asked
-                {
-                    return Err(Failure::error(format!(
-                        "pane {} began waiting for {awaited} after the text was typed; \
-                         Enter was not sent, so the text may still be in its input line.",
-                        args.pane
-                    )));
-                }
-            }
-            self.send_input(args.pane, "\r", false)?;
-        }
         match args.wait {
             Some(options) => {
+                // Said before the wait, so a wait its shell tool kills
+                // without a timeout line still leaves the way back.
+                eprintln!("{}", resume_hint(args.pane, seq));
                 self.wait_subscribed(&[args.pane], send_wait_start(before, seq), &options)
             }
             None => {
@@ -1859,6 +1828,13 @@ impl Session {
                     })
                 }))
             }
+            Err(ClientError::Rpc {
+                code: RPC_OUTCOME_UNKNOWN,
+                message,
+            }) => Err(Failure::unavailable(format!(
+                "Noa did not confirm the input to pane {pane} in time ({message}); it may \
+                 already be typed: `read` the pane before sending again"
+            ))),
             result => Ok(result?),
         }
     }
@@ -1908,6 +1884,156 @@ impl Session {
             )
         })
     }
+}
+
+impl SendTarget for Session {
+    fn panel(&mut self, pane: u64) -> Result<Option<Panel>, Failure> {
+        Ok(self
+            .client
+            .list_panels()?
+            .into_iter()
+            .find(|panel| panel.pane_id.0 == pane))
+    }
+
+    fn subscribe(&mut self, pane: u64) -> Result<(), Failure> {
+        self.client
+            .subscribe(&[EventKind::StateChanged], Some(&[pane]))?;
+        Ok(())
+    }
+
+    fn type_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), Failure> {
+        self.send_input(pane, text, paste)
+    }
+
+    fn pause(&mut self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+}
+
+/// What [`send_steps`] talks to.
+pub(crate) trait SendTarget {
+    /// `pane`'s panel; `None` when it is not listed.
+    fn panel(&mut self, pane: u64) -> Result<Option<Panel>, Failure>;
+    /// Subscribe to `pane`'s state changes (`send --wait`).
+    fn subscribe(&mut self, pane: u64) -> Result<(), Failure>;
+    fn type_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), Failure>;
+    fn pause(&mut self, duration: Duration);
+}
+
+/// The most a `send` takes, measured as its text JSON-encodes. The server
+/// reads a request as one WebSocket frame of at most 256 KiB, and one that
+/// is larger drops the connection, which would read as Noa gone (exit 3);
+/// this leaves room for the rest of the request.
+const MAX_SEND_TEXT_BYTES: usize = 250 * 1024;
+
+/// Refuse a text too large for one request, before anything is typed.
+pub(crate) fn check_send_size(text: &str) -> Result<(), String> {
+    let encoded = serde_json::to_string(text)
+        .expect("a string serializes")
+        .len();
+    if encoded > MAX_SEND_TEXT_BYTES {
+        return Err(format!(
+            "the text is {encoded} bytes after JSON encoding; one send takes at most {} KiB. \
+             Nothing was sent: write the text to a file and send its path",
+            MAX_SEND_TEXT_BYTES / 1024
+        ));
+    }
+    Ok(())
+}
+
+/// Why `send` refuses `panel` before typing, if it does. Enter approves some
+/// prompts with their default choice, and picks the first choice of a
+/// question (D7), so either is only answered on purpose (`--answer`). A
+/// working agent would queue the text, and a `--wait` could end with the
+/// turn already running (`--queue` takes that).
+pub(crate) fn send_refusal(panel: &Panel, args: &SendArgs) -> Option<String> {
+    if args.answer {
+        return None;
+    }
+    if let Some(awaited) = awaits_answer(panel) {
+        return Some(format!(
+            "pane {} is waiting for {awaited}; nothing was sent. Read it, and pass --answer to \
+             answer it from here.",
+            args.pane
+        ));
+    }
+    let working = panel
+        .agent
+        .as_ref()
+        .is_some_and(|agent| agent.state.as_deref() == Some("running"));
+    if working && !args.queue {
+        return Some(format!(
+            "pane {} is working; wait for its turn to end, or pass --queue (the wait may then \
+             end with the current turn)",
+            args.pane
+        ));
+    }
+    None
+}
+
+/// The stderr line `send --wait` prints once the text is in: how to carry
+/// on if this command is killed before its wait ends.
+pub(crate) fn resume_hint(pane: u64, seq: u64) -> String {
+    format!("Noa +ctl: sent to pane {pane}; resume with: wait {pane} --after {seq}")
+}
+
+/// `send`'s checks and typing, before any wait: refuse a text too large or
+/// a pane that should not take it, subscribe for `--wait`, clear the input
+/// line for `--replace`, type, and press Enter. Returns the panel as it was
+/// before typing.
+pub(crate) fn send_steps(
+    target: &mut impl SendTarget,
+    args: &SendArgs,
+    text: &str,
+) -> Result<Panel, Failure> {
+    check_send_size(text).map_err(Failure::error)?;
+    let before = target
+        .panel(args.pane)?
+        .ok_or_else(|| Failure::error("unknown pane"))?;
+    if let Some(refusal) = send_refusal(&before, args) {
+        return Err(Failure::error(refusal));
+    }
+    // Subscribe before typing, so the reply cannot arrive unobserved.
+    if args.wait.is_some() {
+        target.subscribe(args.pane)?;
+    }
+    if args.replace {
+        for keys in replace_keys() {
+            target.type_text(args.pane, &keys, false)?;
+            target.pause(REPLACE_PAUSE);
+        }
+        // Let the TUI take the keys before a paste arrives.
+        target.pause(SUBMIT_DELAY);
+        // Clearing takes long enough for an approval to come up meanwhile.
+        // `--replace` never goes with `--answer`.
+        if let Some(awaited) = target.panel(args.pane)?.as_ref().and_then(awaits_answer) {
+            return Err(Failure::error(format!(
+                "pane {} began waiting for {awaited} while its input line was cleared; the \
+                 text was not typed.",
+                args.pane
+            )));
+        }
+    }
+    if !text.is_empty() {
+        target.type_text(args.pane, text, !args.raw)?;
+    }
+    if args.enter {
+        if !text.is_empty() {
+            target.pause(SUBMIT_DELAY);
+            let asked = target.panel(args.pane)?.as_ref().and_then(awaits_answer);
+            if !args.answer
+                && let Some(awaited) = asked
+            {
+                return Err(Failure::error(format!(
+                    "pane {} began waiting for {awaited} after the text was typed; Enter was \
+                     not sent, so the text may still be in its input line.",
+                    args.pane
+                )));
+            }
+        }
+        target.type_text(args.pane, "\r", false)?;
+    }
+    Ok(before)
 }
 
 /// A spawn's steps once its checks passed: make the `--worktree` worktree
@@ -2082,6 +2208,15 @@ pub(crate) fn wait_loop_with_clock(
     emit: &mut dyn FnMut(&serde_json::Value),
     clock: &mut dyn FnMut() -> Instant,
 ) -> Result<i32, Failure> {
+    let emit = &mut |line: &serde_json::Value| {
+        if options.queued {
+            let mut line = line.clone();
+            line["queued"] = true.into();
+            emit(&line);
+        } else {
+            emit(line);
+        }
+    };
     // A pane named twice is one pane: `--all` counts each once.
     let mut unique = Vec::with_capacity(panes.len());
     for pane in panes {
@@ -3005,12 +3140,14 @@ mod tests {
                 any_pane: false,
                 answer: false,
                 replace: false,
+                queue: false,
                 wait: Some(WaitOptions {
                     reasons: vec![Reason::Finished, Reason::Error],
                     all: false,
                     timeout: Some(Duration::from_secs(30)),
                     tail: None,
                     stall: None,
+                    queued: false,
                 }),
             })
         );
@@ -3952,6 +4089,180 @@ mod tests {
             parse_args(&args(&["send", "8", "--answer", "--enter", "y"])).unwrap(),
             Command::Send(SendArgs { answer: true, .. })
         ));
+    }
+
+    /// A scripted pane for [`send_steps`]: `panels` are answered in order
+    /// (the last one repeats); every write is logged.
+    struct FakeTarget {
+        panels: Vec<Panel>,
+        looks: usize,
+        log: Vec<String>,
+    }
+
+    impl FakeTarget {
+        fn new(panels: Vec<Panel>) -> Self {
+            Self {
+                panels,
+                looks: 0,
+                log: Vec::new(),
+            }
+        }
+    }
+
+    impl SendTarget for FakeTarget {
+        fn panel(&mut self, _pane: u64) -> Result<Option<Panel>, Failure> {
+            let index = self.looks.min(self.panels.len() - 1);
+            self.looks += 1;
+            Ok(Some(self.panels[index].clone()))
+        }
+
+        fn subscribe(&mut self, _pane: u64) -> Result<(), Failure> {
+            self.log.push("subscribe".to_string());
+            Ok(())
+        }
+
+        fn type_text(&mut self, _pane: u64, text: &str, paste: bool) -> Result<(), Failure> {
+            self.log.push(format!("type {text:?} paste={paste}"));
+            Ok(())
+        }
+
+        fn pause(&mut self, _duration: Duration) {}
+    }
+
+    fn send_args(items: &[&str]) -> SendArgs {
+        let mut full = vec!["send", "8"];
+        full.extend(items);
+        match parse_args(&args(&full)).unwrap() {
+            Command::Send(send) => send,
+            other => panic!("send expected, got {other:?}"),
+        }
+    }
+
+    // Audit finding (REL-04): a text over the server's 256 KiB frame limit
+    // dropped the connection, read as Noa gone (exit 3), after --replace
+    // had already cleared the input line.
+    #[test]
+    fn a_text_too_large_for_one_request_is_refused_before_anything_is_typed() {
+        let fits = "x".repeat(MAX_SEND_TEXT_BYTES - 2);
+        assert!(check_send_size(&fits).is_ok());
+        // Each newline doubles under JSON encoding.
+        let over = "\n".repeat(MAX_SEND_TEXT_BYTES / 2);
+        let message = check_send_size(&over).unwrap_err();
+        assert!(message.contains("file"), "{message}");
+
+        let mut target = FakeTarget::new(vec![panel(1, Some("finished"), false)]);
+        let failure = send_steps(&mut target, &send_args(&["--replace", "x"]), &over).unwrap_err();
+        assert_eq!(failure.code, EXIT_ERROR);
+        assert!(target.log.is_empty(), "{:?}", target.log);
+    }
+
+    // Audit finding (AU-05): a send to a working agent was queued by it, and
+    // `--wait` then ended with the turn already running.
+    #[test]
+    fn a_working_agent_takes_a_send_only_with_queue() {
+        let running = panel(3, Some("running"), false);
+        let mut target = FakeTarget::new(vec![running.clone()]);
+        let failure =
+            send_steps(&mut target, &send_args(&["--enter", "more"]), "more").unwrap_err();
+        assert_eq!(failure.code, EXIT_ERROR);
+        assert!(failure.message.contains("--queue"), "{}", failure.message);
+        assert!(target.log.is_empty());
+
+        for flags in [&["--queue", "--enter", "more"][..], &["--answer", "more"]] {
+            let mut target = FakeTarget::new(vec![running.clone()]);
+            assert!(
+                send_steps(&mut target, &send_args(flags), "more").is_ok(),
+                "{flags:?}"
+            );
+        }
+        // Not working: no flag needed.
+        let mut target = FakeTarget::new(vec![panel(3, Some("finished"), false)]);
+        assert!(send_steps(&mut target, &send_args(&["more"]), "more").is_ok());
+
+        // `--queue --wait` marks every wait line.
+        let send = send_args(&["--queue", "--wait", "--timeout", "0", "more"]);
+        let options = send.wait.unwrap();
+        assert!(options.queued);
+        let mut source = FakeSource {
+            lists: vec![vec![with_pane(running.clone(), 8)]],
+            notifications: Default::default(),
+            list_calls: 0,
+            texts: HashMap::new(),
+        };
+        let mut lines = Vec::new();
+        let code = wait_loop(
+            &mut source,
+            &[8],
+            send_wait_start(with_pane(running, 8), 3),
+            &options,
+            WAIT_RELIST_INTERVAL,
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_TIMEOUT));
+        assert_eq!(lines[0]["queued"], true);
+        assert!(!send_args(&["--wait", "x"]).wait.unwrap().queued);
+    }
+
+    // Audit finding (REL-16): `--replace` spends about 0.35 s clearing the
+    // input line, and an approval that came up meanwhile took the paste.
+    #[test]
+    fn replace_checks_for_an_approval_again_before_typing() {
+        let mut target = FakeTarget::new(vec![
+            panel(3, Some("finished"), false),
+            panel(4, Some("permission"), false),
+        ]);
+        let failure = send_steps(
+            &mut target,
+            &send_args(&["--replace", "--enter", "new"]),
+            "new",
+        )
+        .unwrap_err();
+        assert!(
+            failure.message.contains("was not typed"),
+            "{}",
+            failure.message
+        );
+        assert!(target.log.iter().all(|entry| !entry.contains("new")));
+
+        let mut target = FakeTarget::new(vec![panel(3, Some("finished"), false)]);
+        send_steps(
+            &mut target,
+            &send_args(&["--replace", "--enter", "new"]),
+            "new",
+        )
+        .unwrap();
+        assert_eq!(
+            target.log.last().map(String::as_str),
+            Some("type \"\\r\" paste=false")
+        );
+        assert!(target.log.contains(&"type \"new\" paste=true".to_string()));
+    }
+
+    // Audit finding (REL-11): a `send --wait` killed before its wait ended
+    // left no report count to carry on from.
+    #[test]
+    fn send_wait_says_how_to_resume() {
+        assert_eq!(
+            resume_hint(8, 41),
+            "Noa +ctl: sent to pane 8; resume with: wait 8 --after 41"
+        );
+    }
+
+    // Audit finding (AU-06): -32009 (the app did not answer in time) was
+    // exit 1, read as a refusal, and the request was sent again.
+    #[test]
+    fn an_unconfirmed_request_exits_3_and_says_it_may_have_taken_effect() {
+        let failure = Failure::from(ClientError::Rpc {
+            code: RPC_OUTCOME_UNKNOWN,
+            message: "outcome unknown: request timed out".to_string(),
+        });
+        assert_eq!(failure.code, EXIT_UNAVAILABLE);
+        assert!(!failure.transient);
+        assert!(
+            failure.message.contains("may still have taken effect"),
+            "{}",
+            failure.message
+        );
     }
 
     #[test]

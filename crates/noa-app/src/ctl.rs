@@ -1401,10 +1401,11 @@ impl Session {
         } else {
             Some(self.guard_own()?)
         };
-        let here = std::env::current_dir().ok();
+        // The worktree is found from the pane's cwd, so this command's own
+        // cwd (another worktree, or outside the repository) does not matter.
         let mut prune_label = |label: &str, pane_cwd: &str| {
             if prune {
-                worktree::prune(here.as_deref()?, label, std::path::Path::new(pane_cwd))
+                worktree::prune(label, std::path::Path::new(pane_cwd))
             } else {
                 None
             }

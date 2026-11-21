@@ -234,7 +234,7 @@ impl App {
                 #[cfg(target_os = "macos")]
                 self.toggle_ember();
             }
-            AppCommand::OpenAgentDashboard => crate::agent_dashboard::open(),
+            AppCommand::OpenAgentDashboard => self.open_agent_dashboard(),
             AppCommand::Spawn(command) => crate::commands::spawn_in_background(
                 command,
                 self.focused_pane_cwd().as_deref().map(std::path::Path::new),
@@ -371,7 +371,41 @@ impl App {
         }
         self.request_sidebar_redraw();
     }
+
+    /// `agent-dashboard.open`. Why it could not start, or why it exited
+    /// unsuccessfully, is shown as a toast: the dashboard is a separate
+    /// process whose stderr nobody sees.
+    fn open_agent_dashboard(&mut self) {
+        let proxy = self.proxy.clone();
+        let started = crate::agent_dashboard::open(move |message| {
+            let _ = proxy.send_event(UserEvent::AgentDashboardFailed(message));
+        });
+        if let Err(message) = started {
+            self.show_notice_toast(message);
+        }
+    }
+
+    /// A transient message in the focused window (else any window).
+    pub(super) fn show_notice_toast(&mut self, text: String) {
+        let window_id = self
+            .focused
+            .filter(|id| self.windows.contains_key(id))
+            .or_else(|| self.windows.keys().next().copied());
+        let Some(state) = window_id.and_then(|id| self.windows.get_mut(&id)) else {
+            return;
+        };
+        state.resize_overlay = Some(Toast {
+            text,
+            until: Instant::now() + NOTICE_TOAST_DURATION,
+            kind: ToastKind::Resize,
+        });
+        state.window.request_redraw();
+    }
 }
+
+/// How long [`App::show_notice_toast`] stays up: long enough to read a
+/// sentence.
+const NOTICE_TOAST_DURATION: Duration = Duration::from_secs(5);
 
 fn toggle_borderless_fullscreen(window: &Window) {
     let fullscreen = if window.fullscreen().is_some() {

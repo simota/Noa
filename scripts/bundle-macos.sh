@@ -64,7 +64,7 @@ case "$MODE" in
 esac
 
 # The agent dashboard (mock/agent-dashboard, a crate outside the workspace)
-# ships beside Noa, which starts it from View > Agent Dashboard.
+# ships in Noa.app's Contents/Helpers; Noa starts it from View > Agent Dashboard.
 if [ "$PROFILE" = release ]; then
   cargo build --manifest-path "$ROOT/mock/agent-dashboard/Cargo.toml" --locked --release
 else
@@ -87,9 +87,11 @@ if [ ! -f "$ROOT/assets/noa.icns" ]; then
 fi
 
 rm -rf "$APP"
-mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
+mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Helpers" "$CONTENTS/Resources"
 cp "$BIN" "$CONTENTS/MacOS/Noa"
-cp "$DASHBOARD_BIN" "$CONTENTS/MacOS/agent-dashboard-mock"
+# Helpers, not MacOS: an executable in Contents/MacOS takes Noa.app as its
+# main bundle (com.simota.noa, its Dock icon and AppleScript dictionary).
+cp "$DASHBOARD_BIN" "$CONTENTS/Helpers/agent-dashboard-mock"
 cp -RX "$ROOT/assets/wallpapers" "$CONTENTS/Resources/wallpapers"
 
 ICON_KEY=""
@@ -153,7 +155,7 @@ if [ -n "${NOA_SIGN_IDENTITY:-}" ]; then
   # seals an already-signed executable.
   codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/assets/macos.entitlements.plist" \
-    --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/MacOS/agent-dashboard-mock"
+    --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/Helpers/agent-dashboard-mock"
   codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/assets/macos.entitlements.plist" \
     --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/MacOS/Noa"

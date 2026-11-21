@@ -59,22 +59,17 @@ fn run(
     pane_cwd: Option<&Path>,
     home: Option<&Path>,
 ) -> std::io::Result<()> {
-    start_detached(process_command(text, shell, pane_cwd, home), text)
-}
-
-/// Start `command` without waiting for it, reaping it on a thread of its own
-/// when it exits. `label` names it in the log.
-pub(crate) fn start_detached(mut command: Command, label: &str) -> std::io::Result<()> {
+    let mut command = process_command(text, shell, pane_cwd, home);
     match command.spawn() {
         Ok(mut child) => {
-            log::info!("spawn: started `{label}` (pid {})", child.id());
+            log::info!("spawn: started `{text}` (pid {})", child.id());
             std::thread::spawn(move || {
                 let _ = child.wait();
             });
             Ok(())
         }
         Err(err) => {
-            log::warn!("spawn: could not start `{label}`: {err}");
+            log::warn!("spawn: could not start `{text}`: {err}");
             Err(err)
         }
     }

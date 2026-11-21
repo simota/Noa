@@ -20,7 +20,8 @@ use crate::attach::{ATTACH_BINARY_CHUNK_BYTES, MAX_ATTACH_SEED_BYTES};
 use crate::auth::ScopeSet;
 use crate::protocol::{
     AttachResult, EventKind, GetTextResult, HelloResult, ListPanelsResult, OkResult, PaneIdResult,
-    Panel, SpawnParams, SplitDirection, SplitPlacement, TextSource, WireId,
+    Panel, PanelField, SpawnParams, SplitDirection, SplitPlacement, TextSource,
+    UpdateSubscriptionParams, WireId,
 };
 use crate::server::ATTACH_HANDSHAKE_CLOSE_REASON;
 
@@ -55,10 +56,17 @@ const MAX_BUFFERED_NOTIFICATIONS: usize = 1024;
 /// A server-to-client notification received on the control socket.
 #[derive(Clone, Debug)]
 pub enum Notification {
-    /// `noa.stateChanged`: panels that changed or were added. `dropped`
-    /// means earlier notifications were lost (server- or client-side), so
-    /// the caller must re-read state with [`Client::list_panels`].
-    StateChanged { panels: Vec<Panel>, dropped: bool },
+    /// `noa.stateChanged`: panels that changed or were added, and the ids
+    /// of panes that closed (`removedPaneIds`, empty when the server sent
+    /// none). `dropped` means earlier notifications were lost (server- or
+    /// client-side), removals included: the caller must re-read state with
+    /// [`Client::list_panels`] and treat every cached pane missing from that
+    /// list as removed.
+    StateChanged {
+        panels: Vec<Panel>,
+        removed_pane_ids: Vec<u64>,
+        dropped: bool,
+    },
     /// Any other notification (`noa.output`, …), by method name.
     Other { method: String, dropped: bool },
 }
@@ -284,19 +292,52 @@ impl Client {
         events: &[EventKind],
         panes: Option<&[u64]>,
     ) -> Result<u64, ClientError> {
+        self.subscribe_with(events, panes, None)
+    }
+
+    /// [`Self::subscribe`] with a `state_changed` field filter: with
+    /// `fields`, a changed panel is delivered only when one of these fields
+    /// changed (added panels and removals always are). `fields: None` sends
+    /// no `fields` key, so the request is the one [`Self::subscribe`] sent
+    /// before the filter existed.
+    pub fn subscribe_with(
+        &mut self,
+        events: &[EventKind],
+        panes: Option<&[u64]>,
+        fields: Option<&[PanelField]>,
+    ) -> Result<u64, ClientError> {
         #[derive(serde::Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct SubscribeResult {
             subscription_id: WireId,
         }
-        let result: SubscribeResult = self.request(
-            "noa.subscribe",
-            serde_json::json!({
-                "events": events,
-                "paneIds": panes.map(|panes| panes.iter().copied().map(WireId).collect::<Vec<_>>()),
-            }),
-        )?;
+        let mut params = serde_json::json!({
+            "events": events,
+            "paneIds": panes.map(|panes| panes.iter().copied().map(WireId).collect::<Vec<_>>()),
+        });
+        if let Some(fields) = fields {
+            params["fields"] = serde_json::json!(fields);
+        }
+        let result: SubscribeResult = self.request("noa.subscribe", params)?;
         Ok(result.subscription_id.0)
+    }
+
+    /// `noa.updateSubscription`: changes one of this connection's
+    /// subscriptions in place, keeping its id. A key left `None` keeps its
+    /// value; `Some(None)` for `pane_ids` / `fields` clears that filter. An
+    /// unknown id (or another connection's) is `ClientError::Rpc { code:
+    /// -32602, .. }`; a server that predates the method answers -32601.
+    pub fn update_subscription(
+        &mut self,
+        params: &UpdateSubscriptionParams,
+    ) -> Result<(), ClientError> {
+        let result: Value = self.request("noa.updateSubscription", params)?;
+        match result.as_object().and_then(|object| object.get("ok")) {
+            Some(Value::Bool(true)) => Ok(()),
+            _ => Err(ClientError::Protocol(
+                "noa.updateSubscription did not answer an object with ok:true".to_string(),
+            )),
+        }
     }
 
     /// The next notification, waiting up to `timeout`. `Ok(None)` when none
@@ -982,21 +1023,41 @@ fn parse_notification(mut value: Value) -> Result<Notification, Value> {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     if state_changed {
-        let panels = params
-            .and_then(|params| params.get_mut("panels"))
-            .and_then(|panels| serde_json::from_value::<Vec<Panel>>(panels.take()).ok());
-        // A panel list this client cannot read is reported as a loss, so the
-        // caller re-reads state instead of missing a change.
-        return Ok(match panels {
-            Some(panels) => Notification::StateChanged { panels, dropped },
-            None => Notification::StateChanged {
+        let (panels, removed) = match params {
+            Some(params) => (
+                params
+                    .get_mut("panels")
+                    .and_then(|panels| serde_json::from_value::<Vec<Panel>>(panels.take()).ok()),
+                params
+                    .get_mut("removedPaneIds")
+                    .map_or(Some(Vec::new()), |ids| removed_pane_ids(ids.take())),
+            ),
+            None => (None, Some(Vec::new())),
+        };
+        // A panel or removal list this client cannot read is reported as a
+        // loss, so the caller re-reads state instead of missing a change.
+        return Ok(match (panels, removed) {
+            (Some(panels), Some(removed_pane_ids)) => Notification::StateChanged {
+                panels,
+                removed_pane_ids,
+                dropped,
+            },
+            _ => Notification::StateChanged {
                 panels: Vec::new(),
+                removed_pane_ids: Vec::new(),
                 dropped: true,
             },
         });
     }
     let method = value["method"].as_str().unwrap_or_default().to_string();
     Ok(Notification::Other { method, dropped })
+}
+
+/// A present `removedPaneIds` value as pane ids; `None` when it is not a list
+/// of ids (`null` included: the server omits the key when it has none).
+fn removed_pane_ids(ids: Value) -> Option<Vec<u64>> {
+    let ids = serde_json::from_value::<Vec<WireId>>(ids).ok()?;
+    Some(ids.into_iter().map(|WireId(id)| id).collect())
 }
 
 #[derive(serde::Deserialize)]
@@ -1219,10 +1280,21 @@ mod tests {
             let panels = params
                 .and_then(|params| params.get("panels"))
                 .and_then(|panels| serde_json::from_value::<Vec<Panel>>(panels.clone()).ok());
-            return Some(match panels {
-                Some(panels) => Notification::StateChanged { panels, dropped },
-                None => Notification::StateChanged {
+            let removed = match params.and_then(|params| params.get("removedPaneIds")) {
+                None => Some(Vec::new()),
+                Some(ids) => serde_json::from_value::<Vec<WireId>>(ids.clone())
+                    .ok()
+                    .map(|ids| ids.into_iter().map(|id| id.0).collect()),
+            };
+            return Some(match (panels, removed) {
+                (Some(panels), Some(removed_pane_ids)) => Notification::StateChanged {
+                    panels,
+                    removed_pane_ids,
+                    dropped,
+                },
+                _ => Notification::StateChanged {
                     panels: Vec::new(),
+                    removed_pane_ids: Vec::new(),
                     dropped: true,
                 },
             });
@@ -1296,9 +1368,23 @@ mod tests {
                 r#"{"method":"","params":{}}"#,
                 r#"{"method":["noa.stateChanged"]}"#,
                 r#"[{"method":"noa.stateChanged"}]"#,
+                r#"{"method":"noa.stateChanged","params":{"panels":[],"removedPaneIds":["13"]}}"#,
+                r#"{"method":"noa.stateChanged","params":{"panels":[],"removedPaneIds":["13","14"],"dropped":true}}"#,
+                r#"{"method":"noa.stateChanged","params":{"panels":[],"removedPaneIds":[13]}}"#,
+                r#"{"method":"noa.stateChanged","params":{"panels":[],"removedPaneIds":[]}}"#,
+                r#"{"method":"noa.stateChanged","params":{"panels":[],"removedPaneIds":null}}"#,
+                r#"{"method":"noa.stateChanged","params":{"panels":[],"removedPaneIds":7}}"#,
+                r#"{"method":"noa.stateChanged","params":{"panels":[],"removedPaneIds":["x"]}}"#,
+                r#"{"method":"noa.stateChanged","params":{"panels":[],"removedPaneIds":[{"a":1}]}}"#,
+                r#"{"method":"noa.stateChanged","params":{"panels":[{"bad":1}],"removedPaneIds":["13"]}}"#,
+                r#"{"method":"noa.stateChanged","params":{"removedPaneIds":["13"]}}"#,
+                r#"{"method":"noa.output","params":{"removedPaneIds":7}}"#,
             ]
             .map(String::from),
         );
+        corpus.push(format!(
+            r#"{{"method":"noa.stateChanged","params":{{"panels":[{PANEL}],"removedPaneIds":["8"]}}}}"#
+        ));
         for text in &corpus {
             let Ok(value) = serde_json::from_str::<Value>(text) else {
                 continue;
@@ -1317,6 +1403,71 @@ mod tests {
                     assert_eq!(back, value, "a response comes back untouched: {text}");
                 }
             }
+        }
+    }
+
+    fn state_changed(text: &str) -> (Vec<Panel>, Vec<u64>, bool) {
+        let value = serde_json::from_str::<Value>(text).unwrap();
+        match parse_notification(value) {
+            Ok(Notification::StateChanged {
+                panels,
+                removed_pane_ids,
+                dropped,
+            }) => (panels, removed_pane_ids, dropped),
+            other => panic!("not a stateChanged: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn removed_pane_ids_are_read_when_present() {
+        let (panels, removed, dropped) = state_changed(&format!(
+            r#"{{"jsonrpc":"2.0","method":"noa.stateChanged","params":{{"panels":[{PANEL}],"removedPaneIds":["13","14"],"dropped":true}}}}"#
+        ));
+        assert_eq!(panels.len(), 1);
+        assert_eq!(panels[0].pane_id, WireId(7));
+        assert_eq!(removed, [13, 14]);
+        assert!(dropped);
+    }
+
+    #[test]
+    fn absent_removed_pane_ids_read_as_none_removed() {
+        let (panels, removed, dropped) = state_changed(&format!(
+            r#"{{"jsonrpc":"2.0","method":"noa.stateChanged","params":{{"panels":[{PANEL}]}}}}"#
+        ));
+        assert_eq!(panels.len(), 1);
+        assert!(removed.is_empty());
+        assert!(!dropped);
+    }
+
+    #[test]
+    fn a_removal_only_frame_reads_as_removals_with_no_panels() {
+        let (panels, removed, dropped) = state_changed(
+            r#"{"jsonrpc":"2.0","method":"noa.stateChanged","params":{"panels":[],"removedPaneIds":["13"]}}"#,
+        );
+        assert!(panels.is_empty());
+        assert_eq!(removed, [13]);
+        assert!(!dropped);
+    }
+
+    // A removal list this client cannot read may hide a closed pane, so it
+    // reads as a loss (re-list), the same as an unreadable `panels`, and
+    // the readable panels beside it are not delivered either.
+    #[test]
+    fn malformed_removed_pane_ids_read_as_a_loss() {
+        for ids in [
+            "7",
+            "null",
+            r#"["x"]"#,
+            r#"[{"a":1}]"#,
+            r#""13""#,
+            r#"{"13":1}"#,
+        ] {
+            let (panels, removed, dropped) = state_changed(&format!(
+                r#"{{"jsonrpc":"2.0","method":"noa.stateChanged","params":{{"panels":[{PANEL}],"removedPaneIds":{ids}}}}}"#
+            ));
+            assert!(panels.is_empty(), "{ids}");
+            assert!(removed.is_empty(), "{ids}");
+            assert!(dropped, "{ids}");
         }
     }
 
@@ -1579,6 +1730,181 @@ mod tests {
         assert!(matches!(first, Err(ClientError::Timeout(_))), "{first:?}");
         thread::sleep(Duration::from_millis(200));
         assert!(client.list_panels().unwrap().is_empty());
+        drop(client);
+        server.join().unwrap();
+    }
+
+    // AC-4: `subscribe` sends the request it sent before `fields` existed
+    // (no `fields` key); `subscribe_with` adds the key only when asked.
+    #[test]
+    fn subscribe_sends_no_fields_key_and_subscribe_with_sends_one() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            let mut requests = Vec::new();
+            for result in [
+                serde_json::json!({
+                    "protocolVersion": crate::protocol::PROTOCOL_VERSION,
+                    "grantedScopes": ["read"],
+                    "serverVersion": "t",
+                }),
+                serde_json::json!({ "subscriptionId": "1" }),
+                serde_json::json!({ "subscriptionId": "2" }),
+            ] {
+                let Message::Text(text) = socket.read().unwrap() else {
+                    panic!("text request expected");
+                };
+                let id = serde_json::from_str::<Value>(&text).unwrap()["id"].clone();
+                socket
+                    .send(Message::Text(
+                        serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })
+                            .to_string(),
+                    ))
+                    .unwrap();
+                requests.push(text);
+            }
+            requests
+        });
+
+        let mut client = Client::connect_with_timeouts(
+            &url,
+            "token",
+            ScopeSet::from_strings(["read"]),
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let events = [EventKind::StateChanged];
+        assert_eq!(client.subscribe(&events, Some(&[3])).unwrap(), 1);
+        assert_eq!(
+            client
+                .subscribe_with(&events, None, Some(&[PanelField::Agent]))
+                .unwrap(),
+            2
+        );
+        drop(client);
+        let requests = server.join().unwrap();
+
+        // The request exactly as `subscribe` built it before `fields`.
+        assert_eq!(
+            requests[1],
+            r#"{"id":2,"jsonrpc":"2.0","method":"noa.subscribe","params":{"events":["state_changed"],"paneIds":["3"]}}"#
+        );
+        let with_fields: Value = serde_json::from_str(&requests[2]).unwrap();
+        assert_eq!(
+            with_fields["params"],
+            serde_json::json!({
+                "events": ["state_changed"],
+                "paneIds": null,
+                "fields": ["agent"],
+            })
+        );
+    }
+
+    // AC-3: only `{"ok":true}` confirms an update; `ok:false` is not success.
+    #[test]
+    fn update_subscription_rejects_a_negative_ok_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            for result in [
+                serde_json::json!({
+                    "protocolVersion": crate::protocol::PROTOCOL_VERSION,
+                    "grantedScopes": ["read"],
+                    "serverVersion": "t",
+                }),
+                serde_json::json!({ "ok": false }),
+                serde_json::json!({ "ok": true }),
+            ] {
+                let Message::Text(text) = socket.read().unwrap() else {
+                    panic!("text request expected");
+                };
+                let id = serde_json::from_str::<Value>(&text).unwrap()["id"].clone();
+                socket
+                    .send(Message::Text(
+                        serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })
+                            .to_string(),
+                    ))
+                    .unwrap();
+            }
+        });
+
+        let mut client = Client::connect_with_timeouts(
+            &url,
+            "token",
+            ScopeSet::from_strings(["read"]),
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let params = UpdateSubscriptionParams {
+            subscription_id: WireId(1),
+            events: None,
+            pane_ids: None,
+            fields: None,
+        };
+        let negative = client.update_subscription(&params);
+        assert!(
+            matches!(negative, Err(ClientError::Protocol(_))),
+            "{negative:?}"
+        );
+        client.update_subscription(&params).unwrap();
+        drop(client);
+        server.join().unwrap();
+    }
+
+    // Only a JSON object with `"ok": true` confirms an update; serde would
+    // otherwise read `OkResult` from the array `[true]` by position.
+    #[test]
+    fn update_subscription_rejects_a_non_object_result() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            for result in [
+                serde_json::json!({
+                    "protocolVersion": crate::protocol::PROTOCOL_VERSION,
+                    "grantedScopes": ["read"],
+                    "serverVersion": "t",
+                }),
+                serde_json::json!([true]),
+                serde_json::json!({ "ok": true }),
+            ] {
+                let Message::Text(text) = socket.read().unwrap() else {
+                    panic!("text request expected");
+                };
+                let id = serde_json::from_str::<Value>(&text).unwrap()["id"].clone();
+                socket
+                    .send(Message::Text(
+                        serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })
+                            .to_string(),
+                    ))
+                    .unwrap();
+            }
+        });
+
+        let mut client = Client::connect_with_timeouts(
+            &url,
+            "token",
+            ScopeSet::from_strings(["read"]),
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let params = UpdateSubscriptionParams {
+            subscription_id: WireId(1),
+            events: None,
+            pane_ids: None,
+            fields: None,
+        };
+        let array = client.update_subscription(&params);
+        assert!(matches!(array, Err(ClientError::Protocol(_))), "{array:?}");
+        client.update_subscription(&params).unwrap();
         drop(client);
         server.join().unwrap();
     }

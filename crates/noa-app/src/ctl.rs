@@ -3407,7 +3407,9 @@ fn apply_notification(
     panes: &[u64],
 ) -> bool {
     match notification {
-        Notification::StateChanged { panels, dropped } => {
+        Notification::StateChanged {
+            panels, dropped, ..
+        } => {
             for panel in panels {
                 if panes.contains(&panel.pane_id.0) {
                     latest.insert(panel.pane_id.0, panel);
@@ -5099,6 +5101,7 @@ mod tests {
             notifications: (0..20)
                 .map(|_| Notification::StateChanged {
                     panels: vec![busy.clone()],
+                    removed_pane_ids: Vec::new(),
                     dropped: false,
                 })
                 .collect(),
@@ -5136,6 +5139,7 @@ mod tests {
                 .into_iter()
                 .map(|panel| Notification::StateChanged {
                     panels: vec![panel],
+                    removed_pane_ids: Vec::new(),
                     dropped: false,
                 })
                 .collect(),
@@ -5172,6 +5176,7 @@ mod tests {
                 .into_iter()
                 .map(|(panel, dropped)| Notification::StateChanged {
                     panels: vec![panel],
+                    removed_pane_ids: Vec::new(),
                     dropped,
                 })
                 .collect(),
@@ -5256,6 +5261,7 @@ mod tests {
             lists: vec![vec![held.clone(), busy]],
             notifications: [Notification::StateChanged {
                 panels: vec![held, finished],
+                removed_pane_ids: Vec::new(),
                 dropped: false,
             }]
             .into(),
@@ -6925,6 +6931,7 @@ mod tests {
                 lists: vec![vec![running.clone()]],
                 notifications: [Notification::StateChanged {
                     panels: vec![running],
+                    removed_pane_ids: Vec::new(),
                     dropped: false,
                 }]
                 .into(),
@@ -7246,6 +7253,7 @@ mod tests {
             lists: vec![vec![labelled.clone()], Vec::new()],
             notifications: [Notification::StateChanged {
                 panels: vec![labelled],
+                removed_pane_ids: Vec::new(),
                 dropped: false,
             }]
             .into(),
@@ -7678,6 +7686,7 @@ mod tests {
                 3,
                 Notification::StateChanged {
                     panels: vec![finished],
+                    removed_pane_ids: Vec::new(),
                     dropped: false,
                 },
             )),
@@ -7818,6 +7827,7 @@ mod tests {
                 notifications: (0..4)
                     .map(|_| Notification::StateChanged {
                         panels: vec![running.clone()],
+                        removed_pane_ids: Vec::new(),
                         dropped: false,
                     })
                     .collect(),

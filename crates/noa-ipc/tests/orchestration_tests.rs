@@ -12,7 +12,8 @@ use noa_ipc::protocol::{
     TextSource, WireId,
 };
 use noa_ipc::{
-    Broadcaster, Client, ClientError, Notification, ScopeSet, SendTextOptions, Server, ServerConfig,
+    Broadcaster, ChangedPanel, Client, ClientError, FieldMask, Notification, PanelField, ScopeSet,
+    SendTextOptions, Server, ServerConfig, UpdateSubscriptionParams,
 };
 
 const TOKEN: &str = "orchestration-token";
@@ -513,12 +514,98 @@ fn state_changed_reaches_a_subscribed_client_with_the_new_fields() {
         .unwrap()
         .expect("a stateChanged notification");
     match notification {
-        Notification::StateChanged { panels, dropped } => {
+        Notification::StateChanged {
+            panels,
+            removed_pane_ids,
+            dropped,
+        } => {
+            assert!(removed_pane_ids.is_empty());
             assert!(!dropped);
             assert_eq!(panels, vec![panel(1, 7)]);
         }
         other => panic!("unexpected notification: {other:?}"),
     }
+}
+
+/// The next `stateChanged` as `(panels, removed_pane_ids)`; it must not
+/// report a loss.
+fn next_state_changed(client: &mut Client) -> (Vec<Panel>, Vec<u64>) {
+    match client
+        .next_notification(Duration::from_secs(5))
+        .unwrap()
+        .expect("a stateChanged notification")
+    {
+        Notification::StateChanged {
+            panels,
+            removed_pane_ids,
+            dropped,
+        } => {
+            assert!(!dropped);
+            (panels, removed_pane_ids)
+        }
+        other => panic!("unexpected notification: {other:?}"),
+    }
+}
+
+fn changed(panel: Panel, fields: &[PanelField]) -> ChangedPanel {
+    ChangedPanel {
+        panel,
+        fields: FieldMask::from_fields(fields),
+    }
+}
+
+// Pane subscriptions AC-4, end to end through the typed client: a field
+// filter, a removal notice and an in-place scope update. One connection's
+// notifications arrive in the order they were broadcast, so a notification
+// the filter should have held back would arrive before the expected one.
+#[test]
+fn the_client_reads_removals_and_filtered_updates_and_widens_its_scope() {
+    let (_backend, broadcaster, handle) = start(&["read"]);
+    let mut client = connect(&handle, &["read"]);
+    let subscription = client
+        .subscribe_with(
+            &[EventKind::StateChanged],
+            Some(&[1]),
+            Some(&[PanelField::Agent]),
+        )
+        .unwrap();
+
+    broadcaster.broadcast_state_delta(vec![changed(panel(1, 1), &[PanelField::Preview])], vec![]);
+    broadcaster.broadcast_state_delta(vec![changed(panel(1, 2), &[PanelField::Agent])], vec![]);
+    assert_eq!(next_state_changed(&mut client), (vec![panel(1, 2)], vec![]));
+
+    broadcaster.broadcast_state_delta(vec![], vec![1]);
+    assert_eq!(next_state_changed(&mut client), (vec![], vec![1]));
+
+    // Pane 2 is outside the scope until the update widens it.
+    broadcaster.broadcast_state_delta(vec![changed(panel(2, 3), &[PanelField::Agent])], vec![]);
+    client
+        .update_subscription(&UpdateSubscriptionParams {
+            subscription_id: WireId(subscription),
+            pane_ids: Some(Some(vec![WireId(1), WireId(2)])),
+            ..UpdateSubscriptionParams::default()
+        })
+        .unwrap();
+    broadcaster.broadcast_state_delta(vec![changed(panel(2, 4), &[PanelField::Agent])], vec![]);
+    assert_eq!(next_state_changed(&mut client), (vec![panel(2, 4)], vec![]));
+
+    // The id is kept: another update of it still finds it, and an id this
+    // connection does not own is refused.
+    client
+        .update_subscription(&UpdateSubscriptionParams {
+            subscription_id: WireId(subscription),
+            fields: Some(None),
+            ..UpdateSubscriptionParams::default()
+        })
+        .unwrap();
+    let unknown = client.update_subscription(&UpdateSubscriptionParams {
+        subscription_id: WireId(subscription + 100),
+        ..UpdateSubscriptionParams::default()
+    });
+    assert!(
+        matches!(unknown, Err(ClientError::Rpc { code: -32602, .. })),
+        "{unknown:?}"
+    );
 }
 
 #[test]

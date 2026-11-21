@@ -203,6 +203,45 @@ impl Status {
         }
     }
 
+    /// What closing a worker in this state cuts short, as the close prompt
+    /// says it before its question; nothing once it is over (U10).
+    fn still(self, lang: Lang) -> Option<&'static str> {
+        Some(match self {
+            Self::Permission => lang.pick("まだ承認待ちです。", "It still awaits approval. "),
+            Self::Input => lang.pick("まだ答えを待っています。", "It still awaits an answer. "),
+            Self::Error => lang.pick("エラーを報告しています。", "It reported an error. "),
+            Self::Attention => {
+                lang.pick("未読の通知があります。", "It has an unread notification. ")
+            }
+            Self::Running => lang.pick("まだ作業中です。", "It is still at work. "),
+            Self::Quiet => lang.pick("まだ動いています。", "It is still at work. "),
+            Self::Command => lang.pick("まだ実行中です。", "It is still running. "),
+            Self::Finished | Self::Exited(_) => return None,
+        })
+    }
+
+    /// How a worker closed in this state is listed among the closed (U10).
+    fn closed_as(self, lang: Lang) -> String {
+        match self {
+            Self::Permission => lang.pick("承認待ちのまま閉じた", "closed awaiting approval"),
+            Self::Input => lang.pick("答えを待ったまま閉じた", "closed awaiting an answer"),
+            Self::Error => lang.pick("エラーのまま閉じた", "closed after an error"),
+            Self::Attention => lang.pick("通知を残して閉じた", "closed with a notification unread"),
+            Self::Running => lang.pick("作業中に閉じた", "closed at work"),
+            Self::Quiet => lang.pick("報告がないまま閉じた", "closed before it reported"),
+            Self::Command => lang.pick("実行中に閉じた", "closed while running"),
+            Self::Finished => lang.pick("完了後に閉じた", "closed when done"),
+            Self::Exited(Some(code)) => {
+                return lang.pick(
+                    format!("終了コード {code} で閉じた"),
+                    format!("closed after exiting with {code}"),
+                );
+            }
+            Self::Exited(None) => lang.pick("終了後に閉じた", "closed after it exited"),
+        }
+        .to_string()
+    }
+
     /// The label for a narrow pane: the states that share a colour keep a
     /// word each, so they stay apart without the full label.
     fn short_label(self, lang: Lang) -> String {
@@ -2270,18 +2309,7 @@ impl Board {
                 // screen: say so.
                 let busy = self
                     .panel(*pane)
-                    .map(Status::of)
-                    .filter(|status| {
-                        !matches!(status, Status::Exited(_))
-                            && matches!(status.group(), Group::Needs | Group::Working)
-                    })
-                    .map(|status| {
-                        let label = status.label(self.lang);
-                        self.lang.pick(
-                            format!("まだ{label}です。"),
-                            format!("It is still {label}. "),
-                        )
-                    })
+                    .and_then(|panel| Status::of(panel).still(self.lang))
                     .unwrap_or_default();
                 // D13: its own workers close with it.
                 let kids = self
@@ -2957,9 +2985,7 @@ impl Board {
                     &[
                         (
                             Some(BLUE),
-                            self.lang
-                                .pick("● バックグラウンド", "● Background")
-                                .to_string(),
+                            self.lang.pick("● 作業中", "● Working").to_string(),
                         ),
                         (Some(DIM), format!(" {n}")),
                     ],
@@ -3183,12 +3209,8 @@ impl Board {
                 .fg(GREY, "✕ ")
                 .plain(&fit(&gone.name, 20))
                 .fg(DIM, &{
-                    let label = gone.status.label(self.lang);
-                    let ago = ago(Some(gone.at), now, self.lang);
-                    self.lang.pick(
-                        format!("  {label}で閉じた · {ago}"),
-                        format!("  closed while {label} · {ago}"),
-                    )
+                    let closed = gone.status.closed_as(self.lang);
+                    format!("  {closed} · {}", ago(Some(gone.at), now, self.lang))
                 });
             if !gone.detail.is_empty() {
                 let room = cols.saturating_sub(line.width + 3);
@@ -4971,7 +4993,7 @@ mod tests {
         board.key(Key::Char(' '));
         let all = rendered(&board, 80, 40, start + Duration::from_secs(120));
         assert!(
-            all.contains("✕ docs  完了で閉じた · 1 分前  docs detail"),
+            all.contains("✕ docs  完了後に閉じた · 1 分前  docs detail"),
             "{all}"
         );
         // The first listing is the state found, not a closing.
@@ -5821,7 +5843,7 @@ mod tests {
         );
         // lead and its other worker are at work, solo too; sub-b is not
         // counted twice.
-        assert!(all.contains("─ ● バックグラウンド 3 "), "{all}");
+        assert!(all.contains("─ ● 作業中 3 "), "{all}");
         // An older approval (sub-b's, since 1 s) goes before a newer error.
         panels[1].agent.as_mut().unwrap().state = Some("error".to_string());
         panels[1].agent.as_mut().unwrap().seq = 2;
@@ -6552,6 +6574,62 @@ mod tests {
             .any(|ch| matches!(ch, '\u{3040}'..='\u{30ff}' | '\u{4e00}'..='\u{9fff}'))
     }
 
+    // U10: labels put into sentences read "It is still approval." and
+    // "closed while failed 1".
+    #[test]
+    fn states_put_into_sentences_read_as_sentences() {
+        let still = |status: Status| (status.still(Lang::Ja), status.still(Lang::En));
+        assert_eq!(
+            still(Status::Permission),
+            (
+                Some("まだ承認待ちです。"),
+                Some("It still awaits approval. ")
+            )
+        );
+        assert_eq!(
+            still(Status::Input),
+            (
+                Some("まだ答えを待っています。"),
+                Some("It still awaits an answer. ")
+            )
+        );
+        assert_eq!(
+            still(Status::Attention),
+            (
+                Some("未読の通知があります。"),
+                Some("It has an unread notification. ")
+            )
+        );
+        assert_eq!(
+            still(Status::Quiet),
+            (Some("まだ動いています。"), Some("It is still at work. "))
+        );
+        assert_eq!(still(Status::Finished), (None, None));
+        assert_eq!(still(Status::Exited(Some(1))), (None, None));
+        let closed = |status: Status| (status.closed_as(Lang::Ja), status.closed_as(Lang::En));
+        assert_eq!(
+            closed(Status::Exited(Some(1))),
+            (
+                "終了コード 1 で閉じた".to_string(),
+                "closed after exiting with 1".to_string()
+            )
+        );
+        assert_eq!(
+            closed(Status::Permission),
+            (
+                "承認待ちのまま閉じた".to_string(),
+                "closed awaiting approval".to_string()
+            )
+        );
+        assert_eq!(
+            closed(Status::Quiet),
+            (
+                "報告がないまま閉じた".to_string(),
+                "closed before it reported".to_string()
+            )
+        );
+    }
+
     // In English, no label is Japanese, in any view or prompt, at any width.
     #[test]
     fn an_english_board_has_no_japanese_label() {
@@ -6599,6 +6677,19 @@ mod tests {
         board.key(Key::Esc);
         board.key(Key::Char('x'));
         check(&board, "close");
+        // U10: a state put into a sentence reads as one.
+        let all = rendered(&board, 200, 30, t0);
+        for label in [
+            "approval",
+            "question",
+            "notified",
+            "no report",
+            "failed",
+            "exited",
+        ] {
+            assert!(!all.contains(&format!("still {label}")), "{all}");
+            assert!(!all.contains(&format!("while {label}")), "{all}");
+        }
         board.key(Key::Esc);
         board.key(Key::Char('q'));
         check(&board, "quit");

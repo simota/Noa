@@ -320,5 +320,6 @@ fn a_frame_reads_the_time_once() {
     dashboard.frame(third, &mut text);
     assert_eq!(status(&dashboard), "ペインへ移動できません: no such pane");
     dashboard.frame(third + NOTICE_FOR, &mut text);
-    assert_eq!(status(&dashboard), "ワーカー 9 · 同期 1 分前");
+    // 71 s without an update is stale (AC6).
+    assert_eq!(status(&dashboard), "ワーカー 9 · 同期 1 分前 · 古いデータ");
 }

@@ -441,6 +441,10 @@ pub(crate) struct Board {
     pub(crate) elsewhere: bool,
     /// Workers closed since the board opened, newest first.
     gone: Vec<Gone>,
+    /// What was typed on a send line that did not go: cancelled, or refused
+    /// (the worker began waiting for an approval meanwhile, D7). `s` to the
+    /// same worker starts from it (U5).
+    pub(crate) drafts: HashMap<u64, String>,
     /// The key help is shown over the current view.
     pub(crate) help: bool,
     /// Lines the help is scrolled, and how far it can go (set as it is
@@ -492,6 +496,7 @@ impl Board {
             offline: None,
             elsewhere: false,
             gone: Vec::new(),
+            drafts: HashMap::new(),
             help: false,
             help_scroll: 0,
             help_reach: Cell::new(0),
@@ -663,6 +668,7 @@ impl Board {
         self.history.retain(|pane, _| live.contains(pane));
         self.since.retain(|pane, _| live.contains(pane));
         self.screens.retain(|pane, _| live.contains(pane));
+        self.drafts.retain(|pane, _| live.contains(pane));
         self.output.retain(|pane, _| live.contains(pane));
         self.moved.retain(|pane, _| live.contains(pane));
         // Only the work under way folds: a subtree that finished is listed
@@ -1254,6 +1260,17 @@ impl Board {
             .is_some_and(|panel| matches!(Status::of(panel), Status::Exited(_)))
     }
 
+    /// Keep `text` as `pane`'s draft, or drop its draft when nothing is
+    /// left of it (`^U`, then Esc). Returns whether one is kept.
+    fn keep_draft(&mut self, pane: u64, text: String) -> bool {
+        if text.trim().is_empty() {
+            self.drafts.remove(&pane);
+            return false;
+        }
+        self.drafts.insert(pane, text);
+        true
+    }
+
     /// Why nothing can be sent to `pane`, if so.
     fn cannot_send(&self, pane: u64) -> Option<String> {
         let name = self.name(pane);
@@ -1308,12 +1325,22 @@ impl Board {
                     Key::Enter => {
                         self.mode = Mode::Normal;
                         if let Some(why) = self.cannot_send(pane) {
+                            let why = if self.keep_draft(pane, text) {
+                                format!("{why} · {}", draft_kept(self.lang))
+                            } else {
+                                why
+                            };
                             self.message = Some(Notice::warn(why));
                         } else if !text.trim().is_empty() {
                             return Some(Action::Send(pane, text));
                         }
                     }
-                    Key::Esc | Key::CtrlC => self.mode = Mode::Normal,
+                    Key::Esc | Key::CtrlC => {
+                        self.mode = Mode::Normal;
+                        if self.keep_draft(pane, text) {
+                            self.message = Some(Notice::ok(draft_kept(self.lang).to_string()));
+                        }
+                    }
                     _ => {}
                 }
                 None
@@ -1384,7 +1411,10 @@ impl Board {
                         if let Some(pane) = self.target() {
                             match self.cannot_send(pane) {
                                 Some(why) => self.message = Some(Notice::warn(why)),
-                                None => self.mode = Mode::Send(pane, String::new()),
+                                None => {
+                                    let draft = self.drafts.remove(&pane).unwrap_or_default();
+                                    self.mode = Mode::Send(pane, draft);
+                                }
                             }
                         }
                     }
@@ -1399,6 +1429,11 @@ impl Board {
             }
         }
     }
+}
+
+/// Said when a send line's text is kept as a draft.
+fn draft_kept(lang: Lang) -> &'static str {
+    lang.pick("下書きを残しました (s で再開)", "draft kept (s resumes it)")
 }
 
 // Labels and process names come from other processes: never let their
@@ -3720,7 +3755,9 @@ fn run_until_quit(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
             if action == Action::Quit {
                 return Ok(EXIT_OK);
             }
-            board.message = Some(perform(client, &board, action));
+            let (notice, draft) = perform(client, &board, action);
+            board.message = Some(notice);
+            board.drafts.extend(draft);
         }
     }
 }
@@ -3754,8 +3791,13 @@ impl Server for Client {
     }
 }
 
-/// Carry out an action and describe the result in one line.
-fn perform(server: &mut impl Server, board: &Board, action: Action) -> Notice {
+/// Carry out an action and describe the result in one line; a message none
+/// of which was typed comes back to be kept as its worker's draft (U5).
+fn perform(
+    server: &mut impl Server,
+    board: &Board,
+    action: Action,
+) -> (Notice, Option<(u64, String)>) {
     let failed = |err: noa_ipc::ClientError| {
         let why = match err {
             noa_ipc::ClientError::Rpc {
@@ -3775,26 +3817,34 @@ fn perform(server: &mut impl Server, board: &Board, action: Action) -> Notice {
             format!("could not: {why}"),
         ))
     };
+    let kept = |notice: Notice, pane: u64, text: &str| {
+        let notice = Notice {
+            text: format!("{} · {}", notice.text, draft_kept(board.lang)),
+            ..notice
+        };
+        (notice, Some((pane, text.to_string())))
+    };
     // The board's listing can be up to `LIST_EVERY` old: look again right
     // before typing, so a worker that started waiting for an approval since
     // is never answered from here (spec D7).
-    if let Action::Send(pane, _) = &action {
+    if let Action::Send(pane, text) = &action {
         match server.panels() {
             Ok(panels) => {
                 if panels.iter().any(|panel| {
                     panel.pane_id.0 == *pane && Status::of(panel) == Status::Permission
                 }) {
-                    return Notice::warn(approval_message(&board.name(*pane), board.lang));
+                    let why = Notice::warn(approval_message(&board.name(*pane), board.lang));
+                    return kept(why, *pane, text);
                 }
             }
-            Err(err) => return failed(err),
+            Err(err) => return kept(failed(err), *pane, text),
         }
     }
     let result = match &action {
         Action::Focus(pane) => server.focus(*pane),
         Action::Send(pane, text) => {
             if let Err(err) = server.type_text(*pane, text, true) {
-                return failed(err);
+                return kept(failed(err), *pane, text);
             }
             std::thread::sleep(SUBMIT_DELAY);
             // The Enter could answer a prompt that appeared in the pause.
@@ -3804,15 +3854,17 @@ fn perform(server: &mut impl Server, board: &Board, action: Action) -> Notice {
                         panel.pane_id.0 == *pane && Status::of(panel) == Status::Permission
                     }) =>
                 {
+                    // The text is in the worker's input box already: no
+                    // draft, or sending it again would type it twice.
                     let name = board.name(*pane);
-                    return Notice::warn(board.lang.pick(
+                    return (Notice::warn(board.lang.pick(
                         format!(
                             "{name} が承認待ちになったので Enter は送っていません。g でペインへ移動して答えてください"
                         ),
                         format!(
                             "{name} now awaits approval, so Enter was not sent. g goes to its pane to answer it"
                         ),
-                    ));
+                    )), None);
                 }
                 Ok(_) => server.type_text(*pane, "\r", false),
                 Err(err) => Err(err),
@@ -3822,7 +3874,7 @@ fn perform(server: &mut impl Server, board: &Board, action: Action) -> Notice {
         Action::Quit => Ok(()),
     };
     let name = |pane: &u64| board.name(*pane);
-    match (action, result) {
+    let notice = match (action, result) {
         (Action::Focus(pane), Ok(())) => {
             let name = name(&pane);
             Notice::ok(
@@ -3849,7 +3901,8 @@ fn perform(server: &mut impl Server, board: &Board, action: Action) -> Notice {
         }
         (_, Err(err)) => failed(err),
         (Action::Quit, Ok(())) => Notice::ok(String::new()),
-    }
+    };
+    (notice, None)
 }
 
 #[cfg(test)]
@@ -4123,11 +4176,14 @@ mod tests {
             typed: Vec::new(),
         };
 
-        let message = perform(&mut server, &board, Action::Send(2, "y".to_string()));
+        let (message, draft) = perform(&mut server, &board, Action::Send(2, "y".to_string()));
 
         assert_eq!(server.typed, Vec::new());
         assert!(message.text.contains("承認待ち"), "{message:?}");
         assert!(message.warn);
+        // U5: nothing was typed, so the message is kept to send later.
+        assert!(message.text.contains("下書きを残しました"), "{message:?}");
+        assert_eq!(draft, Some((2, "y".to_string())));
     }
 
     // Review finding: the Enter that submits goes 150 ms after the text, and
@@ -4144,11 +4200,55 @@ mod tests {
             typed: Vec::new(),
         };
 
-        let message = perform(&mut server, &board, Action::Send(2, "run it".to_string()));
+        let (message, draft) = perform(&mut server, &board, Action::Send(2, "run it".to_string()));
 
         assert_eq!(server.typed, vec![(2, "run it".to_string())]);
         assert!(message.text.contains("承認待ち"), "{message:?}");
         assert!(message.warn);
+        // It is in the worker's input box: no draft to type it twice.
+        assert_eq!(draft, None);
+    }
+
+    // U5: a message being typed was lost when the worker began waiting for
+    // an approval before Enter, and on Esc.
+    #[test]
+    fn a_message_that_did_not_go_is_kept_as_a_draft() {
+        let t0 = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), t0);
+        board.select(2);
+        board.key(Key::Char('s'));
+        board.key(Key::Paste("look at the tests".to_string()));
+        let mut waiting = sample();
+        waiting[0].agent.as_mut().unwrap().state = Some("permission".to_string());
+        board.update(waiting, t0);
+        assert_eq!(board.key(Key::Enter), None);
+        let message = board.message.clone().unwrap();
+        assert!(
+            message.warn && message.text.ends_with("下書きを残しました (s で再開)"),
+            "{message:?}"
+        );
+        // Not while it still waits; once it works again, `s` starts from it.
+        board.key(Key::Char('s'));
+        assert_eq!(board.mode, Mode::Normal);
+        board.update(sample(), t0);
+        board.key(Key::Char('s'));
+        assert_eq!(board.mode, Mode::Send(2, "look at the tests".to_string()));
+        // Esc keeps it too; a line cleared first drops it.
+        board.key(Key::Esc);
+        assert_eq!(
+            board.drafts.get(&2).map(String::as_str),
+            Some("look at the tests")
+        );
+        board.key(Key::Char('s'));
+        board.key(Key::CtrlU);
+        board.key(Key::Esc);
+        assert!(board.drafts.is_empty());
+        // A draft goes with its worker.
+        board.drafts.insert(2, "later".to_string());
+        let without: Vec<Panel> = sample().into_iter().filter(|p| p.pane_id.0 != 2).collect();
+        board.update(without, t0);
+        assert!(board.drafts.is_empty());
     }
 
     // Review finding: ESC and the key after it in one read (Option/Meta
@@ -5019,7 +5119,7 @@ mod tests {
                 Ok(())
             }
         }
-        let notice = perform(&mut Closed, &board, Action::Focus(5));
+        let (notice, _) = perform(&mut Closed, &board, Action::Focus(5));
         assert!(!notice.text.contains("-32004"), "{notice:?}");
         assert!(
             notice.text.contains("終了したか、閉じられています"),
@@ -6138,7 +6238,7 @@ mod tests {
             listings: vec![sample()],
             typed: Vec::new(),
         };
-        let notice = perform(&mut server, &board, Action::Focus(2));
+        let (notice, _) = perform(&mut server, &board, Action::Focus(2));
         assert!(!japanese(&notice.text), "{}", notice.text);
     }
 

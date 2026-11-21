@@ -66,24 +66,35 @@ Commands:
                                 level deep; no --no-board).
       --cwd DIR  --env KEY=VALUE  --label TEXT  --input TEXT
       --no-wait-after  --focus  --no-board
+                        (--label may not start with board:; --input is
+                        raw keys, refused for claude, codex or agy: use
+                        send once the agent is up)
       --max-children N (default and most 20: the board holds 20 workers;
                          with --no-board this pane holds 8 floats)
       --worktree        Run the worker in its own git worktree
-                        <repo>-wt/LABEL on a new branch orch/LABEL (from
-                        HEAD; needs --label, refuses --cwd). Prints
+                        <repo>-wt/LABEL next to the main worktree, on a
+                        new branch orch/LABEL (from HEAD; needs --label,
+                        refuses --cwd). Prints
                         \"worktree\" and \"branch\" too.
       --tier light|standard|deep
                         Pick the model tier of a claude, codex or agy
                         COMMAND (refused when it already picks a model
                         or effort). Prints \"tier\" too.
   send PANE [--enter] [--raw] [--replace] [--wait [wait options]] [--answer]
-       [--any-pane] [--] TEXT|-  Type TEXT (or stdin) into PANE; prints the
+       [--queue] [--any-pane] [--] TEXT|-
+                                Type TEXT (or stdin) into PANE; prints the
                                 report count to pass to `wait --after`. Refused
-                                while PANE waits for an approval, unless --answer.
-                                --replace first clears what the input line holds
-                                (Ctrl-E, then Ctrl-U per line, up to 32 lines).
+                                while PANE waits for an approval, unless --answer,
+                                and while its agent is running, unless --queue
+                                (then every --wait line has \"queued\":true: the
+                                wait may end with the turn already running).
+                                A TEXT over 250 KiB (JSON-encoded) is refused:
+                                send a file's path instead. --replace first
+                                clears what the input line holds (Ctrl-E, then
+                                Ctrl-U per line, up to 32 lines). --wait prints
+                                how to resume on stderr once the text is in.
   wait PANE...|--children [--after SEQ | --after PANE=SEQ ...] [--for LIST]
-       [--all] [--timeout SECS] [--tail N] [--stall SECS]
+       [--all] [--timeout SECS] [--tail N] [--stall SECS] [--any-pane]
                                 Block until a worker stops. LIST is a comma list
                                 of finished,permission,input,error,exit,attention
                                 (default: all of them), or stalled (needs
@@ -94,6 +105,8 @@ Commands:
                                 pane's last N output lines as \"tail\". A timeout
                                 prints each pending pane's report count as
                                 `baseline`; pass it back as --after PANE=SEQ.
+                                SIGTERM, SIGINT or SIGHUP prints that line too,
+                                with \"interrupted\":true (exit 2).
   read PANE [--scrollback] [--max-bytes N]
                                 Print PANE's screen (or retained output) text;
                                 a cut keeps the end and says so on stderr.
@@ -104,7 +117,9 @@ Commands:
                                 `spawn --worktree` worktree and its branch
                                 (git worktree remove, git branch -d; never
                                 forced, so unsaved work stays and is named
-                                under \"worktree\":{\"kept\":...}).
+                                under \"worktree\":{\"kept\":...}), found
+                                from the pane's cwd; a labelled pane with no
+                                such worktree also gets \"kept\" saying why.
   report STATE [[--] DETAIL]    Write an agent-state report (running, permission,
                                 input, finished, error, clear) to this terminal.
   board [--of PANE]             Show an orchestrator's workers in this pane
@@ -117,8 +132,10 @@ Commands:
 Use `--` before a TEXT or DETAIL that starts with `--`. A pane that exits
 and stays open ends a wait whatever --for lists, as a closed pane does; one
 that had exited before the wait began only ends it when no other pane is left.
-`send` and `close` only accept this pane's own workers unless --any-pane is
-given. Exit status: 0 ok, 1 error, 2 wait timed out, 3 server unavailable.
+`send`, `close` and `wait PANE` only accept this pane's own workers unless
+--any-pane is given. Exit status: 0 ok, 1 error, 2 wait timed out, 3 server
+unavailable, or a request Noa did not confirm in time (it may still have
+taken effect: check with `ls` or `read` before retrying).
 ";
 
 /// What an argument error prints after its message, instead of [`USAGE`].
@@ -206,6 +223,8 @@ pub(crate) struct SendArgs {
     pub(crate) answer: bool,
     /// `--replace`: clear the input line before typing.
     pub(crate) replace: bool,
+    /// `--queue`: type into a pane whose agent is still working.
+    pub(crate) queue: bool,
     /// `--wait`: block like `wait PANE --after <seq before sending>`.
     pub(crate) wait: Option<WaitOptions>,
 }
@@ -213,6 +232,8 @@ pub(crate) struct SendArgs {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WaitArgs {
     pub(crate) panes: PaneSet,
+    /// `--any-pane`: wait on a named pane that is not this pane's worker.
+    pub(crate) any_pane: bool,
     /// `--after`: `(pane, report count)` baselines.
     pub(crate) after: Vec<(u64, u64)>,
     pub(crate) options: WaitOptions,
@@ -228,6 +249,9 @@ pub(crate) struct WaitOptions {
     /// `--stall SECS`: also end the wait for a pane whose screen text has not
     /// changed for this long (`Reason::Stalled`).
     pub(crate) stall: Option<Duration>,
+    /// Set by `send --queue`: the text went to a working agent, so the turn
+    /// that ends the wait may be the one already running. Every line says so.
+    pub(crate) queued: bool,
 }
 
 impl Default for WaitOptions {
@@ -238,6 +262,7 @@ impl Default for WaitOptions {
             timeout: None,
             tail: None,
             stall: None,
+            queued: false,
         }
     }
 }
@@ -321,11 +346,13 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
             while let Some(value) = rest.value("--after")? {
                 afters.push(value);
             }
+            let any_pane = rest.flag("--any-pane");
             let options = parse_wait_options(&mut rest)?;
             let panes = pane_set(&mut rest)?;
             let after = parse_afters(&afters, &panes)?;
             Command::Wait(WaitArgs {
                 panes,
+                any_pane,
                 after,
                 options,
             })
@@ -457,6 +484,24 @@ fn parse_spawn(rest: &mut Args) -> Result<SpawnArgs, String> {
     };
     let cwd = rest.value("--cwd")?;
     let label = rest.value("--label")?;
+    // A board is known by its label alone (`board_pane`).
+    if label
+        .as_deref()
+        .is_some_and(|label| label.starts_with(BOARD_LABEL_PREFIX))
+    {
+        return Err(format!(
+            "--label may not start with {BOARD_LABEL_PREFIX:?}: that names an orchestrator's board"
+        ));
+    }
+    let input = rest.value("--input")?;
+    if input.is_some() && worktree::is_agent_command(&command) {
+        return Err(
+            "--input is written as raw keys right after the worker starts, so an agent takes \
+             each newline as Enter; start the agent, then give it the task with \
+             `send PANE --enter`"
+                .to_string(),
+        );
+    }
     let worktree = rest.flag("--worktree");
     let tier = rest
         .value("--tier")?
@@ -479,7 +524,7 @@ fn parse_spawn(rest: &mut Args) -> Result<SpawnArgs, String> {
         cwd,
         env,
         label,
-        input: rest.value("--input")?,
+        input,
         wait_after: !rest.flag("--no-wait-after"),
         focus: rest.flag("--focus"),
         max_children,
@@ -498,12 +543,16 @@ fn parse_send(rest: &mut Args) -> Result<SendArgs, String> {
     let any_pane = rest.flag("--any-pane");
     let answer = rest.flag("--answer");
     let replace = rest.flag("--replace");
+    let queue = rest.flag("--queue");
     if replace && answer {
         // The keys that clear an input line would land in the prompt.
         return Err("--replace does not go with --answer: a prompt has no input line".to_string());
     }
     let wait = if rest.flag("--wait") {
-        Some(parse_wait_options(rest)?)
+        Some(WaitOptions {
+            queued: queue,
+            ..parse_wait_options(rest)?
+        })
     } else {
         None
     };
@@ -524,6 +573,7 @@ fn parse_send(rest: &mut Args) -> Result<SendArgs, String> {
         any_pane,
         answer,
         replace,
+        queue,
         wait,
     })
 }
@@ -729,6 +779,11 @@ pub(crate) struct Watch {
     pub(crate) attention_armed: bool,
     /// The pane had already exited (and was held open) when the wait began.
     pub(crate) exited_before: bool,
+    /// The pane's label when the wait began, for a line printed after the
+    /// pane is gone.
+    pub(crate) label: Option<String>,
+    /// An agent ran in the pane when the wait began (`agent.kind`).
+    pub(crate) had_agent: bool,
 }
 
 impl Watch {
@@ -740,6 +795,10 @@ impl Watch {
                 .unwrap_or(0),
             attention_armed: !panel.is_some_and(|panel| panel.attention),
             exited_before: panel.is_some_and(|panel| panel.exit.is_some()),
+            label: panel.and_then(|panel| panel.label.clone()),
+            had_agent: panel
+                .and_then(|panel| panel.agent.as_ref())
+                .is_some_and(|agent| agent.kind.is_some()),
         }
     }
 }
@@ -750,6 +809,8 @@ pub(crate) struct Outcome {
     pub(crate) reason: Reason,
     /// The pane is gone (closed, or its child exited without being held).
     pub(crate) closed: bool,
+    /// The agent that ran in the pane quit back to its shell (`exit`).
+    pub(crate) agent_left: bool,
 }
 
 /// Whether `panel` (`None`: no longer listed) ends the wait on `watch`.
@@ -764,6 +825,7 @@ pub(crate) fn evaluate(
         return Some(Outcome {
             reason: Reason::Exit,
             closed: true,
+            agent_left: false,
         });
     };
     // A held-open exited pane will never report again either, so it ends
@@ -772,6 +834,22 @@ pub(crate) fn evaluate(
         return Some(Outcome {
             reason: Reason::Exit,
             closed: false,
+            agent_left: false,
+        });
+    }
+    // An agent that quit back to its shell reports nothing more, and its
+    // card's state is cleared without a new report: nothing else would end
+    // the wait.
+    if watch.had_agent
+        && panel
+            .agent
+            .as_ref()
+            .is_none_or(|agent| agent.kind.is_none() && agent.state.is_none())
+    {
+        return Some(Outcome {
+            reason: Reason::Exit,
+            closed: false,
+            agent_left: true,
         });
     }
     if let Some(agent) = &panel.agent
@@ -782,6 +860,7 @@ pub(crate) fn evaluate(
         return Some(Outcome {
             reason,
             closed: false,
+            agent_left: false,
         });
     }
     if !panel.attention {
@@ -790,25 +869,35 @@ pub(crate) fn evaluate(
         return Some(Outcome {
             reason: Reason::Attention,
             closed: false,
+            agent_left: false,
         });
     }
     None
 }
 
 fn outcome_json(
-    pane: u64,
+    watch: &Watch,
     outcome: &Outcome,
     panel: Option<&Panel>,
     quiet: Option<Duration>,
 ) -> serde_json::Value {
     let agent = panel.and_then(|panel| panel.agent.as_ref());
     let mut value = serde_json::json!({
-        "paneId": WireId(pane),
+        "paneId": WireId(watch.pane),
         "reason": outcome.reason.name(),
     });
     let object = value.as_object_mut().expect("object literal");
+    if let Some(label) = panel
+        .and_then(|panel| panel.label.as_ref())
+        .or(watch.label.as_ref())
+    {
+        object.insert("label".into(), label.clone().into());
+    }
     if outcome.closed {
         object.insert("closed".into(), true.into());
+    }
+    if outcome.agent_left {
+        object.insert("agentLeft".into(), true.into());
     }
     if let Some(agent) = agent {
         object.insert("seq".into(), agent.seq.into());
@@ -974,6 +1063,15 @@ impl From<ClientError> for Failure {
             }
             // Outside a wait, a request that timed out ends the command as
             // before; only the wait loop retries it.
+            // The app took too long, so the server gave up waiting: the
+            // request may still have been carried out (D16).
+            ClientError::Rpc {
+                code: RPC_OUTCOME_UNKNOWN,
+                message,
+            } => Failure::unavailable(format!(
+                "Noa did not confirm the request in time ({message}); it may still have taken \
+                 effect: check with `ls` or `read` before retrying"
+            )),
             ClientError::Timeout(_) => Failure {
                 transient: true,
                 ..Failure::unavailable(format!("Noa did not answer in time: {error}"))
@@ -1142,8 +1240,11 @@ pub(crate) fn board_before_spawn(
 
 /// The label of `own`'s board pane, which a later spawn looks for.
 pub(crate) fn board_label(own: u64) -> String {
-    format!("board:{own}")
+    format!("{BOARD_LABEL_PREFIX}{own}")
 }
+
+/// What every board pane's label starts with; a worker's may not.
+const BOARD_LABEL_PREFIX: &str = "board:";
 
 /// `own`'s board pane, when one is open.
 pub(crate) fn board_pane(panels: &[Panel], own: u64) -> Option<u64> {
@@ -1376,6 +1477,19 @@ impl Session {
         guard_targets(&panels, panes, own).map_err(Failure::error)
     }
 
+    /// Refuse a wait on a listed pane that is neither this pane's worker
+    /// nor this pane, as `send` and `close` refuse one: after Noa restarts,
+    /// pane ids are given out again, and a remembered id can name another
+    /// pane. Outside a listed pane there are no workers to check against,
+    /// and the wait runs as before.
+    fn guard_wait(&mut self, panes: &[u64]) -> Result<(), Failure> {
+        let Some(own) = self.own_now()? else {
+            return Ok(());
+        };
+        let panels = self.client.list_panels()?;
+        wait_guard(&panels, panes, own).map_err(Failure::error)
+    }
+
     /// This pane, for a command that only targets its own workers.
     fn guard_own(&mut self) -> Result<u64, Failure> {
         self.own_now()?.ok_or_else(|| {
@@ -1401,10 +1515,11 @@ impl Session {
         } else {
             Some(self.guard_own()?)
         };
-        let here = std::env::current_dir().ok();
+        // The worktree is found from the pane's cwd, so this command's own
+        // cwd (another worktree, or outside the repository) does not matter.
         let mut prune_label = |label: &str, pane_cwd: &str| {
             if prune {
-                worktree::prune(here.as_deref()?, label, std::path::Path::new(pane_cwd))
+                worktree::prune(label, std::path::Path::new(pane_cwd))
             } else {
                 None
             }
@@ -1446,6 +1561,9 @@ impl Session {
                     return Err(Failure::error("no panes to wait for"));
                 }
                 let named = matches!(args.panes, PaneSet::Ids(_));
+                if named && !args.any_pane {
+                    self.guard_wait(&panes)?;
+                }
                 return self.wait(&panes, named, &args.after, &args.options);
             }
             Command::Read {
@@ -1608,8 +1726,10 @@ impl Session {
         };
         let worktree_label = args.worktree.then(|| args.label.clone()).flatten();
         let label = args.label;
+        let wanted_label = label.clone();
+        let earlier: Vec<u64> = children.iter().map(|panel| panel.pane_id.0).collect();
         let (input, wait_after, focus) = (args.input, args.wait_after, args.focus);
-        let (pane, made) = spawn_steps(
+        let spawned = spawn_steps(
             self,
             |_| match &worktree_label {
                 Some(label) => {
@@ -1627,15 +1747,26 @@ impl Session {
             // (D13).
             |session| {
                 if !opens_board {
-                    return own;
+                    return Host {
+                        pane: own,
+                        opened_board: false,
+                    };
                 }
                 let panels = session.client.list_panels().map_err(Failure::from);
-                let (host, warning) =
-                    board_before_spawn(|| panels, own, || session.open_board(own, Placement::Auto));
+                let mut opened_board = false;
+                let (pane, warning) = board_before_spawn(
+                    || panels,
+                    own,
+                    || {
+                        let opened = session.open_board(own, Placement::Auto);
+                        opened_board = opened.is_ok();
+                        opened
+                    },
+                );
                 if let Some(warning) = warning {
                     eprintln!("Noa +ctl: {warning}");
                 }
-                host
+                Host { pane, opened_board }
             },
             |session, host, made| {
                 if let Some((_, made)) = made {
@@ -1658,6 +1789,22 @@ impl Session {
                     .client
                     .spawn_split(host, SplitPlacement::Float, &params)
             },
+            // The worker may have started though its answer was lost: look
+            // for it a few times, as the app may still be getting to it.
+            |session| {
+                for look in 0..OWN_WAIT_LOOKS {
+                    if look > 0 {
+                        std::thread::sleep(OWN_WAIT_PAUSE);
+                    }
+                    if let Ok(panels) = session.client.list_panels()
+                        && let Some(pane) =
+                            recovered_child(&earlier, &panels, own, wanted_label.as_deref())
+                    {
+                        return Some(pane);
+                    }
+                }
+                None
+            },
             |_, (here, made), refused| {
                 if refused {
                     // Fresh and untouched, so nothing is lost.
@@ -1671,9 +1818,27 @@ impl Session {
                     );
                 }
             },
+            // Any listed worker may now be on the board (a new board takes
+            // back the ones an earlier board handed back), so it is only
+            // closed while this pane has none.
+            |session, board| {
+                let workers = session.client.list_panels().map(|panels| {
+                    panels
+                        .iter()
+                        .any(|panel| panel.parent_pane_id == Some(WireId(own)))
+                });
+                if let Ok(false) = workers
+                    && let Err(err) = session.client.close_pane(board)
+                {
+                    eprintln!("Noa +ctl: could not close the board this spawn opened: {err}");
+                }
+            },
         )?;
-        let mut line = serde_json::json!({ "paneId": WireId(pane) });
-        if let Some((_, made)) = &made {
+        let mut line = serde_json::json!({ "paneId": WireId(spawned.pane) });
+        if spawned.recovered {
+            line["recovered"] = true.into();
+        }
+        if let Some((_, made)) = &spawned.made {
             line["worktree"] = made.path.to_string_lossy().into_owned().into();
             line["branch"] = made.branch.clone().into();
         }
@@ -1686,8 +1851,8 @@ impl Session {
 
     fn send(&mut self, args: SendArgs) -> Result<i32, Failure> {
         self.guard(&[args.pane], args.any_pane)?;
-        let text = match args.text {
-            TextArg::Literal(text) => text,
+        let text = match &args.text {
+            TextArg::Literal(text) => text.clone(),
             TextArg::Stdin => {
                 let mut text = String::new();
                 std::io::stdin()
@@ -1696,64 +1861,13 @@ impl Session {
                 text
             }
         };
-        let before = self
-            .client
-            .list_panels()?
-            .into_iter()
-            .find(|panel| panel.pane_id.0 == args.pane)
-            .ok_or_else(|| Failure::error("unknown pane"))?;
+        let before = send_steps(self, &args, &text)?;
         let seq = before.agent.as_ref().map_or(0, |agent| agent.seq);
-        // Enter approves some prompts with their default choice, and picks
-        // the first choice of a question (D7), so either is only answered on
-        // purpose.
-        if !args.answer
-            && let Some(awaited) = awaits_answer(&before)
-        {
-            return Err(Failure::error(format!(
-                "pane {} is waiting for {awaited}; nothing was sent. Read it, and pass \
-                 --answer to answer it from here.",
-                args.pane
-            )));
-        }
-        // Subscribe before typing, so the reply cannot arrive unobserved.
-        if args.wait.is_some() {
-            self.client
-                .subscribe(&[EventKind::StateChanged], Some(&[args.pane]))?;
-        }
-        if args.replace {
-            for keys in replace_keys() {
-                self.send_input(args.pane, &keys, false)?;
-                std::thread::sleep(REPLACE_PAUSE);
-            }
-            // Let the TUI take the keys before a paste arrives.
-            std::thread::sleep(SUBMIT_DELAY);
-        }
-        if !text.is_empty() {
-            self.send_input(args.pane, &text, !args.raw)?;
-        }
-        if args.enter {
-            if !text.is_empty() {
-                std::thread::sleep(SUBMIT_DELAY);
-                let asked = self
-                    .client
-                    .list_panels()?
-                    .iter()
-                    .find(|panel| panel.pane_id.0 == args.pane)
-                    .and_then(awaits_answer);
-                if !args.answer
-                    && let Some(awaited) = asked
-                {
-                    return Err(Failure::error(format!(
-                        "pane {} began waiting for {awaited} after the text was typed; \
-                         Enter was not sent, so the text may still be in its input line.",
-                        args.pane
-                    )));
-                }
-            }
-            self.send_input(args.pane, "\r", false)?;
-        }
         match args.wait {
             Some(options) => {
+                // Said before the wait, so a wait its shell tool kills
+                // without a timeout line still leaves the way back.
+                eprintln!("{}", resume_hint(args.pane, seq));
                 self.wait_subscribed(&[args.pane], send_wait_start(before, seq), &options)
             }
             None => {
@@ -1780,6 +1894,13 @@ impl Session {
                     })
                 }))
             }
+            Err(ClientError::Rpc {
+                code: RPC_OUTCOME_UNKNOWN,
+                message,
+            }) => Err(Failure::unavailable(format!(
+                "Noa did not confirm the input to pane {pane} in time ({message}); it may \
+                 already be typed: `read` the pane before sending again"
+            ))),
             result => Ok(result?),
         }
     }
@@ -1818,47 +1939,260 @@ impl Session {
         start: WaitStart,
         options: &WaitOptions,
     ) -> Result<i32, Failure> {
-        wait_loop(
-            &mut self.client,
-            panes,
-            start,
-            options,
-            WAIT_RELIST_INTERVAL,
-            &mut print_json,
-        )
+        with_signals_caught(|| {
+            wait_loop(
+                &mut self.client,
+                panes,
+                start,
+                options,
+                WAIT_RELIST_INTERVAL,
+                &mut print_json,
+            )
+        })
     }
+}
+
+impl SendTarget for Session {
+    fn panel(&mut self, pane: u64) -> Result<Option<Panel>, Failure> {
+        Ok(self
+            .client
+            .list_panels()?
+            .into_iter()
+            .find(|panel| panel.pane_id.0 == pane))
+    }
+
+    fn subscribe(&mut self, pane: u64) -> Result<(), Failure> {
+        self.client
+            .subscribe(&[EventKind::StateChanged], Some(&[pane]))?;
+        Ok(())
+    }
+
+    fn type_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), Failure> {
+        self.send_input(pane, text, paste)
+    }
+
+    fn pause(&mut self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+}
+
+/// What [`send_steps`] talks to.
+pub(crate) trait SendTarget {
+    /// `pane`'s panel; `None` when it is not listed.
+    fn panel(&mut self, pane: u64) -> Result<Option<Panel>, Failure>;
+    /// Subscribe to `pane`'s state changes (`send --wait`).
+    fn subscribe(&mut self, pane: u64) -> Result<(), Failure>;
+    fn type_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), Failure>;
+    fn pause(&mut self, duration: Duration);
+}
+
+/// The most a `send` takes, measured as its text JSON-encodes. The server
+/// reads a request as one WebSocket frame of at most 256 KiB, and one that
+/// is larger drops the connection, which would read as Noa gone (exit 3);
+/// this leaves room for the rest of the request.
+const MAX_SEND_TEXT_BYTES: usize = 250 * 1024;
+
+/// Refuse a text too large for one request, before anything is typed.
+pub(crate) fn check_send_size(text: &str) -> Result<(), String> {
+    let encoded = serde_json::to_string(text)
+        .expect("a string serializes")
+        .len();
+    if encoded > MAX_SEND_TEXT_BYTES {
+        return Err(format!(
+            "the text is {encoded} bytes after JSON encoding; one send takes at most {} KiB. \
+             Nothing was sent: write the text to a file and send its path",
+            MAX_SEND_TEXT_BYTES / 1024
+        ));
+    }
+    Ok(())
+}
+
+/// Why `send` refuses `panel` before typing, if it does. Enter approves some
+/// prompts with their default choice, and picks the first choice of a
+/// question (D7), so either is only answered on purpose (`--answer`). A
+/// working agent would queue the text, and a `--wait` could end with the
+/// turn already running (`--queue` takes that).
+pub(crate) fn send_refusal(panel: &Panel, args: &SendArgs) -> Option<String> {
+    if args.answer {
+        return None;
+    }
+    if let Some(awaited) = awaits_answer(panel) {
+        return Some(format!(
+            "pane {} is waiting for {awaited}; nothing was sent. Read it, and pass --answer to \
+             answer it from here.",
+            args.pane
+        ));
+    }
+    let working = panel
+        .agent
+        .as_ref()
+        .is_some_and(|agent| agent.state.as_deref() == Some("running"));
+    if working && !args.queue {
+        return Some(format!(
+            "pane {} is working; wait for its turn to end, or pass --queue (the wait may then \
+             end with the current turn)",
+            args.pane
+        ));
+    }
+    None
+}
+
+/// The stderr line `send --wait` prints once the text is in: how to carry
+/// on if this command is killed before its wait ends.
+pub(crate) fn resume_hint(pane: u64, seq: u64) -> String {
+    format!("Noa +ctl: sent to pane {pane}; resume with: wait {pane} --after {seq}")
+}
+
+/// `send`'s checks and typing, before any wait: refuse a text too large or
+/// a pane that should not take it, subscribe for `--wait`, clear the input
+/// line for `--replace`, type, and press Enter. Returns the panel as it was
+/// before typing.
+pub(crate) fn send_steps(
+    target: &mut impl SendTarget,
+    args: &SendArgs,
+    text: &str,
+) -> Result<Panel, Failure> {
+    check_send_size(text).map_err(Failure::error)?;
+    let before = target
+        .panel(args.pane)?
+        .ok_or_else(|| Failure::error("unknown pane"))?;
+    if let Some(refusal) = send_refusal(&before, args) {
+        return Err(Failure::error(refusal));
+    }
+    // Subscribe before typing, so the reply cannot arrive unobserved.
+    if args.wait.is_some() {
+        target.subscribe(args.pane)?;
+    }
+    if args.replace {
+        for keys in replace_keys() {
+            target.type_text(args.pane, &keys, false)?;
+            target.pause(REPLACE_PAUSE);
+        }
+        // Let the TUI take the keys before a paste arrives.
+        target.pause(SUBMIT_DELAY);
+        // Clearing takes long enough for an approval to come up meanwhile.
+        // `--replace` never goes with `--answer`.
+        if let Some(awaited) = target.panel(args.pane)?.as_ref().and_then(awaits_answer) {
+            return Err(Failure::error(format!(
+                "pane {} began waiting for {awaited} while its input line was cleared; the \
+                 text was not typed.",
+                args.pane
+            )));
+        }
+    }
+    if !text.is_empty() {
+        target.type_text(args.pane, text, !args.raw)?;
+    }
+    if args.enter {
+        if !text.is_empty() {
+            target.pause(SUBMIT_DELAY);
+            let asked = target.panel(args.pane)?.as_ref().and_then(awaits_answer);
+            if !args.answer
+                && let Some(awaited) = asked
+            {
+                return Err(Failure::error(format!(
+                    "pane {} began waiting for {awaited} after the text was typed; Enter was \
+                     not sent, so the text may still be in its input line.",
+                    args.pane
+                )));
+            }
+        }
+        target.type_text(args.pane, "\r", false)?;
+    }
+    Ok(before)
+}
+
+/// Where a spawn's worker goes (`pane`), and whether this spawn opened that
+/// pane as the board.
+pub(crate) struct Host {
+    pub(crate) pane: u64,
+    pub(crate) opened_board: bool,
+}
+
+/// What [`spawn_steps`] started.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Spawned<W> {
+    pub(crate) pane: u64,
+    pub(crate) made: Option<W>,
+    /// The spawn's answer was lost and the worker was found by listing.
+    pub(crate) recovered: bool,
 }
 
 /// A spawn's steps once its checks passed: make the `--worktree` worktree
 /// (`worktree`, `None` without one), find the host pane (`host`, which opens
-/// the board), start the worker there (`spawn`), and undo the worktree when
-/// the start failed (`undo`).
+/// the board), start the worker there (`spawn`), and clean up when the start
+/// failed.
 ///
 /// The worktree comes first: git refusing it (the branch or directory
-/// exists) then starts nothing, not even the board. `undo` is told whether
-/// the server refused the spawn (an RPC error), the one case where no
-/// worker can be running in the worktree; after a lost answer it may be.
+/// exists) then starts nothing, not even the board. After a request the app
+/// did not confirm in time (-32009) or a client timeout, the worker may be
+/// running: `recover` looks for it, and when found the spawn succeeds.
+/// Otherwise `undo` is told whether the server refused the spawn (an RPC
+/// error other than -32009), the one case where no worker can be running in
+/// the worktree, and only that case closes a board this spawn opened
+/// (`close_board`, which checks the board holds no worker).
 pub(crate) fn spawn_steps<S, W>(
     session: &mut S,
     worktree: impl FnOnce(&mut S) -> Result<Option<W>, Failure>,
-    host: impl FnOnce(&mut S) -> u64,
+    host: impl FnOnce(&mut S) -> Host,
     spawn: impl FnOnce(&mut S, u64, Option<&W>) -> Result<u64, ClientError>,
+    recover: impl FnOnce(&mut S) -> Option<u64>,
     undo: impl FnOnce(&mut S, &W, bool),
-) -> Result<(u64, Option<W>), Failure> {
+    close_board: impl FnOnce(&mut S, u64),
+) -> Result<Spawned<W>, Failure> {
     let made = worktree(session)?;
     let host = host(session);
-    match spawn(session, host, made.as_ref()) {
-        Ok(pane) => Ok((pane, made)),
-        Err(err) => {
-            if let Some(made) = &made {
-                // A request the app did not answer in time may still have
-                // started the worker: like a lost answer, not a refusal.
-                let refused =
-                    matches!(err, ClientError::Rpc { code, .. } if code != RPC_OUTCOME_UNKNOWN);
-                undo(session, made, refused);
-            }
-            Err(err.into())
+    let err = match spawn(session, host.pane, made.as_ref()) {
+        Ok(pane) => {
+            return Ok(Spawned {
+                pane,
+                made,
+                recovered: false,
+            });
         }
+        Err(err) => err,
+    };
+    let unknown = matches!(
+        err,
+        ClientError::Rpc {
+            code: RPC_OUTCOME_UNKNOWN,
+            ..
+        } | ClientError::Timeout(_)
+    );
+    if unknown && let Some(pane) = recover(session) {
+        return Ok(Spawned {
+            pane,
+            made,
+            recovered: true,
+        });
+    }
+    let refused = matches!(err, ClientError::Rpc { code, .. } if code != RPC_OUTCOME_UNKNOWN);
+    if let Some(made) = &made {
+        undo(session, made, refused);
+    }
+    if refused && host.opened_board {
+        close_board(session, host.pane);
+    }
+    Err(err.into())
+}
+
+/// The worker a spawn whose answer was lost started: the one child of `own`
+/// in `panels` that is not among `earlier` (and has `label`, when the spawn
+/// gave one). `None` when there is none, or more than one to choose from.
+pub(crate) fn recovered_child(
+    earlier: &[u64],
+    panels: &[Panel],
+    own: u64,
+    label: Option<&str>,
+) -> Option<u64> {
+    let mut new = panels.iter().filter(|panel| {
+        panel.parent_pane_id == Some(WireId(own))
+            && !earlier.contains(&panel.pane_id.0)
+            && label.is_none_or(|label| panel.label.as_deref() == Some(label))
+    });
+    match (new.next(), new.next()) {
+        (Some(panel), None) => Some(panel.pane_id.0),
+        _ => None,
     }
 }
 
@@ -1888,6 +2222,10 @@ pub(crate) trait WaitSource {
     fn scrollback(&mut self, pane: u64) -> Result<Option<String>, Failure>;
     /// `pane`'s visible screen text (`--stall`); `None` once the pane is gone.
     fn screen(&mut self, pane: u64) -> Result<Option<String>, Failure>;
+    /// Whether a terminating signal arrived, so the wait ends as a timeout.
+    fn interrupted(&mut self) -> bool {
+        false
+    }
 }
 
 impl WaitSource for Client {
@@ -1906,6 +2244,37 @@ impl WaitSource for Client {
     fn screen(&mut self, pane: u64) -> Result<Option<String>, Failure> {
         client_text(self, pane, TextSource::Screen)
     }
+
+    fn interrupted(&mut self) -> bool {
+        board::SIGNALED.load(std::sync::atomic::Ordering::Relaxed) != 0
+    }
+}
+
+/// Run `f` with the terminating signals caught (the board's handler), so
+/// a wait that its shell tool kills still prints the timeout line with the
+/// baselines to carry on from. A signal ignored on entry (a shell's `&` job
+/// ignores SIGINT) stays ignored.
+fn with_signals_caught<T>(f: impl FnOnce() -> T) -> T {
+    let previous = board::TERMINATING_SIGNALS.map(|signal| {
+        // SAFETY: the handler only stores to an atomic.
+        let previous = unsafe {
+            libc::signal(
+                signal,
+                board::on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t,
+            )
+        };
+        if previous == libc::SIG_IGN {
+            // SAFETY: puts back the disposition the process started with.
+            unsafe { libc::signal(signal, libc::SIG_IGN) };
+        }
+        previous
+    });
+    let result = f();
+    for (signal, previous) in board::TERMINATING_SIGNALS.into_iter().zip(previous) {
+        // SAFETY: back to the disposition found on entry.
+        unsafe { libc::signal(signal, previous) };
+    }
+    result
 }
 
 /// `None` when the pane closed between its outcome and this request.
@@ -1972,6 +2341,15 @@ pub(crate) fn wait_loop_with_clock(
     emit: &mut dyn FnMut(&serde_json::Value),
     clock: &mut dyn FnMut() -> Instant,
 ) -> Result<i32, Failure> {
+    let emit = &mut |line: &serde_json::Value| {
+        if options.queued {
+            let mut line = line.clone();
+            line["queued"] = true.into();
+            emit(&line);
+        } else {
+            emit(line);
+        }
+    };
     // A pane named twice is one pane: `--all` counts each once.
     let mut unique = Vec::with_capacity(panes.len());
     for pane in panes {
@@ -2041,7 +2419,7 @@ pub(crate) fn wait_loop_with_clock(
             }
             let panel = latest.get(&watch.pane);
             if let Some(outcome) = evaluate(watch, panel, &options.reasons) {
-                emit_outcome(source, options, watch.pane, &outcome, panel, None, emit)?;
+                emit_outcome(source, options, watch, &outcome, panel, None, emit);
                 done.push(watch.pane);
             }
         }
@@ -2115,11 +2493,12 @@ pub(crate) fn wait_loop_with_clock(
                                 Outcome {
                                     reason: Reason::Stalled,
                                     closed: false,
+                                    agent_left: false,
                                 },
                                 Some(quiet_for),
                             ),
                         };
-                        emit_outcome(source, options, pane, &outcome, panel, quiet, emit)?;
+                        emit_outcome(source, options, watch, &outcome, panel, quiet, emit);
                         done.push(pane);
                     }
                 }
@@ -2143,6 +2522,14 @@ pub(crate) fn wait_loop_with_clock(
                 Err(failure) if failure.transient => {}
                 Err(failure) => return Err(failure),
             }
+        }
+        // Checked between requests: a caught signal lets the one in flight
+        // finish (each is bounded), then ends the wait as a timeout would.
+        if source.interrupted() {
+            let mut line = timeout_json(&watches, &done, &latest);
+            line["interrupted"] = true.into();
+            emit(&line);
+            return Ok(EXIT_TIMEOUT);
         }
         let remaining = match deadline {
             Some(deadline) => {
@@ -2190,24 +2577,28 @@ fn apply_notification(
 }
 
 /// Print the line for a pane whose wait ended, with `--tail` if asked.
+/// The wait's outcome stands even when the tail cannot be read: the line
+/// then says why under `tailError` instead.
 fn emit_outcome(
     source: &mut impl WaitSource,
     options: &WaitOptions,
-    pane: u64,
+    watch: &Watch,
     outcome: &Outcome,
     panel: Option<&Panel>,
     quiet: Option<Duration>,
     emit: &mut dyn FnMut(&serde_json::Value),
-) -> Result<(), Failure> {
-    let mut line = outcome_json(pane, outcome, panel, quiet);
+) {
+    let mut line = outcome_json(watch, outcome, panel, quiet);
     if let Some(lines) = options.tail
         && !outcome.closed
-        && let Some(text) = source.scrollback(pane)?
     {
-        line["tail"] = tail_lines(&text, lines).into();
+        match source.scrollback(watch.pane) {
+            Ok(Some(text)) => line["tail"] = tail_lines(&text, lines).into(),
+            Ok(None) => {}
+            Err(failure) => line["tailError"] = failure.message.into(),
+        }
     }
     emit(&line);
-    Ok(())
 }
 
 /// The line a timed-out wait prints. A pane that had exited before the wait
@@ -2241,6 +2632,13 @@ fn timeout_json(
                     "paneId": WireId(watch.pane),
                     "seq": watch.baseline_seq,
                 });
+                if let Some(label) = latest
+                    .get(&watch.pane)
+                    .and_then(|panel| panel.label.as_ref())
+                    .or(watch.label.as_ref())
+                {
+                    entry["label"] = label.clone().into();
+                }
                 if let Some(state) = latest
                     .get(&watch.pane)
                     .and_then(|panel| panel.agent.as_ref()?.state.clone())
@@ -2313,6 +2711,20 @@ pub(crate) fn guard_targets(panels: &[Panel], panes: &[u64], own: u64) -> Result
                 return Err(not_worker_message(*pane));
             }
             Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a wait on a listed pane that is not `own`'s worker (`own` itself
+/// is fine). One that is not listed is left to the wait, which says so.
+pub(crate) fn wait_guard(panels: &[Panel], panes: &[u64], own: u64) -> Result<(), String> {
+    for pane in panes {
+        if let Some(panel) = panels.iter().find(|panel| panel.pane_id.0 == *pane)
+            && *pane != own
+            && panel.parent_pane_id != Some(WireId(own))
+        {
+            return Err(not_worker_message(*pane));
         }
     }
     Ok(())
@@ -2450,6 +2862,7 @@ pub(crate) fn close_panes(
 ) -> Result<i32, Failure> {
     let panels = source.list()?;
     let mut failed = false;
+    let mut unconfirmed = false;
     for (pane, listed) in close_targets(&panels, panes, own).map_err(Failure::error)? {
         let label = panels
             .iter()
@@ -2462,12 +2875,26 @@ pub(crate) fn close_panes(
                 // missing scope refuses every pane, so it fails the command.
                 Err(ClientError::Rpc { code, message }) if code != RPC_SCOPE_DENIED => {
                     let listed = source.list()?;
-                    if listed.iter().any(|panel| panel.pane_id.0 == pane) {
+                    let still_listed = listed.iter().any(|panel| panel.pane_id.0 == pane);
+                    // Not confirmed in time: the close may still happen.
+                    if code == RPC_OUTCOME_UNKNOWN {
+                        if still_listed {
+                            eprintln!(
+                                "Noa +ctl: Noa did not confirm closing pane {pane} in time \
+                                 ({message}); it may still close: check with `ls` before \
+                                 retrying"
+                            );
+                            unconfirmed = true;
+                            continue;
+                        }
+                        false
+                    } else if still_listed {
                         eprintln!("Noa +ctl: pane {pane} was not closed: {message}");
                         failed = true;
                         continue;
+                    } else {
+                        true
                     }
-                    true
                 }
                 Err(err) => return Err(err.into()),
             };
@@ -2485,7 +2912,13 @@ pub(crate) fn close_panes(
         }
         emit(&line);
     }
-    Ok(if failed { EXIT_ERROR } else { EXIT_OK })
+    Ok(if unconfirmed {
+        EXIT_UNAVAILABLE
+    } else if failed {
+        EXIT_ERROR
+    } else {
+        EXIT_OK
+    })
 }
 
 /// The worker's cwd: `--cwd` (a relative one taken from this process's
@@ -2679,12 +3112,51 @@ mod tests {
         }
     }
 
+    // Audit finding (REL-14): a worker labelled `board:7` was taken for
+    // pane 7's board.
+    #[test]
+    fn spawn_refuses_a_board_label() {
+        for bad in [
+            &["spawn", "--label", "board:7"][..],
+            &["spawn", "--label=board:", "--", "zsh"],
+        ] {
+            let err = parse_args(&args(bad)).unwrap_err();
+            assert!(err.contains("board:"), "{bad:?}: {err}");
+        }
+        assert!(parse_args(&args(&["spawn", "--label", "my-board:7"])).is_ok());
+    }
+
+    // Audit finding (AU-14): `--input` is raw keys written as the worker
+    // starts, so a task given to an agent that way had each newline taken
+    // as Enter.
+    #[test]
+    fn spawn_refuses_input_for_an_agent_command() {
+        for agent in ["claude", "codex", "/usr/local/bin/agy"] {
+            let err = parse_args(&args(&["spawn", "--input", "task", "--", agent])).unwrap_err();
+            assert!(err.contains("send"), "{agent}: {err}");
+        }
+        assert!(parse_args(&args(&["spawn", "--input", "make test", "--", "zsh"])).is_ok());
+        assert!(parse_args(&args(&["spawn", "--input", "claude"])).is_ok());
+    }
+
     /// What `run_spawn_steps` returns: the result and the steps taken.
     type StepsRun = (Result<(u64, Option<&'static str>), Failure>, Vec<String>);
 
     /// `spawn_steps` with each step logged; `worktree` fails when
     /// `worktree_fails`, `spawn` fails with `spawn_error`.
     fn run_spawn_steps(worktree_fails: bool, spawn_error: Option<ClientError>) -> StepsRun {
+        let (result, log) = run_spawn_steps_with(worktree_fails, spawn_error, false, None);
+        (result.map(|spawned| (spawned.pane, spawned.made)), log)
+    }
+
+    /// As [`run_spawn_steps`]; `host` says it opened the board when
+    /// `opened_board`, and `recover` finds `recovered`.
+    fn run_spawn_steps_with(
+        worktree_fails: bool,
+        spawn_error: Option<ClientError>,
+        opened_board: bool,
+        recovered: Option<u64>,
+    ) -> (Result<Spawned<&'static str>, Failure>, Vec<String>) {
         let mut log: Vec<String> = Vec::new();
         let result = spawn_steps(
             &mut log,
@@ -2700,7 +3172,10 @@ mod tests {
             },
             |log| {
                 log.push("board".to_string());
-                7
+                Host {
+                    pane: 7,
+                    opened_board,
+                }
             },
             |log, host, made| {
                 log.push(format!("spawn on {host} in {made:?}"));
@@ -2709,9 +3184,93 @@ mod tests {
                     None => Ok(9),
                 }
             },
+            |log| {
+                log.push("recover".to_string());
+                recovered
+            },
             |log, made, refused| log.push(format!("undo {made} refused={refused}")),
+            |log, board| log.push(format!("close board {board}")),
         );
         (result, log)
+    }
+
+    fn outcome_unknown() -> ClientError {
+        ClientError::Rpc {
+            code: RPC_OUTCOME_UNKNOWN,
+            message: "outcome unknown: request timed out".to_string(),
+        }
+    }
+
+    // Audit finding (AU-06): a spawn the app did not confirm in time was
+    // exit 1, read as a refusal, and a second worker was started.
+    #[test]
+    fn a_spawn_whose_answer_was_lost_finds_its_worker() {
+        for error in [
+            outcome_unknown(),
+            ClientError::Timeout("noa.split".to_string()),
+        ] {
+            let (result, log) = run_spawn_steps_with(false, Some(error), true, Some(12));
+            assert_eq!(
+                result.ok(),
+                Some(Spawned {
+                    pane: 12,
+                    made: Some("wt"),
+                    recovered: true,
+                })
+            );
+            // Its worktree is the recovered worker's, and so is the board.
+            assert_eq!(log.last().map(String::as_str), Some("recover"));
+        }
+
+        // Not found: exit 3, and the worktree and board are kept.
+        let (result, log) = run_spawn_steps_with(false, Some(outcome_unknown()), true, None);
+        assert_eq!(result.err().map(|f| f.code), Some(EXIT_UNAVAILABLE));
+        assert_eq!(log[log.len() - 2..], ["recover", "undo wt refused=false"]);
+
+        // A refusal or a lost connection is not looked for.
+        let refusal = ClientError::Rpc {
+            code: -32602,
+            message: "nesting goes one level deep".to_string(),
+        };
+        let (_, log) = run_spawn_steps_with(false, Some(refusal), false, Some(12));
+        assert!(!log.contains(&"recover".to_string()));
+        let lost = ClientError::Transport("connection reset".to_string());
+        let (_, log) = run_spawn_steps_with(false, Some(lost), false, Some(12));
+        assert!(!log.contains(&"recover".to_string()));
+    }
+
+    #[test]
+    fn a_recovered_worker_is_the_one_new_child_with_the_label() {
+        let mut new = worker(12, 1);
+        new.label = Some("api".to_string());
+        let panels = vec![worker(8, 1), new.clone(), worker(13, 2)];
+        assert_eq!(recovered_child(&[8], &panels, 1, None), Some(12));
+        assert_eq!(recovered_child(&[8], &panels, 1, Some("api")), Some(12));
+        assert_eq!(recovered_child(&[8], &panels, 1, Some("web")), None);
+        assert_eq!(recovered_child(&[8, 12], &panels, 1, None), None);
+        // Two new children: which one is this spawn's is not known.
+        let two = vec![worker(8, 1), new, worker(14, 1)];
+        assert_eq!(recovered_child(&[8], &two, 1, None), None);
+        assert_eq!(recovered_child(&[8], &two, 1, Some("api")), Some(12));
+    }
+
+    // Audit finding (REL-13): a spawn the server refused left the board it
+    // had just opened, empty, next to the orchestrator.
+    #[test]
+    fn a_refused_spawn_closes_the_board_it_opened() {
+        let refusal = || ClientError::Rpc {
+            code: -32000,
+            message: "the float could not open".to_string(),
+        };
+        let (result, log) = run_spawn_steps_with(false, Some(refusal()), true, None);
+        assert_eq!(result.err().map(|f| f.code), Some(EXIT_ERROR));
+        assert_eq!(log.last().map(String::as_str), Some("close board 7"));
+
+        // A board that was already open, or an outcome not known, stays.
+        let (_, log) = run_spawn_steps_with(false, Some(refusal()), false, None);
+        assert!(log.iter().all(|entry| !entry.starts_with("close board")));
+        let (_, log) = run_spawn_steps_with(false, Some(outcome_unknown()), true, None);
+        assert!(log.iter().all(|entry| !entry.starts_with("close board")));
     }
 
     // Review finding: the board opened before the worktree was made, so a
@@ -2836,12 +3395,14 @@ mod tests {
                 any_pane: false,
                 answer: false,
                 replace: false,
+                queue: false,
                 wait: Some(WaitOptions {
                     reasons: vec![Reason::Finished, Reason::Error],
                     all: false,
                     timeout: Some(Duration::from_secs(30)),
                     tail: None,
                     stall: None,
+                    queued: false,
                 }),
             })
         );
@@ -2860,6 +3421,7 @@ mod tests {
             parse_args(&args(&["wait", "--children", "--all"])).unwrap(),
             Command::Wait(WaitArgs {
                 panes: PaneSet::Children,
+                any_pane: false,
                 after: Vec::new(),
                 options: WaitOptions {
                     all: true,
@@ -2934,7 +3496,8 @@ mod tests {
             ),
             Some(Outcome {
                 reason: Reason::Finished,
-                closed: false
+                closed: false,
+                agent_left: false
             })
         );
     }
@@ -2990,7 +3553,7 @@ mod tests {
         let outcome = evaluate(&mut watch, Some(&held), &Reason::ALL).unwrap();
         assert_eq!(outcome.reason, Reason::Exit);
         assert_eq!(
-            outcome_json(8, &outcome, Some(&held), None)["exitCode"],
+            outcome_json(&watch, &outcome, Some(&held), None)["exitCode"],
             serde_json::json!(2)
         );
         // A pane that disappeared ends the wait whatever was asked for.
@@ -2998,7 +3561,8 @@ mod tests {
             evaluate(&mut watch, None, &[Reason::Finished]),
             Some(Outcome {
                 reason: Reason::Exit,
-                closed: true
+                closed: true,
+                agent_left: false
             })
         );
     }
@@ -3461,7 +4025,8 @@ mod tests {
             evaluate(&mut watch, Some(&held), &[Reason::Finished, Reason::Error]),
             Some(Outcome {
                 reason: Reason::Exit,
-                closed: false
+                closed: false,
+                agent_left: false
             })
         );
     }
@@ -3712,6 +4277,41 @@ mod tests {
         assert!(lines.is_empty());
     }
 
+    // Audit finding (AU-06): a close the app did not confirm in time was a
+    // failed pane (exit 1), though it may still close.
+    #[test]
+    fn an_unconfirmed_close_exits_3_and_does_not_stop_the_rest() {
+        let mut source = FakeCloser {
+            panels: vec![worker(8, 1)],
+            refuse_code: RPC_OUTCOME_UNKNOWN,
+        };
+        let mut lines = Vec::new();
+        let code = close_panes(
+            &mut source,
+            &[8, 9],
+            Some(1),
+            &mut |_, _| None,
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_UNAVAILABLE));
+        // 9 was already gone and is still reported.
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["paneId"], "9");
+
+        // Gone by the time it is looked at again: it closed.
+        let mut source = VanishingCloser {
+            panels: vec![worker(8, 1)],
+            lists: 0,
+            code: RPC_OUTCOME_UNKNOWN,
+        };
+        let mut lines = Vec::new();
+        let code = close_panes(&mut source, &[8], Some(1), &mut |_, _| None, &mut |line| {
+            lines.push(line.clone())
+        });
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        assert_eq!(lines, [serde_json::json!({"paneId": "8", "closed": true})]);
+    }
+
     // Review finding: the docs said a wait carried on from `baseline`
     // misses nothing, but a notification raised between the two waits is
     // already on when the second starts, so it does not end that wait:
@@ -3779,6 +4379,180 @@ mod tests {
             parse_args(&args(&["send", "8", "--answer", "--enter", "y"])).unwrap(),
             Command::Send(SendArgs { answer: true, .. })
         ));
+    }
+
+    /// A scripted pane for [`send_steps`]: `panels` are answered in order
+    /// (the last one repeats); every write is logged.
+    struct FakeTarget {
+        panels: Vec<Panel>,
+        looks: usize,
+        log: Vec<String>,
+    }
+
+    impl FakeTarget {
+        fn new(panels: Vec<Panel>) -> Self {
+            Self {
+                panels,
+                looks: 0,
+                log: Vec::new(),
+            }
+        }
+    }
+
+    impl SendTarget for FakeTarget {
+        fn panel(&mut self, _pane: u64) -> Result<Option<Panel>, Failure> {
+            let index = self.looks.min(self.panels.len() - 1);
+            self.looks += 1;
+            Ok(Some(self.panels[index].clone()))
+        }
+
+        fn subscribe(&mut self, _pane: u64) -> Result<(), Failure> {
+            self.log.push("subscribe".to_string());
+            Ok(())
+        }
+
+        fn type_text(&mut self, _pane: u64, text: &str, paste: bool) -> Result<(), Failure> {
+            self.log.push(format!("type {text:?} paste={paste}"));
+            Ok(())
+        }
+
+        fn pause(&mut self, _duration: Duration) {}
+    }
+
+    fn send_args(items: &[&str]) -> SendArgs {
+        let mut full = vec!["send", "8"];
+        full.extend(items);
+        match parse_args(&args(&full)).unwrap() {
+            Command::Send(send) => send,
+            other => panic!("send expected, got {other:?}"),
+        }
+    }
+
+    // Audit finding (REL-04): a text over the server's 256 KiB frame limit
+    // dropped the connection, read as Noa gone (exit 3), after --replace
+    // had already cleared the input line.
+    #[test]
+    fn a_text_too_large_for_one_request_is_refused_before_anything_is_typed() {
+        let fits = "x".repeat(MAX_SEND_TEXT_BYTES - 2);
+        assert!(check_send_size(&fits).is_ok());
+        // Each newline doubles under JSON encoding.
+        let over = "\n".repeat(MAX_SEND_TEXT_BYTES / 2);
+        let message = check_send_size(&over).unwrap_err();
+        assert!(message.contains("file"), "{message}");
+
+        let mut target = FakeTarget::new(vec![panel(1, Some("finished"), false)]);
+        let failure = send_steps(&mut target, &send_args(&["--replace", "x"]), &over).unwrap_err();
+        assert_eq!(failure.code, EXIT_ERROR);
+        assert!(target.log.is_empty(), "{:?}", target.log);
+    }
+
+    // Audit finding (AU-05): a send to a working agent was queued by it, and
+    // `--wait` then ended with the turn already running.
+    #[test]
+    fn a_working_agent_takes_a_send_only_with_queue() {
+        let running = panel(3, Some("running"), false);
+        let mut target = FakeTarget::new(vec![running.clone()]);
+        let failure =
+            send_steps(&mut target, &send_args(&["--enter", "more"]), "more").unwrap_err();
+        assert_eq!(failure.code, EXIT_ERROR);
+        assert!(failure.message.contains("--queue"), "{}", failure.message);
+        assert!(target.log.is_empty());
+
+        for flags in [&["--queue", "--enter", "more"][..], &["--answer", "more"]] {
+            let mut target = FakeTarget::new(vec![running.clone()]);
+            assert!(
+                send_steps(&mut target, &send_args(flags), "more").is_ok(),
+                "{flags:?}"
+            );
+        }
+        // Not working: no flag needed.
+        let mut target = FakeTarget::new(vec![panel(3, Some("finished"), false)]);
+        assert!(send_steps(&mut target, &send_args(&["more"]), "more").is_ok());
+
+        // `--queue --wait` marks every wait line.
+        let send = send_args(&["--queue", "--wait", "--timeout", "0", "more"]);
+        let options = send.wait.unwrap();
+        assert!(options.queued);
+        let mut source = FakeSource {
+            lists: vec![vec![with_pane(running.clone(), 8)]],
+            notifications: Default::default(),
+            list_calls: 0,
+            texts: HashMap::new(),
+        };
+        let mut lines = Vec::new();
+        let code = wait_loop(
+            &mut source,
+            &[8],
+            send_wait_start(with_pane(running, 8), 3),
+            &options,
+            WAIT_RELIST_INTERVAL,
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_TIMEOUT));
+        assert_eq!(lines[0]["queued"], true);
+        assert!(!send_args(&["--wait", "x"]).wait.unwrap().queued);
+    }
+
+    // Audit finding (REL-16): `--replace` spends about 0.35 s clearing the
+    // input line, and an approval that came up meanwhile took the paste.
+    #[test]
+    fn replace_checks_for_an_approval_again_before_typing() {
+        let mut target = FakeTarget::new(vec![
+            panel(3, Some("finished"), false),
+            panel(4, Some("permission"), false),
+        ]);
+        let failure = send_steps(
+            &mut target,
+            &send_args(&["--replace", "--enter", "new"]),
+            "new",
+        )
+        .unwrap_err();
+        assert!(
+            failure.message.contains("was not typed"),
+            "{}",
+            failure.message
+        );
+        assert!(target.log.iter().all(|entry| !entry.contains("new")));
+
+        let mut target = FakeTarget::new(vec![panel(3, Some("finished"), false)]);
+        send_steps(
+            &mut target,
+            &send_args(&["--replace", "--enter", "new"]),
+            "new",
+        )
+        .unwrap();
+        assert_eq!(
+            target.log.last().map(String::as_str),
+            Some("type \"\\r\" paste=false")
+        );
+        assert!(target.log.contains(&"type \"new\" paste=true".to_string()));
+    }
+
+    // Audit finding (REL-11): a `send --wait` killed before its wait ended
+    // left no report count to carry on from.
+    #[test]
+    fn send_wait_says_how_to_resume() {
+        assert_eq!(
+            resume_hint(8, 41),
+            "Noa +ctl: sent to pane 8; resume with: wait 8 --after 41"
+        );
+    }
+
+    // Audit finding (AU-06): -32009 (the app did not answer in time) was
+    // exit 1, read as a refusal, and the request was sent again.
+    #[test]
+    fn an_unconfirmed_request_exits_3_and_says_it_may_have_taken_effect() {
+        let failure = Failure::from(ClientError::Rpc {
+            code: RPC_OUTCOME_UNKNOWN,
+            message: "outcome unknown: request timed out".to_string(),
+        });
+        assert_eq!(failure.code, EXIT_UNAVAILABLE);
+        assert!(!failure.transient);
+        assert!(
+            failure.message.contains("may still have taken effect"),
+            "{}",
+            failure.message
+        );
     }
 
     #[test]
@@ -4268,6 +5042,275 @@ mod tests {
         assert_eq!(code.ok(), Some(EXIT_OK));
         assert_eq!(lines[0]["closed"], true);
         assert!(lines[0].get("tail").is_none());
+    }
+
+    /// A [`FakeSource`] whose scrollback reads fail with `error`.
+    struct TailFails(FakeSource, fn() -> ClientError);
+
+    impl WaitSource for TailFails {
+        fn list(&mut self) -> Result<Vec<Panel>, Failure> {
+            self.0.list()
+        }
+
+        fn next(&mut self, timeout: Duration) -> Result<Option<Notification>, Failure> {
+            self.0.next(timeout)
+        }
+
+        fn scrollback(&mut self, _pane: u64) -> Result<Option<String>, Failure> {
+            Err(Failure::from((self.1)()))
+        }
+
+        fn screen(&mut self, pane: u64) -> Result<Option<String>, Failure> {
+            self.0.screen(pane)
+        }
+    }
+
+    /// A [`FakeSource`] that reports a caught signal once `after` calls to
+    /// `next` were made.
+    struct Interrupted {
+        inner: FakeSource,
+        nexts: usize,
+        after: usize,
+    }
+
+    impl WaitSource for Interrupted {
+        fn list(&mut self) -> Result<Vec<Panel>, Failure> {
+            self.inner.list()
+        }
+
+        fn next(&mut self, timeout: Duration) -> Result<Option<Notification>, Failure> {
+            self.nexts += 1;
+            self.inner.next(timeout)
+        }
+
+        fn scrollback(&mut self, pane: u64) -> Result<Option<String>, Failure> {
+            self.inner.scrollback(pane)
+        }
+
+        fn screen(&mut self, pane: u64) -> Result<Option<String>, Failure> {
+            self.inner.screen(pane)
+        }
+
+        fn interrupted(&mut self) -> bool {
+            self.nexts >= self.after
+        }
+    }
+
+    // Audit finding (AU-08, REL-11): a wait killed by its shell tool printed
+    // nothing, so the orchestrator had no baseline to carry on from.
+    #[test]
+    fn a_caught_signal_ends_the_wait_with_its_baselines() {
+        let mut running = with_pane(panel(5, Some("running"), false), 8);
+        running.label = Some("api".to_string());
+        let mut source = Interrupted {
+            inner: FakeSource {
+                lists: vec![vec![running.clone()]],
+                notifications: [Notification::StateChanged {
+                    panels: vec![running],
+                    dropped: false,
+                }]
+                .into(),
+                list_calls: 0,
+                texts: HashMap::new(),
+            },
+            nexts: 0,
+            after: 1,
+        };
+        let mut lines = Vec::new();
+        let code = wait_loop(
+            &mut source,
+            &[8],
+            WaitStart::Listed {
+                after: HashMap::from([(8, 4)]),
+            },
+            &WaitOptions::default(),
+            WAIT_RELIST_INTERVAL,
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_TIMEOUT));
+        assert_eq!(
+            lines,
+            vec![serde_json::json!({
+                "timeout": true,
+                "interrupted": true,
+                "pending": ["8"],
+                "baseline": [{"paneId": "8", "seq": 4, "label": "api", "state": "running"}],
+            })]
+        );
+    }
+
+    // Audit finding (REL-09): `wait PANE` checked no parent, so after a
+    // restart gave pane ids out again, a remembered worker id waited on an
+    // unrelated pane.
+    #[test]
+    fn a_named_wait_refuses_a_listed_pane_that_is_not_a_worker() {
+        let panels = vec![worker(8, 1), worker(5, 2), worker(1, 0)];
+        assert_eq!(wait_guard(&panels, &[8], 1), Ok(()));
+        assert_eq!(wait_guard(&panels, &[8, 5], 1), Err(not_worker_message(5)));
+        // This pane itself, and a pane that is not listed (the wait says so).
+        assert_eq!(wait_guard(&panels, &[1, 9999], 1), Ok(()));
+        let Command::Wait(wait) = parse_args(&args(&["wait", "5", "--any-pane"])).unwrap() else {
+            panic!("wait expected");
+        };
+        assert!(wait.any_pane);
+    }
+
+    // Audit finding (REL-05): a `--tail` read past the client's deadline
+    // ended the wait with exit 3 and lost the outcome it had reached.
+    #[test]
+    fn a_tail_that_cannot_be_read_keeps_the_outcome() {
+        for error in [
+            (|| ClientError::Timeout("noa.getText".to_string())) as fn() -> ClientError,
+            || ClientError::Transport("connection reset".to_string()),
+        ] {
+            let mut source = TailFails(
+                FakeSource {
+                    lists: vec![vec![with_pane(panel(2, Some("finished"), false), 8)]],
+                    notifications: Default::default(),
+                    list_calls: 0,
+                    texts: HashMap::new(),
+                },
+                error,
+            );
+            let mut lines = Vec::new();
+            let code = wait_loop(
+                &mut source,
+                &[8],
+                WaitStart::Listed {
+                    after: HashMap::from([(8, 1)]),
+                },
+                &WaitOptions {
+                    tail: Some(5),
+                    ..WaitOptions::default()
+                },
+                WAIT_RELIST_INTERVAL,
+                &mut |line| lines.push(line.clone()),
+            );
+            assert_eq!(code.ok(), Some(EXIT_OK));
+            assert_eq!(lines.len(), 1);
+            assert_eq!(lines[0]["reason"], "finished");
+            assert!(lines[0].get("tail").is_none());
+            assert!(
+                lines[0]["tailError"]
+                    .as_str()
+                    .is_some_and(|error| !error.is_empty()),
+                "{}",
+                lines[0]
+            );
+        }
+    }
+
+    // Audit finding (REL-12): an agent that quit back to its shell cleared
+    // its state without a new report, so the wait ran to its timeout.
+    #[test]
+    fn an_agent_that_quit_to_its_shell_ends_the_wait() {
+        let running = panel(4, Some("running"), false);
+        let mut watch = Watch::new(8, Some(&running), None);
+        assert!(watch.had_agent);
+        assert_eq!(evaluate(&mut watch, Some(&running), &Reason::ALL), None);
+
+        let mut shell = panel(4, None, false);
+        shell.agent.as_mut().unwrap().kind = None;
+        let outcome = evaluate(&mut watch, Some(&shell), &[Reason::Finished]).unwrap();
+        assert_eq!(
+            outcome,
+            Outcome {
+                reason: Reason::Exit,
+                closed: false,
+                agent_left: true,
+            }
+        );
+        let line = outcome_json(&watch, &outcome, Some(&shell), None);
+        assert_eq!(line["reason"], "exit");
+        assert_eq!(line["agentLeft"], true);
+        assert!(line.get("closed").is_none());
+        shell.agent = None;
+        assert!(evaluate(&mut watch, Some(&shell), &Reason::ALL).is_some_and(|o| o.agent_left));
+
+        // A pane that had no agent when the wait began is a shell's wait.
+        let mut watch = Watch::new(8, Some(&shell), None);
+        assert_eq!(evaluate(&mut watch, Some(&shell), &Reason::ALL), None);
+        // A report left after the agent's process went is still waited on.
+        let mut reported = panel(4, Some("running"), false);
+        reported.agent.as_mut().unwrap().kind = None;
+        let mut watch = Watch::new(8, Some(&running), None);
+        assert_eq!(evaluate(&mut watch, Some(&reported), &Reason::ALL), None);
+    }
+
+    // Audit finding (AU-04): a wait's lines named panes by id only, so an
+    // orchestrator that lost track of its ids could not tell its workers
+    // apart.
+    #[test]
+    fn wait_lines_carry_the_panes_label() {
+        let mut labelled = with_pane(panel(3, Some("running"), false), 8);
+        labelled.label = Some("api".to_string());
+        let unlabelled = with_pane(panel(1, Some("running"), false), 9);
+        let mut source = FakeSource {
+            lists: vec![vec![labelled.clone(), unlabelled.clone()]],
+            notifications: Default::default(),
+            list_calls: 0,
+            texts: HashMap::new(),
+        };
+        let mut lines = Vec::new();
+        let code = wait_loop(
+            &mut source,
+            &[8, 9],
+            WaitStart::Listed {
+                after: HashMap::new(),
+            },
+            &WaitOptions {
+                timeout: Some(Duration::ZERO),
+                ..WaitOptions::default()
+            },
+            WAIT_RELIST_INTERVAL,
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_TIMEOUT));
+        assert_eq!(
+            lines[0]["baseline"],
+            serde_json::json!([
+                {"paneId": "8", "seq": 3, "label": "api", "state": "running"},
+                {"paneId": "9", "seq": 1, "state": "running"},
+            ])
+        );
+
+        // On an outcome, and still once the pane is gone.
+        let mut finished = with_pane(panel(4, Some("finished"), false), 8);
+        finished.label = Some("api".to_string());
+        let mut source = FakeSource {
+            lists: vec![vec![labelled.clone()], Vec::new()],
+            notifications: [Notification::StateChanged {
+                panels: vec![labelled],
+                dropped: false,
+            }]
+            .into(),
+            list_calls: 0,
+            texts: HashMap::new(),
+        };
+        let mut lines = Vec::new();
+        let code = wait_loop(
+            &mut source,
+            &[8],
+            WaitStart::Listed {
+                after: HashMap::new(),
+            },
+            &WaitOptions::default(),
+            Duration::ZERO,
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        assert_eq!(lines[0]["closed"], true);
+        assert_eq!(lines[0]["label"], "api");
+        let watch = Watch::new(8, Some(&finished), Some(3));
+        let outcome = Outcome {
+            reason: Reason::Finished,
+            closed: false,
+            agent_left: false,
+        };
+        assert_eq!(
+            outcome_json(&watch, &outcome, Some(&finished), None)["label"],
+            "api"
+        );
     }
 
     #[test]
@@ -4794,6 +5837,7 @@ mod tests {
     struct VanishingCloser {
         panels: Vec<Panel>,
         lists: usize,
+        code: i64,
     }
 
     impl PaneCloser for VanishingCloser {
@@ -4808,7 +5852,7 @@ mod tests {
 
         fn close(&mut self, _pane: u64) -> Result<(), ClientError> {
             Err(ClientError::Rpc {
-                code: RPC_PANE_CLOSED,
+                code: self.code,
                 message: "pane closed".to_string(),
             })
         }
@@ -4824,6 +5868,7 @@ mod tests {
         let mut source = VanishingCloser {
             panels: vec![labelled],
             lists: 0,
+            code: RPC_PANE_CLOSED,
         };
         let mut asked = Vec::new();
         let mut lines = Vec::new();

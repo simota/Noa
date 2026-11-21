@@ -105,6 +105,13 @@ fn picks_model(agent: Agent, args: &[String]) -> bool {
     }
 }
 
+/// Whether `command` runs claude, codex or agy (the programs `--tier` knows).
+pub(crate) fn is_agent_command(command: &[String]) -> bool {
+    command
+        .first()
+        .is_some_and(|program| agent_of(program).is_some())
+}
+
 /// Argument check for `--tier`: `command` must be one of the three agents
 /// and must not already pick a model.
 pub(crate) fn check_tier_command(command: &[String]) -> Result<(), String> {
@@ -232,34 +239,77 @@ fn first_line(message: &str) -> String {
     message.lines().next().unwrap_or("").to_string()
 }
 
-pub(crate) fn top_level(cwd: &Path) -> Result<PathBuf, String> {
-    let out = git(cwd, &["rev-parse", "--show-toplevel"])?;
-    Ok(PathBuf::from(out.trim_end_matches('\n')))
+/// The repository's main worktree, seen from `cwd`: the first entry of
+/// `git worktree list`, the same from any of its worktrees or subdirectories.
+pub(crate) fn main_worktree(cwd: &Path) -> Result<PathBuf, String> {
+    let entries = parse_worktree_list(&git(cwd, &["worktree", "list", "--porcelain"])?);
+    entries
+        .into_iter()
+        .next()
+        .map(|entry| entry.path)
+        .ok_or_else(|| "git worktree list printed no worktree".to_string())
 }
 
 /// A worktree made for a worker.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Made {
-    pub(crate) top: PathBuf,
     pub(crate) path: PathBuf,
     pub(crate) branch: String,
 }
 
-/// `git worktree add -b orch/<label> <top>-wt/<label> HEAD`, run in `cwd`.
-/// The `Err` is git's stderr. Warns once on stderr when `cwd`'s checkout has
-/// uncommitted changes, which the worktree does not have.
+/// `git worktree add -b orch/<label> <main>-wt/<label> HEAD`, run in `cwd`
+/// (so the branch starts at `cwd`'s HEAD), where `<main>` is the main
+/// worktree: run from another worktree, the new one still goes next to the
+/// repository, not inside that worktree's `-wt`. The `Err` is git's stderr.
+/// Warns on stderr when `cwd`'s checkout has changes the worktree does not
+/// have.
 pub(crate) fn add(cwd: &Path, label: &str) -> Result<Made, String> {
-    let top = top_level(cwd)?;
+    let top = main_worktree(cwd)?;
     let path = worktree_path(&top, label);
     let branch = branch_name(label);
     let path_arg = path.to_string_lossy().into_owned();
     git(cwd, &["worktree", "add", "-b", &branch, &path_arg, "HEAD"])?;
-    if git(cwd, &["status", "--porcelain"]).is_ok_and(|status| !status.trim().is_empty()) {
-        eprintln!(
-            "Noa +ctl: warning: this checkout has uncommitted changes; they are not in the worktree"
-        );
+    if let Ok(status) = git(cwd, &["status", "--porcelain", "--untracked-files=all"]) {
+        for warning in uncommitted_warnings(&status) {
+            eprintln!("Noa +ctl: warning: {warning}");
+        }
     }
-    Ok(Made { top, path, branch })
+    Ok(Made { path, branch })
+}
+
+/// What `git status --porcelain` says the new worktree lacks: changes to
+/// tracked files (which the agent may need committed first) and untracked
+/// files (often the orchestrator's own scratch files), each said apart.
+pub(crate) fn uncommitted_warnings(porcelain: &str) -> Vec<String> {
+    let (mut tracked, mut untracked) = (0, 0);
+    for line in porcelain.lines().filter(|line| !line.is_empty()) {
+        if line.starts_with("??") {
+            untracked += 1;
+        } else {
+            tracked += 1;
+        }
+    }
+    let count = |n: usize, one: &str, many: &str| {
+        if n == 1 {
+            format!("1 {one}")
+        } else {
+            format!("{n} {many}")
+        }
+    };
+    let mut warnings = Vec::new();
+    if tracked > 0 {
+        warnings.push(format!(
+            "this checkout has uncommitted changes to {}; they are not in the worktree",
+            count(tracked, "tracked file", "tracked files")
+        ));
+    }
+    if untracked > 0 {
+        warnings.push(format!(
+            "{} not in the worktree",
+            count(untracked, "untracked file is", "untracked files are")
+        ));
+    }
+    warnings
 }
 
 /// What a removal did.
@@ -297,15 +347,43 @@ pub(crate) fn remove(cwd: &Path, path: &Path, branch: &str) -> Removal {
 }
 
 /// `close --prune` for one closed pane labelled `label`: remove its worktree
-/// and branch when `cwd`'s repository has them and the pane's own cwd
-/// (`pane_cwd`) is in that worktree. `None` when there is no label or no
-/// matching worktree; a worktree the pane was not in is kept, and the result
-/// says why.
-pub(crate) fn prune(cwd: &Path, label: &str, pane_cwd: &Path) -> Option<serde_json::Value> {
+/// `<main>-wt/<label>` and branch `orch/<label>` when the pane's own cwd
+/// (`pane_cwd`) is in that worktree. The repository is the pane's, found
+/// from `pane_cwd`, not the caller's cwd, and git runs in its main worktree.
+/// `None` only for a label `spawn --worktree` could not have given; for any
+/// other the result says what was done, or why nothing was.
+pub(crate) fn prune(label: &str, pane_cwd: &Path) -> Option<serde_json::Value> {
     check_label(label).ok()?;
-    let top = top_level(cwd).ok()?;
-    let entries = parse_worktree_list(&git(cwd, &["worktree", "list", "--porcelain"]).ok()?);
-    let entry = find_worktree(&entries, &top, label)?;
+    let branch = branch_name(label);
+    let kept = |reason: String| {
+        serde_json::json!({
+            "removed": false,
+            "branchDeleted": false,
+            "kept": reason,
+        })
+    };
+    // The listed cwd can be a directory the worker has since removed.
+    let from = pane_cwd
+        .ancestors()
+        .find(|dir| dir.is_dir())
+        .unwrap_or(pane_cwd);
+    let entries = match git(from, &["worktree", "list", "--porcelain"]) {
+        Ok(porcelain) => parse_worktree_list(&porcelain),
+        Err(message) => {
+            return Some(kept(format!(
+                "no {branch} worktree found from the pane's cwd {}: {}",
+                pane_cwd.display(),
+                first_line(&message)
+            )));
+        }
+    };
+    let main = entries.first()?.path.clone();
+    let Some(entry) = find_worktree(&entries, &main, label) else {
+        return Some(kept(format!(
+            "no worktree {} on {branch} in this repository",
+            worktree_path(&main, label).display()
+        )));
+    };
     // Labels are not unique: only the pane that worked in the worktree
     // prunes it, not another pane that happens to share the label.
     if !within(pane_cwd, &entry.path) {
@@ -316,7 +394,7 @@ pub(crate) fn prune(cwd: &Path, label: &str, pane_cwd: &Path) -> Option<serde_js
             "kept": NOT_IN_WORKTREE,
         }));
     }
-    let removal = remove(cwd, &entry.path, &branch_name(label));
+    let removal = remove(&main, &entry.path, &branch);
     let mut info = serde_json::json!({
         "path": entry.path.to_string_lossy(),
         "removed": removal.removed,
@@ -536,7 +614,7 @@ detached
         assert_eq!(made.branch, "orch/job");
         assert!(made.path.join("a.txt").is_file());
 
-        let info = prune(&repo, "job", &made.path).unwrap();
+        let info = prune("job", &made.path).unwrap();
         assert_eq!(info["removed"], true);
         assert_eq!(info["branchDeleted"], true);
         assert!(info.get("kept").is_none());
@@ -559,7 +637,7 @@ detached
         let outside = base.join("plain");
         std::fs::create_dir_all(&outside).unwrap();
         // Not a repo (an enclosing repo under the temp dir would be a bug here).
-        if top_level(&outside).is_err() {
+        if main_worktree(&outside).is_err() {
             assert!(add(&outside, "x").is_err());
             assert!(!base.join("plain-wt").exists());
         }
@@ -572,7 +650,7 @@ detached
         let made = add(&repo, "job").unwrap();
         std::fs::write(made.path.join("new.txt"), "x").unwrap();
 
-        let info = prune(&repo, "job", &made.path).unwrap();
+        let info = prune("job", &made.path).unwrap();
         assert_eq!(info["removed"], false);
         assert_eq!(info["branchDeleted"], false);
         assert!(info["kept"].as_str().is_some_and(|k| !k.is_empty()));
@@ -588,7 +666,7 @@ detached
         run_git(&made.path, &["add", "."]);
         run_git(&made.path, &["commit", "-q", "-m", "work"]);
 
-        let info = prune(&repo, "job", &made.path).unwrap();
+        let info = prune("job", &made.path).unwrap();
         assert_eq!(info["removed"], true);
         assert_eq!(info["branchDeleted"], false);
         assert!(info["kept"].as_str().is_some_and(|k| !k.is_empty()));
@@ -601,19 +679,96 @@ detached
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    // Audit finding (REL-08, AU-07): a label without a matching worktree
+    // printed no "worktree" key, so a worktree that was looked for in the
+    // wrong repository could not be told from none at all.
     #[test]
-    fn prune_ignores_labels_without_a_matching_worktree() {
+    fn prune_says_why_when_no_worktree_matches_the_label() {
         let (base, repo) = repo("none");
-        assert!(prune(&repo, "nothing", &repo).is_none());
-        assert!(prune(&repo, "../escape", &repo).is_none());
+        let missing = prune("nothing", &repo).unwrap();
+        assert_eq!(missing["removed"], false);
+        assert_eq!(missing["branchDeleted"], false);
+        let reason = missing["kept"].as_str().unwrap();
+        assert!(
+            reason.contains("orch/nothing") && reason.contains("repo-wt/nothing"),
+            "{reason}"
+        );
+        // Not a label `spawn --worktree` could have given.
+        assert!(prune("../escape", &repo).is_none());
         // A plain branch of the same name at the same path is not ours.
         let path = worktree_path(&repo, "other");
         run_git(
             &repo,
             &["worktree", "add", "-b", "feature", path.to_str().unwrap()],
         );
-        assert!(prune(&repo, "other", &path).is_none());
+        let other = prune("other", &path).unwrap();
+        assert_eq!(other["removed"], false);
+        assert!(path.exists());
+        // A pane whose cwd is in no repository.
+        let outside = base.join("plain");
+        std::fs::create_dir_all(&outside).unwrap();
+        if main_worktree(&outside).is_err() {
+            let lost = prune("job", &outside).unwrap();
+            assert!(
+                lost["kept"]
+                    .as_str()
+                    .is_some_and(|kept| kept.contains("orch/job")),
+                "{lost}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // Audit finding (REL-08, AU-07): `add` and `prune` worked from the
+    // caller's `--show-toplevel`, so from inside a worker's worktree `add`
+    // nested the new one under `<repo>-wt/A-wt/` and `prune` found nothing.
+    #[test]
+    fn add_and_prune_use_the_main_worktree_from_anywhere_in_the_repository() {
+        let (base, repo) = repo("main-base");
+        let first = add(&repo, "a").unwrap();
+        let sub = first.path.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let second = add(&sub, "b").unwrap();
+        assert_eq!(second.path, base.join("repo-wt").join("b"));
+
+        // The pane's cwd finds the worktree whatever the caller's cwd is.
+        let info = prune("b", &second.path.join(".")).unwrap();
+        assert_eq!(info["removed"], true, "{info}");
+        assert_eq!(info["branchDeleted"], true, "{info}");
+        assert!(!second.path.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn uncommitted_changes_and_untracked_files_are_warned_apart() {
+        assert!(uncommitted_warnings("").is_empty());
+        assert_eq!(
+            uncommitted_warnings("?? task-1.txt\n?? result-1.json\n"),
+            ["2 untracked files are not in the worktree"]
+        );
+        assert_eq!(
+            uncommitted_warnings(" M src/a.rs\n?? task.txt\n"),
+            [
+                "this checkout has uncommitted changes to 1 tracked file; they are not in the \
+                 worktree",
+                "1 untracked file is not in the worktree",
+            ]
+        );
+        assert_eq!(
+            uncommitted_warnings("M  a\nR  b -> c\n"),
+            [
+                "this checkout has uncommitted changes to 2 tracked files; they are not in the \
+              worktree"
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_commands_are_claude_codex_or_agy() {
+        assert!(is_agent_command(&strings(&["/opt/bin/codex", "exec"])));
+        assert!(is_agent_command(&strings(&["claude"])));
+        assert!(!is_agent_command(&strings(&["zsh"])));
+        assert!(!is_agent_command(&[]));
     }
 
     // Review finding: labels are not unique, so closing another pane that
@@ -625,7 +780,7 @@ detached
 
         // Review finding: a skipped prune printed nothing, so the caller
         // could not tell it from a label without a worktree.
-        let kept = prune(&repo, "job", &repo).unwrap();
+        let kept = prune("job", &repo).unwrap();
         assert_eq!(
             kept,
             serde_json::json!({
@@ -641,7 +796,7 @@ detached
                 .trim()
                 .is_empty()
         );
-        let removed = prune(&repo, "job", &made.path.join("src")).unwrap();
+        let removed = prune("job", &made.path.join("src")).unwrap();
         assert_eq!(removed["removed"], true);
         let _ = std::fs::remove_dir_all(&base);
     }

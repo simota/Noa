@@ -3505,13 +3505,14 @@ fn terminal_problem(stdin_tty: bool, stdout_tty: bool) -> Option<Failure> {
 }
 
 /// The terminating signal [`run`] caught, or 0.
-static SIGNALED: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+pub(crate) static SIGNALED: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
-extern "C" fn on_signal(signal: libc::c_int) {
+pub(crate) extern "C" fn on_signal(signal: libc::c_int) {
     SIGNALED.store(signal, std::sync::atomic::Ordering::Relaxed);
 }
 
-const TERMINATING_SIGNALS: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGHUP, libc::SIGINT];
+pub(crate) const TERMINATING_SIGNALS: [libc::c_int; 3] =
+    [libc::SIGTERM, libc::SIGHUP, libc::SIGINT];
 
 /// Run the board until `q`. The terminal is restored before returning; a
 /// terminating signal restores it too, then ends the process as that

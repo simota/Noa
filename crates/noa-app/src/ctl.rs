@@ -2250,21 +2250,27 @@ impl WaitSource for Client {
 
 /// Run `f` with the terminating signals caught (the board's handler), so
 /// a wait that its shell tool kills still prints the timeout line with the
-/// baselines to carry on from.
+/// baselines to carry on from. A signal ignored on entry (a shell's `&` job
+/// ignores SIGINT) stays ignored.
 fn with_signals_caught<T>(f: impl FnOnce() -> T) -> T {
-    for signal in board::TERMINATING_SIGNALS {
+    let previous = board::TERMINATING_SIGNALS.map(|signal| {
         // SAFETY: the handler only stores to an atomic.
-        unsafe {
+        let previous = unsafe {
             libc::signal(
                 signal,
                 board::on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t,
             )
         };
-    }
+        if previous == libc::SIG_IGN {
+            // SAFETY: puts back the disposition the process started with.
+            unsafe { libc::signal(signal, libc::SIG_IGN) };
+        }
+        previous
+    });
     let result = f();
-    for signal in board::TERMINATING_SIGNALS {
-        // SAFETY: back to the default disposition.
-        unsafe { libc::signal(signal, libc::SIG_DFL) };
+    for (signal, previous) in board::TERMINATING_SIGNALS.into_iter().zip(previous) {
+        // SAFETY: back to the disposition found on entry.
+        unsafe { libc::signal(signal, previous) };
     }
     result
 }

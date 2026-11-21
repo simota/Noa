@@ -171,17 +171,14 @@ fn a_lost_link_keeps_the_last_data_marked_stale() {
     let status = status_text(&dashboard);
     assert!(status.starts_with("切断: "), "{status}");
     assert!(status.contains("古いデータ"), "{status}");
-    assert_eq!(
-        status,
-        "切断: 接続が切れました · 最終同期 30 秒前 · 古いデータ"
-    );
+    assert_eq!(status, "切断: 古いデータ（30 秒前）· 接続が切れました");
     assert_eq!(dot_color(&mut dashboard, &mut text), RED);
 
     // The age keeps counting while the link stays down.
     dashboard.tick(base + secs(200));
     assert_eq!(
         status_text(&dashboard),
-        "切断: 接続が切れました · 最終同期 3 分前 · 古いデータ"
+        "切断: 古いデータ（3 分前）· 接続が切れました"
     );
 
     // The server comes back: live data replaces it.
@@ -268,4 +265,64 @@ fn a_rebuilt_header_starts_on_the_text_tick_will_set() {
     dashboard.show_notice_at("通知".to_owned(), lost);
     dashboard.rebuilt(dashboard.view, &mut text);
     assert_eq!(status_text(&dashboard), "通知", "a fresh notice stays");
+}
+
+/// The colour the status label's text is drawn in.
+fn text_color(dashboard: &mut Dashboard, text: &mut TextStore) -> Color {
+    dashboard.prepare(window(), text);
+    let [x, y, _, h] = rect(&dashboard.tree, dashboard.status);
+    dashboard
+        .display_list()
+        .commands()
+        .iter()
+        .rev()
+        .find_map(|command| match command {
+            DrawCommand::Text { rect, color, .. }
+                if (rect.x - x).abs() <= 0.5 && rect.y >= y - 0.5 && rect.y <= y + h =>
+            {
+                Some(*color)
+            }
+            _ => None,
+        })
+        .expect("the status is drawn")
+}
+
+/// The status as drawn: its text, its colour and the dot's.
+fn drawn(dashboard: &mut Dashboard, text: &mut TextStore) -> (String, Color, Color) {
+    let color = text_color(dashboard, text);
+    (status_text(dashboard), color, dot_color(dashboard, text))
+}
+
+#[test]
+fn a_rebuilt_header_draws_the_health_it_had() {
+    let base = Instant::now();
+    // A snapshot that came already stale; the frame ticks at its arrival.
+    let (mut stale, mut text) = live_at(base, 14);
+    let before = drawn(&mut stale, &mut text);
+    assert_eq!(
+        before,
+        (
+            "ワーカー 9 · 同期 14 秒前 · 古いデータ".to_owned(),
+            ORANGE,
+            ORANGE
+        )
+    );
+    // A rebuild between frames (a click, an accessibility action) draws
+    // what the last tick did, with no tick of its own.
+    stale.rebuilt(stale.view, &mut text);
+    assert_eq!(drawn(&mut stale, &mut text), before, "stale");
+
+    // A lost link with its data: red text and dot after the rebuild too.
+    // (Its age is counted from the last live snapshot: the header cannot
+    // know the last tick's time, see `health::built_at`.)
+    let (mut lost, mut text) = live_at(base, 0);
+    let at = base + secs(30);
+    lost.apply_received(down("接続が切れました"), at, &mut text);
+    lost.tick(at);
+    let (_, color, dot) = drawn(&mut lost, &mut text);
+    assert_eq!((color, dot), (RED, RED));
+    lost.rebuilt(lost.view, &mut text);
+    let (status, color, dot) = drawn(&mut lost, &mut text);
+    assert_eq!((color, dot), (RED, RED), "down");
+    assert!(status.starts_with("切断: 古いデータ"), "{status}");
 }

@@ -83,20 +83,30 @@ pub(super) fn status(feed: &Feed, now: Instant) -> String {
     link_text(feed, Some(now))
 }
 
-/// The status text for a screen that is just being built. Building has no
-/// time of its own to read: the frame that follows runs `tick` with the
-/// frame's one `now` before anything is drawn. So this uses the latest
-/// moment the feed itself knows (the snapshot's arrival, or the notice), and
-/// reads no clock. It is what `status` says at that moment.
+/// The status text for a screen that is just being built: what `status`
+/// says at `built_at`.
 pub(super) fn initial_status(feed: &Feed) -> String {
+    text_at(feed, built_at(feed))
+}
+
+/// The moment a screen that is just being built shows the health of.
+/// Building has no time of its own to read: a frame runs `tick` with the
+/// frame's one `now` before anything is drawn. So this is the latest moment
+/// the feed itself knows (the snapshot's arrival, or the notice), and reads
+/// no clock. `None` when nothing has come (the canned fleet, or a link still
+/// connecting): there is no age to count and no notice to expire.
+fn built_at(feed: &Feed) -> Option<Instant> {
     let received = feed
         .synced_at
         .map(|at| at + Duration::from_secs(feed.synced_secs));
     let noticed = feed.notice.as_ref().map(|(_, at)| *at);
-    match received.max(noticed) {
+    received.max(noticed)
+}
+
+/// `status` at `now`, or the link state with nothing to count from.
+fn text_at(feed: &Feed, now: Option<Instant>) -> String {
+    match now {
         Some(now) => status(feed, now),
-        // Nothing has come (the canned fleet, or a link still connecting),
-        // so there is no age to count and no notice to expire.
         None => link_text(feed, None),
     }
 }
@@ -117,8 +127,12 @@ fn link_text(feed: &Feed, now: Option<Instant>) -> String {
         Health::Live => format!("ワーカー {n} · 同期 {ago}前"),
         Health::Stale => format!("ワーカー {n} · 同期 {ago}前 · 古いデータ"),
         Health::Down { had_data: false } => format!("切断: {reason}"),
+        // The reason can be any length and the label cuts its tail, so
+        // what must stay readable comes first: the stale mark and the
+        // data's age (164 px for "59 分", in a slot of up to 200 px, which
+        // leaves room for the reason's first characters).
         Health::Down { had_data: true } => {
-            format!("切断: {reason} · 最終同期 {ago}前 · 古いデータ")
+            format!("切断: 古いデータ（{ago}前）· {reason}")
         }
     }
 }
@@ -144,10 +158,21 @@ fn age(feed: &Feed, now: Option<Instant>) -> Duration {
 /// Brings the dot and the status label up to `now`. The setters change
 /// nothing when the value is the same, so this runs on every frame.
 pub(super) fn tick(tree: &mut UiTree, parts: &HeaderParts, feed: &Feed, now: Instant) {
-    let HealthParts { dot, status: label } = parts.health;
-    let health = health(feed, Some(now));
+    show(tree, parts.health, feed, Some(now));
+}
+
+/// Gives a header that is just being built the text, colour and dot of
+/// `built_at`, all three from that one moment.
+pub(super) fn show_built(tree: &mut UiTree, parts: HealthParts, feed: &Feed) {
+    show(tree, parts, feed, built_at(feed));
+}
+
+/// Sets the dot's colour, the status text and its colour as of `now`.
+fn show(tree: &mut UiTree, parts: HealthParts, feed: &Feed, now: Option<Instant>) {
+    let HealthParts { dot, status: label } = parts;
+    let health = health(feed, now);
     tree.update::<Container, _>(dot, |c, cx| c.set_background(cx, Some(health.dot().into())));
-    let text = status(feed, now);
+    let text = text_at(feed, now);
     tree.update::<Label, _>(label, |l, cx| {
         l.set_text(cx, text);
         match health.text() {

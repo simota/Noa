@@ -3,7 +3,9 @@
 
 use std::time::Instant;
 
-use crate::dashboard::header::STATUS_MIN_WIDTH;
+use noa_gpui_text::TextStyle;
+
+use crate::dashboard::header::STATUS_MAX_WIDTH;
 
 use super::*;
 
@@ -68,22 +70,46 @@ fn at(width: f32, state: State) -> (Dashboard, TextStore) {
         State::LongStatus => {
             dashboard.show_notice_at("あ".repeat(300), now);
         }
-        State::LongReason => {
-            let reason = "切".repeat(200);
-            let snapshot = Snapshot {
-                fleet: Fleet::default(),
-                link: Link::Down(reason),
-                synced_secs: 0,
-                can_focus: false,
-                instance: None,
-            };
-            dashboard.apply_received(snapshot, now, &mut text);
-            dashboard.tick(now);
-        }
+        State::LongReason => lose_link(&mut dashboard, &mut text, now),
         State::Default | State::AllHidden => {}
     }
     dashboard.prepare(size(width), &mut text);
     (dashboard, text)
+}
+
+/// The reason of `lose_link`'s `Down`: 200 characters.
+fn long_reason() -> String {
+    "切".repeat(200)
+}
+
+/// The link goes down with a 200-character reason while the canned workers
+/// are shown (they stay, marked stale).
+fn lose_link(dashboard: &mut Dashboard, text: &mut TextStore, now: Instant) {
+    let snapshot = Snapshot {
+        fleet: Fleet::default(),
+        link: Link::Down(long_reason()),
+        synced_secs: 0,
+        can_focus: false,
+        instance: None,
+    };
+    dashboard.apply_received(snapshot, now, text);
+    dashboard.tick(now);
+}
+
+/// The width a text takes in `style`, measured on its own: not by the
+/// header, whose fit this checks.
+fn text_width(text: &mut TextStore, s: &str, style: TextStyle) -> f32 {
+    let id = text.create(s, style, None);
+    let width = text.size(id).width;
+    text.remove(id);
+    width
+}
+
+/// The status label's whole text at its natural width (12 px, as the
+/// header writes it).
+fn status_natural(dashboard: &Dashboard, text: &mut TextStore) -> f32 {
+    let label = dashboard.tree.get::<Label>(dashboard.status).unwrap();
+    text_width(text, label.text(), TextStyle::new(12.0))
 }
 
 /// The header bar's own children that are shown, with their rectangles.
@@ -108,7 +134,7 @@ fn shown(dashboard: &Dashboard, id: WidgetId) -> bool {
 fn the_header_fits_from_1100_to_1920() {
     for width in WIDTHS {
         for state in STATES {
-            let (dashboard, _text) = at(width, state);
+            let (dashboard, mut text) = at(width, state);
             let what = format!("{width} px, {state:?}");
             no_overlap(&dashboard, width, &what);
 
@@ -130,9 +156,12 @@ fn the_header_fits_from_1100_to_1920() {
                     "{what}: {name} has no width"
                 );
             }
+            // The spec's floor (AC4), written out rather than read from
+            // the header: 140 px, or the whole text when it is shorter.
+            let floor = 140.0_f32.min(status_natural(&dashboard, &mut text));
             assert!(
-                width_of(&dashboard, slot) >= STATUS_MIN_WIDTH - 0.5,
-                "{what}: the status slot is {} wide",
+                width_of(&dashboard, slot) >= floor - 0.5,
+                "{what}: the status slot is {} wide, under {floor}",
                 width_of(&dashboard, slot)
             );
         }
@@ -319,4 +348,131 @@ fn the_tally_tags_and_the_hint_strip_are_gone() {
     // The header's only tag is the longest wait.
     assert_eq!(tags.len(), 1, "{tags:?}");
     assert!(tags[0].starts_with("最長 "), "{tags:?}");
+}
+
+/// The states a lost link must stay readable in: each panel and filter
+/// combination of `STATES`.
+const LAYOUTS: [State; 4] = [
+    State::Default,
+    State::AllHidden,
+    State::Filtering,
+    State::HiddenAndFiltering,
+];
+
+#[test]
+fn a_lost_link_keeps_its_age_readable_at_every_width() {
+    // What must show however long the reason is: the link state, the
+    // data's age and the stale mark, then the reason's start.
+    let fixed = "切断: 古いデータ（0 秒前）· ";
+    for state in LAYOUTS {
+        for width in (1100..=1920).step_by(20) {
+            let (mut dashboard, mut text) = at(width as f32, state);
+            lose_link(&mut dashboard, &mut text, Instant::now());
+            dashboard.prepare(size(width as f32), &mut text);
+            let label = dashboard.tree.get::<Label>(dashboard.status).unwrap();
+            let shown = label.shown_text();
+            let what = format!("{width} px, {state:?}");
+            let reason = shown
+                .strip_prefix(fixed)
+                .unwrap_or_else(|| panic!("{what}: {shown:?} cuts the fixed part"));
+            assert!(
+                reason.starts_with('切') && reason.ends_with('…'),
+                "{what}: the reason's start is not shown: {shown:?}"
+            );
+            assert_eq!(label.text(), format!("{fixed}{}", long_reason()));
+        }
+    }
+}
+
+/// The longest wait, rewritten in place to a far longer text: every
+/// worker's `since` (non-structural: the screen is not rebuilt).
+fn longer_waits(dashboard: &mut Dashboard, text: &mut TextStore, now: Instant) {
+    let mut fleet = dashboard.feed.fleet.clone();
+    for worker in &mut fleet.workers {
+        worker.since = "1000 分以上".to_owned();
+    }
+    let tag = dashboard.header.longest.unwrap();
+    dashboard.apply_received(live(fleet, 0), now, text);
+    dashboard.tick(now);
+    assert_eq!(dashboard.header.longest, Some(tag), "updated in place");
+}
+
+#[test]
+fn a_hidden_item_comes_back_at_its_current_width() {
+    let now = Instant::now();
+    let (mut dashboard, mut text) = at(1920.0, State::HiddenAndFiltering);
+    dashboard.apply_received(live(fleet::canned(), 0), now, &mut text);
+    dashboard.tick(now);
+    // Narrow until the 最長 tag goes.
+    let mut width = 1920;
+    while !dropped(&dashboard)[2] {
+        width -= 1;
+        dashboard.prepare(size(width as f32), &mut text);
+    }
+    let longest = dashboard.header.longest.unwrap();
+    let before = dashboard
+        .tree
+        .get::<Tag>(longest)
+        .unwrap()
+        .text()
+        .to_owned();
+    // While it is hidden, its text grows.
+    longer_waits(&mut dashboard, &mut text, now);
+    let after = dashboard
+        .tree
+        .get::<Tag>(longest)
+        .unwrap()
+        .text()
+        .to_owned();
+    assert!(after.len() > before.len(), "{before} → {after}");
+    dashboard.prepare(size(width as f32), &mut text);
+    // Widening a pixel at a time, every frame fits: it comes back only when
+    // its new width does.
+    for width in width..=1920 {
+        dashboard.prepare(size(width as f32), &mut text);
+        no_overlap(&dashboard, width as f32, &format!("{width} px widening"));
+    }
+    assert!(shown(&dashboard, longest), "1920 px shows it again");
+}
+
+#[test]
+fn the_status_keeps_its_width_until_everything_else_is_dropped() {
+    let now = Instant::now();
+    for state in LAYOUTS {
+        let (mut dashboard, mut text) = at(1920.0, state);
+        // 30 s without an answer: a status longer than the slot's maximum.
+        dashboard.apply_received(live(fleet::canned(), 30), now, &mut text);
+        dashboard.tick(now);
+        let widths = (1000..=1920)
+            .rev()
+            .step_by(4)
+            .chain((1000..=1920).step_by(4));
+        for width in widths {
+            dashboard.prepare(size(width as f32), &mut text);
+            let what = format!("{width} px, {state:?}");
+            let slot = dashboard
+                .tree
+                .parent(dashboard.header.health.status)
+                .unwrap();
+            let wanted = status_natural(&dashboard, &mut text).min(STATUS_MAX_WIDTH);
+            if width_of(&dashboard, slot) < wanted - 0.5 {
+                assert_eq!(
+                    dropped(&dashboard),
+                    [true, true, dashboard.header.longest.is_some(), true],
+                    "{what}: the status shrank to {} before the rest went",
+                    width_of(&dashboard, slot)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_status_is_measured_as_the_header_lays_it_out() {
+    // `status_natural` above is what the label takes when nothing cuts it.
+    let (dashboard, mut text) = at(1920.0, State::Default);
+    let label = dashboard.header.health.status;
+    let natural = status_natural(&dashboard, &mut text);
+    assert!(natural > 0.0);
+    assert!((width_of(&dashboard, label) - natural).abs() <= 0.5);
 }

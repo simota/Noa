@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use noa_gpui_core::style::{
     AlignItems, FlexDirection, Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
@@ -9,19 +9,21 @@ use noa_gpui_core::widgets::{
 };
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use noa_gpui_scene::Size;
-use noa_gpui_text::TextStore;
+use noa_gpui_text::{TextStore, TextStyle};
 
 use crate::fleet::{Grouping, Need, Phase, Worker, minutes_text};
 
 use super::filter::Filter;
-use super::health::{HealthParts, initial_status};
+use super::health::{self, HealthParts};
 use super::panel::Panel;
-use super::style::{GRAY, HEADER_HEIGHT, caption, fixed_width, gap, joined, need_color};
+use super::style::{HEADER_HEIGHT, caption, fixed_width, gap, joined, need_color};
 use super::{Feed, Pulse, Registry, View};
 
 /// The status label is cut beyond this width, so a long notice cannot
 /// push the rest of the header around.
 pub(super) const STATUS_MAX_WIDTH: f32 = 200.0;
+
+const STATUS_FONT_SIZE: f32 = 12.0;
 
 /// The status slot never gets narrower than this (a text that needs more
 /// is cut with an ellipsis): the link state stays readable at any width.
@@ -77,14 +79,46 @@ pub(super) struct ChipParts {
     pub(super) title: WidgetId,
 }
 
-/// The widths `fit` remembers for what it may hide.
+/// The widths `fit` remembers for what it may hide, and the texts it
+/// measures.
 #[derive(Default)]
 struct Widths {
     title: Cell<f32>,
-    longest: Cell<f32>,
+    /// What the 最長 tag adds to its text's width (its padding), from when
+    /// it was last shown: its text changes in place (`Pulse::Longest`), also
+    /// while it is hidden, so its width is this plus its text's.
+    longest_pad: Cell<f32>,
+    longest_text: TextWidth,
     group_caption: Cell<f32>,
     /// Per chip: its width with the title.
     chips: Vec<Cell<f32>>,
+    /// The status label's whole text.
+    status: TextWidth,
+}
+
+/// The width of a text as last measured, shaped again only when the text
+/// changes (`fit` runs on every frame).
+#[derive(Default)]
+struct TextWidth(RefCell<Option<(String, f32)>>);
+
+impl TextWidth {
+    fn of(&self, text: &mut TextStore, s: &str, style: TextStyle) -> f32 {
+        if let Some((known, width)) = &*self.0.borrow()
+            && known == s
+        {
+            return *width;
+        }
+        let id = text.create(s, style, None);
+        let width = text.size(id).width;
+        text.remove(id);
+        self.0.replace(Some((s.to_owned(), width)));
+        width
+    }
+}
+
+/// The style `Tag` shapes its text in (noa-gpui's `Tag::text_style`).
+fn tag_style() -> TextStyle {
+    TextStyle::new(12.0).weight(500)
 }
 
 pub(super) fn header(
@@ -125,10 +159,7 @@ pub(super) fn header(
 
     let dot = tree.insert(
         Some(bar),
-        Container::new(fixed_width(8.0))
-            .height(8.0)
-            .radius(4.0)
-            .background(GRAY),
+        Container::new(fixed_width(8.0)).height(8.0).radius(4.0),
     );
     let status_slot = tree.insert(
         Some(bar),
@@ -147,11 +178,12 @@ pub(super) fn header(
     );
     let status = tree.insert(
         Some(status_slot),
-        Label::new(initial_status(feed))
-            .font_size(12.0)
-            .color(Role::Muted)
+        Label::new(health::initial_status(feed))
+            .font_size(STATUS_FONT_SIZE)
             .truncation(Truncation::Tail),
     );
+    let health = HealthParts { dot, status };
+    health::show_built(tree, health, feed);
 
     let counts = urgency_counts(tree, bar, workers);
 
@@ -205,7 +237,7 @@ pub(super) fn header(
     HeaderParts {
         bar,
         title,
-        health: HealthParts { dot, status },
+        health,
         counts,
         longest,
         chips,
@@ -265,17 +297,20 @@ pub(super) fn match_text(workers: &[Worker], filter: &Filter) -> String {
 /// brings them back when it has room again; true when it changed the tree.
 /// In this order: (1) the グループ caption, (2) the titles of the hidden-panel
 /// chips (their keycaps stay), (3) the 最長 tag, (4) the title. The health
-/// dot and status (never narrower than `STATUS_MIN_WIDTH`), the urgency
-/// counts, the filter field, the `?` keycap and the grouping control are
-/// never dropped.
+/// dot and status, the urgency counts, the filter field, the `?` keycap and
+/// the grouping control are never dropped. The status counts at its whole
+/// text's width, up to `STATUS_MAX_WIDTH`: it is cut (never under
+/// `STATUS_MIN_WIDTH`) only when everything droppable is gone.
 ///
 /// The layout `prepare` just made has the width of everything shown; what is
-/// hidden has none, so the width each droppable item had when it was last
-/// shown is kept in `parts`. Nothing in the bar shrinks but the status slot,
-/// so those widths are the items' natural ones however tight the bar is.
+/// hidden has none. Nothing in the bar shrinks but the status slot, so the
+/// width an item had when it was last shown is its natural one however tight
+/// the bar is, and `parts` keeps it. The 最長 tag's text can change while it
+/// is hidden, so its width is measured from its text now; the title, the
+/// caption and the chips never change theirs.
 pub(super) fn fit(
     tree: &mut UiTree,
-    _text: &mut TextStore,
+    text: &mut TextStore,
     _viewport: Size,
     parts: &HeaderParts,
 ) -> bool {
@@ -287,20 +322,36 @@ pub(super) fn fit(
     };
     let widths = &parts.widths;
     remember(tree, parts.title, &widths.title);
-    if let Some(id) = parts.longest {
-        remember(tree, id, &widths.longest);
-    }
     remember(tree, parts.group_caption, &widths.group_caption);
     for ((chip, cell), titled) in parts.chips.iter().zip(&widths.chips).zip(&parts.chip_parts) {
         if !tree.is_hidden(titled.title) {
             cell.set(width_of(tree, *chip));
         }
     }
+    let longest = parts.longest.map(|id| {
+        let tag_text = tree.get::<Tag>(id).map_or("", Tag::text);
+        let text_width = widths.longest_text.of(text, tag_text, tag_style());
+        if tree.is_hidden(id) {
+            widths.longest_pad.get() + text_width
+        } else {
+            let width = width_of(tree, id);
+            widths.longest_pad.set(width - text_width);
+            width
+        }
+    });
+    let status_text = tree
+        .get::<Label>(parts.health.status)
+        .map_or("", Label::text);
+    let status = widths
+        .status
+        .of(text, status_text, TextStyle::new(STATUS_FONT_SIZE))
+        .clamp(STATUS_MIN_WIDTH, STATUS_MAX_WIDTH);
 
-    // What never goes: the status slot at its least, and the rest as laid out.
+    // What never goes: the status slot at its whole text's width (capped),
+    // and the rest as laid out.
     let fixed = [
         8.0,
-        STATUS_MIN_WIDTH,
+        status,
         width_of(tree, parts.counts),
         0.0,
         width_of(tree, parts.filter_field),
@@ -318,8 +369,10 @@ pub(super) fn fit(
         if level < DROP_TITLE {
             items.push(widths.title.get());
         }
-        if parts.longest.is_some() && level < DROP_LONGEST {
-            items.push(widths.longest.get());
+        if let Some(longest) = longest
+            && level < DROP_LONGEST
+        {
+            items.push(longest);
         }
         if level < DROP_GROUP_CAPTION {
             items.push(widths.group_caption.get());

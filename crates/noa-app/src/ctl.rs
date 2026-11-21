@@ -64,7 +64,10 @@ Commands:
                                 Start a worker in a floating pane stowed on
                                 this pane's board (opened by the first one),
                                 where its row shows it until someone opens
-                                it; prints {\"paneId\":...}. With --no-board,
+                                it; prints {\"paneId\":...,\"cwd\":...}, the
+                                worker's cwd resolved (a relative --cwd is
+                                taken from this process's cwd; . and ..
+                                removed). With --no-board,
                                 or no board, it floats over this pane,
                                 collapsed to its title strip. A worker's
                                 workers go on its orchestrator's board (one
@@ -2237,6 +2240,9 @@ impl Session {
         if let Some(path) = &result_path {
             line["result"] = path.clone().into();
         }
+        if let Some(dir) = &started_in {
+            line["cwd"] = dir.clone().into();
+        }
         self.journal.append(
             "spawn",
             serde_json::json!({
@@ -4070,7 +4076,8 @@ pub(crate) fn close_panes(
 
 /// The worker's cwd: `--cwd` (a relative one taken from this process's
 /// cwd, since Noa resolves the path in its own process), or this process's
-/// cwd.
+/// cwd. An absolute result has no `.` or `..` component (see
+/// [`remove_dot_segments`]); one with none comes out byte-for-byte unchanged.
 pub(crate) fn spawn_cwd(
     requested: Option<String>,
     current: Option<std::path::PathBuf>,
@@ -4080,7 +4087,57 @@ pub(crate) fn spawn_cwd(
         (Some(dir), None) => std::path::PathBuf::from(dir),
         (None, current) => current?,
     };
-    path.into_os_string().into_string().ok()
+    remove_dot_segments(path)
+        .into_os_string()
+        .into_string()
+        .ok()
+}
+
+/// `path` without `.` and `..` components, naming the same directory.
+///
+/// No such segment: unchanged, with no filesystem access. Only `.`: they are
+/// dropped. A `..`: popped lexically, unless the directory does not exist
+/// (returned unchanged, so the caller refuses it) or a symlink before the `..`
+/// makes the kernel's answer differ (then the canonical path). A relative
+/// path is returned unchanged.
+fn remove_dot_segments(path: std::path::PathBuf) -> std::path::PathBuf {
+    use std::path::Component;
+
+    if !path.is_absolute() {
+        return path;
+    }
+    let text = path.to_string_lossy();
+    let has = |dot: &str| text.split('/').any(|segment| segment == dot);
+    let (has_dot, has_parent) = (has("."), has(".."));
+    if !has_dot && !has_parent {
+        return path;
+    }
+    let mut lexical = std::path::PathBuf::new();
+    let mut depth = 0usize;
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if depth > 0 {
+                    lexical.pop();
+                    depth -= 1;
+                }
+            }
+            Component::Normal(name) => {
+                lexical.push(name);
+                depth += 1;
+            }
+            other => lexical.push(other.as_os_str()),
+        }
+    }
+    if !has_parent {
+        return lexical;
+    }
+    match path.canonicalize() {
+        Err(_) => path,
+        Ok(real) if lexical.canonicalize().is_ok_and(|l| l == real) => lexical,
+        Ok(real) => real,
+    }
 }
 
 fn print_panel(mut panel: Panel) {
@@ -6409,6 +6466,106 @@ mod tests {
             Some("/abs")
         );
         assert_eq!(spawn_cwd(None, here).as_deref(), Some("/repo"));
+    }
+
+    fn real_dirs(name: &str) -> std::path::PathBuf {
+        let base = temp_dir(name).canonicalize().unwrap();
+        for dir in ["sub", "other", "a/b", "real/sub"] {
+            std::fs::create_dir_all(base.join(dir)).unwrap();
+        }
+        base
+    }
+
+    fn has_dots(path: &str) -> bool {
+        path.split('/')
+            .any(|segment| segment == "." || segment == "..")
+    }
+
+    #[test]
+    fn dots_in_a_cwd_are_removed_and_name_the_same_directory() {
+        let base = real_dirs("dots");
+        for (dir, expect) in [
+            ("sub/../other", base.join("other")),
+            ("./sub", base.join("sub")),
+            (".", base.clone()),
+            ("a/./b", base.join("a/b")),
+            ("a/b/../..", base.clone()),
+        ] {
+            let got = spawn_cwd(Some(dir.to_string()), Some(base.clone())).unwrap();
+            assert!(!has_dots(&got), "{dir}: {got}");
+            assert_eq!(std::path::Path::new(&got), expect, "{dir}");
+            assert_eq!(
+                std::path::Path::new(&got).canonicalize().unwrap(),
+                base.join(dir).canonicalize().unwrap()
+            );
+        }
+        let parent = spawn_cwd(Some("..".to_string()), Some(base.join("sub"))).unwrap();
+        assert_eq!(std::path::Path::new(&parent), base);
+        let absolute = format!("{}/a/../other", base.display());
+        let got = spawn_cwd(Some(absolute), None).unwrap();
+        assert_eq!(std::path::Path::new(&got), base.join("other"));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn a_cwd_without_dots_is_unchanged() {
+        let base = real_dirs("nodots");
+        let trailing = format!("{}/sub/", base.display());
+        assert_eq!(
+            spawn_cwd(Some(trailing.clone()), Some(base.clone())),
+            Some(trailing)
+        );
+        assert_eq!(
+            spawn_cwd(Some("/repo".to_string()), Some(base.clone())).as_deref(),
+            Some("/repo")
+        );
+        assert_eq!(
+            spawn_cwd(Some("sub".to_string()), None).as_deref(),
+            Some("sub")
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn a_dotdot_after_a_symlink_names_the_kernels_directory() {
+        let base = real_dirs("symlink");
+        std::os::unix::fs::symlink(base.join("real/sub"), base.join("link")).unwrap();
+        let got = spawn_cwd(Some("link/..".to_string()), Some(base.clone())).unwrap();
+        assert_eq!(std::path::Path::new(&got), base.join("real"));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn a_missing_dotdot_cwd_is_returned_unchanged_and_refused() {
+        let base = real_dirs("missing");
+        let got = spawn_cwd(Some("nope/../sub".to_string()), Some(base.clone())).unwrap();
+        assert_eq!(got, format!("{}/nope/../sub", base.display()));
+        let err = check_spawn(
+            &spawn_args(Some("nope/../sub"), &[]),
+            Some(base.clone()),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.ends_with("is not a directory"), "{err}");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn the_result_file_of_a_normalized_cwd_has_no_dots() {
+        let base = real_dirs("result");
+        let cwd = spawn_cwd(Some("sub/../other".to_string()), Some(base.clone())).unwrap();
+        let path = result::prepare(std::path::Path::new(&cwd), Some("x")).unwrap();
+        assert!(!has_dots(&path.to_string_lossy()), "{path:?}");
+        assert!(path.starts_with(base.join("other")), "{path:?}");
+
+        let mut p = panel(1, None, false);
+        p.cwd = cwd.clone();
+        p.label = Some("x".to_string());
+        assert_eq!(
+            result_path(&[], &p),
+            Some(base.join("other/.noa/result-x.md"))
+        );
+        let _ = std::fs::remove_dir_all(base);
     }
 
     fn transport(code: i32) -> ClientError {

@@ -4003,7 +4003,10 @@ fn take_listing(
 fn lost(err: &ClientError) -> bool {
     matches!(
         err,
-        ClientError::Transport(_) | ClientError::Closed(_) | ClientError::TooManyConnections(_)
+        ClientError::Transport(_)
+            | ClientError::HandshakeDropped(_)
+            | ClientError::Closed(_)
+            | ClientError::TooManyConnections(_)
     )
 }
 

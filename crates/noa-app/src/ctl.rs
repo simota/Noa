@@ -1246,7 +1246,9 @@ pub(crate) fn connect_retry_pauses() -> Vec<Duration> {
 
 /// `connect`, tried again after each of [`connect_retry_pauses`] while the
 /// server refuses it at its connection limit: a slot frees up as soon as
-/// another command ends.
+/// another command ends. Past the few refusals it closes with 1013, a full
+/// server drops a connection during the handshake, so that is retried in
+/// the same 3 s too.
 pub(crate) fn connect_retrying<T>(
     mut connect: impl FnMut() -> Result<T, ClientError>,
     mut pause: impl FnMut(Duration),
@@ -1254,10 +1256,12 @@ pub(crate) fn connect_retrying<T>(
     let mut pauses = connect_retry_pauses().into_iter();
     loop {
         match connect() {
-            Err(ClientError::TooManyConnections(reason)) => match pauses.next() {
-                Some(duration) => pause(duration),
-                None => return Err(ClientError::TooManyConnections(reason)),
-            },
+            Err(err @ (ClientError::TooManyConnections(_) | ClientError::HandshakeDropped(_))) => {
+                match pauses.next() {
+                    Some(duration) => pause(duration),
+                    None => return Err(err),
+                }
+            }
             result => return result,
         }
     }
@@ -1279,7 +1283,9 @@ impl From<ClientError> for Failure {
                 message,
             } => Failure::error(message),
             // The server went away mid-command (stopped or restarted).
-            ClientError::Closed(_) | ClientError::Transport(_) => {
+            ClientError::Closed(_)
+            | ClientError::Transport(_)
+            | ClientError::HandshakeDropped(_) => {
                 Failure::unavailable(format!("lost the connection to Noa: {error}"))
             }
             ClientError::TooManyConnections(_) => {
@@ -1366,6 +1372,10 @@ pub(crate) fn connect_failure_message(url: &str, error: &ClientError) -> String 
         )
     } else if matches!(error, ClientError::TooManyConnections(_)) {
         format!("; {TOO_MANY_CONNECTIONS} (tried again for 3 s)")
+    } else if matches!(error, ClientError::HandshakeDropped(_)) {
+        format!(
+            "; Noa may be at its connection limit: {TOO_MANY_CONNECTIONS} (tried again for 3 s)"
+        )
     } else {
         String::new()
     };
@@ -5868,6 +5878,40 @@ mod tests {
         );
         assert!(matches!(result, Err(ClientError::TooManyConnections(_))));
         assert_eq!(tries, pauses.len() + 1);
+        // Review finding #6: a connection dropped during the handshake (a
+        // full server past its few 1013 refusals) is retried in the same
+        // 3 s, and said as a possibly full Noa once they are spent.
+        let dropped = || ClientError::HandshakeDropped("Handshake not finished".to_string());
+        let (mut tries, mut slept) = (0, Vec::new());
+        let result = connect_retrying(
+            || {
+                tries += 1;
+                match tries {
+                    1 => Err(dropped()),
+                    2 => Err(full()),
+                    _ => Ok(tries),
+                }
+            },
+            |pause| slept.push(pause),
+        );
+        assert_eq!(result.ok(), Some(3));
+        assert_eq!(slept, pauses[..2]);
+        let (mut tries, mut slept) = (0, Vec::new());
+        let result: Result<(), _> = connect_retrying(
+            || {
+                tries += 1;
+                Err(dropped())
+            },
+            |pause| slept.push(pause),
+        );
+        assert!(matches!(result, Err(ClientError::HandshakeDropped(_))));
+        assert_eq!(tries, pauses.len() + 1);
+        assert_eq!(slept.iter().sum::<Duration>(), Duration::from_secs(3));
+        let message = connect_failure_message("ws://127.0.0.1:1/", &dropped());
+        assert!(
+            message.contains("may be at its connection limit"),
+            "{message}"
+        );
         // Any other failure is not retried.
         let mut tries = 0;
         let _: Result<(), _> = connect_retrying(

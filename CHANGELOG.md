@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-11-21
+
+The GPU layer moves to wgpu 30.
+
+### Changed
+
+- The renderer is built on wgpu 30 (was 27).
+- Off macOS, the GPU instance is given the event loop's display handle, which
+  the GLES backend uses to pick its EGL platform.
+
 ## [0.9.6] - 2026-11-21
 
 Orchestration that hands a worker its task and reads back its result, with a

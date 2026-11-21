@@ -100,6 +100,9 @@ const NOTICE_FOR: Duration = Duration::from_secs(8);
 const NOTHING_SELECTED: &str = "ワーカーが選ばれていません（J / K で選ぶ）";
 const DRAWER_WIDTH: f32 = 360.0;
 const HELP_WIDTH: f32 = 460.0;
+/// Where `cancel_press` lets go of a press: outside the window, over no
+/// widget.
+const OUTSIDE: Point = Point::new(-1.0, -1.0);
 
 impl Feed {
     fn demo() -> Self {
@@ -239,9 +242,9 @@ pub struct Dashboard {
     /// A structural snapshot held back while an IME composes in the filter
     /// field (a rebuild would end the composition), with when it came.
     pending: Option<(Snapshot, Instant)>,
-    /// The pointer button held down since a press the screen passed on, if
-    /// any (`cancel_press`).
-    held: Option<PointerButton>,
+    /// The pointer buttons held down since presses the screen passed on,
+    /// in the order pressed (`track_press`, `cancel_press`).
+    held: Vec<PointerButton>,
     /// The filter field had the focus when the input being handled began:
     /// a rebuild that input causes focuses the new field. For a release,
     /// what counts is the press: a press moves the focus to what it hits
@@ -354,12 +357,15 @@ impl Dashboard {
     /// until now — the selection, the drawer, the expanded queue card —
     /// since the new instance may give those ids to other panes: Enter or
     /// the drawer's 開く would then reach a worker nobody chose. The rebuild
-    /// that follows shows the new server's workers from the top.
+    /// that follows shows the new server's workers from the top. The feed
+    /// dropped what it watched on the old instance, so what that rebuild
+    /// shows is asked for again even where the ids are the same.
     fn forget_panes(&mut self) {
         self.view.selected = None;
         self.view.reveal = None;
         self.view.detail = None;
         self.view.expanded = None;
+        self.watched = None;
     }
 
     /// Takes in what the feed sent since the last frame, as of `now`. A
@@ -690,7 +696,7 @@ impl Dashboard {
             watched: None,
             wheel_accum: [0.0; 5],
             pending: None,
-            held: None,
+            held: Vec::new(),
             filter_had_focus: false,
             pressed_in_filter: false,
             #[cfg(test)]
@@ -974,12 +980,29 @@ impl Dashboard {
         );
         let close = help::build(&mut self.tree, root);
         self.registry.help = Some((root, close));
+        self.shield_background();
     }
 
     fn close_help(&mut self, text: &mut TextStore) {
         self.view.help = false;
         if let Some((root, _)) = self.registry.help.take() {
             self.tree.close_overlay(root, text);
+        }
+        self.shield_background();
+    }
+
+    /// Disables what lies under the help — the screen and the drawer —
+    /// while it is open, and enables it again when it closes. The modal
+    /// overlay keeps pointer and keys from it, but assistive technology
+    /// acts on a widget directly (`UiTree::accessibility_action`, not
+    /// `dispatch`), and the tree refuses that only for a disabled widget,
+    /// which it also offers as disabled. Disabled controls are drawn
+    /// dimmed under the help.
+    fn shield_background(&mut self) {
+        let enabled = !self.view.help;
+        let drawer = self.registry.drawer.map(|(root, _)| root);
+        for root in self.tree.root().into_iter().chain(drawer) {
+            self.tree.set_enabled(root, enabled);
         }
     }
 
@@ -1015,7 +1038,9 @@ impl Dashboard {
             self.close_drawer(text);
             self.open_drawer();
         }
-        self.refill_body(text);
+        // The count first: shown or hidden, it moves the field, and the
+        // refill lays the screen out at once for input that comes before
+        // the next frame (a click aimed at the field where it now is).
         let count = self.header.match_count;
         set_label(
             &mut self.tree,
@@ -1023,6 +1048,7 @@ impl Dashboard {
             match_text(&self.feed.fleet.workers, &self.filter),
         );
         self.tree.set_hidden(count, !self.filter.active());
+        self.refill_body(text);
         self.watch();
     }
 
@@ -1134,30 +1160,57 @@ impl Dashboard {
         self.lay_out_again(text);
     }
 
-    /// Ends a pointer press in progress without its release taking effect.
-    /// The release goes to the widget that took the press (it holds the
-    /// pointer), so a modal opened in between would let a held 開く fire
+    /// Ends the pointer presses in progress without their releases taking
+    /// effect. A release goes to the widget that took the press (it holds
+    /// the pointer), so a modal opened in between would let a held 開く fire
     /// underneath it. noa-gpui has no call to drop that hold; a release
     /// outside the window does it the way the widgets expect — a button
-    /// lets go without acting on a release that is not over it — and the
-    /// real release that follows meets no held widget. The tree uses the
-    /// pointer position only for the cursor, which the next pointer event
-    /// sets again.
+    /// lets go without acting on a release that is not over it. The left
+    /// button's release goes first: it is the one a button acts on, and
+    /// the tree ends its hold on the pointer at any button's release, after
+    /// which the left one would reach nothing. The real releases that
+    /// follow are sent away from everything too (`track_press`). The tree
+    /// uses the pointer position only for the cursor, which the next
+    /// pointer event sets again.
     fn cancel_press(&mut self, text: &mut TextStore) {
-        let Some(button) = self.held.take() else {
-            return;
-        };
-        let outside = Point::new(-1.0, -1.0);
-        self.tree.dispatch(
-            Event::PointerUp {
-                pos: outside,
-                button,
-            },
-            text,
-        );
+        let mut held = std::mem::take(&mut self.held);
+        held.sort_by_key(|button| *button != PointerButton::Primary);
+        for button in held {
+            let pos = OUTSIDE;
+            self.tree.dispatch(Event::PointerUp { pos, button }, text);
+        }
         // A release away from what was pressed activates nothing: anything
         // said about it is part of the cancelled press.
         drop(self.tree.take_messages());
+    }
+
+    /// Keeps `held` up to date with `event`. A release whose press is not
+    /// held — `cancel_press` ended it — is sent away from everything, as
+    /// the cancelled release was: a button whose press lost the pointer's
+    /// hold before the cancel (another button's release ends it) still
+    /// counts itself pressed, and would fire on a release over it.
+    fn track_press(&mut self, event: Event) -> Event {
+        match event {
+            Event::PointerDown { button, .. } => {
+                if !self.held.contains(&button) {
+                    self.held.push(button);
+                }
+                event
+            }
+            Event::PointerUp { pos, button } => {
+                match self.held.iter().position(|held| *held == button) {
+                    Some(at) => {
+                        self.held.remove(at);
+                        Event::PointerUp { pos, button }
+                    }
+                    None => Event::PointerUp {
+                        pos: OUTSIDE,
+                        button,
+                    },
+                }
+            }
+            event => event,
+        }
     }
 }
 
@@ -1184,11 +1237,7 @@ impl Screen for Dashboard {
         if press {
             self.pressed_in_filter = in_filter;
         }
-        match event {
-            Event::PointerDown { button, .. } => self.held = Some(button),
-            Event::PointerUp { .. } => self.held = None,
-            _ => {}
-        }
+        let event = self.track_press(event);
         self.filter_had_focus = in_filter || (release && self.pressed_in_filter);
         match keymap::route(mode, self.composing(), &event) {
             Route::Act(action) => {

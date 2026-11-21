@@ -55,7 +55,10 @@ pub struct Snapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// The panes whose screen tails the feed fetches: the expanded queue
-    /// card and the worker in the details drawer.
+    /// card and the worker in the details drawer. Pane ids belong to one
+    /// server instance: once the feed follows another one, it drops what it
+    /// watched and waits for the dashboard to ask again, after that
+    /// instance's first snapshot.
     Watch(Vec<u64>),
     Focus(u64),
 }
@@ -221,6 +224,11 @@ struct Feed {
     clock: Clock,
     tracker: Tracker,
     watched: Vec<u64>,
+    /// Set when the feed takes up another server instance, until it has
+    /// published that instance's first snapshot: a `Watch` that comes
+    /// meanwhile names the old instance's panes (the dashboard cannot
+    /// know the new one's yet), so it is not followed.
+    watch_unseen: bool,
     /// Each watched pane's screen tail and when it was fetched.
     screens: HashMap<u64, (Instant, Vec<String>)>,
     last_list: Instant,
@@ -244,6 +252,7 @@ impl Feed {
             clock,
             tracker: Tracker::default(),
             watched: Vec::new(),
+            watch_unseen: false,
             screens: HashMap::new(),
             last_list: now,
             last_contact: now,
@@ -295,7 +304,7 @@ impl Feed {
         loop {
             let left = until.saturating_duration_since(Instant::now());
             match self.commands.recv_timeout(left) {
-                Ok(Command::Watch(panes)) => self.watch(panes),
+                Ok(Command::Watch(panes)) => self.asked_to_watch(panes),
                 Ok(Command::Focus(_)) => {}
                 Err(RecvTimeoutError::Timeout) => return true,
                 Err(RecvTimeoutError::Disconnected) => return false,
@@ -304,12 +313,16 @@ impl Feed {
     }
 
     /// Follows the server instance `instance`. Pane ids mean something only
-    /// within one instance, so another one drops the screen tails fetched
-    /// so far with what the tracker saw: a new pane with an old id must not
-    /// show the old pane's screen.
+    /// within one instance, so another one drops what was chosen by them
+    /// with what the tracker saw: the screen tails fetched so far (a new
+    /// pane with an old id must not show the old pane's screen) and the
+    /// panes watched (a new pane with an old id is nobody's choice). The
+    /// dashboard watches again once it has the new instance's snapshot.
     fn serve(&mut self, instance: &str) {
         if self.tracker.serve(instance) {
             self.screens.clear();
+            self.watched.clear();
+            self.watch_unseen = true;
         }
     }
 
@@ -354,16 +367,27 @@ impl Feed {
     fn take_commands(&mut self, client: &mut impl Noa) -> Result<(), Stop> {
         loop {
             match self.commands.try_recv() {
-                Ok(Command::Watch(panes)) => self.watch(panes),
+                Ok(Command::Watch(panes)) => self.asked_to_watch(panes),
+                // A pane focused is an answer from the server, as a list
+                // or a notification is.
                 Ok(Command::Focus(pane)) => match client.focus_pane(pane) {
+                    Ok(()) => self.last_contact = self.now(),
                     Err(ClientError::Rpc { message, .. }) => {
                         self.notice(format!("ペインへ移動できません: {message}"));
                     }
-                    other => other?,
+                    Err(err) => return Err(err.into()),
                 },
                 Err(TryRecvError::Empty) => return Ok(()),
                 Err(TryRecvError::Disconnected) => return Err(Stop::Gone),
             }
+        }
+    }
+
+    /// A `Watch` from the dashboard, followed unless it names panes of the
+    /// instance the feed followed before (`watch_unseen`).
+    fn asked_to_watch(&mut self, panes: Vec<u64>) {
+        if !self.watch_unseen {
+            self.watch(panes);
         }
     }
 
@@ -426,6 +450,9 @@ impl Feed {
             can_focus: client.can_focus(),
             instance: Some(client.instance().to_owned()),
         })?;
+        // From now on the dashboard can have this instance's panes to
+        // ask for.
+        self.watch_unseen = false;
         *sent = Some((fleet, now));
         Ok(())
     }
@@ -1891,6 +1918,10 @@ pub(crate) mod tests {
         subscribe_takes: Duration,
         /// How long each wait for a notification takes.
         wait_takes: Duration,
+        /// How long focusing a pane takes.
+        focus_takes: Duration,
+        /// The panes whose screens were asked for, in order.
+        fetched: Vec<u64>,
     }
 
     impl ScriptedNoa {
@@ -1907,6 +1938,8 @@ pub(crate) mod tests {
                 clock: clock.clone(),
                 subscribe_takes: Duration::ZERO,
                 wait_takes: Duration::ZERO,
+                focus_takes: Duration::ZERO,
+                fetched: Vec::new(),
             }
         }
     }
@@ -1939,10 +1972,12 @@ pub(crate) mod tests {
         }
 
         fn focus_pane(&mut self, _: u64) -> Result<(), ClientError> {
+            self.clock.advance(self.focus_takes);
             Ok(())
         }
 
         fn screen(&mut self, pane: u64) -> Result<String, ClientError> {
+            self.fetched.push(pane);
             self.screens.get(&pane).cloned().ok_or(ClientError::Rpc {
                 code: -32602,
                 message: "no such pane".into(),
@@ -1973,14 +2008,78 @@ pub(crate) mod tests {
         assert_eq!(tail_of(&snapshot, 2), ["$ old"], "the same server");
         assert_eq!(snapshot.instance.as_deref(), Some("a"));
 
-        // Noa restarted: pane 2 is another pane now, fetched again.
+        // Noa restarted: pane 2 is another pane now, which nobody chose on
+        // the new server. Neither the old tail nor the old watch carries
+        // over: the dashboard asks again for what it shows there.
         let mut other = ScriptedNoa::showing("b", "$ new", &clock);
         assert!(matches!(feed.follow(&mut other), Err(Stop::Lost(_))));
         let snapshot = published.try_iter().last().expect("a snapshot");
-        assert_eq!(tail_of(&snapshot, 2), ["$ new"], "pane 2 of the old server");
+        assert!(tail_of(&snapshot, 2).is_empty(), "pane 2 of the old server");
         assert_eq!(snapshot.instance.as_deref(), Some("b"));
-        assert_eq!(feed.watched, [2], "still watched: fetched from the new one");
+        assert!(feed.watched.is_empty(), "the old server's watch list");
+        assert!(other.fetched.is_empty(), "a screen nobody chose on b");
         assert!(feed.tracker.journals.is_empty(), "a journal was looked for");
+    }
+
+    #[test]
+    fn a_watch_from_before_the_new_server_is_not_followed() {
+        let clock = TestClock::new();
+        let (mut feed, published, commands) = held_feed(&clock);
+        feed.serve("a");
+        feed.watch(vec![2]);
+        // While the feed reconnects, the dashboard (still showing server a)
+        // asks for pane 2's tail: a's pane 2.
+        commands.send(Command::Watch(vec![2])).unwrap();
+        let mut other = ScriptedNoa::showing("b", "$ new", &clock);
+        assert!(matches!(feed.follow(&mut other), Err(Stop::Lost(_))));
+        let first = published.try_iter().next().expect("b's first snapshot");
+        assert_eq!(first.instance.as_deref(), Some("b"));
+        assert!(tail_of(&first, 2).is_empty());
+        assert!(other.fetched.is_empty(), "b's pane 2 under a's watch");
+
+        // Asked for once the dashboard has b's snapshot, it is fetched.
+        commands.send(Command::Watch(vec![2])).unwrap();
+        assert!(feed.take_commands(&mut other).is_ok());
+        assert!(feed.fetch_screens(&mut other).is_ok());
+        assert_eq!(other.fetched, [2]);
+    }
+
+    #[test]
+    fn a_watch_while_down_before_the_new_servers_first_snapshot_is_not_followed() {
+        let clock = TestClock::new();
+        let (mut feed, published, commands) = held_feed(&clock);
+        feed.serve("a");
+        // Server b is taken up, and lost before its first snapshot (its
+        // list fails): the dashboard still shows a, and asks for a's pane
+        // 2 while the feed waits to reconnect.
+        feed.serve("b");
+        commands.send(Command::Watch(vec![2])).unwrap();
+        assert!(feed.pause(Duration::ZERO));
+        let mut other = ScriptedNoa::showing("b", "$ new", &clock);
+        assert!(matches!(feed.follow(&mut other), Err(Stop::Lost(_))));
+        let first = published.try_iter().next().expect("b's first snapshot");
+        assert!(tail_of(&first, 2).is_empty());
+        assert!(other.fetched.is_empty(), "b's pane 2 under a's watch");
+
+        commands.send(Command::Watch(vec![2])).unwrap();
+        assert!(feed.take_commands(&mut other).is_ok());
+        assert!(feed.fetch_screens(&mut other).is_ok());
+        assert_eq!(other.fetched, [2]);
+    }
+
+    #[test]
+    fn a_focus_is_an_answer_from_the_server() {
+        let clock = TestClock::new();
+        let (mut feed, published, commands) = held_feed(&clock);
+        // No pane is watched: the list, then a focus answered 1 s later,
+        // then 1 s without a notification before the first snapshot.
+        commands.send(Command::Focus(2)).unwrap();
+        let mut noa = ScriptedNoa::showing("a", "$ make", &clock);
+        noa.focus_takes = Duration::from_secs(1);
+        noa.wait_takes = Duration::from_secs(1);
+        assert!(matches!(feed.follow(&mut noa), Err(Stop::Lost(_))));
+        let first = published.try_iter().next().expect("a snapshot");
+        assert_eq!(first.synced_secs, 1, "the focus answered 1 s ago");
     }
 
     #[test]

@@ -787,10 +787,16 @@ fn a_card_its_list_can_hold_is_not_pushed_out_by_its_title() {
     let room = list(&low)[3];
     // The most caption lines whose card the list holds, each card measured:
     // a card does not grow by one line per line, as the first lines only
-    // fill the caption row up to its 詳細 button's height.
-    let lines = (0..)
+    // fill the caption row up to its 詳細 button's height. A card that
+    // never outgrows the list within `MOST` lines cannot make the case.
+    const MOST: usize = 200;
+    let lines = (0..MOST)
         .take_while(|&n| card(&grouped(&[n + 1]))[3] <= room)
         .count();
+    assert!(
+        lines < MOST,
+        "a card with {MOST} caption lines still fits the list of {room}"
+    );
 
     let mut dashboard = grouped(&[lines]);
     let height = card(&dashboard)[3];

@@ -4,13 +4,14 @@
 //! this module fills the overlay with the worker's state, task, screen tail
 //! and times.
 
+use noa_gpui_core::clipboard::MemoryClipboard;
 use noa_gpui_core::style::{AlignItems, Rect as LayoutRect, Size as LayoutSize, auto, length};
 use noa_gpui_core::text_edit::TextEditor;
 use noa_gpui_core::widget::{MeasureCx, PaintCx, Widget};
 use noa_gpui_core::widgets::{
     Button, Container, ControlSize, Label, ScrollView, Tag, TagStyle, Tone, Truncation,
 };
-use noa_gpui_core::{MeasureInput, Role, Style, UiTree, WidgetId, accesskit};
+use noa_gpui_core::{Key, MeasureInput, Modifiers, Role, Style, UiTree, WidgetId, accesskit};
 use noa_gpui_scene::{Point, Size};
 use noa_gpui_text::TextStore;
 
@@ -84,9 +85,10 @@ const KIND_SHRINK: f32 = 1000.0;
 pub(super) struct FitTag {
     /// The whole text, as given.
     text: String,
-    /// `text` on one line, which is what is drawn: a tag is one line tall,
-    /// so the lines of a text with line breaks (live input) would be drawn
-    /// over each other.
+    /// `text` on one line ([`one_line`]), which is what is drawn: a tag is
+    /// one line tall, so the lines of a text with line breaks (live input)
+    /// would be drawn over each other, and a paragraph separator would make
+    /// the shaper panic.
     line: String,
     /// Where each grapheme cluster of `line` ends: a cut keeps whole
     /// clusters, so that an emoji sequence or a combining mark is never
@@ -107,31 +109,90 @@ pub(super) struct FitTag {
     fits: Vec<(f32, Option<String>)>,
 }
 
-/// `text` on one line as a single-line text field takes it (line breaks and
-/// tabs become spaces, other control characters are left out), and where
-/// each of its grapheme clusters ends. The editor keeps its caret on
-/// cluster boundaries: moved to the end of a character, it stops at the
-/// end of the cluster that character ends, or else at that cluster's start.
-fn one_line(text: &str) -> (String, Vec<usize>) {
+/// `text` made safe to draw as one line: every control character (line
+/// breaks, tabs, NEL U+0085, the information separators U+001C–U+001E) and
+/// the line and paragraph separators U+2028 and U+2029 become a space, and
+/// a CR LF pair is one line break, so one space. Worker texts come from
+/// live data, and the text shaper (cosmic-text 0.19) splits its lines only
+/// at CR and LF: a paragraph separator left inside a line, with
+/// left-to-right text on one side and right-to-left text on the other,
+/// makes it panic (`assert_eq!(line_rtl, rtl)`). Bidi controls such as
+/// isolates are not control characters and are kept.
+///
+/// The rule the header's status text follows (`health::one_line`, private
+/// to that module), but for CR LF: the drawer's tags have always shown a
+/// CR LF line break as one space.
+pub(super) fn one_line(text: &str) -> String {
+    let mut line = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\r' && chars.peek() == Some(&'\n') {
+            // The LF that follows becomes the space.
+            continue;
+        }
+        if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+            line.push(' ');
+        } else {
+            line.push(c);
+        }
+    }
+    line
+}
+
+/// How many bytes of a line the editor is given to find where one
+/// grapheme cluster ends; a cluster that may run past them is looked for
+/// again in twice as many.
+const CLUSTER_PIECE: usize = 64;
+
+/// Where each grapheme cluster of `line` (a [`one_line`] text) ends, in
+/// time proportional to the line's length. `scanned` counts the bytes
+/// handed to the editor: each step works only inside the piece it is
+/// given, so that count bounds the work.
+///
+/// Each step gives the editor the piece of the line from the last cluster
+/// end and moves its caret one cluster on. A cluster end is a boundary
+/// whatever comes before it, so the rules that look back (emoji
+/// sequences, regional indicator pairs, Indic conjuncts) see all they need
+/// inside the piece; only an end found at the piece's own end may be the
+/// piece's end rather than the cluster's, and then a longer piece is
+/// tried. Moving one editor's caret along the whole line instead costs
+/// time in the square of a cluster's length: each move goes back to the
+/// start of the cluster it lands in.
+pub(super) fn cluster_ends(line: &str, scanned: &mut usize) -> Vec<usize> {
     let mut editor = TextEditor::single_line();
-    editor.set_text(text);
-    let line = editor.text().to_owned();
-    let mut ends: Vec<usize> = line
-        .char_indices()
-        .map(|(i, c)| {
-            editor.move_to(i + c.len_utf8(), false);
-            editor.caret()
-        })
-        .filter(|end| *end > 0)
-        .collect();
-    ends.dedup();
-    (line, ends)
+    let mut clipboard = MemoryClipboard::default();
+    let mut ends = Vec::new();
+    let mut start = 0;
+    let mut piece_len = CLUSTER_PIECE;
+    while start < line.len() {
+        let mut stop = (start + piece_len).min(line.len());
+        while !line.is_char_boundary(stop) {
+            stop += 1;
+        }
+        let piece = &line[start..stop];
+        // A one-line text has no control characters: the editor takes the
+        // piece as it is, so its offsets are the piece's.
+        editor.set_text(piece);
+        editor.move_to(0, false);
+        editor.handle_key(Key::ArrowRight, Modifiers::default(), &mut clipboard);
+        *scanned += piece.len();
+        let end = editor.caret();
+        if end == piece.len() && stop < line.len() {
+            piece_len *= 2;
+            continue;
+        }
+        start += end;
+        ends.push(start);
+        piece_len = CLUSTER_PIECE;
+    }
+    ends
 }
 
 impl FitTag {
     pub(super) fn new(text: impl Into<String>) -> Self {
         let text = text.into();
-        let (line, ends) = one_line(&text);
+        let line = one_line(&text);
+        let ends = cluster_ends(&line, &mut 0);
         Self {
             tag: Some(Tag::new(line.as_str())),
             text,
@@ -207,10 +268,21 @@ impl FitTag {
         let fit = if full <= width + 0.01 {
             Some(self.line.clone())
         } else {
-            // The first `n` grapheme clusters and an ellipsis.
+            // The first `n` grapheme clusters and an ellipsis, without the
+            // clusters before it that are only white space: a cluster is
+            // kept or left out whole, never cut down to its non-space part
+            // (U+0600 and the space after it are one cluster).
             let cut = |n: usize| {
-                let end = n.checked_sub(1).map_or(0, |last| self.ends[last]);
-                format!("{}{ELLIPSIS}", self.line[..end].trim_end())
+                let start_of = |i: usize| i.checked_sub(1).map_or(0, |last| self.ends[last]);
+                let mut n = n;
+                while n > 0
+                    && self.line[start_of(n - 1)..self.ends[n - 1]]
+                        .trim()
+                        .is_empty()
+                {
+                    n -= 1;
+                }
+                format!("{}{ELLIPSIS}", &self.line[..start_of(n)])
             };
             if fits(self, cx, &cut(0)) {
                 // `lo` clusters fit; `hi` do not (the whole line does not).
@@ -272,8 +344,10 @@ impl Widget for FitTag {
         }
     }
 
+    /// The whole line when it is cut: the tooltip is drawn, so it is the
+    /// one-line text too.
     fn tooltip(&self, _local: Point) -> Option<String> {
-        (self.shown_text() != self.text()).then(|| self.text().to_owned())
+        (self.shown_text() != self.line).then(|| self.line.clone())
     }
 
     fn accessibility_role(&self) -> Option<accesskit::Role> {
@@ -297,10 +371,15 @@ fn section(tree: &mut UiTree, parent: WidgetId, title: &str) -> WidgetId {
     column
 }
 
+/// A wrapped label for `text`, which may come from live data: made one
+/// line first ([`one_line`]), and wrapped from there.
 fn text_line(tree: &mut UiTree, parent: WidgetId, text: &str, lines: u32) -> WidgetId {
     tree.insert(
         Some(parent),
-        Label::new(text).font_size(12.0).wrap(true).max_lines(lines),
+        Label::new(one_line(text))
+            .font_size(12.0)
+            .wrap(true)
+            .max_lines(lines),
     )
 }
 
@@ -353,7 +432,7 @@ pub(super) fn build(
     );
     tree.insert(
         Some(slot),
-        Label::new(worker.label.as_str())
+        Label::new(one_line(&worker.label))
             .font_size(16.0)
             .weight(700)
             .truncation(Truncation::Tail),
@@ -424,7 +503,7 @@ pub(super) fn build(
         for line in &worker.screen_tail {
             tree.insert(
                 Some(screen),
-                Label::new(line.as_str())
+                Label::new(one_line(line))
                     .font_size(11.0)
                     .font_family("monospace")
                     .truncation(Truncation::Tail),

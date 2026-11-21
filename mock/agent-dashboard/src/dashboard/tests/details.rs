@@ -99,6 +99,28 @@ fn drawn_text(dashboard: &Dashboard, label: WidgetId) -> ([f32; 4], Color) {
         .expect("the label draws its text")
 }
 
+/// What the text drawn inside `id` says: the string of the text layout
+/// that the last `DrawCommand::Text` inside it draws (the one
+/// [`drawn_text`] finds).
+fn drawn_string(dashboard: &Dashboard, text: &TextStore, id: WidgetId) -> String {
+    let area = rect(&dashboard.tree, id);
+    let layout = dashboard
+        .display_list()
+        .commands()
+        .iter()
+        .rev()
+        .find_map(|command| match command {
+            DrawCommand::Text {
+                rect: r, layout, ..
+            } if inside([r.x, r.y, 0.0, 0.0], area) => Some(*layout),
+            _ => None,
+        })
+        .expect("the widget draws text");
+    let buffer = text.layouts().buffer(layout);
+    let lines: Vec<&str> = buffer.lines.iter().map(|line| line.text()).collect();
+    lines.join("\n")
+}
+
 /// How wide `line` is on one line in `style`.
 fn width_in(text: &mut TextStore, line: &str, style: TextStyle) -> f32 {
     let id = text.create(line, style, None);
@@ -524,20 +546,20 @@ fn long_tags_stay_inside_the_drawer() {
             if worker.is_agent() {
                 long.push(worker.model_line());
             }
-            for text in long {
+            for full in long {
                 let (id, _, shown) = cut
                     .iter()
-                    .find(|(_, full, _)| *full == text)
-                    .unwrap_or_else(|| panic!("{text} is a tag: {cut:?}"));
-                let whole = text.len() < 20;
+                    .find(|(_, given, _)| *given == full)
+                    .unwrap_or_else(|| panic!("{full} is a tag: {cut:?}"));
+                let whole = full.len() < 20;
                 let start = shown.trim_end_matches('\u{2026}');
                 assert!(
                     if whole {
-                        *shown == text
+                        *shown == full
                     } else {
-                        shown.ends_with('\u{2026}') && text.starts_with(start) && !start.is_empty()
+                        shown.ends_with('\u{2026}') && full.starts_with(start) && !start.is_empty()
                     },
-                    "{size:?} pane {pane}: {text:?} shown as {shown:?}"
+                    "{size:?} pane {pane}: {full:?} shown as {shown:?}"
                 );
                 // The tag draws that text, inside itself.
                 let (drawn, _) = drawn_text(&dashboard, *id);
@@ -545,6 +567,11 @@ fn long_tags_stay_inside_the_drawer() {
                 assert!(
                     inside(drawn, area),
                     "{size:?} pane {pane}: {shown:?} drawn at {drawn:?} outside {area:?}"
+                );
+                assert_eq!(
+                    drawn_string(&dashboard, &text, *id),
+                    *shown,
+                    "{size:?} pane {pane}: what the tag draws"
                 );
             }
             let label = label_of(&dashboard, pane);
@@ -675,4 +702,290 @@ fn a_cut_keeps_whole_grapheme_clusters() {
     for start in ["ab".to_owned(), format!("ab{keycap}")] {
         assert!(seen.contains(&start), "{start:?} in {seen:?}");
     }
+}
+
+/// Texts from live data that end a bidi paragraph inside one line of text
+/// with left-to-right text before and right-to-left text after: U+2029,
+/// NEL U+0085 and U+001C. The shaper splits a text into lines at CR and LF
+/// only, and panics on a line that holds paragraphs of both directions.
+/// The last is the review's model name: a label splits it at the LF, but
+/// the tag used to turn the LF into a space first.
+const PARAGRAPH_BREAKS: [&str; 4] = [
+    "A\u{2029}\u{5D0}",
+    "A\u{85}\u{5D0}",
+    "A\u{1C}\u{5D0}",
+    "A\u{2029}\n\u{5D0}",
+];
+
+/// Whether `text` holds a character [`drawer::one_line`] turns into a
+/// space.
+fn breaks_lines(text: &str) -> bool {
+    text.chars()
+        .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+}
+
+/// A live dashboard, grouped by `grouping`, on the canned fleet with
+/// worker 11 (a running agent) changed by `edit`, laid out with 11's card
+/// shown and its drawer open. The timeline and the graph are hidden: they
+/// draw worker labels themselves, outside the drawer and the cards (see
+/// the fix report).
+fn hostile(grouping: Grouping, edit: impl Fn(&mut Worker)) -> (Dashboard, TextStore) {
+    let mut fleet = fleet::canned();
+    edit(fleet.workers.iter_mut().find(|w| w.pane == 11).unwrap());
+    let (channel, snapshots, _notices, _commands) = Channel::detached();
+    let mut dashboard = Dashboard::live(grouping, channel);
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(window(), &mut text);
+    for digit in ['4', '5'] {
+        press(&mut dashboard, &mut text, digit, Modifiers::default());
+    }
+    assert_eq!(
+        dashboard.view.shown,
+        shown_only(&[Panel::Timeline, Panel::Graph])
+    );
+    snapshots.send(live(fleet, 0)).unwrap();
+    dashboard.before_frame(&mut text);
+    dashboard.prepare(window(), &mut text);
+    select(&mut dashboard, &mut text, 11);
+    key(&mut dashboard, &mut text, Key::Space);
+    assert_eq!(dashboard.view.detail, Some(11));
+    (dashboard, text)
+}
+
+/// Every label and tag shown in the drawer and in the running and done
+/// lists is drawn on one line; returns what they say.
+fn assert_one_line_everywhere(dashboard: &Dashboard, what: &str) -> Vec<String> {
+    let tree = &dashboard.tree;
+    let mut roots = vec![drawer(dashboard).expect("the drawer is open")];
+    for panel in [Panel::Running, Panel::Done] {
+        roots.extend(
+            dashboard.registry.lists[panel as usize]
+                .as_ref()
+                .map(|l| l.list),
+        );
+    }
+    let texts: Vec<String> = roots
+        .into_iter()
+        .flat_map(|root| shown_under(tree, root))
+        .filter_map(|id| text_of(tree, id))
+        .collect();
+    for shown in &texts {
+        assert!(!breaks_lines(shown), "{what}: {shown:?} is drawn");
+    }
+    texts
+}
+
+/// D1: a kind, model or branch with a paragraph break (live input) is
+/// drawn on one line in the drawer's tags, the card's tags and the group
+/// titles; the drawer's tags keep the text as given for assistive
+/// technology. Before the fix, laying it out panicked in the shaper.
+#[test]
+fn tags_with_a_paragraph_break_are_drawn_on_one_line() {
+    for given in PARAGRAPH_BREAKS {
+        // A kind that is not an agent's has no model tag: the kind is
+        // tried with the branch, grouped by agent (the kind is a group
+        // title), and the model with the branch, grouped by model.
+        for grouping in [Grouping::Agent, Grouping::Model] {
+            let (dashboard, _text) = hostile(grouping, |worker| {
+                if matches!(grouping, Grouping::Agent) {
+                    worker.kind = given.to_owned();
+                } else {
+                    worker.model = given.to_owned();
+                    worker.effort.clear();
+                }
+                worker.branch = given.to_owned();
+            });
+            let what = format!("{given:?} {grouping:?}");
+            let texts = assert_one_line_everywhere(&dashboard, &what);
+            let line = drawer::one_line(given);
+            // The drawer's two tags, the card's two tags, the group title.
+            let shown = texts.iter().filter(|t| t.starts_with(&line)).count();
+            assert_eq!(shown, 5, "{what}: {line:?} in {texts:?}");
+            let tree = &dashboard.tree;
+            let tags: Vec<&drawer::FitTag> = shown_under(tree, drawer(&dashboard).unwrap())
+                .into_iter()
+                .filter_map(|id| tree.get::<drawer::FitTag>(id))
+                .filter(|tag| tag.text() == given)
+                .collect();
+            assert_eq!(tags.len(), 2, "{what}: two tags in the drawer");
+            for tag in tags {
+                let mut node = accesskit::Node::new(accesskit::Role::Label);
+                tag.accessibility(&mut node);
+                assert_eq!(node.label(), Some(given), "{what}");
+            }
+        }
+    }
+}
+
+/// D1: a cut tag's tooltip, which is drawn, is its one-line text.
+#[test]
+fn a_cut_tag_shows_its_one_line_text_as_its_tooltip() {
+    let mut text = TextStore::new(Default::default());
+    for given in PARAGRAPH_BREAKS {
+        let long = format!("{}{given}", "W".repeat(40));
+        let (tree, id) = fit_tag_in(&mut text, &long, 100.0);
+        let tag = tree.get::<drawer::FitTag>(id).unwrap();
+        assert_ne!(tag.shown_text(), drawer::one_line(&long), "cut");
+        assert_eq!(
+            tag.tooltip(Point::new(0.0, 0.0)),
+            Some(drawer::one_line(&long))
+        );
+    }
+}
+
+/// D1: a worker label with a paragraph break is drawn on one line as the
+/// drawer's head and as the card's title.
+#[test]
+fn a_label_with_a_paragraph_break_is_drawn_on_one_line() {
+    for given in PARAGRAPH_BREAKS {
+        let (dashboard, _text) = hostile(Grouping::Orchestrator, |worker| {
+            worker.label = given.to_owned();
+        });
+        let texts = assert_one_line_everywhere(&dashboard, &format!("{given:?}"));
+        let line = drawer::one_line(given);
+        let shown = texts.iter().filter(|t| **t == line).count();
+        assert_eq!(
+            shown, 2,
+            "{given:?}: the head and the card title in {texts:?}"
+        );
+    }
+}
+
+/// D1: a task and a detail with a paragraph break are drawn as one
+/// paragraph, wrapped, in the drawer and on the card.
+#[test]
+fn a_task_and_detail_with_a_paragraph_break_are_drawn_as_one_paragraph() {
+    for given in PARAGRAPH_BREAKS {
+        let (dashboard, _text) = hostile(Grouping::Orchestrator, |worker| {
+            worker.task = given.to_owned();
+            worker.detail = given.to_owned();
+        });
+        let texts = assert_one_line_everywhere(&dashboard, &format!("{given:?}"));
+        let line = drawer::one_line(given);
+        for wanted in [line.clone(), format!("依頼: {line}")] {
+            assert!(
+                texts.contains(&wanted),
+                "{given:?}: {wanted:?} in {texts:?}"
+            );
+        }
+    }
+}
+
+/// D1: a screen tail line with a paragraph break is drawn on one line.
+#[test]
+fn a_screen_tail_line_with_a_paragraph_break_is_drawn_on_one_line() {
+    for given in PARAGRAPH_BREAKS {
+        let (dashboard, _text) = hostile(Grouping::Orchestrator, |worker| {
+            worker.screen_tail = vec![given.to_owned(), "$ make".to_owned()];
+        });
+        assert_one_line_everywhere(&dashboard, &format!("{given:?}"));
+        assert_eq!(
+            tail_texts(&dashboard),
+            [drawer::one_line(given), "$ make".to_owned()]
+        );
+    }
+}
+
+#[test]
+fn one_line_turns_breaks_and_controls_into_spaces() {
+    assert_eq!(
+        drawer::one_line("a\nb\r\nc\rd\te\u{85}f\u{1C}g\u{2028}h\u{2029}i\u{0}j"),
+        "a b c d e f g h i j"
+    );
+    // Bidi isolates and marks are kept.
+    let isolated = "\u{2067}\u{5D0}\u{2069} \u{200F}";
+    assert_eq!(drawer::one_line(isolated), isolated);
+}
+
+/// Where each grapheme cluster of `line` ends, found as the drawer found
+/// them before D2: an editor's caret moved to the end of each character.
+/// Right, but in time square in a cluster's length.
+fn ends_by_moving_the_caret(line: &str) -> Vec<usize> {
+    let mut editor = noa_gpui_core::text_edit::TextEditor::single_line();
+    editor.set_text(line);
+    let mut ends: Vec<usize> = line
+        .char_indices()
+        .map(|(i, c)| {
+            editor.move_to(i + c.len_utf8(), false);
+            editor.caret()
+        })
+        .filter(|end| *end > 0)
+        .collect();
+    ends.dedup();
+    ends
+}
+
+/// D2: cluster ends are found in time proportional to the line: for a
+/// letter with 50 000 combining marks, and for 5 000 flags (regional
+/// indicator pairs), the editor is handed at most a few bytes per byte of
+/// the line. Moving one caret along the line, as before, hands it the
+/// whole line once per character: 50 001 × 100 003 bytes.
+#[test]
+fn cluster_ends_take_time_in_proportion_to_the_line() {
+    let marks = format!("a{}b", "\u{301}".repeat(50_000));
+    let mut scanned = 0;
+    let ends = drawer::cluster_ends(&marks, &mut scanned);
+    assert_eq!(ends, [marks.len() - 1, marks.len()]);
+    assert!(
+        scanned <= 4 * marks.len(),
+        "{scanned} bytes for {}",
+        marks.len()
+    );
+
+    let flags = "\u{1F1EF}\u{1F1F5}".repeat(5_000);
+    let mut scanned = 0;
+    let ends = drawer::cluster_ends(&flags, &mut scanned);
+    assert_eq!(ends, (1..=5_000).map(|n| 8 * n).collect::<Vec<_>>());
+    assert!(
+        scanned <= 8 * flags.len(),
+        "{scanned} bytes for {}",
+        flags.len()
+    );
+}
+
+/// D2: the ends found piece by piece are the ends the editor finds over
+/// the whole line, also for clusters longer than a piece and for
+/// sequences whose rules look back (emoji, flags, an odd run of regional
+/// indicators, an Indic conjunct, a prepended mark).
+#[test]
+fn cluster_ends_are_the_editors() {
+    let unit = format!(
+        "x{} e\u{301} \u{1F44D}\u{1F3FD} \u{1F469}\u{200D}\u{1F469}\u{200D}\u{1F467} \
+         a{}\u{1F1EF} \u{915}\u{94D}\u{937}\u{93F} \u{600} 1\u{FE0F}\u{20E3}{}end",
+        "\u{301}".repeat(40),
+        "\u{1F1EF}\u{1F1F5}".repeat(16),
+        "\u{1F469}\u{200D}".repeat(12),
+    );
+    for line in [unit.clone(), unit.repeat(3), format!("y{unit}")] {
+        assert_eq!(
+            drawer::cluster_ends(&line, &mut 0),
+            ends_by_moving_the_caret(&line),
+            "{line:?}"
+        );
+    }
+    assert_eq!(drawer::cluster_ends("", &mut 0), Vec::<usize>::new());
+}
+
+/// D3: U+0600 and the space after it are one grapheme cluster: a cut keeps
+/// both or neither, never U+0600 without its space.
+#[test]
+fn a_cut_keeps_a_cluster_with_a_space_whole() {
+    let full = format!("a\u{600} {}", "W".repeat(20));
+    // Where a start of `full` may end: before or after a, the cluster of
+    // U+0600 and the space, and each W.
+    let mut ends = vec![0, 1];
+    ends.extend((0..=20).map(|n| 4 + n));
+    let mut text = TextStore::new(Default::default());
+    let mut seen = Vec::new();
+    for width in 0..=300 {
+        let (tree, tag) = fit_tag_in(&mut text, &full, width as f32);
+        let shown = tree.get::<drawer::FitTag>(tag).unwrap().shown_text();
+        let start = shown.strip_suffix('\u{2026}').unwrap_or(shown);
+        assert!(
+            full.starts_with(start) && ends.contains(&start.len()),
+            "{width}: {shown:?}"
+        );
+        seen.push(start.to_owned());
+    }
+    assert!(seen.iter().any(|s| s == "a\u{600} "), "{seen:?}");
 }

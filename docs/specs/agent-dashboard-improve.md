@@ -1,7 +1,7 @@
 # Agent dashboard: keyboard, filter, paging, health and details
 
 - slug: agent-dashboard-improve
-- status: designed (2026-11-21), not implemented
+- status: implemented (2026-11-22)
 - owner: simota
 - scope: `mock/agent-dashboard/` (a standalone crate with its own
   `[workspace]`) and `docs/`. No change to Noa's workspace crates, `vendor/`,
@@ -427,6 +427,12 @@ it; else selection → clear it; else nothing.
   taken by the dashboard (not passed to the tree): `wheel_accum[p] -= delta.y`;
   every full 40 px forward moves `first[p]` +1 while something is hidden below,
   every 40 px back −1 while `first[p] > 0`. A change runs `fit` (no rebuild).
+  (Changed in implementation: see Implementation record.) The pager keeps a per-list hidden widget, `PageMemory`; when a
+  selection reveal and a wheel step meet, the most recent user action decides;
+  a group header is hidden only when the page's first item would not fit under
+  it; a full rebuild puts wheel-paged lists back to their first page; a wheel
+  over a list that turns no page is passed on to the widget tree; cards paged
+  out are not exposed to accessibility.
 - The queue guarantee: in the demo at 1440×900 nothing in the queue is hidden
   (the existing `every_card_needing_you_shows_without_scrolling` and
   `the_queue_fits_with_any_other_panels_hidden` keep passing with only
@@ -451,6 +457,8 @@ it; else selection → clear it; else nothing.
   the `?` keycap, the grouping control. Estimated worst case (1100 wide, all
   panels hidden, filter active): 1131 px needed vs 1068 available before
   dropping, 1005 after step 4. The implementer records the measured widths.
+  (Changed in implementation: see Implementation record.) Measured at 1100 wide: 1469.6 px needed in the worst case, 958.6
+  after all four drops; the status slot is at most 200 px (`STATUS_MAX_WIDTH`).
 - The hint strip leaves the header (AC9 keeps its information elsewhere): each
   shown panel's title row starts with `Kbd::new([digit])`; each hidden panel
   appears in the header as a chip (`Kbd::new([digit])` + its title, 11 px,
@@ -458,7 +466,8 @@ it; else selection → clear it; else nothing.
   state is still on screen.
 - 人待ち合計 moves from the header into the queue panel's title row (same
   `Tag`, same `Pulse::Waited`). The three tally tags leave the header (their
-  numbers are the panel title badges).
+  numbers are the panel title badges). (Changed in implementation: see Implementation record.) The tags left in U1, not
+  U2.
 
 ### AC5: help (`dashboard/help.rs`)
 
@@ -475,7 +484,9 @@ it; else selection → clear it; else nothing.
   overlay. A rebuild while help is open builds it again (overlays are removed
   by `rebuilt`).
 - Height at 1100×700: about 16 rows × 22 px + headings ≈ 440 px, inside the
-  700 px window (the implementer checks it, see tests).
+  700 px window (the implementer checks it, see tests). (Changed in implementation: see Implementation record.) Measured:
+  `[320, 45.9, 460, 562.3]`. While help is open the screen below is disabled
+  and drawn dimmed, and enabled again on close.
 
 ### AC6: connection health (`dashboard/health.rs`)
 
@@ -486,6 +497,9 @@ it; else selection → clear it; else nothing.
   second while it runs — in `follow` after each loop pass when 1 s has passed
   since the last wake, and in `pause` (waiting with `recv_timeout` of at most
   1 s). So the window redraws every second in live mode and `tick` runs.
+  (Changed in implementation: see Implementation record.) A separate thread, `live-heartbeat`, wakes the window every second
+  (`HEARTBEAT`); the feed thread can wait seconds on Noa and does not do it.
+  One time value is read per frame (`Dashboard::frame(now)`).
 - `health::Health` from `(link, synced_age, had_data)`:
 
 | Health | When | Dot | Status text |
@@ -493,8 +507,12 @@ it; else selection → clear it; else nothing.
 | Demo | no link | `GRAY` | "ワーカー {n} · ダミーデータ" (unchanged) |
 | Connecting | `Link::Connecting` | `YELLOW` | "接続中…" (unchanged) |
 | Live | Live, age < 10 s | `GREEN` | "ワーカー {n} · 同期 {age}前" (unchanged format) |
-| Stale | Live, age ≥ 10 s (`STALE_AFTER`) | `ORANGE` | "ワーカー {n} · 同期 {age}前 · 古いデータ" |
-| Down | `Link::Down(r)` | `RED` | "切断: {r}" (unchanged) when no data was ever shown; "切断: {r} · 最終同期 {age}前 · 古いデータ" when it was |
+| Stale | Live, age ≥ 10 s (`STALE_AFTER`) | `ORANGE` | "古いデータ（同期 {age}前）· ワーカー {n}" |
+| Down | `Link::Down(r)` | `RED` | "切断: {r}" (unchanged) when no data was ever shown; "切断: 古いデータ（{age}前）· {r}" when it was |
+
+(Changed in implementation: see Implementation record.) The stale mark and the age come first because the label cuts its
+tail inside a slot of at most 200 px. Reasons and notices are shown on one
+line.
 
 - The dot is an 8×8 `Container` (radius 4) before the status slot; `tick`
   updates its background and the status label's text in place, and the
@@ -541,7 +559,8 @@ it; else selection → clear it; else nothing.
   Edge::Right, top: HEADER_HEIGHT }, OverlayOptions::PASSIVE)`, width 360,
   height 100 %, `Role::Surface`, left border 1 px `Separator`, padding 14; a
   `ScrollView` inside holds the content (one item, so AC3's paging does not
-  apply). Not modal: keys keep routing through the key map.
+  apply). Not modal: keys keep routing through the key map. (Changed in implementation: see Implementation record.) The
+  border is 1 px on all four sides (`Container` has no per-side border).
 - Content, top to bottom: head row (state mark symbol in its colour as in the
   graph, label 16 px 700 with `Truncation::Tail`, kind `Tag`); tags (model,
   branch, "結果あり" `Tone::Success` or "結果なし" `TagStyle::Outlined`); section
@@ -556,14 +575,17 @@ it; else selection → clear it; else nothing.
 - Time labels update in place through `Pulse::Drawer(pane)` (registered on
   each time label; `drawer::refresh` recomputes that label's text).
 - Running and done cards: the caption row becomes `[caption, fill, tail
-  truncation] [Button::new("詳細").control_size(Small)]`.
+  truncation] [Button::new("詳細").control_size(Small)]`. (Changed in implementation: see Implementation record.) The button
+  row is 26.32 px, not 22, and long tags in the drawer are cut by a `FitTag`.
 - Screen tails for two panes (live.rs, U1): `Command::Expand(Option<u64>)`
   becomes `Command::Watch(Vec<u64>)` = `[expanded queue card, detail worker]`
   without duplicates or `None`s, sent by `build` and whenever either changes.
   The feed keeps `screens: HashMap<u64, (Instant, Vec<String>)>`, fetches each
   watched worker at most every `SCREEN_EVERY`, drops unwatched ones, and
   `Tracker::fleet(now, &HashMap<u64, Vec<String>>)` puts each tail on its
-  worker.
+  worker. (Changed in implementation: see Implementation record.) `Tracker::fleet` takes an `Option<&HashMap<..>>`; the feed keeps
+  the watch list labelled with the server instance it belongs to and fetches
+  only while following that instance (`Snapshot::instance`).
 
 ### AC9: what stays
 
@@ -578,7 +600,13 @@ it; else selection → clear it; else nothing.
   1440x900) and `--keys=SEQ` (dispatched before the snapshot is drawn; each
   character is sent as `KeyDown { Char(c) }` + `Text(c)`, and `<Enter>`,
   `<Esc>`, `<Space>`, `<Down>`, `<Up>` as named keys). Both only affect
-  `--snapshot`. `USAGE` lists them.
+  `--snapshot`. `USAGE` lists them. (Changed in implementation: see Implementation record.) `--keys` sends what the platform
+  sends: Space is `KeyDown(Space)` + `Text(" ")`, a shifted symbol is its
+  unshifted key with shift plus the `Text` (US layout), and `KeyDown` carries
+  `command_is_meta`. A `<...>` that is not one of the five names is literal
+  text; a control character is an error. `--size` is capped: each side at most
+  4096 logical px and a padded readback of at most 128 MiB at 2× (3840x2160
+  is accepted, 4096x4096 is rejected).
 - Docs (U7): this spec's implementation record; `docs/FEATURES.md`'s Agent
   Dashboard entry gains one sentence (keyboard selection, `/` filter, `?`
   help, details drawer, link health); `docs/specs/agent-dashboard-mock.md` gets
@@ -732,6 +760,8 @@ U3 — `tests/paging.rs`
 - `the_wheel_pages_one_item`: wheel with `delta.y = -40` over the running
   list → `first[Running] == 1`, indicator "上に 1 件" (or "上に 1 件 · 下に …"),
   perf-probe shown; `+40` → back to 0; a wheel over the header changes nothing.
+  (Changed in implementation: see Implementation record.) At the measured sizes one −40 step does not show perf-probe at
+  1440×900; two steps are needed.
 - `selecting_brings_the_card_into_view`: select perf-probe (13) → it is shown
   in running and in the queue.
 - `the_timeline_and_graph_page_too`: busy fleet (canned + 6 running) at
@@ -765,6 +795,8 @@ U4 — `tests/details.rs`
 - `the_running_cards_keep_their_height`: running/done card heights equal
   the measured `GroupBox` heights plus the 詳細 row difference recorded by the
   implementer (the 22 px button row replaces the 15 px caption line).
+  (Changed in implementation: see Implementation record.) The button row is 26.32 px: running cards 258.32 / 242.32 / 266.32,
+  done cards 209.32.
 
 U5 — `tests/urgency_steps.rs`
 - `steps_follow_the_thresholds`: `urgency::step` at 4.9/5/14.9/15 min for
@@ -985,9 +1017,14 @@ snapshot shows "下に 1 件" in 作業中 and no cut card.
 `src/dashboard/tests/help_overlay.rs`. Done: `help_overlay.rs` passes.
 
 **U8 `snapshot-options`** — tier: light — AC9 (review aid). Files:
-`src/main.rs`. Done: its two tests pass;
+`src/main.rs`. (Changed in implementation: see Implementation record.) It also caps `--size` and sends `--keys` as the
+platform does (AC9). Done: its tests pass;
 `cargo run --locked -q -- --demo --size=1100x700 --keys='jj?' --snapshot=$TMPDIR/help.png`
 writes a PNG.
+
+Units added during the run (not in this plan; see the Implementation record):
+`core-hardening`, `health-followup`, `integrate-drawer`, `polish-a`,
+`polish-b`. (Changed in implementation: see Implementation record.)
 
 ### Wave 3
 
@@ -1024,3 +1061,142 @@ clippy clean, snapshots at 1100×700, 1440×900, 1920×1200 of the demo, with
   measures them.
 - Whether a 4 px accent bar reads clearly enough as "selected" next to the
   need-coloured borders: owner's eye on the U7 snapshots.
+
+## Implementation record
+
+Implemented 2026-11-22 on `factory/agent-dashboard-improve`. The dashboard
+crate has 229 tests (68 before). Values below marked "measured" are the
+workers' readings with `TextStore::new(Default::default())`; no test pins them,
+and U7 did not re-measure them. Constants and texts were checked against the
+code.
+
+### Units as built
+
+U0 `split-modules`, U1 `core-keys-select-filter`, U2 `header-health`, U3
+`pager`, U4 `detail-drawer`, U5 `urgency-steps`, U6 `help-overlay` and U8
+`snapshot-options` were built as planned. Five units were added during the run:
+
+| Unit | Why it was added |
+| --- | --- |
+| `core-hardening` | Review findings on U1: the help modal shields the background, a press can be cancelled, the watch list survives server instances, the filter count layout. |
+| `health-followup` | `had_data`, a re-tick after a rebuild, the stale wording, one-line reasons. |
+| `integrate-drawer` | Merge of U4 with the pager; `FitTag` for long tags. |
+| `polish-a`, `polish-b` | One-line normalisation of all Noa texts, the notice timer, health of a held snapshot, the `--size` cap, pager wheel and selection composition, the help footer, stronger tests. |
+
+### Differences from the design
+
+- **Header.** The three tally tags left in U1, not U2. The status slot is
+  140 px at least and 200 px at most (`STATUS_MIN_WIDTH`, `STATUS_MAX_WIDTH`).
+- **AC6 texts.** Stale reads `古いデータ（同期 {age}前）· ワーカー {n}`; Down
+  with data reads `切断: 古いデータ（{age}前）· {reason}`. The label cuts its
+  tail, so the stale mark and the age come first. Reasons and notices stay on
+  one line.
+- **Heartbeat.** A separate thread, `live-heartbeat`, wakes the window every
+  second; the feed thread can wait seconds on Noa.
+- **One time per frame.** `Dashboard::frame(now)` reads the clock once;
+  notices (also "…のペインへ移動します") use the notice mechanism for 8 s.
+- **Watch.** The dashboard sends its watch list once per applied Live
+  snapshot. The feed keeps it labelled with the server instance it belongs to
+  (`watched_on`) and fetches only while following that instance; `Snapshot`
+  gained `instance: Option<String>`. On an instance change the dashboard
+  forgets selection, drawer and expansion. Pane ids mean something only within
+  one instance. `Tracker::fleet` takes `Option<&HashMap<..>>`.
+- **Rebuilds** reuse the same `UiTree`, so the app's clipboard and stylesheet
+  survive.
+- **Cards.** Running and done cards are `Container`s copying `GroupBox::card`,
+  exposed to accessibility as named groups (focus group plus label).
+- **Queue.** On volatile snapshots cards are re-ordered in place and the
+  expanded card is swapped in place (`queue::set_expanded`); with no explicit
+  expansion the first card is the expanded one.
+- **Pager (AC3).** A per-list hidden widget, `PageMemory`, holds the page. The
+  most recent user action decides between a selection reveal and a wheel step.
+  A group header is hidden only when the page's first item would not fit under
+  it. A full rebuild puts wheel-paged lists back to the first page. Paged-out
+  cards are not exposed to accessibility. One −40 wheel step does not show
+  perf-probe at 1440×900; two are needed.
+- **Details (AC8).** The 詳細 button row is 26.32 px (the spec guessed 22). The
+  drawer has a 1 px border on all four sides because `Container` has no
+  per-side border. A `FitTag` cuts long tags.
+- **Help (AC5).** While help is open the background is disabled and dimmed.
+- **Snapshot options (U8).** `--keys` sends what the platform sends (Space as
+  `KeyDown(Space)` + `Text(" ")`; shifted symbols as the unshifted key with
+  shift plus `Text`, US layout; `KeyDown` carries `command_is_meta`). A `<...>`
+  that is not one of the five names is literal text; control characters are an
+  error. `--size` is limited to 4096 logical px a side and a padded readback of
+  128 MiB at 2× (3840x2160 accepted, 4096x4096 rejected).
+- **Texts from Noa** are folded to one paragraph at the source
+  (`fleet::one_line`, `Worker::on_one_line`): cosmic-text 0.19 panics when one
+  string holds a paragraph separator and mixed text directions.
+- **Key map** is as designed (`keymap::BINDINGS`).
+
+### Measured values
+
+- Header at 1440×900: title 116, dot 8, status slot 142, urgency counts 145,
+  最長 141, filter 160, count label 39, `?` 20, グループ 44, grouping control
+  226.6; chips 56 / 56 / 45 / 78 / 45; bar gap 10, side padding 16.
+- Header width needed against available: at 1100, 1090.6 by default → 1036.0
+  after dropping グループ (1068 available); worst case (all panels hidden,
+  filter active) 1469.6 → 958.6 after all four drops. At 1440, 1090.6 by
+  default (nothing dropped, about 317 spare); worst case 1469.6 → 1235.6.
+- Queue at 1440×900: title row 20 px, list y 98..610, last card bottom 601.6,
+  8.4 px spare.
+- Running list at 1440×900: 702×512; the demo shows 「下に 1 件」 (perf-probe
+  paged out); the timeline also shows 「下に 1 件」.
+- Cards: 詳細 row 26.32 px; running cards 258.32 / 242.32 / 266.32, done cards
+  209.32.
+- Help at 1100×700: `[320, 45.9, 460, 562.3]`.
+- Stale prefix `古いデータ（同期 59 秒前）` 154 px; Down prefix
+  `切断: 古いデータ（59 分前）· ` 164 px.
+
+### Pre-existing tests replaced or edited
+
+- `the_header_shows_each_shortcut` and `the_hint_strip_fits_the_header` were
+  replaced: their subject, the header hint strip, is gone. `tests/hints.rs`
+  keeps their intent (`each_panel_title_shows_its_shortcut`,
+  `hidden_panels_show_as_chips_in_the_header`).
+- `running_and_done_cards_are_named_groups` now lays out at 1920×1200 (the
+  paged lists would otherwise hide a card).
+- `a_frame_reads_the_time_once` expects the stale text.
+- The `bottom` test helper moved to `tests/layout.rs`.
+- As the Tests section planned: `a_live_screen_follows_its_feed` (`Watch`
+  instead of `Expand`) and `a_volatile_snapshot_updates_in_place` (wheel
+  paging); `a_panel_becomes_a_worker` uses the map form of `Tracker::fleet`.
+
+### Known issues
+
+None was met in normal use by the reviewers. MEDIUM means reachable but
+unusual.
+
+- A notice in `--demo` can stay past 8 s when its expiry falls between
+  `before_frame` and the timer of the same frame.
+- During an IME composition, a held Live followed by a Down shows the age of
+  the last applied sync, not the held one.
+- Pasting text with a paragraph separator into the filter clears its undo
+  history; a pasted U+0085 is dropped by the field before the dashboard can
+  turn it into a space; the caret can land before a combining mark after such
+  a paste.
+- `--size` is checked against fixed limits, not the selected GPU adapter's own
+  texture limit.
+- A long Down reason in the empty-state body wraps over several lines.
+- Pager: a sub-step wheel remainder can survive a selection and wheel burst
+  handled in one frame; a selection and a backward wheel step in one fit can
+  skip the fill-back; the fill-back pass lays out every earlier candidate again
+  for single-column lists; a wheel over a list that turns no page is passed on
+  to the widget tree instead of being consumed (it needs a three-state result
+  from `pager::wheel` and a small change in `Dashboard::wheel`).
+- `Command::Watch` and `Command::Focus` carry no server instance: for less than
+  a frame after a server restart a Focus could reach a pane that reuses the id.
+- noa-gpui: a `Button` keeps its pressed state after a second mouse button's
+  release (upstream).
+- `Worker::since` is drawn raw by `cards.rs` and `drawer.rs` (safe on the live
+  path, which builds it from numbers; only a hand-built fleet could break it).
+  The two `one_line` rules differ on CR LF (`drawer::one_line` gives one
+  space, `fleet::one_line` two).
+- With thousands of workers at 1100 px the header cannot fit and the status
+  slot shrinks to 140 px.
+- Not verified in a real window: key delivery with an IME, the heartbeat's
+  redraw cost, how the drawer, help and selection bar look, trackpad paging.
+- Two workspace tests outside this work are load-sensitive and failed once each
+  on a heavily loaded machine (passing on rerun): noa-ipc
+  `attach_added_processing_latency_stays_below_one_millisecond` and noa-pty
+  `reader_reuses_returned_payload_buffers`.

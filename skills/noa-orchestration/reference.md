@@ -41,7 +41,9 @@ Panel fields that matter for orchestration:
                                  // always false for a command spawned without one
   "attention": false,            // an unread notification (OSC 9 and the like)
   "agent": {"kind": "claude", "state": "input", "detail": "", "seq": 7, "blocked": "question"},
-                                 // omitted for no known agent and no report;
+                                 // omitted for no known agent and no report
+                                 // (a worker spawned as claude, codex or agy
+                                 // has its kind from the start);
                                  // state/detail only after a report; blocked
                                  // ("permission" or "question") only while the
                                  // last report was an OSC 7501 blocked report
@@ -303,7 +305,9 @@ that was not an answer), `lastSentSeq` (the `seq` before the last send),
 A worktree worker also gets `ahead` (commits on its branch that your `HEAD`
 lacks) and `dirty` (uncommitted changes in its worktree), each left out when
 git cannot say. Then the journal's workers that are no longer listed:
-`{"paneId":"…","gone":true,"label"?,"closed"?:true,"cwd"?,…}`.
+`{"paneId":"…","gone":true,"label"?,"closed"?:true,"cwd"?,…}`. Only a pane this
+pane spawned is a worker here: one it merely sent to, waited on or tried to close
+is not listed.
 
 `--answers` prints every prompt answered from this pane (`send --answer`),
 oldest first: `{"ts":…,"paneId":"…","label"?:…,"text":…,"screen":…}`, where
@@ -345,8 +349,10 @@ from yours), first move every `.noa/result-*.md` of the worktree into
 worker that is already gone is pruned too when this pane's journal recorded its
 label and worktree (the worktree is then its cwd). The line gains
 `"worktree":{"path":…,"removed":true,"branchDeleted":true,"result":…}`, where
-`result` is the new path of this worker's own report; `result PANE` and
-`status` read it there. A result file that cannot be moved keeps the worktree
+`result` is the new path of this worker's own report, and `moved` lists every
+file moved (`[{"from":…,"to":…,"paneId"?:…}]`, `paneId` for a report of another
+worker that ran in that worktree); `result PANE` and `status` read each worker's
+report at its new path. A result file that cannot be moved keeps the worktree
 and branch, with `kept` saying why (`cannot move the result file <from> to
 <to>: …`, `cannot make <main>/.noa: …`, `cannot read <wt>/.noa: …`); the files
 are moved even when git then refuses. When git refuses

@@ -991,4 +991,50 @@ detached
         assert_eq!(removed["removed"], true);
         let _ = std::fs::remove_dir_all(&base);
     }
+
+    // `spawn --cwd ../repo-wt/job` from the repository: the cwd the worker
+    // is given (and its report path) must let `prune` find the worktree and
+    // move the report.
+    #[test]
+    fn prune_finds_a_worktree_for_a_relative_spawn_cwd() {
+        let (base, repo) = repo("relcwd");
+        let made = add(&repo, "job").unwrap();
+        let cwd = crate::ctl::spawn_cwd(Some("../repo-wt/job".into()), Some(repo.clone()))
+            .expect("a utf-8 cwd");
+        assert_eq!(cwd, made.path.to_string_lossy());
+        let own = super::super::result::prepare(Path::new(&cwd), Some("job")).unwrap();
+        std::fs::write(&own, "report\n").unwrap();
+
+        let info = prune("job", Path::new(&cwd), Some(&own), &[]).unwrap();
+        assert_eq!(info["removed"], true, "{info}");
+        assert!(!made.path.exists());
+        let moved = PathBuf::from(info["result"].as_str().unwrap());
+        assert_eq!(moved.parent(), Some(repo.join(".noa").as_path()));
+        assert_eq!(std::fs::read_to_string(&moved).unwrap(), "report\n");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // The same with a `..`/`.` path into a subdirectory the worker removed
+    // before the prune (`within` then compares the raw paths).
+    #[test]
+    fn prune_finds_a_worktree_when_the_relative_cwd_subdirectory_is_gone() {
+        let (base, repo) = repo("relcwd-gone");
+        let made = add(&repo, "job").unwrap();
+        let sub = made.path.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let cwd = crate::ctl::spawn_cwd(Some("../repo-wt/job/sub/.".into()), Some(repo.clone()))
+            .expect("a utf-8 cwd");
+        assert_eq!(cwd, sub.to_string_lossy());
+        let own = super::super::result::prepare(&made.path, Some("job")).unwrap();
+        std::fs::write(&own, "report\n").unwrap();
+        std::fs::remove_dir_all(&sub).unwrap();
+
+        let info = prune("job", Path::new(&cwd), Some(&own), &[]).unwrap();
+        assert_eq!(info["removed"], true, "{info}");
+        assert!(!made.path.exists());
+        let moved = PathBuf::from(info["result"].as_str().unwrap());
+        assert_eq!(moved.parent(), Some(repo.join(".noa").as_path()));
+        assert_eq!(std::fs::read_to_string(&moved).unwrap(), "report\n");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

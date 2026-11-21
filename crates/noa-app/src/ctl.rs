@@ -6596,10 +6596,14 @@ mod tests {
         std::fs::write(base.join("file"), "").unwrap();
 
         let given = "file/../other";
-        assert_eq!(
-            spawn_cwd(Some(given.to_string()), Some(base.clone())).as_deref(),
-            base.join("other").to_str(),
-            "it does normalize to a directory"
+        // macOS's realpath resolves `file/..`, so it normalizes to the
+        // directory `other`; glibc's refuses it with ENOTDIR, so it comes
+        // back unchanged. Either way `check_spawn` must refuse it.
+        let got = spawn_cwd(Some(given.to_string()), Some(base.clone())).unwrap();
+        assert!(
+            std::path::Path::new(&got) == base.join("other")
+                || std::path::Path::new(&got) == base.join(given),
+            "{got}"
         );
         let err = check_spawn(&spawn_args(Some(given), &[]), Some(base.clone()), None).unwrap_err();
         assert!(

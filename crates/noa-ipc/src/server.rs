@@ -128,7 +128,10 @@ use crate::auth::{Scope, ScopeSet, constant_time_eq};
 use crate::backend::{IpcBackend, PaneRef, SpawnTarget};
 use crate::error::{ErrorCode, IpcError};
 use crate::protocol::*;
-use crate::push::{AddSubscriptionError, Broadcaster, EventMask, PushQueue, QueuedNotification};
+use crate::push::{
+    AddSubscriptionError, Broadcaster, EventMask, PushQueue, QueuedNotification,
+    SubscriptionUpdate, UpdateSubscriptionError,
+};
 
 /// Server startup configuration (spec §L2 "Config キー").
 pub struct ServerConfig {
@@ -1251,10 +1254,18 @@ fn ws_err_to_io(err: tungstenite::Error) -> io::Error {
 
 fn to_notification(item: QueuedNotification) -> Value {
     match item {
-        QueuedNotification::StateChanged { panels, dropped } => serde_json::json!({
+        QueuedNotification::StateChanged {
+            panels,
+            removed_pane_ids,
+            dropped,
+        } => serde_json::json!({
             "jsonrpc": "2.0",
             "method": "noa.stateChanged",
-            "params": StateChangedParams { panels, dropped },
+            "params": StateChangedParams {
+                panels,
+                removed_pane_ids: removed_pane_ids.into_iter().map(WireId).collect(),
+                dropped,
+            },
         }),
         QueuedNotification::Output {
             pane_id,
@@ -1524,6 +1535,10 @@ fn dispatch(
             "noa.subscribe" => {
                 require_scope(session, Scope::Read)?;
                 handle_subscribe(broadcaster, conn_id, req.params)
+            }
+            "noa.updateSubscription" => {
+                require_scope(session, Scope::Read)?;
+                handle_update_subscription(broadcaster, conn_id, req.params)
             }
             "noa.unsubscribe" => {
                 require_scope(session, Scope::Read)?;
@@ -1887,8 +1902,9 @@ fn handle_subscribe(
     let pane_ids = p
         .pane_ids
         .map(|ids| ids.into_iter().map(|id| id.0).collect::<HashSet<u64>>());
+    let fields = p.fields.map(|f| FieldMask::from_fields(&f));
     let sub_id = broadcaster
-        .add_subscription(conn_id, mask, pane_ids)
+        .add_subscription_filtered(conn_id, mask, pane_ids, fields)
         .map_err(|err| match err {
             AddSubscriptionError::ConnectionNotFound => {
                 RpcFail::new(ErrorCode::InvalidRequest, "connection not registered")
@@ -1903,6 +1919,45 @@ fn handle_subscribe(
         subscription_id: WireId(sub_id),
     })
     .unwrap())
+}
+
+/// `noa.updateSubscription`: everything is validated before the broadcaster
+/// is touched, so a rejected update leaves the subscription as it was. An
+/// unknown id and another connection's id get the same answer.
+fn handle_update_subscription(
+    broadcaster: &Broadcaster,
+    conn_id: u64,
+    params: Value,
+) -> Result<Value, RpcFail> {
+    let p: UpdateSubscriptionParams =
+        serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
+    if p.pane_ids
+        .as_ref()
+        .and_then(Option::as_ref)
+        .is_some_and(|ids| ids.len() > MAX_SUBSCRIBE_PANE_IDS)
+    {
+        return Err(RpcFail::invalid_params());
+    }
+    let update = SubscriptionUpdate {
+        events: p.events.map(|events| EventMask::from_events(&events)),
+        pane_ids: p
+            .pane_ids
+            .map(|ids| ids.map(|ids| ids.into_iter().map(|id| id.0).collect::<HashSet<u64>>())),
+        fields: p
+            .fields
+            .map(|fields| fields.map(|f| FieldMask::from_fields(&f))),
+    };
+    broadcaster
+        .update_subscription(conn_id, p.subscription_id.0, update)
+        .map_err(|err| match err {
+            UpdateSubscriptionError::ConnectionNotFound => {
+                RpcFail::new(ErrorCode::InvalidRequest, "connection not registered")
+            }
+            UpdateSubscriptionError::SubscriptionNotFound => {
+                RpcFail::new(ErrorCode::InvalidParams, "unknown subscription")
+            }
+        })?;
+    Ok(serde_json::to_value(OkResult::ok()).unwrap())
 }
 
 fn handle_unsubscribe(

@@ -1200,6 +1200,277 @@ fn subscribe_delivers_state_changed_and_unsubscribe_stops_it() {
     let _ = sock.close(None);
 }
 
+// ---- pane subscriptions: removal notices, field filters, updateSubscription ----
+
+fn test_panel(pane_id: u64) -> Panel {
+    Panel {
+        window_group_id: WireId(1),
+        window_id: WireId(1),
+        pane_id: WireId(pane_id),
+        name: "shell".into(),
+        cwd: "/tmp".into(),
+        branch: None,
+        process: None,
+        busy: false,
+        attention: false,
+        attachable: true,
+        preview: vec![],
+        surface_id: None,
+        agent: None,
+        exit: None,
+        parent_pane_id: None,
+        label: None,
+        spawn: None,
+    }
+}
+
+/// Subscribes with `params` and returns the subscription id.
+fn subscribe(sock: &mut Sock, id: i64, params: Value) -> String {
+    send_rpc(sock, id, "noa.subscribe", params);
+    let resp = recv_json(sock);
+    resp["result"]["subscriptionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("subscribe should succeed, got {resp:?}"))
+        .to_string()
+}
+
+/// Waits past the connection's 50ms read-timeout poll so a queued
+/// notification is written before anything sent afterwards is answered.
+fn let_the_connection_drain() {
+    std::thread::sleep(Duration::from_millis(150));
+}
+
+/// Asserts nothing was pushed: after the drain window, the next frame is the
+/// response to a `listPanels` probe.
+fn assert_no_notification(sock: &mut Sock, probe_id: i64) {
+    let_the_connection_drain();
+    send_rpc(sock, probe_id, "noa.listPanels", json!({}));
+    let resp = recv_json(sock);
+    assert_eq!(
+        resp["id"], probe_id,
+        "expected the probe response, got {resp:?}"
+    );
+}
+
+fn state_changed_pane_ids(notif: &Value) -> Vec<String> {
+    assert_eq!(notif["method"], "noa.stateChanged", "got {notif:?}");
+    notif["params"]["panels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["paneId"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn a_removal_only_delta_reaches_a_subscriber_over_the_wire() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
+    let broadcaster = handle.broadcaster();
+    let mut sock = connect_plain(handle.port());
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
+    subscribe(&mut sock, 2, json!({ "events": ["state_changed"] }));
+
+    broadcaster.broadcast_state_delta(vec![], vec![1]);
+    let_the_connection_drain();
+    let notif = recv_json(&mut sock);
+    assert_eq!(notif["method"], "noa.stateChanged");
+    assert_eq!(
+        notif["params"],
+        json!({ "panels": [], "removedPaneIds": ["1"] })
+    );
+    let _ = sock.close(None);
+}
+
+#[test]
+fn subscribe_with_an_unknown_field_is_invalid_params_and_creates_no_subscription() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
+    let broadcaster = handle.broadcaster();
+    let mut sock = connect_plain(handle.port());
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
+
+    send_rpc(
+        &mut sock,
+        2,
+        "noa.subscribe",
+        json!({ "events": ["state_changed"], "fields": ["agnt"] }),
+    );
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["error"]["code"], -32602);
+
+    assert!(!broadcaster.has_state_changed_subscribers());
+    broadcaster.broadcast_state_changed(vec![test_panel(1)]);
+    assert_no_notification(&mut sock, 3);
+    let _ = sock.close(None);
+}
+
+#[test]
+fn update_subscription_returns_ok_and_the_next_broadcast_uses_the_new_filter() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
+    let broadcaster = handle.broadcaster();
+    let mut sock = connect_plain(handle.port());
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
+    let sub_id = subscribe(
+        &mut sock,
+        2,
+        json!({ "events": ["state_changed"], "paneIds": ["1"] }),
+    );
+
+    send_rpc(
+        &mut sock,
+        3,
+        "noa.updateSubscription",
+        json!({ "subscriptionId": sub_id, "paneIds": ["2"] }),
+    );
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["result"], json!({ "ok": true }), "got {resp:?}");
+
+    // Pane 1 left the scope and pane 2 entered it: the first frame is the
+    // pane-2 notification, not a pane-1 one.
+    broadcaster.broadcast_state_changed(vec![test_panel(1)]);
+    broadcaster.broadcast_state_changed(vec![test_panel(1), test_panel(2)]);
+    let_the_connection_drain();
+    assert_eq!(state_changed_pane_ids(&recv_json(&mut sock)), vec!["2"]);
+
+    // `null` clears the filter.
+    send_rpc(
+        &mut sock,
+        4,
+        "noa.updateSubscription",
+        json!({ "subscriptionId": sub_id, "paneIds": null, "fields": null }),
+    );
+    assert_eq!(recv_json(&mut sock)["result"]["ok"], true);
+    broadcaster.broadcast_state_changed(vec![test_panel(1), test_panel(2)]);
+    let_the_connection_drain();
+    assert_eq!(
+        state_changed_pane_ids(&recv_json(&mut sock)),
+        vec!["1", "2"]
+    );
+    let _ = sock.close(None);
+}
+
+#[test]
+fn update_subscription_with_an_unknown_id_is_invalid_params() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
+    let mut sock = connect_plain(handle.port());
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
+
+    send_rpc(
+        &mut sock,
+        2,
+        "noa.updateSubscription",
+        json!({ "subscriptionId": "99" }),
+    );
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["error"]["code"], -32602);
+    assert_eq!(resp["error"]["message"], "unknown subscription");
+    let _ = sock.close(None);
+}
+
+#[test]
+fn update_subscription_with_another_connections_id_is_invalid_params_and_leaves_it_working() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
+    let broadcaster = handle.broadcaster();
+    let mut owner = connect_plain(handle.port());
+    hello(&mut owner, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
+    let sub_id = subscribe(
+        &mut owner,
+        2,
+        json!({ "events": ["state_changed"], "paneIds": ["1"] }),
+    );
+
+    let mut other = connect_plain(handle.port());
+    hello(&mut other, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
+    send_rpc(
+        &mut other,
+        2,
+        "noa.updateSubscription",
+        json!({ "subscriptionId": sub_id, "paneIds": ["2"] }),
+    );
+    let resp = recv_json(&mut other);
+    assert_eq!(resp["error"]["code"], -32602);
+    assert_eq!(resp["error"]["message"], "unknown subscription");
+
+    // The owner's filter is still `paneIds: ["1"]`.
+    broadcaster.broadcast_state_changed(vec![test_panel(2)]);
+    broadcaster.broadcast_state_changed(vec![test_panel(1), test_panel(2)]);
+    let_the_connection_drain();
+    assert_eq!(state_changed_pane_ids(&recv_json(&mut owner)), vec!["1"]);
+    let _ = owner.close(None);
+    let _ = other.close(None);
+}
+
+#[test]
+fn update_subscription_with_too_many_pane_ids_is_invalid_params_and_keeps_the_filter() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
+    let broadcaster = handle.broadcaster();
+    let mut sock = connect_plain(handle.port());
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
+    let sub_id = subscribe(
+        &mut sock,
+        2,
+        json!({ "events": ["state_changed"], "paneIds": ["1"] }),
+    );
+
+    let pane_ids: Vec<String> = (0..1025).map(|id| id.to_string()).collect();
+    send_rpc(
+        &mut sock,
+        3,
+        "noa.updateSubscription",
+        json!({ "subscriptionId": sub_id, "paneIds": pane_ids }),
+    );
+    assert_eq!(recv_json(&mut sock)["error"]["code"], -32602);
+
+    broadcaster.broadcast_state_changed(vec![test_panel(2)]);
+    broadcaster.broadcast_state_changed(vec![test_panel(1), test_panel(2)]);
+    let_the_connection_drain();
+    assert_eq!(state_changed_pane_ids(&recv_json(&mut sock)), vec!["1"]);
+    let _ = sock.close(None);
+}
+
+#[test]
+fn update_subscription_with_null_events_is_invalid_params() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
+    let broadcaster = handle.broadcaster();
+    let mut sock = connect_plain(handle.port());
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
+    let sub_id = subscribe(&mut sock, 2, json!({ "events": ["state_changed"] }));
+
+    send_rpc(
+        &mut sock,
+        3,
+        "noa.updateSubscription",
+        json!({ "subscriptionId": sub_id, "events": null }),
+    );
+    assert_eq!(recv_json(&mut sock)["error"]["code"], -32602);
+    assert!(broadcaster.has_state_changed_subscribers());
+    let _ = sock.close(None);
+}
+
+#[test]
+fn update_subscription_without_read_scope_is_32003() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend, "tok", ScopeSet::from_strings(["read", "control"]));
+    let mut sock = connect_plain(handle.port());
+    let resp = hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["control"]);
+    assert_eq!(resp["result"]["grantedScopes"], json!(["control"]));
+
+    send_rpc(
+        &mut sock,
+        2,
+        "noa.updateSubscription",
+        json!({ "subscriptionId": "1" }),
+    );
+    assert_eq!(recv_json(&mut sock)["error"]["code"], -32003);
+    let _ = sock.close(None);
+}
+
 // ---- R-2: per-connection subscription cap ----
 
 #[test]

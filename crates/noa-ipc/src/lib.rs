@@ -36,12 +36,12 @@ pub use client::{
 };
 pub use error::{ErrorCode, IpcError};
 pub use protocol::{
-    AttachParams, AttachResult, Attr, DetachParams, EventKind, GetTextResult, ListPanelsResult,
-    PROTOCOL_VERSION, PaneIdResult, Panel, PanelAgent, PanelExit, PanelSpawn, ResizePaneParams,
-    Row, Span, SpanColor, SpawnConfig, SpawnParams, SplitDirection, SplitPlacement, TextSource,
-    WireId,
+    AttachParams, AttachResult, Attr, DetachParams, EventKind, FieldMask, GetTextResult,
+    ListPanelsResult, PROTOCOL_VERSION, PaneIdResult, Panel, PanelAgent, PanelExit, PanelField,
+    PanelSpawn, ResizePaneParams, Row, Span, SpanColor, SpawnConfig, SpawnParams, SplitDirection,
+    SplitPlacement, TextSource, UpdateSubscriptionParams, WireId,
 };
-pub use push::{Broadcaster, EventMask, PushQueue};
+pub use push::{Broadcaster, ChangedPanel, EventMask, PushQueue};
 pub use server::{
     ATTACH_HANDSHAKE_CLOSE_REASON, MESSAGE_TOO_BIG_REASON, Server, ServerConfig, ServerHandle,
     TOO_MANY_CONNECTIONS_REASON,

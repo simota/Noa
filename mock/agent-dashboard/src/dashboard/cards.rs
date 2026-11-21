@@ -3,13 +3,14 @@ use noa_gpui_core::style::{
     auto, length, percent,
 };
 use noa_gpui_core::widgets::{
-    Chart, ChartSeries, Container, Label, LevelIndicator, LevelStyle, Tag, TagStyle, Tone,
-    Truncation,
+    Button, Chart, ChartSeries, Container, ControlSize, Label, LevelIndicator, LevelStyle, Tag,
+    TagStyle, Tone, Truncation,
 };
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
 use crate::fleet::{FRESHNESS_MAX, Grouping, State, Worker, minutes_text};
 
+use super::drawer::one_line;
 use super::pager::ListParts;
 use super::panel::{
     Panel, card_list, group_header, indicator, mark_card, nothing_matches, panel_title,
@@ -44,13 +45,17 @@ pub(super) fn done_caption(worker: &Worker) -> String {
     joined(&[&worker.since, &took], " · ")
 }
 
+// The worker texts below come from live data: each is drawn as
+// `one_line` makes it, as the shaper panics on a paragraph separator that
+// stays inside a line.
+
 pub(super) fn task_line(tree: &mut UiTree, parent: WidgetId, worker: &Worker) {
     if worker.task.is_empty() {
         return;
     }
     tree.insert(
         Some(parent),
-        Label::new(format!("依頼: {}", worker.task))
+        Label::new(format!("依頼: {}", one_line(&worker.task)))
             .font_size(12.0)
             .color(Role::Muted)
             .wrap(true)
@@ -64,7 +69,7 @@ pub(super) fn detail_line(tree: &mut UiTree, parent: WidgetId, worker: &Worker) 
     }
     tree.insert(
         Some(parent),
-        Label::new(worker.detail.as_str())
+        Label::new(one_line(&worker.detail))
             .font_size(12.0)
             .wrap(true),
     );
@@ -75,7 +80,7 @@ pub(super) fn detail_line(tree: &mut UiTree, parent: WidgetId, worker: &Worker) 
 pub(super) fn identity_tags(tree: &mut UiTree, tags: WidgetId, worker: &Worker) {
     tree.insert(
         Some(tags),
-        Tag::new(worker.kind.as_str()).tone(Tone::Accent),
+        Tag::new(one_line(&worker.kind)).tone(Tone::Accent),
     );
     model_tag(tree, tags, worker);
     branch_tag(tree, tags, worker);
@@ -84,7 +89,7 @@ pub(super) fn identity_tags(tree: &mut UiTree, tags: WidgetId, worker: &Worker) 
 /// A plain command has no model to show.
 pub(super) fn model_tag(tree: &mut UiTree, parent: WidgetId, worker: &Worker) {
     if worker.is_agent() {
-        tree.insert(Some(parent), Tag::new(worker.model_line()));
+        tree.insert(Some(parent), Tag::new(one_line(&worker.model_line())));
     }
 }
 
@@ -92,7 +97,7 @@ pub(super) fn branch_tag(tree: &mut UiTree, parent: WidgetId, worker: &Worker) {
     if !worker.branch.is_empty() {
         tree.insert(
             Some(parent),
-            Tag::new(worker.branch.as_str()).style(TagStyle::Outlined),
+            Tag::new(one_line(&worker.branch)).style(TagStyle::Outlined),
         );
     }
 }
@@ -113,8 +118,10 @@ pub(super) struct Cards {
 /// group named by its title for assistive technology: a `Container` is
 /// exposed as a group only as a focus group, which changes neither layout
 /// nor paint, and Tab still stops on each focusable widget in it while
-/// there is at most one (the 詳細 button). Returns the card and the column
-/// its content goes in.
+/// there is at most one (the 詳細 button). The title is drawn as
+/// [`one_line`] makes it (it is a worker's label, from live data); the
+/// group keeps it as given for assistive technology. Returns the card and
+/// the column its content goes in.
 pub(super) fn card(
     tree: &mut UiTree,
     parent: WidgetId,
@@ -142,13 +149,53 @@ pub(super) fn card(
     tree.set_accessible_label(card, title);
     tree.insert(
         Some(card),
-        Label::new(title)
+        Label::new(one_line(title))
             .font_size(14.0)
             .weight(600)
             .truncation(Truncation::Tail),
     );
     let body = tree.insert(Some(card), Container::column().gap(14.0));
     (card, body)
+}
+
+/// A card's last row: its caption (cut when the card is narrow) and a 詳細
+/// button that opens the details drawer on `pane`. Returns the caption.
+fn caption_row(
+    tree: &mut UiTree,
+    body: WidgetId,
+    text: String,
+    pane: u64,
+    reg: &mut Registry,
+) -> WidgetId {
+    let row = tree.insert(
+        Some(body),
+        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+    );
+    let slot = tree.insert(
+        Some(row),
+        Container::new(Style {
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            min_size: LayoutSize {
+                width: length(0.0),
+                height: auto(),
+            },
+            ..Default::default()
+        }),
+    );
+    let label = tree.insert(
+        Some(slot),
+        Label::new(text)
+            .font_size(11.0)
+            .color(Role::Muted)
+            .truncation(Truncation::Tail),
+    );
+    let details = tree.insert(
+        Some(row),
+        Button::new("詳細").control_size(ControlSize::Small),
+    );
+    reg.detail_buttons.push((details, pane));
+    label
 }
 
 pub(super) fn running(
@@ -174,7 +221,8 @@ pub(super) fn running(
     for (name, group) in cards.grouping.split(members) {
         let indices: Vec<usize> = (items.len()..items.len() + group.len()).collect();
         if let Some(name) = name {
-            let header = group_header(tree, scroll, name, group.len());
+            // A group's name is a worker's orchestrator, kind or model.
+            let header = group_header(tree, scroll, &one_line(name), group.len());
             headers.push((header, indices.clone()));
         }
         let grid = tree.insert(Some(scroll), Container::wrapping_row(8.0, 8.0));
@@ -251,7 +299,7 @@ pub(super) fn running_card(
     );
     reg.pulses.push((level, Pulse::Freshness(pane)));
 
-    let id = caption(tree, body, running_caption(worker));
+    let id = caption_row(tree, body, running_caption(worker), pane, reg);
     reg.pulses.push((id, Pulse::RunningCaption(pane)));
     mark_card(tree, card, pane, reg);
     card
@@ -279,7 +327,7 @@ pub(super) fn done(
     let mut headers = Vec::new();
     for (name, group) in cards.grouping.split(members) {
         if let Some(name) = name {
-            let header = group_header(tree, list, name, group.len());
+            let header = group_header(tree, list, &one_line(name), group.len());
             headers.push((header, (items.len()..items.len() + group.len()).collect()));
         }
         for worker in group {
@@ -313,7 +361,7 @@ pub(super) fn done_card(
     }
     task_line(tree, body, worker);
     detail_line(tree, body, worker);
-    let id = caption(tree, body, done_caption(worker));
+    let id = caption_row(tree, body, done_caption(worker), worker.pane, reg);
     reg.pulses.push((id, Pulse::DoneCaption(worker.pane)));
     mark_card(tree, card, worker.pane, reg);
     card

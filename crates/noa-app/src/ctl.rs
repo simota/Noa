@@ -172,11 +172,14 @@ Commands:
                                 NOA_RESULT from this pane's journal (or where
                                 close --prune moved it), else
                                 <its cwd>/.noa/result-LABEL.md for a pane with a
-                                plain label; exit 1 when there is none or no
-                                file is known. --max-bytes keeps the start and
-                                says so on stderr. --path prints only the file's
-                                path (whether it exists or not), e.g. to tail a
-                                command's log; it does not go with --max-bytes.
+                                plain label. Without --path, exit 1 when no
+                                file is known or the file is missing or empty.
+                                --max-bytes keeps the start and says so on
+                                stderr. --path prints only the file's path
+                                whether it exists or not (e.g. to tail a
+                                command's log) and exits 0 as long as a path is
+                                known (1 only when none is); it does not go
+                                with --max-bytes.
   status [--answers]            One line per worker of this pane: its panel's
                                 state with what this pane's journal knows
                                 (tier, argv, lastTask, lastSentSeq, lastOutcome,
@@ -6297,8 +6300,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // Audit finding (AU-04): after its context was cut, an orchestrator
-    // could not tell which task, tier or answer went to which worker.
     #[test]
     fn result_parses_path_and_refuses_it_with_max_bytes() {
         let plain = Command::Result {
@@ -6327,6 +6328,8 @@ mod tests {
         assert!(parse_args(&args(&["result", "--path"])).is_err());
     }
 
+    // Audit finding (AU-04): after its context was cut, an orchestrator
+    // could not tell which task, tier or answer went to which worker.
     #[test]
     fn status_joins_each_worker_with_its_journal_and_lists_gone_ones_last() {
         let events = journal::parse_events(concat!(

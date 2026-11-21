@@ -1,5 +1,6 @@
-//! A worker's result file (AU-03): `spawn` gives each worker
-//! `NOA_RESULT=<cwd>/.noa/result.md`, in a `.noa/` directory that ignores
+//! A worker's result file (AU-03): `spawn` gives each worker its own
+//! `NOA_RESULT=<cwd>/.noa/result-<label>.md` (a random name without a plain
+//! label), so workers sharing a cwd never share one, in a `.noa/` directory that ignores
 //! itself (`.gitignore` holding `*`), so the file never shows in `git
 //! status` and never keeps `git worktree remove` (`close --prune`) from
 //! removing a worker's worktree. A wait line names the file once the worker
@@ -11,14 +12,27 @@ use std::time::SystemTime;
 /// The variable that tells a worker where to write its final report.
 pub(crate) const RESULT_ENV: &str = "NOA_RESULT";
 
-/// Where a worker started in `cwd` writes its result.
-pub(crate) fn path_in(cwd: &Path) -> PathBuf {
-    cwd.join(".noa").join("result.md")
+/// The result file of a worker labelled `label` in `cwd`, when the label
+/// is a plain name (`worktree::check_label`): `<cwd>/.noa/result-<label>.md`.
+/// Also how a pane the journal does not know is looked up.
+pub(crate) fn labelled_path(cwd: &Path, label: Option<&str>) -> Option<PathBuf> {
+    let label = label.filter(|label| super::worktree::check_label(label).is_ok())?;
+    Some(cwd.join(".noa").join(format!("result-{label}.md")))
+}
+
+/// The result file a new worker in `cwd` gets: [`labelled_path`], else
+/// `<cwd>/.noa/result-<8 random hex digits>.md`.
+pub(crate) fn path_for(cwd: &Path, label: Option<&str>) -> PathBuf {
+    labelled_path(cwd, label).unwrap_or_else(|| {
+        cwd.join(".noa")
+            .join(format!("result-{:08x}.md", rand::random::<u32>()))
+    })
 }
 
 /// Make `<cwd>/.noa/` with its self-ignoring `.gitignore`, and return the
-/// result path. An existing `.gitignore` there is left as it is.
-pub(crate) fn prepare(cwd: &Path) -> std::io::Result<PathBuf> {
+/// result path of a worker labelled `label` ([`path_for`]). An existing
+/// `.gitignore` there is left as it is.
+pub(crate) fn prepare(cwd: &Path, label: Option<&str>) -> std::io::Result<PathBuf> {
     let dir = cwd.join(".noa");
     std::fs::create_dir_all(&dir)?;
     match std::fs::OpenOptions::new()
@@ -30,7 +44,7 @@ pub(crate) fn prepare(cwd: &Path) -> std::io::Result<PathBuf> {
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(err) => return Err(err),
     }
-    Ok(path_in(cwd))
+    Ok(path_for(cwd, label))
 }
 
 /// `{"path":…,"bytes":N}` when the file at `path` was written at or after
@@ -121,13 +135,17 @@ mod tests {
         );
         assert!(added.status.success());
 
-        let path = prepare(&wt).unwrap();
-        assert_eq!(path, wt.join(".noa").join("result.md"));
+        let path = prepare(&wt, Some("x")).unwrap();
+        assert_eq!(path, wt.join(".noa").join("result-x.md"));
         std::fs::write(&path, "done\n").unwrap();
         let status = git(&wt, &["status", "--porcelain", "--untracked-files=all"]);
         assert_eq!(String::from_utf8_lossy(&status.stdout), "");
-        // Prepared again (another worker in the same cwd): still fine.
-        assert_eq!(prepare(&wt).unwrap(), path);
+        // Another worker in the same cwd: its own file, still ignored.
+        let other = prepare(&wt, None).unwrap();
+        assert_ne!(other, path);
+        std::fs::write(&other, "done\n").unwrap();
+        let status = git(&wt, &["status", "--porcelain", "--untracked-files=all"]);
+        assert_eq!(String::from_utf8_lossy(&status.stdout), "");
 
         let removed = git(&repo, &["worktree", "remove", &wt_arg]);
         assert!(
@@ -139,12 +157,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    // Follow-up to AU-03: workers spawned in one cwd without `--worktree`
+    // all wrote `.noa/result.md`, so one's report read as another's.
+    #[test]
+    fn each_worker_gets_its_own_result_file() {
+        let cwd = Path::new("/r");
+        assert_eq!(
+            path_for(cwd, Some("fix-1")),
+            PathBuf::from("/r/.noa/result-fix-1.md")
+        );
+        assert_eq!(
+            labelled_path(cwd, Some("fix-1")),
+            Some(PathBuf::from("/r/.noa/result-fix-1.md"))
+        );
+        // No label, or one that is not a plain name: a random name.
+        for label in [None, Some("a b"), Some("../x")] {
+            assert_eq!(labelled_path(cwd, label), None, "{label:?}");
+            let name = path_for(cwd, label)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            let hex = name
+                .strip_prefix("result-")
+                .and_then(|rest| rest.strip_suffix(".md"))
+                .unwrap();
+            assert_eq!(hex.len(), 8, "{name}");
+            assert!(hex.chars().all(|ch| ch.is_ascii_hexdigit()), "{name}");
+        }
+        assert_ne!(path_for(cwd, None), path_for(cwd, None));
+    }
+
     #[test]
     fn a_result_counts_only_once_written_after_the_wait_began() {
         let dir = temp_dir("since");
-        let path = path_in(&dir);
+        let path = path_for(&dir, Some("w"));
         assert_eq!(written_since(&path, SystemTime::now()), None);
-        prepare(&dir).unwrap();
+        prepare(&dir, Some("w")).unwrap();
         std::fs::write(&path, "old").unwrap();
         let later = SystemTime::now() + std::time::Duration::from_secs(60);
         assert_eq!(written_since(&path, later), None);
@@ -158,11 +207,10 @@ mod tests {
     #[test]
     fn a_result_is_printed_whole_or_cut_at_a_character() {
         let dir = temp_dir("read");
-        let path = path_in(&dir);
+        let path = prepare(&dir, Some("w")).unwrap();
         let missing = read(4, &path, None).unwrap_err();
         assert!(missing.contains("pane 4 has no result"), "{missing}");
         assert!(missing.contains("$NOA_RESULT"), "{missing}");
-        prepare(&dir).unwrap();
         std::fs::write(&path, "aあb").unwrap();
         assert_eq!(read(4, &path, None).unwrap(), ("aあb".to_string(), false));
         assert_eq!(read(4, &path, Some(2)).unwrap(), ("a".to_string(), true));

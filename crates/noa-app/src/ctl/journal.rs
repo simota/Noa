@@ -357,7 +357,7 @@ mod tests {
 
     fn sample() -> Vec<serde_json::Value> {
         parse_events(concat!(
-            r#"{"ev":"spawn","ts":1,"pane":4,"label":"fix","argv":["claude"],"tier":"light","cwd":"/r-wt/fix","worktree":"/r-wt/fix","branch":"orch/fix","result":"/r-wt/fix/.noa/result.md"}"#,
+            r#"{"ev":"spawn","ts":1,"pane":4,"label":"fix","argv":["claude"],"tier":"light","cwd":"/r-wt/fix","worktree":"/r-wt/fix","branch":"orch/fix","result":"/r-wt/fix/.noa/result-fix.md"}"#,
             "\n",
             r#"{"ev":"send","ts":2,"pane":4,"seqBefore":0,"text":"do it","bytes":5,"enter":true,"answer":false,"queue":false}"#,
             "\n",
@@ -392,7 +392,7 @@ mod tests {
         fix.add_to(&mut line);
         assert_eq!(line["lastTask"], "do it");
         assert_eq!(line["answers"], 1);
-        assert_eq!(line["result"], "/r-wt/fix/.noa/result.md");
+        assert_eq!(line["result"], "/r-wt/fix/.noa/result-fix.md");
         assert!(line.get("lastOutcome").is_some());
 
         // A spawn under a pane id seen before starts a new record.

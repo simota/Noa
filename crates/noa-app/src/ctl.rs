@@ -103,11 +103,12 @@ Commands:
                         otherwise nothing is typed: the line has
                         \"sent\":false (exit 0), so read \"screen\" (a trust
                         prompt, a login) and send yourself.
-                        Every worker gets NOA_RESULT=<its cwd>/.noa/result.md
-                        to write its final report to (.noa/ holds a
-                        .gitignore of *, so git never sees it); prints
-                        \"result\" too (none, with a warning, when the cwd
-                        is not writable).
+                        Every worker gets its own file to write its final
+                        report to: NOA_RESULT=<its cwd>/.noa/result-LABEL.md
+                        (a plain --label; else result-<8 random hex>.md).
+                        .noa/ holds a .gitignore of *, so git never sees it.
+                        Prints \"result\" too (none, with a warning, when the
+                        cwd is not writable).
   send PANE [--enter] [--raw] [--replace] [--wait [wait options]] [--answer]
        [--queue] [--any-pane] [--] TEXT|-
                                 Type TEXT (or stdin) into PANE; prints the
@@ -161,10 +162,12 @@ Commands:
                                 pane on the alternate screen keeps no history:
                                 --scrollback (and wait --tail) then says on
                                 stderr that only its screen came back.
-  result PANE [--max-bytes N]   Print PANE's result file (its spawn's
-                                NOA_RESULT, else <its cwd>/.noa/result.md); exit
-                                1 when there is none. --max-bytes keeps the start
-                                and says so on stderr.
+  result PANE [--max-bytes N]   Print PANE's result file: its spawn's
+                                NOA_RESULT from this pane's journal, else
+                                <its cwd>/.noa/result-LABEL.md for a pane with a
+                                plain label; exit 1 when there is none or no
+                                file is known. --max-bytes keeps the start and
+                                says so on stderr.
   status [--answers]            One line per worker of this pane: its panel's
                                 state with what this pane's journal knows
                                 (tier, argv, lastTask, lastSentSeq, lastOutcome,
@@ -2034,7 +2037,7 @@ impl Session {
                 if let Some(dir) = cwd.as_deref()
                     && !env.contains_key(result::RESULT_ENV)
                 {
-                    match result::prepare(Path::new(dir)) {
+                    match result::prepare(Path::new(dir), label.as_deref()) {
                         Ok(path) => {
                             env.insert(
                                 result::RESULT_ENV.to_string(),
@@ -2335,8 +2338,7 @@ impl Session {
         self.wait_subscribed(&panes, start, options, (since, results))
     }
 
-    /// Each pane's result file: the one its spawn gave it (journal), else
-    /// `<cwd>/.noa/result.md`.
+    /// Each pane's known result file ([`result_path`]).
     fn result_paths(&self, panels: &[Panel]) -> HashMap<u64, PathBuf> {
         result_paths(&journal::workers(&self.journal.events()), panels)
     }
@@ -2393,24 +2395,20 @@ impl Session {
 
     /// `result PANE`: print the worker's result file.
     fn result(&mut self, pane: u64, max_bytes: Option<usize>) -> Result<i32, Failure> {
-        let given = journal::workers(&self.journal.events())
-            .into_iter()
+        let workers = journal::workers(&self.journal.events());
+        let given = workers
+            .iter()
             .find(|worker| worker.pane == pane)
-            .and_then(|worker| worker.result);
+            .and_then(|worker| worker.result.clone());
         let path = match given {
             Some(path) => PathBuf::from(path),
             None => {
                 let panels = self.client.list_panels()?;
-                let panel = panels
+                panels
                     .iter()
                     .find(|panel| panel.pane_id.0 == pane)
-                    .ok_or_else(|| {
-                        Failure::error(format!(
-                            "pane {pane} is not listed, and this pane's journal names no result \
-                             file for it"
-                        ))
-                    })?;
-                result::path_in(Path::new(&panel.cwd))
+                    .and_then(|panel| result_path(&workers, panel))
+                    .ok_or_else(|| Failure::error(no_known_result(pane)))?
             }
         };
         let (text, cut) = result::read(pane, &path, max_bytes).map_err(Failure::error)?;
@@ -3506,23 +3504,31 @@ pub(crate) fn line_pane(line: &serde_json::Value) -> Option<u64> {
     line.get("paneId")?.as_str()?.parse().ok()
 }
 
-/// Each listed pane's result file: what its spawn gave it (`workers`, from
-/// the journal), else `<cwd>/.noa/result.md`.
+/// A listed pane's result file: what its spawn gave it (`workers`, from
+/// the journal), else `<cwd>/.noa/result-<label>.md` for a pane with a plain
+/// label. `None`: no known file (a shared name is never guessed).
+pub(crate) fn result_path(workers: &[journal::Worker], panel: &Panel) -> Option<PathBuf> {
+    workers
+        .iter()
+        .find(|worker| worker.pane == panel.pane_id.0)
+        .and_then(|worker| worker.result.as_ref())
+        .map(PathBuf::from)
+        .or_else(|| result::labelled_path(Path::new(&panel.cwd), panel.label.as_deref()))
+}
+
+/// Why `result PANE` has no file to read.
+pub(crate) fn no_known_result(pane: u64) -> String {
+    format!(
+        "pane {pane} has no known result file: this pane's journal has no spawn of it, and it \
+         has no plain label to find <its cwd>/.noa/result-<label>.md by"
+    )
+}
+
+/// [`result_path`] of each listed pane that has one.
 pub(crate) fn result_paths(workers: &[journal::Worker], panels: &[Panel]) -> HashMap<u64, PathBuf> {
     panels
         .iter()
-        .map(|panel| {
-            let pane = panel.pane_id.0;
-            let given = workers
-                .iter()
-                .find(|worker| worker.pane == pane)
-                .and_then(|worker| worker.result.as_ref())
-                .map(PathBuf::from);
-            (
-                pane,
-                given.unwrap_or_else(|| result::path_in(Path::new(&panel.cwd))),
-            )
-        })
+        .filter_map(|panel| Some((panel.pane_id.0, result_path(workers, panel)?)))
         .collect()
 }
 
@@ -5825,9 +5831,14 @@ mod tests {
     #[test]
     fn a_wait_line_names_a_result_written_since_the_wait_began() {
         let dir = temp_dir("wait-result");
-        let path = result::prepare(&dir).unwrap();
+        let path = result::prepare(&dir, Some("fix")).unwrap();
         let mut worker = with_pane(panel(2, Some("finished"), false), 8);
         worker.cwd = dir.to_string_lossy().into_owned();
+        // Unknown to the journal and unlabelled: no file is guessed.
+        assert!(result_paths(&[], &[worker.clone()]).is_empty());
+        assert!(no_known_result(8).starts_with("pane 8 has no known result file"));
+        // Labelled: found by its label.
+        worker.label = Some("fix".to_string());
         let results = result_paths(&[], &[worker.clone()]);
         assert_eq!(results[&8], path);
         // The journal's path wins over the cwd's.
@@ -5864,7 +5875,7 @@ mod tests {
     #[test]
     fn status_joins_each_worker_with_its_journal_and_lists_gone_ones_last() {
         let events = journal::parse_events(concat!(
-            r#"{"ev":"spawn","ts":1,"pane":4,"label":"fix","argv":["claude"],"tier":"light","worktree":"/r-wt/fix","branch":"orch/fix","result":"/r-wt/fix/.noa/result.md"}"#,
+            r#"{"ev":"spawn","ts":1,"pane":4,"label":"fix","argv":["claude"],"tier":"light","worktree":"/r-wt/fix","branch":"orch/fix","result":"/r-wt/fix/.noa/result-fix.md"}"#,
             "\n",
             r#"{"ev":"send","ts":2,"pane":4,"seqBefore":0,"text":"do it","answer":false}"#,
             "\n",
@@ -5896,7 +5907,7 @@ mod tests {
         assert_eq!(lines[0]["lastTask"], "do it");
         assert_eq!(lines[0]["ahead"], 2);
         assert_eq!(lines[0]["dirty"], false);
-        assert_eq!(lines[0]["result"], "/r-wt/fix/.noa/result.md");
+        assert_eq!(lines[0]["result"], "/r-wt/fix/.noa/result-fix.md");
         // Not in the journal: the server's argv, no journal fields.
         assert_eq!(lines[1]["argv"], serde_json::json!(["make"]));
         assert!(lines[1].get("answers").is_none());

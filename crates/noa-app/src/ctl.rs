@@ -189,8 +189,10 @@ Commands:
                                 (git worktree remove, git branch -d; never
                                 forced, so unsaved work stays and is named
                                 under \"worktree\":{\"kept\":...}), found
-                                from the pane's cwd; a labelled pane with no
-                                such worktree also gets \"kept\" saying why.
+                                from the pane's cwd (for one already gone,
+                                from this pane's journal); a labelled pane
+                                with no such worktree also gets \"kept\"
+                                saying why.
                                 Its .noa/result-*.md files first move to the
                                 main worktree's .noa/ (a taken name gets
                                 -<8 hex>); \"worktree\":{\"result\"} is where
@@ -1786,6 +1788,7 @@ impl Session {
             &mut self.client,
             panes,
             own,
+            &workers,
             &mut prune_label,
             &mut |line| {
                 if let Some(pane) = line_pane(line) {
@@ -3820,11 +3823,15 @@ impl PaneCloser for Client {
 /// `close`: a pane that is already gone counts as closed, and a pane that
 /// could not be closed does not keep the rest open, so cleanup after a
 /// failed run always finishes. Writes one JSON line per closed pane through
-/// `emit`; returns the exit status.
+/// `emit`; returns the exit status. `prune` is asked about each closed pane
+/// with a label: a listed one's label and cwd, or for one that is not
+/// listed (already gone), its label and worktree from the journal
+/// (`workers`).
 pub(crate) fn close_panes(
     source: &mut impl PaneCloser,
     panes: &[u64],
     own: Option<u64>,
+    workers: &[journal::Worker],
     prune: &mut dyn FnMut(u64, &str, &str) -> Option<serde_json::Value>,
     emit: &mut dyn FnMut(&serde_json::Value),
 ) -> Result<i32, Failure> {
@@ -3832,10 +3839,13 @@ pub(crate) fn close_panes(
     let mut failed = false;
     let mut unconfirmed = false;
     for (pane, listed) in close_targets(&panels, panes, own).map_err(Failure::error)? {
-        let label = panels
-            .iter()
-            .find(|panel| panel.pane_id.0 == pane)
-            .and_then(|panel| Some((panel.label.clone()?, panel.cwd.clone())));
+        let label = match panels.iter().find(|panel| panel.pane_id.0 == pane) {
+            Some(panel) => panel.label.clone().map(|label| (label, panel.cwd.clone())),
+            None => workers
+                .iter()
+                .find(|worker| worker.pane == pane)
+                .and_then(|worker| Some((worker.label.clone()?, worker.worktree.clone()?))),
+        };
         let gone = !listed
             || match source.close(pane) {
                 Ok(()) => false,
@@ -4380,6 +4390,7 @@ mod tests {
             &mut source,
             &[8, 9, 7],
             Some(1),
+            &[],
             &mut |_pane, label, _cwd| {
                 asked.push(label.to_string());
                 Some(serde_json::json!({ "path": "/r-wt/job", "removed": true }))
@@ -4387,12 +4398,56 @@ mod tests {
             &mut |line| lines.push(line.clone()),
         );
         assert_eq!(code.ok(), Some(EXIT_OK));
-        // No label (9) and already gone (7) are not asked about.
+        // No label (9) and already gone, unknown to the journal (7), are not
+        // asked about.
         assert_eq!(asked, ["job"]);
         assert_eq!(lines[0]["worktree"]["removed"], true);
         assert!(lines[1].get("worktree").is_none());
         assert_eq!(lines[2]["gone"], true);
         assert!(lines[2].get("worktree").is_none());
+    }
+
+    // Review finding #7: `close --prune` on a worktree worker that already
+    // vanished printed only "gone": its worktree and branch stayed, and
+    // nothing said so. The journal knows its label and worktree.
+    #[test]
+    fn prune_finds_a_gone_workers_worktree_from_the_journal() {
+        let mut source = OkCloser(vec![worker(9, 1)]);
+        let workers = [
+            journal::Worker {
+                pane: 7,
+                label: Some("fix".to_string()),
+                cwd: Some("/r-wt/fix/src".to_string()),
+                worktree: Some("/r-wt/fix".to_string()),
+                ..journal::Worker::default()
+            },
+            // Known, but spawned without --worktree: nothing to prune.
+            journal::Worker {
+                pane: 6,
+                label: Some("plain".to_string()),
+                cwd: Some("/r".to_string()),
+                ..journal::Worker::default()
+            },
+        ];
+        let mut asked = Vec::new();
+        let mut lines = Vec::new();
+        let code = close_panes(
+            &mut source,
+            &[7, 6],
+            Some(1),
+            &workers,
+            &mut |pane, label, cwd| {
+                asked.push((pane, label.to_string(), cwd.to_string()));
+                Some(serde_json::json!({ "path": cwd, "removed": true }))
+            },
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        assert_eq!(asked, [(7, "fix".to_string(), "/r-wt/fix".to_string())]);
+        assert_eq!(lines[0]["gone"], true);
+        assert_eq!(lines[0]["worktree"]["path"], "/r-wt/fix");
+        assert_eq!(lines[1]["gone"], true);
+        assert!(lines[1].get("worktree").is_none());
     }
 
     #[test]
@@ -5289,8 +5344,15 @@ mod tests {
             panels: vec![worker(8, 1)],
             refuse_code: -32003,
         };
-        let failure =
-            close_panes(&mut source, &[8], Some(1), &mut |_, _, _| None, &mut |_| {}).unwrap_err();
+        let failure = close_panes(
+            &mut source,
+            &[8],
+            Some(1),
+            &[],
+            &mut |_, _, _| None,
+            &mut |_| {},
+        )
+        .unwrap_err();
         assert_eq!(failure.code, EXIT_UNAVAILABLE);
 
         // Any other refusal of a pane that is still listed fails that pane only.
@@ -5300,6 +5362,7 @@ mod tests {
             &mut source,
             &[8],
             Some(1),
+            &[],
             &mut |_, _, _| None,
             &mut |line| lines.push(line.clone()),
         );
@@ -5320,6 +5383,7 @@ mod tests {
             &mut source,
             &[8, 9],
             Some(1),
+            &[],
             &mut |_, _, _| None,
             &mut |line| lines.push(line.clone()),
         );
@@ -5339,6 +5403,7 @@ mod tests {
             &mut source,
             &[8],
             Some(1),
+            &[],
             &mut |_, _, _| None,
             &mut |line| lines.push(line.clone()),
         );
@@ -7597,6 +7662,7 @@ mod tests {
             &mut source,
             &[8],
             Some(1),
+            &[],
             &mut |_pane, label, cwd| {
                 asked.push((label.to_string(), cwd.to_string()));
                 Some(serde_json::json!({ "path": "/r-wt/job", "removed": true }))

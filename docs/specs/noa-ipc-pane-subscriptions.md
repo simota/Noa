@@ -169,20 +169,45 @@ only reads `panels` still parses it.
   `process` and `preview` refresh on the coarse `IPC_SNAPSHOT_REFRESH` tick,
   not on the structural signature (`ipc_structural_signature`). A `fields`
   filter does not make them faster.
+- `fields` is new, so it is parsed strictly wherever it appears
+  (`noa.subscribe`, by name or by position, and `noa.updateSubscription`, by
+  name only): each element is a field-name string. An unknown name or any other JSON
+  value, serde's map form `{"agent":null}` included, is -32602. The rest of
+  `noa.subscribe` parses exactly as it did before this spec (see the
+  compatibility rule in AC-3).
+- By position, `noa.subscribe` binds `[events, paneIds, fields]` in
+  declaration order, as serde binds any struct, so `fields` is an optional
+  third element. `[["state_changed"]]` and `[["state_changed"],["12"]]` bind
+  as before and set no filter. `[["state_changed"],null,["agent"]]` subscribes
+  with an `agent` filter, and `[["state_changed"],null,[{"agent":null}]]` is
+  -32602 under the string-only rule. A three-element array was -32602 before
+  this spec, because it had more elements than `SubscribeParams` had fields.
+  It now subscribes when the third element is `null` or a list of field
+  names. That is the only by-position input whose answer changes, and it
+  changes only because `fields` is added. Four or more elements are still
+  -32602.
 
 ### Code
 
 - `crates/noa-ipc/src/protocol.rs`:
-  - `#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)] #[serde(rename_all = "camelCase")] pub enum PanelField { WindowGroupId, WindowId, PaneId, Name, Cwd, Branch, Process, Busy, Attention, Attachable, Preview, SurfaceId, Agent, Exit, ParentPaneId, Label, Spawn }`.
-    An unknown string fails deserialization of the whole params, and
+  - `#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)] #[serde(rename_all = "camelCase")] pub enum PanelField { WindowGroupId, WindowId, PaneId, Name, Cwd, Branch, Process, Busy, Attention, Attachable, Preview, SurfaceId, Agent, Exit, ParentPaneId, Label, Spawn }`
+    with a hand-written `Deserialize` that accepts only a string. A derived
+    one would also accept serde's map form `{"agent":null}`. An unknown
+    string or any non-string fails deserialization of the whole params, and
     `handle_subscribe` already maps that to `RpcFail::invalid_params()` (-32602).
+    `EventKind` keeps the derived `Deserialize` it has on `main`, so
+    `noa.subscribe` still accepts its map form (`{"output":null}`). Only
+    `noa.updateSubscription` reads `events` elements through a string-only
+    wrapper (AC-3).
   - `pub struct FieldMask(u32)` with `ALL`, `EMPTY`, `from_fields(&[PanelField])`,
     `intersects(self, other) -> bool` and `is_empty()`. Each bit is
     `1 << (PanelField as u32)`.
   - `impl Panel { pub fn changed_fields(&self, previous: &Panel) -> FieldMask }`.
     It destructures both panels without `..`, so adding a `Panel` field is a
     compile error until it is mapped to a `PanelField`.
-  - `SubscribeParams` gains `#[serde(default)] pub fields: Option<Vec<PanelField>>`.
+  - `SubscribeParams` gains `#[serde(default)] pub fields: Option<Vec<PanelField>>`
+    as its last field. The field order is wire format for by-position params,
+    so `events` and `paneIds` keep their positions and `fields` comes third.
 - `crates/noa-ipc/src/push.rs`:
   - `SubFilter` gains `fields: Option<FieldMask>`.
   - New `add_subscription_filtered(conn_id, events, pane_ids, fields: Option<FieldMask>)`.
@@ -190,9 +215,12 @@ only reads `panels` still parses it.
     `crates/noa-app/src/io_thread/tests.rs` and in `app/ipc.rs` `diff_perf`
     stay untouched.
   - Per panel, `broadcast_state_delta` checks
-    `sub.events ∋ STATE_CHANGED && in_scope(sub, pane) && sub.fields.is_none_or(|f| f.intersects(changed.fields))`.
+    `sub.events ∋ STATE_CHANGED && in_scope(sub, pane) && sub.fields.is_none_or(|f| changed.fields == FieldMask::ALL || f.intersects(changed.fields))`.
+    An added panel carries `FieldMask::ALL`, so it passes every field filter,
+    `fields: []` included (`SubFilter::takes_changed_panel`).
 - `crates/noa-ipc/src/server.rs`: `handle_subscribe` passes
-  `p.fields.map(|f| FieldMask::from_fields(&f))`.
+  `p.fields.map(|f| FieldMask::from_fields(&f))`. It keeps parsing its params
+  with plain `serde_json::from_value`, as on `main`.
 - `crates/noa-app/src/app/ipc.rs`: `state_delta` builds each `ChangedPanel` with
   `current.changed_fields(previous)`. It keeps the panel when the mask is
   non-empty, and uses `FieldMask::ALL` when there is no previous entry.
@@ -273,6 +301,25 @@ Each optional key works the same way:
   as in `handle_subscribe`, for the unreachable "connection not registered" case.
 - Everything is validated before anything changes. A rejected update leaves
   the subscription exactly as it was.
+- **Compatibility rule (FR-19, `PROTOCOL_VERSION` stays 3).** Every method
+  that predates this spec, `noa.subscribe` and `noa.unsubscribe` included,
+  parses its params exactly as on `main` (51b5195). A by-position `params`
+  array binds to the params' fields in declaration order: `noa.hello` with
+  `[3,"tok",["read"]]` authenticates, `noa.subscribe` with
+  `[["state_changed"]]` subscribes, and `noa.unsubscribe` with `["4"]` removes
+  subscription 4. An `events` element of `noa.subscribe` may also be serde's
+  map form of the variant, so `{"events":[{"output":null}]}` subscribes to
+  `output`. `noa.newTab` and `noa.split` answer an array with -32602, as
+  before, because their params flatten the spawn keys and a flattened struct
+  does not deserialize from an array.
+- Strict parsing applies only to what this spec adds. `noa.updateSubscription`
+  takes `params` as an object only. A by-position array is -32602; serde
+  would bind it as `[subscriptionId, events, paneIds, fields]`, so
+  `[id, [], null, null]` would silently stop a subscription. Its `events`
+  elements are the strings `"state_changed"` / `"output"` only, so
+  `{"output":null}` is -32602 here. `fields` takes field-name strings only
+  wherever it appears, including the third by-position element of
+  `noa.subscribe` (AC-2).
 - The update is applied under one `conns` lock acquisition, so any broadcast
   sees either the old filter or the new one, never a mix.
 - Notifications enqueued before the update stay queued.
@@ -292,21 +339,28 @@ Each optional key works the same way:
   outer `Option` means "key present". A local `deserialize_with` helper wraps
   the inner value in `Some`, so `null` becomes `Some(None)`. This needs no new
   dependency. Serialization uses `skip_serializing_if = "Option::is_none"` on
-  the outer `Option`, so `Some(None)` is written as `null`. `events` uses a
-  plain `Option`, so a `null` value fails as -32602.
+  the outer `Option`, so `Some(None)` is written as `null`. `events` has its
+  own `deserialize_with` helper, which reads each element through a private
+  string-only wrapper of `EventKind`: it reads a `String` first, then
+  `EventKind`'s derived `Deserialize` on that string. So `null`,
+  `{"output":null}` and any other non-string fail as -32602. `EventKind`'s
+  own `Deserialize` is not changed, so `noa.subscribe` is not affected.
 - `crates/noa-ipc/src/push.rs`:
   - `pub enum UpdateSubscriptionError { ConnectionNotFound, SubscriptionNotFound }`.
   - `pub struct SubscriptionUpdate { pub events: Option<EventMask>, pub pane_ids: Option<Option<HashSet<u64>>>, pub fields: Option<Option<FieldMask>> }`.
   - `Broadcaster::update_subscription(&self, conn_id, subscription_id, update) -> Result<(), UpdateSubscriptionError>`.
     It looks the id up only in `conns[conn_id].subs`, so another connection's id
-    is `SubscriptionNotFound` by construction. Before releasing the lock it
-    records whether the subscription had `OUTPUT` before and after the update.
-    After the lock is released it adjusts `output_subscribers` by `+1` or `-1`
-    when that changed, the same pattern as `add_subscription` and `remove_subscription`.
+    is `SubscriptionNotFound` by construction. It compares whether the
+    subscription had `OUTPUT` before and after the update and, while `conns`
+    is still held, adjusts `output_subscribers` by `+1` or `-1` when that
+    changed, the same pattern as `add_subscription` and `remove_subscription` (R-1).
 - `crates/noa-ipc/src/server.rs`: a dispatch arm `"noa.updateSubscription"`
   calls `require_scope(session, Scope::Read)` and then
   `handle_update_subscription(broadcaster, conn_id, req.params)`. That handler
-  parses the params, checks the `MAX_SUBSCRIBE_PANE_IDS` limit, converts the
+  parses the params with `parse_named_params`, which answers anything but a
+  JSON object with -32602 and is used by no other method. `handle_subscribe`
+  and `handle_unsubscribe` keep plain `serde_json::from_value`. The handler
+  then checks the `MAX_SUBSCRIBE_PANE_IDS` limit, converts the
   params to a `SubscriptionUpdate`, and maps `SubscriptionNotFound` to
   `RpcFail::new(ErrorCode::InvalidParams, "unknown subscription")` and
   `ConnectionNotFound` to -32600, as in `handle_subscribe`.
@@ -392,15 +446,23 @@ failures. Checks that already fail on the base are listed, not fixed.
   On the app side, `state_delta` runs under `ipc_shared` (for `registry.resolve`),
   and the guard must be dropped before `broadcast_state_delta`. Today nothing
   takes `ipc_shared` while holding `conns`, so nesting them would not deadlock
-  yet. Not nesting them keeps it that way. Both `output_subscribers` updates
-  happen after `conns` is released, as they do now.
+  yet. Not nesting them keeps it that way. Every `output_subscribers` update
+  (`add_subscription`, `update_subscription`, `remove_subscription`,
+  `unregister_connection`) happens while `conns` is still held. The counter is
+  an atomic, not a lock, so this adds no lock edge. Adjusting after release
+  would let two racing updates of one subscription apply their `+1`/`-1` in
+  the wrong order and pass through `0` while another connection still
+  subscribes to `output`.
 - **R-2: queue overflow and `removedPaneIds`.** `PushQueue` evicts the oldest
   entry. It never merges entries, and this spec keeps it that way. An evicted
   `stateChanged` can carry the only notice of a removal. The existing contract
-  covers that loss: the next drained `output` or `stateChanged` entry carries
+  covers that loss: after an eviction, one notification carries
   `dropped: true`, and the client must list panels again and diff the result
-  against its cache. The client-side buffer (`MAX_BUFFERED_NOTIFICATIONS`)
-  follows the same rule. Merging queued `stateChanged` entries to save removals
+  against its cache. Which one differs by side. The server `PushQueue`
+  marks the last `output` or `stateChanged` entry of the next drain (so with
+  capacity 2, after queueing removal A, update B and update C, C carries the
+  mark and B does not). The client buffer (`MAX_BUFFERED_NOTIFICATIONS`)
+  marks the first notification popped after an eviction. Merging queued `stateChanged` entries to save removals
   was rejected for two reasons. It would reorder `panels` relative to
   `noa.output`. It would also need the queue to understand R-5 union
   semantics. When a burst both changes a pane and removes it, both facts stay
@@ -424,10 +486,16 @@ failures. Checks that already fail on the base are listed, not fixed.
   until it gets a `PanelField`. `FieldMask(u32)` has 15 free bits.
 - **R-6: older clients.** A removal-only notification reaches a pre-change
   client as `stateChanged` with `panels: []`. `noa-ipc`'s current client parses
-  it to an empty update, and so does `+ctl`'s `apply_notification`. A client
-  that sends `fields` to an older server has it ignored (FR-19), and so
-  receives unfiltered updates. A client that sends `noa.updateSubscription` to
-  an older server gets -32601 and can fall back to unsubscribe + subscribe.
+  it to an empty update, and so does `+ctl`'s `apply_notification`. What an
+  older server does with `fields` depends on the params form. By name, the
+  `fields` key is ignored (FR-19): `SubscribeParams` on 51b5195 has no
+  `deny_unknown_fields`, so the subscription is created and receives
+  unfiltered updates. By position, the 3-element form
+  `[["state_changed"],null,["agent"]]` has more elements than that struct's
+  two fields, so the old parser fails on its length and the server answers
+  -32602. No subscription is created. A client that sends
+  `noa.updateSubscription` to an older server gets -32601 and can fall back to
+  unsubscribe + subscribe.
 
 ## Build units
 

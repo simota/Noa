@@ -128,7 +128,10 @@ use crate::auth::{Scope, ScopeSet, constant_time_eq};
 use crate::backend::{IpcBackend, PaneRef, SpawnTarget};
 use crate::error::{ErrorCode, IpcError};
 use crate::protocol::*;
-use crate::push::{AddSubscriptionError, Broadcaster, EventMask, PushQueue, QueuedNotification};
+use crate::push::{
+    AddSubscriptionError, Broadcaster, EventMask, PushQueue, QueuedNotification,
+    SubscriptionUpdate, UpdateSubscriptionError,
+};
 
 /// Server startup configuration (spec §L2 "Config キー").
 pub struct ServerConfig {
@@ -1251,10 +1254,18 @@ fn ws_err_to_io(err: tungstenite::Error) -> io::Error {
 
 fn to_notification(item: QueuedNotification) -> Value {
     match item {
-        QueuedNotification::StateChanged { panels, dropped } => serde_json::json!({
+        QueuedNotification::StateChanged {
+            panels,
+            removed_pane_ids,
+            dropped,
+        } => serde_json::json!({
             "jsonrpc": "2.0",
             "method": "noa.stateChanged",
-            "params": StateChangedParams { panels, dropped },
+            "params": StateChangedParams {
+                panels,
+                removed_pane_ids: removed_pane_ids.into_iter().map(WireId).collect(),
+                dropped,
+            },
         }),
         QueuedNotification::Output {
             pane_id,
@@ -1310,6 +1321,20 @@ impl RpcFail {
     fn invalid_params() -> Self {
         RpcFail::new(ErrorCode::InvalidParams, "invalid params")
     }
+}
+
+/// Parses the `params` of `noa.updateSubscription`, which takes them by name
+/// only: anything but a JSON object is -32602. That includes a by-position
+/// array, which serde would otherwise bind to the struct's fields in
+/// declaration order, so `[id, [], null, null]` would stop a subscription.
+/// Every method that predates `noa.updateSubscription`, `noa.subscribe` and
+/// `noa.unsubscribe` included, keeps plain `serde_json::from_value` and
+/// answers such an array as it always has (FR-19).
+fn parse_named_params<T: serde::de::DeserializeOwned>(params: Value) -> Result<T, RpcFail> {
+    if !params.is_object() {
+        return Err(RpcFail::invalid_params());
+    }
+    serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())
 }
 
 impl From<IpcError> for RpcFail {
@@ -1524,6 +1549,10 @@ fn dispatch(
             "noa.subscribe" => {
                 require_scope(session, Scope::Read)?;
                 handle_subscribe(broadcaster, conn_id, req.params)
+            }
+            "noa.updateSubscription" => {
+                require_scope(session, Scope::Read)?;
+                handle_update_subscription(broadcaster, conn_id, req.params)
             }
             "noa.unsubscribe" => {
                 require_scope(session, Scope::Read)?;
@@ -1887,8 +1916,9 @@ fn handle_subscribe(
     let pane_ids = p
         .pane_ids
         .map(|ids| ids.into_iter().map(|id| id.0).collect::<HashSet<u64>>());
+    let fields = p.fields.map(|f| FieldMask::from_fields(&f));
     let sub_id = broadcaster
-        .add_subscription(conn_id, mask, pane_ids)
+        .add_subscription_filtered(conn_id, mask, pane_ids, fields)
         .map_err(|err| match err {
             AddSubscriptionError::ConnectionNotFound => {
                 RpcFail::new(ErrorCode::InvalidRequest, "connection not registered")
@@ -1903,6 +1933,44 @@ fn handle_subscribe(
         subscription_id: WireId(sub_id),
     })
     .unwrap())
+}
+
+/// `noa.updateSubscription`: everything is validated before the broadcaster
+/// is touched, so a rejected update leaves the subscription as it was. An
+/// unknown id and another connection's id get the same answer.
+fn handle_update_subscription(
+    broadcaster: &Broadcaster,
+    conn_id: u64,
+    params: Value,
+) -> Result<Value, RpcFail> {
+    let p: UpdateSubscriptionParams = parse_named_params(params)?;
+    if p.pane_ids
+        .as_ref()
+        .and_then(Option::as_ref)
+        .is_some_and(|ids| ids.len() > MAX_SUBSCRIBE_PANE_IDS)
+    {
+        return Err(RpcFail::invalid_params());
+    }
+    let update = SubscriptionUpdate {
+        events: p.events.map(|events| EventMask::from_events(&events)),
+        pane_ids: p
+            .pane_ids
+            .map(|ids| ids.map(|ids| ids.into_iter().map(|id| id.0).collect::<HashSet<u64>>())),
+        fields: p
+            .fields
+            .map(|fields| fields.map(|f| FieldMask::from_fields(&f))),
+    };
+    broadcaster
+        .update_subscription(conn_id, p.subscription_id.0, update)
+        .map_err(|err| match err {
+            UpdateSubscriptionError::ConnectionNotFound => {
+                RpcFail::new(ErrorCode::InvalidRequest, "connection not registered")
+            }
+            UpdateSubscriptionError::SubscriptionNotFound => {
+                RpcFail::new(ErrorCode::InvalidParams, "unknown subscription")
+            }
+        })?;
+    Ok(serde_json::to_value(OkResult::ok()).unwrap())
 }
 
 fn handle_unsubscribe(
@@ -2358,5 +2426,49 @@ mod tests {
         assert_eq!(id_a.len(), 32);
         assert_eq!(id_a, id_b);
         assert_eq!(id_a, server_instance_id());
+    }
+
+    /// Asserts `params` is -32602 from [`parse_named_params`].
+    fn assert_invalid_params<T: serde::de::DeserializeOwned>(params: Value) {
+        match parse_named_params::<T>(params.clone()) {
+            Ok(_) => panic!("{params} was accepted"),
+            Err(fail) => assert_eq!(fail.code, ErrorCode::InvalidParams, "{params}"),
+        }
+    }
+
+    /// Asserts serde alone binds the array `params` to `T` by position, and
+    /// [`parse_named_params`] still rejects it.
+    fn assert_by_position_rejected<T: serde::de::DeserializeOwned>(params: Value) {
+        assert!(
+            serde_json::from_value::<T>(params.clone()).is_ok(),
+            "{params} no longer binds by position, so this case proves nothing"
+        );
+        assert_invalid_params::<T>(params);
+    }
+
+    /// Only `noa.updateSubscription` parses with [`parse_named_params`]; the
+    /// other methods' by-position behaviour, `noa.subscribe` and
+    /// `noa.unsubscribe` included, is pinned over the wire by
+    /// `only_update_subscription_rejects_params_by_position` in
+    /// `tests/server_tests.rs`.
+    #[test]
+    fn update_subscription_params_given_by_position_are_invalid_params() {
+        use serde_json::json;
+        assert_by_position_rejected::<UpdateSubscriptionParams>(json!(["1", [], null, null]));
+        assert_by_position_rejected::<UpdateSubscriptionParams>(json!(["1"]));
+        for scalar in [json!(null), json!("1"), json!(1), json!(true)] {
+            assert_invalid_params::<UpdateSubscriptionParams>(scalar);
+        }
+    }
+
+    #[test]
+    fn update_subscription_params_given_by_name_still_parse() {
+        use serde_json::json;
+        let update: UpdateSubscriptionParams =
+            parse_named_params(json!({ "subscriptionId": "1", "events": [], "paneIds": null }))
+                .unwrap_or_else(|_| panic!("by-name params were rejected"));
+        assert_eq!(update.subscription_id, WireId(1));
+        assert_eq!(update.events, Some(vec![]));
+        assert_eq!(update.pane_ids, Some(None));
     }
 }

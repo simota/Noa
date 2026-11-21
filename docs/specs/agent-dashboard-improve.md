@@ -363,7 +363,9 @@ Routing rules beyond the table:
 - `Browse`, anything not in the table is `Route::Tree` (Tab focus moves,
   pointer events, wheel). Table keys win over a focused button or segmented
   control: Space and arrows act on the selection, not on a clicked control.
-  After any `Act`, `tree.set_focus(None)` unless the action focuses the field.
+  After any `Act`, `tree.set_focus(None)` unless the action focuses the field
+  (`StartFilter`) or is a `Next`/`Prev` from the field (Filter mode): there
+  the field keeps focus, so typing goes on after ↓/↑.
 - `StartFilter` is triggered by the **Text** event, so the `/` is never typed
   into the field it focuses. It sets focus to the field and the caret to the
   end of the existing query.
@@ -420,7 +422,14 @@ it; else selection → clear it; else nothing.
   5. set the title-row indicator: hidden when nothing is hidden, else
      "上に {above} 件 · 下に {below} 件" with zero parts left out
      ("下に 3 件", "上に 1 件").
-- Item indices are per panel; workers are counted, group headers are not.
+- Item indices are per panel; items are counted, group headers are not. An
+  item is a worker's card or lane, but in the graph it is a root row: a
+  parent with all its workers. So the graph's indicator counts root rows,
+  and a worker cut off inside a shown row is not counted. A root row taller
+  than its list (at 1100×700, a parent given 24 more workers) is shown alone
+  once paged to, from the list's top, and cut at the list's bottom (step 3,
+  which treats any item taller than its list so;
+  `a_row_taller_than_its_list_is_cut_at_the_list`).
 - `view.reveal` is set on every selection change, so the selected worker's
   card/lane/root row is shown in every panel that has it.
 - Wheel: an `Event::Wheel` whose `pos` is inside a panel list's window rect is
@@ -429,8 +438,11 @@ it; else selection → clear it; else nothing.
   every 40 px back −1 while `first[p] > 0`. A change runs `fit` (no rebuild).
   (Changed in implementation: see Implementation record.) The pager keeps a per-list hidden widget, `PageMemory`; when a
   selection reveal and a wheel step meet, the most recent user action decides;
-  a group header is hidden only when the page's first item would not fit under
-  it; a full rebuild puts wheel-paged lists back to their first page; a wheel
+  a group header is shown only when one of its items is on the page, and the
+  header above the page's first item is also hidden when that item would not
+  fit under it; a full rebuild (also a filter change or another server)
+  drops the wheel's page: each list starts at its first item and, when the
+  selected worker is not on that page, pages forward until it is; a wheel
   over a list that turns no page is passed on to the widget tree; cards paged
   out are not exposed to accessibility.
 - The queue guarantee: in the demo at 1440×900 nothing in the queue is hidden
@@ -603,8 +615,10 @@ line.
   `--snapshot`. `USAGE` lists them. (Changed in implementation: see Implementation record.) `--keys` sends what the platform
   sends: Space is `KeyDown(Space)` + `Text(" ")`, a shifted symbol is its
   unshifted key with shift plus the `Text` (US layout), and `KeyDown` carries
-  `command_is_meta`. A `<...>` that is not one of the five names is literal
-  text; a control character is an error. `--size` is capped: each side at most
+  `command_is_meta`. A `<` that does not start one of the five names is typed
+  as the character `<` alone and reading goes on from the next character, so
+  `/<<Enter>` types `<` into the filter and then sends Enter; a control
+  character is an error. `--size` is capped: each side at most
   4096 logical px and a padded readback of at most 128 MiB at 2× (3840x2160
   is accepted, 4096x4096 is rejected).
 - Docs (U7): this spec's implementation record; `docs/FEATURES.md`'s Agent
@@ -731,11 +745,14 @@ U2 — `tests/health.rs`
   row of the AC6 table, at ages 0, 9.9 and 10 s.
 - `the_status_ticks_without_a_snapshot`: live snapshot with `synced_secs` 1;
   `tick(now + 3 s)` → status "ワーカー 9 · 同期 4 秒前"; `tick(now + 12 s)` →
-  ends with "· 古いデータ" and the dot's quad colour is `ORANGE`.
+  "古いデータ（同期 13 秒前）· ワーカー 9" exactly (the AC6 Stale text) and
+  the dot's quad colour is `ORANGE`.
 - `a_lost_link_keeps_the_last_data_marked_stale`: live canned, then a `Down`
   snapshot with an empty fleet → queue still has 5 cards, status starts with
   "切断: " and contains "古いデータ", dot `RED`.
-- `with_no_workers_the_body_says_why` (existing, unchanged) still passes.
+- `with_no_workers_the_body_says_why` (existing) still passes with its
+  assertions unchanged; its `Down` snapshot gains `instance: None`, the field
+  `Snapshot` gained (see Implementation record).
 
 U2 — `tests/header_fit.rs`
 - `the_header_fits_from_1100_to_1920`: for widths 1100, 1280, 1440, 1680, 1920
@@ -752,8 +769,10 @@ U2 — `tests/header_fit.rs`
   (labels' texts); a fleet without failures shows "失敗 0".
 
 U3 — `tests/paging.rs`
-- `no_card_is_drawn_partly`: for 1100×700, 1440×900, 1920×1200 and every
-  grouping, for each panel, every shown item lies inside its list (±0.5).
+- `no_card_is_drawn_partly`: the demo, for 1100×700, 1440×900, 1920×1200 and
+  every grouping, for each panel, every shown item lies inside its list
+  (±0.5). (The demo has no item taller than its list; for the graph row that
+  is, see the item rule under AC3.)
 - `the_running_panel_says_what_it_hides`: demo 1440×900: perf-probe's card is
   hidden, the running indicator reads "下に 1 件"; the queue indicator is
   hidden.
@@ -837,7 +856,8 @@ U8 — in `main.rs` `#[cfg(test)] mod tests`
   widget gets it) — not verified in the window, same as the existing toggles.
 - **Focused controls lose Space/arrows.** A clicked 開く or segmented control
   keeps focus; the key map takes Space and arrows before them. Accepted:
-  `set_focus(None)` after every dashboard action limits the surprise.
+  `set_focus(None)` after every dashboard action (except ↓/↑ from the filter
+  field, which keeps its focus) limits the surprise.
 - **Fit passes double the layout work** on frames where pages or header items
   change (one extra `prepare`). Lists are small (tens of items).
 - **Heartbeat wakes** redraw once a second in live mode; `prepare` returns
@@ -1057,8 +1077,9 @@ clippy clean, snapshots at 1100×700, 1440×900, 1920×1200 of the demo, with
 - The windowed app: key delivery of j/k/`/`/`?` with an IME or the default
   menu, the heartbeat redraw cost, the drawer and help as seen on screen, and
   fonts other than the test `TextStore`'s. Only headless paths were read.
-- Header widths after the redesign are estimates (sum of measured parts); U2
-  measures them.
+- Header widths after the redesign were estimates (sum of measured parts)
+  when this was written; U2 measured them (see Measured values), and U7 did
+  not re-measure them.
 - Whether a 4 px accent bar reads clearly enough as "selected" next to the
   need-coloured borders: owner's eye on the U7 snapshots.
 
@@ -1066,9 +1087,10 @@ clippy clean, snapshots at 1100×700, 1440×900, 1920×1200 of the demo, with
 
 Implemented 2026-11-22 on `factory/agent-dashboard-improve`. The dashboard
 crate has 229 tests (68 before). Values below marked "measured" are the
-workers' readings with `TextStore::new(Default::default())`; no test pins them,
-and U7 did not re-measure them. Constants and texts were checked against the
-code.
+workers' readings with `TextStore::new(Default::default())`, and U7 did not
+re-measure them. Only the card heights are also pinned by a test
+(`the_running_cards_keep_their_height`, ±0.5 px); no test pins the others.
+Constants and texts were checked against the code.
 
 ### Units as built
 
@@ -1098,9 +1120,11 @@ U0 `split-modules`, U1 `core-keys-select-filter`, U2 `header-health`, U3
 - **Watch.** The dashboard sends its watch list once per applied Live
   snapshot. The feed keeps it labelled with the server instance it belongs to
   (`watched_on`) and fetches only while following that instance; `Snapshot`
-  gained `instance: Option<String>`. On an instance change the dashboard
-  forgets selection, drawer and expansion. Pane ids mean something only within
-  one instance. `Tracker::fleet` takes `Option<&HashMap<..>>`.
+  gained `instance: Option<String>`. When it applies the first snapshot of
+  another instance, the dashboard forgets selection, drawer and expansion
+  (until then it still shows the old panes; see Known issues). Pane ids mean
+  something only within one instance. `Tracker::fleet` takes
+  `Option<&HashMap<..>>`.
 - **Rebuilds** reuse the same `UiTree`, so the app's clipboard and stylesheet
   survive.
 - **Cards.** Running and done cards are `Container`s copying `GroupBox::card`,
@@ -1110,20 +1134,28 @@ U0 `split-modules`, U1 `core-keys-select-filter`, U2 `header-health`, U3
   expansion the first card is the expanded one.
 - **Pager (AC3).** A per-list hidden widget, `PageMemory`, holds the page. The
   most recent user action decides between a selection reveal and a wheel step.
-  A group header is hidden only when the page's first item would not fit under
-  it. A full rebuild puts wheel-paged lists back to the first page. Paged-out
-  cards are not exposed to accessibility. One −40 wheel step does not show
-  perf-probe at 1440×900; two are needed.
+  A group header is shown only when one of its items is on the page (in the
+  demo's running list at 1440×900 the perf-wish header goes with its cards),
+  and the header above the page's first item is also hidden when that item
+  would not fit under it. A full rebuild (also a filter change or another
+  server) drops the wheel's page: each list starts at its first item and pages
+  forward to the selected worker when that worker is not on the first page.
+  Paged-out cards are not exposed to accessibility. One −40 wheel step does
+  not show perf-probe at 1440×900; two are needed. A graph root row (a parent with its workers) taller than its
+  list is shown alone and cut at the list's bottom, and its indicator counts
+  root rows, not the workers cut inside one.
 - **Details (AC8).** The 詳細 button row is 26.32 px (the spec guessed 22). The
   drawer has a 1 px border on all four sides because `Container` has no
   per-side border. A `FitTag` cuts long tags.
 - **Help (AC5).** While help is open the background is disabled and dimmed.
 - **Snapshot options (U8).** `--keys` sends what the platform sends (Space as
   `KeyDown(Space)` + `Text(" ")`; shifted symbols as the unshifted key with
-  shift plus `Text`, US layout; `KeyDown` carries `command_is_meta`). A `<...>`
-  that is not one of the five names is literal text; control characters are an
-  error. `--size` is limited to 4096 logical px a side and a padded readback of
-  128 MiB at 2× (3840x2160 accepted, 4096x4096 rejected).
+  shift plus `Text`, US layout; `KeyDown` carries `command_is_meta`). A `<`
+  that does not start one of the five names is typed as `<` alone and the
+  rest is read from the next character (`<<Enter>` is `<` then Enter);
+  control characters are an error. `--size` is limited to 4096 logical px a
+  side and a padded readback of 128 MiB at 2× (3840x2160 accepted, 4096x4096
+  rejected).
 - **Texts from Noa** are folded to one paragraph at the source
   (`fleet::one_line`, `Worker::on_one_line`): cosmic-text 0.19 panics when one
   string holds a paragraph separator and mixed text directions.
@@ -1143,7 +1175,9 @@ U0 `split-modules`, U1 `core-keys-select-filter`, U2 `header-health`, U3
 - Running list at 1440×900: 702×512; the demo shows 「下に 1 件」 (perf-probe
   paged out); the timeline also shows 「下に 1 件」.
 - Cards: 詳細 row 26.32 px; running cards 258.32 / 242.32 / 266.32, done cards
-  209.32.
+  209.32 (pinned by `the_running_cards_keep_their_height`: the `GroupBox`
+  heights 247 / 231 / 255 and 198 plus 26.32 − 15, ±0.5 px, laid out at
+  1440×1800).
 - Help at 1100×700: `[320, 45.9, 460, 562.3]`.
 - Stale prefix `古いデータ（同期 59 秒前）` 154 px; Down prefix
   `切断: 古いデータ（59 分前）· ` 164 px.
@@ -1158,6 +1192,10 @@ U0 `split-modules`, U1 `core-keys-select-filter`, U2 `header-health`, U3
   paged lists would otherwise hide a card).
 - `a_frame_reads_the_time_once` expects the stale text.
 - The `bottom` test helper moved to `tests/layout.rs`.
+- `with_no_workers_the_body_says_why` builds its `Down` snapshot with
+  `instance: None` (the field `Snapshot` gained); its assertions are
+  unchanged. The other existing tests get the field from the shared `live`
+  helper.
 - As the Tests section planned: `a_live_screen_follows_its_feed` (`Watch`
   instead of `Expand`) and `a_volatile_snapshot_updates_in_place` (wheel
   paging); `a_panel_becomes_a_worker` uses the map form of `Tracker::fleet`.
@@ -1184,8 +1222,17 @@ unusual.
   for single-column lists; a wheel over a list that turns no page is passed on
   to the widget tree instead of being consumed (it needs a three-state result
   from `pager::wheel` and a small change in `Dashboard::wheel`).
-- `Command::Watch` and `Command::Focus` carry no server instance: for less than
-  a frame after a server restart a Focus could reach a pane that reuses the id.
+- `Command::Watch` and `Command::Focus` carry no server instance. After Noa
+  restarts, the screen keeps the old server's panes until the dashboard
+  applies the new server's snapshot (an applied `Down` ends this sooner: a
+  screen that is not live sends no `Focus`). Until then a `Focus` sent from
+  the old screen (開く, or Enter outside the filter) that the feed takes
+  after reconnecting reaches whatever pane the new server gave that id.
+  Without an IME composition this lasts at most until the frame after the
+  feed sends that snapshot. While a
+  composition is in progress in the filter field, the structural snapshots
+  (the `Down` and the new server's) are held until it ends, so the window has
+  no bound; a click on 開く then still sends `Focus`.
 - noa-gpui: a `Button` keeps its pressed state after a second mouse button's
   release (upstream).
 - `Worker::since` is drawn raw by `cards.rs` and `drawer.rs` (safe on the live

@@ -111,14 +111,19 @@ Commands:
                                 Ctrl-U per line, up to 32 lines). --wait prints
                                 how to resume on stderr once the text is in.
   wait PANE...|--children [--after SEQ | --after PANE=SEQ ...] [--for LIST]
-       [--all] [--timeout SECS] [--tail N] [--stall SECS] [--any-pane]
+       [--all] [--timeout SECS] [--tail N] [--stall SECS] [--settle SECS]
+       [--any-pane]
                                 Block until a worker stops. LIST is a comma list
                                 of finished,permission,input,error,exit,attention
                                 (default: all of them), or stalled (needs
                                 --stall). --stall SECS also ends the wait for a
                                 pane whose screen text has not changed for SECS
                                 seconds (reason \"stalled\", with \"quietSecs\"),
-                                for an agent that does not report. --tail adds each open
+                                for an agent that does not report. --settle SECS
+                                holds a finished for SECS seconds: a newer report
+                                or a change of the work above the input box
+                                meanwhile drops it and the wait goes on; one that
+                                held is printed with \"settledSecs\". --tail adds each open
                                 pane's last N output lines as \"tail\" (for an
                                 agent, the lines above its input box). A
                                 permission or input line has \"prompt\": the
@@ -302,6 +307,9 @@ pub(crate) struct WaitOptions {
     /// Set by `send --queue`: the text went to a working agent, so the turn
     /// that ends the wait may be the one already running. Every line says so.
     pub(crate) queued: bool,
+    /// `--settle SECS`: hold a `finished` this long, and keep waiting when a
+    /// newer report or a change of the work on screen comes meanwhile.
+    pub(crate) settle: Option<Duration>,
 }
 
 impl Default for WaitOptions {
@@ -313,6 +321,7 @@ impl Default for WaitOptions {
             tail: None,
             stall: None,
             queued: false,
+            settle: None,
         }
     }
 }
@@ -697,16 +706,11 @@ fn parse_wait_options(rest: &mut Args) -> Result<WaitOptions, String> {
     if let Some(value) = rest.value("--tail")? {
         options.tail = Some(parse_u64("--tail", &value)? as usize);
     }
+    if let Some(value) = rest.value("--settle")? {
+        options.settle = Some(positive_secs("--settle", &value)?);
+    }
     if let Some(value) = rest.value("--stall")? {
-        let seconds: f64 = value
-            .parse()
-            .ok()
-            .filter(|seconds: &f64| seconds.is_finite() && *seconds > 0.0)
-            .ok_or_else(|| format!("--stall expects seconds above 0, got {value:?}"))?;
-        options.stall = Some(
-            Duration::try_from_secs_f64(seconds)
-                .map_err(|_| format!("--stall is out of range: {value:?}"))?,
-        );
+        options.stall = Some(positive_secs("--stall", &value)?);
         if !options.reasons.contains(&Reason::Stalled) {
             options.reasons.push(Reason::Stalled);
         }
@@ -714,6 +718,25 @@ fn parse_wait_options(rest: &mut Args) -> Result<WaitOptions, String> {
         return Err("--for stalled needs --stall SECS".to_string());
     }
     Ok(options)
+}
+
+/// A `--stall`/`--settle` value: seconds above 0.
+fn positive_secs(name: &str, value: &str) -> Result<Duration, String> {
+    let seconds: f64 = value
+        .parse()
+        .ok()
+        .filter(|seconds: &f64| seconds.is_finite() && *seconds > 0.0)
+        .ok_or_else(|| format!("{name} expects seconds above 0, got {value:?}"))?;
+    Duration::try_from_secs_f64(seconds).map_err(|_| format!("{name} is out of range: {value:?}"))
+}
+
+/// Seconds as a JSON number: whole ones as an integer.
+fn secs_json(duration: Duration) -> serde_json::Value {
+    if duration.subsec_nanos() == 0 {
+        duration.as_secs().into()
+    } else {
+        duration.as_secs_f64().into()
+    }
 }
 
 fn pane_set(rest: &mut Args) -> Result<PaneSet, String> {
@@ -2690,6 +2713,14 @@ pub(crate) fn wait_loop(
     )
 }
 
+/// A `finished` held by `--settle` (AU-12): its report count, since when,
+/// and the work on screen (above the input box) when the hold began.
+struct Hold {
+    seq: u64,
+    since: Instant,
+    work: Option<String>,
+}
+
 /// What the stall detector remembers of one pane's screen.
 struct Quiet {
     text: Option<String>,
@@ -2779,15 +2810,121 @@ pub(crate) fn wait_loop_with_clock(
     let started = clock();
     let mut quiet: HashMap<u64, Quiet> = HashMap::new();
     let mut screens_polled_at: Option<Instant> = None;
+    let mut holds: HashMap<u64, Hold> = HashMap::new();
+    let mut holds_polled_at: Option<Instant> = None;
     loop {
         for watch in &mut watches {
             if done.contains(&watch.pane) || (skip_exited_before && watch.exited_before) {
                 continue;
             }
             let panel = latest.get(&watch.pane);
-            if let Some(outcome) = evaluate(watch, panel, &options.reasons) {
-                emit_outcome(source, options, watch, &outcome, panel, None, emit);
-                done.push(watch.pane);
+            match evaluate(watch, panel, &options.reasons) {
+                // `--settle`: a `finished` is held, not printed yet. The
+                // same report seen again keeps its hold.
+                Some(outcome) if outcome.reason == Reason::Finished && options.settle.is_some() => {
+                    let seq = panel
+                        .and_then(|panel| panel.agent.as_ref())
+                        .map_or(0, |agent| agent.seq);
+                    if holds.get(&watch.pane).is_none_or(|hold| hold.seq != seq) {
+                        let work = match source.screen(watch.pane) {
+                            Ok(Some(text)) => Some(prompt::work(&text)),
+                            Ok(None) => None,
+                            Err(failure) if failure.transient => None,
+                            Err(failure) => return Err(failure),
+                        };
+                        holds.insert(
+                            watch.pane,
+                            Hold {
+                                seq,
+                                since: clock(),
+                                work,
+                            },
+                        );
+                    }
+                }
+                Some(outcome) => {
+                    holds.remove(&watch.pane);
+                    emit_outcome(source, options, watch, &outcome, panel, None, emit);
+                    done.push(watch.pane);
+                }
+                // A newer report that ends nothing (`running`): the agent
+                // went on. Drop the held `finished`; a later report is
+                // judged as usual.
+                None => {
+                    if let Some(hold) = holds.remove(&watch.pane) {
+                        watch.baseline_seq = hold.seq;
+                    }
+                }
+            }
+        }
+        // A held `finished` stands once its hold passed with the work on
+        // screen unchanged; a change drops it, as a newer report does.
+        if let Some(settle) = options.settle
+            && !holds.is_empty()
+            && !relist_pending
+        {
+            let now = clock();
+            if holds_polled_at.is_none_or(|at| now.saturating_duration_since(at) >= relist_every) {
+                holds_polled_at = Some(now);
+                let mut settled: Vec<u64> = Vec::new();
+                for watch in &mut watches {
+                    let Some(hold) = holds.get_mut(&watch.pane) else {
+                        continue;
+                    };
+                    let work = match source.screen(watch.pane) {
+                        Ok(Some(text)) => prompt::work(&text),
+                        Ok(None) => continue,
+                        Err(failure) if failure.transient => continue,
+                        Err(failure) => return Err(failure),
+                    };
+                    if hold.work.as_ref().is_some_and(|seen| *seen != work) {
+                        watch.baseline_seq = hold.seq;
+                        holds.remove(&watch.pane);
+                        continue;
+                    }
+                    hold.work = Some(work);
+                    if now.saturating_duration_since(hold.since) >= settle {
+                        settled.push(watch.pane);
+                    }
+                }
+                if !settled.is_empty() {
+                    // Reports received while the screens were read come
+                    // first: one newer than the held `finished` is judged on
+                    // the next pass instead.
+                    let mut relist = false;
+                    while let Some(notification) = source.next(Duration::ZERO)? {
+                        relist |= apply_notification(&mut latest, notification, panes);
+                    }
+                    if relist {
+                        relist_pending = true;
+                        settled.clear();
+                    }
+                }
+                for pane in settled {
+                    let Some(watch) = watches.iter_mut().find(|watch| watch.pane == pane) else {
+                        continue;
+                    };
+                    let panel = latest.get(&pane);
+                    let seq = panel
+                        .and_then(|panel| panel.agent.as_ref())
+                        .map_or(0, |agent| agent.seq);
+                    // Anything else that changed is judged on the next pass.
+                    if holds.get(&pane).is_none_or(|hold| hold.seq != seq) {
+                        continue;
+                    }
+                    if let Some(outcome) = evaluate(watch, panel, &options.reasons)
+                        && outcome.reason == Reason::Finished
+                    {
+                        holds.remove(&pane);
+                        let secs = secs_json(settle);
+                        emit_outcome(source, options, watch, &outcome, panel, None, &mut |line| {
+                            let mut line = line.clone();
+                            line["settledSecs"] = secs.clone();
+                            emit(&line);
+                        });
+                        done.push(pane);
+                    }
+                }
             }
         }
         // A report or exit seen above wins over a stall in the same pass.
@@ -2802,7 +2939,10 @@ pub(crate) fn wait_loop_with_clock(
                 screens_polled_at = Some(now);
                 let mut stalled: Vec<(u64, Duration)> = Vec::new();
                 for watch in &watches {
-                    if done.contains(&watch.pane) || (skip_exited_before && watch.exited_before) {
+                    if done.contains(&watch.pane)
+                        || (skip_exited_before && watch.exited_before)
+                        || holds.contains_key(&watch.pane)
+                    {
                         continue;
                     }
                     // A screen read that timed out is taken on the next poll.
@@ -3999,6 +4139,7 @@ mod tests {
                     tail: None,
                     stall: None,
                     queued: false,
+                    settle: None,
                 }),
             })
         );
@@ -6548,6 +6689,119 @@ mod tests {
             },
         );
         (code, lines)
+    }
+
+    /// A `--settle` wait on pane 8 from report count 1: `lists[N]` and
+    /// `screens[N]` are what second N shows. Returns each line with the
+    /// second it was printed at.
+    fn run_settle_wait(
+        lists: Vec<Vec<Panel>>,
+        screens: Vec<&'static str>,
+        settle_secs: u64,
+    ) -> (Result<i32, Failure>, Vec<(u64, serde_json::Value)>) {
+        let now = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut source = StallSource {
+            inner: FakeSource {
+                lists,
+                notifications: Default::default(),
+                list_calls: 0,
+                texts: HashMap::new(),
+            },
+            now: now.clone(),
+            screens,
+            queued: Default::default(),
+            during_screen: None,
+        };
+        let base = Instant::now();
+        let mut lines = Vec::new();
+        let options = WaitOptions {
+            settle: Some(Duration::from_secs(settle_secs)),
+            ..WaitOptions::default()
+        };
+        let clock_now = now.clone();
+        let code = wait_loop_with_clock(
+            &mut source,
+            &[8],
+            WaitStart::Listed {
+                after: HashMap::from([(8, 1)]),
+            },
+            &options,
+            Duration::ZERO,
+            &mut |line| lines.push((now.get(), line.clone())),
+            &mut || base + Duration::from_secs(clock_now.get()),
+        );
+        (code, lines)
+    }
+
+    // Audit finding (AU-12): an agent that reported `finished` went on
+    // working, and the orchestrator took the early report for the end.
+    #[test]
+    fn a_settled_finish_is_printed_only_after_a_quiet_hold() {
+        let finished = |seq| panel(seq, Some("finished"), false);
+        let (code, lines) = run_settle_wait(vec![vec![finished(2)]], vec!["work"], 3);
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        assert_eq!(lines.len(), 1);
+        let (at, line) = &lines[0];
+        assert_eq!(*at, 3);
+        assert_eq!(line["reason"], "finished");
+        assert_eq!(line["settledSecs"], 3);
+
+        // A newer report during the hold drops it; the next finish holds.
+        let (_, lines) = run_settle_wait(
+            vec![
+                vec![finished(2)],
+                vec![panel(3, Some("running"), false)],
+                vec![finished(4)],
+            ],
+            vec!["work"],
+            3,
+        );
+        let (at, line) = &lines[0];
+        assert_eq!(line["seq"], 4);
+        assert_eq!(*at, 5);
+
+        // The work on screen changing drops it too; only a newer report
+        // ends the wait then.
+        let (_, lines) = run_settle_wait(
+            vec![
+                vec![finished(2)],
+                vec![finished(2)],
+                vec![finished(2)],
+                vec![finished(2)],
+                vec![finished(3)],
+            ],
+            vec!["a", "a", "b"],
+            3,
+        );
+        let (at, line) = &lines[0];
+        assert_eq!(line["seq"], 3);
+        assert_eq!(*at, 7);
+
+        // Any other reason ends the wait at once.
+        let (_, lines) = run_settle_wait(
+            vec![vec![finished(2)], vec![panel(3, Some("permission"), false)]],
+            vec!["work"],
+            3,
+        );
+        let (at, line) = &lines[0];
+        assert_eq!(line["reason"], "permission");
+        assert!(line.get("settledSecs").is_none());
+        assert_eq!(*at, 1);
+
+        let Command::Wait(wait) = parse_args(&args(&["wait", "8", "--settle", "1.5"])).unwrap()
+        else {
+            panic!("wait expected");
+        };
+        assert_eq!(wait.options.settle, Some(Duration::from_millis(1500)));
+        assert_eq!(secs_json(Duration::from_millis(1500)), 1.5);
+        assert!(parse_args(&args(&["wait", "8", "--settle", "0"])).is_err());
+        assert!(
+            send_args(&["--wait", "--settle", "10", "x"])
+                .wait
+                .unwrap()
+                .settle
+                .is_some()
+        );
     }
 
     #[test]

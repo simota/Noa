@@ -221,6 +221,11 @@ fn pane_of(event: &serde_json::Value) -> Option<u64> {
     event.get("pane")?.as_u64()
 }
 
+/// A pane id as the wire writes it (`"9"`).
+fn pane_field(value: &serde_json::Value) -> Option<u64> {
+    value.as_str()?.parse().ok()
+}
+
 fn text_field(event: &serde_json::Value, key: &str) -> Option<String> {
     event.get(key)?.as_str().map(str::to_string)
 }
@@ -282,6 +287,14 @@ pub(crate) fn workers(events: &[serde_json::Value]) -> Vec<Worker> {
                 }
             }
             _ => {}
+        }
+        // And the other workers' results that were in that worktree.
+        for moved in event["worktree"]["moved"].as_array().into_iter().flatten() {
+            if let (Some(pane), Some(to)) = (pane_field(&moved["paneId"]), moved["to"].as_str())
+                && let Some(worker) = known.get_mut(&pane)
+            {
+                worker.result = Some(to.to_string());
+            }
         }
     }
     order

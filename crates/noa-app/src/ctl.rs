@@ -196,8 +196,10 @@ Commands:
                                 Its .noa/result-*.md files first move to the
                                 main worktree's .noa/ (a taken name gets
                                 -<8 hex>); \"worktree\":{\"result\"} is where
-                                the worker's went, and result and status read
-                                it there. One that cannot move keeps the
+                                the worker's went, \"moved\" lists every move
+                                (from, to, and the paneId of another worker
+                                whose file it was), and result and status read
+                                each there. One that cannot move keeps the
                                 worktree, with \"kept\" saying why.
   report STATE [[--] DETAIL]    Write an agent-state report (running, permission,
                                 input, finished, error, clear) to this terminal.
@@ -1826,7 +1828,13 @@ impl Session {
                 .and_then(|worker| worker.result.as_ref())
                 .map(PathBuf::from)
                 .or_else(|| result::labelled_path(pane_cwd, Some(label)));
-            worktree::prune(label, pane_cwd, result.as_deref())
+            // Other workers can have worked in this worktree too (`--cwd`).
+            let others: Vec<(u64, PathBuf)> = workers
+                .iter()
+                .filter(|worker| worker.pane != pane)
+                .filter_map(|worker| Some((worker.pane, PathBuf::from(worker.result.as_ref()?))))
+                .collect();
+            worktree::prune(label, pane_cwd, result.as_deref(), &others)
         };
         let journal = &mut self.journal;
         close_panes(

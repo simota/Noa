@@ -355,12 +355,15 @@ pub(crate) fn remove(cwd: &Path, path: &Path, branch: &str) -> Removal {
 ///
 /// The worktree's result files are first moved into `<main>/.noa/`
 /// ([`super::result::move_out`]); `"result"` is where the pane's own
-/// (`result`, its path in the worktree) went. When a file cannot be moved,
-/// the worktree is kept and `"kept"` says why.
+/// (`result`, its path in the worktree) went, and `"moved"` lists every
+/// file moved (`from`, `to`), with the `paneId` of the other worker in
+/// `others` (pane, known result path) whose file it was. When a file cannot
+/// be moved, the worktree is kept and `"kept"` says why.
 pub(crate) fn prune(
     label: &str,
     pane_cwd: &Path,
     result: Option<&Path>,
+    others: &[(u64, PathBuf)],
 ) -> Option<serde_json::Value> {
     check_label(label).ok()?;
     let branch = branch_name(label);
@@ -403,15 +406,21 @@ pub(crate) fn prune(
             "kept": NOT_IN_WORKTREE,
         }));
     }
-    // The pane's own file, by name, when it is in this worktree's `.noa/`
+    // A worker's file, by name, when it is in this worktree's `.noa/`
     // (compared resolved, before the move takes it away).
-    let own_name = result.and_then(|result| {
+    let noa_dir = entry.path.join(".noa").canonicalize().ok();
+    let name_here = |result: &Path| {
         let dir = result.parent()?;
-        (dir.canonicalize().ok()? == entry.path.join(".noa").canonicalize().ok()?)
+        (dir.canonicalize().ok()? == *noa_dir.as_ref()?)
             .then(|| result.file_name())
             .flatten()
             .map(std::ffi::OsStr::to_os_string)
-    });
+    };
+    let own_name = result.and_then(name_here);
+    let other_names: Vec<(u64, std::ffi::OsString)> = others
+        .iter()
+        .filter_map(|(pane, path)| Some((*pane, name_here(path)?)))
+        .collect();
     let mut moved = Vec::new();
     let not_moved = super::result::move_out(&entry.path, &main, &mut moved).err();
     let own_result = own_name.and_then(|name| {
@@ -420,6 +429,22 @@ pub(crate) fn prune(
             .find(|(from, _)| from.file_name() == Some(name.as_os_str()))
             .map(|(_, to)| to.to_string_lossy().into_owned())
     });
+    let moves: Vec<serde_json::Value> = moved
+        .iter()
+        .map(|(from, to)| {
+            let mut line = serde_json::json!({
+                "from": from.to_string_lossy(),
+                "to": to.to_string_lossy(),
+            });
+            if let Some((pane, _)) = other_names
+                .iter()
+                .find(|(_, name)| from.file_name() == Some(name.as_os_str()))
+            {
+                line["paneId"] = serde_json::json!(noa_ipc::WireId(*pane));
+            }
+            line
+        })
+        .collect();
     let removal = match not_moved {
         Some(message) => Removal {
             removed: false,
@@ -438,6 +463,9 @@ pub(crate) fn prune(
     }
     if let Some(result) = own_result {
         info["result"] = result.into();
+    }
+    if !moves.is_empty() {
+        info["moved"] = moves.into();
     }
     Some(info)
 }
@@ -670,7 +698,7 @@ detached
         assert_eq!(made.branch, "orch/job");
         assert!(made.path.join("a.txt").is_file());
 
-        let info = prune("job", &made.path, None).unwrap();
+        let info = prune("job", &made.path, None, &[]).unwrap();
         assert_eq!(info["removed"], true);
         assert_eq!(info["branchDeleted"], true);
         assert!(info.get("kept").is_none());
@@ -697,7 +725,7 @@ detached
         let taken = super::super::result::prepare(&repo, Some("job")).unwrap();
         std::fs::write(&taken, "main's own\n").unwrap();
 
-        let info = prune("job", &made.path, Some(&own)).unwrap();
+        let info = prune("job", &made.path, Some(&own), &[]).unwrap();
         assert_eq!(info["removed"], true, "{info}");
         assert!(!made.path.exists());
         let moved = PathBuf::from(info["result"].as_str().unwrap());
@@ -717,6 +745,40 @@ detached
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    // Review finding: B worked in A's worktree (`--cwd`); `close --prune A`
+    // moved B's report too, but only A's new path was returned and
+    // journaled, so `result B` read a path in the removed worktree.
+    #[test]
+    fn prune_journals_where_every_workers_result_went() {
+        let (base, repo) = repo("shared");
+        let made = add(&repo, "job").unwrap();
+        let own = super::super::result::prepare(&made.path, Some("job")).unwrap();
+        std::fs::write(&own, "a's report\n").unwrap();
+        let b = super::super::result::prepare(&made.path, Some("b")).unwrap();
+        std::fs::write(&b, "b's report\n").unwrap();
+
+        let info = prune("job", &made.path, Some(&own), &[(9, b.clone())]).unwrap();
+        assert_eq!(info["removed"], true, "{info}");
+        assert_eq!(info["moved"].as_array().map(Vec::len), Some(2), "{info}");
+        let events: Vec<serde_json::Value> = vec![
+            serde_json::json!({"ev":"spawn","pane":4,"label":"job","result":own.to_string_lossy()}),
+            serde_json::json!({"ev":"spawn","pane":9,"label":"b","result":b.to_string_lossy()}),
+            serde_json::json!({"ev":"close","pane":9,"worktree":null}),
+            serde_json::json!({"ev":"close","pane":4,"worktree":info}),
+        ];
+        let workers = super::super::journal::workers(&events);
+        for (worker, text) in workers.iter().zip(["a's report\n", "b's report\n"]) {
+            let path = worker.result.as_deref().expect("a result path");
+            assert_eq!(
+                std::fs::read_to_string(path).ok().as_deref(),
+                Some(text),
+                "pane {}: {path}",
+                worker.pane
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn prune_keeps_the_worktree_when_its_result_cannot_be_moved() {
         let (base, repo) = repo("unmovable");
@@ -728,7 +790,7 @@ detached
         run_git(&repo, &["add", ".noa"]);
         run_git(&repo, &["commit", "-q", "-m", "noa file"]);
 
-        let info = prune("job", &made.path, Some(&own)).unwrap();
+        let info = prune("job", &made.path, Some(&own), &[]).unwrap();
         assert_eq!(info["removed"], false);
         assert_eq!(info["branchDeleted"], false);
         let kept = info["kept"].as_str().unwrap();
@@ -779,7 +841,7 @@ detached
         let made = add(&repo, "job").unwrap();
         std::fs::write(made.path.join("new.txt"), "x").unwrap();
 
-        let info = prune("job", &made.path, None).unwrap();
+        let info = prune("job", &made.path, None, &[]).unwrap();
         assert_eq!(info["removed"], false);
         assert_eq!(info["branchDeleted"], false);
         assert!(info["kept"].as_str().is_some_and(|k| !k.is_empty()));
@@ -795,7 +857,7 @@ detached
         run_git(&made.path, &["add", "."]);
         run_git(&made.path, &["commit", "-q", "-m", "work"]);
 
-        let info = prune("job", &made.path, None).unwrap();
+        let info = prune("job", &made.path, None, &[]).unwrap();
         assert_eq!(info["removed"], true);
         assert_eq!(info["branchDeleted"], false);
         assert!(info["kept"].as_str().is_some_and(|k| !k.is_empty()));
@@ -814,7 +876,7 @@ detached
     #[test]
     fn prune_says_why_when_no_worktree_matches_the_label() {
         let (base, repo) = repo("none");
-        let missing = prune("nothing", &repo, None).unwrap();
+        let missing = prune("nothing", &repo, None, &[]).unwrap();
         assert_eq!(missing["removed"], false);
         assert_eq!(missing["branchDeleted"], false);
         let reason = missing["kept"].as_str().unwrap();
@@ -823,21 +885,21 @@ detached
             "{reason}"
         );
         // Not a label `spawn --worktree` could have given.
-        assert!(prune("../escape", &repo, None).is_none());
+        assert!(prune("../escape", &repo, None, &[]).is_none());
         // A plain branch of the same name at the same path is not ours.
         let path = worktree_path(&repo, "other");
         run_git(
             &repo,
             &["worktree", "add", "-b", "feature", path.to_str().unwrap()],
         );
-        let other = prune("other", &path, None).unwrap();
+        let other = prune("other", &path, None, &[]).unwrap();
         assert_eq!(other["removed"], false);
         assert!(path.exists());
         // A pane whose cwd is in no repository.
         let outside = base.join("plain");
         std::fs::create_dir_all(&outside).unwrap();
         if main_worktree(&outside).is_err() {
-            let lost = prune("job", &outside, None).unwrap();
+            let lost = prune("job", &outside, None, &[]).unwrap();
             assert!(
                 lost["kept"]
                     .as_str()
@@ -861,7 +923,7 @@ detached
         assert_eq!(second.path, base.join("repo-wt").join("b"));
 
         // The pane's cwd finds the worktree whatever the caller's cwd is.
-        let info = prune("b", &second.path.join("."), None).unwrap();
+        let info = prune("b", &second.path.join("."), None, &[]).unwrap();
         assert_eq!(info["removed"], true, "{info}");
         assert_eq!(info["branchDeleted"], true, "{info}");
         assert!(!second.path.exists());
@@ -909,7 +971,7 @@ detached
 
         // Review finding: a skipped prune printed nothing, so the caller
         // could not tell it from a label without a worktree.
-        let kept = prune("job", &repo, None).unwrap();
+        let kept = prune("job", &repo, None, &[]).unwrap();
         assert_eq!(
             kept,
             serde_json::json!({
@@ -925,7 +987,7 @@ detached
                 .trim()
                 .is_empty()
         );
-        let removed = prune("job", &made.path.join("src"), None).unwrap();
+        let removed = prune("job", &made.path.join("src"), None, &[]).unwrap();
         assert_eq!(removed["removed"], true);
         let _ = std::fs::remove_dir_all(&base);
     }

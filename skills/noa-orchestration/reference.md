@@ -295,9 +295,10 @@ has not written its report, `cannot read pane N's result <path>: …`, or `pane 
 known result file: …`. Works on closed workers the journal knows.
 
 `--path` prints only the path of the result file and a newline, without opening
-the result file. It exits 0 whether the file exists, is empty or is missing, so a
-path can name a file that is not written yet. With valid arguments, exit 1 only
-with `pane N has no known result file: …`. `--path` with `--max-bytes` is an
+the result file. It exits 0 whenever a path is known, whether the file exists, is
+empty or is missing, so a path can name a file that is not written yet. When no
+path is known it exits 1 with `pane N has no known result file: …`. Other
+failures keep the exit codes of "Exit status" below. `--path` with `--max-bytes` is an
 argument error (also exit 1):
 `--path and --max-bytes conflict: --path reads no file`. Use it to follow a
 command worker's log, which `--max-bytes` cannot show the end of:

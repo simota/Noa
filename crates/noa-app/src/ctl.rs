@@ -213,6 +213,8 @@ pub(crate) struct SendArgs {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WaitArgs {
     pub(crate) panes: PaneSet,
+    /// `--any-pane`: wait on a named pane that is not this pane's worker.
+    pub(crate) any_pane: bool,
     /// `--after`: `(pane, report count)` baselines.
     pub(crate) after: Vec<(u64, u64)>,
     pub(crate) options: WaitOptions,
@@ -321,11 +323,13 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
             while let Some(value) = rest.value("--after")? {
                 afters.push(value);
             }
+            let any_pane = rest.flag("--any-pane");
             let options = parse_wait_options(&mut rest)?;
             let panes = pane_set(&mut rest)?;
             let after = parse_afters(&afters, &panes)?;
             Command::Wait(WaitArgs {
                 panes,
+                any_pane,
                 after,
                 options,
             })
@@ -1436,6 +1440,19 @@ impl Session {
         guard_targets(&panels, panes, own).map_err(Failure::error)
     }
 
+    /// Refuse a wait on a listed pane that is neither this pane's worker
+    /// nor this pane, as `send` and `close` refuse one: after Noa restarts,
+    /// pane ids are given out again, and a remembered id can name another
+    /// pane. Outside a listed pane there are no workers to check against,
+    /// and the wait runs as before.
+    fn guard_wait(&mut self, panes: &[u64]) -> Result<(), Failure> {
+        let Some(own) = self.own_now()? else {
+            return Ok(());
+        };
+        let panels = self.client.list_panels()?;
+        wait_guard(&panels, panes, own).map_err(Failure::error)
+    }
+
     /// This pane, for a command that only targets its own workers.
     fn guard_own(&mut self) -> Result<u64, Failure> {
         self.own_now()?.ok_or_else(|| {
@@ -1507,6 +1524,9 @@ impl Session {
                     return Err(Failure::error("no panes to wait for"));
                 }
                 let named = matches!(args.panes, PaneSet::Ids(_));
+                if named && !args.any_pane {
+                    self.guard_wait(&panes)?;
+                }
                 return self.wait(&panes, named, &args.after, &args.options);
             }
             Command::Read {
@@ -1877,14 +1897,16 @@ impl Session {
         start: WaitStart,
         options: &WaitOptions,
     ) -> Result<i32, Failure> {
-        wait_loop(
-            &mut self.client,
-            panes,
-            start,
-            options,
-            WAIT_RELIST_INTERVAL,
-            &mut print_json,
-        )
+        with_signals_caught(|| {
+            wait_loop(
+                &mut self.client,
+                panes,
+                start,
+                options,
+                WAIT_RELIST_INTERVAL,
+                &mut print_json,
+            )
+        })
     }
 }
 
@@ -1947,6 +1969,10 @@ pub(crate) trait WaitSource {
     fn scrollback(&mut self, pane: u64) -> Result<Option<String>, Failure>;
     /// `pane`'s visible screen text (`--stall`); `None` once the pane is gone.
     fn screen(&mut self, pane: u64) -> Result<Option<String>, Failure>;
+    /// Whether a terminating signal arrived, so the wait ends as a timeout.
+    fn interrupted(&mut self) -> bool {
+        false
+    }
 }
 
 impl WaitSource for Client {
@@ -1965,6 +1991,31 @@ impl WaitSource for Client {
     fn screen(&mut self, pane: u64) -> Result<Option<String>, Failure> {
         client_text(self, pane, TextSource::Screen)
     }
+
+    fn interrupted(&mut self) -> bool {
+        board::SIGNALED.load(std::sync::atomic::Ordering::Relaxed) != 0
+    }
+}
+
+/// Run `f` with the terminating signals caught (the board's handler), so
+/// a wait that its shell tool kills still prints the timeout line with the
+/// baselines to carry on from.
+fn with_signals_caught<T>(f: impl FnOnce() -> T) -> T {
+    for signal in board::TERMINATING_SIGNALS {
+        // SAFETY: the handler only stores to an atomic.
+        unsafe {
+            libc::signal(
+                signal,
+                board::on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t,
+            )
+        };
+    }
+    let result = f();
+    for signal in board::TERMINATING_SIGNALS {
+        // SAFETY: back to the default disposition.
+        unsafe { libc::signal(signal, libc::SIG_DFL) };
+    }
+    result
 }
 
 /// `None` when the pane closed between its outcome and this request.
@@ -2204,6 +2255,14 @@ pub(crate) fn wait_loop_with_clock(
                 Err(failure) => return Err(failure),
             }
         }
+        // Checked between requests: a caught signal lets the one in flight
+        // finish (each is bounded), then ends the wait as a timeout would.
+        if source.interrupted() {
+            let mut line = timeout_json(&watches, &done, &latest);
+            line["interrupted"] = true.into();
+            emit(&line);
+            return Ok(EXIT_TIMEOUT);
+        }
         let remaining = match deadline {
             Some(deadline) => {
                 let remaining = deadline.saturating_duration_since(Instant::now());
@@ -2384,6 +2443,20 @@ pub(crate) fn guard_targets(panels: &[Panel], panes: &[u64], own: u64) -> Result
                 return Err(not_worker_message(*pane));
             }
             Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a wait on a listed pane that is not `own`'s worker (`own` itself
+/// is fine). One that is not listed is left to the wait, which says so.
+pub(crate) fn wait_guard(panels: &[Panel], panes: &[u64], own: u64) -> Result<(), String> {
+    for pane in panes {
+        if let Some(panel) = panels.iter().find(|panel| panel.pane_id.0 == *pane)
+            && *pane != own
+            && panel.parent_pane_id != Some(WireId(own))
+        {
+            return Err(not_worker_message(*pane));
         }
     }
     Ok(())
@@ -2956,6 +3029,7 @@ mod tests {
             parse_args(&args(&["wait", "--children", "--all"])).unwrap(),
             Command::Wait(WaitArgs {
                 panes: PaneSet::Children,
+                any_pane: false,
                 after: Vec::new(),
                 options: WaitOptions {
                     all: true,
@@ -4388,6 +4462,96 @@ mod tests {
         fn screen(&mut self, pane: u64) -> Result<Option<String>, Failure> {
             self.0.screen(pane)
         }
+    }
+
+    /// A [`FakeSource`] that reports a caught signal once `after` calls to
+    /// `next` were made.
+    struct Interrupted {
+        inner: FakeSource,
+        nexts: usize,
+        after: usize,
+    }
+
+    impl WaitSource for Interrupted {
+        fn list(&mut self) -> Result<Vec<Panel>, Failure> {
+            self.inner.list()
+        }
+
+        fn next(&mut self, timeout: Duration) -> Result<Option<Notification>, Failure> {
+            self.nexts += 1;
+            self.inner.next(timeout)
+        }
+
+        fn scrollback(&mut self, pane: u64) -> Result<Option<String>, Failure> {
+            self.inner.scrollback(pane)
+        }
+
+        fn screen(&mut self, pane: u64) -> Result<Option<String>, Failure> {
+            self.inner.screen(pane)
+        }
+
+        fn interrupted(&mut self) -> bool {
+            self.nexts >= self.after
+        }
+    }
+
+    // Audit finding (AU-08, REL-11): a wait killed by its shell tool printed
+    // nothing, so the orchestrator had no baseline to carry on from.
+    #[test]
+    fn a_caught_signal_ends_the_wait_with_its_baselines() {
+        let mut running = with_pane(panel(5, Some("running"), false), 8);
+        running.label = Some("api".to_string());
+        let mut source = Interrupted {
+            inner: FakeSource {
+                lists: vec![vec![running.clone()]],
+                notifications: [Notification::StateChanged {
+                    panels: vec![running],
+                    dropped: false,
+                }]
+                .into(),
+                list_calls: 0,
+                texts: HashMap::new(),
+            },
+            nexts: 0,
+            after: 1,
+        };
+        let mut lines = Vec::new();
+        let code = wait_loop(
+            &mut source,
+            &[8],
+            WaitStart::Listed {
+                after: HashMap::from([(8, 4)]),
+            },
+            &WaitOptions::default(),
+            WAIT_RELIST_INTERVAL,
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_TIMEOUT));
+        assert_eq!(
+            lines,
+            vec![serde_json::json!({
+                "timeout": true,
+                "interrupted": true,
+                "pending": ["8"],
+                "baseline": [{"paneId": "8", "seq": 4, "label": "api", "state": "running"}],
+            })]
+        );
+    }
+
+    // Audit finding (REL-09): `wait PANE` checked no parent, so after a
+    // restart gave pane ids out again, a remembered worker id waited on an
+    // unrelated pane.
+    #[test]
+    fn a_named_wait_refuses_a_listed_pane_that_is_not_a_worker() {
+        let panels = vec![worker(8, 1), worker(5, 2), worker(1, 0)];
+        assert_eq!(wait_guard(&panels, &[8], 1), Ok(()));
+        assert_eq!(wait_guard(&panels, &[8, 5], 1), Err(not_worker_message(5)));
+        // This pane itself, and a pane that is not listed (the wait says so).
+        assert_eq!(wait_guard(&panels, &[1, 9999], 1), Ok(()));
+        let Command::Wait(wait) = parse_args(&args(&["wait", "5", "--any-pane"])).unwrap() else {
+            panic!("wait expected");
+        };
+        assert!(wait.any_pane);
     }
 
     // Audit finding (REL-05): a `--tail` read past the client's deadline

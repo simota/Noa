@@ -3,11 +3,13 @@ use noa_gpui_core::style::{
     Size as LayoutSize, auto, length, percent,
 };
 use noa_gpui_core::widgets::{
-    Badge, Button, ButtonClicked, Chart, ChartSeries, Container, ControlSize, GroupBox, Label,
+    Badge, Button, ButtonClicked, Chart, ChartSeries, Container, ControlSize, GroupBox, Kbd, Label,
     LevelIndicator, LevelStyle, ScrollView, SegmentMode, SegmentedControl, SelectionChanged, Tag,
     TagStyle, Tone, Truncation,
 };
-use noa_gpui_core::{Appearance, Message, Role, Style, Theme, UiTree, WidgetId};
+use noa_gpui_core::{
+    Appearance, Key, Message, Role, Shortcut, ShortcutPressed, Style, Theme, UiTree, WidgetId,
+};
 use noa_gpui_platform::Screen;
 use noa_gpui_scene::Color;
 use noa_gpui_text::TextStore;
@@ -52,6 +54,21 @@ impl Panel {
     ];
     const NOW: [Panel; 3] = [Panel::Queue, Panel::Running, Panel::Done];
     const HISTORY: [Panel; 2] = [Panel::Timeline, Panel::Graph];
+
+    fn title(self) -> &'static str {
+        match self {
+            Panel::Queue => "要対応",
+            Panel::Running => "作業中",
+            Panel::Done => "完了",
+            Panel::Timeline => "状態の推移",
+            Panel::Graph => "関連",
+        }
+    }
+
+    fn shortcut(self) -> Shortcut {
+        let digit = ['1', '2', '3', '4', '5'][self as usize];
+        Shortcut::key(Key::Char(digit))
+    }
 
     fn grows(self) -> bool {
         matches!(self, Panel::Running | Panel::Timeline)
@@ -153,7 +170,10 @@ impl Dashboard {
             .background(Role::Background),
         );
 
-        let (status, grouping_control) = header(&mut tree, root, &workers, grouping);
+        let header = header(&mut tree, root, &workers, grouping, &view.shown);
+        for (panel, item) in Panel::ALL.into_iter().zip(header.hints) {
+            tree.add_shortcut(panel.shortcut(), item);
+        }
         let body = tree.insert(
             Some(root),
             Container::new(Style {
@@ -201,8 +221,8 @@ impl Dashboard {
         Self {
             tree,
             view,
-            status,
-            grouping_control,
+            status: header.status,
+            grouping_control: header.grouping_control,
             queue_buttons,
             panels,
         }
@@ -219,6 +239,14 @@ impl Screen for Dashboard {
     }
 
     fn handle(&mut self, message: Message, _text: &mut TextStore) {
+        if let Some(ShortcutPressed(pressed)) = message.downcast_ref::<ShortcutPressed>() {
+            if let Some(panel) = Panel::ALL.into_iter().find(|p| p.shortcut() == *pressed) {
+                let mut shown = self.view.shown;
+                shown[panel as usize] = !shown[panel as usize];
+                *self = Self::showing(View { shown, ..self.view });
+            }
+            return;
+        }
         if let Some(SelectionChanged(index)) = message.downcast_ref::<SelectionChanged>()
             && message.source == self.grouping_control
         {
@@ -301,12 +329,47 @@ fn phase_color(phase: Phase) -> Color {
     }
 }
 
+struct Header {
+    status: WidgetId,
+    grouping_control: WidgetId,
+    hints: [WidgetId; 5],
+}
+
+fn hint_strip(tree: &mut UiTree, bar: WidgetId, shown: &[bool; 5]) -> [WidgetId; 5] {
+    let strip = tree.insert(
+        Some(bar),
+        Container::new(Style {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::CENTER,
+            gap: gap(8.0),
+            flex_shrink: 0.0,
+            ..Default::default()
+        }),
+    );
+    Panel::ALL.map(|panel| {
+        let item = tree.insert(
+            Some(strip),
+            Container::row().align_items(AlignItems::CENTER).gap(3.0),
+        );
+        tree.insert(Some(item), Kbd::shortcut(panel.shortcut()));
+        let label = Label::new(panel.title()).font_size(11.0);
+        let label = if shown[panel as usize] {
+            label.weight(700)
+        } else {
+            label.weight(400).color(Role::Muted)
+        };
+        tree.insert(Some(item), label);
+        item
+    })
+}
+
 fn header(
     tree: &mut UiTree,
     root: WidgetId,
     workers: &[Worker],
     grouping: Grouping,
-) -> (WidgetId, WidgetId) {
+    shown: &[bool; 5],
+) -> Header {
     let bar = tree.insert(
         Some(root),
         Container::new(Style {
@@ -373,11 +436,24 @@ fn header(
     }
 
     spacer(tree, bar);
-    let status = tree.insert(
+    let hints = hint_strip(tree, bar, shown);
+    let status_slot = tree.insert(
         Some(bar),
+        Container::new(Style {
+            flex_shrink: 1.0,
+            min_size: LayoutSize {
+                width: length(0.0),
+                height: auto(),
+            },
+            ..Default::default()
+        }),
+    );
+    let status = tree.insert(
+        Some(status_slot),
         Label::new(format!("ワーカー {} · ダミーデータ", workers.len()))
             .font_size(12.0)
-            .color(Role::Muted),
+            .color(Role::Muted)
+            .truncation(Truncation::Tail),
     );
     caption(tree, bar, "グループ");
     let selected = Grouping::ALL
@@ -390,7 +466,11 @@ fn header(
             .with_selected(&[selected])
             .control_size(ControlSize::Small),
     );
-    (status, control)
+    Header {
+        status,
+        grouping_control: control,
+        hints,
+    }
 }
 
 fn panel(tree: &mut UiTree, parent: WidgetId, style: Style) -> WidgetId {
@@ -947,7 +1027,7 @@ fn connect(tree: &mut UiTree, row: WidgetId, workers: &[Worker], children: &[&Wo
 
 #[cfg(test)]
 mod tests {
-    use noa_gpui_core::{Event, PointerButton};
+    use noa_gpui_core::{Event, Modifiers, PointerButton};
     use noa_gpui_scene::{Point, Size};
 
     use super::*;
@@ -1161,6 +1241,111 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    fn press(dashboard: &mut Dashboard, text: &mut TextStore, panel: Panel, modifiers: Modifiers) {
+        let key = panel.shortcut().key;
+        dashboard.dispatch(Event::KeyDown { key, modifiers }, text);
+        dashboard.prepare(window(), text);
+    }
+
+    fn hint_strip_of(dashboard: &Dashboard) -> WidgetId {
+        let tree = &dashboard.tree;
+        let slot = tree.parent(dashboard.status).unwrap();
+        let bar = tree.parent(slot).unwrap();
+        let at = tree.children(bar).iter().position(|c| *c == slot).unwrap();
+        tree.children(bar)[at - 1]
+    }
+
+    #[test]
+    fn each_shortcut_hides_and_restores_its_panel() {
+        let expected = [
+            [12.0, 60.0, 400.0, 560.0],
+            [424.0, 60.0, 722.0, 560.0],
+            [1158.0, 60.0, 270.0, 560.0],
+            [12.0, 632.0, 974.0, 256.0],
+            [998.0, 632.0, 430.0, 256.0],
+        ];
+        for modifiers in [Modifiers::default(), Modifiers::on_apple()] {
+            for panel in Panel::ALL {
+                let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+                press(&mut dashboard, &mut text, panel, modifiers);
+                for other in Panel::ALL {
+                    let present = dashboard.panels[other as usize].is_some();
+                    assert_eq!(present, other != panel, "{other:?} after hiding {panel:?}");
+                }
+                press(&mut dashboard, &mut text, panel, modifiers);
+                let id = dashboard.panels[panel as usize].unwrap();
+                let actual = rect(&dashboard.tree, id);
+                assert_rect(actual, expected[panel as usize], &format!("{panel:?}"));
+            }
+        }
+    }
+
+    #[test]
+    fn the_header_shows_each_shortcut() {
+        for shown in [[true; 5], [false; 5]] {
+            let (dashboard, _text) = showing(Grouping::Orchestrator, shown);
+            let tree = &dashboard.tree;
+            let items = tree.children(hint_strip_of(&dashboard));
+            assert_eq!(items.len(), 5);
+            for (panel, item) in Panel::ALL.into_iter().zip(items) {
+                let parts = tree.children(*item);
+                let kbd = tree.get::<Kbd>(parts[0]).unwrap();
+                let keys = panel.shortcut().keys(tree.shortcut_glyphs());
+                assert_eq!(kbd.keys(), keys.as_slice());
+                let label = tree.get::<Label>(parts[1]).unwrap();
+                assert_eq!(label.text(), panel.title());
+            }
+        }
+    }
+
+    #[test]
+    fn the_hint_strip_fits_the_header() {
+        let open = |dashboard: &mut Dashboard, text: &mut TextStore| {
+            let (button, _) = dashboard.queue_buttons.open[0];
+            let pos = center(&dashboard.tree, button);
+            click(dashboard, text, pos);
+        };
+        let (default, _default_text) = laid_out(Grouping::Orchestrator);
+        let (mut opened, mut opened_text) = laid_out(Grouping::Orchestrator);
+        open(&mut opened, &mut opened_text);
+        let queue_only = shown_only(&[Panel::Running, Panel::Done, Panel::Timeline, Panel::Graph]);
+        let (mut narrow, mut narrow_text) = showing(Grouping::Orchestrator, queue_only);
+        let long = "モック: とても長いワーカー名のペインへ移動します ".repeat(6);
+        let status = narrow.status;
+        narrow
+            .tree
+            .update::<Label, _>(status, |l, cx| l.set_text(cx, long));
+        narrow.prepare(window(), &mut narrow_text);
+        let (off, _off_text) = showing(Grouping::Orchestrator, [false; 5]);
+        let default_widths: Vec<f32> = {
+            let tree = &default.tree;
+            let bar = tree.parent(hint_strip_of(&default)).unwrap();
+            tree.children(bar)[..6]
+                .iter()
+                .map(|c| rect(tree, *c)[2])
+                .collect()
+        };
+        for dashboard in [&default, &off, &opened, &narrow] {
+            let tree = &dashboard.tree;
+            let strip = hint_strip_of(dashboard);
+            let bar = tree.parent(strip).unwrap();
+            let rects: Vec<[f32; 4]> = tree.children(bar).iter().map(|c| rect(tree, *c)).collect();
+            for pair in rects.windows(2) {
+                assert!(pair[0][0] + pair[0][2] <= pair[1][0] + 0.5, "{rects:?}");
+            }
+            for (rect, expected) in rects.iter().zip(&default_widths) {
+                assert!((rect[2] - expected).abs() <= 0.5, "{rects:?}");
+            }
+            let last = rects.last().unwrap();
+            assert!(
+                last[0] + last[2] <= window().width - 16.0 + 0.5,
+                "{rects:?}"
+            );
+            let width = rect(tree, strip)[2];
+            assert!((299.5..=312.5).contains(&width), "strip is {width} px");
         }
     }
 }

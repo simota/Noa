@@ -33,6 +33,52 @@ fn delta_changes_overview_label(delta: &SessionDelta) -> bool {
     )
 }
 
+/// The directory to re-poll the git branch for after `delta`, if any
+/// (FR-8, REL-06). Beyond a cwd change (or a new card), a branch can change
+/// in place — `git switch` in the same directory — so the poll also follows
+/// a shell command ending (`busy` falling) and an agent's turn ending
+/// (`finished`/`input`/`error`). A card with no cwd of its own (an agent
+/// spawned without a shell sends no OSC 7) polls `spawn_cwd`. The worker's
+/// per-cwd throttle bounds the extra polls.
+fn branch_poll_cwd(
+    delta: &SessionDelta,
+    card: Option<&crate::session_store::SessionCard>,
+    spawn_cwd: Option<&str>,
+) -> Option<String> {
+    let own_or_spawn = |cwd: &str| {
+        if cwd.is_empty() {
+            spawn_cwd.map(str::to_string)
+        } else {
+            Some(cwd.to_string())
+        }
+    };
+    match delta {
+        SessionDelta::Upsert { cwd, busy, .. } => match card {
+            None => own_or_spawn(cwd),
+            Some(card) if !cwd.is_empty() && &card.cwd != cwd => Some(cwd.clone()),
+            Some(card) if card.busy && !busy => own_or_spawn(cwd),
+            Some(_) => None,
+        },
+        SessionDelta::AgentStatus {
+            status: Some(status),
+            ..
+        } => {
+            let card = card?;
+            let ends_turn = matches!(
+                status.state,
+                noa_grid::AgentState::Finished
+                    | noa_grid::AgentState::Input
+                    | noa_grid::AgentState::Error
+            );
+            let became = card.agent_status.as_ref().map(|old| old.state) != Some(status.state);
+            (ends_turn && became)
+                .then(|| own_or_spawn(&card.cwd))
+                .flatten()
+        }
+        _ => None,
+    }
+}
+
 impl App {
     /// The GUI-agnostic card key for a window/pane (NFR-6): winit's stable
     /// `WindowId` ↔ `u64` mapping is the single conversion point, matching what
@@ -108,17 +154,17 @@ impl App {
                 },
             );
         }
-        // A cwd change (new card or a changed cwd on an existing one) triggers a
-        // branch + icon poll on the dedicated worker (FR-8/FR-9), never on the
-        // io read loop (NFR-2/AC-18). Compared before `apply` moves the delta.
-        if let SessionDelta::Upsert { id, cwd, .. } = &delta
-            && !cwd.is_empty()
-            && self
-                .session_store
-                .get(id)
-                .is_none_or(|card| &card.cwd != cwd)
-        {
-            self.request_branch_poll(*id, cwd.clone());
+        // A cwd change, a finished command or agent turn triggers a branch +
+        // icon poll on the dedicated worker (FR-8/FR-9), never on the io read
+        // loop (NFR-2/AC-18). Compared before `apply` moves the delta.
+        let spawn_cwd = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&delta.id().pane_id))
+            .and_then(|surface| surface.orchestration.as_ref())
+            .and_then(|orchestration| orchestration.cwd.as_deref());
+        if let Some(cwd) = branch_poll_cwd(&delta, self.session_store.get(&delta.id()), spawn_cwd) {
+            self.request_branch_poll(delta.id(), cwd);
         }
         // Bell/attention/progress also surface in the searchable Overview
         // label. Remember that before `apply` moves the delta; the shared
@@ -634,6 +680,109 @@ mod tests {
         assert_eq!(
             progress_flash_for_delta(&SessionDelta::ProgressError { id }),
             Some((ProgressFlashKind::Error, PROGRESS_ERROR_FLASH_DURATION))
+        );
+    }
+
+    fn card(cwd: &str, busy: bool, state: Option<noa_grid::AgentState>) -> SessionCard {
+        let id = SessionCardId::new(SessionWindowId(1), PaneId::new(2));
+        let mut store = crate::session_store::SessionStore::new();
+        store.apply(upsert(cwd, busy));
+        let mut card = store.get(&id).unwrap().clone();
+        card.agent_status = state.map(status);
+        card
+    }
+
+    fn upsert(cwd: &str, busy: bool) -> SessionDelta {
+        SessionDelta::Upsert {
+            id: SessionCardId::new(SessionWindowId(1), PaneId::new(2)),
+            name: "pane".to_string(),
+            cwd: cwd.to_string(),
+            busy,
+            preview: None,
+            updated_at: crate::localtime::wall_clock_now(),
+            seq: 2,
+        }
+    }
+
+    fn status(state: noa_grid::AgentState) -> noa_grid::AgentStatus {
+        noa_grid::AgentStatus {
+            state,
+            detail: String::new(),
+            blocked: None,
+            app: None,
+        }
+    }
+
+    fn report(state: noa_grid::AgentState) -> SessionDelta {
+        SessionDelta::AgentStatus {
+            id: SessionCardId::new(SessionWindowId(1), PaneId::new(2)),
+            status: Some(status(state)),
+            at: crate::localtime::wall_clock_now(),
+            reports: 1,
+        }
+    }
+
+    #[test]
+    fn a_cwd_change_or_a_new_card_polls_the_branch_as_before() {
+        let shell = card("/repo", false, None);
+        assert_eq!(
+            branch_poll_cwd(&upsert("/repo/sub", false), Some(&shell), None).as_deref(),
+            Some("/repo/sub")
+        );
+        assert_eq!(
+            branch_poll_cwd(&upsert("/repo", false), None, None).as_deref(),
+            Some("/repo")
+        );
+        assert_eq!(
+            branch_poll_cwd(&upsert("/repo", false), Some(&shell), None),
+            None
+        );
+    }
+
+    // REL-06: `git switch` in the same directory left `Panel.branch` stale;
+    // a command ending re-polls it.
+    #[test]
+    fn a_command_ending_in_the_same_directory_polls_the_branch() {
+        let running = card("/repo", true, None);
+        assert_eq!(
+            branch_poll_cwd(&upsert("/repo", false), Some(&running), None).as_deref(),
+            Some("/repo")
+        );
+        assert_eq!(
+            branch_poll_cwd(&upsert("/repo", true), Some(&running), None),
+            None
+        );
+    }
+
+    // REL-06: an agent's turn ending re-polls the branch; a worker spawned
+    // without a shell has no cwd of its own and polls its spawn directory.
+    #[test]
+    fn an_agent_turn_ending_polls_the_branch_of_the_spawn_directory() {
+        use noa_grid::AgentState;
+        let working = card("", false, Some(AgentState::Running));
+        for state in [AgentState::Finished, AgentState::Input, AgentState::Error] {
+            assert_eq!(
+                branch_poll_cwd(&report(state), Some(&working), Some("/repo-wt/fix")).as_deref(),
+                Some("/repo-wt/fix")
+            );
+        }
+        assert_eq!(
+            branch_poll_cwd(
+                &report(AgentState::Running),
+                Some(&working),
+                Some("/repo-wt/fix")
+            ),
+            None
+        );
+        let finished = card("/repo", false, Some(AgentState::Finished));
+        assert_eq!(
+            branch_poll_cwd(&report(AgentState::Finished), Some(&finished), None),
+            None,
+            "a repeated report is not a new turn ending"
+        );
+        assert_eq!(
+            branch_poll_cwd(&upsert("", false), None, Some("/repo-wt/fix")).as_deref(),
+            Some("/repo-wt/fix")
         );
     }
 

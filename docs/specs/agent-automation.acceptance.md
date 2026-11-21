@@ -1,4 +1,4 @@
-# Acceptance Test Specification: エージェント自動化サーフェス強化
+# Acceptance Test Specification: Agent Automation Surface Upgrade
 
 | | |
 |---|---|
@@ -7,79 +7,79 @@
 | status | locked |
 | owner | simota |
 | as-of | 2026-10-17 |
-| review trigger | spec の変更 |
+| review trigger | A change to the spec |
 
 ## 1. Test scope
-- In scope: AC-001..033（AppleScript の新しい動詞・プロパティ、Noa Extensions、AX 公開、CFR-001..003）。
-- Out of scope: spec の Out of scope 一覧の項目。既存 `applescript.md` の AC はここでは扱わない（AC-024 で回帰のみ確認）。
-- Not proven by this suite: US 配列と Dvorak 以外の配列での `send key`（JIS かな入力・IME 入力ソース）。Claude 以外の computer use クライアントからの読み取り。マルチモニタでの AXFrame。巨大な scrollback の reflow 中の読み取りの待ち時間（spec OQ-2）。
+- In scope: AC-001..033 (the new AppleScript verbs and properties, Noa Extensions, AX exposure, CFR-001..003).
+- Out of scope: The items in the spec's Out of scope list. The ACs of the existing `applescript.md` are not covered here (AC-024 checks regression only).
+- Not proven by this suite: `send key` on layouts other than US and Dvorak (JIS kana input, IME input sources). Reading from computer-use clients other than Claude. AXFrame on multiple monitors. The wait time of a read during the reflow of a huge scrollback (spec OQ-2).
 
 ## 2. Entry & exit criteria
 | | Criterion |
 |---|-----------|
-| Entry | spec が `locked`。対象コミットから `scripts/bundle-macos.sh` で作った署名済み Noa.app を `/Applications` 以外の場所から起動している。§3 の能力を満たしている |
-| Exit | must-have の TC がすべて PASS。§6 の手順の結果が記録されている。S1/S2 の未解決欠陥がない |
+| Entry | The spec is `locked`. A signed Noa.app built from the target commit with `scripts/bundle-macos.sh` is launched from a location other than `/Applications`. The capabilities in §3 are met |
+| Exit | Every must-have TC is PASS. The results of the §6 procedures are recorded. There is no unresolved S1/S2 defect |
 
 ## 3. Environment
 | Item | Value | How to obtain / set |
 |------|-------|---------------------|
-| Environment | local の Apple Silicon Mac、macOS 13 以上、画面 1 枚 | OQ-1（割り当ては TBD(simota)） |
-| Build under test | 対象コミットの release ビルドを bundle したもの | `scripts/bundle-macos.sh` |
-| Data state | 新規起動。session restore の対象がない状態 | 起動前に `~/Library/Application Support/noa` のセッションファイルを退避する |
-| Accounts & roles | 実行用ターミナル（Ghostty か Terminal.app）に TCC の Automation（→ Noa、System Events）と Accessibility を付与 | システム設定 › プライバシーとセキュリティ |
-| Feature flags | `macos-applescript = true`（TC-026 のみ false） | Noa の config |
-| External dependencies | なし | — |
-| Clock / timezone / locale | 入力ソースは U.S.（TC-014 のみ Dvorak） | システム設定 › キーボード |
+| Environment | A local Apple Silicon Mac, macOS 13 or later, one screen | OQ-1 (the assignment is TBD(simota)) |
+| Build under test | A bundle of the release build of the target commit | `scripts/bundle-macos.sh` |
+| Data state | A fresh launch. A state with nothing for session restore to use | Move aside the session files in `~/Library/Application Support/noa` before launching |
+| Accounts & roles | The terminal used to run the tests (Ghostty or Terminal.app) has TCC Automation (→ Noa, System Events) and Accessibility granted | System Settings › Privacy & Security |
+| Feature flags | `macos-applescript = true` (false only for TC-026) | Noa's config |
+| External dependencies | None | — |
+| Clock / timezone / locale | The input source is U.S. (Dvorak only for TC-014) | System Settings › Keyboard |
 
 ## 4. Test data
 | Fixture | Purpose | Source | Reset procedure | Contains personal data |
 |---------|---------|--------|-----------------|------------------------|
-| snapshot fixture | AC-001 | ユニットテスト内で構築 | テストごとに生成 | no |
-| Terminal fixture（200×60 全角／300 KiB scrollback） | AC-017, AC-022 | ユニットテスト内で `Terminal` に書き込む | テストごとに生成 | no |
-| `seq 1 5000` の出力 | AC-016・AC-031 の scrollback | terminal で実行 | 該当 terminal を閉じる | no |
+| snapshot fixture | AC-001 | Built inside the unit test | Generated per test | no |
+| Terminal fixture (200×60 wide characters / 300 KiB scrollback) | AC-017, AC-022 | Written into a `Terminal` inside the unit test | Generated per test | no |
+| Output of `seq 1 5000` | The scrollback of AC-016 and AC-031 | Run in a terminal | Close that terminal | no |
 
 ## 5. Test cases
-smoke は `scripts/agent-automation-smoke.sh`（新規）にまとめ、各 TC を `PASS <TC-id>` / `FAIL <TC-id>` の行として出力する。既存の `scripts/applescript-smoke.sh` は TC-024 のため変更しない。smoke はスクリプト側で絶対パスを決めてから terminal に渡す（Noa 側の `$TMPDIR` には依存しない）。マーカーは spec L3 の規則に従う。
+The smoke tests are gathered in `scripts/agent-automation-smoke.sh` (new), and print each TC as a `PASS <TC-id>` / `FAIL <TC-id>` line. The existing `scripts/applescript-smoke.sh` is not changed, for TC-024. The smoke script decides absolute paths on the script side before handing them to the terminal (it does not depend on Noa's `$TMPDIR`). Markers follow the rule in spec L3.
 
 | ID | Verifies | Title | Precondition | Steps | Expected result | Mode | Automation ref | Must-have | Priority | Result |
 |----|----------|-------|--------------|-------|-----------------|------|----------------|-----------|----------|--------|
-| TC-001 | AC-001 | 参照の解決 | — | `cargo test -p noa-app applescript_resolve` | AC-001 の Then がすべて assert される | machine | unit | yes | CRITICAL | NOT_RUN |
-| TC-002 | AC-002 | pid/tty | terminal 1 つ | `pid`/`tty` を取得。smoke 側で `ps -o pid=,comm= -t ttysNNN` を実行 | シェルの行の pid と tty が一致 | human | smoke | yes | HIGH | NOT_RUN |
-| TC-003 | AC-003 | focused terminal の e2e | AC-003 の Given | AC-003 の When | 同じ id | human | smoke | yes | HIGH | NOT_RUN |
-| TC-004 | AC-004 | record の解析 | — | `cargo test -p noa-app surface_configuration` | AC-004 の Then が assert される | machine | unit | yes | HIGH | NOT_RUN |
-| TC-005 | AC-005 | 3 動詞の configuration | — | AC-005 の When を動詞ごとに実行し、2 秒待って各 `contents` | 3 つとも `CFG-/usr-bar` を含む | human | smoke | yes | CRITICAL | NOT_RUN |
-| TC-006 | AC-006 | wait after command | — | AC-006 の (a)〜(c) を順に実行。(d) は手で 1 キー押す | AC-006 の Then | human | smoke + 目視 | yes | HIGH | NOT_RUN |
-| TC-007 | AC-007 | font size | 既定 14pt の window がある | AC-007 の When を実行し、スクリーンショットを撮る | 行の高さの比が 1.8〜2.2、split は親と同じ | human | — | yes | MEDIUM | NOT_RUN |
-| TC-008 | AC-008 | new tab in | window 2 個 | `count tabs` を両 window で取る → `new tab in window 2` → 1 秒待つ → 再度 count | window 2 が +1、window 1 は不変 | human | smoke | yes | HIGH | NOT_RUN |
-| TC-009 | AC-009 | split の対象と 2 形式 | AC-009 の Given | AC-009 の When。各操作の 250 ms 後に AX frame を読む | AC-009 の Then | human | smoke | yes | HIGH | NOT_RUN |
-| TC-010 | AC-010 | 返り値をすぐ使う | Noa を `activate` 済み、window 1 個 | AC-010 の When を 1 本の osascript で実行 | AC-010 の Then | human | smoke | yes | CRITICAL | NOT_RUN |
-| TC-011 | AC-011 | perform action on | AC-011 の Given | AC-011 の When。250 ms 後に AX frame を読む | AC-011 の Then | human | smoke | yes | HIGH | NOT_RUN |
-| TC-012 | AC-012 | キーの解析と符号化 | — | `cargo test -p noa-app applescript_send_key` | AC-012 の Then が assert される | machine | unit | yes | HIGH | NOT_RUN |
-| TC-013 | AC-013 | send key の e2e と DECCKM | US 配列 | AC-013 の (1)(2)。各段階で 1 秒待って `contents` | `^[[A`、`^[OA`、プロンプト復帰 | human | smoke | yes | HIGH | NOT_RUN |
-| TC-014 | AC-014 | 配列での変換 | 入力ソースが Dvorak | AC-014 の When → `contents` | 最終行が `o` | human | — | yes | MEDIUM | NOT_RUN |
-| TC-015 | AC-015 | mouse tracking あり | AC-015 の Given | AC-015 の When → 1 秒待つ → `contents` とカーソル位置 | 3 つの列が同じ c;r（c>1, r>1）で含まれ、カーソル位置は不変 | human | smoke | yes | HIGH | NOT_RUN |
-| TC-016 | AC-016 | mouse tracking なし | `seq 1 5000` 実行済み | `contents` を保存 → AC-016 の When → `contents` | 2 回目の先頭行の番号が小さい | human | smoke | yes | HIGH | NOT_RUN |
-| TC-017 | AC-017 | テキスト抽出 | — | `cargo test -p noa-app applescript_text` | AC-017 の Then が assert される | machine | unit | yes | HIGH | NOT_RUN |
-| TC-018 | AC-018 | 全角・secure input | Noa のメニューで Secure Keyboard Entry を ON | AC-018 の When | `あいう-AC18` を 1 回だけ含む | human | smoke | yes | HIGH | NOT_RUN |
-| TC-019 | AC-019 | AX ツリー | AC-019 の Given | AC-019 の When を、パレットを閉じた状態と開いた状態（`cmd+shift+p`）の 2 回 | どちらも AC-019 の Then | human | smoke | yes | CRITICAL | NOT_RUN |
-| TC-020 | AC-020 | AX focus・frame・追従 | AC-019 の Given | AC-020 の (a)〜(f) | AC-020 の Then | human | smoke | yes | CRITICAL | NOT_RUN |
-| TC-021 | AC-021 | 選択と挿入点 | AC-021 の Given | AC-021 の When | `hello`、`4`、`hello` | human | smoke | yes | MEDIUM | NOT_RUN |
-| TC-024 | AC-024 | 既存の smoke の回帰 | — | 変更前の smoke の項目を実行 | 既存の全項目が PASS | human | smoke | yes | CRITICAL | NOT_RUN |
-| TC-026 | AC-026 | 無効化 | config に `macos-applescript = false` を入れて再起動 | AC-026 の When。差分を grep して権限 UI のコードがないことを確認 | AC-026 の Then | human | smoke + review | yes | HIGH | NOT_RUN |
-| TC-027 | AC-027 | 不正な入力 | terminal 1 つ。別の terminal を閉じて、その id を記録しておく | AC-027 の When を 1 つずつ実行 | AC-027 の Then の順にエラー番号が返る。Noa のプロセスが残っている | human | smoke | yes | HIGH | NOT_RUN |
-| TC-028 | AC-028 | sdef の照合 | Appendix B を `crates/noa-app/tests/fixtures/ghostty-sdef-terms.txt` に転記済み | `cargo test -p noa-app sdef` | 照合テストが 2 本とも成功 | machine | unit | yes | HIGH | NOT_RUN |
-| TC-029 | AC-029 | close tab/window・count・exists | AC-029 の Given | AC-029 の When | AC-029 の Then | human | smoke | yes | HIGH | NOT_RUN |
-| TC-030 | AC-030 | pending registry | — | `cargo test -p noa-app applescript_pending` | AC-030 の Then が assert される | machine | unit | yes | CRITICAL | NOT_RUN |
-| TC-031 | AC-031 | scrollback と selection の e2e | AC-031 の Given | AC-031 の When | AC-031 の Then | human | smoke | yes | HIGH | NOT_RUN |
-| TC-032 | AC-032 | point→セル変換 | — | `cargo test -p noa-app applescript_mouse_cell` | AC-032 の Then が assert される | machine | unit | yes | HIGH | NOT_RUN |
-| TC-033 | AC-033 | close 形式のコンパイル | bundle 済みの Noa.app | `scripts/applescript-sdef-check.sh target/release/Noa.app`（sandbox 外） | AC-033 の Then | machine | script | yes | HIGH | NOT_RUN |
+| TC-001 | AC-001 | Resolving references | — | `cargo test -p noa-app applescript_resolve` | Every Then of AC-001 is asserted | machine | unit | yes | CRITICAL | NOT_RUN |
+| TC-002 | AC-002 | pid/tty | One terminal | Get `pid`/`tty`. On the smoke side, run `ps -o pid=,comm= -t ttysNNN` | The pid of the shell's line and the tty match | human | smoke | yes | HIGH | NOT_RUN |
+| TC-003 | AC-003 | focused terminal e2e | The Given of AC-003 | The When of AC-003 | The same id | human | smoke | yes | HIGH | NOT_RUN |
+| TC-004 | AC-004 | Parsing a record | — | `cargo test -p noa-app surface_configuration` | The Then of AC-004 is asserted | machine | unit | yes | HIGH | NOT_RUN |
+| TC-005 | AC-005 | Configuration on 3 verbs | — | Run the When of AC-005 for each verb, wait 2 seconds, and read each `contents` | All three contain `CFG-/usr-bar` | human | smoke | yes | CRITICAL | NOT_RUN |
+| TC-006 | AC-006 | wait after command | — | Run (a) to (c) of AC-006 in order. For (d), press one key by hand | The Then of AC-006 | human | smoke + by eye | yes | HIGH | NOT_RUN |
+| TC-007 | AC-007 | font size | A window at the default 14pt exists | Run the When of AC-007 and take a screenshot | The row-height ratio is 1.8–2.2, and the split is the same as its parent | human | — | yes | MEDIUM | NOT_RUN |
+| TC-008 | AC-008 | new tab in | 2 windows | Get `count tabs` in both windows → `new tab in window 2` → wait 1 second → count again | window 2 is +1, window 1 is unchanged | human | smoke | yes | HIGH | NOT_RUN |
+| TC-009 | AC-009 | Target of split and the 2 forms | The Given of AC-009 | The When of AC-009. Read the AX frames 250 ms after each operation | The Then of AC-009 | human | smoke | yes | HIGH | NOT_RUN |
+| TC-010 | AC-010 | Using the return value at once | Noa has been `activate`d, 1 window | Run the When of AC-010 in one osascript | The Then of AC-010 | human | smoke | yes | CRITICAL | NOT_RUN |
+| TC-011 | AC-011 | perform action on | The Given of AC-011 | The When of AC-011. Read the AX frames 250 ms later | The Then of AC-011 | human | smoke | yes | HIGH | NOT_RUN |
+| TC-012 | AC-012 | Parsing and encoding keys | — | `cargo test -p noa-app applescript_send_key` | The Then of AC-012 is asserted | machine | unit | yes | HIGH | NOT_RUN |
+| TC-013 | AC-013 | send key e2e and DECCKM | US layout | (1) and (2) of AC-013. Wait 1 second at each stage and read `contents` | `^[[A`, `^[OA`, and the prompt returns | human | smoke | yes | HIGH | NOT_RUN |
+| TC-014 | AC-014 | Translation by layout | The input source is Dvorak | The When of AC-014 → `contents` | The last line is `o` | human | — | yes | MEDIUM | NOT_RUN |
+| TC-015 | AC-015 | With mouse tracking | The Given of AC-015 | The When of AC-015 → wait 1 second → `contents` and the cursor position | The 3 sequences are contained with the same c;r (c>1, r>1), and the cursor position is unchanged | human | smoke | yes | HIGH | NOT_RUN |
+| TC-016 | AC-016 | Without mouse tracking | `seq 1 5000` has been run | Save `contents` → the When of AC-016 → `contents` | The number of the first line of the second read is smaller | human | smoke | yes | HIGH | NOT_RUN |
+| TC-017 | AC-017 | Text extraction | — | `cargo test -p noa-app applescript_text` | The Then of AC-017 is asserted | machine | unit | yes | HIGH | NOT_RUN |
+| TC-018 | AC-018 | Wide characters and secure input | Secure Keyboard Entry is ON in Noa's menu | The When of AC-018 | Contains `あいう-AC18` exactly once | human | smoke | yes | HIGH | NOT_RUN |
+| TC-019 | AC-019 | AX tree | The Given of AC-019 | The When of AC-019, twice: with the palette closed and with it open (`cmd+shift+p`) | Both meet the Then of AC-019 | human | smoke | yes | CRITICAL | NOT_RUN |
+| TC-020 | AC-020 | AX focus, frame and following | The Given of AC-019 | (a) to (f) of AC-020 | The Then of AC-020 | human | smoke | yes | CRITICAL | NOT_RUN |
+| TC-021 | AC-021 | Selection and insertion point | The Given of AC-021 | The When of AC-021 | `hello`, `4`, `hello` | human | smoke | yes | MEDIUM | NOT_RUN |
+| TC-024 | AC-024 | Regression of the existing smoke | — | Run the items of the smoke script as it was before the change | Every existing item PASSes | human | smoke | yes | CRITICAL | NOT_RUN |
+| TC-026 | AC-026 | Disabling | Put `macos-applescript = false` in the config and restart | The When of AC-026. Grep the diff to confirm there is no permission-UI code | The Then of AC-026 | human | smoke + review | yes | HIGH | NOT_RUN |
+| TC-027 | AC-027 | Invalid input | One terminal. Close another terminal and record its id | Run the When of AC-027 one at a time | The error numbers come back in the order of the Then of AC-027. The Noa process is still alive | human | smoke | yes | HIGH | NOT_RUN |
+| TC-028 | AC-028 | Checking the sdef | Appendix B has been transcribed to `crates/noa-app/tests/fixtures/ghostty-sdef-terms.txt` | `cargo test -p noa-app sdef` | Both check tests pass | machine | unit | yes | HIGH | NOT_RUN |
+| TC-029 | AC-029 | close tab/window, count, exists | The Given of AC-029 | The When of AC-029 | The Then of AC-029 | human | smoke | yes | HIGH | NOT_RUN |
+| TC-030 | AC-030 | pending registry | — | `cargo test -p noa-app applescript_pending` | The Then of AC-030 is asserted | machine | unit | yes | CRITICAL | NOT_RUN |
+| TC-031 | AC-031 | scrollback and selection e2e | The Given of AC-031 | The When of AC-031 | The Then of AC-031 | human | smoke | yes | HIGH | NOT_RUN |
+| TC-032 | AC-032 | point-to-cell conversion | — | `cargo test -p noa-app applescript_mouse_cell` | The Then of AC-032 is asserted | machine | unit | yes | HIGH | NOT_RUN |
+| TC-033 | AC-033 | Compiling the close forms | A bundled Noa.app | `scripts/applescript-sdef-check.sh target/release/Noa.app` (outside the sandbox) | The Then of AC-033 | machine | script | yes | HIGH | NOT_RUN |
 
 ## 6. Non-functional procedures (`CFR-n`)
 | ID | Verifies | CFR | Measure / criterion | Required outcome (from spec) | Procedure | Tool / observer | Conditions / sample | Observed result | Result |
 |----|----------|-----|---------------------|------------------------------|-----------|-----------------|---------------------|-----------------|--------|
-| TC-022 | AC-022 | CFR-001 | (a)(b)(c) の p95/p99 | see spec CFR-001 | `cargo test -p noa-app --release applescript_read_perf -- --ignored --nocapture` | テストの出力 | spec CFR-001 の (a)(b)(c) の条件、各 1000 回。計測スレッドは main スレッドと同じ user-interactive QoS（テスト内で設定） | — | NOT_RUN |
-| TC-023 | AC-023 | CFR-002 | idle RSS の差分と、新しいタイマー・スレッドの数 | see spec CFR-002 | main と対象ビルドで `bench/` の idle 計測を各 3 回 → 中央値を比較。diff の `spawn`/`Timer`/`NSTimer` を grep | ハーネス + レビュアー | 新規起動から 60 秒後、ペイン 1 つ | — | NOT_RUN |
-| TC-025 | AC-025 | CFR-003 | ハンドラ内の待ち | see spec CFR-003 | AE と AX のハンドラから到達する関数をレビューし、`recv`/`block_on`/`wait`/winit の型を確認 | レビュアー | 対象コミットの diff | — | NOT_RUN |
+| TC-022 | AC-022 | CFR-001 | p95/p99 of (a)(b)(c) | see spec CFR-001 | `cargo test -p noa-app --release applescript_read_perf -- --ignored --nocapture` | The test output | The conditions (a)(b)(c) of spec CFR-001, 1000 runs each. The measuring thread has the same user-interactive QoS as the main thread (set inside the test) | — | NOT_RUN |
+| TC-023 | AC-023 | CFR-002 | The idle RSS difference, and the number of new timers and threads | see spec CFR-002 | Run the idle measurement in `bench/` 3 times each on main and on the target build → compare the medians. Grep the diff for `spawn`/`Timer`/`NSTimer` | Harness + reviewer | 60 seconds after a fresh launch, one pane | — | NOT_RUN |
+| TC-025 | AC-025 | CFR-003 | Waits inside handlers | see spec CFR-003 | Review the functions reachable from the AE and AX handlers, and check `recv`/`block_on`/`wait`/winit types | Reviewer | The diff of the target commit | — | NOT_RUN |
 
 ## 7. Coverage matrix
 | AC | Must-have | Covered by | Mode | Gap |
@@ -121,12 +121,12 @@ smoke は `scripts/agent-automation-smoke.sh`（新規）にまとめ、各 TC �
 ## 8. Defect handling
 | Severity | Definition | Blocks exit |
 |----------|-----------|-------------|
-| S1 | must-have の AC を満たさない、またはクラッシュ・ハングする | yes |
-| S2 | must-have の AC を回避策を使わないと満たせない | yes |
-| S3 | must-have 以外の AC を満たさない | no（記録する） |
-| S4 | 表示・文言 | no（記録する） |
+| S1 | Does not meet a must-have AC, or crashes or hangs | yes |
+| S2 | Meets a must-have AC only with a workaround | yes |
+| S3 | Does not meet a non-must-have AC | no (record it) |
+| S4 | Display and wording | no (record it) |
 
-must-have の TC が失敗したら、ビルドの欠陥か、AC が書かれたままでは作れないかを判定する。作れない場合は `spec-dialogue agent-automation` に戻す。
+If a must-have TC fails, decide whether it is a defect in the build or the AC cannot be built as written. If it cannot be built, send it back with `spec-dialogue agent-automation`.
 
 ## 9. Execution record
 | Run | Date | Build | Executed by | Passed | Failed | Blocked | Skipped | Defects raised |
@@ -134,9 +134,9 @@ must-have の TC が失敗したら、ビルドの欠陥か、AC が書かれた
 | 1 | | | | | | | | |
 
 ## 10. Residual risk
-- smoke の大半は、署名済み bundle と TCC の権限が必要な human 手順。CI では回らない。
-- AX は System Events 経由で確認する。Claude computer use 本体からの読み取りは、この suite では確かめない。
-- TC-007 と TC-014 は目視判定。
+- Most of the smoke tests are human procedures that need a signed bundle and TCC permissions. They do not run in CI.
+- AX is checked through System Events. Reading from Claude computer use itself is not verified in this suite.
+- TC-007 and TC-014 are judged by eye.
 
 ## 11. Sign-off
 | | |

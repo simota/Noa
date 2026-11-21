@@ -1,4 +1,4 @@
-# フローティングペインの受け入れテスト仕様
+# Floating panes acceptance test spec
 
 | | |
 |---|---|
@@ -6,175 +6,175 @@
 | spec source | `docs/specs/floating-panes.md` as-of 2026-11-10 |
 | status | locked |
 | owner | simota |
-| reader | 実装者と受け入れ担当。スイートを実行し、ビルドを受け入れるか決める |
+| reader | The implementer and the acceptance owner. Runs the suite and decides whether to accept the build |
 | as-of | 2026-11-10 |
-| review trigger | 仕様が変わったとき |
+| review trigger | When the spec changes |
 
 ## 1. Test scope
 
-- In scope: 仕様 L3 の AC-001〜AC-044。
-- Out of scope: 仕様の Out of scope に挙げた項目。どこでもテストしない。
-- Not proven by this suite: ドラッグ中の描画の滑らかさ。上限 8 枚を使い切ったときの資源消費。マルチモニタと HiDPI の混在。IME 入力（分割ペインと同じ入力経路を通る前提で、個別には確かめない）。
+- In scope: AC-001 to AC-044 of the spec's L3.
+- Out of scope: The items listed under the spec's Out of scope. They are not tested anywhere.
+- Not proven by this suite: Smoothness of drawing during a drag. Resource consumption when the limit of 8 is used up. A mix of multiple monitors and HiDPI. IME input (assumed to go through the same input path as split panes, and not checked separately).
 
 ## 2. Entry & exit criteria
 
 | | Criterion |
 |---|-----------|
-| Entry | 仕様が `locked`。コミットで識別できるビルドが §3 の環境にある |
-| Exit | must-have の TC が macOS と Linux の両方で全 PASS。§8 の S1・S2 が残っていない。must-have でない失敗はすべて欠陥として記録済み |
+| Entry | The spec is `locked`. A build identifiable by commit exists in the §3 environment |
+| Exit | All must-have TCs PASS on both macOS and Linux. No S1 or S2 from §8 remains. Every failure that is not must-have is recorded as a defect |
 
 ## 3. Environment
 
 | Item | Value | How to obtain / set |
 |------|-------|---------------------|
-| Environment | ローカル。(a) macOS Apple Silicon、(b) Linux。どちらもディスプレイと GPU があり、pty を開ける（サンドボックス外）こと | (b) の具体構成は `TBD(simota)`（仕様 OQ-3） |
-| Build under test | 実行時のコミット | `git rev-parse HEAD` を §9 に記録 |
-| Data state | 空。セッションファイルなしで起動 | §4 F-0 |
-| Accounts & roles | N/A（ローカル単一利用者） | — |
-| Feature flags | N/A（フラグなし） | — |
-| External dependencies | N/A（外部依存なし。エージェント状態は OSC を手で出して再現する） | §4 F-2 |
-| Clock / timezone / locale | N/A（時刻に依存する挙動なし） | — |
+| Environment | Local. (a) macOS Apple Silicon, (b) Linux. Both must have a display and a GPU and be able to open a pty (outside the sandbox) | The concrete configuration of (b) is `TBD(simota)` (spec OQ-3) |
+| Build under test | The commit at run time | Record `git rev-parse HEAD` in §9 |
+| Data state | Empty. Start without a session file | §4 F-0 |
+| Accounts & roles | N/A (local single user) | — |
+| Feature flags | N/A (no flags) | — |
+| External dependencies | N/A (no external dependencies. Agent state is reproduced by emitting OSC by hand) | §4 F-2 |
+| Clock / timezone / locale | N/A (no time-dependent behaviour) | — |
 
 ## 4. Test data
 
 | Fixture | Purpose | Source | Reset procedure | Contains personal data |
 |---------|---------|--------|-----------------|------------------------|
-| F-0 | 空の起動状態 | noa のセッションファイルと scrollback ディレクトリを退避して起動 | テスト後に退避したものを戻す | no |
-| F-1 | 幾何の単体テスト用の固定値 | 仕様 L3 冒頭の F-1 をテストコード内の定数にする | N/A（状態を持たない） | no |
-| F-2a | `AgentState::Permission` の再現 | フロート内で `printf '\033]7501;state=blocked:kind=permission:app=test\033\\'` | フロートを閉じる | no |
-| F-2b | `AgentState::Input` の再現 | フロート内で `printf '\033]7501;state=blocked:app=test\033\\'` | フロートを閉じる | no |
-| F-2c | `AgentState::Error` の再現 | フロート内で `printf '\033]7501;state=blocked:kind=auth:app=test\033\\'` | フロートを閉じる | no |
-| F-3 | 壊れたセッションファイル: フロート記録2件、うち1件の origin の x が `NaN` | テストコード内で生成 | N/A（一時ファイル） | no |
+| F-0 | Empty startup state | Move aside noa's session file and scrollback directory, then start | Put back what was moved aside after the test | no |
+| F-1 | Fixed values for geometry unit tests | Make F-1 at the head of the spec's L3 a constant in the test code | N/A (holds no state) | no |
+| F-2a | Reproduce `AgentState::Permission` | In a float: `printf '\033]7501;state=blocked:kind=permission:app=test\033\\'` | Close the float | no |
+| F-2b | Reproduce `AgentState::Input` | In a float: `printf '\033]7501;state=blocked:app=test\033\\'` | Close the float | no |
+| F-2c | Reproduce `AgentState::Error` | In a float: `printf '\033]7501;state=blocked:kind=auth:app=test\033\\'` | Close the float | no |
+| F-3 | Corrupt session file: 2 float records, one of which has `NaN` in the origin's x | Generated inside the test code | N/A (temporary file) | no |
 
 ## 5. Test cases
 
-machine モードのケースは自動テストで実装し、テスト名に TC の ID を含める。ファイルパスは `TBD(実装者)`（仕様 OQ-2）。Automation ref 列の `OQ-2` はこれを指す。TC の番号は検証する AC と同じ番号にしてある。
+Machine-mode cases are implemented as automated tests, and the test name includes the TC's ID. The file path is `TBD(implementer)` (spec OQ-2). `OQ-2` in the Automation ref column refers to this. TC numbers are the same as the numbers of the ACs they verify.
 
 | ID | Verifies | Title | Precondition | Steps | Expected result | Mode | Automation ref | Must-have | Priority | Result |
 |----|----------|-------|--------------|-------|-----------------|------|----------------|-----------|----------|--------|
-| TC-001 | AC-001 | 作成で分割が変わらない | F-1（タブ1は分割ペイン1枚、タブ2は2枚）、フロート0枚 | タブ1で `float.new` | 全分割ペインの矩形不変。フロート (200,100)-(1000,600)、80×24、フォーカスあり、cwd 一致 | machine | OQ-2 | yes | CRITICAL | NOT_RUN |
-| TC-002 | AC-002 | 2・3枚目のずらし | TC-001 の直後 | `float.new` ×2 | (180,80)-(980,580)、(160,60)-(960,560)。別に、1枚目をタブアンカーにしてから `float.new` → (180,80)-(980,580)。A/B 分割で B 上の (600,100) 300×200 px だけがあるとき A で `float.new` → (50,100) 450×500 px（ずれなし） | machine | OQ-2 | yes | HIGH | NOT_RUN |
-| TC-003 | AC-003 | 小さいアンカーでの縮小 | アンカー 600×300 px | `float.new` | 540×270 px、54×12 | machine | OQ-2 | yes | HIGH | NOT_RUN |
-| TC-005 | AC-005 | 移動のクランプ | F-1、フロート 400×300 px を (100,100) | (a) 帯を (+900,+900) (b) 初期状態から (−900,−900) | (a) 左上 (600,300) (b) (0,0) | machine | OQ-2 | yes | CRITICAL | NOT_RUN |
-| TC-006 | AC-006 | タブ切替時の表示と pty 継続 | タブ2枚、3種のフロート各1枚（ペインアンカーはタブ1） | タブ2を表示し、非表示2枚の pty に `x` を届ける | 表示はウィンドウアンカーのみ・位置不変。非表示2枚の端末に `x` が入っている | machine | OQ-2 | yes | CRITICAL | NOT_RUN |
-| TC-007 | AC-007 | ズーム時の非表示 | F-1、A にフロート | B をズーム、解除 | ズーム中は非表示、解除後に元の位置 | machine | OQ-2 | yes | HIGH | NOT_RUN |
-| TC-008 | AC-008 | アンカー切替 | F-1、ペインアンカー(A) 300×200 px を (100,100) | `float.cycle-anchor`、帯を (+500,0)、`float.cycle-anchor`、アイコンをクリック | タブ→ウィンドウ→ペイン(B)。切替の各回で画面矩形不変、直後は新しい層の最前面 | machine | OQ-2 | yes | CRITICAL | NOT_RUN |
-| TC-009 | AC-009 | 比率追従と下限 | F-1、origin (0.1,0.1) size (0.2,0.2)、帯をドラッグ中 | アンカーを 500×300 px、次に 1000×600 px | (50,30) 200×80 px、次に (100,60) 200×120 px。ドラッグ状態は継続 | machine | OQ-2 | yes | CRITICAL | NOT_RUN |
-| TC-010 | AC-010 | 下限未満で非表示 | フロート1枚 | アンカーを 150×60 px、次に 1000×600 px | 非表示かつ存在、次に元の比率で表示 | machine | OQ-2 | yes | HIGH | NOT_RUN |
-| TC-011 | AC-011 | 層つき z順 | P1, P2, T1, W1 の順に作成し重ねる。分割ペインをクリック | P1 をクリック、`float.focus-next` | W1,T1,P1,P2、次に W1,T1,P2,P1 | machine | OQ-2 | yes | CRITICAL | NOT_RUN |
-| TC-012 | AC-012 | 折りたたみ往復（3つの方法） | F-1、80×24 でフォーカス中の通常フロート | 折りたたみボタン、帯ダブルクリック、`float.toggle-collapse` のそれぞれで折りたたみ→展開 | 各方法で: 帯 20 px・幅と左上不変、フォーカスは復帰先ペイン→展開でフロート、pty サイズ通知 0 回、80×24。別に、分割ペインにフォーカスした状態で折りたたみボタン → フォーカスは分割ペインのまま | machine | OQ-2 | yes | CRITICAL | NOT_RUN |
-| TC-013 | AC-013 | 最大化往復 | F-1、(200,100) 400×300 px | `float.toggle-maximize`、最大化ボタン | (0,0) 1000×600 px・100×29・帯あり・通知 1 回、次に (200,100) 400×300 px | machine | OQ-2 | yes | HIGH | NOT_RUN |
-| TC-014 | AC-014 | 最大化中の制限 | 最大化したフロート | (a) 折りたたみ→展開 (b) 帯を (+50,+50) (c) 右辺を (−50,0) (d) 通常状態のフロートを折りたたみ、最大化ボタン、`float.toggle-maximize`、展開 | (a) 最大化 (b)(c) 矩形不変 (d) 折りたたみのまま、展開で通常状態 | machine | OQ-2 | yes | HIGH | NOT_RUN |
-| TC-015 | AC-015 | フォーカス移動 | F-1、B のペインアンカーで F1,F2,F3 を作成し F3 を折りたたむ。F1 をクリック、A をクリック。「B をクリック」は (520,10) | `float.toggle-focus`、`float.focus-next` ×2、`float.focus-previous`、`float.toggle-focus`、B をクリック、`float.focus-next`、B をクリック、`float.focus-previous`、B をクリック、F1 内容領域をクリック、F1 上でホイールとマウス移動 | フォーカス F1→F2→F1→F2→A→B→F1→B→F2→B→F1。クリック・ホイール・マウス移動は B に届かず、F1 がスクロール | machine | OQ-2 | yes | CRITICAL | NOT_RUN |
-| TC-017 | AC-017 | 閉じる確認 | 分割ペインとそのフロートで `sleep 600` を実行中 | (a) 閉じるボタン (b) 作り直して `tab.close` (c) 作り直して分割ペインを閉じる | (a)(b) 確認→承認でフロートのみ閉じ、フォーカスは復帰先ペイン (c) 実行中プログラム数 2 の確認→両方閉じる | machine | OQ-2 | yes | CRITICAL | NOT_RUN |
-| TC-018 | AC-018 | 自動承認 | 自動承認有効、同じ承認待ち画面を分割ペインとフロートに用意 | 自動承認を走らせる | 判定が等しく、承認入力がフロートの pty に書かれる | machine | OQ-2 | yes | HIGH | NOT_RUN |
-| TC-020 | AC-020 | セッション往復 | AC-020 の Given | 保存→読み戻し | AC-020 の Then（タブアンカーは折りたたみで復元、展開で (300,200) 300×200 px の通常状態。ウィンドウアンカーは (200,100) 400×300 px の通常状態。復元直後の `float.toggle-focus` はウィンドウアンカーのフロートへ） | machine | OQ-2 | yes | HIGH | NOT_RUN |
-| TC-021 | AC-021 | 壊れた記録・旧ファイル・無効時 | (a) F-3 (b) バージョン 3 のファイル (c) `window-save-state` 無効でフロート1枚 | (a)(b) 読む (c) 保存処理 | (a) 1枚復元 (b) 0枚で正常 (c) 書かれない。書き出すバージョンは 4 | machine | OQ-2 | yes | HIGH | NOT_RUN |
-| TC-022 | AC-022 | 上限 | (a) 同じ分割ペインに 8 枚 (b) タブアンカー 8 枚＋ペインアンカー1枚 (c) フロート 8 枚、分割ペイン 8 枚 | (a) `float.new` (b) ペインアンカーで `float.cycle-anchor` (c) 分割ペインを追加 | (a) 増えずトースト (b) ペインのままトースト (c) 分割ペイン 9 枚 | machine | OQ-2 | yes | HIGH | NOT_RUN |
-| TC-023 | AC-023 | 0枚での無操作 | フロート0枚 | `float.new` 以外の6アクション | 状態とフォーカス不変 | machine | OQ-2 | yes | MEDIUM | NOT_RUN |
-| TC-024 | AC-024 | pty 生成失敗 | pty 生成を失敗させる差し替え | `float.new` | フロート数とフォーカス不変、エラーログ 1 件 | machine | OQ-2 | yes | HIGH | NOT_RUN |
-| TC-025 | AC-025 | ドラッグ中の破棄 | フロートをドラッグ中 | (a) アンカーの分割ペインを閉じる (b) シェル終了による破棄 | ドラッグ状態なし、フロートなし | machine | OQ-2 | yes | HIGH | NOT_RUN |
-| TC-026 | AC-026 | リサイズ | F-1、フロート (300,100) 400×300 px。(e) は A/B 分割でタブアンカーのフロート (500,100) 400×300 px。(f) は同じ分割ペインで F1 (100,100) 300×300 px、F2 (350,150) 300×200 px の順に作り（F2 が前面）、分割ペインの (50,50) をクリックしてフォーカスを分割ペインへ移す | (a) 右下隅 (−2000,−2000) (b) 右下隅 (+2000,+2000) (c) 左辺 (−50,0) (d) 8ハンドルを外向きに 10 px (e) (497,200) を押して (−50,0) (f) (402,250) を押して (+50,0) | (a) 内容領域 200×60 px (b) 右下 (1000,600) (c) 450 px・+5 列・最後の通知が新グリッド (d) 対応する辺のみ 10 px (e) フロート幅 450 px、分割線は x=500 のまま (f) F1 は 300×300 px のまま、F2 がフォーカス | machine | OQ-2 | yes | CRITICAL | NOT_RUN |
-| TC-027 | AC-027 | キーバインド | (a) 既定 (b) `float.new`〜`float.cycle-anchor` に `cmd+alt+1`〜`cmd+alt+7` を割り当てる `keybind =` 7行 | エンジン構築、(b) は各コードを引く | (a) 既定は2アクション、衝突なし、`cmd+shift+f` 未割り当て (b) 7つとも解決 | machine | OQ-2 | yes | HIGH | NOT_RUN |
-| TC-028 | AC-028 | フロート上の分割操作 | フロートにフォーカス | `split.` で始まる全アクション名を列挙して実行 | 分割ツリー・ズーム・フォーカス不変 | machine | OQ-2 | yes | MEDIUM | NOT_RUN |
-| TC-029 | AC-029 | 対象外ウィンドウ | (a) Scratch Terminal (b) Quick Terminal にフォーカス | `float.new` | フロート数不変 | machine | OQ-2 | yes | MEDIUM | NOT_RUN |
-| TC-031 | AC-031 | 外部面に出ない | フロート1枚 | AppleScript・IPC・AX のスナップショットと Overview のレイアウトを生成 | どれにもフロートの `PaneId` がない | machine | OQ-2 | yes | MEDIUM | NOT_RUN |
-| TC-032 | AC-032 | 既存ゲート | ビルド済み | `cargo test --workspace`、`cargo clippy --workspace`（サンドボックス外） | どちらも終了コード 0、clippy の警告 0 件 | machine | コマンドそのもの | yes | CRITICAL | NOT_RUN |
-| TC-033 | AC-033 | 非表示フロートを描かない | (a) 別タブ (b) 他ペインがズーム中 (c) アンカー 150×60 px | 描画計画を作る | どの場合もそのフロートが計画にない | machine | OQ-2 | yes | HIGH | NOT_RUN |
-| TC-036 | AC-036 | シェル終了 | 既定設定、フロートと分割ペイン | それぞれで `exit` | フロートの結果が分割ペインと同じ | machine | OQ-2 | yes | HIGH | NOT_RUN |
-| TC-037 | AC-037 | アンカーの移動と消滅 | AC-037 の Given。フロートでは `sleep 600` を実行中 | (a) 分割ペインを別タブへ (b) タブを別ウィンドウへ (c) 別々に: タブ1を閉じる／ウィンドウを閉じる／アプリを終了 | (a) 同じ比率で同じ分割ペインに付く (b) タブと一緒に移る (c) 実行中プログラム数 2／3／3、承認後に pty 解放 | machine | OQ-2 | yes | CRITICAL | NOT_RUN |
-| TC-038 | AC-038 | 非表示化でのフォーカス | (a) タブ1の A のフロートにフォーカス、タブ2に C (b) A のフロートにフォーカス | (a) タブ2へ、タブ1へ (b) アンカーを 150×60 px、1000×600 px | (a) C、戻ると A (b) A、戻しても A | machine | OQ-2 | yes | HIGH | NOT_RUN |
-| TC-039 | AC-039 | 折りたたみ中の操作 | F-1、(500,250) 400×300 px を折りたたむ | (a) 帯を (+900,+900) (b) 右辺をドラッグ (c) `float.cycle-anchor` (d) 展開 | (a) 帯左上 (600,580) (b) 不変 (c) タブ (d) 左上 (600,300) | machine | OQ-2 | yes | HIGH | NOT_RUN |
-| TC-040 | AC-040 | 最大化中のアンカー切替 | F-1、ウィンドウアンカー・通常時 (0,100) 800×500 px を最大化 | `float.cycle-anchor`、`float.toggle-maximize` | (0,0) 500×600 px で最大化、解除後は (0,100) 500×500 px | machine | OQ-2 | yes | HIGH | NOT_RUN |
-| TC-041 | AC-041 | フロートからの新規作成 | F-1、A のフロートにフォーカス | `float.new` | 新フロートのアンカーは A | machine | OQ-2 | yes | MEDIUM | NOT_RUN |
-| TC-042 | AC-042 | タイトル帯クリック | F1（背面）、F2（前面・折りたたみ）、フォーカスは分割ペイン | F1 の帯、F2 の帯を順にクリック | F1 最前面＋フォーカス、次に F2 最前面でフォーカスは F1 | machine | OQ-2 | yes | HIGH | NOT_RUN |
-| TC-043 | AC-043 | サイドバーからのジャンプ（特殊な状態） | (a) B ズーム中の A のフロート (b) 別ウィンドウのフロート (c) アンカー 150×60 px のペインアンカー | 各カードを選択 | (a) ズーム解除＋フロートにフォーカス (b) ウィンドウ前面＋フロートにフォーカス (c) アンカーの分割ペインにフォーカス | machine | OQ-2 | yes | HIGH | NOT_RUN |
-| TC-044 | AC-044 | フォントサイズ変更 | F-1、(200,100) 400×300 px、40×14 | セルを 20×40 px にする | 矩形不変、タイトル帯 40 px、20×6、最後の通知が 20×6 | machine | OQ-2 | yes | HIGH | NOT_RUN |
+| TC-001 | AC-001 | Creation does not change the splits | F-1 (tab 1 has 1 split pane, tab 2 has 2), 0 floats | `float.new` in tab 1 | All split pane rectangles unchanged. Float (200,100)-(1000,600), 80×24, has focus, cwd matches | machine | OQ-2 | yes | CRITICAL | NOT_RUN |
+| TC-002 | AC-002 | Shift of the 2nd and 3rd | Right after TC-001 | `float.new` ×2 | (180,80)-(980,580), (160,60)-(960,560). Separately, make the 1st a tab anchor and then `float.new` → (180,80)-(980,580). With an A/B split, when only (600,100) 300×200 px exists over B, `float.new` on A → (50,100) 450×500 px (no shift) | machine | OQ-2 | yes | HIGH | NOT_RUN |
+| TC-003 | AC-003 | Shrink on a small anchor | Anchor 600×300 px | `float.new` | 540×270 px, 54×12 | machine | OQ-2 | yes | HIGH | NOT_RUN |
+| TC-005 | AC-005 | Clamp on move | F-1, a 400×300 px float at (100,100) | (a) band by (+900,+900) (b) from the initial state, (−900,−900) | (a) top-left (600,300) (b) (0,0) | machine | OQ-2 | yes | CRITICAL | NOT_RUN |
+| TC-006 | AC-006 | Display on tab switch and pty continuation | 2 tabs, one float of each of the 3 kinds (the pane anchor is in tab 1) | Show tab 2 and deliver `x` to the pty of the 2 hidden floats | Only the window anchor is displayed, position unchanged. `x` has entered the terminals of the 2 hidden floats | machine | OQ-2 | yes | CRITICAL | NOT_RUN |
+| TC-007 | AC-007 | Hidden while zoomed | F-1, a float on A | Zoom B, release | Hidden while zoomed, at its original position after release | machine | OQ-2 | yes | HIGH | NOT_RUN |
+| TC-008 | AC-008 | Anchor switch | F-1, pane anchor (A) 300×200 px at (100,100) | `float.cycle-anchor`, band by (+500,0), `float.cycle-anchor`, click the icon | tab → window → pane (B). On each switch the on-screen rectangle is unchanged, and right after it is front-most of the new layer | machine | OQ-2 | yes | CRITICAL | NOT_RUN |
+| TC-009 | AC-009 | Ratio following and lower limit | F-1, origin (0.1,0.1) size (0.2,0.2), band being dragged | Anchor to 500×300 px, then 1000×600 px | (50,30) 200×80 px, then (100,60) 200×120 px. The drag state continues | machine | OQ-2 | yes | CRITICAL | NOT_RUN |
+| TC-010 | AC-010 | Hidden below the lower limit | One float | Anchor to 150×60 px, then 1000×600 px | Hidden but existing, then displayed at its original ratio | machine | OQ-2 | yes | HIGH | NOT_RUN |
+| TC-011 | AC-011 | Layered z-order | Create P1, P2, T1, W1 in that order and overlap them. Click a split pane | Click P1, `float.focus-next` | W1,T1,P1,P2, then W1,T1,P2,P1 | machine | OQ-2 | yes | CRITICAL | NOT_RUN |
+| TC-012 | AC-012 | Collapse round trip (3 methods) | F-1, a normal float with focus at 80×24 | Collapse → expand with each of the collapse button, band double-click and `float.toggle-collapse` | For each method: band 20 px, width and top-left unchanged, focus goes to the return pane → to the float on expand, 0 pty size notifications, 80×24. Separately, press the collapse button with focus on a split pane → focus stays on the split pane | machine | OQ-2 | yes | CRITICAL | NOT_RUN |
+| TC-013 | AC-013 | Maximize round trip | F-1, (200,100) 400×300 px | `float.toggle-maximize`, maximize button | (0,0) 1000×600 px, 100×29, band present, 1 notification, then (200,100) 400×300 px | machine | OQ-2 | yes | HIGH | NOT_RUN |
+| TC-014 | AC-014 | Restrictions while maximized | A maximized float | (a) collapse → expand (b) band by (+50,+50) (c) right edge by (−50,0) (d) collapse a normal-state float, maximize button, `float.toggle-maximize`, expand | (a) maximized (b)(c) rectangle unchanged (d) stays collapsed, normal state on expand | machine | OQ-2 | yes | HIGH | NOT_RUN |
+| TC-015 | AC-015 | Focus movement | F-1, create F1,F2,F3 anchored to pane B and collapse F3. Click F1, click A. "Click B" is at (520,10) | `float.toggle-focus`, `float.focus-next` ×2, `float.focus-previous`, `float.toggle-focus`, click B, `float.focus-next`, click B, `float.focus-previous`, click B, click F1's content area, wheel and mouse move over F1 | Focus F1→F2→F1→F2→A→B→F1→B→F2→B→F1. Click, wheel and mouse move do not reach B, and F1 scrolls | machine | OQ-2 | yes | CRITICAL | NOT_RUN |
+| TC-017 | AC-017 | Close confirmation | `sleep 600` running in the split pane and its float | (a) close button (b) recreate and `tab.close` (c) recreate and close the split pane | (a)(b) confirmation → on approval only the float closes and focus goes to the return pane (c) confirmation with 2 running programs → both close | machine | OQ-2 | yes | CRITICAL | NOT_RUN |
+| TC-018 | AC-018 | Auto-approve | Auto-approve enabled, the same approval-wait screen prepared in a split pane and a float | Run auto-approve | The decisions are equal, and the approval input is written to the float's pty | machine | OQ-2 | yes | HIGH | NOT_RUN |
+| TC-020 | AC-020 | Session round trip | The Given of AC-020 | Save → read back | The Then of AC-020 (the tab anchor is restored collapsed and, on expand, is in the normal state at (300,200) 300×200 px. The window anchor is in the normal state at (200,100) 400×300 px. `float.toggle-focus` right after restore goes to the window-anchored float) | machine | OQ-2 | yes | HIGH | NOT_RUN |
+| TC-021 | AC-021 | Corrupt record, old file, disabled | (a) F-3 (b) a version-3 file (c) 1 float with `window-save-state` disabled | (a)(b) read (c) save process | (a) 1 restored (b) 0, normal (c) not written. The version written is 4 | machine | OQ-2 | yes | HIGH | NOT_RUN |
+| TC-022 | AC-022 | Limit | (a) 8 on the same split pane (b) 8 tab anchors + 1 pane anchor (c) 8 floats, 8 split panes | (a) `float.new` (b) `float.cycle-anchor` on the pane anchor (c) add a split pane | (a) no increase, toast (b) stays pane, toast (c) 9 split panes | machine | OQ-2 | yes | HIGH | NOT_RUN |
+| TC-023 | AC-023 | No-op with 0 floats | 0 floats | The 6 actions other than `float.new` | State and focus unchanged | machine | OQ-2 | yes | MEDIUM | NOT_RUN |
+| TC-024 | AC-024 | pty creation failure | A substitute that makes pty creation fail | `float.new` | Float count and focus unchanged, 1 error log line | machine | OQ-2 | yes | HIGH | NOT_RUN |
+| TC-025 | AC-025 | Discard during a drag | A float is being dragged | (a) close the anchor's split pane (b) discard by shell exit | No drag state, no float | machine | OQ-2 | yes | HIGH | NOT_RUN |
+| TC-026 | AC-026 | Resize | F-1, a float at (300,100) 400×300 px. (e) is a tab-anchored float at (500,100) 400×300 px with an A/B split. (f) creates F1 (100,100) 300×300 px and F2 (350,150) 300×200 px in that order on the same split pane (F2 is in front), then clicks (50,50) on the split pane to move focus to the split pane | (a) bottom-right corner (−2000,−2000) (b) bottom-right corner (+2000,+2000) (c) left edge (−50,0) (d) 8 handles outward by 10 px (e) press (497,200) and drag (−50,0) (f) press (402,250) and drag (+50,0) | (a) content area 200×60 px (b) bottom-right (1000,600) (c) 450 px, +5 columns, the last notification is the new grid (d) only the matching edge, by 10 px (e) float width 450 px, the divider stays at x=500 (f) F1 stays 300×300 px, F2 gains focus | machine | OQ-2 | yes | CRITICAL | NOT_RUN |
+| TC-027 | AC-027 | Key bindings | (a) defaults (b) 7 `keybind =` lines assigning `cmd+alt+1` to `cmd+alt+7` to `float.new` through `float.cycle-anchor` | Build the engine; for (b), look up each code | (a) the defaults are 2 actions, no collisions, `cmd+shift+f` unassigned (b) all 7 resolve | machine | OQ-2 | yes | HIGH | NOT_RUN |
+| TC-028 | AC-028 | Split operations on a float | A float has focus | Enumerate and run every action name that starts with `split.` | Split tree, zoom and focus unchanged | machine | OQ-2 | yes | MEDIUM | NOT_RUN |
+| TC-029 | AC-029 | Excluded windows | (a) Scratch Terminal (b) Quick Terminal has focus | `float.new` | Float count unchanged | machine | OQ-2 | yes | MEDIUM | NOT_RUN |
+| TC-031 | AC-031 | Not on external surfaces | One float | Generate the AppleScript, IPC and AX snapshots and the Overview layout | None contains the float's `PaneId` | machine | OQ-2 | yes | MEDIUM | NOT_RUN |
+| TC-032 | AC-032 | Existing gates | Built | `cargo test --workspace`, `cargo clippy --workspace` (outside the sandbox) | Both exit code 0, 0 clippy warnings | machine | The commands themselves | yes | CRITICAL | NOT_RUN |
+| TC-033 | AC-033 | Hidden floats are not drawn | (a) another tab (b) another pane zoomed (c) anchor 150×60 px | Build the draw plan | In every case the float is not in the plan | machine | OQ-2 | yes | HIGH | NOT_RUN |
+| TC-036 | AC-036 | Shell exit | Default settings, a float and a split pane | `exit` in each | The float's result is the same as the split pane's | machine | OQ-2 | yes | HIGH | NOT_RUN |
+| TC-037 | AC-037 | Anchor movement and disappearance | The Given of AC-037. `sleep 600` is running in the floats | (a) split pane to another tab (b) tab to another window (c) separately: close tab 1 / close the window / quit the app | (a) attaches to the same split pane at the same ratio (b) moves with the tab (c) running-program counts 2 / 3 / 3, ptys released after approval | machine | OQ-2 | yes | CRITICAL | NOT_RUN |
+| TC-038 | AC-038 | Focus on becoming hidden | (a) tab 1's float on A has focus, tab 2 has C (b) A's float has focus | (a) to tab 2, to tab 1 (b) anchor to 150×60 px, 1000×600 px | (a) C, and A on return (b) A, and A even after restoring | machine | OQ-2 | yes | HIGH | NOT_RUN |
+| TC-039 | AC-039 | Operations while collapsed | F-1, collapse a (500,250) 400×300 px float | (a) band by (+900,+900) (b) drag the right edge (c) `float.cycle-anchor` (d) expand | (a) band top-left (600,580) (b) unchanged (c) tab (d) top-left (600,300) | machine | OQ-2 | yes | HIGH | NOT_RUN |
+| TC-040 | AC-040 | Anchor switch while maximized | F-1, window anchor, normal-state (0,100) 800×500 px, maximized | `float.cycle-anchor`, `float.toggle-maximize` | (0,0) 500×600 px maximized, after unmaximizing (0,100) 500×500 px | machine | OQ-2 | yes | HIGH | NOT_RUN |
+| TC-041 | AC-041 | New creation from a float | F-1, A's float has focus | `float.new` | The new float's anchor is A | machine | OQ-2 | yes | MEDIUM | NOT_RUN |
+| TC-042 | AC-042 | Title band click | F1 (back), F2 (front, collapsed), focus is on a split pane | Click F1's band, then F2's band in turn | F1 front-most + focus, then F2 front-most with focus staying on F1 | machine | OQ-2 | yes | HIGH | NOT_RUN |
+| TC-043 | AC-043 | Jump from the sidebar (special states) | (a) A's float while B is zoomed (b) a float in another window (c) a pane anchor with anchor 150×60 px | Select each card | (a) zoom released + float gets focus (b) window to front + float gets focus (c) the anchor's split pane gets focus | machine | OQ-2 | yes | HIGH | NOT_RUN |
+| TC-044 | AC-044 | Font size change | F-1, (200,100) 400×300 px, 40×14 | Make the cell 20×40 px | Rectangle unchanged, title band 40 px, 20×6, the last notification is 20×6 | machine | OQ-2 | yes | HIGH | NOT_RUN |
 
-### TC-004: タイトル帯の構成
+### TC-004: Composition of the title band
 - Verifies: `AC-004` (`REQ-002`)
-- Mode: human · Must-have: yes · Automation ref: N/A（目視） · Result: `NOT_RUN`
-- Precondition: F-0 で起動。
+- Mode: human · Must-have: yes · Automation ref: N/A (visual) · Result: `NOT_RUN`
+- Precondition: Start with F-0.
 - Steps:
-  1. `float.new` を実行する。
-  2. フロートを含むスクリーンショットを撮る。
-- Expected result: 実装者が、タイトル帯に左からアンカー種別アイコン、タイトル、エージェント状態の領域、最大化、折りたたみ、閉じるの6要素を確認できる。欠けまたは順序違いがあれば FAIL。
-- Teardown: フロートを閉じる。
+  1. Run `float.new`.
+  2. Take a screenshot that includes the float.
+- Expected result: The implementer can confirm the 6 elements in the title band, from the left: anchor kind icon, title, the agent state area, maximize, collapse, close. FAIL if any is missing or out of order.
+- Teardown: Close the float.
 
-### TC-016: 折りたたみ中の入力待ち表示
+### TC-016: Waiting-for-input display while collapsed
 - Verifies: `AC-016` (`REQ-014`)
-- Mode: human · Must-have: yes · Automation ref: N/A（目視） · Result: `NOT_RUN`
-- Precondition: F-0 で起動。サイドバーを開く。分割ペインで F-2a を実行し、そのカードの attention 色を控える。
+- Mode: human · Must-have: yes · Automation ref: N/A (visual) · Result: `NOT_RUN`
+- Precondition: Start with F-0. Open the sidebar. Run F-2a in a split pane and note that card's attention colour.
 - Steps:
-  1. フロートを作り、`sleep 5; ` に続けて F-2a のコマンドを実行する。
-  2. 5秒以内にフロートを折りたたむ。
-  3. 10秒待ってスクリーンショットを撮る。
-  4. フロートを閉じ、F-2b、F-2c でそれぞれ 1〜3 を繰り返す。
-- Expected result: 実装者が各回で次の3点を確認できる: フロートが折りたたまれたまま、タイトル帯の背景色が控えた attention 色と同じ、状態ラベルが F-2a では `approval needed`、F-2b では `reply needed`、F-2c では `error`。1点でも欠ければ FAIL。
-- Teardown: フロートを閉じる。
+  1. Create a float and run `sleep 5; ` followed by the F-2a command.
+  2. Collapse the float within 5 seconds.
+  3. Wait 10 seconds and take a screenshot.
+  4. Close the float, and repeat 1 to 3 with F-2b and F-2c.
+- Expected result: The implementer can confirm the following 3 points each time: the float stays collapsed, the title band's background colour is the same as the noted attention colour, and the state label is `approval needed` for F-2a, `reply needed` for F-2b and `error` for F-2c. FAIL if even one point is missing.
+- Teardown: Close the float.
 
-### TC-019: サイドバーと通知からのジャンプ
+### TC-019: Jump from the sidebar and notifications
 - Verifies: `AC-019` (`REQ-016`)
-- Mode: human · Must-have: yes · Automation ref: N/A（目視） · Result: `NOT_RUN`
-- Precondition: F-0 で起動。タブ1でフロートを作り、`sleep 8; ` に続けて F-2a のコマンドを実行して折りたたむ。タブ2を作って表示する。サイドバーを開き、8秒待つ。
+- Mode: human · Must-have: yes · Automation ref: N/A (visual) · Result: `NOT_RUN`
+- Precondition: Start with F-0. In tab 1, create a float, run `sleep 8; ` followed by the F-2a command, and collapse it. Create and show tab 2. Open the sidebar and wait 8 seconds.
 - Steps:
-  1. サイドバーでそのフロートのカードを確認し、選択する。
-  2. Precondition をやり直し、`NextNotification`（macOS `cmd+shift+j`、Linux `ctrl+shift+j`）を実行する。
-- Expected result: 実装者が次を確認できる: カードにフロートの印がある。どちらの操作でもタブ1が表示され、フロートが展開されており、打鍵がフロートに入る。1点でも欠ければ FAIL。
-- Teardown: タブを閉じる。
+  1. Check that float's card in the sidebar, and select it.
+  2. Redo the Precondition and run `NextNotification` (macOS `cmd+shift+j`, Linux `ctrl+shift+j`).
+- Expected result: The implementer can confirm the following: the card carries the float mark. With both operations, tab 1 is shown, the float is expanded, and keystrokes go into the float. FAIL if even one is missing.
+- Teardown: Close the tabs.
 
-### TC-030: 背景が透けない
+### TC-030: The background does not show through
 - Verifies: `AC-030` (`REQ-022`)
-- Mode: human · Must-have: yes · Automation ref: N/A（目視） · Result: `NOT_RUN`
-- Precondition: 設定に `background-opacity = 0.5`。分割ペインで `yes ABCDEFGHIJ | head -200` を実行。
+- Mode: human · Must-have: yes · Automation ref: N/A (visual) · Result: `NOT_RUN`
+- Precondition: `background-opacity = 0.5` in the settings. Run `yes ABCDEFGHIJ | head -200` in a split pane.
 - Steps:
-  1. `float.new` を実行する。
-  2. フロートの内容領域を 400% に拡大したスクリーンショットを撮る。
-- Expected result: 実装者がフロートの矩形内に `ABCDEFGHIJ` を判読できない。判読できれば FAIL。
-- Teardown: 設定を戻す。
+  1. Run `float.new`.
+  2. Take a screenshot with the float's content area magnified to 400%.
+- Expected result: The implementer cannot read `ABCDEFGHIJ` inside the float's rectangle. FAIL if it can be read.
+- Teardown: Restore the settings.
 
-### TC-034: 両 OS での実行
+### TC-034: Run on both OSes
 - Verifies: `AC-034` (`CFR-004`)
-- Mode: human · Must-have: yes · Automation ref: N/A（実行記録の確認） · Result: `NOT_RUN`
-- Precondition: §3 の (a) と (b) の環境。
+- Mode: human · Must-have: yes · Automation ref: N/A (checking the execution record) · Result: `NOT_RUN`
+- Precondition: The environments (a) and (b) of §3.
 - Steps:
-  1. このスイートを (a) で実行し、§9 に1行記録する。
-  2. 同じコミットで (b) で実行し、§9 に1行記録する。
-- Expected result: §9 に同じ Build の行が2つあり、どちらも must-have の Failed と Blocked が 0。
+  1. Run this suite on (a) and record one row in §9.
+  2. Run it on (b) at the same commit and record one row in §9.
+- Expected result: §9 has two rows with the same Build, and both have must-have Failed and Blocked of 0.
 - Teardown: none required
 
-### TC-035: オーバーレイがフロートより上
+### TC-035: Overlays are above floats
 - Verifies: `AC-035` (`REQ-008`)
-- Mode: human · Must-have: yes · Automation ref: N/A（目視） · Result: `NOT_RUN`
-- Precondition: F-0 で起動。フロートを作り、最大化する。フロート内で `sleep 600` を実行する。
+- Mode: human · Must-have: yes · Automation ref: N/A (visual) · Result: `NOT_RUN`
+- Precondition: Start with F-0. Create a float and maximize it. Run `sleep 600` in the float.
 - Steps:
-  1. コマンドパレットを開き、スクリーンショットを撮って閉じる。
-  2. フロートの閉じるボタンを押して確認ダイアログを出し、スクリーンショットを撮ってキャンセルする。
-  3. Overview を開き、スクリーンショットを撮って閉じる。
-- Expected result: 実装者が3枚それぞれで、オーバーレイの領域にフロートの文字やタイトル帯が重なっていないことを確認できる。1枚でも重なっていれば FAIL。
-- Teardown: フロートを閉じる。
+  1. Open the command palette, take a screenshot, and close it.
+  2. Press the float's close button to bring up the confirmation dialog, take a screenshot, and cancel.
+  3. Open Overview, take a screenshot, and close it.
+- Expected result: In each of the 3 screenshots, the implementer can confirm that no float text or title band overlaps the overlay's area. FAIL if it overlaps in even one.
+- Teardown: Close the float.
 
 ## 6. Non-functional procedures (`CFR-n`)
 
-N/A。負荷や標本を伴う測定がない。CFR-001〜CFR-004 は §5 の TC-032、TC-012、TC-033、TC-034 が担う。
+N/A. There is no measurement that involves load or sampling. CFR-001 to CFR-004 are covered by TC-032, TC-012, TC-033 and TC-034 in §5.
 
 ## 7. Coverage matrix
 
 | AC | Must-have | Covered by | Mode | Gap |
 |----|-----------|-----------|------|-----|
-| AC-001〜AC-044（下記6件を除く） | yes | 同じ番号の TC | machine | — |
-| AC-004, AC-016, AC-019, AC-030, AC-034, AC-035 | yes | 同じ番号の TC | human | — |
+| AC-001 to AC-044 (excluding the 6 below) | yes | The TC with the same number | machine | — |
+| AC-004, AC-016, AC-019, AC-030, AC-034, AC-035 | yes | The TC with the same number | human | — |
 
 ## 8. Defect handling
 
 | Severity | Definition | Blocks exit |
 |----------|-----------|-------------|
-| S1 | must-have の AC を満たさない。またはフロート内のプロセスが意図せず終了する | yes |
-| S2 | must-have の AC を回避手順でしか満たせない | yes |
-| S3 | must-have でない AC を満たさない | no（記録） |
-| S4 | 見た目や文言 | no（記録） |
+| S1 | Does not satisfy a must-have AC, or a process inside a float exits unintentionally | yes |
+| S2 | A must-have AC can be satisfied only by a workaround procedure | yes |
+| S3 | Does not satisfy an AC that is not must-have | no (record) |
+| S4 | Appearance or wording | no (record) |
 
-must-have の失敗は、ビルドの欠陥（修正して再実行）か、書かれたとおりには作れない AC かに振り分ける。後者はここで読み替えず、`spec-dialogue floating-panes` で仕様を改訂する。
+A must-have failure is sorted into either a build defect (fix and re-run) or an AC that cannot be built as written. The latter is not reinterpreted here; the spec is revised with `spec-dialogue floating-panes`.
 
 ## 9. Execution record
 
@@ -184,10 +184,10 @@ must-have の失敗は、ビルドの欠陥（修正して再実行）か、書�
 
 ## 10. Residual risk
 
-- machine モードのケースは状態と幾何の計算を確かめる。実際の画面でその矩形どおりに描かれることは、human の5ケース（TC-004, 016, 019, 030, 035）が触れる範囲でしか確かめていない。
-- macOS のネイティブタブ切替でウィンドウアンカーのフロートが描き直される瞬間のちらつきは判定していない。
-- human のケースは1人の目視に依る。
-- Linux は1構成でのみ実行する（OQ-3）。
+- Machine-mode cases check the computation of state and geometry. That the rectangles are actually drawn as computed on the real screen is checked only to the extent the 5 human cases (TC-004, 016, 019, 030, 035) touch it.
+- The flicker at the moment a window-anchored float is redrawn on a macOS native tab switch is not judged.
+- Human cases depend on one person's visual check.
+- Linux is run on only one configuration (OQ-3).
 
 ## 11. Sign-off
 

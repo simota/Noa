@@ -1,265 +1,265 @@
-# エージェント自動化サーフェス強化（AppleScript v2 + Accessibility）
+# Agent Automation Surface Upgrade (AppleScript v2 + Accessibility)
 
 | | |
 |---|---|
 | slug | agent-automation |
-| status | locked（2026-10-17、owner サインオフ） |
+| status | locked (2026-10-17, owner sign-off) |
 | owner | simota |
 | as-of | 2026-10-17 |
-| review trigger | Ghostty の `macos/Ghostty.sdef` 変更、winit メジャー更新、または `docs/specs/applescript.md` の改訂 |
+| review trigger | A change to Ghostty's `macos/Ghostty.sdef`, a winit major update, or a revision of `docs/specs/applescript.md` |
 | depth | standard |
 | build path | one-shot autonomous build |
 
-## L0：Vision
-- Problem：エージェントが Noa を外から操作して出力を読み返すには、今は noa-server（`noa.getText`/`sendText`/`split`、`docs/specs/noa-server.md:70-76`）を使うしかない。noa-server は既定で無効で、使うには起動とトークンの払い出しが必要になる。設定なしで使える AppleScript は Ghostty 1.3 の辞書より狭く、出力を読めず、実際のキーイベントも送れない（`input text` は paste 扱い）。AX ツリーには端末ペインが一切出てこないので、AX を読むアシスタントやエージェントからは Noa の中身が見えない。（FRAME 改訂 2026-10-17：反証パネルの指摘を受けて書き直し、ratified）
-- Audience：(a) shell から `osascript` で Noa を操作するエージェント。設定もトークンも使わない。(b) macOS の AX ツリーを読むアシスタントや、AX ベースのエージェントフレームワーク。スクリーンショットと座標操作だけで動く computer use クライアントには、AX は何も足さない（Anthropic の computer use ツールの公開仕様）。（elicited 2026-10-17、改訂 ratified）
-- Job to be done：設定なしで、エージェントが Noa の terminal を特定し、キーやテキストを送り、その結果をテキストとして読み返すこと。
-- Success definition：1 本の osascript で「split → input text → contents 読み取り」が完走すること（AC-010）。AX を読むクライアントから各ペインの画面テキストと位置が取れること（AC-019/020）。Ghostty.sdef の用語がすべて Noa の辞書にあること（AC-028）。
-- Existing assets & constraints（Reuse scan 2026-10-17、HEAD 25577d2）
-  - 既存 AppleScript：`assets/Noa.sdef`、`crates/noa-app/src/macos_applescript.rs`、`crates/noa-app/src/app/applescript.rs`。spec は `docs/specs/applescript.md`（locked）。今は `coregetd`、`coreclos`、`miscactv` と Noa Suite だけを自前で登録している（`macos_applescript.rs:640-662`）。それ以外の標準イベント（`count` など）には、`NSAppleScriptEnabled` によって Cocoa Scripting が応答している。
-  - C1：Apple Event は main スレッドで dispatch される。ハンドラ内でイベントループの応答を待つことは禁止。読み取りは `Arc<Mutex<AppStateSnapshot>>` から行う（applescript Amendment 1.1）。`sync_applescript_snapshot` は、signature が変わるか 500 ms 経つと snapshot を丸ごと置き換える。
-  - C2：`PaneId` は `split_tree/tree/types.rs:31` のグローバル `AtomicU64`。tab id は今 `u64::from(WindowId)`。`WindowGroupId` は `App::next_group_id` が採番する（`lifecycle.rs:729`）。既存の `UserEvent::WriteText`/`RaiseWindow`/`ClosePane` は winit の `WindowId` を運ぶ（`events.rs:100-125`）。`UserEvent` は `Eq` を derive している。
-  - C3：winit 0.30.13 の macOS 実装に accessibility の実装はない。NSView は既定で AX から無視されるので、子要素の AX 上の親は、無視されていない最も近い祖先になる。
-  - C4：フォントサイズはタブ単位（`WindowState.font_px`、`state.rs:262`）。
-  - C5：`PtyConfig`（`noa-pty/src/pty.rs:21`）は環境変数を受け取れない。`Pty` は子の pid も tty 名も公開していない。wait-after-command は未実装。
-  - C6：io thread は最大 64 KiB のチャンクごとに `Terminal` のロックを握る（`io_thread/feed.rs:220`）。リサイズ時の reflow もロックの中で行う。
-  - 再利用：`ipc_bridge.rs:498` の `screen_text()`（今は private。`pub(crate)` にする）、`Terminal::scrollback_text_tail()`（`noa-grid/src/terminal.rs:427`、active screen を含む全履歴の末尾）、`Terminal::selected_text()`、`encode_key_with_modes`（`input/key.rs:82`）、`encode_mouse_input/motion/wheel`（`mouse.rs:244-300`）、`APPLESCRIPT_INPUT_TEXT_CAP`（8 MiB）、`noa_ipc::DEFAULT_TEXT_MAX_BYTES`（256 KiB）、`noa_ipc::truncate_tail`。
-  - 準拠の基準：Ghostty `macos/Ghostty.sdef` と `macos/Sources/Features/AppleScript/*.swift`（main、2026-10-17 取得）。必要な部分は Appendix A/B としてこの文書に取り込んである。
+## L0: Vision
+- Problem: To operate Noa from outside and read its output back, an agent today has to use noa-server (`noa.getText`/`sendText`/`split`, `docs/specs/noa-server.md:70-76`). noa-server is disabled by default, and using it requires starting it and issuing a token. The AppleScript that works without setup is narrower than the Ghostty 1.3 dictionary: it cannot read output and cannot send real key events (`input text` is treated as a paste). Terminal panes do not appear in the AX tree at all, so an assistant or agent that reads AX cannot see the inside of Noa. (FRAME revised 2026-10-17: rewritten after the falsification panel's findings, ratified.)
+- Audience: (a) Agents that drive Noa from a shell with `osascript`, using no config and no token. (b) Assistants that read the macOS AX tree, and AX-based agent frameworks. AX adds nothing for computer-use clients that work only from screenshots and coordinate actions (Anthropic's public specification of the computer use tool). (elicited 2026-10-17, revision ratified)
+- Job to be done: Without any setup, an agent identifies a Noa terminal, sends it keys or text, and reads the result back as text.
+- Success definition: One osascript runs "split → input text → read contents" to completion (AC-010). An AX-reading client can get each pane's screen text and position (AC-019/020). Every term in Ghostty.sdef exists in Noa's dictionary (AC-028).
+- Existing assets & constraints (Reuse scan 2026-10-17, HEAD 25577d2)
+  - Existing AppleScript: `assets/Noa.sdef`, `crates/noa-app/src/macos_applescript.rs`, `crates/noa-app/src/app/applescript.rs`. The spec is `docs/specs/applescript.md` (locked). Today Noa registers only `coregetd`, `coreclos`, `miscactv` and the Noa Suite itself (`macos_applescript.rs:640-662`). Cocoa Scripting answers the other standard events (such as `count`) because of `NSAppleScriptEnabled`.
+  - C1: Apple Events are dispatched on the main thread. A handler must not wait for the event loop to respond. Reads come from `Arc<Mutex<AppStateSnapshot>>` (applescript Amendment 1.1). `sync_applescript_snapshot` replaces the whole snapshot when its signature changes or 500 ms have passed.
+  - C2: `PaneId` is a global `AtomicU64` at `split_tree/tree/types.rs:31`. The tab id is currently `u64::from(WindowId)`. `WindowGroupId` is numbered by `App::next_group_id` (`lifecycle.rs:729`). The existing `UserEvent::WriteText`/`RaiseWindow`/`ClosePane` carry winit's `WindowId` (`events.rs:100-125`). `UserEvent` derives `Eq`.
+  - C3: The macOS implementation of winit 0.30.13 has no accessibility implementation. An NSView is ignored by AX by default, so the AX parent of a child element is the nearest ancestor that is not ignored.
+  - C4: Font size is per tab (`WindowState.font_px`, `state.rs:262`).
+  - C5: `PtyConfig` (`noa-pty/src/pty.rs:21`) cannot take environment variables. `Pty` exposes neither the child's pid nor its tty name. wait-after-command is not implemented.
+  - C6: The io thread holds the `Terminal` lock for each chunk of up to 64 KiB (`io_thread/feed.rs:220`). Reflow on resize also runs inside the lock.
+  - Reuse: `screen_text()` at `ipc_bridge.rs:498` (currently private; make it `pub(crate)`), `Terminal::scrollback_text_tail()` (`noa-grid/src/terminal.rs:427`, the tail of the whole history including the active screen), `Terminal::selected_text()`, `encode_key_with_modes` (`input/key.rs:82`), `encode_mouse_input/motion/wheel` (`mouse.rs:244-300`), `APPLESCRIPT_INPUT_TEXT_CAP` (8 MiB), `noa_ipc::DEFAULT_TEXT_MAX_BYTES` (256 KiB), `noa_ipc::truncate_tail`.
+  - Conformance baseline: Ghostty `macos/Ghostty.sdef` and `macos/Sources/Features/AppleScript/*.swift` (main, fetched 2026-10-17). The parts we need are included in this document as Appendix A/B.
 
 ## Glossary
 | Term | Definition | Not to be called | Code identifier |
 |------|-----------|------------------|-----------------|
-| window | ネイティブタブを束ねたタブグループ 1 つ | tab group | `WindowGroupId` |
-| tab | ネイティブ NSWindow タブ 1 枚 | window（AppleScript 文脈では） | `WindowState` / 新設 `TabId` |
-| terminal | split の 1 ペイン | pane、surface（辞書・AC 上で） | `PaneId` |
-| surface configuration | 生成時の設定値をまとめた AE record（6 フィールド） | config、profile | `SurfaceConfiguration` |
-| pending object | 事前採番済みで、まだ生成処理が終わっていない window/tab/terminal | — | `PendingRegistry` の要素 |
-| contents | terminal が**今表示している** viewport のテキスト。ユーザーが scrollback を遡っていれば、その位置の行になる | screen text、buffer | `screen_text(visible_rows())` |
-| scrollback | active screen を含む全履歴の末尾 256 KiB | history | `scrollback_text_tail` |
-| AX element | terminal 1 つに対応する NSAccessibility 要素 | accessibility node | `TerminalAxElement` |
+| window | One tab group that bundles native tabs | tab group | `WindowGroupId` |
+| tab | One native NSWindow tab | window (in an AppleScript context) | `WindowState` / new `TabId` |
+| terminal | One pane of a split | pane, surface (in the dictionary and in ACs) | `PaneId` |
+| surface configuration | An AE record (6 fields) that gathers the settings used at creation | config, profile | `SurfaceConfiguration` |
+| pending object | A window/tab/terminal that has an id assigned in advance but whose creation has not finished | — | element of `PendingRegistry` |
+| contents | The text of the viewport the terminal is **showing now**. If the user has scrolled back, these are the lines at that position | screen text, buffer | `screen_text(visible_rows())` |
+| scrollback | The last 256 KiB of the whole history, including the active screen | history | `scrollback_text_tail` |
+| AX element | The NSAccessibility element that corresponds to one terminal | accessibility node | `TerminalAxElement` |
 
-## L1：Requirements
+## L1: Requirements
 
 ### Functional (`REQ-n`)
 | ID | Requirement | Priority | Source |
 |----|-------------|----------|--------|
-| REQ-001 | 参照プロパティ：application `front window`（key な tab が属する window。key がなければ最後に key だった window）、window `selected tab`、tab `focused terminal`、terminal `pid`・`tty`。application と window に `terminals` 要素を追加する。index 形式、id 形式、every 形式（`terminals of window 1` はリストを返す）で解決できる。index の順序は、window は `window_order` で最初に現れる順、tab は `window_order` 内の相対順、terminal は `PaneId` の昇順 | MUST | elicited（範囲 1） |
-| REQ-002 | コマンド `close tab <tab>`、`close window <window>`、`count`（`corecnte`）、`exists`（`coredoex`）を自前で登録する（Cocoa Scripting の応答を置き換える）。`count windows` は window（タブグループ）の数を返す。旧形式 `close tab 2 of window 1` は Amendment 2 により breaking change | MUST | grounded（Ghostty.sdef）+ elicited（close の競合の回答、Amendment 2） |
-| REQ-003 | `new surface configuration [from <record>]` が 6 フィールドの record を返す。`new window`、`new tab`、`split` が `with configuration <record>` を受け付ける。既存の `initial working directory` / `command` パラメータも引き続き受け付ける | MUST | elicited（範囲 1） |
-| REQ-004 | surface configuration の意味は L2.4 に従う。`font size` は new window/new tab で作られる tab にだけ反映し、split では無視する | MUST | elicited（font size の回答） |
-| REQ-005 | `wait after command` が true のとき、子プロセスが終了しても（`command` の有無にかかわらず）ペインを残し、`Process exited. Press any key to close the terminal.` を表示する。次のキー押下（物理または `send key`）でペインを閉じる | MUST | elicited（wait after の回答） |
-| REQ-006 | `new tab in <window>` で指定 window（pending でもよい）に tab を追加する。`in` を省略すると、AE を受け取った時点の live な `front window` に追加する（pending の window は対象にしない。live な window がなければ新しい window を作る）。new window と new tab で作った tab は、UI の `cmd+n`/`cmd+t` と同じく Noa 内で key・選択状態になる。アプリの activate はしない | MUST | elicited（範囲 1）+ ASSUME-6 |
-| REQ-007 | `split <terminal> direction <dir> [with configuration]` は、指定した terminal を分割する。旧形式 `split <dir>` は focused terminal を分割する | MUST | elicited + 互換（REQ-013） |
-| REQ-008 | 生成コマンドは作ったオブジェクトの id 形式の参照を返す（new window→window、new tab→tab、split→terminal）。返した参照（とその要素：`selected tab of w`、`focused terminal of b`）は、直後の Apple Event からすぐ解決でき、操作対象にできる | MUST | elicited（D2 の選択） |
-| REQ-009 | `perform action <s> on <terminal>`。対象 terminal に focus を移してから dispatch する（ASSUME-3）。`on` を省略すると focused terminal が対象。dispatch したら `true` を返す | MUST | elicited（範囲 1） |
-| REQ-010 | `send key <name> [action press\|release] [modifiers <s>] [to <terminal>]`。キー名は Appendix A。現在のキーボード配列で 1 回だけ変換し、物理キーの押下と同じエンコーダ経路（DECCKM、kitty、modifyOtherKeys、`macos-option-as-alt` を含む）を通す | MUST | elicited（配列の回答）+ grounded |
-| REQ-011 | `send mouse button`、`send mouse position`、`send mouse scroll` を、対象 terminal 上の同じ位置で物理イベントが起きたのと同じ効果にする。OS のカーソルは動かさない | MUST | elicited（範囲 2） |
-| REQ-012 | Noa Extensions suite：terminal の `contents`、`selection`、`scrollback` プロパティ（読み取り専用。Glossary の定義どおり） | MUST | elicited（範囲 3） |
-| REQ-013 | `docs/specs/applescript.md` の既存の動詞とプロパティは、すべてそのまま動き続ける | MUST | derived from REQ-002/003/007 |
-| REQ-014 | 各 terminal を AX element として公開する。属性は L2.2 の AX 表のとおりで、すべて読み取り専用 | MUST | elicited（範囲 4） |
-| REQ-015 | AX の子要素一覧と frame は、ペイン構成の変化（split、close、divider の移動、window のリサイズ）を適用する main スレッドの処理の中で更新する | MUST | derived from REQ-014 |
+| REQ-001 | Reference properties: application `front window` (the window that the key tab belongs to; if there is no key tab, the window that was key last), window `selected tab`, tab `focused terminal`, terminal `pid` and `tty`. Add a `terminals` element to application and window. These resolve by index form, id form and every form (`terminals of window 1` returns a list). Index order: windows by first appearance in `window_order`; tabs by relative order within `window_order`; terminals by ascending `PaneId` | MUST | elicited (scope 1) |
+| REQ-002 | Register the commands `close tab <tab>`, `close window <window>`, `count` (`corecnte`) and `exists` (`coredoex`) ourselves (replacing Cocoa Scripting's answer). `count windows` returns the number of windows (tab groups). The old form `close tab 2 of window 1` is a breaking change under Amendment 2 | MUST | grounded (Ghostty.sdef) + elicited (answer on the close conflict, Amendment 2) |
+| REQ-003 | `new surface configuration [from <record>]` returns a record with 6 fields. `new window`, `new tab` and `split` accept `with configuration <record>`. The existing `initial working directory` / `command` parameters stay accepted | MUST | elicited (scope 1) |
+| REQ-004 | The meaning of surface configuration follows L2.4. `font size` applies only to the tab created by new window/new tab, and is ignored by split | MUST | elicited (font size answer) |
+| REQ-005 | When `wait after command` is true, keep the pane after the child process exits (whether or not `command` is given) and show `Process exited. Press any key to close the terminal.` The next key press (physical or `send key`) closes the pane | MUST | elicited (wait after answer) |
+| REQ-006 | `new tab in <window>` adds a tab to the given window (it may be pending). When `in` is omitted, the tab is added to the live `front window` at the moment the AE is received (a pending window is not a target; if there is no live window, a new window is created). Tabs created by new window and new tab become key and selected inside Noa, the same as UI `cmd+n`/`cmd+t`. The app is not activated | MUST | elicited (scope 1) + ASSUME-6 |
+| REQ-007 | `split <terminal> direction <dir> [with configuration]` splits the given terminal. The old form `split <dir>` splits the focused terminal | MUST | elicited + compatibility (REQ-013) |
+| REQ-008 | A creation command returns an id-form reference to the object it created (new window→window, new tab→tab, split→terminal). The returned reference (and its elements: `selected tab of w`, `focused terminal of b`) can be resolved right away by the next Apple Event and used as a target | MUST | elicited (choice of D2) |
+| REQ-009 | `perform action <s> on <terminal>`. Move focus to the target terminal, then dispatch (ASSUME-3). With `on` omitted, the focused terminal is the target. Returns `true` once dispatched | MUST | elicited (scope 1) |
+| REQ-010 | `send key <name> [action press\|release] [modifiers <s>] [to <terminal>]`. Key names are in Appendix A. Translate once with the current keyboard layout and pass through the same encoder path as a physical key press (including DECCKM, kitty, modifyOtherKeys and `macos-option-as-alt`) | MUST | elicited (layout answer) + grounded |
+| REQ-011 | `send mouse button`, `send mouse position` and `send mouse scroll` have the same effect as a physical event at the same position on the target terminal. The OS cursor does not move | MUST | elicited (scope 2) |
+| REQ-012 | Noa Extensions suite: the terminal properties `contents`, `selection` and `scrollback` (read-only; as defined in the Glossary) | MUST | elicited (scope 3) |
+| REQ-013 | Every existing verb and property in `docs/specs/applescript.md` keeps working unchanged | MUST | derived from REQ-002/003/007 |
+| REQ-014 | Expose each terminal as an AX element. The attributes are as in the AX table in L2.2, all read-only | MUST | elicited (scope 4) |
+| REQ-015 | The AX child list and frame are updated inside the main-thread code that applies a change of pane layout (split, close, divider move, window resize) | MUST | derived from REQ-014 |
 
 ### Cross-functional (`CFR-n`)
 | ID | Requirement | Measure / criterion | Target / required outcome | Verified how | Priority | Source |
 |----|-------------|---------------------|---------------------------|--------------|----------|--------|
-| CFR-001 | main スレッドの読み取りコスト | ロック取得を含む抽出 1 回分の時間（release ビルド）。(a) 200×60 全セル全角の `contents`、競合なし、(b) (a) と同じだが、別スレッドが 10 MB を 64 KiB チャンクで `Stream` に流し続ける、(c) 256 KiB の `scrollback`、競合なし | (a) p95 ≤ 1 ms、(b) p99 ≤ 8.3 ms（120 Hz の 1 フレーム）、(c) p95 ≤ 4.2 ms（半フレーム）。各 1000 回 | `#[ignore]` 付きの計測テストの出力 | HIGH | derived（C1、C6） |
-| CFR-002 | 問い合わせがないときのコストはゼロ | AX と AE の値計算は getter の中だけで行い、定期処理やスレッドは増やさない／idle RSS | 新しいタイマー・スレッドは 0（レビュー）。idle RSS は main 比 +1 MiB 以下 | コードレビュー + `bench/` の idle 計測 | HIGH | derived（Noa の省メモリ方針） |
-| CFR-003 | スレッド規律 | AE と AX のハンドラが、イベントループ・チャネル・condvar を待たず、winit オブジェクトに触れない（`Terminal` の mutex は CFR-001 の範囲で可） | 該当箇所 0（レビュー） | コードレビュー | CRITICAL | grounded（applescript Amendment 1.1） |
+| CFR-001 | Main-thread read cost | Time of one extraction including lock acquisition (release build). (a) `contents` of a 200×60 all-wide-character grid, no contention; (b) the same as (a), but another thread keeps feeding 10 MB into `Stream` in 64 KiB chunks; (c) 256 KiB `scrollback`, no contention | (a) p95 ≤ 1 ms, (b) p99 ≤ 8.3 ms (one frame at 120 Hz), (c) p95 ≤ 4.2 ms (half a frame). 1000 runs each | Output of `#[ignore]` measurement tests | HIGH | derived (C1, C6) |
+| CFR-002 | Zero cost when nobody asks | AX and AE values are computed only inside getters, and no periodic work or thread is added / idle RSS | 0 new timers or threads (review). Idle RSS no more than +1 MiB against main | Code review + idle measurement in `bench/` | HIGH | derived (Noa's low-memory policy) |
+| CFR-003 | Thread discipline | AE and AX handlers do not wait on the event loop, a channel or a condvar, and do not touch winit objects (the `Terminal` mutex is allowed within CFR-001) | 0 occurrences (review) | Code review | CRITICAL | grounded (applescript Amendment 1.1) |
 
-## L2：Detail
+## L2: Detail
 
 ### L2.1 Data model
 | Entity | Field | Type | Constraints | Default | Nullable | Owned by |
 |--------|-------|------|-------------|---------|----------|----------|
-| `PendingRegistry` | window/tab/terminal の仮エントリ | 独立した `Arc<Mutex<…>>`（snapshot とは別） | AE ハンドラが挿入する。`sync_applescript_snapshot` は毎回、実体の後ろに pending をマージする。削除は 2 通り：(1) 実体のトポロジに同じ id が現れた sync、(2) 生成に失敗したときに UserEvent の処理側が明示的に削除 | 空 | — | AE ハンドラ / main |
-| 仮エントリの位置 | — | — | window は最後、tab はその window の最後、terminal はその tab の最後。live な容器の `front window`・`selected tab`・`focused terminal` の結果にはならない。pending な容器の中では、最後に追加した pending な子がその容器の `selected tab`・`focused terminal` になる（`selected tab of w`、`focused terminal of b` が解決できる） | — | — | — |
-| TerminalSnapshot | `terminal` | `Arc<Mutex<Terminal>>` | contents/selection/scrollback 用。pending の間は None（読むと `""`） | — | yes | main（sync） |
-| TerminalSnapshot | `pid` / `tty` | `u32` / `String` | spawn 時に `Pty` から取得する（新しく公開する）。取れなければ missing value | — | yes | main |
-| TabId | — | `u64`（新設のグローバル `AtomicU64`） | AppleScript の tab id。`u64::from(WindowId)` を置き換える | — | no | `WindowState` |
-| WindowGroupId 採番 | — | `next_group_id` をグローバル `AtomicU64` に変更 | AE ハンドラから事前採番できるようにする | — | no | `lifecycle.rs` |
-| UserEvent の宛先 | — | 新しく作るイベントと pending を対象にするイベントは `PaneId`（生成系はさらに事前採番した `TabId`/`WindowGroupId`）を運ぶ | main 側は pane → tab を検索して解決する。既存イベントの `WindowId` フィールドは、pane から解決できるときは使わない | — | — | — |
-| `SurfaceConfigPayload` | 6 フィールド | `Eq` を満たす型。font size は 1/100 pt 単位の `u32` | `SpawnTab` と `Split` 系のイベントに載せる | — | — | — |
+| `PendingRegistry` | Provisional entries for window/tab/terminal | A separate `Arc<Mutex<…>>` (apart from the snapshot) | AE handlers insert into it. `sync_applescript_snapshot` merges the pending entries behind the real ones on every run. Removal happens in two ways: (1) a sync where the same id appears in the real topology; (2) explicit removal by the UserEvent handler when creation fails | empty | — | AE handler / main |
+| Position of a provisional entry | — | — | A window goes last, a tab goes last in its window, a terminal goes last in its tab. It never becomes the result of `front window`, `selected tab` or `focused terminal` of a live container. Inside a pending container, the pending child added last becomes that container's `selected tab` / `focused terminal` (so `selected tab of w` and `focused terminal of b` resolve) | — | — | — |
+| TerminalSnapshot | `terminal` | `Arc<Mutex<Terminal>>` | For contents/selection/scrollback. None while pending (reads give `""`) | — | yes | main (sync) |
+| TerminalSnapshot | `pid` / `tty` | `u32` / `String` | Taken from `Pty` at spawn (newly exposed). If unavailable, missing value | — | yes | main |
+| TabId | — | `u64` (new global `AtomicU64`) | The AppleScript tab id. Replaces `u64::from(WindowId)` | — | no | `WindowState` |
+| WindowGroupId numbering | — | Change `next_group_id` to a global `AtomicU64` | Lets AE handlers number ahead of time | — | no | `lifecycle.rs` |
+| UserEvent destination | — | New events, and events that target a pending object, carry a `PaneId` (creation events additionally carry the pre-numbered `TabId`/`WindowGroupId`) | The main side resolves by searching pane → tab. The `WindowId` field of existing events is not used when it can be resolved from the pane | — | — | — |
+| `SurfaceConfigPayload` | 6 fields | A type that satisfies `Eq`. Font size is a `u32` in units of 1/100 pt | Carried on `SpawnTab` and `Split` events | — | — | — |
 
 ### L2.2 Interface contract
-AppleScript。用語の綴りは Ghostty と同じ。四文字コードは、既存の用語は Noa の既存コードのまま、新しい用語は Appendix B の Ghostty のコードをそのまま使う。Noa Extensions は `contents=NEct`、`selection=NEsl`、`scrollback=NEsb`（suite `noaE`）。
+AppleScript. Terms are spelled as in Ghostty. For four-character codes, existing terms keep Noa's existing codes, and new terms use Ghostty's codes from Appendix B as they are. Noa Extensions are `contents=NEct`, `selection=NEsl`, `scrollback=NEsb` (suite `noaE`).
 
 | Operation | Input | Output | Errors |
 |-----------|-------|--------|--------|
-| get `front window` / `selected tab` / `focused terminal` | specifier | id 形式の参照 | 対象がない → -1728 |
-| get `terminals of …` | every 形式 | 参照のリスト（要素 0 なら空リスト） | 容器がない → -1728 |
+| get `front window` / `selected tab` / `focused terminal` | specifier | id-form reference | no target → -1728 |
+| get `terminals of …` | every form | list of references (an empty list if there are 0 elements) | no container → -1728 |
 | get `pid` / `tty` / `contents` / `selection` / `scrollback` | terminal specifier | integer / text | -1728 |
 | `close tab` / `close window` | specifier | — | -1728 |
-| `count` / `exists` | specifier | integer / boolean | 容器がない → -1728（`exists` は false） |
-| `new surface configuration [from r]` | record? | record（L2.4） | フィールド不正 → -1700 |
-| `new window [with configuration r] [initial working directory s] [command s]` | | window 参照 | -1700 |
-| `new tab [in w] [with configuration r] […]` | | tab 参照 | w がない → -1728 |
-| `split <terminal\|dir> [direction d] [with configuration r]` | | terminal 参照 | 対象がない → -1728。direction がない（specifier 形式のとき） → -1715 |
-| `perform action s [on t]` | | boolean `true` | 表にない action → -1708 |
-| `send key name [action a] [modifiers m] [to t]` | 既定は press / 修飾キーなし / focused terminal | — | 未知のキー・修飾キー → -1700 |
-| `send mouse button b [action a] [modifiers m] [to t]` | b は `left button`/`right button`/`middle button` | — | -1700 / -1728 |
-| `send mouse position x x y y [modifiers m] [to t]` | real。ペインの左上が原点の point 座標 | — | 欠落 → -1715 / -1728 |
-| `send mouse scroll x dx y dy [precision p] [momentum m] [to t]` | y>0 で上方向。precision の既定は false。false のとき dx/dy は 0 方向に丸めた整数のホイール刻み数（1 刻み = 物理ホイール 1 ノッチと同じ処理）。true のときは point 単位で、トラックパッドの delta と同じ処理。momentum は列挙値を検証し（不正なら -1700）受け付けるが、効果はない（Noa は物理ホイールの phase も使わない。Amendment 1） | — | 欠落 → -1715 / -1728 |
+| `count` / `exists` | specifier | integer / boolean | no container → -1728 (`exists` gives false) |
+| `new surface configuration [from r]` | record? | record (L2.4) | bad field → -1700 |
+| `new window [with configuration r] [initial working directory s] [command s]` | | window reference | -1700 |
+| `new tab [in w] [with configuration r] […]` | | tab reference | no w → -1728 |
+| `split <terminal\|dir> [direction d] [with configuration r]` | | terminal reference | no target → -1728. No direction (when in specifier form) → -1715 |
+| `perform action s [on t]` | | boolean `true` | action not in the table → -1708 |
+| `send key name [action a] [modifiers m] [to t]` | Defaults: press / no modifiers / focused terminal | — | unknown key or modifier → -1700 |
+| `send mouse button b [action a] [modifiers m] [to t]` | b is `left button`/`right button`/`middle button` | — | -1700 / -1728 |
+| `send mouse position x x y y [modifiers m] [to t]` | real. Point coordinates with the origin at the top-left of the pane | — | missing → -1715 / -1728 |
+| `send mouse scroll x dx y dy [precision p] [momentum m] [to t]` | y>0 scrolls up. The default of precision is false. When false, dx/dy are integer wheel steps rounded toward 0 (1 step is handled as one notch of a physical wheel). When true, they are in points and handled like a trackpad delta. momentum validates the enumeration value (invalid → -1700) and is accepted, but has no effect (Noa does not use the physical wheel's phase either; Amendment 1) | — | missing → -1715 / -1728 |
 
-AX（`TerminalAxElement`、`NSAccessibilityElement` のサブクラス）：
+AX (`TerminalAxElement`, a subclass of `NSAccessibilityElement`):
 
 | Attribute | Value |
 |-----------|-------|
 | AXRole / AXRoleDescription | `AXTextArea` / `terminal` |
-| AXIdentifier | `noa-terminal-<terminal id>`（AppleScript の terminal id と同じ値） |
+| AXIdentifier | `noa-terminal-<terminal id>` (the same value as the AppleScript terminal id) |
 | AXTitle | terminal `name` |
-| AXValue | `contents` と同じ文字列 |
-| AXNumberOfCharacters | AXValue の UTF-16 長 |
-| AXSelectedText | `selection` と同じ文字列 |
-| AXInsertionPointLineNumber | viewport の中でのカーソル行（0 起点）。カーソルが viewport の外にあれば属性値なし |
-| AXFrame | ペイン矩形（スクリーン座標） |
-| AXFocused | その tab が key window で、かつ focused pane のとき true |
-| AXParent | 無視されていない最も近い祖先（NSWindow、または代替案の AXGroup） |
+| AXValue | The same string as `contents` |
+| AXNumberOfCharacters | UTF-16 length of AXValue |
+| AXSelectedText | The same string as `selection` |
+| AXInsertionPointLineNumber | The cursor row within the viewport (0-based). No attribute value if the cursor is outside the viewport |
+| AXFrame | The pane rectangle (screen coordinates) |
+| AXFocused | true when that tab is the key window and the pane is the focused pane |
+| AXParent | The nearest ancestor that is not ignored (the NSWindow, or the AXGroup in the alternative) |
 
-取り付け方：第一案は winit の NSView（raw-window-handle の `ns_view`）に `setAccessibilityChildren:` で付ける。AX ツリーに出てこなかった場合の代替案は、hit-test しない透明 NSView を子に置き、そこに要素をぶら下げる。どちらでも REQ-014 の観測結果（AC-019/020 は `entire contents` で探す）は同じ。
+How to attach: the first plan is to attach to winit's NSView (`ns_view` from raw-window-handle) with `setAccessibilityChildren:`. If the elements do not show up in the AX tree, the alternative is to place a transparent NSView that is not hit-tested as a child and hang the elements on it. Either way the observable result of REQ-014 is the same (AC-019/020 search with `entire contents`).
 
 ### L2.3 State & transitions
 | From | Event | To | Guard | Side effect |
 |------|-------|----|-------|-------------|
-| （なし） | 生成コマンドの AE | pending | 採番成功 | `PendingRegistry` に挿入し、事前採番した id を UserEvent に載せる |
-| pending | main が UserEvent を処理 | live | spawn 成功 | 事前採番した id で実体を作る。次の sync で registry から消える |
-| pending | spawn 失敗 | （削除） | — | 処理側が registry から削除する。その id を対象にした後続 UserEvent は破棄 |
-| live（wait after=true） | 子プロセス終了 | exited | — | 終了メッセージを表示。contents は保持 |
-| exited | キー押下（物理または `send key`） | （閉じる） | — | 通常の close-pane 経路 |
+| (none) | AE of a creation command | pending | numbering succeeded | Insert into `PendingRegistry` and carry the pre-numbered id on the UserEvent |
+| pending | main handles the UserEvent | live | spawn succeeded | Create the real object with the pre-numbered id. It disappears from the registry on the next sync |
+| pending | spawn failed | (removed) | — | The handler removes it from the registry. Later UserEvents that target that id are dropped |
+| live (wait after=true) | child process exits | exited | — | Show the exit message. contents is kept |
+| exited | key press (physical or `send key`) | (closed) | — | The normal close-pane path |
 
 ### L2.4 Validation rules
 | Field | Rule | On violation | Message source |
 |-------|------|--------------|----------------|
-| font size | real。0 だけを未指定扱いにし、それ以外の有限値（負の値・巨大な値を含む）は f32 に変換する前に `clamp_runtime_font_size` の範囲（6〜96 pt）へクランプ | 数値でない → -1700 | errAECoercionFail |
-| initial working directory | text。空文字は未指定扱い。存在しないディレクトリなら既存の spawn と同じフォールバック | 型不正 → -1700 | 同上 |
-| command | text。空文字は未指定扱い。シェルの代わりに `/bin/sh -c <command>` を pty の子として起動する（CLI の `-e` と同じ。Amendment 1） | 型不正 → -1700 | 同上 |
-| initial input | text。spawn 直後に pty へ生バイトとして書き込む（bracketed paste で包まない）。8 MiB（`APPLESCRIPT_INPUT_TEXT_CAP`）に切り詰める | 型不正 → -1700 | 同上 |
-| wait after command | boolean（数値は 0 → false、それ以外 → true） | 型不正 → -1700 | 同上 |
-| environment variables | `KEY=VALUE` の text のリスト。KEY は空でないこと。最初の `=` で分割する | 不正なエントリ → -1700 | 同上 |
-| `with configuration` と旧パラメータの両方 | record 側のフィールドが空でなければそちらを優先し、空なら旧パラメータを使う | — | — |
-| send key name | Appendix A の閉じた集合（大文字小文字を区別）。キーコードがあるキーは、現在の入力ソース（`kTISPropertyUnicodeKeyLayoutData` がなければ `TISCopyCurrentASCIICapableKeyboardLayoutInputSource`）で UCKeyTranslate を 1 回かけて文字を得る。dead key は合成しない。`-` のキーは文字なしで `KeyCode` だけで符号化する | -1700 | errAECoercionFail |
-| modifiers | `,` で区切り、前後の空白を除き、大文字小文字を区別しない。`shift`/`control`/`option`/`command` のみ | -1700 | 同上 |
-| scroll x/y | 1 回の量を、刻み数なら ±1000、point なら ±100000 にクランプしてから既存のホイール処理へ渡す（巨大な有限値で行数の変換が溢れないため） | 欠落 → -1715 | errAEParamMissed |
-| mouse x/y | セルは `floor((p − padding) / cell) + 1`（境界上の点は右・下のセル）。ペインの範囲外ならペイン端のセルにクランプ（物理ドラッグがペイン外に出たときと同じ）。座標は動かさず、イベントは対象ペインに直接届ける（ドラッグ中の捕捉と同じく対象ペインの矩形で解決し、divider のドラッグは始めない）。ボタン・ホイールは、ウィンドウのポインタが別のペインにあるときは、そのペインに最後にスクリプトで送った位置（ペイン相対の point で保持し、現在の矩形と倍率で変換し直す）へ戻してから送る。一度も位置を送っていないペインでは左上に置く | 欠落 → -1715 | errAEParamMissed |
+| font size | real. Only 0 counts as unspecified; any other finite value (including negative and huge values) is clamped to the range of `clamp_runtime_font_size` (6–96 pt) before conversion to f32 | not a number → -1700 | errAECoercionFail |
+| initial working directory | text. An empty string counts as unspecified. A directory that does not exist falls back as the existing spawn does | wrong type → -1700 | same |
+| command | text. An empty string counts as unspecified. Starts `/bin/sh -c <command>` as the pty child in place of the shell (the same as the CLI's `-e`; Amendment 1) | wrong type → -1700 | same |
+| initial input | text. Written to the pty as raw bytes right after spawn (not wrapped in bracketed paste). Truncated to 8 MiB (`APPLESCRIPT_INPUT_TEXT_CAP`) | wrong type → -1700 | same |
+| wait after command | boolean (a number is 0 → false, anything else → true) | wrong type → -1700 | same |
+| environment variables | A list of `KEY=VALUE` text. KEY must be non-empty. Split at the first `=` | invalid entry → -1700 | same |
+| both `with configuration` and the old parameters | The record's field wins if it is non-empty; if it is empty the old parameter is used | — | — |
+| send key name | The closed set of Appendix A (case-sensitive). For a key that has a key code, apply UCKeyTranslate once with the current input source (`TISCopyCurrentASCIICapableKeyboardLayoutInputSource` if there is no `kTISPropertyUnicodeKeyLayoutData`) to get the character. Dead keys are not composed. The `-` key is encoded with only its `KeyCode`, with no character | -1700 | errAECoercionFail |
+| modifiers | Separated by `,`, surrounding spaces removed, case-insensitive. Only `shift`/`control`/`option`/`command` | -1700 | same |
+| scroll x/y | Clamp one amount to ±1000 for steps and ±100000 for points, then pass it to the existing wheel handling (so that a huge finite value cannot overflow the row conversion) | missing → -1715 | errAEParamMissed |
+| mouse x/y | The cell is `floor((p − padding) / cell) + 1` (a point on a boundary belongs to the cell on the right / below). Outside the pane, clamp to the cell at the pane edge (the same as a physical drag that leaves the pane). The cursor is not moved, and the event is delivered directly to the target pane (resolved by the target pane's rectangle, as with capture during a drag, and it never starts a divider drag). For a button or wheel, when the window's pointer is over a different pane, return to the position last sent to that pane by script (held as a pane-relative point and converted again with the current rectangle and scale) before sending. A pane that has never been sent a position gets the top-left | missing → -1715 | errAEParamMissed |
 
 ## Behavior matrix
 | Condition | Applies to | Expected behavior | User-visible | Verifies |
 |-----------|-----------|-------------------|--------------|----------|
-| Empty state：window が 0 個 | REQ-001/002 | `front window` → -1728。`count windows` → 0。`terminals` → 空リスト | osascript のエラー | AC-001 |
-| Empty state：選択なし | REQ-012/014 | `selection` と AXSelectedText は `""` | — | AC-017 |
-| Empty state：pending の terminal を読む | REQ-008/012 | `contents`/`selection`/`scrollback` は `""`、`pid`/`tty` は missing value | — | AC-030 |
-| Invalid input：未知のキー名・修飾キー・env エントリ・型不正 | REQ-003/010 | -1700。アプリは何もしない | osascript のエラー | AC-027 |
-| Invalid input：必須パラメータの欠落 | REQ-007/011 | -1715 | osascript のエラー | AC-027 |
-| Unauthorized：TCC Automation の拒否、Accessibility 権限がない | 全体 | OS が拒否する。Noa は独自の権限 UI を出さない（applescript R-12） | OS のダイアログ | N/A（OS が強制。権限 UI のコードがないことは AC-026 のレビューで確認） |
-| Unauthorized：`macos-applescript = false` | REQ-001..013 | Noa のハンドラは何も登録しない。Noa Suite の動詞はエラーになり、何も起きない。標準イベント（`count windows` など）には Cocoa Scripting が従来どおり応答する。AX は影響を受けない（config キーなし、ratified） | osascript のエラー | AC-026 |
-| Dependency unavailable：resolve から処理までの間に対象が閉じた | REQ-009..011 | UserEvent を破棄する。プロパティ読み取りは -1728 | — | AC-027 |
-| Dependency unavailable：pending の生成に失敗 | REQ-008 | 処理側が registry から削除し、後続イベントを破棄。参照の読み取りは -1728 | — | AC-030 |
-| Concurrent modification：生成直後に返した参照を使う | REQ-008 | registry で解決する。UserEvent は FIFO なので、生成の後に処理される | — | AC-010 |
-| Concurrent modification：snapshot の再構築と pending の挿入が重なる | REQ-008 | 再構築は registry をマージするので、仮エントリは消えない | — | AC-030 |
-| Concurrent modification：複数のスクリプトが同時に送る | 全体 | AE は main スレッドで直列に処理される。追加の制御は不要 | — | N/A（構造上保証） |
-| Concurrent modification：io thread がロックを保持中 | REQ-012/014 | 読み取りはロックを待つ（CFR-001 の範囲）。reflow 中の待ちは CFR-001 の対象外（OQ-2） | 一時的な待ち | AC-022 |
-| Limit exceeded：scrollback が 256 KiB を超える | REQ-012 | 末尾を優先して UTF-8 境界で切り詰める | 先頭が欠ける | AC-017 |
-| Limit exceeded：initial input / input text が 8 MiB を超える | REQ-004 | 既存の `cap_input_text` と同じく切り詰める | — | AC-017 |
-| Domain：全角文字・結合文字 | REQ-012/014 | `screen_text` と同じく、wide spacer を出力しない | — | AC-018 |
-| Domain：Secure Keyboard Entry 中 | REQ-012/014 | 隠さずにそのまま公開する（ratified 2026-10-17） | — | AC-018 |
-| Domain：ユーザーが scrollback を遡っている | REQ-012/014 | `contents` と AXValue は表示中の行を返す（Glossary） | — | AC-016 |
-| Domain：key release（kitty の report-events が無効） | REQ-010 | 物理キーと同じく何も送らない | — | AC-012 |
-| Domain：split の font size | REQ-004 | 無視し、親 tab のサイズを使う | — | AC-007 |
-| Domain：モーダル（パレット・設定）を開いている | REQ-014 | AX のペイン要素はそのまま。モーダル自体は公開しない（対象外） | — | AC-019 |
-| Domain：Noa が key window でない | REQ-014 | AXFocused はすべて false | — | AC-020 |
+| Empty state: 0 windows | REQ-001/002 | `front window` → -1728. `count windows` → 0. `terminals` → empty list | osascript error | AC-001 |
+| Empty state: no selection | REQ-012/014 | `selection` and AXSelectedText are `""` | — | AC-017 |
+| Empty state: reading a pending terminal | REQ-008/012 | `contents`/`selection`/`scrollback` are `""`, `pid`/`tty` are missing value | — | AC-030 |
+| Invalid input: unknown key name, modifier or env entry; wrong type | REQ-003/010 | -1700. The app does nothing | osascript error | AC-027 |
+| Invalid input: a required parameter is missing | REQ-007/011 | -1715 | osascript error | AC-027 |
+| Unauthorized: TCC Automation denied, no Accessibility permission | all | The OS refuses. Noa shows no permission UI of its own (applescript R-12) | OS dialog | N/A (enforced by the OS; that there is no permission-UI code is checked in the AC-026 review) |
+| Unauthorized: `macos-applescript = false` | REQ-001..013 | Noa registers no handlers. Noa Suite verbs error and nothing happens. Cocoa Scripting answers standard events (such as `count windows`) as before. AX is not affected (no config key, ratified) | osascript error | AC-026 |
+| Dependency unavailable: the target closed between resolve and handling | REQ-009..011 | The UserEvent is dropped. A property read gives -1728 | — | AC-027 |
+| Dependency unavailable: creation of a pending object failed | REQ-008 | The handler removes it from the registry and drops later events. Reading the reference gives -1728 | — | AC-030 |
+| Concurrent modification: using a reference returned right after creation | REQ-008 | Resolved through the registry. UserEvents are FIFO, so they are handled after the creation | — | AC-010 |
+| Concurrent modification: a snapshot rebuild overlaps with a pending insert | REQ-008 | The rebuild merges the registry, so the provisional entry does not disappear | — | AC-030 |
+| Concurrent modification: several scripts send at once | all | AEs are processed serially on the main thread. No extra control is needed | — | N/A (guaranteed by structure) |
+| Concurrent modification: the io thread holds the lock | REQ-012/014 | The read waits for the lock (within CFR-001). Waiting during reflow is outside CFR-001 (OQ-2) | brief wait | AC-022 |
+| Limit exceeded: scrollback is over 256 KiB | REQ-012 | Truncate at a UTF-8 boundary, keeping the tail | the head is missing | AC-017 |
+| Limit exceeded: initial input / input text is over 8 MiB | REQ-004 | Truncate, the same as the existing `cap_input_text` | — | AC-017 |
+| Domain: wide and combining characters | REQ-012/014 | The wide spacer is not output, the same as `screen_text` | — | AC-018 |
+| Domain: during Secure Keyboard Entry | REQ-012/014 | Exposed as it is, not hidden (ratified 2026-10-17) | — | AC-018 |
+| Domain: the user has scrolled back | REQ-012/014 | `contents` and AXValue return the lines being shown (Glossary) | — | AC-016 |
+| Domain: key release (kitty report-events disabled) | REQ-010 | Sends nothing, the same as a physical key | — | AC-012 |
+| Domain: font size of a split | REQ-004 | Ignored; the parent tab's size is used | — | AC-007 |
+| Domain: a modal (palette, settings) is open | REQ-014 | The AX pane elements stay as they are. The modal itself is not exposed (out of scope) | — | AC-019 |
+| Domain: Noa is not the key window | REQ-014 | AXFocused is false for all | — | AC-020 |
 
 ## Dependencies & integration points
 | Dependency | Kind | We control? | Contract / version | Failure mode | Fallback |
 |------------|------|-------------|--------------------|--------------|----------|
-| NSAccessibility（AppKit） | OS API | no | macOS 13+（`LSMinimumSystemVersion`）の `NSAccessibilityElement` | winit のビューで子要素が出てこない | L2.2 の透明 NSView 案 |
-| TIS / UCKeyTranslate（HIToolbox） | OS API | no | 現在の入力ソースの `kTISPropertyUnicodeKeyLayoutData` | レイアウトデータがない入力ソース（IME など） | ASCII 対応の入力ソース（L2.4） |
-| Cocoa Scripting（`NSAppleScriptEnabled`） | OS | no | 自前で登録したイベントは自前のハンドラが優先される | — | — |
-| portable-pty | crate | no | 子の `process_id()` と tty 名 | 取れない | pid/tty は missing value |
-| Ghostty.sdef の用語 | 外部仕様 | no | Appendix B（main 2026-10-17） | Ghostty 側の改名 | review trigger で再照合 |
+| NSAccessibility (AppKit) | OS API | no | `NSAccessibilityElement` on macOS 13+ (`LSMinimumSystemVersion`) | Child elements do not show up in winit's view | The transparent NSView plan in L2.2 |
+| TIS / UCKeyTranslate (HIToolbox) | OS API | no | `kTISPropertyUnicodeKeyLayoutData` of the current input source | An input source with no layout data (such as an IME) | An ASCII-capable input source (L2.4) |
+| Cocoa Scripting (`NSAppleScriptEnabled`) | OS | no | Events we register ourselves are handled by our own handlers first | — | — |
+| portable-pty | crate | no | The child's `process_id()` and the tty name | unavailable | pid/tty are missing value |
+| Terms of Ghostty.sdef | external spec | no | Appendix B (main 2026-10-17) | Ghostty renames a term | Re-check at the review trigger |
 
 ## Migration & rollout
-- Existing data：永続データはない。
-- 挙動の変化：(1) tab id が `WindowId` 由来から `TabId` に変わる。id は実行中だけ有効な値なので互換性の問題はない。(2) `count windows` は、Cocoa Scripting が数えていた NSWindow の数（ネイティブタブ 1 枚ごとに 1）から、window（タブグループ）の数に変わる。Noa の `window` クラスの定義に合わせた変更として CHANGELOG に記載する。
-- Staged release：フラグは使わない。既存の `macos-applescript` が AppleScript 側の有効・無効を決める。
-- Rollback：コミットを revert するだけ。不可逆な変更はない。
+- Existing data: There is no persistent data.
+- Behavior changes: (1) The tab id changes from being derived from `WindowId` to `TabId`. An id is valid only while the app runs, so there is no compatibility problem. (2) `count windows` changes from the number of NSWindows that Cocoa Scripting counted (one per native tab) to the number of windows (tab groups). This aligns with the definition of Noa's `window` class, and is recorded in the CHANGELOG.
+- Staged release: No flag is used. The existing `macos-applescript` decides whether AppleScript is enabled.
+- Rollback: Revert the commits. Nothing is irreversible.
 
-## L3：Acceptance Criteria
-マーカー文字列は、入力したコマンド行には現れず、実行結果にだけ現れる形で作る（例：`printf 'NOA-%s\n' AC10` の出力は `NOA-AC10`）。
+## L3: Acceptance Criteria
+Build the marker string so that it does not appear in the typed command line and appears only in the result of running it (for example, the output of `printf 'NOA-%s\n' AC10` is `NOA-AC10`).
 
 | ID | Given | When | Then | Verifies | Mode | Oracle | Must-have |
 |----|-------|------|------|----------|------|--------|-----------|
-| AC-001 | fixture snapshot（window 2 個。window 1 に tab 2 枚、tab 2 が選択中でペイン 2 つ、ペイン 2 に focus。加えて window 0 個の fixture） | resolver で `front window`、`selected tab of window 1`、`focused terminal of tab 2 of window 1`、`terminals of window 1`、`terminals`（app）、`count windows` を解決する | window 1、tab 2、ペイン 2、window 1 の全ペイン（PaneId 昇順）、全ペイン、2 になる。0 個の fixture では -1728、空リスト、0 | REQ-001, REQ-002 | machine | `macos_applescript.rs` のユニットテスト | yes |
-| AC-002 | 実機。terminal 1 つ（ログインシェルが動いている） | `pid of t` と `tty of t` を取得する | pid が `ps -o pid=,comm= -t <tty の ttysNNN 部分>` の中で、comm の basename（先頭の `-` を除く）が `$SHELL` の basename と一致する行の pid と一致する。tty が `/dev/` + その ttysNNN と一致する | REQ-001 | human | smoke | yes |
-| AC-003 | Noa を前面にし、ペイン 2 つの tab がある。ペイン 2 に focus | `focused terminal of selected tab of front window` の id を取る。System Events で AXFocused が true の要素の AXIdentifier を取る | 両者が同じ id を指す | REQ-001, REQ-014 | human | smoke | yes |
-| AC-004 | — | record の解析・直列化関数に、6 フィールド／`from` による複製／不正な env `"NOEQ"`／型不正／旧パラメータとの優先順位（record の空文字と非空文字）を与える | 往復で値が保たれる。不正な入力は -1700。優先順位は L2.4 のとおり | REQ-003, REQ-004 | machine | ユニットテスト | yes |
-| AC-005 | — | new window、new tab、split（`direction right`）のそれぞれで `with configuration {initial working directory:"/usr", environment variables:{"FOO=bar"}, initial input:"printf 'CFG-%s-%s\\n' \"$PWD\" \"$FOO\"\n"}` | 2 秒以内に、3 つの terminal の `contents` がそれぞれ `CFG-/usr-bar` を含む | REQ-003, REQ-004 | human | smoke | yes |
-| AC-006 | — | (a) `command:"/bin/echo done", wait after command:true` で new tab を作る。(b) command なし、`wait after command:true`、`initial input:"exit\n"`。(c) (a) と同じだが wait なし。(d) (a) の状態から物理キーを押す | (a) と (b) は 2 秒後も terminal が存在し、`contents` が終了メッセージを含む（(a) は `done` も含む）。`send key "a" to` で閉じる。(c) は 2 秒以内に消える。(d) も閉じる | REQ-005 | human | smoke（(d) は目視） | yes |
-| AC-007 | 既定 14pt | `new window with configuration {font size:28}`。そのペインで `split … with configuration {font size:8}` | 新しい window の行の高さが既定の window の 1.8〜2.2 倍。split したペインの行の高さは親と同じ | REQ-004 | human | スクリーンショットで行の高さを比較 | yes |
-| AC-008 | window 2 個。window 1 に focus | `new tab in window 2` | window 2 の tab 数が +1、window 1 は変わらない | REQ-006 | human | smoke | yes |
-| AC-009 | Noa を前面にし、ペイン 1 つの tab で `split right` して右のペインを作った状態（左 = terminal 1）。右に focus | `split (terminal 1 of selected tab of front window) direction down`、続けて旧形式 `split right` | 1 回目の後、AX の frame で左のペインが上下に分かれている。2 回目の後、focused terminal が左右に分かれている。ペイン数は 4 | REQ-007, REQ-013 | human | smoke（AX frame で判定） | yes |
-| AC-010 | Noa を `activate` 済み。window 1 個 | 1 本の osascript で：`set t to split (focused terminal of selected tab of front window) direction right` → `input text "printf 'NOA-%s\\n' AC10\n" to t`。`set w to new window` → `input text "printf 'NOA-%s\\n' W10\n" to focused terminal of selected tab of w`。`set b to new tab in w` → `input text "printf 'NOA-%s\\n' B10\n" to focused terminal of b`。2 秒待ち、3 つの `contents` を読む。最後に `id of w` と `id of front window`、`id of b` と `id of selected tab of front window` を比べる | どのステップも -1728 にならない。3 つの contents がそれぞれ `NOA-AC10`、`NOA-W10`、`NOA-B10` を含む。w は最後に key になった window なので `id of w` = `id of front window`。b は w の中で最後に選択された tab なので `id of b` = `id of selected tab of front window` | REQ-006, REQ-008 | human | smoke | yes |
-| AC-011 | Noa を前面にし、ペイン 1 つの tab で `split right` して右のペインを作った状態（左 = terminal 1）。右に focus | `perform action "new_split:down" on terminal 1 of selected tab of front window`。続けて `perform action "nonexistent"` | 1 つ目は `true` を返し、AX の frame で左のペインが上下に分かれている。2 つ目は -1708 | REQ-009 | human | smoke（AX frame で判定） | yes |
-| AC-012 | — | 解析・符号化関数に `enter`、`arrowUp`、`a`、`digit1`、`f21`、`foo`、`"shift, Control"`、`hyper` を与える。release を kitty フラグ 0 と report-events ありで符号化する。固定の US レイアウトデータで `semicolon`+shift を変換する | 既知の名前は Appendix A のキーコードと winit `KeyCode` に対応する。`foo` と `hyper` はエラー。release はフラグ 0 では空、report-events ありでは kitty の release 列になる。US の変換結果は `:` | REQ-010 | machine | ユニットテスト | yes |
-| AC-013 | US 配列 | (1) `cat -v` を実行し、`send key "arrowUp"` → `send key "enter"` → `send key "c" modifiers "control"`。(2) `printf '\e[?1h'; cat -v` を 1 行で実行し、同じ 3 つを送る | (1) の後 `contents` に `^[[A`、(2) の後 `^[OA` が含まれる。どちらも cat が終了してプロンプトに戻る | REQ-010 | human | smoke | yes |
-| AC-014 | 入力ソースを Dvorak にする | `cat -v` に対して `send key "s"`、`send key "enter"` | 物理 S キーを押したときと同じく `o` が出る | REQ-010 | human | 目視 | yes |
-| AC-015 | Noa を前面にする。terminal で `printf '\e[?1000h\e[?1006h'; cat -v` を実行中。`NSEvent.mouseLocation` を記録しておく | `send mouse position x 300 y 120` → `send mouse button left button` → 同じく `action release` → `send mouse scroll x 0 y 1` | `contents` に `^[[<0;c;rM`、`^[[<0;c;rm`、`^[[<64;c;rM` が、同じ c;r で含まれる。c>1 かつ r>1（端へのクランプではない）。`NSEvent.mouseLocation` が変わっていない。point 座標からセルへの変換の正しさは AC-032 で確かめる | REQ-011 | human | smoke | yes |
-| AC-016 | mouse tracking なし。`seq 1 5000` の出力がある | `send mouse scroll x 0 y 5` | `contents` の先頭行の番号が scroll 前より小さい（物理ホイールと同じく遡る） | REQ-011, REQ-012 | human | smoke | yes |
-| AC-017 | fixture Terminal | contents、selection、scrollback の抽出関数を呼ぶ（選択なし／選択あり／300 KiB の履歴／9 MiB の initial input） | contents は `screen_text(visible_rows)` と一致する。selection は選択なしで `""`、選択ありで `selected_text()` と一致する。scrollback は 256 KiB 以下で、履歴全体の末尾と一致する。initial input は 8 MiB に切り詰められる | REQ-012, REQ-004 | machine | ユニットテスト | yes |
-| AC-018 | 実機。Secure Keyboard Entry を ON にしている | `input text "printf '%s-%s\\n' あいう AC18\n"` → `contents` | `あいう-AC18` がちょうど 1 回含まれる（spacer なし、隠されない） | REQ-012 | human | smoke | yes |
-| AC-019 | ペイン 2 つの tab が前面にある。各ペインで `printf 'AXM-%s\n' <n>` を実行済み（コマンドパレットを開いた状態でもう 1 回） | System Events で `entire contents of window 1 of process "Noa"` から role が `AXTextArea` の要素を集め、`value`、`role description`、`AXIdentifier` を読む | 2 要素が返る。`value` にそれぞれ `AXM-<n>` が含まれる。role description が `terminal`。AXIdentifier が `noa-terminal-<AppleScript の id>` | REQ-014 | human | smoke（Accessibility 権限を持つ端末から実行） | yes |
-| AC-020 | AC-019 と同じ | (a) Noa を `activate` し、ペイン 2 に focus して AXFocused を読む。(b) 実行元の端末を前面にしてもう一度読む。(c) split を追加する。(d) ペインを 1 つ閉じる。(e) `tell application "System Events" to set size of window 1 of process "Noa" to {900, 600}` で大きさを変える。(f) 各操作の AE が返ってから 250 ms 後に、全要素の `position` と `size` を読む | (a) true はペイン 2 だけ。(b) すべて false。(c)(d) 要素数が増減する。(e)(f) 全要素の frame が重ならず、合わせて window のコンテンツ領域を埋める（divider の幅は除く）。リサイズ後の新しい大きさに追従している | REQ-014, REQ-015 | human | smoke | yes |
-| AC-021 | ペイン 1 つ。`clear; printf 'hello\e[5;1H'; cat` を実行中（cat はカーソルを動かさず何も出力しない）。1 行目の `hello` をダブルクリックで選択済み | `AXSelectedText`、`AXInsertionPointLineNumber`、AE の `selection of t` を読む | `hello`、`4`、`hello` | REQ-012, REQ-014 | human | smoke | yes |
-| AC-022 | release ビルド | CFR-001 の (a)(b)(c) を計測する | CFR-001 の目標を満たす | CFR-001 | machine | `#[ignore]` の計測テスト | yes |
-| AC-023 | AX クライアントなし、AE なし | idle 計測を main と比べる。差分をレビューする | CFR-002 を満たす | CFR-002 | machine + review | `bench/` の idle ハーネスとレビュー記録 | yes |
-| AC-024 | — | 既存の `scripts/applescript-smoke.sh` を変更せずに実行する | 既存の全項目が PASS | REQ-013 | human | smoke | yes |
-| AC-025 | at review | AE と AX のハンドラから到達する関数を読む | `recv`、`block_on`、condvar による待ち、winit オブジェクトへの直接アクセスが 0 | CFR-003 | review | レビュアーのチェックリスト | yes |
-| AC-026 | `macos-applescript = false` で起動 | `tell app "Noa" to perform action "new_tab"`、`tell app "Noa" to count windows`、AC-019 の手順 | 1 つ目はエラーになり、tab 数が変わらない。2 つ目は Cocoa Scripting が答える（エラーにならない）。AX は AC-019 と同じく取得できる。独自の権限 UI のコードはない（レビュー） | REQ-014, Behavior matrix | human + review | smoke | yes |
-| AC-027 | 実機 | `send key "foo"`、`send key "a" modifiers "hyper"`、env `"NOEQ"`、`send mouse position x 1`（y なし）、閉じた terminal の id への `send key` と `contents` | -1700、-1700、-1700、-1715、-1728、-1728。アプリはクラッシュしない | REQ-003, REQ-010, REQ-011 | human | smoke | yes |
-| AC-028 | at build | sdef と Rust のコード表の照合テスト。sdef と Appendix B（リポジトリ内のフィクスチャファイルに転記）の照合テスト | Noa の sdef が Appendix B の名前をすべて含み、新しい用語のコードが Appendix B と一致し、すべてのコードが Rust の表にある | REQ-001..012 | machine | `sdef_codes_are_all_in_the_rust_table` と新しい照合テスト | yes |
-| AC-029 | tab 2 枚の window 1。シェルは idle（close の確認が出ない状態） | `count tabs of window 1` → `exists tab 3 of window 1` → `exists tab 1 of window 1` → `close tab (tab 2 of window 1)` → 新しい tab を作ってから `close (tab 2 of window 1)` → `close window (window 1)` | 2 → false → true → 1 → 1 → window 数が 1 減る | REQ-002, REQ-013 | human | smoke | yes |
-| AC-030 | — | `PendingRegistry` と snapshot の再構築のユニットテスト：pending を挿入した直後に再構築する／実体が現れる／生成失敗で削除する／pending の terminal を読む | 再構築後も pending が残る。実体が現れると消える。失敗で消えて、その後の解決は -1728。pending の読み取りは Behavior matrix のとおり | REQ-008 | machine | ユニットテスト | yes |
-| AC-031 | `seq 1 5000` の出力がある terminal。`printf 'SEL-%s\n' X` の出力をマウスで選択済み | `scrollback of t` と `selection of t` を読む | scrollback が `5000` を含み、256 KiB 以下で、`SEL-X` で終わる行を含む。selection が `SEL-X` | REQ-012 | human | smoke | yes |
-| AC-032 | — | point 座標→セル変換関数に、セル 8×16 pt・padding 左 4/上 2 pt・80×24 のペインで (300,120)、(0,0)、(10000,10000) を与える | (38, 8)、(1, 1)、(80, 24)。規則は `floor((p − padding) / cell) + 1` を 1..cols / 1..rows にクランプ（境界上の点は右・下のセル） | REQ-011 | machine | ユニットテスト | yes |
-| AC-033 | at build | 同梱する sdef を辞書として、`osacompile` で `tell app "Noa" to close tab 2 of window 1`、`close tab (tab 2 of window 1)`、`close (tab 2 of window 1)` をコンパイルし、`osadecompile` で戻す | 旧形式はコンパイルエラーになる（Amendment 2 の breaking change が実在する）。新形式 2 つはコンパイルでき、元の文に戻る | REQ-002, REQ-013 | machine | `scripts/applescript-sdef-check.sh`（sandbox 外で実行） | yes |
+| AC-001 | A fixture snapshot (2 windows. Window 1 has 2 tabs, tab 2 is selected and has 2 panes, and pane 2 has focus. Also a fixture with 0 windows) | Resolve `front window`, `selected tab of window 1`, `focused terminal of tab 2 of window 1`, `terminals of window 1`, `terminals` (app) and `count windows` with the resolver | They give window 1, tab 2, pane 2, all panes of window 1 (ascending PaneId), all panes, and 2. With the 0-window fixture: -1728, an empty list, and 0 | REQ-001, REQ-002 | machine | Unit test in `macos_applescript.rs` | yes |
+| AC-002 | A real machine. One terminal (a login shell is running) | Get `pid of t` and `tty of t` | pid equals the pid of the line in `ps -o pid=,comm= -t <the ttysNNN part of the tty>` whose comm basename (without the leading `-`) matches the basename of `$SHELL`. tty equals `/dev/` + that ttysNNN | REQ-001 | human | smoke | yes |
+| AC-003 | Noa is in front, with a tab of 2 panes. Pane 2 has focus | Get the id of `focused terminal of selected tab of front window`. With System Events, get the AXIdentifier of the element whose AXFocused is true | Both point at the same id | REQ-001, REQ-014 | human | smoke | yes |
+| AC-004 | — | Give the record parse/serialize functions: 6 fields, duplication by `from`, an invalid env `"NOEQ"`, wrong types, and precedence against old parameters (an empty and a non-empty string in the record) | Values survive a round trip. Invalid input gives -1700. Precedence is as in L2.4 | REQ-003, REQ-004 | machine | unit test | yes |
+| AC-005 | — | For each of new window, new tab and split (`direction right`): `with configuration {initial working directory:"/usr", environment variables:{"FOO=bar"}, initial input:"printf 'CFG-%s-%s\\n' \"$PWD\" \"$FOO\"\n"}` | Within 2 seconds, the `contents` of each of the 3 terminals contains `CFG-/usr-bar` | REQ-003, REQ-004 | human | smoke | yes |
+| AC-006 | — | (a) Create a new tab with `command:"/bin/echo done", wait after command:true`. (b) No command, `wait after command:true`, `initial input:"exit\n"`. (c) The same as (a) but without wait. (d) From the state of (a), press a physical key | (a) and (b): after 2 seconds the terminal still exists and `contents` contains the exit message ((a) also contains `done`). `send key "a" to` closes it. (c) disappears within 2 seconds. (d) also closes it | REQ-005 | human | smoke ((d) by eye) | yes |
+| AC-007 | Default 14pt | `new window with configuration {font size:28}`. In that pane, `split … with configuration {font size:8}` | The row height of the new window is 1.8–2.2 times that of a default window. The row height of the split pane is the same as its parent | REQ-004 | human | Compare row heights in screenshots | yes |
+| AC-008 | 2 windows. Window 1 has focus | `new tab in window 2` | The tab count of window 2 is +1, and window 1 is unchanged | REQ-006 | human | smoke | yes |
+| AC-009 | Noa is in front. In a one-pane tab, `split right` was run to make a right pane (left = terminal 1). The right pane has focus | `split (terminal 1 of selected tab of front window) direction down`, then the old form `split right` | After the first, the AX frames show the left pane split top and bottom. After the second, the focused terminal is split left and right. The pane count is 4 | REQ-007, REQ-013 | human | smoke (decided by AX frame) | yes |
+| AC-010 | Noa has been `activate`d. 1 window | In one osascript: `set t to split (focused terminal of selected tab of front window) direction right` → `input text "printf 'NOA-%s\\n' AC10\n" to t`. `set w to new window` → `input text "printf 'NOA-%s\\n' W10\n" to focused terminal of selected tab of w`. `set b to new tab in w` → `input text "printf 'NOA-%s\\n' B10\n" to focused terminal of b`. Wait 2 seconds and read the 3 `contents`. Finally compare `id of w` with `id of front window`, and `id of b` with `id of selected tab of front window` | No step gives -1728. The 3 contents contain `NOA-AC10`, `NOA-W10` and `NOA-B10` respectively. w is the window that was key last, so `id of w` = `id of front window`. b is the tab selected last in w, so `id of b` = `id of selected tab of front window` | REQ-006, REQ-008 | human | smoke | yes |
+| AC-011 | Noa is in front. In a one-pane tab, `split right` was run to make a right pane (left = terminal 1). The right pane has focus | `perform action "new_split:down" on terminal 1 of selected tab of front window`. Then `perform action "nonexistent"` | The first returns `true`, and the AX frames show the left pane split top and bottom. The second gives -1708 | REQ-009 | human | smoke (decided by AX frame) | yes |
+| AC-012 | — | Give the parse/encode functions `enter`, `arrowUp`, `a`, `digit1`, `f21`, `foo`, `"shift, Control"`, `hyper`. Encode a release with kitty flags 0 and with report-events on. Translate `semicolon`+shift with fixed US layout data | Known names map to the Appendix A key codes and to winit `KeyCode`. `foo` and `hyper` are errors. A release is empty with flags 0, and is a kitty release sequence with report-events. The US translation result is `:` | REQ-010 | machine | unit test | yes |
+| AC-013 | US layout | (1) Run `cat -v`, then `send key "arrowUp"` → `send key "enter"` → `send key "c" modifiers "control"`. (2) In one line run `printf '\e[?1h'; cat -v`, and send the same three | After (1) `contents` contains `^[[A`, and after (2) `^[OA`. In both, cat exits and the prompt returns | REQ-010 | human | smoke | yes |
+| AC-014 | Set the input source to Dvorak | For `cat -v`, `send key "s"` and `send key "enter"` | `o` appears, the same as pressing the physical S key | REQ-010 | human | by eye | yes |
+| AC-015 | Noa is in front. A terminal is running `printf '\e[?1000h\e[?1006h'; cat -v`. `NSEvent.mouseLocation` has been recorded | `send mouse position x 300 y 120` → `send mouse button left button` → the same with `action release` → `send mouse scroll x 0 y 1` | `contents` contains `^[[<0;c;rM`, `^[[<0;c;rm` and `^[[<64;c;rM`, with the same c;r. c>1 and r>1 (not clamped to an edge). `NSEvent.mouseLocation` has not changed. The correctness of the point-to-cell conversion is checked in AC-032 | REQ-011 | human | smoke | yes |
+| AC-016 | No mouse tracking. There is `seq 1 5000` output | `send mouse scroll x 0 y 5` | The number of the first line of `contents` is smaller than before the scroll (it scrolls back, the same as a physical wheel) | REQ-011, REQ-012 | human | smoke | yes |
+| AC-017 | A fixture Terminal | Call the extraction functions for contents, selection and scrollback (no selection / a selection / 300 KiB of history / 9 MiB of initial input) | contents equals `screen_text(visible_rows)`. selection is `""` with no selection, and equals `selected_text()` with a selection. scrollback is at most 256 KiB and equals the tail of the whole history. initial input is truncated to 8 MiB | REQ-012, REQ-004 | machine | unit test | yes |
+| AC-018 | A real machine. Secure Keyboard Entry is ON | `input text "printf '%s-%s\\n' あいう AC18\n"` → `contents` | `あいう-AC18` is contained exactly once (no spacer, not hidden) | REQ-012 | human | smoke | yes |
+| AC-019 | A tab with 2 panes is in front. In each pane `printf 'AXM-%s\n' <n>` has been run (once more with the command palette open) | With System Events, collect the elements whose role is `AXTextArea` from `entire contents of window 1 of process "Noa"`, and read `value`, `role description` and `AXIdentifier` | 2 elements are returned. Each `value` contains `AXM-<n>`. The role description is `terminal`. AXIdentifier is `noa-terminal-<the AppleScript id>` | REQ-014 | human | smoke (run from a terminal that has Accessibility permission) | yes |
+| AC-020 | The same as AC-019 | (a) `activate` Noa, focus pane 2 and read AXFocused. (b) Bring the originating terminal to the front and read again. (c) Add a split. (d) Close one pane. (e) Change the size with `tell application "System Events" to set size of window 1 of process "Noa" to {900, 600}`. (f) 250 ms after the AE of each operation returns, read `position` and `size` of all elements | (a) true for pane 2 only. (b) All false. (c)(d) The element count goes up and down. (e)(f) The frames of all elements do not overlap, and together fill the window's content area (excluding divider width). They follow the new size after the resize | REQ-014, REQ-015 | human | smoke | yes |
+| AC-021 | One pane. Running `clear; printf 'hello\e[5;1H'; cat` (cat does not move the cursor and prints nothing). `hello` on line 1 is selected by double-click | Read `AXSelectedText`, `AXInsertionPointLineNumber` and the AE `selection of t` | `hello`, `4`, `hello` | REQ-012, REQ-014 | human | smoke | yes |
+| AC-022 | A release build | Measure (a)(b)(c) of CFR-001 | The targets of CFR-001 are met | CFR-001 | machine | `#[ignore]` measurement test | yes |
+| AC-023 | No AX client, no AE | Compare the idle measurement with main. Review the diff | CFR-002 is met | CFR-002 | machine + review | The idle harness in `bench/` and the review record | yes |
+| AC-024 | — | Run the existing `scripts/applescript-smoke.sh` without changing it | Every existing item PASSes | REQ-013 | human | smoke | yes |
+| AC-025 | at review | Read the functions reachable from the AE and AX handlers | 0 occurrences of `recv`, `block_on`, condvar waits, or direct access to winit objects | CFR-003 | review | Reviewer's checklist | yes |
+| AC-026 | Launched with `macos-applescript = false` | `tell app "Noa" to perform action "new_tab"`, `tell app "Noa" to count windows`, and the AC-019 procedure | The first errors and the tab count does not change. The second is answered by Cocoa Scripting (no error). AX can be read, the same as in AC-019. There is no code for a permission UI of our own (review) | REQ-014, Behavior matrix | human + review | smoke | yes |
+| AC-027 | A real machine | `send key "foo"`, `send key "a" modifiers "hyper"`, env `"NOEQ"`, `send mouse position x 1` (no y), and `send key` and `contents` to the id of a closed terminal | -1700, -1700, -1700, -1715, -1728, -1728. The app does not crash | REQ-003, REQ-010, REQ-011 | human | smoke | yes |
+| AC-028 | at build | A test that checks the sdef against the Rust code table. A test that checks the sdef against Appendix B (transcribed into a fixture file in the repository) | Noa's sdef contains every name in Appendix B, the codes of new terms match Appendix B, and every code is in the Rust table | REQ-001..012 | machine | `sdef_codes_are_all_in_the_rust_table` and the new check test | yes |
+| AC-029 | Window 1 with 2 tabs. The shell is idle (no close confirmation appears) | `count tabs of window 1` → `exists tab 3 of window 1` → `exists tab 1 of window 1` → `close tab (tab 2 of window 1)` → create a new tab and then `close (tab 2 of window 1)` → `close window (window 1)` | 2 → false → true → 1 → 1 → the window count drops by 1 | REQ-002, REQ-013 | human | smoke | yes |
+| AC-030 | — | Unit tests of `PendingRegistry` and the snapshot rebuild: rebuild right after inserting a pending entry / the real object appears / remove on creation failure / read a pending terminal | The pending entry survives the rebuild. It disappears when the real object appears. It disappears on failure, and resolving it afterwards gives -1728. A pending read is as in the Behavior matrix | REQ-008 | machine | unit test | yes |
+| AC-031 | A terminal with `seq 1 5000` output. The output of `printf 'SEL-%s\n' X` is selected with the mouse | Read `scrollback of t` and `selection of t` | scrollback contains `5000`, is at most 256 KiB, and contains the line that ends with `SEL-X`. selection is `SEL-X` | REQ-012 | human | smoke | yes |
+| AC-032 | — | Give the point-to-cell function (300,120), (0,0) and (10000,10000), with an 8×16 pt cell, padding 4 pt left / 2 pt top, and an 80×24 pane | (38, 8), (1, 1), (80, 24). The rule is `floor((p − padding) / cell) + 1` clamped to 1..cols / 1..rows (a point on a boundary belongs to the cell on the right / below) | REQ-011 | machine | unit test | yes |
+| AC-033 | at build | Using the bundled sdef as the dictionary, compile `tell app "Noa" to close tab 2 of window 1`, `close tab (tab 2 of window 1)` and `close (tab 2 of window 1)` with `osacompile`, and decompile them with `osadecompile` | The old form gives a compile error (the breaking change of Amendment 2 is real). The two new forms compile and decompile back to the original statement | REQ-002, REQ-013 | machine | `scripts/applescript-sdef-check.sh` (run outside the sandbox) | yes |
 
 ## Scope
-- In scope：REQ-001..015、CFR-001..003。新しい smoke スクリプト `scripts/agent-automation-smoke.sh` と sdef コンパイル確認 `scripts/applescript-sdef-check.sh`。sdef の更新。Appendix B のフィクスチャファイル。CHANGELOG への `count windows` の変化の記載。
-- Out of scope：`wait for` 系の待機プリミティブ、AX の値変化通知、自前描画 UI（サイドバー、Overview、設定、パレット、モーダル）の AX 化、`whose` フィルタ、VoiceOver 向けの調整、Shortcuts（App Intents）、AppleScript からの設定変更、AX の範囲指定属性（`AXBoundsForRange` など）、ペイン単位のフォントサイズ、AXValue の書き込み、Secure Input 中のマスク処理、AX 公開の config キー、noa-server 側の変更。
+- In scope: REQ-001..015, CFR-001..003. The new smoke script `scripts/agent-automation-smoke.sh` and the sdef compile check `scripts/applescript-sdef-check.sh`. The sdef update. The fixture file for Appendix B. A CHANGELOG entry for the `count windows` change.
+- Out of scope: `wait for`-style wait primitives, AX value-change notifications, AX for the self-drawn UI (sidebar, Overview, settings, palette, modals), `whose` filters, VoiceOver tuning, Shortcuts (App Intents), changing settings from AppleScript, AX range attributes (such as `AXBoundsForRange`), per-pane font size, writing AXValue, masking during Secure Input, a config key for AX exposure, changes on the noa-server side.
 
 ## Considered but rejected
-- D1 Ghostty 準拠の厳守のみ：出力の読み返しがなく、エージェントの JTBD を満たせない（独自 suite に隔離する部分だけ採用）。
-- D3 AccessKit でアプリ全体を AX 化：依存と作業量が最大。自前描画 UI は対象外とした。
-- D4 読み取りを noa-server に任せる：起動とトークンが要り、設定なしの osascript 経路にならない。反証パネルで再検討したが、ユーザーは範囲の維持を選んだ（2026-10-17）。
-- D5 読み取り面を AX に一本化：呼び出す側に Accessibility 権限が要り、System Events 経由は脆い。
-- 範囲の縮小（AX と send mouse を外す、または準拠と send key だけにする）：反証パネルを受けて提示したが、ユーザーは範囲の維持を選んだ（2026-10-17）。
-- `wait for`：C1 の制約で、AE の suspend/resume 機構が必要になる。`contents` のポーリングで代わりになる。
-- AX の値変化通知：VoiceOver は対象外。大量出力中の CPU コストに見合わない。
-- ペイン単位のフォントサイズ：描画とレイアウトへの影響が大きい（ユーザー選択 2026-10-17）。
-- US-ANSI 固定のキー変換：Ghostty と結果がずれる（ユーザー選択 2026-10-17）。
-- `close tab`/`close window` を足さない：Ghostty 向けスクリプトとの一致を優先した（ユーザー選択 2026-10-17）。
+- D1 Strict Ghostty conformance only: It cannot read output back, so it does not meet the agent's JTBD (only the part isolated into our own suite is adopted).
+- D3 Make the whole app AX with AccessKit: The largest dependency and amount of work. The self-drawn UI was put out of scope.
+- D4 Leave reading to noa-server: It needs startup and a token, so it is not a no-setup osascript path. Reconsidered in the falsification panel, but the user chose to keep the scope (2026-10-17).
+- D5 Make AX the only reading surface: The caller would need Accessibility permission, and going through System Events is fragile.
+- Shrinking the scope (dropping AX and send mouse, or keeping only conformance and send key): Presented after the falsification panel, but the user chose to keep the scope (2026-10-17).
+- `wait for`: Under constraint C1 it needs an AE suspend/resume mechanism. Polling `contents` can stand in for it.
+- AX value-change notifications: VoiceOver is out of scope. The CPU cost during heavy output is not worth it.
+- Per-pane font size: The impact on rendering and layout is large (user choice 2026-10-17).
+- Key translation fixed to US-ANSI: The results would differ from Ghostty (user choice 2026-10-17).
+- Not adding `close tab`/`close window`: Matching Ghostty-targeted scripts took priority (user choice 2026-10-17).
 
 ## Assumption Ledger
 | ID | Assumption | Default chosen | Why | Status |
 |----|-----------|----------------|-----|--------|
-| ASSUME-1 (delegated) | CHALLENGE の選択 | D2 + D1 の suite 隔離 −`wait for` −通知 | 「推奨で」（2026-10-17） | ratified |
-| ASSUME-2 | id の型 | integer のまま（Ghostty は text） | 既存スクリプトとの互換 | ratified（2026-10-17） |
-| ASSUME-3 | `perform action … on t` の実現方法 | 対象 terminal に focus を移してから dispatch する | Noa の AppCommand は focused window を対象にする構造のため | ratified（2026-10-17） |
-| ASSUME-4 | `pid` の意味 | pty の直接の子（シェル）の pid | Ghostty の surface の pid と同じ意味と判断 | ratified（2026-10-17） |
-| ASSUME-5 | scroll の符号 | y>0 で上方向（NSEvent と同じ） | Ghostty は NSEvent の delta をそのまま渡している | ratified（2026-10-17） |
-| ASSUME-6 | `in` を省略した `new tab` の対象と、生成後の key | AE を受け取った時点の live な front window。作った tab は Noa 内で key になるが、アプリは activate しない | UI の `cmd+t` と同じ挙動。pending を対象にすると、スクリプトの順序で結果が変わる | ratified（2026-10-17） |
-| ASSUME-7 | 旧形式 `close tab 2 of window 1` を保てない場合の扱い（AC-033 で発生し、Amendment 2 で breaking change に確定） | AC-033 が失敗したら、実装で回避せずに spec に戻り、REQ-002 と AC-029/033 を breaking change（旧形式は `close (tab 2 of window 1)` で代替）として改訂するかをユーザーが決める | Ghostty との一致を優先した選択（2026-10-17）の帰結 | ratified（2026-10-17） |
+| ASSUME-1 (delegated) | The choice at CHALLENGE | D2 + the suite isolation of D1, minus `wait for`, minus notifications | "Go with the recommendation" (2026-10-17) | ratified |
+| ASSUME-2 | The type of id | Stay integer (Ghostty uses text) | Compatibility with existing scripts | ratified (2026-10-17) |
+| ASSUME-3 | How `perform action … on t` is realized | Move focus to the target terminal, then dispatch | Noa's AppCommand is structured to target the focused window | ratified (2026-10-17) |
+| ASSUME-4 | The meaning of `pid` | The pid of the pty's direct child (the shell) | Judged to be the same meaning as the pid of a Ghostty surface | ratified (2026-10-17) |
+| ASSUME-5 | The sign of scroll | y>0 scrolls up (the same as NSEvent) | Ghostty passes the NSEvent delta through as it is | ratified (2026-10-17) |
+| ASSUME-6 | The target of `new tab` with `in` omitted, and which tab is key after creation | The live front window at the moment the AE is received. The tab that was created becomes key inside Noa, but the app is not activated | The same behavior as UI `cmd+t`. If a pending object were the target, the result would change with the order of the script | ratified (2026-10-17) |
+| ASSUME-7 | What to do if the old form `close tab 2 of window 1` cannot be kept (arose in AC-033; settled as a breaking change in Amendment 2) | If AC-033 fails, do not work around it in the implementation: go back to the spec, and the user decides whether to revise REQ-002 and AC-029/033 as a breaking change (the old form is replaced by `close (tab 2 of window 1)`) | A consequence of the choice to prioritize matching Ghostty (2026-10-17) | ratified (2026-10-17) |
 
 ## Open Questions / Deferred Decisions
 | ID | Question | Blocks | Owner | Resolve by | Impact if wrong |
 |----|----------|--------|-------|-----------|-----------------|
-| OQ-1 | 実機テストを行う Mac の割り当て（Dvorak 入力ソース、Accessibility と Automation の権限を付与した端末） | nothing（能力要件は acceptance §3 で確定済み。割り当てだけ） | simota | before-ship | 受け入れを実行できない |
-| OQ-2 | 巨大な scrollback の reflow 中（10 MB で約 76 ms の実測あり）に AE/AX の読み取りが待つ時間に上限を設けるか（`try_lock` と古い値での応答など） | nothing（CFR-001 は reflow 中を対象外として確定済み。発生頻度が低く、ユーザー操作中に限られるため、今回のビルドには影響しない） | simota | deferred | リサイズ中に AX クライアントが読むと、最大で数十 ms 止まる |
+| OQ-1 | Assigning the Mac for the real-machine tests (a machine with the Dvorak input source and Accessibility and Automation permissions granted) | nothing (the capability requirements are settled in acceptance §3; only the assignment remains) | simota | before-ship | The acceptance run cannot be executed |
+| OQ-2 | Whether to put an upper bound on how long an AE/AX read waits during the reflow of a huge scrollback (about 76 ms measured at 10 MB), such as `try_lock` and answering with a stale value | nothing (CFR-001 is settled with reflow excluded. It is rare and limited to user interaction, so it does not affect this build) | simota | deferred | If an AX client reads during a resize, it can stall for up to several tens of ms |
 
 ## Build-path decision
-one-shot autonomous build（elicited 2026-10-17）。machine AC（AC-001/004/012/017/022/028/030/032/033）と `cargo build/test/clippy --workspace` をビルドのゲートにする。human AC は `scripts/agent-automation-smoke.sh` を渡して実機確認待ちとする（OQ-1）。
+one-shot autonomous build (elicited 2026-10-17). The machine ACs (AC-001/004/012/017/022/028/030/032/033) and `cargo build/test/clippy --workspace` are the build gates. The human ACs wait for real-machine confirmation, handing over `scripts/agent-automation-smoke.sh` (OQ-1).
 
-## Appendix A：send key のキー名（Ghostty `Ghostty.Input.Key` rawValue、main 2026-10-17）
+## Appendix A: send key key names (Ghostty `Ghostty.Input.Key` rawValue, main 2026-10-17)
 
-形式：`名前=macOS 仮想キーコード(hex)`。`-` は Mac に対応するキーコードがないキー。配列変換を経ずに、キー名から winit `KeyCode` へ直接対応させて符号化する（L2.4）。
+Format: `name=macOS virtual key code (hex)`. `-` marks a key that has no key code on a Mac. The name is mapped directly to winit's `KeyCode` and encoded without going through layout translation (L2.4).
 
 ```
 backquote=0x32 backslash=0x2a bracketLeft=0x21 bracketRight=0x1e comma=0x2b digit0=0x1d digit1=0x12 
@@ -285,7 +285,7 @@ mediaTrackNext=- mediaTrackPrevious=- power=- sleep=- audioVolumeDown=0x49 audio
 audioVolumeUp=0x48 wakeUp=- copy=- cut=- paste=-
 ```
 
-## Appendix B：Ghostty.sdef の用語と四文字コード（main 2026-10-17。新規用語はこのコードをそのまま使う）
+## Appendix B: Ghostty.sdef terms and four-character codes (main 2026-10-17. New terms use these codes as they are)
 
 ```
 application=capp; name=pnam; frontmost=pisf; front window=GFWn; version=vers; window=Gwnd; id=ID  ; 
@@ -305,20 +305,20 @@ scroll=GhstSMSc; x=GMsX; y=GMsY; precision=GMsP; momentum=GMsM; to=GMsT; count=c
 exists=coredoex; quit=aevtquit
 ```
 
-## Amendment 1：実装時の確定（2026-10-17）
-- `command` の実行方式：L2.4 の「既存の `SpawnTab.command` と同じ（シェルに 1 行入力）」と AC-006(c)（wait なしなら 2 秒以内に消える）が矛盾していた。ユーザーの選択により、Ghostty と同じ「シェルの代わりに起動」に確定する（elicited 2026-10-17）。旧パラメータ `new tab command "x"` も同じ意味になり、従来の「シェルに入力して残る」挙動から変わる。CHANGELOG に記載する。`docs/specs/applescript.md` の AC-4（指定コマンドが新しい surface で実行される）はこの意味でも満たされる。
-- `momentum`：Ghostty 辞書との互換（AC-028）のため引数は残し、列挙値を検証する（不正なら -1700）が、効果はない。Noa のホイール処理（`event_loop.rs` の `MouseWheel { delta, .. }`）は物理イベントの phase も使わないため、渡し先がない。sdef の説明にも明記した（2026-10-17 レビュー指摘）。
-- `font size` の寿命：tab に設定したサイズは、その window の scale 変更や実行時のフォントサイズ変更（`cmd+=` など全体操作・config reload）で全体のサイズに戻る。REQ-004 は生成時の反映だけを求めている。
-- `wait after command` の保持中のキー：修飾キー単独と Cmd ショートカットでは閉じない（出力のコピーやアプリ切り替えのため）。IME の入力（空でない Preedit・Commit）でも閉じ、変換中の入力は破棄する。
-- `close tab`：対象タブ全体を UI と同じ確認つきの経路（`request_close_tab`）で閉じる。`AppCommand::CloseTab` は分割タブではフォーカス中のペインしか閉じないため使わない。
-- `space` キー：Space も配列変換を通す（US 配列の Option+Space は U+00A0）。普通の空白になったときだけ名前付きキー Space として扱う。
-- pending の退役：生成に成功した時点で、その id を registry から外す（短命なコマンドで snapshot の再構築より先に閉じても、pending として残り続けない）。外すのはその id だけで、同じ tab に先に約束した split は残す。
-- UserEvent のペイロード：L2.1 の「`Eq` を満たす `SurfaceConfigPayload`」の代わりに、noa-server の `IpcAction` と同じ形（共有の待ち表にペイロードを置き、`UserEvent` は request id だけを運ぶ）にする。`Eq` の制約を受けずに f64 などを運べる。観測できる挙動は変わらない。
+## Amendment 1: Settled at implementation time (2026-10-17)
+- How `command` runs: L2.4 said "the same as the existing `SpawnTab.command` (type one line into the shell)", which contradicted AC-006(c) (without wait, it disappears within 2 seconds). By the user's choice, this is settled as Ghostty's "start it in place of the shell" (elicited 2026-10-17). The old parameter `new tab command "x"` now has the same meaning, which changes the previous behavior of "type it into the shell and stay". It is recorded in the CHANGELOG. AC-4 of `docs/specs/applescript.md` (the given command runs in the new surface) is still met in this sense.
+- `momentum`: The argument stays for compatibility with the Ghostty dictionary (AC-028), and its enumeration value is validated (invalid → -1700), but it has no effect. Noa's wheel handling (`MouseWheel { delta, .. }` in `event_loop.rs`) does not use the physical event's phase either, so there is nowhere to pass it. This is also stated in the sdef description (review finding 2026-10-17).
+- Lifetime of `font size`: A size set on a tab goes back to the global size on a scale change of that window, or on a runtime font-size change (global operations such as `cmd+=`, and config reload). REQ-004 only requires it to apply at creation.
+- Keys while `wait after command` holds: A lone modifier key and Cmd shortcuts do not close it (so that output can be copied and apps switched). IME input (a non-empty Preedit or Commit) also closes it, and input being composed is discarded.
+- `close tab`: Closes the whole target tab through the same confirming path as the UI (`request_close_tab`). `AppCommand::CloseTab` is not used because in a split tab it closes only the focused pane.
+- The `space` key: Space also goes through layout translation (Option+Space on the US layout is U+00A0). It is handled as the named key Space only when the result is a plain space.
+- Retiring pending entries: When creation succeeds, that id is removed from the registry (so a short-lived command that closes before the snapshot rebuild does not stay pending). Only that id is removed; a split promised earlier on the same tab is kept.
+- UserEvent payload: Instead of the `SurfaceConfigPayload` that satisfies `Eq` in L2.1, use the same shape as noa-server's `IpcAction` (the payload goes in a shared wait table, and `UserEvent` carries only a request id). This can carry f64 and the like without the `Eq` constraint. Observable behavior does not change.
 
-## Amendment 2：旧形式 `close tab N of window M` の扱い（2026-10-17）
-- AC-033 の実測で、Ghostty の `close tab` コマンドを辞書に加えると、旧形式 `close tab 2 of window 1` がコンパイルできなくなる（AppleScript が `close tab` コマンド ＋ `2 of window 1` と解釈し、`Can't get 2 of window 1 (-1723)` になる）ことを確認した。`close window 1` と新形式 `close tab (tab 2 of window 1)` / `close (tab 2 of window 1)` は動く。
-- ASSUME-7 に従って spec に戻し、ユーザーが breaking change として受け入れた（elicited 2026-10-17）。REQ-002 の「旧形式も同じ結果になる」は削除し、旧形式は CHANGELOG で置き換え先（`close (tab 2 of window 1)` または `close tab (tab 2 of window 1)`）を案内する。AC-029 の旧形式ステップは `close (tab 2 of window 1)` に置き換え、AC-033 の Then は「旧形式はコンパイルエラー、新形式 2 つはコンパイルできる」に改める。
+## Amendment 2: Handling of the old form `close tab N of window M` (2026-10-17)
+- AC-033 measured that adding Ghostty's `close tab` command to the dictionary makes the old form `close tab 2 of window 1` fail to compile (AppleScript reads it as the `close tab` command plus `2 of window 1`, giving `Can't get 2 of window 1 (-1723)`). `close window 1` and the new forms `close tab (tab 2 of window 1)` / `close (tab 2 of window 1)` work.
+- Following ASSUME-7, this went back to the spec, and the user accepted it as a breaking change (elicited 2026-10-17). "The old form gives the same result" is removed from REQ-002, and the CHANGELOG points the old form to its replacement (`close (tab 2 of window 1)` or `close tab (tab 2 of window 1)`). The old-form step of AC-029 is replaced with `close (tab 2 of window 1)`, and the Then of AC-033 is changed to "the old form is a compile error and the two new forms compile".
 
 ## Quality Gate Record
-- 2026-10-17 初回：3 PASS / 5 FAIL（BLOCKING 7）→ 修正。反証パネル 2 名：「問題は実在する」は根拠付きで一部反証 → FRAME に戻して L0 を書き直し（範囲はユーザーが維持を選択）。「AC が要件を証明する」は 18 件の穴 → AC を修正・追加。
-- 2 回目：7 件は解決、新たな BLOCKING 4 → 修正。3 回目：AC-032 の期待値 1 件 → 修正。それ以外はすべて解決済み、Completeness PASS。
+- 2026-10-17 first run: 3 PASS / 5 FAIL (BLOCKING 7) → fixed. Falsification panel, 2 members: "the problem is real" was partly refuted with evidence → went back to FRAME and rewrote L0 (the user chose to keep the scope). "The ACs prove the requirements" found 18 gaps → ACs fixed and added.
+- Second run: 7 items resolved, 4 new BLOCKING → fixed. Third run: 1 expected value in AC-032 → fixed. Everything else is resolved, Completeness PASS.

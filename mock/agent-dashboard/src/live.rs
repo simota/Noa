@@ -58,7 +58,11 @@ pub enum Command {
     /// card and the worker in the details drawer. Pane ids belong to one
     /// server instance: the feed takes them as the panes of the instance of
     /// the newest snapshot it had sent (the dashboard can know no newer
-    /// one), and fetches them only while it follows that instance.
+    /// one), and fetches them only while it follows that instance. The
+    /// dashboard sends its list whenever it changes and again with each
+    /// live snapshot it takes in, so a list the feed named after an
+    /// instance the dashboard never showed is named again by the next one;
+    /// the same list for the same instance changes nothing.
     Watch(Vec<u64>),
     Focus(u64),
 }
@@ -229,9 +233,11 @@ struct Feed {
     /// newest snapshot published when the `Watch` came (`shown`). The
     /// panes are fetched only while the feed follows that instance: the
     /// same ids on another one are other panes, which nobody chose. The
-    /// list itself outlives a detour to another instance, since the
-    /// dashboard asks again only for a change it makes: back on the
-    /// instance it shows, the feed fetches what it showed there.
+    /// list itself outlives a detour to another instance the dashboard
+    /// never shows: back on the instance it shows, the feed fetches what
+    /// it showed there. The dashboard sends its list again with each live
+    /// snapshot it takes in, which names it afresh after the instance
+    /// followed then.
     watched_on: Option<String>,
     /// The server instance of the newest snapshot published, `None`
     /// before the first.
@@ -389,7 +395,9 @@ impl Feed {
     }
 
     /// A `Watch` from the dashboard: panes of the instance it was last
-    /// sent (`watched_on`).
+    /// sent (`watched_on`). The same list again keeps the tails fetched
+    /// and when they were, so the dashboard can repeat it with every
+    /// snapshot without fetching more often.
     fn watch(&mut self, panes: Vec<u64>) {
         self.screens.retain(|pane, _| panes.contains(pane));
         self.watched = panes;
@@ -1156,7 +1164,18 @@ fn worker_of(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use noa_gpui_core::widgets::Label;
+    use noa_gpui_core::{Event, Key, Modifiers, UiTree, WidgetId};
+    use noa_gpui_platform::Screen;
+    use noa_gpui_scene::Size;
+    use noa_gpui_text::TextStore;
+
     use super::*;
+    use crate::dashboard::Dashboard;
+    use crate::fleet::Grouping;
 
     fn panel(value: serde_json::Value) -> Panel {
         let mut base = serde_json::json!({
@@ -1935,6 +1954,9 @@ pub(crate) mod tests {
         focused: Vec<u64>,
         /// The panes whose screens were asked for, in order.
         fetched: Vec<u64>,
+        /// Runs during each wait for a notification, as what the window
+        /// does meanwhile on its own thread.
+        on_wait: Option<Box<dyn FnMut()>>,
     }
 
     impl ScriptedNoa {
@@ -1954,6 +1976,7 @@ pub(crate) mod tests {
                 focus_takes: Duration::ZERO,
                 focused: Vec::new(),
                 fetched: Vec::new(),
+                on_wait: None,
             }
         }
     }
@@ -1982,6 +2005,9 @@ pub(crate) mod tests {
             }
             self.waits -= 1;
             self.clock.advance(self.wait_takes);
+            if let Some(on_wait) = &mut self.on_wait {
+                on_wait();
+            }
             Ok(None)
         }
 
@@ -2105,6 +2131,133 @@ pub(crate) mod tests {
         assert_eq!(snapshot.instance.as_deref(), Some("a"));
         assert_eq!(again.fetched, [2]);
         assert_eq!(tail_of(&snapshot, 2), ["$ new"]);
+    }
+
+    /// The labels of `id` and everything under it.
+    fn labels_under(tree: &UiTree, id: WidgetId) -> Vec<String> {
+        let own = tree.get::<Label>(id).map(|l| l.text().to_owned());
+        let children = tree.children(id).iter();
+        own.into_iter()
+            .chain(children.flat_map(|child| labels_under(tree, *child)))
+            .collect()
+    }
+
+    /// A Noa whose workers wait on a person: 2 for an approval, at the top
+    /// of the queue, and 3 (検査) for an answer.
+    fn asking(instance: &str, clock: &TestClock) -> ScriptedNoa {
+        let mut noa = ScriptedNoa::showing(instance, "$ approve?", clock);
+        let waiting = |pane: &str, label: &str, state: &str| {
+            panel(serde_json::json!({
+                "paneId": pane,
+                "parentPaneId": "1",
+                "label": label,
+                "agent": { "seq": 1, "kind": "claude", "state": state },
+            }))
+        };
+        noa.panels.truncate(1);
+        noa.panels.push(waiting("2", "alpha", "permission"));
+        noa.panels.push(waiting("3", "検査", "input"));
+        noa.screens.insert(3, "$ cargo test".to_owned());
+        noa
+    }
+
+    /// The review's sequence, with the feed and the dashboard as the app
+    /// runs them: the screen shows server a; while an IME composes in its
+    /// filter, a snapshot of server b is held back; the feed is back on a
+    /// when the composition ends and the filter makes the screen watch 3,
+    /// so the feed takes that `Watch` before a's first snapshot, as naming
+    /// b's pane 3. The next frame passes over b for a, which looks to the
+    /// screen like nothing changed. Taking a's snapshot in tells the feed
+    /// again, and on the same connection pane 3's tail is fetched and
+    /// shown, with nobody choosing anything again.
+    #[test]
+    fn a_watch_named_after_a_server_never_shown_heals_on_the_next_snapshot() {
+        let clock = TestClock::new();
+        let (snapshot_tx, snapshots) = mpsc::channel();
+        let (commands, command_rx) = mpsc::channel();
+        let (notice_tx, notices) = mpsc::channel();
+        let mut feed = Feed::new(
+            snapshot_tx,
+            notice_tx,
+            command_rx,
+            Arc::new(|| {}),
+            clock.boxed(),
+        );
+        let channel = Channel {
+            snapshots,
+            notices,
+            commands,
+            _heartbeat: mpsc::channel().0,
+        };
+        let window = Size::new(1440.0, 900.0);
+        let screen = Rc::new(RefCell::new((
+            Dashboard::live(Grouping::Orchestrator, channel),
+            TextStore::new(Default::default()),
+        )));
+        let frame = {
+            let screen = Rc::clone(&screen);
+            move || {
+                let (dashboard, text) = &mut *screen.borrow_mut();
+                dashboard.before_frame(text);
+                dashboard.prepare(window, text);
+            }
+        };
+        let input = |event: Event| {
+            let (dashboard, text) = &mut *screen.borrow_mut();
+            dashboard.dispatch(event, text);
+            dashboard.prepare(window, text);
+        };
+        let shown = || {
+            let (dashboard, _) = &*screen.borrow();
+            let tree = dashboard.tree();
+            labels_under(tree, tree.root().expect("a screen"))
+        };
+        frame();
+
+        let mut first = asking("a", &clock);
+        assert!(matches!(feed.follow(&mut first), Err(Stop::Lost(_))));
+        frame();
+        assert!(shown().iter().any(|l| l == "検査"), "a's workers are shown");
+
+        let key = Key::Char('/');
+        let modifiers = Modifiers::default();
+        input(Event::KeyDown { key, modifiers });
+        input(Event::Text("/".into()));
+        let text = "けんさ".into();
+        input(Event::Composition { text, cursor: None });
+        let mut other = asking("b", &clock);
+        assert!(matches!(feed.follow(&mut other), Err(Stop::Lost(_))));
+        frame();
+        // The composition ends: the filter leaves 3 the only card, expanded.
+        input(Event::Text("検査".into()));
+
+        // Back on a. A wait takes 3 s: the first pass sends a's snapshot,
+        // the window takes it in during the second, and the third pass,
+        // 6 s after the first snapshot, sends the next.
+        let mut again = asking("a", &clock);
+        again.waits = 3;
+        again.wait_takes = Duration::from_secs(3);
+        let frame_once = {
+            let mut waits = 0;
+            let frame = frame.clone();
+            move || {
+                waits += 1;
+                if waits == 2 {
+                    frame();
+                }
+            }
+        };
+        again.on_wait = Some(Box::new(frame_once));
+        assert!(matches!(feed.follow(&mut again), Err(Stop::Lost(_))));
+        assert_eq!(again.fetched, [3], "a's pane 3, which the screen shows");
+        assert_eq!(feed.watched_on.as_deref(), Some("a"));
+
+        frame();
+        assert!(
+            shown().iter().any(|l| l == "$ cargo test"),
+            "3's tail on its card: {:?}",
+            shown()
+        );
     }
 
     #[test]

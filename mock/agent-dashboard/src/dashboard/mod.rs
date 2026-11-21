@@ -235,7 +235,8 @@ pub struct Dashboard {
     /// The size the last `prepare` laid the screen out at. A rebuilt screen is
     /// laid out at it at once (see `rebuilt`).
     viewport: Option<Size>,
-    /// The panes whose screen tails the feed was last asked for.
+    /// The panes whose screen tails the feed was last asked for; `None`
+    /// until the next `watch` asks, whatever it finds.
     watched: Option<Vec<u64>>,
     /// Wheel travel not yet turned into pages, per panel (the pager).
     wheel_accum: [f32; 5],
@@ -333,6 +334,17 @@ impl Dashboard {
     /// another server instance rebuilds it without the panes chosen on the
     /// old one (`forget_panes`). The caller brings the header's time up to
     /// its own (`tick`).
+    ///
+    /// A live snapshot also tells the feed again, once, which panes this
+    /// screen watches. The feed takes a `Watch` as naming the panes of the
+    /// newest instance it had sent when the `Watch` came, and that can be
+    /// one this screen never showed: a snapshot of another Noa held back
+    /// while an IME composed, then passed over for a newer one of the Noa
+    /// shown. The feed would then never fetch what this screen shows,
+    /// since nothing it shows changed. Told again as each live snapshot is
+    /// taken in, the feed names the list after the instance it is
+    /// following by the next one at the latest; the same list again
+    /// changes nothing there.
     fn apply_received(&mut self, snapshot: Snapshot, received: Instant, text: &mut TextStore) {
         let old = self.order();
         let other_server = self.feed.other_server(&snapshot);
@@ -340,6 +352,12 @@ impl Dashboard {
         let structural = other_server
             || self.feed.link.as_ref() != Some(&snapshot.link)
             || !self.feed.fleet.same_structure(&fleet);
+        let live = snapshot.link == Link::Live;
+        if live {
+            // The rebuild or the in-place update below asks for what it
+            // shows; else the `watch` at the end does.
+            self.watched = None;
+        }
         self.feed.accept(fleet, snapshot, received);
         if other_server {
             self.forget_panes();
@@ -354,22 +372,24 @@ impl Dashboard {
         } else {
             self.refresh(text);
         }
+        if live {
+            self.watch();
+        }
     }
 
     /// Drops what names a pane of the server instance the screen showed
     /// until now — the selection, the drawer, the expanded queue card —
     /// since the new instance may give those ids to other panes: Enter or
     /// the drawer's 開く would then reach a worker nobody chose. The rebuild
-    /// that follows shows the new server's workers from the top. The feed
-    /// takes a `Watch` as naming the newest instance it sent, so what that
-    /// rebuild shows is asked for again even where the ids are the same:
-    /// the ids asked for before were the old instance's panes.
+    /// that follows shows the new server's workers from the top, and asks
+    /// for their tails as every live snapshot does (`apply_received`), even
+    /// where the ids are the same: the ids asked for before were the old
+    /// instance's panes.
     fn forget_panes(&mut self) {
         self.view.selected = None;
         self.view.reveal = None;
         self.view.detail = None;
         self.view.expanded = None;
-        self.watched = None;
     }
 
     /// Takes in what the feed sent since the last frame, as of `now`. A

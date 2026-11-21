@@ -255,14 +255,22 @@ fn a_cancelled_release_leaves_a_press_begun_since_alone() {
     assert!(!dashboard.view.help);
 
     // A click on the last segment, with the middle button let go during it.
+    // The middle button's release changes nothing: passed on where it
+    // happened, it would end the segment's press and pick the segment then,
+    // leaving the left button's release nothing to do.
+    let last_segment = Grouping::ALL[Grouping::ALL.len() - 1];
+    assert_ne!(dashboard.view.grouping, last_segment);
     dashboard.dispatch(down(left), &mut text);
     dashboard.dispatch(up(middle), &mut text);
-    dashboard.dispatch(up(left), &mut text);
     dashboard.prepare(window(), &mut text);
     assert_eq!(
         dashboard.view.grouping,
-        Grouping::ALL[Grouping::ALL.len() - 1]
+        Grouping::Orchestrator,
+        "picked at the middle button's release"
     );
+    dashboard.dispatch(up(left), &mut text);
+    dashboard.prepare(window(), &mut text);
+    assert_eq!(dashboard.view.grouping, last_segment);
 }
 
 #[test]

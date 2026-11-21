@@ -120,7 +120,8 @@ Commands:
                                 with the turn already running); --raw keys (Esc,
                                 Ctrl-C) still go to a running agent. Pasted text
                                 for an agent (or a pane whose program is not
-                                listed yet) waits up to 15 s for it to enable
+                                listed yet, unless spawn started it with a
+                                command) waits up to 15 s for it to enable
                                 bracketed paste, before any key; if it does not,
                                 nothing is sent (exit 1).
                                 A TEXT over 250 KiB (JSON-encoded) is refused:

@@ -51,8 +51,8 @@ const ROW_INDENT: usize = 6;
 /// How long a lone ESC waits for the rest of a sequence before it counts
 /// as the Esc key.
 const ESC_WAIT: Duration = Duration::from_millis(50);
-/// The `float.toggle-focus` binding, which takes focus from an open worker
-/// back to the board (agent-orchestration D10).
+/// The `float.toggle-focus` binding, which folds an opened worker back
+/// into its row and takes focus to the board (agent-orchestration D10).
 const BACK_TO_BOARD: &str = if cfg!(target_os = "macos") {
     "⌘⇧I"
 } else {
@@ -2139,9 +2139,13 @@ impl Board {
                     String::new()
                 };
                 let name = self.name(*pane);
+                // The keys are in the prompt: an opened worker covers the
+                // footer that lists them (D10).
                 let ask = self.lang.pick(
-                    format!("{name} を閉じますか? {busy}{kids}出力は消えます。"),
-                    format!("Close {name}? {busy}{kids}Its output is lost."),
+                    format!(
+                        "{name} を閉じますか? y で閉じる · ほかのキーで取り消し · {busy}{kids}出力は消えます。"
+                    ),
+                    format!("Close {name}? y closes · other keys cancel · {busy}{kids}Its output is lost."),
                 );
                 line.fg(RED, &fit(&ask, room));
             }
@@ -2221,8 +2225,8 @@ impl Board {
                 }
                 (None, None) => {
                     let hint = self.lang.pick(
-                        format!("{BACK_TO_BOARD} 開いたワーカーからボードへ  ·  ? キー一覧"),
-                        format!("{BACK_TO_BOARD} back here from an opened worker  ·  ? keys"),
+                        format!("{BACK_TO_BOARD} ワーカーをたたんでボードへ  ·  ? キー一覧"),
+                        format!("{BACK_TO_BOARD} fold an opened worker, back here  ·  ? keys"),
                     );
                     line.fg(DIM, &fit(&hint, room));
                 }
@@ -2285,8 +2289,8 @@ impl Board {
             (
                 BACK_TO_BOARD,
                 l(
-                    "開いたワーカーからボードへ戻る",
-                    "back to the board from an opened worker",
+                    "開いたワーカーをたたんでボードへ戻る",
+                    "fold the opened worker and come back here",
                 ),
             ),
             (
@@ -4697,6 +4701,12 @@ mod tests {
         board.key(Key::Char('j'));
         board.key(Key::Char('x'));
         let lines = board.render(100, 20, Instant::now());
+        // U4: the keys are said where an opened worker does not cover them.
+        assert!(
+            visible(&lines[2]).contains("api を閉じますか? y で閉じる · ほかのキーで取り消し"),
+            "{}",
+            visible(&lines[2])
+        );
         assert!(
             visible(&lines[2]).contains("まだ作業中です。"),
             "{}",

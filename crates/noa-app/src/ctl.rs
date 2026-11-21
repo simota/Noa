@@ -9,6 +9,7 @@
 
 mod board;
 mod journal;
+mod prompt;
 mod result;
 mod worktree;
 
@@ -118,7 +119,12 @@ Commands:
                                 pane whose screen text has not changed for SECS
                                 seconds (reason \"stalled\", with \"quietSecs\"),
                                 for an agent that does not report. --tail adds each open
-                                pane's last N output lines as \"tail\". A timeout
+                                pane's last N output lines as \"tail\" (for an
+                                agent, the lines above its input box). A
+                                permission or input line has \"prompt\": the
+                                screen's block below the work (the dialog or
+                                input box, up to 20 lines, rules removed),
+                                with or without --tail. A timeout
                                 prints each pending pane's report count as
                                 `baseline`; pass it back as --after PANE=SEQ.
                                 SIGTERM, SIGINT or SIGHUP prints that line too,
@@ -2939,7 +2945,9 @@ fn apply_notification(
 
 /// Print the line for a pane whose wait ended, with `--tail` if asked.
 /// The wait's outcome stands even when the tail cannot be read: the line
-/// then says why under `tailError` instead.
+/// then says why under `tailError` instead. A `permission` or `input` line
+/// shows what is asked (`"prompt"`, AU-11); on an agent's pane, any other
+/// line's tail is taken from above its input box.
 fn emit_outcome(
     source: &mut impl WaitSource,
     options: &WaitOptions,
@@ -2950,10 +2958,24 @@ fn emit_outcome(
     emit: &mut dyn FnMut(&serde_json::Value),
 ) {
     let mut line = outcome_json(watch, outcome, panel, quiet);
+    let asks = matches!(outcome.reason, Reason::Permission | Reason::Input);
+    if asks
+        && !outcome.closed
+        && let Ok(Some(screen)) = source.screen(watch.pane)
+        && let Some(asked) = prompt::block(&screen)
+    {
+        line["prompt"] = asked.into();
+    }
+    let agent = panel
+        .and_then(|panel| panel.agent.as_ref())
+        .is_some_and(|agent| agent.kind.is_some());
     if let Some(lines) = options.tail
         && !outcome.closed
     {
         match source.scrollback(watch.pane) {
+            Ok(Some(text)) if agent && !asks => {
+                line["tail"] = prompt::agent_tail(&text, lines).into();
+            }
             Ok(Some(text)) => line["tail"] = tail_lines(&text, lines).into(),
             Ok(None) => {}
             Err(failure) => line["tailError"] = failure.message.into(),
@@ -5994,6 +6016,82 @@ mod tests {
         assert_eq!(code.ok(), Some(EXIT_OK));
         assert_eq!(lines[0]["closed"], true);
         assert!(lines[0].get("tail").is_none());
+    }
+
+    /// A [`FakeSource`] whose every pane shows `screen`.
+    struct WithScreen(FakeSource, String);
+
+    impl WaitSource for WithScreen {
+        fn list(&mut self) -> Result<Vec<Panel>, Failure> {
+            self.0.list()
+        }
+
+        fn next(&mut self, timeout: Duration) -> Result<Option<Notification>, Failure> {
+            self.0.next(timeout)
+        }
+
+        fn scrollback(&mut self, pane: u64) -> Result<Option<String>, Failure> {
+            self.0.scrollback(pane)
+        }
+
+        fn screen(&mut self, _pane: u64) -> Result<Option<String>, Failure> {
+            Ok(Some(self.1.clone()))
+        }
+    }
+
+    const BOX_RULE: &str = "────────────────────────────────────────";
+
+    // Audit finding (AU-11): a `permission` line did not say what was
+    // asked, and an agent's `--tail` ended in its input box and status line.
+    #[test]
+    fn a_question_line_shows_the_prompt_and_an_agents_tail_skips_its_input_box() {
+        let screen = format!(
+            "● Reading a.rs\n{BOX_RULE}\n Allow edit of a.rs?\n ❯ 1. Yes\n   2. No\n{BOX_RULE}\n\n"
+        );
+        let run = |state: &str, tail: Option<usize>, agent: bool| {
+            let mut asked = with_pane(panel(2, Some(state), false), 8);
+            if !agent {
+                asked.agent.as_mut().unwrap().kind = None;
+            }
+            let mut source = WithScreen(
+                FakeSource {
+                    lists: vec![vec![asked]],
+                    notifications: Default::default(),
+                    list_calls: 0,
+                    texts: HashMap::from([(8, format!("one\ntwo\n{screen}"))]),
+                },
+                screen.clone(),
+            );
+            let mut lines = Vec::new();
+            let options = WaitOptions {
+                tail,
+                ..WaitOptions::default()
+            };
+            let code = wait_loop(
+                &mut source,
+                &[8],
+                WaitStart::Listed {
+                    after: HashMap::from([(8, 1)]),
+                },
+                &options,
+                WAIT_RELIST_INTERVAL,
+                &mut |line| lines.push(line.clone()),
+            );
+            assert_eq!(code.ok(), Some(EXIT_OK));
+            lines.remove(0)
+        };
+        let line = run("permission", None, true);
+        assert_eq!(line["prompt"], " Allow edit of a.rs?\n ❯ 1. Yes\n   2. No");
+        let line = run("input", Some(2), true);
+        assert!(line.get("prompt").is_some());
+        assert!(line["tail"].as_str().unwrap().contains("2. No"));
+
+        let line = run("finished", Some(2), true);
+        assert!(line.get("prompt").is_none());
+        assert_eq!(line["tail"], "two\n● Reading a.rs");
+        // A plain command keeps the raw end.
+        let line = run("finished", Some(1), false);
+        assert_eq!(line["tail"], BOX_RULE);
     }
 
     /// A [`FakeSource`] whose scrollback reads fail with `error`.

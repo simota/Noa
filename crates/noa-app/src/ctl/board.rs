@@ -1557,7 +1557,7 @@ fn approval_message(name: &str, lang: Lang) -> String {
 }
 
 /// A full-width rule, as agents draw around their input box.
-fn is_rule(line: &str) -> bool {
+pub(crate) fn is_rule(line: &str) -> bool {
     let line = line.trim();
     line.chars().count() >= 20 && line.chars().all(|ch| matches!(ch, '─' | '━' | '═'))
 }

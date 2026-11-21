@@ -26,6 +26,9 @@ const LANE_TOTAL_WIDTH: f32 = 44.0;
 const LANE_HEIGHT: f32 = 12.0;
 const GRAPH_WIDTH: f32 = 430.0;
 const HISTORY_HEIGHT: f32 = 256.0;
+/// Small but not zero: flex shrinks in proportion to `flex_shrink` times the
+/// basis, so this lets the status label absorb a deficit before the strip.
+const HINT_STRIP_SHRINK: f32 = 0.0001;
 
 const GREEN: Color = Color::hex(0x34c759);
 const DIM_GREEN: Color = Color::hex(0x2f5d3c);
@@ -138,7 +141,7 @@ pub struct Dashboard {
     status: WidgetId,
     grouping_control: WidgetId,
     queue_buttons: QueueButtons,
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     panels: [Option<WidgetId>; 5],
 }
 
@@ -152,10 +155,20 @@ impl Dashboard {
     }
 
     fn showing(view: View) -> Self {
+        Self::build(view, Theme::for_appearance(Appearance::Dark))
+    }
+
+    /// Builds the same screen again for a changed view, keeping the theme (the
+    /// appearance the OS last set) the screen has now.
+    fn rebuilt(&mut self, view: View) {
+        *self = Self::build(view, self.tree.theme().clone());
+    }
+
+    fn build(view: View, theme: Theme) -> Self {
         let grouping = view.grouping;
         let workers = fleet::canned();
         let mut tree = UiTree::new();
-        tree.set_theme(Theme::for_appearance(Appearance::Dark));
+        tree.set_theme(theme);
 
         let root = tree.insert(
             None,
@@ -184,6 +197,7 @@ impl Dashboard {
             }),
         );
         let mut queue_buttons = QueueButtons::default();
+        #[cfg(test)]
         let mut panels = [None; 5];
         let now_shown = Panel::NOW.iter().any(|p| view.shown[*p as usize]);
         let rows = [
@@ -205,7 +219,10 @@ impl Dashboard {
             );
             for &member in members.iter().filter(|p| view.shown[**p as usize]) {
                 let id = panel(&mut tree, row, member.style(&view.shown));
-                panels[member as usize] = Some(id);
+                #[cfg(test)]
+                {
+                    panels[member as usize] = Some(id);
+                }
                 match member {
                     Panel::Queue => {
                         queue_buttons = queue(&mut tree, id, &workers, view.expanded);
@@ -224,6 +241,7 @@ impl Dashboard {
             status: header.status,
             grouping_control: header.grouping_control,
             queue_buttons,
+            #[cfg(test)]
             panels,
         }
     }
@@ -243,14 +261,14 @@ impl Screen for Dashboard {
             if let Some(panel) = Panel::ALL.into_iter().find(|p| p.shortcut() == *pressed) {
                 let mut shown = self.view.shown;
                 shown[panel as usize] = !shown[panel as usize];
-                *self = Self::showing(View { shown, ..self.view });
+                self.rebuilt(View { shown, ..self.view });
             }
             return;
         }
         if let Some(SelectionChanged(index)) = message.downcast_ref::<SelectionChanged>()
             && message.source == self.grouping_control
         {
-            *self = Self::showing(View {
+            self.rebuilt(View {
                 grouping: Grouping::ALL[*index],
                 ..self.view
             });
@@ -260,7 +278,7 @@ impl Screen for Dashboard {
             return;
         }
         if let Some(label) = QueueButtons::worker(&self.queue_buttons.details, message.source) {
-            *self = Self::showing(View {
+            self.rebuilt(View {
                 expanded: Some(label),
                 ..self.view
             });
@@ -342,23 +360,43 @@ fn hint_strip(tree: &mut UiTree, bar: WidgetId, shown: &[bool; 5]) -> [WidgetId;
             flex_direction: FlexDirection::Row,
             align_items: AlignItems::CENTER,
             gap: gap(8.0),
-            flex_shrink: 0.0,
+            // Next to the status label it is the last to give way: the status
+            // label takes the whole deficit while it can, and the strip only
+            // the rest (clipped), so the left-hand items and the grouping
+            // control are never pushed off screen.
+            flex_shrink: HINT_STRIP_SHRINK,
+            min_size: LayoutSize {
+                width: length(0.0),
+                height: auto(),
+            },
             ..Default::default()
-        }),
+        })
+        .clip(true),
     );
     Panel::ALL.map(|panel| {
+        // On and off share the label's font, size and padding, so the strip is
+        // the same size in either state; on is told apart by a filled pill and
+        // the text colour.
+        let on = shown[panel as usize];
+        let item = Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(3.0)
+            .padding(2.0)
+            .radius(4.0);
         let item = tree.insert(
             Some(strip),
-            Container::row().align_items(AlignItems::CENTER).gap(3.0),
+            if on {
+                item.background(Role::SurfaceAlt)
+            } else {
+                item
+            },
         );
         tree.insert(Some(item), Kbd::shortcut(panel.shortcut()));
         let label = Label::new(panel.title()).font_size(11.0);
-        let label = if shown[panel as usize] {
-            label.weight(700)
-        } else {
-            label.weight(400).color(Role::Muted)
-        };
-        tree.insert(Some(item), label);
+        tree.insert(
+            Some(item),
+            if on { label } else { label.color(Role::Muted) },
+        );
         item
     })
 }
@@ -1244,8 +1282,16 @@ mod tests {
         }
     }
 
-    fn press(dashboard: &mut Dashboard, text: &mut TextStore, panel: Panel, modifiers: Modifiers) {
-        let key = panel.shortcut().key;
+    const KEYS: [(char, Panel, &str); 5] = [
+        ('1', Panel::Queue, "要対応"),
+        ('2', Panel::Running, "作業中"),
+        ('3', Panel::Done, "完了"),
+        ('4', Panel::Timeline, "状態の推移"),
+        ('5', Panel::Graph, "関連"),
+    ];
+
+    fn press(dashboard: &mut Dashboard, text: &mut TextStore, digit: char, modifiers: Modifiers) {
+        let key = Key::Char(digit);
         dashboard.dispatch(Event::KeyDown { key, modifiers }, text);
         dashboard.prepare(window(), text);
     }
@@ -1268,14 +1314,14 @@ mod tests {
             [998.0, 632.0, 430.0, 256.0],
         ];
         for modifiers in [Modifiers::default(), Modifiers::on_apple()] {
-            for panel in Panel::ALL {
+            for (digit, panel, _) in KEYS {
                 let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
-                press(&mut dashboard, &mut text, panel, modifiers);
+                press(&mut dashboard, &mut text, digit, modifiers);
                 for other in Panel::ALL {
                     let present = dashboard.panels[other as usize].is_some();
                     assert_eq!(present, other != panel, "{other:?} after hiding {panel:?}");
                 }
-                press(&mut dashboard, &mut text, panel, modifiers);
+                press(&mut dashboard, &mut text, digit, modifiers);
                 let id = dashboard.panels[panel as usize].unwrap();
                 let actual = rect(&dashboard.tree, id);
                 assert_rect(actual, expected[panel as usize], &format!("{panel:?}"));
@@ -1290,13 +1336,12 @@ mod tests {
             let tree = &dashboard.tree;
             let items = tree.children(hint_strip_of(&dashboard));
             assert_eq!(items.len(), 5);
-            for (panel, item) in Panel::ALL.into_iter().zip(items) {
+            for ((digit, _, title), item) in KEYS.into_iter().zip(items) {
                 let parts = tree.children(*item);
                 let kbd = tree.get::<Kbd>(parts[0]).unwrap();
-                let keys = panel.shortcut().keys(tree.shortcut_glyphs());
-                assert_eq!(kbd.keys(), keys.as_slice());
+                assert_eq!(kbd.keys(), [digit.to_string()].as_slice());
                 let label = tree.get::<Label>(parts[1]).unwrap();
-                assert_eq!(label.text(), panel.title());
+                assert_eq!(label.text(), title);
             }
         }
     }
@@ -1320,6 +1365,7 @@ mod tests {
             .update::<Label, _>(status, |l, cx| l.set_text(cx, long));
         narrow.prepare(window(), &mut narrow_text);
         let (off, _off_text) = showing(Grouping::Orchestrator, [false; 5]);
+        let strip_width = rect(&default.tree, hint_strip_of(&default))[2];
         let default_widths: Vec<f32> = {
             let tree = &default.tree;
             let bar = tree.parent(hint_strip_of(&default)).unwrap();
@@ -1345,7 +1391,47 @@ mod tests {
                 "{rects:?}"
             );
             let width = rect(tree, strip)[2];
-            assert!((299.5..=312.5).contains(&width), "strip is {width} px");
+            assert!((width - strip_width).abs() <= 0.5, "strip is {width} px");
         }
+        let (default_tree, default_strip) = (&default.tree, hint_strip_of(&default));
+        let default_rect = rect(default_tree, default_strip);
+        let mut states: Vec<(String, [bool; 5])> = Panel::ALL
+            .map(|p| (format!("{p:?} off"), shown_only(&[p])))
+            .into();
+        states.push(("all off".into(), [false; 5]));
+        for (name, shown) in states {
+            let (dashboard, _text) = showing(Grouping::Orchestrator, shown);
+            let actual = rect(&dashboard.tree, hint_strip_of(&dashboard));
+            assert_rect(actual, default_rect, &format!("hint strip, {name}"));
+        }
+    }
+
+    #[test]
+    fn a_rebuild_keeps_the_appearance() {
+        let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+        dashboard.set_system_appearance(Appearance::Light);
+        assert_eq!(dashboard.tree.theme().appearance, Appearance::Light);
+        press(&mut dashboard, &mut text, '1', Modifiers::default());
+        assert!(dashboard.panels[Panel::Queue as usize].is_none());
+        assert_eq!(dashboard.tree.theme().appearance, Appearance::Light);
+    }
+
+    #[test]
+    fn the_grouping_control_stays_reachable_at_1140() {
+        let size = Size::new(1140.0, 900.0);
+        let mut dashboard = Dashboard::new(Grouping::Orchestrator);
+        let mut text = TextStore::new(Default::default());
+        dashboard.prepare(size, &mut text);
+        let control = dashboard.grouping_control;
+        let origin = dashboard.tree.window_origin(control).unwrap();
+        let width = dashboard.tree.layout(control).unwrap().rect.width;
+        let right = origin.x + width;
+        assert!(right <= size.width - 16.0 + 0.5, "control ends at {right}");
+        let pos = Point::new(right - 12.0, origin.y + 8.0);
+        let button = PointerButton::Primary;
+        dashboard.dispatch(Event::PointerMove { pos }, &mut text);
+        dashboard.dispatch(Event::PointerDown { pos, button }, &mut text);
+        dashboard.dispatch(Event::PointerUp { pos, button }, &mut text);
+        assert_eq!(dashboard.view.grouping, Grouping::Flat);
     }
 }

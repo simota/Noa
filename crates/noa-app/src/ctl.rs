@@ -457,6 +457,24 @@ fn parse_spawn(rest: &mut Args) -> Result<SpawnArgs, String> {
     };
     let cwd = rest.value("--cwd")?;
     let label = rest.value("--label")?;
+    // A board is known by its label alone (`board_pane`).
+    if label
+        .as_deref()
+        .is_some_and(|label| label.starts_with(BOARD_LABEL_PREFIX))
+    {
+        return Err(format!(
+            "--label may not start with {BOARD_LABEL_PREFIX:?}: that names an orchestrator's board"
+        ));
+    }
+    let input = rest.value("--input")?;
+    if input.is_some() && worktree::is_agent_command(&command) {
+        return Err(
+            "--input is written as raw keys right after the worker starts, so an agent takes \
+             each newline as Enter; start the agent, then give it the task with \
+             `send PANE --enter`"
+                .to_string(),
+        );
+    }
     let worktree = rest.flag("--worktree");
     let tier = rest
         .value("--tier")?
@@ -479,7 +497,7 @@ fn parse_spawn(rest: &mut Args) -> Result<SpawnArgs, String> {
         cwd,
         env,
         label,
-        input: rest.value("--input")?,
+        input,
         wait_after: !rest.flag("--no-wait-after"),
         focus: rest.flag("--focus"),
         max_children,
@@ -1142,8 +1160,11 @@ pub(crate) fn board_before_spawn(
 
 /// The label of `own`'s board pane, which a later spawn looks for.
 pub(crate) fn board_label(own: u64) -> String {
-    format!("board:{own}")
+    format!("{BOARD_LABEL_PREFIX}{own}")
 }
+
+/// What every board pane's label starts with; a worker's may not.
+const BOARD_LABEL_PREFIX: &str = "board:";
 
 /// `own`'s board pane, when one is open.
 pub(crate) fn board_pane(panels: &[Panel], own: u64) -> Option<u64> {
@@ -2674,6 +2695,33 @@ mod tests {
         ] {
             assert!(parse_args(&args(bad)).is_err(), "{bad:?} must be rejected");
         }
+    }
+
+    // Audit finding (REL-14): a worker labelled `board:7` was taken for
+    // pane 7's board.
+    #[test]
+    fn spawn_refuses_a_board_label() {
+        for bad in [
+            &["spawn", "--label", "board:7"][..],
+            &["spawn", "--label=board:", "--", "zsh"],
+        ] {
+            let err = parse_args(&args(bad)).unwrap_err();
+            assert!(err.contains("board:"), "{bad:?}: {err}");
+        }
+        assert!(parse_args(&args(&["spawn", "--label", "my-board:7"])).is_ok());
+    }
+
+    // Audit finding (AU-14): `--input` is raw keys written as the worker
+    // starts, so a task given to an agent that way had each newline taken
+    // as Enter.
+    #[test]
+    fn spawn_refuses_input_for_an_agent_command() {
+        for agent in ["claude", "codex", "/usr/local/bin/agy"] {
+            let err = parse_args(&args(&["spawn", "--input", "task", "--", agent])).unwrap_err();
+            assert!(err.contains("send"), "{agent}: {err}");
+        }
+        assert!(parse_args(&args(&["spawn", "--input", "make test", "--", "zsh"])).is_ok());
+        assert!(parse_args(&args(&["spawn", "--input", "claude"])).is_ok());
     }
 
     /// What `run_spawn_steps` returns: the result and the steps taken.

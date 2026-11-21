@@ -1600,52 +1600,82 @@ pub(crate) fn control_url(bind: &str, port: u16) -> String {
     format!("ws://{}/", std::net::SocketAddr::new(ip, port))
 }
 
+/// How [`connect_client`] treats a server at its connection limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConnectRetry {
+    /// Tried again for 3 s ([`connect_retrying`]): a command.
+    ForThreeSeconds,
+    /// Tried once: the board backs off between attempts itself and must
+    /// not sleep through them on its UI thread.
+    Once,
+}
+
+/// `connect` under `retry`.
+pub(crate) fn connect_with<T>(
+    retry: ConnectRetry,
+    mut connect: impl FnMut() -> Result<T, ClientError>,
+    pause: impl FnMut(Duration),
+) -> Result<T, ClientError> {
+    match retry {
+        ConnectRetry::ForThreeSeconds => connect_retrying(connect, pause),
+        ConnectRetry::Once => connect(),
+    }
+}
+
+/// A control connection to the Noa this process's config names, with its
+/// token, and the port it is on.
+pub(crate) fn connect_client(retry: ConnectRetry) -> Result<(Client, u16), Failure> {
+    let (config, _diagnostics) =
+        noa_config::load_startup_config(noa_config::ConfigOverrides::default())
+            .map_err(|err| Failure::error(format!("cannot load config: {err:#}")))?;
+    if !config.server_enable {
+        return Err(Failure::unavailable(format!(
+            "the Noa control server is disabled; {SCOPES_HINT}"
+        )));
+    }
+    let token = match config.server_token.filter(|token| !token.trim().is_empty()) {
+        Some(token) => token,
+        None => {
+            let path = noa_config::server_token_path()
+                .ok_or_else(|| Failure::unavailable("cannot resolve the token path"))?;
+            std::fs::read_to_string(&path)
+                .map(|token| token.trim().to_string())
+                .ok()
+                .filter(|token| !token.is_empty())
+                .ok_or_else(|| {
+                    Failure::unavailable(format!(
+                        "no server token at {} (is Noa running with the server enabled?)",
+                        path.display()
+                    ))
+                })?
+        }
+    };
+    let url = control_url(&config.server_bind, config.server_port);
+    connect_with(
+        retry,
+        || {
+            Client::connect(
+                &url,
+                &token,
+                ScopeSet::from_strings(["read", "control", "input"]),
+            )
+        },
+        std::thread::sleep,
+    )
+    .map(|client| (client, config.server_port))
+    .map_err(|err| match err {
+        ClientError::Rpc { .. } => Failure::unavailable(err.to_string()),
+        other => Failure::unavailable(connect_failure_message(&url, &other)),
+    })
+}
+
 impl Session {
     fn connect() -> Result<Self, Failure> {
-        let (config, _diagnostics) =
-            noa_config::load_startup_config(noa_config::ConfigOverrides::default())
-                .map_err(|err| Failure::error(format!("cannot load config: {err:#}")))?;
-        if !config.server_enable {
-            return Err(Failure::unavailable(format!(
-                "the Noa control server is disabled; {SCOPES_HINT}"
-            )));
-        }
-        let token = match config.server_token.filter(|token| !token.trim().is_empty()) {
-            Some(token) => token,
-            None => {
-                let path = noa_config::server_token_path()
-                    .ok_or_else(|| Failure::unavailable("cannot resolve the token path"))?;
-                std::fs::read_to_string(&path)
-                    .map(|token| token.trim().to_string())
-                    .ok()
-                    .filter(|token| !token.is_empty())
-                    .ok_or_else(|| {
-                        Failure::unavailable(format!(
-                            "no server token at {} (is Noa running with the server enabled?)",
-                            path.display()
-                        ))
-                    })?
-            }
-        };
-        let url = control_url(&config.server_bind, config.server_port);
-        let client = connect_retrying(
-            || {
-                Client::connect(
-                    &url,
-                    &token,
-                    ScopeSet::from_strings(["read", "control", "input"]),
-                )
-            },
-            std::thread::sleep,
-        )
-        .map_err(|err| match err {
-            ClientError::Rpc { .. } => Failure::unavailable(err.to_string()),
-            other => Failure::unavailable(connect_failure_message(&url, &other)),
-        })?;
+        let (client, port) = connect_client(ConnectRetry::ForThreeSeconds)?;
         let mut session = Self {
             client,
             own: None,
-            port: config.server_port,
+            port,
             waited_for_own: false,
             lacks_surface_ids: false,
             journal: journal::Journal::open(),

@@ -1590,6 +1590,44 @@ fn update_subscription_with_null_events_is_invalid_params() {
     let _ = sock.close(None);
 }
 
+/// A valid `events` update reaches the broadcaster: an `output` subscription
+/// updated to `events: []` stops receiving output, and `events: ["output"]`
+/// brings it back under the same id.
+#[test]
+fn update_subscription_events_stop_and_resume_output() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
+    let broadcaster = handle.broadcaster();
+    let mut sock = connect_plain(handle.port());
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
+    let sub_id = subscribe(&mut sock, 2, json!({ "events": ["output"] }));
+
+    send_rpc(
+        &mut sock,
+        3,
+        "noa.updateSubscription",
+        json!({ "subscriptionId": sub_id, "events": [] }),
+    );
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["result"], json!({ "ok": true }), "got {resp:?}");
+    broadcaster.broadcast_output(1, 0, vec![]);
+    assert_no_notification(&mut sock, 4);
+
+    send_rpc(
+        &mut sock,
+        5,
+        "noa.updateSubscription",
+        json!({ "subscriptionId": sub_id, "events": ["output"] }),
+    );
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["result"], json!({ "ok": true }), "got {resp:?}");
+    broadcaster.broadcast_output(1, 0, vec![]);
+    let notif = recv_notification(&mut sock);
+    assert_eq!(notif["method"], "noa.output", "got {notif:?}");
+    assert_eq!(notif["params"]["paneId"], "1");
+    let _ = sock.close(None);
+}
+
 #[test]
 fn repeated_removed_ids_reach_the_wire_once_in_first_occurrence_order() {
     let backend = Arc::new(MockBackend::default());
@@ -1609,8 +1647,10 @@ fn repeated_removed_ids_reach_the_wire_once_in_first_occurrence_order() {
     let _ = sock.close(None);
 }
 
+/// `noa.subscribe` predates `noa.updateSubscription` and parses as it always
+/// has (FR-19): serde's map form of an event kind still subscribes.
 #[test]
-fn subscribe_with_a_map_form_event_is_invalid_params_and_creates_no_subscription() {
+fn subscribe_with_a_map_form_event_subscribes_to_output_as_before() {
     let backend = Arc::new(MockBackend::default());
     let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
     let broadcaster = handle.broadcaster();
@@ -1618,19 +1658,14 @@ fn subscribe_with_a_map_form_event_is_invalid_params_and_creates_no_subscription
     hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
 
     // serde's map form of the `output` variant.
-    send_rpc(
-        &mut sock,
-        2,
-        "noa.subscribe",
-        json!({ "events": [{ "output": null }] }),
-    );
-    let resp = recv_json(&mut sock);
-    assert_eq!(resp["error"]["code"], -32602, "got {resp:?}");
+    subscribe(&mut sock, 2, json!({ "events": [{ "output": null }] }));
 
-    assert!(!broadcaster.has_output_subscribers());
+    assert!(broadcaster.has_output_subscribers());
     assert!(!broadcaster.has_state_changed_subscribers());
     broadcaster.broadcast_output(1, 0, vec![]);
-    assert_no_notification(&mut sock, 3);
+    let notif = recv_notification(&mut sock);
+    assert_eq!(notif["method"], "noa.output", "got {notif:?}");
+    assert_eq!(notif["params"]["paneId"], "1");
     let _ = sock.close(None);
 }
 
@@ -1665,21 +1700,66 @@ fn update_subscription_with_a_map_form_event_is_invalid_params_and_keeps_the_eve
     let _ = sock.close(None);
 }
 
+/// `noa.subscribe` binds a by-position array as it always has (FR-19).
 #[test]
-fn subscribe_with_params_by_position_is_invalid_params_and_creates_no_subscription() {
+fn subscribe_with_params_by_position_subscribes_as_before() {
     let backend = Arc::new(MockBackend::default());
     let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
     let broadcaster = handle.broadcaster();
     let mut sock = connect_plain(handle.port());
     hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
 
-    send_rpc(&mut sock, 2, "noa.subscribe", json!([["state_changed"]]));
+    subscribe(&mut sock, 2, json!([["state_changed"]]));
+
+    assert!(broadcaster.has_state_changed_subscribers());
+    broadcaster.broadcast_state_changed(vec![test_panel(1)]);
+    assert_eq!(
+        state_changed_pane_ids(&recv_notification(&mut sock)),
+        vec!["1"]
+    );
+    let _ = sock.close(None);
+}
+
+/// By position `noa.subscribe` binds `[events, paneIds, fields]`: the new
+/// `fields` is an optional third element, with field-name strings only, as
+/// by name.
+#[test]
+fn subscribe_by_position_takes_fields_as_an_optional_third_element() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
+    let broadcaster = handle.broadcaster();
+    let mut sock = connect_plain(handle.port());
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
+
+    send_rpc(
+        &mut sock,
+        2,
+        "noa.subscribe",
+        json!([["state_changed"], null, [{ "agent": null }]]),
+    );
     let resp = recv_json(&mut sock);
     assert_eq!(resp["error"]["code"], -32602, "got {resp:?}");
-
     assert!(!broadcaster.has_state_changed_subscribers());
-    broadcaster.broadcast_state_changed(vec![test_panel(1)]);
-    assert_no_notification(&mut sock, 3);
+
+    subscribe(&mut sock, 3, json!([["state_changed"], null, ["agent"]]));
+    // Pane 1 changed only `preview`, which the `agent` filter drops.
+    broadcaster.broadcast_state_delta(
+        vec![
+            ChangedPanel {
+                panel: test_panel(1),
+                fields: FieldMask::from_fields(&[PanelField::Preview]),
+            },
+            ChangedPanel {
+                panel: test_panel(2),
+                fields: FieldMask::from_fields(&[PanelField::Agent]),
+            },
+        ],
+        vec![],
+    );
+    assert_eq!(
+        state_changed_pane_ids(&recv_notification(&mut sock)),
+        vec!["2"]
+    );
     let _ = sock.close(None);
 }
 
@@ -1711,8 +1791,9 @@ fn update_subscription_with_params_by_position_is_invalid_params_and_keeps_the_s
     let _ = sock.close(None);
 }
 
+/// `noa.unsubscribe` binds a by-position array as it always has (FR-19).
 #[test]
-fn unsubscribe_with_params_by_position_is_invalid_params_and_keeps_the_subscription() {
+fn unsubscribe_with_params_by_position_removes_the_subscription_as_before() {
     let backend = Arc::new(MockBackend::default());
     let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
     let broadcaster = handle.broadcaster();
@@ -1722,14 +1803,12 @@ fn unsubscribe_with_params_by_position_is_invalid_params_and_keeps_the_subscript
 
     send_rpc(&mut sock, 3, "noa.unsubscribe", json!([sub_id]));
     let resp = recv_json(&mut sock);
-    assert_eq!(resp["error"]["code"], -32602, "got {resp:?}");
+    assert_eq!(resp["result"], json!({ "ok": true }), "got {resp:?}");
 
-    assert!(broadcaster.has_state_changed_subscribers());
+    // `{ ok:true }` is the answer for any id, so check that it was removed.
+    assert!(!broadcaster.has_state_changed_subscribers());
     broadcaster.broadcast_state_changed(vec![test_panel(1)]);
-    assert_eq!(
-        state_changed_pane_ids(&recv_notification(&mut sock)),
-        vec!["1"]
-    );
+    assert_no_notification(&mut sock, 4);
     let _ = sock.close(None);
 }
 
@@ -1741,13 +1820,13 @@ fn without_id(mut resp: Value) -> Value {
     resp
 }
 
-/// Only the subscription RPCs reject `params` given by position (AC-3). Every
-/// other method answers a by-position array as it did before them: bound to
-/// its params in field order, so a v3 client that sends one gets the answer it
-/// would get by name, or -32602 for `noa.newTab` / `noa.split`, which never
-/// took one.
+/// Only `noa.updateSubscription`, which is new, rejects `params` given by
+/// position (AC-3). Every method that predates it answers a by-position array
+/// as it always has: bound to its params in field order, so a v3 client that
+/// sends one gets the answer it would get by name, or -32602 for
+/// `noa.newTab` / `noa.split`, which never took one.
 #[test]
-fn only_the_subscription_rpcs_reject_params_by_position() {
+fn only_update_subscription_rejects_params_by_position() {
     let backend = Arc::new(MockBackend::default());
     backend.text.lock().unwrap().insert(1, "hello".to_string());
     backend.grid_rows.lock().unwrap().insert(
@@ -1831,17 +1910,21 @@ fn only_the_subscription_rpcs_reject_params_by_position() {
         assert_eq!(resp["error"]["code"], -32602, "{method}: got {resp:?}");
     }
 
-    // The subscription RPCs take their params by name only.
-    let sub_id = subscribe(&mut sock, 40, json!({ "events": ["state_changed"] }));
-    for (id, (method, params)) in (41..).zip([
-        ("noa.subscribe", json!([["state_changed"]])),
-        ("noa.updateSubscription", json!([&sub_id, [], null, null])),
-        ("noa.unsubscribe", json!([&sub_id])),
-    ]) {
-        send_rpc(&mut sock, id, method, params);
-        let resp = recv_json(&mut sock);
-        assert_eq!(resp["error"]["code"], -32602, "{method}: got {resp:?}");
-    }
+    // `noa.subscribe` and `noa.unsubscribe` bind by position too (what they
+    // then deliver is pinned by the `*_by_position_*_as_before` tests), and
+    // `noa.updateSubscription` takes its params by name only.
+    let sub_id = subscribe(&mut sock, 40, json!([["state_changed"]]));
+    send_rpc(
+        &mut sock,
+        41,
+        "noa.updateSubscription",
+        json!([&sub_id, [], null, null]),
+    );
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["error"]["code"], -32602, "got {resp:?}");
+    send_rpc(&mut sock, 42, "noa.unsubscribe", json!([&sub_id]));
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["result"], json!({ "ok": true }), "got {resp:?}");
     let _ = sock.close(None);
 }
 

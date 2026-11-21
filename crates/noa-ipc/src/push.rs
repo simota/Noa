@@ -1110,8 +1110,12 @@ mod tests {
     fn two_subscriptions_on_one_connection_give_one_notification_with_the_union_of_removals() {
         let b = Broadcaster::new();
         let (conn_id, queue) = b.register_connection();
-        b.add_subscription(conn_id, EventMask::STATE_CHANGED, Some(HashSet::from([1])))
-            .unwrap();
+        b.add_subscription(
+            conn_id,
+            EventMask::STATE_CHANGED,
+            Some(HashSet::from([1, 3])),
+        )
+        .unwrap();
         b.add_subscription(
             conn_id,
             EventMask::STATE_CHANGED,
@@ -1119,8 +1123,10 @@ mod tests {
         )
         .unwrap();
 
-        b.broadcast_state_delta(vec![changed(1, FieldMask::ALL)], vec![2, 1, 3]);
-        assert_eq!(drain_one_state_changed(&queue), (vec![1], vec![2, 1]));
+        // Neither subscription alone covers [3, 2, 1]: the first gives [3, 1]
+        // and the second [2, 1]. Pane 4 is in neither.
+        b.broadcast_state_delta(vec![changed(1, FieldMask::ALL)], vec![3, 2, 1, 4]);
+        assert_eq!(drain_one_state_changed(&queue), (vec![1], vec![3, 2, 1]));
     }
 
     #[test]
@@ -1401,7 +1407,6 @@ mod tests {
         let sub_b = b
             .add_subscription(conn_b, EventMask::STATE_CHANGED, None)
             .unwrap();
-        let done = AtomicUsize::new(0);
         let toggle = |first: EventMask, second: EventMask| {
             for _ in 0..ROUNDS {
                 for events in [first, second] {
@@ -1416,16 +1421,25 @@ mod tests {
                     .unwrap();
                 }
             }
-            done.fetch_add(1, Ordering::SeqCst);
         };
         std::thread::scope(|scope| {
-            scope.spawn(|| toggle(EventMask::OUTPUT, EventMask::STATE_CHANGED));
-            scope.spawn(|| toggle(EventMask::STATE_CHANGED, EventMask::OUTPUT));
-            while done.load(Ordering::SeqCst) < 2 {
+            let workers = [
+                scope.spawn(|| toggle(EventMask::OUTPUT, EventMask::STATE_CHANGED)),
+                scope.spawn(|| toggle(EventMask::STATE_CHANGED, EventMask::OUTPUT)),
+            ];
+            // Watch until both workers have ended, by finishing or by
+            // panicking, then re-raise a worker's panic so the test fails
+            // with it instead of waiting forever.
+            while !workers.iter().all(|worker| worker.is_finished()) {
                 assert!(
                     b.has_output_subscriber_for(1),
                     "A's output subscription vanished mid-race"
                 );
+            }
+            for worker in workers {
+                if let Err(panic) = worker.join() {
+                    std::panic::resume_unwind(panic);
+                }
             }
         });
         b.update_subscription(

@@ -1323,14 +1323,13 @@ impl RpcFail {
     }
 }
 
-/// Parses the `params` of a subscription RPC (`noa.subscribe`,
-/// `noa.updateSubscription`, `noa.unsubscribe`), which take them by name
+/// Parses the `params` of `noa.updateSubscription`, which takes them by name
 /// only: anything but a JSON object is -32602. That includes a by-position
 /// array, which serde would otherwise bind to the struct's fields in
-/// declaration order, so `[id, [], null, null]` would stop a subscription
-/// and `[id]` would remove one. The other methods keep plain
-/// `serde_json::from_value` and answer such an array as they always have,
-/// so existing v3 clients that send one keep working.
+/// declaration order, so `[id, [], null, null]` would stop a subscription.
+/// Every method that predates `noa.updateSubscription`, `noa.subscribe` and
+/// `noa.unsubscribe` included, keeps plain `serde_json::from_value` and
+/// answers such an array as it always has (FR-19).
 fn parse_named_params<T: serde::de::DeserializeOwned>(params: Value) -> Result<T, RpcFail> {
     if !params.is_object() {
         return Err(RpcFail::invalid_params());
@@ -1905,7 +1904,8 @@ fn handle_subscribe(
     conn_id: u64,
     params: Value,
 ) -> Result<Value, RpcFail> {
-    let p: SubscribeParams = parse_named_params(params)?;
+    let p: SubscribeParams =
+        serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
     if p.pane_ids
         .as_ref()
         .is_some_and(|ids| ids.len() > MAX_SUBSCRIBE_PANE_IDS)
@@ -1978,7 +1978,8 @@ fn handle_unsubscribe(
     conn_id: u64,
     params: Value,
 ) -> Result<Value, RpcFail> {
-    let p: UnsubscribeParams = parse_named_params(params)?;
+    let p: UnsubscribeParams =
+        serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
     broadcaster.remove_subscription(conn_id, p.subscription_id.0);
     Ok(serde_json::to_value(OkResult::ok()).unwrap())
 }
@@ -2445,27 +2446,23 @@ mod tests {
         assert_invalid_params::<T>(params);
     }
 
-    /// Only the subscription RPCs parse with [`parse_named_params`]; the
-    /// other methods' by-position behaviour is pinned over the wire by
-    /// `only_the_subscription_rpcs_reject_params_by_position` in
+    /// Only `noa.updateSubscription` parses with [`parse_named_params`]; the
+    /// other methods' by-position behaviour, `noa.subscribe` and
+    /// `noa.unsubscribe` included, is pinned over the wire by
+    /// `only_update_subscription_rejects_params_by_position` in
     /// `tests/server_tests.rs`.
     #[test]
-    fn subscription_params_given_by_position_are_invalid_params() {
+    fn update_subscription_params_given_by_position_are_invalid_params() {
         use serde_json::json;
-        assert_by_position_rejected::<SubscribeParams>(json!([
-            ["state_changed"],
-            ["1"],
-            ["agent"]
-        ]));
         assert_by_position_rejected::<UpdateSubscriptionParams>(json!(["1", [], null, null]));
-        assert_by_position_rejected::<UnsubscribeParams>(json!(["1"]));
+        assert_by_position_rejected::<UpdateSubscriptionParams>(json!(["1"]));
         for scalar in [json!(null), json!("1"), json!(1), json!(true)] {
-            assert_invalid_params::<UnsubscribeParams>(scalar);
+            assert_invalid_params::<UpdateSubscriptionParams>(scalar);
         }
     }
 
     #[test]
-    fn subscription_params_given_by_name_still_parse() {
+    fn update_subscription_params_given_by_name_still_parse() {
         use serde_json::json;
         let update: UpdateSubscriptionParams =
             parse_named_params(json!({ "subscriptionId": "1", "events": [], "paneIds": null }))
@@ -2473,7 +2470,5 @@ mod tests {
         assert_eq!(update.subscription_id, WireId(1));
         assert_eq!(update.events, Some(vec![]));
         assert_eq!(update.pane_ids, Some(None));
-        assert!(parse_named_params::<SubscribeParams>(json!({ "events": ["output"] })).is_ok());
-        assert!(parse_named_params::<UnsubscribeParams>(json!({ "subscriptionId": "1" })).is_ok());
     }
 }

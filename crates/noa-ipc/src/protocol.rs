@@ -472,30 +472,30 @@ pub enum SplitDirection {
     Vertical,
 }
 
-/// Subscribable event kinds for `noa.subscribe` / `noa.updateSubscription`.
-/// Only the strings `"state_changed"` and `"output"` deserialize: any other
-/// JSON value, including serde's `{"output": null}` map form of a variant,
-/// fails, which the server answers with -32602.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+/// Subscribable event kinds for `noa.subscribe`.
+///
+/// The derived `Deserialize` also accepts serde's map form of a variant
+/// (`{"output": null}`). `noa.subscribe` has always accepted it and keeps
+/// doing so (FR-19). `noa.updateSubscription` is newer and reads its
+/// `events` through the private `EventKindName`, which takes only the strings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
     StateChanged,
     Output,
 }
 
-/// The derived name → [`EventKind`] mapping behind [`EventKind`]'s
-/// string-only `Deserialize`, as [`PanelFieldName`] is for [`PanelField`].
-#[derive(Deserialize)]
-#[serde(remote = "EventKind", rename_all = "snake_case")]
-enum EventKindName {
-    StateChanged,
-    Output,
-}
+/// One `noa.updateSubscription` `events` element: an [`EventKind`] given as
+/// the string `"state_changed"` or `"output"`. Any other JSON value fails,
+/// including the map form that [`EventKind`]'s own `Deserialize` accepts,
+/// and the server answers that with -32602.
+struct EventKindName(EventKind);
 
-impl<'de> Deserialize<'de> for EventKind {
+impl<'de> Deserialize<'de> for EventKindName {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let name = String::deserialize(deserializer)?;
-        EventKindName::deserialize(de::IntoDeserializer::<D::Error>::into_deserializer(name))
+        EventKind::deserialize(de::IntoDeserializer::<D::Error>::into_deserializer(name))
+            .map(EventKindName)
     }
 }
 
@@ -779,6 +779,10 @@ impl SplitPlacement {
 
 // ---- noa.subscribe / noa.unsubscribe ----
 
+/// `noa.subscribe` params, parsed with plain `serde_json::from_value` as
+/// before `fields` existed (FR-19). By position, serde binds an array to the
+/// fields in declaration order, `[events, paneIds, fields]`, so the order is
+/// part of the wire format and `fields` is an optional third element.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubscribeParams {
@@ -787,6 +791,7 @@ pub struct SubscribeParams {
     pub pane_ids: Option<Vec<WireId>>,
     /// `state_changed` only: deliver a changed panel only when one of these
     /// fields changed. Added panels and removals are always delivered.
+    /// Field-name strings only, by name or by position (see [`PanelField`]).
     #[serde(default)]
     pub fields: Option<Vec<PanelField>>,
 }
@@ -806,14 +811,16 @@ pub struct UnsubscribeParams {
 /// `noa.updateSubscription` params. For each optional key the outer `Option`
 /// means "key present": absent keeps the current value, an array replaces it,
 /// and `null` (`paneIds` / `fields` only, as `Some(None)`) clears the filter.
-/// `events: null` fails to deserialize.
+/// `events: null` fails to deserialize, and so does an `events` element that
+/// is not one of the strings (see `EventKindName`). The server takes these
+/// params as an object only (`parse_named_params` in `server.rs`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateSubscriptionParams {
     pub subscription_id: WireId,
     #[serde(
         default,
-        deserialize_with = "present",
+        deserialize_with = "present_event_names",
         skip_serializing_if = "Option::is_none"
     )]
     pub events: Option<Vec<EventKind>>,
@@ -840,6 +847,17 @@ where
     T: Deserialize<'de>,
 {
     T::deserialize(deserializer).map(Some)
+}
+
+/// [`present`] for `UpdateSubscriptionParams::events`, reading each element
+/// through the string-only [`EventKindName`].
+fn present_event_names<'de, D>(deserializer: D) -> Result<Option<Vec<EventKind>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let names = Vec::<EventKindName>::deserialize(deserializer)?;
+    let kinds = names.into_iter().map(|EventKindName(kind)| kind).collect();
+    Ok(Some(kinds))
 }
 
 // ---- notifications ----
@@ -1250,36 +1268,108 @@ mod subscription_tests {
     }
 
     #[test]
-    fn an_event_kind_must_be_one_of_its_strings() {
-        for kind in [EventKind::StateChanged, EventKind::Output] {
-            let name = serde_json::to_value(kind).unwrap();
-            assert_eq!(serde_json::from_value::<EventKind>(name).unwrap(), kind);
-        }
+    fn subscribe_params_take_an_event_kind_as_a_string_or_in_map_form_as_before() {
         assert_eq!(
             serde_json::to_value([EventKind::StateChanged, EventKind::Output]).unwrap(),
             serde_json::json!(["state_changed", "output"])
         );
+        for (value, kind) in [
+            (serde_json::json!("state_changed"), EventKind::StateChanged),
+            (serde_json::json!("output"), EventKind::Output),
+            // serde's externally tagged map form of a unit variant, which
+            // `noa.subscribe` has always accepted.
+            (
+                serde_json::json!({ "state_changed": null }),
+                EventKind::StateChanged,
+            ),
+            (serde_json::json!({ "output": null }), EventKind::Output),
+        ] {
+            assert_eq!(
+                serde_json::from_value::<EventKind>(value.clone()).unwrap(),
+                kind,
+                "{value}"
+            );
+            let subscribe = serde_json::json!({ "events": [value] });
+            let params: SubscribeParams = serde_json::from_value(subscribe).unwrap();
+            assert_eq!(params.events, vec![kind], "{value}");
+        }
         for value in [
-            // serde's externally tagged map form of a unit variant.
+            serde_json::json!("stateChanged"),
+            serde_json::json!(1),
+            serde_json::json!(null),
+        ] {
+            let subscribe = serde_json::json!({ "events": [value] });
+            assert!(
+                serde_json::from_value::<SubscribeParams>(subscribe).is_err(),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_subscription_events_must_be_one_of_the_strings() {
+        let params: UpdateSubscriptionParams = serde_json::from_value(
+            serde_json::json!({ "subscriptionId": "4", "events": ["state_changed", "output"] }),
+        )
+        .unwrap();
+        assert_eq!(
+            params.events,
+            Some(vec![EventKind::StateChanged, EventKind::Output])
+        );
+        for value in [
+            // The map form that `noa.subscribe` still accepts.
             serde_json::json!({ "output": null }),
             serde_json::json!({ "state_changed": null }),
             serde_json::json!("stateChanged"),
             serde_json::json!(1),
             serde_json::json!(null),
         ] {
-            assert!(
-                serde_json::from_value::<EventKind>(value.clone()).is_err(),
-                "{value}"
-            );
-            let subscribe = serde_json::json!({ "events": [value] });
-            assert!(
-                serde_json::from_value::<SubscribeParams>(subscribe).is_err(),
-                "{value}"
-            );
             let update = serde_json::json!({ "subscriptionId": "4", "events": [value] });
             assert!(
                 serde_json::from_value::<UpdateSubscriptionParams>(update).is_err(),
                 "{value}"
+            );
+        }
+    }
+
+    /// By position `SubscribeParams` binds as serde binds any struct, in
+    /// declaration order: `[events]` and `[events, paneIds]` as before
+    /// `fields` existed, and `fields` as an optional third element under the
+    /// same string-only rule as by name.
+    #[test]
+    fn subscribe_params_by_position_take_fields_as_an_optional_third_element() {
+        let params: SubscribeParams =
+            serde_json::from_value(serde_json::json!([["state_changed"]])).unwrap();
+        assert_eq!(params.events, vec![EventKind::StateChanged]);
+        assert_eq!(params.pane_ids, None);
+        assert_eq!(params.fields, None);
+
+        let params: SubscribeParams =
+            serde_json::from_value(serde_json::json!([["output"], ["12"]])).unwrap();
+        assert_eq!(params.events, vec![EventKind::Output]);
+        assert_eq!(params.pane_ids, Some(vec![WireId(12)]));
+        assert_eq!(params.fields, None);
+
+        let params: SubscribeParams =
+            serde_json::from_value(serde_json::json!([["state_changed"], null, ["agent"]]))
+                .unwrap();
+        assert_eq!(params.pane_ids, None);
+        assert_eq!(params.fields, Some(vec![PanelField::Agent]));
+
+        let params: SubscribeParams =
+            serde_json::from_value(serde_json::json!([["state_changed"], ["12"], null])).unwrap();
+        assert_eq!(params.pane_ids, Some(vec![WireId(12)]));
+        assert_eq!(params.fields, None);
+
+        for params in [
+            serde_json::json!([["state_changed"], null, [{ "agent": null }]]),
+            serde_json::json!([["state_changed"], null, ["agnt"]]),
+            // More elements than fields.
+            serde_json::json!([["state_changed"], null, null, null]),
+        ] {
+            assert!(
+                serde_json::from_value::<SubscribeParams>(params.clone()).is_err(),
+                "{params}"
             );
         }
     }

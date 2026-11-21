@@ -1014,10 +1014,15 @@ detached
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    // The same with a `..`/`.` path into a subdirectory the worker removed
-    // before the prune (`within` then compares the raw paths).
+    // The worker was started at the worktree root (its report lives there),
+    // then its pane cwd became a subdirectory, given in `..`/`.` form and
+    // normalized by `spawn_cwd`, which the worker removed before the prune.
+    // `within` canonicalizes each argument separately and falls back to the
+    // raw path only for the one that does not exist (the pane cwd); the
+    // worktree root side is canonicalized, and the normalized cwd still
+    // starts with it.
     #[test]
-    fn prune_finds_a_worktree_when_the_relative_cwd_subdirectory_is_gone() {
+    fn prune_finds_a_worktree_when_the_pane_cwd_became_a_removed_relative_subdirectory() {
         let (base, repo) = repo("relcwd-gone");
         let made = add(&repo, "job").unwrap();
         let sub = made.path.join("sub");

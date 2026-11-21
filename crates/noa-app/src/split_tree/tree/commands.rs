@@ -64,6 +64,7 @@ pub fn resolve_pane_command_target(
         | AppCommand::ToggleSecureKeyboardEntry
         | AppCommand::ToggleBackgroundOpacity
         | AppCommand::ToggleEmber
+        | AppCommand::Spawn(_)
         | AppCommand::ToggleSidebar
         | AppCommand::ToggleAutoApprove
         | AppCommand::SelectTab(_)

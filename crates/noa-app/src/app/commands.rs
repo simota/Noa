@@ -234,6 +234,10 @@ impl App {
                 #[cfg(target_os = "macos")]
                 self.toggle_ember();
             }
+            AppCommand::Spawn(command) => crate::commands::spawn_in_background(
+                command,
+                self.focused_pane_cwd().as_deref().map(std::path::Path::new),
+            ),
             AppCommand::CloseWindow => self.request_close_window(event_loop),
             AppCommand::Quit => self.request_quit(event_loop),
         }

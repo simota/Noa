@@ -294,7 +294,7 @@ it has no menu item or default palette entry.
 
 - The text after `spawn:`, with surrounding whitespace trimmed, runs as `$SHELL -l -c <text>`
   (`/bin/sh` when `SHELL` is unset or empty). A login shell reads the login startup files
-  (for zsh `.zprofile` and `.zlogin`, for bash `.bash_profile`), not the interactive ones such
+  (for zsh `.zshenv`, `.zprofile` and `.zlogin`, for bash `.bash_profile`), not the interactive ones such
   as `.zshrc`, so a Noa started from the Dock finds on `PATH` only what those files add. When
   in doubt, give the program's full path.
 - It runs in the focused pane's working directory when that is a directory that exists,

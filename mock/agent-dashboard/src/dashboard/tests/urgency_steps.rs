@@ -12,8 +12,9 @@ fn worker_with(need_of: u64, minutes: f64) -> Worker {
 
 #[test]
 fn steps_follow_the_thresholds() {
-    // spec-review (16) waits on a question, e2e-smoke (19) on a failure,
-    // fix-tests (14) on nothing yet: only the wait and the need matter.
+    // Only the wait and the need given matter, not the worker's own state:
+    // every case starts from spec-review (16), a question waiting 6 minutes
+    // in the demo, with its wait and the need replaced.
     let steps = |need: Need, minutes: [f64; 4]| {
         let worker = worker_with(16, 0.0);
         minutes.map(|m| {

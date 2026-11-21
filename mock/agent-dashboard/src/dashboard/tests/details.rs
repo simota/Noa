@@ -730,8 +730,14 @@ fn breaks_lines(text: &str) -> bool {
 /// draw worker labels themselves, outside the drawer and the cards (see
 /// the fix report).
 fn hostile(grouping: Grouping, edit: impl Fn(&mut Worker)) -> (Dashboard, TextStore) {
+    hostile_on(grouping, 11, edit)
+}
+
+/// [`hostile`] with worker `pane` changed by `edit` instead of 11; the
+/// drawer is still open on 11.
+fn hostile_on(grouping: Grouping, pane: u64, edit: impl Fn(&mut Worker)) -> (Dashboard, TextStore) {
     let mut fleet = fleet::canned();
-    edit(fleet.workers.iter_mut().find(|w| w.pane == 11).unwrap());
+    edit(fleet.workers.iter_mut().find(|w| w.pane == pane).unwrap());
     let (channel, snapshots, _notices, _commands) = Channel::detached();
     let mut dashboard = Dashboard::live(grouping, channel);
     let mut text = TextStore::new(Default::default());
@@ -851,23 +857,88 @@ fn a_label_with_a_paragraph_break_is_drawn_on_one_line() {
     }
 }
 
-/// D1: a task and a detail with a paragraph break are drawn as one
-/// paragraph, wrapped, in the drawer and on the card.
+/// The texts the drawer's section `title` shows under its caption.
+fn drawer_section(dashboard: &Dashboard, title: &str) -> Vec<String> {
+    let tree = &dashboard.tree;
+    let root = drawer(dashboard).expect("the drawer is open");
+    let caption = shown_under(tree, root)
+        .into_iter()
+        .find(|id| text_of(tree, *id).as_deref() == Some(title))
+        .unwrap_or_else(|| panic!("no section {title:?} in the drawer"));
+    let section = tree.parent(caption).expect("a caption heads its section");
+    let below = tree.children(section).iter().skip(1);
+    below
+        .flat_map(|id| shown_under(tree, *id))
+        .filter_map(|id| text_of(tree, id))
+        .collect()
+}
+
+/// D1: a task and a detail with a paragraph break are each drawn as one
+/// paragraph, wrapped, where they belong: the detail under the drawer's
+/// 状態 after the state, the task under its 依頼, and on the running card
+/// the task after "依頼: " and the detail on a line of its own.
 #[test]
 fn a_task_and_detail_with_a_paragraph_break_are_drawn_as_one_paragraph() {
     for given in PARAGRAPH_BREAKS {
+        let (task, detail) = (format!("T{given}"), format!("D{given}"));
         let (dashboard, _text) = hostile(Grouping::Orchestrator, |worker| {
-            worker.task = given.to_owned();
-            worker.detail = given.to_owned();
+            worker.task = task.clone();
+            worker.detail = detail.clone();
         });
-        let texts = assert_one_line_everywhere(&dashboard, &format!("{given:?}"));
-        let line = drawer::one_line(given);
-        for wanted in [line.clone(), format!("依頼: {line}")] {
-            assert!(
-                texts.contains(&wanted),
-                "{given:?}: {wanted:?} in {texts:?}"
-            );
-        }
+        let what = format!("{given:?}");
+        assert_one_line_everywhere(&dashboard, &what);
+        let (task, detail) = (drawer::one_line(&task), drawer::one_line(&detail));
+
+        let state = drawer_section(&dashboard, "状態");
+        assert_eq!(state.len(), 2, "{what}: {state:?}");
+        assert_eq!(state[1], detail, "{what}: 状態 {state:?}");
+        let asked = drawer_section(&dashboard, "依頼");
+        assert_eq!(asked, std::slice::from_ref(&task), "{what}");
+
+        let tree = &dashboard.tree;
+        let running = dashboard.registry.lists[Panel::Running as usize].as_ref();
+        let (card, _) = running
+            .unwrap()
+            .items
+            .iter()
+            .find(|(_, pane)| *pane == Some(11))
+            .expect("11's running card");
+        let on_card: Vec<String> = shown_under(tree, *card)
+            .into_iter()
+            .filter_map(|id| text_of(tree, id))
+            .collect();
+        let lines = |wanted: &str| on_card.iter().filter(|t| *t == wanted).count();
+        assert_eq!(lines(&format!("依頼: {task}")), 1, "{what}: {on_card:?}");
+        assert_eq!(lines(&detail), 1, "{what}: {on_card:?}");
+        assert_eq!(lines(&task), 0, "{what}: {on_card:?}");
+        assert_eq!(lines(&format!("依頼: {detail}")), 0, "{what}: {on_card:?}");
+    }
+}
+
+/// D1: a done worker's model with a paragraph break is drawn on one line
+/// as its group's title in the done panel, grouped by model: the done
+/// panel draws its group titles itself.
+#[test]
+fn a_done_group_title_with_a_paragraph_break_is_drawn_on_one_line() {
+    for given in PARAGRAPH_BREAKS {
+        let (dashboard, _text) = hostile_on(Grouping::Model, 17, |worker| {
+            assert_eq!(worker.state, crate::fleet::State::Finished, "17 is done");
+            worker.model = given.to_owned();
+            worker.effort.clear();
+        });
+        let what = format!("{given:?}");
+        assert_one_line_everywhere(&dashboard, &what);
+        let tree = &dashboard.tree;
+        let done = dashboard.registry.lists[Panel::Done as usize].as_ref();
+        let titles: Vec<String> = done
+            .unwrap()
+            .headers
+            .iter()
+            .filter(|(id, _)| !tree.is_hidden(*id))
+            .filter_map(|(id, _)| text_of(tree, *id))
+            .collect();
+        let wanted = format!("{} · 1", drawer::one_line(given));
+        assert!(titles.contains(&wanted), "{what}: {wanted:?} in {titles:?}");
     }
 }
 
@@ -899,14 +970,15 @@ fn one_line_turns_breaks_and_controls_into_spaces() {
 
 /// Where each grapheme cluster of `line` ends, found as the drawer found
 /// them before D2: an editor's caret moved to the end of each character.
-/// Right, but in time square in a cluster's length.
-fn ends_by_moving_the_caret(line: &str) -> Vec<usize> {
-    let mut editor = noa_gpui_core::text_edit::TextEditor::single_line();
+/// Right, but in time square in a cluster's length: `scanned` counts what
+/// the editor holds at each call, as for [`drawer::cluster_ends`].
+fn ends_by_moving_the_caret(line: &str, scanned: &mut usize) -> Vec<usize> {
+    let mut editor = drawer::CountingEditor::new(scanned);
     editor.set_text(line);
     let mut ends: Vec<usize> = line
         .char_indices()
         .map(|(i, c)| {
-            editor.move_to(i + c.len_utf8(), false);
+            editor.move_to(i + c.len_utf8());
             editor.caret()
         })
         .filter(|end| *end > 0)
@@ -915,31 +987,53 @@ fn ends_by_moving_the_caret(line: &str) -> Vec<usize> {
     ends
 }
 
-/// D2: cluster ends are found in time proportional to the line: for a
-/// letter with 50 000 combining marks, and for 5 000 flags (regional
-/// indicator pairs), the editor is handed at most a few bytes per byte of
-/// the line. Moving one caret along the line, as before, hands it the
-/// whole line once per character: 50 001 × 100 003 bytes.
+/// A letter with `n` combining marks after it, and a letter: two clusters.
+fn marked(n: usize) -> String {
+    format!("a{}b", "\u{301}".repeat(n))
+}
+
+/// At most this many times a line's bytes for a run of combining marks
+/// (pieces doubling up to the line: about 2.3 times its length, each
+/// piece held through three calls).
+const MARKS_PER_BYTE: usize = 8;
+
+/// D2: cluster ends are found in time proportional to the line, counted
+/// as the bytes the editor holds at each call: for a letter with 50 000
+/// combining marks, and for 5 000 flags (regional indicator pairs), a few
+/// bytes per byte of the line. The same count of the way it was done
+/// before, one caret moved along the whole line, is over that bound
+/// already at 2 000 marks: each move is charged the whole line.
 #[test]
 fn cluster_ends_take_time_in_proportion_to_the_line() {
-    let marks = format!("a{}b", "\u{301}".repeat(50_000));
+    let marks = marked(50_000);
     let mut scanned = 0;
     let ends = drawer::cluster_ends(&marks, &mut scanned);
     assert_eq!(ends, [marks.len() - 1, marks.len()]);
     assert!(
-        scanned <= 4 * marks.len(),
+        scanned <= MARKS_PER_BYTE * marks.len(),
         "{scanned} bytes for {}",
         marks.len()
     );
 
+    // A 64-byte piece, held through three calls, for each 8-byte flag.
     let flags = "\u{1F1EF}\u{1F1F5}".repeat(5_000);
     let mut scanned = 0;
     let ends = drawer::cluster_ends(&flags, &mut scanned);
     assert_eq!(ends, (1..=5_000).map(|n| 8 * n).collect::<Vec<_>>());
     assert!(
-        scanned <= 8 * flags.len(),
+        scanned <= 24 * flags.len(),
         "{scanned} bytes for {}",
         flags.len()
+    );
+
+    let short = marked(2_000);
+    let mut before = 0;
+    let ends = ends_by_moving_the_caret(&short, &mut before);
+    assert_eq!(ends, [short.len() - 1, short.len()]);
+    assert!(
+        before > MARKS_PER_BYTE * short.len(),
+        "the caret walk: {before} bytes for {}",
+        short.len()
     );
 }
 
@@ -959,7 +1053,7 @@ fn cluster_ends_are_the_editors() {
     for line in [unit.clone(), unit.repeat(3), format!("y{unit}")] {
         assert_eq!(
             drawer::cluster_ends(&line, &mut 0),
-            ends_by_moving_the_caret(&line),
+            ends_by_moving_the_caret(&line, &mut 0),
             "{line:?}"
         );
     }

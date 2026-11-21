@@ -33,11 +33,13 @@ const SLACK: f32 = 0.5;
 #[derive(Debug, Default)]
 pub(super) struct PageMemory {
     seen: Option<Seen>,
-    /// The selection still waiting to be paged into view (`view.reveal`)
-    /// when the wheel last turned this list's page since its last fit: the
-    /// wheel came after that selection, so it decides this list's page.
-    /// `wheel` holds only a shared tree, hence the cell.
-    wheeled_after: Cell<Option<u64>>,
+    /// Wheel steps over this list (forward positive) that came after a
+    /// selection still waiting to be paged into view (`view.reveal`, the
+    /// pane named here): the page that selection brings into view is not
+    /// laid out yet, so the steps are counted from it by the next `fit`,
+    /// which pages the selection into view first. `wheel` holds only a
+    /// shared tree, hence the cell.
+    after_reveal: Cell<Option<(u64, isize)>>,
 }
 
 impl Widget for PageMemory {
@@ -292,7 +294,36 @@ struct Job<'a> {
     panel: usize,
     parts: &'a ListParts,
     aim: Aim,
+    /// Wheel steps to take once `aim` is reached (forward positive): the
+    /// wheel turned this list after the selection the aim brings into view.
+    then: isize,
     page: Page,
+}
+
+impl Job<'_> {
+    /// The first item after one round from `first`, whose page is `page`;
+    /// `None` when this list is settled.
+    fn step(&mut self, first: usize, page: Page) -> Option<usize> {
+        let len = self.parts.items.len();
+        match self.aim {
+            Aim::Item(item) if item < first => Some(item),
+            Aim::Item(item) if item >= page.end => Some(first + 1),
+            Aim::Item(_) if self.then != 0 => {
+                // The selection is on the page: the wheel's steps follow.
+                let steps = std::mem::take(&mut self.then);
+                if steps > 0 {
+                    self.aim = Aim::Forward(first + steps.unsigned_abs());
+                    self.step(first, page)
+                } else {
+                    self.aim = Aim::Back;
+                    let back = first.saturating_sub(steps.unsigned_abs());
+                    (back != first).then_some(back)
+                }
+            }
+            Aim::Forward(to) if first < to && page.end < len => Some(first + 1),
+            _ => None,
+        }
+    }
 }
 
 /// Lays out the page from each `(parts, first)` and measures it: twice for
@@ -348,16 +379,21 @@ fn measure(
 /// - a list built again (no memory: a rebuild, a filter change, another
 ///   server) starts at its first item, with the selected worker in view;
 /// - a selection made since the list's last fit (`view.reveal`) is paged
-///   into view, unless the wheel turned this list's page after it
-///   (`PageMemory::wheeled_after`): then, as when no selection came since,
-///   the wheel's page holds — its steps forward stop at the first page that
-///   hides nothing below (`wheel` cannot lay out to see it);
+///   into view; when the wheel turned this list after that selection
+///   (`PageMemory::after_reveal`), its steps are then taken from the page
+///   that shows the selection — the page a fit between the two would have
+///   left, so a frame drawn between them or not makes no difference;
+/// - the wheel's page holds when no selection came since: its steps
+///   forward stop at the first page that hides nothing below (`wheel`
+///   cannot lay out to see it);
 /// - with no user action since the last fit (a new size, an item changed
 ///   in place), the page keeps its first item; the selected worker is
 ///   brought back only when it was on the page (the user had not paged
-///   away from it) and the change pushed it off. Then, when the page
-///   reaches the end of the list (a larger window, an item that shrank),
-///   it starts at the earliest item from which everything to the end fits.
+///   away from it) and the change pushed it off. Then the page starts at
+///   the earliest item from which everything to the end fits, if there is
+///   one before it (a larger window, an item that shrank) — also when the
+///   page from its own first item does not reach the end: cards wrapped in
+///   rows pair up differently from an earlier first item.
 ///
 /// The fit is measured, not computed: card heights change in place (a
 /// queue card expands or collapses on a volatile snapshot, lanes are made
@@ -378,7 +414,10 @@ pub(super) fn fit(
             continue;
         };
         let (_, memory) = parts.memory(tree);
-        let wheeled_after = memory.wheeled_after.take();
+        let after_reveal = memory.after_reveal.take();
+        let then = after_reveal
+            .filter(|(pane, _)| view.reveal == Some(*pane))
+            .map_or(0, |(_, steps)| steps);
         let seen = memory.seen.clone();
         let look = parts.look(tree);
         let first = &mut view.first[panel];
@@ -387,13 +426,12 @@ pub(super) fn fit(
             .is_some_and(|seen| seen.first == *first && seen.look == look);
         let item = |pane: Option<u64>| pane.and_then(|pane| parts.item_of(pane));
         let selected = item(view.selected);
-        let reveal = view.reveal.filter(|pane| wheeled_after != Some(*pane));
         let aim = match &seen {
             None => {
                 *first = 0;
                 selected.map_or(Aim::Stay, Aim::Item)
             }
-            Some(seen) => match item(reveal) {
+            Some(seen) => match item(view.reveal) {
                 Some(item) => Aim::Item(item),
                 None if seen.first < *first => Aim::Forward(std::mem::replace(first, seen.first)),
                 None if seen.first > *first => Aim::Back,
@@ -408,7 +446,7 @@ pub(super) fn fit(
             Aim::Item(item) => look.items[item].1.is_some(),
             _ => true,
         };
-        if kept && on_page {
+        if kept && on_page && then == 0 {
             let held = parts.shown(tree, view.selected);
             if seen.is_some_and(|seen| seen.held != held) {
                 parts.remember(tree, *first, view.selected);
@@ -423,6 +461,7 @@ pub(super) fn fit(
             panel,
             parts,
             aim,
+            then,
             page,
         });
     }
@@ -433,8 +472,9 @@ pub(super) fn fit(
     let mut changed = false;
     let first = &mut view.first;
 
-    // Each round moves a list's first item one step toward its aim, so a
-    // list of n items needs at most n rounds.
+    // Each round moves a list's first item one step toward its aim (the
+    // wheel's steps back after a selection are one round), so a list of n
+    // items needs at most 2n + 1 rounds.
     let mut open: Vec<usize> = (0..jobs.len()).collect();
     while !open.is_empty() {
         let pages: Vec<(&ListParts, usize)> = open
@@ -447,28 +487,23 @@ pub(super) fn fit(
             let job = &mut jobs[j];
             job.page = page;
             let first = &mut first[job.panel];
-            let len = job.parts.items.len();
-            *first = match job.aim {
-                Aim::Item(item) if item < *first => item,
-                Aim::Item(item) if item >= page.end => *first + 1,
-                Aim::Forward(to) if *first < to && page.end < len => *first + 1,
-                _ => continue,
+            let Some(step) = job.step(*first, page) else {
+                continue;
             };
+            *first = step;
             next.push(j);
         }
         open = next;
     }
 
-    // A page that reaches the end starts at the earliest item from which
-    // everything to the end fits. Cards wrapped in rows do not fit by
-    // count (two high cards share a row only when they start it), so every
-    // earlier first item is tried, earliest first, not just the one before.
+    // A page starts at the earliest item from which everything to the end
+    // fits, when there is one before its first. Cards wrapped in rows do
+    // not fit by count (two high cards share a row only when they start
+    // it), so every earlier first item is tried, earliest first, not just
+    // the one before — and also for a page that does not reach the end:
+    // from an earlier first item the rows can pair up so that all fits.
     let mut open: Vec<(usize, usize)> = (0..jobs.len())
-        .filter(|&j| {
-            let job = &jobs[j];
-            job.aim.fills_back() && job.page.end == job.parts.items.len()
-        })
-        .filter(|&j| first[jobs[j].panel] > 0)
+        .filter(|&j| jobs[j].aim.fills_back() && first[jobs[j].panel] > 0)
         .map(|j| (j, 0))
         .collect();
     while !open.is_empty() {
@@ -530,7 +565,10 @@ fn set_indicator(tree: &mut UiTree, id: WidgetId, text: Option<String>) -> bool 
 /// Pages a panel list with a wheel event over it: every full `WHEEL_STEP`
 /// forward shows the list from one item later while something is hidden
 /// below, every step back from one item earlier while something is hidden
-/// above. True when that turned the page: the caller then pages and
+/// above. While a selection in this list waits to be paged into view
+/// (`view.reveal`), the steps are kept for `fit` to take from the page
+/// that shows it (see `PageMemory::after_reveal`), which stops them at
+/// either end. True when that turned the page: the caller then pages and
 /// presents. Travel that turns no page (less than a step, sideways, past
 /// either end) and a wheel over anything else — the header, a panel's
 /// title, an overlay above a list — are left to the tree (false), where
@@ -575,6 +613,22 @@ pub(super) fn wheel(
         *accum = 0.0;
     }
     *accum += travel;
+    let (_, memory) = parts.memory(tree);
+    if let Some(pane) = view.reveal.filter(|pane| parts.item_of(*pane).is_some()) {
+        // The page that will show the selection is not laid out yet, so
+        // neither end is known: `fit` stops the steps at either.
+        let steps = (*accum / WHEEL_STEP).trunc();
+        if steps == 0.0 {
+            return false;
+        }
+        *accum -= steps * WHEEL_STEP;
+        let before = memory.after_reveal.get();
+        let before = before.filter(|(p, _)| *p == pane).map_or(0, |(_, n)| n);
+        memory
+            .after_reveal
+            .set(Some((pane, before + steps as isize)));
+        return true;
+    }
     let first = &mut view.first[panel];
     let from = *first;
     let last = parts.items.len().saturating_sub(1);
@@ -595,10 +649,5 @@ pub(super) fn wheel(
         *accum += WHEEL_STEP;
         *first -= 1;
     }
-    if *first == from {
-        return false;
-    }
-    let (_, memory) = parts.memory(tree);
-    memory.wheeled_after.set(view.reveal);
-    true
+    *first != from
 }

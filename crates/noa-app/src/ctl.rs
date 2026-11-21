@@ -2966,7 +2966,14 @@ pub(crate) fn wait_loop_with_clock(
     let before_deadline = || deadline.is_none_or(|deadline| Instant::now() < deadline);
     let first = loop {
         match source.list() {
-            Err(failure) if failure.transient && before_deadline() => {}
+            Err(failure) if failure.transient && before_deadline() => {
+                // A caught signal ends a wait still without its first
+                // listing too (a wedged Noa keeps the socket open).
+                if source.interrupted() {
+                    emit(&interrupted_before_listing(&start, panes));
+                    return Ok(EXIT_TIMEOUT);
+                }
+            }
             result => break result?,
         }
     };
@@ -3264,6 +3271,30 @@ pub(crate) fn wait_loop_with_clock(
         // Still set here only when a re-list above timed out: keep it.
         relist_pending |= relist || listed_at.elapsed() >= relist_every;
     }
+}
+
+/// The line of a wait a signal ended before any listing came back: every
+/// pane pending, with the baselines known without a listing (`--after`, or
+/// what `send --wait` saw before typing).
+fn interrupted_before_listing(start: &WaitStart, panes: &[u64]) -> serde_json::Value {
+    let known = |pane: u64| match start {
+        WaitStart::Listed { after } | WaitStart::Named { after } => after.get(&pane).copied(),
+        WaitStart::Before { panels, after } => after.or_else(|| {
+            panels
+                .iter()
+                .find(|panel| panel.pane_id.0 == pane)
+                .and_then(|panel| Some(panel.agent.as_ref()?.seq))
+        }),
+    };
+    serde_json::json!({
+        "timeout": true,
+        "interrupted": true,
+        "pending": panes.iter().copied().map(WireId).collect::<Vec<_>>(),
+        "baseline": panes
+            .iter()
+            .filter_map(|&pane| Some(serde_json::json!({ "paneId": WireId(pane), "seq": known(pane)? })))
+            .collect::<Vec<_>>(),
+    })
 }
 
 /// Apply a pushed notification to `latest`; returns whether earlier ones
@@ -6797,6 +6828,69 @@ mod tests {
                 "interrupted": true,
                 "pending": ["8"],
                 "baseline": [{"paneId": "8", "seq": 4, "label": "api", "state": "running"}],
+            })]
+        );
+    }
+
+    /// A source whose every listing times out, with a signal caught once
+    /// `after` listings were asked for.
+    struct ListingTimesOut {
+        lists: usize,
+        after: usize,
+    }
+
+    impl WaitSource for ListingTimesOut {
+        fn list(&mut self) -> Result<Vec<Panel>, Failure> {
+            self.lists += 1;
+            assert!(self.lists < 100, "the wait kept listing after the signal");
+            Err(Failure::from(ClientError::Timeout(
+                "noa.listPanels".to_string(),
+            )))
+        }
+
+        fn next(&mut self, _timeout: Duration) -> Result<Option<Notification>, Failure> {
+            unreachable!("no notification before the first listing")
+        }
+
+        fn scrollback(&mut self, _pane: u64) -> Result<Option<String>, Failure> {
+            unreachable!()
+        }
+
+        fn screen(&mut self, _pane: u64) -> Result<Option<String>, Failure> {
+            unreachable!()
+        }
+
+        fn interrupted(&mut self) -> bool {
+            self.lists >= self.after
+        }
+    }
+
+    // Review finding #8: with every listing timing out (a wedged Noa), the
+    // first-listing retry loop never looked at a caught signal, so Ctrl-C
+    // and SIGTERM could not end the wait.
+    #[test]
+    fn a_caught_signal_ends_a_wait_still_without_its_first_listing() {
+        let mut source = ListingTimesOut { lists: 0, after: 3 };
+        let mut lines = Vec::new();
+        let code = wait_loop(
+            &mut source,
+            &[8, 9],
+            WaitStart::Listed {
+                after: HashMap::from([(8, 4)]),
+            },
+            &WaitOptions::default(),
+            WAIT_RELIST_INTERVAL,
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_TIMEOUT));
+        assert_eq!(source.lists, 3);
+        assert_eq!(
+            lines,
+            vec![serde_json::json!({
+                "timeout": true,
+                "interrupted": true,
+                "pending": ["8", "9"],
+                "baseline": [{"paneId": "8", "seq": 4}],
             })]
         );
     }

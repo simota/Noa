@@ -617,7 +617,17 @@ impl Board {
                 )
             })
             .collect();
-        for (pane, seq, status, detail) in workers.iter().cloned() {
+        // The orchestrator's state is dated like a worker's: the header
+        // says it, and the queue while it needs someone (U3).
+        let orchestrator = self
+            .of
+            .and_then(|of| self.panel(of))
+            .map(|panel| (panel.pane_id.0, Status::of(panel)));
+        for (pane, status) in workers
+            .iter()
+            .map(|(pane, _, status, _)| (*pane, *status))
+            .chain(orchestrator)
+        {
             match self.since.get(&pane) {
                 Some((seen, _)) if *seen == status => {}
                 _ => {
@@ -625,6 +635,8 @@ impl Board {
                     self.since.insert(pane, (status, at));
                 }
             }
+        }
+        for (pane, seq, status, detail) in workers.iter().cloned() {
             let Some(seq) = seq else { continue };
             let history = self.history.entry(pane).or_default();
             let newest = history.first().map(|report| report.seq);
@@ -665,6 +677,8 @@ impl Board {
             }
         }
         self.gone.truncate(GONE_CAP);
+        let mut live = live;
+        live.extend(orchestrator.map(|(pane, _)| pane));
         self.history.retain(|pane, _| live.contains(pane));
         self.since.retain(|pane, _| live.contains(pane));
         self.screens.retain(|pane, _| live.contains(pane));
@@ -680,7 +694,11 @@ impl Board {
             .map(|node| node.panel.pane_id.0)
             .collect();
         self.collapsed.retain(|pane| at_work.contains(pane));
-        if self.selected.is_none_or(|pane| !live.contains(&pane)) {
+        // The orchestrator is selectable only while it is in the queue.
+        let lead = self.lead().map(|panel| panel.pane_id.0);
+        if self.selected.is_none_or(|pane| {
+            !live.contains(&pane) || (Some(pane) == self.of && Some(pane) != lead)
+        }) {
             self.past = 0;
             self.selected = self.picks().first().copied();
         }
@@ -718,12 +736,21 @@ impl Board {
         ring
     }
 
-    /// The panes in the queue: the workers that need someone.
+    /// The panes in the queue: the workers that need someone, and the
+    /// orchestrator when it does.
     fn needing(&self) -> HashSet<u64> {
         self.listed()
             .filter(|panel| Status::of(panel).group() == Group::Needs)
+            .chain(self.lead())
             .map(|panel| panel.pane_id.0)
             .collect()
+    }
+
+    /// The orchestrator while it needs someone (U3): an approval for its own
+    /// `+ctl` call holds every worker up, so it heads the queue.
+    fn lead(&self) -> Option<&Panel> {
+        self.panel(self.of?)
+            .filter(|panel| Status::of(panel).group() == Group::Needs)
     }
 
     #[cfg(test)]
@@ -921,8 +948,14 @@ impl Board {
             let pane = node.panel.pane_id.0;
             (self.urgency(node.panel), self.number(pane), pane)
         });
-        let mut entries: Vec<Entry> = queue
+        let lead = self.lead().map(|panel| Node {
+            panel,
+            branch: Branch::Top { kids: 0 },
+            zone: Zone::Queue,
+        });
+        let mut entries: Vec<Entry> = lead
             .into_iter()
+            .chain(queue)
             .map(|node| Entry {
                 node,
                 queued: true,
@@ -1123,6 +1156,12 @@ impl Board {
     }
 
     fn name(&self, pane: u64) -> String {
+        if Some(pane) == self.of {
+            return self
+                .lang
+                .pick("オーケストレーター", "orchestrator")
+                .to_string();
+        }
         self.panel(pane)
             .map(worker_name)
             .unwrap_or_else(|| format!("pane {pane}"))
@@ -1438,8 +1477,17 @@ impl Board {
                         }
                     }
                     Key::Char('x') => {
-                        if let Some(pane) = self.target() {
-                            self.mode = Mode::ConfirmClose(pane);
+                        match self.target() {
+                            // Closing the orchestrator closes every worker.
+                            Some(pane) if Some(pane) == self.of => {
+                                let text = self.lang.pick(
+                                    "オーケストレーターはボードからは閉じません",
+                                    "the board does not close the orchestrator",
+                                );
+                                self.message = Some(Notice::warn(text.to_string()));
+                            }
+                            Some(pane) => self.mode = Mode::ConfirmClose(pane),
+                            None => {}
                         }
                     }
                     _ => {}
@@ -1875,6 +1923,7 @@ impl Columns {
         rows: &[(&Panel, usize)],
         tallies: [usize; 3],
         cols: usize,
+        name: impl Fn(&Panel) -> String,
         state: impl Fn(&Panel, StateForm) -> String,
     ) -> Self {
         let widest = |text: &dyn Fn(&Panel) -> String| {
@@ -1887,7 +1936,7 @@ impl Columns {
         let indent = rows.iter().map(|&(_, indent)| indent).max().unwrap_or(0);
         let mut name = rows
             .iter()
-            .map(|&(panel, indent)| indent + worker_name(panel).width())
+            .map(|&(panel, indent)| indent + name(panel).width())
             .max()
             .unwrap_or(0)
             .min(24 + indent)
@@ -2104,7 +2153,7 @@ impl Board {
                 .filter(|panel| Status::of(panel).group() == group)
                 .count()
         };
-        let needs = count(Group::Needs);
+        let needs = self.needing().len();
         let working = count(Group::Working);
         if needs > 0 {
             self.lang.pick(
@@ -2476,18 +2525,42 @@ impl Board {
                 .pick("すべてのワーカー", "all workers")
                 .to_string(),
         };
+        // What the orchestrator itself is doing, which can hold every worker
+        // up (U3): when it is an agent, or needs someone.
+        let state = self.of.and_then(|of| self.panel(of)).and_then(|panel| {
+            let status = Status::of(panel);
+            (panel.agent.is_some() || status.group() == Group::Needs).then(|| {
+                let pane = panel.pane_id.0;
+                let state = self.state_text(pane, status, StateForm::Full, now);
+                let state = format!("  {} {state}", status.mark());
+                (status.color(), state, clean(&self.last_word(panel)))
+            })
+        });
         let room = cols.saturating_sub(title.width + count.width() + 1);
-        title.fg(DIM, &fit(&scope, room));
+        // The state before a long name; neither cut to nothing.
+        let state = state.filter(|(_, text, _)| text.width() + 1 + 8 <= room);
+        let scope_room = room - state.as_ref().map_or(0, |(_, text, _)| text.width() + 1);
+        title.fg(DIM, &fit(&scope, scope_room));
+        if let Some((color, text, detail)) = state {
+            title.fg(color, &text);
+            let room = cols.saturating_sub(title.width + count.width() + 3);
+            if !detail.is_empty() && room >= 6 {
+                title.fg(DIM, &format!("  {}", fit(&detail, room)));
+            }
+        }
         let pad = cols.saturating_sub(title.width + count.width());
         title.plain(&" ".repeat(pad)).fg(DIM, &count);
 
         let mut chips = Line::default();
         chips.plain(" ");
         for group in Group::ALL {
-            let n = workers
-                .iter()
-                .filter(|panel| Status::of(panel).group() == group)
-                .count();
+            let n = match group {
+                Group::Needs => self.needing().len(),
+                _ => workers
+                    .iter()
+                    .filter(|panel| Status::of(panel).group() == group)
+                    .count(),
+            };
             let text = format!(" {} {n}", group.title(self.lang));
             // An empty section is dimmed, so the ones with workers stand out.
             if n == 0 {
@@ -2630,9 +2703,13 @@ impl Board {
             widest_tally(StateForm::Short),
             widest_tally(StateForm::Bare),
         ];
-        let columns = Columns::of(&named, tallies, cols, |panel, form| {
-            self.state_text(panel.pane_id.0, Status::of(panel), form, now)
-        });
+        let columns = Columns::of(
+            &named,
+            tallies,
+            cols,
+            |panel| self.name(panel.pane_id.0),
+            |panel, form| self.state_text(panel.pane_id.0, Status::of(panel), form, now),
+        );
         let space_on_subtree = self.space_target().is_some();
         let mut body: Vec<String> = Vec::new();
         // Each selectable row's line in `body`, and its worker's group.
@@ -2777,10 +2854,7 @@ impl Board {
         };
         match zone {
             Zone::Queue => {
-                let n = tree
-                    .iter()
-                    .filter(|node| Status::of(node.panel).group() == Group::Needs)
-                    .count();
+                let n = self.needing().len();
                 rule(
                     cols,
                     &[
@@ -2862,15 +2936,19 @@ impl Board {
             return vec![blank(); height];
         };
         let status = Status::of(panel);
-        let mut name = worker_name(panel);
+        let mut name = self.name(pane);
         if let Some(parent) = self.tree_parent(pane) {
             name = format!("{}{name}", self.crumb(parent));
         }
+        let number = self
+            .numbers
+            .get(&pane)
+            .map_or(" ".to_string(), |number| format!(" {number} "));
         out.push(rule(
             cols,
             &[
                 (Some(BLUE), self.lang.pick("選択中", "Selected").to_string()),
-                (Some(DIM), format!(" {} ", self.number(pane))),
+                (Some(DIM), number),
                 (Some(status.color()), format!("{} ", status.mark())),
                 (None, name),
             ],
@@ -3133,12 +3211,16 @@ impl Board {
                 (name, String::new())
             }
         };
-        let number = format!("{:>width$}", self.number(pane));
+        // The orchestrator has no number (U3).
+        let number = match self.numbers.get(&pane) {
+            Some(number) => format!("{number:>width$}"),
+            None => " ".repeat(width),
+        };
         line.fg(DIM, &number)
             .plain(" ")
             .fg(status.color(), status.mark())
             .plain(" ");
-        let name = pad(&format!("{crumb}{}", worker_name(panel)), name_width);
+        let name = pad(&format!("{crumb}{}", self.name(pane)), name_width);
         if selected {
             line.bold(&name);
         } else if entry.echo {
@@ -4875,6 +4957,64 @@ mod tests {
             Instant::now(),
         );
         assert_eq!(calm.title(), "ボード");
+    }
+
+    // U3: the orchestrator waiting for an approval of its own `+ctl` call
+    // held every worker up, and the board did not say so.
+    #[test]
+    fn an_orchestrator_needing_someone_heads_the_queue() {
+        let t0 = Instant::now();
+        let orchestrator = |state: &str| {
+            let mut me = worker(1, 0, "", Some(state), 3);
+            me.parent_pane_id = None;
+            me.label = None;
+            me.name = "fix the flaky suite".to_string();
+            me.agent.as_mut().unwrap().detail = Some("Bash: +ctl wait".to_string());
+            me
+        };
+        let with = |state: &str| {
+            let mut panels = sample();
+            panels.push(orchestrator(state));
+            panels
+        };
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(with("running"), t0);
+        // At work: said in the header, not queued.
+        let header = visible(&board.render(120, 30, t0)[0]);
+        assert!(
+            header.contains("fix the flaky suite · claude  ● 作業中  Bash: +ctl wait"),
+            "{header}"
+        );
+        assert_eq!(queue(&board), vec![3]);
+        assert_eq!(board.title(), "ボード · 要対応 1");
+
+        assert!(board.update(with("permission"), t0 + Duration::from_secs(1)));
+        let at = t0 + Duration::from_secs(6);
+        let all = rendered(&board, 120, 30, at);
+        assert!(all.contains("! 承認待ち 5 秒  Bash: +ctl wait"), "{all}");
+        assert_eq!(queue(&board), vec![1, 3]);
+        assert!(line_with(&all, "! 人の対応が必要").contains(" 2 "), "{all}");
+        assert!(
+            line_with(&all, "! オーケストレーター").contains("承認待ち"),
+            "{all}"
+        );
+        assert_eq!(board.title(), "ボード · 要対応 2");
+        // Selected and gone to like a worker, but never closed from here.
+        board.key(Key::Char('n'));
+        assert_eq!(board.selected(), Some(1));
+        assert_eq!(board.key(Key::Char('g')), Some(Action::Focus(1)));
+        assert_eq!(board.key(Key::Char('x')), None);
+        assert_eq!(board.mode, Mode::Normal);
+        assert!(board.message.clone().unwrap().warn);
+        for cols in [24, 40, 60, 80, 120] {
+            for line in board.render(cols, 30, at) {
+                assert_eq!(visible(&line).width(), cols, "{cols}: {:?}", visible(&line));
+            }
+        }
+        // Back at work it leaves the queue, and the selection moves on.
+        assert!(!board.update(with("running"), at));
+        assert_eq!(queue(&board), vec![3]);
+        assert_eq!(board.selected(), Some(3));
     }
 
     /// The number in a "あと N 件" marker line with `arrow`, if drawn.

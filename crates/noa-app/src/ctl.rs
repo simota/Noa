@@ -105,7 +105,8 @@ Commands:
                         prompt, a login) and send yourself.
                         Every worker gets its own file to write its final
                         report to: NOA_RESULT=<its cwd>/.noa/result-LABEL.md
-                        (a plain --label; else result-<8 random hex>.md).
+                        (a plain --label; result-LABEL-<8 hex>.md when that
+                        file exists; else result-<8 random hex>.md).
                         .noa/ holds a .gitignore of *, so git never sees it.
                         Prints \"result\" too (none, with a warning, when the
                         cwd is not writable).

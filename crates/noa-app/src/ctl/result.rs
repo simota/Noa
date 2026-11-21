@@ -1,6 +1,7 @@
 //! A worker's result file (AU-03): `spawn` gives each worker its own
 //! `NOA_RESULT=<cwd>/.noa/result-<label>.md` (a random name without a plain
-//! label), so workers sharing a cwd never share one, in a `.noa/` directory that ignores
+//! label, `-<8 hex>` added when that file exists), so workers sharing a cwd
+//! never share one, in a `.noa/` directory that ignores
 //! itself (`.gitignore` holding `*`), so the file never shows in `git
 //! status` and never keeps `git worktree remove` (`close --prune`) from
 //! removing a worker's worktree. A wait line names the file once the worker
@@ -47,10 +48,22 @@ pub(crate) fn prepare_dir(cwd: &Path) -> std::io::Result<PathBuf> {
 }
 
 /// Make `<cwd>/.noa/` ([`prepare_dir`]), and return the result path of a
-/// worker labelled `label` ([`path_for`]).
+/// worker labelled `label` ([`path_for`]). Labels are not unique: when the
+/// labelled file already exists (another worker of that label in this cwd,
+/// now or before), the new worker gets `result-<label>-<8 hex>.md`, so no
+/// report overwrites another or is read as another's.
 pub(crate) fn prepare(cwd: &Path, label: Option<&str>) -> std::io::Result<PathBuf> {
-    prepare_dir(cwd)?;
-    Ok(path_for(cwd, label))
+    let dir = prepare_dir(cwd)?;
+    Ok(match labelled_path(cwd, label) {
+        Some(labelled) if labelled.exists() => {
+            let stem = labelled
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .expect("a plain label is UTF-8");
+            unused_path(&dir, stem)
+        }
+        _ => path_for(cwd, label),
+    })
 }
 
 /// `<dir>/<stem>.md`, or `<dir>/<stem>-<8 random hex digits>.md` when that
@@ -258,6 +271,29 @@ mod tests {
             assert!(hex.chars().all(|ch| ch.is_ascii_hexdigit()), "{name}");
         }
         assert_ne!(path_for(cwd, None), path_for(cwd, None));
+    }
+
+    // Review finding #5: two workers with one label in one cwd shared
+    // `.noa/result-<label>.md`, so one's report overwrote the other's.
+    #[test]
+    fn a_label_whose_file_exists_gets_a_disambiguated_name() {
+        let dir = temp_dir("same-label");
+        let first = prepare(&dir, Some("review")).unwrap();
+        assert_eq!(first, dir.join(".noa").join("result-review.md"));
+        // Not written yet: the next worker of that label still gets it.
+        assert_eq!(prepare(&dir, Some("review")).unwrap(), first);
+        std::fs::write(&first, "first\n").unwrap();
+        let second = prepare(&dir, Some("review")).unwrap();
+        assert_ne!(second, first);
+        assert_eq!(second.parent(), first.parent());
+        let name = second.file_name().unwrap().to_string_lossy().into_owned();
+        let hex = name
+            .strip_prefix("result-review-")
+            .and_then(|rest| rest.strip_suffix(".md"))
+            .unwrap();
+        assert_eq!(hex.len(), 8, "{name}");
+        assert!(hex.chars().all(|ch| ch.is_ascii_hexdigit()), "{name}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

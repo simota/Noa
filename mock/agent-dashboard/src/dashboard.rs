@@ -34,9 +34,70 @@ const GRAY: Color = Color::hex(0x8e8e93);
 const BLUE: Color = Color::hex(0x0a84ff);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Panel {
+    Queue,
+    Running,
+    Done,
+    Timeline,
+    Graph,
+}
+
+impl Panel {
+    const ALL: [Panel; 5] = [
+        Panel::Queue,
+        Panel::Running,
+        Panel::Done,
+        Panel::Timeline,
+        Panel::Graph,
+    ];
+    const NOW: [Panel; 3] = [Panel::Queue, Panel::Running, Panel::Done];
+    const HISTORY: [Panel; 2] = [Panel::Timeline, Panel::Graph];
+
+    fn grows(self) -> bool {
+        matches!(self, Panel::Running | Panel::Timeline)
+    }
+
+    fn grower(self) -> Panel {
+        if Self::ALL[..3].contains(&self) {
+            Panel::Running
+        } else {
+            Panel::Timeline
+        }
+    }
+
+    fn width(self) -> f32 {
+        match self {
+            Panel::Queue => QUEUE_WIDTH,
+            Panel::Done => DONE_WIDTH,
+            Panel::Graph => GRAPH_WIDTH,
+            Panel::Running | Panel::Timeline => 0.0,
+        }
+    }
+
+    fn style(self, shown: &[bool; 5]) -> Style {
+        if self.grows() {
+            fill_remaining()
+        } else if shown[self.grower() as usize] {
+            fixed_width(self.width())
+        } else {
+            Style {
+                flex_grow: 1.0,
+                flex_basis: length(self.width()),
+                min_size: LayoutSize {
+                    width: length(0.0),
+                    height: auto(),
+                },
+                ..Default::default()
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct View {
     grouping: Grouping,
     expanded: Option<&'static str>,
+    shown: [bool; 5],
 }
 
 #[derive(Default)]
@@ -60,6 +121,8 @@ pub struct Dashboard {
     status: WidgetId,
     grouping_control: WidgetId,
     queue_buttons: QueueButtons,
+    #[cfg_attr(not(test), allow(dead_code))]
+    panels: [Option<WidgetId>; 5],
 }
 
 impl Dashboard {
@@ -67,6 +130,7 @@ impl Dashboard {
         Self::showing(View {
             grouping,
             expanded: None,
+            shown: [true; 5],
         })
     }
 
@@ -99,34 +163,40 @@ impl Dashboard {
                 ..fill_remaining()
             }),
         );
-        let now = tree.insert(
-            Some(body),
-            Container::new(Style {
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::STRETCH,
-                gap: gap(GUTTER),
-                ..fill_remaining()
-            }),
-        );
-        let queue_buttons = queue(&mut tree, now, &workers, view.expanded);
-        running(&mut tree, now, &workers, grouping);
-        done(&mut tree, now, &workers, grouping);
-        let history = tree.insert(
-            Some(body),
-            Container::new(Style {
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::STRETCH,
-                gap: gap(GUTTER),
-                size: LayoutSize {
-                    width: auto(),
-                    height: length(HISTORY_HEIGHT),
-                },
-                flex_shrink: 0.0,
-                ..Default::default()
-            }),
-        );
-        timeline(&mut tree, history, &workers, grouping);
-        graph(&mut tree, history, &workers);
+        let mut queue_buttons = QueueButtons::default();
+        let mut panels = [None; 5];
+        let now_shown = Panel::NOW.iter().any(|p| view.shown[*p as usize]);
+        let rows = [
+            (Panel::NOW.as_slice(), fill_remaining()),
+            (Panel::HISTORY.as_slice(), history_row(now_shown)),
+        ];
+        for (members, style) in rows {
+            if !members.iter().any(|p| view.shown[*p as usize]) {
+                continue;
+            }
+            let row = tree.insert(
+                Some(body),
+                Container::new(Style {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::STRETCH,
+                    gap: gap(GUTTER),
+                    ..style
+                }),
+            );
+            for &member in members.iter().filter(|p| view.shown[**p as usize]) {
+                let id = panel(&mut tree, row, member.style(&view.shown));
+                panels[member as usize] = Some(id);
+                match member {
+                    Panel::Queue => {
+                        queue_buttons = queue(&mut tree, id, &workers, view.expanded);
+                    }
+                    Panel::Running => running(&mut tree, id, &workers, grouping),
+                    Panel::Done => done(&mut tree, id, &workers, grouping),
+                    Panel::Timeline => timeline(&mut tree, id, &workers, grouping),
+                    Panel::Graph => graph(&mut tree, id, &workers),
+                }
+            }
+        }
 
         Self {
             tree,
@@ -134,6 +204,7 @@ impl Dashboard {
             status,
             grouping_control,
             queue_buttons,
+            panels,
         }
     }
 }
@@ -165,8 +236,7 @@ impl Screen for Dashboard {
                 expanded: Some(label),
                 ..self.view
             });
-        } else if let Some(label) = QueueButtons::worker(&self.queue_buttons.open, message.source)
-        {
+        } else if let Some(label) = QueueButtons::worker(&self.queue_buttons.open, message.source) {
             let status = format!("モック: {label} のペインへ移動します");
             self.tree
                 .update::<Label, _>(self.status, |l, cx| l.set_text(cx, status));
@@ -178,6 +248,21 @@ fn gap(px: f32) -> LayoutSize<LengthPercentage> {
     LayoutSize {
         width: length(px),
         height: length(px),
+    }
+}
+
+fn history_row(now_shown: bool) -> Style {
+    if now_shown {
+        Style {
+            size: LayoutSize {
+                width: auto(),
+                height: length(HISTORY_HEIGHT),
+            },
+            flex_shrink: 0.0,
+            ..Default::default()
+        }
+    } else {
+        fill_remaining()
     }
 }
 
@@ -389,7 +474,7 @@ fn task_line(tree: &mut UiTree, parent: WidgetId, worker: &Worker) {
 
 fn queue(
     tree: &mut UiTree,
-    now: WidgetId,
+    rail: WidgetId,
     workers: &[Worker],
     expanded: Option<&'static str>,
 ) -> QueueButtons {
@@ -405,7 +490,6 @@ fn queue(
     });
     let expanded = expanded.or(waiting.first().map(|(worker, _)| worker.label));
 
-    let rail = panel(tree, now, fixed_width(QUEUE_WIDTH));
     panel_title(tree, rail, "要対応", waiting.len(), Tone::Warning);
     let list = card_list(tree, rail);
     let mut buttons = QueueButtons::default();
@@ -520,12 +604,11 @@ fn queue_card_body(tree: &mut UiTree, card: WidgetId, worker: &Worker) -> Widget
     )
 }
 
-fn running(tree: &mut UiTree, now: WidgetId, workers: &[Worker], grouping: Grouping) {
+fn running(tree: &mut UiTree, column: WidgetId, workers: &[Worker], grouping: Grouping) {
     let members: Vec<&Worker> = workers
         .iter()
         .filter(|w| w.state == State::Running)
         .collect();
-    let column = panel(tree, now, fill_remaining());
     panel_title(tree, column, "作業中", members.len(), Tone::Success);
     let scroll = card_list(tree, column);
     for (name, group) in grouping.split(members) {
@@ -610,12 +693,11 @@ fn running_card(tree: &mut UiTree, grid: WidgetId, worker: &Worker) {
     );
 }
 
-fn done(tree: &mut UiTree, now: WidgetId, workers: &[Worker], grouping: Grouping) {
+fn done(tree: &mut UiTree, column: WidgetId, workers: &[Worker], grouping: Grouping) {
     let members: Vec<&Worker> = workers
         .iter()
         .filter(|w| w.state == State::Finished)
         .collect();
-    let column = panel(tree, now, fixed_width(DONE_WIDTH));
     panel_title(tree, column, "完了", members.len(), Tone::Neutral);
     let list = card_list(tree, column);
     for (name, group) in grouping.split(members) {
@@ -657,8 +739,7 @@ fn done_card(tree: &mut UiTree, list: WidgetId, worker: &Worker) {
     );
 }
 
-fn timeline(tree: &mut UiTree, history: WidgetId, workers: &[Worker], grouping: Grouping) {
-    let section = panel(tree, history, fill_remaining());
+fn timeline(tree: &mut UiTree, section: WidgetId, workers: &[Worker], grouping: Grouping) {
     let span = workers
         .iter()
         .map(Worker::total_minutes)
@@ -770,8 +851,7 @@ fn mark(worker: &Worker) -> (&'static str, Color) {
     }
 }
 
-fn graph(tree: &mut UiTree, history: WidgetId, workers: &[Worker]) {
-    let section = panel(tree, history, fixed_width(GRAPH_WIDTH));
+fn graph(tree: &mut UiTree, section: WidgetId, workers: &[Worker]) {
     tree.insert(
         Some(section),
         Label::new("関連（親 → ワーカー → 孫）")
@@ -968,5 +1048,119 @@ mod tests {
         let pos = Point::new(origin.x + rect.width - 12.0, origin.y + rect.height / 2.0);
         click(&mut dashboard, &mut text, pos);
         assert_eq!(dashboard.view.grouping, Grouping::Flat);
+    }
+
+    fn shown_only(hidden: &[Panel]) -> [bool; 5] {
+        let mut shown = [true; 5];
+        for panel in hidden {
+            shown[*panel as usize] = false;
+        }
+        shown
+    }
+
+    fn showing(grouping: Grouping, shown: [bool; 5]) -> (Dashboard, TextStore) {
+        let mut dashboard = Dashboard::showing(View {
+            grouping,
+            expanded: None,
+            shown,
+        });
+        let mut text = TextStore::new(Default::default());
+        dashboard.prepare(window(), &mut text);
+        (dashboard, text)
+    }
+
+    fn rect(tree: &UiTree, id: WidgetId) -> [f32; 4] {
+        let origin = tree.window_origin(id).unwrap();
+        let size = tree.layout(id).unwrap().rect;
+        [origin.x, origin.y, size.width, size.height]
+    }
+
+    fn assert_rect(actual: [f32; 4], expected: [f32; 4], what: &str) {
+        for (a, e) in actual.iter().zip(expected) {
+            assert!((a - e).abs() <= 0.5, "{what}: {actual:?} vs {expected:?}");
+        }
+    }
+
+    fn assert_row_spans(dashboard: &Dashboard, members: &[Panel]) {
+        let rects: Vec<[f32; 4]> = members
+            .iter()
+            .filter_map(|p| dashboard.panels[*p as usize])
+            .map(|id| rect(&dashboard.tree, id))
+            .collect();
+        let (first, last) = (rects.first().unwrap(), rects.last().unwrap());
+        assert!((first[0] - GUTTER).abs() <= 0.5, "{rects:?}");
+        assert!(
+            (last[0] + last[2] - (window().width - GUTTER)).abs() <= 0.5,
+            "{rects:?}"
+        );
+        for pair in rects.windows(2) {
+            let gap = pair[1][0] - (pair[0][0] + pair[0][2]);
+            assert!((gap - GUTTER).abs() <= 0.5, "{rects:?}");
+        }
+    }
+
+    #[test]
+    fn all_panels_on_keeps_todays_layout() {
+        let expected = [
+            [12.0, 60.0, 400.0, 560.0],
+            [424.0, 60.0, 722.0, 560.0],
+            [1158.0, 60.0, 270.0, 560.0],
+            [12.0, 632.0, 974.0, 256.0],
+            [998.0, 632.0, 430.0, 256.0],
+        ];
+        for grouping in Grouping::ALL {
+            let (dashboard, _text) = showing(grouping, [true; 5]);
+            for panel in Panel::ALL {
+                let id = dashboard.panels[panel as usize].unwrap();
+                let actual = rect(&dashboard.tree, id);
+                assert_rect(actual, expected[panel as usize], &format!("{panel:?}"));
+            }
+        }
+    }
+
+    #[test]
+    fn a_hidden_panel_leaves_its_row_to_the_others() {
+        for hidden in Panel::ALL {
+            let (dashboard, _text) = showing(Grouping::Orchestrator, shown_only(&[hidden]));
+            assert!(dashboard.panels[hidden as usize].is_none());
+            assert_row_spans(&dashboard, &Panel::NOW);
+            assert_row_spans(&dashboard, &Panel::HISTORY);
+        }
+        let body_height = window().height - HEADER_HEIGHT - 2.0 * GUTTER;
+        let (dashboard, _text) = showing(Grouping::Orchestrator, shown_only(&Panel::NOW));
+        assert_row_spans(&dashboard, &Panel::HISTORY);
+        let id = dashboard.panels[Panel::Timeline as usize].unwrap();
+        assert_eq!(rect(&dashboard.tree, id)[3].round(), body_height.round());
+        let (dashboard, _text) = showing(Grouping::Orchestrator, shown_only(&Panel::HISTORY));
+        assert_row_spans(&dashboard, &Panel::NOW);
+        let id = dashboard.panels[Panel::Queue as usize].unwrap();
+        assert_eq!(rect(&dashboard.tree, id)[3].round(), body_height.round());
+    }
+
+    #[test]
+    fn the_queue_fits_with_any_other_panels_hidden() {
+        let others = [Panel::Running, Panel::Done, Panel::Timeline, Panel::Graph];
+        for grouping in Grouping::ALL {
+            for mask in 0..16u8 {
+                let hidden: Vec<Panel> = others
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| mask >> i & 1 == 1)
+                    .map(|(_, p)| *p)
+                    .collect();
+                let (dashboard, _text) = showing(grouping, shown_only(&hidden));
+                let tree = &dashboard.tree;
+                let buttons = &dashboard.queue_buttons;
+                assert_eq!(buttons.open.len() + buttons.details.len(), 5);
+                for (button, label) in buttons.open.iter().chain(&buttons.details) {
+                    let card = tree.parent(tree.parent(*button).unwrap()).unwrap();
+                    let list = tree.parent(card).unwrap();
+                    assert!(
+                        bottom(tree, card) <= bottom(tree, list),
+                        "{label} overflows with {hidden:?} hidden ({grouping:?})"
+                    );
+                }
+            }
+        }
     }
 }

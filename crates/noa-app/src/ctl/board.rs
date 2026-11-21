@@ -2824,7 +2824,9 @@ impl Board {
     fn render_list(&self, cols: usize, rows: usize, now: Instant) -> Vec<String> {
         let mut lines = self.header(cols, now);
         let room = rows.saturating_sub(lines.len() + 1);
-        if self.workers().is_empty() {
+        // The orchestrator needing someone is listed (and selectable) with
+        // no worker too.
+        if self.workers().is_empty() && self.lead().is_none() {
             lines.extend(self.empty_lines(cols, room, now));
             return lines;
         }
@@ -5631,6 +5633,35 @@ mod tests {
         assert!(!board.update(with("running"), at));
         assert_eq!(queue(&board), vec![3]);
         assert_eq!(board.selected(), Some(3));
+    }
+
+    /// Orchestrator 1 waiting for an approval, with no worker yet.
+    fn lone_orchestrator() -> Board {
+        let mut me = worker(1, 0, "", Some("permission"), 3);
+        me.parent_pane_id = None;
+        me.label = None;
+        me.name = "fix the flaky suite".to_string();
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(vec![me], Instant::now());
+        board
+    }
+
+    // Review finding: with no worker, the orchestrator needing someone was
+    // counted in the header and selected, but the list drew only the
+    // empty note: neither its queue row nor its preview.
+    #[test]
+    fn an_orchestrator_needing_someone_is_drawn_with_no_workers() {
+        let mut board = lone_orchestrator();
+        board.set_screen(1, "Allow Bash: +ctl wait?");
+        assert_eq!(board.title(), "ボード · 要対応 1");
+        assert_eq!(board.selected(), Some(1));
+        let all = rendered(&board, 120, 30, Instant::now());
+        assert!(
+            line_with(&all, "▶  ! オーケストレーター").contains("承認待ち"),
+            "{all}"
+        );
+        assert!(all.contains("Allow Bash: +ctl wait?"), "{all}");
+        assert!(!all.contains("ワーカーはまだいません"), "{all}");
     }
 
     /// The number in a "あと N 件" marker line with `arrow`, if drawn.

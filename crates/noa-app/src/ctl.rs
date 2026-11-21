@@ -140,9 +140,10 @@ Commands:
                                 seconds (reason \"stalled\", with \"quietSecs\"),
                                 for an agent that does not report. --settle
                                 SECS holds a finished for SECS seconds: a newer
-                                report or a change of the work above the input
-                                box meanwhile drops it and the wait goes on; one
-                                that held is printed with \"settledSecs\".
+                                report meanwhile drops it and the wait goes on,
+                                a change of the work above the input box starts
+                                the SECS again; one that held is printed with
+                                \"settledSecs\".
                                 --tail adds each open pane's last N output lines
                                 as \"tail\" (for an agent, the lines above its
                                 input box). A permission or input line has
@@ -3040,7 +3041,10 @@ pub(crate) fn wait_loop_with_clock(
             }
         }
         // A held `finished` stands once its hold passed with the work on
-        // screen unchanged; a change drops it, as a newer report does.
+        // screen unchanged. A change starts the hold again and keeps the
+        // report: an agent that goes on keeps changing its screen or reports
+        // again, while a one-off repaint (a late render, a re-wrap) only
+        // delays the line. Dropping it hung a wait with no newer report.
         if let Some(settle) = options.settle
             && !holds.is_empty()
             && !relist_pending
@@ -3060,8 +3064,8 @@ pub(crate) fn wait_loop_with_clock(
                         Err(failure) => return Err(failure),
                     };
                     if hold.work.as_ref().is_some_and(|seen| *seen != work) {
-                        watch.baseline_seq = hold.seq;
-                        holds.remove(&watch.pane);
+                        hold.since = now;
+                        hold.work = Some(work);
                         continue;
                     }
                     hold.work = Some(work);
@@ -7015,8 +7019,10 @@ mod tests {
         };
         let base = Instant::now();
         let mut lines = Vec::new();
+        // Bounded, so a wait that would never end shows as a timeout.
         let options = WaitOptions {
             settle: Some(Duration::from_secs(settle_secs)),
+            timeout: Some(Duration::from_secs(30)),
             ..WaitOptions::default()
         };
         let clock_now = now.clone();
@@ -7061,8 +7067,17 @@ mod tests {
         assert_eq!(line["seq"], 4);
         assert_eq!(*at, 5);
 
-        // The work on screen changing drops it too; only a newer report
-        // ends the wait then.
+        // Review finding #3: the work on screen changing starts the hold
+        // again and keeps the report, so a one-off repaint only delays the
+        // line (dropping it hung a wait that got no newer report).
+        let (code, lines) = run_settle_wait(vec![vec![finished(2)]], vec!["a", "a", "b"], 3);
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        let (at, line) = &lines[0];
+        assert_eq!(line["reason"], "finished");
+        assert_eq!(line["seq"], 2);
+        assert_eq!(line["settledSecs"], 3);
+        assert_eq!(*at, 5);
+        // A newer report during the restarted hold still replaces it.
         let (_, lines) = run_settle_wait(
             vec![
                 vec![finished(2)],

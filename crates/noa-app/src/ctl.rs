@@ -1708,8 +1708,10 @@ impl Session {
         };
         let worktree_label = args.worktree.then(|| args.label.clone()).flatten();
         let label = args.label;
+        let wanted_label = label.clone();
+        let earlier: Vec<u64> = children.iter().map(|panel| panel.pane_id.0).collect();
         let (input, wait_after, focus) = (args.input, args.wait_after, args.focus);
-        let (pane, made) = spawn_steps(
+        let spawned = spawn_steps(
             self,
             |_| match &worktree_label {
                 Some(label) => {
@@ -1727,15 +1729,26 @@ impl Session {
             // (D13).
             |session| {
                 if !opens_board {
-                    return own;
+                    return Host {
+                        pane: own,
+                        opened_board: false,
+                    };
                 }
                 let panels = session.client.list_panels().map_err(Failure::from);
-                let (host, warning) =
-                    board_before_spawn(|| panels, own, || session.open_board(own, Placement::Auto));
+                let mut opened_board = false;
+                let (pane, warning) = board_before_spawn(
+                    || panels,
+                    own,
+                    || {
+                        let opened = session.open_board(own, Placement::Auto);
+                        opened_board = opened.is_ok();
+                        opened
+                    },
+                );
                 if let Some(warning) = warning {
                     eprintln!("Noa +ctl: {warning}");
                 }
-                host
+                Host { pane, opened_board }
             },
             |session, host, made| {
                 if let Some((_, made)) = made {
@@ -1757,6 +1770,22 @@ impl Session {
                     .client
                     .spawn_split(host, SplitPlacement::Float, &params)
             },
+            // The worker may have started though its answer was lost: look
+            // for it a few times, as the app may still be getting to it.
+            |session| {
+                for look in 0..OWN_WAIT_LOOKS {
+                    if look > 0 {
+                        std::thread::sleep(OWN_WAIT_PAUSE);
+                    }
+                    if let Ok(panels) = session.client.list_panels()
+                        && let Some(pane) =
+                            recovered_child(&earlier, &panels, own, wanted_label.as_deref())
+                    {
+                        return Some(pane);
+                    }
+                }
+                None
+            },
             |_, (here, made), refused| {
                 if refused {
                     // Fresh and untouched, so nothing is lost.
@@ -1770,9 +1799,27 @@ impl Session {
                     );
                 }
             },
+            // Any listed worker may now be on the board (a new board takes
+            // back the ones an earlier board handed back), so it is only
+            // closed while this pane has none.
+            |session, board| {
+                let workers = session.client.list_panels().map(|panels| {
+                    panels
+                        .iter()
+                        .any(|panel| panel.parent_pane_id == Some(WireId(own)))
+                });
+                if let Ok(false) = workers
+                    && let Err(err) = session.client.close_pane(board)
+                {
+                    eprintln!("Noa +ctl: could not close the board this spawn opened: {err}");
+                }
+            },
         )?;
-        let mut line = serde_json::json!({ "paneId": WireId(pane) });
-        if let Some((_, made)) = &made {
+        let mut line = serde_json::json!({ "paneId": WireId(spawned.pane) });
+        if spawned.recovered {
+            line["recovered"] = true.into();
+        }
+        if let Some((_, made)) = &spawned.made {
             line["worktree"] = made.path.to_string_lossy().into_owned().into();
             line["branch"] = made.branch.clone().into();
         }
@@ -2036,36 +2083,97 @@ pub(crate) fn send_steps(
     Ok(before)
 }
 
+/// Where a spawn's worker goes (`pane`), and whether this spawn opened that
+/// pane as the board.
+pub(crate) struct Host {
+    pub(crate) pane: u64,
+    pub(crate) opened_board: bool,
+}
+
+/// What [`spawn_steps`] started.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Spawned<W> {
+    pub(crate) pane: u64,
+    pub(crate) made: Option<W>,
+    /// The spawn's answer was lost and the worker was found by listing.
+    pub(crate) recovered: bool,
+}
+
 /// A spawn's steps once its checks passed: make the `--worktree` worktree
 /// (`worktree`, `None` without one), find the host pane (`host`, which opens
-/// the board), start the worker there (`spawn`), and undo the worktree when
-/// the start failed (`undo`).
+/// the board), start the worker there (`spawn`), and clean up when the start
+/// failed.
 ///
 /// The worktree comes first: git refusing it (the branch or directory
-/// exists) then starts nothing, not even the board. `undo` is told whether
-/// the server refused the spawn (an RPC error), the one case where no
-/// worker can be running in the worktree; after a lost answer it may be.
+/// exists) then starts nothing, not even the board. After a request the app
+/// did not confirm in time (-32009) or a client timeout, the worker may be
+/// running: `recover` looks for it, and when found the spawn succeeds.
+/// Otherwise `undo` is told whether the server refused the spawn (an RPC
+/// error other than -32009), the one case where no worker can be running in
+/// the worktree, and only that case closes a board this spawn opened
+/// (`close_board`, which checks the board holds no worker).
 pub(crate) fn spawn_steps<S, W>(
     session: &mut S,
     worktree: impl FnOnce(&mut S) -> Result<Option<W>, Failure>,
-    host: impl FnOnce(&mut S) -> u64,
+    host: impl FnOnce(&mut S) -> Host,
     spawn: impl FnOnce(&mut S, u64, Option<&W>) -> Result<u64, ClientError>,
+    recover: impl FnOnce(&mut S) -> Option<u64>,
     undo: impl FnOnce(&mut S, &W, bool),
-) -> Result<(u64, Option<W>), Failure> {
+    close_board: impl FnOnce(&mut S, u64),
+) -> Result<Spawned<W>, Failure> {
     let made = worktree(session)?;
     let host = host(session);
-    match spawn(session, host, made.as_ref()) {
-        Ok(pane) => Ok((pane, made)),
-        Err(err) => {
-            if let Some(made) = &made {
-                // A request the app did not answer in time may still have
-                // started the worker: like a lost answer, not a refusal.
-                let refused =
-                    matches!(err, ClientError::Rpc { code, .. } if code != RPC_OUTCOME_UNKNOWN);
-                undo(session, made, refused);
-            }
-            Err(err.into())
+    let err = match spawn(session, host.pane, made.as_ref()) {
+        Ok(pane) => {
+            return Ok(Spawned {
+                pane,
+                made,
+                recovered: false,
+            });
         }
+        Err(err) => err,
+    };
+    let unknown = matches!(
+        err,
+        ClientError::Rpc {
+            code: RPC_OUTCOME_UNKNOWN,
+            ..
+        } | ClientError::Timeout(_)
+    );
+    if unknown && let Some(pane) = recover(session) {
+        return Ok(Spawned {
+            pane,
+            made,
+            recovered: true,
+        });
+    }
+    let refused = matches!(err, ClientError::Rpc { code, .. } if code != RPC_OUTCOME_UNKNOWN);
+    if let Some(made) = &made {
+        undo(session, made, refused);
+    }
+    if refused && host.opened_board {
+        close_board(session, host.pane);
+    }
+    Err(err.into())
+}
+
+/// The worker a spawn whose answer was lost started: the one child of `own`
+/// in `panels` that is not among `earlier` (and has `label`, when the spawn
+/// gave one). `None` when there is none, or more than one to choose from.
+pub(crate) fn recovered_child(
+    earlier: &[u64],
+    panels: &[Panel],
+    own: u64,
+    label: Option<&str>,
+) -> Option<u64> {
+    let mut new = panels.iter().filter(|panel| {
+        panel.parent_pane_id == Some(WireId(own))
+            && !earlier.contains(&panel.pane_id.0)
+            && label.is_none_or(|label| panel.label.as_deref() == Some(label))
+    });
+    match (new.next(), new.next()) {
+        (Some(panel), None) => Some(panel.pane_id.0),
+        _ => None,
     }
 }
 
@@ -2729,6 +2837,7 @@ pub(crate) fn close_panes(
 ) -> Result<i32, Failure> {
     let panels = source.list()?;
     let mut failed = false;
+    let mut unconfirmed = false;
     for (pane, listed) in close_targets(&panels, panes, own).map_err(Failure::error)? {
         let label = panels
             .iter()
@@ -2741,12 +2850,26 @@ pub(crate) fn close_panes(
                 // missing scope refuses every pane, so it fails the command.
                 Err(ClientError::Rpc { code, message }) if code != RPC_SCOPE_DENIED => {
                     let listed = source.list()?;
-                    if listed.iter().any(|panel| panel.pane_id.0 == pane) {
+                    let still_listed = listed.iter().any(|panel| panel.pane_id.0 == pane);
+                    // Not confirmed in time: the close may still happen.
+                    if code == RPC_OUTCOME_UNKNOWN {
+                        if still_listed {
+                            eprintln!(
+                                "Noa +ctl: Noa did not confirm closing pane {pane} in time \
+                                 ({message}); it may still close: check with `ls` before \
+                                 retrying"
+                            );
+                            unconfirmed = true;
+                            continue;
+                        }
+                        false
+                    } else if still_listed {
                         eprintln!("Noa +ctl: pane {pane} was not closed: {message}");
                         failed = true;
                         continue;
+                    } else {
+                        true
                     }
-                    true
                 }
                 Err(err) => return Err(err.into()),
             };
@@ -2764,7 +2887,13 @@ pub(crate) fn close_panes(
         }
         emit(&line);
     }
-    Ok(if failed { EXIT_ERROR } else { EXIT_OK })
+    Ok(if unconfirmed {
+        EXIT_UNAVAILABLE
+    } else if failed {
+        EXIT_ERROR
+    } else {
+        EXIT_OK
+    })
 }
 
 /// The worker's cwd: `--cwd` (a relative one taken from this process's
@@ -2989,6 +3118,18 @@ mod tests {
     /// `spawn_steps` with each step logged; `worktree` fails when
     /// `worktree_fails`, `spawn` fails with `spawn_error`.
     fn run_spawn_steps(worktree_fails: bool, spawn_error: Option<ClientError>) -> StepsRun {
+        let (result, log) = run_spawn_steps_with(worktree_fails, spawn_error, false, None);
+        (result.map(|spawned| (spawned.pane, spawned.made)), log)
+    }
+
+    /// As [`run_spawn_steps`]; `host` says it opened the board when
+    /// `opened_board`, and `recover` finds `recovered`.
+    fn run_spawn_steps_with(
+        worktree_fails: bool,
+        spawn_error: Option<ClientError>,
+        opened_board: bool,
+        recovered: Option<u64>,
+    ) -> (Result<Spawned<&'static str>, Failure>, Vec<String>) {
         let mut log: Vec<String> = Vec::new();
         let result = spawn_steps(
             &mut log,
@@ -3004,7 +3145,10 @@ mod tests {
             },
             |log| {
                 log.push("board".to_string());
-                7
+                Host {
+                    pane: 7,
+                    opened_board,
+                }
             },
             |log, host, made| {
                 log.push(format!("spawn on {host} in {made:?}"));
@@ -3013,9 +3157,93 @@ mod tests {
                     None => Ok(9),
                 }
             },
+            |log| {
+                log.push("recover".to_string());
+                recovered
+            },
             |log, made, refused| log.push(format!("undo {made} refused={refused}")),
+            |log, board| log.push(format!("close board {board}")),
         );
         (result, log)
+    }
+
+    fn outcome_unknown() -> ClientError {
+        ClientError::Rpc {
+            code: RPC_OUTCOME_UNKNOWN,
+            message: "outcome unknown: request timed out".to_string(),
+        }
+    }
+
+    // Audit finding (AU-06): a spawn the app did not confirm in time was
+    // exit 1, read as a refusal, and a second worker was started.
+    #[test]
+    fn a_spawn_whose_answer_was_lost_finds_its_worker() {
+        for error in [
+            outcome_unknown(),
+            ClientError::Timeout("noa.split".to_string()),
+        ] {
+            let (result, log) = run_spawn_steps_with(false, Some(error), true, Some(12));
+            assert_eq!(
+                result.ok(),
+                Some(Spawned {
+                    pane: 12,
+                    made: Some("wt"),
+                    recovered: true,
+                })
+            );
+            // Its worktree is the recovered worker's, and so is the board.
+            assert_eq!(log.last().map(String::as_str), Some("recover"));
+        }
+
+        // Not found: exit 3, and the worktree and board are kept.
+        let (result, log) = run_spawn_steps_with(false, Some(outcome_unknown()), true, None);
+        assert_eq!(result.err().map(|f| f.code), Some(EXIT_UNAVAILABLE));
+        assert_eq!(log[log.len() - 2..], ["recover", "undo wt refused=false"]);
+
+        // A refusal or a lost connection is not looked for.
+        let refusal = ClientError::Rpc {
+            code: -32602,
+            message: "nesting goes one level deep".to_string(),
+        };
+        let (_, log) = run_spawn_steps_with(false, Some(refusal), false, Some(12));
+        assert!(!log.contains(&"recover".to_string()));
+        let lost = ClientError::Transport("connection reset".to_string());
+        let (_, log) = run_spawn_steps_with(false, Some(lost), false, Some(12));
+        assert!(!log.contains(&"recover".to_string()));
+    }
+
+    #[test]
+    fn a_recovered_worker_is_the_one_new_child_with_the_label() {
+        let mut new = worker(12, 1);
+        new.label = Some("api".to_string());
+        let panels = vec![worker(8, 1), new.clone(), worker(13, 2)];
+        assert_eq!(recovered_child(&[8], &panels, 1, None), Some(12));
+        assert_eq!(recovered_child(&[8], &panels, 1, Some("api")), Some(12));
+        assert_eq!(recovered_child(&[8], &panels, 1, Some("web")), None);
+        assert_eq!(recovered_child(&[8, 12], &panels, 1, None), None);
+        // Two new children: which one is this spawn's is not known.
+        let two = vec![worker(8, 1), new, worker(14, 1)];
+        assert_eq!(recovered_child(&[8], &two, 1, None), None);
+        assert_eq!(recovered_child(&[8], &two, 1, Some("api")), Some(12));
+    }
+
+    // Audit finding (REL-13): a spawn the server refused left the board it
+    // had just opened, empty, next to the orchestrator.
+    #[test]
+    fn a_refused_spawn_closes_the_board_it_opened() {
+        let refusal = || ClientError::Rpc {
+            code: -32000,
+            message: "the float could not open".to_string(),
+        };
+        let (result, log) = run_spawn_steps_with(false, Some(refusal()), true, None);
+        assert_eq!(result.err().map(|f| f.code), Some(EXIT_ERROR));
+        assert_eq!(log.last().map(String::as_str), Some("close board 7"));
+
+        // A board that was already open, or an outcome not known, stays.
+        let (_, log) = run_spawn_steps_with(false, Some(refusal()), false, None);
+        assert!(log.iter().all(|entry| !entry.starts_with("close board")));
+        let (_, log) = run_spawn_steps_with(false, Some(outcome_unknown()), true, None);
+        assert!(log.iter().all(|entry| !entry.starts_with("close board")));
     }
 
     // Review finding: the board opened before the worktree was made, so a
@@ -4020,6 +4248,41 @@ mod tests {
         });
         assert_eq!(code.ok(), Some(EXIT_ERROR));
         assert!(lines.is_empty());
+    }
+
+    // Audit finding (AU-06): a close the app did not confirm in time was a
+    // failed pane (exit 1), though it may still close.
+    #[test]
+    fn an_unconfirmed_close_exits_3_and_does_not_stop_the_rest() {
+        let mut source = FakeCloser {
+            panels: vec![worker(8, 1)],
+            refuse_code: RPC_OUTCOME_UNKNOWN,
+        };
+        let mut lines = Vec::new();
+        let code = close_panes(
+            &mut source,
+            &[8, 9],
+            Some(1),
+            &mut |_, _| None,
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_UNAVAILABLE));
+        // 9 was already gone and is still reported.
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["paneId"], "9");
+
+        // Gone by the time it is looked at again: it closed.
+        let mut source = VanishingCloser {
+            panels: vec![worker(8, 1)],
+            lists: 0,
+            code: RPC_OUTCOME_UNKNOWN,
+        };
+        let mut lines = Vec::new();
+        let code = close_panes(&mut source, &[8], Some(1), &mut |_, _| None, &mut |line| {
+            lines.push(line.clone())
+        });
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        assert_eq!(lines, [serde_json::json!({"paneId": "8", "closed": true})]);
     }
 
     // Review finding: the docs said a wait carried on from `baseline`
@@ -5547,6 +5810,7 @@ mod tests {
     struct VanishingCloser {
         panels: Vec<Panel>,
         lists: usize,
+        code: i64,
     }
 
     impl PaneCloser for VanishingCloser {
@@ -5561,7 +5825,7 @@ mod tests {
 
         fn close(&mut self, _pane: u64) -> Result<(), ClientError> {
             Err(ClientError::Rpc {
-                code: RPC_PANE_CLOSED,
+                code: self.code,
                 message: "pane closed".to_string(),
             })
         }
@@ -5577,6 +5841,7 @@ mod tests {
         let mut source = VanishingCloser {
             panels: vec![labelled],
             lists: 0,
+            code: RPC_PANE_CLOSED,
         };
         let mut asked = Vec::new();
         let mut lines = Vec::new();

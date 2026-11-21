@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use noa_ipc::{Client, ClientError, EventKind, Notification, Panel, ScopeSet, TextSource};
+use noa_ipc::{Client, ClientError, EventKind, Notification, Panel, Scope, ScopeSet, TextSource};
 
 use crate::fleet::{Fleet, Orchestrator, Phase, State, Worker, minutes_text};
 
@@ -38,6 +38,9 @@ pub struct Snapshot {
     pub link: Link,
     /// Seconds since the server last answered.
     pub synced_secs: u64,
+    /// Whether Noa granted the `control` scope `noa.focusPane` needs. Its
+    /// default `server-scopes` is `read` only.
+    pub can_focus: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +53,8 @@ pub enum Command {
 /// The dashboard's end of the feed.
 pub struct Channel {
     pub snapshots: Receiver<Snapshot>,
+    /// Why a command failed, for the header to show.
+    pub notices: Receiver<String>,
     commands: Sender<Command>,
 }
 
@@ -61,15 +66,18 @@ impl Channel {
     }
 
     #[cfg(test)]
-    pub fn detached() -> (Self, Sender<Snapshot>, Receiver<Command>) {
+    pub fn detached() -> (Self, Sender<Snapshot>, Sender<String>, Receiver<Command>) {
         let (snapshot_tx, snapshots) = mpsc::channel();
         let (commands, command_rx) = mpsc::channel();
+        let (notice_tx, notices) = mpsc::channel();
         (
             Self {
                 snapshots,
+                notices,
                 commands,
             },
             snapshot_tx,
+            notice_tx,
             command_rx,
         )
     }
@@ -79,8 +87,10 @@ impl Channel {
 pub fn start(wake: impl Fn() + Send + 'static) -> Channel {
     let (snapshot_tx, snapshots) = mpsc::channel();
     let (commands, command_rx) = mpsc::channel();
+    let (notice_tx, notices) = mpsc::channel();
     let feed = Feed {
         snapshots: snapshot_tx,
+        notices: notice_tx,
         commands: command_rx,
         wake: Box::new(wake),
         tracker: Tracker::default(),
@@ -95,6 +105,7 @@ pub fn start(wake: impl Fn() + Send + 'static) -> Channel {
         .expect("the live feed thread starts");
     Channel {
         snapshots,
+        notices,
         commands,
     }
 }
@@ -113,6 +124,7 @@ impl From<ClientError> for Stop {
 
 struct Feed {
     snapshots: Sender<Snapshot>,
+    notices: Sender<String>,
     commands: Receiver<Command>,
     wake: Box<dyn Fn() + Send>,
     tracker: Tracker,
@@ -142,6 +154,7 @@ impl Feed {
                 fleet: Fleet::default(),
                 link: Link::Down(reason),
                 synced_secs: 0,
+                can_focus: false,
             };
             if self.publish(down).is_err() || !self.pause(backoff) {
                 return;
@@ -187,7 +200,7 @@ impl Feed {
             }
             self.tracker.advance(unix_now());
             self.fetch_screen(client)?;
-            self.send_if_due(&mut sent)?;
+            self.send_if_due(client, &mut sent)?;
         }
     }
 
@@ -207,7 +220,7 @@ impl Feed {
                 Ok(Command::Expand(pane)) => self.expand(pane),
                 Ok(Command::Focus(pane)) => match client.focus_pane(pane) {
                     Err(ClientError::Rpc { message, .. }) => {
-                        eprintln!("focus pane {pane}: {message}");
+                        self.notice(format!("ペインへ移動できません: {message}"));
                     }
                     other => other?,
                 },
@@ -246,7 +259,11 @@ impl Feed {
         Ok(())
     }
 
-    fn send_if_due(&mut self, sent: &mut Option<(Fleet, Instant)>) -> Result<(), Stop> {
+    fn send_if_due(
+        &mut self,
+        client: &Client,
+        sent: &mut Option<(Fleet, Instant)>,
+    ) -> Result<(), Stop> {
         let tail = self
             .screen
             .as_ref()
@@ -262,9 +279,16 @@ impl Feed {
             fleet: fleet.clone(),
             link: Link::Live,
             synced_secs: self.last_contact.elapsed().as_secs(),
+            can_focus: client.granted_scopes().contains(Scope::Control),
         })?;
         *sent = Some((fleet, Instant::now()));
         Ok(())
+    }
+
+    fn notice(&self, text: String) {
+        // Only the dashboard's end can be gone, and `publish` ends the feed then.
+        let _ = self.notices.send(text);
+        (self.wake)();
     }
 
     fn publish(&self, snapshot: Snapshot) -> Result<(), Stop> {

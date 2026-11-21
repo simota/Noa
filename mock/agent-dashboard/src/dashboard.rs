@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use noa_gpui_core::style::{
     AlignItems, FlexDirection, JustifyContent, LengthPercentage, Rect as LayoutRect,
     Size as LayoutSize, auto, length, percent,
@@ -161,8 +163,15 @@ struct Feed {
     fleet: Fleet,
     link: Option<Link>,
     synced_secs: u64,
+    /// The live feed's `Snapshot::can_focus`.
+    can_focus: bool,
+    /// Why the last "open" failed, shown in the header instead of the link
+    /// state for `NOTICE_FOR`.
+    notice: Option<(String, Instant)>,
     channel: Option<Channel>,
 }
+
+const NOTICE_FOR: Duration = Duration::from_secs(8);
 
 impl Feed {
     fn demo() -> Self {
@@ -173,6 +182,11 @@ impl Feed {
     }
 
     fn status(&self) -> String {
+        if let Some((notice, at)) = &self.notice
+            && at.elapsed() < NOTICE_FOR
+        {
+            return notice.clone();
+        }
         let n = self.fleet.workers.len();
         match &self.link {
             None => format!("ワーカー {n} · ダミーデータ"),
@@ -256,6 +270,8 @@ impl Dashboard {
             fleet: snapshot.fleet,
             link: Some(snapshot.link),
             synced_secs: snapshot.synced_secs,
+            can_focus: snapshot.can_focus,
+            notice: None,
             channel: None,
         };
         Self::build(view, Theme::for_appearance(Appearance::Dark), feed)
@@ -270,11 +286,17 @@ impl Dashboard {
         self.feed.fleet = snapshot.fleet;
         self.feed.link = Some(snapshot.link);
         self.feed.synced_secs = snapshot.synced_secs;
+        self.feed.can_focus = snapshot.can_focus;
         if structural {
             self.rebuilt(self.view, text);
         } else {
             self.refresh(text);
         }
+    }
+
+    fn show_notice(&mut self, notice: String) {
+        self.feed.notice = Some((notice, Instant::now()));
+        set_label(&mut self.tree, self.status, self.feed.status());
     }
 
     fn refresh(&mut self, text: &mut TextStore) {
@@ -488,6 +510,14 @@ impl Screen for Dashboard {
         if let Some(snapshot) = latest {
             self.apply(snapshot, text);
         }
+        let notice = self
+            .feed
+            .channel
+            .as_ref()
+            .and_then(|channel| channel.notices.try_iter().last());
+        if let Some(notice) = notice {
+            self.show_notice(notice);
+        }
     }
 
     fn handle(&mut self, message: Message, text: &mut TextStore) {
@@ -526,13 +556,23 @@ impl Screen for Dashboard {
             && let Some(worker) = self.feed.fleet.worker(pane)
         {
             let status = match &self.feed.channel {
+                Some(_) if self.feed.link != Some(Link::Live) => {
+                    Err("ペインへ移動できません: Noa に接続していません".to_owned())
+                }
+                Some(_) if !self.feed.can_focus => Err(
+                    "ペインへ移動できません: Noa の server-scopes に control がありません"
+                        .to_owned(),
+                ),
                 Some(channel) => {
                     channel.send(Command::Focus(pane));
-                    format!("{} のペインへ移動します", worker.label)
+                    Ok(format!("{} のペインへ移動します", worker.label))
                 }
-                None => format!("モック: {} のペインへ移動します", worker.label),
+                None => Ok(format!("モック: {} のペインへ移動します", worker.label)),
             };
-            set_label(&mut self.tree, self.status, status);
+            match status {
+                Ok(status) => set_label(&mut self.tree, self.status, status),
+                Err(notice) => self.show_notice(notice),
+            }
         }
     }
 }
@@ -864,8 +904,19 @@ fn joined(parts: &[&str], separator: &str) -> String {
         .join(separator)
 }
 
+/// Longer worker labels are cut to this many characters in the header's
+/// "longest" tag, which cannot truncate itself: an uncut pane title there
+/// squeezes the link status to nothing.
+const LONGEST_LABEL_CHARS: usize = 12;
+
 fn longest_text(worker: &Worker) -> String {
-    joined(&["最長", &worker.label, &worker.since], " ")
+    let label = if worker.label.chars().count() > LONGEST_LABEL_CHARS {
+        let cut: String = worker.label.chars().take(LONGEST_LABEL_CHARS - 1).collect();
+        format!("{cut}…")
+    } else {
+        worker.label.clone()
+    };
+    joined(&["最長", &label, &worker.since], " ")
 }
 
 fn queue_since(worker: &Worker, need: Need) -> String {
@@ -1040,12 +1091,19 @@ fn queue_card(
             .weight(700)
             .color(color),
     );
-    tree.insert(Some(head), Label::new(worker.label.as_str()).weight(700));
+    // The label takes what the kind and the wait leave and is cut short, so
+    // a long pane title cannot push the wait out of the card.
+    let label_slot = tree.insert(Some(head), Container::new(fill_remaining()));
+    tree.insert(
+        Some(label_slot),
+        Label::new(worker.label.as_str())
+            .weight(700)
+            .truncation(Truncation::Tail),
+    );
     tree.insert(
         Some(head),
         Tag::new(worker.kind.as_str()).tone(Tone::Accent),
     );
-    spacer(tree, head);
     let since = tree.insert(
         Some(head),
         Label::new(queue_since(worker, need))
@@ -2175,6 +2233,7 @@ mod tests {
             fleet,
             link: Link::Live,
             synced_secs,
+            can_focus: true,
         }
     }
 
@@ -2292,6 +2351,7 @@ mod tests {
             fleet: Fleet::default(),
             link: Link::Down("no token".into()),
             synced_secs: 0,
+            can_focus: false,
         };
         let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, down);
         let mut text = TextStore::new(Default::default());
@@ -2322,7 +2382,7 @@ mod tests {
 
     #[test]
     fn a_live_screen_follows_its_feed() {
-        let (channel, snapshots, commands) = Channel::detached();
+        let (channel, snapshots, _notices, commands) = Channel::detached();
         let mut dashboard = Dashboard::live(Grouping::Orchestrator, channel);
         let mut text = TextStore::new(Default::default());
         dashboard.prepare(window(), &mut text);
@@ -2684,5 +2744,117 @@ mod tests {
                 ["◆", "zsh", "●", "w-d"],
             ]
         );
+    }
+
+    #[test]
+    fn opening_without_the_control_scope_says_why_and_sends_nothing() {
+        let (channel, snapshots, _notices, commands) = Channel::detached();
+        let mut dashboard = Dashboard::live(Grouping::Orchestrator, channel);
+        let mut text = TextStore::new(Default::default());
+        dashboard.prepare(window(), &mut text);
+        let read_only = Snapshot {
+            can_focus: false,
+            ..live(fleet::canned(), 0)
+        };
+        snapshots.send(read_only).unwrap();
+        dashboard.before_frame(&mut text);
+        dashboard.prepare(window(), &mut text);
+        let (open, _) = dashboard.queue_buttons.open[0];
+        let pos = center(&dashboard.tree, open);
+        click(&mut dashboard, &mut text, pos);
+        assert!(
+            commands.try_iter().all(|c| !matches!(c, Command::Focus(_))),
+            "a focus the server will refuse is not sent"
+        );
+        let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
+        assert_eq!(
+            status.text(),
+            "ペインへ移動できません: Noa の server-scopes に control がありません"
+        );
+
+        // The next snapshot keeps the reason up instead of the link state.
+        snapshots
+            .send(Snapshot {
+                can_focus: false,
+                ..live(fleet::canned(), 3)
+            })
+            .unwrap();
+        dashboard.before_frame(&mut text);
+        let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
+        assert!(status.text().contains("control"), "{}", status.text());
+    }
+
+    #[test]
+    fn a_focus_the_server_refused_replaces_the_promise_in_the_header() {
+        let (channel, snapshots, notices, commands) = Channel::detached();
+        let mut dashboard = Dashboard::live(Grouping::Orchestrator, channel);
+        let mut text = TextStore::new(Default::default());
+        dashboard.prepare(window(), &mut text);
+        snapshots.send(live(fleet::canned(), 0)).unwrap();
+        dashboard.before_frame(&mut text);
+        dashboard.prepare(window(), &mut text);
+        let (open, pane) = dashboard.queue_buttons.open[0];
+        let pos = center(&dashboard.tree, open);
+        click(&mut dashboard, &mut text, pos);
+        assert!(commands.try_iter().any(|c| c == Command::Focus(pane)));
+        notices
+            .send("ペインへ移動できません: no such pane".into())
+            .unwrap();
+        dashboard.before_frame(&mut text);
+        let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
+        assert_eq!(status.text(), "ペインへ移動できません: no such pane");
+    }
+
+    const LONG_LABEL: &str = "noa-gpui ウィジェットによるUI拡張案とその検証作業のまとめ";
+
+    #[test]
+    fn a_long_label_leaves_the_wait_inside_its_queue_card() {
+        let mut fleet = fleet::canned();
+        for worker in fleet.workers.iter_mut() {
+            worker.label = LONG_LABEL.into();
+        }
+        let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet, 0));
+        let mut text = TextStore::new(Default::default());
+        dashboard.prepare(window(), &mut text);
+        let tree = &dashboard.tree;
+        let sinces: Vec<WidgetId> = dashboard
+            .pulses
+            .iter()
+            .filter(|(_, p)| matches!(p, Pulse::QueueSince(_)))
+            .map(|(id, _)| *id)
+            .collect();
+        assert!(!sinces.is_empty());
+        for since in sinces {
+            let head = tree.parent(since).unwrap();
+            let card = tree.parent(head).unwrap();
+            for part in tree.children(head) {
+                assert!(
+                    inside(rect(tree, *part), rect(tree, card)),
+                    "{:?} leaves its card {:?}",
+                    rect(tree, *part),
+                    rect(tree, card)
+                );
+            }
+            assert!(rect(tree, since)[2] > 40.0, "the wait is squeezed");
+        }
+    }
+
+    #[test]
+    fn a_long_longest_label_leaves_room_for_the_link_status() {
+        let mut fleet = fleet::canned();
+        for worker in fleet.workers.iter_mut() {
+            worker.label = LONG_LABEL.into();
+        }
+        let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet, 0));
+        let mut text = TextStore::new(Default::default());
+        dashboard.prepare(window(), &mut text);
+        let status = rect(&dashboard.tree, dashboard.status);
+        assert!(
+            status[2] >= 100.0,
+            "the link status is squeezed: {status:?}"
+        );
+        let longest = pulse_id(&dashboard, |p| matches!(p, Pulse::Longest));
+        let longest = dashboard.tree.get::<Tag>(longest).unwrap().text();
+        assert!(longest.contains('…'), "{longest}");
     }
 }

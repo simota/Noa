@@ -1,15 +1,29 @@
 use noa_gpui_core::Role;
 use noa_gpui_core::widgets::Label;
+use noa_gpui_scene::Color;
+use noa_gpui_text::TextStyle;
 
 use super::*;
 
 /// Presses J until `pane` is selected.
 fn select(dashboard: &mut Dashboard, text: &mut TextStore, pane: u64) {
+    select_at(dashboard, text, pane, window());
+}
+
+/// A key pressed with no modifier, then the next frame's layout at `size`.
+fn key_at(dashboard: &mut Dashboard, text: &mut TextStore, key: Key, size: Size) {
+    let modifiers = Modifiers::default();
+    dashboard.dispatch(Event::KeyDown { key, modifiers }, text);
+    dashboard.prepare(size, text);
+}
+
+/// [`select`] in a window of `size`.
+fn select_at(dashboard: &mut Dashboard, text: &mut TextStore, pane: u64, size: Size) {
     for _ in 0..20 {
         if dashboard.view.selected == Some(pane) {
             return;
         }
-        key(dashboard, text, Key::Char('j'));
+        key_at(dashboard, text, Key::Char('j'), size);
     }
     panic!("J never selects {pane}");
 }
@@ -19,12 +33,77 @@ fn drawer(dashboard: &Dashboard) -> Option<WidgetId> {
     dashboard.registry.drawer.map(|(root, _)| root)
 }
 
-/// The labels and tags in the drawer.
+/// The widgets under `id` (itself included) that are drawn: a hidden
+/// widget, or one inside a hidden widget, is left out.
+fn shown_under(tree: &UiTree, id: WidgetId) -> Vec<WidgetId> {
+    let mut found = Vec::new();
+    let mut stack = vec![id];
+    while let Some(id) = stack.pop() {
+        if tree.is_hidden(id) {
+            continue;
+        }
+        found.push(id);
+        stack.extend(tree.children(id).iter().rev());
+    }
+    found
+}
+
+/// What a label or tag says (a cut tag: as drawn).
+fn text_of(tree: &UiTree, id: WidgetId) -> Option<String> {
+    tree.get::<Label>(id)
+        .map(|label| label.text().to_owned())
+        .or_else(|| tree.get::<Tag>(id).map(|tag| tag.text().to_owned()))
+        .or_else(|| {
+            tree.get::<drawer::FitTag>(id)
+                .map(|tag| tag.shown_text().to_owned())
+        })
+}
+
+/// The labels and tags the drawer shows: those hidden, or inside a hidden
+/// row, are not seen and not listed.
 fn drawer_texts(dashboard: &Dashboard) -> Vec<String> {
     let root = drawer(dashboard).expect("the drawer is open");
-    let mut texts = labels_under(&dashboard.tree, root);
-    texts.extend(tags_under(&dashboard.tree, root));
-    texts
+    let tree = &dashboard.tree;
+    shown_under(tree, root)
+        .into_iter()
+        .filter_map(|id| text_of(tree, id))
+        .collect()
+}
+
+/// The shown label in the drawer that says `wanted`.
+fn drawer_label(dashboard: &Dashboard, wanted: &str) -> WidgetId {
+    let root = drawer(dashboard).expect("the drawer is open");
+    let tree = &dashboard.tree;
+    shown_under(tree, root)
+        .into_iter()
+        .find(|id| tree.get::<Label>(*id).is_some_and(|l| l.text() == wanted))
+        .unwrap_or_else(|| panic!("no shown label {wanted:?} in the drawer"))
+}
+
+/// Where the text of `label` is drawn (`[x, y, w, h]`, the text layout's
+/// box) and in which colour.
+fn drawn_text(dashboard: &Dashboard, label: WidgetId) -> ([f32; 4], Color) {
+    let area = rect(&dashboard.tree, label);
+    dashboard
+        .display_list()
+        .commands()
+        .iter()
+        .rev()
+        .find_map(|command| match command {
+            DrawCommand::Text { rect: r, color, .. } if inside([r.x, r.y, 0.0, 0.0], area) => {
+                Some(([r.x, r.y, r.width, r.height], *color))
+            }
+            _ => None,
+        })
+        .expect("the label draws its text")
+}
+
+/// How wide `line` is on one line in `style`.
+fn width_in(text: &mut TextStore, line: &str, style: TextStyle) -> f32 {
+    let id = text.create(line, style, None);
+    let width = text.size(id).width;
+    text.remove(id);
+    width
 }
 
 fn shows(dashboard: &Dashboard, wanted: &str) -> bool {
@@ -33,13 +112,18 @@ fn shows(dashboard: &Dashboard, wanted: &str) -> bool {
 
 /// A live dashboard showing `fleet`.
 fn live_of(fleet: Fleet) -> (Dashboard, TextStore) {
+    live_at(fleet, window())
+}
+
+/// A live dashboard showing `fleet` in a window of `size`.
+fn live_at(fleet: Fleet, size: Size) -> (Dashboard, TextStore) {
     let (channel, snapshots, _notices, _commands) = Channel::detached();
     let mut dashboard = Dashboard::live(Grouping::Orchestrator, channel);
     let mut text = TextStore::new(Default::default());
-    dashboard.prepare(window(), &mut text);
+    dashboard.prepare(size, &mut text);
     snapshots.send(live(fleet, 0)).unwrap();
     dashboard.before_frame(&mut text);
-    dashboard.prepare(window(), &mut text);
+    dashboard.prepare(size, &mut text);
     (dashboard, text)
 }
 
@@ -100,31 +184,62 @@ fn the_drawer_follows_the_selection() {
     assert!(!shows(&dashboard, label_of(&dashboard, 11)));
 }
 
-/// The drawer's lines of screen, when it shows a tail: the labels inside
-/// the box that holds them (the queue card's box: `Role::Background`).
-fn tail_lines(dashboard: &Dashboard) -> Vec<String> {
+/// The drawer's lines of screen, when it shows a tail: the shown labels
+/// inside the box that holds them (the queue card's box:
+/// `Role::Background`).
+fn tail_lines(dashboard: &Dashboard) -> Vec<WidgetId> {
     let root = drawer(dashboard).expect("the drawer is open");
     let tree = &dashboard.tree;
     let background = tree.theme().color(Role::Background);
-    fn boxes(tree: &UiTree, id: WidgetId, found: &mut Vec<WidgetId>) {
-        found.push(id);
-        for child in tree.children(id) {
-            boxes(tree, *child, found);
-        }
-    }
-    let mut all = Vec::new();
-    boxes(tree, root, &mut all);
-    for id in all {
-        let parts = labels_under(tree, id);
-        let own = tree.get::<Label>(id).is_none();
-        if own
-            && !parts.is_empty()
-            && quad_at(dashboard, rect(tree, id)).is_some_and(|(color, _)| color == background)
-        {
-            return parts;
-        }
-    }
-    Vec::new()
+    let labels = |id| -> Vec<WidgetId> {
+        shown_under(tree, id)
+            .into_iter()
+            .filter(|id| tree.get::<Label>(*id).is_some())
+            .collect()
+    };
+    shown_under(tree, root)
+        .into_iter()
+        .filter(|id| tree.get::<Label>(*id).is_none())
+        .find(|id| {
+            !labels(*id).is_empty()
+                && quad_at(dashboard, rect(tree, *id)).is_some_and(|(color, _)| color == background)
+        })
+        .map(labels)
+        .unwrap_or_default()
+}
+
+fn tail_texts(dashboard: &Dashboard) -> Vec<String> {
+    tail_lines(dashboard)
+        .into_iter()
+        .filter_map(|id| text_of(&dashboard.tree, id))
+        .collect()
+}
+
+/// An empty tail is said in the section captions' style: 11 px, muted.
+fn assert_caption(dashboard: &Dashboard, text: &mut TextStore, wanted: &str) {
+    let (drawn, color) = drawn_text(dashboard, drawer_label(dashboard, wanted));
+    assert_eq!(color, dashboard.tree.theme().color(Role::Muted), "{wanted}");
+    let caption = width_in(text, wanted, TextStyle::new(11.0));
+    let body = width_in(text, wanted, TextStyle::new(12.0));
+    assert!(
+        (drawn[2] - caption).abs() <= 0.5 && (body - caption).abs() > 1.0,
+        "{wanted}: drawn {} wide, 11 px {caption}, 12 px {body}",
+        drawn[2]
+    );
+}
+
+/// Line `index` of the drawer's tail, which says `line`, is drawn in the
+/// 11 px monospace font: as wide as `line` is in it. Returns that width.
+fn assert_monospace(dashboard: &Dashboard, text: &mut TextStore, index: usize, line: &str) -> f32 {
+    let (drawn, _) = drawn_text(dashboard, tail_lines(dashboard)[index]);
+    let monospace = TextStyle::new(11.0).family(text.font_family("monospace"));
+    let mono = width_in(text, line, monospace);
+    assert!(
+        (drawn[2] - mono).abs() <= 0.5,
+        "{line}: drawn {} wide, {mono} in monospace",
+        drawn[2]
+    );
+    mono
 }
 
 #[test]
@@ -139,20 +254,39 @@ fn the_drawer_shows_the_screen_tail() {
     let (mut dashboard, mut text) = live_of(fleet);
     select(&mut dashboard, &mut text, 12);
     key(&mut dashboard, &mut text, Key::Space);
-    assert_eq!(tail_lines(&dashboard), ["$ make"]);
+    assert_eq!(tail_texts(&dashboard), ["$ make"]);
     assert!(!shows(&dashboard, "まだ取得していません"));
+    assert_monospace(&dashboard, &mut text, 0, "$ make");
+
+    // A line whose width tells the fonts apart well: "$ make" is about as
+    // wide in either.
+    let narrow = "iiiiiiiiii";
+    let mut fleet = fleet::canned();
+    fleet
+        .workers
+        .iter_mut()
+        .find(|w| w.pane == 12)
+        .unwrap()
+        .screen_tail = vec!["$ make".to_owned(), narrow.to_owned()];
+    let (mut dashboard, mut text) = live_of(fleet);
+    select(&mut dashboard, &mut text, 12);
+    key(&mut dashboard, &mut text, Key::Space);
+    assert_eq!(tail_texts(&dashboard), ["$ make", narrow]);
+    let proportional = width_in(&mut text, narrow, TextStyle::new(11.0));
+    let mono = assert_monospace(&dashboard, &mut text, 1, narrow);
+    assert!(mono - proportional > 10.0, "{mono} vs {proportional}");
 
     let (mut dashboard, mut text) = live_of(fleet::canned());
     select(&mut dashboard, &mut text, 12);
     key(&mut dashboard, &mut text, Key::Space);
     assert!(tail_lines(&dashboard).is_empty());
-    assert!(shows(&dashboard, "まだ取得していません"));
+    assert_caption(&dashboard, &mut text, "まだ取得していません");
 
     // The demo has nothing to fetch.
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
     select(&mut dashboard, &mut text, 12);
     key(&mut dashboard, &mut text, Key::Space);
-    assert!(shows(&dashboard, "なし"));
+    assert_caption(&dashboard, &mut text, "なし");
 }
 
 #[test]
@@ -240,21 +374,20 @@ fn the_drawer_stays_inside_the_window() {
 /// `GroupBox::card` made the running cards 247 / 231 / 255 px and the done
 /// cards 198 px tall (measured before U1). The caption line (15 px) became a
 /// row with a small 詳細 button, 26.32 px tall: every card grew by 11.32 px.
+///
+/// Measured where every card is shown whole: a hidden card (one a list
+/// pages out) measures 0. The cards' widths are fixed (336 px running, the
+/// 270 px done panel), so their heights do not depend on the window; at
+/// 1440×1800 the lists are about 900 px taller than at 1440×900, far more
+/// than both panels' cards need, so nothing has to page out.
 #[test]
 fn the_running_cards_keep_their_height() {
     const ROW_GROWTH: f32 = 26.32 - 15.0;
-    let (dashboard, _text) = laid_out(Grouping::Orchestrator);
-    let height_of = |panel: Panel, pane: u64| {
-        let (card, _) = dashboard.registry.lists[panel as usize]
-            .as_ref()
-            .unwrap()
-            .items
-            .iter()
-            .find(|(_, p)| *p == Some(pane))
-            .copied()
-            .unwrap();
-        rect(&dashboard.tree, card)[3]
-    };
+    let size = Size::new(1440.0, 1800.0);
+    let mut dashboard = Dashboard::new(Grouping::Orchestrator);
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(size, &mut text);
+    let tree = &dashboard.tree;
     for (panel, pane, group_box) in [
         (Panel::Running, 11, 247.0),
         (Panel::Running, 12, 231.0),
@@ -262,11 +395,165 @@ fn the_running_cards_keep_their_height() {
         (Panel::Done, 17, 198.0),
         (Panel::Done, 18, 198.0),
     ] {
-        let height = height_of(panel, pane);
+        let parts = dashboard.registry.lists[panel as usize].as_ref().unwrap();
+        let (card, _) = *parts.items.iter().find(|(_, p)| *p == Some(pane)).unwrap();
+        assert!(!tree.is_hidden(card), "card {pane} is shown");
+        let card_rect = rect(tree, card);
+        assert!(
+            inside(card_rect, rect(tree, parts.list)),
+            "card {pane} {card_rect:?} lies inside its list"
+        );
+        let height = card_rect[3];
         assert!(
             (height - (group_box + ROW_GROWTH)).abs() <= 0.5,
             "card {pane}: {height} vs {}",
             group_box + ROW_GROWTH
         );
+    }
+}
+
+/// AC8: the start row says "開始 {started}前", or "不明" when the start is
+/// not known.
+#[test]
+fn an_unknown_start_says_unknown() {
+    let mut fleet = fleet::canned();
+    fleet
+        .workers
+        .iter_mut()
+        .find(|w| w.pane == 11)
+        .unwrap()
+        .started_minutes = None;
+    let (mut dashboard, mut text) = live_of(fleet);
+    select(&mut dashboard, &mut text, 11);
+    key(&mut dashboard, &mut text, Key::Space);
+    let started = pulse_id(&dashboard, |p| matches!(p, Pulse::Drawer(11)));
+    assert_eq!(dashboard.tree.get::<Label>(started).unwrap().text(), "不明");
+    assert!(!shows(&dashboard, "開始 不明"));
+
+    let mut fleet = dashboard.feed.fleet.clone();
+    fleet
+        .workers
+        .iter_mut()
+        .find(|w| w.pane == 11)
+        .unwrap()
+        .started_minutes = Some(30.0);
+    dashboard.apply(live(fleet, 0), &mut text);
+    dashboard.prepare(window(), &mut text);
+    assert_eq!(
+        dashboard.tree.get::<Label>(started).unwrap().text(),
+        "開始 30 分前"
+    );
+    let mut fleet = dashboard.feed.fleet.clone();
+    fleet
+        .workers
+        .iter_mut()
+        .find(|w| w.pane == 11)
+        .unwrap()
+        .started_minutes = None;
+    dashboard.apply(live(fleet, 0), &mut text);
+    dashboard.prepare(window(), &mut text);
+    assert_eq!(dashboard.tree.get::<Label>(started).unwrap().text(), "不明");
+}
+
+/// A long command name as the kind, a long branch, a long model: every tag
+/// stays inside the drawer's content, cut with an ellipsis, and the
+/// worker's label is not cut for them. A long label is cut too, but keeps
+/// most of the head row: the kind gives way first.
+#[test]
+fn long_tags_stay_inside_the_drawer() {
+    let branch = "W".repeat(80);
+    let command = "cargo-nextest-run-workspace-all-features-no-fail-fast-retries-3";
+    let model = "gemini-4-argon-experimental-long-context-preview-2026-11-01";
+    for size in [Size::new(1100.0, 700.0), Size::new(1440.0, 900.0)] {
+        let mut fleet = fleet::canned();
+        for worker in &mut fleet.workers {
+            match worker.pane {
+                // A plain command: kind, branch, no model.
+                12 => {
+                    worker.kind = command.to_owned();
+                    worker.branch.clone_from(&branch);
+                }
+                // An agent: kind, model, branch.
+                11 => {
+                    worker.model = model.to_owned();
+                    worker.branch.clone_from(&branch);
+                }
+                // A long label and a long kind.
+                13 => {
+                    worker.label = LONG_LABEL.to_owned();
+                    worker.kind = command.to_owned();
+                }
+                _ => {}
+            }
+        }
+        let (mut dashboard, mut text) = live_at(fleet, size);
+        // In the order J visits them.
+        for pane in [13, 11, 12] {
+            select_at(&mut dashboard, &mut text, pane, size);
+            if dashboard.view.detail != Some(pane) {
+                key_at(&mut dashboard, &mut text, Key::Space, size);
+            }
+            assert_eq!(dashboard.view.detail, Some(pane));
+            let root = drawer(&dashboard).unwrap();
+            let tree = &dashboard.tree;
+            let content = tree.children(root)[0];
+            let inner = rect(tree, content);
+            let rows = &tree.children(content)[..2];
+            for row in rows {
+                for id in shown_under(tree, *row) {
+                    let r = rect(tree, id);
+                    assert!(
+                        inside(r, inner),
+                        "{size:?} pane {pane}: {:?} {r:?} outside {inner:?}",
+                        text_of(tree, id)
+                    );
+                }
+            }
+            // Each long text is cut with an ellipsis, short ones are whole.
+            let cut: Vec<(String, String)> = rows
+                .iter()
+                .flat_map(|row| shown_under(tree, *row))
+                .filter_map(|id| tree.get::<drawer::FitTag>(id))
+                .map(|tag| (tag.text().to_owned(), tag.shown_text().to_owned()))
+                .collect();
+            let worker = dashboard.feed.fleet.worker(pane).unwrap();
+            let mut long = vec![worker.kind.clone(), worker.branch.clone()];
+            if worker.is_agent() {
+                long.push(worker.model_line());
+            }
+            for text in long {
+                let (_, shown) = cut
+                    .iter()
+                    .find(|(full, _)| *full == text)
+                    .unwrap_or_else(|| panic!("{text} is a tag: {cut:?}"));
+                let whole = text.len() < 20;
+                let start = shown.trim_end_matches('\u{2026}');
+                assert!(
+                    if whole {
+                        *shown == text
+                    } else {
+                        shown.ends_with('\u{2026}') && text.starts_with(start) && !start.is_empty()
+                    },
+                    "{size:?} pane {pane}: {text:?} shown as {shown:?}"
+                );
+            }
+            let label = label_of(&dashboard, pane);
+            let head = shown_under(tree, rows[0]);
+            let label_id = *head
+                .iter()
+                .find(|id| tree.get::<Label>(**id).is_some_and(|l| l.text() == label))
+                .expect("the head shows the label");
+            let shown = tree.get::<Label>(label_id).unwrap().shown_text();
+            if label == LONG_LABEL {
+                let width = rect(tree, label_id)[2];
+                assert!(
+                    width >= inner[2] / 2.0,
+                    "{size:?}: the long label keeps {width} of {}",
+                    inner[2]
+                );
+            } else {
+                assert_eq!(shown, label, "{size:?}: the label is not cut");
+            }
+        }
     }
 }

@@ -70,7 +70,9 @@ Commands:
                         raw keys, refused for claude, codex or agy: use
                         send once the agent is up)
       --max-children N (default and most 20: the board holds 20 workers;
-                         with --no-board this pane holds 8 floats)
+                         with --no-board this pane holds 8 floats;
+                         workers held open after exiting count; Noa checks
+                         it too, so spawns run at once stay under it)
       --worktree        Run the worker in its own git worktree
                         <repo>-wt/LABEL next to the main worktree, on a
                         new branch orch/LABEL (from HEAD; needs --label,
@@ -1055,6 +1057,8 @@ const RPC_OUTCOME_UNKNOWN: i64 = -32009;
 /// The server's JSON-RPC code for a paste refused with `requirePasteMode`:
 /// the pane has not enabled bracketed paste yet.
 const RPC_NOT_READY: i64 = -32010;
+/// The server's JSON-RPC code for a spawn refused at its `maxChildren`.
+const RPC_LIMIT_REACHED: i64 = -32011;
 
 const SCOPES_HINT: &str = "enable it in Noa's config with `server-enable = true` and `server-scopes = read,control,input`";
 
@@ -1107,6 +1111,10 @@ impl From<ClientError> for Failure {
                 code: RPC_UNKNOWN_PANE,
                 ..
             } => Failure::error("unknown pane"),
+            ClientError::Rpc {
+                code: RPC_LIMIT_REACHED,
+                message,
+            } => Failure::error(message),
             // The server went away mid-command (stopped or restarted).
             ClientError::Closed(_) | ClientError::Transport(_) => {
                 Failure::unavailable(format!("lost the connection to Noa: {error}"))
@@ -1774,14 +1782,17 @@ impl Session {
             .into_iter()
             .filter(|panel| panel.parent_pane_id == Some(WireId(own)))
             .collect();
-        if children.len() >= args.max_children {
-            let exited = children.iter().filter(|panel| panel.exit.is_some()).count();
+        // Also checked by the server, atomically with the spawn (REL-02);
+        // this check is for a server that predates `maxChildren`.
+        let (workers, exited) = children_counts(&children, own);
+        if workers >= args.max_children {
             return Err(Failure::error(max_children_message(
-                children.len(),
+                workers,
                 exited,
                 args.max_children,
             )));
         }
+        let max_children = args.max_children;
         let env = worker_env(args.env, !args.command.is_empty(), std::env::vars());
         let mut cwd = spawn_cwd(args.cwd, std::env::current_dir().ok());
         // `--worktree` refuses `--cwd`; the worktree replaces this one.
@@ -1848,11 +1859,16 @@ impl Session {
                     label,
                     parent_pane_id: Some(WireId(own)),
                     focus: Some(focus),
-                    max_children: None,
+                    max_children: u32::try_from(max_children).ok(),
                 };
                 session
                     .client
                     .spawn_split(host, SplitPlacement::Float, &params)
+                    .map_err(|err| {
+                        limit_reached_said(err, own, max_children, || {
+                            session.client.list_panels().ok()
+                        })
+                    })
             },
             // The worker may have started though its answer was lost: look
             // for it a few times, as the app may still be getting to it.
@@ -2882,6 +2898,45 @@ pub(crate) fn exited_input_failure(pane: u64, panel: Option<&Panel>) -> Option<F
     Some(Failure::error(format!(
         "pane {pane}'s process has exited{code}; it takes no input — read it, then close it"
     )))
+}
+
+/// How many of `panels` are `own`'s workers, and how many of those exited
+/// (held open, they keep their slot).
+pub(crate) fn children_counts(panels: &[Panel], own: u64) -> (usize, usize) {
+    panels
+        .iter()
+        .filter(|panel| panel.parent_pane_id == Some(WireId(own)))
+        .fold((0, 0), |(all, exited), panel| {
+            (all + 1, exited + usize::from(panel.exit.is_some()))
+        })
+}
+
+/// A spawn the server refused at `maxChildren` (-32011), said as the
+/// client's own check says it, from a fresh listing (`relist`; the server's
+/// own message when that fails). Still an RPC error, so a `--worktree` spawn
+/// counts it as refused and removes its worktree.
+pub(crate) fn limit_reached_said(
+    err: ClientError,
+    own: u64,
+    max: usize,
+    relist: impl FnOnce() -> Option<Vec<Panel>>,
+) -> ClientError {
+    match err {
+        ClientError::Rpc {
+            code: RPC_LIMIT_REACHED,
+            message,
+        } => ClientError::Rpc {
+            code: RPC_LIMIT_REACHED,
+            message: match relist() {
+                Some(panels) => {
+                    let (workers, exited) = children_counts(&panels, own);
+                    max_children_message(workers, exited, max)
+                }
+                None => message,
+            },
+        },
+        other => other,
+    }
 }
 
 /// Why a spawn is refused at the `--max-children` limit. Exited workers
@@ -5128,6 +5183,43 @@ mod tests {
         assert_eq!(parsed("3"), Ok(3));
         let above = parsed("21").unwrap_err();
         assert!(above.contains("holds 20"), "{above}");
+    }
+
+    // Audit finding (REL-02): spawns run in parallel each counted the
+    // workers before the others started, and together went past the limit.
+    // The server now refuses at the limit (-32011), said as the client
+    // says it, and a `--worktree` spawn counts that as refused.
+    #[test]
+    fn a_spawn_the_server_refused_at_the_limit_says_so_like_the_client() {
+        let mut exited = worker(5, 3);
+        exited.exit = Some(PanelExit { code: Some(0) });
+        let panels = vec![worker(4, 3), exited, worker(6, 9)];
+        assert_eq!(children_counts(&panels, 3), (2, 1));
+
+        let refused = || ClientError::Rpc {
+            code: RPC_LIMIT_REACHED,
+            message: "pane 3 already has 2 children (1 live, 1 exited); maxChildren is 2"
+                .to_string(),
+        };
+        let said = limit_reached_said(refused(), 3, 2, || Some(panels.clone()));
+        let failure = Failure::from(said);
+        assert_eq!(failure.code, EXIT_ERROR);
+        assert_eq!(failure.message, max_children_message(2, 1, 2));
+        // Without a listing, the server's own words.
+        let failure = Failure::from(limit_reached_said(refused(), 3, 2, || None));
+        assert!(failure.message.starts_with("pane 3 already has 2 children"));
+        // Other errors pass through untouched.
+        assert!(matches!(
+            limit_reached_said(outcome_unknown(), 3, 2, || panic!("not listed")),
+            ClientError::Rpc {
+                code: RPC_OUTCOME_UNKNOWN,
+                ..
+            }
+        ));
+
+        let (result, log) = run_spawn_steps(false, Some(refused()));
+        assert!(result.is_err());
+        assert!(log.contains(&"undo wt refused=true".to_string()), "{log:?}");
     }
 
     // Review finding (F8/skill F8): input to an exited, held-open worker was

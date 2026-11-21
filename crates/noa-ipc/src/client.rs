@@ -331,8 +331,14 @@ impl Client {
         &mut self,
         params: &UpdateSubscriptionParams,
     ) -> Result<(), ClientError> {
-        let _: OkResult = self.request("noa.updateSubscription", params)?;
-        Ok(())
+        let result: OkResult = self.request("noa.updateSubscription", params)?;
+        if result.ok {
+            Ok(())
+        } else {
+            Err(ClientError::Protocol(
+                "noa.updateSubscription answered ok:false".to_string(),
+            ))
+        }
     }
 
     /// The next notification, waiting up to `timeout`. `Ok(None)` when none
@@ -1783,16 +1789,10 @@ mod tests {
         let requests = server.join().unwrap();
 
         // The request exactly as `subscribe` built it before `fields`.
-        let before = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "noa.subscribe",
-            "params": serde_json::json!({
-                "events": events,
-                "paneIds": Some([WireId(3)]),
-            }),
-        });
-        assert_eq!(requests[1], before.to_string());
+        assert_eq!(
+            requests[1],
+            r#"{"id":2,"jsonrpc":"2.0","method":"noa.subscribe","params":{"events":["state_changed"],"paneIds":["3"]}}"#
+        );
         let with_fields: Value = serde_json::from_str(&requests[2]).unwrap();
         assert_eq!(
             with_fields["params"],
@@ -1802,6 +1802,60 @@ mod tests {
                 "fields": ["agent"],
             })
         );
+    }
+
+    // AC-3: only `{"ok":true}` confirms an update; `ok:false` is not success.
+    #[test]
+    fn update_subscription_rejects_a_negative_ok_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            for result in [
+                serde_json::json!({
+                    "protocolVersion": crate::protocol::PROTOCOL_VERSION,
+                    "grantedScopes": ["read"],
+                    "serverVersion": "t",
+                }),
+                serde_json::json!({ "ok": false }),
+                serde_json::json!({ "ok": true }),
+            ] {
+                let Message::Text(text) = socket.read().unwrap() else {
+                    panic!("text request expected");
+                };
+                let id = serde_json::from_str::<Value>(&text).unwrap()["id"].clone();
+                socket
+                    .send(Message::Text(
+                        serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })
+                            .to_string(),
+                    ))
+                    .unwrap();
+            }
+        });
+
+        let mut client = Client::connect_with_timeouts(
+            &url,
+            "token",
+            ScopeSet::from_strings(["read"]),
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let params = UpdateSubscriptionParams {
+            subscription_id: WireId(1),
+            events: None,
+            pane_ids: None,
+            fields: None,
+        };
+        let negative = client.update_subscription(&params);
+        assert!(
+            matches!(negative, Err(ClientError::Protocol(_))),
+            "{negative:?}"
+        );
+        client.update_subscription(&params).unwrap();
+        drop(client);
+        server.join().unwrap();
     }
 
     #[test]

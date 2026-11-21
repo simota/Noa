@@ -499,3 +499,63 @@ fn running_and_done_cards_are_named_groups() {
     }
     assert_eq!(count, 5, "three running cards and two done cards");
 }
+
+#[test]
+fn another_server_instance_forgets_the_chosen_panes() {
+    let (channel, snapshots, _notices, commands) = Channel::detached();
+    let mut dashboard = Dashboard::live(Grouping::Orchestrator, channel);
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(window(), &mut text);
+    snapshots.send(live(fleet::canned(), 0)).unwrap();
+    dashboard.before_frame(&mut text);
+    dashboard.prepare(window(), &mut text);
+    select(&mut dashboard, &mut text, 15);
+    key(&mut dashboard, &mut text, Key::Space);
+    assert_eq!(dashboard.view.detail, Some(15));
+    commands.try_iter().for_each(drop);
+
+    // Noa restarts and gives every pane id out again. The link went down
+    // and came back before the next frame, which takes in only the last
+    // snapshot: nothing but the instance says the panes are others.
+    let down = Snapshot {
+        fleet: Fleet::default(),
+        link: Link::Down("the connection closed".into()),
+        synced_secs: 0,
+        can_focus: false,
+        instance: None,
+    };
+    snapshots.send(down).unwrap();
+    let restarted = Snapshot {
+        instance: Some("restarted".into()),
+        ..live(fleet::canned(), 0)
+    };
+    snapshots.send(restarted).unwrap();
+    dashboard.before_frame(&mut text);
+    dashboard.prepare(window(), &mut text);
+
+    assert_eq!(dashboard.view.selected, None);
+    assert_eq!(dashboard.view.detail, None);
+    assert!(drawer_labels(&dashboard).is_none());
+    assert_eq!(dashboard.tree.overlays().count(), 0);
+    assert!(
+        dashboard.registry.open_buttons.is_empty(),
+        "the drawer's 開く"
+    );
+    assert_eq!(dashboard.queue_buttons.expanded, Some(14), "the top card");
+    key(&mut dashboard, &mut text, Key::Enter);
+    assert!(
+        focused_panes(&commands).is_empty(),
+        "the old 15 is not reached"
+    );
+    assert_eq!(status_of(&dashboard), NOTHING_SELECTED);
+
+    // Snapshots from the new instance keep what is chosen on it.
+    select(&mut dashboard, &mut text, 15);
+    let again = Snapshot {
+        instance: Some("restarted".into()),
+        ..live(fleet::canned(), 1)
+    };
+    snapshots.send(again).unwrap();
+    dashboard.before_frame(&mut text);
+    assert_eq!(dashboard.view.selected, Some(15));
+}

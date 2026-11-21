@@ -1,5 +1,5 @@
 use crate::dashboard::keymap::{BINDINGS, Mode, Route, Trigger, route};
-use noa_gpui_core::widgets::ScrollView;
+use noa_gpui_core::widgets::{Label, ScrollView};
 
 use super::*;
 
@@ -93,14 +93,24 @@ fn no_tree_shortcuts_are_registered() {
     assert!(dashboard.panels.iter().all(Option::is_some));
 }
 
+/// Each item of a panel's list: whether it is hidden, and where it is.
+fn items_on_screen(dashboard: &Dashboard, panel: Panel) -> Vec<(bool, [f32; 4])> {
+    let list = dashboard.registry.lists[panel as usize].as_ref().unwrap();
+    let tree = &dashboard.tree;
+    list.items
+        .iter()
+        .map(|(id, _)| (tree.is_hidden(*id), rect(tree, *id)))
+        .collect()
+}
+
 #[test]
 fn a_wheel_page_change_reaches_the_next_frame() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
     // What the window does after a frame: nothing is left to draw.
     dashboard.prepare(window(), &mut text);
     assert!(!dashboard.needs_update(window()));
-    // A page the pager must change: a running card it hid stands for the
-    // page the wheel left behind.
+    // A running card hidden and not laid out since stands for a page the
+    // list does not show (U1's pager shows every item; U3's turns pages).
     let list = dashboard.registry.lists[Panel::Running as usize]
         .as_ref()
         .unwrap();
@@ -125,8 +135,60 @@ fn a_wheel_page_change_reaches_the_next_frame() {
         .get::<ScrollView>(list)
         .map(ScrollView::offset);
     assert!(offset.is_none_or(|offset| offset == 0.0), "{offset:?}");
+    // The page the pager now shows is in place at once, hidden items and
+    // layout both — input that comes before the next frame hits it — and
+    // the next frame must still draw it.
     assert!(
         dashboard.needs_update(window()),
         "the window would keep the old page until the next input"
+    );
+    let at_once = items_on_screen(&dashboard, Panel::Running);
+    dashboard.prepare(window(), &mut text);
+    assert_eq!(
+        at_once,
+        items_on_screen(&dashboard, Panel::Running),
+        "the wheel left the page to the next frame"
+    );
+}
+
+#[test]
+fn opening_help_cancels_a_press_underneath() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    let status = |d: &Dashboard| d.tree.get::<Label>(d.status).unwrap().text().to_owned();
+    let before = status(&dashboard);
+    let (open, pane) = dashboard.queue_buttons.open[0];
+    let pos = center(&dashboard.tree, open);
+    let button = PointerButton::Primary;
+    // 開く is held down, ? opens the help, and the pointer is let go over
+    // 開く: the release must not open the pane under the modal.
+    dashboard.dispatch(Event::PointerMove { pos }, &mut text);
+    dashboard.dispatch(Event::PointerDown { pos, button }, &mut text);
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    let slash = Key::Char('/');
+    dashboard.dispatch(
+        Event::KeyDown {
+            key: slash,
+            modifiers: shift,
+        },
+        &mut text,
+    );
+    typed(&mut dashboard, &mut text, "?");
+    assert!(dashboard.view.help);
+    dashboard.dispatch(Event::PointerUp { pos, button }, &mut text);
+    dashboard.prepare(window(), &mut text);
+    assert_eq!(status(&dashboard), before, "開く fired under the help");
+    assert_eq!(dashboard.view.selected, None);
+
+    // Closed again, the help leaves 開く working as before.
+    key(&mut dashboard, &mut text, Key::Escape);
+    assert!(!dashboard.view.help);
+    click(&mut dashboard, &mut text, pos);
+    let label = label_of(&dashboard, pane).to_owned();
+    assert_eq!(
+        status(&dashboard),
+        format!("モック: {label} のペインへ移動します")
     );
 }

@@ -118,12 +118,16 @@ fn fresh_frame(mut fresh: Dashboard) -> Vec<String> {
     frame_of(fresh.display_list(), &fresh_text)
 }
 
+/// The server instance the tests' live snapshots come from.
+const INSTANCE: &str = "test-instance";
+
 fn live(fleet: Fleet, synced_secs: u64) -> Snapshot {
     Snapshot {
         fleet,
         link: Link::Live,
         synced_secs,
         can_focus: true,
+        instance: Some(INSTANCE.to_owned()),
     }
 }
 

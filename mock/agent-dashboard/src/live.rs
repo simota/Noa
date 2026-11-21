@@ -46,6 +46,10 @@ pub struct Snapshot {
     /// Whether Noa granted the `control` scope `noa.focusPane` needs. Its
     /// default `server-scopes` is `read` only.
     pub can_focus: bool,
+    /// The server instance the fleet's pane ids belong to
+    /// (`Client::server_instance_id`); `None` while the link is down. A
+    /// restarted Noa gives its ids out again, to other panes.
+    pub instance: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,17 +114,13 @@ fn start_with<C: Noa + 'static>(
     let (notice_tx, notices) = mpsc::channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
     let (heartbeat, _thread) = heartbeat(every, Arc::clone(&wake));
-    let feed = Feed {
-        snapshots: snapshot_tx,
-        notices: notice_tx,
-        commands: command_rx,
+    let feed = Feed::new(
+        snapshot_tx,
+        notice_tx,
+        command_rx,
         wake,
-        tracker: Tracker::default(),
-        watched: Vec::new(),
-        screens: HashMap::new(),
-        last_list: Instant::now(),
-        last_contact: Instant::now(),
-    };
+        Box::new(Instant::now),
+    );
     std::thread::Builder::new()
         .name("live-feed".into())
         .spawn(move || feed.run(connect))
@@ -208,11 +208,17 @@ impl Noa for Client {
     }
 }
 
+/// Where the feed reads the time: `Instant::now`, or a test's own clock.
+type Clock = Box<dyn Fn() -> Instant + Send>;
+
 struct Feed {
     snapshots: Sender<Snapshot>,
     notices: Sender<String>,
     commands: Receiver<Command>,
     wake: Arc<dyn Fn() + Send + Sync>,
+    /// The time the feed's intervals and ages are measured in (relists,
+    /// screen fetches, pulses, `synced_secs`).
+    clock: Clock,
     tracker: Tracker,
     watched: Vec<u64>,
     /// Each watched pane's screen tail and when it was fetched.
@@ -222,6 +228,37 @@ struct Feed {
 }
 
 impl Feed {
+    fn new(
+        snapshots: Sender<Snapshot>,
+        notices: Sender<String>,
+        commands: Receiver<Command>,
+        wake: Arc<dyn Fn() + Send + Sync>,
+        clock: Clock,
+    ) -> Self {
+        let now = clock();
+        Feed {
+            snapshots,
+            notices,
+            commands,
+            wake,
+            clock,
+            tracker: Tracker::default(),
+            watched: Vec::new(),
+            screens: HashMap::new(),
+            last_list: now,
+            last_contact: now,
+        }
+    }
+
+    fn now(&self) -> Instant {
+        (self.clock)()
+    }
+
+    /// How long ago `then` was, by the feed's clock.
+    fn since(&self, then: Instant) -> Duration {
+        self.now().saturating_duration_since(then)
+    }
+
     fn run<C: Noa>(mut self, mut connect: impl FnMut() -> Result<C, String>) {
         let mut backoff = BACKOFF_MIN;
         loop {
@@ -241,6 +278,7 @@ impl Feed {
                 link: Link::Down(reason),
                 synced_secs: 0,
                 can_focus: false,
+                instance: None,
             };
             if self.publish(down).is_err() || !self.pause(backoff) {
                 return;
@@ -250,7 +288,8 @@ impl Feed {
     }
 
     /// Waits `backoff` while keeping up with the dashboard's commands; false
-    /// once the dashboard is gone.
+    /// once the dashboard is gone. The wait is real: it reads the system's
+    /// clock, not the feed's.
     fn pause(&mut self, backoff: Duration) -> bool {
         let until = Instant::now() + backoff;
         loop {
@@ -278,14 +317,16 @@ impl Feed {
         self.serve(client.instance());
         self.relist(client)?;
         client.subscribe()?;
+        // The subscription's answer is the server's too.
+        self.last_contact = self.now();
         let mut sent: Option<(Fleet, Instant)> = None;
         loop {
             self.take_commands(client)?;
-            if self.last_list.elapsed() >= RELIST_EVERY {
+            if self.since(self.last_list) >= RELIST_EVERY {
                 self.relist(client)?;
             }
             if let Some(notification) = client.next_notification(NOTIFY_WAIT)? {
-                self.last_contact = Instant::now();
+                self.last_contact = self.now();
                 let dropped = notification.dropped();
                 if let Notification::StateChanged { panels, .. } = notification {
                     self.tracker.merge(panels, unix_now());
@@ -302,7 +343,7 @@ impl Feed {
 
     fn relist(&mut self, client: &mut impl Noa) -> Result<(), Stop> {
         let panels = client.list_panels()?;
-        self.last_list = Instant::now();
+        self.last_list = self.now();
         self.last_contact = self.last_list;
         self.tracker.replace(panels, unix_now());
         self.tracker.read_journals();
@@ -340,20 +381,22 @@ impl Feed {
                 || self
                     .screens
                     .get(&pane)
-                    .is_some_and(|(at, _)| at.elapsed() < SCREEN_EVERY)
+                    .is_some_and(|(at, _)| self.since(*at) < SCREEN_EVERY)
             {
                 continue;
             }
-            let tail = match client.screen(pane) {
+            let answer = client.screen(pane);
+            let now = self.now();
+            let tail = match answer {
                 Ok(text) => {
-                    self.last_contact = Instant::now();
+                    self.last_contact = now;
                     screen_tail(&text)
                 }
                 // The pane closed since the last list: the next list drops it.
                 Err(ClientError::Rpc { .. }) => Vec::new(),
                 Err(err) => return Err(err.into()),
             };
-            self.screens.insert(pane, (Instant::now(), tail));
+            self.screens.insert(pane, (now, tail));
         }
         Ok(())
     }
@@ -369,19 +412,21 @@ impl Feed {
             .map(|(pane, (_, tail))| (*pane, tail.clone()))
             .collect();
         let fleet = self.tracker.fleet(unix_now(), Some(&tails));
-        let due = sent
-            .as_ref()
-            .is_none_or(|(last, at)| !last.same_structure(&fleet) || at.elapsed() >= PULSE_EVERY);
+        let now = self.now();
+        let due = sent.as_ref().is_none_or(|(last, at)| {
+            !last.same_structure(&fleet) || now.saturating_duration_since(*at) >= PULSE_EVERY
+        });
         if !due {
             return Ok(());
         }
         self.publish(Snapshot {
             fleet: fleet.clone(),
             link: Link::Live,
-            synced_secs: self.last_contact.elapsed().as_secs(),
+            synced_secs: now.saturating_duration_since(self.last_contact).as_secs(),
             can_focus: client.can_focus(),
+            instance: Some(client.instance().to_owned()),
         })?;
-        *sent = Some((fleet, Instant::now()));
+        *sent = Some((fleet, now));
         Ok(())
     }
 
@@ -1796,45 +1841,72 @@ pub(crate) mod tests {
         assert!(tracker.seen.is_empty() && tracker.panels.is_empty());
     }
 
-    /// A feed whose dashboard end the test holds: what it publishes, and the
-    /// sender of its commands (kept, or the feed takes the dashboard for gone).
-    fn held_feed() -> (Feed, Receiver<Snapshot>, Sender<Command>) {
+    /// A clock that moves only when the test moves it: the feed's
+    /// intervals and ages then do not depend on how fast the machine runs.
+    #[derive(Clone)]
+    struct TestClock(Arc<std::sync::Mutex<Instant>>);
+
+    impl TestClock {
+        fn new() -> Self {
+            TestClock(Arc::new(std::sync::Mutex::new(Instant::now())))
+        }
+
+        fn now(&self) -> Instant {
+            *self.0.lock().unwrap()
+        }
+
+        fn advance(&self, by: Duration) {
+            *self.0.lock().unwrap() += by;
+        }
+
+        fn boxed(&self) -> Clock {
+            let clock = self.clone();
+            Box::new(move || clock.now())
+        }
+    }
+
+    /// A feed on `clock` whose dashboard end the test holds: what it
+    /// publishes, and the sender of its commands (kept, or the feed takes
+    /// the dashboard for gone).
+    fn held_feed(clock: &TestClock) -> (Feed, Receiver<Snapshot>, Sender<Command>) {
         let (snapshots, published) = mpsc::channel();
         let (commands, command_rx) = mpsc::channel();
-        let feed = Feed {
-            snapshots,
-            notices: mpsc::channel().0,
-            commands: command_rx,
-            wake: Arc::new(|| {}),
-            tracker: Tracker::default(),
-            watched: Vec::new(),
-            screens: HashMap::new(),
-            last_list: Instant::now(),
-            last_contact: Instant::now(),
-        };
+        let wake = Arc::new(|| {});
+        let notices = mpsc::channel().0;
+        let feed = Feed::new(snapshots, notices, command_rx, wake, clock.boxed());
         (feed, published, commands)
     }
 
     /// A Noa that answers from a script: the panels it lists and the
     /// screens it shows. Its connection is lost once it has waited
-    /// `waits` times for a notification.
+    /// `waits` times for a notification. Its answers take no time on the
+    /// test's clock unless a test says how long they take.
     struct ScriptedNoa {
         instance: String,
         panels: Vec<Panel>,
         screens: HashMap<u64, String>,
         waits: usize,
+        clock: TestClock,
+        /// How long the subscription takes to answer.
+        subscribe_takes: Duration,
+        /// How long each wait for a notification takes.
+        wait_takes: Duration,
     }
 
     impl ScriptedNoa {
         /// Pane 2 (a running worker under orchestrator 1) showing `screen`.
-        fn showing(instance: &str, screen: &str) -> Self {
-            let orchestrator =
-                panel(serde_json::json!({ "paneId": "1", "label": "release", "surfaceId": "s1" }));
+        /// The orchestrator has no surface id, so following this Noa looks
+        /// for no journal: none of the user's own files is read.
+        fn showing(instance: &str, screen: &str, clock: &TestClock) -> Self {
+            let orchestrator = panel(serde_json::json!({ "paneId": "1", "label": "release" }));
             ScriptedNoa {
                 instance: instance.to_owned(),
                 panels: vec![orchestrator, running_agent("2", "1", "a")],
                 screens: HashMap::from([(2, screen.to_owned())]),
                 waits: 1,
+                clock: clock.clone(),
+                subscribe_takes: Duration::ZERO,
+                wait_takes: Duration::ZERO,
             }
         }
     }
@@ -1853,6 +1925,7 @@ pub(crate) mod tests {
         }
 
         fn subscribe(&mut self) -> Result<(), ClientError> {
+            self.clock.advance(self.subscribe_takes);
             Ok(())
         }
 
@@ -1861,6 +1934,7 @@ pub(crate) mod tests {
                 return Err(ClientError::Transport("the script ended".into()));
             }
             self.waits -= 1;
+            self.clock.advance(self.wait_takes);
             Ok(None)
         }
 
@@ -1883,35 +1957,42 @@ pub(crate) mod tests {
 
     #[test]
     fn another_server_instance_drops_the_screen_tails() {
-        let (mut feed, published, _commands) = held_feed();
+        let clock = TestClock::new();
+        let (mut feed, published, _commands) = held_feed(&clock);
         feed.serve("a");
         feed.watch(vec![2]);
-        // Fetched from server "a" just now: not due again for a while.
-        feed.screens
-            .insert(2, (Instant::now(), vec!["$ old".into()]));
+        // Fetched from server "a" just now. The test's clock stands still,
+        // so the tail stays within SCREEN_EVERY through both connections:
+        // only a dropped tail is fetched again.
+        feed.screens.insert(2, (clock.now(), vec!["$ old".into()]));
 
         // The same server again (a reconnect): the tail is kept.
-        let mut same = ScriptedNoa::showing("a", "$ new");
+        let mut same = ScriptedNoa::showing("a", "$ new", &clock);
         assert!(matches!(feed.follow(&mut same), Err(Stop::Lost(_))));
         let snapshot = published.try_iter().last().expect("a snapshot");
         assert_eq!(tail_of(&snapshot, 2), ["$ old"], "the same server");
+        assert_eq!(snapshot.instance.as_deref(), Some("a"));
 
         // Noa restarted: pane 2 is another pane now, fetched again.
-        let mut other = ScriptedNoa::showing("b", "$ new");
+        let mut other = ScriptedNoa::showing("b", "$ new", &clock);
         assert!(matches!(feed.follow(&mut other), Err(Stop::Lost(_))));
         let snapshot = published.try_iter().last().expect("a snapshot");
         assert_eq!(tail_of(&snapshot, 2), ["$ new"], "pane 2 of the old server");
+        assert_eq!(snapshot.instance.as_deref(), Some("b"));
         assert_eq!(feed.watched, [2], "still watched: fetched from the new one");
+        assert!(feed.tracker.journals.is_empty(), "a journal was looked for");
     }
 
     #[test]
     fn a_screen_tail_is_an_answer_from_the_server() {
-        let (mut feed, published, _commands) = held_feed();
-        let mut noa = ScriptedNoa::showing("a", "$ make");
+        let clock = TestClock::new();
+        let (mut feed, published, _commands) = held_feed(&clock);
+        let mut noa = ScriptedNoa::showing("a", "$ make", &clock);
         feed.tracker.replace(noa.panels.clone(), unix_now());
         feed.watch(vec![2]);
         // The last list or notification came 8 s ago (two slow tails).
-        feed.last_contact = Instant::now() - Duration::from_secs(8);
+        feed.last_contact = clock.now();
+        clock.advance(Duration::from_secs(8));
         assert!(feed.fetch_screens(&mut noa).is_ok());
         assert!(feed.send_if_due(&noa, &mut None).is_ok());
         let snapshot = published.try_recv().expect("a snapshot");
@@ -1919,7 +2000,8 @@ pub(crate) mod tests {
         assert_eq!(snapshot.synced_secs, 0);
 
         // A pane that closed since the list answers with an error: no tail.
-        feed.last_contact = Instant::now() - Duration::from_secs(8);
+        feed.last_contact = clock.now();
+        clock.advance(Duration::from_secs(8));
         noa.screens.clear();
         feed.screens.clear();
         assert!(feed.fetch_screens(&mut noa).is_ok());
@@ -1929,7 +2011,25 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_subscription_is_an_answer_from_the_server() {
+        let clock = TestClock::new();
+        let (mut feed, published, _commands) = held_feed(&clock);
+        // No pane is watched, so no screen tail answers in between: the
+        // list, then the subscription 1.5 s later, then 1 s without a
+        // notification before the first snapshot goes out.
+        let mut noa = ScriptedNoa::showing("a", "$ make", &clock);
+        noa.subscribe_takes = Duration::from_millis(1500);
+        noa.wait_takes = Duration::from_secs(1);
+        assert!(matches!(feed.follow(&mut noa), Err(Stop::Lost(_))));
+        let first = published.try_iter().next().expect("a snapshot");
+        assert_eq!(first.synced_secs, 1, "the subscription answered 1 s ago");
+    }
+
+    #[test]
     fn the_heartbeat_wakes_on_its_own_until_the_channel_goes() {
+        // The waits below end as soon as what they wait for comes; they are
+        // long only so that a loaded machine cannot outlast them.
+        const PATIENCE: Duration = Duration::from_secs(60);
         let (woken, wakes) = mpsc::channel();
         let wake = move || {
             let _ = woken.send(());
@@ -1943,8 +2043,7 @@ pub(crate) mod tests {
         };
         let channel = start_with(wake, Duration::from_millis(5), connect);
         for n in 0..3 {
-            let wait = Duration::from_secs(1);
-            assert!(wakes.recv_timeout(wait).is_ok(), "wake {n}");
+            assert!(wakes.recv_timeout(PATIENCE).is_ok(), "wake {n}");
         }
         assert!(
             channel.snapshots.try_recv().is_err(),
@@ -1953,7 +2052,7 @@ pub(crate) mod tests {
         drop(channel);
         drop(release);
         // Both threads end, and with them the last `wake`.
-        let until = Instant::now() + Duration::from_secs(5);
+        let until = Instant::now() + PATIENCE;
         loop {
             let left = until.saturating_duration_since(Instant::now());
             match wakes.recv_timeout(left) {

@@ -7,11 +7,11 @@ use noa_gpui_core::widgets::{
     ButtonClicked, Chart, Container, LevelIndicator, SelectionChanged, TextChanged, TextField,
 };
 use noa_gpui_core::{
-    Appearance, Dirty, Edge, Event, Message, OverlayOptions, Placement, Role, Style, Theme, UiTree,
-    WidgetId,
+    Appearance, Dirty, Edge, Event, Message, OverlayOptions, Placement, PointerButton, Role, Style,
+    Theme, UiTree, WidgetId,
 };
 use noa_gpui_platform::Screen;
-use noa_gpui_scene::{Color, Size};
+use noa_gpui_scene::{Color, Point, Size};
 use noa_gpui_text::TextStore;
 
 use crate::fleet::{self, Fleet, Grouping, Worker};
@@ -87,6 +87,9 @@ struct Feed {
     synced_at: Option<Instant>,
     /// The live feed's `Snapshot::can_focus`.
     can_focus: bool,
+    /// The server instance the shown pane ids belong to (the last
+    /// `Snapshot::instance` that named one).
+    instance: Option<String>,
     /// What the last action said (a pane opened, or why not), shown in the
     /// header instead of the link state for `NOTICE_FOR`.
     notice: Option<(String, Instant)>,
@@ -119,10 +122,26 @@ impl Feed {
         self.link = Some(snapshot.link);
         self.synced_secs = snapshot.synced_secs;
         self.can_focus = snapshot.can_focus;
+        if snapshot.instance.is_some() {
+            self.instance = snapshot.instance;
+        }
     }
 
     fn structural(&self, snapshot: &Snapshot) -> bool {
-        self.link.as_ref() != Some(&snapshot.link) || !self.fleet.same_structure(&snapshot.fleet)
+        self.other_server(snapshot)
+            || self.link.as_ref() != Some(&snapshot.link)
+            || !self.fleet.same_structure(&snapshot.fleet)
+    }
+
+    /// Whether the snapshot comes from another server instance than the
+    /// panes shown (Noa restarted): its pane ids name other panes, even
+    /// where they are the same numbers. A snapshot that names no instance
+    /// (the link is down) says nothing either way.
+    fn other_server(&self, snapshot: &Snapshot) -> bool {
+        matches!(
+            (&self.instance, &snapshot.instance),
+            (Some(shown), Some(new)) if shown != new
+        )
     }
 }
 
@@ -220,6 +239,9 @@ pub struct Dashboard {
     /// A structural snapshot held back while an IME composes in the filter
     /// field (a rebuild would end the composition), with when it came.
     pending: Option<(Snapshot, Instant)>,
+    /// The pointer button held down since a press the screen passed on, if
+    /// any (`cancel_press`).
+    held: Option<PointerButton>,
     /// The filter field had the focus when the input being handled began:
     /// a rebuild that input causes focuses the new field. For a release,
     /// what counts is the press: a press moves the focus to what it hits
@@ -278,37 +300,66 @@ impl Dashboard {
         Self::from_snapshot(View::of(grouping), snapshot)
     }
 
+    /// The header shows the snapshot's age as of when it was taken in: the
+    /// one time the build reads, not a later clock reading.
     fn from_snapshot(view: View, snapshot: Snapshot) -> Self {
         let mut feed = Feed::default();
         let fleet = snapshot.fleet.clone();
-        feed.accept(fleet, snapshot, Instant::now());
-        Self::start(view, feed)
+        let received = Instant::now();
+        feed.accept(fleet, snapshot, received);
+        let mut dashboard = Self::start(view, feed);
+        dashboard.tick(received);
+        dashboard
     }
 
-    /// Takes a snapshot in that has just come.
+    /// Takes a snapshot in that has just come, as a frame does.
     #[cfg(test)]
     fn apply(&mut self, snapshot: Snapshot, text: &mut TextStore) {
-        self.apply_received(snapshot, Instant::now(), text);
+        let now = Instant::now();
+        self.apply_received(snapshot, now, text);
+        self.tick(now);
     }
 
     /// Takes a snapshot in that came at `received`. One that changes only
     /// what time changes (texts, meters, lanes, the queue's order) updates
     /// those widgets in place, so the scroll positions and the hover
-    /// survive; any other change rebuilds the screen.
+    /// survive; any other change rebuilds the screen. A snapshot from
+    /// another server instance rebuilds it without the panes chosen on the
+    /// old one (`forget_panes`). The caller brings the header's time up to
+    /// its own (`tick`).
     fn apply_received(&mut self, snapshot: Snapshot, received: Instant, text: &mut TextStore) {
         let old = self.order();
+        let other_server = self.feed.other_server(&snapshot);
         let fleet = health::keep_on_down(&self.feed.fleet, snapshot.fleet.clone(), &snapshot.link);
-        let structural = self.feed.link.as_ref() != Some(&snapshot.link)
+        let structural = other_server
+            || self.feed.link.as_ref() != Some(&snapshot.link)
             || !self.feed.fleet.same_structure(&fleet);
         self.feed.accept(fleet, snapshot, received);
-        // What the filter matches is structure: only a structural snapshot
-        // can move the selection or the drawer, and its rebuild shows that.
-        self.reselect(&old);
+        if other_server {
+            self.forget_panes();
+        } else {
+            // What the filter matches is structure: only a structural
+            // snapshot can move the selection or the drawer, and its
+            // rebuild shows that.
+            self.reselect(&old);
+        }
         if structural {
             self.rebuilt(self.view, text);
         } else {
             self.refresh(text);
         }
+    }
+
+    /// Drops what names a pane of the server instance the screen showed
+    /// until now — the selection, the drawer, the expanded queue card —
+    /// since the new instance may give those ids to other panes: Enter or
+    /// the drawer's 開く would then reach a worker nobody chose. The rebuild
+    /// that follows shows the new server's workers from the top.
+    fn forget_panes(&mut self) {
+        self.view.selected = None;
+        self.view.reveal = None;
+        self.view.detail = None;
+        self.view.expanded = None;
     }
 
     /// Takes in what the feed sent since the last frame, as of `now`. A
@@ -330,6 +381,23 @@ impl Dashboard {
                 self.apply_received(snapshot, received, text);
             }
         }
+    }
+
+    /// One frame's work before it is drawn, all as of `now`: the snapshot
+    /// taken in, the notice that came, and the header's link health. Each
+    /// reads this one time, so what the header says does not depend on how
+    /// long the frame took (a rebuild under load can take a second).
+    fn frame(&mut self, now: Instant, text: &mut TextStore) {
+        self.take_snapshots(now, text);
+        let notice = self
+            .feed
+            .channel
+            .as_ref()
+            .and_then(|channel| channel.notices.try_iter().last());
+        if let Some(notice) = notice {
+            self.show_notice_at(notice, now);
+        }
+        self.tick(now);
     }
 
     /// The order J / K walk now.
@@ -377,8 +445,12 @@ impl Dashboard {
     }
 
     fn show_notice(&mut self, notice: String) {
-        self.feed.notice = Some((notice, Instant::now()));
-        self.tick(Instant::now());
+        self.show_notice_at(notice, Instant::now());
+    }
+
+    fn show_notice_at(&mut self, notice: String, now: Instant) {
+        self.feed.notice = Some((notice, now));
+        self.tick(now);
     }
 
     /// Brings the link health in the header up to `now`; `before_frame`
@@ -448,7 +520,6 @@ impl Dashboard {
         }
         self.reorder_queue(text);
         self.paint_selection();
-        self.tick(Instant::now());
     }
 
     /// Puts the queue's cards (and its pager items) in the queue's order
@@ -557,6 +628,7 @@ impl Dashboard {
         self.watched = old.watched;
         self.wheel_accum = old.wheel_accum;
         self.pending = old.pending;
+        self.held = old.held;
         self.filter_had_focus = old.filter_had_focus;
         self.pressed_in_filter = old.pressed_in_filter;
         self.watch();
@@ -618,6 +690,7 @@ impl Dashboard {
             watched: None,
             wheel_accum: [0.0; 5],
             pending: None,
+            held: None,
             filter_had_focus: false,
             pressed_in_filter: false,
             #[cfg(test)]
@@ -1025,6 +1098,7 @@ impl Dashboard {
                 self.change_view(view, text);
             }
             Action::OpenHelp => {
+                self.cancel_press(text);
                 self.view.help = true;
                 self.open_help();
                 self.lay_out_again(text);
@@ -1059,6 +1133,32 @@ impl Dashboard {
     fn paged(&mut self, text: &mut TextStore) {
         self.lay_out_again(text);
     }
+
+    /// Ends a pointer press in progress without its release taking effect.
+    /// The release goes to the widget that took the press (it holds the
+    /// pointer), so a modal opened in between would let a held 開く fire
+    /// underneath it. noa-gpui has no call to drop that hold; a release
+    /// outside the window does it the way the widgets expect — a button
+    /// lets go without acting on a release that is not over it — and the
+    /// real release that follows meets no held widget. The tree uses the
+    /// pointer position only for the cursor, which the next pointer event
+    /// sets again.
+    fn cancel_press(&mut self, text: &mut TextStore) {
+        let Some(button) = self.held.take() else {
+            return;
+        };
+        let outside = Point::new(-1.0, -1.0);
+        self.tree.dispatch(
+            Event::PointerUp {
+                pos: outside,
+                button,
+            },
+            text,
+        );
+        // A release away from what was pressed activates nothing: anything
+        // said about it is part of the cancelled press.
+        drop(self.tree.take_messages());
+    }
 }
 
 impl Screen for Dashboard {
@@ -1083,6 +1183,11 @@ impl Screen for Dashboard {
         };
         if press {
             self.pressed_in_filter = in_filter;
+        }
+        match event {
+            Event::PointerDown { button, .. } => self.held = Some(button),
+            Event::PointerUp { .. } => self.held = None,
+            _ => {}
         }
         self.filter_had_focus = in_filter || (release && self.pressed_in_filter);
         match keymap::route(mode, self.composing(), &event) {
@@ -1129,16 +1234,7 @@ impl Screen for Dashboard {
     }
 
     fn before_frame(&mut self, text: &mut TextStore) {
-        self.take_snapshots(Instant::now(), text);
-        let notice = self
-            .feed
-            .channel
-            .as_ref()
-            .and_then(|channel| channel.notices.try_iter().last());
-        if let Some(notice) = notice {
-            self.show_notice(notice);
-        }
-        self.tick(Instant::now());
+        self.frame(Instant::now(), text);
     }
 
     fn handle(&mut self, message: Message, text: &mut TextStore) {

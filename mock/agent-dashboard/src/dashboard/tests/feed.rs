@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crate::fleet::{Phase, State};
 use noa_gpui_core::widgets::{Label, ScrollView};
 
@@ -113,6 +115,7 @@ fn with_no_workers_the_body_says_why() {
         link: Link::Down("no token".into()),
         synced_secs: 0,
         can_focus: false,
+        instance: None,
     };
     let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, down);
     let mut text = TextStore::new(Default::default());
@@ -285,4 +288,37 @@ fn the_drawer_worker_is_watched_too() {
     assert_eq!(dashboard.view.detail, Some(12));
     let last = commands.try_iter().last();
     assert_eq!(last, Some(Command::Watch(vec![14, 12])));
+}
+
+#[test]
+fn a_frame_reads_the_time_once() {
+    let (channel, snapshots, notices, _commands) = Channel::detached();
+    let mut dashboard = Dashboard::live(Grouping::Orchestrator, channel);
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(window(), &mut text);
+    let status = |d: &Dashboard| d.tree.get::<Label>(d.status).unwrap().text().to_owned();
+    // Frames at times far from the system clock's: a part of the frame
+    // that read the clock itself would be minutes off.
+    let first = Instant::now() + Duration::from_secs(600);
+
+    // The first snapshot rebuilds the screen.
+    snapshots.send(live(fleet::canned(), 2)).unwrap();
+    dashboard.frame(first, &mut text);
+    assert_eq!(status(&dashboard), "ワーカー 9 · 同期 2 秒前");
+
+    // A later one changes only times: in place.
+    let second = first + Duration::from_secs(60);
+    snapshots.send(live(later(&fleet::canned()), 3)).unwrap();
+    dashboard.frame(second, &mut text);
+    assert_eq!(status(&dashboard), "ワーカー 9 · 同期 3 秒前");
+
+    // A notice that came shows for NOTICE_FOR from this frame on.
+    let third = second + Duration::from_secs(60);
+    notices
+        .send("ペインへ移動できません: no such pane".into())
+        .unwrap();
+    dashboard.frame(third, &mut text);
+    assert_eq!(status(&dashboard), "ペインへ移動できません: no such pane");
+    dashboard.frame(third + NOTICE_FOR, &mut text);
+    assert_eq!(status(&dashboard), "ワーカー 9 · 同期 1 分前");
 }

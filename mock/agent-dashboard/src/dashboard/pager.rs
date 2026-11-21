@@ -49,6 +49,10 @@ impl Widget for PageMemory {
 struct Seen {
     first: usize,
     selected: Option<u64>,
+    /// Whether the selected worker's item was on the page: an in-place
+    /// change that pushes it off brings it back, unless the wheel has
+    /// moved the page since.
+    selected_shown: bool,
     look: Look,
 }
 
@@ -59,12 +63,13 @@ struct Look {
     list: Option<Rect>,
     /// The pane each item shows: what the list holds.
     panes: Vec<Option<u64>>,
-    /// Each item, with its rect while it is shown. A shown item that grew
-    /// or shrank in place moves its own rect or a later one.
-    items: Vec<(WidgetId, Option<Rect>)>,
-    /// What the first hidden item after the page holds: it would fit, were
-    /// it to shrink in place (a caption cut shorter, a card collapsed).
-    next: Option<u64>,
+    /// Each item: a digest of what it holds, and its rect while it is
+    /// shown. Any item can decide the page when it grows or shrinks in
+    /// place: a shown one by moving its own rect or a later one, a hidden
+    /// one below by fitting after all, a hidden one above by letting the
+    /// last page start earlier. A hidden item has no rect, so its digest
+    /// stands for its size.
+    items: Vec<(u64, Option<Rect>)>,
 }
 
 /// One panel's pageable list.
@@ -152,31 +157,47 @@ impl ListParts {
 
     /// What decides the list's page now, as last laid out.
     fn look(&self, tree: &UiTree) -> Look {
-        let items: Vec<(WidgetId, Option<Rect>)> = self
-            .items
-            .iter()
-            .map(|(id, _)| (*id, tree.window_rect(*id).filter(|_| !tree.is_hidden(*id))))
-            .collect();
-        let after_page = items.iter().rposition(|(_, rect)| rect.is_some());
-        let next = after_page
-            .and_then(|last| items.get(last + 1))
-            .map(|(id, _)| content(tree, *id));
+        let items = self.items.iter().map(|(id, _)| {
+            let rect = tree.window_rect(*id).filter(|_| !tree.is_hidden(*id));
+            (content(tree, *id), rect)
+        });
         Look {
             list: tree.window_rect(self.list),
             panes: self.items.iter().map(|(_, pane)| *pane).collect(),
-            items,
-            next,
+            items: items.collect(),
         }
+    }
+
+    /// Whether the item that shows `pane` is shown.
+    fn shows(&self, tree: &UiTree, pane: Option<u64>) -> bool {
+        let item = pane.and_then(|pane| self.item_of(pane));
+        item.is_some_and(|item| !tree.is_hidden(self.items[item].0))
+    }
+
+    /// Remembers the page at `first`, as laid out now, for the next fit.
+    fn remember(&self, tree: &mut UiTree, first: usize, selected: Option<u64>) {
+        let seen = Seen {
+            first,
+            selected,
+            selected_shown: self.shows(tree, selected),
+            look: self.look(tree),
+        };
+        let memory = self.memory(tree);
+        tree.update::<PageMemory, _>(memory, |m, _| m.seen = Some(seen));
     }
 }
 
-/// A digest of the widgets under `id` and the texts they show: it changes
-/// when a hidden item is rebuilt or relabelled in place.
+/// A digest of the widgets under `id`, the texts they show and which of
+/// them are hidden: it changes when an item is rebuilt, relabelled or
+/// shows or hides a part in place — what can resize it. Whether `id`
+/// itself is hidden is the pager's own doing and left out.
 fn content(tree: &UiTree, id: WidgetId) -> u64 {
     let mut digest = DefaultHasher::new();
-    let mut stack = vec![id];
+    let mut stack: Vec<WidgetId> = tree.children(id).iter().rev().copied().collect();
+    id.hash(&mut digest);
     while let Some(id) = stack.pop() {
         id.hash(&mut digest);
+        tree.is_hidden(id).hash(&mut digest);
         if let Some(label) = tree.get::<Label>(id) {
             label.text().hash(&mut digest);
         }
@@ -208,12 +229,24 @@ pub(super) fn indicator_text(above: usize, below: usize) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
+/// Where a list's page is headed.
+#[derive(Debug, Clone, Copy)]
+enum Aim {
+    /// Stay at the first item it has.
+    Stay,
+    /// Bring this item onto the page.
+    Item(usize),
+    /// The wheel's travel forward: from the page it started on, one item
+    /// further per step up to this first item, while something is still
+    /// hidden below the page reached.
+    Wheel(usize),
+}
+
 /// A list `fit` pages again this time.
 struct Job<'a> {
     panel: usize,
     parts: &'a ListParts,
-    /// The item to bring onto the page, if any.
-    target: Option<usize>,
+    aim: Aim,
     /// One past the page's last item.
     end: usize,
 }
@@ -222,18 +255,22 @@ struct Job<'a> {
 /// the tree (the caller lays out again).
 ///
 /// A list keeps its page while nothing that decides it changed: the same
-/// room, the same items laid out the same way, the same first item. Then
-/// `fit` touches nothing, so a frame with nothing new (the live window
-/// wakes every second) is neither laid out again nor presented. Otherwise:
+/// room, the same items holding the same content laid out the same way,
+/// the same first item. Then `fit` touches nothing, so a frame with nothing
+/// new (the live window wakes every second) is neither laid out again nor
+/// presented. Otherwise:
 ///
 /// - a list built again (no memory: a rebuild, a filter change, another
 ///   server) starts at its first item;
 /// - the selected worker is brought into view when the selection just
 ///   changed (`view.reveal`), or when the list was built again, holds other
-///   panes or got another size; a page the wheel moved away from the
-///   selection otherwise stays where the wheel put it;
+///   panes or got another size, or when it was on the page and an item
+///   changed in place; a page the wheel moved away from the selection
+///   otherwise stays where the wheel put it;
+/// - the wheel's steps forward stop at the first page that hides nothing
+///   below (`wheel` cannot lay out to see it);
 /// - earlier items are shown again while everything to the end still fits
-///   (a larger window, an item that shrank, the wheel past the last page).
+///   (a larger window, an item that shrank).
 ///
 /// The fit is measured, not computed: card heights change in place (a
 /// queue card expands or collapses on a volatile snapshot, lanes are made
@@ -256,41 +293,48 @@ pub(super) fn fit(
         let memory = parts.memory(tree);
         let seen = tree.get::<PageMemory>(memory).and_then(|m| m.seen.clone());
         let look = parts.look(tree);
+        let last = parts.items.len().saturating_sub(1);
         let first = &mut view.first[panel];
-        let moved = match &seen {
+        let (moved, held, from) = match &seen {
             None => {
                 *first = 0;
-                true
+                (true, false, 0)
             }
             Some(seen) => {
-                seen.look.list != look.list
+                let moved = seen.look.list != look.list
                     || seen.look.panes != look.panes
-                    || seen.selected != view.selected
+                    || seen.selected != view.selected;
+                // The wheel is the only other hand on `first`.
+                let held = seen.selected_shown && seen.first == *first;
+                (moved, held, seen.first.min(last))
             }
         };
-        let pane = view.reveal.or(view.selected.filter(|_| moved));
+        let pane = view.reveal.or(view.selected.filter(|_| moved || held));
         let target = pane.and_then(|pane| parts.item_of(pane));
-        *first = (*first).min(parts.items.len().saturating_sub(1));
+        *first = (*first).min(last);
         let on_page = target.is_none_or(|item| look.items[item].1.is_some());
         let kept = seen
             .as_ref()
             .is_some_and(|seen| seen.first == *first && seen.look == look);
         if kept && on_page {
             if seen.is_some_and(|seen| seen.selected != view.selected) {
-                let seen = Seen {
-                    first: *first,
-                    selected: view.selected,
-                    look,
-                };
-                tree.update::<PageMemory, _>(memory, |m, _| m.seen = Some(seen));
+                parts.remember(tree, *first, view.selected);
             }
             continue;
         }
+        let aim = match target {
+            Some(item) => Aim::Item(item),
+            None if from < *first => {
+                let to = std::mem::replace(first, from);
+                Aim::Wheel(to)
+            }
+            None => Aim::Stay,
+        };
         let end = parts.items.len();
         jobs.push(Job {
             panel,
             parts,
-            target,
+            aim,
             end,
         });
     }
@@ -301,8 +345,8 @@ pub(super) fn fit(
     let mut changed = false;
     let first = &mut view.first;
 
-    // Each round moves a list's first item one step toward its target, so
-    // a list of n items needs at most n rounds.
+    // Each round moves a list's first item one step toward its aim, so a
+    // list of n items needs at most n rounds.
     let mut open: Vec<usize> = (0..jobs.len()).collect();
     while !open.is_empty() {
         let mut shown = false;
@@ -317,10 +361,12 @@ pub(super) fn fit(
         open.retain(|&j| {
             let job = &mut jobs[j];
             let first = &mut first[job.panel];
+            let len = job.parts.items.len();
             job.end = job.parts.fits_until(tree, *first);
-            match job.target {
-                Some(item) if item < *first => *first = item,
-                Some(item) if item >= job.end => *first += 1,
+            match job.aim {
+                Aim::Item(item) if item < *first => *first = item,
+                Aim::Item(item) if item >= job.end => *first += 1,
+                Aim::Wheel(to) if *first < to && job.end < len => *first += 1,
                 _ => return false,
             }
             true
@@ -360,13 +406,7 @@ pub(super) fn fit(
         tree.prepare(viewport, text);
     }
     for job in &jobs {
-        let seen = Seen {
-            first: first[job.panel],
-            selected: view.selected,
-            look: job.parts.look(tree),
-        };
-        let memory = job.parts.memory(tree);
-        tree.update::<PageMemory, _>(memory, |m, _| m.seen = Some(seen));
+        job.parts.remember(tree, first[job.panel], view.selected);
     }
     if changed && let Some(root) = tree.root() {
         // The layouts inside this fit took the changes with them: the
@@ -391,14 +431,19 @@ fn set_indicator(tree: &mut UiTree, id: WidgetId, text: Option<String>) -> bool 
 }
 
 /// Takes a wheel event over a panel list (true) to page it: every full
-/// `WHEEL_STEP` forward shows the list from one item later, every step back
-/// from one item earlier while something is hidden above. The caller fits
-/// the pages again (no rebuild), which also takes back steps past the last
-/// page: how far the list pages depends on the travel only, not on how the
-/// platform cut it into events (a step that still leaves items hidden
-/// below cannot know in advance how many). A wheel over anything else —
-/// the header, a panel's title, an overlay above a list — is left to the
-/// tree (false).
+/// `WHEEL_STEP` forward shows the list from one item later while something
+/// is hidden below, every step back from one item earlier while something
+/// is hidden above. A wheel over anything else — the header, a panel's
+/// title, an overlay above a list — is left to the tree (false).
+///
+/// Travel that turns no page leaves nothing behind to spend later: the
+/// remainder is dropped when the wheel turns the other way, and all of it
+/// when a step meets the end. How far the list pages then depends on the
+/// travel only, not on how the platform cut it into events. Whether a step
+/// forward meets the end depends on the page the step before reached,
+/// which only a layout tells: `wheel` refuses a step from the page on
+/// screen when it hides nothing below, and `fit` takes back the steps past
+/// the first page that hides nothing below.
 pub(super) fn wheel(
     tree: &UiTree,
     lists: &[Option<ListParts>; 5],
@@ -424,25 +469,29 @@ pub(super) fn wheel(
         return false;
     };
     // Positive `delta.y` moves content down, toward the start.
-    accum[panel] -= delta.y;
+    let travel = -delta.y;
+    let accum = &mut accum[panel];
+    if *accum * travel < 0.0 {
+        *accum = 0.0;
+    }
+    *accum += travel;
     let first = &mut view.first[panel];
     let last = parts.items.len().saturating_sub(1);
     let on_last_page = parts.hidden_below(tree, *first) == 0;
-    while accum[panel] >= WHEEL_STEP {
-        accum[panel] -= WHEEL_STEP;
+    while *accum >= WHEEL_STEP {
         if on_last_page || *first >= last {
-            // At the end: travel past it does not pile up for the way back.
-            accum[panel] = 0.0;
+            *accum = 0.0;
             break;
         }
+        *accum -= WHEEL_STEP;
         *first += 1;
     }
-    while accum[panel] <= -WHEEL_STEP {
-        accum[panel] += WHEEL_STEP;
+    while *accum <= -WHEEL_STEP {
         if *first == 0 {
-            accum[panel] = 0.0;
+            *accum = 0.0;
             break;
         }
+        *accum += WHEEL_STEP;
         *first -= 1;
     }
     true

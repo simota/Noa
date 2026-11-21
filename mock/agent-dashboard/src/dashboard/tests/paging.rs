@@ -483,3 +483,194 @@ fn a_row_taller_than_its_list_is_cut_at_the_list() {
     );
     assert_whole_items(&dashboard, "a tall graph row");
 }
+
+/// A fleet of running workers only, panes 1, 2, …, ungrouped by
+/// `Grouping::Flat`: a card's caption gains one 15 px line per `extra[n]`
+/// (a running card is 247 px tall at 1440 wide and 1100 wide, its caption
+/// keeps the worker's `since`, which a volatile snapshot changes in place).
+fn running_fleet(extra: &[usize]) -> Fleet {
+    let mut fleet = fleet::canned();
+    let base = fleet.workers[0].clone();
+    fleet.orchestrators.clear();
+    fleet.workers = extra
+        .iter()
+        .zip(1..)
+        .map(|(&lines, pane)| Worker {
+            pane,
+            label: format!("worker-{pane}"),
+            orchestrator: String::new(),
+            since: tall_since(lines),
+            ..base.clone()
+        })
+        .collect();
+    fleet
+}
+
+/// A `since` that adds `lines` lines to a running card's caption.
+fn tall_since(lines: usize) -> String {
+    std::iter::once("8 秒前に出力")
+        .chain(std::iter::repeat_n("…", lines))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The running fleet as a live dashboard laid out at `size`.
+fn running_at(extra: &[usize], size: Size) -> (Dashboard, TextStore) {
+    let mut dashboard = Dashboard::of_snapshot(Grouping::Flat, live(running_fleet(extra), 1));
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(size, &mut text);
+    (dashboard, text)
+}
+
+/// Shown panes of a panel's items, in order.
+fn shown_panes(dashboard: &Dashboard, panel: Panel) -> Vec<u64> {
+    let parts = parts(dashboard, panel);
+    let shown = parts
+        .items
+        .iter()
+        .filter(|(id, _)| !dashboard.tree.is_hidden(*id));
+    shown.filter_map(|(_, pane)| *pane).collect()
+}
+
+/// Travel that turns no page does not linger: at the demo's last running
+/// page, 10 px more forward is dropped (the end refuses it), so 40 px back
+/// turns one page back whether the forward travel came as one event or as
+/// two.
+#[test]
+fn travel_past_the_end_does_not_eat_the_way_back() {
+    let at_the_end = || {
+        let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+        let pos = over_list(&dashboard, Panel::Running);
+        wheel(&mut dashboard, &mut text, pos, -40.0);
+        wheel(&mut dashboard, &mut text, pos, -40.0);
+        assert_eq!(first(&dashboard, Panel::Running), 2);
+        assert_eq!(
+            indicator(&dashboard, Panel::Running).as_deref(),
+            Some("上に 2 件")
+        );
+        (dashboard, text, pos)
+    };
+    for split in [&[-50.0, 40.0][..], &[-40.0, -10.0, 40.0], &[-10.0, 40.0]] {
+        let (mut dashboard, mut text, pos) = at_the_end();
+        for dy in split {
+            wheel(&mut dashboard, &mut text, pos, *dy);
+        }
+        assert_eq!(first(&dashboard, Panel::Running), 1, "{split:?}");
+        assert_eq!(
+            indicator(&dashboard, Panel::Running).as_deref(),
+            Some("上に 1 件 · 下に 1 件"),
+            "{split:?}"
+        );
+    }
+    // Turning back drops the remainder of the way forward too.
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    let pos = over_list(&dashboard, Panel::Running);
+    for dy in [-30.0, 30.0, -30.0] {
+        wheel(&mut dashboard, &mut text, pos, dy);
+    }
+    assert_eq!(first(&dashboard, Panel::Running), 0);
+}
+
+/// Two columns of cards of two heights, low (247 px) and high (307 px):
+/// L L L H H. At 1440×980 the running list (592 px) holds a low row and a
+/// high row but not two high rows. From the top (rows LL, LH, H) one step
+/// shows LL, HH: everything left, so that is the last page — a further
+/// step would wrap the cards as LH, H and hide the last again. One long
+/// wheel event stops on the same page as short ones.
+#[test]
+fn a_long_wheel_event_stops_at_the_last_page() {
+    let size = Size::new(1440.0, 980.0);
+    let extra = [0, 0, 0, 4, 4];
+    let (dashboard, _) = running_at(&extra, size);
+    let list = rect(&dashboard.tree, parts(&dashboard, Panel::Running).list);
+    assert_eq!(list[3], 592.0, "the running list's height");
+    assert_eq!(shown_panes(&dashboard, Panel::Running), [1, 2, 3, 4]);
+
+    for split in [
+        &[-40.0, -40.0][..],
+        &[-80.0],
+        &[-120.0],
+        &[-40.0, -40.0, -40.0],
+    ] {
+        let (mut dashboard, mut text) = running_at(&extra, size);
+        let pos = over_list(&dashboard, Panel::Running);
+        for dy in split {
+            wheel_at(&mut dashboard, &mut text, size, pos, *dy);
+        }
+        let what = format!("{split:?}");
+        assert_eq!(first(&dashboard, Panel::Running), 1, "{what}");
+        assert_eq!(
+            shown_panes(&dashboard, Panel::Running),
+            [2, 3, 4, 5],
+            "{what}"
+        );
+        assert_eq!(
+            indicator(&dashboard, Panel::Running).as_deref(),
+            Some("上に 1 件"),
+            "{what}"
+        );
+        assert_whole_items(&dashboard, &what);
+        // And the way back is one step.
+        wheel_at(&mut dashboard, &mut text, size, pos, 40.0);
+        assert_eq!(first(&dashboard, Panel::Running), 0, "{what}");
+    }
+}
+
+/// One column (1100×1200: the running list is 812 px tall) of a tall card
+/// (607 px) and a low one: on the last page the low card shows alone. When
+/// the tall card, hidden above, shrinks in place to fit with it, the page
+/// takes it back and the indicator says nothing is hidden.
+#[test]
+fn an_item_above_that_shrinks_comes_back() {
+    let size = Size::new(1100.0, 1200.0);
+    let (mut dashboard, mut text) = running_at(&[24, 0], size);
+    let list = rect(&dashboard.tree, parts(&dashboard, Panel::Running).list);
+    assert_eq!(list[3], 812.0, "the running list's height");
+    let pos = over_list(&dashboard, Panel::Running);
+    wheel_at(&mut dashboard, &mut text, size, pos, -40.0);
+    assert_eq!(shown_panes(&dashboard, Panel::Running), [2]);
+    assert_eq!(
+        indicator(&dashboard, Panel::Running).as_deref(),
+        Some("上に 1 件")
+    );
+
+    dashboard.apply(live(running_fleet(&[0, 0]), 2), &mut text);
+    dashboard.prepare(size, &mut text);
+    assert_eq!(shown_panes(&dashboard, Panel::Running), [1, 2]);
+    assert_eq!(first(&dashboard, Panel::Running), 0);
+    assert_eq!(indicator(&dashboard, Panel::Running), None);
+    assert_whole_items(&dashboard, "the card above shrank");
+    assert!(!dashboard.prepare(size, &mut text), "a frame after");
+}
+
+/// The same column with two low cards, the lower one selected: when the
+/// upper card grows in place so that both no longer fit, the page follows
+/// the selection (no wheel moved it away) instead of hiding it.
+#[test]
+fn a_shown_selection_stays_shown_when_a_card_grows() {
+    let size = Size::new(1100.0, 1200.0);
+    let (mut dashboard, mut text) = running_at(&[0, 0], size);
+    while dashboard.view.selected != Some(2) {
+        dashboard.dispatch(
+            Event::KeyDown {
+                key: Key::Char('j'),
+                modifiers: Modifiers::default(),
+            },
+            &mut text,
+        );
+        dashboard.prepare(size, &mut text);
+    }
+    assert_eq!(shown_panes(&dashboard, Panel::Running), [1, 2]);
+
+    dashboard.apply(live(running_fleet(&[30, 0]), 2), &mut text);
+    dashboard.prepare(size, &mut text);
+    assert_eq!(dashboard.view.selected, Some(2));
+    assert_eq!(shown_panes(&dashboard, Panel::Running), [2]);
+    assert_eq!(first(&dashboard, Panel::Running), 1);
+    assert_eq!(
+        indicator(&dashboard, Panel::Running).as_deref(),
+        Some("上に 1 件")
+    );
+    assert_whole_items(&dashboard, "the card above grew");
+    assert!(!dashboard.prepare(size, &mut text), "a frame after");
+}

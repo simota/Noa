@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-11-21
+
+Orchestration that hands a worker its task and reads back its result, with a
+board that shows the orchestrator too and stays up while Noa is unreachable.
+
+### Added
+
+- `Noa +ctl spawn --ready` waits until the worker is ready, and `--task` gives
+  it its task then.
+- Each worker gets a result file (`NOA_RESULT`), and spawns, sends and outcomes
+  are kept in a journal; `Noa +ctl status` and `Noa +ctl result` read them.
+- `Noa +ctl wait --settle` holds a `finished` until the agent stays quiet.
+- The board shows the orchestrator's own state, and puts it at the head of the
+  queue while it needs someone.
+- The board shows each worker's model, effort, start time and branch, and what
+  a blocked worker is asking.
+- The `noa-factory` skill runs a goal through design, implementation, review
+  and verification on worker panes, merging only what passes.
+
+### Changed
+
+- `Noa +ctl send` checks everything before typing: it refuses a text over
+  250 KiB, a pane whose agent is running (unless `--queue`) and a pane blocked
+  on a question, and waits for an agent to enable bracketed paste.
+- A request Noa did not answer in time is reported as outcome unknown
+  (RPC `-32009`, exit 3) instead of a failure; `spawn` recovers the worker
+  whose answer was lost.
+- Noa enforces `--max-children` itself, and a full server or an oversized
+  request is named as such; a refused or dropped connection is retried.
+- A worker running a plain command shows as running on the board, not as
+  "no report".
+- The board draws each frame inside a synchronized update and skips unchanged
+  frames.
+- Closing a worker in a `spawn --worktree` worktree says that the worktree and
+  branch stay; `close --prune` keeps the worker's result file.
+
+### Fixed
+
+- The board no longer ends after 30 seconds of failed listings or when another
+  Noa answers a reconnect: it keeps retrying, and holds its actions until its
+  own Noa answers.
+- A second `^C` by reflex no longer ends the board and closes workers; ending a
+  board that will close workers asks for `y`.
+- Board keys stay on the worker they were meant for when that worker goes away,
+  and a message that was not sent is kept as that worker's draft.
+- The board restores the terminal on `SIGTERM`, `SIGHUP` and `SIGINT`, and does
+  not show stale or not-yet-read state as current.
+- `wait` keeps its outcome when a `--tail` read fails, prints its baselines
+  when killed, says which worker each outcome is for, and reports an agent
+  that quit back to its shell.
+- `spawn --worktree` and `close --prune` find the worktree from any worktree or
+  subdirectory.
+- The sidebar re-reads the branch when a command or agent turn ends.
+- Worker floats started over IPC are left out of the restored session.
+
 ## [0.9.5] - 2026-11-20
 
 No more frozen windows: the main-thread hangs and multi-second stalls are gone,

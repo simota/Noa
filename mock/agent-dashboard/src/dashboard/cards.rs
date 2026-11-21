@@ -3,8 +3,8 @@ use noa_gpui_core::style::{
     auto, length, percent,
 };
 use noa_gpui_core::widgets::{
-    Chart, ChartSeries, Container, Label, LevelIndicator, LevelStyle, Tag, TagStyle, Tone,
-    Truncation,
+    Button, Chart, ChartSeries, Container, ControlSize, Label, LevelIndicator, LevelStyle, Tag,
+    TagStyle, Tone, Truncation,
 };
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
@@ -151,6 +151,46 @@ pub(super) fn card(
     (card, body)
 }
 
+/// A card's last row: its caption (cut when the card is narrow) and a 詳細
+/// button that opens the details drawer on `pane`. Returns the caption.
+fn caption_row(
+    tree: &mut UiTree,
+    body: WidgetId,
+    text: String,
+    pane: u64,
+    reg: &mut Registry,
+) -> WidgetId {
+    let row = tree.insert(
+        Some(body),
+        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+    );
+    let slot = tree.insert(
+        Some(row),
+        Container::new(Style {
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            min_size: LayoutSize {
+                width: length(0.0),
+                height: auto(),
+            },
+            ..Default::default()
+        }),
+    );
+    let label = tree.insert(
+        Some(slot),
+        Label::new(text)
+            .font_size(11.0)
+            .color(Role::Muted)
+            .truncation(Truncation::Tail),
+    );
+    let details = tree.insert(
+        Some(row),
+        Button::new("詳細").control_size(ControlSize::Small),
+    );
+    reg.detail_buttons.push((details, pane));
+    label
+}
+
 pub(super) fn running(
     tree: &mut UiTree,
     column: WidgetId,
@@ -251,7 +291,7 @@ pub(super) fn running_card(
     );
     reg.pulses.push((level, Pulse::Freshness(pane)));
 
-    let id = caption(tree, body, running_caption(worker));
+    let id = caption_row(tree, body, running_caption(worker), pane, reg);
     reg.pulses.push((id, Pulse::RunningCaption(pane)));
     mark_card(tree, card, pane, reg);
     card
@@ -313,7 +353,7 @@ pub(super) fn done_card(
     }
     task_line(tree, body, worker);
     detail_line(tree, body, worker);
-    let id = caption(tree, body, done_caption(worker));
+    let id = caption_row(tree, body, done_caption(worker), worker.pane, reg);
     reg.pulses.push((id, Pulse::DoneCaption(worker.pane)));
     mark_card(tree, card, worker.pane, reg);
     card

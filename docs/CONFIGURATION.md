@@ -286,6 +286,28 @@ keybind = cmd+shift+n=tab.new
 
 See [KEYBINDINGS.md](KEYBINDINGS.md) for chord syntax, the full list of canonical actions, and the default bindings.
 
+### `spawn:` (Noa extension)
+
+`spawn:<command line>` starts a program in the background. Ghostty has no such action. It is
+accepted by `keybind` and `command-palette-entry`, but not by AppleScript's `perform action`, and
+it has no menu item or default palette entry.
+
+- The text after `spawn:`, with surrounding whitespace trimmed, runs as `$SHELL -l -c <text>`
+  (`/bin/sh` when `SHELL` is unset or empty). A login shell reads the login startup files
+  (for zsh `.zshenv`, `.zprofile` and `.zlogin`, for bash `.bash_profile`), not the interactive ones such
+  as `.zshrc`, so a Noa started from the Dock finds on `PATH` only what those files add. When
+  in doubt, give the program's full path.
+- It runs in the focused pane's working directory when that is a directory that exists,
+  otherwise in your home directory.
+- It is detached: stdin, stdout and stderr go to `/dev/null`, it gets its own process group,
+  and it keeps running after Noa quits. Noa logs the start and any failure to start, and shows
+  nothing else.
+- `spawn:` with nothing after it is not a valid action.
+
+```conf
+keybind = cmd+alt+d=spawn:open -a Calculator
+```
+
 ## Command palette
 
 `command-palette-entry` is repeatable, and entries are applied to the default palette entries in order from top to bottom.
@@ -298,6 +320,14 @@ See [KEYBINDINGS.md](KEYBINDINGS.md) for chord syntax, the full list of canonica
 command-palette-entry = clear
 command-palette-entry = title:Split Right,action:new_split:right
 command-palette-entry = title:"Focus Left",description:"Focus the split to the left, if any.",action:goto_split:left
+```
+
+A `spawn:` action (see [`spawn:`](#spawn-noa-extension)) whose command line contains a comma
+must be in double quotes, since the entry's fields are split on commas outside quotes. Inside
+the quotes, write `"` as `\"` and `\` as `\\`.
+
+```conf
+command-palette-entry = title:"Agent Dashboard",action:"spawn:~/bin/agent-dashboard --ports=8080,8081"
 ```
 
 Unknown keys and invalid values show a diagnostic, and that override is not applied.

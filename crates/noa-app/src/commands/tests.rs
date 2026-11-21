@@ -1126,3 +1126,82 @@ fn tc_028_split_actions_are_exactly_the_split_layout_commands() {
             .all(|action| !AppCommand::Float(action).is_split_action())
     );
 }
+
+#[test]
+fn spawn_takes_the_command_line_after_the_colon_verbatim() {
+    let spawn = |action| match super::command_from_keybind_action(action) {
+        Some(AppCommand::Spawn(command)) => Some(command.text().to_string()),
+        other => {
+            assert_eq!(other, None, "{action}");
+            None
+        }
+    };
+    assert_eq!(
+        spawn("spawn:open -a Calculator").as_deref(),
+        Some("open -a Calculator")
+    );
+    assert_eq!(spawn("  spawn:  htop \t").as_deref(), Some("htop"));
+    assert_eq!(
+        spawn(r#"spawn:env A=1 printf '%s' "x,y:z""#).as_deref(),
+        Some(r#"env A=1 printf '%s' "x,y:z""#)
+    );
+    assert_eq!(spawn("spawn:"), None);
+    assert_eq!(spawn("spawn:   "), None);
+}
+
+#[test]
+fn spawn_action_name_round_trips() {
+    let text = r#"~/bin/tool --flag=a,b "c:d""#;
+    let command = AppCommand::from_action_name(&format!("spawn:{text}")).unwrap();
+    assert_eq!(command.action_name(), format!("spawn:{text}"));
+    assert_eq!(
+        AppCommand::from_action_name(&command.action_name()),
+        Some(command)
+    );
+}
+
+#[test]
+fn spawn_interns_each_distinct_command_line_once() {
+    let first = super::SpawnCommand::new("spawn-test interned").unwrap();
+    assert_eq!(
+        super::SpawnCommand::new(" spawn-test interned "),
+        Some(first)
+    );
+    assert_ne!(super::SpawnCommand::new("spawn-test other"), Some(first));
+    fn assert_copy<T: Copy>() {}
+    assert_copy::<AppCommand>();
+}
+
+#[test]
+fn a_spawn_keybind_loads_from_config() {
+    let configs = [noa_config::KeybindConfig::Bind {
+        trigger: "cmd+alt+d".to_string(),
+        action: "spawn:open -a Calculator".to_string(),
+    }];
+    let (engine, diagnostics) = KeybindEngine::from_config(&configs, None);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let resolved = engine.resolve(
+        &Key::Character("d".into()),
+        ModifiersState::SUPER | ModifiersState::ALT,
+    );
+    let Some(AppCommand::Spawn(command)) = resolved else {
+        panic!("{resolved:?}");
+    };
+    assert_eq!(&*command.text(), "open -a Calculator");
+}
+
+/// AppleScript `perform action` must not run arbitrary command lines.
+#[test]
+fn applescript_actions_do_not_include_spawn() {
+    for action in ["spawn:open -a Calculator", "spawn:true", "spawn"] {
+        assert_eq!(
+            super::command_from_applescript_action(action),
+            None,
+            "{action}"
+        );
+    }
+    assert_eq!(
+        super::command_from_applescript_action("new_tab"),
+        Some(AppCommand::NewTab)
+    );
+}

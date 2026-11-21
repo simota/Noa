@@ -93,6 +93,7 @@ For the type, allowed values, defaults, and clamp/fallback rules of every key, s
 
 - **Ghostty config import**: import with migration statistics
 - **Custom keybindings**: reassignment via `keybind = <chord>=<action>` / `unbind` / `clear`
+- **`spawn:` action** (Noa extension): `keybind` and `command-palette-entry` can run `spawn:<command line>` in the background through a login shell, in the focused pane's directory
 - **Palette overrides and includes**: `palette = N=#RRGGBB` overrides one palette entry; `config-file` includes another file (`?` makes it optional)
 - **Live reload**: the config file is watched and re-applied at runtime: immediately on window focus gain and settings-panel commits, otherwise on a slow 3s idle poll (so a save from inside a focused noa pane applies within ≤3s; refocus or use the settings UI to apply instantly)
 - **Deviating defaults**: `cursor-stop-blinking-after = 10` (Ghostty blinks forever; `0` restores parity) and `quick-terminal-screen = mouse` (Ghostty: `main`); see CONFIGURATION.md "Deviations from Ghostty defaults" for rationale

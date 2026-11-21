@@ -138,6 +138,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::NextNotification => "Go to Next Unread Notification",
         AppCommand::ComposePrompt => "Compose Prompt",
         AppCommand::ReadOutput => "Read Output Snapshot",
+        AppCommand::Spawn(_) => "Run Command",
     }
 }
 
@@ -263,6 +264,7 @@ pub(crate) fn command_palette_description(command: AppCommand) -> &'static str {
         AppCommand::NextNotification => "Go to the next session with an unread notification.",
         AppCommand::ComposePrompt => "Write a prompt for the current pane in an editor.",
         AppCommand::ReadOutput => "Read the selection or the latest output in a separate view.",
+        AppCommand::Spawn(_) => "Run a command in the background.",
     }
 }
 
@@ -634,6 +636,7 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         | AppCommand::OpenThemePicker
         | AppCommand::OpenSettings
         | AppCommand::ReloadConfig
+        | AppCommand::Spawn(_)
         | AppCommand::Quit => CommandCategory::Application,
         AppCommand::Copy
         | AppCommand::ComposePrompt
@@ -1470,6 +1473,29 @@ mod tests {
         let palette = CommandPalette::open(Vec::new());
         assert_eq!(palette.entry_count(), 0);
         assert_eq!(palette.selected_command(), None);
+    }
+
+    #[test]
+    fn a_spawn_entry_is_appended_under_its_own_title() {
+        let action = "spawn:~/bin/agent-dashboard --port=1,2";
+        let (entries, diagnostics) =
+            resolve_palette_entries(&[custom("Agent Dashboard", "", action)]);
+
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let entry = entries.last().unwrap();
+        assert_eq!(entry.title, "Agent Dashboard");
+        let AppCommand::Spawn(command) = entry.command else {
+            panic!("{:?}", entry.command);
+        };
+        assert_eq!(&*command.text(), "~/bin/agent-dashboard --port=1,2");
+    }
+
+    #[test]
+    fn an_empty_spawn_entry_is_left_out_with_a_diagnostic() {
+        let (entries, diagnostics) = resolve_palette_entries(&[custom("Nothing", "", "spawn: ")]);
+
+        assert_eq!(entries, default_palette_entries());
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     }
 
     #[test]

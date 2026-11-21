@@ -417,6 +417,7 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::ToggleSecureKeyboardEntry
         | AppCommand::ToggleBackgroundOpacity
         | AppCommand::ToggleEmber
+        | AppCommand::Spawn(_)
         | AppCommand::ToggleSidebar
         | AppCommand::CloseWindow
         | AppCommand::Quit => CommandScope::App,
@@ -477,6 +478,7 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::ToggleSecureKeyboardEntry
         | AppCommand::ToggleBackgroundOpacity
         | AppCommand::ToggleEmber
+        | AppCommand::Spawn(_)
         | AppCommand::ToggleSidebar => CommandScope::App,
         // Off macOS it opens a window of its own, so it is held back like
         // New Window; on macOS it only opens the file like Edit Config File.

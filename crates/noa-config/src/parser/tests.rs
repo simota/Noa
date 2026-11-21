@@ -2354,6 +2354,30 @@ fn command_palette_entry_parses_ghostty_fields() {
     );
 }
 
+/// The `spawn:` examples in docs/CONFIGURATION.md: a quoted action keeps its
+/// commas, and `\"` inside the quotes is a literal quote.
+#[test]
+fn command_palette_entry_keeps_a_quoted_spawn_command_line() {
+    let (overrides, diagnostics) = parse_overrides(
+        path(),
+        "command-palette-entry = title:\"Agent Dashboard\",action:\"spawn:~/bin/agent-dashboard --ports=8080,8081\"\n\
+         command-palette-entry = title:Say,action:\"spawn:say \\\"a, b\\\"\"",
+    );
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(
+        overrides.command_palette_entries,
+        vec![
+            palette_entry(
+                "Agent Dashboard",
+                "",
+                "spawn:~/bin/agent-dashboard --ports=8080,8081"
+            ),
+            palette_entry("Say", "", "spawn:say \"a, b\""),
+        ]
+    );
+}
+
 #[test]
 fn command_palette_entry_clear_and_empty_keep_their_order() {
     let (overrides, diagnostics) = parse_overrides(

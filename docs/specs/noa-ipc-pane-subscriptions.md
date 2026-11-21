@@ -59,10 +59,14 @@ only reads `panels` still parses it.
   absent from the current one, and its registry entry is gone after
   `IpcRegistry::prune`, meaning `shared.registry.resolve(id)` is `None` because
   its Surface closed. A pane that leaves the listing while its Surface is still
-  alive is not reported. That case comes up rarely: a pane whose window stops
-  being sidebar-eligible, or a float losing its parent. The subscriber sees it
-  again as an added panel if it comes back, or learns of it from the next
-  `listPanels`. A cross-tab move keeps its id (`IpcRegistry::rekey`), so it is
+  alive is not reported then. That case comes up rarely: a pane whose window
+  stops being sidebar-eligible, or a float losing its parent. The app keeps its
+  id in `IpcShared::unlisted_live`: if its Surface closes before it is listed
+  again, the id is in `removedPaneIds` of that diff (after the ids from the
+  previous listing, in ascending order); if it comes back, the subscriber sees
+  it as an added panel and the id leaves the set. While nobody subscribes to
+  `state_changed` the set is cleared, since a later subscriber lists the panes
+  itself. A cross-tab move keeps its id (`IpcRegistry::rekey`), so it is
   neither removed nor added.
 - Scope: a removed id is delivered to a connection when at least one of its
   subscriptions has `state_changed` and either no `paneIds` or a `paneIds`

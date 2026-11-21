@@ -236,6 +236,21 @@ pub(crate) fn workers(events: &[serde_json::Value]) -> Vec<Worker> {
         .collect()
 }
 
+/// When the last `send` to `pane` with report count `seq` before it was
+/// made (its `ts`), for a wait that resumes it (`wait --after PANE=SEQ`).
+pub(crate) fn sent_at(events: &[serde_json::Value], pane: u64, seq: u64) -> Option<u64> {
+    events
+        .iter()
+        .rev()
+        .find(|event| {
+            event["ev"] == "send"
+                && pane_of(event) == Some(pane)
+                && event["seqBefore"].as_u64() == Some(seq)
+        })?
+        .get("ts")?
+        .as_u64()
+}
+
 /// `status --answers`: every answered prompt, oldest first, with the
 /// worker's label when the journal knows it.
 pub(crate) fn answers(events: &[serde_json::Value]) -> Vec<serde_json::Value> {

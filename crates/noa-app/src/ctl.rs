@@ -156,8 +156,10 @@ Commands:
                                 with \"interrupted\":true (exit 2). A line gains
                                 \"result\":{\"path\",\"bytes\"} once the pane's
                                 result file was written since the wait (or the
-                                send of send --wait) began, and \"blocked\" when
-                                the agent reported what it is blocked on.
+                                send of send --wait, or the send that --after
+                                SEQ resumes, from this pane's journal) began,
+                                and \"blocked\" when the agent reported what it
+                                is blocked on.
   read PANE [--scrollback] [--max-bytes N]
                                 Print PANE's screen (or retained output) text;
                                 a cut keeps the end and says so on stderr. A
@@ -2275,7 +2277,7 @@ impl Session {
                     &[args.pane],
                     send_wait_start(before, seq),
                     options,
-                    (since, results),
+                    (since, HashMap::new(), results),
                 )
             }
             None => {
@@ -2344,6 +2346,7 @@ impl Session {
             panes.extend(closed_after_panes(&panes, after, &listed));
         }
         let after = wait_baselines(&panes, after).map_err(Failure::error)?;
+        let resumed = resumed_since(&self.journal.events(), &after);
         let start = if named {
             WaitStart::Named { after }
         } else {
@@ -2352,7 +2355,7 @@ impl Session {
         let since = SystemTime::now();
         let panels = self.client.list_panels()?;
         let results = self.result_paths(&panels);
-        self.wait_subscribed(&panes, start, options, (since, results))
+        self.wait_subscribed(&panes, start, options, (since, resumed, results))
     }
 
     /// Each pane's known result file ([`result_path`]).
@@ -2361,13 +2364,14 @@ impl Session {
     }
 
     /// The wait loop, printing each line with its pane's result file once
-    /// written after `since` (`results`), and journaling each outcome.
+    /// written after `since` (a resumed pane's own in `resumed`)
+    /// (`results`), and journaling each outcome.
     fn wait_subscribed(
         &mut self,
         panes: &[u64],
         start: WaitStart,
         options: &WaitOptions,
-        (since, results): (SystemTime, HashMap<u64, PathBuf>),
+        (since, resumed, results): (SystemTime, HashMap<u64, SystemTime>, HashMap<u64, PathBuf>),
     ) -> Result<i32, Failure> {
         let journal = &mut self.journal;
         let client = &mut self.client;
@@ -2380,7 +2384,7 @@ impl Session {
                 WAIT_RELIST_INTERVAL,
                 &mut |line| {
                     let mut line = line.clone();
-                    if let Some(event) = finish_wait_line(&mut line, &results, since) {
+                    if let Some(event) = finish_wait_line(&mut line, &results, since, &resumed) {
                         journal.append("outcome", event);
                     }
                     print_json(&line);
@@ -3559,14 +3563,17 @@ pub(crate) fn result_paths(workers: &[journal::Worker], panels: &[Panel]) -> Has
 }
 
 /// A wait line as printed: with `"result"` when its pane's result file was
-/// written after `since`. Returns the journal's `outcome` event for a line
-/// that ended a pane's wait (not a timeout's).
+/// written after `since`, or for a pane in `resumed` ([`resumed_since`])
+/// after the send it resumes. Returns the journal's `outcome` event for a
+/// line that ended a pane's wait (not a timeout's).
 pub(crate) fn finish_wait_line(
     line: &mut serde_json::Value,
     results: &HashMap<u64, PathBuf>,
     since: SystemTime,
+    resumed: &HashMap<u64, SystemTime>,
 ) -> Option<serde_json::Value> {
     let pane = line_pane(line)?;
+    let since = resumed.get(&pane).copied().unwrap_or(since);
     if let Some(info) = results
         .get(&pane)
         .and_then(|path| result::written_since(path, since))
@@ -3580,6 +3587,23 @@ pub(crate) fn finish_wait_line(
         "seq": line.get("seq"),
         "label": line.get("label"),
     }))
+}
+
+/// A wait resumed with `--after PANE=SEQ` (as `send --wait`'s resume hint
+/// says): for each such pane, when the journal's `send` with that
+/// `seqBefore` was made (its `ts`, whole seconds rounded down). A report
+/// written between that send and this wait still counts as its result.
+pub(crate) fn resumed_since(
+    events: &[serde_json::Value],
+    after: &HashMap<u64, u64>,
+) -> HashMap<u64, SystemTime> {
+    after
+        .iter()
+        .filter_map(|(&pane, &seq)| {
+            let ts = journal::sent_at(events, pane, seq)?;
+            Some((pane, SystemTime::UNIX_EPOCH + Duration::from_secs(ts)))
+        })
+        .collect()
 }
 
 /// `status`: a line per worker in `children`, with what the journal knows
@@ -5923,7 +5947,7 @@ mod tests {
 
         let since = SystemTime::now() - Duration::from_secs(5);
         let mut line = serde_json::json!({ "paneId": "8", "reason": "finished", "seq": 2 });
-        let event = finish_wait_line(&mut line, &results, since).unwrap();
+        let event = finish_wait_line(&mut line, &results, since, &HashMap::new()).unwrap();
         assert!(line.get("result").is_none());
         assert_eq!(event["pane"], 8);
         assert_eq!(event["reason"], "finished");
@@ -5931,11 +5955,43 @@ mod tests {
 
         std::fs::write(&path, "report").unwrap();
         let mut line = serde_json::json!({ "paneId": "8", "reason": "finished", "seq": 2 });
-        finish_wait_line(&mut line, &results, since).unwrap();
+        finish_wait_line(&mut line, &results, since, &HashMap::new()).unwrap();
         assert_eq!(line["result"]["bytes"], 6);
         // A timeout line is no outcome.
         let mut timeout = serde_json::json!({ "timeout": true, "pending": ["8"] });
-        assert!(finish_wait_line(&mut timeout, &results, since).is_none());
+        assert!(finish_wait_line(&mut timeout, &results, since, &HashMap::new()).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Review finding #4: a `wait P --after SEQ` resuming a killed `send
+    // --wait` left out "result" for a report written before it began.
+    #[test]
+    fn a_resumed_wait_counts_a_result_written_since_the_send_it_resumes() {
+        let dir = temp_dir("wait-resumed");
+        let path = result::prepare(&dir, Some("fix")).unwrap();
+        std::fs::write(&path, "report").unwrap();
+        let results = HashMap::from([(8, path)]);
+        let sent = journal::now_secs() - 30;
+        let events = journal::parse_events(&format!(
+            "{{\"ev\":\"send\",\"ts\":{},\"pane\":8,\"seqBefore\":1,\"text\":\"a\"}}\n\
+             {{\"ev\":\"send\",\"ts\":{sent},\"pane\":8,\"seqBefore\":2,\"text\":\"b\"}}\n\
+             {{\"ev\":\"send\",\"ts\":{sent},\"pane\":9,\"seqBefore\":3,\"text\":\"c\"}}\n",
+            sent - 100
+        ));
+        let resumed = resumed_since(&events, &HashMap::from([(8, 2), (7, 2)]));
+        assert_eq!(
+            resumed,
+            HashMap::from([(8, SystemTime::UNIX_EPOCH + Duration::from_secs(sent))])
+        );
+        // The wait began after the report was written.
+        let started = SystemTime::now() + Duration::from_secs(5);
+        let line = || serde_json::json!({ "paneId": "8", "reason": "finished", "seq": 3 });
+        let mut plain = line();
+        finish_wait_line(&mut plain, &results, started, &HashMap::new()).unwrap();
+        assert!(plain.get("result").is_none());
+        let mut resumed_line = line();
+        finish_wait_line(&mut resumed_line, &results, started, &resumed).unwrap();
+        assert_eq!(resumed_line["result"]["bytes"], 6);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

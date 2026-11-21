@@ -177,9 +177,9 @@ Commands:
                                 --max-bytes keeps the start and says so on
                                 stderr. --path prints only the file's path
                                 whether it exists or not (e.g. to tail a
-                                command's log) and exits 0 as long as a path is
-                                known (1 only when none is); it does not go
-                                with --max-bytes.
+                                command's log) and exits 0 when a path is
+                                known, and exits 1 when no path is known; it
+                                does not go with --max-bytes.
   status [--answers]            One line per worker of this pane: its panel's
                                 state with what this pane's journal knows
                                 (tier, argv, lastTask, lastSentSeq, lastOutcome,

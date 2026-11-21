@@ -117,7 +117,10 @@ Commands:
                                 with \"interrupted\":true (exit 2).
   read PANE [--scrollback] [--max-bytes N]
                                 Print PANE's screen (or retained output) text;
-                                a cut keeps the end and says so on stderr.
+                                a cut keeps the end and says so on stderr. A
+                                pane on the alternate screen keeps no history:
+                                --scrollback (and wait --tail) then says on
+                                stderr that only its screen came back.
   close PANE...|--children [--any-pane] [--prune]
                                 Close worker panes. One that is already gone
                                 prints \"gone\":true and is not an error.
@@ -1664,6 +1667,9 @@ impl Session {
                 if result.truncated {
                     eprintln!("{}", truncated_message(result.text.len()));
                 }
+                if let Some(notice) = history_notice(pane, source, &result) {
+                    eprintln!("{notice}");
+                }
             }
             Command::Close {
                 panes,
@@ -2427,7 +2433,12 @@ fn client_text(
     source: TextSource,
 ) -> Result<Option<String>, Failure> {
     match client.get_text(pane, source, None) {
-        Ok(result) => Ok(Some(result.text)),
+        Ok(result) => {
+            if let Some(notice) = history_notice(pane, source, &result) {
+                eprintln!("{notice}");
+            }
+            Ok(Some(result.text))
+        }
         Err(ClientError::Rpc {
             code: RPC_UNKNOWN_PANE | RPC_PANE_CLOSED,
             ..
@@ -2989,6 +3000,23 @@ pub(crate) fn tail_lines(text: &str, lines: usize) -> String {
 /// How Noa's `wait-after-command` banner under an exited command starts
 /// (`app/child_exited.rs`).
 pub(crate) const HOLD_BANNER: &str = "[Process exited.";
+
+/// The stderr line for a retained-output read (`read --scrollback`, `wait
+/// --tail`) of a pane on the alternate screen, which keeps no history: only
+/// its screen came back (REL-07). A server that predates `alternateScreen`
+/// never says so.
+pub(crate) fn history_notice(
+    pane: u64,
+    source: TextSource,
+    result: &noa_ipc::GetTextResult,
+) -> Option<String> {
+    (source == TextSource::Scrollback && result.alternate_screen).then(|| {
+        format!(
+            "Noa +ctl: pane {pane} is on the alternate screen; its program keeps no history \
+             here: only the screen is returned"
+        )
+    })
+}
 
 /// The stderr line for a `getText` the server cut: it keeps the end.
 pub(crate) fn truncated_message(kept: usize) -> String {
@@ -5021,6 +5049,30 @@ mod tests {
             "{}",
             failure.message
         );
+    }
+
+    // Audit finding (REL-07): `read --scrollback` of an agent on the
+    // alternate screen returned one screen, and nothing said why.
+    #[test]
+    fn a_history_read_of_the_alternate_screen_says_only_the_screen_came_back() {
+        let result = |alternate_screen| noa_ipc::GetTextResult {
+            pane_id: WireId(4),
+            text: "screen".to_string(),
+            truncated: false,
+            alternate_screen,
+        };
+        assert_eq!(
+            history_notice(4, TextSource::Scrollback, &result(true)).as_deref(),
+            Some(
+                "Noa +ctl: pane 4 is on the alternate screen; its program keeps no history \
+                 here: only the screen is returned"
+            )
+        );
+        assert_eq!(
+            history_notice(4, TextSource::Scrollback, &result(false)),
+            None
+        );
+        assert_eq!(history_notice(4, TextSource::Screen, &result(true)), None);
     }
 
     // Review finding: a relative `--cwd` reached the GUI process as is, and

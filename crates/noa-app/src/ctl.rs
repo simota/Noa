@@ -510,14 +510,14 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
             answers: rest.flag("--answers"),
         },
         "result" => {
-            let max_bytes = rest
-                .value("--max-bytes")?
-                .map(|v| parse_u64("--max-bytes", &v).map(|n| n as usize))
-                .transpose()?;
+            let max_bytes = rest.value("--max-bytes")?;
             let path = rest.flag("--path");
             if path && max_bytes.is_some() {
                 return Err("--path and --max-bytes conflict: --path reads no file".to_string());
             }
+            let max_bytes = max_bytes
+                .map(|v| parse_u64("--max-bytes", &v).map(|n| n as usize))
+                .transpose()?;
             Command::Result {
                 pane: single_pane(&mut rest)?,
                 max_bytes,
@@ -6316,14 +6316,13 @@ mod tests {
         assert_eq!(parse_args(&args(&["result", "4", "--path"])).unwrap(), only);
         assert_eq!(parse_args(&args(&["result", "--path", "4"])).unwrap(), only);
         for both in [
-            ["result", "4", "--path", "--max-bytes", "10"],
-            ["result", "4", "--max-bytes", "10", "--path"],
+            &["result", "4", "--path", "--max-bytes", "10"][..],
+            &["result", "4", "--max-bytes", "10", "--path"],
+            &["result", "4", "--path", "--max-bytes", "bad"],
+            &["result", "4", "--max-bytes=bad", "--path"],
         ] {
-            let err = parse_args(&args(&both)).unwrap_err();
-            assert!(
-                err.contains("--path") && err.contains("--max-bytes"),
-                "{err}"
-            );
+            let err = parse_args(&args(both)).unwrap_err();
+            assert!(err.contains("--path and --max-bytes conflict"), "{err}");
         }
         assert!(parse_args(&args(&["result", "--path"])).is_err());
     }

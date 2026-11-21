@@ -3,9 +3,9 @@ use noa_gpui_core::style::{
     Size as LayoutSize, auto, length, percent,
 };
 use noa_gpui_core::widgets::{
-    Badge, Button, ButtonClicked, Chart, ChartSeries, Container, ControlSize, GroupBox, Kbd, Label,
-    LevelIndicator, LevelStyle, ScrollView, SegmentMode, SegmentedControl, SelectionChanged, Tag,
-    TagStyle, Tone, Truncation,
+    Badge, Button, ButtonClicked, Chart, ChartSeries, Container, ControlSize, EmptyState, GroupBox,
+    Kbd, Label, LevelIndicator, LevelStyle, ScrollView, SegmentMode, SegmentedControl,
+    SelectionChanged, Tag, TagStyle, Tone, Truncation,
 };
 use noa_gpui_core::{
     Appearance, Dirty, Key, Message, Role, Shortcut, ShortcutPressed, Style, Theme, UiTree,
@@ -15,7 +15,10 @@ use noa_gpui_platform::Screen;
 use noa_gpui_scene::{Color, Size};
 use noa_gpui_text::TextStore;
 
-use crate::fleet::{self, FRESHNESS_MAX, Grouping, Need, Phase, State, Worker};
+use crate::fleet::{
+    self, FRESHNESS_MAX, Fleet, Grouping, Need, Phase, State, Worker, minutes_text,
+};
+use crate::live::{Channel, Command, Link, Snapshot};
 
 const HEADER_HEIGHT: f32 = 48.0;
 const GUTTER: f32 = 12.0;
@@ -25,6 +28,10 @@ const RUNNING_CARD_WIDTH: f32 = 336.0;
 const LANE_LABEL_WIDTH: f32 = 104.0;
 const LANE_TOTAL_WIDTH: f32 = 44.0;
 const LANE_HEIGHT: f32 = 12.0;
+/// What a full lane's grow factors add up to. Grow factors that add up to
+/// less than 1 hand out only that fraction of the free space, so a lane is
+/// scaled to this whatever its span (a span under a minute is under 1).
+const LANE_SHARES: f64 = 1000.0;
 const GRAPH_WIDTH: f32 = 430.0;
 const HISTORY_HEIGHT: f32 = 256.0;
 /// Small but not zero: flex shrinks in proportion to `flex_shrink` times the
@@ -117,31 +124,97 @@ impl Panel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct View {
     grouping: Grouping,
-    expanded: Option<&'static str>,
+    expanded: Option<u64>,
     shown: [bool; 5],
+}
+
+impl View {
+    fn of(grouping: Grouping) -> Self {
+        View {
+            grouping,
+            expanded: None,
+            shown: [true; 5],
+        }
+    }
 }
 
 #[derive(Default)]
 struct QueueButtons {
-    open: Vec<(WidgetId, &'static str)>,
-    details: Vec<(WidgetId, &'static str)>,
+    open: Vec<(WidgetId, u64)>,
+    details: Vec<(WidgetId, u64)>,
+    /// The card shown expanded, whichever it is.
+    expanded: Option<u64>,
 }
 
 impl QueueButtons {
-    fn worker(buttons: &[(WidgetId, &'static str)], source: WidgetId) -> Option<&'static str> {
+    fn worker(buttons: &[(WidgetId, u64)], source: WidgetId) -> Option<u64> {
         buttons
             .iter()
             .find(|(id, _)| *id == source)
-            .map(|(_, label)| *label)
+            .map(|(_, pane)| *pane)
     }
+}
+
+/// Where the workers come from: the canned fleet (no link) or the live feed.
+#[derive(Default)]
+struct Feed {
+    fleet: Fleet,
+    link: Option<Link>,
+    synced_secs: u64,
+    channel: Option<Channel>,
+}
+
+impl Feed {
+    fn demo() -> Self {
+        Feed {
+            fleet: fleet::canned(),
+            ..Feed::default()
+        }
+    }
+
+    fn status(&self) -> String {
+        let n = self.fleet.workers.len();
+        match &self.link {
+            None => format!("ワーカー {n} · ダミーデータ"),
+            Some(Link::Connecting) => "接続中…".to_owned(),
+            Some(Link::Live) => format!(
+                "ワーカー {n} · 同期 {}前",
+                minutes_text(self.synced_secs as f64 / 60.0)
+            ),
+            Some(Link::Down(reason)) => format!("切断: {reason}"),
+        }
+    }
+}
+
+/// A widget whose content changes as time passes, updated in place by
+/// `Dashboard::refresh`; the pane names the worker it shows.
+#[derive(Debug, Clone, Copy)]
+enum Pulse {
+    Status,
+    Waited,
+    Longest,
+    QueueSince(u64),
+    QuietTag(u64),
+    Output(u64),
+    Freshness(u64),
+    RunningCaption(u64),
+    DoneCaption(u64),
+}
+
+struct TimelineParts {
+    span: WidgetId,
+    lanes: WidgetId,
 }
 
 pub struct Dashboard {
     tree: UiTree,
     view: View,
+    feed: Feed,
     status: WidgetId,
     grouping_control: WidgetId,
     queue_buttons: QueueButtons,
+    pulses: Vec<(WidgetId, Pulse)>,
+    timeline: Option<TimelineParts>,
     /// The size the last `prepare` laid the screen out at. A rebuilt screen is
     /// laid out at it at once (see `rebuilt`).
     viewport: Option<Size>,
@@ -150,16 +223,99 @@ pub struct Dashboard {
 }
 
 impl Dashboard {
+    /// The demo: the canned fleet.
     pub fn new(grouping: Grouping) -> Self {
-        Self::showing(View {
-            grouping,
-            expanded: None,
-            shown: [true; 5],
-        })
+        Self::showing(View::of(grouping))
     }
 
     fn showing(view: View) -> Self {
-        Self::build(view, Theme::for_appearance(Appearance::Dark))
+        Self::build(view, Theme::for_appearance(Appearance::Dark), Feed::demo())
+    }
+
+    /// Fed by the live feed, connecting until its first snapshot arrives.
+    pub fn live(grouping: Grouping, channel: Channel) -> Self {
+        let feed = Feed {
+            link: Some(Link::Connecting),
+            channel: Some(channel),
+            ..Feed::default()
+        };
+        Self::build(
+            View::of(grouping),
+            Theme::for_appearance(Appearance::Dark),
+            feed,
+        )
+    }
+
+    /// One live snapshot, with no feed behind it.
+    pub fn of_snapshot(grouping: Grouping, snapshot: Snapshot) -> Self {
+        Self::from_snapshot(View::of(grouping), snapshot)
+    }
+
+    fn from_snapshot(view: View, snapshot: Snapshot) -> Self {
+        let feed = Feed {
+            fleet: snapshot.fleet,
+            link: Some(snapshot.link),
+            synced_secs: snapshot.synced_secs,
+            channel: None,
+        };
+        Self::build(view, Theme::for_appearance(Appearance::Dark), feed)
+    }
+
+    /// Takes a snapshot in. One that changes only what time changes (texts,
+    /// meters, lanes) updates those widgets in place, so the scroll positions
+    /// and the hover survive; any other change rebuilds the screen.
+    fn apply(&mut self, snapshot: Snapshot, text: &mut TextStore) {
+        let structural = self.feed.link.as_ref() != Some(&snapshot.link)
+            || !self.feed.fleet.same_structure(&snapshot.fleet);
+        self.feed.fleet = snapshot.fleet;
+        self.feed.link = Some(snapshot.link);
+        self.feed.synced_secs = snapshot.synced_secs;
+        if structural {
+            self.rebuilt(self.view, text);
+        } else {
+            self.refresh(text);
+        }
+    }
+
+    fn refresh(&mut self, text: &mut TextStore) {
+        let (tree, fleet) = (&mut self.tree, &self.feed.fleet);
+        for &(id, pulse) in &self.pulses {
+            let worker = |pane: u64| fleet.worker(pane).expect("the same structure");
+            match pulse {
+                Pulse::Status => set_label(tree, id, self.feed.status()),
+                Pulse::Waited => set_tag(tree, id, waited_text(&fleet.workers)),
+                Pulse::Longest => {
+                    if let Some(worker) = longest(&fleet.workers) {
+                        set_tag(tree, id, longest_text(worker));
+                    }
+                }
+                Pulse::QueueSince(pane) => {
+                    let worker = worker(pane);
+                    if let Some(need) = worker.need() {
+                        set_label(tree, id, queue_since(worker, need));
+                    }
+                }
+                Pulse::QuietTag(pane) => set_tag(tree, id, quiet_text(worker(pane))),
+                Pulse::Output(pane) => {
+                    let values = worker(pane).lines_per_tick.clone();
+                    tree.update::<Chart, _>(id, |c, cx| c.set_values(cx, 0, values));
+                }
+                Pulse::Freshness(pane) => {
+                    let value = worker(pane).freshness;
+                    tree.update::<LevelIndicator, _>(id, |l, cx| l.set_value(cx, value));
+                }
+                Pulse::RunningCaption(pane) => set_label(tree, id, running_caption(worker(pane))),
+                Pulse::DoneCaption(pane) => set_label(tree, id, done_caption(worker(pane))),
+            }
+        }
+        if let Some(parts) = &self.timeline {
+            let span = timeline_span(&fleet.workers);
+            set_label(tree, parts.span, span_text(span));
+            for lane in tree.children(parts.lanes).to_vec() {
+                tree.remove(lane, text);
+            }
+            fill_lanes(tree, parts.lanes, &fleet.workers, self.view.grouping, span);
+        }
     }
 
     /// Builds the same screen again for a changed view, keeping the theme (the
@@ -185,7 +341,8 @@ impl Dashboard {
             self.tree.remove(root, text);
         }
         let viewport = self.viewport;
-        *self = Self::build(view, theme);
+        let feed = std::mem::take(&mut self.feed);
+        *self = Self::build(view, theme, feed);
         if let Some(viewport) = viewport {
             self.prepare(viewport, text);
             if let Some(root) = self.tree.root() {
@@ -194,9 +351,10 @@ impl Dashboard {
         }
     }
 
-    fn build(view: View, theme: Theme) -> Self {
+    fn build(view: View, theme: Theme, feed: Feed) -> Self {
         let grouping = view.grouping;
-        let workers = fleet::canned();
+        let workers = &feed.fleet.workers;
+        let mut pulses = Vec::new();
         let mut tree = UiTree::new();
         tree.set_theme(theme);
 
@@ -213,7 +371,7 @@ impl Dashboard {
             .background(Role::Background),
         );
 
-        let header = header(&mut tree, root, &workers, grouping, &view.shown);
+        let header = header(&mut tree, root, &feed, grouping, &view.shown, &mut pulses);
         for (panel, item) in Panel::ALL.into_iter().zip(header.hints) {
             tree.add_shortcut(panel.shortcut(), item);
         }
@@ -227,6 +385,7 @@ impl Dashboard {
             }),
         );
         let mut queue_buttons = QueueButtons::default();
+        let mut timeline_parts = None;
         #[cfg(test)]
         let mut panels = [None; 5];
         let now_shown = Panel::NOW.iter().any(|p| view.shown[*p as usize]);
@@ -234,7 +393,21 @@ impl Dashboard {
             (Panel::NOW.as_slice(), fill_remaining()),
             (Panel::HISTORY.as_slice(), history_row(now_shown)),
         ];
+        let nobody = feed.link.as_ref().filter(|_| workers.is_empty());
+        if let Some(link) = nobody {
+            empty(&mut tree, body, link);
+        }
+        // The demo's numbers stand for lines; the live ones count preview
+        // updates.
+        let output_caption = if feed.link.is_some() {
+            "出力の更新（回 / 5 秒）"
+        } else {
+            "出力（行 / 間隔）"
+        };
         for (members, style) in rows {
+            if nobody.is_some() {
+                break;
+            }
             if !members.iter().any(|p| view.shown[*p as usize]) {
                 continue;
             }
@@ -255,22 +428,36 @@ impl Dashboard {
                 }
                 match member {
                     Panel::Queue => {
-                        queue_buttons = queue(&mut tree, id, &workers, view.expanded);
+                        queue_buttons = queue(&mut tree, id, workers, view.expanded, &mut pulses);
                     }
-                    Panel::Running => running(&mut tree, id, &workers, grouping),
-                    Panel::Done => done(&mut tree, id, &workers, grouping),
-                    Panel::Timeline => timeline(&mut tree, id, &workers, grouping),
-                    Panel::Graph => graph(&mut tree, id, &workers),
+                    Panel::Running => {
+                        let cards = Cards {
+                            grouping,
+                            output_caption,
+                        };
+                        running(&mut tree, id, workers, cards, &mut pulses);
+                    }
+                    Panel::Done => done(&mut tree, id, workers, grouping, &mut pulses),
+                    Panel::Timeline => {
+                        timeline_parts = Some(timeline(&mut tree, id, workers, grouping));
+                    }
+                    Panel::Graph => graph(&mut tree, id, &feed.fleet),
                 }
             }
+        }
+        if let Some(channel) = &feed.channel {
+            channel.send(Command::Expand(queue_buttons.expanded));
         }
 
         Self {
             tree,
             view,
+            feed,
             status: header.status,
             grouping_control: header.grouping_control,
             queue_buttons,
+            pulses,
+            timeline: timeline_parts,
             viewport: None,
             #[cfg(test)]
             panels,
@@ -290,6 +477,17 @@ impl Screen for Dashboard {
     fn prepare(&mut self, viewport: Size, text: &mut TextStore) -> bool {
         self.viewport = Some(viewport);
         self.tree.prepare(viewport, text).is_some()
+    }
+
+    fn before_frame(&mut self, text: &mut TextStore) {
+        let latest = self
+            .feed
+            .channel
+            .as_ref()
+            .and_then(|channel| channel.snapshots.try_iter().last());
+        if let Some(snapshot) = latest {
+            self.apply(snapshot, text);
+        }
     }
 
     fn handle(&mut self, message: Message, text: &mut TextStore) {
@@ -316,18 +514,25 @@ impl Screen for Dashboard {
         if message.downcast_ref::<ButtonClicked>().is_none() {
             return;
         }
-        if let Some(label) = QueueButtons::worker(&self.queue_buttons.details, message.source) {
+        if let Some(pane) = QueueButtons::worker(&self.queue_buttons.details, message.source) {
             self.rebuilt(
                 View {
-                    expanded: Some(label),
+                    expanded: Some(pane),
                     ..self.view
                 },
                 text,
             );
-        } else if let Some(label) = QueueButtons::worker(&self.queue_buttons.open, message.source) {
-            let status = format!("モック: {label} のペインへ移動します");
-            self.tree
-                .update::<Label, _>(self.status, |l, cx| l.set_text(cx, status));
+        } else if let Some(pane) = QueueButtons::worker(&self.queue_buttons.open, message.source)
+            && let Some(worker) = self.feed.fleet.worker(pane)
+        {
+            let status = match &self.feed.channel {
+                Some(channel) => {
+                    channel.send(Command::Focus(pane));
+                    format!("{} のペインへ移動します", worker.label)
+                }
+                None => format!("モック: {} のペインへ移動します", worker.label),
+            };
+            set_label(&mut self.tree, self.status, status);
         }
     }
 }
@@ -375,6 +580,7 @@ fn need_color(need: Need) -> Color {
         Need::Approval => YELLOW,
         Need::Failure => RED,
         Need::Question => ORANGE,
+        Need::Notice => BLUE,
         Need::Quiet => GRAY,
     }
 }
@@ -446,10 +652,12 @@ fn hint_strip(tree: &mut UiTree, bar: WidgetId, shown: &[bool; 5]) -> [WidgetId;
 fn header(
     tree: &mut UiTree,
     root: WidgetId,
-    workers: &[Worker],
+    feed: &Feed,
     grouping: Grouping,
     shown: &[bool; 5],
+    pulses: &mut Vec<(WidgetId, Pulse)>,
 ) -> Header {
+    let workers = &feed.fleet.workers;
     let bar = tree.insert(
         Some(root),
         Container::new(Style {
@@ -494,25 +702,19 @@ fn header(
         tree.insert(Some(bar), Tag::new(format!("{name} {n}")).tone(tone));
     }
 
-    let waited: f64 = workers
-        .iter()
-        .map(|w| w.minutes_where(Phase::waits_on_a_person))
-        .sum();
-    tree.insert(
+    let waited = tree.insert(
         Some(bar),
-        Tag::new(format!("人待ち合計 {waited:.0} 分")).style(TagStyle::Outlined),
+        Tag::new(waited_text(workers)).style(TagStyle::Outlined),
     );
-    let longest = workers
-        .iter()
-        .filter(|w| w.need().is_some_and(|need| need != Need::Quiet))
-        .max_by(|a, b| a.wait_minutes.total_cmp(&b.wait_minutes));
-    if let Some(worker) = longest {
-        tree.insert(
+    pulses.push((waited, Pulse::Waited));
+    if let Some(worker) = longest(workers) {
+        let id = tree.insert(
             Some(bar),
-            Tag::new(format!("最長 {} {}", worker.label, worker.since))
+            Tag::new(longest_text(worker))
                 .style(TagStyle::Outlined)
                 .tone(Tone::Warning),
         );
+        pulses.push((id, Pulse::Longest));
     }
 
     spacer(tree, bar);
@@ -530,11 +732,12 @@ fn header(
     );
     let status = tree.insert(
         Some(status_slot),
-        Label::new(format!("ワーカー {} · ダミーデータ", workers.len()))
+        Label::new(feed.status())
             .font_size(12.0)
             .color(Role::Muted)
             .truncation(Truncation::Tail),
     );
+    pulses.push((status, Pulse::Status));
     caption(tree, bar, "グループ");
     let selected = Grouping::ALL
         .iter()
@@ -621,7 +824,99 @@ fn caption(tree: &mut UiTree, parent: WidgetId, text: impl Into<String>) -> Widg
     )
 }
 
+fn set_label(tree: &mut UiTree, id: WidgetId, text: String) {
+    tree.update::<Label, _>(id, |l, cx| l.set_text(cx, text));
+}
+
+fn set_tag(tree: &mut UiTree, id: WidgetId, text: String) {
+    tree.update::<Tag, _>(id, |t, cx| t.set_text(cx, text));
+}
+
+fn waited_text(workers: &[Worker]) -> String {
+    let waited: f64 = workers
+        .iter()
+        .map(|w| w.minutes_where(Phase::waits_on_a_person))
+        .sum();
+    format!("人待ち合計 {}", minutes_text(waited))
+}
+
+/// The worker waiting longest on a person. Only these needs have a wait
+/// text, known or a lower bound; a 通知 or a quiet worker has none.
+fn longest(workers: &[Worker]) -> Option<&Worker> {
+    workers
+        .iter()
+        .filter(|w| {
+            matches!(
+                w.need(),
+                Some(Need::Approval | Need::Failure | Need::Question)
+            )
+        })
+        .max_by(|a, b| a.wait_minutes.total_cmp(&b.wait_minutes))
+}
+
+/// The parts that are known, joined by `separator`.
+fn joined(parts: &[&str], separator: &str) -> String {
+    parts
+        .iter()
+        .filter(|part| !part.is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
+fn longest_text(worker: &Worker) -> String {
+    joined(&["最長", &worker.label, &worker.since], " ")
+}
+
+fn queue_since(worker: &Worker, need: Need) -> String {
+    joined(&[need.title(), &worker.since], " ")
+}
+
+fn quiet_text(worker: &Worker) -> String {
+    format!("静止 {:.0} 分", worker.wait_minutes)
+}
+
+/// Only times whose start is known are shown.
+fn running_caption(worker: &Worker) -> String {
+    let started = worker
+        .started_minutes
+        .map(|minutes| format!("{}前に開始", minutes_text(minutes)))
+        .unwrap_or_default();
+    let reports = format!("報告 {} 回", worker.reports);
+    joined(&[&started, &reports, &worker.since], " · ")
+}
+
+fn done_caption(worker: &Worker) -> String {
+    if worker.since.is_empty() {
+        return "完了".to_owned();
+    }
+    let took = worker
+        .took_minutes
+        .map(|minutes| format!("所要 {}", minutes_text(minutes)))
+        .unwrap_or_default();
+    joined(&[&worker.since, &took], " · ")
+}
+
+fn span_text(span: f64) -> String {
+    format!("← {}前　　いま →", minutes_text(span))
+}
+
+fn empty(tree: &mut UiTree, body: WidgetId, link: &Link) {
+    let state = match link {
+        Link::Connecting => EmptyState::new("Noa に接続しています…"),
+        Link::Live => EmptyState::new("エージェントのペインが見つかりません").message(
+            "claude / codex / agy が動いているペインと、+ctl で起動したワーカーがここに出ます",
+        ),
+        Link::Down(reason) => EmptyState::new("エージェントのペインが見つかりません")
+            .message(format!("Noa に接続できません: {reason}")),
+    };
+    state.width(560.0).insert(tree, body);
+}
+
 fn task_line(tree: &mut UiTree, parent: WidgetId, worker: &Worker) {
+    if worker.task.is_empty() {
+        return;
+    }
     tree.insert(
         Some(parent),
         Label::new(format!("依頼: {}", worker.task))
@@ -632,11 +927,51 @@ fn task_line(tree: &mut UiTree, parent: WidgetId, worker: &Worker) {
     );
 }
 
+fn detail_line(tree: &mut UiTree, parent: WidgetId, worker: &Worker) {
+    if worker.detail.is_empty() {
+        return;
+    }
+    tree.insert(
+        Some(parent),
+        Label::new(worker.detail.as_str())
+            .font_size(12.0)
+            .wrap(true),
+    );
+}
+
+/// The kind, model and branch tags every card starts with; no branch tag
+/// when the branch is unknown.
+fn identity_tags(tree: &mut UiTree, tags: WidgetId, worker: &Worker) {
+    tree.insert(
+        Some(tags),
+        Tag::new(worker.kind.as_str()).tone(Tone::Accent),
+    );
+    model_tag(tree, tags, worker);
+    branch_tag(tree, tags, worker);
+}
+
+/// A plain command has no model to show.
+fn model_tag(tree: &mut UiTree, parent: WidgetId, worker: &Worker) {
+    if worker.is_agent() {
+        tree.insert(Some(parent), Tag::new(worker.model_line()));
+    }
+}
+
+fn branch_tag(tree: &mut UiTree, parent: WidgetId, worker: &Worker) {
+    if !worker.branch.is_empty() {
+        tree.insert(
+            Some(parent),
+            Tag::new(worker.branch.as_str()).style(TagStyle::Outlined),
+        );
+    }
+}
+
 fn queue(
     tree: &mut UiTree,
     rail: WidgetId,
     workers: &[Worker],
-    expanded: Option<&'static str>,
+    expanded: Option<u64>,
+    pulses: &mut Vec<(WidgetId, Pulse)>,
 ) -> QueueButtons {
     let mut waiting: Vec<(&Worker, Need)> = workers
         .iter()
@@ -648,27 +983,38 @@ fn queue(
             .cmp(&b_need.rank())
             .then(b.wait_minutes.total_cmp(&a.wait_minutes))
     });
-    let expanded = expanded.or(waiting.first().map(|(worker, _)| worker.label));
+    let expanded = expanded
+        .filter(|pane| waiting.iter().any(|(w, _)| w.pane == *pane))
+        .or(waiting.first().map(|(worker, _)| worker.pane));
 
     panel_title(tree, rail, "要対応", waiting.len(), Tone::Warning);
     let list = card_list(tree, rail);
-    let mut buttons = QueueButtons::default();
+    let mut buttons = QueueButtons {
+        expanded,
+        ..QueueButtons::default()
+    };
     for (worker, need) in waiting {
-        let card = queue_card(tree, list, worker, need);
-        if expanded == Some(worker.label) {
+        let card = queue_card(tree, list, worker, need, pulses);
+        if expanded == Some(worker.pane) {
             buttons
                 .open
-                .push((queue_card_body(tree, card, worker), worker.label));
+                .push((queue_card_body(tree, card, worker), worker.pane));
         } else {
             buttons
                 .details
-                .push((queue_card_summary(tree, card, worker), worker.label));
+                .push((queue_card_summary(tree, card, worker), worker.pane));
         }
     }
     buttons
 }
 
-fn queue_card(tree: &mut UiTree, list: WidgetId, worker: &Worker, need: Need) -> WidgetId {
+fn queue_card(
+    tree: &mut UiTree,
+    list: WidgetId,
+    worker: &Worker,
+    need: Need,
+    pulses: &mut Vec<(WidgetId, Pulse)>,
+) -> WidgetId {
     let color = need_color(need);
     let card = tree.insert(
         Some(list),
@@ -694,16 +1040,20 @@ fn queue_card(tree: &mut UiTree, list: WidgetId, worker: &Worker, need: Need) ->
             .weight(700)
             .color(color),
     );
-    tree.insert(Some(head), Label::new(worker.label).weight(700));
-    tree.insert(Some(head), Tag::new(worker.kind).tone(Tone::Accent));
-    spacer(tree, head);
+    tree.insert(Some(head), Label::new(worker.label.as_str()).weight(700));
     tree.insert(
         Some(head),
-        Label::new(format!("{} {}", need.title(), worker.since))
+        Tag::new(worker.kind.as_str()).tone(Tone::Accent),
+    );
+    spacer(tree, head);
+    let since = tree.insert(
+        Some(head),
+        Label::new(queue_since(worker, need))
             .font_size(12.0)
             .weight(700)
             .color(color),
     );
+    pulses.push((since, Pulse::QueueSince(worker.pane)));
     card
 }
 
@@ -713,13 +1063,15 @@ fn queue_card_summary(tree: &mut UiTree, card: WidgetId, worker: &Worker) -> Wid
         Container::row().align_items(AlignItems::CENTER).gap(8.0),
     );
     let detail = tree.insert(Some(row), Container::new(fill_remaining()));
-    tree.insert(
-        Some(detail),
-        Label::new(worker.detail)
-            .font_size(12.0)
-            .color(Role::Muted)
-            .truncation(Truncation::Tail),
-    );
+    if !worker.detail.is_empty() {
+        tree.insert(
+            Some(detail),
+            Label::new(worker.detail.as_str())
+                .font_size(12.0)
+                .color(Role::Muted)
+                .truncation(Truncation::Tail),
+        );
+    }
     tree.insert(
         Some(row),
         Button::new("詳細").control_size(ControlSize::Small),
@@ -729,85 +1081,134 @@ fn queue_card_summary(tree: &mut UiTree, card: WidgetId, worker: &Worker) -> Wid
 fn queue_card_body(tree: &mut UiTree, card: WidgetId, worker: &Worker) -> WidgetId {
     task_line(tree, card, worker);
 
-    let screen = tree.insert(
-        Some(card),
-        Container::new(Style {
-            flex_direction: FlexDirection::Column,
-            gap: gap(2.0),
-            padding: LayoutRect::length(8.0),
-            ..Default::default()
-        })
-        .background(Role::Background)
-        .radius(6.0),
-    );
-    for line in worker.screen_tail {
-        tree.insert(
-            Some(screen),
-            Label::new(*line).font_size(11.0).font_family("monospace"),
+    if !worker.screen_tail.is_empty() {
+        let screen = tree.insert(
+            Some(card),
+            Container::new(Style {
+                flex_direction: FlexDirection::Column,
+                gap: gap(2.0),
+                padding: LayoutRect::length(8.0),
+                ..Default::default()
+            })
+            .background(Role::Background)
+            .radius(6.0),
         );
+        for line in &worker.screen_tail {
+            tree.insert(
+                Some(screen),
+                Label::new(line.as_str())
+                    .font_size(11.0)
+                    .font_family("monospace")
+                    .truncation(Truncation::Tail),
+            );
+        }
     }
 
+    // 開く never gives way: the orchestrator's name is cut first, then the
+    // tags are clipped.
     let actions = tree.insert(
         Some(card),
         Container::row().align_items(AlignItems::CENTER).gap(8.0),
     );
-    tree.insert(
+    let tags = tree.insert(
         Some(actions),
-        Tag::new(worker.branch).style(TagStyle::Outlined),
+        Container::new(Style {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::CENTER,
+            gap: gap(8.0),
+            flex_shrink: HINT_STRIP_SHRINK,
+            min_size: LayoutSize {
+                width: length(0.0),
+                height: auto(),
+            },
+            ..Default::default()
+        })
+        .clip(true),
     );
-    tree.insert(Some(actions), Tag::new(worker.model_line()));
+    branch_tag(tree, tags, worker);
+    model_tag(tree, tags, worker);
     spacer(tree, actions);
-    caption(tree, actions, worker.orchestrator);
+    let slot = tree.insert(
+        Some(actions),
+        Container::new(Style {
+            flex_shrink: 1.0,
+            min_size: LayoutSize {
+                width: length(0.0),
+                height: auto(),
+            },
+            ..Default::default()
+        }),
+    );
+    tree.insert(
+        Some(slot),
+        Label::new(worker.orchestrator.as_str())
+            .font_size(11.0)
+            .color(Role::Muted)
+            .truncation(Truncation::Tail),
+    );
     tree.insert(
         Some(actions),
         Button::new("開く").control_size(ControlSize::Small),
     )
 }
 
-fn running(tree: &mut UiTree, column: WidgetId, workers: &[Worker], grouping: Grouping) {
+/// How the running and done panels lay their cards out.
+#[derive(Clone, Copy)]
+struct Cards {
+    grouping: Grouping,
+    output_caption: &'static str,
+}
+
+fn running(
+    tree: &mut UiTree,
+    column: WidgetId,
+    workers: &[Worker],
+    cards: Cards,
+    pulses: &mut Vec<(WidgetId, Pulse)>,
+) {
     let members: Vec<&Worker> = workers
         .iter()
         .filter(|w| w.state == State::Running)
         .collect();
     panel_title(tree, column, "作業中", members.len(), Tone::Success);
     let scroll = card_list(tree, column);
-    for (name, group) in grouping.split(members) {
+    for (name, group) in cards.grouping.split(members) {
         if let Some(name) = name {
             group_header(tree, scroll, name, group.len());
         }
         let grid = tree.insert(Some(scroll), Container::wrapping_row(8.0, 8.0));
         for worker in group {
-            running_card(tree, grid, worker);
+            running_card(tree, grid, worker, cards.output_caption, pulses);
         }
     }
 }
 
-fn running_card(tree: &mut UiTree, grid: WidgetId, worker: &Worker) {
+fn running_card(
+    tree: &mut UiTree,
+    grid: WidgetId,
+    worker: &Worker,
+    output_caption: &str,
+    pulses: &mut Vec<(WidgetId, Pulse)>,
+) {
+    let pane = worker.pane;
     let card = tree.insert(
         Some(grid),
-        GroupBox::card(worker.label).width(RUNNING_CARD_WIDTH),
+        GroupBox::card(worker.label.as_str()).width(RUNNING_CARD_WIDTH),
     );
     let tags = tree.insert(
         Some(card),
         Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
     );
-    tree.insert(Some(tags), Tag::new(worker.kind).tone(Tone::Accent));
-    tree.insert(Some(tags), Tag::new(worker.model_line()));
-    tree.insert(
-        Some(tags),
-        Tag::new(worker.branch).style(TagStyle::Outlined),
-    );
+    identity_tags(tree, tags, worker);
     if worker.quiet {
-        tree.insert(
+        let id = tree.insert(
             Some(tags),
-            Tag::new(format!("静止 {:.0} 分", worker.wait_minutes)).tone(Tone::Critical),
+            Tag::new(quiet_text(worker)).tone(Tone::Critical),
         );
+        pulses.push((id, Pulse::QuietTag(pane)));
     }
     task_line(tree, card, worker);
-    tree.insert(
-        Some(card),
-        Label::new(worker.detail).font_size(12.0).wrap(true),
-    );
+    detail_line(tree, card, worker);
 
     let meters = tree.insert(
         Some(card),
@@ -817,18 +1218,19 @@ fn running_card(tree: &mut UiTree, grid: WidgetId, worker: &Worker) {
             .gap(12.0),
     );
     let output = tree.insert(Some(meters), Container::column().gap(2.0));
-    caption(tree, output, "出力（行 / 間隔）");
-    tree.insert(
+    caption(tree, output, output_caption);
+    let chart = tree.insert(
         Some(output),
         Chart::line(vec![String::new(); worker.lines_per_tick.len()])
-            .series(ChartSeries::new("行", worker.lines_per_tick.to_vec()))
+            .series(ChartSeries::new("行", worker.lines_per_tick.clone()))
             .sparkline()
             .width(170.0)
             .height(26.0),
     );
+    pulses.push((chart, Pulse::Output(pane)));
     let fresh = tree.insert(Some(meters), Container::column().gap(2.0));
     caption(tree, fresh, "鮮度");
-    tree.insert(
+    let level = tree.insert(
         Some(fresh),
         LevelIndicator::new(
             LevelStyle::DiscreteCapacity,
@@ -840,20 +1242,19 @@ fn running_card(tree: &mut UiTree, grid: WidgetId, worker: &Worker) {
         .critical(1.0)
         .width(80.0),
     );
+    pulses.push((level, Pulse::Freshness(pane)));
 
-    caption(
-        tree,
-        card,
-        format!(
-            "{:.0} 分前に開始 · 報告 {} 回 · {}",
-            worker.total_minutes(),
-            worker.reports,
-            worker.since
-        ),
-    );
+    let id = caption(tree, card, running_caption(worker));
+    pulses.push((id, Pulse::RunningCaption(pane)));
 }
 
-fn done(tree: &mut UiTree, column: WidgetId, workers: &[Worker], grouping: Grouping) {
+fn done(
+    tree: &mut UiTree,
+    column: WidgetId,
+    workers: &[Worker],
+    grouping: Grouping,
+    pulses: &mut Vec<(WidgetId, Pulse)>,
+) {
     let members: Vec<&Worker> = workers
         .iter()
         .filter(|w| w.state == State::Finished)
@@ -865,45 +1266,49 @@ fn done(tree: &mut UiTree, column: WidgetId, workers: &[Worker], grouping: Group
             group_header(tree, list, name, group.len());
         }
         for worker in group {
-            done_card(tree, list, worker);
+            done_card(tree, list, worker, pulses);
         }
     }
 }
 
-fn done_card(tree: &mut UiTree, list: WidgetId, worker: &Worker) {
-    let card = tree.insert(Some(list), GroupBox::card(worker.label).fill_width());
+fn done_card(
+    tree: &mut UiTree,
+    list: WidgetId,
+    worker: &Worker,
+    pulses: &mut Vec<(WidgetId, Pulse)>,
+) {
+    let card = tree.insert(
+        Some(list),
+        GroupBox::card(worker.label.as_str()).fill_width(),
+    );
     let tags = tree.insert(
         Some(card),
         Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
     );
-    tree.insert(Some(tags), Tag::new(worker.kind).tone(Tone::Accent));
-    tree.insert(Some(tags), Tag::new(worker.model_line()));
-    tree.insert(
-        Some(tags),
-        Tag::new(worker.branch).style(TagStyle::Outlined),
-    );
-    tree.insert(Some(tags), Tag::new("結果あり").tone(Tone::Success));
+    identity_tags(tree, tags, worker);
+    if worker.has_result {
+        tree.insert(Some(tags), Tag::new("結果あり").tone(Tone::Success));
+    }
     task_line(tree, card, worker);
-    tree.insert(
-        Some(card),
-        Label::new(worker.detail).font_size(12.0).wrap(true),
-    );
-    caption(
-        tree,
-        card,
-        format!(
-            "{} · 所要 {:.0} 分",
-            worker.since,
-            worker.minutes_where(|phase| phase != Phase::Ended)
-        ),
-    );
+    detail_line(tree, card, worker);
+    let id = caption(tree, card, done_caption(worker));
+    pulses.push((id, Pulse::DoneCaption(worker.pane)));
 }
 
-fn timeline(tree: &mut UiTree, section: WidgetId, workers: &[Worker], grouping: Grouping) {
-    let span = workers
+fn timeline_span(workers: &[Worker]) -> f64 {
+    workers
         .iter()
         .map(Worker::total_minutes)
-        .fold(0.0, f64::max);
+        .fold(0.0, f64::max)
+}
+
+fn timeline(
+    tree: &mut UiTree,
+    section: WidgetId,
+    workers: &[Worker],
+    grouping: Grouping,
+) -> TimelineParts {
+    let span = timeline_span(workers);
 
     let title = tree.insert(
         Some(section),
@@ -932,7 +1337,7 @@ fn timeline(tree: &mut UiTree, section: WidgetId, workers: &[Worker], grouping: 
         caption(tree, item, phase.title());
     }
     spacer(tree, title);
-    caption(tree, title, format!("← {span:.0} 分前　　いま →"));
+    let span_caption = caption(tree, title, span_text(span));
 
     let lanes = tree.insert(
         Some(section),
@@ -942,6 +1347,20 @@ fn timeline(tree: &mut UiTree, section: WidgetId, workers: &[Worker], grouping: 
             ..fill_remaining()
         }),
     );
+    fill_lanes(tree, lanes, workers, grouping, span);
+    TimelineParts {
+        span: span_caption,
+        lanes,
+    }
+}
+
+fn fill_lanes(
+    tree: &mut UiTree,
+    lanes: WidgetId,
+    workers: &[Worker],
+    grouping: Grouping,
+    span: f64,
+) {
     for (name, group) in grouping.split(workers) {
         if let Some(name) = name {
             group_header(tree, lanes, name, group.len());
@@ -958,7 +1377,12 @@ fn lane(tree: &mut UiTree, lanes: WidgetId, worker: &Worker, span: f64) {
         Container::row().align_items(AlignItems::CENTER).gap(8.0),
     );
     let name = tree.insert(Some(row), Container::row().width(LANE_LABEL_WIDTH));
-    tree.insert(Some(name), Label::new(worker.label).font_size(11.0));
+    tree.insert(
+        Some(name),
+        Label::new(worker.label.as_str())
+            .font_size(11.0)
+            .truncation(Truncation::Tail),
+    );
 
     let track = tree.insert(
         Some(row),
@@ -974,8 +1398,9 @@ fn lane(tree: &mut UiTree, lanes: WidgetId, worker: &Worker, span: f64) {
         .radius(3.0)
         .clip(true),
     );
+    let scale = if span > 0.0 { LANE_SHARES / span } else { 0.0 };
     let segment = |minutes: f64| Style {
-        flex_grow: minutes as f32,
+        flex_grow: (minutes * scale) as f32,
         flex_basis: length(0.0),
         size: LayoutSize {
             width: auto(),
@@ -987,7 +1412,7 @@ fn lane(tree: &mut UiTree, lanes: WidgetId, worker: &Worker, span: f64) {
     if before_start > 0.0 {
         tree.insert(Some(track), Container::new(segment(before_start)));
     }
-    for (phase, minutes) in worker.phases {
+    for (phase, minutes) in &worker.phases {
         tree.insert(
             Some(track),
             Container::new(segment(*minutes)).background(phase_color(*phase)),
@@ -1000,7 +1425,7 @@ fn lane(tree: &mut UiTree, lanes: WidgetId, worker: &Worker, span: f64) {
             .width(LANE_TOTAL_WIDTH)
             .justify_content(JustifyContent::END),
     );
-    caption(tree, total, format!("{:.0} 分", worker.total_minutes()));
+    caption(tree, total, minutes_text(worker.total_minutes()));
 }
 
 fn mark(worker: &Worker) -> (&'static str, Color) {
@@ -1011,7 +1436,8 @@ fn mark(worker: &Worker) -> (&'static str, Color) {
     }
 }
 
-fn graph(tree: &mut UiTree, section: WidgetId, workers: &[Worker]) {
+fn graph(tree: &mut UiTree, section: WidgetId, fleet: &Fleet) {
+    let workers = &fleet.workers;
     tree.insert(
         Some(section),
         Label::new("関連（親 → ワーカー → 孫）")
@@ -1020,15 +1446,19 @@ fn graph(tree: &mut UiTree, section: WidgetId, workers: &[Worker]) {
             .color(Role::Muted),
     );
     let roots = tree.insert(Some(section), Container::column().gap(12.0));
-    for name in fleet::ORCHESTRATORS {
+    for orchestrator in &fleet.orchestrators {
         let row = tree.insert(
             Some(roots),
             Container::row().align_items(AlignItems::CENTER),
         );
-        node(tree, row, "◆", name, BLUE);
+        // An orchestrator that is a worker itself is the root, not a child.
+        let own = orchestrator.pane.and_then(|pane| fleet.worker(pane));
+        let (symbol, color) = own.map_or(("◆", BLUE), mark);
+        node(tree, row, symbol, &orchestrator.name, color);
         let children: Vec<&Worker> = workers
             .iter()
-            .filter(|w| w.orchestrator == name && w.parent.is_none())
+            .filter(|w| w.orchestrator == orchestrator.name && w.parent.is_none())
+            .filter(|w| Some(w.pane) != orchestrator.pane)
             .collect();
         connect(tree, row, workers, &children);
     }
@@ -1096,10 +1526,10 @@ fn connect(tree: &mut UiTree, row: WidgetId, workers: &[Worker], children: &[&Wo
         );
         edge(tree, child_row, 8.0);
         let (symbol, color) = mark(child);
-        node(tree, child_row, symbol, child.label, color);
+        node(tree, child_row, symbol, &child.label, color);
         let grandchildren: Vec<&Worker> = workers
             .iter()
-            .filter(|w| w.parent == Some(child.label))
+            .filter(|w| w.parent == Some(child.pane))
             .collect();
         connect(tree, child_row, workers, &grandchildren);
     }
@@ -1135,6 +1565,10 @@ mod tests {
         dashboard.prepare(window(), text);
     }
 
+    fn label_of(dashboard: &Dashboard, pane: u64) -> &str {
+        &dashboard.feed.fleet.worker(pane).unwrap().label
+    }
+
     fn center(tree: &UiTree, id: WidgetId) -> Point {
         let origin = tree.window_origin(id).unwrap();
         let rect = tree.layout(id).unwrap().rect;
@@ -1168,7 +1602,7 @@ mod tests {
             .queue_buttons
             .open
             .iter()
-            .map(|(_, label)| *label)
+            .map(|(_, pane)| label_of(&dashboard, *pane))
             .collect();
         assert_eq!(open, ["fix-tests"]);
     }
@@ -1180,11 +1614,11 @@ mod tests {
         let pos = center(&dashboard.tree, button);
         click(&mut dashboard, &mut text, pos);
         assert_eq!(dashboard.view.expanded, Some(label));
-        let open: Vec<&str> = dashboard
+        let open: Vec<u64> = dashboard
             .queue_buttons
             .open
             .iter()
-            .map(|(_, label)| *label)
+            .map(|(_, pane)| *pane)
             .collect();
         assert_eq!(open, [label]);
     }
@@ -1196,6 +1630,7 @@ mod tests {
         let pos = center(&dashboard.tree, button);
         click(&mut dashboard, &mut text, pos);
         let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
+        let label = label_of(&dashboard, label);
         assert!(status.text().contains(label), "{}", status.text());
     }
 
@@ -1620,6 +2055,7 @@ mod tests {
         dashboard.prepare(window(), &mut text);
         dashboard.dispatch(Event::PointerUp { pos, button }, &mut text);
         let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
+        let label = label_of(&dashboard, label);
         assert!(status.text().contains(label), "{}", status.text());
     }
 
@@ -1657,11 +2093,15 @@ mod tests {
             "the frame after the rebuild presents nothing"
         );
         let shown = frame_of(dashboard.display_list(), text);
-        let mut fresh = Dashboard::showing(dashboard.view);
+        let fresh = Dashboard::showing(dashboard.view);
+        assert_eq!(shown, fresh_frame(fresh));
+        assert_ne!(shown, before, "the frame still shows the old screen");
+    }
+
+    fn fresh_frame(mut fresh: Dashboard) -> Vec<String> {
         let mut fresh_text = TextStore::new(Default::default());
         fresh.prepare(window(), &mut fresh_text);
-        assert_eq!(shown, frame_of(fresh.display_list(), &fresh_text));
-        assert_ne!(shown, before, "the frame still shows the old screen");
+        frame_of(fresh.display_list(), &fresh_text)
     }
 
     #[test]
@@ -1727,5 +2167,496 @@ mod tests {
         dashboard.dispatch(Event::PointerDown { pos, button }, &mut text);
         dashboard.dispatch(Event::PointerUp { pos, button }, &mut text);
         assert_eq!(dashboard.view.grouping, Grouping::Flat);
+    }
+
+    fn live(fleet: Fleet, synced_secs: u64) -> Snapshot {
+        Snapshot {
+            fleet,
+            link: Link::Live,
+            synced_secs,
+        }
+    }
+
+    /// The canned fleet with six more running workers, so that the running
+    /// list scrolls at the default window size.
+    fn busy_fleet() -> Fleet {
+        let mut fleet = fleet::canned();
+        for n in 0..6 {
+            let mut worker = fleet.workers[0].clone();
+            worker.pane = 100 + n;
+            worker.label = format!("extra-{n}");
+            fleet.workers.push(worker);
+        }
+        fleet
+    }
+
+    /// The same workers a while later: only what time changes differs.
+    fn later(fleet: &Fleet) -> Fleet {
+        let mut later = fleet.clone();
+        for worker in &mut later.workers {
+            worker.since = format!("later {}", worker.pane);
+            worker.wait_minutes += 1.0;
+            worker.reports += 1;
+            worker.lines_per_tick.iter_mut().for_each(|v| *v += 1.0);
+            worker.freshness = 2.0;
+            worker.phases.push((Phase::Running, 5.0));
+        }
+        later
+    }
+
+    fn pulse_id(dashboard: &Dashboard, wanted: impl Fn(Pulse) -> bool) -> WidgetId {
+        let (id, _) = dashboard.pulses.iter().find(|(_, p)| wanted(*p)).unwrap();
+        *id
+    }
+
+    #[test]
+    fn a_volatile_snapshot_updates_in_place() {
+        let fleet = busy_fleet();
+        let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet.clone(), 1));
+        let mut text = TextStore::new(Default::default());
+        dashboard.prepare(window(), &mut text);
+        let list = list_of(&dashboard);
+        dashboard
+            .tree
+            .update::<ScrollView, _>(list, |s, cx| s.set_offset(cx, 40.0));
+        dashboard.prepare(window(), &mut text);
+        let offset = |d: &Dashboard| d.tree.get::<ScrollView>(list).map(ScrollView::offset);
+        assert_eq!(offset(&dashboard), Some(40.0), "the running list scrolls");
+        let chart = pulse_id(&dashboard, |p| matches!(p, Pulse::Output(11)));
+        let since = pulse_id(&dashboard, |p| matches!(p, Pulse::QueueSince(14)));
+
+        let later = later(&fleet);
+        dashboard.apply(live(later.clone(), 4), &mut text);
+        dashboard.prepare(window(), &mut text);
+
+        assert_eq!(
+            offset(&dashboard),
+            Some(40.0),
+            "the running list was rebuilt"
+        );
+        let values = &dashboard.tree.get::<Chart>(chart).unwrap().series_list()[0].values;
+        assert_eq!(values, &later.worker(11).unwrap().lines_per_tick);
+        let since = dashboard.tree.get::<Label>(since).unwrap();
+        assert_eq!(since.text(), "承認待ち later 14");
+        let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
+        assert!(status.text().contains("同期 4 秒前"), "{}", status.text());
+        // The lanes were made again and the old ones' text layouts released:
+        // the screen shows and owns what one built for the later fleet does.
+        let mut fresh = Dashboard::of_snapshot(Grouping::Orchestrator, live(later, 4));
+        let mut fresh_text = TextStore::new(Default::default());
+        fresh.prepare(window(), &mut fresh_text);
+        let fresh_list = list_of(&fresh);
+        fresh
+            .tree
+            .update::<ScrollView, _>(fresh_list, |s, cx| s.set_offset(cx, 40.0));
+        fresh.prepare(window(), &mut fresh_text);
+        assert_eq!(
+            frame_of(dashboard.display_list(), &text),
+            frame_of(fresh.display_list(), &fresh_text)
+        );
+        assert_eq!(text.layouts().len(), fresh_text.layouts().len());
+    }
+
+    fn list_of(dashboard: &Dashboard) -> WidgetId {
+        let running = dashboard.panels[Panel::Running as usize].unwrap();
+        dashboard.tree.children(running)[1]
+    }
+
+    #[test]
+    fn a_structural_snapshot_rebuilds_the_screen() {
+        let fleet = fleet::canned();
+        let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet.clone(), 1));
+        let mut text = TextStore::new(Default::default());
+        dashboard.prepare(window(), &mut text);
+        let before = frame_of(dashboard.display_list(), &text);
+        let mut changed = fleet;
+        let worker = changed.workers.iter_mut().find(|w| w.pane == 12).unwrap();
+        worker.state = State::Permission;
+        worker.detail = "Bash: cargo publish".into();
+        dashboard.apply(live(changed.clone(), 1), &mut text);
+        let buttons = &dashboard.queue_buttons;
+        assert_eq!(buttons.open.len() + buttons.details.len(), 6);
+        assert!(buttons.details.iter().any(|(_, pane)| *pane == 12));
+        assert!(dashboard.needs_update(window()));
+        assert!(dashboard.prepare(window(), &mut text));
+        let shown = frame_of(dashboard.display_list(), &text);
+        let fresh = Dashboard::of_snapshot(Grouping::Orchestrator, live(changed, 1));
+        assert_eq!(shown, fresh_frame(fresh));
+        assert_ne!(shown, before);
+    }
+
+    #[test]
+    fn with_no_workers_the_body_says_why() {
+        let down = Snapshot {
+            fleet: Fleet::default(),
+            link: Link::Down("no token".into()),
+            synced_secs: 0,
+        };
+        let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, down);
+        let mut text = TextStore::new(Default::default());
+        dashboard.prepare(window(), &mut text);
+        assert!(dashboard.panels.iter().all(Option::is_none));
+        let tree = &dashboard.tree;
+        let texts = labels_under(tree, tree.root().unwrap());
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Noa に接続できません: no token")),
+            "{texts:?}"
+        );
+        let status = tree.get::<Label>(dashboard.status).unwrap();
+        assert_eq!(status.text(), "切断: no token");
+    }
+
+    fn labels_under(tree: &UiTree, id: WidgetId) -> Vec<String> {
+        let own = tree.get::<Label>(id).map(|l| l.text().to_owned());
+        own.into_iter()
+            .chain(
+                tree.children(id)
+                    .iter()
+                    .flat_map(|child| labels_under(tree, *child)),
+            )
+            .collect()
+    }
+
+    #[test]
+    fn a_live_screen_follows_its_feed() {
+        let (channel, snapshots, commands) = Channel::detached();
+        let mut dashboard = Dashboard::live(Grouping::Orchestrator, channel);
+        let mut text = TextStore::new(Default::default());
+        dashboard.prepare(window(), &mut text);
+        assert_eq!(commands.try_recv(), Ok(Command::Expand(None)));
+        let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
+        assert_eq!(status.text(), "接続中…");
+
+        snapshots.send(live(fleet::canned(), 0)).unwrap();
+        snapshots.send(live(fleet::canned(), 2)).unwrap();
+        dashboard.before_frame(&mut text);
+        dashboard.prepare(window(), &mut text);
+        assert_eq!(commands.try_recv(), Ok(Command::Expand(Some(14))));
+        let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
+        assert_eq!(status.text(), "ワーカー 9 · 同期 2 秒前");
+
+        let (open, pane) = dashboard.queue_buttons.open[0];
+        let pos = center(&dashboard.tree, open);
+        click(&mut dashboard, &mut text, pos);
+        assert_eq!(commands.try_recv(), Ok(Command::Focus(pane)));
+        let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
+        assert_eq!(status.text(), "fix-tests のペインへ移動します");
+    }
+
+    fn text_of(dashboard: &Dashboard, wanted: impl Fn(Pulse) -> bool) -> String {
+        let id = pulse_id(dashboard, wanted);
+        dashboard.tree.get::<Label>(id).unwrap().text().to_owned()
+    }
+
+    #[test]
+    fn unknown_times_and_results_are_not_shown() {
+        let mut fleet = fleet::canned();
+        for worker in &mut fleet.workers {
+            worker.started_minutes = None;
+            worker.took_minutes = None;
+            worker.has_result = false;
+        }
+        fleet
+            .workers
+            .iter_mut()
+            .find(|w| w.pane == 18)
+            .unwrap()
+            .since = String::new();
+        let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet, 0));
+        let mut text = TextStore::new(Default::default());
+        dashboard.prepare(window(), &mut text);
+        assert_eq!(
+            text_of(&dashboard, |p| matches!(p, Pulse::RunningCaption(11))),
+            "報告 7 回 · 8 秒前に出力"
+        );
+        assert_eq!(
+            text_of(&dashboard, |p| matches!(p, Pulse::DoneCaption(18))),
+            "完了"
+        );
+        assert_eq!(
+            text_of(&dashboard, |p| matches!(p, Pulse::DoneCaption(17))),
+            "4 分前に完了"
+        );
+        let tree = &dashboard.tree;
+        let tags = tags_under(tree, tree.root().unwrap());
+        assert!(!tags.iter().any(|t| t == "結果あり"), "{tags:?}");
+    }
+
+    fn tags_under(tree: &UiTree, id: WidgetId) -> Vec<String> {
+        let own = tree.get::<Tag>(id).map(|t| t.text().to_owned());
+        own.into_iter()
+            .chain(
+                tree.children(id)
+                    .iter()
+                    .flat_map(|child| tags_under(tree, *child)),
+            )
+            .collect()
+    }
+
+    #[test]
+    fn the_demo_done_cards_keep_their_times_and_results() {
+        let (dashboard, _text) = laid_out(Grouping::Orchestrator);
+        assert_eq!(
+            text_of(&dashboard, |p| matches!(p, Pulse::DoneCaption(17))),
+            "4 分前に完了 · 所要 16 分"
+        );
+        let tree = &dashboard.tree;
+        let tags = tags_under(tree, tree.root().unwrap());
+        assert_eq!(tags.iter().filter(|t| *t == "結果あり").count(), 2);
+    }
+
+    #[test]
+    fn a_long_lane_label_is_cut_inside_its_column() {
+        let mut fleet = fleet::canned();
+        fleet.workers[0].label = "noa-gpui ウィジェットによるUI拡張案".into();
+        let mut dashboard = Dashboard::of_snapshot(Grouping::Flat, live(fleet, 0));
+        let mut text = TextStore::new(Default::default());
+        dashboard.prepare(window(), &mut text);
+        let tree = &dashboard.tree;
+        let lanes = dashboard.timeline.as_ref().unwrap().lanes;
+        let column = tree.children(tree.children(lanes)[0])[0];
+        let label = tree.children(column)[0];
+        let shown = tree.get::<Label>(label).unwrap();
+        assert_ne!(shown.shown_text(), shown.text());
+        assert!(shown.shown_text().ends_with('…'), "{}", shown.shown_text());
+        let (column, label) = (rect(tree, column), rect(tree, label));
+        assert!(
+            label[0] >= column[0] - 0.5 && label[0] + label[2] <= column[0] + column[2] + 0.5,
+            "label {label:?} is not inside its column {column:?}"
+        );
+    }
+
+    const REPORTED_ORCHESTRATOR: &str = "noa-gpui ウィジェットによるUI拡張案";
+
+    fn graph_labels(dashboard: &Dashboard) -> Vec<String> {
+        let graph = dashboard.panels[Panel::Graph as usize].unwrap();
+        labels_under(&dashboard.tree, graph)
+    }
+
+    #[test]
+    fn the_orchestrator_is_the_graph_root_not_its_own_child() {
+        let fleet = crate::live::tests::reported_fleet();
+        let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet, 0));
+        let mut text = TextStore::new(Default::default());
+        dashboard.prepare(window(), &mut text);
+        let labels = graph_labels(&dashboard);
+        let at = |name: &str| labels.iter().position(|l| l == name).unwrap();
+        let named = labels
+            .iter()
+            .filter(|l| *l == REPORTED_ORCHESTRATOR)
+            .count();
+        assert_eq!(named, 1, "{labels:?}");
+        // The root carries its own pane's state: running.
+        assert_eq!(labels[at(REPORTED_ORCHESTRATOR) - 1], "●", "{labels:?}");
+        assert!(at("demo-sleep") > at(REPORTED_ORCHESTRATOR), "{labels:?}");
+        assert!(at("demo-agent") > at(REPORTED_ORCHESTRATOR), "{labels:?}");
+        assert_eq!(labels[at("単独") - 1], "◆", "{labels:?}");
+        assert!(at("Claude Code") > at("単独"), "{labels:?}");
+        assert_eq!(labels.iter().filter(|l| *l == "◆").count(), 1);
+    }
+
+    fn tags_of(dashboard: &Dashboard) -> Vec<String> {
+        tags_under(&dashboard.tree, dashboard.tree.root().unwrap())
+    }
+
+    #[test]
+    fn the_longest_wait_tag_needs_a_wait_text() {
+        let fleet = crate::live::tests::reported_fleet();
+        let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet, 0));
+        let mut text = TextStore::new(Default::default());
+        dashboard.prepare(window(), &mut text);
+        let tags = tags_of(&dashboard);
+        assert!(!tags.iter().any(|t| t.starts_with("最長")), "{tags:?}");
+
+        let mut fleet = fleet::canned();
+        let mut notice = fleet.workers[0].clone();
+        notice.pane = 99;
+        notice.state = State::Finished;
+        notice.attention = true;
+        notice.since = String::new();
+        notice.wait_minutes = 600.0;
+        fleet.workers.push(notice);
+        let dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet, 0));
+        let longest: Vec<String> = tags_of(&dashboard)
+            .into_iter()
+            .filter(|t| t.starts_with("最長"))
+            .collect();
+        assert_eq!(longest, ["最長 spec-review 6 分"]);
+    }
+
+    #[test]
+    fn a_plain_command_has_no_model_tag() {
+        let reported = crate::live::tests::reported_fleet();
+        let sleeper = reported.worker(33).unwrap().clone();
+        let mut fleet = Fleet {
+            orchestrators: reported.orchestrators.clone(),
+            workers: Vec::new(),
+        };
+        for (pane, state) in [
+            (33, State::Running),
+            (35, State::Finished),
+            (36, State::Error),
+        ] {
+            fleet.workers.push(Worker {
+                pane,
+                state,
+                ..sleeper.clone()
+            });
+        }
+        let mut dashboard = Dashboard::of_snapshot(Grouping::Flat, live(fleet, 0));
+        let mut text = TextStore::new(Default::default());
+        dashboard.prepare(window(), &mut text);
+        assert_eq!(
+            dashboard.queue_buttons.open.len(),
+            1,
+            "the queue card is expanded"
+        );
+        let tags = tags_of(&dashboard);
+        // Kind tags: the running, done and queue cards.
+        assert_eq!(tags.iter().filter(|t| *t == "sleep").count(), 3, "{tags:?}");
+        assert!(!tags.iter().any(|t| t.contains("モデル")), "{tags:?}");
+    }
+
+    fn inside(inner: [f32; 4], outer: [f32; 4]) -> bool {
+        inner[0] >= outer[0] - 0.5
+            && inner[1] >= outer[1] - 0.5
+            && inner[0] + inner[2] <= outer[0] + outer[2] + 0.5
+            && inner[1] + inner[3] <= outer[1] + outer[3] + 0.5
+    }
+
+    /// Two lanes whose phases are given in seconds.
+    fn fleet_in_seconds(lanes: [&[(Phase, f64)]; 2]) -> Fleet {
+        let canned = fleet::canned();
+        let workers = lanes
+            .iter()
+            .zip(&canned.workers)
+            .map(|(phases, worker)| Worker {
+                phases: phases.iter().map(|(p, secs)| (*p, secs / 60.0)).collect(),
+                ..worker.clone()
+            })
+            .collect();
+        Fleet {
+            workers,
+            orchestrators: canned.orchestrators,
+        }
+    }
+
+    #[test]
+    fn lanes_reach_now_whatever_the_span() {
+        let cases: [[&[(Phase, f64)]; 2]; 2] = [
+            [
+                &[
+                    (Phase::Running, 20.0),
+                    (Phase::Permission, 10.0),
+                    (Phase::Running, 9.0),
+                ],
+                &[(Phase::Running, 3.0)],
+            ],
+            [
+                &[(Phase::Running, 2.0), (Phase::Input, 1.5)],
+                &[(Phase::Quiet, 0.5), (Phase::Ended, 1.0)],
+            ],
+        ];
+        for lanes in cases {
+            let fleet = fleet_in_seconds(lanes);
+            let span: f64 = lanes[0].iter().map(|(_, secs)| secs).sum();
+            let mut dashboard = Dashboard::of_snapshot(Grouping::Flat, live(fleet, 0));
+            let mut text = TextStore::new(Default::default());
+            dashboard.prepare(window(), &mut text);
+            let tree = &dashboard.tree;
+            let rows = tree.children(dashboard.timeline.as_ref().unwrap().lanes);
+            assert_eq!(rows.len(), 2);
+            for (row, phases) in rows.iter().zip(lanes) {
+                let track = rect(tree, tree.children(*row)[1]);
+                let segments: Vec<[f32; 4]> = tree
+                    .children(tree.children(*row)[1])
+                    .iter()
+                    .map(|s| rect(tree, *s))
+                    .collect();
+                let last = segments.last().unwrap();
+                assert!(
+                    (last[0] + last[2] - (track[0] + track[2])).abs() <= 0.5,
+                    "span {span} s: lane ends at {} of a track ending at {}",
+                    last[0] + last[2],
+                    track[0] + track[2]
+                );
+                let lane: f64 = phases.iter().map(|(_, secs)| secs).sum();
+                let mut durations: Vec<f64> = phases.iter().map(|(_, secs)| *secs).collect();
+                if lane < span {
+                    durations.insert(0, span - lane);
+                }
+                assert_eq!(segments.len(), durations.len());
+                for (segment, secs) in segments.iter().zip(&durations) {
+                    let expected = track[2] * (*secs / span) as f32;
+                    assert!(
+                        (segment[2] - expected).abs() <= 0.5,
+                        "span {span} s: a {secs} s segment is {} px, expected {expected}",
+                        segment[2]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_queue_card_keeps_its_buttons_inside() {
+        let long_line = "x".repeat(200);
+        let mut fleet = fleet::canned();
+        for worker in &mut fleet.workers {
+            worker.orchestrator = REPORTED_ORCHESTRATOR.into();
+            worker.branch = "factory/agent-dashboard".into();
+        }
+        let expanded = fleet.workers.iter_mut().find(|w| w.pane == 14).unwrap();
+        expanded.screen_tail.push(long_line.clone());
+        let collapsed = fleet.workers.iter_mut().find(|w| w.pane == 19).unwrap();
+        collapsed.detail = "とても長い詳細 ".repeat(30);
+        let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet, 0));
+        let mut text = TextStore::new(Default::default());
+        dashboard.prepare(window(), &mut text);
+        let tree = &dashboard.tree;
+
+        let (open, pane) = dashboard.queue_buttons.open[0];
+        assert_eq!(pane, 14);
+        let actions = tree.parent(open).unwrap();
+        let card = tree.parent(actions).unwrap();
+        assert!(
+            inside(rect(tree, open), rect(tree, card)),
+            "開く leaves its card"
+        );
+        let slot = tree.children(actions)[2];
+        let name = tree.get::<Label>(tree.children(slot)[0]).unwrap();
+        assert_eq!(name.text(), REPORTED_ORCHESTRATOR);
+        assert_ne!(
+            name.shown_text(),
+            name.text(),
+            "the orchestrator is not cut"
+        );
+        let at = tree
+            .children(card)
+            .iter()
+            .position(|c| *c == actions)
+            .unwrap();
+        let screen = tree.children(card)[at - 1];
+        let lines = tree.children(screen);
+        let last = tree.get::<Label>(*lines.last().unwrap()).unwrap();
+        assert_eq!(last.text(), long_line);
+        assert_ne!(last.shown_text(), last.text(), "the long line is not cut");
+        for line in lines {
+            assert!(
+                inside(rect(tree, *line), rect(tree, screen)),
+                "a screen line leaves its box"
+            );
+        }
+        assert!(inside(rect(tree, screen), rect(tree, card)));
+
+        for (details, _) in &dashboard.queue_buttons.details {
+            let card = tree.parent(tree.parent(*details).unwrap()).unwrap();
+            assert!(
+                inside(rect(tree, *details), rect(tree, card)),
+                "詳細 leaves its card"
+            );
+        }
     }
 }

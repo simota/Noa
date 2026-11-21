@@ -1644,7 +1644,7 @@ fn answered_in_pane(status: Status) -> bool {
 }
 
 /// A full-width rule, as agents draw around their input box.
-fn is_rule(line: &str) -> bool {
+pub(crate) fn is_rule(line: &str) -> bool {
     let line = line.trim();
     line.chars().count() >= 20 && line.chars().all(|ch| matches!(ch, '─' | '━' | '═'))
 }
@@ -3998,9 +3998,13 @@ fn take_listing(
     ring
 }
 
-/// Whether `err` means the connection is gone and must be opened again.
+/// Whether `err` means the connection is gone and must be opened again. A
+/// server at its connection limit closes the connection too (1013).
 fn lost(err: &ClientError) -> bool {
-    matches!(err, ClientError::Transport(_) | ClientError::Closed(_))
+    matches!(
+        err,
+        ClientError::Transport(_) | ClientError::Closed(_) | ClientError::TooManyConnections(_)
+    )
 }
 
 /// Read the screens the board wants through `get`. The first lost
@@ -7333,6 +7337,16 @@ mod tests {
         let mut empty = Board::new(Some(1), Some(8));
         empty.update(Vec::new(), t0);
         assert_eq!(empty.key(Key::Char('q')), Some(Action::Quit));
+    }
+
+    // Audit finding (REL-10): a server at its connection limit closes the
+    // connection (1013); the board opens it again like a lost one.
+    #[test]
+    fn a_full_server_is_a_lost_connection() {
+        assert!(lost(&ClientError::TooManyConnections(
+            "1013 too many connections".to_string()
+        )));
+        assert!(!lost(&ClientError::Timeout("noa.listPanels".to_string())));
     }
 
     // Review finding: with the server stopped, each screen read waited out

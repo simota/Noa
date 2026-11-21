@@ -406,6 +406,26 @@ pub(crate) fn prune(label: &str, pane_cwd: &Path) -> Option<serde_json::Value> {
     Some(info)
 }
 
+/// `status`: how many commits `branch` has that `here`'s HEAD lacks (`git
+/// rev-list --count HEAD..branch`); `None` when git cannot say (`here` is
+/// outside the repository, or the branch is gone).
+pub(crate) fn ahead(here: &Path, branch: &str) -> Option<u64> {
+    let range = format!("HEAD..{branch}");
+    git(here, &["rev-list", "--count", &range, "--"])
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// `status`: whether the checkout at `dir` has changes, untracked files
+/// included; `None` when git cannot say.
+pub(crate) fn dirty(dir: &Path) -> Option<bool> {
+    git(dir, &["status", "--porcelain", "--untracked-files=all"])
+        .ok()
+        .map(|status| !status.trim().is_empty())
+}
+
 /// Why `close --prune` kept the worktree of a pane's label: the pane did not
 /// work in it.
 pub(crate) const NOT_IN_WORKTREE: &str = "the pane's cwd is not in this worktree";
@@ -641,6 +661,24 @@ detached
             assert!(add(&outside, "x").is_err());
             assert!(!base.join("plain-wt").exists());
         }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // Audit finding (AU-04): `status` says how far a worktree worker got.
+    #[test]
+    fn ahead_counts_the_workers_commits_and_dirty_its_changes() {
+        let (base, repo) = repo("ahead");
+        let made = add(&repo, "job").unwrap();
+        assert_eq!(ahead(&repo, "orch/job"), Some(0));
+        assert_eq!(dirty(&made.path), Some(false));
+        std::fs::write(made.path.join("b.txt"), "b\n").unwrap();
+        assert_eq!(dirty(&made.path), Some(true));
+        run_git(&made.path, &["add", "."]);
+        run_git(&made.path, &["commit", "-q", "-m", "b"]);
+        assert_eq!(dirty(&made.path), Some(false));
+        assert_eq!(ahead(&repo, "orch/job"), Some(1));
+        assert_eq!(ahead(&repo, "orch/missing"), None);
+        assert_eq!(ahead(&base, "orch/job"), None);
         let _ = std::fs::remove_dir_all(&base);
     }
 

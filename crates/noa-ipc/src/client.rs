@@ -331,13 +331,12 @@ impl Client {
         &mut self,
         params: &UpdateSubscriptionParams,
     ) -> Result<(), ClientError> {
-        let result: OkResult = self.request("noa.updateSubscription", params)?;
-        if result.ok {
-            Ok(())
-        } else {
-            Err(ClientError::Protocol(
-                "noa.updateSubscription answered ok:false".to_string(),
-            ))
+        let result: Value = self.request("noa.updateSubscription", params)?;
+        match result.as_object().and_then(|object| object.get("ok")) {
+            Some(Value::Bool(true)) => Ok(()),
+            _ => Err(ClientError::Protocol(
+                "noa.updateSubscription did not answer an object with ok:true".to_string(),
+            )),
         }
     }
 
@@ -1853,6 +1852,58 @@ mod tests {
             matches!(negative, Err(ClientError::Protocol(_))),
             "{negative:?}"
         );
+        client.update_subscription(&params).unwrap();
+        drop(client);
+        server.join().unwrap();
+    }
+
+    // Only a JSON object with `"ok": true` confirms an update; serde would
+    // otherwise read `OkResult` from the array `[true]` by position.
+    #[test]
+    fn update_subscription_rejects_a_non_object_result() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            for result in [
+                serde_json::json!({
+                    "protocolVersion": crate::protocol::PROTOCOL_VERSION,
+                    "grantedScopes": ["read"],
+                    "serverVersion": "t",
+                }),
+                serde_json::json!([true]),
+                serde_json::json!({ "ok": true }),
+            ] {
+                let Message::Text(text) = socket.read().unwrap() else {
+                    panic!("text request expected");
+                };
+                let id = serde_json::from_str::<Value>(&text).unwrap()["id"].clone();
+                socket
+                    .send(Message::Text(
+                        serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })
+                            .to_string(),
+                    ))
+                    .unwrap();
+            }
+        });
+
+        let mut client = Client::connect_with_timeouts(
+            &url,
+            "token",
+            ScopeSet::from_strings(["read"]),
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let params = UpdateSubscriptionParams {
+            subscription_id: WireId(1),
+            events: None,
+            pane_ids: None,
+            fields: None,
+        };
+        let array = client.update_subscription(&params);
+        assert!(matches!(array, Err(ClientError::Protocol(_))), "{array:?}");
         client.update_subscription(&params).unwrap();
         drop(client);
         server.join().unwrap();

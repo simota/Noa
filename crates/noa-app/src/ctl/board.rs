@@ -292,7 +292,7 @@ pub(crate) enum Mode {
     Send(u64, String),
     /// Waiting for `y` to close the pane.
     ConfirmClose(u64),
-    /// Waiting for `q` (or ^C) again to end the board, which hands every
+    /// Waiting for [`Board::quit_key`] to end the board, which hands every
     /// worker back to the orchestrator and cannot be undone from here.
     ConfirmQuit,
     /// The worker a send line or close prompt was open for went away (its
@@ -1260,6 +1260,25 @@ impl Board {
             .is_some_and(|panel| matches!(Status::of(panel), Status::Exited(_)))
     }
 
+    /// The key that ends the board from its prompt (U7): `y` when ending it
+    /// closes workers for sure — the workers of workers (D13), or more
+    /// workers than the floats an orchestrator's pane holds (REQ-019; some
+    /// may be split panes, which stay, so this can ask for `y` where `q`
+    /// would do) — else `q` again. `^C`, pressed twice by reflex, never ends
+    /// it.
+    fn quit_key(&self) -> char {
+        let tree = self.tree();
+        let kids = tree
+            .iter()
+            .filter(|node| matches!(node.branch, Branch::Kid { .. }))
+            .count();
+        if kids > 0 || tree.len() - kids > crate::floating::MAX_PER_ANCHOR {
+            'y'
+        } else {
+            'q'
+        }
+    }
+
     /// Keep `text` as `pane`'s draft, or drop its draft when nothing is
     /// left of it (`^U`, then Esc). Returns whether one is kept.
     fn keep_draft(&mut self, pane: u64, text: String) -> bool {
@@ -1351,7 +1370,7 @@ impl Board {
             }
             Mode::ConfirmQuit => {
                 self.mode = Mode::Normal;
-                matches!(key, Key::Char('q') | Key::CtrlC).then_some(Action::Quit)
+                (key == Key::Char(self.quit_key())).then_some(Action::Quit)
             }
             Mode::TargetGone(_) => {
                 if key == Key::Esc {
@@ -2194,22 +2213,34 @@ impl Board {
                 // a pane holds 8 of, those it already has included
                 // (floating-panes REQ-019): how many fit is not known here.
                 // A worker's own workers close: their parent is a float then
-                // (D13). What closes is said first, so a narrow pane cuts
-                // the rest.
-                let ask = match (self.lang, kids > 0) {
-                    (Lang::En, true) => format!(
-                        "{kids} workers' workers, and workers that don't fit on the orchestrator, close; others go back. q again quits"
+                // (D13). The key comes first, as an opened worker covers the
+                // footer (D10); the whole prompt fits 80 columns.
+                let ask = match (self.lang, self.quit_key(), kids > 0) {
+                    (Lang::En, 'y', true) => format!(
+                        "y quits · {kids} workers' workers and those the orchestrator can't fit close"
                     ),
-                    (Lang::En, false) => {
-                        "Workers that don't fit on the orchestrator close; others go back. q again quits"
-                            .to_string()
+                    (Lang::En, key, _) => {
+                        let quits = if key == 'y' {
+                            "y quits"
+                        } else {
+                            "q again quits"
+                        };
+                        format!(
+                            "{quits} · workers the orchestrator can't fit close; others go back"
+                        )
                     }
-                    (Lang::Ja, true) => format!(
-                        "ワーカーの子 {kids} 件と、オーケストレーターに収まらないワーカーは閉じ、残りは戻ります。再度 q で終了"
+                    (Lang::Ja, 'y', true) => format!(
+                        "y で終了 · ワーカーの子 {kids} 件と、オーケストレーターに収まらない分は閉じます"
                     ),
-                    (Lang::Ja, false) => {
-                        "オーケストレーターに収まらないワーカーは閉じ、残りは戻ります。再度 q で終了"
-                            .to_string()
+                    (Lang::Ja, key, _) => {
+                        let quits = if key == 'y' {
+                            "y で終了"
+                        } else {
+                            "再度 q で終了"
+                        };
+                        format!(
+                            "{quits} · オーケストレーターに収まらないワーカーは閉じ、残りは戻ります"
+                        )
                     }
                 };
                 line.fg(ORANGE, &fit(&ask, room));
@@ -3303,7 +3334,11 @@ impl Board {
             ],
             Mode::TargetGone(_) => vec![("Esc", l("続ける", "go on"), l("続ける", "go on"))],
             Mode::ConfirmQuit => vec![
-                ("q", l("終了", "quit"), l("終了", "quit")),
+                (
+                    if self.quit_key() == 'y' { "y" } else { "q" },
+                    l("終了", "quit"),
+                    l("終了", "quit"),
+                ),
                 (
                     l("ほかのキー", "other keys"),
                     l("取り消し", "cancel"),
@@ -4708,7 +4743,8 @@ mod tests {
         assert!(!board.help);
         board.key(Key::Char('?'));
         assert_eq!(board.key(Key::CtrlC), None);
-        assert_eq!(board.key(Key::CtrlC), Some(Action::Quit));
+        assert_eq!(board.mode, Mode::ConfirmQuit);
+        assert_eq!(board.key(Key::Char('q')), Some(Action::Quit));
     }
 
     #[test]
@@ -5272,8 +5308,13 @@ mod tests {
         // Any other key takes it back.
         assert_eq!(board.key(Key::Char('j')), None);
         assert_eq!(board.mode, Mode::Normal);
+        // U7: ^C asks too, and a second ^C takes it back.
         assert_eq!(board.key(Key::CtrlC), None);
-        assert_eq!(board.key(Key::CtrlC), Some(Action::Quit));
+        assert_eq!(board.mode, Mode::ConfirmQuit);
+        assert_eq!(board.key(Key::CtrlC), None);
+        assert_eq!(board.mode, Mode::Normal);
+        board.key(Key::CtrlC);
+        assert_eq!(board.key(Key::Char('q')), Some(Action::Quit));
 
         let mut empty = Board::new(Some(1), Some(8));
         empty.update(Vec::new(), Instant::now());
@@ -5723,47 +5764,72 @@ mod tests {
         assert!(top.contains("ワーカーの子 2 件も閉じます"), "{top}");
     }
 
+    // U7: with workers that close for sure, `q` again is not enough.
     #[test]
     fn quitting_says_the_workers_of_workers_close() {
         let mut board = Board::new(Some(1), Some(8));
         board.update(nested(), Instant::now());
         board.key(Key::Char('q'));
-        let top = visible(&board.render(200, 20, Instant::now())[2]);
+        let lines = board.render(80, 20, Instant::now());
+        let top = visible(&lines[2]);
         assert!(
             top.contains(
-                "ワーカーの子 2 件と、オーケストレーターに収まらないワーカーは閉じ、残りは戻ります"
+                "y で終了 · ワーカーの子 2 件と、オーケストレーターに収まらない分は閉じます"
             ),
             "{top}"
         );
+        assert!(
+            visible(&lines[19]).contains("y 終了"),
+            "{}",
+            visible(&lines[19])
+        );
+        assert_eq!(board.key(Key::Char('q')), None);
+        assert_eq!(board.mode, Mode::Normal);
+        board.key(Key::Char('q'));
+        assert_eq!(board.key(Key::Char('y')), Some(Action::Quit));
     }
 
     // Review finding: the prompt promised that every worker goes back to
     // the orchestrator, which holds 8 floats with those it already has, and
     // at 80 columns in English its warning about the rest was cut off.
+    // U11: the key goes first, and the whole prompt fits 80 columns, with
+    // workers of workers too. More workers than an orchestrator's pane holds
+    // ask for `y` (U7).
     #[test]
     fn quitting_warns_first_that_workers_that_do_not_fit_close() {
-        let panels: Vec<Panel> = (20..29)
-            .map(|pane| worker(pane, 1, &format!("w{pane}"), Some("running"), 1))
-            .collect();
+        let panels = |n: u64| -> Vec<Panel> {
+            (20..20 + n)
+                .map(|pane| worker(pane, 1, &format!("w{pane}"), Some("running"), 1))
+                .collect()
+        };
         for lang in [Lang::En, Lang::Ja] {
-            let mut board = Board::new(Some(1), None);
+            for (n, quit) in [
+                (8, lang.pick("再度 q で終了", "q again quits")),
+                (9, lang.pick("y で終了", "y quits")),
+            ] {
+                let mut board = Board::new(Some(1), None);
+                board.lang = lang;
+                board.update(panels(n), Instant::now());
+                board.key(Key::Char('q'));
+                let top = visible(&board.render(80, 20, Instant::now())[2]);
+                let warning = lang.pick(
+                    "オーケストレーターに収まらないワーカーは閉じ、残りは戻ります",
+                    "workers the orchestrator can't fit close; others go back",
+                );
+                assert!(top.trim_start().starts_with(quit), "{top}");
+                assert!(top.trim_end().ends_with(warning), "whole at 80: {top}");
+                assert!(!top.contains('9') && !top.contains('8'), "no count: {top}");
+            }
+            let mut board = Board::new(Some(1), Some(8));
             board.lang = lang;
-            board.update(panels.clone(), Instant::now());
+            let mut deep = nested();
+            deep.extend((30..40).map(|pane| worker(pane, 2, "k", Some("running"), 1)));
+            board.update(deep, Instant::now());
             board.key(Key::Char('q'));
             let top = visible(&board.render(80, 20, Instant::now())[2]);
-            let (warning, quit) = lang.pick(
-                (
-                    "オーケストレーターに収まらないワーカーは閉じ",
-                    "再度 q で終了",
-                ),
-                (
-                    "Workers that don't fit on the orchestrator close",
-                    "q again quits",
-                ),
-            );
-            assert!(top.trim_start().starts_with(warning), "{top}");
-            assert!(top.contains(quit), "whole at 80 columns: {top}");
-            assert!(!top.contains('9') && !top.contains('8'), "no count: {top}");
+            let end = lang.pick("収まらない分は閉じます", "can't fit close");
+            assert!(top.trim_end().ends_with(end), "whole at 80: {top}");
+            assert!(top.contains("12"), "{top}");
         }
     }
     // D15: the selected worker's screen sits beside the list in a wide

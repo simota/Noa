@@ -125,6 +125,10 @@ fn system_language() -> Option<String> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Status {
     Permission,
+    /// A question dialog (`OSC 7501` blocked, `Panel.agent.blocked:
+    /// "question"`): Enter would answer it with its first choice.
+    Question,
+    /// Waiting for input, reported without a dialog (a hook, `OSC 777`).
     Input,
     Error,
     /// An unread notification, with no blocking report.
@@ -160,6 +164,14 @@ impl Status {
             .and_then(|agent| agent.state.as_deref())
         {
             Some("permission") => Self::Permission,
+            Some("input")
+                if panel
+                    .agent
+                    .as_ref()
+                    .is_some_and(|agent| agent.blocked.as_deref() == Some("question")) =>
+            {
+                Self::Question
+            }
             Some("input") => Self::Input,
             Some("error") => Self::Error,
             // A finished turn usually raises a notification too; it is done,
@@ -180,7 +192,9 @@ impl Status {
 
     pub(crate) fn group(self) -> Group {
         match self {
-            Self::Permission | Self::Input | Self::Error | Self::Attention => Group::Needs,
+            Self::Permission | Self::Question | Self::Input | Self::Error | Self::Attention => {
+                Group::Needs
+            }
             status if status.failed() => Group::Needs,
             Self::Running | Self::Quiet | Self::Command => Group::Working,
             Self::Finished => Group::Done,
@@ -191,7 +205,8 @@ impl Status {
     fn label(self, lang: Lang) -> String {
         match self {
             Self::Permission => lang.pick("承認待ち", "approval").to_string(),
-            Self::Input => lang.pick("入力待ち", "question").to_string(),
+            Self::Question => lang.pick("質問", "question").to_string(),
+            Self::Input => lang.pick("入力待ち", "input").to_string(),
             Self::Error => lang.pick("エラー", "error").to_string(),
             Self::Attention => lang.pick("通知あり", "notified").to_string(),
             Self::Running => lang.pick("作業中", "working").to_string(),
@@ -211,6 +226,10 @@ impl Status {
     fn still(self, lang: Lang) -> Option<&'static str> {
         Some(match self {
             Self::Permission => lang.pick("まだ承認待ちです。", "It still awaits approval. "),
+            Self::Question => lang.pick(
+                "まだ質問の答えを待っています。",
+                "It still awaits an answer to its question. ",
+            ),
             Self::Input => lang.pick("まだ答えを待っています。", "It still awaits an answer. "),
             Self::Error => lang.pick("エラーを報告しています。", "It reported an error. "),
             Self::Attention => {
@@ -227,6 +246,10 @@ impl Status {
     fn closed_as(self, lang: Lang) -> String {
         match self {
             Self::Permission => lang.pick("承認待ちのまま閉じた", "closed awaiting approval"),
+            Self::Question => lang.pick(
+                "質問に答えないまま閉じた",
+                "closed with its question unanswered",
+            ),
             Self::Input => lang.pick("答えを待ったまま閉じた", "closed awaiting an answer"),
             Self::Error => lang.pick("エラーのまま閉じた", "closed after an error"),
             Self::Attention => lang.pick("通知を残して閉じた", "closed with a notification unread"),
@@ -250,7 +273,8 @@ impl Status {
     fn short_label(self, lang: Lang) -> String {
         match self {
             Self::Permission => lang.pick("承認", "appr").to_string(),
-            Self::Input => lang.pick("入力", "ask").to_string(),
+            Self::Question => lang.pick("質問", "ask").to_string(),
+            Self::Input => lang.pick("入力", "input").to_string(),
             Self::Attention => lang.pick("通知", "note").to_string(),
             Self::Error => lang.pick("エラー", "error").to_string(),
             status if status.failed() => lang.pick("失敗", "fail").to_string(),
@@ -263,7 +287,7 @@ impl Status {
     fn mark(self) -> &'static str {
         match self {
             Self::Permission | Self::Attention => "!",
-            Self::Input => "?",
+            Self::Question | Self::Input => "?",
             Self::Error => "×",
             status if status.failed() => "×",
             Self::Running | Self::Command => "●",
@@ -274,7 +298,7 @@ impl Status {
 
     fn color(self) -> Rgb {
         match self {
-            Self::Permission | Self::Input | Self::Attention => ORANGE,
+            Self::Permission | Self::Question | Self::Input | Self::Attention => ORANGE,
             Self::Error => RED,
             status if status.failed() => RED,
             Self::Running | Self::Command => BLUE,
@@ -914,7 +938,10 @@ impl Board {
         if group != Group::Needs {
             return (group, 0, None);
         }
-        let rank = u8::from(matches!(status, Status::Input | Status::Attention));
+        let rank = u8::from(matches!(
+            status,
+            Status::Question | Status::Input | Status::Attention
+        ));
         // `None` (already so when the board opened) is the oldest.
         let began = self.since.get(&panel.pane_id.0).and_then(|(_, at)| *at);
         (group, rank, began)
@@ -1350,11 +1377,12 @@ impl Board {
         self.select(needing[next]);
     }
 
-    /// Whether `pane` waits for an approval, which is answered in its own
-    /// pane, never from the board (spec D7).
-    fn awaits_approval(&self, pane: u64) -> bool {
+    /// Whether `pane` waits for an approval or on a question dialog, which
+    /// is answered in its own pane, never from the board (spec D7): the
+    /// Enter that submits a send line would pick the first choice.
+    fn awaits_answer(&self, pane: u64) -> bool {
         self.panel(pane)
-            .is_some_and(|panel| Status::of(panel) == Status::Permission)
+            .is_some_and(|panel| answered_in_pane(Status::of(panel)))
     }
 
     /// Whether `pane`'s process has ended: nothing typed reaches it.
@@ -1396,8 +1424,11 @@ impl Board {
     /// Why nothing can be sent to `pane`, if so.
     fn cannot_send(&self, pane: u64) -> Option<String> {
         let name = self.name(pane);
-        if self.awaits_approval(pane) {
-            Some(approval_message(&name, self.lang))
+        if let Some(why) = self
+            .panel(pane)
+            .and_then(|panel| answer_message(Status::of(panel), &name, self.lang))
+        {
+            Some(why)
         } else if self.has_exited(pane) {
             Some(self.lang.pick(
                 format!("{name} は終了しています。x で閉じる"),
@@ -1569,11 +1600,27 @@ fn draft_kept(lang: Lang) -> &'static str {
 
 // Labels and process names come from other processes: never let their
 // control characters reach this terminal.
-fn approval_message(name: &str, lang: Lang) -> String {
-    match lang {
-        Lang::Ja => format!("{name} は承認待ちです。g でペインへ移動して答えてください"),
-        Lang::En => format!("{name} awaits approval. g goes to its pane to answer it"),
-    }
+fn answer_message(status: Status, name: &str, lang: Lang) -> Option<String> {
+    Some(match (status, lang) {
+        (Status::Permission, Lang::Ja) => {
+            format!("{name} は承認待ちです。g でペインへ移動して答えてください")
+        }
+        (Status::Permission, Lang::En) => {
+            format!("{name} awaits approval. g goes to its pane to answer it")
+        }
+        (Status::Question, Lang::Ja) => format!(
+            "{name} は質問の答えを待っています。Enter は最初の選択肢を選ぶので、g でペインへ移動して答えてください"
+        ),
+        (Status::Question, Lang::En) => format!(
+            "{name} asks a question, and Enter would pick its first choice. g goes to its pane to answer it"
+        ),
+        _ => return None,
+    })
+}
+
+/// Whether a worker in `status` is answered only in its own pane (D7).
+fn answered_in_pane(status: Status) -> bool {
+    matches!(status, Status::Permission | Status::Question)
 }
 
 /// A full-width rule, as agents draw around their input box.
@@ -2517,8 +2564,8 @@ impl Board {
             (
                 "g",
                 l(
-                    "ワーカーをこの下に開く(承認はそこで答える)",
-                    "open the worker below (answer approvals there)",
+                    "ワーカーをこの下に開く(承認や質問はそこで答える)",
+                    "open the worker below (answer approvals and questions there)",
                 ),
             ),
             (
@@ -2531,8 +2578,8 @@ impl Board {
             (
                 "s",
                 l(
-                    "ワーカーに送る(承認待ち・終了したワーカーには送れません)",
-                    "send to the worker (not to one awaiting approval or exited)",
+                    "ワーカーに送る(承認待ち・質問中・終了したワーカーには送れません)",
+                    "send to the worker (not to one awaiting approval, asking a question or exited)",
                 ),
             ),
             (
@@ -3585,7 +3632,7 @@ impl Board {
                 return line.finish(cols);
             }
             Mode::Normal => {
-                let approval = self.target().is_some_and(|pane| self.awaits_approval(pane));
+                let approval = self.target().is_some_and(|pane| self.awaits_answer(pane));
                 let go = if approval {
                     l("移動して答える", "go and answer")
                 } else {
@@ -4117,16 +4164,19 @@ fn perform(
         (notice, Some((pane, text.to_string())))
     };
     // The board's listing can be up to `LIST_EVERY` old: look again right
-    // before typing, so a worker that started waiting for an approval since
-    // is never answered from here (spec D7).
+    // before typing, so a worker that started waiting for an approval or on
+    // a question since is never answered from here (spec D7).
     if let Action::Send(pane, text) = &action {
         match server.panels() {
             Ok(panels) => {
-                if panels.iter().any(|panel| {
-                    panel.pane_id.0 == *pane && Status::of(panel) == Status::Permission
-                }) {
-                    let why = Notice::warn(approval_message(&board.name(*pane), board.lang));
-                    return kept(why, *pane, text);
+                if let Some(why) = panels
+                    .iter()
+                    .find(|panel| panel.pane_id.0 == *pane)
+                    .and_then(|panel| {
+                        answer_message(Status::of(panel), &board.name(*pane), board.lang)
+                    })
+                {
+                    return kept(Notice::warn(why), *pane, text);
                 }
             }
             Err(err) => return kept(failed(err), *pane, text),
@@ -4140,25 +4190,39 @@ fn perform(
             }
             std::thread::sleep(SUBMIT_DELAY);
             // The Enter could answer a prompt that appeared in the pause.
-            match server.panels() {
-                Ok(panels)
-                    if panels.iter().any(|panel| {
-                        panel.pane_id.0 == *pane && Status::of(panel) == Status::Permission
-                    }) =>
-                {
+            let asking = server.panels().map(|panels| {
+                panels
+                    .iter()
+                    .find(|panel| panel.pane_id.0 == *pane)
+                    .map(Status::of)
+                    .filter(|status| answered_in_pane(*status))
+            });
+            match asking {
+                Ok(Some(status)) => {
                     // The text is in the worker's input box already: no
                     // draft, or sending it again would type it twice.
                     let name = board.name(*pane);
-                    return (Notice::warn(board.lang.pick(
-                        format!(
-                            "{name} が承認待ちになったので Enter は送っていません。g でペインへ移動して答えてください"
+                    let why = match status {
+                        Status::Question => board.lang.pick(
+                            format!(
+                                "{name} が質問を出したので Enter は送っていません (最初の選択肢を選ぶため)。g でペインへ移動して答えてください"
+                            ),
+                            format!(
+                                "{name} now asks a question, so Enter was not sent (it would pick the first choice). g goes to its pane to answer it"
+                            ),
                         ),
-                        format!(
-                            "{name} now awaits approval, so Enter was not sent. g goes to its pane to answer it"
+                        _ => board.lang.pick(
+                            format!(
+                                "{name} が承認待ちになったので Enter は送っていません。g でペインへ移動して答えてください"
+                            ),
+                            format!(
+                                "{name} now awaits approval, so Enter was not sent. g goes to its pane to answer it"
+                            ),
                         ),
-                    )), None);
+                    };
+                    return (Notice::warn(why), None);
                 }
-                Ok(_) => server.type_text(*pane, "\r", false),
+                Ok(None) => server.type_text(*pane, "\r", false),
                 Err(err) => Err(err),
             }
         }
@@ -4721,6 +4785,107 @@ mod tests {
         panels[0].agent.as_mut().unwrap().state = Some("permission".to_string());
         board.update(panels, Instant::now());
         assert_eq!(board.key(Key::Enter), None);
+    }
+
+    /// `panel` asking a question dialog, as an `OSC 7501` blocked report
+    /// lists it (AU-01).
+    fn asking(mut panel: Panel) -> Panel {
+        let agent = panel.agent.as_mut().unwrap();
+        agent.state = Some("input".to_string());
+        agent.blocked = Some("question".to_string());
+        panel
+    }
+
+    // A question dialog is answered in its pane like an approval: the Enter
+    // that submits a send line would pick its first choice. An input
+    // reported without a dialog (a hook) still takes a message.
+    #[test]
+    fn a_question_dialog_reads_as_a_question_and_is_answered_in_its_pane() {
+        let t0 = Instant::now();
+        let question = asking(worker(2, 1, "ask", Some("running"), 2));
+        assert_eq!(Status::of(&question), Status::Question);
+        let hook = worker(3, 1, "hook", Some("input"), 2);
+        assert_eq!(Status::of(&hook), Status::Input);
+        for lang in [Lang::Ja, Lang::En] {
+            let mut board = Board::new(Some(1), None);
+            board.lang = lang;
+            board.update(vec![question.clone(), hook.clone()], t0);
+            let all = rendered(&board, 80, 30, t0);
+            let row = line_with(&all, "? ask");
+            assert!(row.contains(lang.pick("質問", "question")), "{all}");
+            let row = line_with(&all, "? hook");
+            assert!(row.contains(lang.pick("入力待ち", "input")), "{all}");
+            assert!(!row.contains("question"), "{all}");
+
+            board.select(2);
+            assert_eq!(board.key(Key::Char('s')), None);
+            assert_eq!(board.mode, Mode::Normal);
+            let notice = board.message.clone().unwrap();
+            assert!(notice.warn);
+            assert!(
+                notice
+                    .text
+                    .contains(lang.pick("最初の選択肢", "first choice")),
+                "{notice:?}"
+            );
+            let footer = visible(&board.render(120, 20, t0).pop().unwrap());
+            assert!(
+                footer.contains(lang.pick("移動して答える", "go and answer")),
+                "{footer}"
+            );
+            board.view = View::Detail(2);
+            let detail = rendered(&board, 80, 30, t0);
+            assert!(
+                line_with(&detail, "ask").contains(lang.pick("質問", "question")),
+                "{detail}"
+            );
+            board.view = View::List;
+
+            board.select(3);
+            board.key(Key::Char('s'));
+            assert!(matches!(board.mode, Mode::Send(3, _)));
+            // It opened a dialog while the message was being typed.
+            board.mode = Mode::Send(2, "yes".to_string());
+            assert_eq!(board.key(Key::Enter), None);
+            assert_eq!(board.drafts.get(&2).map(String::as_str), Some("yes"));
+        }
+    }
+
+    // The listing right before typing, and the one after the pause before
+    // Enter, refuse a question dialog as they do an approval.
+    #[test]
+    fn sending_never_answers_a_question_dialog_that_opened_since() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), Instant::now());
+        let mut now_asking = sample();
+        now_asking[0] = asking(now_asking[0].clone());
+        let mut server = FakeServer {
+            listings: vec![now_asking.clone()],
+            typed: Vec::new(),
+        };
+        let (message, draft) = perform(&mut server, &board, Action::Send(2, "go".to_string()));
+        assert!(server.typed.is_empty());
+        assert!(
+            message.warn && message.text.contains("最初の選択肢"),
+            "{message:?}"
+        );
+        assert_eq!(draft, Some((2, "go".to_string())));
+
+        let mut server = FakeServer {
+            listings: vec![sample(), now_asking],
+            typed: Vec::new(),
+        };
+        board.lang = Lang::En;
+        let (message, draft) = perform(&mut server, &board, Action::Send(2, "go".to_string()));
+        assert_eq!(server.typed, vec![(2, "go".to_string())]);
+        assert!(
+            message.warn
+                && message
+                    .text
+                    .contains("asks a question, so Enter was not sent"),
+            "{message:?}"
+        );
+        assert_eq!(draft, None);
     }
 
     // Review finding: a label is not cleaned like screen text, so an escape

@@ -1,7 +1,7 @@
 # Agent dashboard mock: crates.io noa-gpui and panel toggles
 
 - slug: agent-dashboard-mock
-- status: draft (2026-11-21)
+- status: implemented (2026-11-21)
 - owner: simota
 - scope: `mock/agent-dashboard/` only (a standalone crate with its own
   `[workspace]`; not a member of Noa's workspace)
@@ -96,13 +96,13 @@ change is needed (see Findings).
 - `View` gains `shown: [bool; 5]`, indexed by `Panel`. It stays `Copy + Eq`.
   `Dashboard::new` turns all five on, so its signature is unchanged.
 - `Dashboard::showing` builds only the panels that are shown. It records each
-  built panel's container in `panels: [Option<WidgetId>; 5]` and registers
+  built panel's container in `panels: [Option<WidgetId>; 5]` (Changed in implementation: see Implementation record.) and registers
   every shortcut with `tree.add_shortcut(panel.shortcut(), hint_item)`, where
   `hint_item` is that panel's item in the hint strip. The item is always
   present, so the target is always in the tree.
 - `handle`:
   1. On `ShortcutPressed(s)`, find the panel with `shortcut() == s`, flip its
-     flag, and rebuild with `*self = Self::showing(View { shown, ..self.view })`.
+     flag, and rebuild with `*self = Self::showing(View { shown, ..self.view })`. (Changed in implementation: see Implementation record.)
      This is the pattern the grouping and 詳細 handlers already use, so the
      shortcuts are registered again on the new tree.
   2. The existing `ButtonClicked` early return must come after this check.
@@ -131,7 +131,7 @@ Layout when panels are off. The rows are `now` (queue | running | done) and
   - `Label::new(panel.title())` at 11 px.
 - On is drawn with the default text color at weight 700. Off is drawn with
   `Role::Muted` at weight 400. The strip has the same width in either state, so
-  toggling never moves the header.
+  toggling never moves the header. (Changed in implementation: see Implementation record.)
 - Keep the header from overflowing after 開く. The status label goes inside a
   container with `min_size.width: 0` and `flex_shrink: 1`, and gets
   `Truncation::Tail`. `dashboard.status` stays the Label's id, so
@@ -253,11 +253,11 @@ Add `Panel::shortcut`, the hint strip, `add_shortcut` registration, the
   equals `panel.title()`.
 - `the_hint_strip_fits_the_header`: in three states (default, all off, and
   after clicking 開く), adjacent header children do not overlap and the strip
-  keeps its natural width (312 px in the test font).
+  keeps its natural width (312 px in the test font). (Changed in implementation: see Implementation record.)
 
 Done when all of these hold:
 
-- The AC5 commands pass: 5 old tests unedited plus 6 new ones.
+- The AC5 commands pass: 5 old tests unedited plus 6 new ones. (Changed in implementation: see Implementation record.)
 - The `git diff` footprint check is empty.
 - `--snapshot=$TMPDIR/after.png` writes a PNG that, compared by eye with
   `before.png`, differs only by the header hint strip.
@@ -274,4 +274,26 @@ Done when all of these hold:
   This needs the owner's eye on `after.png`. The state is not exposed through a
   widget getter (`Label` has no color or weight accessor in 0.2.0), so tests
   check the shortcut text and the layout, not the styling.
-- The size of the `Cargo.lock` diff after the path → registry switch.
+
+## Implementation record (2026-11-21)
+
+- Lockfile: the path-to-registry switch (`f6a8743`) removed 619 lines and added 24 in `Cargo.lock`. It added no package other than the six noa-gpui ones.
+- Hint strip look: both states use the same weight. On is a filled `SurfaceAlt` pill with the default text colour; off has no fill and `Role::Muted` text. The spec's weight 700 / 400 was dropped because weight changes the text width (300 px vs 312 px), which moved the strip when a panel was toggled. The strip is 332 px wide at 1440x900 in the test font, not 312.
+- Narrow windows: the strip has `min_size.width` 0, clipping, and a very small `flex_shrink`, so at 1140 px wide it is clipped (its last items are cut) and the grouping control stays reachable. Not all five hints are readable at that width.
+- Rebuilds go through `Dashboard::rebuilt`, which:
+  - keeps the current theme (a light system appearance is no longer reset to dark);
+  - removes the old tree's roots through `UiTree::remove`, so their text layouts are released;
+  - lays the new tree out at the last viewport before returning, so input that arrives before the next frame hits the right widget;
+  - then marks the new root `Dirty::COMPOSITE`, because the windowed app requests a redraw only when `needs_update` is true and presents only when `prepare` returns true.
+- `Dashboard::panels` exists only in test builds (`#[cfg(test)]`); nothing in non-test code reads it.
+- Tests: 21 in `dashboard.rs`; the 5 original ones are unedited.
+  - Original: `every_card_needing_you_shows_without_scrolling`, `the_most_urgent_card_starts_expanded`, `details_expands_that_card_instead`, `open_names_the_pane_it_would_go_to`, `the_last_segment_removes_the_groups`.
+  - Layout with hidden panels: `all_panels_on_keeps_todays_layout`, `a_hidden_panel_leaves_its_row_to_the_others`, `the_queue_fits_with_any_other_panels_hidden`.
+  - Shortcuts and hint strip: `each_shortcut_hides_and_restores_its_panel`, `the_header_shows_each_shortcut`, `the_hint_strip_fits_the_header`, `the_grouping_control_stays_reachable_at_1140`.
+  - Rebuild behaviour: `hide_and_restore_cycles_release_the_old_text_layouts`, `a_grouping_change_releases_the_old_text_layouts`, `a_details_click_releases_the_old_text_layouts`, `a_press_right_after_a_panel_toggle_hits_the_grouping_control`, `a_press_right_after_a_details_click_hits_the_open_button`, `a_panel_toggle_reaches_the_next_frame`, `a_grouping_change_reaches_the_next_frame`, `a_details_click_reaches_the_next_frame`, `a_rebuild_keeps_the_appearance`.
+- Known limits, accepted:
+  - a rebuild resets scroll positions, the header status text, hover and an in-progress pointer press;
+  - a held key toggles again on each repeat;
+  - modifier matching on non-Apple platforms is noa-gpui's;
+  - the hint-strip test's expected widths assume the default `TextStore` system fonts.
+- Not verified: the windowed app (key delivery with an IME or the default menu, fonts, and what the on/off look reads like on screen). Only the headless paths were run.

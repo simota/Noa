@@ -2251,6 +2251,33 @@ pub fn session_state_path_in(data_dir: &Path) -> PathBuf {
     data_dir.join("noa").join("session.json")
 }
 
+/// The `Noa +ctl` journal of the orchestrator pane whose `NOA_SURFACE_ID`
+/// is `surface_id` (`<data-dir>/noa/ctl/<surface_id>.jsonl`): what it
+/// spawned, sent and saw, kept on disk so the orchestrator can recover it.
+pub fn ctl_journal_path(surface_id: &str) -> Option<PathBuf> {
+    dirs::data_dir().map(|path| ctl_journal_path_in(&path, surface_id))
+}
+
+/// As [`ctl_journal_path`]. The id comes from the environment, so anything
+/// but ASCII letters, digits, `-` and `_` becomes `_`: it names one file in
+/// that directory, never a path.
+pub fn ctl_journal_path_in(data_dir: &Path, surface_id: &str) -> PathBuf {
+    let name: String = surface_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    data_dir
+        .join("noa")
+        .join("ctl")
+        .join(format!("{name}.jsonl"))
+}
+
 /// Directory holding per-pane persisted scrollback snapshots
 /// (`<data-dir>/noa/scrollback/`). Only created when `scrollback-persist` is
 /// not `never` — the default leaves no trace of terminal output on disk.
@@ -2835,6 +2862,23 @@ font-size = 15.5
                 .parent()
                 .expect("session state lives in a directory")
                 .join("scrollback")
+        );
+    }
+
+    #[test]
+    fn a_ctl_journal_is_one_file_per_surface_beside_the_session_state_file() {
+        let data_dir = Path::new("/tmp/data");
+        let dir = session_state_path_in(data_dir)
+            .parent()
+            .expect("session state lives in a directory")
+            .join("ctl");
+        assert_eq!(
+            ctl_journal_path_in(data_dir, "0x00000000000000a3"),
+            dir.join("0x00000000000000a3.jsonl")
+        );
+        assert_eq!(
+            ctl_journal_path_in(data_dir, "../x/y"),
+            dir.join("___x_y.jsonl")
         );
     }
 

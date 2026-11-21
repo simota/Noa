@@ -8,11 +8,14 @@
 //! unit-testable without a server; [`run`] is the thin I/O shell around them.
 
 mod board;
+mod journal;
+mod result;
 mod worktree;
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
 
 use noa_ipc::{
     Client, ClientError, EventKind, MAX_SEND_TEXT_BYTES, Notification, Panel, ScopeSet,
@@ -82,6 +85,11 @@ Commands:
                         Pick the model tier of a claude, codex or agy
                         COMMAND (refused when it already picks a model
                         or effort). Prints \"tier\" too.
+                        Every worker gets NOA_RESULT=<its cwd>/.noa/result.md
+                        to write its final report to (.noa/ holds a
+                        .gitignore of *, so git never sees it); prints
+                        \"result\" too (none, with a warning, when the cwd
+                        is not writable).
   send PANE [--enter] [--raw] [--replace] [--wait [wait options]] [--answer]
        [--queue] [--any-pane] [--] TEXT|-
                                 Type TEXT (or stdin) into PANE; prints the
@@ -114,13 +122,28 @@ Commands:
                                 prints each pending pane's report count as
                                 `baseline`; pass it back as --after PANE=SEQ.
                                 SIGTERM, SIGINT or SIGHUP prints that line too,
-                                with \"interrupted\":true (exit 2).
+                                with \"interrupted\":true (exit 2). A line gains
+                                \"result\":{\"path\",\"bytes\"} once the pane's
+                                result file was written since the wait (or the
+                                send of send --wait) began, and \"blocked\" when
+                                the agent reported what it is blocked on.
   read PANE [--scrollback] [--max-bytes N]
                                 Print PANE's screen (or retained output) text;
                                 a cut keeps the end and says so on stderr. A
                                 pane on the alternate screen keeps no history:
                                 --scrollback (and wait --tail) then says on
                                 stderr that only its screen came back.
+  result PANE [--max-bytes N]   Print PANE's result file (its spawn's NOA_RESULT,
+                                else <its cwd>/.noa/result.md); exit 1 when there
+                                is none. --max-bytes keeps the start and says so
+                                on stderr.
+  status [--answers]            One line per worker of this pane: its panel's
+                                state with what this pane's journal knows
+                                (tier, argv, lastTask, lastSentSeq, lastOutcome,
+                                answers, result; ahead and dirty for a worktree
+                                worker); workers the journal knows that are gone
+                                come last with \"gone\":true. --answers prints
+                                every prompt answered from here, oldest first.
   close PANE...|--children [--any-pane] [--prune]
                                 Close worker panes. One that is already gone
                                 prints \"gone\":true and is not an error.
@@ -182,6 +205,16 @@ pub(crate) enum Command {
         of: Option<u64>,
         /// `--open`: start a board pane next to this one instead.
         open: Option<Placement>,
+    },
+    /// `status [--answers]`: this pane's workers with what the journal
+    /// knows of them, or every answered prompt.
+    Status {
+        answers: bool,
+    },
+    /// `result PANE [--max-bytes N]`: print a worker's result file.
+    Result {
+        pane: u64,
+        max_bytes: Option<usize>,
     },
 }
 
@@ -394,6 +427,19 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
             Command::Board {
                 of,
                 open: opening.then_some(placement),
+            }
+        }
+        "status" => Command::Status {
+            answers: rest.flag("--answers"),
+        },
+        "result" => {
+            let max_bytes = rest
+                .value("--max-bytes")?
+                .map(|v| parse_u64("--max-bytes", &v).map(|n| n as usize))
+                .transpose()?;
+            Command::Result {
+                pane: single_pane(&mut rest)?,
+                max_bytes,
             }
         }
         "close" => {
@@ -1160,6 +1206,8 @@ struct Session {
     waited_for_own: bool,
     /// Whether the last listing searched for this pane named no surface ids.
     lacks_surface_ids: bool,
+    /// This pane's journal of what its commands did (AU-04).
+    journal: journal::Journal,
 }
 
 /// A worker's environment: `--env` first, then what the orchestrator has that
@@ -1474,6 +1522,7 @@ impl Session {
             port: config.server_port,
             waited_for_own: false,
             lacks_surface_ids: false,
+            journal: journal::Journal::open(),
         };
         session.own = session.find_own()?;
         Ok(session)
@@ -1600,12 +1649,21 @@ impl Session {
                 None
             }
         };
+        let journal = &mut self.journal;
         close_panes(
             &mut self.client,
             panes,
             own,
             &mut prune_label,
-            &mut print_json,
+            &mut |line| {
+                if let Some(pane) = line_pane(line) {
+                    journal.append(
+                        "close",
+                        serde_json::json!({ "pane": pane, "worktree": line.get("worktree") }),
+                    );
+                }
+                print_json(line);
+            },
         )
     }
 
@@ -1680,6 +1738,8 @@ impl Session {
                 return self.close(&panes, any_pane, prune);
             }
             Command::Board { of, open } => return self.board(of, open),
+            Command::Status { answers } => return self.status(answers),
+            Command::Result { pane, max_bytes } => return self.result(pane, max_bytes),
             Command::Report { .. } => unreachable!("handled before connecting"),
         }
         Ok(EXIT_OK)
@@ -1799,7 +1859,7 @@ impl Session {
             )));
         }
         let max_children = args.max_children;
-        let env = worker_env(args.env, !args.command.is_empty(), std::env::vars());
+        let mut env = worker_env(args.env, !args.command.is_empty(), std::env::vars());
         let mut cwd = spawn_cwd(args.cwd, std::env::current_dir().ok());
         // `--worktree` refuses `--cwd`; the worktree replaces this one.
         let command = match args.tier {
@@ -1811,6 +1871,10 @@ impl Session {
         let wanted_label = label.clone();
         let earlier: Vec<u64> = children.iter().map(|panel| panel.pane_id.0).collect();
         let (input, wait_after, focus) = (args.input, args.wait_after, args.focus);
+        let argv = command.clone();
+        // The worker's cwd and result file, once its worktree is known.
+        let mut started_in: Option<String> = None;
+        let mut result_path: Option<String> = None;
         let spawned = spawn_steps(
             self,
             |_| match &worktree_label {
@@ -1854,6 +1918,25 @@ impl Session {
                 if let Some((_, made)) = made {
                     cwd = made.path.to_str().map(str::to_string);
                 }
+                if let Some(dir) = cwd.as_deref()
+                    && !env.contains_key(result::RESULT_ENV)
+                {
+                    match result::prepare(Path::new(dir)) {
+                        Ok(path) => {
+                            env.insert(
+                                result::RESULT_ENV.to_string(),
+                                path.to_string_lossy().into_owned(),
+                            );
+                        }
+                        Err(err) => eprintln!(
+                            "Noa +ctl: warning: the worker gets no ${}: cannot write {dir}/.noa: \
+                             {err}",
+                            result::RESULT_ENV
+                        ),
+                    }
+                }
+                result_path = env.get(result::RESULT_ENV).cloned();
+                started_in = cwd.clone();
                 let params = SpawnParams {
                     config: Some(SpawnConfig {
                         command: (!command.is_empty()).then_some(command),
@@ -1932,6 +2015,22 @@ impl Session {
         if let Some(tier) = args.tier {
             line["tier"] = tier.name().into();
         }
+        if let Some(path) = &result_path {
+            line["result"] = path.clone().into();
+        }
+        self.journal.append(
+            "spawn",
+            serde_json::json!({
+                "pane": spawned.pane,
+                "label": wanted_label,
+                "argv": argv,
+                "tier": args.tier.map(worktree::Tier::name),
+                "cwd": started_in,
+                "worktree": line.get("worktree"),
+                "branch": line.get("branch"),
+                "result": result_path,
+            }),
+        );
         print_json(&line);
         Ok(EXIT_OK)
     }
@@ -1948,14 +2047,43 @@ impl Session {
                 text
             }
         };
+        // What an answer answered, for `status --answers`.
+        let screen = if args.answer {
+            client_text(&mut self.client, args.pane, TextSource::Screen)
+                .ok()
+                .flatten()
+                .map(|text| last_lines(&text, PROMPT_LINES))
+        } else {
+            None
+        };
+        let since = SystemTime::now();
         let before = send_steps(self, &args, &text)?;
         let seq = before.agent.as_ref().map_or(0, |agent| agent.seq);
+        let mut event = serde_json::json!({
+            "pane": args.pane,
+            "seqBefore": seq,
+            "text": journal::clip(&text),
+            "bytes": text.len(),
+            "enter": args.enter,
+            "answer": args.answer,
+            "queue": args.queue,
+        });
+        if let Some(screen) = screen {
+            event["screen"] = screen.into();
+        }
+        self.journal.append("send", event);
         match args.wait {
             Some(options) => {
                 // Said before the wait, so a wait its shell tool kills
                 // without a timeout line still leaves the way back.
                 eprintln!("{}", resume_hint(args.pane, seq));
-                self.wait_subscribed(&[args.pane], send_wait_start(before, seq), &options)
+                let results = self.result_paths(std::slice::from_ref(&before));
+                self.wait_subscribed(
+                    &[args.pane],
+                    send_wait_start(before, seq),
+                    &options,
+                    (since, results),
+                )
             }
             None => {
                 print_json(&serde_json::json!({ "paneId": WireId(args.pane), "seq": seq }));
@@ -2028,25 +2156,104 @@ impl Session {
         } else {
             WaitStart::Listed { after }
         };
-        self.wait_subscribed(&panes, start, options)
+        let since = SystemTime::now();
+        let panels = self.client.list_panels()?;
+        let results = self.result_paths(&panels);
+        self.wait_subscribed(&panes, start, options, (since, results))
     }
 
+    /// Each pane's result file: the one its spawn gave it (journal), else
+    /// `<cwd>/.noa/result.md`.
+    fn result_paths(&self, panels: &[Panel]) -> HashMap<u64, PathBuf> {
+        result_paths(&journal::workers(&self.journal.events()), panels)
+    }
+
+    /// The wait loop, printing each line with its pane's result file once
+    /// written after `since` (`results`), and journaling each outcome.
     fn wait_subscribed(
         &mut self,
         panes: &[u64],
         start: WaitStart,
         options: &WaitOptions,
+        (since, results): (SystemTime, HashMap<u64, PathBuf>),
     ) -> Result<i32, Failure> {
+        let journal = &mut self.journal;
+        let client = &mut self.client;
         with_signals_caught(|| {
             wait_loop(
-                &mut self.client,
+                client,
                 panes,
                 start,
                 options,
                 WAIT_RELIST_INTERVAL,
-                &mut print_json,
+                &mut |line| {
+                    let mut line = line.clone();
+                    if let Some(event) = finish_wait_line(&mut line, &results, since) {
+                        journal.append("outcome", event);
+                    }
+                    print_json(&line);
+                },
             )
         })
+    }
+
+    /// `status`: one line per worker of this pane, with what the journal
+    /// knows; workers the journal knows that are gone come last.
+    /// `--answers`: every prompt answered from here, oldest first.
+    fn status(&mut self, answers: bool) -> Result<i32, Failure> {
+        let events = self.journal.events();
+        if answers {
+            journal::answers(&events).iter().for_each(print_json);
+            return Ok(EXIT_OK);
+        }
+        let children = self.children()?;
+        let here = std::env::current_dir().ok();
+        let lines = status_lines(&children, &journal::workers(&events), |branch, dir| {
+            let ahead = here
+                .as_deref()
+                .and_then(|here| worktree::ahead(here, branch));
+            (ahead, worktree::dirty(Path::new(dir)))
+        });
+        lines.iter().for_each(print_json);
+        Ok(EXIT_OK)
+    }
+
+    /// `result PANE`: print the worker's result file.
+    fn result(&mut self, pane: u64, max_bytes: Option<usize>) -> Result<i32, Failure> {
+        let given = journal::workers(&self.journal.events())
+            .into_iter()
+            .find(|worker| worker.pane == pane)
+            .and_then(|worker| worker.result);
+        let path = match given {
+            Some(path) => PathBuf::from(path),
+            None => {
+                let panels = self.client.list_panels()?;
+                let panel = panels
+                    .iter()
+                    .find(|panel| panel.pane_id.0 == pane)
+                    .ok_or_else(|| {
+                        Failure::error(format!(
+                            "pane {pane} is not listed, and this pane's journal names no result \
+                             file for it"
+                        ))
+                    })?;
+                result::path_in(Path::new(&panel.cwd))
+            }
+        };
+        let (text, cut) = result::read(pane, &path, max_bytes).map_err(Failure::error)?;
+        let mut stdout = std::io::stdout().lock();
+        let _ = stdout.write_all(text.as_bytes());
+        if !text.ends_with('\n') {
+            let _ = stdout.write_all(b"\n");
+        }
+        if cut {
+            eprintln!(
+                "Noa +ctl: result cut; printed the first {} bytes of {}",
+                text.len(),
+                path.display()
+            );
+        }
+        Ok(EXIT_OK)
     }
 }
 
@@ -2968,6 +3175,159 @@ pub(crate) fn max_children_message(live: usize, exited: usize, max: usize) -> St
         "this pane already has {live} workers{exited} (limit {max}); close finished ones \
          after reading them{raise}"
     )
+}
+
+/// The pane a printed line is about (`"paneId"`).
+pub(crate) fn line_pane(line: &serde_json::Value) -> Option<u64> {
+    line.get("paneId")?.as_str()?.parse().ok()
+}
+
+/// Each listed pane's result file: what its spawn gave it (`workers`, from
+/// the journal), else `<cwd>/.noa/result.md`.
+pub(crate) fn result_paths(workers: &[journal::Worker], panels: &[Panel]) -> HashMap<u64, PathBuf> {
+    panels
+        .iter()
+        .map(|panel| {
+            let pane = panel.pane_id.0;
+            let given = workers
+                .iter()
+                .find(|worker| worker.pane == pane)
+                .and_then(|worker| worker.result.as_ref())
+                .map(PathBuf::from);
+            (
+                pane,
+                given.unwrap_or_else(|| result::path_in(Path::new(&panel.cwd))),
+            )
+        })
+        .collect()
+}
+
+/// A wait line as printed: with `"result"` when its pane's result file was
+/// written after `since`. Returns the journal's `outcome` event for a line
+/// that ended a pane's wait (not a timeout's).
+pub(crate) fn finish_wait_line(
+    line: &mut serde_json::Value,
+    results: &HashMap<u64, PathBuf>,
+    since: SystemTime,
+) -> Option<serde_json::Value> {
+    let pane = line_pane(line)?;
+    if let Some(info) = results
+        .get(&pane)
+        .and_then(|path| result::written_since(path, since))
+    {
+        line["result"] = info;
+    }
+    let reason = line.get("reason")?;
+    Some(serde_json::json!({
+        "pane": pane,
+        "reason": reason,
+        "seq": line.get("seq"),
+        "label": line.get("label"),
+    }))
+}
+
+/// `status`: a line per worker in `children`, with what the journal knows
+/// of it (`workers`), and for a worktree worker `ahead`/`dirty` from `git`
+/// (given its branch and worktree); then the journal's workers that are no
+/// longer listed, as `"gone":true`.
+pub(crate) fn status_lines(
+    children: &[Panel],
+    workers: &[journal::Worker],
+    mut git: impl FnMut(&str, &str) -> (Option<u64>, Option<bool>),
+) -> Vec<serde_json::Value> {
+    let known = |pane: u64| workers.iter().find(|worker| worker.pane == pane);
+    let mut lines = Vec::new();
+    for panel in children {
+        let pane = panel.pane_id.0;
+        let mut line = serde_json::json!({ "paneId": WireId(pane), "cwd": panel.cwd });
+        let agent = panel.agent.as_ref();
+        let fields = [
+            ("label", panel.label.clone().map(Into::into)),
+            (
+                "state",
+                agent.and_then(|agent| agent.state.clone()).map(Into::into),
+            ),
+            ("seq", agent.map(|agent| agent.seq.into())),
+            (
+                "blocked",
+                agent
+                    .and_then(|agent| agent.blocked.clone())
+                    .map(Into::into),
+            ),
+            (
+                "exit",
+                panel
+                    .exit
+                    .as_ref()
+                    .map(|exit| serde_json::to_value(exit).expect("PanelExit serializes")),
+            ),
+            ("branch", panel.branch.clone().map(Into::into)),
+        ];
+        for (key, value) in fields {
+            if let Some(value) = value {
+                line[key] = value;
+            }
+        }
+        let worker = known(pane);
+        if let Some(worker) = worker {
+            worker.add_to(&mut line);
+        }
+        if line.get("argv").is_none()
+            && let Some(spawn) = &panel.spawn
+        {
+            line["argv"] = spawn.argv.clone().into();
+        }
+        // A `spawn --worktree` worker: its branch and worktree from the
+        // journal, else an `orch/` branch checked out in its cwd.
+        let checkout = match worker
+            .and_then(|worker| Some((worker.branch.clone()?, worker.worktree.clone()?)))
+        {
+            Some(checkout) => Some(checkout),
+            None => panel
+                .branch
+                .clone()
+                .filter(|branch| branch.starts_with("orch/"))
+                .map(|branch| (branch, panel.cwd.clone())),
+        };
+        if let Some((branch, dir)) = checkout {
+            let (ahead, dirty) = git(&branch, &dir);
+            if let Some(ahead) = ahead {
+                line["ahead"] = ahead.into();
+            }
+            if let Some(dirty) = dirty {
+                line["dirty"] = dirty.into();
+            }
+        }
+        lines.push(line);
+    }
+    for worker in workers {
+        if children.iter().any(|panel| panel.pane_id.0 == worker.pane) {
+            continue;
+        }
+        let mut line = serde_json::json!({ "paneId": WireId(worker.pane), "gone": true });
+        if let Some(label) = &worker.label {
+            line["label"] = label.clone().into();
+        }
+        if worker.closed {
+            line["closed"] = true.into();
+        }
+        worker.add_to(&mut line);
+        lines.push(line);
+    }
+    lines
+}
+
+/// How many screen lines a prompt, a spawn's first screen or an answered
+/// prompt keeps.
+pub(crate) const PROMPT_LINES: usize = 20;
+
+/// The last `lines` non-blank lines of `text`.
+pub(crate) fn last_lines(text: &str, lines: usize) -> String {
+    let kept: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    kept[kept.len().saturating_sub(lines)..].join("\n")
 }
 
 /// `text` without the blank (empty or whitespace-only) lines at its end.
@@ -5073,6 +5433,107 @@ mod tests {
             None
         );
         assert_eq!(history_notice(4, TextSource::Screen, &result(true)), None);
+    }
+
+    // Audit finding (AU-03): a worker's report file was only found by
+    // asking; a wait line now names it once written during the wait.
+    #[test]
+    fn a_wait_line_names_a_result_written_since_the_wait_began() {
+        let dir = temp_dir("wait-result");
+        let path = result::prepare(&dir).unwrap();
+        let mut worker = with_pane(panel(2, Some("finished"), false), 8);
+        worker.cwd = dir.to_string_lossy().into_owned();
+        let results = result_paths(&[], &[worker.clone()]);
+        assert_eq!(results[&8], path);
+        // The journal's path wins over the cwd's.
+        let given = journal::Worker {
+            pane: 8,
+            result: Some("/elsewhere/r.md".to_string()),
+            ..journal::Worker::default()
+        };
+        assert_eq!(
+            result_paths(&[given], &[worker])[&8],
+            PathBuf::from("/elsewhere/r.md")
+        );
+
+        let since = SystemTime::now() - Duration::from_secs(5);
+        let mut line = serde_json::json!({ "paneId": "8", "reason": "finished", "seq": 2 });
+        let event = finish_wait_line(&mut line, &results, since).unwrap();
+        assert!(line.get("result").is_none());
+        assert_eq!(event["pane"], 8);
+        assert_eq!(event["reason"], "finished");
+        assert_eq!(event["seq"], 2);
+
+        std::fs::write(&path, "report").unwrap();
+        let mut line = serde_json::json!({ "paneId": "8", "reason": "finished", "seq": 2 });
+        finish_wait_line(&mut line, &results, since).unwrap();
+        assert_eq!(line["result"]["bytes"], 6);
+        // A timeout line is no outcome.
+        let mut timeout = serde_json::json!({ "timeout": true, "pending": ["8"] });
+        assert!(finish_wait_line(&mut timeout, &results, since).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Audit finding (AU-04): after its context was cut, an orchestrator
+    // could not tell which task, tier or answer went to which worker.
+    #[test]
+    fn status_joins_each_worker_with_its_journal_and_lists_gone_ones_last() {
+        let events = journal::parse_events(concat!(
+            r#"{"ev":"spawn","ts":1,"pane":4,"label":"fix","argv":["claude"],"tier":"light","worktree":"/r-wt/fix","branch":"orch/fix","result":"/r-wt/fix/.noa/result.md"}"#,
+            "\n",
+            r#"{"ev":"send","ts":2,"pane":4,"seqBefore":0,"text":"do it","answer":false}"#,
+            "\n",
+            r#"{"ev":"spawn","ts":3,"pane":6,"label":"old","argv":["codex"]}"#,
+            "\n",
+            r#"{"ev":"close","ts":4,"pane":6}"#,
+            "\n",
+        ));
+        let workers = journal::workers(&events);
+        let mut fix = worker(4, 3);
+        fix.label = Some("fix".to_string());
+        fix.agent.as_mut().unwrap().blocked = Some("question".to_string());
+        let mut plain = worker(5, 3);
+        plain.agent = None;
+        plain.spawn = Some(noa_ipc::PanelSpawn {
+            argv: vec!["make".to_string()],
+            started_at: 1,
+        });
+        let mut asked = Vec::new();
+        let lines = status_lines(&[fix, plain], &workers, |branch, dir| {
+            asked.push(format!("{branch} {dir}"));
+            (Some(2), Some(false))
+        });
+        assert_eq!(asked, vec!["orch/fix /r-wt/fix".to_string()]);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0]["paneId"], "4");
+        assert_eq!(lines[0]["blocked"], "question");
+        assert_eq!(lines[0]["tier"], "light");
+        assert_eq!(lines[0]["lastTask"], "do it");
+        assert_eq!(lines[0]["ahead"], 2);
+        assert_eq!(lines[0]["dirty"], false);
+        assert_eq!(lines[0]["result"], "/r-wt/fix/.noa/result.md");
+        // Not in the journal: the server's argv, no journal fields.
+        assert_eq!(lines[1]["argv"], serde_json::json!(["make"]));
+        assert!(lines[1].get("answers").is_none());
+        assert!(lines[1].get("ahead").is_none());
+        assert_eq!(lines[2]["paneId"], "6");
+        assert_eq!(lines[2]["gone"], true);
+        assert_eq!(lines[2]["closed"], true);
+        assert_eq!(lines[2]["label"], "old");
+
+        assert_eq!(
+            parse_args(&args(&["status", "--answers"])).unwrap(),
+            Command::Status { answers: true }
+        );
+        assert_eq!(
+            parse_args(&args(&["result", "4", "--max-bytes", "10"])).unwrap(),
+            Command::Result {
+                pane: 4,
+                max_bytes: Some(10)
+            }
+        );
+        assert!(parse_args(&args(&["result"])).is_err());
+        assert_eq!(last_lines("a\n\nb\n  \nc\n\n", 2), "b\nc");
     }
 
     // Review finding: a relative `--cwd` reached the GUI process as is, and

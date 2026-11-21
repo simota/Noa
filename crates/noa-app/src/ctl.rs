@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use noa_ipc::{
     Client, ClientError, EventKind, MAX_SEND_TEXT_BYTES, Notification, Panel, ScopeSet,
-    SpawnConfig, SpawnParams, SplitPlacement, TextSource, WireId,
+    SendTextOptions, SpawnConfig, SpawnParams, SplitPlacement, TextSource, WireId,
 };
 
 /// Exit status: the request succeeded (or the wait condition held).
@@ -89,7 +89,11 @@ Commands:
                                 its agent is running, unless --queue (then every
                                 --wait line has \"queued\":true: the wait may end
                                 with the turn already running); --raw keys (Esc,
-                                Ctrl-C) still go to a running agent.
+                                Ctrl-C) still go to a running agent. Pasted text
+                                for an agent (or a pane whose program is not
+                                listed yet) waits up to 15 s for it to enable
+                                bracketed paste, before any key; if it does not,
+                                nothing is sent (exit 1).
                                 A TEXT over 250 KiB (JSON-encoded) is refused:
                                 send a file's path instead. --replace first
                                 clears what the input line holds (Ctrl-E, then
@@ -1048,6 +1052,9 @@ const RPC_PANE_CLOSED: i64 = -32004;
 /// The server's JSON-RPC code for a request the app did not answer in time:
 /// it may still have been carried out.
 const RPC_OUTCOME_UNKNOWN: i64 = -32009;
+/// The server's JSON-RPC code for a paste refused with `requirePasteMode`:
+/// the pane has not enabled bracketed paste yet.
+const RPC_NOT_READY: i64 = -32010;
 
 const SCOPES_HINT: &str = "enable it in Noa's config with `server-enable = true` and `server-scopes = read,control,input`";
 
@@ -1937,8 +1944,19 @@ impl Session {
 
     /// `noa.sendText`, with a refusal of a pane whose process has exited
     /// (held open, so still listed) said as such rather than "pane closed".
-    fn send_input(&mut self, pane: u64, text: &str, bracketed: bool) -> Result<(), Failure> {
-        match self.client.send_text(pane, text, bracketed) {
+    /// Returns `false` for a paste that `requirePasteMode` refused (-32010):
+    /// nothing was written.
+    fn send_input(
+        &mut self,
+        pane: u64,
+        text: &str,
+        options: SendTextOptions,
+    ) -> Result<bool, Failure> {
+        match self.client.send_text_with(pane, text, options) {
+            Err(ClientError::Rpc {
+                code: RPC_NOT_READY,
+                ..
+            }) if options.require_paste_mode => Ok(false),
             Err(ClientError::Rpc {
                 code: RPC_PANE_CLOSED,
                 message,
@@ -1959,7 +1977,7 @@ impl Session {
                 "Noa did not confirm the input to pane {pane} in time ({message}); it may \
                  already be typed: `read` the pane before sending again"
             ))),
-            result => Ok(result?),
+            result => result.map(|()| true).map_err(Failure::from),
         }
     }
 
@@ -2026,7 +2044,22 @@ impl SendTarget for Session {
     }
 
     fn type_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), Failure> {
-        self.send_input(pane, text, paste)
+        let options = SendTextOptions {
+            paste,
+            require_paste_mode: false,
+        };
+        self.send_input(pane, text, options).map(drop)
+    }
+
+    /// An empty paste that requires paste mode: refused (-32010) while the
+    /// pane has not enabled bracketed paste, and writes nothing either way.
+    /// A server that predates the option takes it as ready.
+    fn paste_ready(&mut self, pane: u64) -> Result<bool, Failure> {
+        let options = SendTextOptions {
+            paste: true,
+            require_paste_mode: true,
+        };
+        self.send_input(pane, "", options)
     }
 
     fn pause(&mut self, duration: Duration) {
@@ -2041,7 +2074,43 @@ pub(crate) trait SendTarget {
     /// Subscribe to `pane`'s state changes (`send --wait`).
     fn subscribe(&mut self, pane: u64) -> Result<(), Failure>;
     fn type_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), Failure>;
+    /// Whether `pane` takes a paste as one (bracketed paste is on); writes
+    /// nothing.
+    fn paste_ready(&mut self, pane: u64) -> Result<bool, Failure>;
     fn pause(&mut self, duration: Duration);
+}
+
+/// How often, and how long, `send` asks again whether a pane has enabled
+/// bracketed paste: 200 ms apart for up to 15 s.
+const PASTE_MODE_PAUSE: Duration = Duration::from_millis(200);
+const PASTE_MODE_TRIES: usize = 75;
+
+/// Whether a paste into `panel` waits until it has enabled bracketed paste
+/// (REL-01): an agent's pane, or one whose program is not even listed yet
+/// (just spawned). Until then every newline of a paste lands as Enter.
+pub(crate) fn needs_paste_mode(panel: &Panel) -> bool {
+    panel
+        .agent
+        .as_ref()
+        .is_some_and(|agent| agent.kind.is_some())
+        || panel.process.as_deref().is_none_or(str::is_empty)
+}
+
+/// Wait for `pane` to enable bracketed paste, asking every
+/// [`PASTE_MODE_PAUSE`] up to [`PASTE_MODE_TRIES`] times.
+fn wait_for_paste_mode(target: &mut impl SendTarget, pane: u64) -> Result<(), Failure> {
+    for tried in 0..=PASTE_MODE_TRIES {
+        if target.paste_ready(pane)? {
+            return Ok(());
+        }
+        if tried < PASTE_MODE_TRIES {
+            target.pause(PASTE_MODE_PAUSE);
+        }
+    }
+    Err(Failure::error(format!(
+        "pane {pane} has not enabled bracketed paste yet (its program may still be starting); \
+         nothing was sent"
+    )))
 }
 
 /// Refuse a text too large for one request, before anything is typed.
@@ -2111,6 +2180,11 @@ pub(crate) fn send_steps(
         .ok_or_else(|| Failure::error("unknown pane"))?;
     if let Some(refusal) = send_refusal(&before, args, text) {
         return Err(Failure::error(refusal));
+    }
+    // Before `--replace`'s keys too: they would reach a program that is
+    // still starting.
+    if !args.raw && !text.is_empty() && needs_paste_mode(&before) {
+        wait_for_paste_mode(target, args.pane)?;
     }
     // Subscribe before typing, so the reply cannot arrive unobserved.
     if args.wait.is_some() {
@@ -4503,6 +4577,10 @@ mod tests {
         panels: Vec<Panel>,
         looks: usize,
         log: Vec<String>,
+        /// Bracketed paste is on from this many asks on (`None`: always).
+        paste_ready_after: Option<usize>,
+        paste_asks: usize,
+        paused: Duration,
     }
 
     impl FakeTarget {
@@ -4511,6 +4589,9 @@ mod tests {
                 panels,
                 looks: 0,
                 log: Vec::new(),
+                paste_ready_after: None,
+                paste_asks: 0,
+                paused: Duration::ZERO,
             }
         }
     }
@@ -4532,7 +4613,18 @@ mod tests {
             Ok(())
         }
 
-        fn pause(&mut self, _duration: Duration) {}
+        fn paste_ready(&mut self, _pane: u64) -> Result<bool, Failure> {
+            self.log.push("paste ready?".to_string());
+            let ready = self
+                .paste_ready_after
+                .is_none_or(|after| self.paste_asks >= after);
+            self.paste_asks += 1;
+            Ok(ready)
+        }
+
+        fn pause(&mut self, duration: Duration) {
+            self.paused += duration;
+        }
     }
 
     fn send_args(items: &[&str]) -> SendArgs {
@@ -4619,6 +4711,73 @@ mod tests {
         assert_eq!(code.ok(), Some(EXIT_TIMEOUT));
         assert_eq!(lines[0]["queued"], true);
         assert!(!send_args(&["--wait", "x"]).wait.unwrap().queued);
+    }
+
+    // Audit finding (REL-01): a send right after a spawn reached an agent
+    // that had not enabled bracketed paste yet, so each newline of the text
+    // landed as Enter.
+    #[test]
+    fn a_paste_into_an_agent_waits_for_bracketed_paste_before_any_key() {
+        let mut target = FakeTarget::new(vec![panel(0, None, false)]);
+        target.paste_ready_after = Some(3);
+        send_steps(
+            &mut target,
+            &send_args(&["--replace", "--enter", "a\nb"]),
+            "a\nb",
+        )
+        .unwrap();
+        assert_eq!(target.paste_asks, 4);
+        assert_eq!(
+            target.paused,
+            PASTE_MODE_PAUSE * 3 + REPLACE_PAUSE * 5 + SUBMIT_DELAY * 2
+        );
+        let first_key = target
+            .log
+            .iter()
+            .position(|entry| entry.starts_with("type"))
+            .unwrap();
+        assert!(
+            target.log[..first_key]
+                .iter()
+                .all(|entry| entry == "paste ready?")
+        );
+        assert_eq!(first_key, 4);
+
+        // Never ready: nothing at all is typed after 15 s.
+        let mut target = FakeTarget::new(vec![panel(0, None, false)]);
+        target.paste_ready_after = Some(usize::MAX);
+        let failure = send_steps(
+            &mut target,
+            &send_args(&["--replace", "--enter", "go"]),
+            "go",
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, EXIT_ERROR);
+        assert_eq!(
+            failure.message,
+            "pane 8 has not enabled bracketed paste yet (its program may still be starting); \
+             nothing was sent"
+        );
+        assert_eq!(target.paused, Duration::from_secs(15));
+        assert!(target.log.iter().all(|entry| !entry.starts_with("type")));
+
+        // Raw keys, a bare Enter and a plain command's pane are not gated.
+        let mut shell = panel(0, None, false);
+        shell.agent = None;
+        shell.process = Some("zsh".to_string());
+        for (panel, flags, text) in [
+            (panel(0, None, false), &["--raw", "x"][..], "x"),
+            (panel(0, None, false), &["--enter", ""], ""),
+            (shell.clone(), &["--enter", "make"], "make"),
+        ] {
+            let mut target = FakeTarget::new(vec![panel]);
+            target.paste_ready_after = Some(usize::MAX);
+            send_steps(&mut target, &send_args(flags), text).unwrap();
+            assert_eq!(target.paste_asks, 0, "{flags:?}");
+        }
+        // A pane whose program is not listed yet is gated.
+        shell.process = None;
+        assert!(needs_paste_mode(&shell));
     }
 
     // Audit finding (REL-16): `--replace` spends about 0.35 s clearing the

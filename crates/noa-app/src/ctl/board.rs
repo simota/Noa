@@ -16,11 +16,10 @@ use super::{EXIT_OK, Failure, HOLD_BANNER, SUBMIT_DELAY};
 
 /// How often the pane list is read again.
 const LIST_EVERY: Duration = Duration::from_millis(500);
-/// After a listing fails, the first wait before trying again, the most it
-/// grows to, and how long failing without a break ends the board.
+/// After a listing fails, the first wait before trying again and the most
+/// it grows to. Failing never ends the board (see [`Polling`]).
 const RETRY_FIRST: Duration = Duration::from_millis(500);
 const RETRY_MAX: Duration = Duration::from_secs(4);
-const GIVE_UP_AFTER: Duration = Duration::from_secs(30);
 /// How soon a second digit must follow the first to make a two-digit
 /// worker number.
 const SECOND_DIGIT: Duration = Duration::from_millis(1000);
@@ -437,6 +436,9 @@ pub(crate) struct Board {
     /// Since when the pane list could not be read; what is shown is the
     /// last listing that worked.
     pub(crate) offline: Option<Instant>,
+    /// Whether the last reconnect reached another Noa than the one the
+    /// board started on, whose panes are not these workers.
+    pub(crate) elsewhere: bool,
     /// Workers closed since the board opened, newest first.
     gone: Vec<Gone>,
     /// The key help is shown over the current view.
@@ -463,6 +465,9 @@ pub(crate) struct Board {
     /// missing from the latest one since.
     of_seen: bool,
     of_gone: bool,
+    /// The panes that needed someone at the last listing, so only one that
+    /// newly does rings the bell (U2).
+    needs_seen: HashSet<u64>,
     /// The language of every label (see [`Lang::detect`]).
     pub(crate) lang: Lang,
 }
@@ -485,6 +490,7 @@ impl Board {
             mode: Mode::Normal,
             message: None,
             offline: None,
+            elsewhere: false,
             gone: Vec::new(),
             help: false,
             help_scroll: 0,
@@ -496,6 +502,7 @@ impl Board {
             synced: None,
             of_seen: false,
             of_gone: false,
+            needs_seen: HashSet::new(),
             lang: Lang::Ja,
         }
     }
@@ -555,7 +562,11 @@ impl Board {
 
     /// Take a fresh pane listing. A report count that moved is kept in the
     /// worker's history; the first listing records the state found as is.
-    pub(crate) fn update(&mut self, panels: Vec<Panel>, now: Instant) {
+    /// Returns whether a worker newly needs someone since the last listing
+    /// (never on the first): the board rings the bell then, which Noa marks
+    /// on the board's tab and sidebar row while the board is not in focus
+    /// (U2).
+    pub(crate) fn update(&mut self, panels: Vec<Panel>, now: Instant) -> bool {
         let first = !self.started;
         self.started = true;
         self.synced = Some(now);
@@ -695,6 +706,18 @@ impl Board {
         {
             self.mode = Mode::TargetGone(name);
         }
+        let needing = self.needing();
+        let ring = !first && !needing.is_subset(&self.needs_seen);
+        self.needs_seen = needing;
+        ring
+    }
+
+    /// The panes in the queue: the workers that need someone.
+    fn needing(&self) -> HashSet<u64> {
+        self.listed()
+            .filter(|panel| Status::of(panel).group() == Group::Needs)
+            .map(|panel| panel.pane_id.0)
+            .collect()
     }
 
     #[cfg(test)]
@@ -2160,13 +2183,36 @@ impl Board {
                 line.fg(ORANGE, &fit(&text, room));
             }
             Mode::Normal => match (&self.offline, &self.message) {
-                // The listing failed: what is shown is as of `since`.
+                // The listing failed: what is shown is the last one that
+                // worked. The board waits for Noa as long as it takes; only
+                // the person ends it (U1).
                 (Some(since), _) => {
                     let secs = now.saturating_duration_since(*since).as_secs();
-                    let text = self.lang.pick(
-                        format!("接続できません · 再試行中 {secs} 秒"),
-                        format!("Cannot connect · retrying for {secs}s"),
-                    );
+                    let seen = match self.synced {
+                        Some(at) => {
+                            let ago = ago(Some(at), now, self.lang);
+                            self.lang
+                                .pick(format!("表示は {ago}のもの"), format!("as of {ago}"))
+                        }
+                        None => self
+                            .lang
+                            .pick("一覧はまだ読めていません", "nothing read yet")
+                            .to_string(),
+                    };
+                    let text = match (self.elsewhere, self.lang) {
+                        (false, Lang::Ja) => {
+                            format!("接続できません {secs} 秒 · {seen} · q で終了")
+                        }
+                        (false, Lang::En) => {
+                            format!("Cannot reach Noa for {secs}s · {seen} · q quits")
+                        }
+                        (true, Lang::Ja) => format!(
+                            "別の Noa が応答 · 元の Noa を待機中 {secs} 秒 · {seen} · q で終了"
+                        ),
+                        (true, Lang::En) => format!(
+                            "Another Noa answered · waiting for ours {secs}s · {seen} · q quits"
+                        ),
+                    };
                     line.fg(ORANGE, &fit(&text, room));
                 }
                 (None, Some(notice)) => {
@@ -3370,6 +3416,12 @@ impl Screen {
         let _ = out.flush();
     }
 
+    fn bell() {
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(b"\x07");
+        let _ = out.flush();
+    }
+
     fn draw(lines: &[String]) {
         let mut out = std::io::stdout().lock();
         let _ = out.write_all(b"\x1b[H");
@@ -3393,9 +3445,10 @@ impl Drop for Screen {
 }
 
 /// When to read the pane list next. A failed listing is tried again after
-/// a growing wait, and only a run of failures [`GIVE_UP_AFTER`] long ends
-/// the board: one timeout or a server restart must not close it, which
-/// would hand every worker back to the orchestrator (D10).
+/// a growing wait, up to [`RETRY_MAX`], for as long as it takes: ending the
+/// board hands every worker back to the orchestrator, which holds 8 of the
+/// 20 it may have, and closes the workers of workers (D10, D12, D13), so a
+/// stalled or restarting Noa must never end it; only the person does (U1).
 #[derive(Default)]
 pub(crate) struct Polling {
     next: Option<Instant>,
@@ -3415,13 +3468,11 @@ impl Polling {
         };
     }
 
-    /// Note a failed listing; `false` once they have failed for
-    /// [`GIVE_UP_AFTER`] without a break.
-    pub(crate) fn failed(&mut self, now: Instant) -> bool {
-        let since = *self.failing_since.get_or_insert(now);
+    /// Note a failed listing.
+    pub(crate) fn failed(&mut self, now: Instant) {
+        self.failing_since.get_or_insert(now);
         self.delay = (self.delay * 2).clamp(RETRY_FIRST, RETRY_MAX);
         self.next = Some(now + self.delay);
-        now.saturating_duration_since(since) < GIVE_UP_AFTER
     }
 
     pub(crate) fn failing_since(&self) -> Option<Instant> {
@@ -3429,10 +3480,12 @@ impl Polling {
     }
 }
 
-/// Why a listing failed: worth trying again, or the board must end.
+/// Why a listing failed; either way it is tried again.
 enum ListFailure {
-    Retry(Failure),
-    End(Failure),
+    /// Noa did not answer, or the connection could not be opened.
+    Lost,
+    /// A reconnect reached another Noa (see [`same_instance`]).
+    Elsewhere,
 }
 
 /// Whether a connection opened again reached the Noa the board started on
@@ -3443,7 +3496,8 @@ fn same_instance(first: &str, now: &str) -> bool {
     first.is_empty() || first == now
 }
 
-/// One pane listing. A connection that was lost is opened again first.
+/// One pane listing. A connection that was lost is opened again first, and
+/// again on the next try while it reaches another Noa.
 fn list(
     client: &mut Client,
     reconnect: &mut bool,
@@ -3451,19 +3505,43 @@ fn list(
 ) -> Result<Vec<Panel>, ListFailure> {
     if *reconnect {
         *client = super::Session::connect()
-            .map_err(ListFailure::Retry)?
+            .map_err(|_| ListFailure::Lost)?
             .client;
-        *reconnect = false;
         if !same_instance(instance, client.server_instance_id()) {
-            return Err(ListFailure::End(Failure::error(
-                "the Noa that answered after a reconnect is not the one the board started on; its panes are not these workers",
-            )));
+            return Err(ListFailure::Elsewhere);
         }
+        *reconnect = false;
     }
     client.list_panels().map_err(|err| {
         *reconnect = lost(&err);
-        ListFailure::Retry(Failure::from(err))
+        ListFailure::Lost
     })
+}
+
+/// Take what a listing gave, and whether to ring the bell (see
+/// [`Board::update`]). A failure is only noted: the board keeps what it had
+/// and tries again (see [`Polling`]).
+fn take_listing(
+    board: &mut Board,
+    polling: &mut Polling,
+    listing: Result<Vec<Panel>, ListFailure>,
+    now: Instant,
+) -> bool {
+    let ring = match listing {
+        Ok(panels) => {
+            let ring = board.update(panels, now);
+            board.elsewhere = false;
+            polling.succeeded(now);
+            ring
+        }
+        Err(failure) => {
+            board.elsewhere = matches!(failure, ListFailure::Elsewhere);
+            polling.failed(now);
+            false
+        }
+    };
+    board.offline = polling.failing_since();
+    ring
 }
 
 /// Whether `err` means the connection is gone and must be opened again.
@@ -3573,6 +3651,7 @@ fn run_until_quit(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
     let mut size = (0, 0);
     let mut dirty = true;
     let mut title = String::new();
+    let mut ring = false;
     let mut reader = KeyReader::default();
     loop {
         if SIGNALED.load(std::sync::atomic::Ordering::Relaxed) != 0 {
@@ -3580,16 +3659,8 @@ fn run_until_quit(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
         }
         let now = Instant::now();
         if polling.due(now) {
-            match list(client, &mut reconnect, &instance) {
-                Ok(panels) => {
-                    board.update(panels, now);
-                    polling.succeeded(now);
-                }
-                Err(ListFailure::End(failure)) => return Err(failure),
-                Err(ListFailure::Retry(failure)) if !polling.failed(now) => return Err(failure),
-                Err(ListFailure::Retry(_)) => {}
-            }
-            board.offline = polling.failing_since();
+            let listing = list(client, &mut reconnect, &instance);
+            ring |= take_listing(&mut board, &mut polling, listing, now);
             dirty = true;
         }
         // While offline the notice counts the seconds.
@@ -3622,6 +3693,9 @@ fn run_until_quit(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
                 title = current;
             }
             dirty = false;
+        }
+        if std::mem::take(&mut ring) {
+            Screen::bell();
         }
         // A lone ESC waits briefly for the rest of a sequence.
         let wait = if reader.waiting_on_esc() {
@@ -5096,9 +5170,35 @@ mod tests {
         assert_eq!(empty.key(Key::Char('q')), Some(Action::Quit));
     }
 
-    // Review B02: one failed listing ended the board.
+    // U2: a worker newly needing someone showed only on the board's rows,
+    // which are out of sight while the person works elsewhere.
     #[test]
-    fn failed_listings_are_retried_with_backoff_for_thirty_seconds() {
+    fn a_worker_newly_needing_someone_rings_once() {
+        let t0 = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        // ui awaits approval already: not on the first listing.
+        assert!(!board.update(sample(), t0));
+        assert!(!board.update(sample(), t0));
+        let mut asks = sample();
+        asks[0].agent.as_mut().unwrap().state = Some("input".to_string());
+        assert!(board.update(asks.clone(), t0), "api asks");
+        // Not again while it stays in the queue, whatever it waits for.
+        assert!(!board.update(asks.clone(), t0));
+        asks[0].agent.as_mut().unwrap().state = Some("permission".to_string());
+        assert!(!board.update(asks, t0));
+        // Back to work, then waiting again: a new request.
+        assert!(!board.update(sample(), t0));
+        let mut fails = sample();
+        fails.push(failed_worker(6, 2));
+        assert!(board.update(fails, t0), "a command failed");
+        // Leaving the queue rings nothing.
+        assert!(!board.update(Vec::new(), t0));
+    }
+
+    // Review B02: one failed listing ended the board. U1: so did 30 seconds
+    // of them, which closed every worker the orchestrator had no room for.
+    #[test]
+    fn failed_listings_are_retried_with_backoff_for_as_long_as_it_takes() {
         let t0 = Instant::now();
         let mut polling = Polling::default();
         assert!(polling.due(t0));
@@ -5108,7 +5208,8 @@ mod tests {
 
         let mut at = t0 + LIST_EVERY;
         let mut waits = Vec::new();
-        while polling.failed(at) {
+        while at < t0 + Duration::from_secs(600) {
+            polling.failed(at);
             assert_eq!(polling.failing_since(), Some(t0 + LIST_EVERY));
             let next = polling.next.unwrap();
             waits.push(next - at);
@@ -5119,26 +5220,50 @@ mod tests {
             waits[..5],
             [500, 1000, 2000, 4000, 4000].map(Duration::from_millis)
         );
-        let failed_for = at - (t0 + LIST_EVERY);
-        assert!(failed_for >= GIVE_UP_AFTER && failed_for < GIVE_UP_AFTER + RETRY_MAX);
+        assert_eq!(waits.last(), Some(&RETRY_MAX));
 
         // One listing that works starts the count again.
         let mut polling = Polling::default();
-        assert!(polling.failed(t0));
+        polling.failed(t0);
         polling.succeeded(t0 + Duration::from_secs(20));
         assert_eq!(polling.failing_since(), None);
-        assert!(polling.failed(t0 + Duration::from_secs(40)));
+        polling.failed(t0 + Duration::from_secs(40));
+        assert_eq!(polling.failing_since(), Some(t0 + Duration::from_secs(40)));
     }
 
     #[test]
     fn the_board_says_it_cannot_connect_and_keeps_what_it_had() {
         let t0 = Instant::now();
         let mut board = Board::new(Some(1), Some(8));
-        board.update(sample(), t0);
-        board.offline = Some(t0);
-        let all = rendered(&board, 80, 30, t0 + Duration::from_secs(7));
-        assert!(all.contains("接続できません · 再試行中 7 秒"), "{all}");
+        let mut polling = Polling::default();
+        take_listing(&mut board, &mut polling, Ok(sample()), t0);
+        take_listing(&mut board, &mut polling, Err(ListFailure::Lost), t0);
+        let all = rendered(&board, 100, 30, t0 + Duration::from_secs(7));
+        assert!(
+            all.contains("接続できません 7 秒 · 表示は 7 秒前のもの · q で終了"),
+            "{all}"
+        );
         assert!(all.contains("ui") && all.contains("api"), "{all}");
+        // Another Noa answering is said, and tried again too.
+        take_listing(&mut board, &mut polling, Err(ListFailure::Elsewhere), t0);
+        let all = rendered(&board, 120, 30, t0 + Duration::from_secs(7));
+        assert!(
+            all.contains("別の Noa が応答 · 元の Noa を待機中 7 秒"),
+            "{all}"
+        );
+        assert!(polling.next.is_some());
+        // The Noa the board started on answering again puts it back.
+        take_listing(
+            &mut board,
+            &mut polling,
+            Ok(sample()),
+            t0 + Duration::from_secs(8),
+        );
+        assert_eq!((board.offline, board.elsewhere), (None, false));
+        // Q still asks first while the listing fails.
+        take_listing(&mut board, &mut polling, Err(ListFailure::Lost), t0);
+        assert_eq!(board.key(Key::Char('q')), None);
+        assert_eq!(board.mode, Mode::ConfirmQuit);
     }
 
     // Review B11: "作業中 12 分" looked the same whether the worker was

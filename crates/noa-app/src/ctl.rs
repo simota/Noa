@@ -2407,9 +2407,9 @@ impl Session {
         result_paths(&journal::workers(&self.journal.events()), panels)
     }
 
-    /// The wait loop, printing each line with its pane's result file once
-    /// written after `since` (a resumed pane's own in `resumed`)
-    /// (`results`), and journaling each outcome.
+    /// The wait loop, printing each line with its pane's result file
+    /// (`results`) once written after `since`, or for a pane in `resumed`
+    /// after its own time there, and journaling each outcome.
     fn wait_subscribed(
         &mut self,
         panes: &[u64],

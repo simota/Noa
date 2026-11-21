@@ -844,8 +844,40 @@ fn connect_websocket(url: &str, timeout: Duration) -> Result<Socket, ClientError
     let stream = MaybeTlsStream::Plain(stream);
     let (socket, _) =
         tungstenite::client::client_with_config(request, stream, Some(client_ws_config()))
-            .map_err(|error| ClientError::Transport(error.to_string()))?;
+            .map_err(handshake_error)?;
     Ok(socket)
+}
+
+/// A failed websocket handshake: [`ClientError::HandshakeDropped`] when the
+/// server ended the connection under it (EOF or reset after the TCP
+/// connect), as one at its connection limit does past the few refusals it
+/// answers with 1013; anything else (a timeout, an HTTP refusal) is
+/// [`ClientError::Transport`].
+fn handshake_error<Role: tungstenite::handshake::HandshakeRole>(
+    error: tungstenite::HandshakeError<Role>,
+) -> ClientError {
+    use std::io::ErrorKind;
+    use tungstenite::error::{Error, ProtocolError};
+    let dropped = match &error {
+        tungstenite::HandshakeError::Failure(
+            Error::ConnectionClosed
+            | Error::AlreadyClosed
+            | Error::Protocol(ProtocolError::HandshakeIncomplete),
+        ) => true,
+        tungstenite::HandshakeError::Failure(Error::Io(io)) => matches!(
+            io.kind(),
+            ErrorKind::ConnectionReset
+                | ErrorKind::ConnectionAborted
+                | ErrorKind::BrokenPipe
+                | ErrorKind::UnexpectedEof
+        ),
+        _ => false,
+    };
+    if dropped {
+        ClientError::HandshakeDropped(error.to_string())
+    } else {
+        ClientError::Transport(error.to_string())
+    }
 }
 
 fn resolve_socket_addrs_with_deadline<F>(
@@ -1022,6 +1054,12 @@ pub enum ClientError {
     InvalidInput(String),
     #[error("websocket transport error: {0}")]
     Transport(String),
+    /// The server ended the connection during the websocket handshake,
+    /// after the TCP connect succeeded: a server at its connection limit
+    /// drops the refusals past the few it closes with 1013, so retrying
+    /// later can succeed.
+    #[error("the server dropped the connection during the websocket handshake: {0}")]
+    HandshakeDropped(String),
     /// A request's response did not arrive within its deadline while the
     /// connection stayed open: the server may still answer (late), so this
     /// is not a lost connection.
@@ -1396,6 +1434,61 @@ mod tests {
         assert!(steps[25].contains(r#"name: "v""#), "{}", steps[25]);
         assert!(steps[6].contains("-32004") && steps[6].contains("pane closed"));
         assert!(steps[29].contains("dropped: true"), "{}", steps[29]);
+    }
+
+    // Review finding #6: only a connection the server ended under the
+    // handshake is retried by `+ctl`; a timeout or an HTTP refusal is not.
+    #[test]
+    fn a_dropped_handshake_is_told_from_other_failures() {
+        use tungstenite::error::{Error, ProtocolError};
+        type Failed = tungstenite::HandshakeError<
+            tungstenite::handshake::client::ClientHandshake<std::io::Cursor<Vec<u8>>>,
+        >;
+        for error in [
+            Error::Protocol(ProtocolError::HandshakeIncomplete),
+            Error::ConnectionClosed,
+            Error::Io(std::io::ErrorKind::ConnectionReset.into()),
+            Error::Io(std::io::ErrorKind::BrokenPipe.into()),
+        ] {
+            let mapped = handshake_error(Failed::Failure(error));
+            assert!(
+                matches!(mapped, ClientError::HandshakeDropped(_)),
+                "{mapped:?}"
+            );
+        }
+        for error in [
+            Error::Io(std::io::ErrorKind::TimedOut.into()),
+            Error::Io(std::io::ErrorKind::WouldBlock.into()),
+            Error::Protocol(ProtocolError::WrongHttpMethod),
+        ] {
+            let mapped = handshake_error(Failed::Failure(error));
+            assert!(matches!(mapped, ClientError::Transport(_)), "{mapped:?}");
+        }
+    }
+
+    // Review finding #6: past its few 1013 refusals, a full server drops a
+    // connection during the handshake; that read as an unreachable Noa.
+    #[test]
+    fn a_connection_dropped_during_the_handshake_is_handshake_dropped() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            drop(stream);
+        });
+        let result = Client::connect_with_timeouts(
+            &url,
+            "token",
+            ScopeSet::empty(),
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        );
+        assert!(
+            matches!(result, Err(ClientError::HandshakeDropped(_))),
+            "{:?}",
+            result.err()
+        );
+        server.join().unwrap();
     }
 
     #[test]

@@ -105,7 +105,8 @@ Commands:
                         prompt, a login) and send yourself.
                         Every worker gets its own file to write its final
                         report to: NOA_RESULT=<its cwd>/.noa/result-LABEL.md
-                        (a plain --label; else result-<8 random hex>.md).
+                        (a plain --label; result-LABEL-<8 hex>.md when that
+                        file exists; else result-<8 random hex>.md).
                         .noa/ holds a .gitignore of *, so git never sees it.
                         Prints \"result\" too (none, with a warning, when the
                         cwd is not writable).
@@ -120,7 +121,8 @@ Commands:
                                 with the turn already running); --raw keys (Esc,
                                 Ctrl-C) still go to a running agent. Pasted text
                                 for an agent (or a pane whose program is not
-                                listed yet) waits up to 15 s for it to enable
+                                listed yet, unless spawn started it with a
+                                command) waits up to 15 s for it to enable
                                 bracketed paste, before any key; if it does not,
                                 nothing is sent (exit 1).
                                 A TEXT over 250 KiB (JSON-encoded) is refused:
@@ -139,9 +141,10 @@ Commands:
                                 seconds (reason \"stalled\", with \"quietSecs\"),
                                 for an agent that does not report. --settle
                                 SECS holds a finished for SECS seconds: a newer
-                                report or a change of the work above the input
-                                box meanwhile drops it and the wait goes on; one
-                                that held is printed with \"settledSecs\".
+                                report meanwhile drops it and the wait goes on,
+                                a change of the work above the input box starts
+                                the SECS again; one that held is printed with
+                                \"settledSecs\".
                                 --tail adds each open pane's last N output lines
                                 as \"tail\" (for an agent, the lines above its
                                 input box). A permission or input line has
@@ -154,8 +157,10 @@ Commands:
                                 with \"interrupted\":true (exit 2). A line gains
                                 \"result\":{\"path\",\"bytes\"} once the pane's
                                 result file was written since the wait (or the
-                                send of send --wait) began, and \"blocked\" when
-                                the agent reported what it is blocked on.
+                                send of send --wait, or the send that --after
+                                SEQ resumes, from this pane's journal) began,
+                                and \"blocked\" when the agent reported what it
+                                is blocked on.
   read PANE [--scrollback] [--max-bytes N]
                                 Print PANE's screen (or retained output) text;
                                 a cut keeps the end and says so on stderr. A
@@ -163,7 +168,8 @@ Commands:
                                 --scrollback (and wait --tail) then says on
                                 stderr that only its screen came back.
   result PANE [--max-bytes N]   Print PANE's result file: its spawn's
-                                NOA_RESULT from this pane's journal, else
+                                NOA_RESULT from this pane's journal (or where
+                                close --prune moved it), else
                                 <its cwd>/.noa/result-LABEL.md for a pane with a
                                 plain label; exit 1 when there is none or no
                                 file is known. --max-bytes keeps the start and
@@ -183,8 +189,16 @@ Commands:
                                 (git worktree remove, git branch -d; never
                                 forced, so unsaved work stays and is named
                                 under \"worktree\":{\"kept\":...}), found
-                                from the pane's cwd; a labelled pane with no
-                                such worktree also gets \"kept\" saying why.
+                                from the pane's cwd (for one already gone,
+                                from this pane's journal); a labelled pane
+                                with no such worktree also gets \"kept\"
+                                saying why.
+                                Its .noa/result-*.md files first move to the
+                                main worktree's .noa/ (a taken name gets
+                                -<8 hex>); \"worktree\":{\"result\"} is where
+                                the worker's went, and result and status read
+                                it there. One that cannot move keeps the
+                                worktree, with \"kept\" saying why.
   report STATE [[--] DETAIL]    Write an agent-state report (running, permission,
                                 input, finished, error, clear) to this terminal.
   board [--of PANE]             Show an orchestrator's workers in this pane
@@ -1234,7 +1248,9 @@ pub(crate) fn connect_retry_pauses() -> Vec<Duration> {
 
 /// `connect`, tried again after each of [`connect_retry_pauses`] while the
 /// server refuses it at its connection limit: a slot frees up as soon as
-/// another command ends.
+/// another command ends. Past the few refusals it closes with 1013, a full
+/// server drops a connection during the handshake, so that is retried in
+/// the same 3 s too.
 pub(crate) fn connect_retrying<T>(
     mut connect: impl FnMut() -> Result<T, ClientError>,
     mut pause: impl FnMut(Duration),
@@ -1242,10 +1258,12 @@ pub(crate) fn connect_retrying<T>(
     let mut pauses = connect_retry_pauses().into_iter();
     loop {
         match connect() {
-            Err(ClientError::TooManyConnections(reason)) => match pauses.next() {
-                Some(duration) => pause(duration),
-                None => return Err(ClientError::TooManyConnections(reason)),
-            },
+            Err(err @ (ClientError::TooManyConnections(_) | ClientError::HandshakeDropped(_))) => {
+                match pauses.next() {
+                    Some(duration) => pause(duration),
+                    None => return Err(err),
+                }
+            }
             result => return result,
         }
     }
@@ -1267,7 +1285,9 @@ impl From<ClientError> for Failure {
                 message,
             } => Failure::error(message),
             // The server went away mid-command (stopped or restarted).
-            ClientError::Closed(_) | ClientError::Transport(_) => {
+            ClientError::Closed(_)
+            | ClientError::Transport(_)
+            | ClientError::HandshakeDropped(_) => {
                 Failure::unavailable(format!("lost the connection to Noa: {error}"))
             }
             ClientError::TooManyConnections(_) => {
@@ -1354,6 +1374,10 @@ pub(crate) fn connect_failure_message(url: &str, error: &ClientError) -> String 
         )
     } else if matches!(error, ClientError::TooManyConnections(_)) {
         format!("; {TOO_MANY_CONNECTIONS} (tried again for 3 s)")
+    } else if matches!(error, ClientError::HandshakeDropped(_)) {
+        format!(
+            "; Noa may be at its connection limit: {TOO_MANY_CONNECTIONS} (tried again for 3 s)"
+        )
     } else {
         String::new()
     };
@@ -1576,52 +1600,82 @@ pub(crate) fn control_url(bind: &str, port: u16) -> String {
     format!("ws://{}/", std::net::SocketAddr::new(ip, port))
 }
 
+/// How [`connect_client`] treats a server at its connection limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConnectRetry {
+    /// Tried again for 3 s ([`connect_retrying`]): a command.
+    ForThreeSeconds,
+    /// Tried once: the board backs off between attempts itself and must
+    /// not sleep through them on its UI thread.
+    Once,
+}
+
+/// `connect` under `retry`.
+pub(crate) fn connect_with<T>(
+    retry: ConnectRetry,
+    mut connect: impl FnMut() -> Result<T, ClientError>,
+    pause: impl FnMut(Duration),
+) -> Result<T, ClientError> {
+    match retry {
+        ConnectRetry::ForThreeSeconds => connect_retrying(connect, pause),
+        ConnectRetry::Once => connect(),
+    }
+}
+
+/// A control connection to the Noa this process's config names, with its
+/// token, and the port it is on.
+pub(crate) fn connect_client(retry: ConnectRetry) -> Result<(Client, u16), Failure> {
+    let (config, _diagnostics) =
+        noa_config::load_startup_config(noa_config::ConfigOverrides::default())
+            .map_err(|err| Failure::error(format!("cannot load config: {err:#}")))?;
+    if !config.server_enable {
+        return Err(Failure::unavailable(format!(
+            "the Noa control server is disabled; {SCOPES_HINT}"
+        )));
+    }
+    let token = match config.server_token.filter(|token| !token.trim().is_empty()) {
+        Some(token) => token,
+        None => {
+            let path = noa_config::server_token_path()
+                .ok_or_else(|| Failure::unavailable("cannot resolve the token path"))?;
+            std::fs::read_to_string(&path)
+                .map(|token| token.trim().to_string())
+                .ok()
+                .filter(|token| !token.is_empty())
+                .ok_or_else(|| {
+                    Failure::unavailable(format!(
+                        "no server token at {} (is Noa running with the server enabled?)",
+                        path.display()
+                    ))
+                })?
+        }
+    };
+    let url = control_url(&config.server_bind, config.server_port);
+    connect_with(
+        retry,
+        || {
+            Client::connect(
+                &url,
+                &token,
+                ScopeSet::from_strings(["read", "control", "input"]),
+            )
+        },
+        std::thread::sleep,
+    )
+    .map(|client| (client, config.server_port))
+    .map_err(|err| match err {
+        ClientError::Rpc { .. } => Failure::unavailable(err.to_string()),
+        other => Failure::unavailable(connect_failure_message(&url, &other)),
+    })
+}
+
 impl Session {
     fn connect() -> Result<Self, Failure> {
-        let (config, _diagnostics) =
-            noa_config::load_startup_config(noa_config::ConfigOverrides::default())
-                .map_err(|err| Failure::error(format!("cannot load config: {err:#}")))?;
-        if !config.server_enable {
-            return Err(Failure::unavailable(format!(
-                "the Noa control server is disabled; {SCOPES_HINT}"
-            )));
-        }
-        let token = match config.server_token.filter(|token| !token.trim().is_empty()) {
-            Some(token) => token,
-            None => {
-                let path = noa_config::server_token_path()
-                    .ok_or_else(|| Failure::unavailable("cannot resolve the token path"))?;
-                std::fs::read_to_string(&path)
-                    .map(|token| token.trim().to_string())
-                    .ok()
-                    .filter(|token| !token.is_empty())
-                    .ok_or_else(|| {
-                        Failure::unavailable(format!(
-                            "no server token at {} (is Noa running with the server enabled?)",
-                            path.display()
-                        ))
-                    })?
-            }
-        };
-        let url = control_url(&config.server_bind, config.server_port);
-        let client = connect_retrying(
-            || {
-                Client::connect(
-                    &url,
-                    &token,
-                    ScopeSet::from_strings(["read", "control", "input"]),
-                )
-            },
-            std::thread::sleep,
-        )
-        .map_err(|err| match err {
-            ClientError::Rpc { .. } => Failure::unavailable(err.to_string()),
-            other => Failure::unavailable(connect_failure_message(&url, &other)),
-        })?;
+        let (client, port) = connect_client(ConnectRetry::ForThreeSeconds)?;
         let mut session = Self {
             client,
             own: None,
-            port: config.server_port,
+            port,
             waited_for_own: false,
             lacks_surface_ids: false,
             journal: journal::Journal::open(),
@@ -1744,18 +1798,27 @@ impl Session {
         };
         // The worktree is found from the pane's cwd, so this command's own
         // cwd (another worktree, or outside the repository) does not matter.
-        let mut prune_label = |label: &str, pane_cwd: &str| {
-            if prune {
-                worktree::prune(label, std::path::Path::new(pane_cwd))
-            } else {
-                None
+        // The pane's result file is moved out of it first ([`result_path`]).
+        let workers = journal::workers(&self.journal.events());
+        let mut prune_label = |pane: u64, label: &str, pane_cwd: &str| {
+            if !prune {
+                return None;
             }
+            let pane_cwd = Path::new(pane_cwd);
+            let result = workers
+                .iter()
+                .find(|worker| worker.pane == pane)
+                .and_then(|worker| worker.result.as_ref())
+                .map(PathBuf::from)
+                .or_else(|| result::labelled_path(pane_cwd, Some(label)));
+            worktree::prune(label, pane_cwd, result.as_deref())
         };
         let journal = &mut self.journal;
         close_panes(
             &mut self.client,
             panes,
             own,
+            &workers,
             &mut prune_label,
             &mut |line| {
                 if let Some(pane) = line_pane(line) {
@@ -2258,7 +2321,7 @@ impl Session {
                     &[args.pane],
                     send_wait_start(before, seq),
                     options,
-                    (since, results),
+                    (since, HashMap::new(), results),
                 )
             }
             None => {
@@ -2327,6 +2390,7 @@ impl Session {
             panes.extend(closed_after_panes(&panes, after, &listed));
         }
         let after = wait_baselines(&panes, after).map_err(Failure::error)?;
+        let resumed = resumed_since(&self.journal.events(), &after);
         let start = if named {
             WaitStart::Named { after }
         } else {
@@ -2335,7 +2399,7 @@ impl Session {
         let since = SystemTime::now();
         let panels = self.client.list_panels()?;
         let results = self.result_paths(&panels);
-        self.wait_subscribed(&panes, start, options, (since, results))
+        self.wait_subscribed(&panes, start, options, (since, resumed, results))
     }
 
     /// Each pane's known result file ([`result_path`]).
@@ -2343,14 +2407,15 @@ impl Session {
         result_paths(&journal::workers(&self.journal.events()), panels)
     }
 
-    /// The wait loop, printing each line with its pane's result file once
-    /// written after `since` (`results`), and journaling each outcome.
+    /// The wait loop, printing each line with its pane's result file
+    /// (`results`) once written after `since`, or for a pane in `resumed`
+    /// after its own time there, and journaling each outcome.
     fn wait_subscribed(
         &mut self,
         panes: &[u64],
         start: WaitStart,
         options: &WaitOptions,
-        (since, results): (SystemTime, HashMap<u64, PathBuf>),
+        (since, resumed, results): (SystemTime, HashMap<u64, SystemTime>, HashMap<u64, PathBuf>),
     ) -> Result<i32, Failure> {
         let journal = &mut self.journal;
         let client = &mut self.client;
@@ -2363,7 +2428,7 @@ impl Session {
                 WAIT_RELIST_INTERVAL,
                 &mut |line| {
                     let mut line = line.clone();
-                    if let Some(event) = finish_wait_line(&mut line, &results, since) {
+                    if let Some(event) = finish_wait_line(&mut line, &results, since, &resumed) {
                         journal.append("outcome", event);
                     }
                     print_json(&line);
@@ -2506,12 +2571,18 @@ const PASTE_MODE_TRIES: usize = 75;
 /// Whether a paste into `panel` waits until it has enabled bracketed paste
 /// (REL-01): an agent's pane, or one whose program is not even listed yet
 /// (just spawned). Until then every newline of a paste lands as Enter.
+///
+/// A pane an IPC spawn started with a command (`panel.spawn`) is not
+/// "starting" for want of a process name: a shell-less spawn never gets one
+/// (see `panel_agent`), and a shell-less agent already has its `kind` from
+/// argv0. Gating it would refuse `send` to a script or REPL that never
+/// enables bracketed paste.
 pub(crate) fn needs_paste_mode(panel: &Panel) -> bool {
     panel
         .agent
         .as_ref()
         .is_some_and(|agent| agent.kind.is_some())
-        || panel.process.as_deref().is_none_or(str::is_empty)
+        || (panel.process.as_deref().is_none_or(str::is_empty) && panel.spawn.is_none())
 }
 
 /// Wait for `pane` to enable bracketed paste, asking every
@@ -2925,7 +2996,14 @@ pub(crate) fn wait_loop_with_clock(
     let before_deadline = || deadline.is_none_or(|deadline| Instant::now() < deadline);
     let first = loop {
         match source.list() {
-            Err(failure) if failure.transient && before_deadline() => {}
+            Err(failure) if failure.transient && before_deadline() => {
+                // A caught signal ends a wait still without its first
+                // listing too (a wedged Noa keeps the socket open).
+                if source.interrupted() {
+                    emit(&interrupted_before_listing(&start, panes));
+                    return Ok(EXIT_TIMEOUT);
+                }
+            }
             result => break result?,
         }
     };
@@ -3018,7 +3096,10 @@ pub(crate) fn wait_loop_with_clock(
             }
         }
         // A held `finished` stands once its hold passed with the work on
-        // screen unchanged; a change drops it, as a newer report does.
+        // screen unchanged. A change starts the hold again and keeps the
+        // report: an agent that goes on keeps changing its screen or reports
+        // again, while a one-off repaint (a late render, a re-wrap) only
+        // delays the line. Dropping it hung a wait with no newer report.
         if let Some(settle) = options.settle
             && !holds.is_empty()
             && !relist_pending
@@ -3038,8 +3119,8 @@ pub(crate) fn wait_loop_with_clock(
                         Err(failure) => return Err(failure),
                     };
                     if hold.work.as_ref().is_some_and(|seen| *seen != work) {
-                        watch.baseline_seq = hold.seq;
-                        holds.remove(&watch.pane);
+                        hold.since = now;
+                        hold.work = Some(work);
                         continue;
                     }
                     hold.work = Some(work);
@@ -3220,6 +3301,30 @@ pub(crate) fn wait_loop_with_clock(
         // Still set here only when a re-list above timed out: keep it.
         relist_pending |= relist || listed_at.elapsed() >= relist_every;
     }
+}
+
+/// The line of a wait a signal ended before any listing came back: every
+/// pane pending, with the baselines known without a listing (`--after`, or
+/// what `send --wait` saw before typing).
+fn interrupted_before_listing(start: &WaitStart, panes: &[u64]) -> serde_json::Value {
+    let known = |pane: u64| match start {
+        WaitStart::Listed { after } | WaitStart::Named { after } => after.get(&pane).copied(),
+        WaitStart::Before { panels, after } => after.or_else(|| {
+            panels
+                .iter()
+                .find(|panel| panel.pane_id.0 == pane)
+                .and_then(|panel| Some(panel.agent.as_ref()?.seq))
+        }),
+    };
+    serde_json::json!({
+        "timeout": true,
+        "interrupted": true,
+        "pending": panes.iter().copied().map(WireId).collect::<Vec<_>>(),
+        "baseline": panes
+            .iter()
+            .filter_map(|&pane| Some(serde_json::json!({ "paneId": WireId(pane), "seq": known(pane)? })))
+            .collect::<Vec<_>>(),
+    })
 }
 
 /// Apply a pushed notification to `latest`; returns whether earlier ones
@@ -3533,14 +3638,17 @@ pub(crate) fn result_paths(workers: &[journal::Worker], panels: &[Panel]) -> Has
 }
 
 /// A wait line as printed: with `"result"` when its pane's result file was
-/// written after `since`. Returns the journal's `outcome` event for a line
-/// that ended a pane's wait (not a timeout's).
+/// written after `since`, or for a pane in `resumed` ([`resumed_since`])
+/// after the send it resumes. Returns the journal's `outcome` event for a
+/// line that ended a pane's wait (not a timeout's).
 pub(crate) fn finish_wait_line(
     line: &mut serde_json::Value,
     results: &HashMap<u64, PathBuf>,
     since: SystemTime,
+    resumed: &HashMap<u64, SystemTime>,
 ) -> Option<serde_json::Value> {
     let pane = line_pane(line)?;
+    let since = resumed.get(&pane).copied().unwrap_or(since);
     if let Some(info) = results
         .get(&pane)
         .and_then(|path| result::written_since(path, since))
@@ -3554,6 +3662,23 @@ pub(crate) fn finish_wait_line(
         "seq": line.get("seq"),
         "label": line.get("label"),
     }))
+}
+
+/// A wait resumed with `--after PANE=SEQ` (as `send --wait`'s resume hint
+/// says): for each such pane, when the journal's `send` with that
+/// `seqBefore` was made (its `ts`, whole seconds rounded down). A report
+/// written between that send and this wait still counts as its result.
+pub(crate) fn resumed_since(
+    events: &[serde_json::Value],
+    after: &HashMap<u64, u64>,
+) -> HashMap<u64, SystemTime> {
+    after
+        .iter()
+        .filter_map(|(&pane, &seq)| {
+            let ts = journal::sent_at(events, pane, seq)?;
+            Some((pane, SystemTime::UNIX_EPOCH + Duration::from_secs(ts)))
+        })
+        .collect()
 }
 
 /// `status`: a line per worker in `children`, with what the journal knows
@@ -3759,22 +3884,29 @@ impl PaneCloser for Client {
 /// `close`: a pane that is already gone counts as closed, and a pane that
 /// could not be closed does not keep the rest open, so cleanup after a
 /// failed run always finishes. Writes one JSON line per closed pane through
-/// `emit`; returns the exit status.
+/// `emit`; returns the exit status. `prune` is asked about each closed pane
+/// with a label: a listed one's label and cwd, or for one that is not
+/// listed (already gone), its label and worktree from the journal
+/// (`workers`).
 pub(crate) fn close_panes(
     source: &mut impl PaneCloser,
     panes: &[u64],
     own: Option<u64>,
-    prune: &mut dyn FnMut(&str, &str) -> Option<serde_json::Value>,
+    workers: &[journal::Worker],
+    prune: &mut dyn FnMut(u64, &str, &str) -> Option<serde_json::Value>,
     emit: &mut dyn FnMut(&serde_json::Value),
 ) -> Result<i32, Failure> {
     let panels = source.list()?;
     let mut failed = false;
     let mut unconfirmed = false;
     for (pane, listed) in close_targets(&panels, panes, own).map_err(Failure::error)? {
-        let label = panels
-            .iter()
-            .find(|panel| panel.pane_id.0 == pane)
-            .and_then(|panel| Some((panel.label.clone()?, panel.cwd.clone())));
+        let label = match panels.iter().find(|panel| panel.pane_id.0 == pane) {
+            Some(panel) => panel.label.clone().map(|label| (label, panel.cwd.clone())),
+            None => workers
+                .iter()
+                .find(|worker| worker.pane == pane)
+                .and_then(|worker| Some((worker.label.clone()?, worker.worktree.clone()?))),
+        };
         let gone = !listed
             || match source.close(pane) {
                 Ok(()) => false,
@@ -3813,7 +3945,7 @@ pub(crate) fn close_panes(
         // label and cwd already read), so its process no longer holds the
         // worktree; a refusal keeps it and does not fail.
         if let Some((label, pane_cwd)) = label
-            && let Some(info) = prune(&label, &pane_cwd)
+            && let Some(info) = prune(pane, &label, &pane_cwd)
         {
             line["worktree"] = info;
         }
@@ -4319,19 +4451,64 @@ mod tests {
             &mut source,
             &[8, 9, 7],
             Some(1),
-            &mut |label, _cwd| {
+            &[],
+            &mut |_pane, label, _cwd| {
                 asked.push(label.to_string());
                 Some(serde_json::json!({ "path": "/r-wt/job", "removed": true }))
             },
             &mut |line| lines.push(line.clone()),
         );
         assert_eq!(code.ok(), Some(EXIT_OK));
-        // No label (9) and already gone (7) are not asked about.
+        // No label (9) and already gone, unknown to the journal (7), are not
+        // asked about.
         assert_eq!(asked, ["job"]);
         assert_eq!(lines[0]["worktree"]["removed"], true);
         assert!(lines[1].get("worktree").is_none());
         assert_eq!(lines[2]["gone"], true);
         assert!(lines[2].get("worktree").is_none());
+    }
+
+    // Review finding #7: `close --prune` on a worktree worker that already
+    // vanished printed only "gone": its worktree and branch stayed, and
+    // nothing said so. The journal knows its label and worktree.
+    #[test]
+    fn prune_finds_a_gone_workers_worktree_from_the_journal() {
+        let mut source = OkCloser(vec![worker(9, 1)]);
+        let workers = [
+            journal::Worker {
+                pane: 7,
+                label: Some("fix".to_string()),
+                cwd: Some("/r-wt/fix/src".to_string()),
+                worktree: Some("/r-wt/fix".to_string()),
+                ..journal::Worker::default()
+            },
+            // Known, but spawned without --worktree: nothing to prune.
+            journal::Worker {
+                pane: 6,
+                label: Some("plain".to_string()),
+                cwd: Some("/r".to_string()),
+                ..journal::Worker::default()
+            },
+        ];
+        let mut asked = Vec::new();
+        let mut lines = Vec::new();
+        let code = close_panes(
+            &mut source,
+            &[7, 6],
+            Some(1),
+            &workers,
+            &mut |pane, label, cwd| {
+                asked.push((pane, label.to_string(), cwd.to_string()));
+                Some(serde_json::json!({ "path": cwd, "removed": true }))
+            },
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        assert_eq!(asked, [(7, "fix".to_string(), "/r-wt/fix".to_string())]);
+        assert_eq!(lines[0]["gone"], true);
+        assert_eq!(lines[0]["worktree"]["path"], "/r-wt/fix");
+        assert_eq!(lines[1]["gone"], true);
+        assert!(lines[1].get("worktree").is_none());
     }
 
     #[test]
@@ -5228,16 +5405,28 @@ mod tests {
             panels: vec![worker(8, 1)],
             refuse_code: -32003,
         };
-        let failure =
-            close_panes(&mut source, &[8], Some(1), &mut |_, _| None, &mut |_| {}).unwrap_err();
+        let failure = close_panes(
+            &mut source,
+            &[8],
+            Some(1),
+            &[],
+            &mut |_, _, _| None,
+            &mut |_| {},
+        )
+        .unwrap_err();
         assert_eq!(failure.code, EXIT_UNAVAILABLE);
 
         // Any other refusal of a pane that is still listed fails that pane only.
         source.refuse_code = -32000;
         let mut lines = Vec::new();
-        let code = close_panes(&mut source, &[8], Some(1), &mut |_, _| None, &mut |line| {
-            lines.push(line.clone())
-        });
+        let code = close_panes(
+            &mut source,
+            &[8],
+            Some(1),
+            &[],
+            &mut |_, _, _| None,
+            &mut |line| lines.push(line.clone()),
+        );
         assert_eq!(code.ok(), Some(EXIT_ERROR));
         assert!(lines.is_empty());
     }
@@ -5255,7 +5444,8 @@ mod tests {
             &mut source,
             &[8, 9],
             Some(1),
-            &mut |_, _| None,
+            &[],
+            &mut |_, _, _| None,
             &mut |line| lines.push(line.clone()),
         );
         assert_eq!(code.ok(), Some(EXIT_UNAVAILABLE));
@@ -5270,9 +5460,14 @@ mod tests {
             code: RPC_OUTCOME_UNKNOWN,
         };
         let mut lines = Vec::new();
-        let code = close_panes(&mut source, &[8], Some(1), &mut |_, _| None, &mut |line| {
-            lines.push(line.clone())
-        });
+        let code = close_panes(
+            &mut source,
+            &[8],
+            Some(1),
+            &[],
+            &mut |_, _, _| None,
+            &mut |line| lines.push(line.clone()),
+        );
         assert_eq!(code.ok(), Some(EXIT_OK));
         assert_eq!(lines, [serde_json::json!({"paneId": "8", "closed": true})]);
     }
@@ -5614,6 +5809,41 @@ mod tests {
         assert!(needs_paste_mode(&shell));
     }
 
+    // Review finding #1: a pane spawned with a non-agent command never gets
+    // a process name, so `send` to `-- ./deploy.sh` waited 15 s and was
+    // refused. The spawn's argv says it is not starting; an agent's argv
+    // still gates through its `kind`.
+    #[test]
+    fn a_spawned_command_without_a_process_name_is_not_gated() {
+        let mut script = panel(0, None, false);
+        script.agent = None;
+        script.process = None;
+        script.spawn = Some(noa_ipc::PanelSpawn {
+            argv: vec!["./deploy.sh".to_string()],
+            started_at: 0,
+        });
+        assert!(!needs_paste_mode(&script));
+        let mut target = FakeTarget::new(vec![script.clone()]);
+        target.paste_ready_after = Some(usize::MAX);
+        send_steps(&mut target, &send_args(&["--enter", "y"]), "y").unwrap();
+        assert_eq!(target.paste_asks, 0);
+        assert!(target.log.iter().any(|entry| entry.starts_with("type")));
+
+        let mut agent = script;
+        agent.spawn = Some(noa_ipc::PanelSpawn {
+            argv: vec!["claude".to_string()],
+            started_at: 0,
+        });
+        agent.agent = Some(PanelAgent {
+            kind: Some("claude".to_string()),
+            state: None,
+            detail: None,
+            seq: 0,
+            blocked: None,
+        });
+        assert!(needs_paste_mode(&agent));
+    }
+
     // Audit finding (REL-16): `--replace` spends about 0.35 s clearing the
     // input line, and an approval that came up meanwhile took the paste.
     #[test]
@@ -5774,6 +6004,40 @@ mod tests {
         );
         assert!(matches!(result, Err(ClientError::TooManyConnections(_))));
         assert_eq!(tries, pauses.len() + 1);
+        // Review finding #6: a connection dropped during the handshake (a
+        // full server past its few 1013 refusals) is retried in the same
+        // 3 s, and said as a possibly full Noa once they are spent.
+        let dropped = || ClientError::HandshakeDropped("Handshake not finished".to_string());
+        let (mut tries, mut slept) = (0, Vec::new());
+        let result = connect_retrying(
+            || {
+                tries += 1;
+                match tries {
+                    1 => Err(dropped()),
+                    2 => Err(full()),
+                    _ => Ok(tries),
+                }
+            },
+            |pause| slept.push(pause),
+        );
+        assert_eq!(result.ok(), Some(3));
+        assert_eq!(slept, pauses[..2]);
+        let (mut tries, mut slept) = (0, Vec::new());
+        let result: Result<(), _> = connect_retrying(
+            || {
+                tries += 1;
+                Err(dropped())
+            },
+            |pause| slept.push(pause),
+        );
+        assert!(matches!(result, Err(ClientError::HandshakeDropped(_))));
+        assert_eq!(tries, pauses.len() + 1);
+        assert_eq!(slept.iter().sum::<Duration>(), Duration::from_secs(3));
+        let message = connect_failure_message("ws://127.0.0.1:1/", &dropped());
+        assert!(
+            message.contains("may be at its connection limit"),
+            "{message}"
+        );
         // Any other failure is not retried.
         let mut tries = 0;
         let _: Result<(), _> = connect_retrying(
@@ -5854,7 +6118,7 @@ mod tests {
 
         let since = SystemTime::now() - Duration::from_secs(5);
         let mut line = serde_json::json!({ "paneId": "8", "reason": "finished", "seq": 2 });
-        let event = finish_wait_line(&mut line, &results, since).unwrap();
+        let event = finish_wait_line(&mut line, &results, since, &HashMap::new()).unwrap();
         assert!(line.get("result").is_none());
         assert_eq!(event["pane"], 8);
         assert_eq!(event["reason"], "finished");
@@ -5862,11 +6126,43 @@ mod tests {
 
         std::fs::write(&path, "report").unwrap();
         let mut line = serde_json::json!({ "paneId": "8", "reason": "finished", "seq": 2 });
-        finish_wait_line(&mut line, &results, since).unwrap();
+        finish_wait_line(&mut line, &results, since, &HashMap::new()).unwrap();
         assert_eq!(line["result"]["bytes"], 6);
         // A timeout line is no outcome.
         let mut timeout = serde_json::json!({ "timeout": true, "pending": ["8"] });
-        assert!(finish_wait_line(&mut timeout, &results, since).is_none());
+        assert!(finish_wait_line(&mut timeout, &results, since, &HashMap::new()).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Review finding #4: a `wait P --after SEQ` resuming a killed `send
+    // --wait` left out "result" for a report written before it began.
+    #[test]
+    fn a_resumed_wait_counts_a_result_written_since_the_send_it_resumes() {
+        let dir = temp_dir("wait-resumed");
+        let path = result::prepare(&dir, Some("fix")).unwrap();
+        std::fs::write(&path, "report").unwrap();
+        let results = HashMap::from([(8, path)]);
+        let sent = journal::now_secs() - 30;
+        let events = journal::parse_events(&format!(
+            "{{\"ev\":\"send\",\"ts\":{},\"pane\":8,\"seqBefore\":1,\"text\":\"a\"}}\n\
+             {{\"ev\":\"send\",\"ts\":{sent},\"pane\":8,\"seqBefore\":2,\"text\":\"b\"}}\n\
+             {{\"ev\":\"send\",\"ts\":{sent},\"pane\":9,\"seqBefore\":3,\"text\":\"c\"}}\n",
+            sent - 100
+        ));
+        let resumed = resumed_since(&events, &HashMap::from([(8, 2), (7, 2)]));
+        assert_eq!(
+            resumed,
+            HashMap::from([(8, SystemTime::UNIX_EPOCH + Duration::from_secs(sent))])
+        );
+        // The wait began after the report was written.
+        let started = SystemTime::now() + Duration::from_secs(5);
+        let line = || serde_json::json!({ "paneId": "8", "reason": "finished", "seq": 3 });
+        let mut plain = line();
+        finish_wait_line(&mut plain, &results, started, &HashMap::new()).unwrap();
+        assert!(plain.get("result").is_none());
+        let mut resumed_line = line();
+        finish_wait_line(&mut resumed_line, &results, started, &resumed).unwrap();
+        assert_eq!(resumed_line["result"]["bytes"], 6);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6566,6 +6862,69 @@ mod tests {
         );
     }
 
+    /// A source whose every listing times out, with a signal caught once
+    /// `after` listings were asked for.
+    struct ListingTimesOut {
+        lists: usize,
+        after: usize,
+    }
+
+    impl WaitSource for ListingTimesOut {
+        fn list(&mut self) -> Result<Vec<Panel>, Failure> {
+            self.lists += 1;
+            assert!(self.lists < 100, "the wait kept listing after the signal");
+            Err(Failure::from(ClientError::Timeout(
+                "noa.listPanels".to_string(),
+            )))
+        }
+
+        fn next(&mut self, _timeout: Duration) -> Result<Option<Notification>, Failure> {
+            unreachable!("no notification before the first listing")
+        }
+
+        fn scrollback(&mut self, _pane: u64) -> Result<Option<String>, Failure> {
+            unreachable!()
+        }
+
+        fn screen(&mut self, _pane: u64) -> Result<Option<String>, Failure> {
+            unreachable!()
+        }
+
+        fn interrupted(&mut self) -> bool {
+            self.lists >= self.after
+        }
+    }
+
+    // Review finding #8: with every listing timing out (a wedged Noa), the
+    // first-listing retry loop never looked at a caught signal, so Ctrl-C
+    // and SIGTERM could not end the wait.
+    #[test]
+    fn a_caught_signal_ends_a_wait_still_without_its_first_listing() {
+        let mut source = ListingTimesOut { lists: 0, after: 3 };
+        let mut lines = Vec::new();
+        let code = wait_loop(
+            &mut source,
+            &[8, 9],
+            WaitStart::Listed {
+                after: HashMap::from([(8, 4)]),
+            },
+            &WaitOptions::default(),
+            WAIT_RELIST_INTERVAL,
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_TIMEOUT));
+        assert_eq!(source.lists, 3);
+        assert_eq!(
+            lines,
+            vec![serde_json::json!({
+                "timeout": true,
+                "interrupted": true,
+                "pending": ["8", "9"],
+                "baseline": [{"paneId": "8", "seq": 4}],
+            })]
+        );
+    }
+
     // Audit finding (REL-09): `wait PANE` checked no parent, so after a
     // restart gave pane ids out again, a remembered worker id waited on an
     // unrelated pane.
@@ -6950,8 +7309,10 @@ mod tests {
         };
         let base = Instant::now();
         let mut lines = Vec::new();
+        // Bounded, so a wait that would never end shows as a timeout.
         let options = WaitOptions {
             settle: Some(Duration::from_secs(settle_secs)),
+            timeout: Some(Duration::from_secs(30)),
             ..WaitOptions::default()
         };
         let clock_now = now.clone();
@@ -6996,8 +7357,17 @@ mod tests {
         assert_eq!(line["seq"], 4);
         assert_eq!(*at, 5);
 
-        // The work on screen changing drops it too; only a newer report
-        // ends the wait then.
+        // Review finding #3: the work on screen changing starts the hold
+        // again and keeps the report, so a one-off repaint only delays the
+        // line (dropping it hung a wait that got no newer report).
+        let (code, lines) = run_settle_wait(vec![vec![finished(2)]], vec!["a", "a", "b"], 3);
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        let (at, line) = &lines[0];
+        assert_eq!(line["reason"], "finished");
+        assert_eq!(line["seq"], 2);
+        assert_eq!(line["settledSecs"], 3);
+        assert_eq!(*at, 5);
+        // A newer report during the restarted hold still replaces it.
         let (_, lines) = run_settle_wait(
             vec![
                 vec![finished(2)],
@@ -7416,7 +7786,8 @@ mod tests {
             &mut source,
             &[8],
             Some(1),
-            &mut |label, cwd| {
+            &[],
+            &mut |_pane, label, cwd| {
                 asked.push((label.to_string(), cwd.to_string()));
                 Some(serde_json::json!({ "path": "/r-wt/job", "removed": true }))
             },

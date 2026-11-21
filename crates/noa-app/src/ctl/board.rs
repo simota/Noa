@@ -3950,17 +3950,23 @@ fn same_instance(first: &str, now: &str) -> bool {
     first.is_empty() || first == now
 }
 
-/// One pane listing. A connection that was lost is opened again first, and
-/// again on the next try while it reaches another Noa.
+/// How the board opens a lost connection again: once per attempt. Its own
+/// backoff ([`Polling`]) spaces the attempts; a connect that slept through
+/// 3 s of retries froze keys and redraws while Noa was at its connection
+/// limit.
+const RECONNECT: super::ConnectRetry = super::ConnectRetry::Once;
+
+/// One pane listing. A connection that was lost is opened again first
+/// ([`RECONNECT`]), and again on the next try while it reaches another Noa.
 fn list(
     client: &mut Client,
     reconnect: &mut bool,
     instance: &str,
 ) -> Result<Vec<Panel>, ListFailure> {
     if *reconnect {
-        *client = super::Session::connect()
+        *client = super::connect_client(RECONNECT)
             .map_err(|_| ListFailure::Lost)?
-            .client;
+            .0;
         if !same_instance(instance, client.server_instance_id()) {
             return Err(ListFailure::Elsewhere);
         }
@@ -4003,7 +4009,10 @@ fn take_listing(
 fn lost(err: &ClientError) -> bool {
     matches!(
         err,
-        ClientError::Transport(_) | ClientError::Closed(_) | ClientError::TooManyConnections(_)
+        ClientError::Transport(_)
+            | ClientError::HandshakeDropped(_)
+            | ClientError::Closed(_)
+            | ClientError::TooManyConnections(_)
     )
 }
 
@@ -7285,6 +7294,25 @@ mod tests {
         assert!(!same_instance("a1", ""));
         // A server from before the id cannot be told apart.
         assert!(same_instance("", "b2"));
+    }
+
+    // Review finding #9: each reconnect slept through up to 3 s of connect
+    // retries while Noa was at its connection limit, freezing keys (`q`
+    // included), redraws and the offline counter. It connects once.
+    #[test]
+    fn a_reconnect_connects_once_without_sleeping() {
+        let (mut tries, mut slept) = (0, Vec::new());
+        let result: Result<(), _> = super::super::connect_with(
+            RECONNECT,
+            || {
+                tries += 1;
+                Err(ClientError::TooManyConnections("1013".to_string()))
+            },
+            |pause| slept.push(pause),
+        );
+        assert!(matches!(result, Err(ClientError::TooManyConnections(_))));
+        assert_eq!(tries, 1);
+        assert!(slept.is_empty());
     }
 
     // Review finding: a worker closing under the send line or the close

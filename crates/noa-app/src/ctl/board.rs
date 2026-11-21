@@ -46,6 +46,9 @@ const CRUMB_WIDTH: usize = 10;
 const MOVED_GAP: Duration = Duration::from_secs(3);
 /// Closed workers kept at the end of the list.
 const GONE_CAP: usize = 5;
+/// The worker numbers a board gives out before it takes freed ones again
+/// (U14): the digit keys reach 1-20 (D12).
+const NUMBERS: usize = 20;
 /// Where a row's name starts, which its preview lines line up with.
 const ROW_INDENT: usize = 6;
 /// How long a lone ESC waits for the rest of a sequence before it counts
@@ -443,6 +446,7 @@ type Urgency = (Group, u8, Option<Instant>);
 /// A worker that was closed while the board watched: what it last said.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Gone {
+    number: Option<usize>,
     name: String,
     status: Status,
     detail: String,
@@ -467,8 +471,13 @@ pub(crate) struct Board {
     since: HashMap<u64, (Status, Option<Instant>)>,
     /// Each worker's number, given once when it is first listed and kept
     /// while it lives, so `3` means the same worker however the list is
-    /// sorted. A closed worker's number goes to the next one that appears.
+    /// sorted, and not given to another while the board is open (U14).
     numbers: HashMap<u64, usize>,
+    /// The highest number given yet, and the numbers of closed workers,
+    /// oldest first: one is given again only once all of 1-[`NUMBERS`]
+    /// were.
+    issued: usize,
+    freed: Vec<usize>,
     /// The digit just typed and when, so a second digit soon after picks
     /// a two-digit number (a board holds up to 20 workers, D12).
     digit: Option<(usize, Instant)>,
@@ -532,6 +541,8 @@ impl Board {
             history: HashMap::new(),
             since: HashMap::new(),
             numbers: HashMap::new(),
+            issued: 0,
+            freed: Vec::new(),
             digit: None,
             selected: None,
             view: View::List,
@@ -624,6 +635,7 @@ impl Board {
             .iter()
             .map(|panel| {
                 let gone = Gone {
+                    number: self.numbers.get(&panel.pane_id.0).copied(),
                     name: worker_name(panel),
                     status: Status::of(panel),
                     detail: self.last_word(panel),
@@ -700,17 +712,25 @@ impl Board {
         }
         let mut live: Vec<u64> = self.listed().map(|panel| panel.pane_id.0).collect();
         live.sort_unstable();
+        let mut freed: Vec<usize> = self
+            .numbers
+            .iter()
+            .filter(|(pane, _)| !live.contains(pane))
+            .map(|(_, number)| *number)
+            .collect();
+        freed.sort_unstable();
+        self.freed.extend(freed);
         self.numbers.retain(|pane, _| live.contains(pane));
-        // New workers in spawn order (pane ids grow), each the lowest free
-        // number.
+        // New workers in spawn order (pane ids grow), each the next number
+        // never given, or once 1-20 all were, the one freed longest ago.
         for &pane in &live {
             if !self.numbers.contains_key(&pane) {
-                let taken: std::collections::HashSet<usize> =
-                    self.numbers.values().copied().collect();
-                let mut number = 1;
-                while taken.contains(&number) {
-                    number += 1;
-                }
+                let number = if self.issued < NUMBERS || self.freed.is_empty() {
+                    self.issued += 1;
+                    self.issued
+                } else {
+                    self.freed.remove(0)
+                };
                 self.numbers.insert(pane, number);
             }
         }
@@ -3212,13 +3232,15 @@ impl Board {
         let mut lines = vec![title.finish(cols)];
         for gone in &self.gone {
             let mut line = Line::default();
-            line.plain("   ")
-                .fg(GREY, "✕ ")
-                .plain(&fit(&gone.name, 20))
-                .fg(DIM, &{
-                    let closed = gone.status.closed_as(self.lang);
-                    format!("  {closed} · {}", ago(Some(gone.at), now, self.lang))
-                });
+            line.plain("   ").fg(GREY, "✕ ");
+            // Its number, which no other worker takes meanwhile (U14).
+            if let Some(number) = gone.number {
+                line.fg(DIM, &format!("#{number} "));
+            }
+            line.plain(&fit(&gone.name, 20)).fg(DIM, &{
+                let closed = gone.status.closed_as(self.lang);
+                format!("  {closed} · {}", ago(Some(gone.at), now, self.lang))
+            });
             if !gone.detail.is_empty() {
                 let room = cols.saturating_sub(line.width + 3);
                 line.plain("  ").fg(DIM, &fit(&clean(&gone.detail), room));
@@ -5034,7 +5056,7 @@ mod tests {
         board.key(Key::Char(' '));
         let all = rendered(&board, 80, 40, start + Duration::from_secs(120));
         assert!(
-            all.contains("✕ docs  完了後に閉じた · 1 分前  docs detail"),
+            all.contains("✕ #3 docs  完了後に閉じた · 1 分前  docs detail"),
             "{all}"
         );
         // The first listing is the state found, not a closing.
@@ -5231,7 +5253,7 @@ mod tests {
         }
         assert_eq!(board.selected(), Some(4));
         let all = rendered(&board, 60, 12, start + Duration::from_secs(2));
-        assert!(all.contains("✕ w5"), "{all}");
+        assert!(all.contains("✕ #4 w5"), "{all}");
         assert!(all.contains("▶3 ● w4"), "{all}");
     }
 
@@ -5295,14 +5317,17 @@ mod tests {
         let view = |board: &Board| rendered(board, 60, 10, start + Duration::from_secs(2));
         // Counted on the line of the finished and exited workers.
         assert!(view(&board).contains("閉じた 5"), "{}", view(&board));
-        assert!(!view(&board).contains("✕ w3"), "{}", view(&board));
+        assert!(!view(&board).contains("w3"), "{}", view(&board));
 
         for _ in 0..10 {
             board.key(Key::Char('j'));
         }
         let all = view(&board);
         for pane in 3..8 {
-            assert!(all.contains(&format!("✕ w{pane}")), "w{pane}:\n{all}");
+            assert!(
+                all.contains(&format!("✕ #{} w{pane}", pane - 1)),
+                "w{pane}:\n{all}"
+            );
         }
         assert!(!all.contains("↓"), "{all}");
         // The selected row scrolled out of view, and the marker says so.
@@ -5337,7 +5362,7 @@ mod tests {
             let all = view(&board);
             assert!(!all.contains("あと 0 件"), "{all}");
             for pane in 2..7 {
-                if all.contains(&format!("✕ w{pane}")) {
+                if all.contains(&format!("✕ #{} w{pane}", pane - 1)) {
                     seen.insert(pane);
                 }
             }
@@ -5356,7 +5381,8 @@ mod tests {
             "{all}"
         );
 
-        // A worker that starts while the section is scrolled is in view.
+        // A worker that starts while the section is scrolled is in view,
+        // with a number none of the closed ones had (U14).
         for _ in 0..10 {
             board.key(Key::Char('j'));
         }
@@ -5365,7 +5391,7 @@ mod tests {
             start + Duration::from_secs(3),
         );
         let all = view(&board);
-        assert!(all.contains("▶1 ● w9"), "{all}");
+        assert!(all.contains("▶6 ● w9"), "{all}");
     }
 
     // Review B09: at 30 columns the state column was dropped, so 承認待ち,
@@ -5502,14 +5528,45 @@ mod tests {
         board.key(Key::Char('2'));
         assert_eq!(board.selected(), Some(3));
 
-        // A closed worker's number goes to the next one spawned.
+        // A closed worker's number is not the next one's (U14).
         panels.remove(0);
         panels.push(worker(7, 1, "w7", Some("running"), 1));
         board.update(panels, start + Duration::from_secs(2));
-        board.key(Key::Char('1'));
+        board.key(Key::Char('4'));
         assert_eq!(board.selected(), Some(7));
+        board.key(Key::Char('1'));
+        assert_eq!(board.selected(), Some(7), "1 is w2's, which closed");
         board.key(Key::Char('3'));
         assert_eq!(board.selected(), Some(4));
+    }
+
+    // U14: "3 awaits approval" must not come to mean another worker while
+    // the board is open; numbers come back only once 1-20 were all given.
+    #[test]
+    fn a_closed_workers_number_is_given_again_only_after_twenty() {
+        let start = Instant::now();
+        let mut board = Board::new(Some(1), None);
+        let mut panels: Vec<Panel> = (2..22)
+            .map(|pane| worker(pane, 1, &format!("w{pane}"), Some("running"), 1))
+            .collect();
+        board.update(panels.clone(), start);
+        assert_eq!(board.number(21), 20);
+        // w5 (#4) closes, then w3 (#2).
+        panels.retain(|panel| panel.pane_id.0 != 5);
+        board.update(panels.clone(), start + Duration::from_secs(1));
+        panels.retain(|panel| panel.pane_id.0 != 3);
+        board.update(panels.clone(), start + Duration::from_secs(2));
+        // All of 1-20 were given: the next takes the number freed first.
+        panels.push(worker(30, 1, "w30", Some("running"), 1));
+        board.update(panels.clone(), start + Duration::from_secs(3));
+        assert_eq!(board.number(30), 4);
+        panels.push(worker(31, 1, "w31", Some("running"), 1));
+        board.update(panels.clone(), start + Duration::from_secs(4));
+        assert_eq!(board.number(31), 2);
+        // None freed is left: the numbers go on past 20.
+        panels.push(worker(32, 1, "w32", Some("running"), 1));
+        board.update(panels, start + Duration::from_secs(5));
+        assert_eq!(board.number(32), 21);
     }
 
     // Review B08: within 要対応 workers were in pane order, so an approval
@@ -6804,8 +6861,12 @@ mod tests {
         board.offline = Some(t0);
         check(&board, "offline");
         assert!(!japanese(&board.title()), "{}", board.title());
-        // A notice from an action, and from a key with nothing to do.
-        board.key(Key::Char('9'));
+        // A notice from an action, and from a key with nothing to do: a
+        // number no live worker has.
+        let unused = (1..10)
+            .find(|n| !board.numbers.values().any(|v| v == n))
+            .unwrap();
+        board.key(Key::Char(char::from_digit(unused as u32, 10).unwrap()));
         assert!(!japanese(&board.message.clone().unwrap().text));
         let mut server = FakeServer {
             listings: vec![sample()],

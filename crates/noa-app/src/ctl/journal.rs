@@ -8,9 +8,17 @@
 //! `send`, `outcome` and `close`. A journal that cannot be written never
 //! fails a command: the first failure is a warning on stderr, the rest are
 //! silent.
+//!
+//! The journal holds sent tasks and answered prompts, so it is made `0600`
+//! in a `0700` directory. Commands run at once (background `send --wait`s):
+//! each append and each rotation holds an exclusive `flock` on
+//! `<journal>.lock`, so a rotation never renames its halved copy over a
+//! line appended meanwhile.
 
 use std::collections::HashMap;
 use std::io::Write;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 /// A journal over this size when it is opened loses its oldest half.
@@ -56,7 +64,13 @@ impl Journal {
         };
         if let Some(path) = journal.path.clone()
             && std::fs::metadata(&path).is_ok_and(|meta| meta.len() > MAX_JOURNAL_BYTES)
-            && let Err(err) = drop_oldest_half(&path)
+            && let Err(err) = lock(&path).and_then(|_lock| {
+                // Another command may have rotated it while this one waited.
+                if std::fs::metadata(&path)?.len() > MAX_JOURNAL_BYTES {
+                    drop_oldest_half(&path)?;
+                }
+                Ok(())
+            })
         {
             journal.warn(&path, &err);
         }
@@ -75,7 +89,8 @@ impl Journal {
 
     /// Append the event `ev` with `fields` (an object), stamped with `ts`.
     /// One write per line, through `O_APPEND`, so the lines of commands
-    /// running at once (background `send --wait`s) do not interleave.
+    /// running at once (background `send --wait`s) do not interleave, under
+    /// the journal's lock, so a rotation does not drop it.
     pub(crate) fn append(&mut self, ev: &str, fields: serde_json::Value) {
         let Some(path) = self.path.clone() else {
             return;
@@ -88,14 +103,21 @@ impl Journal {
         line.push('\n');
         let written = path
             .parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|()| {
+            .map_or(Ok(()), |dir| {
+                std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(dir)
+            })
+            .and_then(|()| lock(&path))
+            .and_then(|_lock| {
                 std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(&path)
-            })
-            .and_then(|mut file| file.write_all(line.as_bytes()));
+                    .mode(0o600)
+                    .open(&path)?
+                    .write_all(line.as_bytes())
+            });
         if let Err(err) = written {
             self.warn(&path, &err);
         }
@@ -121,8 +143,34 @@ pub(crate) fn parse_events(text: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// An exclusive `flock` on `<path>.lock` (made `0600`), held until the
+/// returned file is dropped. A lock file beside the journal, not the
+/// journal itself: a rotation replaces the journal's inode.
+fn lock(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut lock_path = path.as_os_str().to_owned();
+    lock_path.push(".lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(lock_path)?;
+    loop {
+        // SAFETY: `file` owns the descriptor for the whole call.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            return Ok(file);
+        }
+        let err = std::io::Error::last_os_error();
+        // A signal the wait catches (SIGINT, SIGTERM) can interrupt it.
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
 /// Keep the newer half of the file at `path`, cut at a line start, swapped
-/// in by a rename so a reader never sees half a file.
+/// in by a rename so a reader never sees half a file. The caller holds the
+/// journal's [`lock`].
 fn drop_oldest_half(path: &Path) -> std::io::Result<()> {
     let bytes = std::fs::read(path)?;
     let middle = bytes.len() / 2;
@@ -133,7 +181,13 @@ fn drop_oldest_half(path: &Path) -> std::io::Result<()> {
     let mut temp = path.as_os_str().to_owned();
     temp.push(format!(".{}.tmp", std::process::id()));
     let temp = PathBuf::from(temp);
-    std::fs::write(&temp, &bytes[start..])?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&temp)?
+        .write_all(&bytes[start..])?;
     std::fs::rename(&temp, path)
 }
 
@@ -373,6 +427,81 @@ mod tests {
         assert_eq!(kept.lines().count(), events.len());
         assert_eq!(events.last().unwrap()["pane"], (count - 1) as u64);
         assert!(events[0]["pane"].as_u64().unwrap() > 0);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
+
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    // Review finding #11: the journal (sent tasks, answered prompts) was
+    // made with the umask's permissions, readable by other local users.
+    #[test]
+    fn a_journal_is_private_to_its_user() {
+        let path = temp_path("mode");
+        let mut journal = Journal::at(path.clone());
+        journal.append("spawn", serde_json::json!({ "pane": 1 }));
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+
+        // A rotated journal stays private.
+        let line = format!(
+            "{{\"ev\":\"send\",\"pane\":1,\"text\":\"{}\"}}\n",
+            "x".repeat(99)
+        );
+        let big = line.repeat(MAX_JOURNAL_BYTES as usize / line.len() + 10);
+        std::fs::write(&path, big).unwrap();
+        let journal = Journal::at(path.clone());
+        assert!(std::fs::metadata(&path).unwrap().len() <= MAX_JOURNAL_BYTES);
+        assert_eq!(mode(&path), 0o600);
+        assert!(!journal.warned);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
+
+    // Review finding #10: a rotation read the journal, another command
+    // appended, and the rotation renamed its halved copy over that line.
+    // An append and a rotation each wait for the other's lock.
+    #[test]
+    fn appends_and_rotations_wait_for_the_journals_lock() {
+        let path = temp_path("lock");
+        let mut journal = Journal::at(path.clone());
+        journal.append("spawn", serde_json::json!({ "pane": 1 }));
+        let lines = || std::fs::read_to_string(&path).unwrap().lines().count();
+
+        let held = lock(&path).unwrap();
+        let appender = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                Journal::at(path).append("send", serde_json::json!({ "pane": 1 }));
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(lines(), 1, "appended while another held the lock");
+        drop(held);
+        appender.join().unwrap();
+        assert_eq!(lines(), 2);
+
+        let line = format!(
+            "{{\"ev\":\"send\",\"pane\":1,\"text\":\"{}\"}}\n",
+            "x".repeat(99)
+        );
+        let big = line.repeat(MAX_JOURNAL_BYTES as usize / line.len() + 10);
+        std::fs::write(&path, &big).unwrap();
+        let held = lock(&path).unwrap();
+        let rotator = {
+            let path = path.clone();
+            std::thread::spawn(move || drop(Journal::at(path)))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            big.len() as u64,
+            "rotated while another held the lock"
+        );
+        drop(held);
+        rotator.join().unwrap();
+        assert!(std::fs::metadata(&path).unwrap().len() <= MAX_JOURNAL_BYTES);
         let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
     }
 

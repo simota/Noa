@@ -94,8 +94,9 @@ accepted and changes nothing.
 **Result file.** Every spawn whose cwd is known creates `<cwd>/.noa/` with a
 `.gitignore` of `*` (an existing one is left alone) and gives the worker
 `NOA_RESULT=<cwd>/.noa/result-LABEL.md` (a plain `--label`;
-`result-LABEL-<8 hex>.md` when that file already exists; otherwise
-`result-<8 random hex digits>.md`), so no two workers share one. The line gains
+`result-LABEL-<8 hex>.md` when that name is taken; otherwise
+`result-<8 random hex digits>.md`). The file is created empty at the spawn, which
+reserves its name, so no two workers share one even before either writes. The line gains
 `"result":"<path>"`. With `--worktree` the cwd is the worktree. `.noa/` never
 shows in `git status` and does not stop `git worktree remove`. `--env
 NOA_RESULT=…` wins and makes no directory. When `.noa` cannot be written, stderr
@@ -287,7 +288,8 @@ where `close --prune` moved it), else `<its cwd>/.noa/result-LABEL.md` for a lis
 `--max-bytes` keeps the **start** (a report's summary is at its top) and says
 `Noa +ctl: result cut; printed the first N bytes of <path>` on stderr. Exit 1:
 `pane N has no result: <path> does not exist (the worker writes its report to
-$NOA_RESULT)`, `cannot read pane N's result <path>: …`, or `pane N has no
+$NOA_RESULT)`, `pane N has no result yet: <path> is empty (…)` for a worker that
+has not written its report, `cannot read pane N's result <path>: …`, or `pane N has no
 known result file: …`. Works on closed workers the journal knows.
 
 ### `status [--answers]`

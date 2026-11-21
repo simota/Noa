@@ -3964,12 +3964,15 @@ fn list(
     instance: &str,
 ) -> Result<Vec<Panel>, ListFailure> {
     if *reconnect {
-        *client = super::connect_client(RECONNECT)
+        let fresh = super::connect_client(RECONNECT)
             .map_err(|_| ListFailure::Lost)?
             .0;
-        if !same_instance(instance, client.server_instance_id()) {
+        // Another Noa's connection is dropped here, never kept: an action
+        // through it would reach that instance's pane of the same id.
+        if !same_instance(instance, fresh.server_instance_id()) {
             return Err(ListFailure::Elsewhere);
         }
+        *client = fresh;
         *reconnect = false;
     }
     client.list_panels().map_err(|err| {
@@ -4187,11 +4190,31 @@ fn run_until_quit(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
             if action == Action::Quit {
                 return Ok(EXIT_OK);
             }
+            if let Some(notice) = held_elsewhere(&board) {
+                board.message = Some(notice);
+                continue;
+            }
             let (notice, draft) = perform(client, &board, action);
             board.message = Some(notice);
             board.drafts.extend(draft);
         }
     }
+}
+
+/// Why no action is carried out right now: the last reconnect reached
+/// another Noa, whose panes share ids with the workers listed here.
+fn held_elsewhere(board: &Board) -> Option<Notice> {
+    board.elsewhere.then(|| {
+        Notice::warn(
+            board
+                .lang
+                .pick(
+                    "別の Noa が応答しているため操作できません · 元の Noa を待っています",
+                    "Another Noa answered, so nothing is done · waiting for ours",
+                )
+                .to_string(),
+        )
+    })
 }
 
 /// The server calls an action makes, so they can be faked in tests.
@@ -7299,6 +7322,17 @@ mod tests {
     // Review finding #9: each reconnect slept through up to 3 s of connect
     // retries while Noa was at its connection limit, freezing keys (`q`
     // included), redraws and the offline counter. It connects once.
+    // PR #210 review: after a reconnect reached another Noa the board kept
+    // running, and g / x / send went to that instance's pane of the same id.
+    #[test]
+    fn nothing_is_done_while_another_noa_answers() {
+        let mut board = Board::new(Some(1), Some(8));
+        assert!(held_elsewhere(&board).is_none());
+        board.elsewhere = true;
+        let notice = held_elsewhere(&board).expect("actions are held");
+        assert!(notice.warn);
+    }
+
     #[test]
     fn a_reconnect_connects_once_without_sleeping() {
         let (mut tries, mut slept) = (0, Vec::new());

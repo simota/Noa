@@ -47,23 +47,34 @@ pub(crate) fn prepare_dir(cwd: &Path) -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
-/// Make `<cwd>/.noa/` ([`prepare_dir`]), and return the result path of a
-/// worker labelled `label` ([`path_for`]). Labels are not unique: when the
-/// labelled file already exists (another worker of that label in this cwd,
-/// now or before), the new worker gets `result-<label>-<8 hex>.md`, so no
-/// report overwrites another or is read as another's.
+/// Make `<cwd>/.noa/` ([`prepare_dir`]) and reserve the result file of a
+/// worker labelled `label` there: `result-<label>.md` ([`path_for`]), or
+/// `result-<label>-<8 hex>.md` when that name is taken. Labels are not
+/// unique, and a worker writes its report only at the end, so the file is
+/// created (empty) here: a second worker of that label in this cwd, spawned
+/// while the first still works, cannot be handed the same path.
 pub(crate) fn prepare(cwd: &Path, label: Option<&str>) -> std::io::Result<PathBuf> {
     let dir = prepare_dir(cwd)?;
-    Ok(match labelled_path(cwd, label) {
-        Some(labelled) if labelled.exists() => {
-            let stem = labelled
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .expect("a plain label is UTF-8");
-            unused_path(&dir, stem)
+    let first = path_for(cwd, label);
+    let stem = first
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .expect("a result name is ASCII")
+        .to_string();
+    let mut path = first;
+    loop {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => return Ok(path),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                path = dir.join(format!("{stem}-{:08x}.md", rand::random::<u32>()));
+            }
+            Err(err) => return Err(err),
         }
-        _ => path_for(cwd, label),
-    })
+    }
 }
 
 /// `<dir>/<stem>.md`, or `<dir>/<stem>-<8 random hex digits>.md` when that
@@ -100,7 +111,13 @@ pub(crate) fn move_out(
     };
     let mut files: Vec<PathBuf> = entries
         .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        // A file still empty is a name `prepare` reserved for a worker that
+        // wrote no report: nothing to keep.
+        .filter(|entry| {
+            entry
+                .metadata()
+                .is_ok_and(|meta| meta.is_file() && meta.len() > 0)
+        })
         .map(|entry| entry.path())
         .filter(|path| {
             path.file_name()
@@ -138,7 +155,7 @@ pub(crate) fn move_out(
 pub(crate) fn written_since(path: &Path, since: SystemTime) -> Option<serde_json::Value> {
     let meta = std::fs::metadata(path).ok()?;
     let modified = meta.modified().ok()?;
-    (meta.is_file() && modified >= since).then(|| {
+    (meta.is_file() && meta.len() > 0 && modified >= since).then(|| {
         serde_json::json!({
             "path": path.to_string_lossy(),
             "bytes": meta.len(),
@@ -165,6 +182,13 @@ pub(crate) fn read(
             format!("cannot read pane {pane}'s result {}: {err}", path.display())
         }
     })?;
+    if bytes.is_empty() {
+        return Err(format!(
+            "pane {pane} has no result yet: {} is empty (the worker writes its report to \
+             ${RESULT_ENV})",
+            path.display()
+        ));
+    }
     let text = String::from_utf8_lossy(&bytes).into_owned();
     match max_bytes {
         Some(max) if text.len() > max => {
@@ -280,9 +304,7 @@ mod tests {
         let dir = temp_dir("same-label");
         let first = prepare(&dir, Some("review")).unwrap();
         assert_eq!(first, dir.join(".noa").join("result-review.md"));
-        // Not written yet: the next worker of that label still gets it.
-        assert_eq!(prepare(&dir, Some("review")).unwrap(), first);
-        std::fs::write(&first, "first\n").unwrap();
+        // The name is taken from the moment it is handed out, written or not.
         let second = prepare(&dir, Some("review")).unwrap();
         assert_ne!(second, first);
         assert_eq!(second.parent(), first.parent());
@@ -327,5 +349,25 @@ mod tests {
             ("aあb".to_string(), false)
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // PR #210 review: two workers of one label spawned in one cwd before
+    // either wrote its report were handed the same path.
+    #[test]
+    fn a_result_name_is_reserved_when_it_is_handed_out() {
+        let dir = temp_dir("reserve");
+        let first = prepare(&dir, Some("fix")).unwrap();
+        let second = prepare(&dir, Some("fix")).unwrap();
+        assert_ne!(first, second);
+        assert!(first.is_file() && second.is_file());
+        let a = prepare(&dir, None).unwrap();
+        let b = prepare(&dir, None).unwrap();
+        assert_ne!(a, b);
+        // A reserved, still empty file is no result yet.
+        let long_ago = SystemTime::UNIX_EPOCH;
+        assert!(written_since(&first, long_ago).is_none());
+        assert!(read(1, &first, None).unwrap_err().contains("no result yet"));
+        std::fs::write(&first, "done\n").unwrap();
+        assert!(written_since(&first, long_ago).is_some());
     }
 }

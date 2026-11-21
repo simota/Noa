@@ -297,3 +297,51 @@ Done when all of these hold:
   - modifier matching on non-Apple platforms is noa-gpui's;
   - the hint-strip test's expected widths assume the default `TextStore` system fonts.
 - Not verified: the windowed app (key delivery with an IME or the default menu, fonts, and what the on/off look reads like on screen). Only the headless paths were run.
+
+## Live data from noa-ipc (2026-11-21)
+
+Added after U1–U3 at the owner's request. The crate shows the running Noa's
+panes by default; `--demo` shows the canned fleet, which the layout tests use.
+The scope line and Goal above describe the earlier, canned-only state.
+
+- Dependencies: path dependencies on `crates/noa-ipc` and `crates/noa-config`,
+  and `serde_json` (to read the journal). Noa's own workspace, lockfile and
+  crates are unchanged.
+- Connection (`src/live.rs`): one background thread owns a `noa_ipc::Client`.
+  It finds the server as `+ctl` does (`load_startup_config`, then
+  `server_token_path`) and asks for the `read` and `control` scopes only. It
+  never sends input. A failed connection is retried from 0.5 s up to every 4 s
+  and shown in the header with its reason.
+- Calls made: `noa.subscribe` (`state_changed`), `noa.listPanels` every 2 s (a
+  closed pane sends no event), `noa.getText` at most every 2 s for the one
+  queue card that is expanded, and `noa.focusPane` when 開く is clicked.
+  `noa.output` is not subscribed: its load on Noa was not measured.
+- Which panes are shown: a panel with `agent` or `parentPaneId`, except those
+  labelled `board:…`. A pane with no parent that has workers under it is an
+  orchestrator and names their group; an agent pane with no parent and no
+  workers goes under `単独`.
+- Where each value comes from:
+  - state, detail and report count: `Panel.agent` and `Panel.exit`;
+  - model and effort: the flags in `Panel.spawn.argv`;
+  - task: the latest non-answer `send` after the pane's last `spawn` in the
+    spawner's journal (`ctl_journal_path` of the parent's `surfaceId`);
+  - `結果あり`: a non-empty `result-<label>.md` (or with an 8-hex suffix) in
+    `<cwd>/.noa/`;
+  - start time: `Panel.spawn.startedAt`.
+- What the dashboard records itself, from its own start only: the timeline
+  phases, how often `Panel.preview` changed per 5 s (the sparkline and the
+  freshness meter), and quiet (running with no preview change for 120 s). A
+  time whose start was not observed is not shown; a wait already in place at
+  first sight is shown as a lower bound (`N 分以上`).
+- Updates: a snapshot that changes only times, the sparkline, freshness or the
+  timeline is applied in place; one that changes the set of workers, a state,
+  a group or a text rebuilds the screen through `Dashboard::rebuilt`.
+- Checked on the running Noa (0.9.6) with one command worker and one `light`
+  claude worker, by rendering to PNG: the fleet matched `+ctl ls`; model,
+  effort, task, result tag, parent links, observed transitions with their
+  durations and the expanded card's screen tail were shown.
+- Not verified: the window itself (the in-place updates as the user sees them,
+  and `noa.focusPane` from 開く); codex and agy workers; approval and question
+  states on a real pane; a long worker label in the queue card's head row.
+- Known: a worker that finished with `attention` set appears in both the queue
+  (通知) and 完了.

@@ -66,24 +66,35 @@ Commands:
                                 level deep; no --no-board).
       --cwd DIR  --env KEY=VALUE  --label TEXT  --input TEXT
       --no-wait-after  --focus  --no-board
+                        (--label may not start with board:; --input is
+                        raw keys, refused for claude, codex or agy: use
+                        send once the agent is up)
       --max-children N (default and most 20: the board holds 20 workers;
                          with --no-board this pane holds 8 floats)
       --worktree        Run the worker in its own git worktree
-                        <repo>-wt/LABEL on a new branch orch/LABEL (from
-                        HEAD; needs --label, refuses --cwd). Prints
+                        <repo>-wt/LABEL next to the main worktree, on a
+                        new branch orch/LABEL (from HEAD; needs --label,
+                        refuses --cwd). Prints
                         \"worktree\" and \"branch\" too.
       --tier light|standard|deep
                         Pick the model tier of a claude, codex or agy
                         COMMAND (refused when it already picks a model
                         or effort). Prints \"tier\" too.
   send PANE [--enter] [--raw] [--replace] [--wait [wait options]] [--answer]
-       [--any-pane] [--] TEXT|-  Type TEXT (or stdin) into PANE; prints the
+       [--queue] [--any-pane] [--] TEXT|-
+                                Type TEXT (or stdin) into PANE; prints the
                                 report count to pass to `wait --after`. Refused
-                                while PANE waits for an approval, unless --answer.
-                                --replace first clears what the input line holds
-                                (Ctrl-E, then Ctrl-U per line, up to 32 lines).
+                                while PANE waits for an approval, unless --answer,
+                                and while its agent is running, unless --queue
+                                (then every --wait line has \"queued\":true: the
+                                wait may end with the turn already running).
+                                A TEXT over 250 KiB (JSON-encoded) is refused:
+                                send a file's path instead. --replace first
+                                clears what the input line holds (Ctrl-E, then
+                                Ctrl-U per line, up to 32 lines). --wait prints
+                                how to resume on stderr once the text is in.
   wait PANE...|--children [--after SEQ | --after PANE=SEQ ...] [--for LIST]
-       [--all] [--timeout SECS] [--tail N] [--stall SECS]
+       [--all] [--timeout SECS] [--tail N] [--stall SECS] [--any-pane]
                                 Block until a worker stops. LIST is a comma list
                                 of finished,permission,input,error,exit,attention
                                 (default: all of them), or stalled (needs
@@ -94,6 +105,8 @@ Commands:
                                 pane's last N output lines as \"tail\". A timeout
                                 prints each pending pane's report count as
                                 `baseline`; pass it back as --after PANE=SEQ.
+                                SIGTERM, SIGINT or SIGHUP prints that line too,
+                                with \"interrupted\":true (exit 2).
   read PANE [--scrollback] [--max-bytes N]
                                 Print PANE's screen (or retained output) text;
                                 a cut keeps the end and says so on stderr.
@@ -104,7 +117,9 @@ Commands:
                                 `spawn --worktree` worktree and its branch
                                 (git worktree remove, git branch -d; never
                                 forced, so unsaved work stays and is named
-                                under \"worktree\":{\"kept\":...}).
+                                under \"worktree\":{\"kept\":...}), found
+                                from the pane's cwd; a labelled pane with no
+                                such worktree also gets \"kept\" saying why.
   report STATE [[--] DETAIL]    Write an agent-state report (running, permission,
                                 input, finished, error, clear) to this terminal.
   board [--of PANE]             Show an orchestrator's workers in this pane
@@ -117,8 +132,10 @@ Commands:
 Use `--` before a TEXT or DETAIL that starts with `--`. A pane that exits
 and stays open ends a wait whatever --for lists, as a closed pane does; one
 that had exited before the wait began only ends it when no other pane is left.
-`send` and `close` only accept this pane's own workers unless --any-pane is
-given. Exit status: 0 ok, 1 error, 2 wait timed out, 3 server unavailable.
+`send`, `close` and `wait PANE` only accept this pane's own workers unless
+--any-pane is given. Exit status: 0 ok, 1 error, 2 wait timed out, 3 server
+unavailable, or a request Noa did not confirm in time (it may still have
+taken effect: check with `ls` or `read` before retrying).
 ";
 
 /// What an argument error prints after its message, instead of [`USAGE`].

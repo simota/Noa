@@ -747,6 +747,11 @@ pub(crate) struct Watch {
     pub(crate) attention_armed: bool,
     /// The pane had already exited (and was held open) when the wait began.
     pub(crate) exited_before: bool,
+    /// The pane's label when the wait began, for a line printed after the
+    /// pane is gone.
+    pub(crate) label: Option<String>,
+    /// An agent ran in the pane when the wait began (`agent.kind`).
+    pub(crate) had_agent: bool,
 }
 
 impl Watch {
@@ -758,6 +763,10 @@ impl Watch {
                 .unwrap_or(0),
             attention_armed: !panel.is_some_and(|panel| panel.attention),
             exited_before: panel.is_some_and(|panel| panel.exit.is_some()),
+            label: panel.and_then(|panel| panel.label.clone()),
+            had_agent: panel
+                .and_then(|panel| panel.agent.as_ref())
+                .is_some_and(|agent| agent.kind.is_some()),
         }
     }
 }
@@ -768,6 +777,8 @@ pub(crate) struct Outcome {
     pub(crate) reason: Reason,
     /// The pane is gone (closed, or its child exited without being held).
     pub(crate) closed: bool,
+    /// The agent that ran in the pane quit back to its shell (`exit`).
+    pub(crate) agent_left: bool,
 }
 
 /// Whether `panel` (`None`: no longer listed) ends the wait on `watch`.
@@ -782,6 +793,7 @@ pub(crate) fn evaluate(
         return Some(Outcome {
             reason: Reason::Exit,
             closed: true,
+            agent_left: false,
         });
     };
     // A held-open exited pane will never report again either, so it ends
@@ -790,6 +802,22 @@ pub(crate) fn evaluate(
         return Some(Outcome {
             reason: Reason::Exit,
             closed: false,
+            agent_left: false,
+        });
+    }
+    // An agent that quit back to its shell reports nothing more, and its
+    // card's state is cleared without a new report: nothing else would end
+    // the wait.
+    if watch.had_agent
+        && panel
+            .agent
+            .as_ref()
+            .is_none_or(|agent| agent.kind.is_none() && agent.state.is_none())
+    {
+        return Some(Outcome {
+            reason: Reason::Exit,
+            closed: false,
+            agent_left: true,
         });
     }
     if let Some(agent) = &panel.agent
@@ -800,6 +828,7 @@ pub(crate) fn evaluate(
         return Some(Outcome {
             reason,
             closed: false,
+            agent_left: false,
         });
     }
     if !panel.attention {
@@ -808,25 +837,35 @@ pub(crate) fn evaluate(
         return Some(Outcome {
             reason: Reason::Attention,
             closed: false,
+            agent_left: false,
         });
     }
     None
 }
 
 fn outcome_json(
-    pane: u64,
+    watch: &Watch,
     outcome: &Outcome,
     panel: Option<&Panel>,
     quiet: Option<Duration>,
 ) -> serde_json::Value {
     let agent = panel.and_then(|panel| panel.agent.as_ref());
     let mut value = serde_json::json!({
-        "paneId": WireId(pane),
+        "paneId": WireId(watch.pane),
         "reason": outcome.reason.name(),
     });
     let object = value.as_object_mut().expect("object literal");
+    if let Some(label) = panel
+        .and_then(|panel| panel.label.as_ref())
+        .or(watch.label.as_ref())
+    {
+        object.insert("label".into(), label.clone().into());
+    }
     if outcome.closed {
         object.insert("closed".into(), true.into());
+    }
+    if outcome.agent_left {
+        object.insert("agentLeft".into(), true.into());
     }
     if let Some(agent) = agent {
         object.insert("seq".into(), agent.seq.into());
@@ -2061,7 +2100,7 @@ pub(crate) fn wait_loop_with_clock(
             }
             let panel = latest.get(&watch.pane);
             if let Some(outcome) = evaluate(watch, panel, &options.reasons) {
-                emit_outcome(source, options, watch.pane, &outcome, panel, None, emit)?;
+                emit_outcome(source, options, watch, &outcome, panel, None, emit);
                 done.push(watch.pane);
             }
         }
@@ -2135,11 +2174,12 @@ pub(crate) fn wait_loop_with_clock(
                                 Outcome {
                                     reason: Reason::Stalled,
                                     closed: false,
+                                    agent_left: false,
                                 },
                                 Some(quiet_for),
                             ),
                         };
-                        emit_outcome(source, options, pane, &outcome, panel, quiet, emit)?;
+                        emit_outcome(source, options, watch, &outcome, panel, quiet, emit);
                         done.push(pane);
                     }
                 }
@@ -2210,24 +2250,28 @@ fn apply_notification(
 }
 
 /// Print the line for a pane whose wait ended, with `--tail` if asked.
+/// The wait's outcome stands even when the tail cannot be read: the line
+/// then says why under `tailError` instead.
 fn emit_outcome(
     source: &mut impl WaitSource,
     options: &WaitOptions,
-    pane: u64,
+    watch: &Watch,
     outcome: &Outcome,
     panel: Option<&Panel>,
     quiet: Option<Duration>,
     emit: &mut dyn FnMut(&serde_json::Value),
-) -> Result<(), Failure> {
-    let mut line = outcome_json(pane, outcome, panel, quiet);
+) {
+    let mut line = outcome_json(watch, outcome, panel, quiet);
     if let Some(lines) = options.tail
         && !outcome.closed
-        && let Some(text) = source.scrollback(pane)?
     {
-        line["tail"] = tail_lines(&text, lines).into();
+        match source.scrollback(watch.pane) {
+            Ok(Some(text)) => line["tail"] = tail_lines(&text, lines).into(),
+            Ok(None) => {}
+            Err(failure) => line["tailError"] = failure.message.into(),
+        }
     }
     emit(&line);
-    Ok(())
 }
 
 /// The line a timed-out wait prints. A pane that had exited before the wait
@@ -2261,6 +2305,13 @@ fn timeout_json(
                     "paneId": WireId(watch.pane),
                     "seq": watch.baseline_seq,
                 });
+                if let Some(label) = latest
+                    .get(&watch.pane)
+                    .and_then(|panel| panel.label.as_ref())
+                    .or(watch.label.as_ref())
+                {
+                    entry["label"] = label.clone().into();
+                }
                 if let Some(state) = latest
                     .get(&watch.pane)
                     .and_then(|panel| panel.agent.as_ref()?.state.clone())
@@ -2979,7 +3030,8 @@ mod tests {
             ),
             Some(Outcome {
                 reason: Reason::Finished,
-                closed: false
+                closed: false,
+                agent_left: false
             })
         );
     }
@@ -3035,7 +3087,7 @@ mod tests {
         let outcome = evaluate(&mut watch, Some(&held), &Reason::ALL).unwrap();
         assert_eq!(outcome.reason, Reason::Exit);
         assert_eq!(
-            outcome_json(8, &outcome, Some(&held), None)["exitCode"],
+            outcome_json(&watch, &outcome, Some(&held), None)["exitCode"],
             serde_json::json!(2)
         );
         // A pane that disappeared ends the wait whatever was asked for.
@@ -3043,7 +3095,8 @@ mod tests {
             evaluate(&mut watch, None, &[Reason::Finished]),
             Some(Outcome {
                 reason: Reason::Exit,
-                closed: true
+                closed: true,
+                agent_left: false
             })
         );
     }
@@ -3506,7 +3559,8 @@ mod tests {
             evaluate(&mut watch, Some(&held), &[Reason::Finished, Reason::Error]),
             Some(Outcome {
                 reason: Reason::Exit,
-                closed: false
+                closed: false,
+                agent_left: false
             })
         );
     }
@@ -4313,6 +4367,185 @@ mod tests {
         assert_eq!(code.ok(), Some(EXIT_OK));
         assert_eq!(lines[0]["closed"], true);
         assert!(lines[0].get("tail").is_none());
+    }
+
+    /// A [`FakeSource`] whose scrollback reads fail with `error`.
+    struct TailFails(FakeSource, fn() -> ClientError);
+
+    impl WaitSource for TailFails {
+        fn list(&mut self) -> Result<Vec<Panel>, Failure> {
+            self.0.list()
+        }
+
+        fn next(&mut self, timeout: Duration) -> Result<Option<Notification>, Failure> {
+            self.0.next(timeout)
+        }
+
+        fn scrollback(&mut self, _pane: u64) -> Result<Option<String>, Failure> {
+            Err(Failure::from((self.1)()))
+        }
+
+        fn screen(&mut self, pane: u64) -> Result<Option<String>, Failure> {
+            self.0.screen(pane)
+        }
+    }
+
+    // Audit finding (REL-05): a `--tail` read past the client's deadline
+    // ended the wait with exit 3 and lost the outcome it had reached.
+    #[test]
+    fn a_tail_that_cannot_be_read_keeps_the_outcome() {
+        for error in [
+            (|| ClientError::Timeout("noa.getText".to_string())) as fn() -> ClientError,
+            || ClientError::Transport("connection reset".to_string()),
+        ] {
+            let mut source = TailFails(
+                FakeSource {
+                    lists: vec![vec![with_pane(panel(2, Some("finished"), false), 8)]],
+                    notifications: Default::default(),
+                    list_calls: 0,
+                    texts: HashMap::new(),
+                },
+                error,
+            );
+            let mut lines = Vec::new();
+            let code = wait_loop(
+                &mut source,
+                &[8],
+                WaitStart::Listed {
+                    after: HashMap::from([(8, 1)]),
+                },
+                &WaitOptions {
+                    tail: Some(5),
+                    ..WaitOptions::default()
+                },
+                WAIT_RELIST_INTERVAL,
+                &mut |line| lines.push(line.clone()),
+            );
+            assert_eq!(code.ok(), Some(EXIT_OK));
+            assert_eq!(lines.len(), 1);
+            assert_eq!(lines[0]["reason"], "finished");
+            assert!(lines[0].get("tail").is_none());
+            assert!(
+                lines[0]["tailError"]
+                    .as_str()
+                    .is_some_and(|error| !error.is_empty()),
+                "{}",
+                lines[0]
+            );
+        }
+    }
+
+    // Audit finding (REL-12): an agent that quit back to its shell cleared
+    // its state without a new report, so the wait ran to its timeout.
+    #[test]
+    fn an_agent_that_quit_to_its_shell_ends_the_wait() {
+        let running = panel(4, Some("running"), false);
+        let mut watch = Watch::new(8, Some(&running), None);
+        assert!(watch.had_agent);
+        assert_eq!(evaluate(&mut watch, Some(&running), &Reason::ALL), None);
+
+        let mut shell = panel(4, None, false);
+        shell.agent.as_mut().unwrap().kind = None;
+        let outcome = evaluate(&mut watch, Some(&shell), &[Reason::Finished]).unwrap();
+        assert_eq!(
+            outcome,
+            Outcome {
+                reason: Reason::Exit,
+                closed: false,
+                agent_left: true,
+            }
+        );
+        let line = outcome_json(&watch, &outcome, Some(&shell), None);
+        assert_eq!(line["reason"], "exit");
+        assert_eq!(line["agentLeft"], true);
+        assert!(line.get("closed").is_none());
+        shell.agent = None;
+        assert!(evaluate(&mut watch, Some(&shell), &Reason::ALL).is_some_and(|o| o.agent_left));
+
+        // A pane that had no agent when the wait began is a shell's wait.
+        let mut watch = Watch::new(8, Some(&shell), None);
+        assert_eq!(evaluate(&mut watch, Some(&shell), &Reason::ALL), None);
+        // A report left after the agent's process went is still waited on.
+        let mut reported = panel(4, Some("running"), false);
+        reported.agent.as_mut().unwrap().kind = None;
+        let mut watch = Watch::new(8, Some(&running), None);
+        assert_eq!(evaluate(&mut watch, Some(&reported), &Reason::ALL), None);
+    }
+
+    // Audit finding (AU-04): a wait's lines named panes by id only, so an
+    // orchestrator that lost track of its ids could not tell its workers
+    // apart.
+    #[test]
+    fn wait_lines_carry_the_panes_label() {
+        let mut labelled = with_pane(panel(3, Some("running"), false), 8);
+        labelled.label = Some("api".to_string());
+        let unlabelled = with_pane(panel(1, Some("running"), false), 9);
+        let mut source = FakeSource {
+            lists: vec![vec![labelled.clone(), unlabelled.clone()]],
+            notifications: Default::default(),
+            list_calls: 0,
+            texts: HashMap::new(),
+        };
+        let mut lines = Vec::new();
+        let code = wait_loop(
+            &mut source,
+            &[8, 9],
+            WaitStart::Listed {
+                after: HashMap::new(),
+            },
+            &WaitOptions {
+                timeout: Some(Duration::ZERO),
+                ..WaitOptions::default()
+            },
+            WAIT_RELIST_INTERVAL,
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_TIMEOUT));
+        assert_eq!(
+            lines[0]["baseline"],
+            serde_json::json!([
+                {"paneId": "8", "seq": 3, "label": "api", "state": "running"},
+                {"paneId": "9", "seq": 1, "state": "running"},
+            ])
+        );
+
+        // On an outcome, and still once the pane is gone.
+        let mut finished = with_pane(panel(4, Some("finished"), false), 8);
+        finished.label = Some("api".to_string());
+        let mut source = FakeSource {
+            lists: vec![vec![labelled.clone()], Vec::new()],
+            notifications: [Notification::StateChanged {
+                panels: vec![labelled],
+                dropped: false,
+            }]
+            .into(),
+            list_calls: 0,
+            texts: HashMap::new(),
+        };
+        let mut lines = Vec::new();
+        let code = wait_loop(
+            &mut source,
+            &[8],
+            WaitStart::Listed {
+                after: HashMap::new(),
+            },
+            &WaitOptions::default(),
+            Duration::ZERO,
+            &mut |line| lines.push(line.clone()),
+        );
+        assert_eq!(code.ok(), Some(EXIT_OK));
+        assert_eq!(lines[0]["closed"], true);
+        assert_eq!(lines[0]["label"], "api");
+        let watch = Watch::new(8, Some(&finished), Some(3));
+        let outcome = Outcome {
+            reason: Reason::Finished,
+            closed: false,
+            agent_left: false,
+        };
+        assert_eq!(
+            outcome_json(&watch, &outcome, Some(&finished), None)["label"],
+            "api"
+        );
     }
 
     #[test]

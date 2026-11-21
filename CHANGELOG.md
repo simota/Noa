@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.8] - 2026-11-21
+
+A keybind action that starts a program in the background, and an agent
+dashboard that ships inside Noa.app.
+
+### Added
+
+- `spawn:<command line>` (Noa extension) runs a command in the background
+  through `$SHELL -l -c`, in the focused pane's directory (else home), detached
+  in its own process group. `keybind` and `command-palette-entry` accept it.
+- View > Agent Dashboard opens a separate dashboard window that shows the
+  running Noa's agent panes, read live from the control server. It ships in
+  `Noa.app/Contents/Helpers`.
+
 ## [0.9.7] - 2026-11-21
 
 The GPU layer moves to wgpu 30.

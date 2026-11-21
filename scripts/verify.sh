@@ -116,8 +116,13 @@ elif [ "${#changed[@]}" -gt 0 ]; then
     echo "verify: related packages: $(echo $related)"
     [ "$os" = Linux ] && run clippy cargo clippy --locked --all-targets "${args[@]}" -- -D warnings
     run test cargo test --locked "${args[@]}"
-    uses=$(dashboard_uses)
-    for p in "${pkgs[@]}"; do grep -qx "$p" <<<"$uses" && dash=1; done
+    # Without the dashboard's package list, run its check rather than skip it.
+    if uses=$(dashboard_uses); then
+      for p in "${pkgs[@]}"; do grep -qx "$p" <<<"$uses" && dash=1; done
+    else
+      echo "verify: cannot list the dashboard's packages; checking it anyway"
+      dash=1
+    fi
   fi
   [ "$dash" = 1 ] && run dashboard dashboard_check
   [ "$hook" = 1 ] && run hook-test python3 -I -B scripts/test_noa_agent_hook.py

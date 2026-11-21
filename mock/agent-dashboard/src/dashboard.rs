@@ -8,7 +8,8 @@ use noa_gpui_core::widgets::{
     TagStyle, Tone, Truncation,
 };
 use noa_gpui_core::{
-    Appearance, Key, Message, Role, Shortcut, ShortcutPressed, Style, Theme, UiTree, WidgetId,
+    Appearance, Dirty, Key, Message, Role, Shortcut, ShortcutPressed, Style, Theme, UiTree,
+    WidgetId,
 };
 use noa_gpui_platform::Screen;
 use noa_gpui_scene::{Color, Size};
@@ -167,6 +168,11 @@ impl Dashboard {
     /// layouts in the `TextStore`. The new tree is laid out at the old size
     /// before this returns: the window delivers input before it lays out for the
     /// next frame, and a tree without rects would let that input hit nothing.
+    /// That layout is not a frame the window presented, so the root is marked
+    /// for compositing again: the window then requests a redraw (it asks
+    /// `needs_update` after input) and presents (`prepare` returns true), and the
+    /// list it presents is the new tree's, reassembled from what this layout
+    /// painted.
     fn rebuilt(&mut self, view: View, text: &mut TextStore) {
         let theme = self.tree.theme().clone();
         let roots: Vec<WidgetId> = self
@@ -182,6 +188,9 @@ impl Dashboard {
         *self = Self::build(view, theme);
         if let Some(viewport) = viewport {
             self.prepare(viewport, text);
+            if let Some(root) = self.tree.root() {
+                self.tree.invalidate(root, Dirty::COMPOSITE);
+            }
         }
     }
 
@@ -1099,7 +1108,7 @@ fn connect(tree: &mut UiTree, row: WidgetId, workers: &[Worker], children: &[&Wo
 #[cfg(test)]
 mod tests {
     use noa_gpui_core::{Event, Modifiers, PointerButton};
-    use noa_gpui_scene::{Point, Size};
+    use noa_gpui_scene::{DisplayList, DrawCommand, Point, Size};
 
     use super::*;
 
@@ -1612,6 +1621,83 @@ mod tests {
         dashboard.dispatch(Event::PointerUp { pos, button }, &mut text);
         let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
         assert!(status.text().contains(label), "{}", status.text());
+    }
+
+    /// The display list as plain text, with each text layout given by its size:
+    /// layout ids depend on the `TextStore` that made them.
+    fn frame_of(list: &DisplayList, text: &TextStore) -> Vec<String> {
+        list.commands()
+            .iter()
+            .map(|command| match command {
+                DrawCommand::Text {
+                    rect,
+                    layout,
+                    color,
+                } => format!("Text {rect:?} {color:?} {:?}", text.size(*layout)),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// What the window does after input and on the next frame: it redraws only if
+    /// `needs_update`, and presents only if `prepare` says the list changed. The
+    /// list it presents must be the rebuilt screen's, the same as a screen built
+    /// for that view from scratch.
+    fn assert_next_frame_shows_the_rebuild(
+        dashboard: &mut Dashboard,
+        text: &mut TextStore,
+        before: &[String],
+    ) {
+        assert!(
+            dashboard.needs_update(window()),
+            "no redraw is requested after the rebuild"
+        );
+        assert!(
+            dashboard.prepare(window(), text),
+            "the frame after the rebuild presents nothing"
+        );
+        let shown = frame_of(dashboard.display_list(), text);
+        let mut fresh = Dashboard::showing(dashboard.view);
+        let mut fresh_text = TextStore::new(Default::default());
+        fresh.prepare(window(), &mut fresh_text);
+        assert_eq!(shown, frame_of(fresh.display_list(), &fresh_text));
+        assert_ne!(shown, before, "the frame still shows the old screen");
+    }
+
+    #[test]
+    fn a_panel_toggle_reaches_the_next_frame() {
+        let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+        let before = frame_of(dashboard.display_list(), &text);
+        let key = Key::Char('2');
+        let modifiers = Modifiers::default();
+        dashboard.dispatch(Event::KeyDown { key, modifiers }, &mut text);
+        assert!(dashboard.panels[Panel::Running as usize].is_none());
+        assert_next_frame_shows_the_rebuild(&mut dashboard, &mut text, &before);
+    }
+
+    #[test]
+    fn a_grouping_change_reaches_the_next_frame() {
+        let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+        let before = frame_of(dashboard.display_list(), &text);
+        let pos = last_segment(&dashboard);
+        let button = PointerButton::Primary;
+        dashboard.dispatch(Event::PointerDown { pos, button }, &mut text);
+        dashboard.dispatch(Event::PointerUp { pos, button }, &mut text);
+        assert_eq!(dashboard.view.grouping, Grouping::Flat);
+        assert_next_frame_shows_the_rebuild(&mut dashboard, &mut text, &before);
+    }
+
+    #[test]
+    fn a_details_click_reaches_the_next_frame() {
+        let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+        let before = frame_of(dashboard.display_list(), &text);
+        let (details, label) = dashboard.queue_buttons.details[1];
+        let pos = center(&dashboard.tree, details);
+        let button = PointerButton::Primary;
+        dashboard.dispatch(Event::PointerDown { pos, button }, &mut text);
+        dashboard.dispatch(Event::PointerUp { pos, button }, &mut text);
+        assert_eq!(dashboard.view.expanded, Some(label));
+        assert_next_frame_shows_the_rebuild(&mut dashboard, &mut text, &before);
     }
 
     #[test]

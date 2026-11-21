@@ -528,6 +528,7 @@ mod tests {
             exit: None,
             parent_pane_id: None,
             label: None,
+            spawn: None,
         }
     }
 

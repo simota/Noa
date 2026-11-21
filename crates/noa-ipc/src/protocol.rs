@@ -197,6 +197,19 @@ pub struct Panel {
     /// The label given at spawn, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// What the pane was started with, for a pane an IPC spawn started with
+    /// a command. Absent otherwise, and from servers that predate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn: Option<PanelSpawn>,
+}
+
+/// `Panel.spawn`: the argv an IPC spawn ran and when the pane started.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PanelSpawn {
+    pub argv: Vec<String>,
+    /// Unix time in seconds.
+    pub started_at: u64,
 }
 
 /// `Panel.agent`. `state`/`detail` mirror the last `OSC 777;noa-agent`
@@ -215,6 +228,11 @@ pub struct PanelAgent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     pub seq: u64,
+    /// What the agent is blocked on, `permission` or `question`: set only
+    /// from an `OSC 7501` blocked report, so a `state: input` without it came
+    /// from a hook or `OSC 777` report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<String>,
 }
 
 /// `Panel.exit`: the held-open pane's child exit code, when one was reported.
@@ -327,6 +345,10 @@ pub struct GetTextResult {
     pub text: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
+    /// The pane is on the alternate screen, which keeps no scrollback: a
+    /// `scrollback` read returns only what the screen shows. Absent = false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub alternate_screen: bool,
 }
 
 // ---- noa.getGrid ----
@@ -373,6 +395,11 @@ pub struct SendTextParams {
     /// lone `"\r"` acts as Enter for the running app (e.g. scripting a TUI).
     #[serde(default)]
     pub paste: Option<bool>,
+    /// With `paste`: write nothing and answer `-32010` (NotReady) while the
+    /// pane has not enabled bracketed paste (DECSET 2004), so multi-line text
+    /// is never typed into a program that is still starting. Omitted = false.
+    #[serde(default)]
+    pub require_paste_mode: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -480,6 +507,12 @@ pub struct SpawnParams {
     /// `false` keeps keyboard focus where it was. Omitted means `true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focus: Option<bool>,
+    /// With `parentPaneId`: refuse with `-32011` (LimitReached) when that
+    /// parent already has this many panes (exited-but-open ones included).
+    /// The count and the spawn are one step on the app's UI thread, so
+    /// concurrent spawns cannot overshoot it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_children: Option<u32>,
 }
 
 impl SpawnParams {

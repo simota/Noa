@@ -7,7 +7,7 @@
 use std::hash::{Hash, Hasher};
 
 use super::applescript::{ScriptSpawn, usable_cwd};
-use super::state::Orchestration;
+use super::state::{IpcSpawn, Orchestration};
 use super::*;
 use crate::ipc_bridge::{
     AppIpcBackend, IpcActionKind, IpcActionReply, PanelSurfaceFacts, bare_panel, card_to_panel,
@@ -444,10 +444,16 @@ impl App {
                 self.sync_ipc_snapshot();
                 Ok(IpcActionReply::Ok)
             }
-            IpcActionKind::SendText { pane, text, paste } => {
+            IpcActionKind::SendText {
+                pane,
+                text,
+                paste,
+                require_paste_mode,
+            } => {
                 let (window_id, pane_id) = self.resolve_ipc_pane(pane)?;
                 let bytes = if paste {
                     let bracketed = self.bracketed_paste(window_id, pane_id);
+                    check_paste_mode(pane, require_paste_mode, bracketed)?;
                     input::applescript_input_bytes(&text, bracketed)
                 } else {
                     // Raw injection (noa.sendText paste:false): keyboard-like
@@ -534,6 +540,19 @@ impl App {
         if let Some(parent) = params.parent_pane_id {
             self.resolve_ipc_pane(parent.0)?;
             check_nesting(parent.0, |pane| self.ipc_orchestrator_of(pane))?;
+            // REL-02: counted here, on the UI thread that also creates the
+            // pane, so concurrent spawns from one parent cannot overshoot.
+            if let Some(most) = params.max_children {
+                let children = self.windows.values().flat_map(|state| {
+                    state.surfaces.values().map(|surface| {
+                        (
+                            surface.orchestration.as_ref().and_then(|meta| meta.parent),
+                            surface.exited,
+                        )
+                    })
+                });
+                check_max_children(parent.0, most, children)?;
+            }
         }
         let previous_focus = self
             .focused
@@ -720,6 +739,19 @@ impl App {
                 parent: params.parent_pane_id.map(|id| id.0),
                 label: params.label,
                 cwd: spawn_cwd,
+            });
+        }
+        if let Some(argv) = config.command
+            && let Some(surface) = self
+                .windows
+                .get_mut(&window_id)
+                .and_then(|state| state.surfaces.get_mut(&pane_id))
+        {
+            surface.ipc_spawn = Some(IpcSpawn {
+                argv,
+                started_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |since| since.as_secs()),
             });
         }
         self.write_initial_input(window_id, pane_id, config.initial_input);
@@ -1212,7 +1244,54 @@ fn surface_facts(surface: &Surface) -> PanelSurfaceFacts {
             .orchestration
             .as_ref()
             .and_then(|meta| meta.cwd.clone()),
+        spawn: surface.ipc_spawn.as_ref().map(|spawn| noa_ipc::PanelSpawn {
+            argv: spawn.argv.clone(),
+            started_at: spawn.started_at,
+        }),
     }
+}
+
+/// REL-01: a paste that asked for paste mode is refused, with nothing
+/// written, while the pane has not enabled bracketed paste: its program may
+/// still be starting, and every newline of the text would land as Enter.
+fn check_paste_mode(
+    pane: u64,
+    require_paste_mode: bool,
+    bracketed: bool,
+) -> Result<(), noa_ipc::IpcError> {
+    if require_paste_mode && !bracketed {
+        return Err(noa_ipc::IpcError::NotReady(format!(
+            "pane {pane} has not enabled bracketed paste yet (its program may still be \
+             starting); nothing was sent"
+        )));
+    }
+    Ok(())
+}
+
+/// REL-02: refuse a spawn once `parent` has `most` children. `children` is
+/// every pane's orchestration parent and whether it has exited; a pane held
+/// open after its child exited still counts, as the client's own count does.
+fn check_max_children(
+    parent: u64,
+    most: u32,
+    children: impl Iterator<Item = (Option<u64>, bool)>,
+) -> Result<(), noa_ipc::IpcError> {
+    let (mut live, mut exited) = (0u32, 0u32);
+    for (_, gone) in children.filter(|(of, _)| *of == Some(parent)) {
+        if gone {
+            exited += 1;
+        } else {
+            live += 1;
+        }
+    }
+    if live + exited >= most {
+        return Err(noa_ipc::IpcError::LimitReached(format!(
+            "pane {parent} already has {} children ({live} live, {exited} exited); \
+             maxChildren is {most}",
+            live + exited
+        )));
+    }
+    Ok(())
 }
 
 /// A live pane and the orchestrator that spawned it, if any.
@@ -1966,5 +2045,47 @@ mod send_text_reply_tests {
             ipc_input_queue_result(QueueInputResult::Disconnected),
             Err(noa_ipc::IpcError::PaneClosed)
         ));
+    }
+}
+
+#[cfg(test)]
+mod orchestration_limit_tests {
+    use super::*;
+
+    // REL-01: before the pane's program enables bracketed paste, a send that
+    // asked for paste mode is refused as not ready; one that did not ask, or
+    // a pane already in paste mode, goes through.
+    #[test]
+    fn a_paste_requiring_paste_mode_waits_for_bracketed_paste() {
+        let refused = check_paste_mode(4, true, false).unwrap_err();
+        assert!(matches!(refused, noa_ipc::IpcError::NotReady(_)));
+        assert_eq!(refused.code().code(), -32010);
+        assert!(refused.to_string().contains("pane 4"));
+
+        assert!(check_paste_mode(4, true, true).is_ok());
+        assert!(check_paste_mode(4, false, false).is_ok());
+    }
+
+    // REL-02: the parent's children are counted on the app's side, exited
+    // panes held open included, and only the parent's own.
+    #[test]
+    fn max_children_counts_the_parents_live_and_exited_panes() {
+        let panes = [
+            (Some(3), false),
+            (Some(3), true),
+            (Some(9), false),
+            (None, false),
+        ];
+
+        assert!(check_max_children(3, 3, panes.into_iter()).is_ok());
+        let refused = check_max_children(3, 2, panes.into_iter()).unwrap_err();
+        assert!(matches!(refused, noa_ipc::IpcError::LimitReached(_)));
+        assert_eq!(refused.code().code(), -32011);
+        assert!(
+            refused.to_string().contains("1 live, 1 exited"),
+            "{refused}"
+        );
+        assert!(check_max_children(9, 1, panes.into_iter()).is_err());
+        assert!(check_max_children(7, 0, panes.into_iter()).is_err());
     }
 }

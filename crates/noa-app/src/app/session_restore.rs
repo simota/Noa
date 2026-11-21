@@ -90,16 +90,24 @@ impl App {
     }
 
     /// floating-panes REQ-017: `state`'s floats on `anchor`, with each one's
-    /// cwd.
+    /// cwd, less the workers an IPC spawn started (REL-09).
     fn float_records(
         &self,
         window_id: WindowId,
         state: &WindowState,
         anchor: FloatAnchor,
     ) -> Vec<session::FloatRecord> {
-        state
-            .floats
-            .records_on(anchor, |id| self.pane_cwd(window_id, id))
+        restorable_float_records(
+            &state.floats,
+            anchor,
+            |id| self.pane_cwd(window_id, id),
+            |id| {
+                state
+                    .surfaces
+                    .get(&id)
+                    .is_some_and(|surface| surface.orchestration.is_some())
+            },
+        )
     }
 
     /// floating-panes REQ-017: respawn a restored tab's floats. Pane-anchored
@@ -676,9 +684,56 @@ fn capture_window_frame(window: &Window) -> session::WindowFrame {
     }
 }
 
+/// `floats`' records on `anchor`, leaving out the floats `is_worker` names
+/// (REL-09): an IPC-spawned worker's program is gone after a relaunch and the
+/// orchestration is not restored, so it would come back as a bare shell —
+/// one per stowed worker, piled over the board's pane past any float limit.
+fn restorable_float_records(
+    floats: &crate::floating::FloatSet,
+    anchor: FloatAnchor,
+    cwd: impl Fn(PaneId) -> Option<String>,
+    is_worker: impl Fn(PaneId) -> bool,
+) -> Vec<session::FloatRecord> {
+    let mut kept = floats.clone();
+    for float in floats.floats().iter().filter(|float| is_worker(float.id)) {
+        kept.remove(float.id);
+    }
+    kept.records_on(anchor, cwd)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // REL-09: a relaunch brought every stowed worker back as a shell float
+    // over the board's pane; only the user's own floats are recorded.
+    #[test]
+    fn ipc_spawned_worker_floats_are_not_recorded() {
+        let anchor = FloatAnchor::Pane(PaneId::new(1));
+        let record = |seq| session::FloatRecord {
+            origin: (0.1, 0.1),
+            size: (0.5, 0.5),
+            collapsed: false,
+            seq,
+            z: seq,
+            cwd: None,
+            strip_moved: false,
+        };
+        let mut floats = crate::floating::FloatSet::default();
+        floats.restore(PaneId::new(5), anchor, &record(1));
+        floats.restore(PaneId::new(6), anchor, &record(2));
+
+        let records = restorable_float_records(
+            &floats,
+            anchor,
+            |id| Some(format!("/cwd/{}", id.get())),
+            |id| id == PaneId::new(6),
+        );
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].cwd.as_deref(), Some("/cwd/5"));
+        assert_eq!(floats.floats().len(), 2, "the live set is untouched");
+    }
 
     #[test]
     fn saved_focused_tab_prefers_app_focus_then_native_selection() {

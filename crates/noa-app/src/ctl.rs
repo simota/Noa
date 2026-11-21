@@ -1543,6 +1543,7 @@ impl Session {
             label: Some(board_label(own)),
             parent_pane_id: None,
             focus: Some(false),
+            max_children: None,
         };
         let window = self
             .client
@@ -1651,6 +1652,7 @@ impl Session {
                     label,
                     parent_pane_id: Some(WireId(own)),
                     focus: Some(focus),
+                    max_children: None,
                 };
                 session
                     .client
@@ -2549,10 +2551,12 @@ mod tests {
                 state: state.map(str::to_string),
                 detail: None,
                 seq,
+                blocked: None,
             }),
             exit: None,
             parent_pane_id: Some(WireId(3)),
             label: None,
+            spawn: None,
         }
     }
 

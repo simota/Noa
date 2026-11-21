@@ -22,6 +22,25 @@ use tungstenite::protocol::{CloseFrame, WebSocketConfig};
 /// unbounded number of connection threads.
 const MAX_CONNECTIONS: usize = 32;
 
+/// Connections over [`MAX_CONNECTIONS`] that may be refused at once with a
+/// close frame rather than dropped unanswered. Each refusal is bounded by the
+/// handshake timeout; past this many, excess accepts are dropped as before,
+/// so a flood still costs a bounded number of threads.
+const MAX_REFUSING_CONNECTIONS: usize = 4;
+
+/// Close reason sent with code 1013 (Try Again Later) to a connection
+/// refused at [`MAX_CONNECTIONS`].
+pub const TOO_MANY_CONNECTIONS_REASON: &str = "too many connections";
+
+/// Close reason sent with code 1009 (Message Too Big) when a control frame
+/// or message is over [`MAX_WS_FRAME_SIZE`]/[`MAX_WS_MESSAGE_SIZE`].
+pub const MESSAGE_TOO_BIG_REASON: &str = "message too big";
+
+/// How long a connection closed for an oversized frame keeps reading (and
+/// discarding) the rest of it, so closing the socket with unread input does
+/// not reset the connection before the client reads the close frame.
+const OVERSIZE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Most pane ids one `noa.subscribe` may filter on. Each id is kept per
 /// subscription and scanned on every broadcast while the connection map is
 /// locked; far more than any window holds, far less than a 1 MiB message.
@@ -51,7 +70,7 @@ const MAX_CONNECTIONS_PER_REMOTE_IP: usize =
 /// otherwise capped, but a well-behaved client's paste-sized input is far
 /// under this) and far below tungstenite's 64 MiB/16 MiB defaults.
 const MAX_WS_MESSAGE_SIZE: usize = 1024 * 1024;
-const MAX_WS_FRAME_SIZE: usize = 256 * 1024;
+pub(crate) const MAX_WS_FRAME_SIZE: usize = 256 * 1024;
 const MAX_WS_WRITE_BUFFER_SIZE: usize = crate::attach::ATTACH_OUTPUT_CAPACITY_BYTES;
 /// Leaves room for tungstenite's frame header inside its 1 MiB write buffer.
 const MAX_WS_TEXT_PAYLOAD_SIZE: usize = MAX_WS_WRITE_BUFFER_SIZE - 1024;
@@ -340,6 +359,7 @@ impl Server {
         let handshake_timeout = config.handshake_timeout;
         let connection_count = Arc::new(AtomicUsize::new(0));
         let connection_count_handle = connection_count.clone();
+        let refusing_count = Arc::new(AtomicUsize::new(0));
         let attach_registry = broadcaster.attach_registry();
         let per_ip_counts: Arc<Mutex<HashMap<IpAddr, usize>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -358,11 +378,27 @@ impl Server {
                             drop(stream);
                             break;
                         }
-                        // Refuse excess connections by closing immediately
-                        // rather than spawning a thread for them (F-3).
+                        // Refuse excess connections with a 1013 close after
+                        // the handshake, so the client can tell "busy" from
+                        // "gone"; past the few refusals allowed at once,
+                        // close immediately rather than spawning a thread
+                        // for them (F-3).
                         if connection_count.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
                             connection_count.fetch_sub(1, Ordering::SeqCst);
-                            drop(stream);
+                            if refusing_count.fetch_add(1, Ordering::SeqCst)
+                                >= MAX_REFUSING_CONNECTIONS
+                            {
+                                refusing_count.fetch_sub(1, Ordering::SeqCst);
+                                drop(stream);
+                                continue;
+                            }
+                            let refusing_count = refusing_count.clone();
+                            thread::spawn(move || {
+                                if let Err(err) = refuse_connection(stream, handshake_timeout) {
+                                    log::debug!("noa-ipc: refused connection ended: {err}");
+                                }
+                                refusing_count.fetch_sub(1, Ordering::SeqCst);
+                            });
                             continue;
                         }
                         // Per-remote-IP cap (LAN-exposure hardening): keep a
@@ -925,9 +961,66 @@ fn run_connection_loop(
             Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
                 return Ok(());
             }
+            Err(tungstenite::Error::Capacity(_)) => return close_too_big(ws),
             Err(err) => return Err(ws_err_to_io(err)),
         }
     }
+}
+
+/// Answers a connection over [`MAX_CONNECTIONS`]: complete the handshake
+/// (bounded by `handshake_timeout`), close with 1013 Try Again Later, and
+/// read until the client's close reply so the request it already sent does
+/// not reset the socket under the close frame.
+fn refuse_connection(stream: TcpStream, handshake_timeout: Duration) -> io::Result<()> {
+    stream.set_nonblocking(false)?;
+    let deadline_stream = DeadlineStream::new_handshake(stream, handshake_timeout);
+    let mut ws = tungstenite::accept_with_config(deadline_stream, Some(connection_ws_config()))
+        .map_err(|err| io::Error::other(err.to_string()))?;
+    let frame = CloseFrame {
+        code: CloseCode::Again,
+        reason: Cow::Borrowed(TOO_MANY_CONNECTIONS_REASON),
+    };
+    match ws.close(Some(frame)) {
+        Ok(()) | Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {}
+        Err(err) => return Err(ws_err_to_io(err)),
+    }
+    // The stream stays in handshake mode, so these reads end at its deadline
+    // even if the client never answers.
+    while ws.read().is_ok() {}
+    Ok(())
+}
+
+/// Ends a control connection whose client sent a frame or message over the
+/// size bounds: close with 1009 Message Too Big, then discard the rest of
+/// the oversized frame (for at most [`OVERSIZE_DRAIN_TIMEOUT`]) so closing
+/// with unread input does not reset the socket before the client has read
+/// the close frame.
+fn close_too_big(ws: &mut tungstenite::WebSocket<DeadlineStream>) -> io::Result<()> {
+    let frame = CloseFrame {
+        code: CloseCode::Size,
+        reason: Cow::Borrowed(MESSAGE_TOO_BIG_REASON),
+    };
+    match ws.close(Some(frame)) {
+        Ok(()) | Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {}
+        Err(err) => return Err(ws_err_to_io(err)),
+    }
+    // Read the raw socket, not through the `DeadlineStream`, whose expired
+    // hello deadline would fail every read at once; its 50 ms read timeout
+    // paces the loop.
+    let raw = &mut ws.get_mut().inner;
+    let deadline = Instant::now() + OVERSIZE_DRAIN_TIMEOUT;
+    let mut buf = [0u8; 64 * 1024];
+    while Instant::now() < deadline {
+        match io::Read::read(raw, &mut buf) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(err)
+                if err.kind() == io::ErrorKind::WouldBlock
+                    || err.kind() == io::ErrorKind::TimedOut => {}
+            Err(_) => break,
+        }
+    }
+    Ok(())
 }
 
 struct ActiveAttachGuard {
@@ -1524,6 +1617,7 @@ fn handle_get_text(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value
         pane_id: p.pane_id,
         text: String::new(),
         truncated: truncated_here || backend_result.truncated,
+        alternate_screen: backend_result.alternate_screen,
     })
     .unwrap();
     result["text"] = Value::String(text);
@@ -1555,7 +1649,12 @@ fn handle_get_grid(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value
 fn handle_send_text(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value, RpcFail> {
     let p: SendTextParams =
         serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
-    backend.send_text(p.pane_id.0, &p.text, p.paste.unwrap_or(true))?;
+    backend.send_text(
+        p.pane_id.0,
+        &p.text,
+        p.paste.unwrap_or(true),
+        p.require_paste_mode.unwrap_or(false),
+    )?;
     Ok(serde_json::to_value(OkResult::ok()).unwrap())
 }
 
@@ -1655,8 +1754,25 @@ fn check_spawn_params(session: &Session, params: &SpawnParams) -> Result<(), Rpc
             format!("label exceeds {MAX_SPAWN_LABEL_BYTES} bytes"),
         ));
     }
+    // A pane labelled `board:<id>` is taken for that orchestrator's board.
+    // The board itself is spawned with that label and no parent; a worker
+    // (which has a parent) must not claim it.
+    if params.parent_pane_id.is_some()
+        && params
+            .label
+            .as_ref()
+            .is_some_and(|label| label.starts_with(BOARD_LABEL_PREFIX))
+    {
+        return Err(RpcFail::new(
+            ErrorCode::InvalidParams,
+            format!("a pane with parentPaneId cannot take a \"{BOARD_LABEL_PREFIX}\" label"),
+        ));
+    }
     Ok(())
 }
+
+/// The label prefix that marks an orchestrator's board pane.
+const BOARD_LABEL_PREFIX: &str = "board:";
 
 fn handle_close_pane(
     backend: &Arc<dyn IpcBackend>,
@@ -1818,6 +1934,7 @@ mod tests {
                 pane_id: WireId(7),
                 text: "tail".to_string(),
                 truncated: true,
+                alternate_screen: false,
             })
             .unwrap(),
         ];
@@ -1826,6 +1943,41 @@ mod tests {
                 assert_eq!(success_response(&id, result), value_envelope(&id, result));
             }
         }
+    }
+
+    fn session() -> Session {
+        Session {
+            hello_done: true,
+            header_authed: false,
+            auth_failed: false,
+            granted_scopes: ScopeSet::from_strings(["read", "control", "input"]),
+            attach_authority: String::new(),
+            attach_leases: HashMap::new(),
+        }
+    }
+
+    // REL-14: a worker spawned with `label: "board:7"` was taken for pane
+    // 7's board. The board itself has that label and no parent.
+    #[test]
+    fn only_a_pane_without_a_parent_may_take_a_board_label() {
+        let board = SpawnParams {
+            label: Some("board:7".to_string()),
+            ..SpawnParams::default()
+        };
+        assert!(check_spawn_params(&session(), &board).is_ok());
+
+        let worker = SpawnParams {
+            parent_pane_id: Some(WireId(7)),
+            ..board.clone()
+        };
+        let refused = check_spawn_params(&session(), &worker).unwrap_err();
+        assert_eq!(refused.code, ErrorCode::InvalidParams);
+
+        let ordinary = SpawnParams {
+            label: Some("boarding".to_string()),
+            ..worker
+        };
+        assert!(check_spawn_params(&session(), &ordinary).is_ok());
     }
 
     #[test]
@@ -1838,6 +1990,7 @@ mod tests {
             pane_id: WireId(1),
             text,
             truncated: false,
+            alternate_screen: false,
         })
         .unwrap();
         let response = capped_get_text_response(&Value::from(1), result);
@@ -2066,7 +2219,13 @@ mod tests {
         ) -> Result<crate::backend::GridResult, IpcError> {
             Err(IpcError::PaneClosed)
         }
-        fn send_text(&self, _pane: PaneRef, _text: &str, _paste: bool) -> Result<(), IpcError> {
+        fn send_text(
+            &self,
+            _pane: PaneRef,
+            _text: &str,
+            _paste: bool,
+            _require_paste_mode: bool,
+        ) -> Result<(), IpcError> {
             Err(IpcError::PaneClosed)
         }
         fn focus_pane(&self, _pane: PaneRef) -> Result<(), IpcError> {

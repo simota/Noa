@@ -22,6 +22,12 @@ pub enum ErrorCode {
     /// it may still be carried out (or already was), so the caller cannot
     /// treat it as refused.
     OutcomeUnknown,
+    /// The pane is not ready for what the request needs (`noa.sendText`
+    /// with `requirePasteMode` before the pane enabled bracketed paste).
+    /// Nothing was done; the caller may retry.
+    NotReady,
+    /// A spawn would exceed the caller's `maxChildren` for its parent pane.
+    LimitReached,
     Internal,
 }
 
@@ -42,6 +48,8 @@ impl ErrorCode {
             ErrorCode::AttachConflict => -32007,
             ErrorCode::AttachHandshakeFailure => -32008,
             ErrorCode::OutcomeUnknown => -32009,
+            ErrorCode::NotReady => -32010,
+            ErrorCode::LimitReached => -32011,
         }
     }
 }
@@ -84,6 +92,14 @@ pub enum IpcError {
     /// may still take effect.
     #[error("outcome unknown: {0}")]
     OutcomeUnknown(String),
+    /// Refused without effect because the pane is not ready yet; the reason
+    /// is the message.
+    #[error("{0}")]
+    NotReady(String),
+    /// Refused because a limit the request named was reached; the reason is
+    /// the message.
+    #[error("{0}")]
+    LimitReached(String),
 }
 
 impl IpcError {
@@ -96,6 +112,8 @@ impl IpcError {
             IpcError::Internal(_) => ErrorCode::Internal,
             IpcError::InvalidParams(_) => ErrorCode::InvalidParams,
             IpcError::OutcomeUnknown(_) => ErrorCode::OutcomeUnknown,
+            IpcError::NotReady(_) => ErrorCode::NotReady,
+            IpcError::LimitReached(_) => ErrorCode::LimitReached,
         }
     }
 }
@@ -123,5 +141,22 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::OutcomeUnknown);
         assert_eq!(error.code().code(), -32009);
         assert_ne!(error.code().code(), ErrorCode::Internal.code());
+    }
+
+    // REL-01/REL-02: a send refused before the pane enabled bracketed paste
+    // and a spawn over `maxChildren` each have their own code, so a client
+    // can retry the first and report the second without parsing messages.
+    #[test]
+    fn not_ready_and_limit_reached_have_their_own_codes() {
+        let not_ready = IpcError::NotReady("pane 3 has not enabled bracketed paste".to_string());
+        assert_eq!(not_ready.code(), ErrorCode::NotReady);
+        assert_eq!(not_ready.code().code(), -32010);
+        assert_eq!(
+            not_ready.to_string(),
+            "pane 3 has not enabled bracketed paste"
+        );
+        let limit = IpcError::LimitReached("2 children (1 live, 1 exited)".to_string());
+        assert_eq!(limit.code(), ErrorCode::LimitReached);
+        assert_eq!(limit.code().code(), -32011);
     }
 }

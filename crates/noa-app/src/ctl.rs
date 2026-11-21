@@ -136,17 +136,17 @@ Commands:
                                 --stall). --stall SECS also ends the wait for a
                                 pane whose screen text has not changed for SECS
                                 seconds (reason \"stalled\", with \"quietSecs\"),
-                                for an agent that does not report. --settle SECS
-                                holds a finished for SECS seconds: a newer report
-                                or a change of the work above the input box
-                                meanwhile drops it and the wait goes on; one that
-                                held is printed with \"settledSecs\". --tail adds each open
-                                pane's last N output lines as \"tail\" (for an
-                                agent, the lines above its input box). A
-                                permission or input line has \"prompt\": the
-                                screen's block below the work (the dialog or
-                                input box, up to 20 lines, rules removed),
-                                with or without --tail. A timeout
+                                for an agent that does not report. --settle
+                                SECS holds a finished for SECS seconds: a newer
+                                report or a change of the work above the input
+                                box meanwhile drops it and the wait goes on; one
+                                that held is printed with \"settledSecs\".
+                                --tail adds each open pane's last N output lines
+                                as \"tail\" (for an agent, the lines above its
+                                input box). A permission or input line has
+                                \"prompt\": the screen's block below the work
+                                (the dialog or input box, up to 20 lines, rules
+                                removed), with or without --tail. A timeout
                                 prints each pending pane's report count as
                                 `baseline`; pass it back as --after PANE=SEQ.
                                 SIGTERM, SIGINT or SIGHUP prints that line too,
@@ -161,10 +161,10 @@ Commands:
                                 pane on the alternate screen keeps no history:
                                 --scrollback (and wait --tail) then says on
                                 stderr that only its screen came back.
-  result PANE [--max-bytes N]   Print PANE's result file (its spawn's NOA_RESULT,
-                                else <its cwd>/.noa/result.md); exit 1 when there
-                                is none. --max-bytes keeps the start and says so
-                                on stderr.
+  result PANE [--max-bytes N]   Print PANE's result file (its spawn's
+                                NOA_RESULT, else <its cwd>/.noa/result.md); exit
+                                1 when there is none. --max-bytes keeps the start
+                                and says so on stderr.
   status [--answers]            One line per worker of this pane: its panel's
                                 state with what this pane's journal knows
                                 (tier, argv, lastTask, lastSentSeq, lastOutcome,
@@ -2234,7 +2234,7 @@ impl Session {
         let mut event = serde_json::json!({
             "pane": args.pane,
             "seqBefore": seq,
-            "text": journal::clip(&text),
+            "text": journal::clip(text),
             "bytes": text.len(),
             "enter": args.enter,
             "answer": args.answer,

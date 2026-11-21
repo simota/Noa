@@ -11,7 +11,7 @@ use noa_gpui_core::{
     Appearance, Key, Message, Role, Shortcut, ShortcutPressed, Style, Theme, UiTree, WidgetId,
 };
 use noa_gpui_platform::Screen;
-use noa_gpui_scene::Color;
+use noa_gpui_scene::{Color, Size};
 use noa_gpui_text::TextStore;
 
 use crate::fleet::{self, FRESHNESS_MAX, Grouping, Need, Phase, State, Worker};
@@ -141,6 +141,9 @@ pub struct Dashboard {
     status: WidgetId,
     grouping_control: WidgetId,
     queue_buttons: QueueButtons,
+    /// The size the last `prepare` laid the screen out at. A rebuilt screen is
+    /// laid out at it at once (see `rebuilt`).
+    viewport: Option<Size>,
     #[cfg(test)]
     panels: [Option<WidgetId>; 5],
 }
@@ -161,7 +164,9 @@ impl Dashboard {
     /// Builds the same screen again for a changed view, keeping the theme (the
     /// appearance the OS last set) the screen has now. The old tree's widgets
     /// go through `UiTree::remove` first: that is what releases their text
-    /// layouts in the `TextStore`.
+    /// layouts in the `TextStore`. The new tree is laid out at the old size
+    /// before this returns: the window delivers input before it lays out for the
+    /// next frame, and a tree without rects would let that input hit nothing.
     fn rebuilt(&mut self, view: View, text: &mut TextStore) {
         let theme = self.tree.theme().clone();
         let roots: Vec<WidgetId> = self
@@ -173,7 +178,11 @@ impl Dashboard {
         for root in roots {
             self.tree.remove(root, text);
         }
+        let viewport = self.viewport;
         *self = Self::build(view, theme);
+        if let Some(viewport) = viewport {
+            self.prepare(viewport, text);
+        }
     }
 
     fn build(view: View, theme: Theme) -> Self {
@@ -253,6 +262,7 @@ impl Dashboard {
             status: header.status,
             grouping_control: header.grouping_control,
             queue_buttons,
+            viewport: None,
             #[cfg(test)]
             panels,
         }
@@ -266,6 +276,11 @@ impl Screen for Dashboard {
 
     fn tree_mut(&mut self) -> &mut UiTree {
         &mut self.tree
+    }
+
+    fn prepare(&mut self, viewport: Size, text: &mut TextStore) -> bool {
+        self.viewport = Some(viewport);
+        self.tree.prepare(viewport, text).is_some()
     }
 
     fn handle(&mut self, message: Message, text: &mut TextStore) {
@@ -1469,6 +1484,30 @@ mod tests {
             );
             assert_strip_holds_its_items(dashboard, "header state");
         }
+        // The status label lives inside its own container; it must stay inside
+        // it, and where its text is longer than the container it is cut short.
+        for (name, dashboard, cut) in [
+            ("default", &default, false),
+            ("all off", &off, false),
+            ("after 開く", &opened, true),
+            ("long status", &narrow, true),
+        ] {
+            let tree = &dashboard.tree;
+            let slot = rect(tree, tree.parent(dashboard.status).unwrap());
+            let label = rect(tree, dashboard.status);
+            assert!(
+                label[0] >= slot[0] - 0.5 && label[0] + label[2] <= slot[0] + slot[2] + 0.5,
+                "{name}: status label {label:?} is not inside its container {slot:?}"
+            );
+            let status = tree.get::<Label>(dashboard.status).unwrap();
+            assert_eq!(
+                status.shown_text() != status.text(),
+                cut,
+                "{name}: shows {:?} of {:?}",
+                status.shown_text(),
+                status.text()
+            );
+        }
         let (default_tree, default_strip) = (&default.tree, hint_strip_of(&default));
         let default_rect = rect(default_tree, default_strip);
         let mut states: Vec<(String, [bool; 5])> = Panel::ALL
@@ -1529,6 +1568,50 @@ mod tests {
         click(&mut dashboard, &mut text, pos);
         assert_eq!(dashboard.view.expanded, Some(label));
         assert_eq!(text.layouts().len(), layout_count(view_of(&dashboard)));
+    }
+
+    fn last_segment(dashboard: &Dashboard) -> Point {
+        let control = dashboard.grouping_control;
+        let origin = dashboard.tree.window_origin(control).unwrap();
+        let rect = dashboard.tree.layout(control).unwrap().rect;
+        Point::new(origin.x + rect.width - 12.0, origin.y + rect.height / 2.0)
+    }
+
+    #[test]
+    fn a_press_right_after_a_panel_toggle_hits_the_grouping_control() {
+        let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+        let pos = last_segment(&dashboard);
+        let button = PointerButton::Primary;
+        let key = Key::Char('2');
+        let modifiers = Modifiers::default();
+        // The window delivers input before it lays out for the next frame:
+        // no `prepare` between the toggle and the press.
+        dashboard.dispatch(Event::KeyDown { key, modifiers }, &mut text);
+        assert!(dashboard.panels[Panel::Running as usize].is_none());
+        dashboard.dispatch(Event::PointerDown { pos, button }, &mut text);
+        dashboard.prepare(window(), &mut text);
+        dashboard.dispatch(Event::PointerUp { pos, button }, &mut text);
+        assert_eq!(dashboard.view.grouping, Grouping::Flat);
+    }
+
+    #[test]
+    fn a_press_right_after_a_details_click_hits_the_open_button() {
+        let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+        let (details, label) = dashboard.queue_buttons.details[1];
+        let pos = center(&dashboard.tree, details);
+        let button = PointerButton::Primary;
+        dashboard.dispatch(Event::PointerDown { pos, button }, &mut text);
+        dashboard.dispatch(Event::PointerUp { pos, button }, &mut text);
+        assert_eq!(dashboard.view.expanded, Some(label));
+        // The new 開く button's place is known from the rebuilt tree before any
+        // `prepare`, so the press can be aimed at it.
+        let (open, _) = dashboard.queue_buttons.open[0];
+        let pos = center(&dashboard.tree, open);
+        dashboard.dispatch(Event::PointerDown { pos, button }, &mut text);
+        dashboard.prepare(window(), &mut text);
+        dashboard.dispatch(Event::PointerUp { pos, button }, &mut text);
+        let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
+        assert!(status.text().contains(label), "{}", status.text());
     }
 
     #[test]

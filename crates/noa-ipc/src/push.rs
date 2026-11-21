@@ -476,8 +476,12 @@ impl Broadcaster {
     /// A changed panel matches a subscription by scope and, when the
     /// subscription has `fields`, by an intersecting field mask (an added
     /// panel, [`FieldMask::ALL`], always passes). A removed id matches by
-    /// scope alone.
-    pub fn broadcast_state_delta(&self, changed: Vec<ChangedPanel>, removed: Vec<u64>) {
+    /// scope alone. `removed` is deduplicated here, keeping each id's first
+    /// position (AC-1), so a caller that repeats an id still puts it on the
+    /// wire once.
+    pub fn broadcast_state_delta(&self, changed: Vec<ChangedPanel>, mut removed: Vec<u64>) {
+        let mut seen = HashSet::with_capacity(removed.len());
+        removed.retain(|&id| seen.insert(id));
         let conns = self.conns.lock();
         for entry in conns.values() {
             let panels: Vec<Panel> = changed
@@ -1086,6 +1090,20 @@ mod tests {
 
         b.broadcast_state_delta(vec![], vec![3, 1, 2]);
         assert_eq!(drain_one_state_changed(&queue), (vec![], vec![3, 1, 2]));
+    }
+
+    #[test]
+    fn repeated_removed_ids_are_delivered_once_in_first_occurrence_order() {
+        let b = Broadcaster::new();
+        let (conn_id, queue) = b.register_connection();
+        b.add_subscription(conn_id, EventMask::STATE_CHANGED, None)
+            .unwrap();
+
+        b.broadcast_state_delta(vec![], vec![13, 14, 13]);
+        assert_eq!(drain_one_state_changed(&queue), (vec![], vec![13, 14]));
+
+        b.broadcast_state_delta(vec![], vec![2, 1, 2, 1, 3, 2]);
+        assert_eq!(drain_one_state_changed(&queue), (vec![], vec![2, 1, 3]));
     }
 
     #[test]

@@ -472,12 +472,31 @@ pub enum SplitDirection {
     Vertical,
 }
 
-/// Subscribable event kinds for `noa.subscribe`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Subscribable event kinds for `noa.subscribe` / `noa.updateSubscription`.
+/// Only the strings `"state_changed"` and `"output"` deserialize: any other
+/// JSON value, including serde's `{"output": null}` map form of a variant,
+/// fails, which the server answers with -32602.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
     StateChanged,
     Output,
+}
+
+/// The derived name → [`EventKind`] mapping behind [`EventKind`]'s
+/// string-only `Deserialize`, as [`PanelFieldName`] is for [`PanelField`].
+#[derive(Deserialize)]
+#[serde(remote = "EventKind", rename_all = "snake_case")]
+enum EventKindName {
+    StateChanged,
+    Output,
+}
+
+impl<'de> Deserialize<'de> for EventKind {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        EventKindName::deserialize(de::IntoDeserializer::<D::Error>::into_deserializer(name))
+    }
 }
 
 // ---- noa.hello ----
@@ -1194,6 +1213,41 @@ mod subscription_tests {
             serde_json::to_value(PanelField::ParentPaneId).unwrap(),
             serde_json::json!("parentPaneId")
         );
+    }
+
+    #[test]
+    fn an_event_kind_must_be_one_of_its_strings() {
+        for kind in [EventKind::StateChanged, EventKind::Output] {
+            let name = serde_json::to_value(kind).unwrap();
+            assert_eq!(serde_json::from_value::<EventKind>(name).unwrap(), kind);
+        }
+        assert_eq!(
+            serde_json::to_value([EventKind::StateChanged, EventKind::Output]).unwrap(),
+            serde_json::json!(["state_changed", "output"])
+        );
+        for value in [
+            // serde's externally tagged map form of a unit variant.
+            serde_json::json!({ "output": null }),
+            serde_json::json!({ "state_changed": null }),
+            serde_json::json!("stateChanged"),
+            serde_json::json!(1),
+            serde_json::json!(null),
+        ] {
+            assert!(
+                serde_json::from_value::<EventKind>(value.clone()).is_err(),
+                "{value}"
+            );
+            let subscribe = serde_json::json!({ "events": [value] });
+            assert!(
+                serde_json::from_value::<SubscribeParams>(subscribe).is_err(),
+                "{value}"
+            );
+            let update = serde_json::json!({ "subscriptionId": "4", "events": [value] });
+            assert!(
+                serde_json::from_value::<UpdateSubscriptionParams>(update).is_err(),
+                "{value}"
+            );
+        }
     }
 
     #[test]

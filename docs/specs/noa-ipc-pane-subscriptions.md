@@ -173,9 +173,12 @@ only reads `panels` still parses it.
 ### Code
 
 - `crates/noa-ipc/src/protocol.rs`:
-  - `#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)] #[serde(rename_all = "camelCase")] pub enum PanelField { WindowGroupId, WindowId, PaneId, Name, Cwd, Branch, Process, Busy, Attention, Attachable, Preview, SurfaceId, Agent, Exit, ParentPaneId, Label, Spawn }`.
-    An unknown string fails deserialization of the whole params, and
+  - `#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)] #[serde(rename_all = "camelCase")] pub enum PanelField { WindowGroupId, WindowId, PaneId, Name, Cwd, Branch, Process, Busy, Attention, Attachable, Preview, SurfaceId, Agent, Exit, ParentPaneId, Label, Spawn }`
+    with a hand-written `Deserialize` that accepts only a string. A derived
+    one would also accept serde's map form `{"agent":null}`. An unknown
+    string or any non-string fails deserialization of the whole params, and
     `handle_subscribe` already maps that to `RpcFail::invalid_params()` (-32602).
+    `EventKind` deserializes the same way, from `"state_changed"` or `"output"` only.
   - `pub struct FieldMask(u32)` with `ALL`, `EMPTY`, `from_fields(&[PanelField])`,
     `intersects(self, other) -> bool` and `is_empty()`. Each bit is
     `1 << (PanelField as u32)`.
@@ -273,6 +276,11 @@ Each optional key works the same way:
   as in `handle_subscribe`, for the unreachable "connection not registered" case.
 - Everything is validated before anything changes. A rejected update leaves
   the subscription exactly as it was.
+- Only the documented form is accepted, here and in `noa.subscribe` and
+  `noa.unsubscribe`: `params` is an object, `events` elements are the strings
+  `"state_changed"` / `"output"`, and `fields` elements are field-name strings.
+  A by-position `params` array (which serde would bind to the struct fields in
+  order) and serde's map form of an enum variant (`{"output":null}`) are -32602.
 - The update is applied under one `conns` lock acquisition, so any broadcast
   sees either the old filter or the new one, never a mix.
 - Notifications enqueued before the update stay queued.
@@ -299,10 +307,10 @@ Each optional key works the same way:
   - `pub struct SubscriptionUpdate { pub events: Option<EventMask>, pub pane_ids: Option<Option<HashSet<u64>>>, pub fields: Option<Option<FieldMask>> }`.
   - `Broadcaster::update_subscription(&self, conn_id, subscription_id, update) -> Result<(), UpdateSubscriptionError>`.
     It looks the id up only in `conns[conn_id].subs`, so another connection's id
-    is `SubscriptionNotFound` by construction. Before releasing the lock it
-    records whether the subscription had `OUTPUT` before and after the update.
-    After the lock is released it adjusts `output_subscribers` by `+1` or `-1`
-    when that changed, the same pattern as `add_subscription` and `remove_subscription`.
+    is `SubscriptionNotFound` by construction. It compares whether the
+    subscription had `OUTPUT` before and after the update and, while `conns`
+    is still held, adjusts `output_subscribers` by `+1` or `-1` when that
+    changed, the same pattern as `add_subscription` and `remove_subscription` (R-1).
 - `crates/noa-ipc/src/server.rs`: a dispatch arm `"noa.updateSubscription"`
   calls `require_scope(session, Scope::Read)` and then
   `handle_update_subscription(broadcaster, conn_id, req.params)`. That handler

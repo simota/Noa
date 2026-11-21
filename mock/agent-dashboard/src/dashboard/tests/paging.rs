@@ -40,9 +40,23 @@ fn shows(dashboard: &Dashboard, panel: Panel, pane: u64) -> bool {
 }
 
 fn wheel(dashboard: &mut Dashboard, text: &mut TextStore, pos: Point, dy: f32) {
+    wheel_at(dashboard, text, window(), pos, dy);
+}
+
+/// A wheel event, then the next frame's layout at `size`.
+fn wheel_at(dashboard: &mut Dashboard, text: &mut TextStore, size: Size, pos: Point, dy: f32) {
     let delta = Point::new(0.0, dy);
     dashboard.dispatch(Event::Wheel { pos, delta }, text);
-    dashboard.prepare(window(), text);
+    dashboard.prepare(size, text);
+}
+
+/// The centre of a panel's list, where a wheel pages it.
+fn over_list(dashboard: &Dashboard, panel: Panel) -> Point {
+    center(&dashboard.tree, parts(dashboard, panel).list)
+}
+
+fn first(dashboard: &Dashboard, panel: Panel) -> usize {
+    dashboard.view.first[panel as usize]
 }
 
 /// Every shown item of every list lies inside its list, but for the one
@@ -64,6 +78,19 @@ fn assert_whole_items(dashboard: &Dashboard, what: &str) {
                 inside(item, list) || alone_and_taller,
                 "{what} {panel:?}: item {item:?} outside its list {list:?}"
             );
+            if alone_and_taller {
+                // It starts at the list's top, and the list cuts what is
+                // drawn of it at its bottom.
+                assert!((item[1] - list[1]).abs() <= 0.5, "{what} {panel:?}");
+                let seen = tree.visible_rect(*id).expect("a tall item is drawn");
+                let seen = [seen.x, seen.y, seen.width, seen.height];
+                assert!(
+                    inside(seen, list),
+                    "{what} {panel:?}: {seen:?} drawn outside its list {list:?}"
+                );
+                let bottom = |r: [f32; 4]| r[1] + r[3];
+                assert!((bottom(seen) - bottom(list)).abs() <= 0.5, "{what}");
+            }
         }
         for (header, of) in &parts.headers {
             let any = of.iter().any(|i| !tree.is_hidden(parts.items[*i].0));
@@ -220,4 +247,239 @@ fn the_timeline_and_graph_page_too() {
             );
         }
     }
+}
+
+/// How far the wheel pages depends on how far it travelled, not on how the
+/// platform cut the travel into events: at 1440×900 one step still leaves
+/// perf-probe hidden below (docs-sync's row and the perf-wish group do not
+/// fit together), so 80 px pages twice, in one event or in two.
+#[test]
+fn one_long_wheel_event_pages_as_far_as_short_ones() {
+    let (mut long, mut text) = laid_out(Grouping::Orchestrator);
+    let pos = over_list(&long, Panel::Running);
+    wheel(&mut long, &mut text, pos, -80.0);
+    let (mut short, mut short_text) = laid_out(Grouping::Orchestrator);
+    wheel(&mut short, &mut short_text, pos, -40.0);
+    wheel(&mut short, &mut short_text, pos, -40.0);
+
+    for (dashboard, what) in [(&long, "one -80 event"), (&short, "two -40 events")] {
+        assert_eq!(first(dashboard, Panel::Running), 2, "{what}");
+        assert!(shows(dashboard, Panel::Running, 13), "{what}: perf-probe");
+        assert_eq!(
+            indicator(dashboard, Panel::Running).as_deref(),
+            Some("上に 2 件"),
+            "{what}"
+        );
+    }
+    // Far past the end pages no further than the last page, and the way
+    // back starts at once.
+    wheel(&mut long, &mut text, pos, -400.0);
+    assert_eq!(first(&long, Panel::Running), 2);
+    wheel(&mut long, &mut text, pos, 40.0);
+    assert_eq!(first(&long, Panel::Running), 1);
+}
+
+/// A list built again (the filter cleared, a panel shown again) shows the
+/// worker that is still selected.
+#[test]
+fn clearing_the_filter_keeps_the_selected_card_in_view() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    key(&mut dashboard, &mut text, Key::Char('/'));
+    typed(&mut dashboard, &mut text, "/");
+    typed(&mut dashboard, &mut text, "perf");
+    key(&mut dashboard, &mut text, Key::Enter);
+    key(&mut dashboard, &mut text, Key::Char('j'));
+    assert_eq!(dashboard.view.selected, Some(13));
+
+    key(&mut dashboard, &mut text, Key::Escape);
+    assert_eq!(dashboard.filter.query, "");
+    assert_eq!(dashboard.view.selected, Some(13));
+    assert!(
+        shows(&dashboard, Panel::Running, 13),
+        "perf-probe is hidden"
+    );
+    assert!(shows(&dashboard, Panel::Queue, 13));
+    assert_whole_items(&dashboard, "filter cleared");
+}
+
+#[test]
+fn showing_a_panel_again_shows_the_selected_card() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    press(&mut dashboard, &mut text, '2', Modifiers::default());
+    assert!(dashboard.registry.lists[Panel::Running as usize].is_none());
+    // J walks the queue: 14, 19, 15, 16, then perf-probe (13).
+    for _ in 0..5 {
+        key(&mut dashboard, &mut text, Key::Char('j'));
+    }
+    assert_eq!(dashboard.view.selected, Some(13));
+
+    press(&mut dashboard, &mut text, '2', Modifiers::default());
+    assert!(
+        shows(&dashboard, Panel::Running, 13),
+        "perf-probe is hidden"
+    );
+    assert_whole_items(&dashboard, "running shown again");
+}
+
+/// Paged away from the selected card, the page stays where the wheel put
+/// it, also when the screen is laid out again or a snapshot updates it in
+/// place; a new selection brings the page back to it.
+#[test]
+fn the_wheel_does_not_fight_the_selection() {
+    let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet::canned(), 1));
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(window(), &mut text);
+    key(&mut dashboard, &mut text, Key::Char('j'));
+    while dashboard.view.selected != Some(11) {
+        key(&mut dashboard, &mut text, Key::Char('j'));
+    }
+    assert_eq!(first(&dashboard, Panel::Running), 0);
+    let pos = over_list(&dashboard, Panel::Running);
+    wheel(&mut dashboard, &mut text, pos, -80.0);
+    assert_eq!(first(&dashboard, Panel::Running), 2);
+    assert!(!shows(&dashboard, Panel::Running, 11), "api-refactor");
+
+    dashboard.prepare(window(), &mut text);
+    let mut later = fleet::canned();
+    for worker in &mut later.workers {
+        worker.lines_per_tick.reverse();
+    }
+    dashboard.apply(live(later, 2), &mut text);
+    dashboard.prepare(window(), &mut text);
+    assert_eq!(dashboard.view.selected, Some(11));
+    assert_eq!(first(&dashboard, Panel::Running), 2, "the page went back");
+
+    key(&mut dashboard, &mut text, Key::Char('k'));
+    key(&mut dashboard, &mut text, Key::Char('j'));
+    assert_eq!(dashboard.view.selected, Some(11));
+    assert!(shows(&dashboard, Panel::Running, 11), "api-refactor");
+}
+
+/// A window made larger shows what now fits above the page: at 1100×700 the
+/// queue hides cards and can be paged; at 1440×900 all five fit again.
+#[test]
+fn a_larger_window_pages_back_what_fits() {
+    let small = Size::new(1100.0, 700.0);
+    let mut dashboard = Dashboard::new(Grouping::Orchestrator);
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(small, &mut text);
+    assert!(visible_items(&dashboard, Panel::Queue).len() < 5);
+    let pos = over_list(&dashboard, Panel::Queue);
+    wheel_at(&mut dashboard, &mut text, small, pos, -40.0);
+    assert_eq!(first(&dashboard, Panel::Queue), 1);
+
+    dashboard.prepare(window(), &mut text);
+    assert_eq!(first(&dashboard, Panel::Queue), 0);
+    assert_eq!(visible_items(&dashboard, Panel::Queue).len(), 5);
+    assert_eq!(indicator(&dashboard, Panel::Queue), None);
+    assert_whole_items(&dashboard, "1100×700 → 1440×900");
+}
+
+/// Another server instance's workers start at the top of every list, as
+/// the panes chosen on the old one are forgotten.
+#[test]
+fn another_server_starts_the_lists_at_the_top() {
+    let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet::canned(), 1));
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(window(), &mut text);
+    let pos = over_list(&dashboard, Panel::Running);
+    wheel(&mut dashboard, &mut text, pos, -40.0);
+    wheel(&mut dashboard, &mut text, pos, -40.0);
+    assert_eq!(first(&dashboard, Panel::Running), 2);
+
+    let restarted = Snapshot {
+        instance: Some("restarted".into()),
+        ..live(fleet::canned(), 1)
+    };
+    dashboard.apply(restarted, &mut text);
+    dashboard.prepare(window(), &mut text);
+    assert_eq!(first(&dashboard, Panel::Running), 0);
+    assert!(
+        shows(&dashboard, Panel::Running, 11),
+        "the new server's first"
+    );
+    assert_eq!(
+        indicator(&dashboard, Panel::Running).as_deref(),
+        Some("下に 1 件")
+    );
+}
+
+/// A frame in which nothing changed — no input, no data, the same size —
+/// lays nothing out again and has nothing to present (the live window
+/// wakes every second).
+#[test]
+fn an_unchanged_frame_presents_nothing() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    assert!(!dashboard.prepare(window(), &mut text), "after the build");
+    assert!(!dashboard.tree.needs_update(window()));
+    assert!(!shows(&dashboard, Panel::Running, 13));
+
+    let pos = over_list(&dashboard, Panel::Running);
+    wheel(&mut dashboard, &mut text, pos, -40.0);
+    assert!(!dashboard.prepare(window(), &mut text), "after a page");
+    assert_eq!(first(&dashboard, Panel::Running), 1);
+
+    let small = Size::new(1100.0, 700.0);
+    assert!(dashboard.prepare(small, &mut text), "a new size");
+    assert!(!dashboard.prepare(small, &mut text), "after the new size");
+    assert_whole_items(&dashboard, "1100×700");
+}
+
+/// Whatever other panels are shown, the demo's queue shows all five cards
+/// at 1440×900 and hides none.
+#[test]
+fn the_whole_queue_shows_with_any_other_panels() {
+    let mut text = TextStore::new(Default::default());
+    for others in 0..16_usize {
+        let mut shown = [true; 5];
+        for (bit, panel) in Panel::ALL[1..].iter().enumerate() {
+            shown[*panel as usize] = others & (1 << bit) != 0;
+        }
+        let mut dashboard = Dashboard::showing(View {
+            shown,
+            ..View::of(Grouping::Orchestrator)
+        });
+        dashboard.prepare(window(), &mut text);
+        let what = format!("shown {shown:?}");
+        assert_eq!(visible_items(&dashboard, Panel::Queue).len(), 5, "{what}");
+        assert_eq!(indicator(&dashboard, Panel::Queue), None, "{what}");
+        assert_whole_items(&dashboard, &what);
+    }
+}
+
+/// An orchestrator with more workers than its graph row can show at
+/// 1100×700: the row is shown alone and the list cuts it at its bottom.
+#[test]
+fn a_row_taller_than_its_list_is_cut_at_the_list() {
+    let mut fleet = fleet::canned();
+    for n in 0..24 {
+        let mut worker = fleet.workers[0].clone();
+        worker.pane = 100 + n;
+        worker.label = format!("extra-{n}");
+        fleet.workers.push(worker);
+    }
+    let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet, 1));
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(Size::new(1100.0, 700.0), &mut text);
+    let parts = parts(&dashboard, Panel::Graph);
+    let list = rect(&dashboard.tree, parts.list);
+    let tall = parts.items.iter().map(|(id, _)| *id).find(|id| {
+        let row = rect(&dashboard.tree, *id);
+        row[3] > list[3] + 1.0
+    });
+    let tall = tall.expect("a graph row taller than the list");
+    let tall_index = parts.items.iter().position(|(id, _)| *id == tall).unwrap();
+    // Page to the tall row: it is shown alone, from the list's top.
+    let pos = over_list(&dashboard, Panel::Graph);
+    let size = Size::new(1100.0, 700.0);
+    for _ in 0..tall_index {
+        wheel_at(&mut dashboard, &mut text, size, pos, -40.0);
+    }
+    assert_eq!(visible_items(&dashboard, Panel::Graph), [tall]);
+    let row = rect(&dashboard.tree, tall);
+    assert!(
+        row[1] + row[3] > list[1] + list[3] + 1.0,
+        "{row:?} {list:?}"
+    );
+    assert_whole_items(&dashboard, "a tall graph row");
 }

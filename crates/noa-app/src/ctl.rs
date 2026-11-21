@@ -2506,12 +2506,18 @@ const PASTE_MODE_TRIES: usize = 75;
 /// Whether a paste into `panel` waits until it has enabled bracketed paste
 /// (REL-01): an agent's pane, or one whose program is not even listed yet
 /// (just spawned). Until then every newline of a paste lands as Enter.
+///
+/// A pane an IPC spawn started with a command (`panel.spawn`) is not
+/// "starting" for want of a process name: a shell-less spawn never gets one
+/// (see `panel_agent`), and a shell-less agent already has its `kind` from
+/// argv0. Gating it would refuse `send` to a script or REPL that never
+/// enables bracketed paste.
 pub(crate) fn needs_paste_mode(panel: &Panel) -> bool {
     panel
         .agent
         .as_ref()
         .is_some_and(|agent| agent.kind.is_some())
-        || panel.process.as_deref().is_none_or(str::is_empty)
+        || (panel.process.as_deref().is_none_or(str::is_empty) && panel.spawn.is_none())
 }
 
 /// Wait for `pane` to enable bracketed paste, asking every
@@ -5612,6 +5618,41 @@ mod tests {
         // A pane whose program is not listed yet is gated.
         shell.process = None;
         assert!(needs_paste_mode(&shell));
+    }
+
+    // Review finding #1: a pane spawned with a non-agent command never gets
+    // a process name, so `send` to `-- ./deploy.sh` waited 15 s and was
+    // refused. The spawn's argv says it is not starting; an agent's argv
+    // still gates through its `kind`.
+    #[test]
+    fn a_spawned_command_without_a_process_name_is_not_gated() {
+        let mut script = panel(0, None, false);
+        script.agent = None;
+        script.process = None;
+        script.spawn = Some(noa_ipc::PanelSpawn {
+            argv: vec!["./deploy.sh".to_string()],
+            started_at: 0,
+        });
+        assert!(!needs_paste_mode(&script));
+        let mut target = FakeTarget::new(vec![script.clone()]);
+        target.paste_ready_after = Some(usize::MAX);
+        send_steps(&mut target, &send_args(&["--enter", "y"]), "y").unwrap();
+        assert_eq!(target.paste_asks, 0);
+        assert!(target.log.iter().any(|entry| entry.starts_with("type")));
+
+        let mut agent = script;
+        agent.spawn = Some(noa_ipc::PanelSpawn {
+            argv: vec!["claude".to_string()],
+            started_at: 0,
+        });
+        agent.agent = Some(PanelAgent {
+            kind: Some("claude".to_string()),
+            state: None,
+            detail: None,
+            seq: 0,
+            blocked: None,
+        });
+        assert!(needs_paste_mode(&agent));
     }
 
     // Audit finding (REL-16): `--replace` spends about 0.35 s clearing the

@@ -17,6 +17,7 @@ mod keys;
 mod lanes;
 mod layout;
 mod paging;
+mod paragraphs;
 mod queue_cards;
 mod rebuild;
 mod relations;

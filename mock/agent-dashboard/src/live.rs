@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use noa_ipc::{Client, ClientError, EventKind, Notification, Panel, Scope, ScopeSet, TextSource};
 
-use crate::fleet::{Fleet, Orchestrator, Phase, State, Worker, minutes_text};
+use crate::fleet::{Fleet, Orchestrator, Phase, State, Worker, minutes_text, one_line};
 
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(4);
@@ -298,7 +298,9 @@ impl Feed {
             };
             let down = Snapshot {
                 fleet: Fleet::default(),
-                link: Link::Down(reason),
+                // An error's text from the server or the system: on one
+                // line, like every text from Noa (`Worker::on_one_line`).
+                link: Link::Down(one_line(&reason)),
                 synced_secs: 0,
                 can_focus: false,
                 instance: None,
@@ -471,7 +473,7 @@ impl Feed {
 
     fn notice(&self, text: String) {
         // Only the dashboard's end can be gone, and `publish` ends the feed then.
-        let _ = self.notices.send(text);
+        let _ = self.notices.send(one_line(&text));
         (self.wake)();
     }
 
@@ -1160,6 +1162,11 @@ fn worker_of(
         freshness: if running { freshness(change_secs) } else { 0.0 },
         phases: seen.phases(now),
     }
+    // Every text above comes from Noa (pane titles, agent details, branch
+    // names, journals, screens) and may hold line breaks or a paragraph
+    // separator, which the shaper panics on next to right-to-left text.
+    // The orchestrators' names are copied from these workers.
+    .on_one_line()
 }
 
 #[cfg(test)]
@@ -1786,6 +1793,104 @@ pub(crate) mod tests {
             let expected = tails.get(&worker.pane).cloned().unwrap_or_default();
             assert_eq!(worker.screen_tail, expected, "pane {}", worker.pane);
         }
+    }
+
+    /// Holds each of the breaks `one_line` takes out, around right-to-left
+    /// text: the shaper panics on "A\u{2029}\u{5D0}" in one label.
+    const BROKEN: &str = "A\u{2029}\u{5D0}\u{2028}b\nc\td\u{85}e";
+
+    /// Whether `text` would be drawn as more than one paragraph.
+    fn breaks(text: &str) -> bool {
+        text.chars()
+            .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+    }
+
+    #[test]
+    fn every_text_from_noa_is_on_one_line() {
+        let orchestrator =
+            panel(serde_json::json!({ "paneId": "1", "label": BROKEN, "surfaceId": "s1" }));
+        // An agent whose model and effort come from its flags, and a command
+        // whose kind is its own text.
+        let agent = panel(serde_json::json!({
+            "paneId": "2",
+            "parentPaneId": "1",
+            "name": "claude",
+            "label": BROKEN,
+            "branch": BROKEN,
+            "agent": { "seq": 3, "kind": "claude", "state": "running", "detail": BROKEN },
+            "spawn": { "argv": ["claude", "--model", BROKEN, "--effort", BROKEN], "startedAt": 410 },
+        }));
+        let command = panel(serde_json::json!({
+            "paneId": "3",
+            "parentPaneId": "1",
+            "name": BROKEN,
+            "agent": { "seq": 1, "kind": BROKEN, "state": "permission", "detail": BROKEN },
+            "spawn": { "argv": [BROKEN], "startedAt": 410 },
+        }));
+        let mut tracker = Tracker::default();
+        tracker.merge(vec![orchestrator, agent, command], 1000.0);
+        // A task is the first line of what was sent: every other break stays.
+        let task = BROKEN.replace('\n', " ");
+        let journal = [
+            spawn_line(2, None),
+            serde_json::json!({ "ev": "send", "pane": 2, "text": task, "ts": 2 }).to_string(),
+        ]
+        .join("\n");
+        with_journal(&mut tracker, "s1", &journal);
+        let tails = HashMap::from([(2, vec![BROKEN.to_owned(), BROKEN.to_owned()])]);
+        let fleet = tracker.fleet(1010.0, Some(&tails));
+
+        let line = crate::fleet::one_line(BROKEN);
+        assert_eq!(line, "A \u{5D0} b c d e");
+        let agent = fleet.worker(2).unwrap();
+        let command = fleet.worker(3).unwrap();
+        assert_eq!(agent.label, line);
+        assert_eq!(
+            (agent.model.as_str(), agent.effort.as_str()),
+            (&*line, &*line)
+        );
+        assert_eq!(agent.branch, line);
+        assert_eq!(agent.detail, line);
+        assert_eq!(agent.task, crate::fleet::one_line(&task));
+        assert_eq!(agent.screen_tail, [line.clone(), line.clone()]);
+        assert_eq!(agent.orchestrator, line);
+        assert_eq!(command.kind, line);
+        assert_eq!(command.label, line);
+        assert_eq!(fleet.orchestrators.len(), 1);
+        assert_eq!(fleet.orchestrators[0].name, line);
+        for worker in &fleet.workers {
+            let texts = [
+                &worker.label,
+                &worker.kind,
+                &worker.branch,
+                &worker.model,
+                &worker.effort,
+                &worker.orchestrator,
+                &worker.task,
+                &worker.detail,
+                &worker.since,
+            ];
+            for text in texts.into_iter().chain(&worker.screen_tail) {
+                assert!(!breaks(text), "pane {}: {text:?}", worker.pane);
+            }
+        }
+    }
+
+    #[test]
+    fn a_lost_links_reason_and_a_notice_are_on_one_line() {
+        let (snapshots, published) = mpsc::channel();
+        let (notices, noticed) = mpsc::channel();
+        let (commands, command_rx) = mpsc::channel::<Command>();
+        // With the dashboard's commands gone, the feed publishes the lost
+        // link once and ends instead of waiting to connect again.
+        drop(commands);
+        let clock: Clock = Box::new(Instant::now);
+        let feed = Feed::new(snapshots, notices, command_rx, Arc::new(|| {}), clock);
+        let line = crate::fleet::one_line(BROKEN);
+        feed.notice(BROKEN.to_owned());
+        assert_eq!(noticed.try_recv().unwrap(), line);
+        feed.run(|| Err::<ScriptedNoa, _>(BROKEN.to_owned()));
+        assert_eq!(published.try_recv().unwrap().link, Link::Down(line));
     }
 
     #[test]

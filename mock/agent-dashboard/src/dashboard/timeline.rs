@@ -4,7 +4,7 @@ use noa_gpui_core::style::{
 use noa_gpui_core::widgets::{Badge, Container, Label, Tone, Truncation};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
-use crate::fleet::{Grouping, Phase, Worker, minutes_text};
+use crate::fleet::{Grouping, Phase, Worker, minutes_text, one_line};
 
 use super::pager::ListParts;
 use super::panel::{Panel, card_list, group_header, indicator, nothing_matches, title_row};
@@ -131,7 +131,7 @@ pub(super) fn lane(tree: &mut UiTree, lanes: WidgetId, worker: &Worker, span: f6
     let name = tree.insert(Some(row), Container::row().width(LANE_LABEL_WIDTH));
     tree.insert(
         Some(name),
-        Label::new(worker.label.as_str())
+        Label::new(one_line(&worker.label))
             .font_size(11.0)
             .truncation(Truncation::Tail),
     );

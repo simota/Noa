@@ -3,7 +3,7 @@ use noa_gpui_core::widgets::{Container, Label};
 use noa_gpui_core::{Paint, Role, Style, UiTree, WidgetId};
 use noa_gpui_scene::Color;
 
-use crate::fleet::{Fleet, State, Worker};
+use crate::fleet::{Fleet, State, Worker, one_line};
 
 use super::filter::Filter;
 use super::pager::ListParts;
@@ -137,7 +137,8 @@ pub(super) fn node(
         Some(pill),
         Label::new(symbol).font_size(10.0).weight(700).color(color),
     );
-    let label = Label::new(label).font_size(11.0);
+    // An orchestrator's or a worker's name: drawn on one line.
+    let label = Label::new(one_line(label)).font_size(11.0);
     tree.insert(
         Some(pill),
         if muted {

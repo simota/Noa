@@ -412,3 +412,192 @@ fn a_notice_with_line_breaks_shows_on_one_line() {
     dashboard.show_notice_at("移動できません:\nno such pane".to_owned(), base);
     assert_eq!(status_text(&dashboard), "移動できません: no such pane");
 }
+
+/// A live screen fed by the test, laid out, that has taken in the canned
+/// fleet at `base`, with the filter field composing "けん".
+fn composing_live_at(base: Instant) -> (Dashboard, TextStore, std::sync::mpsc::Sender<Snapshot>) {
+    let (channel, snapshots, _notices, _commands) = Channel::detached();
+    let mut dashboard = Dashboard::live(Grouping::Orchestrator, channel);
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(window(), &mut text);
+    snapshots.send(live(fleet::canned(), 0)).unwrap();
+    dashboard.frame(base, &mut text);
+    typed(&mut dashboard, &mut text, "/");
+    let composing = Event::Composition {
+        text: "けん".into(),
+        cursor: None,
+    };
+    dashboard.dispatch(composing, &mut text);
+    dashboard.prepare(window(), &mut text);
+    assert!(dashboard.composing());
+    (dashboard, text, snapshots)
+}
+
+#[test]
+fn a_lost_link_shows_while_a_composition_holds_the_snapshot() {
+    let base = Instant::now();
+    let (mut dashboard, mut text, snapshots) = composing_live_at(base);
+    let field = dashboard.header.filter_field;
+    let lost = base + secs(30);
+    snapshots.send(down("接続が切れました")).unwrap();
+    dashboard.frame(lost, &mut text);
+    dashboard.prepare(window(), &mut text);
+
+    // The body and the field wait for the composition ...
+    assert!(dashboard.pending.is_some(), "held");
+    assert_eq!(dashboard.feed.link, Some(Link::Live));
+    assert_eq!(dashboard.header.filter_field, field);
+    assert!(dashboard.composing(), "the composition goes on");
+    // ... the header does not: down, red, with the age of the last data.
+    let down_text = "切断: 古いデータ（30 秒前）· 接続が切れました";
+    assert_eq!(
+        drawn(&mut dashboard, &mut text),
+        (down_text.into(), RED, RED)
+    );
+    // It stays down as time passes: not "stale" orange.
+    dashboard.tick(base + secs(40));
+    let (status, color, dot) = drawn(&mut dashboard, &mut text);
+    assert_eq!(status, "切断: 古いデータ（40 秒前）· 接続が切れました");
+    assert_eq!((color, dot), (RED, RED));
+
+    // The composition ends: the snapshot is taken in, the header unchanged.
+    typed(&mut dashboard, &mut text, "検");
+    dashboard.frame(base + secs(41), &mut text);
+    assert!(dashboard.pending.is_none());
+    assert!(matches!(dashboard.feed.link, Some(Link::Down(_))));
+    assert_eq!(dashboard.feed.fleet.workers.len(), 9, "the last data stays");
+    let (status, color, dot) = drawn(&mut dashboard, &mut text);
+    assert_eq!(status, "切断: 古いデータ（41 秒前）· 接続が切れました");
+    assert_eq!((color, dot), (RED, RED));
+}
+
+#[test]
+fn a_held_snapshot_from_a_link_back_up_shows_it_live() {
+    let base = Instant::now();
+    let (mut dashboard, mut text, snapshots) = composing_live_at(base);
+    snapshots.send(down("切れた")).unwrap();
+    // A composition already under way holds what comes next as well.
+    typed(&mut dashboard, &mut text, "検");
+    dashboard.frame(base + secs(5), &mut text);
+    let composing = Event::Composition {
+        text: "けん".into(),
+        cursor: None,
+    };
+    dashboard.dispatch(composing, &mut text);
+    let back = base + secs(60);
+    let mut fewer = fleet::canned();
+    fewer.workers.truncate(4);
+    snapshots.send(live(fewer, 1)).unwrap();
+    dashboard.frame(back, &mut text);
+    assert!(dashboard.pending.is_some(), "held");
+    assert_eq!(dashboard.feed.fleet.workers.len(), 9, "the body waits");
+    // The header counts the workers the snapshot brings, from when it came.
+    let live_text = "ワーカー 4 · 同期 1 秒前".to_owned();
+    let muted = dashboard.tree.theme().color(Role::Muted);
+    assert_eq!(drawn(&mut dashboard, &mut text), (live_text, muted, GREEN));
+}
+
+#[test]
+fn a_notice_asks_for_the_frame_that_ends_it() {
+    // The demo: no feed wakes the window, only what the screen asks for.
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    assert_eq!(dashboard.tree.next_timer(), None);
+    key(&mut dashboard, &mut text, Key::Enter);
+    assert_eq!(status_text(&dashboard), NOTHING_SELECTED);
+    let (_, at) = dashboard.feed.notice.clone().expect("a notice");
+    // The tests' tree clock stands at 0: the frame is asked for at the
+    // moment the notice ends.
+    assert_eq!(dashboard.tree.now(), 0.0);
+    assert_eq!(dashboard.tree.next_timer(), Some(NOTICE_FOR.as_secs_f64()));
+
+    // A rebuild (a panel toggled) asks again, on its new header.
+    key(&mut dashboard, &mut text, Key::Char('5'));
+    assert_eq!(dashboard.tree.next_timer(), Some(NOTICE_FOR.as_secs_f64()));
+    key(&mut dashboard, &mut text, Key::Char('5'));
+
+    // A frame that comes a little early asks for what is left.
+    let early = at + NOTICE_FOR - Duration::from_millis(250);
+    dashboard.frame(early, &mut text);
+    assert_eq!(status_text(&dashboard), NOTHING_SELECTED);
+    assert_eq!(dashboard.tree.next_timer(), Some(0.25));
+
+    // The frame the timer brings shows the health again.
+    dashboard.frame(at + NOTICE_FOR, &mut text);
+    assert_eq!(status_text(&dashboard), "ワーカー 9 · ダミーデータ");
+}
+
+#[test]
+fn the_empty_body_gives_the_reason_on_one_line() {
+    let down = down("A\nB\u{2029}\u{5D0}\tC");
+    let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, down);
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(window(), &mut text);
+    assert!(dashboard.panels.iter().all(Option::is_none));
+    let tree = &dashboard.tree;
+    let texts = labels_under(tree, tree.root().unwrap());
+    let reason = "Noa に接続できません: A B \u{5D0} C";
+    assert!(texts.iter().any(|t| t == reason), "{texts:?}");
+    assert!(
+        texts.iter().all(|t| !t.contains(['\n', '\t', '\u{2029}'])),
+        "{texts:?}"
+    );
+    assert_eq!(status_text(&dashboard), "切断: A B \u{5D0} C");
+}
+
+#[test]
+fn a_header_built_before_any_tick_draws_the_feeds_health() {
+    let base = Instant::now();
+    let built = |feed: Feed| {
+        let mut dashboard = Dashboard::start(View::of(Grouping::Orchestrator), feed);
+        let mut text = TextStore::new(Default::default());
+        assert_eq!(dashboard.ticked, None, "no frame has ticked");
+        drawn(&mut dashboard, &mut text)
+    };
+    let accepted = |snapshots: Vec<(Snapshot, Instant)>| {
+        let mut feed = Feed::default();
+        for (snapshot, at) in snapshots {
+            let fleet = health::keep_on_down(&feed.fleet, snapshot.fleet.clone(), &snapshot.link);
+            feed.accept(fleet, snapshot, at);
+        }
+        feed
+    };
+    let muted = Dashboard::new(Grouping::Orchestrator)
+        .tree
+        .theme()
+        .color(Role::Muted);
+
+    let fresh = accepted(vec![(live(fleet::canned(), 2), base)]);
+    assert_eq!(
+        built(fresh),
+        ("ワーカー 9 · 同期 2 秒前".into(), muted, GREEN)
+    );
+    let stale = accepted(vec![(live(fleet::canned(), 14), base)]);
+    assert_eq!(
+        built(stale),
+        (
+            "古いデータ（同期 14 秒前）· ワーカー 9".into(),
+            ORANGE,
+            ORANGE
+        )
+    );
+    let lost = accepted(vec![
+        (live(fleet::canned(), 0), base),
+        (down("切れた"), base + secs(30)),
+    ]);
+    let (status, color, dot) = built(lost);
+    assert!(status.starts_with("切断: 古いデータ"), "{status}");
+    assert!(status.ends_with("· 切れた"), "{status}");
+    assert_eq!((color, dot), (RED, RED));
+    let never = accepted(vec![(down("接続できません"), base)]);
+    assert_eq!(built(never), ("切断: 接続できません".into(), RED, RED));
+    let connecting = Feed {
+        link: Some(Link::Connecting),
+        ..Feed::default()
+    };
+    assert_eq!(built(connecting), ("接続中…".into(), muted, YELLOW));
+    let demo = Feed::demo();
+    assert_eq!(
+        built(demo),
+        ("ワーカー 9 · ダミーデータ".into(), muted, GRAY)
+    );
+}

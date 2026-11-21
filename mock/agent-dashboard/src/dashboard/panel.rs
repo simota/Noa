@@ -4,6 +4,7 @@ use noa_gpui_core::style::{
 use noa_gpui_core::widgets::{Badge, Container, EmptyState, Kbd, Label, Tone};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
+use crate::fleet::one_line;
 use crate::live::Link;
 
 use super::pager::PageMemory;
@@ -184,10 +185,12 @@ pub(super) fn nothing_matches(tree: &mut UiTree, list: WidgetId) {
     caption(tree, list, "該当なし");
 }
 
+/// A group's name and size. The name is a worker's text (an orchestrator,
+/// an agent, a model): drawn on one line ([`one_line`]).
 pub(super) fn group_header(tree: &mut UiTree, parent: WidgetId, name: &str, n: usize) -> WidgetId {
     tree.insert(
         Some(parent),
-        Label::new(format!("{name} · {n}"))
+        Label::new(format!("{} · {n}", one_line(name)))
             .font_size(11.0)
             .weight(700)
             .color(Role::Muted),
@@ -203,8 +206,10 @@ pub(super) fn empty(tree: &mut UiTree, body: WidgetId, link: &Link, shown: &[boo
         Link::Live => EmptyState::new("エージェントのペインが見つかりません").message(
             "claude / codex / agy が動いているペインと、+ctl で起動したワーカーがここに出ます",
         ),
+        // On one line, as the header shows it: a reason with a line break
+        // would make the message two lines however short it is.
         Link::Down(reason) => EmptyState::new("エージェントのペインが見つかりません")
-            .message(format!("Noa に接続できません: {reason}")),
+            .message(format!("Noa に接続できません: {}", one_line(reason))),
     };
     let parts = state.width(560.0).insert(tree, body);
     let keys = tree.insert(

@@ -154,6 +154,26 @@ impl Worker {
         self.minutes_where(|_| true)
     }
 
+    /// The worker with every text on one line ([`one_line`]): what the
+    /// live feed builds from what Noa reports, so no text it shows can make
+    /// the shaper panic.
+    pub fn on_one_line(self) -> Worker {
+        let line = |text: String| one_line(&text);
+        Worker {
+            label: line(self.label),
+            kind: line(self.kind),
+            branch: line(self.branch),
+            model: line(self.model),
+            effort: line(self.effort),
+            orchestrator: line(self.orchestrator),
+            task: line(self.task),
+            detail: line(self.detail),
+            since: line(self.since),
+            screen_tail: self.screen_tail.into_iter().map(line).collect(),
+            ..self
+        }
+    }
+
     /// The worker without the values that change as time passes: two workers
     /// equal under this draw the same tree, and differ only in the texts,
     /// meters and lanes the dashboard updates in place.
@@ -210,6 +230,31 @@ impl Fleet {
                 .zip(&other.workers)
                 .all(|(a, b)| a.structure() == b.structure())
     }
+}
+
+/// `text` as one paragraph: each control character (line breaks, tabs,
+/// U+0085 NEL) and each line or paragraph separator (U+2028, U+2029)
+/// becomes a space, character for character, so the result for a prefix of
+/// `text` is a prefix of the result (a caret maps through). A label draws a line break as one; and
+/// cosmic-text's shaper panics on a text that holds a paragraph separator
+/// and both text directions ("A\u{2029}\u{5D0}"). Everything else, bidi
+/// controls included, is kept.
+///
+/// The one rule for what enters the dashboard: the live feed's texts
+/// (`Worker::on_one_line`), the header's status, the panels that draw
+/// worker texts, and the filter field. The drawer's own `one_line`
+/// (`dashboard/drawer.rs`) is the same rule but for CR LF, which it shows
+/// as one space.
+pub fn one_line(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// A duration as the dashboard writes it: seconds under a minute, else whole

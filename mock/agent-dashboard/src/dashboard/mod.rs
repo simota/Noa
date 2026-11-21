@@ -122,16 +122,23 @@ impl Feed {
     fn accept(&mut self, fleet: Fleet, snapshot: Snapshot, received: Instant) {
         self.fleet = fleet;
         self.had_data |= !self.fleet.workers.is_empty();
-        self.synced_at = (snapshot.link == Link::Live)
-            .then(|| received.checked_sub(Duration::from_secs(snapshot.synced_secs)))
-            .flatten()
-            .or(self.synced_at);
+        self.synced_at = self.synced_at_after(&snapshot, received);
         self.link = Some(snapshot.link);
         self.synced_secs = snapshot.synced_secs;
         self.can_focus = snapshot.can_focus;
         if snapshot.instance.is_some() {
             self.instance = snapshot.instance;
         }
+    }
+
+    /// When the server last answered once `snapshot`, which came at
+    /// `received`, is taken in: a live one says; any other keeps what was
+    /// known.
+    fn synced_at_after(&self, snapshot: &Snapshot, received: Instant) -> Option<Instant> {
+        (snapshot.link == Link::Live)
+            .then(|| received.checked_sub(Duration::from_secs(snapshot.synced_secs)))
+            .flatten()
+            .or(self.synced_at)
     }
 
     fn structural(&self, snapshot: &Snapshot) -> bool {
@@ -491,10 +498,14 @@ impl Dashboard {
     }
 
     /// Brings the link health in the header up to `now`; `before_frame`
-    /// calls it on every frame (the live feed wakes the window every second).
+    /// calls it on every frame (the live feed wakes the window every second,
+    /// and a notice asks for the frame that ends it). A snapshot held back
+    /// while an IME composes already shows its link state there: a lost
+    /// link must not wait for the composition to end.
     fn tick(&mut self, now: Instant) {
         self.ticked = Some(now);
-        health::tick(&mut self.tree, &self.header, &self.feed, now);
+        let held = self.pending.as_ref().map(|(snapshot, at)| (snapshot, *at));
+        health::tick(&mut self.tree, &self.header, &self.feed, held, now);
     }
 
     fn refresh(&mut self, text: &mut TextStore) {
@@ -1287,6 +1298,11 @@ impl Screen for Dashboard {
             }
             Route::Swallow => {}
             Route::Tree => {
+                let event = if in_filter {
+                    filter::one_line_input(event)
+                } else {
+                    event
+                };
                 if !self.wheel(&event, text) {
                     self.tree.dispatch(event, text);
                     for message in self.tree.take_messages() {
@@ -1327,11 +1343,24 @@ impl Screen for Dashboard {
         if let Some(TextChanged(query)) = message.downcast_ref::<TextChanged>()
             && message.source == self.header.filter_field
         {
+            let field = message.source;
             let caret = self
                 .tree
-                .get::<TextField>(message.source)
+                .get::<TextField>(field)
                 .map_or(query.len(), TextField::caret);
-            self.set_filter(query.clone(), caret, text);
+            // A paste puts the clipboard's text in as it is: the field
+            // gets it on one line before anything lays it out.
+            let (query, caret) = match filter::on_one_line(query, caret) {
+                Some((line, caret)) => {
+                    self.tree.update::<TextField, _>(field, |f, cx| {
+                        f.set_text(cx, line.as_str());
+                        f.select(cx, caret..caret);
+                    });
+                    (line, caret)
+                }
+                None => (query.clone(), caret),
+            };
+            self.set_filter(query, caret, text);
             return;
         }
         if let Some(SelectionChanged(index)) = message.downcast_ref::<SelectionChanged>()

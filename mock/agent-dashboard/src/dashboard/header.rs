@@ -11,7 +11,7 @@ use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use noa_gpui_scene::Size;
 use noa_gpui_text::{TextStore, TextStyle};
 
-use crate::fleet::{Grouping, Need, Phase, Worker, minutes_text};
+use crate::fleet::{Grouping, Need, Phase, Worker, minutes_text, one_line};
 
 use super::filter::Filter;
 use super::health::{self, HealthParts};
@@ -466,12 +466,15 @@ pub(super) fn longest(workers: &[Worker]) -> Option<&Worker> {
 /// squeezes the link status to nothing.
 pub(super) const LONGEST_LABEL_CHARS: usize = 12;
 
+/// The label and the wait on one line ([`one_line`]): cutting the label
+/// would keep a paragraph separator it holds.
 pub(super) fn longest_text(worker: &Worker) -> String {
-    let label = if worker.label.chars().count() > LONGEST_LABEL_CHARS {
-        let cut: String = worker.label.chars().take(LONGEST_LABEL_CHARS - 1).collect();
+    let label = one_line(&worker.label);
+    let label = if label.chars().count() > LONGEST_LABEL_CHARS {
+        let cut: String = label.chars().take(LONGEST_LABEL_CHARS - 1).collect();
         format!("{cut}…")
     } else {
-        worker.label.clone()
+        label
     };
-    joined(&["最長", &label, &worker.since], " ")
+    joined(&["最長", &label, &one_line(&worker.since)], " ")
 }

@@ -7,7 +7,7 @@ use noa_gpui_core::widgets::{
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use noa_gpui_text::TextStore;
 
-use crate::fleet::{Need, Worker};
+use crate::fleet::{Need, Worker, one_line};
 
 use super::cards::{branch_tag, model_tag, task_line};
 use super::header::waited_text;
@@ -34,8 +34,12 @@ impl QueueButtons {
     }
 }
 
+/// A queue card draws each of its worker's texts on one line
+/// ([`one_line`]): the live feed's already are, but a fleet from elsewhere
+/// (the canned one, a test's) is drawn as it is, and the shaper panics on
+/// a paragraph separator next to right-to-left text.
 pub(super) fn queue_since(worker: &Worker, need: Need) -> String {
-    joined(&[need.title(), &worker.since], " ")
+    joined(&[need.title(), &one_line(&worker.since)], " ")
 }
 
 /// The workers waiting on a person, in the queue's order: the most urgent
@@ -161,13 +165,13 @@ pub(super) fn queue_card(
     let label_slot = tree.insert(Some(head), Container::new(fill_remaining()));
     tree.insert(
         Some(label_slot),
-        Label::new(worker.label.as_str())
+        Label::new(one_line(&worker.label))
             .weight(700)
             .truncation(Truncation::Tail),
     );
     tree.insert(
         Some(head),
-        Tag::new(worker.kind.as_str()).tone(Tone::Accent),
+        Tag::new(one_line(&worker.kind)).tone(Tone::Accent),
     );
     let since = tree.insert(
         Some(head),
@@ -218,7 +222,7 @@ pub(super) fn queue_card_summary(tree: &mut UiTree, card: WidgetId, worker: &Wor
     if !worker.detail.is_empty() {
         tree.insert(
             Some(detail),
-            Label::new(worker.detail.as_str())
+            Label::new(one_line(&worker.detail))
                 .font_size(12.0)
                 .color(Role::Muted)
                 .truncation(Truncation::Tail),
@@ -248,7 +252,7 @@ pub(super) fn queue_card_body(tree: &mut UiTree, card: WidgetId, worker: &Worker
         for line in &worker.screen_tail {
             tree.insert(
                 Some(screen),
-                Label::new(line.as_str())
+                Label::new(one_line(line))
                     .font_size(11.0)
                     .font_family("monospace")
                     .truncation(Truncation::Tail),
@@ -293,7 +297,7 @@ pub(super) fn queue_card_body(tree: &mut UiTree, card: WidgetId, worker: &Worker
     );
     tree.insert(
         Some(slot),
-        Label::new(worker.orchestrator.as_str())
+        Label::new(one_line(&worker.orchestrator))
             .font_size(11.0)
             .color(Role::Muted)
             .truncation(Truncation::Tail),

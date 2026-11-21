@@ -1289,6 +1289,7 @@ mod tests {
         let b = Broadcaster::new();
         let (conn_id, queue) = b.register_connection();
         let agent = FieldMask::from_fields(&[PanelField::Agent]);
+        let preview = FieldMask::from_fields(&[PanelField::Preview]);
         let sub = b
             .add_subscription_filtered(
                 conn_id,
@@ -1298,30 +1299,29 @@ mod tests {
             )
             .unwrap();
 
-        // Only `fields` changes; `events` and `pane_ids` stay.
+        // Only `pane_ids` changes; `events` and the `fields` filter stay.
         b.update_subscription(
             conn_id,
             sub,
             SubscriptionUpdate {
-                fields: Some(None),
+                pane_ids: Some(Some(HashSet::from([2]))),
                 ..Default::default()
             },
         )
         .unwrap();
 
-        b.broadcast_state_delta(
-            vec![
-                changed(1, FieldMask::from_fields(&[PanelField::Preview])),
-                changed(2, FieldMask::from_fields(&[PanelField::Preview])),
-            ],
-            vec![],
-        );
-        assert_eq!(drain_one_state_changed(&queue), (vec![1], vec![]));
+        b.broadcast_state_delta(vec![changed(2, preview)], vec![]);
+        assert!(queue.is_empty(), "the agent filter survived the update");
+        b.broadcast_state_delta(vec![changed(1, agent), changed(2, agent)], vec![]);
+        assert_eq!(drain_one_state_changed(&queue), (vec![2], vec![]));
 
+        // An update with every key absent keeps all three.
         b.update_subscription(conn_id, sub, SubscriptionUpdate::default())
             .unwrap();
-        b.broadcast_state_changed(vec![panel_with_id(1), panel_with_id(2)]);
-        assert_eq!(drain_one_state_changed(&queue), (vec![1], vec![]));
+        b.broadcast_state_delta(vec![changed(2, preview)], vec![]);
+        assert!(queue.is_empty(), "the agent filter survived the update");
+        b.broadcast_state_delta(vec![changed(1, agent), changed(2, agent)], vec![]);
+        assert_eq!(drain_one_state_changed(&queue), (vec![2], vec![]));
     }
 
     #[test]

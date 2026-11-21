@@ -215,7 +215,9 @@ only reads `panels` still parses it.
     `crates/noa-app/src/io_thread/tests.rs` and in `app/ipc.rs` `diff_perf`
     stay untouched.
   - Per panel, `broadcast_state_delta` checks
-    `sub.events ∋ STATE_CHANGED && in_scope(sub, pane) && sub.fields.is_none_or(|f| f.intersects(changed.fields))`.
+    `sub.events ∋ STATE_CHANGED && in_scope(sub, pane) && sub.fields.is_none_or(|f| changed.fields == FieldMask::ALL || f.intersects(changed.fields))`.
+    An added panel carries `FieldMask::ALL`, so it passes every field filter,
+    `fields: []` included (`SubFilter::takes_changed_panel`).
 - `crates/noa-ipc/src/server.rs`: `handle_subscribe` passes
   `p.fields.map(|f| FieldMask::from_fields(&f))`. It keeps parsing its params
   with plain `serde_json::from_value`, as on `main`.
@@ -481,10 +483,16 @@ failures. Checks that already fail on the base are listed, not fixed.
   until it gets a `PanelField`. `FieldMask(u32)` has 15 free bits.
 - **R-6: older clients.** A removal-only notification reaches a pre-change
   client as `stateChanged` with `panels: []`. `noa-ipc`'s current client parses
-  it to an empty update, and so does `+ctl`'s `apply_notification`. A client
-  that sends `fields` to an older server has it ignored (FR-19), and so
-  receives unfiltered updates. A client that sends `noa.updateSubscription` to
-  an older server gets -32601 and can fall back to unsubscribe + subscribe.
+  it to an empty update, and so does `+ctl`'s `apply_notification`. What an
+  older server does with `fields` depends on the params form. By name, the
+  `fields` key is ignored (FR-19): `SubscribeParams` on 51b5195 has no
+  `deny_unknown_fields`, so the subscription is created and receives
+  unfiltered updates. By position, the 3-element form
+  `[["state_changed"],null,["agent"]]` has more elements than that struct's
+  two fields, so the old parser fails on its length and the server answers
+  -32602. No subscription is created. A client that sends
+  `noa.updateSubscription` to an older server gets -32601 and can fall back to
+  unsubscribe + subscribe.
 
 ## Build units
 

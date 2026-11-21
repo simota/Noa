@@ -32,6 +32,8 @@ struct MockBackend {
     /// in call order (fix-pass-5 R-1: asserts the server clamps before
     /// calling the backend, not after).
     requested_max_bytes: Mutex<Vec<usize>>,
+    /// Every `(pane, cols, rows)` that reached `resize_pane`, in call order.
+    resized: Mutex<Vec<(u64, u16, u16)>>,
 }
 
 impl IpcBackend for MockBackend {
@@ -129,6 +131,18 @@ impl IpcBackend for MockBackend {
 
     fn close_pane(&self, pane: PaneRef) -> Result<(), IpcError> {
         self.closed_panes.lock().unwrap().insert(pane);
+        Ok(())
+    }
+
+    fn validate_attach(&self, pane: PaneRef) -> Result<(), IpcError> {
+        if self.closed_panes.lock().unwrap().contains(&pane) {
+            return Err(IpcError::PaneClosed);
+        }
+        Ok(())
+    }
+
+    fn resize_pane(&self, pane: PaneRef, cols: u16, rows: u16) -> Result<(), IpcError> {
+        self.resized.lock().unwrap().push((pane, cols, rows));
         Ok(())
     }
 }
@@ -1872,13 +1886,6 @@ fn only_update_subscription_rejects_params_by_position() {
             json!({ "paneId": "1", "text": "x" }),
         ),
         ("noa.focusPane", json!(["1"]), json!({ "paneId": "1" })),
-        ("noa.attach", json!(["1"]), json!({ "paneId": "1" })),
-        ("noa.detach", json!(["1"]), json!({ "paneId": "1" })),
-        (
-            "noa.resizePane",
-            json!(["1", 80, 24]),
-            json!({ "paneId": "1", "cols": 80, "rows": 24 }),
-        ),
         ("noa.closePane", json!(["2"]), json!({ "paneId": "2" })),
     ];
     for (id, (method, by_position, by_name)) in (2..).step_by(2).zip(calls) {
@@ -1898,6 +1905,38 @@ fn only_update_subscription_rejects_params_by_position() {
     assert_eq!(backend.requested_max_bytes.lock().unwrap().len(), 2);
     assert_eq!(backend.sent_text.lock().unwrap().len(), 2);
     assert_eq!(*backend.focused.lock().unwrap(), vec![1, 1]);
+
+    // `noa.attach`, `noa.resizePane` and `noa.detach` hold a lease between
+    // calls, so each form runs the whole cycle: attach, resize under the
+    // lease, detach. A second attach succeeding shows the first detach
+    // released the lease, and the backend sees the resize arguments in
+    // (cols, rows) order from both forms.
+    let cycles = [
+        (
+            json!({ "paneId": "1" }),
+            json!({ "paneId": "1", "cols": 80, "rows": 24 }),
+            json!({ "paneId": "1" }),
+        ),
+        (json!(["1"]), json!(["1", 80, 24]), json!(["1"])),
+    ];
+    for (id, (attach, resize, detach)) in (20..).step_by(3).zip(cycles) {
+        send_rpc(&mut sock, id, "noa.attach", attach.clone());
+        let resp = recv_json(&mut sock);
+        assert!(
+            resp["result"]["attachToken"].is_string(),
+            "{attach}: {resp:?}"
+        );
+        send_rpc(&mut sock, id + 1, "noa.resizePane", resize.clone());
+        let resp = recv_json(&mut sock);
+        assert_eq!(resp["result"], json!({ "ok": true }), "{resize}: {resp:?}");
+        send_rpc(&mut sock, id + 2, "noa.detach", detach.clone());
+        let resp = recv_json(&mut sock);
+        assert_eq!(resp["result"], json!({ "ok": true }), "{detach}: {resp:?}");
+    }
+    assert_eq!(
+        *backend.resized.lock().unwrap(),
+        vec![(1, 80, 24), (1, 80, 24)]
+    );
 
     // `noa.newTab` and `noa.split` flatten their spawn params, and a struct
     // with a flattened field never deserialized from an array: still -32602.

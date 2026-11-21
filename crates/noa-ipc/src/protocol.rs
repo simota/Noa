@@ -1386,6 +1386,16 @@ mod subscription_tests {
                 "{field:?}"
             );
         }
+
+        // Two fields at once: both bits, not just the first difference.
+        let previous = base_panel();
+        let mut current = base_panel();
+        mutate(&mut current, PanelField::Busy);
+        mutate(&mut current, PanelField::Agent);
+        assert_eq!(
+            current.changed_fields(&previous),
+            FieldMask::from_fields(&[PanelField::Busy, PanelField::Agent])
+        );
     }
 
     #[test]

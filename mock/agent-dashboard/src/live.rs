@@ -2,7 +2,7 @@
 //! Noa (`noa-ipc`) and sends the dashboard snapshots of its agent panes.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -421,7 +421,16 @@ struct Tracker {
 
 struct Journal {
     modified: Option<SystemTime>,
-    tasks: HashMap<u64, String>,
+    spawns: HashMap<u64, Spawned>,
+}
+
+/// What a spawner's journal says of the latest worker it spawned in a pane.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Spawned {
+    /// Empty until a task is sent.
+    task: String,
+    /// The worker's own result file (`$NOA_RESULT`).
+    result: Option<PathBuf>,
 }
 
 impl Tracker {
@@ -494,34 +503,43 @@ impl Tracker {
             {
                 continue;
             }
-            let tasks = std::fs::read_to_string(&path)
-                .map(|text| journal_tasks(&text))
+            let spawns = std::fs::read_to_string(&path)
+                .map(|text| journal_spawns(&text))
                 .unwrap_or_default();
-            self.journals.insert(surface, Journal { modified, tasks });
+            self.journals.insert(surface, Journal { modified, spawns });
         }
     }
 
-    /// Looks again for each done labelled worker's result file.
+    /// Looks again at each done worker's own result file, the one its
+    /// spawner's journal names. The file is there before the worker writes
+    /// it, so an empty one is no result; no path in the journal, no result.
     fn read_results(&mut self) {
         self.results = self
             .panels
             .values()
             .filter(|panel| is_worker(panel) && state_of(panel) == State::Finished)
             .filter(|panel| {
-                let label = panel.label.as_deref().unwrap_or_default();
-                !label.is_empty() && has_result_file(Path::new(&panel.cwd), label)
+                let result = self
+                    .spawned(panel)
+                    .and_then(|spawned| spawned.result.as_ref());
+                result.is_some_and(|path| {
+                    let path = Path::new(&panel.cwd).join(path);
+                    std::fs::metadata(path).is_ok_and(|meta| meta.len() > 0)
+                })
             })
             .map(|panel| panel.pane_id.0)
             .collect();
     }
 
+    fn spawned(&self, panel: &Panel) -> Option<&Spawned> {
+        let parent = self.panels.get(&panel.parent_pane_id?.0)?;
+        let journal = self.journals.get(parent.surface_id.as_ref()?)?;
+        journal.spawns.get(&panel.pane_id.0)
+    }
+
     fn task(&self, panel: &Panel) -> String {
-        let surface = panel
-            .parent_pane_id
-            .and_then(|parent| self.panels.get(&parent.0)?.surface_id.as_ref());
-        surface
-            .and_then(|surface| self.journals.get(surface)?.tasks.get(&panel.pane_id.0))
-            .cloned()
+        self.spawned(panel)
+            .map(|spawned| spawned.task.clone())
             .unwrap_or_default()
     }
 
@@ -553,10 +571,13 @@ impl Tracker {
             .collect();
         let mut orchestrators: Vec<Orchestrator> = Vec::new();
         for worker in &workers {
-            if !orchestrators.iter().any(|o| o.name == worker.orchestrator) {
+            let known = orchestrators
+                .iter()
+                .any(|o| o.name == worker.orchestrator && o.pane == worker.orchestrator_pane);
+            if !known {
                 orchestrators.push(Orchestrator {
                     name: worker.orchestrator.clone(),
-                    pane: placement(worker.pane, &self.panels).root,
+                    pane: worker.orchestrator_pane,
                 });
             }
         }
@@ -569,37 +590,6 @@ impl Tracker {
 
 fn modified(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
-}
-
-/// Whether `<cwd>/.noa/` holds a result file for the worker labelled
-/// `label`, as `+ctl spawn` names it. The file is there before the worker
-/// writes it, so an empty one is no result.
-fn has_result_file(cwd: &Path, label: &str) -> bool {
-    std::fs::read_dir(cwd.join(".noa")).is_ok_and(|entries| {
-        entries.flatten().any(|entry| {
-            let named = entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| is_result_of(name, label));
-            named && entry.metadata().is_ok_and(|meta| meta.len() > 0)
-        })
-    })
-}
-
-/// `result-<label>.md`, or `result-<label>-<8 hex digits>.md` when that name
-/// was taken (`crates/noa-app/src/ctl/result.rs`).
-fn is_result_of(name: &str, label: &str) -> bool {
-    let Some(rest) = name
-        .strip_prefix("result-")
-        .and_then(|rest| rest.strip_prefix(label))
-        .and_then(|rest| rest.strip_suffix(".md"))
-    else {
-        return false;
-    };
-    rest.is_empty()
-        || rest
-            .strip_prefix('-')
-            .is_some_and(|hex| hex.len() == 8 && hex.chars().all(|ch| ch.is_ascii_hexdigit()))
 }
 
 /// A worker is an agent pane or a pane an orchestrator spawned, but not a
@@ -759,11 +749,11 @@ fn placement(pane: u64, panels: &HashMap<u64, Panel>) -> Placement {
     }
 }
 
-/// The task each pane was last sent in a journal: the first non-empty line
-/// of the latest `send` after the pane's latest `spawn` (pane ids are given
-/// out again after Noa restarts). Answers to prompts are not tasks.
-fn journal_tasks(text: &str) -> HashMap<u64, String> {
-    let mut tasks: HashMap<u64, String> = HashMap::new();
+/// Each pane's latest `spawn` in a journal (pane ids are given out again
+/// after Noa restarts): its result path, and the first non-empty line of the
+/// latest `send` after it as the task. Answers to prompts are not tasks.
+fn journal_spawns(text: &str) -> HashMap<u64, Spawned> {
+    let mut spawns: HashMap<u64, Spawned> = HashMap::new();
     for line in text.lines() {
         let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -773,18 +763,25 @@ fn journal_tasks(text: &str) -> HashMap<u64, String> {
         };
         match event["ev"].as_str() {
             Some("spawn") => {
-                tasks.insert(pane, String::new());
+                let result = event["result"].as_str().map(PathBuf::from);
+                spawns.insert(
+                    pane,
+                    Spawned {
+                        result,
+                        ..Spawned::default()
+                    },
+                );
             }
             Some("send") if event["answer"].as_bool() != Some(true) => {
-                if let (Some(task), Some(text)) = (tasks.get_mut(&pane), event["text"].as_str()) {
-                    *task = first_line(text).to_owned();
+                if let (Some(spawned), Some(text)) = (spawns.get_mut(&pane), event["text"].as_str())
+                {
+                    spawned.task = first_line(text).to_owned();
                 }
             }
             _ => {}
         }
     }
-    tasks.retain(|_, task| !task.is_empty());
-    tasks
+    spawns
 }
 
 fn first_line(text: &str) -> &str {
@@ -894,8 +891,8 @@ fn worker_of(
     let (model, effort) = model_and_effort(&kind, argv);
     let Placement {
         orchestrator,
+        root: orchestrator_pane,
         parent,
-        ..
     } = placement(pane, panels);
     let state = seen.state;
     let quiet = seen.quiet(now);
@@ -930,6 +927,7 @@ fn worker_of(
         model,
         effort,
         orchestrator,
+        orchestrator_pane,
         parent,
         state,
         attention: panel.attention,
@@ -1143,6 +1141,165 @@ pub(crate) mod tests {
         tracker.fleet(1001.0, None)
     }
 
+    /// Two agent roots both named `Claude Code` and two shells both named
+    /// `zsh`, each with one worker of its own.
+    pub(crate) fn same_named_roots_fleet() -> Fleet {
+        let claude = serde_json::json!({ "seq": 1, "kind": "claude", "state": "running" });
+        let panes = vec![
+            panel(serde_json::json!({ "paneId": "1", "name": "Claude Code", "agent": claude })),
+            panel(serde_json::json!({ "paneId": "2", "name": "Claude Code", "agent": claude })),
+            panel(serde_json::json!({
+                "paneId": "11", "label": "w-a", "parentPaneId": "1", "agent": claude,
+            })),
+            panel(serde_json::json!({
+                "paneId": "12", "label": "w-b", "parentPaneId": "2", "agent": claude,
+            })),
+            panel(serde_json::json!({ "paneId": "5", "name": "zsh" })),
+            panel(serde_json::json!({ "paneId": "6", "name": "zsh" })),
+            panel(serde_json::json!({ "paneId": "15", "label": "w-c", "parentPaneId": "5" })),
+            panel(serde_json::json!({ "paneId": "16", "label": "w-d", "parentPaneId": "6" })),
+        ];
+        let mut tracker = Tracker::default();
+        tracker.merge(panes, 1000.0);
+        tracker.fleet(1001.0, None)
+    }
+
+    #[test]
+    fn roots_with_one_name_stay_apart() {
+        let fleet = same_named_roots_fleet();
+        let roots: Vec<(&str, Option<u64>)> = fleet
+            .orchestrators
+            .iter()
+            .map(|o| (o.name.as_str(), o.pane))
+            .collect();
+        assert_eq!(
+            roots,
+            [
+                ("Claude Code", Some(1)),
+                ("Claude Code", Some(2)),
+                ("zsh", Some(5)),
+                ("zsh", Some(6)),
+            ]
+        );
+        let groups: Vec<(Option<&str>, Vec<u64>)> = crate::fleet::Grouping::Orchestrator
+            .split(&fleet.workers)
+            .into_iter()
+            .map(|(name, members)| (name, members.iter().map(|w| w.pane).collect()))
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                (Some("Claude Code"), vec![1, 11]),
+                (Some("Claude Code"), vec![2, 12]),
+                (Some("zsh"), vec![15]),
+                (Some("zsh"), vec![16]),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_effort_without_a_model_is_kept() {
+        let agent = serde_json::json!({ "seq": 0, "kind": "claude" });
+        let with = |argv: &[&str]| {
+            let spawn = serde_json::json!({ "argv": argv, "startedAt": 1 });
+            let mut tracker = Tracker::default();
+            tracker.merge(
+                vec![panel(
+                    serde_json::json!({ "paneId": "2", "agent": agent, "spawn": spawn }),
+                )],
+                1000.0,
+            );
+            tracker.fleet(1001.0, None).workers[0].model_line()
+        };
+        assert_eq!(with(&["claude", "--effort", "high"]), "モデル既定 · high");
+        assert_eq!(with(&["claude"]), "モデル既定");
+        assert_eq!(with(&["claude", "--model", "opus"]), "opus");
+    }
+
+    /// A fresh `.noa` directory for one test.
+    fn noa_dir(name: &str) -> PathBuf {
+        let cwd =
+            std::env::temp_dir().join(format!("agent-dashboard-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cwd);
+        std::fs::create_dir_all(cwd.join(".noa")).unwrap();
+        cwd
+    }
+
+    fn spawn_line(pane: u64, result: Option<&Path>) -> String {
+        let mut event =
+            serde_json::json!({ "ev": "spawn", "pane": pane, "argv": ["claude"], "ts": 1 });
+        if let Some(result) = result {
+            event["result"] = serde_json::json!(result.to_str().unwrap());
+        }
+        event.to_string()
+    }
+
+    fn with_journal(tracker: &mut Tracker, surface: &str, text: &str) {
+        let journal = Journal {
+            modified: None,
+            spawns: journal_spawns(text),
+        };
+        tracker.journals.insert(surface.to_owned(), journal);
+    }
+
+    /// Whether a done worker (pane 7, spawned by pane 1) in `cwd` shows a
+    /// result, given its spawner's journal.
+    fn shows_result(cwd: &Path, label: Option<&str>, journal: &str) -> bool {
+        let orchestrator = panel(serde_json::json!({ "paneId": "1", "surfaceId": "s-results" }));
+        let mut worker = serde_json::json!({
+            "paneId": "7",
+            "parentPaneId": "1",
+            "cwd": cwd.to_str().unwrap(),
+            "agent": { "seq": 1, "kind": "claude", "state": "finished" },
+        });
+        if let Some(label) = label {
+            worker["label"] = serde_json::json!(label);
+        }
+        let mut tracker = Tracker::default();
+        tracker.merge(vec![orchestrator, panel(worker)], 1000.0);
+        with_journal(&mut tracker, "s-results", journal);
+        tracker.read_results();
+        tracker.fleet(1001.0, None).worker(7).unwrap().has_result
+    }
+
+    #[test]
+    fn a_result_is_the_workers_own_file() {
+        let cwd = noa_dir("own-result");
+        let own = cwd.join(".noa").join("result-review-0a1b2c3d.md");
+        // A previous worker with the same label left its report.
+        std::fs::write(cwd.join(".noa").join("result-review.md"), "old report").unwrap();
+        std::fs::write(&own, "").unwrap();
+        let journal = spawn_line(7, Some(&own));
+        let before = shows_result(&cwd, Some("review"), &journal);
+        std::fs::write(&own, "new report").unwrap();
+        let after = shows_result(&cwd, Some("review"), &journal);
+        std::fs::remove_dir_all(&cwd).unwrap();
+        assert_eq!((before, after), (false, true));
+    }
+
+    #[test]
+    fn an_unlabelled_worker_finds_its_result() {
+        let cwd = noa_dir("unlabelled-result");
+        let own = cwd.join(".noa").join("result-0a1b2c3d.md");
+        std::fs::write(&own, "report").unwrap();
+        let shown = shows_result(&cwd, None, &spawn_line(7, Some(&own)));
+        std::fs::remove_dir_all(&cwd).unwrap();
+        assert!(shown, "the unlabelled worker's own result is not shown");
+    }
+
+    #[test]
+    fn no_journal_path_means_no_result() {
+        let cwd = noa_dir("no-result-path");
+        let file = cwd.join(".noa").join("result-review.md");
+        std::fs::write(&file, "report").unwrap();
+        let none = shows_result(&cwd, Some("review"), &spawn_line(7, None));
+        // A later spawn of the same pane id (Noa restarted) has no path.
+        let respawned = [spawn_line(7, Some(&file)), spawn_line(7, None)].join("\n");
+        let after_respawn = shows_result(&cwd, Some("review"), &respawned);
+        std::fs::remove_dir_all(&cwd).unwrap();
+        assert_eq!((none, after_respawn), (false, false));
+    }
+
     #[test]
     fn a_parentless_pane_with_workers_is_their_orchestrator() {
         let fleet = reported_fleet();
@@ -1222,12 +1379,14 @@ pub(crate) mod tests {
             r#"{"ev":"send","pane":9,"text":"new run","ts":12}"#,
         ]
         .join("\n");
-        let tasks = journal_tasks(&journal);
-        assert_eq!(tasks.get(&4).map(String::as_str), Some("second task"));
-        assert_eq!(tasks.get(&6), None);
-        assert_eq!(tasks.get(&8), None);
-        assert_eq!(tasks.get(&9).map(String::as_str), Some("new run"));
-        assert_eq!(tasks.len(), 2);
+        let spawns = journal_spawns(&journal);
+        let task = |pane: u64| spawns.get(&pane).map(|spawned| spawned.task.as_str());
+        assert_eq!(task(4), Some("second task"));
+        assert_eq!(task(6), Some(""));
+        assert_eq!(task(8), Some(""));
+        assert_eq!(task(9), Some("new run"));
+        assert_eq!(task(5), None);
+        assert_eq!(spawns.len(), 4);
     }
 
     #[test]
@@ -1326,41 +1485,6 @@ pub(crate) mod tests {
                 "{state:?} quiet={quiet} {in_state:?} {output:?}"
             );
         }
-    }
-
-    #[test]
-    fn result_files_are_matched_by_label() {
-        assert!(is_result_of("result-fix.md", "fix"));
-        assert!(is_result_of("result-fix-0a1b2c3d.md", "fix"));
-        assert!(!is_result_of("result-fix-1.md", "fix"));
-        assert!(!is_result_of("result-fix-0a1b2c3g.md", "fix"));
-        assert!(!is_result_of("result-fixer.md", "fix"));
-        assert!(!is_result_of("result-fix.md.tmp", "fix"));
-        assert!(!is_result_of("result-0a1b2c3d.md", "fix"));
-        assert!(!is_result_of("notes-fix.md", "fix"));
-    }
-
-    #[test]
-    fn a_result_file_is_looked_for_in_the_panes_noa_dir() {
-        let cwd =
-            std::env::temp_dir().join(format!("agent-dashboard-result-{}", std::process::id()));
-        std::fs::create_dir_all(cwd.join(".noa")).unwrap();
-        let noa = cwd.join(".noa");
-        std::fs::write(noa.join("result-review-deadbeef.md"), "done").unwrap();
-        // Made at spawn, never written: no result.
-        std::fs::write(noa.join("result-sleep.md"), "").unwrap();
-        // An empty file next to a written one with the same label.
-        std::fs::write(noa.join("result-both.md"), "").unwrap();
-        std::fs::write(noa.join("result-both-0123abcd.md"), "done").unwrap();
-        let found = (
-            has_result_file(&cwd, "review"),
-            has_result_file(&cwd, "sleep"),
-            has_result_file(&cwd, "both"),
-            has_result_file(&cwd, "other"),
-            has_result_file(&cwd.join("missing"), "review"),
-        );
-        std::fs::remove_dir_all(&cwd).unwrap();
-        assert_eq!(found, (true, false, true, false, false));
     }
 
     #[test]

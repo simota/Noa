@@ -90,6 +90,9 @@ pub struct Worker {
     pub model: String,
     pub effort: String,
     pub orchestrator: String,
+    /// The orchestrator's pane, when it is one: what groups and graph roots
+    /// are keyed by, since two orchestrators can share a name.
+    pub orchestrator_pane: Option<u64>,
     pub parent: Option<u64>,
     pub state: State,
     pub attention: bool,
@@ -132,7 +135,8 @@ impl Worker {
 
     pub fn model_line(&self) -> String {
         match (self.model.as_str(), self.effort.as_str()) {
-            ("", _) => "モデル既定".to_owned(),
+            ("", "") => "モデル既定".to_owned(),
+            ("", effort) => format!("モデル既定 · {effort}"),
             (model, "") => model.to_owned(),
             (model, effort) => format!("{model} · {effort}"),
         }
@@ -221,6 +225,10 @@ pub fn minutes_text(minutes: f64) -> String {
     }
 }
 
+/// A group's name, and for orchestrators the pane that tells two of the same
+/// name apart.
+type GroupKey<'a> = (Option<&'a str>, Option<u64>);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Grouping {
     Orchestrator,
@@ -256,14 +264,14 @@ impl Grouping {
         }
     }
 
-    fn key(self, worker: &Worker) -> Option<&str> {
+    fn key(self, worker: &Worker) -> GroupKey<'_> {
         match self {
-            Grouping::Orchestrator => Some(&worker.orchestrator),
-            Grouping::Agent => Some(&worker.kind),
-            Grouping::Model if !worker.is_agent() => Some("モデルなし"),
-            Grouping::Model if worker.model.is_empty() => Some("モデル既定"),
-            Grouping::Model => Some(&worker.model),
-            Grouping::Flat => None,
+            Grouping::Orchestrator => (Some(&worker.orchestrator), worker.orchestrator_pane),
+            Grouping::Agent => (Some(&worker.kind), None),
+            Grouping::Model if !worker.is_agent() => (Some("モデルなし"), None),
+            Grouping::Model if worker.model.is_empty() => (Some("モデル既定"), None),
+            Grouping::Model => (Some(&worker.model), None),
+            Grouping::Flat => (None, None),
         }
     }
 
@@ -271,15 +279,18 @@ impl Grouping {
         self,
         workers: impl IntoIterator<Item = &'a Worker>,
     ) -> Vec<(Option<&'a str>, Vec<&'a Worker>)> {
-        let mut groups: Vec<(Option<&'a str>, Vec<&'a Worker>)> = Vec::new();
+        let mut groups: Vec<(GroupKey<'a>, Vec<&'a Worker>)> = Vec::new();
         for worker in workers {
             let key = self.key(worker);
-            match groups.iter_mut().find(|(name, _)| *name == key) {
+            match groups.iter_mut().find(|(group, _)| *group == key) {
                 Some((_, members)) => members.push(worker),
                 None => groups.push((key, vec![worker])),
             }
         }
         groups
+            .into_iter()
+            .map(|((name, _), members)| (name, members))
+            .collect()
     }
 }
 
@@ -295,6 +306,7 @@ pub fn canned() -> Fleet {
             model: "opus".into(),
             effort: "high".into(),
             orchestrator: "release-0.9.7".into(),
+            orchestrator_pane: None,
             parent: None,
             state: State::Running,
             attention: false,
@@ -326,6 +338,7 @@ pub fn canned() -> Fleet {
             model: "gemini-4-argon-medium".into(),
             effort: "".into(),
             orchestrator: "release-0.9.7".into(),
+            orchestrator_pane: None,
             parent: None,
             state: State::Running,
             attention: false,
@@ -355,6 +368,7 @@ pub fn canned() -> Fleet {
             model: "gpt-6.2-astra".into(),
             effort: "high".into(),
             orchestrator: "perf-wish".into(),
+            orchestrator_pane: None,
             parent: None,
             state: State::Running,
             attention: false,
@@ -382,6 +396,7 @@ pub fn canned() -> Fleet {
             model: "sonnet".into(),
             effort: "medium".into(),
             orchestrator: "release-0.9.7".into(),
+            orchestrator_pane: None,
             parent: Some(11),
             state: State::Permission,
             attention: false,
@@ -412,6 +427,7 @@ pub fn canned() -> Fleet {
             model: "gpt-6.2-sol".into(),
             effort: "medium".into(),
             orchestrator: "perf-wish".into(),
+            orchestrator_pane: None,
             parent: None,
             state: State::Permission,
             attention: false,
@@ -441,6 +457,7 @@ pub fn canned() -> Fleet {
             model: "".into(),
             effort: "".into(),
             orchestrator: "release-0.9.7".into(),
+            orchestrator_pane: None,
             parent: None,
             state: State::Input,
             attention: false,
@@ -470,6 +487,7 @@ pub fn canned() -> Fleet {
             model: "gemini-4-hydrogen-low".into(),
             effort: "".into(),
             orchestrator: "release-0.9.7".into(),
+            orchestrator_pane: None,
             parent: Some(11),
             state: State::Finished,
             attention: false,
@@ -500,6 +518,7 @@ pub fn canned() -> Fleet {
             model: "sonnet".into(),
             effort: "low".into(),
             orchestrator: "release-0.9.7".into(),
+            orchestrator_pane: None,
             parent: None,
             state: State::Finished,
             attention: false,
@@ -525,6 +544,7 @@ pub fn canned() -> Fleet {
             model: "gpt-6-luna".into(),
             effort: "low".into(),
             orchestrator: "perf-wish".into(),
+            orchestrator_pane: None,
             parent: Some(13),
             state: State::Error,
             attention: false,

@@ -1458,6 +1458,7 @@ fn graph(tree: &mut UiTree, section: WidgetId, fleet: &Fleet) {
         let children: Vec<&Worker> = workers
             .iter()
             .filter(|w| w.orchestrator == orchestrator.name && w.parent.is_none())
+            .filter(|w| w.orchestrator_pane == orchestrator.pane)
             .filter(|w| Some(w.pane) != orchestrator.pane)
             .collect();
         connect(tree, row, workers, &children);
@@ -2658,5 +2659,30 @@ mod tests {
                 "詳細 leaves its card"
             );
         }
+    }
+
+    #[test]
+    fn the_graph_keeps_roots_with_one_name_apart() {
+        let fleet = crate::live::tests::same_named_roots_fleet();
+        let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet, 0));
+        let mut text = TextStore::new(Default::default());
+        dashboard.prepare(window(), &mut text);
+        let tree = &dashboard.tree;
+        let graph = dashboard.panels[Panel::Graph as usize].unwrap();
+        let roots = tree.children(graph)[1];
+        let rows: Vec<Vec<String>> = tree
+            .children(roots)
+            .iter()
+            .map(|row| labels_under(tree, *row))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ["●", "Claude Code", "●", "w-a"],
+                ["●", "Claude Code", "●", "w-b"],
+                ["◆", "zsh", "●", "w-c"],
+                ["◆", "zsh", "●", "w-d"],
+            ]
+        );
     }
 }

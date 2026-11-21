@@ -3695,17 +3695,43 @@ impl Screen {
         let _ = out.flush();
     }
 
-    fn bell() {
+    fn write(bytes: &[u8]) {
         let mut out = std::io::stdout().lock();
-        let _ = out.write_all(b"\x07");
+        let _ = out.write_all(bytes);
         let _ = out.flush();
     }
+}
 
-    fn draw(lines: &[String]) {
-        let mut out = std::io::stdout().lock();
-        let _ = out.write_all(b"\x1b[H");
-        let _ = out.write_all(lines.join("\r\n").as_bytes());
-        let _ = out.flush();
+/// What a frame writes (U13): nothing when it is the one on screen, else
+/// the whole frame inside a synchronized update (DEC 2026), so the terminal
+/// never paints half of one.
+#[derive(Default)]
+struct Frames {
+    shown: Option<Vec<String>>,
+    /// The screen is to be cleared first (the pane was resized).
+    clear: bool,
+}
+
+impl Frames {
+    fn next(&mut self, lines: Vec<String>) -> Option<Vec<u8>> {
+        if self.shown.as_ref() == Some(&lines) {
+            return None;
+        }
+        let mut out = b"\x1b[?2026h".to_vec();
+        if std::mem::take(&mut self.clear) {
+            out.extend_from_slice(b"\x1b[2J");
+        }
+        out.extend_from_slice(b"\x1b[H");
+        out.extend_from_slice(lines.join("\r\n").as_bytes());
+        out.extend_from_slice(b"\x1b[?2026l");
+        self.shown = Some(lines);
+        Some(out)
+    }
+
+    /// The pane was resized: the next frame clears and draws whole.
+    fn resized(&mut self) {
+        self.shown = None;
+        self.clear = true;
     }
 }
 
@@ -3928,6 +3954,7 @@ fn run_until_quit(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
     let _screen = Screen::enter();
     let mut screens_at: Option<Instant> = None;
     let mut size = (0, 0);
+    let mut frames = Frames::default();
     let mut dirty = true;
     let mut title = String::new();
     let mut ring = false;
@@ -3961,11 +3988,13 @@ fn run_until_quit(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
         let current = Screen::size();
         if current != size {
             size = current;
-            let _ = std::io::stdout().lock().write_all(b"\x1b[2J");
+            frames.resized();
             dirty = true;
         }
         if dirty {
-            Screen::draw(&board.render(size.0, size.1, now));
+            if let Some(frame) = frames.next(board.render(size.0, size.1, now)) {
+                Screen::write(&frame);
+            }
             let current = board.title();
             if current != title {
                 Screen::set_title(&current);
@@ -3974,7 +4003,7 @@ fn run_until_quit(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
             dirty = false;
         }
         if std::mem::take(&mut ring) {
-            Screen::bell();
+            Screen::write(b"\x07");
         }
         // A lone ESC waits briefly for the rest of a sequence.
         let wait = if reader.waiting_on_esc() {
@@ -6782,6 +6811,23 @@ mod tests {
         };
         let (notice, _) = perform(&mut server, &board, Action::Focus(2));
         assert!(!japanese(&notice.text), "{}", notice.text);
+    }
+
+    // U13: every tick wrote the whole screen, unchanged or not, outside a
+    // synchronized update.
+    #[test]
+    fn a_frame_is_written_once_and_whole() {
+        let mut frames = Frames::default();
+        let frame = |text: &str| vec![text.to_string(), "two".to_string()];
+        let first = frames.next(frame("one")).expect("drawn");
+        assert_eq!(first, b"\x1b[?2026h\x1b[Hone\r\ntwo\x1b[?2026l");
+        assert_eq!(frames.next(frame("one")), None);
+        assert!(frames.next(frame("1")).is_some());
+        // After a resize the same frame is drawn again, on a cleared screen.
+        frames.resized();
+        let again = frames.next(frame("1")).expect("drawn");
+        assert!(again.starts_with(b"\x1b[?2026h\x1b[2J\x1b[H"), "{again:?}");
+        assert_eq!(frames.next(frame("1")), None);
     }
 
     // Review finding: run from a tool shell the board wrote escape

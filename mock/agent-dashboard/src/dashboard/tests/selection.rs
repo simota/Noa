@@ -474,7 +474,19 @@ fn a_new_top_card_is_expanded_in_place() {
 
 #[test]
 fn running_and_done_cards_are_named_groups() {
-    let (dashboard, _text) = laid_out(Grouping::Orchestrator);
+    // A card the pager hides is not exposed to assistive technology: at
+    // 1920×1200 every running and done card is on its page.
+    let mut dashboard = Dashboard::new(Grouping::Orchestrator);
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(Size::new(1920.0, 1200.0), &mut text);
+    for panel in [Panel::Running, Panel::Done] {
+        let parts = dashboard.registry.lists[panel as usize].as_ref().unwrap();
+        assert_eq!(
+            visible_items(&dashboard, panel).len(),
+            parts.items.len(),
+            "{panel:?} pages cards out at 1920×1200"
+        );
+    }
     let update = dashboard.tree.accessibility_update(1.0);
     let groups: Vec<&str> = update
         .nodes

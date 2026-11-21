@@ -1,11 +1,12 @@
 use noa_gpui_core::style::{
     AlignItems, FlexDirection, Position, Rect as LayoutRect, Size as LayoutSize, auto, length,
 };
-use noa_gpui_core::widgets::{Badge, Container, EmptyState, Kbd, Label, ScrollView, Tone};
+use noa_gpui_core::widgets::{Badge, Container, EmptyState, Kbd, Label, Tone};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
 use crate::live::Link;
 
+use super::pager::PageMemory;
 use super::style::{caption, fill_remaining, fixed_width, gap};
 use super::{Mark, Registry};
 
@@ -138,10 +139,13 @@ pub(super) fn title_row(tree: &mut UiTree, parent: WidgetId, panel: Panel, gap: 
 }
 
 /// The pager's "上に N 件 · 下に M 件" label, hidden until something is
-/// hidden.
+/// hidden, followed in `row` by the list's page memory (`pager::fit`), which
+/// takes no space.
 pub(super) fn indicator(tree: &mut UiTree, row: WidgetId) -> WidgetId {
     let id = caption(tree, row, "");
     tree.set_hidden(id, true);
+    let memory = tree.insert(Some(row), PageMemory::default());
+    tree.set_hidden(memory, true);
     id
 }
 
@@ -159,15 +163,19 @@ pub(super) fn panel_title(
     row
 }
 
-/// A panel list, `gap` between its items.
+/// A panel list, `gap` between its items: a clipped column, not a scroll
+/// view, so that it shows whole items only (`pager::fit` hides those that
+/// would be cut). Its items are its direct children (the queue reorders its
+/// cards by child index).
 pub(super) fn card_list(tree: &mut UiTree, parent: WidgetId, gap_px: f32) -> WidgetId {
     tree.insert(
         Some(parent),
-        ScrollView::new(Style {
+        Container::new(Style {
             flex_direction: FlexDirection::Column,
             gap: gap(gap_px),
             ..fill_remaining()
-        }),
+        })
+        .clip(true),
     )
 }
 

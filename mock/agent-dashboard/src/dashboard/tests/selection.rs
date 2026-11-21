@@ -363,3 +363,139 @@ fn every_graph_node_names_its_root_row() {
     assert_eq!(graph.items[perf_wish].1, None);
     assert_eq!(graph.item_of(19), Some(perf_wish));
 }
+
+fn last_watch(commands: &std::sync::mpsc::Receiver<Command>) -> Option<Vec<u64>> {
+    commands
+        .try_iter()
+        .filter_map(|c| match c {
+            Command::Watch(panes) => Some(panes),
+            Command::Focus(_) => None,
+        })
+        .last()
+}
+
+fn open_panes(dashboard: &Dashboard) -> Vec<u64> {
+    let open = dashboard.queue_buttons.open.iter();
+    open.map(|(_, pane)| *pane).collect()
+}
+
+#[test]
+fn a_reselection_to_nobody_closes_the_drawer() {
+    let (mut dashboard, mut text, commands) = live_with(live(fleet::canned(), 0));
+    key(&mut dashboard, &mut text, Key::Char('/'));
+    typed(&mut dashboard, &mut text, "/");
+    typed(&mut dashboard, &mut text, "fix-tests");
+    key(&mut dashboard, &mut text, Key::Enter);
+    key(&mut dashboard, &mut text, Key::Char('j'));
+    key(&mut dashboard, &mut text, Key::Space);
+    assert_eq!(dashboard.view.detail, Some(14));
+    commands.try_iter().for_each(drop);
+
+    // Hiding the queue leaves fix-tests nowhere to be selected.
+    key(&mut dashboard, &mut text, Key::Char('1'));
+    assert_eq!(dashboard.view.selected, None);
+    assert_eq!(dashboard.view.detail, None);
+    assert!(drawer_labels(&dashboard).is_none());
+    assert_eq!(dashboard.tree.overlays().count(), 0);
+    assert!(
+        dashboard.registry.open_buttons.is_empty(),
+        "the drawer's 開く"
+    );
+    assert_eq!(last_watch(&commands), Some(vec![]), "14 is not watched");
+    key(&mut dashboard, &mut text, Key::Enter);
+    assert!(focused_panes(&commands).is_empty());
+    assert_eq!(status_of(&dashboard), NOTHING_SELECTED);
+}
+
+#[test]
+fn the_queue_comes_back_with_the_selected_card_expanded() {
+    let (mut dashboard, mut text, commands) = live_with(live(fleet::canned(), 0));
+    key(&mut dashboard, &mut text, Key::Char('1'));
+    select(&mut dashboard, &mut text, 13);
+    commands.try_iter().for_each(drop);
+
+    key(&mut dashboard, &mut text, Key::Char('1'));
+    assert_eq!(dashboard.view.selected, Some(13));
+    assert_eq!(dashboard.queue_buttons.expanded, Some(13));
+    assert_eq!(open_panes(&dashboard), [13], "開く is on the selected card");
+    assert_eq!(last_watch(&commands), Some(vec![13]));
+}
+
+/// The queue's card widgets, by pane.
+fn queue_cards(dashboard: &Dashboard) -> Vec<(WidgetId, Option<u64>)> {
+    let list = dashboard.registry.lists[Panel::Queue as usize].as_ref();
+    let mut cards = list.unwrap().items.clone();
+    cards.sort_by_key(|(_, pane)| *pane);
+    cards
+}
+
+#[test]
+fn a_new_top_card_is_expanded_in_place() {
+    let (mut dashboard, mut text, commands) = live_with(live(fleet::canned(), 0));
+    assert_eq!(dashboard.queue_buttons.expanded, Some(14));
+    let cards = queue_cards(&dashboard);
+    // Only e2e-smoke's wait grows, past fix-tests': it is the top card now.
+    let mut fleet = fleet::canned();
+    let smoke = fleet.workers.iter_mut().find(|w| w.pane == 19).unwrap();
+    smoke.wait_minutes = 3.0;
+    dashboard.apply(live(fleet.clone(), 0), &mut text);
+    dashboard.prepare(window(), &mut text);
+
+    assert_eq!(queue_cards(&dashboard), cards, "no rebuild");
+    assert_eq!(queue_on_screen(&dashboard), [19, 14, 15, 16, 13]);
+    assert_eq!(dashboard.queue_buttons.expanded, Some(19));
+    assert_eq!(open_panes(&dashboard), [19]);
+    let details: Vec<u64> = dashboard
+        .queue_buttons
+        .details
+        .iter()
+        .map(|b| b.1)
+        .collect();
+    assert_eq!(details, [14, 15, 16, 13]);
+    assert_eq!(last_watch(&commands), Some(vec![19]));
+    // What a screen built for this fleet shows (and owns).
+    let mut fresh = Dashboard::live(Grouping::Orchestrator, Channel::detached().0);
+    let mut fresh_text = TextStore::new(Default::default());
+    fresh.prepare(window(), &mut fresh_text);
+    fresh.apply(live(fleet, 0), &mut fresh_text);
+    fresh.prepare(window(), &mut fresh_text);
+    assert_eq!(fresh.queue_buttons.expanded, Some(19));
+    assert_eq!(
+        frame_of(dashboard.display_list(), &text),
+        frame_of(fresh.display_list(), &fresh_text)
+    );
+    assert_eq!(text.layouts().len(), fresh_text.layouts().len());
+
+    // A rebuild for something else keeps it.
+    key(&mut dashboard, &mut text, Key::Char('5'));
+    assert_eq!(dashboard.queue_buttons.expanded, Some(19));
+    assert_eq!(last_watch(&commands), None, "the watch did not change");
+}
+
+#[test]
+fn running_and_done_cards_are_named_groups() {
+    let (dashboard, _text) = laid_out(Grouping::Orchestrator);
+    let update = dashboard.tree.accessibility_update(1.0);
+    let groups: Vec<&str> = update
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.role() == noa_gpui_core::accesskit::Role::Group)
+        .filter_map(|(_, node)| node.label())
+        .collect();
+    let carded = dashboard
+        .feed
+        .fleet
+        .workers
+        .iter()
+        .filter(|w| matches!(w.state, fleet::State::Running | fleet::State::Finished));
+    let mut count = 0;
+    for worker in carded {
+        count += 1;
+        let label = worker.label.as_str();
+        assert!(
+            groups.contains(&label),
+            "no group for {label} in {groups:?}"
+        );
+    }
+    assert_eq!(count, 5, "three running cards and two done cards");
+}

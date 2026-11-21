@@ -228,6 +228,10 @@ pub struct Dashboard {
     pressed_in_filter: bool,
     #[cfg(test)]
     panels: [Option<WidgetId>; 5],
+    /// Lets the tests drive `wheel` as if the pager took the event: U1's
+    /// pager stub takes none (U3 fills `pager::wheel` in).
+    #[cfg(test)]
+    pager_takes_wheel: bool,
 }
 
 /// The tests read the registry's parts as the dashboard's own, as they read
@@ -252,8 +256,9 @@ impl Dashboard {
     }
 
     fn start(view: View, feed: Feed) -> Self {
-        let theme = Theme::for_appearance(Appearance::Dark);
-        let mut dashboard = Self::build(view, theme, feed, Filter::default(), false);
+        let mut tree = UiTree::new();
+        tree.set_theme(Theme::for_appearance(Appearance::Dark));
+        let mut dashboard = Self::build(tree, view, feed, Filter::default(), false);
         dashboard.watch();
         dashboard
     }
@@ -343,9 +348,11 @@ impl Dashboard {
         if moved {
             self.view.selected = selected;
             self.view.reveal = selected;
-            if let Some(pane) = selected.filter(|pane| self.waits(*pane)) {
-                self.view.expanded = Some(pane);
-            }
+        }
+        // The selected worker's queue card is the expanded one, also when
+        // the queue comes back after the selection moved without it.
+        if let Some(pane) = self.view.selected.filter(|pane| self.waits(*pane)) {
+            self.view.expanded = Some(pane);
         }
         let gone = |pane: u64| {
             self.feed
@@ -355,7 +362,8 @@ impl Dashboard {
         };
         if self.view.detail.is_some_and(gone) {
             self.view.detail = None;
-        } else if moved && self.view.detail.is_some() && selected.is_some() {
+        } else if moved && self.view.detail.is_some() {
+            // With no selection left, the drawer closes.
             self.view.detail = selected;
         }
     }
@@ -438,14 +446,17 @@ impl Dashboard {
             );
             registry.timeline = Some(parts);
         }
-        self.reorder_queue();
+        self.reorder_queue(text);
         self.paint_selection();
         self.tick(Instant::now());
     }
 
     /// Puts the queue's cards (and its pager items) in the queue's order
-    /// again, which waits change: the cards show the order J / K walk.
-    fn reorder_queue(&mut self) {
+    /// again, which waits change: the cards show the order J / K walk. The
+    /// expanded card follows as a build picks it — `view.expanded` while
+    /// the queue has it, else the top card — so a new top card is expanded
+    /// in place (and watched), as a fresh build of the same state shows it.
+    fn reorder_queue(&mut self, text: &mut TextStore) {
         let Some(parts) = self.registry.lists[Panel::Queue as usize].as_mut() else {
             return;
         };
@@ -466,12 +477,56 @@ impl Dashboard {
         for (index, (card, _)) in parts.items.iter().enumerate() {
             self.tree.move_child(*card, index);
         }
+        let expanded = self
+            .view
+            .expanded
+            .filter(|pane| order.contains(pane))
+            .or(order.first().copied());
+        if expanded != self.queue_buttons.expanded {
+            self.expand_in_place(expanded, &order, text);
+        }
     }
 
-    /// Builds the same screen again for a changed view, keeping the theme (the
-    /// appearance the OS last set) the screen has now. The old tree's widgets
-    /// go through `UiTree::remove` first: that is what releases their text
-    /// layouts in the `TextStore`. The new tree is laid out at the old size
+    /// Makes `pane`'s queue card the expanded one without a rebuild: the
+    /// card expanded so far collapses, and the buttons are registered as
+    /// `queue` registers them (in the queue's `order`).
+    fn expand_in_place(&mut self, pane: Option<u64>, order: &[u64], text: &mut TextStore) {
+        let Some(parts) = self.registry.lists[Panel::Queue as usize].as_ref() else {
+            return;
+        };
+        let card_of = |pane: u64| {
+            let item = parts.items.iter().find(|(_, own)| *own == Some(pane));
+            item.map(|(card, _)| *card)
+        };
+        let fleet = &self.feed.fleet;
+        let buttons = &mut self.queue_buttons;
+        for (pane, expanded) in [(buttons.expanded, false), (pane, true)] {
+            let Some((pane, card)) = pane.and_then(|pane| Some((pane, card_of(pane)?))) else {
+                continue;
+            };
+            let worker = fleet.worker(pane).expect("a queue card's worker");
+            let button = queue::set_expanded(&mut self.tree, card, worker, expanded, text);
+            buttons.open.retain(|(_, own)| *own != pane);
+            buttons.details.retain(|(_, own)| *own != pane);
+            if expanded {
+                buttons.open.push((button, pane));
+            } else {
+                buttons.details.push((button, pane));
+            }
+        }
+        buttons.expanded = pane;
+        let at = |pane: u64| order.iter().position(|p| *p == pane);
+        buttons.details.sort_by_key(|(_, pane)| at(*pane));
+        self.watch();
+    }
+
+    /// Builds the same screen again for a changed view, in the same `UiTree`:
+    /// what the app installed on it stays — the system clipboard (⌘V into
+    /// the filter field), a stylesheet, the theme (the appearance the OS last
+    /// set), input recording — where a new tree would start from its
+    /// defaults (an empty in-app clipboard). The old widgets go through
+    /// `UiTree::remove` first: that is what releases their text layouts in
+    /// the `TextStore`. The new widgets are laid out at the old size
     /// before this returns: the window delivers input before it lays out for the
     /// next frame, and a tree without rects would let that input hit nothing.
     /// That layout is not a frame the window presented, so the root is marked
@@ -485,7 +540,6 @@ impl Dashboard {
         if let Some(caret) = self.tree.get::<TextField>(field).map(TextField::caret) {
             self.filter.caret = caret;
         }
-        let theme = self.tree.theme().clone();
         let roots: Vec<WidgetId> = self
             .tree
             .root()
@@ -495,9 +549,10 @@ impl Dashboard {
         for root in roots {
             self.tree.remove(root, text);
         }
+        let tree = std::mem::take(&mut self.tree);
         let feed = std::mem::take(&mut self.feed);
         let filter = std::mem::take(&mut self.filter);
-        let old = std::mem::replace(self, Self::build(view, theme, feed, filter, refocus));
+        let old = std::mem::replace(self, Self::build(tree, view, feed, filter, refocus));
         self.viewport = old.viewport;
         self.watched = old.watched;
         self.wheel_accum = old.wheel_accum;
@@ -519,9 +574,8 @@ impl Dashboard {
         }
     }
 
-    fn build(view: View, theme: Theme, feed: Feed, filter: Filter, refocus: bool) -> Self {
-        let mut tree = UiTree::new();
-        tree.set_theme(theme);
+    /// Builds the screen into `tree`, which has no root or overlay.
+    fn build(mut tree: UiTree, view: View, feed: Feed, filter: Filter, refocus: bool) -> Self {
         let root = tree.insert(
             None,
             Container::new(Style {
@@ -568,6 +622,8 @@ impl Dashboard {
             pressed_in_filter: false,
             #[cfg(test)]
             panels: [None; 5],
+            #[cfg(test)]
+            pager_takes_wheel: false,
         };
         dashboard.fill_body();
         dashboard.open_drawer();
@@ -893,8 +949,7 @@ impl Dashboard {
             count,
             match_text(&self.feed.fleet.workers, &self.filter),
         );
-        // Shown for any query, one of blanks too (it matches everyone).
-        self.tree.set_hidden(count, self.filter.query.is_empty());
+        self.tree.set_hidden(count, !self.filter.active());
         self.watch();
     }
 
@@ -958,7 +1013,7 @@ impl Dashboard {
             Action::Back => {
                 if self.view.detail.is_some() {
                     self.set_detail(None, text);
-                } else if !self.filter.query.is_empty() {
+                } else if self.filter.active() {
                     self.clear_filter(text);
                 } else if self.view.selected.is_some() {
                     self.select(None, text);
@@ -989,6 +1044,8 @@ impl Dashboard {
             &mut self.wheel_accum,
             event,
         );
+        #[cfg(test)]
+        let taken = taken || (self.pager_takes_wheel && matches!(event, Event::Wheel { .. }));
         if taken {
             self.paged(text);
         }

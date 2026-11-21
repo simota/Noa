@@ -3,6 +3,8 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use crate::dashboard::filter::matches;
+use noa_gpui_core::StyleSheet;
+use noa_gpui_core::clipboard::{Clipboard, MemoryClipboard};
 use noa_gpui_core::widgets::{Badge, Label, TextField};
 
 use super::*;
@@ -256,4 +258,72 @@ fn a_held_snapshot_keeps_its_age() {
     assert_eq!(dashboard.feed.synced_at, Some(came));
     let status = crate::dashboard::health::status(&dashboard.feed, applied);
     assert_eq!(status, "ワーカー 9 · 同期 3 秒前");
+}
+
+#[test]
+fn a_full_rebuild_keeps_what_the_app_installed_on_the_tree() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    // What the app installs at start: the system clipboard (holding what
+    // another app copied), a stylesheet, the OS click interval, and input
+    // recording when asked for.
+    let mut clipboard = MemoryClipboard::default();
+    clipboard.write_text("codex");
+    let sheet = StyleSheet::parse("#nothing-here { background-color: red; }").unwrap();
+    let tree = dashboard.tree_mut();
+    tree.set_clipboard(Box::new(clipboard));
+    tree.set_stylesheet(sheet);
+    tree.set_multi_click(0.7, 6.0);
+    tree.start_recording();
+
+    // A full rebuild: a panel toggle.
+    key(&mut dashboard, &mut text, Key::Char('5'));
+    assert!(dashboard.panels[Panel::Graph as usize].is_none());
+
+    slash(&mut dashboard, &mut text);
+    let command = Modifiers {
+        command: true,
+        meta: true,
+        ..Modifiers::on_apple()
+    };
+    let paste = Event::KeyDown {
+        key: Key::Char('v'),
+        modifiers: command,
+    };
+    dashboard.dispatch(paste, &mut text);
+    dashboard.prepare(window(), &mut text);
+    assert_eq!(dashboard.filter.query, "codex", "⌘V pastes the copied text");
+    assert_eq!(count_label(&dashboard).as_deref(), Some("3 / 9 件"));
+    let tree = dashboard.tree();
+    let sheet = format!("{:?}", tree.stylesheet());
+    assert!(sheet.contains("#nothing-here"), "the stylesheet: {sheet}");
+    assert_eq!(tree.multi_click(), (0.7, 6.0));
+    assert!(tree.is_recording());
+}
+
+/// A live fleet of running workers only (api-refactor, docs-sync,
+/// perf-probe): nothing is done.
+fn running_only() -> Snapshot {
+    let mut fleet = fleet::canned();
+    fleet.workers.retain(|w| w.state == fleet::State::Running);
+    live(fleet, 0)
+}
+
+#[test]
+fn a_query_of_blanks_says_which_panels_have_nobody() {
+    let snapshot = running_only();
+    let running = snapshot.fleet.workers.len();
+    let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, snapshot);
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(window(), &mut text);
+    let done = dashboard.panels[Panel::Done as usize].unwrap();
+    assert!(!labels_under(&dashboard.tree, done).contains(&"該当なし".to_owned()));
+
+    slash(&mut dashboard, &mut text);
+    typed(&mut dashboard, &mut text, "\u{3000}");
+    let count = format!("{running} / {running} 件");
+    assert_eq!(count_label(&dashboard), Some(count), "the filter is on");
+    let done = dashboard.panels[Panel::Done as usize].unwrap();
+    let labels = labels_under(&dashboard.tree, done);
+    assert!(labels.contains(&"該当なし".to_owned()), "{labels:?}");
+    assert_eq!(panes_in(&dashboard, Panel::Running).len(), running);
 }

@@ -1,4 +1,5 @@
 use crate::dashboard::keymap::{BINDINGS, Mode, Route, Trigger, route};
+use noa_gpui_core::widgets::ScrollView;
 
 use super::*;
 
@@ -104,9 +105,26 @@ fn a_wheel_page_change_reaches_the_next_frame() {
         .as_ref()
         .unwrap();
     let (card, _) = list.items[0];
+    let list = list.list;
+    let over_list = center(&dashboard.tree, list);
     dashboard.tree.set_hidden(card, true);
-    dashboard.paged(&mut text);
-    assert!(!dashboard.tree.is_hidden(card), "paged");
+    // The wheel over the list, as the window delivers it, taken by the
+    // pager (U1's stub takes none: the test stands in for U3's).
+    dashboard.pager_takes_wheel = true;
+    let delta = Point::new(0.0, -40.0);
+    dashboard.dispatch(
+        Event::Wheel {
+            pos: over_list,
+            delta,
+        },
+        &mut text,
+    );
+    // The pager took it: the list (a `ScrollView` until U3) did not scroll.
+    let offset = dashboard
+        .tree
+        .get::<ScrollView>(list)
+        .map(ScrollView::offset);
+    assert!(offset.is_none_or(|offset| offset == 0.0), "{offset:?}");
     assert!(
         dashboard.needs_update(window()),
         "the window would keep the old page until the next input"

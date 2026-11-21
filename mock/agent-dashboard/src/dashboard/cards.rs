@@ -109,8 +109,12 @@ pub(super) struct Cards {
 /// A card as `GroupBox::card` draws one (surface fill, 1 px separator
 /// border, radius 10, padding 18, a 14 px weight-600 title 10 px above the
 /// content, 14 px between content rows), built from containers so that the
-/// selection bar and buttons can be its children. Returns the card and the
-/// column its content goes in.
+/// selection bar and buttons can be its children. Like `GroupBox`, it is a
+/// group named by its title for assistive technology: a `Container` is
+/// exposed as a group only as a focus group, which changes neither layout
+/// nor paint, and Tab still stops on each focusable widget in it while
+/// there is at most one (the 詳細 button). Returns the card and the column
+/// its content goes in.
 pub(super) fn card(
     tree: &mut UiTree,
     parent: WidgetId,
@@ -132,8 +136,10 @@ pub(super) fn card(
         })
         .background(Role::Surface)
         .border(1.0, Role::Separator)
-        .radius(10.0),
+        .radius(10.0)
+        .focus_group(true),
     );
+    tree.set_accessible_label(card, title);
     tree.insert(
         Some(card),
         Label::new(title)

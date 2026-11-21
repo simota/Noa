@@ -134,7 +134,7 @@ pub(super) fn header(
             .font_size(12.0)
             .color(Role::Muted),
     );
-    tree.set_hidden(match_count, filter.query.is_empty());
+    tree.set_hidden(match_count, !filter.active());
     let help_key = tree.insert(Some(bar), Kbd::new(["?"]));
     let group_caption = caption(tree, bar, "グループ");
     let selected = Grouping::ALL

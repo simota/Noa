@@ -5,6 +5,7 @@ use noa_gpui_core::widgets::{
     Button, Container, ControlSize, Label, Tag, TagStyle, Tone, Truncation,
 };
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
+use noa_gpui_text::TextStore;
 
 use crate::fleet::{Need, Worker};
 
@@ -169,6 +170,34 @@ pub(super) fn queue_card(
     reg.pulses.push((since, Pulse::QueueSince(worker.pane)));
     reg.pulses.push((card, Pulse::QueueCard(worker.pane)));
     card
+}
+
+/// Turns a queue card into the expanded one (task, screen tail, 開く) or a
+/// collapsed one (detail, 詳細) in place: the card, its head and its
+/// selection bar stay, and it ends up as `queue` builds a card in that
+/// state. Returns its new 開く or 詳細.
+pub(super) fn set_expanded(
+    tree: &mut UiTree,
+    card: WidgetId,
+    worker: &Worker,
+    expanded: bool,
+    text: &mut TextStore,
+) -> WidgetId {
+    // A card's children: its head, what `queue_card_body` or
+    // `queue_card_summary` added, and the selection bar (`mark_card`).
+    let children = tree.children(card).to_vec();
+    let (&bar, content) = children[1..].split_last().expect("a head and a bar");
+    for &id in content {
+        tree.remove(id, text);
+    }
+    let button = if expanded {
+        queue_card_body(tree, card, worker)
+    } else {
+        queue_card_summary(tree, card, worker)
+    };
+    let last = tree.children(card).len() - 1;
+    tree.move_child(bar, last);
+    button
 }
 
 pub(super) fn queue_card_summary(tree: &mut UiTree, card: WidgetId, worker: &Worker) -> WidgetId {

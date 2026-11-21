@@ -12,8 +12,12 @@ pub(super) struct Filter {
 }
 
 impl Filter {
+    /// The filter is on once anything is typed, blanks too: the header
+    /// shows the match count, an empty panel says "該当なし" and the graph
+    /// mutes what does not match, all by this one rule. (A query of blanks
+    /// matches every worker, so it hides no one.)
     pub(super) fn active(&self) -> bool {
-        !self.query.trim().is_empty()
+        !self.query.is_empty()
     }
 
     pub(super) fn matches(&self, worker: &Worker) -> bool {

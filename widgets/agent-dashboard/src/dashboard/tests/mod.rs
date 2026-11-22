@@ -5,6 +5,7 @@ use noa_gpui_scene::{Border, DisplayList, DrawCommand, Point, Size};
 
 use super::*;
 
+mod actions;
 mod details;
 mod feed;
 mod filtering;
@@ -22,6 +23,7 @@ mod queue_cards;
 mod rebuild;
 mod relations;
 mod selection;
+mod tabs;
 mod triage;
 mod urgency_steps;
 mod window_sizes;
@@ -147,6 +149,7 @@ fn live(fleet: Fleet, synced_secs: u64) -> Snapshot {
         link: Link::Live,
         synced_secs,
         can_focus: true,
+        can_input: true,
         instance: Some(INSTANCE.to_owned()),
     }
 }
@@ -197,6 +200,20 @@ const LONG_LABEL: &str = "noa-gpui ウィジェットによるUI拡張案とそ�
 fn key(dashboard: &mut Dashboard, text: &mut TextStore, key: Key) {
     let modifiers = Modifiers::default();
     dashboard.dispatch(Event::KeyDown { key, modifiers }, text);
+    dashboard.prepare(window(), text);
+}
+
+/// A character key as the platform sends it: `KeyDown`, then its `Text`.
+fn stroke(dashboard: &mut Dashboard, text: &mut TextStore, c: char) {
+    let modifiers = Modifiers::default();
+    dashboard.dispatch(
+        Event::KeyDown {
+            key: Key::Char(c),
+            modifiers,
+        },
+        text,
+    );
+    dashboard.dispatch(Event::Text(c.to_string()), text);
     dashboard.prepare(window(), text);
 }
 

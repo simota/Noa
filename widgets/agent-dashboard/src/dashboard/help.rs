@@ -9,7 +9,7 @@ use super::keymap::{BINDINGS, Mode};
 use super::style::{gap, spacer};
 
 /// Width of the keycaps column.
-const KEYS_WIDTH: f32 = 96.0;
+const KEYS_WIDTH: f32 = 104.0;
 
 const SECTIONS: [(Mode, &str); 3] = [
     (Mode::Browse, "一覧"),

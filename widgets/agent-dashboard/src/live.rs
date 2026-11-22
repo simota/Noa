@@ -18,6 +18,9 @@ const NOTIFY_WAIT: Duration = Duration::from_secs(1);
 const RELIST_EVERY: Duration = Duration::from_secs(2);
 const SCREEN_EVERY: Duration = Duration::from_secs(2);
 const PULSE_EVERY: Duration = Duration::from_secs(5);
+/// Short pause between pasting text and sending Enter so a TUI agent's
+/// bracketed-paste handler finishes reading before submit.
+const SUBMIT_DELAY: Duration = Duration::from_millis(80);
 /// The window is woken at least this often while the feed runs, so the
 /// header's time since the last sync ticks between snapshots.
 const HEARTBEAT: Duration = Duration::from_secs(1);
@@ -45,9 +48,11 @@ pub struct Snapshot {
     pub link: Link,
     /// Seconds since the server last answered.
     pub synced_secs: u64,
-    /// Whether Noa granted the `control` scope `noa.focusPane` needs. Its
-    /// default `server-scopes` is `read` only.
+    /// Whether Noa granted the `control` scope `noa.focusPane` and
+    /// `noa.closePane` need. Its default `server-scopes` is `read` only.
     pub can_focus: bool,
+    /// Whether Noa granted the `input` scope `noa.sendText` needs.
+    pub can_input: bool,
     /// The server instance the fleet's pane ids belong to
     /// (`Client::server_instance_id`); `None` while the link is down. A
     /// restarted Noa gives its ids out again, to other panes.
@@ -67,6 +72,11 @@ pub enum Command {
     /// the same list for the same instance changes nothing.
     Watch(Vec<u64>),
     Focus(u64),
+    Send {
+        pane: u64,
+        text: String,
+    },
+    Close(u64),
 }
 
 /// The dashboard's end of the feed.
@@ -74,6 +84,9 @@ pub struct Channel {
     pub snapshots: Receiver<Snapshot>,
     /// Why a command failed, for the notice line to show.
     pub notices: Receiver<String>,
+    /// Each `Command::Send` the feed did not deliver, given back as
+    /// `(pane, text)` to be the pane's draft again.
+    pub unsent: Receiver<(u64, String)>,
     commands: Sender<Command>,
     /// Dropped with this end, which ends the heartbeat thread.
     _heartbeat: Sender<()>,
@@ -95,6 +108,7 @@ impl Channel {
             Self {
                 snapshots,
                 notices,
+                unsent: mpsc::channel().1,
                 commands,
                 _heartbeat: mpsc::channel().0,
             },
@@ -121,11 +135,13 @@ fn start_with<C: Noa + 'static>(
     let (snapshot_tx, snapshots) = mpsc::channel();
     let (commands, command_rx) = mpsc::channel();
     let (notice_tx, notices) = mpsc::channel();
+    let (unsent_tx, unsent) = mpsc::channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
     let (heartbeat, _thread) = heartbeat(every, Arc::clone(&wake));
     let feed = Feed::new(
         snapshot_tx,
         notice_tx,
+        unsent_tx,
         command_rx,
         wake,
         Box::new(Instant::now),
@@ -137,6 +153,7 @@ fn start_with<C: Noa + 'static>(
     Channel {
         snapshots,
         notices,
+        unsent,
         commands,
         _heartbeat: heartbeat,
     }
@@ -177,11 +194,18 @@ trait Noa {
     /// The server's per-process identity (`Client::server_instance_id`).
     fn instance(&self) -> &str;
     fn can_focus(&self) -> bool;
+    fn can_input(&self) -> bool;
     fn list_panels(&mut self) -> Result<Vec<Panel>, ClientError>;
     /// Subscribes to every pane's state changes.
     fn subscribe(&mut self) -> Result<(), ClientError>;
     fn next_notification(&mut self, wait: Duration) -> Result<Option<Notification>, ClientError>;
     fn focus_pane(&mut self, pane: u64) -> Result<(), ClientError>;
+    fn send_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), ClientError>;
+    fn close_pane(&mut self, pane: u64) -> Result<(), ClientError>;
+    /// Pause between pasting text and submitting Enter.
+    fn submit_delay(&self) -> Duration {
+        SUBMIT_DELAY
+    }
     /// The pane's screen text, at most `SCREEN_MAX_BYTES` of it.
     fn screen(&mut self, pane: u64) -> Result<String, ClientError>;
 }
@@ -193,6 +217,10 @@ impl Noa for Client {
 
     fn can_focus(&self) -> bool {
         self.granted_scopes().contains(Scope::Control)
+    }
+
+    fn can_input(&self) -> bool {
+        self.granted_scopes().contains(Scope::Input)
     }
 
     fn list_panels(&mut self) -> Result<Vec<Panel>, ClientError> {
@@ -211,6 +239,14 @@ impl Noa for Client {
         Client::focus_pane(self, pane)
     }
 
+    fn send_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), ClientError> {
+        Client::send_text(self, pane, text, paste)
+    }
+
+    fn close_pane(&mut self, pane: u64) -> Result<(), ClientError> {
+        Client::close_pane(self, pane)
+    }
+
     fn screen(&mut self, pane: u64) -> Result<String, ClientError> {
         let result = self.get_text(pane, TextSource::Screen, Some(SCREEN_MAX_BYTES))?;
         Ok(result.text)
@@ -223,6 +259,7 @@ type Clock = Box<dyn Fn() -> Instant + Send>;
 struct Feed {
     snapshots: Sender<Snapshot>,
     notices: Sender<String>,
+    unsent: Sender<(u64, String)>,
     commands: Receiver<Command>,
     wake: Arc<dyn Fn() + Send + Sync>,
     /// The time the feed's intervals and ages are measured in (relists,
@@ -254,6 +291,7 @@ impl Feed {
     fn new(
         snapshots: Sender<Snapshot>,
         notices: Sender<String>,
+        unsent: Sender<(u64, String)>,
         commands: Receiver<Command>,
         wake: Arc<dyn Fn() + Send + Sync>,
         clock: Clock,
@@ -262,6 +300,7 @@ impl Feed {
         Feed {
             snapshots,
             notices,
+            unsent,
             commands,
             wake,
             clock,
@@ -305,6 +344,7 @@ impl Feed {
                 link: Link::Down(one_line(&reason)),
                 synced_secs: 0,
                 can_focus: false,
+                can_input: false,
                 instance: None,
             };
             if self.publish(down).is_err() || !self.pause(backoff) {
@@ -324,6 +364,14 @@ impl Feed {
             match self.commands.recv_timeout(left) {
                 Ok(Command::Watch(panes)) => self.watch(panes),
                 Ok(Command::Focus(_)) => {}
+                // The screen sent these before it heard the link was lost.
+                Ok(Command::Send { pane, text }) => {
+                    self.notice("送信できません: Noa に接続していません".to_owned());
+                    self.give_back(pane, text);
+                }
+                Ok(Command::Close(_)) => {
+                    self.notice("ペインを閉じられません: Noa に接続していません".to_owned());
+                }
                 Err(RecvTimeoutError::Timeout) => return true,
                 Err(RecvTimeoutError::Disconnected) => return false,
             }
@@ -389,6 +437,66 @@ impl Feed {
                     Ok(()) => self.last_contact = self.now(),
                     Err(ClientError::Rpc { message, .. }) => {
                         self.notice(format!("ペインへ移動できません: {message}"));
+                    }
+                    Err(err) => return Err(err.into()),
+                },
+                Ok(Command::Send { pane, text }) => {
+                    // Guard against answering a permission dialog that appeared
+                    // between the user pressing Enter and the feed sending it.
+                    let panels = match client.list_panels() {
+                        Ok(panels) => panels,
+                        Err(err) => {
+                            self.give_back(pane, text);
+                            return Err(err.into());
+                        }
+                    };
+                    self.last_list = self.now();
+                    self.last_contact = self.last_list;
+                    self.tracker.replace(panels, unix_now());
+                    if self
+                        .tracker
+                        .panels
+                        .get(&pane)
+                        .is_some_and(|panel| state_of(panel) == State::Permission)
+                    {
+                        self.notice(
+                            "承認待ちのペインには安全のため送信しませんでした（開く で直接操作してください）"
+                                .to_owned(),
+                        );
+                        self.give_back(pane, text);
+                        continue;
+                    }
+                    match client.send_text(pane, &text, true) {
+                        Ok(()) => {
+                            let delay = client.submit_delay();
+                            if !delay.is_zero() {
+                                std::thread::sleep(delay);
+                            }
+                            match client.send_text(pane, "\r", false) {
+                                Ok(()) => self.last_contact = self.now(),
+                                Err(ClientError::Rpc { message, .. }) => {
+                                    self.notice(format!("送信の確定に失敗しました: {message}"));
+                                }
+                                Err(err) => return Err(err.into()),
+                            }
+                        }
+                        Err(ClientError::Rpc { message, .. }) => {
+                            self.notice(format!("送信できません: {message}"));
+                            self.give_back(pane, text);
+                        }
+                        Err(err) => {
+                            self.give_back(pane, text);
+                            return Err(err.into());
+                        }
+                    }
+                }
+                Ok(Command::Close(pane)) => match client.close_pane(pane) {
+                    Ok(()) => {
+                        self.last_contact = self.now();
+                        self.relist(client)?;
+                    }
+                    Err(ClientError::Rpc { message, .. }) => {
+                        self.notice(format!("ペインを閉じられません: {message}"));
                     }
                     Err(err) => return Err(err.into()),
                 },
@@ -464,6 +572,7 @@ impl Feed {
             link: Link::Live,
             synced_secs: now.saturating_duration_since(self.last_contact).as_secs(),
             can_focus: client.can_focus(),
+            can_input: client.can_input(),
             instance: Some(client.instance().to_owned()),
         })?;
         // From now on the dashboard can have this instance's panes to
@@ -471,6 +580,14 @@ impl Feed {
         self.shown = Some(client.instance().to_owned());
         *sent = Some((fleet, now));
         Ok(())
+    }
+
+    /// A message not delivered (the paste never reached the pane), for the
+    /// screen to make the pane's draft again.
+    fn give_back(&self, pane: u64, text: String) {
+        // As with `notice`, only a gone dashboard fails this.
+        let _ = self.unsent.send((pane, text));
+        (self.wake)();
     }
 
     fn notice(&self, text: String) {
@@ -508,11 +625,14 @@ fn connect() -> Result<Client, String> {
         }
     };
     let url = control_url(&config.server_bind, config.server_port);
-    Client::connect(&url, &token, ScopeSet::from_strings(["read", "control"])).map_err(|err| {
-        match err {
-            ClientError::Rpc { .. } => rpc_reason(&err),
-            other => format!("{url} に接続できません: {other}"),
-        }
+    Client::connect(
+        &url,
+        &token,
+        ScopeSet::from_strings(["read", "control", "input"]),
+    )
+    .map_err(|err| match err {
+        ClientError::Rpc { .. } => rpc_reason(&err),
+        other => format!("{url} に接続できません: {other}"),
     })
 }
 
@@ -1918,7 +2038,15 @@ pub(crate) mod tests {
         // link once and ends instead of waiting to connect again.
         drop(commands);
         let clock: Clock = Box::new(Instant::now);
-        let feed = Feed::new(snapshots, notices, command_rx, Arc::new(|| {}), clock);
+        let unsent = mpsc::channel().0;
+        let feed = Feed::new(
+            snapshots,
+            notices,
+            unsent,
+            command_rx,
+            Arc::new(|| {}),
+            clock,
+        );
         let line = crate::fleet::one_line(BROKEN);
         feed.notice(BROKEN.to_owned());
         assert_eq!(noticed.try_recv().unwrap(), line);
@@ -2061,7 +2189,8 @@ pub(crate) mod tests {
         let (commands, command_rx) = mpsc::channel();
         let wake = Arc::new(|| {});
         let notices = mpsc::channel().0;
-        let feed = Feed::new(snapshots, notices, command_rx, wake, clock.boxed());
+        let unsent = mpsc::channel().0;
+        let feed = Feed::new(snapshots, notices, unsent, command_rx, wake, clock.boxed());
         (feed, published, commands)
     }
 
@@ -2090,6 +2219,10 @@ pub(crate) mod tests {
         focus_takes: Duration,
         /// The panes asked to be focused, in order.
         focused: Vec<u64>,
+        /// Texts sent to panes: `(pane, text, paste)`.
+        sent: Vec<(u64, String, bool)>,
+        /// The panes asked to be closed, in order.
+        closed: Vec<u64>,
         /// The panes whose screens were asked for, in order.
         fetched: Vec<u64>,
         /// Runs during each wait for a notification, as what the window
@@ -2113,6 +2246,8 @@ pub(crate) mod tests {
                 wait_takes: Duration::ZERO,
                 focus_takes: Duration::ZERO,
                 focused: Vec::new(),
+                sent: Vec::new(),
+                closed: Vec::new(),
                 fetched: Vec::new(),
                 on_wait: None,
             }
@@ -2125,6 +2260,10 @@ pub(crate) mod tests {
         }
 
         fn can_focus(&self) -> bool {
+            true
+        }
+
+        fn can_input(&self) -> bool {
             true
         }
 
@@ -2153,6 +2292,21 @@ pub(crate) mod tests {
             self.focused.push(pane);
             self.clock.advance(self.focus_takes);
             Ok(())
+        }
+
+        fn send_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), ClientError> {
+            self.sent.push((pane, text.to_owned(), paste));
+            Ok(())
+        }
+
+        fn close_pane(&mut self, pane: u64) -> Result<(), ClientError> {
+            self.closed.push(pane);
+            self.panels.retain(|panel| panel.pane_id.0 != pane);
+            Ok(())
+        }
+
+        fn submit_delay(&self) -> Duration {
+            Duration::ZERO
         }
 
         fn screen(&mut self, pane: u64) -> Result<String, ClientError> {
@@ -2314,9 +2468,11 @@ pub(crate) mod tests {
         let (snapshot_tx, snapshots) = mpsc::channel();
         let (commands, command_rx) = mpsc::channel();
         let (notice_tx, notices) = mpsc::channel();
+        let (unsent_tx, unsent) = mpsc::channel();
         let mut feed = Feed::new(
             snapshot_tx,
             notice_tx,
+            unsent_tx,
             command_rx,
             Arc::new(|| {}),
             clock.boxed(),
@@ -2324,6 +2480,7 @@ pub(crate) mod tests {
         let channel = Channel {
             snapshots,
             notices,
+            unsent,
             commands,
             _heartbeat: mpsc::channel().0,
         };
@@ -2493,5 +2650,180 @@ pub(crate) mod tests {
                 Err(RecvTimeoutError::Timeout) => panic!("the heartbeat outlives its channel"),
             }
         }
+    }
+
+    #[test]
+    fn send_command_pastes_then_submits_and_blocks_permission_panes() {
+        let clock = TestClock::new();
+        let (mut feed, _published, commands) = held_feed(&clock);
+        let mut noa = ScriptedNoa::showing("a", "$ ready", &clock);
+        commands
+            .send(Command::Send {
+                pane: 2,
+                text: "continue".into(),
+            })
+            .unwrap();
+        assert!(matches!(feed.follow(&mut noa), Err(Stop::Lost(_))));
+        assert_eq!(
+            noa.sent,
+            vec![
+                (2, "continue".to_owned(), true),
+                (2, "\r".to_owned(), false),
+            ]
+        );
+
+        // When the pane is waiting for permission, the feed refuses to send.
+        let (mut feed, _published, commands) = held_feed(&clock);
+        let mut noa = ScriptedNoa::showing("a", "$ allow?", &clock);
+        noa.panels[1] = panel(serde_json::json!({
+            "paneId": "2",
+            "parentPaneId": "1",
+            "label": "a",
+            "agent": { "seq": 1, "kind": "claude", "state": "permission" },
+        }));
+        commands
+            .send(Command::Send {
+                pane: 2,
+                text: "yes".into(),
+            })
+            .unwrap();
+        assert!(matches!(feed.follow(&mut noa), Err(Stop::Lost(_))));
+        assert!(noa.sent.is_empty(), "permission pane must not receive text");
+    }
+
+    /// Every text field's text on the screen, overlays included.
+    fn field_texts(tree: &UiTree) -> Vec<String> {
+        fn walk(tree: &UiTree, id: WidgetId, out: &mut Vec<String>) {
+            if let Some(field) = tree.get::<noa_gpui_core::widgets::TextField>(id) {
+                out.push(field.text().to_owned());
+            }
+            for child in tree.children(id) {
+                walk(tree, *child, out);
+            }
+        }
+        let mut out = Vec::new();
+        for root in tree.root().into_iter().chain(tree.overlays()) {
+            walk(tree, root, &mut out);
+        }
+        out
+    }
+
+    /// A message the feed did not deliver comes back as the draft: refused
+    /// because the pane began to wait for a permission after Enter, and
+    /// dropped because the link was down while the screen still showed it
+    /// live.
+    #[test]
+    fn a_message_the_feed_did_not_deliver_comes_back_as_the_draft() {
+        let clock = TestClock::new();
+        let (snapshot_tx, snapshots) = mpsc::channel();
+        let (commands, command_rx) = mpsc::channel();
+        let (notice_tx, notices) = mpsc::channel();
+        let (unsent_tx, unsent) = mpsc::channel();
+        let mut feed = Feed::new(
+            snapshot_tx,
+            notice_tx,
+            unsent_tx,
+            command_rx,
+            Arc::new(|| {}),
+            clock.boxed(),
+        );
+        let channel = Channel {
+            snapshots,
+            notices,
+            unsent,
+            commands,
+            _heartbeat: mpsc::channel().0,
+        };
+        let window = Size::new(1440.0, 900.0);
+        let mut dashboard = Dashboard::live(Grouping::Orchestrator, channel);
+        let mut text = TextStore::new(Default::default());
+        let frame = |dashboard: &mut Dashboard, text: &mut TextStore| {
+            dashboard.before_frame(text);
+            dashboard.prepare(window, text);
+        };
+        let input = |dashboard: &mut Dashboard, text: &mut TextStore, event: Event| {
+            dashboard.dispatch(event, text);
+            dashboard.prepare(window, text);
+        };
+        let modifiers = Modifiers::default();
+        let send = |dashboard: &mut Dashboard, text: &mut TextStore, message: Option<&str>| {
+            input(
+                dashboard,
+                text,
+                Event::KeyDown {
+                    key: Key::Char('s'),
+                    modifiers,
+                },
+            );
+            input(dashboard, text, Event::Text("s".into()));
+            if let Some(message) = message {
+                input(dashboard, text, Event::Text(message.into()));
+            }
+            input(
+                dashboard,
+                text,
+                Event::KeyDown {
+                    key: Key::Enter,
+                    modifiers,
+                },
+            );
+        };
+        frame(&mut dashboard, &mut text);
+        let mut noa = ScriptedNoa::showing("a", "$ ready", &clock);
+        assert!(matches!(feed.follow(&mut noa), Err(Stop::Lost(_))));
+        frame(&mut dashboard, &mut text);
+        input(
+            &mut dashboard,
+            &mut text,
+            Event::KeyDown {
+                key: Key::Char('j'),
+                modifiers,
+            },
+        );
+        send(&mut dashboard, &mut text, Some("yes"));
+
+        // The pane waits for a permission when the feed comes to send.
+        let mut noa = ScriptedNoa::showing("a", "$ allow?", &clock);
+        noa.panels[1] = panel(serde_json::json!({
+            "paneId": "2",
+            "parentPaneId": "1",
+            "label": "a",
+            "agent": { "seq": 1, "kind": "claude", "state": "permission" },
+        }));
+        assert!(matches!(feed.follow(&mut noa), Err(Stop::Lost(_))));
+        assert!(noa.sent.is_empty());
+        frame(&mut dashboard, &mut text);
+        // Running again: the send field is back, with the message in it.
+        let mut noa = ScriptedNoa::showing("a", "$ ready", &clock);
+        assert!(matches!(feed.follow(&mut noa), Err(Stop::Lost(_))));
+        frame(&mut dashboard, &mut text);
+        assert!(
+            field_texts(dashboard.tree()).contains(&"yes".to_owned()),
+            "{:?}",
+            field_texts(dashboard.tree())
+        );
+
+        // The link is down, though the screen has not heard yet.
+        send(&mut dashboard, &mut text, None);
+        assert!(!field_texts(dashboard.tree()).contains(&"yes".to_owned()));
+        assert!(feed.pause(Duration::from_millis(1)));
+        frame(&mut dashboard, &mut text);
+        assert!(
+            field_texts(dashboard.tree()).contains(&"yes".to_owned()),
+            "{:?}",
+            field_texts(dashboard.tree())
+        );
+    }
+
+    #[test]
+    fn close_command_closes_the_pane_and_relists_at_once() {
+        let clock = TestClock::new();
+        let (mut feed, published, commands) = held_feed(&clock);
+        let mut noa = ScriptedNoa::showing("a", "$ done", &clock);
+        commands.send(Command::Close(2)).unwrap();
+        assert!(matches!(feed.follow(&mut noa), Err(Stop::Lost(_))));
+        assert_eq!(noa.closed, vec![2]);
+        let last = published.try_iter().last().expect("a snapshot");
+        assert!(last.fleet.workers.is_empty(), "closed pane is gone");
     }
 }

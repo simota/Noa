@@ -56,6 +56,8 @@ pub(super) struct HeaderParts {
     pub(super) health: HealthParts,
     /// The row of urgency counts.
     pub(super) counts: WidgetId,
+    /// Each urgency count label and the need it filters when clicked.
+    pub(super) urgency_labels: [(WidgetId, Need); 4],
     pub(super) longest: Option<WidgetId>,
     /// One chip per hidden panel, in `Panel::ALL` order: its keycap and
     /// title.
@@ -185,7 +187,7 @@ pub(super) fn header(
     let health = HealthParts { dot, status };
     health::show_built(tree, health, feed);
 
-    let counts = urgency_counts(tree, bar, workers);
+    let (counts, urgency_labels) = urgency_counts(tree, bar, workers);
 
     let longest = longest(workers).map(|worker| {
         let id = tree.insert(
@@ -239,6 +241,7 @@ pub(super) fn header(
         title,
         health,
         counts,
+        urgency_labels,
         longest,
         chips,
         chip_parts,
@@ -253,11 +256,16 @@ pub(super) fn header(
 
 /// The four urgency counts, each "{title} {n}" in its need's colour, or
 /// muted and light at zero. Counted over every worker, filter or not.
-fn urgency_counts(tree: &mut UiTree, bar: WidgetId, workers: &[Worker]) -> WidgetId {
+fn urgency_counts(
+    tree: &mut UiTree,
+    bar: WidgetId,
+    workers: &[Worker],
+) -> (WidgetId, [(WidgetId, Need); 4]) {
     let row = tree.insert(
         Some(bar),
         Container::row().align_items(AlignItems::CENTER).gap(8.0),
     );
+    let mut ids = Vec::with_capacity(4);
     for (title, need) in URGENCY {
         let n = workers.iter().filter(|w| w.need() == Some(need)).count();
         let label = Label::new(format!("{title} {n}")).font_size(12.0);
@@ -266,9 +274,11 @@ fn urgency_counts(tree: &mut UiTree, bar: WidgetId, workers: &[Worker]) -> Widge
         } else {
             label.weight(700).color(need_color(need))
         };
-        tree.insert(Some(row), label);
+        let id = tree.insert(Some(row), label);
+        ids.push((id, need));
     }
-    row
+    let labels: [(WidgetId, Need); 4] = ids.try_into().expect("four urgency counts");
+    (row, labels)
 }
 
 /// A hidden panel in the header: its keycap and its title, muted, no fill.

@@ -123,10 +123,19 @@ pub(super) fn fill_lanes(
 pub(super) fn lane(tree: &mut UiTree, lanes: WidgetId, worker: &Worker, span: f64) -> WidgetId {
     let row = tree.insert(
         Some(lanes),
-        Container::row()
-            .align_items(AlignItems::CENTER)
-            .gap(8.0)
-            .radius(3.0),
+        Container::new(Style {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::CENTER,
+            gap: super::style::gap(8.0),
+            padding: noa_gpui_core::style::Rect {
+                left: length(6.0),
+                right: length(6.0),
+                top: length(2.0),
+                bottom: length(2.0),
+            },
+            ..Default::default()
+        })
+        .radius(4.0),
     );
     let name = tree.insert(Some(row), Container::row().width(LANE_LABEL_WIDTH));
     tree.insert(
@@ -147,7 +156,8 @@ pub(super) fn lane(tree: &mut UiTree, lanes: WidgetId, worker: &Worker, span: f6
             ..fill_remaining()
         })
         .background(Role::Background)
-        .radius(3.0)
+        .border(1.0, Role::Separator)
+        .radius(4.0)
         .clip(true),
     );
     let scale = if span > 0.0 { LANE_SHARES / span } else { 0.0 };

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -5,8 +6,8 @@ use noa_gpui_core::style::{
     AlignItems, FlexDirection, Rect as LayoutRect, Size as LayoutSize, length, percent,
 };
 use noa_gpui_core::widgets::{
-    ButtonClicked, Chart, Container, Label, LevelIndicator, SelectionChanged, TextChanged,
-    TextField, Truncation,
+    ButtonClicked, Chart, Container, ControlSize, Label, LevelIndicator, ScrollView, SegmentMode,
+    SegmentedControl, SelectionChanged, TextChanged, TextField, Truncation,
 };
 use noa_gpui_core::{
     Appearance, Dirty, Edge, Event, Message, OverlayOptions, Placement, PointerButton, Role, Style,
@@ -16,17 +17,20 @@ use noa_gpui_platform::Screen;
 use noa_gpui_scene::{Color, Point, Size};
 use noa_gpui_text::TextStore;
 
-use crate::fleet::{self, Fleet, Grouping, Tier, Worker};
+use crate::fleet::{self, Fleet, Grouping, Need, State, Tier, Worker};
 use crate::live::{Channel, Command, Link, Snapshot};
 
+mod analytics;
 mod cards;
 mod drawer;
 mod filter;
+mod gantt;
 mod graph;
 mod header;
 mod health;
 mod help;
 mod keymap;
+mod mindmap;
 mod pager;
 mod panel;
 mod queue;
@@ -36,9 +40,11 @@ mod timeline;
 mod urgency;
 use cards::{Cards, done, done_caption, quiet_text, running, running_caption};
 use filter::Filter;
+use gantt::TimeScale;
 use graph::graph;
 use header::{HeaderParts, longest, longest_text, match_text, waited_text};
 use keymap::{Action, Mode, Route};
+use mindmap::MapAxis;
 use pager::ListParts;
 use panel::{Panel, empty, history_row, panel};
 use queue::{QueueButtons, queue, queue_since};
@@ -46,8 +52,51 @@ use select::Step;
 use style::{GUTTER, HEADER_HEIGHT, fill_remaining, gap, set_label, set_tag};
 use timeline::{TimelineParts, fill_lanes, span_text, timeline, timeline_span};
 
+/// The unsent messages a rebuild carries over (`Dashboard::drafts`,
+/// `Dashboard::send_caret`), so the drawer is built with its draft at once.
+#[derive(Default)]
+struct Drafts {
+    text: HashMap<u64, String>,
+    caret: Option<(u64, usize)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tab {
+    #[default]
+    Operations,
+    Analytics,
+    MindMap,
+    Timeline,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 4] = [Tab::Operations, Tab::Analytics, Tab::MindMap, Tab::Timeline];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Tab::Operations => "運用",
+            Tab::Analytics => "統計",
+            Tab::MindMap => "マップ",
+            Tab::Timeline => "タイムライン",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "ops" | "operations" => Some(Tab::Operations),
+            "analytics" | "stats" => Some(Tab::Analytics),
+            "map" | "mindmap" => Some(Tab::MindMap),
+            "timeline" | "gantt" => Some(Tab::Timeline),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct View {
+    tab: Tab,
+    map_axis: MapAxis,
+    time_scale: TimeScale,
     grouping: Grouping,
     /// The queue card shown expanded.
     expanded: Option<u64>,
@@ -60,6 +109,8 @@ struct View {
     detail: Option<u64>,
     /// The worker whose result file the drawer shows, read when asked for.
     result: Option<u64>,
+    /// The worker awaiting a second confirmation to close its pane.
+    confirm_close: Option<u64>,
     /// Whether the keyboard help is open (AC5).
     help: bool,
     /// The first item each panel list shows (AC3, the pager).
@@ -71,6 +122,9 @@ struct View {
 impl View {
     fn of(grouping: Grouping) -> Self {
         View {
+            tab: Tab::Operations,
+            map_axis: MapAxis::Orchestrator,
+            time_scale: TimeScale::All,
             grouping,
             expanded: None,
             info_open: false,
@@ -78,6 +132,7 @@ impl View {
             selected: None,
             detail: None,
             result: None,
+            confirm_close: None,
             help: false,
             first: [0; 5],
             reveal: None,
@@ -95,6 +150,8 @@ struct Feed {
     synced_at: Option<Instant>,
     /// The live feed's `Snapshot::can_focus`.
     can_focus: bool,
+    /// The live feed's `Snapshot::can_input`.
+    can_input: bool,
     /// The server instance the shown pane ids belong to (the last
     /// `Snapshot::instance` that named one).
     instance: Option<String>,
@@ -110,8 +167,8 @@ struct Feed {
 const NOTICE_FOR: Duration = Duration::from_secs(8);
 const NOTICE_HEIGHT: f32 = 24.0;
 const NOTHING_SELECTED: &str = "ワーカーが選ばれていません（J / K で選ぶ）";
-const DRAWER_WIDTH: f32 = 360.0;
-const HELP_WIDTH: f32 = 460.0;
+const DRAWER_WIDTH: f32 = 384.0;
+const HELP_WIDTH: f32 = 520.0;
 /// Where `cancel_press` lets go of a press: outside the window, over no
 /// widget.
 const OUTSIDE: Point = Point::new(-1.0, -1.0);
@@ -152,6 +209,7 @@ impl Feed {
         self.link = Some(snapshot.link);
         self.synced_secs = snapshot.synced_secs;
         self.can_focus = snapshot.can_focus;
+        self.can_input = snapshot.can_input;
         if snapshot.instance.is_some() {
             self.instance = snapshot.instance;
         }
@@ -235,8 +293,22 @@ pub struct Registry {
     timeline: Option<TimelineParts>,
     /// The drawer overlay and its 閉じる.
     drawer: Option<(WidgetId, WidgetId)>,
+    /// The drawer's ペインを閉じる / 本当に閉じる button.
+    close_pane_button: Option<(WidgetId, u64)>,
     /// The drawer's result 表示 / 隠す.
     result_toggle: Option<WidgetId>,
+    /// The drawer's result 再読込 button.
+    result_reload: Option<WidgetId>,
+    /// The drawer's result コピー button.
+    result_copy: Option<WidgetId>,
+    /// The drawer's screen tail コピー button.
+    tail_copy: Option<WidgetId>,
+    /// The drawer's send input field and 送信 button.
+    send_field: Option<(WidgetId, u64)>,
+    send_button: Option<(WidgetId, u64)>,
+    /// Tab-local segmented controls (map axis, timeline scale).
+    axis_control: Option<WidgetId>,
+    scale_control: Option<WidgetId>,
     /// The help overlay and its 閉じる.
     help: Option<(WidgetId, WidgetId)>,
 }
@@ -249,18 +321,21 @@ impl Registry {
         self.marks.clear();
         self.lists = Default::default();
         self.timeline = None;
+        self.axis_control = None;
+        self.scale_control = None;
     }
 }
 
-/// The line under the panels that shows what the last action said, cut at
-/// the window's width. It keeps its height when empty, so a notice moves
-/// nothing.
-fn notice_line(tree: &mut UiTree, root: WidgetId, feed: &Feed) -> WidgetId {
+/// The footer bar under the panels: left notice text (cut at available width)
+/// and right tab switcher (`運用 / 統計 / マップ / タイムライン`). Keeps its
+/// fixed height (`NOTICE_HEIGHT`) so switching notices moves nothing.
+fn notice_line(tree: &mut UiTree, root: WidgetId, feed: &Feed, tab: Tab) -> (WidgetId, WidgetId) {
     let line = tree.insert(
         Some(root),
         Container::new(Style {
             flex_direction: FlexDirection::Row,
             align_items: AlignItems::CENTER,
+            gap: gap(10.0),
             size: LayoutSize {
                 width: percent(1.0),
                 height: length(NOTICE_HEIGHT),
@@ -273,15 +348,37 @@ fn notice_line(tree: &mut UiTree, root: WidgetId, feed: &Feed) -> WidgetId {
             },
             flex_shrink: 0.0,
             ..Default::default()
-        }),
+        })
+        .background(Role::Surface)
+        .border(1.0, Role::Separator),
     );
     let slot = tree.insert(Some(line), Container::new(fill_remaining()));
-    tree.insert(
+    let notice = tree.insert(
         Some(slot),
         Label::new(health::initial_notice(feed))
             .font_size(12.0)
             .truncation(Truncation::Tail),
-    )
+    );
+    let selected = Tab::ALL.iter().position(|t| *t == tab).unwrap_or(0);
+    let tab_control = tree.insert(
+        Some(line),
+        SegmentedControl::new(Tab::ALL.map(Tab::title), SegmentMode::SelectOne)
+            .with_selected(&[selected])
+            .control_size(ControlSize::Small),
+    );
+    (notice, tab_control)
+}
+
+/// The scroll views under `id`, depth first.
+fn scroll_views(tree: &UiTree, id: WidgetId) -> Vec<WidgetId> {
+    let own = tree.get::<ScrollView>(id).map(|_| id);
+    own.into_iter()
+        .chain(
+            tree.children(id)
+                .iter()
+                .flat_map(|child| scroll_views(tree, *child)),
+        )
+        .collect()
 }
 
 fn button_pane(buttons: &[(WidgetId, u64)], source: WidgetId) -> Option<u64> {
@@ -303,9 +400,16 @@ pub struct Dashboard {
     body: WidgetId,
     /// The notice line at the foot of the window (`health::tick`).
     notice: WidgetId,
+    /// The tab switcher in the footer bar.
+    tab_control: WidgetId,
     /// The result file `view.result` shows, as read when 表示 was pressed:
     /// a rebuild shows it again without reading the file.
     preview: Option<(u64, PathBuf, drawer::Preview)>,
+    /// Unsent message drafts per worker pane, kept when switching workers.
+    drafts: HashMap<u64, String>,
+    /// The send field's caret across rebuilds, with the pane whose draft it
+    /// is in: another worker's field puts its caret at its draft's end.
+    send_caret: Option<(u64, usize)>,
     queue_buttons: QueueButtons,
     registry: Registry,
     /// The size the last `prepare` laid the screen out at. A rebuilt screen is
@@ -328,6 +432,9 @@ pub struct Dashboard {
     /// What the open help disabled under it, to enable again when it
     /// closes (`open_help`).
     shielded: Vec<WidgetId>,
+    /// When the close `view.confirm_close` waits for ends unconfirmed: as
+    /// its notice does (`NOTICE_FOR`).
+    close_until: Option<Instant>,
     /// The filter field had the focus when the input being handled began:
     /// a rebuild that input causes focuses the new field. For a release,
     /// what counts is the press: a press moves the focus to what it hits
@@ -366,7 +473,15 @@ impl Dashboard {
     fn start(view: View, feed: Feed) -> Self {
         let mut tree = UiTree::new();
         tree.set_theme(Theme::for_appearance(Appearance::Dark));
-        let mut dashboard = Self::build(tree, view, feed, Filter::default(), false, None);
+        let mut dashboard = Self::build(
+            tree,
+            view,
+            feed,
+            Filter::default(),
+            false,
+            None,
+            Drafts::default(),
+        );
         dashboard.watch();
         dashboard
     }
@@ -379,6 +494,35 @@ impl Dashboard {
             ..Feed::default()
         };
         Self::start(View::of(grouping), feed)
+    }
+
+    /// Switches to an initial tab (e.g. from `--tab=...`) before the first frame.
+    pub fn with_tab(mut self, tab: Tab) -> Self {
+        if self.view.tab == tab {
+            return self;
+        }
+        let mut text = TextStore::new(Default::default());
+        let view = View { tab, ..self.view };
+        self.change_view(view, &mut text);
+        self
+    }
+
+    /// Applies an initial filter query (e.g. from `--filter=...`) before the
+    /// first frame.
+    pub fn with_filter(mut self, query: String) -> Self {
+        let query = fleet::one_line(&query);
+        if query.is_empty() {
+            return self;
+        }
+        let caret = query.len();
+        let field = self.header.filter_field;
+        self.tree.update::<TextField, _>(field, |f, cx| {
+            f.set_text(cx, query.as_str());
+            f.select(cx, caret..caret);
+        });
+        let mut text = TextStore::new(Default::default());
+        self.set_filter(query, caret, &mut text);
+        self
     }
 
     /// One live snapshot, with no feed behind it.
@@ -465,10 +609,11 @@ impl Dashboard {
     }
 
     /// Drops what names a pane of the server instance the screen showed
-    /// until now — the selection, the drawer, the expanded queue card —
-    /// since the new instance may give those ids to other panes: Enter or
-    /// the drawer's 開く would then reach a worker nobody chose. The rebuild
-    /// that follows shows the new server's workers from the top, and asks
+    /// until now — the selection, the drawer, the expanded queue card, the
+    /// unsent drafts — since the new instance may give those ids to other
+    /// panes: Enter, the drawer's 開く or 送信 would then reach a worker
+    /// nobody chose. The rebuild that follows shows the new server's
+    /// workers from the top, and asks
     /// for their tails as every live snapshot does (`apply_received`), even
     /// where the ids are the same: the ids asked for before were the old
     /// instance's panes.
@@ -477,7 +622,10 @@ impl Dashboard {
         self.view.reveal = None;
         self.view.detail = None;
         self.view.result = None;
+        self.view.confirm_close = None;
         self.view.expanded = None;
+        self.drafts.clear();
+        self.send_caret = None;
     }
 
     /// Takes in what the feed sent since the last frame, as of `now`. A
@@ -507,6 +655,9 @@ impl Dashboard {
     /// long the frame took (a rebuild under load can take a second).
     fn frame(&mut self, now: Instant, text: &mut TextStore) {
         self.take_snapshots(now, text);
+        if self.close_until.is_some_and(|until| now >= until) {
+            self.disarm_close(text);
+        }
         let notice = self
             .feed
             .channel
@@ -515,7 +666,38 @@ impl Dashboard {
         if let Some(notice) = notice {
             self.show_notice_at(notice, now);
         }
+        self.take_unsent(text);
         self.tick(now);
+    }
+
+    /// Makes each message the feed gave back undelivered its pane's draft
+    /// again, before what was typed for that pane since; the drawer shows
+    /// it at once when it is on that pane.
+    fn take_unsent(&mut self, text: &mut TextStore) {
+        let unsent: Vec<(u64, String)> = self
+            .feed
+            .channel
+            .as_ref()
+            .map(|channel| channel.unsent.try_iter().collect())
+            .unwrap_or_default();
+        for (pane, message) in unsent {
+            let draft = match self.drafts.remove(&pane) {
+                Some(newer) => format!("{message} {newer}"),
+                None => message,
+            };
+            self.send_caret = Some((pane, draft.len()));
+            self.drafts.insert(pane, draft);
+            if self.registry.send_field.is_some_and(|(_, p)| p == pane) {
+                let focused = self
+                    .registry
+                    .send_field
+                    .is_some_and(|(id, _)| self.tree.focused() == Some(id));
+                self.reopen_drawer(text);
+                if focused && let Some((id, _)) = self.registry.send_field {
+                    self.tree.set_focus(Some(id));
+                }
+            }
+        }
     }
 
     /// The order J / K walk now.
@@ -543,6 +725,8 @@ impl Dashboard {
         };
         let moved = selected != self.view.selected;
         if moved {
+            // The caller's rebuild shows the drawer of the new selection.
+            self.view.confirm_close = None;
             self.view.selected = selected;
             self.view.reveal = selected;
         }
@@ -663,6 +847,30 @@ impl Dashboard {
         }
         self.reorder_queue(text);
         self.paint_selection();
+        if self.view.tab != Tab::Operations {
+            // The other tabs draw what time changes (totals, charts, bars,
+            // waits) with no widget registered to update in place.
+            self.refill_keeping_scroll(text);
+        }
+    }
+
+    /// `refill_body`, each scroll view in the body scrolled back to where
+    /// it was: the refill is the same structure, so they pair in order.
+    fn refill_keeping_scroll(&mut self, text: &mut TextStore) {
+        let positions: Vec<Point> = scroll_views(&self.tree, self.body)
+            .into_iter()
+            .filter_map(|id| self.tree.get::<ScrollView>(id))
+            .map(ScrollView::scroll_position)
+            .collect();
+        self.refill_body(text);
+        for (id, position) in scroll_views(&self.tree, self.body)
+            .into_iter()
+            .zip(positions)
+        {
+            self.tree
+                .update::<ScrollView, _>(id, |s, cx| s.set_scroll_position(cx, position));
+        }
+        self.lay_out_again(text);
     }
 
     /// Puts the queue's cards (and its pager items) in the queue's order
@@ -787,8 +995,18 @@ impl Dashboard {
     fn rebuilt(&mut self, view: View, text: &mut TextStore) {
         let field = self.header.filter_field;
         let refocus = self.filter_had_focus || self.tree.focused() == Some(field);
+        let refocus_send = !refocus
+            && self
+                .registry
+                .send_field
+                .is_some_and(|(id, _)| self.tree.focused() == Some(id));
         if let Some(caret) = self.tree.get::<TextField>(field).map(TextField::caret) {
             self.filter.caret = caret;
+        }
+        if let Some((id, pane)) = self.registry.send_field
+            && let Some(caret) = self.tree.get::<TextField>(id).map(TextField::caret)
+        {
+            self.send_caret = Some((pane, caret));
         }
         let roots: Vec<WidgetId> = self
             .tree
@@ -803,7 +1021,14 @@ impl Dashboard {
         let feed = std::mem::take(&mut self.feed);
         let filter = std::mem::take(&mut self.filter);
         let preview = self.preview.take();
-        let built = Self::build(tree, view, feed, filter, refocus, preview);
+        let drafts = Drafts {
+            text: std::mem::take(&mut self.drafts),
+            caret: self.send_caret,
+        };
+        let mut built = Self::build(tree, view, feed, filter, refocus, preview, drafts);
+        if refocus_send && let Some((id, _)) = built.registry.send_field {
+            built.tree.set_focus(Some(id));
+        }
         let old = std::mem::replace(self, built);
         self.viewport = old.viewport;
         self.watched = old.watched;
@@ -813,6 +1038,7 @@ impl Dashboard {
             self.tick(now);
         }
         self.held = old.held;
+        self.close_until = old.close_until;
         self.filter_had_focus = old.filter_had_focus;
         self.pressed_in_filter = old.pressed_in_filter;
         self.watch();
@@ -838,6 +1064,7 @@ impl Dashboard {
         filter: Filter,
         refocus: bool,
         preview: Option<(u64, PathBuf, drawer::Preview)>,
+        drafts: Drafts,
     ) -> Self {
         let root = tree.insert(
             None,
@@ -862,7 +1089,7 @@ impl Dashboard {
                 ..fill_remaining()
             }),
         );
-        let notice = notice_line(&mut tree, root, &feed);
+        let (notice, tab_control) = notice_line(&mut tree, root, &feed, view.tab);
         if refocus {
             tree.set_focus(Some(header.filter_field));
         }
@@ -877,7 +1104,10 @@ impl Dashboard {
             header,
             body,
             notice,
+            tab_control,
             preview,
+            drafts: drafts.text,
+            send_caret: drafts.caret,
             queue_buttons: QueueButtons::default(),
             registry,
             viewport: None,
@@ -887,6 +1117,7 @@ impl Dashboard {
             ticked: None,
             held: Vec::new(),
             shielded: Vec::new(),
+            close_until: None,
             filter_had_focus: false,
             pressed_in_filter: false,
             #[cfg(test)]
@@ -941,39 +1172,73 @@ impl Dashboard {
             output_caption,
             filtering,
         };
-        for (members, style) in rows {
-            if nobody.is_some() {
-                break;
-            }
-            if !members.iter().any(|p| view.shown[*p as usize]) {
-                continue;
-            }
-            let row = tree.insert(
-                Some(body),
-                Container::new(Style {
-                    flex_direction: FlexDirection::Row,
-                    align_items: AlignItems::STRETCH,
-                    gap: gap(GUTTER),
-                    ..style
-                }),
-            );
-            for &member in members.iter().filter(|p| view.shown[**p as usize]) {
-                let id = panel(tree, row, member.style(&view.shown));
-                #[cfg(test)]
-                {
-                    panels[member as usize] = Some(id);
+        if nobody.is_none() {
+            match view.tab {
+                Tab::Operations => {
+                    for (members, style) in rows {
+                        if !members.iter().any(|p| view.shown[*p as usize]) {
+                            continue;
+                        }
+                        let row = tree.insert(
+                            Some(body),
+                            Container::new(Style {
+                                flex_direction: FlexDirection::Row,
+                                align_items: AlignItems::STRETCH,
+                                gap: gap(GUTTER),
+                                ..style
+                            }),
+                        );
+                        for &member in members.iter().filter(|p| view.shown[**p as usize]) {
+                            let id = panel(tree, row, member.style(&view.shown));
+                            #[cfg(test)]
+                            {
+                                panels[member as usize] = Some(id);
+                            }
+                            match member {
+                                Panel::Queue => {
+                                    queue_buttons = queue(
+                                        tree, id, &matching, workers, &view, filtering, registry,
+                                    );
+                                }
+                                Panel::Running => running(tree, id, &matching, cards, registry),
+                                Panel::Done => done(tree, id, &matching, cards, registry),
+                                Panel::Timeline => {
+                                    timeline(
+                                        tree,
+                                        id,
+                                        &matching,
+                                        view.grouping,
+                                        filtering,
+                                        registry,
+                                    );
+                                }
+                                Panel::Graph => graph(tree, id, &feed.fleet, filter, registry),
+                            }
+                        }
+                    }
                 }
-                match member {
-                    Panel::Queue => {
-                        queue_buttons =
-                            queue(tree, id, &matching, workers, &view, filtering, registry);
-                    }
-                    Panel::Running => running(tree, id, &matching, cards, registry),
-                    Panel::Done => done(tree, id, &matching, cards, registry),
-                    Panel::Timeline => {
-                        timeline(tree, id, &matching, view.grouping, filtering, registry);
-                    }
-                    Panel::Graph => graph(tree, id, &feed.fleet, filter, registry),
+                Tab::Analytics => {
+                    analytics::build(tree, body, &matching, output_caption, filtering, registry);
+                }
+                Tab::MindMap => {
+                    registry.axis_control = Some(mindmap::build(
+                        tree,
+                        body,
+                        &feed.fleet,
+                        filter,
+                        view.map_axis,
+                        registry,
+                    ));
+                }
+                Tab::Timeline => {
+                    registry.scale_control = Some(gantt::build(
+                        tree,
+                        body,
+                        &matching,
+                        view.grouping,
+                        view.time_scale,
+                        registry,
+                    ));
                 }
             }
         }
@@ -1025,6 +1290,9 @@ impl Dashboard {
     /// expanded (a rebuild when another card was); an open drawer moves to
     /// the new worker.
     fn select(&mut self, pane: Option<u64>, text: &mut TextStore) {
+        if self.view.confirm_close != pane {
+            self.view.confirm_close = None;
+        }
         self.view.selected = pane;
         self.view.reveal = pane;
         let mut rebuild = false;
@@ -1136,17 +1404,33 @@ impl Dashboard {
             self.preview = Some((pane, path.to_owned(), drawer::read_result(path)));
         }
         let preview = self.preview.as_ref().map(|(_, _, preview)| preview);
+        let draft = self.drafts.get(&pane).map_or("", String::as_str);
+        let confirm_close = self.view.confirm_close == Some(pane);
         let buttons = drawer::build(
             &mut self.tree,
             root,
-            worker,
-            &self.feed,
-            preview,
+            drawer::DrawerInput {
+                worker,
+                feed: &self.feed,
+                preview,
+                draft,
+                send_caret: match self.send_caret {
+                    Some((of, caret)) if of == pane => caret,
+                    _ => draft.len(),
+                },
+                confirm_close,
+            },
             &mut self.registry,
         );
         self.registry.open_buttons.push((buttons.open, pane));
+        self.registry.close_pane_button = Some((buttons.close_pane, pane));
         self.registry.drawer = Some((root, buttons.close));
         self.registry.result_toggle = buttons.result;
+        self.registry.result_reload = buttons.result_reload;
+        self.registry.result_copy = buttons.result_copy;
+        self.registry.tail_copy = buttons.tail_copy;
+        self.registry.send_field = buttons.send_field.map(|id| (id, pane));
+        self.registry.send_button = buttons.send_button.map(|id| (id, pane));
     }
 
     fn close_drawer(&mut self, text: &mut TextStore) {
@@ -1154,7 +1438,13 @@ impl Dashboard {
             self.tree.close_overlay(root, text);
         }
         self.registry.open_buttons.clear();
+        self.registry.close_pane_button = None;
         self.registry.result_toggle = None;
+        self.registry.result_reload = None;
+        self.registry.result_copy = None;
+        self.registry.tail_copy = None;
+        self.registry.send_field = None;
+        self.registry.send_button = None;
         self.registry
             .pulses
             .retain(|(_, pulse)| !matches!(pulse, Pulse::Drawer(_)));
@@ -1294,22 +1584,261 @@ impl Dashboard {
             Mode::Help
         } else if self.tree.focused() == Some(self.header.filter_field) {
             Mode::Filter
+        } else if self
+            .registry
+            .send_field
+            .is_some_and(|(id, _)| self.tree.focused() == Some(id))
+        {
+            Mode::Send
         } else {
             Mode::Browse
         }
     }
 
-    /// Whether an IME composition is in progress in the filter field.
+    /// Whether an IME composition is in progress in the filter or send field.
     fn composing(&self) -> bool {
-        self.tree
+        let in_filter = self
+            .tree
             .get::<TextField>(self.header.filter_field)
-            .is_some_and(|f| !f.composition().is_empty())
+            .is_some_and(|f| !f.composition().is_empty());
+        let in_send = self.registry.send_field.is_some_and(|(id, _)| {
+            self.tree
+                .get::<TextField>(id)
+                .is_some_and(|f| !f.composition().is_empty())
+        });
+        in_filter || in_send
+    }
+
+    /// Sends the current draft to `pane`. Refused here, the draft stays; a
+    /// message the feed then does not deliver comes back as the draft
+    /// (`Channel::unsent`, `take_unsent`).
+    fn submit_send(&mut self, pane: u64, text: &mut TextStore) {
+        let Some(worker) = self.feed.fleet.worker(pane) else {
+            return;
+        };
+        let label = worker.label.clone();
+        if worker.state == State::Permission {
+            self.show_notice(drawer::PERMISSION_SEND_GUARD.to_owned());
+            return;
+        }
+        let message = self
+            .drafts
+            .get(&pane)
+            .map(|s| s.trim().to_owned())
+            .unwrap_or_default();
+        if message.is_empty() {
+            self.show_notice("送信するメッセージを入力してください".to_owned());
+            return;
+        }
+        match &self.feed.channel {
+            Some(_) if self.feed.link != Some(Link::Live) => {
+                self.show_notice("送信できません: Noa に接続していません".to_owned());
+                return;
+            }
+            Some(_) if !self.feed.can_input => {
+                self.show_notice(format!("送信できません: {}", drawer::NEEDS_INPUT));
+                return;
+            }
+            Some(channel) => {
+                channel.send(Command::Send {
+                    pane,
+                    text: message,
+                });
+            }
+            None => {}
+        }
+        self.drafts.remove(&pane);
+        self.send_caret = None;
+        if let Some((field, field_pane)) = self.registry.send_field
+            && field_pane == pane
+        {
+            self.tree.update::<TextField, _>(field, |f, cx| {
+                f.set_text(cx, "");
+                f.select(cx, 0..0);
+            });
+        }
+        self.tree.set_focus(None);
+        self.show_notice(format!("{label} へ送信しました"));
+        self.lay_out_again(text);
+    }
+
+    /// Two-step confirmation to close `pane` safely.
+    fn request_close_pane(&mut self, pane: u64, text: &mut TextStore) {
+        let Some(worker) = self.feed.fleet.worker(pane) else {
+            return;
+        };
+        let label = worker.label.clone();
+        if self.view.confirm_close != Some(pane) {
+            self.view.confirm_close = Some(pane);
+            self.close_until = Some(Instant::now() + NOTICE_FOR);
+            if self.view.detail == Some(pane) {
+                self.reopen_drawer(text);
+            }
+            self.show_notice(format!(
+                "{label} のペインを閉じますか？ もう一度 X または「本当に閉じる」で実行（Esc でキャンセル）"
+            ));
+            return;
+        }
+        self.view.confirm_close = None;
+        match &self.feed.channel {
+            Some(_) if self.feed.link != Some(Link::Live) => {
+                if self.view.detail == Some(pane) {
+                    self.reopen_drawer(text);
+                }
+                self.show_notice("ペインを閉じられません: Noa に接続していません".to_owned());
+            }
+            Some(_) if !self.feed.can_focus => {
+                if self.view.detail == Some(pane) {
+                    self.reopen_drawer(text);
+                }
+                self.show_notice(
+                    "ペインを閉じられません: Noa の server-scopes に control がありません（例: server-scopes = read,control）"
+                        .to_owned(),
+                );
+            }
+            Some(channel) => {
+                channel.send(Command::Close(pane));
+                if self.view.detail == Some(pane) {
+                    self.reopen_drawer(text);
+                }
+                self.show_notice(format!("{label} のペインを閉じます"));
+            }
+            None => {
+                let old = self.order();
+                self.feed.fleet.workers.retain(|w| w.pane != pane);
+                self.drafts.remove(&pane);
+                self.reselect(&old, Vanish::Neighbour);
+                self.rebuilt(self.view, text);
+                self.show_notice(format!("{label} のペインを閉じました"));
+            }
+        }
+    }
+
+    fn copy_screen_tail(&mut self) {
+        let Some(pane) = self.view.detail else {
+            return;
+        };
+        let Some(worker) = self.feed.fleet.worker(pane) else {
+            return;
+        };
+        if worker.screen_tail.is_empty() {
+            return;
+        }
+        let lines = worker.screen_tail.len();
+        let joined = worker.screen_tail.join("\n");
+        self.tree.clipboard().write_text(&joined);
+        self.show_notice(format!("画面の末尾をコピーしました（{lines} 行）"));
+    }
+
+    fn copy_result(&mut self) {
+        let Some((_, _, Ok((body, _)))) = &self.preview else {
+            return;
+        };
+        let body = body.clone();
+        self.tree.clipboard().write_text(&body);
+        self.show_notice("結果をコピーしました".to_owned());
+    }
+
+    fn toggle_urgency_filter(&mut self, need: Need, text: &mut TextStore) {
+        let token = match need {
+            Need::Approval => "need:approval",
+            Need::Question => "need:question",
+            Need::Failure => "need:failure",
+            Need::Quiet => "need:quiet",
+            Need::Notice => "need:notice",
+        };
+        if self.filter.query.trim().eq_ignore_ascii_case(token) {
+            self.clear_filter(text);
+        } else {
+            let field = self.header.filter_field;
+            let caret = token.len();
+            self.tree.update::<TextField, _>(field, |f, cx| {
+                f.set_text(cx, token);
+                f.select(cx, caret..caret);
+            });
+            self.set_filter(token.to_owned(), caret, text);
+        }
+    }
+
+    /// Handles a direct click on a header urgency count, timeline lane, or
+    /// graph node without changing any widget layout.
+    fn try_direct_click(&mut self, pos: Point, text: &mut TextStore) -> bool {
+        if self.view.help {
+            return false;
+        }
+        let Some(hit) = self.tree.hit_test(pos) else {
+            return false;
+        };
+        if let Some((_, need)) = self
+            .header
+            .urgency_labels
+            .iter()
+            .find(|(id, _)| *id == hit)
+            .copied()
+        {
+            self.disarm_close(text);
+            self.toggle_urgency_filter(need, text);
+            return true;
+        }
+        // Ignore clicks inside an open drawer overlay.
+        if let Some((drawer_root, _)) = self.registry.drawer
+            && self.tree.ancestors(hit).any(|id| id == drawer_root)
+        {
+            return false;
+        }
+        let clicked_pane = self.registry.marks.iter().find_map(|&(id, pane, mark)| {
+            matches!(mark, Mark::Lane | Mark::Node { .. })
+                .then(|| {
+                    self.tree
+                        .ancestors(hit)
+                        .any(|anc| anc == id)
+                        .then_some(pane)
+                })
+                .flatten()
+        });
+        if let Some(pane) = clicked_pane {
+            self.disarm_close(text);
+            if self.view.tab == Tab::Operations {
+                self.select(Some(pane), text);
+            } else {
+                self.set_detail(Some(pane), text);
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Takes back a close that waits for its second press: the next action
+    /// is not that press, or its notice ended. The drawer's button says
+    /// ペインを閉じる again.
+    fn disarm_close(&mut self, text: &mut TextStore) {
+        self.close_until = None;
+        if let Some(pane) = self.view.confirm_close.take()
+            && self.view.detail == Some(pane)
+        {
+            self.reopen_drawer(text);
+        }
     }
 
     fn act(&mut self, action: Action, text: &mut TextStore) {
+        // Only the second X confirms a close (Esc says it was cancelled).
+        if !matches!(action, Action::ClosePane | Action::Back) {
+            self.disarm_close(text);
+        }
         match action {
             Action::Next => self.step(Step::Next, text),
             Action::Prev => self.step(Step::Prev, text),
+            Action::NextWaiting => {
+                match select::next_waiting(
+                    &self.feed.fleet,
+                    &self.view,
+                    &self.filter,
+                    self.view.selected,
+                ) {
+                    Some(pane) => self.select(Some(pane), text),
+                    None => self.show_notice("要対応のワーカーはありません".to_owned()),
+                }
+            }
             Action::Open => match self.view.selected {
                 Some(pane) => self.open(pane),
                 None => self.show_notice(NOTHING_SELECTED.to_owned()),
@@ -1321,6 +1850,70 @@ impl Dashboard {
                 }
                 None => self.show_notice(NOTHING_SELECTED.to_owned()),
             },
+            Action::StartSend => match self.view.selected {
+                Some(pane) => {
+                    if self
+                        .feed
+                        .fleet
+                        .worker(pane)
+                        .is_some_and(|w| w.state == State::Permission)
+                    {
+                        self.show_notice(drawer::PERMISSION_SEND_GUARD.to_owned());
+                        return;
+                    }
+                    if self.view.detail != Some(pane) {
+                        self.set_detail(Some(pane), text);
+                    }
+                    if let Some((field, _)) = self.registry.send_field {
+                        self.tree.set_focus(Some(field));
+                        self.tree.update::<TextField, _>(field, |f, cx| {
+                            let end = f.text().len();
+                            f.select(cx, end..end);
+                        });
+                        let end = self.drafts.get(&pane).map_or(0, String::len);
+                        self.send_caret = Some((pane, end));
+                    }
+                }
+                None => self.show_notice(NOTHING_SELECTED.to_owned()),
+            },
+            Action::SubmitSend => {
+                if let Some((_, pane)) = self.registry.send_field {
+                    self.submit_send(pane, text);
+                }
+            }
+            Action::CancelSend => {
+                self.tree.set_focus(None);
+            }
+            Action::ClosePane => match self.view.selected {
+                Some(pane) => self.request_close_pane(pane, text),
+                None => self.show_notice(NOTHING_SELECTED.to_owned()),
+            },
+            Action::CycleGrouping => {
+                let current = Grouping::ALL
+                    .iter()
+                    .position(|g| *g == self.view.grouping)
+                    .unwrap_or(0);
+                let next = Grouping::ALL[(current + 1) % Grouping::ALL.len()];
+                let view = View {
+                    grouping: next,
+                    ..self.view
+                };
+                self.change_view(view, text);
+                self.show_notice(format!("グループ: {}", next.title()));
+            }
+            Action::NextTab => {
+                let current = Tab::ALL
+                    .iter()
+                    .position(|t| *t == self.view.tab)
+                    .unwrap_or(0);
+                let next = Tab::ALL[(current + 1) % Tab::ALL.len()];
+                let view = View {
+                    tab: next,
+                    ..self.view
+                };
+                self.change_view(view, text);
+                self.show_notice(format!("表示: {}", next.title()));
+            }
             Action::StartFilter => {
                 let field = self.header.filter_field;
                 self.tree.set_focus(Some(field));
@@ -1331,7 +1924,12 @@ impl Dashboard {
                 self.filter.caret = self.filter.query.len();
             }
             Action::Back => {
-                if self.view.detail.is_some() {
+                if let Some(pane) = self.view.confirm_close.take() {
+                    if self.view.detail == Some(pane) {
+                        self.reopen_drawer(text);
+                    }
+                    self.show_notice("ペイン終了をキャンセルしました".to_owned());
+                } else if self.view.detail.is_some() {
                     self.set_detail(None, text);
                 } else if self.filter.active() {
                     self.clear_filter(text);
@@ -1459,7 +2057,7 @@ impl Screen for Dashboard {
         match keymap::route(mode, self.composing(), &event) {
             Route::Act(action) => {
                 self.act(action, text);
-                let typing_on = action == Action::StartFilter
+                let typing_on = matches!(action, Action::StartFilter | Action::StartSend)
                     || (mode == Mode::Filter && matches!(action, Action::Next | Action::Prev));
                 if !typing_on {
                     self.tree.set_focus(None);
@@ -1467,7 +2065,17 @@ impl Screen for Dashboard {
             }
             Route::Swallow => {}
             Route::Tree => {
-                let event = if in_filter {
+                if let Event::PointerDown {
+                    pos,
+                    button: PointerButton::Primary,
+                } = event
+                    && self.try_direct_click(pos, text)
+                {
+                    self.filter_had_focus = false;
+                    self.after_input();
+                    return;
+                }
+                let event = if matches!(mode, Mode::Filter | Mode::Send) {
                     filter::one_line_input(event)
                 } else {
                     event
@@ -1532,20 +2140,93 @@ impl Screen for Dashboard {
             self.set_filter(query, caret, text);
             return;
         }
-        if let Some(SelectionChanged(index)) = message.downcast_ref::<SelectionChanged>()
-            && message.source == self.grouping_control
+        if let Some(TextChanged(value)) = message.downcast_ref::<TextChanged>()
+            && let Some((field, pane)) = self.registry.send_field
+            && message.source == field
         {
-            let view = View {
-                grouping: Grouping::ALL[*index],
-                ..self.view
+            let caret = self
+                .tree
+                .get::<TextField>(field)
+                .map_or(value.len(), TextField::caret);
+            let (value, caret) = match filter::on_one_line(value, caret) {
+                Some((line, caret)) => {
+                    self.tree.update::<TextField, _>(field, |f, cx| {
+                        f.set_text(cx, line.as_str());
+                        f.select(cx, caret..caret);
+                    });
+                    (line, caret)
+                }
+                None => (value.clone(), caret),
             };
-            self.change_view(view, text);
+            if value.is_empty() {
+                self.drafts.remove(&pane);
+            } else {
+                self.drafts.insert(pane, value);
+            }
+            self.send_caret = Some((pane, caret));
             return;
+        }
+        if let Some(SelectionChanged(index)) = message.downcast_ref::<SelectionChanged>() {
+            if message.source == self.grouping_control {
+                let view = View {
+                    grouping: Grouping::ALL[*index],
+                    ..self.view
+                };
+                self.change_view(view, text);
+                return;
+            }
+            if message.source == self.tab_control {
+                let view = View {
+                    tab: Tab::ALL[*index],
+                    ..self.view
+                };
+                self.change_view(view, text);
+                return;
+            }
+            if self.registry.axis_control == Some(message.source) {
+                let view = View {
+                    map_axis: MapAxis::ALL[*index],
+                    ..self.view
+                };
+                self.change_view(view, text);
+                return;
+            }
+            if self.registry.scale_control == Some(message.source) {
+                let view = View {
+                    time_scale: TimeScale::ALL[*index],
+                    ..self.view
+                };
+                self.change_view(view, text);
+                return;
+            }
         }
         if message.downcast_ref::<ButtonClicked>().is_none() {
             return;
         }
         let source = message.source;
+        // Any other button takes back a close waiting for its confirmation;
+        // the drawer's button is relabelled once this click is handled
+        // (relabelling first would give the drawer's buttons new ids).
+        let confirms = self
+            .registry
+            .close_pane_button
+            .is_some_and(|(id, _)| id == source);
+        let disarmed = if confirms {
+            None
+        } else {
+            self.close_until = None;
+            self.view.confirm_close.take()
+        };
+        self.click(source, text);
+        if disarmed.is_some() && disarmed == self.view.detail {
+            self.reopen_drawer(text);
+        }
+    }
+}
+
+impl Dashboard {
+    /// What a clicked button does (`Screen::handle`).
+    fn click(&mut self, source: WidgetId, text: &mut TextStore) {
         if self.queue_buttons.info_toggle == Some(source) {
             let view = View {
                 info_open: !self.view.info_open,
@@ -1572,11 +2253,27 @@ impl Screen for Dashboard {
             self.view.result = if shown { None } else { self.view.detail };
             self.preview = None;
             self.reopen_drawer(text);
+        } else if self.registry.result_reload == Some(source) {
+            self.preview = None;
+            self.reopen_drawer(text);
+        } else if self.registry.result_copy == Some(source) {
+            self.copy_result();
+        } else if self.registry.tail_copy == Some(source) {
+            self.copy_screen_tail();
+        } else if let Some((_, pane)) = self.registry.send_button.filter(|(id, _)| *id == source) {
+            self.submit_send(pane, text);
+        } else if let Some((_, pane)) = self
+            .registry
+            .close_pane_button
+            .filter(|(id, _)| *id == source)
+        {
+            self.request_close_pane(pane, text);
         } else if self
             .registry
             .drawer
             .is_some_and(|(_, close)| close == source)
         {
+            self.view.confirm_close = None;
             self.set_detail(None, text);
         } else if self.registry.help.is_some_and(|(_, close)| close == source) {
             self.close_help(text);

@@ -63,6 +63,9 @@ pub struct RepoTheater {
     diff_cache: HashMap<(String, String), String>,
     /// The file the live feed was last asked to keep refreshing.
     requested_diff: Option<(String, String)>,
+    /// The diff body the log view holds, so an unchanged refresh keeps its
+    /// scroll position and line selection.
+    shown_diff: Option<String>,
 
     // Current selection into `filtered`.
     sel_repo: usize,
@@ -477,6 +480,7 @@ impl RepoTheater {
             tokens: Vec::new(),
             diff_cache: HashMap::new(),
             requested_diff: None,
+            shown_diff: None,
             sel_repo: 0,
             sel_wt: 0,
             sel_file: 0,
@@ -548,8 +552,41 @@ impl RepoTheater {
         }
     }
 
+    /// (repo root, worktree cwd, file path) of the current selection.
+    fn selection_key(&self) -> (Option<String>, Option<String>, Option<String>) {
+        (
+            self.current_repo().map(|r| r.root.clone()),
+            self.current_worktree().map(|w| w.cwd.clone()),
+            self.current_file().map(|f| f.path.clone()),
+        )
+    }
+
+    /// Points the selection indices back at the same repo, worktree and file
+    /// after `filtered` was rebuilt; whatever is gone keeps its old index.
+    fn restore_selection(&mut self, key: (Option<String>, Option<String>, Option<String>)) {
+        let (root, cwd, path) = key;
+        let Some(ri) =
+            root.and_then(|root| self.filtered.repos.iter().position(|r| r.root == root))
+        else {
+            return;
+        };
+        self.sel_repo = ri;
+        let worktrees = &self.filtered.repos[ri].worktrees;
+        let Some(wi) = cwd.and_then(|cwd| worktrees.iter().position(|w| w.cwd == cwd)) else {
+            return;
+        };
+        self.sel_wt = wi;
+        if let Some(fi) =
+            path.and_then(|path| worktrees[wi].files.iter().position(|f| f.path == path))
+        {
+            self.sel_file = fi;
+        }
+    }
+
     fn sync_views(&mut self, text: &mut TextStore) {
+        let key = self.selection_key();
         self.filtered = self.raw_data.filtered(&self.tokens);
+        self.restore_selection(key);
         self.clamp_selection();
         self.rebuild_browser(text);
         self.rebuild_path_control(text);
@@ -729,7 +766,9 @@ impl RepoTheater {
                 (Some(wt), None) => (
                     format!("{} ({}) — 変更ファイルなし", wt.branch, wt.cwd),
                     None,
-                    "(このワークツリーに差分はありません)".into(),
+                    wt.note
+                        .clone()
+                        .unwrap_or_else(|| "(このワークツリーに差分はありません)".into()),
                 ),
                 _ => (
                     "差分シアター".into(),
@@ -752,9 +791,12 @@ impl RepoTheater {
             );
         }
 
-        let lines: Vec<LogLine> = diff_text.lines().map(colorize_diff_line).collect();
-        self.tree
-            .update::<LogView, _>(self.diff_log, |log, cx| log.set_lines(cx, lines));
+        if self.shown_diff.as_deref() != Some(diff_text.as_str()) {
+            let lines: Vec<LogLine> = diff_text.lines().map(colorize_diff_line).collect();
+            self.tree
+                .update::<LogView, _>(self.diff_log, |log, cx| log.set_lines(cx, lines));
+            self.shown_diff = Some(diff_text);
+        }
     }
 
     fn update_terminal(&mut self) {
@@ -955,6 +997,8 @@ impl RepoTheater {
         match &self.source {
             Source::Demo => {
                 self.toast(format!("[DEMO] ペイン #{pane_id} へ指示を送信しました"));
+                self.tree
+                    .update::<TextArea, _>(self.prompt_area, |area, cx| area.set_text(cx, ""));
             }
             Source::Live(ch) => {
                 if !self.can_send {
@@ -968,8 +1012,6 @@ impl RepoTheater {
                 });
             }
         }
-        self.tree
-            .update::<TextArea, _>(self.prompt_area, |area, cx| area.set_text(cx, ""));
     }
 
     fn send_dropped_files(&mut self, paths: &[PathBuf]) {
@@ -1009,6 +1051,11 @@ impl RepoTheater {
         }
         self.diff_mode = mode;
         self.diff_cache.clear();
+        let idx = DiffMode::ALL.iter().position(|m| *m == mode).unwrap_or(0);
+        self.tree
+            .update::<SegmentedControl, _>(self.diff_mode_seg, |seg, cx| {
+                seg.set_selected(cx, &[idx])
+            });
         match &self.source {
             Source::Demo => {
                 self.raw_data = demo_data(mode);
@@ -1035,12 +1082,28 @@ impl RepoTheater {
     fn poll_live(&mut self, text: &mut TextStore) {
         let mut latest = None;
         let mut notices = Vec::new();
+        let mut delivered = Vec::new();
         if let Source::Live(ch) = &self.source {
             while let Ok(snap) = ch.snapshots.try_recv() {
                 latest = Some(snap);
             }
             while let Ok(msg) = ch.notices.try_recv() {
                 notices.push(msg);
+            }
+            while let Ok(sent) = ch.delivered.try_recv() {
+                delivered.push(sent);
+            }
+        }
+        // Clear the prompt only once the pane took it, and only if it was not
+        // edited meanwhile; a failed send leaves it for another try.
+        for sent in delivered {
+            let current = self
+                .tree
+                .get::<TextArea>(self.prompt_area)
+                .map(|a| a.text().trim().to_owned());
+            if current.as_deref() == Some(sent.as_str()) {
+                self.tree
+                    .update::<TextArea, _>(self.prompt_area, |area, cx| area.set_text(cx, ""));
             }
         }
         if let Some(snap) = latest {
@@ -1065,6 +1128,28 @@ impl RepoTheater {
     fn show_notices(&mut self, notices: Vec<String>) {
         for notice in notices {
             self.toast(notice);
+        }
+    }
+
+    fn run_palette_action(&mut self, action: PaletteAction, text: &mut TextStore) {
+        match action {
+            PaletteAction::SelectFile(ri, wi, fi) => {
+                self.sel_repo = ri;
+                self.sel_wt = wi;
+                self.sel_file = fi;
+                self.sync_views(text);
+            }
+            PaletteAction::FocusPane(id) => match &self.source {
+                Source::Demo => self.toast(format!("[DEMO] ペイン #{id} にフォーカス")),
+                Source::Live(ch) => ch.send(Command::Focus(id)),
+            },
+            PaletteAction::SwitchDiffMode(m) => self.set_diff_mode(m, text),
+            PaletteAction::ToggleInspector => self.toggle_inspector(),
+            PaletteAction::Refresh => {
+                if let Source::Live(ch) = &self.source {
+                    ch.send(Command::Refresh);
+                }
+            }
         }
     }
 
@@ -1102,25 +1187,7 @@ impl RepoTheater {
             let action = actions.get(*idx).cloned();
             self.active_palette = None;
             if let Some(action) = action {
-                match action {
-                    PaletteAction::SelectFile(ri, wi, fi) => {
-                        self.sel_repo = ri;
-                        self.sel_wt = wi;
-                        self.sel_file = fi;
-                        self.sync_views(text);
-                    }
-                    PaletteAction::FocusPane(id) => match &self.source {
-                        Source::Demo => self.toast(format!("[DEMO] ペイン #{id} にフォーカス")),
-                        Source::Live(ch) => ch.send(Command::Focus(id)),
-                    },
-                    PaletteAction::SwitchDiffMode(m) => self.set_diff_mode(m, text),
-                    PaletteAction::ToggleInspector => self.toggle_inspector(),
-                    PaletteAction::Refresh => {
-                        if let Source::Live(ch) = &self.source {
-                            ch.send(Command::Refresh);
-                        }
-                    }
-                }
+                self.run_palette_action(action, text);
             }
             return;
         }
@@ -1313,9 +1380,8 @@ mod tests {
 
     // ── Live-mode regression tests driven through a fake channel ─────────────
 
-    use crate::live::test_channel;
+    use crate::live::{TestFeed, test_channel};
     use crate::model::PaneSummary;
-    use std::sync::mpsc::{Receiver, Sender};
 
     const CWD: &str = "/repo";
 
@@ -1338,6 +1404,7 @@ mod tests {
                     branch: "main".into(),
                     ahead: 0,
                     behind: 0,
+                    note: None,
                     panes: vec![PaneSummary {
                         pane_id: 7,
                         name: "zsh".into(),
@@ -1368,31 +1435,29 @@ mod tests {
     struct LiveHarness {
         screen: RepoTheater,
         text: TextStore,
-        snapshots: Sender<Snapshot>,
-        commands: Receiver<Command>,
+        feed: TestFeed,
     }
 
     impl LiveHarness {
         fn new() -> Self {
-            let (channel, snapshots, commands) = test_channel();
+            let (channel, feed) = test_channel();
             let mut h = LiveHarness {
                 screen: RepoTheater::live(channel),
                 text: TextStore::new(Default::default()),
-                snapshots,
-                commands,
+                feed,
             };
             h.deliver(snapshot(DiffMode::Unstaged, Some(("a.rs", "+a v1"))));
             h
         }
 
         fn deliver(&mut self, snap: Snapshot) {
-            self.snapshots.send(snap).unwrap();
+            self.feed.snapshots.send(snap).unwrap();
             self.screen
                 .prepare(Size::new(1440.0, 900.0), &mut self.text);
         }
 
         fn drain(&self) -> Vec<Command> {
-            self.commands.try_iter().collect()
+            self.feed.commands.try_iter().collect()
         }
 
         fn select_file(&mut self, fi: usize) {
@@ -1511,5 +1576,113 @@ mod tests {
             texts,
             vec!["'/Users/x/Desktop/Screen Shot 1.png' /tmp/plain.txt '/tmp/it'\\''s.txt'"]
         );
+    }
+
+    fn prompt_text(screen: &RepoTheater) -> String {
+        screen
+            .tree()
+            .get::<TextArea>(screen.prompt_area)
+            .unwrap()
+            .text()
+            .to_owned()
+    }
+
+    fn set_prompt(screen: &mut RepoTheater, text: &str) {
+        let text = text.to_owned();
+        screen
+            .tree
+            .update::<TextArea, _>(screen.prompt_area, |a, cx| a.set_text(cx, text));
+    }
+
+    #[test]
+    fn missing_base_branch_is_shown_instead_of_no_changes() {
+        let mut h = LiveHarness::new();
+        let mut snap = snapshot(DiffMode::VsMain, None);
+        let wt = &mut snap.data.repos[0].worktrees[0];
+        wt.files.clear();
+        wt.note = Some("比較元ブランチ (main / master / origin/HEAD) が見つかりません".into());
+        h.screen.set_diff_mode(DiffMode::VsMain, &mut h.text);
+        h.deliver(snap);
+        assert_eq!(
+            h.diff_lines(),
+            vec!["比較元ブランチ (main / master / origin/HEAD) が見つかりません"]
+        );
+    }
+
+    #[test]
+    fn selection_follows_the_file_when_earlier_files_appear() {
+        let mut h = LiveHarness::new();
+        h.select_file(1);
+        let mut snap = snapshot(DiffMode::Unstaged, Some(("b.rs", "+b")));
+        let files = &mut snap.data.repos[0].worktrees[0].files;
+        let mut first = files[0].clone();
+        first.path = "0.rs".into();
+        files.insert(0, first);
+        h.deliver(snap);
+        assert_eq!(h.screen.current_file().unwrap().path, "b.rs");
+    }
+
+    #[test]
+    fn selection_follows_the_worktree_when_an_earlier_one_appears() {
+        let mut h = LiveHarness::new();
+        let mut snap = snapshot(DiffMode::Unstaged, None);
+        let mut other = snap.data.repos[0].worktrees[0].clone();
+        other.cwd = "/repo-wt-aaa".into();
+        other.branch = "aaa".into();
+        other.panes[0].pane_id = 99;
+        snap.data.repos[0].worktrees.insert(0, other);
+        h.deliver(snap);
+        assert_eq!(h.screen.current_worktree().unwrap().cwd, CWD);
+        set_prompt(&mut h.screen, "直して");
+        h.drain();
+        h.screen.send_review_prompt();
+        let targets: Vec<u64> = h
+            .drain()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::SendText { pane_id, .. } => Some(pane_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(targets, vec![7]);
+    }
+
+    #[test]
+    fn unchanged_periodic_snapshot_keeps_diff_selection() {
+        let mut h = LiveHarness::new();
+        let diff_log = h.screen.diff_log;
+        h.screen
+            .tree
+            .update::<LogView, _>(diff_log, |log, cx| log.select_lines(cx, 0..1));
+        h.deliver(snapshot(DiffMode::Unstaged, Some(("a.rs", "+a v1"))));
+        let log = h.screen.tree().get::<LogView>(diff_log).unwrap();
+        assert_eq!(log.selected_lines(), Some(0..1));
+    }
+
+    #[test]
+    fn review_prompt_is_kept_until_the_pane_accepts_it() {
+        let mut h = LiveHarness::new();
+        set_prompt(&mut h.screen, "直して");
+        h.screen.send_review_prompt();
+        assert_eq!(prompt_text(&h.screen), "直して");
+        h.feed.notices.send("送信失敗: refused".into()).unwrap();
+        h.deliver(snapshot(DiffMode::Unstaged, Some(("a.rs", "+a v1"))));
+        assert_eq!(prompt_text(&h.screen), "直して");
+        h.feed.delivered.send("直して".into()).unwrap();
+        h.deliver(snapshot(DiffMode::Unstaged, Some(("a.rs", "+a v1"))));
+        assert_eq!(prompt_text(&h.screen), "");
+    }
+
+    #[test]
+    fn diff_mode_from_palette_updates_toolbar_segment() {
+        let mut screen = RepoTheater::demo();
+        let mut text = TextStore::new(Default::default());
+        screen.prepare(Size::new(1440.0, 900.0), &mut text);
+        screen.run_palette_action(PaletteAction::SwitchDiffMode(DiffMode::Staged), &mut text);
+        let seg = screen
+            .tree()
+            .get::<SegmentedControl>(screen.diff_mode_seg)
+            .unwrap();
+        assert_eq!(seg.selected(), &[false, true, false]);
     }
 }

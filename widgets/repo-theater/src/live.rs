@@ -55,6 +55,8 @@ pub enum Command {
 pub struct Channel {
     pub snapshots: Receiver<Snapshot>,
     pub notices: Receiver<String>,
+    /// Review prompts (`SendText { submit: true }`) the pane accepted.
+    pub delivered: Receiver<String>,
     commands: Sender<Command>,
 }
 
@@ -67,15 +69,17 @@ impl Channel {
 pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Channel {
     let (snapshot_tx, snapshots) = mpsc::channel();
     let (notice_tx, notices) = mpsc::channel();
+    let (delivered_tx, delivered) = mpsc::channel();
     let (commands, command_rx) = mpsc::channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
     std::thread::Builder::new()
         .name("repo-theater-live".into())
-        .spawn(move || run(snapshot_tx, notice_tx, command_rx, wake))
+        .spawn(move || run(snapshot_tx, notice_tx, delivered_tx, command_rx, wake))
         .expect("spawn repo-theater-live thread");
     Channel {
         snapshots,
         notices,
+        delivered,
         commands,
     }
 }
@@ -83,6 +87,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Channel {
 fn run(
     snapshot_tx: Sender<Snapshot>,
     notice_tx: Sender<String>,
+    delivered_tx: Sender<String>,
     command_rx: Receiver<Command>,
     wake: Arc<dyn Fn() + Send + Sync>,
 ) {
@@ -139,23 +144,34 @@ fn run(
                                 text,
                                 submit,
                             } => {
-                                let result = send_requests(&text, submit).into_iter().try_for_each(
-                                    |(chunk, paste)| {
-                                        // A pane without bracketed paste would
-                                        // still run each line: refuse instead.
-                                        client.send_text_with(
-                                            pane_id,
-                                            &chunk,
-                                            SendTextOptions {
-                                                paste,
-                                                require_paste_mode: paste && chunk.contains('\n'),
-                                            },
-                                        )
-                                    },
-                                );
+                                let result =
+                                    send_steps(&text, submit).into_iter().try_for_each(|step| {
+                                        match step {
+                                            SendStep::Type { text: chunk, paste } => {
+                                                // A pane without bracketed paste would
+                                                // still run each line: refuse instead.
+                                                client.send_text_with(
+                                                    pane_id,
+                                                    &chunk,
+                                                    SendTextOptions {
+                                                        paste,
+                                                        require_paste_mode: paste
+                                                            && chunk.contains('\n'),
+                                                    },
+                                                )
+                                            }
+                                            SendStep::Pause(d) => {
+                                                std::thread::sleep(d);
+                                                Ok(())
+                                            }
+                                        }
+                                    });
                                 if let Err(err) = result {
                                     let _ = notice_tx.send(format!("送信失敗: {err}"));
                                 } else {
+                                    if submit {
+                                        let _ = delivered_tx.send(text);
+                                    }
                                     let _ = notice_tx
                                         .send(format!("ペイン #{pane_id} へ指示を送信しました"));
                                 }
@@ -249,15 +265,32 @@ fn run(
     }
 }
 
-/// The `noa.sendText` calls (text, paste) that deliver `text` to a pane: the
-/// text as one bracketed paste, so embedded newlines are not each an Enter,
-/// then a raw CR when it should be submitted.
-fn send_requests(text: &str, submit: bool) -> Vec<(String, bool)> {
-    let mut requests = vec![(text.to_owned(), true)];
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SendStep {
+    Type { text: String, paste: bool },
+    Pause(Duration),
+}
+
+/// Pause between a pasted prompt and the Enter that submits it, so a TUI that
+/// debounces paste sees two events (`noa +ctl send`'s `SUBMIT_DELAY`).
+const SUBMIT_DELAY: Duration = Duration::from_millis(150);
+
+/// How `text` is delivered to a pane: the text as one bracketed paste, so
+/// embedded newlines are not each an Enter, then, after [`SUBMIT_DELAY`], a
+/// raw CR when it should be submitted.
+fn send_steps(text: &str, submit: bool) -> Vec<SendStep> {
+    let mut steps = vec![SendStep::Type {
+        text: text.to_owned(),
+        paste: true,
+    }];
     if submit {
-        requests.push(("\r".to_owned(), false));
+        steps.push(SendStep::Pause(SUBMIT_DELAY));
+        steps.push(SendStep::Type {
+            text: "\r".to_owned(),
+            paste: false,
+        });
     }
-    requests
+    steps
 }
 
 type DiffEntry = (String, String, String);
@@ -314,6 +347,7 @@ fn build_snapshot(
                 behind: info.behind,
                 panes,
                 files: info.files,
+                note: info.note,
             };
             (info.repo_name, info.repo_root, wt)
         })
@@ -423,18 +457,33 @@ fn control_url(bind: &str, port: u16) -> String {
 }
 
 #[cfg(test)]
-pub(crate) fn test_channel() -> (Channel, Sender<Snapshot>, Receiver<Command>) {
+#[cfg(test)]
+pub(crate) struct TestFeed {
+    pub snapshots: Sender<Snapshot>,
+    pub notices: Sender<String>,
+    pub delivered: Sender<String>,
+    pub commands: Receiver<Command>,
+}
+
+#[cfg(test)]
+pub(crate) fn test_channel() -> (Channel, TestFeed) {
     let (snapshot_tx, snapshots) = mpsc::channel();
-    let (_notice_tx, notices) = mpsc::channel();
+    let (notice_tx, notices) = mpsc::channel();
+    let (delivered_tx, delivered) = mpsc::channel();
     let (commands, command_rx) = mpsc::channel();
     (
         Channel {
             snapshots,
             notices,
+            delivered,
             commands,
         },
-        snapshot_tx,
-        command_rx,
+        TestFeed {
+            snapshots: snapshot_tx,
+            notices: notice_tx,
+            delivered: delivered_tx,
+            commands: command_rx,
+        },
     )
 }
 
@@ -445,17 +494,30 @@ mod tests {
     #[test]
     fn multiline_text_is_never_written_raw() {
         let text = "[main / a.rs]\n```diff\n+foo\n```\n修正依頼: 直して";
-        let requests = send_requests(text, true);
-        for (chunk, paste) in &requests {
-            assert!(
-                *paste || !chunk.contains('\n'),
-                "raw chunk with newline: {chunk:?}"
-            );
+        let steps = send_steps(text, true);
+        for step in &steps {
+            if let SendStep::Type { text, paste } = step {
+                assert!(
+                    *paste || !text.contains('\n'),
+                    "raw chunk with newline: {text:?}"
+                );
+            }
         }
-        assert_eq!(
-            requests,
-            vec![(text.to_owned(), true), ("\r".to_owned(), false)]
-        );
-        assert_eq!(send_requests("a b", false), vec![("a b".to_owned(), true)]);
+        let typed = |text: &str, paste| SendStep::Type {
+            text: text.to_owned(),
+            paste,
+        };
+        assert_eq!(steps.first(), Some(&typed(text, true)));
+        assert_eq!(steps.last(), Some(&typed("\r", false)));
+        assert_eq!(send_steps("a b", false), vec![typed("a b", true)]);
+    }
+
+    #[test]
+    fn enter_waits_for_the_paste_to_settle() {
+        // Same pause `noa +ctl send` leaves (crates/noa-app/src/ctl.rs
+        // SUBMIT_DELAY) so a TUI that debounces paste sees two events.
+        let steps = send_steps("fix it", true);
+        assert_eq!(steps.len(), 3, "{steps:?}");
+        assert_eq!(steps[1], SendStep::Pause(Duration::from_millis(150)));
     }
 }

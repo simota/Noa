@@ -14,6 +14,7 @@ pub struct WorktreeGitInfo {
     pub ahead: usize,
     pub behind: usize,
     pub files: Vec<ChangedFile>,
+    pub note: Option<String>,
 }
 
 fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
@@ -99,6 +100,8 @@ pub fn inspect_worktree(cwd: &str, mode: DiffMode) -> Option<WorktreeGitInfo> {
             None => Vec::new(),
         },
     };
+    let note = (mode == DiffMode::VsMain && range.is_none())
+        .then(|| "比較元ブランチ (main / master / origin/HEAD) が見つかりません".to_owned());
     let numstat_out = if numstat_args.is_empty() {
         String::new()
     } else {
@@ -161,6 +164,7 @@ pub fn inspect_worktree(cwd: &str, mode: DiffMode) -> Option<WorktreeGitInfo> {
         ahead,
         behind,
         files,
+        note,
     })
 }
 
@@ -461,5 +465,20 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         assert_eq!(paths, vec!["old.rs"]);
         let diff = file_diff(cwd(&repo), "old.rs", DiffMode::VsMain);
         assert!(diff.contains("+fn changed() {}"), "{diff}");
+    }
+
+    #[test]
+    fn vs_main_without_base_branch_says_so() {
+        let repo = temp_repo("nobase", "trunk");
+        let info = inspect_worktree(cwd(&repo), DiffMode::VsMain).unwrap();
+        assert!(info.files.is_empty());
+        let note = info.note.expect("a note explaining the empty list");
+        assert!(note.contains("比較元ブランチ"), "{note}");
+        // A repo that has a base has no note.
+        let repo = temp_repo("withbase", "main");
+        assert_eq!(
+            inspect_worktree(cwd(&repo), DiffMode::VsMain).unwrap().note,
+            None
+        );
     }
 }

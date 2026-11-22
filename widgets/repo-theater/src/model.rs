@@ -74,6 +74,8 @@ pub struct Worktree {
     pub behind: usize,
     pub panes: Vec<PaneSummary>,
     pub files: Vec<ChangedFile>,
+    /// Why `files` may be empty for a reason other than "no changes".
+    pub note: Option<String>,
 }
 
 impl Worktree {
@@ -291,6 +293,7 @@ pub fn demo_data(mode: DiffMode) -> TheaterData {
                         branch: "feat/pane-subscriptions".into(),
                         ahead: 3,
                         behind: 0,
+                        note: None,
                         panes: vec![PaneSummary {
                             pane_id: 12,
                             name: "claude · subs".into(),
@@ -365,6 +368,7 @@ pub fn demo_data(mode: DiffMode) -> TheaterData {
                         branch: "fix/ipc-reconnect".into(),
                         ahead: 1,
                         behind: 1,
+                        note: None,
                         panes: vec![PaneSummary {
                             pane_id: 19,
                             name: "codex · reconnect".into(),
@@ -421,6 +425,7 @@ pub fn demo_data(mode: DiffMode) -> TheaterData {
                         branch: "main".into(),
                         ahead: 0,
                         behind: 0,
+                        note: None,
                         panes: vec![PaneSummary {
                             pane_id: 3,
                             name: "zsh · Noa".into(),
@@ -461,6 +466,7 @@ pub fn demo_data(mode: DiffMode) -> TheaterData {
                     branch: "feat/diff-highlight".into(),
                     ahead: 2,
                     behind: 0,
+                    note: None,
                     panes: vec![PaneSummary {
                         pane_id: 27,
                         name: "agy · gpui".into(),
@@ -525,6 +531,7 @@ mod tests {
             branch: "(detached)".into(),
             ahead: 0,
             behind: 0,
+            note: None,
             panes: Vec::new(),
             files: vec![file("src/lib.rs")],
         };

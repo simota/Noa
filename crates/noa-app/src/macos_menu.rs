@@ -401,6 +401,12 @@ impl MacosMenu {
                     true,
                     None,
                 ),
+                &MenuItem::with_id(
+                    AppCommand::OpenDiscussion.menu_id(),
+                    "Discussion",
+                    true,
+                    None,
+                ),
                 &auto_approve,
                 &PredefinedMenuItem::separator(),
                 &MenuItem::with_id(

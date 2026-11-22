@@ -1,7 +1,8 @@
 //! Start a noa-gpui widget program (`widgets/<crate>`, with its own event
-//! loop) beside Noa: the agent dashboard (`agent-dashboard.open`) and the repo
-//! theater (`repo-theater.open`). They read Noa's panes through the control
-//! server, so each runs as a process of its own.
+//! loop) beside Noa: the agent dashboard (`agent-dashboard.open`), the repo
+//! theater (`repo-theater.open`) and the discussion (`discussion.open`). They
+//! read Noa's panes through the control server, so each runs as a process of
+//! its own.
 
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -32,6 +33,12 @@ pub(crate) const REPO_THEATER: HelperProgram = HelperProgram {
     title: "Repo Theater",
     bundled: "Noa Repo Theater",
     crate_name: "repo-theater",
+};
+
+pub(crate) const DISCUSSION: HelperProgram = HelperProgram {
+    title: "Discussion",
+    bundled: "Noa Discussion",
+    crate_name: "discussion",
 };
 
 /// How much of the program's stderr is kept to say why it exited.
@@ -218,7 +225,7 @@ mod tests {
 
     #[test]
     fn the_dev_build_dirs_are_each_programs_own_crate_target_dirs() {
-        for helper in [AGENT_DASHBOARD, REPO_THEATER] {
+        for helper in [AGENT_DASHBOARD, REPO_THEATER, DISCUSSION] {
             let dirs = dev_build_dirs(helper);
             assert_eq!(dirs.len(), 2);
             let crate_dir = format!("widgets/{}/target", helper.crate_name);
@@ -255,6 +262,26 @@ mod tests {
         assert_eq!(
             locate(REPO_THEATER, Some(&exe_dir), std::slice::from_ref(&dev)),
             Some(dev.join("repo-theater"))
+        );
+        for dir in [exe_dir, dev] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn discussion_is_found_by_its_own_binary_name() {
+        let exe_dir = scratch_dir("discussion-exe");
+        let dev = scratch_dir("discussion-dev");
+        std::fs::write(dev.join(REPO_THEATER.crate_name), "").unwrap();
+        assert_eq!(
+            locate(DISCUSSION, Some(&exe_dir), std::slice::from_ref(&dev)),
+            None
+        );
+        std::fs::write(exe_dir.join("Noa Discussion"), "").unwrap();
+        std::fs::write(dev.join("discussion"), "").unwrap();
+        assert_eq!(
+            locate(DISCUSSION, Some(&exe_dir), std::slice::from_ref(&dev)),
+            Some(exe_dir.join("Noa Discussion"))
         );
         for dir in [exe_dir, dev] {
             let _ = std::fs::remove_dir_all(dir);

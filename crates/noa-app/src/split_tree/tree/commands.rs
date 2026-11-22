@@ -66,6 +66,7 @@ pub fn resolve_pane_command_target(
         | AppCommand::ToggleEmber
         | AppCommand::OpenAgentDashboard
         | AppCommand::OpenRepoTheater
+        | AppCommand::OpenDiscussion
         | AppCommand::Spawn(_)
         | AppCommand::ToggleSidebar
         | AppCommand::ToggleAutoApprove

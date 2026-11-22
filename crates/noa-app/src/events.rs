@@ -135,8 +135,9 @@ pub enum UserEvent {
     },
     /// A pane was picked in Ember's menu bar list.
     EmberJump(SessionCardId),
-    /// A widget program (`agent-dashboard.open`, `repo-theater.open`) exited
-    /// unsuccessfully; the text says why, for a toast.
+    /// A widget program (`agent-dashboard.open`, `repo-theater.open`,
+    /// `discussion.open`) exited unsuccessfully; the text says why, for a
+    /// toast.
     HelperProgramFailed(String),
 }
 

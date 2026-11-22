@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- View > Discussion (and the command palette's Open Discussion) opens the
+  discussion, a separate window where a moderator agent relays a topic to
+  claude, codex and agy panelists, each running in a pane of a Noa tab of its
+  own, and summarizes every round. `Noa.app` ships it as "Noa Discussion".
+
 ## [0.9.10] - 2026-11-22
 
 A repo theater window that reviews every worktree's diffs beside its panes.

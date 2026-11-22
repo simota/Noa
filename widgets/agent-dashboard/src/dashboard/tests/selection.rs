@@ -255,7 +255,7 @@ fn the_drawer_follows_any_reselection() {
     assert_eq!(pane, selected, "the drawer's 開く");
     key(&mut dashboard, &mut text, Key::Enter);
     let status = status_of(&dashboard);
-    assert_eq!(status, format!("モック: {label} のペインへ移動します"));
+    assert_eq!(status, format!("{label} のペインへ移動します"));
 }
 
 #[test]

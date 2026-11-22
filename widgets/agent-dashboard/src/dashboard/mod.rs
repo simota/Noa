@@ -937,7 +937,7 @@ impl Dashboard {
                 channel.send(Command::Focus(pane));
                 format!("{} のペインへ移動します", worker.label)
             }
-            None => format!("モック: {} のペインへ移動します", worker.label),
+            None => format!("{} のペインへ移動します", worker.label),
         };
         self.show_notice(status);
     }

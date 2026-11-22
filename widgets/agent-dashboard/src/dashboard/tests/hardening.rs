@@ -232,7 +232,7 @@ fn the_help_cancels_a_left_press_whatever_else_is_held() {
         // A press of its own opens the pane as before.
         click(&mut dashboard, &mut text, pos);
         let label = label_of(&dashboard, pane).to_owned();
-        let opened = format!("モック: {label} のペインへ移動します");
+        let opened = format!("{label} のペインへ移動します");
         assert_eq!(status_of(&dashboard), opened, "{chord:?}");
     }
 }

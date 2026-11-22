@@ -225,7 +225,14 @@ pub fn file_diff(cwd: &str, path: &str, mode: DiffMode) -> String {
             None => return format!("(比較元ブランチ main / master が見つかりません: {path})"),
         },
     }
-    args.extend(["--", path]);
+    // A rename is only paired, and its edits shown, when both of its paths
+    // are in the pathspec.
+    let orig = (mode != DiffMode::Unstaged)
+        .then(|| rename_source(dir, &args, path))
+        .flatten();
+    args.push("--");
+    args.extend(orig.as_deref());
+    args.push(path);
     let out = run_git(dir, &args).unwrap_or_default();
     if !out.trim().is_empty() {
         return out;
@@ -241,12 +248,13 @@ pub fn file_diff(cwd: &str, path: &str, mode: DiffMode) -> String {
                 target.display()
             );
         }
-        if let Ok(content) = std::fs::read_to_string(&full) {
+        if let Some(preview) = read_preview(&full) {
+            let lines: Vec<&str> = preview.lines().take(PREVIEW_LINES).collect();
             let mut buf = format!(
                 "--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
-                content.lines().count()
+                lines.len()
             );
-            for line in content.lines().take(500) {
+            for line in lines {
                 buf.push('+');
                 buf.push_str(line);
                 buf.push('\n');
@@ -255,6 +263,44 @@ pub fn file_diff(cwd: &str, path: &str, mode: DiffMode) -> String {
         }
     }
     format!("(差分なし: {path})")
+}
+
+/// How much of an untracked file the preview shows: at most this many lines
+/// of at most this many leading bytes, so a huge file is never read whole.
+const PREVIEW_LINES: usize = 500;
+const PREVIEW_BYTES: u64 = 64 * 1024;
+
+/// The first [`PREVIEW_BYTES`] of `path` as text, or `None` if it cannot be
+/// read (a directory, a missing file).
+fn read_preview(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(PREVIEW_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The source path of `path` when the diff `args` (without pathspecs) pair
+/// it as the destination of a rename or copy.
+fn rename_source(dir: &Path, args: &[&str], path: &str) -> Option<String> {
+    let mut status = args.to_vec();
+    status.extend(["--name-status", "-z"]);
+    let out = run_git(dir, &status)?;
+    let mut entries = out.split('\0');
+    while let Some(code) = entries.next() {
+        if code.starts_with('R') || code.starts_with('C') {
+            let (from, to) = (entries.next()?, entries.next()?);
+            if to == path {
+                return Some(from.to_owned());
+            }
+        } else {
+            entries.next();
+        }
+    }
+    None
 }
 
 struct PorcelainStatus {
@@ -642,5 +688,35 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         assert!(!diff.contains("EXTERNAL"), "{diff}");
         assert!(!diff.contains('\x1b'), "{diff:?}");
         assert!(diff.lines().any(|l| l == "+fn b() {}"), "{diff}");
+    }
+
+    #[test]
+    fn edited_rename_diff_shows_the_edits_not_a_new_file() {
+        let repo = temp_repo("rename-edit", "main");
+        let body = "a\nb\nc\nd\ne\nf\ng\nh\n";
+        std::fs::write(repo.0.join("old.rs"), body).unwrap();
+        git(&repo.0, &["commit", "-q", "-am", "body"]);
+        git(&repo.0, &["checkout", "-q", "-b", "feature"]);
+        git(&repo.0, &["mv", "old.rs", "new.rs"]);
+        std::fs::write(repo.0.join("new.rs"), body.replace("d\n", "D\n")).unwrap();
+        git(&repo.0, &["add", "."]);
+        let check = |diff: &str| {
+            assert!(diff.contains("rename from old.rs"), "{diff}");
+            assert!(diff.contains("-d\n") && diff.contains("+D\n"), "{diff}");
+            assert!(!diff.contains("+a\n"), "{diff}");
+        };
+        check(&file_diff(cwd(&repo), "new.rs", DiffMode::Staged));
+        git(&repo.0, &["commit", "-q", "-m", "rename"]);
+        check(&file_diff(cwd(&repo), "new.rs", DiffMode::VsMain));
+    }
+
+    #[test]
+    fn untracked_preview_reads_a_bounded_prefix() {
+        let repo = temp_repo("big-untracked", "main");
+        let line = "x".repeat(4 * 1024 * 1024);
+        std::fs::write(repo.0.join("huge.log"), format!("{line}\nsecond\n")).unwrap();
+        let diff = file_diff(cwd(&repo), "huge.log", DiffMode::Unstaged);
+        assert!(diff.len() <= 80 * 1024, "{} bytes", diff.len());
+        assert!(diff.starts_with("--- /dev/null"), "{}", &diff[..80]);
     }
 }

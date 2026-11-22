@@ -1,0 +1,1677 @@
+//! Runs one discussion against a live Noa, on a thread of its own.
+//!
+//! The runner owns the [`Engine`] and the [`Store`]. It opens a Noa tab for
+//! the discussion, starts the moderator and every panelist there as
+//! interactive agents (`claude`, `codex`, `agy`) in splits, carries out the
+//! engine's effects (briefs pasted and submitted, reply files watched), and
+//! feeds back what it sees: deliveries, agent state reports, reply files,
+//! the user's actions and the time. A lost connection is retried with
+//! backoff; the discussion keeps its state meanwhile.
+//!
+//! The UI starts it with [`spawn_session`] and gets a [`SessionHandle`]:
+//! [`Update`]s come in on `handle.updates` (call the `wake` it was given
+//! for each), and [`Action`]s go out with `handle.send`. Dropping the
+//! handle, or sending [`Action::Stop`], ends the thread; the agents' panes
+//! stay open.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use discussion::engine::{AgentState, Config, Effect, Engine, EngineError, Input};
+use discussion::model::types::{
+    AgentKind, DebateId, IssueId, Millis, PartId, Phase, RoundNo, Session, SessionId,
+};
+use discussion::store::{self, Store};
+
+use super::ipc::{Changes, Connect, IpcConnect, Noa, NoaError, PaneSpec, PaneView, Placement};
+
+/// How long one step waits for Noa's state changes (or sleeps while the
+/// link is down): the runner's reaction time.
+const POLL: Duration = Duration::from_millis(200);
+/// How often the engine gets `Tick` for its timeouts.
+const TICK_EVERY: Millis = 1_000;
+/// Waits between connection attempts: 0.5 s doubling up to 8 s.
+const BACKOFF_MIN: Millis = 500;
+const BACKOFF_MAX: Millis = 8_000;
+/// Pause between a pasted brief and the Enter that submits it, so a TUI
+/// that debounces paste sees two events (`noa +ctl send`'s `SUBMIT_DELAY`).
+const SUBMIT_DELAY: Duration = Duration::from_millis(150);
+/// A fresh pane is ready for its first brief once its agent has reported
+/// something other than `running`, or its screen has shown the same text
+/// this long (`noa +ctl spawn --ready`'s rule)...
+const QUIET_FOR: Millis = 1_500;
+/// ...or, failing both, this long after it was spawned. A brief whose pane
+/// has not enabled bracketed paste this long after it was queued fails.
+const READY_LIMIT: Millis = 30_000;
+/// A reply file is taken in once its text has stayed the same this long, so
+/// a file still being written is not read half-done.
+const REPLY_STABLE_FOR: Millis = 600;
+/// Panes started for one brief before its send counts as failed: an agent
+/// that exits at once would otherwise be respawned forever.
+const MAX_SPAWNS: u8 = 2;
+
+/// What starts a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Start {
+    /// A new discussion, stored under `root` (usually
+    /// [`store::default_root`]).
+    New {
+        topic: String,
+        moderator: AgentKind,
+        panel: Vec<AgentKind>,
+        root: PathBuf,
+    },
+    /// The discussion stored at `dir`, picked up where it stopped.
+    Resume { dir: PathBuf },
+}
+
+/// What the user does. Times are stamped by the runner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    /// Speak into the meeting; `to` empty means everyone.
+    Intervene {
+        to: Vec<PartId>,
+        body: String,
+    },
+    /// Approve the proposed debate, optionally with other sides.
+    ApproveDebate {
+        id: DebateId,
+        pro: Option<Vec<PartId>>,
+        con: Option<Vec<PartId>>,
+    },
+    DeclineDebate {
+        id: DebateId,
+    },
+    /// Start a debate on an issue (⚔); sides default to the latest stances.
+    StartDebate {
+        issue: IssueId,
+        pro: Option<Vec<PartId>>,
+        con: Option<Vec<PartId>>,
+    },
+    /// Try the current round's failed briefs again.
+    Retry,
+    /// End the runner. The agents' panes stay open.
+    Stop,
+}
+
+/// The state of the connection to Noa.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Link {
+    Connecting,
+    Live,
+    /// Why it is down; the runner keeps retrying.
+    Down(String),
+}
+
+/// What the runner tells the UI.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Update {
+    /// The session after a change (sent first once it is open).
+    Session(Box<Session>),
+    Link(Link),
+    /// Something to show briefly: a refused action, a pane that closed.
+    Notice(String),
+    /// The runner stopped: `Ok` after [`Action::Stop`], `Err` with why it
+    /// could not go on (the session could not be opened or written).
+    Ended(Result<(), String>),
+}
+
+/// The UI's end of a running session.
+pub struct SessionHandle {
+    pub updates: Receiver<Update>,
+    actions: Sender<Action>,
+}
+
+impl SessionHandle {
+    pub fn send(&self, action: Action) {
+        let _ = self.actions.send(action);
+    }
+}
+
+/// Runs `start` against the running Noa on a new thread. `wake` is called
+/// after every update sent.
+pub fn spawn_session(start: Start, wake: impl Fn() + Send + 'static) -> SessionHandle {
+    let (update_tx, updates) = mpsc::channel();
+    let (actions, action_rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("discussion-live".into())
+        .spawn(move || {
+            run_session(
+                start,
+                IpcConnect,
+                SystemClock,
+                Config::default(),
+                action_rx,
+                update_tx,
+                wake,
+            )
+        })
+        .expect("spawn discussion-live thread");
+    SessionHandle { updates, actions }
+}
+
+/// The runner's loop, with Noa, the clock and the engine's config given:
+/// [`spawn_session`] runs it with the real ones.
+pub fn run_session<C: Connect, K: Clock>(
+    start: Start,
+    connector: C,
+    clock: K,
+    config: Config,
+    actions: Receiver<Action>,
+    updates: Sender<Update>,
+    wake: impl Fn() + 'static,
+) {
+    let wake: Rc<dyn Fn()> = Rc::new(wake);
+    let opened = Runner::open(
+        start,
+        connector,
+        clock,
+        config,
+        actions,
+        updates.clone(),
+        wake.clone(),
+    );
+    let result = opened.and_then(|mut runner| runner.run());
+    let _ = updates.send(Update::Ended(result));
+    wake();
+}
+
+/// Wall-clock time in ms, and sleeping: injected so the runner is tested
+/// without waiting.
+pub trait Clock {
+    fn now(&self) -> Millis;
+    fn sleep(&self, duration: Duration);
+}
+
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Millis {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as Millis)
+    }
+
+    fn sleep(&self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+}
+
+/// How an agent is started in its pane: through the user's login shell, so
+/// it finds `claude`/`codex`/`agy` on the PATH the user's shell sets up
+/// (Noa started from Finder has a bare one), then `exec`ed so the agent is
+/// the pane's foreground program.
+fn agent_argv(kind: AgentKind) -> Vec<String> {
+    let shell = std::env::var("SHELL")
+        .ok()
+        .filter(|shell| shell.starts_with('/'))
+        .unwrap_or_else(|| "/bin/zsh".to_owned());
+    vec![
+        shell,
+        "-l".into(),
+        "-i".into(),
+        "-c".into(),
+        format!("exec {}", kind.command()),
+    ]
+}
+
+fn agent_state(state: Option<&str>) -> Option<AgentState> {
+    Some(match state? {
+        "running" => AgentState::Running,
+        "permission" => AgentState::Permission,
+        "input" => AgentState::Input,
+        "finished" => AgentState::Finished,
+        "error" => AgentState::Error,
+        _ => return None,
+    })
+}
+
+/// Whether the engine still waits for `part`'s brief of `round` to be
+/// delivered or answered (the engine's own rule for a brief in play).
+fn in_play(session: &Session, round: RoundNo, part: &PartId) -> bool {
+    let Some(current) = session.current_round() else {
+        return false;
+    };
+    if current.no != round {
+        return false;
+    }
+    let phase_ok = if *part == session.moderator.id {
+        current.phase == Phase::Summarizing
+    } else {
+        matches!(current.phase, Phase::Briefing | Phase::Awaiting)
+    };
+    phase_ok
+        && current
+            .brief(part)
+            .is_some_and(|b| b.receipt.replied.is_none() && b.receipt.failed.is_none())
+}
+
+enum Fail {
+    /// The connection is gone: reconnect, keep everything else.
+    Link(String),
+    /// The session cannot go on.
+    Fatal(String),
+}
+
+impl From<String> for Fail {
+    fn from(why: String) -> Self {
+        Fail::Fatal(why)
+    }
+}
+
+fn link(err: NoaError) -> Fail {
+    match err {
+        NoaError::Link(why) => Fail::Link(why),
+        other => Fail::Link(other.to_string()),
+    }
+}
+
+/// An agent's pane.
+#[derive(Debug, Clone)]
+struct Pane {
+    id: u64,
+    spawned_at: Millis,
+    /// Ready for a brief (see [`QUIET_FOR`]).
+    ready: bool,
+    /// The agent's last report count and state.
+    seq: u64,
+    state: Option<String>,
+    /// The screen text last seen and since when, while waiting for ready.
+    quiet: Option<(String, Millis)>,
+}
+
+impl Pane {
+    fn new(id: u64, now: Millis) -> Self {
+        Pane {
+            id,
+            spawned_at: now,
+            ready: false,
+            seq: 0,
+            state: None,
+            quiet: None,
+        }
+    }
+}
+
+/// A brief waiting to be typed into its agent's pane.
+#[derive(Debug, Clone)]
+struct Delivery {
+    round: RoundNo,
+    part: PartId,
+    body: String,
+    queued: Millis,
+    /// The text is in; only the Enter is left (the link went down between).
+    pasted: bool,
+    spawns: u8,
+}
+
+/// A reply file being watched.
+#[derive(Debug, Clone)]
+struct Watch {
+    round: RoundNo,
+    part: PartId,
+    /// The text last read and since when it has been the same.
+    seen: Option<(String, Millis)>,
+    /// The text last given to the engine.
+    reported: Option<String>,
+}
+
+pub(crate) struct Runner<C: Connect, K: Clock> {
+    engine: Engine,
+    store: Store,
+    connector: C,
+    clock: K,
+    actions: Receiver<Action>,
+    updates: Sender<Update>,
+    wake: Rc<dyn Fn()>,
+    conn: Option<C::Conn>,
+    next_connect: Millis,
+    backoff: Millis,
+    /// `Start` has gone to the engine (after the first connection).
+    started: bool,
+    /// Every participant's pane was started once (on the first connection).
+    spawned_all: bool,
+    panes: BTreeMap<PartId, Pane>,
+    deliveries: Vec<Delivery>,
+    watches: BTreeMap<PathBuf, Watch>,
+    next_tick: Millis,
+    ui_gone: bool,
+}
+
+impl<C: Connect, K: Clock> Runner<C, K> {
+    fn open(
+        start: Start,
+        connector: C,
+        clock: K,
+        config: Config,
+        actions: Receiver<Action>,
+        updates: Sender<Update>,
+        wake: Rc<dyn Fn()>,
+    ) -> Result<Self, String> {
+        let now = clock.now();
+        let (engine, store) = match start {
+            Start::New {
+                topic,
+                moderator,
+                panel,
+                root,
+            } => {
+                let id = SessionId::at(now);
+                let dir = store::session_dir(&root, &id);
+                let (engine, out) =
+                    Engine::create(id, &topic, moderator, &panel, &dir, config, now)
+                        .map_err(|e| format!("討論を始められません: {e}"))?;
+                let first = out.batches.first().map(Vec::as_slice).unwrap_or_default();
+                let store = Store::create(&dir, first)
+                    .map_err(|e| format!("{} を作れません: {e}", dir.display()))?;
+                (engine, store)
+            }
+            Start::Resume { dir } => {
+                let (store, session) = Store::open(&dir)
+                    .map_err(|e| format!("{} を開けません: {e}", dir.display()))?;
+                (Engine::resume(session, &dir, config), store)
+            }
+        };
+        let mut runner = Runner {
+            engine,
+            store,
+            connector,
+            clock,
+            actions,
+            updates,
+            wake,
+            conn: None,
+            next_connect: now,
+            backoff: BACKOFF_MIN,
+            started: false,
+            spawned_all: false,
+            panes: BTreeMap::new(),
+            deliveries: Vec::new(),
+            watches: BTreeMap::new(),
+            next_tick: now + TICK_EVERY,
+            ui_gone: false,
+        };
+        runner.publish();
+        runner.update(Update::Link(Link::Connecting));
+        Ok(runner)
+    }
+
+    fn run(&mut self) -> Result<(), String> {
+        while self.step()? {}
+        Ok(())
+    }
+
+    /// One turn of the loop; `false` once the runner should stop.
+    fn step(&mut self) -> Result<bool, String> {
+        loop {
+            match self.actions.try_recv() {
+                Ok(Action::Stop) | Err(TryRecvError::Disconnected) => return Ok(false),
+                Ok(action) => self.user(action)?,
+                Err(TryRecvError::Empty) => break,
+            }
+        }
+        if self.conn.is_none() && self.clock.now() >= self.next_connect {
+            self.connect()?;
+        }
+        match self.conn.take() {
+            Some(mut conn) => match self.connected(&mut conn) {
+                Ok(()) => self.conn = Some(conn),
+                Err(Fail::Link(why)) => self.lost(why),
+                Err(Fail::Fatal(why)) => return Err(why),
+            },
+            None => self.clock.sleep(POLL),
+        }
+        self.poll_replies()?;
+        let now = self.clock.now();
+        if now >= self.next_tick {
+            self.next_tick = now + TICK_EVERY;
+            self.feed(Input::Tick { now })?;
+        }
+        Ok(!self.ui_gone)
+    }
+
+    // ---- talking to the UI ----
+
+    fn update(&mut self, update: Update) {
+        if self.updates.send(update).is_err() {
+            self.ui_gone = true;
+        }
+        (self.wake)();
+    }
+
+    fn publish(&mut self) {
+        let session = Box::new(self.engine.session().clone());
+        self.update(Update::Session(session));
+    }
+
+    fn notice(&mut self, text: String) {
+        self.update(Update::Notice(text));
+    }
+
+    fn user(&mut self, action: Action) -> Result<(), String> {
+        let at = self.clock.now();
+        let input = match action {
+            Action::Intervene { to, body } => Input::UserIntervention { to, body, at },
+            Action::ApproveDebate { id, pro, con } => Input::UserApproveDebate { id, pro, con, at },
+            Action::DeclineDebate { id } => Input::UserDeclineDebate { id, at },
+            Action::StartDebate { issue, pro, con } => Input::UserStartDebate {
+                issue,
+                pro,
+                con,
+                at,
+            },
+            Action::Retry => Input::UserRetry,
+            Action::Stop => return Ok(()),
+        };
+        if let Some(why) = self.feed(input)? {
+            self.notice(why);
+        }
+        Ok(())
+    }
+
+    // ---- the engine ----
+
+    /// Gives `input` to the engine, stores what it committed and carries
+    /// out its effects. `Ok(Some(why))`: the engine refused the input.
+    fn feed(&mut self, input: Input) -> Result<Option<String>, String> {
+        match self.engine.handle(input) {
+            Ok(out) => {
+                self.store
+                    .append_all(&out.batches)
+                    .map_err(|e| format!("討論の記録を書けません: {e}"))?;
+                for effect in out.effects {
+                    self.effect(effect);
+                }
+                if !out.batches.is_empty() {
+                    self.publish();
+                }
+                Ok(None)
+            }
+            Err(EngineError::Rejected(why)) => Ok(Some(why)),
+            Err(err @ EngineError::Reduce(_)) => Err(err.to_string()),
+        }
+    }
+
+    fn effect(&mut self, effect: Effect) {
+        match effect {
+            Effect::SendBrief { round, part, body } => {
+                let queued = self.clock.now();
+                self.queue(Delivery {
+                    round,
+                    part,
+                    body,
+                    queued,
+                    pasted: false,
+                    spawns: 0,
+                });
+            }
+            Effect::WatchReply { round, part, path } => {
+                if let Err(err) = store::prepare_reply(&path) {
+                    self.notice(format!("{} を用意できません: {err}", path.display()));
+                }
+                let watch = Watch {
+                    round,
+                    part,
+                    seen: None,
+                    reported: None,
+                };
+                self.watches.insert(path, watch);
+            }
+            Effect::ClearReply { path } => {
+                if let Err(err) = store::clear_reply(&path) {
+                    self.notice(format!("{} を消せません: {err}", path.display()));
+                }
+                if let Some(watch) = self.watches.get_mut(&path) {
+                    watch.seen = None;
+                    watch.reported = None;
+                }
+            }
+        }
+    }
+
+    /// Queues a delivery; a newer one to the same agent replaces the older.
+    fn queue(&mut self, delivery: Delivery) {
+        self.deliveries.retain(|d| d.part != delivery.part);
+        self.deliveries.push(delivery);
+    }
+
+    // ---- the connection ----
+
+    fn connect(&mut self) -> Result<(), String> {
+        match self.connector.connect() {
+            Ok(mut conn) => match self.sync(&mut conn) {
+                Ok(()) => {
+                    self.conn = Some(conn);
+                    self.backoff = BACKOFF_MIN;
+                    self.update(Update::Link(Link::Live));
+                }
+                Err(Fail::Link(why)) => self.lost(why),
+                Err(Fail::Fatal(why)) => return Err(why),
+            },
+            Err(why) => self.lost(why),
+        }
+        Ok(())
+    }
+
+    fn lost(&mut self, why: String) {
+        self.conn = None;
+        self.next_connect = self.clock.now() + self.backoff;
+        self.backoff = (self.backoff * 2).min(BACKOFF_MAX);
+        self.update(Update::Link(Link::Down(why)));
+    }
+
+    /// After a connect: match the session's panes to Noa's, start the
+    /// missing ones the first time, and start the engine.
+    fn sync(&mut self, conn: &mut C::Conn) -> Result<(), Fail> {
+        let views = conn.panes().map_err(link)?;
+        self.relist(&views)?;
+        if !self.spawned_all {
+            let parts: Vec<PartId> = self.order();
+            for part in parts {
+                if !self.panes.contains_key(&part)
+                    && let Err(why) = self.spawn(conn, &part)?
+                {
+                    self.notice(format!("{part} を起動できません: {why}"));
+                }
+            }
+            self.spawned_all = true;
+        }
+        if !self.started {
+            self.started = true;
+            let now = self.clock.now();
+            self.feed(Input::Start { now })?;
+        }
+        Ok(())
+    }
+
+    fn connected(&mut self, conn: &mut C::Conn) -> Result<(), Fail> {
+        if let Some(changes) = conn.changes(POLL).map_err(link)? {
+            self.apply_changes(conn, changes)?;
+        }
+        self.deliver(conn)
+    }
+
+    // ---- panes ----
+
+    /// The moderator, then the panelists.
+    fn order(&self) -> Vec<PartId> {
+        let session = self.engine.session();
+        std::iter::once(&session.moderator)
+            .chain(&session.panelists)
+            .map(|p| p.id.clone())
+            .collect()
+    }
+
+    /// The label a participant's pane gets. It names the session, so a pane
+    /// of this discussion is told from another pane that got the same id
+    /// after Noa restarted.
+    fn label(&self, part: &PartId) -> String {
+        format!("{part} · {}", self.engine.session().id)
+    }
+
+    fn part_of(&self, pane_id: u64) -> Option<PartId> {
+        self.panes
+            .iter()
+            .find(|(_, pane)| pane.id == pane_id)
+            .map(|(part, _)| part.clone())
+    }
+
+    /// Takes a full pane list: panes no longer listed are gone, the
+    /// session's own panes still listed (a resume) are taken back, and
+    /// every agent's state is read.
+    fn relist(&mut self, views: &[PaneView]) -> Result<(), String> {
+        let gone: Vec<PartId> = self
+            .panes
+            .iter()
+            .filter(|(_, pane)| !views.iter().any(|v| v.pane_id == pane.id))
+            .map(|(part, _)| part.clone())
+            .collect();
+        for part in gone {
+            self.pane_gone(&part)?;
+        }
+        let now = self.clock.now();
+        let session = self.engine.session();
+        let adopt: Vec<(PartId, u64)> = std::iter::once(&session.moderator)
+            .chain(&session.panelists)
+            .filter(|p| !self.panes.contains_key(&p.id))
+            .filter_map(|p| {
+                let id = p.pane_id?;
+                let label = self.label(&p.id);
+                views
+                    .iter()
+                    .any(|v| v.pane_id == id && v.label.as_deref() == Some(label.as_str()))
+                    .then(|| (p.id.clone(), id))
+            })
+            .collect();
+        for (part, id) in adopt {
+            self.panes.insert(part, Pane::new(id, now));
+        }
+        for view in views {
+            self.observe(view)?;
+        }
+        Ok(())
+    }
+
+    fn apply_changes(&mut self, conn: &mut C::Conn, changes: Changes) -> Result<(), Fail> {
+        if changes.dropped {
+            let views = conn.panes().map_err(link)?;
+            return Ok(self.relist(&views)?);
+        }
+        for id in changes.removed {
+            if let Some(part) = self.part_of(id) {
+                self.pane_gone(&part)?;
+            }
+        }
+        for view in &changes.panes {
+            self.observe(view)?;
+        }
+        Ok(())
+    }
+
+    /// A new report from an agent goes to the engine.
+    fn observe(&mut self, view: &PaneView) -> Result<(), String> {
+        let Some(part) = self.part_of(view.pane_id) else {
+            return Ok(());
+        };
+        let Some(pane) = self.panes.get_mut(&part) else {
+            return Ok(());
+        };
+        if view.agent_seq <= pane.seq {
+            return Ok(());
+        }
+        pane.seq = view.agent_seq;
+        pane.state.clone_from(&view.agent_state);
+        let Some(state) = agent_state(view.agent_state.as_deref()) else {
+            return Ok(());
+        };
+        let at = self.clock.now();
+        self.feed(Input::AgentStateChanged { part, state, at })?;
+        Ok(())
+    }
+
+    /// `part`'s pane closed. A brief it was working on is sent again (to a
+    /// new pane) as for an agent error.
+    fn pane_gone(&mut self, part: &PartId) -> Result<(), String> {
+        if self.panes.remove(part).is_none() {
+            return Ok(());
+        }
+        self.notice(format!("{part} のペインが閉じました"));
+        let at = self.clock.now();
+        self.feed(Input::AgentStateChanged {
+            part: part.clone(),
+            state: AgentState::Error,
+            at,
+        })?;
+        Ok(())
+    }
+
+    /// Where `part`'s new pane goes: the discussion's own tab for the first,
+    /// then the moderator on the left and the panelists stacked on the right.
+    fn placement(&self, part: &PartId) -> Placement {
+        let session = self.engine.session();
+        let live = |id: &PartId| self.panes.get(id).map(|pane| pane.id);
+        let Some(any) = self.panes.values().next().map(|pane| pane.id) else {
+            return Placement::NewTab;
+        };
+        if session.is_panelist(part) {
+            if let Some(last) = session.panelist_ids().filter_map(live).last() {
+                return Placement::Below(last);
+            }
+            if let Some(moderator) = live(&session.moderator.id) {
+                return Placement::Right(moderator);
+            }
+        }
+        Placement::Below(any)
+    }
+
+    /// Starts `part`'s agent. `Ok(Err(why))`: Noa refused.
+    fn spawn(&mut self, conn: &mut C::Conn, part: &PartId) -> Result<Result<(), String>, Fail> {
+        let Some(kind) = self.engine.session().participant(part).map(|p| p.kind) else {
+            return Ok(Err(format!("no participant {part}")));
+        };
+        let cwd = agent_cwd(self.engine.dir());
+        loop {
+            let placement = self.placement(part);
+            let spec = PaneSpec {
+                argv: agent_argv(kind),
+                cwd: cwd.clone(),
+                label: self.label(part),
+            };
+            match conn.spawn(placement, &spec) {
+                Ok(id) => {
+                    let now = self.clock.now();
+                    self.panes.insert(part.clone(), Pane::new(id, now));
+                    self.feed(Input::PaneSpawned {
+                        part: part.clone(),
+                        pane_id: id,
+                    })?;
+                    return Ok(Ok(()));
+                }
+                // The pane to split off closed: forget it, place again.
+                Err(NoaError::PaneGone) => match placement {
+                    Placement::Right(beside) | Placement::Below(beside) => {
+                        if let Some(gone) = self.part_of(beside) {
+                            self.pane_gone(&gone)?;
+                        } else {
+                            return Ok(Err(NoaError::PaneGone.to_string()));
+                        }
+                    }
+                    Placement::NewTab => return Ok(Err(NoaError::PaneGone.to_string())),
+                },
+                Err(NoaError::Link(why)) => return Err(Fail::Link(why)),
+                Err(other) => return Ok(Err(other.to_string())),
+            }
+        }
+    }
+
+    /// Whether `part`'s pane is ready for a brief (see [`QUIET_FOR`]).
+    fn ready(&mut self, conn: &mut C::Conn, part: &PartId) -> Result<bool, Fail> {
+        let now = self.clock.now();
+        let Some(pane) = self.panes.get_mut(part) else {
+            return Ok(false);
+        };
+        if pane.ready {
+            return Ok(true);
+        }
+        match conn.paste_ready(pane.id) {
+            Ok(true) => {}
+            Ok(false) | Err(NoaError::PaneGone | NoaError::NotReady | NoaError::Refused(_)) => {
+                return Ok(false);
+            }
+            Err(NoaError::Link(why)) => return Err(Fail::Link(why)),
+        }
+        let reported = pane.seq > 0 && pane.state.as_deref() != Some("running");
+        let quiet = match conn.screen(pane.id) {
+            Ok(text) if text.trim().is_empty() => {
+                pane.quiet = None;
+                false
+            }
+            Ok(text) => match &pane.quiet {
+                Some((seen, since)) if *seen == text => now.saturating_sub(*since) >= QUIET_FOR,
+                _ => {
+                    pane.quiet = Some((text, now));
+                    false
+                }
+            },
+            Err(NoaError::Link(why)) => return Err(Fail::Link(why)),
+            Err(_) => false,
+        };
+        if reported || quiet || now.saturating_sub(pane.spawned_at) >= READY_LIMIT {
+            pane.ready = true;
+        }
+        Ok(pane.ready)
+    }
+
+    // ---- deliveries ----
+
+    fn deliver(&mut self, conn: &mut C::Conn) -> Result<(), Fail> {
+        let mut pending = std::mem::take(&mut self.deliveries).into_iter();
+        let mut keep = Vec::new();
+        let mut result = Ok(());
+        while let Some(mut delivery) = pending.next() {
+            match self.try_deliver(conn, &mut delivery) {
+                Ok(true) => {}
+                Ok(false) => keep.push(delivery),
+                Err(fail) => {
+                    keep.push(delivery);
+                    keep.extend(pending.by_ref());
+                    result = Err(fail);
+                }
+            }
+        }
+        // Deliveries queued meanwhile (a retry) replace the kept ones.
+        let added = std::mem::replace(&mut self.deliveries, keep);
+        for delivery in added {
+            self.queue(delivery);
+        }
+        result
+    }
+
+    fn send_failed(&mut self, delivery: &Delivery, error: String) -> Result<(), String> {
+        self.feed(Input::SendFailed {
+            round: delivery.round,
+            part: delivery.part.clone(),
+            error,
+        })?;
+        Ok(())
+    }
+
+    /// Moves `delivery` on; `true` once it is done with (sent, failed or no
+    /// longer wanted).
+    fn try_deliver(&mut self, conn: &mut C::Conn, delivery: &mut Delivery) -> Result<bool, Fail> {
+        let part = delivery.part.clone();
+        if !in_play(self.engine.session(), delivery.round, &part) {
+            return Ok(true);
+        }
+        let Some(pane) = self.panes.get(&part).map(|pane| pane.id) else {
+            if delivery.spawns >= MAX_SPAWNS {
+                self.send_failed(delivery, "the agent's pane keeps closing".to_owned())?;
+                return Ok(true);
+            }
+            delivery.spawns += 1;
+            delivery.pasted = false;
+            if let Err(why) = self.spawn(conn, &part)? {
+                self.send_failed(delivery, why)?;
+                return Ok(true);
+            }
+            return Ok(false);
+        };
+        if !delivery.pasted {
+            if !self.ready(conn, &part)? {
+                let now = self.clock.now();
+                if now.saturating_sub(delivery.queued) >= READY_LIMIT {
+                    self.send_failed(delivery, NoaError::NotReady.to_string())?;
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
+            match conn.type_text(pane, &delivery.body, true) {
+                Ok(()) => delivery.pasted = true,
+                Err(NoaError::NotReady) => {
+                    if let Some(pane) = self.panes.get_mut(&part) {
+                        pane.ready = false;
+                    }
+                    return Ok(false);
+                }
+                Err(NoaError::PaneGone) => {
+                    self.pane_gone(&part)?;
+                    return Ok(false);
+                }
+                Err(NoaError::Refused(why)) => {
+                    self.send_failed(delivery, why)?;
+                    return Ok(true);
+                }
+                Err(NoaError::Link(why)) => return Err(Fail::Link(why)),
+            }
+            self.clock.sleep(SUBMIT_DELAY);
+        }
+        match conn.type_text(pane, "\r", false) {
+            Ok(()) => {}
+            Err(NoaError::PaneGone) => {
+                delivery.pasted = false;
+                self.pane_gone(&part)?;
+                return Ok(false);
+            }
+            Err(NoaError::Link(why)) => return Err(Fail::Link(why)),
+            Err(other) => {
+                self.send_failed(delivery, other.to_string())?;
+                return Ok(true);
+            }
+        }
+        let at = self.clock.now();
+        self.feed(Input::Sent {
+            round: delivery.round,
+            part,
+            at,
+        })?;
+        Ok(true)
+    }
+
+    // ---- reply files ----
+
+    fn poll_replies(&mut self) -> Result<(), String> {
+        let now = self.clock.now();
+        let mut written = Vec::new();
+        for (path, watch) in &mut self.watches {
+            let text = match store::read_reply(path) {
+                Ok(Some(text)) if !text.trim().is_empty() => text,
+                _ => {
+                    watch.seen = None;
+                    continue;
+                }
+            };
+            if watch.reported.as_ref() == Some(&text) {
+                continue;
+            }
+            match &watch.seen {
+                Some((seen, since)) if *seen == text => {
+                    if now.saturating_sub(*since) >= REPLY_STABLE_FOR {
+                        written.push((path.clone(), watch.round, watch.part.clone(), text));
+                    }
+                }
+                _ => watch.seen = Some((text, now)),
+            }
+        }
+        for (path, round, part, content) in written {
+            if let Some(watch) = self.watches.get_mut(&path) {
+                watch.reported = Some(content.clone());
+                watch.seen = None;
+            }
+            self.feed(Input::ReplyFileWritten {
+                round,
+                part,
+                content,
+                at: now,
+            })?;
+        }
+        let session = self.engine.session();
+        self.watches.retain(|_, watch| {
+            !session
+                .round(watch.round)
+                .and_then(|r| r.brief(&watch.part))
+                .is_some_and(|b| b.receipt.replied.is_some())
+        });
+        Ok(())
+    }
+}
+
+/// Where the agents run: the discussions directory, so the reply files are
+/// inside their working directory and an agent that asks to trust its
+/// folder asks once for all discussions.
+fn agent_cwd(dir: &Path) -> PathBuf {
+    dir.parent().unwrap_or(dir).to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug, Clone)]
+    struct FakePane {
+        label: String,
+        paste: bool,
+        screen: String,
+        state: Option<String>,
+        seq: u64,
+    }
+
+    #[derive(Default)]
+    struct World {
+        now: Millis,
+        up: bool,
+        attempts: Vec<Millis>,
+        next_pane: u64,
+        /// Whether new panes take a paste at once.
+        cold: bool,
+        /// New panes whose label starts with this exit at once.
+        doomed: Option<String>,
+        panes: BTreeMap<u64, FakePane>,
+        events: VecDeque<Changes>,
+        typed: Vec<(u64, String, bool)>,
+        spawned: Vec<(Placement, PaneSpec, u64)>,
+    }
+
+    /// A fake Noa, its connector and the clock, sharing one world.
+    #[derive(Clone)]
+    struct Fake(Rc<RefCell<World>>);
+
+    impl Fake {
+        fn new() -> Self {
+            Fake(Rc::new(RefCell::new(World {
+                up: true,
+                next_pane: 100,
+                ..World::default()
+            })))
+        }
+
+        fn w(&self) -> std::cell::RefMut<'_, World> {
+            self.0.borrow_mut()
+        }
+
+        fn view(id: u64, pane: &FakePane) -> PaneView {
+            PaneView {
+                pane_id: id,
+                label: Some(pane.label.clone()),
+                agent_state: pane.state.clone(),
+                agent_seq: pane.seq,
+            }
+        }
+
+        fn report(&self, pane: u64, state: &str) {
+            let mut w = self.w();
+            let p = w.panes.get_mut(&pane).unwrap();
+            p.seq += 1;
+            p.state = Some(state.to_owned());
+            let view = Fake::view(pane, p);
+            w.events.push_back(Changes {
+                panes: vec![view],
+                ..Changes::default()
+            });
+        }
+
+        fn close(&self, pane: u64) {
+            let mut w = self.w();
+            w.panes.remove(&pane);
+            w.events.push_back(Changes {
+                removed: vec![pane],
+                ..Changes::default()
+            });
+        }
+
+        /// The texts typed into `pane`: (text, paste).
+        fn typed(&self, pane: u64) -> Vec<(String, bool)> {
+            self.0
+                .borrow()
+                .typed
+                .iter()
+                .filter(|(p, ..)| *p == pane)
+                .map(|(_, text, paste)| (text.clone(), *paste))
+                .collect()
+        }
+
+        fn pane_of(&self, label_start: &str) -> u64 {
+            let w = self.0.borrow();
+            *w.panes
+                .iter()
+                .find(|(_, p)| p.label.starts_with(label_start))
+                .unwrap()
+                .0
+        }
+
+        fn up(&self) -> Result<(), NoaError> {
+            if self.0.borrow().up {
+                Ok(())
+            } else {
+                Err(NoaError::Link("closed".into()))
+            }
+        }
+    }
+
+    impl Clock for Fake {
+        fn now(&self) -> Millis {
+            self.0.borrow().now
+        }
+
+        fn sleep(&self, duration: Duration) {
+            self.w().now += duration.as_millis() as Millis;
+        }
+    }
+
+    impl Connect for Fake {
+        type Conn = Fake;
+
+        fn connect(&mut self) -> Result<Fake, String> {
+            let mut w = self.w();
+            let now = w.now;
+            w.attempts.push(now);
+            if w.up {
+                Ok(self.clone())
+            } else {
+                Err("Noa is not running".into())
+            }
+        }
+    }
+
+    impl Noa for Fake {
+        fn panes(&mut self) -> Result<Vec<PaneView>, NoaError> {
+            self.up()?;
+            let w = self.0.borrow();
+            Ok(w.panes.iter().map(|(id, p)| Fake::view(*id, p)).collect())
+        }
+
+        fn changes(&mut self, wait: Duration) -> Result<Option<Changes>, NoaError> {
+            self.up()?;
+            let mut w = self.w();
+            w.now += wait.as_millis() as Millis;
+            Ok(w.events.pop_front())
+        }
+
+        fn spawn(&mut self, placement: Placement, spec: &PaneSpec) -> Result<u64, NoaError> {
+            self.up()?;
+            let mut w = self.w();
+            if let Placement::Right(beside) | Placement::Below(beside) = placement
+                && !w.panes.contains_key(&beside)
+            {
+                return Err(NoaError::PaneGone);
+            }
+            let id = w.next_pane;
+            w.next_pane += 1;
+            let paste = !w.cold;
+            w.panes.insert(
+                id,
+                FakePane {
+                    label: spec.label.clone(),
+                    paste,
+                    screen: "> ".into(),
+                    state: None,
+                    seq: 0,
+                },
+            );
+            w.spawned.push((placement, spec.clone(), id));
+            if w.doomed
+                .as_ref()
+                .is_some_and(|d| spec.label.starts_with(d.as_str()))
+            {
+                w.panes.remove(&id);
+                w.events.push_back(Changes {
+                    removed: vec![id],
+                    ..Changes::default()
+                });
+            }
+            Ok(id)
+        }
+
+        fn paste_ready(&mut self, pane: u64) -> Result<bool, NoaError> {
+            self.up()?;
+            let w = self.0.borrow();
+            w.panes
+                .get(&pane)
+                .map(|p| p.paste)
+                .ok_or(NoaError::PaneGone)
+        }
+
+        fn screen(&mut self, pane: u64) -> Result<String, NoaError> {
+            self.up()?;
+            let w = self.0.borrow();
+            w.panes
+                .get(&pane)
+                .map(|p| p.screen.clone())
+                .ok_or(NoaError::PaneGone)
+        }
+
+        fn type_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), NoaError> {
+            self.up()?;
+            let mut w = self.w();
+            let p = w.panes.get(&pane).ok_or(NoaError::PaneGone)?;
+            if paste && !p.paste {
+                return Err(NoaError::NotReady);
+            }
+            w.typed.push((pane, text.to_owned(), paste));
+            Ok(())
+        }
+    }
+
+    const CONFIG: Config = Config {
+        start_timeout: 60_000,
+        reply_timeout: 600_000,
+        max_retries: 2,
+        debate_max_exchanges: 2,
+    };
+
+    fn temp_root(name: &str) -> PathBuf {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "noa-discussion-live-{}-{name}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn p(id: &str) -> PartId {
+        PartId::new(id)
+    }
+
+    struct Rig {
+        fake: Fake,
+        runner: Runner<Fake, Fake>,
+        actions: Sender<Action>,
+        updates: Receiver<Update>,
+    }
+
+    impl Rig {
+        fn open(fake: &Fake, start: Start) -> Rig {
+            let (actions, action_rx) = mpsc::channel();
+            let (update_tx, updates) = mpsc::channel();
+            let runner = Runner::open(
+                start,
+                fake.clone(),
+                fake.clone(),
+                CONFIG,
+                action_rx,
+                update_tx,
+                Rc::new(|| {}),
+            )
+            .unwrap();
+            Rig {
+                fake: fake.clone(),
+                runner,
+                actions,
+                updates,
+            }
+        }
+
+        fn new(fake: &Fake, root: &Path) -> Rig {
+            fake.w().now = 1_000;
+            Rig::open(
+                fake,
+                Start::New {
+                    topic: "Pick a database".into(),
+                    moderator: AgentKind::Claude,
+                    panel: vec![AgentKind::Claude, AgentKind::Codex],
+                    root: root.to_owned(),
+                },
+            )
+        }
+
+        fn session(&self) -> &Session {
+            self.runner.engine.session()
+        }
+
+        fn dir(&self) -> PathBuf {
+            self.runner.engine.dir().to_owned()
+        }
+
+        fn step(&mut self) {
+            assert!(self.runner.step().unwrap());
+        }
+
+        /// Steps until `done`, at most `max` times.
+        fn until(&mut self, max: usize, done: impl Fn(&Rig) -> bool) {
+            for _ in 0..max {
+                if done(self) {
+                    return;
+                }
+                self.step();
+            }
+            assert!(done(self), "condition not met after {max} steps");
+        }
+
+        fn updates(&self) -> Vec<Update> {
+            self.updates.try_iter().collect()
+        }
+
+        fn receipt(&self, round: RoundNo, part: &str) -> discussion::model::types::Receipt {
+            self.session()
+                .round(round)
+                .unwrap()
+                .brief(&p(part))
+                .unwrap()
+                .receipt
+                .clone()
+        }
+
+        fn submitted(&self, pane: u64) -> usize {
+            self.fake
+                .typed(pane)
+                .iter()
+                .filter(|(text, paste)| text == "\r" && !paste)
+                .count()
+        }
+    }
+
+    #[test]
+    fn a_new_session_opens_its_tab_and_runs_a_whole_round() {
+        let root = temp_root("round");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.step();
+
+        // One tab: the moderator, then the panelists split to its right.
+        let spawned = fake.0.borrow().spawned.clone();
+        let placements: Vec<Placement> = spawned.iter().map(|s| s.0).collect();
+        assert_eq!(
+            placements,
+            vec![
+                Placement::NewTab,
+                Placement::Right(100),
+                Placement::Below(101)
+            ]
+        );
+        let id = rig.session().id.clone();
+        for ((_, spec, _), (part, cmd)) in
+            spawned
+                .iter()
+                .zip([("noa", "claude"), ("claude", "claude"), ("codex", "codex")])
+        {
+            assert_eq!(spec.label, format!("{part} · {id}"));
+            assert_eq!(spec.argv.last().unwrap(), &format!("exec {cmd}"));
+            assert_eq!(spec.cwd, root);
+        }
+        let parts = &rig.session().panelists;
+        assert_eq!(parts[0].pane_id, Some(101));
+        assert_eq!(rig.session().moderator.pane_id, Some(100));
+
+        // Each panelist's brief is pasted whole, then submitted with a raw
+        // Enter, once its pane has settled; the moderator gets nothing yet.
+        rig.until(40, |r| r.submitted(101) == 1 && r.submitted(102) == 1);
+        for pane in [101, 102] {
+            let typed = fake.typed(pane);
+            assert_eq!(typed.len(), 2);
+            assert!(typed[0].1 && typed[0].0.contains("Pick a database"));
+            assert_eq!(typed[1], ("\r".to_owned(), false));
+        }
+        assert!(fake.typed(100).is_empty());
+        let brief = &rig.session().round(1).unwrap().briefs[0];
+        assert_eq!(fake.typed(101)[0].0, brief.body);
+        assert!(rig.receipt(1, "claude").sent.is_some());
+
+        // claude reports; codex never does, but its reply counts as started.
+        fake.report(101, "running");
+        rig.step();
+        assert!(rig.receipt(1, "claude").started.is_some());
+        let dir = rig.dir();
+        fs::write(store::reply_path(&dir, 1, &p("claude")), "Postgres.").unwrap();
+        fs::write(store::reply_path(&dir, 1, &p("codex")), "SQLite.").unwrap();
+        rig.until(20, |r| {
+            r.session().current_round().unwrap().phase == Phase::Summarizing
+        });
+        assert!(rig.receipt(1, "codex").started.is_some());
+
+        // The moderator gets its brief, and its JSON starts round 2.
+        rig.until(20, |r| r.submitted(100) == 1);
+        assert!(fake.typed(100)[0].0.contains("Postgres."));
+        fs::write(
+            store::moderator_reply_path(&dir, 1),
+            r#"{"summary":"Two options."}"#,
+        )
+        .unwrap();
+        rig.until(20, |r| r.session().rounds.len() == 2);
+        rig.until(20, |r| r.submitted(101) == 2 && r.submitted(102) == 2);
+        assert_eq!(fake.0.borrow().spawned.len(), 3);
+
+        // Everything went to the log: it folds back to the same session.
+        let (_, stored) = Store::open(&dir).unwrap();
+        assert_eq!(&stored, rig.session());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_down_noa_is_retried_with_backoff_and_panes_are_kept_across_reconnects() {
+        let root = temp_root("reconnect");
+        let fake = Fake::new();
+        fake.w().up = false;
+        let mut rig = Rig::new(&fake, &root);
+        for _ in 0..20 {
+            rig.step();
+        }
+        assert!(
+            rig.updates()
+                .iter()
+                .any(|u| matches!(u, Update::Link(Link::Down(why)) if why == "Noa is not running"))
+        );
+        let attempts = fake.0.borrow().attempts.clone();
+        assert!(attempts.len() >= 3, "{attempts:?}");
+        let gaps: Vec<Millis> = attempts.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(gaps[0] >= 500 && gaps[1] >= 1_000, "{gaps:?}");
+        assert!(fake.0.borrow().spawned.is_empty());
+        // Nothing is started (or sent) before Noa is there.
+        assert!(rig.session().rounds.is_empty());
+
+        fake.w().up = true;
+        rig.until(60, |r| r.runner.conn.is_some());
+        assert!(rig.updates().contains(&Update::Link(Link::Live)));
+        assert_eq!(fake.0.borrow().spawned.len(), 3);
+
+        // The link drops before the briefs are typed, then comes back.
+        fake.w().up = false;
+        rig.step();
+        assert!(rig.runner.conn.is_none());
+        fake.w().up = true;
+        rig.until(60, |r| r.submitted(101) == 1 && r.submitted(102) == 1);
+        assert_eq!(fake.0.borrow().spawned.len(), 3, "panes were respawned");
+        // Each brief went once.
+        for _ in 0..20 {
+            rig.step();
+        }
+        assert_eq!(rig.submitted(101), 1);
+        assert_eq!(rig.submitted(102), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_closed_pane_is_respawned_and_its_brief_sent_again() {
+        let root = temp_root("closed");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.until(40, |r| r.submitted(101) == 1 && r.submitted(102) == 1);
+        fake.close(101);
+        rig.until(40, |r| r.submitted(103) == 1);
+        let spawned = fake.0.borrow().spawned.clone();
+        assert_eq!(spawned.len(), 4);
+        assert_eq!(spawned[3].0, Placement::Below(102));
+        assert!(spawned[3].1.label.starts_with("claude · "));
+        assert_eq!(rig.session().panelists[0].pane_id, Some(103));
+        assert_eq!(rig.receipt(1, "claude").retries, 1);
+        assert_eq!(fake.typed(103)[0].0, fake.typed(101)[0].0);
+        assert!(
+            rig.updates()
+                .iter()
+                .any(|u| matches!(u, Update::Notice(n) if n.contains("claude")))
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_agent_error_is_acted_on_once_however_often_the_pane_is_listed() {
+        let root = temp_root("error");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.until(40, |r| r.submitted(101) == 1);
+        fake.report(101, "error");
+        rig.until(10, |r| r.submitted(101) == 2);
+        assert_eq!(rig.receipt(1, "claude").retries, 1);
+        // Lost notifications make the runner list every pane again: the
+        // same report must not count twice.
+        for _ in 0..3 {
+            fake.w().events.push_back(Changes {
+                dropped: true,
+                ..Changes::default()
+            });
+            rig.step();
+        }
+        assert_eq!(rig.receipt(1, "claude").retries, 1);
+        assert_eq!(rig.submitted(101), 2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_agent_that_exits_at_once_is_not_respawned_forever() {
+        let root = temp_root("doomed");
+        let fake = Fake::new();
+        fake.w().doomed = Some("claude · ".into());
+        let mut rig = Rig::new(&fake, &root);
+        rig.step();
+        rig.until(200, |r| r.receipt(1, "claude").failed.is_some());
+        let claude_spawns = |fake: &Fake| {
+            let w = fake.0.borrow();
+            w.spawned
+                .iter()
+                .filter(|s| s.1.label.starts_with("claude · "))
+                .count()
+        };
+        let spawns = claude_spawns(&fake);
+        // The first spawn, then MAX_SPAWNS per send attempt (1 + retries).
+        assert!(spawns <= 1 + MAX_SPAWNS as usize * 3, "{spawns}");
+        for _ in 0..50 {
+            rig.step();
+        }
+        assert_eq!(claude_spawns(&fake), spawns);
+        // codex is not held up by it.
+        rig.until(40, |r| r.receipt(1, "codex").sent.is_some());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn nothing_is_typed_until_the_pane_takes_a_paste() {
+        let root = temp_root("cold");
+        let fake = Fake::new();
+        fake.w().cold = true;
+        let mut rig = Rig::new(&fake, &root);
+        for _ in 0..30 {
+            rig.step();
+        }
+        assert!(fake.0.borrow().typed.is_empty());
+        assert!(rig.receipt(1, "claude").sent.is_none());
+        for pane in fake.w().panes.values_mut() {
+            pane.paste = true;
+        }
+        rig.until(40, |r| r.submitted(101) == 1 && r.submitted(102) == 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_fresh_agent_that_reports_idle_gets_its_brief_without_the_quiet_wait() {
+        let root = temp_root("idle");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.step();
+        fake.report(101, "input");
+        rig.step();
+        // One step to see the report, one to deliver: well under QUIET_FOR.
+        rig.step();
+        assert_eq!(rig.submitted(101), 1);
+        assert_eq!(rig.submitted(102), 0);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_reply_file_is_read_only_once_it_stops_changing() {
+        let root = temp_root("stable");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.until(40, |r| r.submitted(101) == 1 && r.submitted(102) == 1);
+        let path = store::reply_path(&rig.dir(), 1, &p("claude"));
+        // Read twice, 200 ms apart, while it is still being written.
+        fs::write(&path, "---\nissues: [").unwrap();
+        rig.step();
+        rig.step();
+        fs::write(&path, "---\nissues: []\n---\nPostgres, because of JSONB.").unwrap();
+        rig.until(10, |r| r.receipt(1, "claude").replied.is_some());
+        let receipt = rig.receipt(1, "claude");
+        assert_eq!(receipt.rejected, None);
+        assert_eq!(receipt.retries, 0);
+        let reply = rig.session().messages.last().unwrap();
+        assert_eq!(reply.body.trim(), "Postgres, because of JSONB.");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_resumed_session_takes_its_panes_back_and_sends_what_was_left() {
+        let root = temp_root("resume");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.step();
+        // codex's pane never takes a paste before the widget quits.
+        fake.w().panes.get_mut(&102).unwrap().paste = false;
+        rig.until(40, |r| r.submitted(101) == 1);
+        let dir = rig.dir();
+        rig.actions.send(Action::Stop).unwrap();
+        assert!(!rig.runner.step().unwrap());
+        drop(rig);
+
+        fake.w().panes.get_mut(&102).unwrap().paste = true;
+        let mut rig = Rig::open(&fake, Start::Resume { dir });
+        rig.until(40, |r| r.submitted(102) == 1);
+        assert_eq!(fake.0.borrow().spawned.len(), 3, "panes were respawned");
+        for _ in 0..10 {
+            rig.step();
+        }
+        assert_eq!(rig.submitted(101), 1, "a sent brief was sent again");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_pane_with_the_old_id_but_another_label_is_not_taken_back() {
+        let root = temp_root("relabel");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.step();
+        let dir = rig.dir();
+        drop(rig);
+        // Noa restarted: pane 101 is now someone else's shell.
+        fake.w().panes.get_mut(&101).unwrap().label = "zsh".into();
+        let mut rig = Rig::open(&fake, Start::Resume { dir });
+        rig.step();
+        let spawned = fake.0.borrow().spawned.clone();
+        assert_eq!(spawned.len(), 4);
+        assert!(spawned[3].1.label.starts_with("claude · "));
+        assert_eq!(rig.session().panelists[0].pane_id, Some(103));
+        assert_eq!(fake.pane_of("zsh"), 101);
+        rig.until(40, |r| r.submitted(103) == 1);
+        assert!(fake.typed(101).is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn user_actions_reach_the_engine_and_refusals_come_back_as_notices() {
+        let root = temp_root("actions");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.step();
+        rig.updates();
+        rig.actions
+            .send(Action::Intervene {
+                to: vec![p("nobody")],
+                body: "hi".into(),
+            })
+            .unwrap();
+        rig.actions
+            .send(Action::Intervene {
+                to: vec![],
+                body: "Consider cost.".into(),
+            })
+            .unwrap();
+        rig.step();
+        let updates = rig.updates();
+        assert!(updates.contains(&Update::Notice("no participant nobody".into())));
+        assert!(
+            rig.session()
+                .messages
+                .iter()
+                .any(|m| m.body == "Consider cost.")
+        );
+        assert!(
+            updates
+                .iter()
+                .any(|u| matches!(u, Update::Session(s) if s.messages.iter().any(|m| m.body == "Consider cost.")))
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stop_ends_the_loop_and_reports_it() {
+        let root = temp_root("stop");
+        let fake = Fake::new();
+        fake.w().now = 5;
+        let (actions, action_rx) = mpsc::channel();
+        let (update_tx, updates) = mpsc::channel();
+        actions.send(Action::Stop).unwrap();
+        run_session(
+            Start::New {
+                topic: "t".into(),
+                moderator: AgentKind::Codex,
+                panel: vec![AgentKind::Agy],
+                root: root.clone(),
+            },
+            fake.clone(),
+            fake.clone(),
+            CONFIG,
+            action_rx,
+            update_tx,
+            || {},
+        );
+        let updates: Vec<Update> = updates.try_iter().collect();
+        assert!(matches!(updates.first(), Some(Update::Session(_))));
+        assert_eq!(updates.last(), Some(&Update::Ended(Ok(()))));
+
+        // A session that cannot be opened ends at once with why.
+        let (_actions, action_rx) = mpsc::channel();
+        let (update_tx, updates) = mpsc::channel();
+        run_session(
+            Start::Resume {
+                dir: root.join("missing"),
+            },
+            fake.clone(),
+            fake.clone(),
+            CONFIG,
+            action_rx,
+            update_tx,
+            || {},
+        );
+        let updates: Vec<Update> = updates.try_iter().collect();
+        assert!(matches!(updates.as_slice(), [Update::Ended(Err(_))]));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn agents_start_through_the_login_shell() {
+        let argv = agent_argv(AgentKind::Agy);
+        assert!(argv[0].starts_with('/'));
+        assert_eq!(&argv[1..], ["-l", "-i", "-c", "exec agy"]);
+        assert_eq!(
+            agent_state(Some("permission")),
+            Some(AgentState::Permission)
+        );
+        assert_eq!(agent_state(Some("weird")), None);
+        assert_eq!(agent_state(None), None);
+    }
+}

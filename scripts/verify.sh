@@ -61,10 +61,10 @@ for dep, pkg in bad:
 sys.exit(1 if bad else 0)'
 }
 
-# mock/agent-dashboard is a crate of its own, outside the workspace. It is built
+# widgets/agent-dashboard is a crate of its own, outside the workspace. It is built
 # with its tests everywhere; the tests run on macOS only, because some expect
 # the text widths of macOS's system fonts.
-dashboard=mock/agent-dashboard/Cargo.toml
+dashboard=widgets/agent-dashboard/Cargo.toml
 dashboard_check() {
   cargo build --manifest-path "$dashboard" --locked --all-targets || return
   [ "$os" = Darwin ] || return 0
@@ -103,7 +103,7 @@ elif [ "${#changed[@]}" -gt 0 ]; then
   pkgs=() hook=0 skill=0 dash=0
   for path in "${changed[@]}"; do
     p=$(package_of "$path"); [ -n "$p" ] && pkgs+=("$p")
-    case $path in mock/agent-dashboard/*) dash=1 ;; esac
+    case $path in widgets/agent-dashboard/*) dash=1 ;; esac
     case $path in scripts/noa-agent-hook.py | scripts/test_noa_agent_hook.py) hook=1 ;; esac
     case $path in scripts/install-agent-skill.sh | scripts/test_install_agent_skill.py | skills/*) skill=1 ;; esac
   done

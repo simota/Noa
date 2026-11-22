@@ -94,7 +94,7 @@ pub enum AppCommand {
     /// Show or hide Ember, the pane list in the macOS menu bar, for this
     /// session (`ember` sets the launch state).
     ToggleEmber,
-    /// Start the agent dashboard (`mock/agent-dashboard`) as a program of
+    /// Start the agent dashboard (`widgets/agent-dashboard`) as a program of
     /// its own beside Noa.
     OpenAgentDashboard,
     /// Open the "Theme" picker half of the split theme-settings overlay

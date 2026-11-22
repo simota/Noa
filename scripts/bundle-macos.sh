@@ -63,12 +63,12 @@ case "$MODE" in
   *) echo "usage: $0 [release|debug]" >&2; exit 2 ;;
 esac
 
-# The agent dashboard (mock/agent-dashboard, a crate outside the workspace)
+# The agent dashboard (widgets/agent-dashboard, a crate outside the workspace)
 # ships in Noa.app's Contents/Helpers; Noa starts it from View > Agent Dashboard.
 if [ "$PROFILE" = release ]; then
-  cargo build --manifest-path "$ROOT/mock/agent-dashboard/Cargo.toml" --locked --release
+  cargo build --manifest-path "$ROOT/widgets/agent-dashboard/Cargo.toml" --locked --release
 else
-  cargo build --manifest-path "$ROOT/mock/agent-dashboard/Cargo.toml" --locked
+  cargo build --manifest-path "$ROOT/widgets/agent-dashboard/Cargo.toml" --locked
 fi
 
 TARGET_DIR="$TARGET_ROOT/$PROFILE"
@@ -76,7 +76,7 @@ BIN="$TARGET_DIR/Noa"
 APP="$TARGET_DIR/Noa.app"
 CONTENTS="$APP/Contents"
 
-DASHBOARD_BIN="$TARGET_DIR/agent-dashboard-mock"
+DASHBOARD_BIN="$TARGET_DIR/agent-dashboard"
 
 [ -x "$BIN" ] || { echo "error: binary not found at $BIN" >&2; exit 1; }
 [ -x "$DASHBOARD_BIN" ] || { echo "error: binary not found at $DASHBOARD_BIN" >&2; exit 1; }

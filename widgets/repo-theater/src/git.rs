@@ -214,14 +214,18 @@ fn base_range(dir: &Path) -> Option<String> {
 pub fn file_diff(cwd: &str, path: &str, mode: DiffMode) -> String {
     let dir = Path::new(cwd);
     let range = base_range(dir);
-    let args: Vec<&str> = match mode {
-        DiffMode::Unstaged => vec!["diff", "--", path],
-        DiffMode::Staged => vec!["diff", "--cached", "--", path],
+    // Plain unified diff of exactly `path`: the path is a literal, not a
+    // pathspec pattern, and no external diff tool or colour reformats it.
+    let mut args: Vec<&str> = vec!["--literal-pathspecs", "diff", "--no-ext-diff", "--no-color"];
+    match mode {
+        DiffMode::Unstaged => {}
+        DiffMode::Staged => args.push("--cached"),
         DiffMode::VsMain => match &range {
-            Some(range) => vec!["diff", range.as_str(), "--", path],
+            Some(range) => args.push(range.as_str()),
             None => return format!("(比較元ブランチ main / master が見つかりません: {path})"),
         },
-    };
+    }
+    args.extend(["--", path]);
     let out = run_git(dir, &args).unwrap_or_default();
     if !out.trim().is_empty() {
         return out;
@@ -229,6 +233,14 @@ pub fn file_diff(cwd: &str, path: &str, mode: DiffMode) -> String {
     // Untracked file fallback: show contents as added lines.
     if mode == DiffMode::Unstaged {
         let full = dir.join(path);
+        // A symlink's content is its target path (as git stores it), never
+        // the file it points at, which may lie outside the repository.
+        if let Ok(target) = std::fs::read_link(&full) {
+            return format!(
+                "new file mode 120000\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+{}\n",
+                target.display()
+            );
+        }
         if let Ok(content) = std::fs::read_to_string(&full) {
             let mut buf = format!(
                 "--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
@@ -577,5 +589,58 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         assert_eq!(paths, vec!["old.rs", "sub/x.rs"]);
         let diff = file_diff(&info.worktree_root, "old.rs", DiffMode::VsMain);
         assert!(diff.contains("+fn changed() {}"), "{diff}");
+    }
+
+    #[test]
+    fn untracked_symlink_shows_the_link_not_its_target() {
+        let repo = temp_repo("symlink", "main");
+        let outside = scratch_dir("symlink-target");
+        let secret = outside.0.join("secret.txt");
+        std::fs::write(&secret, "TOP-SECRET\n").unwrap();
+        std::os::unix::fs::symlink(&secret, repo.0.join("link")).unwrap();
+        let diff = file_diff(cwd(&repo), "link", DiffMode::Unstaged);
+        assert!(!diff.contains("TOP-SECRET"), "{diff}");
+        assert!(diff.contains(&format!("+{}", secret.display())), "{diff}");
+    }
+
+    #[test]
+    fn selected_path_is_matched_literally() {
+        let repo = temp_repo("literal", "main");
+        std::fs::write(repo.0.join("a[1].rs"), "one\n").unwrap();
+        std::fs::write(repo.0.join("a1.rs"), "one\n").unwrap();
+        git(&repo.0, &["add", "."]);
+        git(&repo.0, &["commit", "-q", "-m", "files"]);
+        std::fs::write(repo.0.join("a[1].rs"), "bracket\n").unwrap();
+        std::fs::write(repo.0.join("a1.rs"), "plain\n").unwrap();
+        git(&repo.0, &["add", "."]);
+        for mode in [DiffMode::Staged, DiffMode::VsMain] {
+            if mode == DiffMode::VsMain {
+                git(&repo.0, &["checkout", "-q", "-b", "feature"]);
+                git(&repo.0, &["commit", "-q", "-m", "change"]);
+            }
+            let diff = file_diff(cwd(&repo), "a[1].rs", mode);
+            assert!(diff.contains("+bracket"), "{mode:?}: {diff}");
+            assert!(!diff.contains("a1.rs"), "{mode:?}: {diff}");
+        }
+        std::fs::write(repo.0.join("a[1].rs"), "again\n").unwrap();
+        std::fs::write(repo.0.join("a1.rs"), "again\n").unwrap();
+        let diff = file_diff(cwd(&repo), "a[1].rs", DiffMode::Unstaged);
+        assert!(diff.contains("+again"), "{diff}");
+        assert!(!diff.contains("a1.rs"), "{diff}");
+    }
+
+    #[test]
+    fn user_diff_config_does_not_reformat_the_body() {
+        let repo = temp_repo("extdiff", "main");
+        git(
+            &repo.0,
+            &["config", "diff.external", "sh -c 'echo EXTERNAL' --"],
+        );
+        git(&repo.0, &["config", "color.diff", "always"]);
+        std::fs::write(repo.0.join("old.rs"), "fn b() {}\n").unwrap();
+        let diff = file_diff(cwd(&repo), "old.rs", DiffMode::Unstaged);
+        assert!(!diff.contains("EXTERNAL"), "{diff}");
+        assert!(!diff.contains('\x1b'), "{diff:?}");
+        assert!(diff.lines().any(|l| l == "+fn b() {}"), "{diff}");
     }
 }

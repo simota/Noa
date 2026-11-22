@@ -129,6 +129,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::ToggleEmber => "Toggle Ember in Menu Bar",
         AppCommand::OpenAgentDashboard => "Open Agent Dashboard",
         AppCommand::OpenRepoTheater => "Open Repo Theater",
+        AppCommand::OpenDiscussion => "Open Discussion",
         // Deviation: the locked spec's literal label is Japanese
         // ("テーマ・設定を開く"), but every existing palette title is English
         // (this whole `match`) — following that established convention
@@ -267,6 +268,9 @@ pub(crate) fn command_palette_description(command: AppCommand) -> &'static str {
         AppCommand::OpenRepoTheater => {
             "Review each worktree's changed files and diffs next to its panes, in a window of their own."
         }
+        AppCommand::OpenDiscussion => {
+            "Hold a moderated discussion between agents running in Noa's panes, in a window of its own."
+        }
         AppCommand::OpenThemePicker => "Choose a color theme.",
         AppCommand::ToggleProcessMonitor => "Show the processes running in each terminal.",
         AppCommand::NextNotification => "Go to the next session with an unread notification.",
@@ -366,6 +370,7 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::ToggleEmber,
         AppCommand::OpenAgentDashboard,
         AppCommand::OpenRepoTheater,
+        AppCommand::OpenDiscussion,
         AppCommand::SetTabTitle,
         AppCommand::CloseTab,
         AppCommand::NextTab,
@@ -664,7 +669,8 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         | AppCommand::ToggleFullscreen
         | AppCommand::ToggleProcessMonitor
         | AppCommand::OpenAgentDashboard
-        | AppCommand::OpenRepoTheater => CommandCategory::View,
+        | AppCommand::OpenRepoTheater
+        | AppCommand::OpenDiscussion => CommandCategory::View,
         AppCommand::Search(_) => CommandCategory::Search,
         AppCommand::ScrollViewport(_) => CommandCategory::Scroll,
         AppCommand::CopyMode(_) => CommandCategory::Clipboard,
@@ -1030,6 +1036,7 @@ mod tests {
             AppCommand::ToggleEmber,
             AppCommand::OpenAgentDashboard,
             AppCommand::OpenRepoTheater,
+            AppCommand::OpenDiscussion,
         ];
         commands.extend((1..=9).map(AppCommand::SelectTab));
         commands

@@ -15,7 +15,7 @@ use crate::dashboard::Dashboard;
 use crate::fleet::Grouping;
 use crate::live::{Link, Snapshot};
 
-const USAGE: &str = "usage: agent-dashboard-mock [--demo] [--group=parent|agent|model|none] \
+const USAGE: &str = "usage: agent-dashboard [--demo] [--group=parent|agent|model|none] \
                      [--snapshot=FILE.png [--size=WxH] [--keys=SEQ]]\n  \
                      --size: snapshot size in logical pixels (default 1440x900; at most \
                      4096 a side and about 8.3 million pixels, e.g. 3840x2160); \

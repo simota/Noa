@@ -1,4 +1,4 @@
-//! `agent-dashboard.open`: start the agent dashboard (`mock/agent-dashboard`,
+//! `agent-dashboard.open`: start the agent dashboard (`widgets/agent-dashboard`,
 //! a noa-gpui program with its own event loop) beside Noa. It reads Noa's
 //! panes through the control server, so it runs as a process of its own.
 
@@ -11,8 +11,8 @@ use std::process::{Command, ExitStatus, Stdio};
 /// executable's process after its file in the menu bar and Dock, so the
 /// bundle ships it under the product name, not the crate's binary name.
 const BUNDLED_PROGRAM: &str = "Noa Agent Dashboard";
-/// The binary `cargo build` makes in `mock/agent-dashboard/target`.
-const DEV_PROGRAM: &str = "agent-dashboard-mock";
+/// The binary `cargo build` makes in `widgets/agent-dashboard/target`.
+const DEV_PROGRAM: &str = "agent-dashboard";
 
 /// How much of the dashboard's stderr is kept to say why it exited.
 const STDERR_TAIL: usize = 4096;
@@ -26,11 +26,11 @@ pub(crate) fn open(on_failure: impl FnOnce(String) + Send + 'static) -> Result<(
         .and_then(|exe| exe.parent().map(Path::to_path_buf));
     let helpers = exe_dir.as_deref().and_then(helpers_dir);
     let Some(program) = locate(helpers.as_deref(), &dev_build_dirs()) else {
-        let message = "Agent Dashboard is not installed (build mock/agent-dashboard)".to_owned();
+        let message = "Agent Dashboard is not installed (build widgets/agent-dashboard)".to_owned();
         log::error!(
             "agent dashboard: no {BUNDLED_PROGRAM:?} in Noa.app's Helpers or {DEV_PROGRAM} in \
-             mock/agent-dashboard/target \
-             (build it with `cargo build --manifest-path mock/agent-dashboard/Cargo.toml`)"
+             widgets/agent-dashboard/target \
+             (build it with `cargo build --manifest-path widgets/agent-dashboard/Cargo.toml`)"
         );
         return Err(message);
     };
@@ -123,7 +123,7 @@ fn locate(helpers: Option<&Path>, dev_dirs: &[PathBuf]) -> Option<PathBuf> {
 /// The dashboard crate's own target directories in this checkout, the one
 /// matching Noa's build profile first.
 fn dev_build_dirs() -> Vec<PathBuf> {
-    let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mock/agent-dashboard/target");
+    let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../widgets/agent-dashboard/target");
     let profiles = if cfg!(debug_assertions) {
         ["debug", "release"]
     } else {
@@ -183,8 +183,8 @@ mod tests {
         assert_eq!(dirs.len(), 2);
         for dir in &dirs {
             assert!(
-                dir.ends_with("mock/agent-dashboard/target/debug")
-                    || dir.ends_with("mock/agent-dashboard/target/release"),
+                dir.ends_with("widgets/agent-dashboard/target/debug")
+                    || dir.ends_with("widgets/agent-dashboard/target/release"),
                 "{dir:?}"
             );
         }

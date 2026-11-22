@@ -92,11 +92,28 @@ pub(super) fn graph(
         headers: Vec::new(),
         indicator,
     });
-    caption(
-        tree,
-        section,
-        "● 作業中　! 承認待ち　? 質問　× 失敗　… 静止　✓ 完了",
+    let legend = tree.insert(
+        Some(section),
+        Container::wrapping_row(10.0, 2.0).align_items(AlignItems::CENTER),
     );
+    for (symbol, text, color) in [
+        ("●", "作業中", GREEN),
+        ("!", "承認待ち", super::style::YELLOW),
+        ("?", "質問", super::style::ORANGE),
+        ("×", "失敗", super::style::RED),
+        ("…", "静止", GRAY),
+        ("✓", "完了", GRAY),
+    ] {
+        let item = tree.insert(
+            Some(legend),
+            Container::row().align_items(AlignItems::CENTER).gap(3.0),
+        );
+        tree.insert(
+            Some(item),
+            Label::new(symbol).font_size(10.0).weight(700).color(color),
+        );
+        caption(tree, item, text);
+    }
 }
 
 /// A node pill; a muted one (on the way to a match) has a muted label and

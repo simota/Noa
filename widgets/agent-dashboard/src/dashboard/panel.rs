@@ -117,7 +117,8 @@ pub(super) fn panel(tree: &mut UiTree, parent: WidgetId, style: Style) -> Widget
             ..style
         })
         .background(Role::Surface)
-        .radius(10.0),
+        .border(1.0, Role::Separator)
+        .radius(12.0),
     )
 }
 

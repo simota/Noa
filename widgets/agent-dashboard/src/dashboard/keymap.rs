@@ -13,6 +13,8 @@ pub(super) enum Mode {
     Browse,
     /// The filter field has the focus: keys not bound here edit it.
     Filter,
+    /// The drawer's send field has the focus: Enter sends, Esc leaves it.
+    Send,
     /// The help overlay is open: keys not bound here are swallowed.
     Help,
 }
@@ -29,8 +31,14 @@ pub(super) enum Trigger {
 pub(super) enum Action {
     Next,
     Prev,
+    NextWaiting,
     Open,
     ToggleDetail,
+    StartSend,
+    SubmitSend,
+    CancelSend,
+    ClosePane,
+    CycleGrouping,
     StartFilter,
     Back,
     TogglePanel(Panel),
@@ -91,6 +99,13 @@ pub(super) const BINDINGS: &[Binding] = &[
     bind(Browse, K(Key::ArrowUp), &["↑"], Prev, PREV),
     bind(
         Browse,
+        K(Key::Char('n')),
+        &["N"],
+        NextWaiting,
+        "次の要対応ワーカーを選ぶ",
+    ),
+    bind(
+        Browse,
         K(Key::Enter),
         &["↩"],
         Open,
@@ -105,10 +120,31 @@ pub(super) const BINDINGS: &[Binding] = &[
     ),
     bind(
         Browse,
+        K(Key::Char('s')),
+        &["S"],
+        StartSend,
+        "選んだワーカーへメッセージ送信",
+    ),
+    bind(
+        Browse,
+        K(Key::Char('x')),
+        &["X"],
+        ClosePane,
+        "選んだワーカーのペインを閉じる（2 回で確認）",
+    ),
+    bind(
+        Browse,
+        K(Key::Char('g')),
+        &["G"],
+        CycleGrouping,
+        "グループを切り替え",
+    ),
+    bind(
+        Browse,
         T("/"),
         &["/"],
         StartFilter,
-        "絞り込む（ラベル・エージェント・モデル・ブランチ・依頼）",
+        "絞り込む（state: / need: / parent: / -否定 に対応）",
     ),
     bind(
         Browse,
@@ -188,9 +224,18 @@ fn matches(trigger: Trigger, event: &Event) -> bool {
 }
 
 /// Where `event` goes in `mode`. While an IME composition is in progress in
-/// the filter field, every event goes to the field.
+/// a text field (`Filter` or `Send`), every event goes to the field.
 pub(super) fn route(mode: Mode, composing: bool, event: &Event) -> Route {
-    if mode == Mode::Filter && composing {
+    if matches!(mode, Mode::Filter | Mode::Send) && composing {
+        return Route::Tree;
+    }
+    if mode == Mode::Send {
+        if matches(Trigger::Key(Key::Enter), event) {
+            return Route::Act(Action::SubmitSend);
+        }
+        if matches(Trigger::Key(Key::Escape), event) {
+            return Route::Act(Action::CancelSend);
+        }
         return Route::Tree;
     }
     if let Some(binding) = BINDINGS

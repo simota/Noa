@@ -5,6 +5,7 @@ use noa_gpui_scene::{Border, DisplayList, DrawCommand, Point, Size};
 
 use super::*;
 
+mod actions;
 mod details;
 mod feed;
 mod filtering;
@@ -147,6 +148,7 @@ fn live(fleet: Fleet, synced_secs: u64) -> Snapshot {
         link: Link::Live,
         synced_secs,
         can_focus: true,
+        can_input: true,
         instance: Some(INSTANCE.to_owned()),
     }
 }

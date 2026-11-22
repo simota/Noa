@@ -305,10 +305,16 @@ pub(super) fn queue_card_body(tree: &mut UiTree, card: WidgetId, worker: &Worker
             Container::new(Style {
                 flex_direction: FlexDirection::Column,
                 gap: gap(2.0),
-                padding: LayoutRect::length(8.0),
+                padding: LayoutRect {
+                    left: length(10.0),
+                    right: length(10.0),
+                    top: length(8.0),
+                    bottom: length(8.0),
+                },
                 ..Default::default()
             })
             .background(Role::Background)
+            .border(1.0, Role::Separator)
             .radius(6.0),
         );
         for line in worker.card_tail() {
@@ -366,6 +372,8 @@ pub(super) fn queue_card_body(tree: &mut UiTree, card: WidgetId, worker: &Worker
     );
     tree.insert(
         Some(actions),
-        Button::new("開く").control_size(ControlSize::Small),
+        Button::new("開く")
+            .control_size(ControlSize::Small)
+            .selected(true),
     )
 }

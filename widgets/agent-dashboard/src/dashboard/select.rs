@@ -87,3 +87,25 @@ pub(super) fn reselect(old: &[u64], new: &[u64], selected: Option<u64>) -> Optio
     let at = old.iter().position(|p| *p == pane).unwrap_or(0);
     new.get(at.min(new.len().checked_sub(1)?)).copied()
 }
+
+/// The next waiting worker in queue order (wrapping around): jumps straight
+/// to the top urgent worker from anywhere, or cycles through waiting ones.
+pub(super) fn next_waiting(
+    fleet: &Fleet,
+    view: &View,
+    filter: &Filter,
+    selected: Option<u64>,
+) -> Option<u64> {
+    let matching = fleet.workers.iter().filter(|w| filter.matches(w));
+    let waiting: Vec<u64> = cards(matching, view.info_open)
+        .into_iter()
+        .map(|(w, _)| w.pane)
+        .collect();
+    if waiting.is_empty() {
+        return None;
+    }
+    match selected.and_then(|pane| waiting.iter().position(|p| *p == pane)) {
+        Some(index) => Some(waiting[(index + 1) % waiting.len()]),
+        None => Some(waiting[0]),
+    }
+}

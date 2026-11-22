@@ -28,8 +28,12 @@ impl Filter {
 }
 
 /// Every whitespace-separated term of `query` (ASCII space and U+3000 both
-/// separate), lowercased, is part of the worker's label, agent, model,
-/// branch or task. An empty query matches every worker.
+/// separate), lowercased, must match the worker. A term may be prefixed with
+/// `-` to negate it, and may use a `field:value` qualifier (`state:`/`s:`,
+/// `need:`/`n:`, `agent:`/`a:`, `model:`/`m:`, `branch:`/`b:`,
+/// `parent:`/`p:`, `label:`/`l:`, `task:`/`t:`, `result:`/`r:`). Plain terms
+/// match label, agent, model, branch or task. An empty query matches every
+/// worker.
 pub(super) fn matches(worker: &Worker, query: &str) -> bool {
     let fields = [
         &worker.label,
@@ -42,8 +46,70 @@ pub(super) fn matches(worker: &Worker, query: &str) -> bool {
     query
         .split(char::is_whitespace)
         .filter(|term| !term.is_empty())
-        .map(str::to_lowercase)
-        .all(|term| fields.iter().any(|field| field.contains(&term)))
+        .all(|raw| match_term(worker, &fields, raw))
+}
+
+fn match_term(worker: &Worker, fields: &[String; 5], raw: &str) -> bool {
+    let (negated, term) = match raw.strip_prefix('-') {
+        Some(rest) if !rest.is_empty() => (true, rest),
+        _ => (false, raw),
+    };
+    let term = term.to_lowercase();
+    let matched = match_qualified(worker, &term)
+        .unwrap_or_else(|| fields.iter().any(|field| field.contains(&term)));
+    if negated { !matched } else { matched }
+}
+
+fn match_qualified(worker: &Worker, term: &str) -> Option<bool> {
+    let (key, value) = term.split_once(':')?;
+    if value.is_empty() {
+        return None;
+    }
+    use crate::fleet::{Need, State};
+    let hit = match key {
+        "state" | "s" => match value {
+            "running" | "作業中" => worker.state == State::Running,
+            "permission" | "approval" | "承認" | "承認待ち" => {
+                worker.state == State::Permission
+            }
+            "input" | "question" | "入力" | "入力待ち" | "質問" => {
+                worker.state == State::Input
+            }
+            "finished" | "done" | "完了" => worker.state == State::Finished,
+            "error" | "fail" | "failure" | "失敗" => worker.state == State::Error,
+            "quiet" | "静止" => worker.quiet,
+            "waiting" | "要対応" => worker.need().is_some(),
+            _ => false,
+        },
+        "need" | "n" => match value {
+            "approval" | "承認" | "承認待ち" => worker.need() == Some(Need::Approval),
+            "question" | "質問" => worker.need() == Some(Need::Question),
+            "failure" | "失敗" => worker.need() == Some(Need::Failure),
+            "notice" | "通知" => worker.need() == Some(Need::Notice),
+            "quiet" | "静止" => worker.need() == Some(Need::Quiet),
+            "decision" | "判断待ち" => worker
+                .need()
+                .is_some_and(|n| n.tier() == crate::fleet::Tier::Decision),
+            "any" | "あり" => worker.need().is_some(),
+            _ => false,
+        },
+        "agent" | "a" => worker.kind.to_lowercase().contains(value),
+        "model" | "m" => {
+            worker.model.to_lowercase().contains(value)
+                || worker.effort.to_lowercase().contains(value)
+        }
+        "branch" | "b" => worker.branch.to_lowercase().contains(value),
+        "parent" | "p" => worker.orchestrator.to_lowercase().contains(value),
+        "label" | "l" => worker.label.to_lowercase().contains(value),
+        "task" | "t" => worker.task.to_lowercase().contains(value),
+        "result" | "r" => match value {
+            "yes" | "true" | "1" | "あり" => worker.has_result,
+            "no" | "false" | "0" | "なし" => !worker.has_result,
+            _ => false,
+        },
+        _ => return None,
+    };
+    Some(hit)
 }
 
 /// Typed text and an IME's composition as the filter field is given them:

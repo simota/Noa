@@ -19,6 +19,7 @@ fn down(reason: &str) -> Snapshot {
         link: Link::Down(reason.to_owned()),
         synced_secs: 0,
         can_focus: false,
+        can_input: false,
         instance: None,
     }
 }

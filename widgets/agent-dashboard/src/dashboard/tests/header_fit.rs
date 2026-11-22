@@ -90,6 +90,7 @@ fn lose_link(dashboard: &mut Dashboard, text: &mut TextStore, now: Instant) {
         link: Link::Down(long_reason()),
         synced_secs: 0,
         can_focus: false,
+        can_input: false,
         instance: None,
     };
     dashboard.apply_received(snapshot, now, text);

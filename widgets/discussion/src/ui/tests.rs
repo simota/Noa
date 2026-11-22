@@ -878,3 +878,121 @@ fn the_map_saves_as_a_png_of_the_whole_map() {
     );
     let _ = std::fs::remove_file(&path);
 }
+
+/// The first scroll view under `host`, depth first.
+fn scroll_under(tree: &UiTree, host: WidgetId) -> WidgetId {
+    let mut stack = vec![host];
+    while let Some(id) = stack.pop() {
+        if tree.get::<ScrollView>(id).is_some() {
+            return id;
+        }
+        stack.extend(tree.children(id).iter().rev().copied());
+    }
+    panic!("no scroll view under {host:?}");
+}
+
+fn scroll_position(tree: &UiTree, id: WidgetId) -> Point {
+    tree.get::<ScrollView>(id).unwrap().scroll_position()
+}
+
+/// Scrolls the first scroll view under `host` by `delta`, then delivers the
+/// same session one revision later, as a receipt update does. Returns the
+/// position before and after the update.
+fn scrolled_across_an_update(
+    h: &mut Harness,
+    host: WidgetId,
+    delta: Point,
+    size: Size,
+) -> (Point, Point) {
+    h.screen.prepare(size, &mut h.text);
+    let scroll = scroll_under(&h.screen.tree, host);
+    let [x, y, w, height] = rect(&h.screen.tree, scroll);
+    h.screen.dispatch(
+        Event::Wheel {
+            pos: Point::new(x + w / 2.0, y + height / 2.0),
+            delta,
+        },
+        &mut h.text,
+    );
+    h.screen.prepare(size, &mut h.text);
+    let before = scroll_position(&h.screen.tree, scroll);
+    let mut session = h.screen.session.clone().unwrap();
+    session.rev += 1;
+    h.feed
+        .snapshots
+        .send(Snapshot {
+            link: Link::Live,
+            session: Some(session),
+        })
+        .unwrap();
+    h.screen.prepare(size, &mut h.text);
+    let after = scroll_position(&h.screen.tree, scroll_under(&h.screen.tree, host));
+    (before, after)
+}
+
+#[test]
+fn a_live_update_keeps_the_chat_where_the_user_scrolled_it() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    h.deliver(Some(crate::demo::session()));
+    let host = h.screen.center_host;
+    // Up from the end, where the chat opens.
+    let (before, after) = scrolled_across_an_update(&mut h, host, Point::new(0.0, 300.0), window());
+    let scroll = scroll_under(&h.screen.tree, host);
+    assert!(
+        !h.screen
+            .tree
+            .get::<ScrollView>(scroll)
+            .unwrap()
+            .is_following_end(),
+        "the chat went back to its end"
+    );
+    assert!((after.y - before.y).abs() < 1.0, "{before:?} -> {after:?}");
+}
+
+#[test]
+fn a_live_update_keeps_the_map_where_the_user_panned_it() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    h.deliver(Some(crate::demo::session()));
+    h.screen.run(Action::ShowMap, &mut h.text);
+    h.screen.prepare(window(), &mut h.text);
+    let host = h.screen.center_host;
+    let (before, after) =
+        scrolled_across_an_update(&mut h, host, Point::new(-120.0, -80.0), window());
+    assert!(before.x > 1.0, "the map did not scroll: {before:?}");
+    assert!(
+        (after.x - before.x).abs() < 1.0 && (after.y - before.y).abs() < 1.0,
+        "{before:?} -> {after:?}"
+    );
+}
+
+#[test]
+fn a_live_update_keeps_the_tree_and_the_minutes_where_they_were() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    // Taller than both panes.
+    let mut session = crate::demo::session();
+    for n in 0..12 {
+        let mut issue = session.issues.issues[0].clone();
+        issue.id = IssueId::new(format!("Z{n}"));
+        issue.parent = None;
+        session.issues.issues.push(issue);
+        let item = session.minutes.section(MinuteSection::Decisions)[0].clone();
+        session
+            .minutes
+            .section_mut(MinuteSection::Decisions)
+            .push(item);
+    }
+    h.deliver(Some(session));
+    for host in [h.screen.tree_host, h.screen.minutes_host] {
+        let (before, after) = scrolled_across_an_update(
+            &mut h,
+            host,
+            Point::new(0.0, -200.0),
+            Size::new(MIN_WINDOW.0 as f32, MIN_WINDOW.1 as f32),
+        );
+        assert!(before.y > 1.0, "did not scroll: {before:?}");
+        assert!((after.y - before.y).abs() < 1.0, "{before:?} -> {after:?}");
+    }
+}

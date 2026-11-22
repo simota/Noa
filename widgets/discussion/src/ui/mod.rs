@@ -962,6 +962,17 @@ pub(crate) fn scroll_column(tree: &mut UiTree, parent: WidgetId, spacing: f32) -
     scroller(tree, parent, spacing, false)
 }
 
+/// Keeps where the user scrolled the scroll view holding `list` across
+/// rebuilds: every live update rebuilds the panes, and a new scroll view
+/// would otherwise open at its start (or, following its end, at the end).
+/// `pane` names the view within `session`.
+pub(crate) fn keep_scroll(tree: &mut UiTree, list: WidgetId, session: &Session, pane: &str) {
+    let scroll = tree
+        .parent(list)
+        .expect("a scroll column sits in its scroll view");
+    tree.set_autosave_name(scroll, format!("{}/{pane}", session.id));
+}
+
 /// [`scroll_column`] that opens at its end and stays there as content
 /// grows, as a chat log does.
 pub(crate) fn tail_column(tree: &mut UiTree, parent: WidgetId, spacing: f32) -> WidgetId {

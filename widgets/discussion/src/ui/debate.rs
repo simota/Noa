@@ -17,8 +17,8 @@ use discussion::model::types::{
 
 use super::chat::message_card;
 use super::{
-    Action, author_color, caption, debate_in_play, fill, gap, part_name, spacer, state_tag, tag,
-    tail_column,
+    Action, author_color, caption, debate_in_play, fill, gap, keep_scroll, part_name, spacer,
+    state_tag, tag, tail_column,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -369,6 +369,11 @@ pub(super) fn insert(
             );
         }
         let list = tail_column(tree, column, 8.0);
+        let target = match &view.target {
+            DebateTarget::Draft(issue) => format!("draft/{issue}"),
+            DebateTarget::Existing(id) => id.to_string(),
+        };
+        keep_scroll(tree, list, session, &format!("debate/{target}/{title}"));
         if messages.is_empty() {
             caption(tree, list, empty);
         }

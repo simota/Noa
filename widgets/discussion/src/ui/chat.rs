@@ -13,7 +13,7 @@ use discussion::model::types::{IssueId, Message, MsgKind, RoundKind, Session};
 
 use super::{
     Action, Delivery, author_color, author_name, caption, debate_in_play, gap, is_about,
-    kind_label, outlined, part_name, phase_label, spacer, subtree, tag, tail_column,
+    keep_scroll, kind_label, outlined, part_name, phase_label, spacer, subtree, tag, tail_column,
 };
 
 /// The messages the chat shows: all of them, or those about `filter` and
@@ -45,6 +45,11 @@ pub(super) fn insert(
         filter_bar(tree, host, session, issue, actions);
     }
     let list = tail_column(tree, host, 8.0);
+    let pane = match filter {
+        Some(issue) => format!("chat/{issue}"),
+        None => "chat".into(),
+    };
+    keep_scroll(tree, list, session, &pane);
     let messages = visible(session, filter);
     if messages.is_empty() {
         caption(

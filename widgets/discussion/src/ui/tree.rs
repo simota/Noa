@@ -11,8 +11,8 @@ use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use discussion::model::types::{Issue, IssueId, IssueState, Session};
 
 use super::{
-    Action, caption, debate_in_play, gap, heading, note, outlined, part_name, position_tag,
-    scroll_column, state_tag, tag,
+    Action, caption, debate_in_play, gap, heading, keep_scroll, note, outlined, part_name,
+    position_tag, scroll_column, state_tag, tag,
 };
 
 const INDENT: f32 = 16.0;
@@ -34,6 +34,7 @@ pub(super) fn insert(
         actions.push((clear, Action::ClearFilter));
     }
     let list = scroll_column(tree, host, 6.0);
+    keep_scroll(tree, list, session, "tree");
 
     caption(tree, list, "議題");
     tree.insert(

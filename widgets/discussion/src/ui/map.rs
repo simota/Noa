@@ -123,6 +123,7 @@ pub(super) fn insert(
         Some(host),
         ScrollView::new(fill()).horizontal(true).vertical(true),
     );
+    tree.set_autosave_name(scroll, format!("{}/map", session.id));
     let canvas = tree.insert(
         Some(scroll),
         Container::new(Style {

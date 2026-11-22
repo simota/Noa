@@ -8,7 +8,7 @@ use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use discussion::model::types::{AgentKind, MinuteSection, Session};
 
 use super::chat::issue_link;
-use super::{Action, caption, gap, heading, note, scroll_column, tag};
+use super::{Action, caption, gap, heading, keep_scroll, note, scroll_column, tag};
 
 pub(crate) fn section_title(section: MinuteSection) -> &'static str {
     match section {
@@ -60,6 +60,7 @@ pub(super) fn insert(
         );
     }
     let list = scroll_column(tree, host, 14.0);
+    keep_scroll(tree, list, session, "minutes");
     for section in MinuteSection::ALL {
         let items = session.minutes.section(section);
         let block = tree.insert(Some(list), Container::column().gap(6.0));

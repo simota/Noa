@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
-use noa_ipc::{Client, ClientError, EventKind, Panel, Scope, ScopeSet, TextSource};
+use noa_ipc::{
+    Client, ClientError, EventKind, Panel, Scope, ScopeSet, SendTextOptions, TextSource,
+};
 
 use crate::git;
 use crate::model::{AgentActivity, DiffMode, PaneSummary, TheaterData, Worktree, group_repos};
@@ -38,9 +40,16 @@ pub struct Snapshot {
 pub enum Command {
     Refresh,
     SetDiffMode(DiffMode),
-    LoadDiff { cwd: String, path: String },
+    LoadDiff {
+        cwd: String,
+        path: String,
+    },
     Focus(u64),
-    SendText { pane_id: u64, text: String },
+    SendText {
+        pane_id: u64,
+        text: String,
+        submit: bool,
+    },
 }
 
 pub struct Channel {
@@ -125,8 +134,26 @@ fn run(
                                     wake();
                                 }
                             }
-                            Command::SendText { pane_id, text } => {
-                                if let Err(err) = client.send_text(pane_id, &text, false) {
+                            Command::SendText {
+                                pane_id,
+                                text,
+                                submit,
+                            } => {
+                                let result = send_requests(&text, submit).into_iter().try_for_each(
+                                    |(chunk, paste)| {
+                                        // A pane without bracketed paste would
+                                        // still run each line: refuse instead.
+                                        client.send_text_with(
+                                            pane_id,
+                                            &chunk,
+                                            SendTextOptions {
+                                                paste,
+                                                require_paste_mode: paste && chunk.contains('\n'),
+                                            },
+                                        )
+                                    },
+                                );
+                                if let Err(err) = result {
                                     let _ = notice_tx.send(format!("送信失敗: {err}"));
                                 } else {
                                     let _ = notice_tx
@@ -220,6 +247,17 @@ fn run(
             }
         }
     }
+}
+
+/// The `noa.sendText` calls (text, paste) that deliver `text` to a pane: the
+/// text as one bracketed paste, so embedded newlines are not each an Enter,
+/// then a raw CR when it should be submitted.
+fn send_requests(text: &str, submit: bool) -> Vec<(String, bool)> {
+    let mut requests = vec![(text.to_owned(), true)];
+    if submit {
+        requests.push(("\r".to_owned(), false));
+    }
+    requests
 }
 
 type DiffEntry = (String, String, String);
@@ -382,4 +420,42 @@ fn control_url(bind: &str, port: u16) -> String {
         ip => ip,
     };
     format!("ws://{}/", SocketAddr::new(ip, port))
+}
+
+#[cfg(test)]
+pub(crate) fn test_channel() -> (Channel, Sender<Snapshot>, Receiver<Command>) {
+    let (snapshot_tx, snapshots) = mpsc::channel();
+    let (_notice_tx, notices) = mpsc::channel();
+    let (commands, command_rx) = mpsc::channel();
+    (
+        Channel {
+            snapshots,
+            notices,
+            commands,
+        },
+        snapshot_tx,
+        command_rx,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multiline_text_is_never_written_raw() {
+        let text = "[main / a.rs]\n```diff\n+foo\n```\n修正依頼: 直して";
+        let requests = send_requests(text, true);
+        for (chunk, paste) in &requests {
+            assert!(
+                *paste || !chunk.contains('\n'),
+                "raw chunk with newline: {chunk:?}"
+            );
+        }
+        assert_eq!(
+            requests,
+            vec![(text.to_owned(), true), ("\r".to_owned(), false)]
+        );
+        assert_eq!(send_requests("a b", false), vec![("a b".to_owned(), true)]);
+    }
 }

@@ -144,7 +144,9 @@ impl TheaterData {
     /// Marks files that are modified in more than one worktree of the same repo.
     pub fn compute_conflicts(&mut self) {
         for repo in &mut self.repos {
-            let mut editors: HashMap<String, Vec<String>> = HashMap::new();
+            // Worktrees are told apart by cwd: branch names are not unique
+            // (two detached HEADs are both "(detached)").
+            let mut editors: HashMap<String, Vec<(String, String)>> = HashMap::new();
             for wt in &repo.worktrees {
                 let mut seen = HashSet::new();
                 for f in &wt.files {
@@ -152,17 +154,17 @@ impl TheaterData {
                         editors
                             .entry(f.path.clone())
                             .or_default()
-                            .push(wt.branch.clone());
+                            .push((wt.cwd.clone(), wt.branch.clone()));
                     }
                 }
             }
             for wt in &mut repo.worktrees {
                 for f in &mut wt.files {
-                    if let Some(branches) = editors.get(&f.path) {
-                        f.conflict_worktrees = branches
+                    if let Some(editors) = editors.get(&f.path) {
+                        f.conflict_worktrees = editors
                             .iter()
-                            .filter(|b| b.as_str() != wt.branch.as_str())
-                            .cloned()
+                            .filter(|(cwd, _)| cwd.as_str() != wt.cwd.as_str())
+                            .map(|(_, branch)| branch.clone())
                             .collect();
                     } else {
                         f.conflict_worktrees.clear();
@@ -506,6 +508,39 @@ pub fn demo_data(mode: DiffMode) -> TheaterData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detached_worktrees_editing_same_file_conflict() {
+        let file = |path: &str| ChangedFile {
+            path: path.into(),
+            status: "M".into(),
+            added: 1,
+            deleted: 0,
+            diff: String::new(),
+            conflict_worktrees: Vec::new(),
+        };
+        let wt = |cwd: &str| Worktree {
+            name: "(detached)".into(),
+            cwd: cwd.into(),
+            branch: "(detached)".into(),
+            ahead: 0,
+            behind: 0,
+            panes: Vec::new(),
+            files: vec![file("src/lib.rs")],
+        };
+        let mut data = TheaterData {
+            repos: vec![Repo {
+                name: "r".into(),
+                root: "/r".into(),
+                worktrees: vec![wt("/r/a"), wt("/r/b")],
+            }],
+        };
+        data.compute_conflicts();
+        for wt in &data.repos[0].worktrees {
+            assert_eq!(wt.files[0].conflict_worktrees.len(), 1, "{}", wt.cwd);
+        }
+        assert_eq!(data.totals().3, 2);
+    }
 
     #[test]
     fn demo_data_marks_cross_worktree_conflict() {

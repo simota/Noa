@@ -61,6 +61,8 @@ pub struct RepoTheater {
     filtered: TheaterData,
     tokens: Vec<String>,
     diff_cache: HashMap<(String, String), String>,
+    /// The file the live feed was last asked to keep refreshing.
+    requested_diff: Option<(String, String)>,
 
     // Current selection into `filtered`.
     sel_repo: usize,
@@ -474,6 +476,7 @@ impl RepoTheater {
             filtered,
             tokens: Vec::new(),
             diff_cache: HashMap::new(),
+            requested_diff: None,
             sel_repo: 0,
             sel_wt: 0,
             sel_file: 0,
@@ -664,27 +667,45 @@ impl RepoTheater {
             .insert(Some(self.path_bar_host), PathControl::new(crumbs));
     }
 
+    /// The selected file's diff body: its inline diff, else the live cache.
+    fn current_diff_text(&self) -> Option<String> {
+        let wt = self.current_worktree()?;
+        let file = self.current_file()?;
+        if !file.diff.is_empty() {
+            return Some(file.diff.clone());
+        }
+        self.diff_cache
+            .get(&(wt.cwd.clone(), file.path.clone()))
+            .cloned()
+    }
+
     fn rebuild_diff_view(&mut self, text: &mut TextStore) {
         self.clear_children(self.diff_header, text);
 
+        // The live feed refreshes only the last requested file, so re-request
+        // on every selection change, cached or not.
+        let wanted = match (self.current_worktree(), self.current_file()) {
+            (Some(wt), Some(file)) if file.diff.is_empty() => {
+                Some((wt.cwd.clone(), file.path.clone()))
+            }
+            _ => None,
+        };
+        if let (Source::Live(ch), Some(key)) = (&self.source, wanted)
+            && self.requested_diff.as_ref() != Some(&key)
+        {
+            ch.send(Command::LoadDiff {
+                cwd: key.0.clone(),
+                path: key.1.clone(),
+            });
+            self.requested_diff = Some(key);
+        }
+
         let (header_text, conflict_note, diff_text) =
             match (self.current_worktree(), self.current_file()) {
-                (Some(wt), Some(file)) => {
-                    let text = if !file.diff.is_empty() {
-                        file.diff.clone()
-                    } else if let Some(cached) =
-                        self.diff_cache.get(&(wt.cwd.clone(), file.path.clone()))
-                    {
-                        cached.clone()
-                    } else {
-                        if let Source::Live(ch) = &self.source {
-                            ch.send(Command::LoadDiff {
-                                cwd: wt.cwd.clone(),
-                                path: file.path.clone(),
-                            });
-                        }
-                        "差分を取得しています…".into()
-                    };
+                (Some(_), Some(file)) => {
+                    let text = self
+                        .current_diff_text()
+                        .unwrap_or_else(|| "差分を取得しています…".into());
                     let note = if file.conflict_worktrees.is_empty() {
                         None
                     } else {
@@ -904,8 +925,8 @@ impl RepoTheater {
             .and_then(LogView::copy_text)
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| {
-                self.current_file()
-                    .map(|f| f.diff.lines().take(10).collect::<Vec<_>>().join("\n"))
+                self.current_diff_text()
+                    .map(|d| d.lines().take(10).collect::<Vec<_>>().join("\n"))
                     .unwrap_or_default()
             });
         let quote = format!("{header}\n```diff\n{snippet}\n```\n修正依頼: ");
@@ -942,7 +963,8 @@ impl RepoTheater {
                 }
                 ch.send(Command::SendText {
                     pane_id,
-                    text: format!("{text}\n"),
+                    text,
+                    submit: true,
                 });
             }
         }
@@ -956,7 +978,7 @@ impl RepoTheater {
         }
         let joined = paths
             .iter()
-            .map(|p| p.display().to_string())
+            .map(|p| shell_escape(&p.display().to_string()))
             .collect::<Vec<_>>()
             .join(" ");
         let Some(pane) = self.current_worktree().and_then(Worktree::primary_pane) else {
@@ -974,6 +996,7 @@ impl RepoTheater {
                 ch.send(Command::SendText {
                     pane_id,
                     text: joined.clone(),
+                    submit: false,
                 });
                 self.toast(format!("ペイン #{pane_id} へパスを送信しました"));
             }
@@ -1024,13 +1047,22 @@ impl RepoTheater {
             self.link = snap.link;
             self.can_focus = snap.can_focus;
             self.can_send = snap.can_send;
-            self.diff_mode = snap.diff_mode;
+            // The UI is the only source of mode changes; a snapshot in another
+            // mode was built before the feed saw our SetDiffMode.
+            if snap.diff_mode != self.diff_mode {
+                self.rebuild_status_bar(text);
+                return self.show_notices(notices);
+            }
             self.raw_data = snap.data;
             if let Some((cwd, path, diff)) = snap.selected_diff {
                 self.diff_cache.insert((cwd, path), diff);
             }
             self.sync_views(text);
         }
+        self.show_notices(notices);
+    }
+
+    fn show_notices(&mut self, notices: Vec<String>) {
         for notice in notices {
             self.toast(notice);
         }
@@ -1206,6 +1238,24 @@ impl Screen for RepoTheater {
     }
 }
 
+/// Shell-escapes one word: single-quotes it (embedded `'` as `'\''`) unless
+/// it only holds characters no shell treats specially. Mirrors noa-app's
+/// drop/paste escaping.
+fn shell_escape(s: &str) -> String {
+    let is_safe = !s.is_empty()
+        && s.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'-' | b'_' | b'.' | b'/' | b':' | b'@' | b'%' | b'+' | b'='
+                )
+        });
+    if is_safe {
+        return s.to_owned();
+    }
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 fn colorize_diff_line(line: &str) -> LogLine {
     if line.starts_with("+++") || line.starts_with("---") || line.starts_with("diff --git") {
         LogLine::new(line).color(DIFF_META_FG)
@@ -1259,5 +1309,207 @@ mod tests {
             .unwrap()
             .text();
         assert!(prompt.contains("crates/noa-ipc/src/push.rs"));
+    }
+
+    // ── Live-mode regression tests driven through a fake channel ─────────────
+
+    use crate::live::test_channel;
+    use crate::model::PaneSummary;
+    use std::sync::mpsc::{Receiver, Sender};
+
+    const CWD: &str = "/repo";
+
+    fn live_data() -> TheaterData {
+        let file = |path: &str| ChangedFile {
+            path: path.into(),
+            status: "M".into(),
+            added: 1,
+            deleted: 0,
+            diff: String::new(),
+            conflict_worktrees: Vec::new(),
+        };
+        TheaterData {
+            repos: vec![Repo {
+                name: "repo".into(),
+                root: CWD.into(),
+                worktrees: vec![Worktree {
+                    name: "main".into(),
+                    cwd: CWD.into(),
+                    branch: "main".into(),
+                    ahead: 0,
+                    behind: 0,
+                    panes: vec![PaneSummary {
+                        pane_id: 7,
+                        name: "zsh".into(),
+                        label: None,
+                        process: None,
+                        activity: AgentActivity::None,
+                        busy: false,
+                        attention: false,
+                        terminal_tail: String::new(),
+                    }],
+                    files: vec![file("a.rs"), file("b.rs")],
+                }],
+            }],
+        }
+    }
+
+    fn snapshot(mode: DiffMode, selected: Option<(&str, &str)>) -> Snapshot {
+        Snapshot {
+            data: live_data(),
+            link: Link::Live,
+            can_focus: true,
+            can_send: true,
+            diff_mode: mode,
+            selected_diff: selected.map(|(path, diff)| (CWD.into(), path.into(), diff.into())),
+        }
+    }
+
+    struct LiveHarness {
+        screen: RepoTheater,
+        text: TextStore,
+        snapshots: Sender<Snapshot>,
+        commands: Receiver<Command>,
+    }
+
+    impl LiveHarness {
+        fn new() -> Self {
+            let (channel, snapshots, commands) = test_channel();
+            let mut h = LiveHarness {
+                screen: RepoTheater::live(channel),
+                text: TextStore::new(Default::default()),
+                snapshots,
+                commands,
+            };
+            h.deliver(snapshot(DiffMode::Unstaged, Some(("a.rs", "+a v1"))));
+            h
+        }
+
+        fn deliver(&mut self, snap: Snapshot) {
+            self.snapshots.send(snap).unwrap();
+            self.screen
+                .prepare(Size::new(1440.0, 900.0), &mut self.text);
+        }
+
+        fn drain(&self) -> Vec<Command> {
+            self.commands.try_iter().collect()
+        }
+
+        fn select_file(&mut self, fi: usize) {
+            self.screen.sel_file = fi;
+            self.screen.rebuild_diff_view(&mut self.text);
+        }
+
+        fn diff_lines(&self) -> Vec<String> {
+            let log = self
+                .screen
+                .tree()
+                .get::<LogView>(self.screen.diff_log)
+                .unwrap();
+            log.all_text().lines().map(str::to_owned).collect()
+        }
+    }
+
+    fn load_diff_paths(cmds: &[Command]) -> Vec<String> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                Command::LoadDiff { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn returning_to_cached_file_requests_fresh_diff() {
+        let mut h = LiveHarness::new();
+        h.drain();
+        h.select_file(1);
+        assert_eq!(load_diff_paths(&h.drain()), vec!["b.rs"]);
+        h.select_file(0);
+        assert_eq!(load_diff_paths(&h.drain()), vec!["a.rs"]);
+        h.deliver(snapshot(DiffMode::Unstaged, Some(("a.rs", "+a v2"))));
+        assert_eq!(h.diff_lines(), vec!["+a v2"]);
+        // A periodic snapshot for the same selection must not re-request it.
+        assert!(load_diff_paths(&h.drain()).is_empty());
+    }
+
+    #[test]
+    fn quote_without_selection_uses_live_diff() {
+        let mut h = LiveHarness::new();
+        h.screen.quote_selected_diff();
+        let prompt = h
+            .screen
+            .tree()
+            .get::<TextArea>(h.screen.prompt_area)
+            .unwrap()
+            .text()
+            .to_owned();
+        assert!(prompt.contains("```diff\n+a v1\n```"), "{prompt}");
+    }
+
+    #[test]
+    fn stale_snapshot_from_previous_mode_is_ignored() {
+        let mut h = LiveHarness::new();
+        h.screen.set_diff_mode(DiffMode::Staged, &mut h.text);
+        h.deliver(snapshot(DiffMode::Unstaged, Some(("a.rs", "+unstaged"))));
+        assert_eq!(h.screen.diff_mode, DiffMode::Staged);
+        assert!(h.screen.diff_cache.is_empty());
+        h.deliver(snapshot(DiffMode::Staged, Some(("a.rs", "+staged"))));
+        assert_eq!(h.diff_lines(), vec!["+staged"]);
+    }
+
+    #[test]
+    fn review_prompt_is_sent_as_paste_then_submitted() {
+        let mut h = LiveHarness::new();
+        h.screen
+            .tree
+            .update::<TextArea, _>(h.screen.prompt_area, |a, cx| {
+                a.set_text(cx, "[main / a.rs]\n```diff\n+x\n```\n修正依頼: 直して")
+            });
+        h.drain();
+        h.screen.send_review_prompt();
+        let sends: Vec<_> = h
+            .drain()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::SendText {
+                    pane_id,
+                    text,
+                    submit,
+                } => Some((pane_id, text, submit)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            sends,
+            vec![(
+                7,
+                "[main / a.rs]\n```diff\n+x\n```\n修正依頼: 直して".to_owned(),
+                true
+            )]
+        );
+    }
+
+    #[test]
+    fn dropped_paths_are_shell_escaped() {
+        let mut h = LiveHarness::new();
+        h.drain();
+        h.screen.send_dropped_files(&[
+            PathBuf::from("/Users/x/Desktop/Screen Shot 1.png"),
+            PathBuf::from("/tmp/plain.txt"),
+            PathBuf::from("/tmp/it's.txt"),
+        ]);
+        let texts: Vec<String> = h
+            .drain()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::SendText { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["'/Users/x/Desktop/Screen Shot 1.png' /tmp/plain.txt '/tmp/it'\\''s.txt'"]
+        );
     }
 }

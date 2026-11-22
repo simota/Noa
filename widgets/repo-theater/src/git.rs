@@ -50,10 +50,12 @@ pub fn inspect_worktree(cwd: &str, mode: DiffMode) -> Option<WorktreeGitInfo> {
     let common_raw = run_git(dir, &["rev-parse", "--git-common-dir"])
         .map(|s| s.trim().to_owned())
         .unwrap_or_else(|| ".git".into());
+    // A relative `--git-common-dir` is relative to the directory git ran in,
+    // not to the worktree top level.
     let common_path = if Path::new(&common_raw).is_absolute() {
         PathBuf::from(&common_raw)
     } else {
-        Path::new(&toplevel).join(&common_raw)
+        dir.join(&common_raw)
     };
     let repo_root = common_path
         .parent()
@@ -65,7 +67,17 @@ pub fn inspect_worktree(cwd: &str, mode: DiffMode) -> Option<WorktreeGitInfo> {
         .unwrap_or("repo")
         .to_owned();
 
-    let status_out = run_git(dir, &["status", "--porcelain=v2", "--branch"]).unwrap_or_default();
+    let status_out = run_git(
+        dir,
+        &[
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "-z",
+            "--untracked-files=all",
+        ],
+    )
+    .unwrap_or_default();
     let PorcelainStatus {
         mut branch,
         ahead,
@@ -78,12 +90,20 @@ pub fn inspect_worktree(cwd: &str, mode: DiffMode) -> Option<WorktreeGitInfo> {
             .unwrap_or_else(|| "HEAD".into());
     }
 
-    let numstat_args: &[&str] = match mode {
-        DiffMode::Unstaged => &["diff", "--numstat"],
-        DiffMode::Staged => &["diff", "--cached", "--numstat"],
-        DiffMode::VsMain => &["diff", "--numstat", "main...HEAD"],
+    let range = base_range(dir);
+    let numstat_args: Vec<&str> = match mode {
+        DiffMode::Unstaged => vec!["diff", "--numstat", "-z"],
+        DiffMode::Staged => vec!["diff", "--cached", "--numstat", "-z"],
+        DiffMode::VsMain => match &range {
+            Some(range) => vec!["diff", "--numstat", "-z", range.as_str()],
+            None => Vec::new(),
+        },
     };
-    let numstat_out = run_git(dir, numstat_args).unwrap_or_default();
+    let numstat_out = if numstat_args.is_empty() {
+        String::new()
+    } else {
+        run_git(dir, &numstat_args).unwrap_or_default()
+    };
     let mut stats = parse_numstat(&numstat_out);
 
     let mut files = Vec::new();
@@ -113,6 +133,8 @@ pub fn inspect_worktree(cwd: &str, mode: DiffMode) -> Option<WorktreeGitInfo> {
                 let (added, deleted) = stats.remove(&path).unwrap_or((0, 0));
                 let status = if code.0 == '?' {
                     "?".to_owned()
+                } else if code.0 == 'U' {
+                    "U".to_owned()
                 } else if mode == DiffMode::Staged {
                     code.0.to_string()
                 } else {
@@ -142,12 +164,45 @@ pub fn inspect_worktree(cwd: &str, mode: DiffMode) -> Option<WorktreeGitInfo> {
     })
 }
 
+/// `<base>...HEAD` for the "vs main" mode: the local `main`, else the local
+/// `master`, else whatever `origin/HEAD` points at.
+fn base_range(dir: &Path) -> Option<String> {
+    let base = ["main", "master"]
+        .into_iter()
+        .find(|name| {
+            run_git(
+                dir,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{name}"),
+                ],
+            )
+            .is_some()
+        })
+        .map(str::to_owned)
+        .or_else(|| {
+            run_git(
+                dir,
+                &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+            )
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+        })?;
+    Some(format!("{base}...HEAD"))
+}
+
 pub fn file_diff(cwd: &str, path: &str, mode: DiffMode) -> String {
     let dir = Path::new(cwd);
+    let range = base_range(dir);
     let args: Vec<&str> = match mode {
         DiffMode::Unstaged => vec!["diff", "--", path],
         DiffMode::Staged => vec!["diff", "--cached", "--", path],
-        DiffMode::VsMain => vec!["diff", "main...HEAD", "--", path],
+        DiffMode::VsMain => match &range {
+            Some(range) => vec!["diff", range.as_str(), "--", path],
+            None => return format!("(比較元ブランチ main / master が見つかりません: {path})"),
+        },
     };
     let out = run_git(dir, &args).unwrap_or_default();
     if !out.trim().is_empty() {
@@ -179,15 +234,19 @@ struct PorcelainStatus {
     files: Vec<(String, (char, char))>,
 }
 
+/// Parses `git status --porcelain=v2 --branch -z` output. Paths are raw
+/// (never C-quoted) in `-z` mode; a rename/copy record is followed by its
+/// original path as a separate NUL-terminated entry.
 fn parse_porcelain_v2(text: &str) -> PorcelainStatus {
     let mut branch = String::new();
     let mut ahead = 0;
     let mut behind = 0;
     let mut files = Vec::new();
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("# branch.head ") {
+    let mut entries = text.split('\0');
+    while let Some(entry) = entries.next() {
+        if let Some(rest) = entry.strip_prefix("# branch.head ") {
             branch = rest.trim().to_owned();
-        } else if let Some(rest) = line.strip_prefix("# branch.ab ") {
+        } else if let Some(rest) = entry.strip_prefix("# branch.ab ") {
             for part in rest.split_whitespace() {
                 if let Some(n) = part.strip_prefix('+') {
                     ahead = n.parse().unwrap_or(0);
@@ -195,21 +254,28 @@ fn parse_porcelain_v2(text: &str) -> PorcelainStatus {
                     behind = n.parse().unwrap_or(0);
                 }
             }
-        } else if line.starts_with("1 ") || line.starts_with("2 ") {
-            let parts: Vec<&str> = line.splitn(9, ' ').collect();
-            if parts.len() >= 9 {
+        } else if entry.starts_with("1 ") || entry.starts_with("2 ") {
+            // `1 XY sub mH mI mW hH hI path`
+            // `2 XY sub mH mI mW hH hI Xscore path` + NUL + orig path
+            let renamed = entry.starts_with("2 ");
+            let fields = if renamed { 10 } else { 9 };
+            let parts: Vec<&str> = entry.splitn(fields, ' ').collect();
+            if renamed {
+                entries.next();
+            }
+            if parts.len() == fields {
                 let mut chars = parts[1].chars();
                 let x = chars.next().unwrap_or('.');
                 let y = chars.next().unwrap_or('.');
-                let path_part = parts[8];
-                let path = if line.starts_with("2 ") {
-                    path_part.split('\t').next().unwrap_or(path_part).to_owned()
-                } else {
-                    path_part.to_owned()
-                };
-                files.push((path, (x, y)));
+                files.push((parts[fields - 1].to_owned(), (x, y)));
             }
-        } else if let Some(path) = line.strip_prefix("? ") {
+        } else if entry.starts_with("u ") {
+            // `u XY sub m1 m2 m3 mW h1 h2 h3 path`: unmerged, shown in both modes.
+            let parts: Vec<&str> = entry.splitn(11, ' ').collect();
+            if parts.len() == 11 {
+                files.push((parts[10].to_owned(), ('U', 'U')));
+            }
+        } else if let Some(path) = entry.strip_prefix("? ") {
             files.push((path.to_owned(), ('?', '?')));
         }
     }
@@ -221,16 +287,28 @@ fn parse_porcelain_v2(text: &str) -> PorcelainStatus {
     }
 }
 
+/// Parses `git diff --numstat -z`. A rename is `added\tdeleted\t` followed by
+/// the old and new paths as separate entries; it is keyed by the new path.
 fn parse_numstat(text: &str) -> std::collections::HashMap<String, (usize, usize)> {
     let mut map = std::collections::HashMap::new();
-    for line in text.lines() {
-        let mut parts = line.split('\t');
-        let Some(a) = parts.next() else { continue };
-        let Some(d) = parts.next() else { continue };
-        let Some(p) = parts.next() else { continue };
+    let mut entries = text.split('\0');
+    while let Some(entry) = entries.next() {
+        let mut parts = entry.splitn(3, '\t');
+        let (Some(a), Some(d), Some(p)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let path = if p.is_empty() {
+            entries.next();
+            match entries.next() {
+                Some(new) => new,
+                None => continue,
+            }
+        } else {
+            p
+        };
         let added = a.parse().unwrap_or(0);
         let deleted = d.parse().unwrap_or(0);
-        map.insert(p.to_owned(), (added, deleted));
+        map.insert(path.to_owned(), (added, deleted));
     }
     map
 }
@@ -241,21 +319,147 @@ mod tests {
 
     #[test]
     fn parses_porcelain_v2_branch_and_files() {
-        let sample = "\
-# branch.oid 123456
-# branch.head feat/test
-# branch.ab +2 -1
-1 .M N... 100644 100644 100644 a b src/main.rs
-1 A. N... 000000 100644 100644 0 c src/new.rs
-? notes.txt
-";
+        let sample = "# branch.oid 123456\0\
+# branch.head feat/test\0\
+# branch.ab +2 -1\0\
+1 .M N... 100644 100644 100644 a b src/main.rs\0\
+1 A. N... 000000 100644 100644 0 c src/new.rs\0\
+? notes.txt\0\
+2 R. N... 100644 100644 100644 a a R100 src/renamed name.rs\0src/orig.rs\0\
+u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         let parsed = parse_porcelain_v2(sample);
         assert_eq!(parsed.branch, "feat/test");
         assert_eq!(parsed.ahead, 2);
         assert_eq!(parsed.behind, 1);
-        assert_eq!(parsed.files.len(), 3);
+        assert_eq!(parsed.files.len(), 5);
+        assert_eq!(parsed.files[3], ("src/renamed name.rs".into(), ('R', '.')));
+        assert_eq!(parsed.files[4], ("src/conflict.rs".into(), ('U', 'U')));
         assert_eq!(parsed.files[0], ("src/main.rs".into(), ('.', 'M')));
         assert_eq!(parsed.files[1], ("src/new.rs".into(), ('A', '.')));
         assert_eq!(parsed.files[2], ("notes.txt".into(), ('?', '?')));
+    }
+
+    // ── Regression tests against real temporary repositories ─────────────────
+
+    struct TempRepo(PathBuf);
+
+    impl Drop for TempRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success() || args.first() == Some(&"merge"),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn temp_repo(name: &str, branch: &str) -> TempRepo {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "repo-theater-{name}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        git(&dir, &["init", "-q", "-b", branch]);
+        git(&dir, &["config", "core.quotePath", "true"]);
+        std::fs::write(dir.join("old.rs"), "fn a() {}\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "init"]);
+        TempRepo(dir)
+    }
+
+    fn cwd(repo: &TempRepo) -> &str {
+        repo.0.to_str().unwrap()
+    }
+
+    #[test]
+    fn staged_rename_uses_new_path_and_shows_diff() {
+        let repo = temp_repo("rename", "main");
+        git(&repo.0, &["mv", "old.rs", "new.rs"]);
+        let info = inspect_worktree(cwd(&repo), DiffMode::Staged).unwrap();
+        let paths: Vec<&str> = info.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["new.rs"]);
+        let diff = file_diff(cwd(&repo), "new.rs", DiffMode::Staged);
+        assert!(!diff.starts_with("(差分なし"), "{diff}");
+    }
+
+    #[test]
+    fn quoted_non_ascii_path_is_decoded() {
+        let repo = temp_repo("quote", "main");
+        std::fs::write(repo.0.join("日本語.txt"), "こんにちは\n").unwrap();
+        std::fs::write(repo.0.join("old.rs"), "fn b() {}\n").unwrap();
+        let info = inspect_worktree(cwd(&repo), DiffMode::Unstaged).unwrap();
+        let paths: Vec<&str> = info.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["old.rs", "日本語.txt"]);
+        let diff = file_diff(cwd(&repo), "日本語.txt", DiffMode::Unstaged);
+        assert!(diff.contains("+こんにちは"), "{diff}");
+    }
+
+    #[test]
+    fn repo_root_from_subdirectory_matches_toplevel() {
+        let repo = temp_repo("subdir", "main");
+        let sub = repo.0.join("a/b");
+        std::fs::create_dir_all(&sub).unwrap();
+        let top = inspect_worktree(cwd(&repo), DiffMode::Unstaged).unwrap();
+        let nested = inspect_worktree(sub.to_str().unwrap(), DiffMode::Unstaged).unwrap();
+        assert_eq!(nested.repo_root, top.repo_root);
+        assert_eq!(nested.repo_root, canonical_or_raw(&repo.0));
+    }
+
+    #[test]
+    fn untracked_directory_lists_its_files() {
+        let repo = temp_repo("untracked", "main");
+        std::fs::create_dir_all(repo.0.join("new-dir")).unwrap();
+        std::fs::write(repo.0.join("new-dir/x.rs"), "fn x() {}\n").unwrap();
+        let info = inspect_worktree(cwd(&repo), DiffMode::Unstaged).unwrap();
+        let paths: Vec<&str> = info.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["new-dir/x.rs"]);
+        let diff = file_diff(cwd(&repo), "new-dir/x.rs", DiffMode::Unstaged);
+        assert!(diff.contains("+fn x() {}"), "{diff}");
+    }
+
+    #[test]
+    fn unmerged_conflict_file_is_listed() {
+        let repo = temp_repo("unmerged", "main");
+        git(&repo.0, &["checkout", "-q", "-b", "other"]);
+        std::fs::write(repo.0.join("old.rs"), "fn other() {}\n").unwrap();
+        git(&repo.0, &["commit", "-q", "-am", "other"]);
+        git(&repo.0, &["checkout", "-q", "main"]);
+        std::fs::write(repo.0.join("old.rs"), "fn mine() {}\n").unwrap();
+        git(&repo.0, &["commit", "-q", "-am", "mine"]);
+        git(&repo.0, &["merge", "-q", "other"]);
+        for mode in [DiffMode::Unstaged, DiffMode::Staged] {
+            let info = inspect_worktree(cwd(&repo), mode).unwrap();
+            let paths: Vec<&str> = info.files.iter().map(|f| f.path.as_str()).collect();
+            assert_eq!(paths, vec!["old.rs"], "{mode:?}");
+            assert_eq!(info.files[0].status, "U", "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn vs_main_works_when_default_branch_is_master() {
+        let repo = temp_repo("master", "master");
+        git(&repo.0, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(repo.0.join("old.rs"), "fn changed() {}\n").unwrap();
+        git(&repo.0, &["commit", "-q", "-am", "change"]);
+        let info = inspect_worktree(cwd(&repo), DiffMode::VsMain).unwrap();
+        let paths: Vec<&str> = info.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["old.rs"]);
+        let diff = file_diff(cwd(&repo), "old.rs", DiffMode::VsMain);
+        assert!(diff.contains("+fn changed() {}"), "{diff}");
     }
 }

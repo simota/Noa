@@ -97,7 +97,7 @@ fn send_key_opens_drawer_and_submits_message_with_draft_preservation() {
     // Select running worker 11 (api-refactor).
     dashboard.select(Some(11), &mut text);
     dashboard.prepare(window(), &mut text);
-    key(&mut dashboard, &mut text, Key::Char('s'));
+    stroke(&mut dashboard, &mut text, 's');
     assert_eq!(dashboard.view.detail, Some(11));
     let (field, pane) = dashboard.registry.send_field.expect("send field");
     assert_eq!(pane, 11);
@@ -122,7 +122,7 @@ fn send_key_opens_drawer_and_submits_message_with_draft_preservation() {
     );
 
     // Focus again and press Enter to send.
-    key(&mut dashboard, &mut text, Key::Char('s'));
+    stroke(&mut dashboard, &mut text, 's');
     key(&mut dashboard, &mut text, Key::Enter);
     let sent: Vec<Command> = commands
         .try_iter()
@@ -156,12 +156,12 @@ fn permission_worker_cannot_be_sent_messages_and_missing_scope_keeps_draft() {
 
     // Permission worker 14 is blocked by safety guard.
     dashboard.select(Some(14), &mut text);
-    key(&mut dashboard, &mut text, Key::Char('s'));
+    stroke(&mut dashboard, &mut text, 's');
     assert_eq!(notice_of(&dashboard), drawer::PERMISSION_SEND_GUARD);
 
     // Worker 11 without `input` scope refuses sending and preserves draft.
     dashboard.select(Some(11), &mut text);
-    key(&mut dashboard, &mut text, Key::Char('s'));
+    stroke(&mut dashboard, &mut text, 's');
     typed(&mut dashboard, &mut text, "hello");
     key(&mut dashboard, &mut text, Key::Enter);
     assert!(
@@ -338,4 +338,182 @@ fn with_filter_applies_initial_query_for_cli() {
             .collect::<Vec<_>>(),
         vec![13, 15]
     );
+}
+
+/// A live dashboard that took in the canned fleet from `INSTANCE`.
+fn live_dashboard() -> (
+    Dashboard,
+    TextStore,
+    std::sync::mpsc::Sender<Snapshot>,
+    std::sync::mpsc::Receiver<Command>,
+) {
+    let (channel, snapshots, _notices, commands) = Channel::detached();
+    let mut dashboard = Dashboard::live(Grouping::Orchestrator, channel);
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(window(), &mut text);
+    snapshots.send(live(fleet::canned(), 0)).unwrap();
+    dashboard.before_frame(&mut text);
+    dashboard.prepare(window(), &mut text);
+    (dashboard, text, snapshots, commands)
+}
+
+fn send_field_text(dashboard: &Dashboard) -> String {
+    let (field, _) = dashboard.registry.send_field.expect("send field");
+    dashboard
+        .tree
+        .get::<TextField>(field)
+        .unwrap()
+        .text()
+        .to_owned()
+}
+
+fn closed(commands: &std::sync::mpsc::Receiver<Command>) -> Vec<u64> {
+    commands
+        .try_iter()
+        .filter_map(|c| match c {
+            Command::Close(pane) => Some(pane),
+            _ => None,
+        })
+        .collect()
+}
+
+/// S as the platform sends it (`KeyDown`, then `Text("s")`) opens the send
+/// field empty: the key's own text does not land in it.
+#[test]
+fn s_opens_the_send_field_without_typing_an_s_into_it() {
+    let (mut dashboard, mut text, _snapshots, _commands) = live_dashboard();
+    dashboard.select(Some(11), &mut text);
+    stroke(&mut dashboard, &mut text, 's');
+    let (field, _) = dashboard.registry.send_field.expect("send field");
+    assert_eq!(dashboard.tree.focused(), Some(field));
+    assert_eq!(send_field_text(&dashboard), "");
+    assert!(!dashboard.drafts.contains_key(&11));
+}
+
+/// Pane ids of a restarted Noa name other panes: a draft written for the
+/// old pane 11 must not wait in the new pane 11's send field.
+#[test]
+fn a_new_server_instance_drops_the_drafts() {
+    let (mut dashboard, mut text, snapshots, _commands) = live_dashboard();
+    dashboard.select(Some(11), &mut text);
+    stroke(&mut dashboard, &mut text, 's');
+    typed(&mut dashboard, &mut text, "古い指示");
+    key(&mut dashboard, &mut text, Key::Escape);
+    assert!(dashboard.drafts.contains_key(&11));
+
+    snapshots
+        .send(Snapshot {
+            instance: Some("restarted".to_owned()),
+            ..live(fleet::canned(), 0)
+        })
+        .unwrap();
+    dashboard.before_frame(&mut text);
+    dashboard.prepare(window(), &mut text);
+    assert!(dashboard.drafts.is_empty(), "{:?}", dashboard.drafts);
+    dashboard.set_detail(Some(11), &mut text);
+    dashboard.prepare(window(), &mut text);
+    assert_eq!(send_field_text(&dashboard), "");
+}
+
+/// A live rebuild while the help is open keeps a drawer with a draft under
+/// the help, disabled, as it keeps one without.
+#[test]
+fn a_rebuild_under_the_help_keeps_a_drafted_drawer_shielded() {
+    let (mut dashboard, mut text, snapshots, _commands) = live_dashboard();
+    dashboard.select(Some(11), &mut text);
+    stroke(&mut dashboard, &mut text, 's');
+    typed(&mut dashboard, &mut text, "draft");
+    key(&mut dashboard, &mut text, Key::Escape);
+    typed(&mut dashboard, &mut text, "?");
+    assert!(dashboard.view.help);
+
+    let mut fleet = fleet::canned();
+    fleet
+        .workers
+        .iter_mut()
+        .find(|w| w.pane == 12)
+        .unwrap()
+        .label = "docs-sync-2".into();
+    snapshots.send(live(fleet, 0)).unwrap();
+    dashboard.before_frame(&mut text);
+    dashboard.prepare(window(), &mut text);
+
+    let (drawer, _) = dashboard.registry.drawer.expect("drawer");
+    let (help, _) = dashboard.registry.help.expect("help");
+    assert!(
+        !dashboard.tree.is_enabled(drawer),
+        "drawer under help is disabled"
+    );
+    assert_eq!(dashboard.tree.overlays().last(), Some(help), "help on top");
+    assert_eq!(send_field_text(&dashboard), "draft");
+}
+
+/// The close confirmation holds only for the very next action, and only
+/// while its notice shows.
+#[test]
+fn the_close_confirmation_does_not_outlive_the_next_action_or_its_notice() {
+    // Another action in between.
+    let (mut dashboard, mut text, _snapshots, commands) = live_dashboard();
+    dashboard.select(Some(17), &mut text);
+    key(&mut dashboard, &mut text, Key::Char('x'));
+    key(&mut dashboard, &mut text, Key::Char('g'));
+    key(&mut dashboard, &mut text, Key::Char('x'));
+    assert!(
+        closed(&commands).is_empty(),
+        "G in between: X only asks again"
+    );
+    assert_eq!(dashboard.view.confirm_close, Some(17));
+
+    // The selection moved away by a filter and came back.
+    let (mut dashboard, mut text, _snapshots, commands) = live_dashboard();
+    dashboard.select(Some(17), &mut text);
+    key(&mut dashboard, &mut text, Key::Char('x'));
+    typed(&mut dashboard, &mut text, "/");
+    typed(&mut dashboard, &mut text, "docs-sync");
+    assert_ne!(dashboard.view.selected, Some(17));
+    key(&mut dashboard, &mut text, Key::Escape);
+    dashboard.select(Some(17), &mut text);
+    key(&mut dashboard, &mut text, Key::Char('x'));
+    assert!(
+        closed(&commands).is_empty(),
+        "back on 17: X only asks again"
+    );
+
+    // The notice ended.
+    let (mut dashboard, mut text, _snapshots, commands) = live_dashboard();
+    dashboard.select(Some(17), &mut text);
+    key(&mut dashboard, &mut text, Key::Char('x'));
+    dashboard.frame(
+        Instant::now() + NOTICE_FOR + Duration::from_secs(1),
+        &mut text,
+    );
+    assert_eq!(dashboard.view.confirm_close, None);
+    key(&mut dashboard, &mut text, Key::Char('x'));
+    assert!(
+        closed(&commands).is_empty(),
+        "after the notice: X only asks again"
+    );
+}
+
+/// Each worker's send field puts the caret at the end of its own draft,
+/// never at a byte offset carried over from another worker's.
+#[test]
+fn the_send_caret_does_not_carry_over_to_another_workers_draft() {
+    let (mut dashboard, mut text, _snapshots, _commands) = live_dashboard();
+    dashboard.select(Some(12), &mut text);
+    stroke(&mut dashboard, &mut text, 's');
+    typed(&mut dashboard, &mut text, "あいう");
+    key(&mut dashboard, &mut text, Key::Escape);
+    dashboard.select(Some(11), &mut text);
+    stroke(&mut dashboard, &mut text, 's');
+    typed(&mut dashboard, &mut text, "abcd");
+    key(&mut dashboard, &mut text, Key::Escape);
+
+    dashboard.select(Some(12), &mut text);
+    dashboard.prepare(window(), &mut text);
+    let (field, pane) = dashboard.registry.send_field.expect("send field");
+    assert_eq!(pane, 12);
+    let field = dashboard.tree.get::<TextField>(field).unwrap();
+    assert_eq!(field.text(), "あいう");
+    assert_eq!(field.caret(), "あいう".len());
 }

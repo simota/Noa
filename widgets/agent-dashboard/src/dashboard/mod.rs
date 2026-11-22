@@ -6,7 +6,7 @@ use noa_gpui_core::style::{
     AlignItems, FlexDirection, Rect as LayoutRect, Size as LayoutSize, length, percent,
 };
 use noa_gpui_core::widgets::{
-    ButtonClicked, Chart, Container, ControlSize, Label, LevelIndicator, SegmentMode,
+    ButtonClicked, Chart, Container, ControlSize, Label, LevelIndicator, ScrollView, SegmentMode,
     SegmentedControl, SelectionChanged, TextChanged, TextField, Truncation,
 };
 use noa_gpui_core::{
@@ -51,6 +51,14 @@ use queue::{QueueButtons, queue, queue_since};
 use select::Step;
 use style::{GUTTER, HEADER_HEIGHT, fill_remaining, gap, set_label, set_tag};
 use timeline::{TimelineParts, fill_lanes, span_text, timeline, timeline_span};
+
+/// The unsent messages a rebuild carries over (`Dashboard::drafts`,
+/// `Dashboard::send_caret`), so the drawer is built with its draft at once.
+#[derive(Default)]
+struct Drafts {
+    text: HashMap<u64, String>,
+    caret: Option<(u64, usize)>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tab {
@@ -361,6 +369,18 @@ fn notice_line(tree: &mut UiTree, root: WidgetId, feed: &Feed, tab: Tab) -> (Wid
     (notice, tab_control)
 }
 
+/// The scroll views under `id`, depth first.
+fn scroll_views(tree: &UiTree, id: WidgetId) -> Vec<WidgetId> {
+    let own = tree.get::<ScrollView>(id).map(|_| id);
+    own.into_iter()
+        .chain(
+            tree.children(id)
+                .iter()
+                .flat_map(|child| scroll_views(tree, *child)),
+        )
+        .collect()
+}
+
 fn button_pane(buttons: &[(WidgetId, u64)], source: WidgetId) -> Option<u64> {
     QueueButtons::worker(buttons, source)
 }
@@ -387,8 +407,9 @@ pub struct Dashboard {
     preview: Option<(u64, PathBuf, drawer::Preview)>,
     /// Unsent message drafts per worker pane, kept when switching workers.
     drafts: HashMap<u64, String>,
-    /// Caret position in the drawer's send field across rebuilds.
-    send_caret: usize,
+    /// The send field's caret across rebuilds, with the pane whose draft it
+    /// is in: another worker's field puts its caret at its draft's end.
+    send_caret: Option<(u64, usize)>,
     queue_buttons: QueueButtons,
     registry: Registry,
     /// The size the last `prepare` laid the screen out at. A rebuilt screen is
@@ -411,6 +432,9 @@ pub struct Dashboard {
     /// What the open help disabled under it, to enable again when it
     /// closes (`open_help`).
     shielded: Vec<WidgetId>,
+    /// When the close `view.confirm_close` waits for ends unconfirmed: as
+    /// its notice does (`NOTICE_FOR`).
+    close_until: Option<Instant>,
     /// The filter field had the focus when the input being handled began:
     /// a rebuild that input causes focuses the new field. For a release,
     /// what counts is the press: a press moves the focus to what it hits
@@ -449,7 +473,15 @@ impl Dashboard {
     fn start(view: View, feed: Feed) -> Self {
         let mut tree = UiTree::new();
         tree.set_theme(Theme::for_appearance(Appearance::Dark));
-        let mut dashboard = Self::build(tree, view, feed, Filter::default(), false, None);
+        let mut dashboard = Self::build(
+            tree,
+            view,
+            feed,
+            Filter::default(),
+            false,
+            None,
+            Drafts::default(),
+        );
         dashboard.watch();
         dashboard
     }
@@ -577,10 +609,11 @@ impl Dashboard {
     }
 
     /// Drops what names a pane of the server instance the screen showed
-    /// until now — the selection, the drawer, the expanded queue card —
-    /// since the new instance may give those ids to other panes: Enter or
-    /// the drawer's 開く would then reach a worker nobody chose. The rebuild
-    /// that follows shows the new server's workers from the top, and asks
+    /// until now — the selection, the drawer, the expanded queue card, the
+    /// unsent drafts — since the new instance may give those ids to other
+    /// panes: Enter, the drawer's 開く or 送信 would then reach a worker
+    /// nobody chose. The rebuild that follows shows the new server's
+    /// workers from the top, and asks
     /// for their tails as every live snapshot does (`apply_received`), even
     /// where the ids are the same: the ids asked for before were the old
     /// instance's panes.
@@ -591,6 +624,8 @@ impl Dashboard {
         self.view.result = None;
         self.view.confirm_close = None;
         self.view.expanded = None;
+        self.drafts.clear();
+        self.send_caret = None;
     }
 
     /// Takes in what the feed sent since the last frame, as of `now`. A
@@ -620,6 +655,9 @@ impl Dashboard {
     /// long the frame took (a rebuild under load can take a second).
     fn frame(&mut self, now: Instant, text: &mut TextStore) {
         self.take_snapshots(now, text);
+        if self.close_until.is_some_and(|until| now >= until) {
+            self.disarm_close(text);
+        }
         let notice = self
             .feed
             .channel
@@ -628,7 +666,38 @@ impl Dashboard {
         if let Some(notice) = notice {
             self.show_notice_at(notice, now);
         }
+        self.take_unsent(text);
         self.tick(now);
+    }
+
+    /// Makes each message the feed gave back undelivered its pane's draft
+    /// again, before what was typed for that pane since; the drawer shows
+    /// it at once when it is on that pane.
+    fn take_unsent(&mut self, text: &mut TextStore) {
+        let unsent: Vec<(u64, String)> = self
+            .feed
+            .channel
+            .as_ref()
+            .map(|channel| channel.unsent.try_iter().collect())
+            .unwrap_or_default();
+        for (pane, message) in unsent {
+            let draft = match self.drafts.remove(&pane) {
+                Some(newer) => format!("{message} {newer}"),
+                None => message,
+            };
+            self.send_caret = Some((pane, draft.len()));
+            self.drafts.insert(pane, draft);
+            if self.registry.send_field.is_some_and(|(_, p)| p == pane) {
+                let focused = self
+                    .registry
+                    .send_field
+                    .is_some_and(|(id, _)| self.tree.focused() == Some(id));
+                self.reopen_drawer(text);
+                if focused && let Some((id, _)) = self.registry.send_field {
+                    self.tree.set_focus(Some(id));
+                }
+            }
+        }
     }
 
     /// The order J / K walk now.
@@ -656,6 +725,8 @@ impl Dashboard {
         };
         let moved = selected != self.view.selected;
         if moved {
+            // The caller's rebuild shows the drawer of the new selection.
+            self.view.confirm_close = None;
             self.view.selected = selected;
             self.view.reveal = selected;
         }
@@ -776,6 +847,30 @@ impl Dashboard {
         }
         self.reorder_queue(text);
         self.paint_selection();
+        if self.view.tab != Tab::Operations {
+            // The other tabs draw what time changes (totals, charts, bars,
+            // waits) with no widget registered to update in place.
+            self.refill_keeping_scroll(text);
+        }
+    }
+
+    /// `refill_body`, each scroll view in the body scrolled back to where
+    /// it was: the refill is the same structure, so they pair in order.
+    fn refill_keeping_scroll(&mut self, text: &mut TextStore) {
+        let positions: Vec<Point> = scroll_views(&self.tree, self.body)
+            .into_iter()
+            .filter_map(|id| self.tree.get::<ScrollView>(id))
+            .map(ScrollView::scroll_position)
+            .collect();
+        self.refill_body(text);
+        for (id, position) in scroll_views(&self.tree, self.body)
+            .into_iter()
+            .zip(positions)
+        {
+            self.tree
+                .update::<ScrollView, _>(id, |s, cx| s.set_scroll_position(cx, position));
+        }
+        self.lay_out_again(text);
     }
 
     /// Puts the queue's cards (and its pager items) in the queue's order
@@ -908,10 +1003,10 @@ impl Dashboard {
         if let Some(caret) = self.tree.get::<TextField>(field).map(TextField::caret) {
             self.filter.caret = caret;
         }
-        if let Some((id, _)) = self.registry.send_field
+        if let Some((id, pane)) = self.registry.send_field
             && let Some(caret) = self.tree.get::<TextField>(id).map(TextField::caret)
         {
-            self.send_caret = caret;
+            self.send_caret = Some((pane, caret));
         }
         let roots: Vec<WidgetId> = self
             .tree
@@ -926,15 +1021,11 @@ impl Dashboard {
         let feed = std::mem::take(&mut self.feed);
         let filter = std::mem::take(&mut self.filter);
         let preview = self.preview.take();
-        let drafts = std::mem::take(&mut self.drafts);
-        let send_caret = self.send_caret;
-        let mut built = Self::build(tree, view, feed, filter, refocus, preview);
-        built.drafts = drafts;
-        built.send_caret = send_caret;
-        if built.view.detail.is_some() && built.drafts.contains_key(&built.view.detail.unwrap()) {
-            built.close_drawer(text);
-            built.open_drawer();
-        }
+        let drafts = Drafts {
+            text: std::mem::take(&mut self.drafts),
+            caret: self.send_caret,
+        };
+        let mut built = Self::build(tree, view, feed, filter, refocus, preview, drafts);
         if refocus_send && let Some((id, _)) = built.registry.send_field {
             built.tree.set_focus(Some(id));
         }
@@ -947,6 +1038,7 @@ impl Dashboard {
             self.tick(now);
         }
         self.held = old.held;
+        self.close_until = old.close_until;
         self.filter_had_focus = old.filter_had_focus;
         self.pressed_in_filter = old.pressed_in_filter;
         self.watch();
@@ -972,6 +1064,7 @@ impl Dashboard {
         filter: Filter,
         refocus: bool,
         preview: Option<(u64, PathBuf, drawer::Preview)>,
+        drafts: Drafts,
     ) -> Self {
         let root = tree.insert(
             None,
@@ -1013,8 +1106,8 @@ impl Dashboard {
             notice,
             tab_control,
             preview,
-            drafts: HashMap::new(),
-            send_caret: 0,
+            drafts: drafts.text,
+            send_caret: drafts.caret,
             queue_buttons: QueueButtons::default(),
             registry,
             viewport: None,
@@ -1024,6 +1117,7 @@ impl Dashboard {
             ticked: None,
             held: Vec::new(),
             shielded: Vec::new(),
+            close_until: None,
             filter_had_focus: false,
             pressed_in_filter: false,
             #[cfg(test)]
@@ -1320,7 +1414,10 @@ impl Dashboard {
                 feed: &self.feed,
                 preview,
                 draft,
-                send_caret: self.send_caret,
+                send_caret: match self.send_caret {
+                    Some((of, caret)) if of == pane => caret,
+                    _ => draft.len(),
+                },
                 confirm_close,
             },
             &mut self.registry,
@@ -1512,7 +1609,9 @@ impl Dashboard {
         in_filter || in_send
     }
 
-    /// Sends the current draft to `pane`, preserving the draft on any error.
+    /// Sends the current draft to `pane`. Refused here, the draft stays; a
+    /// message the feed then does not deliver comes back as the draft
+    /// (`Channel::unsent`, `take_unsent`).
     fn submit_send(&mut self, pane: u64, text: &mut TextStore) {
         let Some(worker) = self.feed.fleet.worker(pane) else {
             return;
@@ -1549,7 +1648,7 @@ impl Dashboard {
             None => {}
         }
         self.drafts.remove(&pane);
-        self.send_caret = 0;
+        self.send_caret = None;
         if let Some((field, field_pane)) = self.registry.send_field
             && field_pane == pane
         {
@@ -1571,6 +1670,7 @@ impl Dashboard {
         let label = worker.label.clone();
         if self.view.confirm_close != Some(pane) {
             self.view.confirm_close = Some(pane);
+            self.close_until = Some(Instant::now() + NOTICE_FOR);
             if self.view.detail == Some(pane) {
                 self.reopen_drawer(text);
             }
@@ -1676,6 +1776,7 @@ impl Dashboard {
             .find(|(id, _)| *id == hit)
             .copied()
         {
+            self.disarm_close(text);
             self.toggle_urgency_filter(need, text);
             return true;
         }
@@ -1696,6 +1797,7 @@ impl Dashboard {
                 .flatten()
         });
         if let Some(pane) = clicked_pane {
+            self.disarm_close(text);
             if self.view.tab == Tab::Operations {
                 self.select(Some(pane), text);
             } else {
@@ -1706,7 +1808,23 @@ impl Dashboard {
         false
     }
 
+    /// Takes back a close that waits for its second press: the next action
+    /// is not that press, or its notice ended. The drawer's button says
+    /// ペインを閉じる again.
+    fn disarm_close(&mut self, text: &mut TextStore) {
+        self.close_until = None;
+        if let Some(pane) = self.view.confirm_close.take()
+            && self.view.detail == Some(pane)
+        {
+            self.reopen_drawer(text);
+        }
+    }
+
     fn act(&mut self, action: Action, text: &mut TextStore) {
+        // Only the second X confirms a close (Esc says it was cancelled).
+        if !matches!(action, Action::ClosePane | Action::Back) {
+            self.disarm_close(text);
+        }
         match action {
             Action::Next => self.step(Step::Next, text),
             Action::Prev => self.step(Step::Prev, text),
@@ -1752,7 +1870,8 @@ impl Dashboard {
                             let end = f.text().len();
                             f.select(cx, end..end);
                         });
-                        self.send_caret = self.drafts.get(&pane).map_or(0, String::len);
+                        let end = self.drafts.get(&pane).map_or(0, String::len);
+                        self.send_caret = Some((pane, end));
                     }
                 }
                 None => self.show_notice(NOTHING_SELECTED.to_owned()),
@@ -2044,7 +2163,7 @@ impl Screen for Dashboard {
             } else {
                 self.drafts.insert(pane, value);
             }
-            self.send_caret = caret;
+            self.send_caret = Some((pane, caret));
             return;
         }
         if let Some(SelectionChanged(index)) = message.downcast_ref::<SelectionChanged>() {
@@ -2085,6 +2204,29 @@ impl Screen for Dashboard {
             return;
         }
         let source = message.source;
+        // Any other button takes back a close waiting for its confirmation;
+        // the drawer's button is relabelled once this click is handled
+        // (relabelling first would give the drawer's buttons new ids).
+        let confirms = self
+            .registry
+            .close_pane_button
+            .is_some_and(|(id, _)| id == source);
+        let disarmed = if confirms {
+            None
+        } else {
+            self.close_until = None;
+            self.view.confirm_close.take()
+        };
+        self.click(source, text);
+        if disarmed.is_some() && disarmed == self.view.detail {
+            self.reopen_drawer(text);
+        }
+    }
+}
+
+impl Dashboard {
+    /// What a clicked button does (`Screen::handle`).
+    fn click(&mut self, source: WidgetId, text: &mut TextStore) {
         if self.queue_buttons.info_toggle == Some(source) {
             let view = View {
                 info_open: !self.view.info_open,

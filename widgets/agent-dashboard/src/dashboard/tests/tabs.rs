@@ -134,3 +134,135 @@ fn tab_parse_accepts_cli_names() {
     assert_eq!(Tab::parse("timeline"), Some(Tab::Timeline));
     assert_eq!(Tab::parse("unknown"), None);
 }
+
+/// The canned fleet with 600 more minutes waited on approval by worker 14:
+/// the same structure, so a live dashboard takes it in place.
+fn later_fleet() -> Fleet {
+    let mut fleet = fleet::canned();
+    let worker = fleet.workers.iter_mut().find(|w| w.pane == 14).unwrap();
+    worker.phases.push((fleet::Phase::Permission, 600.0));
+    worker.wait_minutes += 600.0;
+    fleet
+}
+
+fn live_on(tab: Tab, size: Size) -> (Dashboard, TextStore, std::sync::mpsc::Sender<Snapshot>) {
+    let (channel, snapshots, _notices, _commands) = Channel::detached();
+    let mut dashboard = Dashboard::live(Grouping::Orchestrator, channel).with_tab(tab);
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(size, &mut text);
+    snapshots.send(live(fleet::canned(), 0)).unwrap();
+    dashboard.before_frame(&mut text);
+    dashboard.prepare(size, &mut text);
+    (dashboard, text, snapshots)
+}
+
+fn scroll_views(tree: &UiTree, id: WidgetId, out: &mut Vec<WidgetId>) {
+    if tree.get::<noa_gpui_core::widgets::ScrollView>(id).is_some() {
+        out.push(id);
+    }
+    for child in tree.children(id) {
+        scroll_views(tree, *child, out);
+    }
+}
+
+/// Statistics shows what time changed (the waited total) once a live
+/// snapshot of the same structure comes, and keeps its scroll position.
+#[test]
+fn analytics_follows_a_live_snapshot_of_the_same_structure() {
+    let size = Size::new(1100.0, 600.0);
+    let (mut dashboard, mut text, snapshots) = live_on(Tab::Analytics, size);
+    let mut views = Vec::new();
+    scroll_views(&dashboard.tree, dashboard.body, &mut views);
+    let scroll = views[0];
+    dashboard
+        .tree
+        .update::<noa_gpui_core::widgets::ScrollView, _>(scroll, |s, cx| s.set_offset(cx, 80.0));
+    dashboard.prepare(size, &mut text);
+    let offset = |d: &Dashboard| {
+        let mut views = Vec::new();
+        scroll_views(&d.tree, d.body, &mut views);
+        d.tree
+            .get::<noa_gpui_core::widgets::ScrollView>(views[0])
+            .unwrap()
+            .offset()
+    };
+    let before = offset(&dashboard);
+    assert!(
+        before > 0.0,
+        "the statistics overflow the window and scrolled"
+    );
+
+    let later = later_fleet();
+    assert!(fleet::canned().same_structure(&later));
+    let refs: Vec<&Worker> = later.workers.iter().collect();
+    let metrics = compute_metrics(&refs);
+    let expected = format!(
+        "人待ち合計 {} / 延べ {}",
+        fleet::minutes_text(metrics.waited_minutes),
+        fleet::minutes_text(metrics.total_minutes)
+    );
+    snapshots.send(live(later, 0)).unwrap();
+    dashboard.before_frame(&mut text);
+    dashboard.prepare(size, &mut text);
+    let labels = labels_under(&dashboard.tree, dashboard.body);
+    assert!(labels.contains(&expected), "{expected:?} in {labels:?}");
+    assert_eq!(offset(&dashboard), before, "scroll position kept");
+}
+
+/// The timeline tab's lanes show the new total once a live snapshot of the
+/// same structure comes.
+#[test]
+fn the_timeline_tab_follows_a_live_snapshot_of_the_same_structure() {
+    let (mut dashboard, mut text, snapshots) = live_on(Tab::Timeline, window());
+    let later = later_fleet();
+    let expected = fleet::minutes_text(later.worker(14).unwrap().total_minutes());
+    snapshots.send(live(later, 0)).unwrap();
+    dashboard.before_frame(&mut text);
+    dashboard.prepare(window(), &mut text);
+    let labels = labels_under(&dashboard.tree, dashboard.body);
+    assert!(labels.contains(&expected), "{expected:?} in {labels:?}");
+}
+
+/// The map's tree, filtered, leaves out the children that neither match
+/// nor lead to a match, and an orchestrator's own pane is clickable only
+/// when it matches.
+#[test]
+fn the_map_prunes_unmatched_descendants_and_unmatched_orchestrator_panes() {
+    // 11 (running) matches state:running; its children 14 and 17 do not.
+    let mut dashboard = Dashboard::new(Grouping::Orchestrator)
+        .with_tab(Tab::MindMap)
+        .with_filter("state:running".into());
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(window(), &mut text);
+    let labels = labels_under(&dashboard.tree, dashboard.body);
+    for gone in ["fix-tests", "lint-pass"] {
+        assert!(!labels.iter().any(|l| l == gone), "{gone} in {labels:?}");
+    }
+    assert!(labels.iter().any(|l| l == "api-refactor"));
+
+    // release-0.9.7 as the open pane 16 (input), its workers under it.
+    let mut fleet = fleet::canned();
+    let release = fleet
+        .orchestrators
+        .iter_mut()
+        .find(|o| o.name == "release-0.9.7")
+        .unwrap();
+    release.pane = Some(16);
+    for worker in &mut fleet.workers {
+        if worker.orchestrator == "release-0.9.7" && worker.pane != 16 {
+            worker.orchestrator_pane = Some(16);
+        }
+    }
+    let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet, 0))
+        .with_tab(Tab::MindMap)
+        .with_filter("state:running".into());
+    dashboard.prepare(window(), &mut text);
+    assert!(
+        !dashboard
+            .registry
+            .marks
+            .iter()
+            .any(|(_, pane, _)| *pane == 16),
+        "16 does not match state:running"
+    );
+}

@@ -118,16 +118,7 @@ fn build_orchestrator_map(
     reg: &mut Registry,
 ) {
     let workers = &fleet.workers;
-    let keeps = |worker: &Worker| -> bool {
-        fn has_match(workers: &[Worker], filter: &Filter, worker: &Worker) -> bool {
-            filter.matches(worker)
-                || workers
-                    .iter()
-                    .filter(|c| c.parent == Some(worker.pane))
-                    .any(|c| has_match(workers, filter, c))
-        }
-        has_match(workers, filter, worker)
-    };
+    let keeps = |worker: &Worker| leads_to_match(workers, filter, worker);
 
     for orchestrator in &fleet.orchestrators {
         let own = orchestrator.pane.and_then(|pane| fleet.worker(pane));
@@ -163,7 +154,9 @@ fn build_orchestrator_map(
                 warning: None,
             },
         );
-        if let Some(own) = own {
+        // An own pane outside the filter is drawn (its workers match) but
+        // not chosen: the drawer shows only what the filter lets through.
+        if let Some(own) = own.filter(|_| own_matches) {
             reg.marks
                 .push((root_card, own.pane, Mark::Node { normal: color }));
         }
@@ -316,6 +309,16 @@ fn root_hub(tree: &mut UiTree, row: WidgetId, info: HubInfo<'_>) -> WidgetId {
     hub
 }
 
+/// Whether `worker` matches the filter, or one of its workers does, down
+/// the tree: the map draws it then.
+fn leads_to_match(workers: &[Worker], filter: &Filter, worker: &Worker) -> bool {
+    filter.matches(worker)
+        || workers
+            .iter()
+            .filter(|c| c.parent == Some(worker.pane))
+            .any(|c| leads_to_match(workers, filter, c))
+}
+
 fn connect_rich(
     tree: &mut UiTree,
     row: WidgetId,
@@ -345,6 +348,7 @@ fn connect_rich(
         let grandchildren: Vec<&Worker> = all
             .iter()
             .filter(|w| w.parent == Some(child.pane))
+            .filter(|w| leads_to_match(all, filter, w))
             .collect();
         connect_rich(tree, child_row, all, filter, &grandchildren, reg);
     }

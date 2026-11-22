@@ -203,6 +203,20 @@ fn key(dashboard: &mut Dashboard, text: &mut TextStore, key: Key) {
     dashboard.prepare(window(), text);
 }
 
+/// A character key as the platform sends it: `KeyDown`, then its `Text`.
+fn stroke(dashboard: &mut Dashboard, text: &mut TextStore, c: char) {
+    let modifiers = Modifiers::default();
+    dashboard.dispatch(
+        Event::KeyDown {
+            key: Key::Char(c),
+            modifiers,
+        },
+        text,
+    );
+    dashboard.dispatch(Event::Text(c.to_string()), text);
+    dashboard.prepare(window(), text);
+}
+
 /// Committed text, as the platform sends it after the key that typed it.
 fn typed(dashboard: &mut Dashboard, text: &mut TextStore, typed: &str) {
     dashboard.dispatch(Event::Text(typed.to_owned()), text);

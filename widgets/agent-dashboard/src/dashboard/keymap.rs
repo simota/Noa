@@ -119,9 +119,11 @@ pub(super) const BINDINGS: &[Binding] = &[
         ToggleDetail,
         "選んだワーカーの詳細を開く・閉じる",
     ),
+    // On its text, as / is: the key's `Text("s")` is then taken here,
+    // not typed into the field this focuses.
     bind(
         Browse,
-        K(Key::Char('s')),
+        T("s"),
         &["S"],
         StartSend,
         "選んだワーカーへメッセージ送信",

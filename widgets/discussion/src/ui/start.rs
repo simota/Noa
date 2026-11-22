@@ -6,9 +6,11 @@ use noa_gpui_core::style::{
     length, percent,
 };
 use noa_gpui_core::widgets::{
-    Button, CheckState, Checkbox, Container, Label, PopUpButton, TextArea,
+    Button, CheckState, Checkbox, Container, Label, PopUpButton, TextArea, TextField,
 };
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
+use std::path::PathBuf;
+
 use noa_gpui_text::TextStore;
 
 use discussion::model::types::AgentKind;
@@ -19,6 +21,7 @@ use crate::live::Link;
 pub(super) struct Parts {
     pub(super) root: WidgetId,
     pub(super) topic: WidgetId,
+    pub(super) workdir: WidgetId,
     pub(super) moderator: WidgetId,
     /// One checkbox per agent kind, in `AgentKind::ALL` order.
     pub(super) panel: Vec<WidgetId>,
@@ -28,6 +31,8 @@ pub(super) struct Parts {
 
 pub(crate) struct Form {
     pub topic: String,
+    /// As typed; empty runs the agents in the discussions directory.
+    pub workdir: String,
     pub moderator: AgentKind,
     pub panel: Vec<AgentKind>,
 }
@@ -83,6 +88,20 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         Some(card),
         TextArea::new("例: 社内ツールの永続化層を SQLite のままにするか").min_lines(3),
     );
+    caption(tree, card, "作業ディレクトリ（リポジトリ）");
+    let workdir = tree.insert(
+        Some(card),
+        TextField::new("空欄: 議論専用フォルダ。例: ~/repos/my-app", 512.0),
+    );
+    tree.insert(
+        Some(card),
+        Label::new(
+            "エージェントはここで起動し、コードを読んで議論します。返答ファイルは .noa/discussions に書かれます（git には載りません）。",
+        )
+        .font_size(11.0)
+        .color(Role::Muted)
+        .wrap(true),
+    );
 
     let row = tree.insert(
         Some(card),
@@ -114,6 +133,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
     Parts {
         root,
         topic,
+        workdir,
         moderator,
         panel,
         start_button,
@@ -137,6 +157,10 @@ pub(super) fn read(tree: &UiTree, parts: &Parts) -> Form {
         .get::<TextArea>(parts.topic)
         .map(|a| a.text().trim().to_owned())
         .unwrap_or_default();
+    let workdir = tree
+        .get::<TextField>(parts.workdir)
+        .map(|f| f.text().trim().to_owned())
+        .unwrap_or_default();
     let moderator = tree
         .get::<PopUpButton>(parts.moderator)
         .map_or(AgentKind::ALL[0], |p| AgentKind::ALL[p.selected()]);
@@ -151,7 +175,32 @@ pub(super) fn read(tree: &UiTree, parts: &Parts) -> Form {
         .collect();
     Form {
         topic,
+        workdir,
         moderator,
         panel,
     }
+}
+
+/// The working directory typed in the start view: empty is none, `~` is
+/// the home directory, and anything else must be an existing directory.
+pub(super) fn workdir(typed: &str) -> Result<Option<PathBuf>, String> {
+    if typed.is_empty() {
+        return Ok(None);
+    }
+    let path = match typed.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+            let Some(home) = std::env::var_os("HOME") else {
+                return Err("ホームディレクトリが分かりません".into());
+            };
+            PathBuf::from(home).join(rest.trim_start_matches('/'))
+        }
+        _ => PathBuf::from(typed),
+    };
+    if !path.is_absolute() {
+        return Err(format!("{typed} は絶対パスではありません"));
+    }
+    if !path.is_dir() {
+        return Err(format!("{} はディレクトリではありません", path.display()));
+    }
+    Ok(Some(path))
 }

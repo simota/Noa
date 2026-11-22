@@ -481,6 +481,7 @@ fn without_a_session_the_start_view_shows_and_starts_one() {
         h.drain(),
         vec![Command::Start {
             topic: "テストの方針".into(),
+            workdir: None,
             moderator: AgentKind::Codex,
             panel: vec![AgentKind::Codex, AgentKind::Agy],
         }]
@@ -552,4 +553,20 @@ fn notices_from_the_live_layer_are_toasted() {
     h.feed.notices.send("送信失敗: pane gone".into()).unwrap();
     h.screen.prepare(window(), &mut h.text);
     assert_eq!(h.screen.toasts, ["送信失敗: pane gone"]);
+}
+
+#[test]
+fn the_start_views_workdir_is_empty_home_relative_or_an_existing_directory() {
+    use crate::ui::start::workdir;
+    assert_eq!(workdir(""), Ok(None));
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    assert_eq!(workdir("~"), Ok(Some(home.clone())));
+    let tmp = std::env::temp_dir();
+    assert_eq!(workdir(tmp.to_str().unwrap()), Ok(Some(tmp.clone())));
+    assert!(workdir("relative/dir").unwrap_err().contains("絶対パス"));
+    assert!(
+        workdir("/no/such/dir/for/noa")
+            .unwrap_err()
+            .contains("ディレクトリではありません")
+    );
 }

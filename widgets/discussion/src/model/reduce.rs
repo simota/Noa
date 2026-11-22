@@ -18,6 +18,9 @@ pub enum Event {
     Created {
         id: SessionId,
         topic: String,
+        /// Absent in logs written before sessions could name a directory.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workdir: Option<std::path::PathBuf>,
         moderator: Participant,
         panelists: Vec<Participant>,
         at: Millis,
@@ -138,6 +141,7 @@ pub fn create(batch: &[Event]) -> Result<Session, ReduceError> {
         Event::Created {
             id,
             topic,
+            workdir,
             moderator,
             panelists,
             at,
@@ -150,6 +154,7 @@ pub fn create(batch: &[Event]) -> Result<Session, ReduceError> {
     let mut session = Session {
         id: id.clone(),
         topic: topic.clone(),
+        workdir: workdir.clone(),
         rev: 1,
         created_at: *at,
         moderator: moderator.clone(),
@@ -458,6 +463,24 @@ mod tests {
     use super::*;
     use crate::model::types::{AgentKind, Author, MessageId, Position, Role};
 
+    #[test]
+    fn a_log_written_before_workdirs_reads_as_none() {
+        let line = r#"{"event":"created","id":"disc-1","topic":"t","moderator":{"id":"noa","kind":"claude","role":"moderator","pane_id":null},"panelists":[],"at":1}"#;
+        let event: Event = serde_json::from_str(line).unwrap();
+        let session = create(&[event]).unwrap();
+        assert_eq!(session.workdir, None);
+        let back = serde_json::to_string(&Event::Created {
+            id: SessionId::new("disc-1"),
+            topic: "t".into(),
+            workdir: None,
+            moderator: session.moderator.clone(),
+            panelists: Vec::new(),
+            at: 1,
+        })
+        .unwrap();
+        assert!(!back.contains("workdir"), "{back}");
+    }
+
     fn part(id: &str, kind: AgentKind, role: Role) -> Participant {
         Participant {
             id: PartId::new(id),
@@ -471,6 +494,7 @@ mod tests {
         vec![Event::Created {
             id: SessionId::new("s"),
             topic: "t".into(),
+            workdir: None,
             moderator: part("noa", AgentKind::Claude, Role::Moderator),
             panelists: vec![part("claude", AgentKind::Claude, Role::Panelist)],
             at: 5,

@@ -575,6 +575,9 @@ pub struct ModeratorOutput {
 pub struct Session {
     pub id: SessionId,
     pub topic: String,
+    /// The directory (or repository) the agents run in, when the user named
+    /// one; `None` runs them in the discussions directory.
+    pub workdir: Option<std::path::PathBuf>,
     /// Bumped once per applied event batch.
     pub rev: u64,
     pub created_at: Millis,

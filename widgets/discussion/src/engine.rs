@@ -208,6 +208,18 @@ pub fn participants(moderator: AgentKind, panel: &[AgentKind]) -> (Participant, 
     (moderator, panelists)
 }
 
+/// What a new session is about and who takes part.
+#[derive(Debug, Clone)]
+pub struct Setup<'a> {
+    pub topic: &'a str,
+    /// The directory (or repository) the agents run in. Their reply files
+    /// go under it ([`store::workdir_reply_dir`]), so an agent whose sandbox
+    /// writes only inside its working directory can write them.
+    pub workdir: Option<PathBuf>,
+    pub moderator: AgentKind,
+    pub panel: &'a [AgentKind],
+}
+
 #[derive(Debug, Clone)]
 pub struct Engine {
     session: Session,
@@ -227,6 +239,30 @@ impl Engine {
         config: Config,
         now: Millis,
     ) -> Result<(Engine, Output), EngineError> {
+        let setup = Setup {
+            topic,
+            workdir: None,
+            moderator,
+            panel,
+        };
+        Engine::create_in(id, setup, dir, config, now)
+    }
+
+    /// [`Engine::create`] from a [`Setup`], which can name the directory
+    /// the agents run in.
+    pub fn create_in(
+        id: SessionId,
+        setup: Setup<'_>,
+        dir: &Path,
+        config: Config,
+        now: Millis,
+    ) -> Result<(Engine, Output), EngineError> {
+        let Setup {
+            topic,
+            workdir,
+            moderator,
+            panel,
+        } = setup;
         let topic = topic.trim();
         if topic.is_empty() {
             return rejected("the topic is empty");
@@ -238,6 +274,7 @@ impl Engine {
         let batch = vec![Event::Created {
             id,
             topic: topic.to_owned(),
+            workdir,
             moderator,
             panelists,
             at: now,
@@ -253,6 +290,15 @@ impl Engine {
             effects: Vec::new(),
         };
         Ok((engine, output))
+    }
+
+    /// Where the agents' reply files go: under the session's working
+    /// directory when it has one, else the session directory.
+    pub fn reply_dir(&self) -> PathBuf {
+        match &self.session.workdir {
+            Some(workdir) => store::workdir_reply_dir(workdir, &self.session.id),
+            None => self.dir.clone(),
+        }
     }
 
     /// An engine over a session folded from its log; send `Start` to pick
@@ -527,7 +573,7 @@ impl Engine {
         let briefs: Vec<Brief> = questions
             .iter()
             .map(|(part, question)| {
-                let path = store::reply_path(&self.dir, no, part);
+                let path = store::reply_path(&self.reply_dir(), no, part);
                 brief::panelist_brief(&self.session, part, no, question, &path)
             })
             .collect();
@@ -580,7 +626,7 @@ impl Engine {
     }
 
     fn summarize(&mut self, out: &mut Output, no: RoundNo) -> Result<(), EngineError> {
-        let path = store::moderator_reply_path(&self.dir, no);
+        let path = store::moderator_reply_path(&self.reply_dir(), no);
         let brief = brief::moderator_brief(&self.session, no, &path);
         self.commit(
             out,
@@ -1034,6 +1080,39 @@ mod tests {
     use super::*;
     use crate::model::brief::{MODERATOR_SECTIONS, PANELIST_SECTIONS, render_message};
     use crate::model::types::{IssueState, MessageId};
+
+    #[test]
+    fn a_session_with_a_workdir_sends_replies_under_its_dot_noa() {
+        let setup = Setup {
+            topic: "Pick a database",
+            workdir: Some(PathBuf::from("/repo")),
+            moderator: AgentKind::Codex,
+            panel: &[AgentKind::Claude, AgentKind::Agy],
+        };
+        let (mut engine, _) =
+            Engine::create_in(SessionId::new("disc-1"), setup, Path::new("/d"), CONFIG, 0).unwrap();
+        assert_eq!(
+            engine.session().workdir.as_deref(),
+            Some(Path::new("/repo"))
+        );
+        assert_eq!(
+            engine.reply_dir(),
+            Path::new("/repo/.noa/discussions/disc-1")
+        );
+        engine.handle(Input::Start { now: 1 }).unwrap();
+        for brief in &round(&engine).briefs {
+            assert!(
+                brief
+                    .reply_path
+                    .starts_with("/repo/.noa/discussions/disc-1/r1"),
+                "{}",
+                brief.reply_path.display()
+            );
+            assert!(brief.body.contains("/repo/.noa/discussions/disc-1/r1/"));
+        }
+        // Without a workdir the replies stay in the session directory.
+        assert_eq!(self::engine().reply_dir(), Path::new("/d"));
+    }
 
     const CONFIG: Config = Config {
         start_timeout: 1_000,

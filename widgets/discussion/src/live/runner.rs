@@ -20,7 +20,7 @@ use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use discussion::engine::{AgentState, Config, Effect, Engine, EngineError, Input};
+use discussion::engine::{AgentState, Config, Effect, Engine, EngineError, Input, Setup};
 use discussion::model::types::{
     AgentKind, DebateId, IssueId, Millis, PartId, Phase, RoundNo, Session, SessionId,
 };
@@ -51,9 +51,11 @@ const QUIET_FOR: Millis = 1_500;
 /// that brief waits, and the user is told once.
 const READY_LIMIT: Millis = 30_000;
 /// What Noa reports for Claude Code's folder trust prompt (`detail`, with
-/// `blocked: permission`), and the choice that trusts the folder. Agents
-/// run in the discussions directory the runner made for them, so the
-/// runner answers this prompt itself.
+/// `blocked: permission`), and the choice that trusts the folder. The
+/// runner answers this prompt itself only for agents in the discussions
+/// directory it made for them. A working directory the user named is a
+/// repository with its own settings and hooks, so its trust prompt is left
+/// to the user.
 const CLAUDE_TRUST_DETAIL: &str = "trust this folder";
 const CLAUDE_TRUST_YES: &str = "Yes, I trust this folder";
 /// Keys typed into one trust prompt before it is left to the user.
@@ -75,6 +77,9 @@ pub enum Start {
     /// [`store::default_root`]).
     New {
         topic: String,
+        /// The directory (or repository) the agents run in; `None` runs
+        /// them in the discussions directory.
+        workdir: Option<PathBuf>,
         moderator: AgentKind,
         panel: Vec<AgentKind>,
         root: PathBuf,
@@ -457,15 +462,31 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         let (engine, store) = match start {
             Start::New {
                 topic,
+                workdir,
                 moderator,
                 panel,
                 root,
             } => {
+                if let Some(workdir) = &workdir {
+                    if !workdir.is_dir() {
+                        return Err(format!(
+                            "{} はディレクトリではありません",
+                            workdir.display()
+                        ));
+                    }
+                    store::prepare_workdir(workdir)
+                        .map_err(|e| format!("{} に .noa を作れません: {e}", workdir.display()))?;
+                }
                 let id = SessionId::at(now);
                 let dir = store::session_dir(&root, &id);
-                let (engine, out) =
-                    Engine::create(id, &topic, moderator, &panel, &dir, config, now)
-                        .map_err(|e| format!("討論を始められません: {e}"))?;
+                let setup = Setup {
+                    topic: &topic,
+                    workdir,
+                    moderator,
+                    panel: &panel,
+                };
+                let (engine, out) = Engine::create_in(id, setup, &dir, config, now)
+                    .map_err(|e| format!("討論を始められません: {e}"))?;
                 let first = out.batches.first().map(Vec::as_slice).unwrap_or_default();
                 let store = Store::create(&dir, first)
                     .map_err(|e| format!("{} を作れません: {e}", dir.display()))?;
@@ -839,7 +860,10 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         let Some(kind) = self.engine.session().participant(part).map(|p| p.kind) else {
             return Ok(Err(format!("no participant {part}")));
         };
-        let cwd = agent_cwd(self.engine.dir());
+        let cwd = match &self.engine.session().workdir {
+            Some(workdir) => workdir.clone(),
+            None => agent_cwd(self.engine.dir()),
+        };
         loop {
             let placement = self.placement(part);
             let spec = PaneSpec {
@@ -878,13 +902,15 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     /// pane held on a prompt is not, and the user is told once.
     fn ready(&mut self, conn: &mut C::Conn, part: &PartId) -> Result<bool, Fail> {
         let now = self.clock.now();
+        let auto_trust = self.engine.session().workdir.is_none();
         let Some(pane) = self.panes.get_mut(part) else {
             return Ok(false);
         };
         if pane.ready {
             return Ok(true);
         }
-        if pane.held()
+        if auto_trust
+            && pane.held()
             && pane.blocked.as_deref() == Some("permission")
             && pane.detail.as_deref() == Some(CLAUDE_TRUST_DETAIL)
             && pane.trust_keys < TRUST_KEYS_MAX
@@ -1434,6 +1460,7 @@ mod tests {
                 fake,
                 Start::New {
                     topic: "Pick a database".into(),
+                    workdir: None,
                     moderator: AgentKind::Claude,
                     panel: vec![AgentKind::Claude, AgentKind::Codex],
                     root: root.to_owned(),
@@ -1794,6 +1821,36 @@ mod tests {
     }
 
     #[test]
+    fn a_trust_prompt_in_a_named_workdir_is_left_to_the_user() {
+        let root = temp_root("trust-workdir");
+        let workdir = temp_root("trust-workdir-repo");
+        fs::create_dir_all(&workdir).unwrap();
+        let fake = Fake::new();
+        fake.w().now = 1_000;
+        let mut rig = Rig::open(
+            &fake,
+            Start::New {
+                topic: "Review this repo".into(),
+                workdir: Some(workdir.clone()),
+                moderator: AgentKind::Claude,
+                panel: vec![AgentKind::Claude, AgentKind::Codex],
+                root: root.clone(),
+            },
+        );
+        rig.step();
+        fake.report_blocked(101, "permission", "permission", CLAUDE_TRUST_DETAIL);
+        fake.w().panes.get_mut(&101).unwrap().screen =
+            " ❯ No, exit\n   Yes, I trust this folder\n".into();
+        for _ in 0..20 {
+            rig.step();
+        }
+        assert!(fake.typed(101).is_empty(), "{:?}", fake.typed(101));
+        assert!(rig.notices().iter().any(|n| n.contains("確認待ち")));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&workdir);
+    }
+
+    #[test]
     fn a_trust_prompt_that_does_not_go_away_is_left_to_the_user() {
         let root = temp_root("trust-stuck");
         let fake = Fake::new();
@@ -1842,6 +1899,66 @@ mod tests {
         fake.report(101, "finished");
         rig.until(10, |r| r.submitted(101) == 1);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn agents_run_in_the_named_workdir_which_gets_a_self_ignoring_dot_noa() {
+        let root = temp_root("workdir");
+        let workdir = temp_root("workdir-repo");
+        fs::create_dir_all(&workdir).unwrap();
+        let fake = Fake::new();
+        fake.w().now = 1_000;
+        let mut rig = Rig::open(
+            &fake,
+            Start::New {
+                topic: "Review this repo".into(),
+                workdir: Some(workdir.clone()),
+                moderator: AgentKind::Claude,
+                panel: vec![AgentKind::Codex],
+                root: root.clone(),
+            },
+        );
+        rig.step();
+        let spawned = fake.0.borrow().spawned.clone();
+        assert!(!spawned.is_empty());
+        assert!(spawned.iter().all(|(_, spec, _)| spec.cwd == workdir));
+        assert_eq!(
+            fs::read_to_string(workdir.join(".noa/.gitignore")).unwrap(),
+            "*\n"
+        );
+        // The session log stays in the discussions directory.
+        assert!(rig.dir().starts_with(&root));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&workdir);
+    }
+
+    #[test]
+    fn a_workdir_that_is_not_a_directory_is_refused() {
+        let root = temp_root("no-workdir");
+        let fake = Fake::new();
+        let (_actions, action_rx) = mpsc::channel();
+        let (update_tx, _updates) = mpsc::channel();
+        let missing = root.join("missing");
+        let opened = Runner::open(
+            Start::New {
+                topic: "t".into(),
+                workdir: Some(missing.clone()),
+                moderator: AgentKind::Claude,
+                panel: vec![AgentKind::Codex],
+                root: root.clone(),
+            },
+            fake.clone(),
+            fake.clone(),
+            CONFIG,
+            action_rx,
+            update_tx,
+            Rc::new(|| {}),
+        );
+        let Err(why) = opened else {
+            panic!("opened with a missing workdir");
+        };
+        assert!(why.contains("ディレクトリではありません"), "{why}");
+        assert!(!root.exists(), "nothing was stored");
     }
 
     #[test]
@@ -1972,6 +2089,7 @@ mod tests {
         run_session(
             Start::New {
                 topic: "t".into(),
+                workdir: None,
                 moderator: AgentKind::Codex,
                 panel: vec![AgentKind::Agy],
                 root: root.clone(),

@@ -454,6 +454,7 @@ mod tests {
         reduce::create(&[Event::Created {
             id: SessionId::new("s"),
             topic: "Pick a database".into(),
+            workdir: None,
             moderator: p("noa", AgentKind::Claude, Role::Moderator),
             panelists: vec![
                 p("claude", AgentKind::Claude, Role::Panelist),

@@ -560,6 +560,7 @@ mod tests {
         let mut session = reduce::create(&[Event::Created {
             id: SessionId::new("s"),
             topic: "t".into(),
+            workdir: None,
             moderator: part("noa", AgentKind::Claude, Role::Moderator),
             panelists: vec![
                 part("claude", AgentKind::Claude, Role::Panelist),

@@ -533,6 +533,13 @@ impl Discussion {
             self.toast("パネリストを 1 人以上選んでください");
             return;
         }
+        let workdir = match start::workdir(&form.workdir) {
+            Ok(workdir) => workdir,
+            Err(why) => {
+                self.toast(why);
+                return;
+            }
+        };
         let note = format!(
             "司会 {} とパネル {} で開始します",
             form.moderator.command(),
@@ -545,6 +552,7 @@ impl Discussion {
         self.send(
             Command::Start {
                 topic: form.topic,
+                workdir,
                 moderator: form.moderator,
                 panel: form.panel,
             },

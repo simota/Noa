@@ -34,6 +34,9 @@ pub enum Command {
     /// Create a session and spawn its agents (`Engine::create`, then `Start`).
     Start {
         topic: String,
+        /// The directory (or repository) the agents run in; `None` for the
+        /// discussions directory.
+        workdir: Option<std::path::PathBuf>,
         moderator: AgentKind,
         panel: Vec<AgentKind>,
     },
@@ -109,6 +112,7 @@ fn run_commands(
             (
                 Command::Start {
                     topic,
+                    workdir,
                     moderator,
                     panel,
                 },
@@ -123,6 +127,7 @@ fn run_commands(
                 let started = runner::spawn_session(
                     runner::Start::New {
                         topic,
+                        workdir,
                         moderator,
                         panel,
                         root,

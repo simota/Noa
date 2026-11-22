@@ -33,6 +33,30 @@ pub fn round_dir(dir: &Path, round: RoundNo) -> PathBuf {
     dir.join(format!("r{round}"))
 }
 
+/// Where the reply files of session `id` go when its agents run in
+/// `workdir`: `<workdir>/.noa/discussions/<id>`, beside `noa +ctl`'s
+/// `$NOA_RESULT` files.
+pub fn workdir_reply_dir(workdir: &Path, id: &SessionId) -> PathBuf {
+    workdir.join(".noa").join("discussions").join(id.as_str())
+}
+
+/// Makes `<workdir>/.noa/` with a `.gitignore` holding `*`, as `noa +ctl`
+/// does, so the reply files never show in `git status`. An existing
+/// `.gitignore` there is kept.
+pub fn prepare_workdir(workdir: &Path) -> io::Result<()> {
+    let dir = workdir.join(".noa");
+    fs::create_dir_all(&dir)?;
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dir.join(".gitignore"))
+    {
+        Ok(mut file) => io::Write::write_all(&mut file, b"*\n"),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 /// The file panelist `part` writes its round-`round` reply to.
 pub fn reply_path(dir: &Path, round: RoundNo, part: &PartId) -> PathBuf {
     round_dir(dir, round).join(format!("{part}.md"))
@@ -231,6 +255,28 @@ mod tests {
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[test]
+    fn a_workdir_gets_a_self_ignoring_dot_noa_and_keeps_an_existing_gitignore() {
+        let root = temp_root("workdir");
+        fs::create_dir_all(&root).unwrap();
+        prepare_workdir(&root).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join(".noa/.gitignore")).unwrap(),
+            "*\n"
+        );
+        fs::write(root.join(".noa/.gitignore"), "mine\n").unwrap();
+        prepare_workdir(&root).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join(".noa/.gitignore")).unwrap(),
+            "mine\n"
+        );
+        assert_eq!(
+            workdir_reply_dir(&root, &SessionId::new("disc-9")),
+            root.join(".noa/discussions/disc-9")
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
     fn temp_root(name: &str) -> PathBuf {
         static N: AtomicUsize = AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
@@ -252,6 +298,7 @@ mod tests {
         vec![Event::Created {
             id: SessionId::new("disc-1"),
             topic: "t".into(),
+            workdir: None,
             moderator: p("noa", AgentKind::Codex, Role::Moderator),
             panelists: vec![p("claude", AgentKind::Claude, Role::Panelist)],
             at: 1,

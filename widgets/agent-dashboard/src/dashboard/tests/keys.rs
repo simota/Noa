@@ -187,8 +187,5 @@ fn opening_help_cancels_a_press_underneath() {
     assert!(!dashboard.view.help);
     click(&mut dashboard, &mut text, pos);
     let label = label_of(&dashboard, pane).to_owned();
-    assert_eq!(
-        status(&dashboard),
-        format!("モック: {label} のペインへ移動します")
-    );
+    assert_eq!(status(&dashboard), format!("{label} のペインへ移動します"));
 }

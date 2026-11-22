@@ -74,7 +74,7 @@ fn the_status_label_is_cut_inside_its_slot() {
     click(&mut opened, &mut opened_text, pos);
     let queue_only = shown_only(&[Panel::Running, Panel::Done, Panel::Timeline, Panel::Graph]);
     let (mut narrow, mut narrow_text) = showing(Grouping::Orchestrator, queue_only);
-    let long: String = "モック: とても長いワーカー名のペインへ移動します "
+    let long: String = "とても長いワーカー名のペインへ移動します "
         .chars()
         .cycle()
         .take(300)
@@ -89,7 +89,7 @@ fn the_status_label_is_cut_inside_its_slot() {
     for (name, dashboard, cut) in [
         ("default", &default, false),
         ("all off", &off, false),
-        ("after 開く", &opened, true),
+        ("after 開く", &opened, false),
         ("long status", &narrow, true),
     ] {
         let tree = &dashboard.tree;

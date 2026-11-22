@@ -28,9 +28,41 @@ const SNAPSHOT_SCALE: f32 = 2.0;
 /// How long `--snapshot` waits for the live feed's first snapshot.
 const FIRST_SNAPSHOT_WAIT: Duration = Duration::from_secs(3);
 
+/// The window title in the person's language: Japanese where the locale is
+/// Japanese, English anywhere else. The locale variables in POSIX order
+/// (`LC_ALL`, `LC_MESSAGES`, `LANG`: the first one set wins), else the
+/// system's preferred language, as Noa's own board decides
+/// (`noa-app` `ctl/board.rs` `Lang::from_locale`).
+fn title(
+    var: impl Fn(&str) -> Option<String>,
+    system: impl FnOnce() -> Option<String>,
+) -> &'static str {
+    let tag = ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .find_map(|key| var(key).filter(|value| !value.is_empty()))
+        .or_else(system);
+    match tag {
+        Some(tag) if tag.starts_with("ja") => "Noa · エージェント運用ダッシュボード",
+        _ => "Noa · Agent Operations Dashboard",
+    }
+}
+
+/// The first of the person's preferred languages, as a BCP 47 tag (`ja-JP`).
+#[cfg(target_os = "macos")]
+fn system_language() -> Option<String> {
+    objc2_foundation::NSLocale::preferredLanguages()
+        .firstObject()
+        .map(|tag| tag.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_language() -> Option<String> {
+    None
+}
+
 fn options() -> AppOptions {
     AppOptions {
-        title: "Noa · エージェント運用ダッシュボード（モック）".into(),
+        title: title(|key| std::env::var(key).ok(), system_language).into(),
         size: (1440.0, 900.0),
         ..AppOptions::new("Noa Agent Dashboard")
     }
@@ -271,6 +303,38 @@ fn main() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_title_follows_the_locale() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        let ja = "Noa · エージェント運用ダッシュボード";
+        let en = "Noa · Agent Operations Dashboard";
+        assert_eq!(title(env(&[("LANG", "ja_JP.UTF-8")]), || None), ja);
+        assert_eq!(title(env(&[("LANG", "en_US.UTF-8")]), || None), en);
+        // LC_ALL wins over LANG; an empty one is skipped.
+        assert_eq!(
+            title(
+                env(&[("LC_ALL", "en_US.UTF-8"), ("LANG", "ja_JP.UTF-8")]),
+                || None
+            ),
+            en
+        );
+        assert_eq!(
+            title(env(&[("LC_ALL", ""), ("LANG", "ja_JP.UTF-8")]), || None),
+            ja
+        );
+        // No locale variables: the system's preferred language.
+        assert_eq!(title(env(&[]), || Some("ja-JP".into())), ja);
+        assert_eq!(title(env(&[]), || Some("en-US".into())), en);
+        assert_eq!(title(env(&[]), || None), en);
+    }
 
     /// A key press as noa-gpui-platform 0.2.1 sends it (`input.rs`): on
     /// Apple platforms every key carries `command_is_meta`.

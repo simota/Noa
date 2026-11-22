@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use noa_gpui_core::style::{
@@ -166,11 +166,14 @@ pub struct RepoBrowser {
     target_wt: Option<String>,
     /// What the target display was last built from.
     target_key: String,
-    /// The worktree (cwd) the prompt was started for.
-    prompt_origin: Option<String>,
-    /// The prompt (and its origin) the last "クリア" emptied. TextArea drops
-    /// its undo history on `set_text`, so the screen keeps one level itself.
-    cleared_prompt: Option<(String, Option<String>)>,
+    /// The worktrees (cwds) each quote header line was taken from. Which
+    /// worktree a prompt belongs to is read from the headers still in its
+    /// text, so typing, deleting, undoing or restoring can never leave it
+    /// claiming the wrong one.
+    quote_origins: HashMap<String, BTreeSet<String>>,
+    /// The prompt the last "クリア" emptied. TextArea drops its undo
+    /// history on `set_text`, so the screen keeps one level itself.
+    cleared_prompt: Option<String>,
     /// Every toast shown, for tests to inspect.
     #[cfg(test)]
     toasts: Vec<String>,
@@ -666,7 +669,7 @@ impl RepoBrowser {
             target_pane: None,
             target_wt: None,
             target_key: String::new(),
-            prompt_origin: None,
+            quote_origins: HashMap::new(),
             cleared_prompt: None,
             #[cfg(test)]
             toasts: Vec::new(),
@@ -1399,7 +1402,13 @@ impl RepoBrowser {
 
         for repo in &self.filtered.repos {
             for wt in &repo.worktrees {
-                if let Some(pane) = wt.primary_pane() {
+                // The selected worktree's focus goes where its prompt does.
+                let pane = if self.current_worktree().is_some_and(|c| c.cwd == wt.cwd) {
+                    self.target()
+                } else {
+                    wt.primary_pane()
+                };
+                if let Some(pane) = pane {
                     commands.push(
                         PaletteCommand::new(format!("ペインへ移動: {} ({})", wt.branch, pane.name))
                             .detail(format!("{} · #{}", repo.name, pane.pane_id))
@@ -1604,7 +1613,12 @@ impl RepoBrowser {
         }
         let lines: Vec<&str> = self.shown_diff.as_deref().unwrap_or("").lines().collect();
         let files: Vec<usize> = (0..lines.len())
-            .filter(|&i| lines[i].starts_with("diff --git "))
+            // A merge commit's files are combined diffs (`diff --cc`).
+            .filter(|&i| {
+                ["diff --git ", "diff --cc ", "diff --combined "]
+                    .iter()
+                    .any(|p| lines[i].starts_with(p))
+            })
             .collect();
         let selected = self
             .tree
@@ -1619,7 +1633,7 @@ impl RepoBrowser {
             .find(|&&i| i > start)
             .copied()
             .unwrap_or(lines.len());
-        let path = diff_git_new_path(lines[start])
+        let path = section_new_path(&lines[start..end])
             .ok_or_else(|| format!("開くファイルのパスを読めません: {}", lines[start]))?;
         let deleted = lines[start..end]
             .iter()
@@ -1650,8 +1664,11 @@ impl RepoBrowser {
                 .lines()
                 .skip(section.start)
                 .take(section.len())
-                .find_map(parse_hunk_header)
-                .map(|(_, new)| new)
+                .find_map(|l| {
+                    parse_hunk_header(l)
+                        .map(|(_, new)| new)
+                        .or_else(|| combined_hunk_new_start(l))
+                })
         };
         from_selection.or_else(first_hunk).unwrap_or(1).max(1)
     }
@@ -1701,21 +1718,27 @@ impl RepoBrowser {
             self.toast("同じ範囲はすでに引用済みです");
             return;
         }
-        let cwd = self.current_worktree().map(|w| w.cwd.clone());
+        let cwd = self
+            .current_worktree()
+            .map(|w| w.cwd.clone())
+            .unwrap_or_default();
+        // One prompt goes to one worktree's pane, so it never holds another
+        // worktree's diff.
+        let origins = self.origins_of(&current);
+        if !origins.is_empty() && origins != BTreeSet::from([cwd.clone()]) {
+            let origin = self.origin_names(&origins);
+            self.toast(format!(
+                "この指示は worktree {origin} の引用から作られています。別の worktree の引用は、送信するかクリアしてから足してください"
+            ));
+            return;
+        }
+        self.quote_origins
+            .entry(header.clone())
+            .or_default()
+            .insert(cwd);
         let mut next = if current.trim().is_empty() {
-            self.prompt_origin = cwd;
             format!("{QUOTE_LEAD}\n")
         } else {
-            let mixed = self.prompt_origin.is_some() && self.prompt_origin != cwd;
-            if self.prompt_origin.is_none() {
-                self.prompt_origin = cwd;
-            }
-            if mixed {
-                let origin = self.prompt_origin_name().unwrap_or_default();
-                self.toast(format!(
-                    "この指示は複数の worktree の引用を含みます。送信できるのは最初に引用した worktree {origin} からです"
-                ));
-            }
             let mut text = current;
             if !text.ends_with('\n') {
                 text.push('\n');
@@ -1742,22 +1765,18 @@ impl RepoBrowser {
     /// Empties the prompt without asking; pressed again, it brings the text
     /// back (TextArea has no undo across `set_text`, so one level is kept here).
     fn clear_or_restore_prompt(&mut self) {
-        if let Some((prev, origin)) = self.cleared_prompt.take() {
+        if let Some(prev) = self.cleared_prompt.take() {
             let current = self.prompt_text();
-            let current_origin = if current.trim().is_empty() {
-                None
-            } else {
-                self.prompt_origin.clone()
-            };
             // Joining quotes of two worktrees would let one worktree's pane
-            // receive the other's diff, so that restore waits.
-            if let (Some(saved), Some(now)) = (&origin, &current_origin)
-                && saved != now
-            {
-                self.cleared_prompt = Some((prev, origin));
-                self.toast(
-                    "元に戻す指示は別の worktree の引用を含むため、今の指示を送るかクリアしてから戻してください",
-                );
+            // receive the other's diff: swap the two prompts instead, so the
+            // button keeps working and pressing it again swaps them back.
+            let mut both = self.origins_of(&prev);
+            both.extend(self.origins_of(&current));
+            if both.len() > 1 {
+                self.cleared_prompt = Some(current);
+                self.set_prompt_text(prev);
+                self.toast("別の worktree の指示と入れ替えました（もう一度押すと戻ります）");
+                self.sync_clear_label();
                 return;
             }
             let restored = if current.trim().is_empty() {
@@ -1766,13 +1785,12 @@ impl RepoBrowser {
                 format!("{}\n{current}", prev.trim_end())
             };
             self.set_prompt_text(restored);
-            self.prompt_origin = origin.or(current_origin);
         } else {
             let current = self.prompt_text();
             if current.is_empty() {
                 return;
             }
-            self.cleared_prompt = Some((current, self.prompt_origin.take()));
+            self.cleared_prompt = Some(current);
             self.set_prompt_text(String::new());
         }
         self.sync_clear_label();
@@ -1781,7 +1799,7 @@ impl RepoBrowser {
     /// The prompt left the screen for good (sent): nothing to restore.
     fn reset_prompt_state(&mut self) {
         self.set_prompt_text(String::new());
-        self.prompt_origin = None;
+        self.quote_origins.clear();
         self.cleared_prompt = None;
         self.sync_clear_label();
     }
@@ -1796,18 +1814,29 @@ impl RepoBrowser {
             .update::<Button, _>(self.clear_btn, |b, cx| b.set_label(cx, label));
     }
 
-    /// The branch of the worktree the prompt's quotes were taken from (its
-    /// cwd when it is no longer listed).
-    fn prompt_origin_name(&self) -> Option<String> {
-        let origin = self.prompt_origin.as_ref()?;
-        let branch = self
-            .raw_data
-            .repos
+    /// The worktrees (cwds) whose quote headers are in `text`.
+    fn origins_of(&self, text: &str) -> BTreeSet<String> {
+        text.lines()
+            .filter_map(|line| self.quote_origins.get(line))
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
+    /// The branches of `origins` (a cwd when it is no longer listed).
+    fn origin_names(&self, origins: &BTreeSet<String>) -> String {
+        origins
             .iter()
-            .flat_map(|r| &r.worktrees)
-            .find(|w| w.cwd == *origin)
-            .map(|w| w.branch.clone());
-        Some(branch.unwrap_or_else(|| origin.clone()))
+            .map(|origin| {
+                self.raw_data
+                    .repos
+                    .iter()
+                    .flat_map(|r| &r.worktrees)
+                    .find(|w| w.cwd == *origin)
+                    .map_or_else(|| origin.clone(), |w| w.branch.clone())
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     fn send_review_prompt(&mut self) {
@@ -1822,10 +1851,10 @@ impl RepoBrowser {
         }
         // The quotes describe another worktree's diff: its agent, not this
         // one's, is the one to receive them.
-        if self.prompt_origin.is_some()
-            && self.prompt_origin.as_ref() != self.current_worktree().map(|w| &w.cwd)
-        {
-            let origin = self.prompt_origin_name().unwrap_or_default();
+        let origins = self.origins_of(&text);
+        let here = self.current_worktree().map(|w| w.cwd.clone());
+        if !origins.is_empty() && here.is_none_or(|cwd| origins != BTreeSet::from([cwd])) {
+            let origin = self.origin_names(&origins);
             self.toast(format!(
                 "この指示は worktree {origin} の引用から作られています。{origin} に戻って送信するか、指示をクリアしてください"
             ));
@@ -2462,6 +2491,35 @@ impl Gutter {
 }
 
 /// The new-side path of a `diff --git a/<old> b/<new>` line, unquoted.
+/// The new path of one file's section of a diff: its `rename to` or `+++`
+/// header when present (they name the path alone), else the `diff --git`
+/// line, which is ambiguous when a renamed path holds ` b/`.
+fn section_new_path(section: &[&str]) -> Option<String> {
+    let header = section.iter().take_while(|l| !l.starts_with("@@"));
+    let unquote = |p: &str| {
+        if p.starts_with('"') {
+            c_unquote(p)
+        } else {
+            Some(p.to_owned())
+        }
+    };
+    for line in header.clone() {
+        if let Some(path) = line.strip_prefix("rename to ") {
+            return unquote(path);
+        }
+    }
+    for line in header {
+        if let Some(path) = line.strip_prefix("+++ ") {
+            // git ends the name with a tab when it holds a space.
+            let path = unquote(path.trim_end_matches('\t'))?;
+            if let Some(path) = path.strip_prefix("b/") {
+                return Some(path.to_owned());
+            }
+        }
+    }
+    diff_git_new_path(section.first()?)
+}
+
 fn diff_git_new_path(line: &str) -> Option<String> {
     let rest = line.strip_prefix("diff --git ")?;
     if let Some(unclosed) = rest.strip_suffix('"') {
@@ -2523,6 +2581,13 @@ fn c_unquote(quoted: &str) -> Option<String> {
 }
 
 /// The (old, new) start lines of a `@@ -a,b +c,d @@` hunk header.
+/// The new start line of a combined diff's `@@@ -a,b -c,d +e,f @@@` hunk.
+fn combined_hunk_new_start(line: &str) -> Option<u32> {
+    let rest = line.strip_prefix("@@@ ")?;
+    let new = rest.split(' ').find_map(|t| t.strip_prefix('+'))?;
+    new.split(',').next()?.parse().ok()
+}
+
 fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
     let rest = line.strip_prefix("@@ -")?;
     let (old, rest) = rest.split_once(' ')?;
@@ -3230,7 +3295,7 @@ mod tests {
     }
 
     #[test]
-    fn quoting_from_another_worktree_warns_that_the_prompt_is_mixed() {
+    fn quoting_from_another_worktree_is_refused_with_a_toast() {
         let mut h = LiveHarness::new();
         let mut snap = snapshot(DiffMode::Unstaged, Some(("a.rs", "+a v1")));
         let mut other = snap.data.repos[0].worktrees[0].clone();
@@ -3247,14 +3312,13 @@ mod tests {
         h.screen.sync_views(&mut h.text);
         h.screen.quote_selected_diff();
         assert_eq!(h.screen.toasts.len(), 1, "{:?}", h.screen.toasts);
-        assert!(h.screen.toasts[0].contains("複数の worktree"));
         assert!(
-            h.screen.toasts[0].contains("worktree main"),
+            h.screen.toasts[0].contains("worktree main の引用"),
             "{:?}",
             h.screen.toasts
         );
         assert!(prompt_text(&h.screen).contains("[main / a.rs]"));
-        assert!(prompt_text(&h.screen).contains("[b / a.rs]"));
+        assert!(!prompt_text(&h.screen).contains("[b / a.rs]"));
     }
 
     #[test]
@@ -3789,6 +3853,125 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_quote_from_another_worktree_is_not_appended() {
+        let mut h = LiveHarness::new();
+        h.deliver(snapshot_with_two_worktrees());
+        h.screen
+            .diff_cache
+            .insert(("/repo-wt-b".into(), "a.rs".into()), "+b v1".into());
+        h.screen.quote_selected_diff(); // in main
+        h.screen.sel_wt = 1;
+        h.screen.sync_views(&mut h.text);
+        h.screen.quote_selected_diff(); // in b
+        assert!(
+            !prompt_text(&h.screen).contains("[b /"),
+            "{}",
+            prompt_text(&h.screen)
+        );
+        for (pane, text) in send_from(&mut h, 0) {
+            assert!(!text.contains("[b /"), "b's quote sent to #{pane}");
+        }
+    }
+
+    #[test]
+    fn a_refused_restore_never_leaves_the_button_stuck() {
+        let mut h = LiveHarness::new();
+        h.deliver(snapshot_with_two_worktrees());
+        h.screen
+            .diff_cache
+            .insert(("/repo-wt-b".into(), "a.rs".into()), "+b v1".into());
+        h.screen.quote_selected_diff(); // in main
+        h.screen.clear_or_restore_prompt(); // clear main's prompt
+        h.screen.sel_wt = 1;
+        h.screen.sync_views(&mut h.text);
+        h.screen.quote_selected_diff(); // in b
+        let b_prompt = prompt_text(&h.screen);
+        h.screen.clear_or_restore_prompt(); // cannot join: b's prompt goes away
+        assert!(
+            !prompt_text(&h.screen).contains("[b /"),
+            "{}",
+            prompt_text(&h.screen)
+        );
+        // And nothing is lost: pressing again brings b's prompt back.
+        h.screen.clear_or_restore_prompt();
+        assert_eq!(prompt_text(&h.screen), b_prompt);
+    }
+
+    #[test]
+    fn undoing_a_cleared_by_hand_prompt_keeps_its_worktree() {
+        let mut h = LiveHarness::new();
+        h.deliver(snapshot_with_two_worktrees());
+        h.screen.quote_selected_diff(); // in main
+        let quoted = prompt_text(&h.screen);
+        set_prompt(&mut h.screen, ""); // select all, delete
+        h.screen.prepare(Size::new(1440.0, 900.0), &mut h.text); // next frame
+        set_prompt(&mut h.screen, &quoted); // ⌘Z brings it back
+        h.screen.prepare(Size::new(1440.0, 900.0), &mut h.text);
+        assert!(send_from(&mut h, 1).is_empty(), "main's quote sent from b");
+        assert_eq!(send_from(&mut h, 0).len(), 1);
+    }
+
+    #[test]
+    fn palette_focus_goes_to_the_chosen_target() {
+        let mut h = LiveHarness::new();
+        h.deliver(snapshot_with_panes(vec![
+            pane(7, "zsh", ""),
+            pane(8, "claude", ""),
+        ]));
+        h.screen.choose_target(1, &mut h.text);
+        assert_eq!(h.screen.target().unwrap().pane_id, 8);
+        h.screen.open_command_palette();
+        let (_, actions) = h.screen.active_palette.clone().unwrap();
+        let focus: Vec<u64> = actions
+            .iter()
+            .filter_map(|a| match a {
+                PaletteAction::FocusPane(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(focus, vec![8]);
+    }
+
+    /// A merge commit: `git show` prints its files as combined diffs.
+    const MERGE_COMMIT_SHOW: &str = "commit aaaaaaa1\nMerge: 1111111 2222222\nAuthor:     t <t@example.com>\n\n    Merge branch 'x'\n\n\
+diff --cc src/x.rs\nindex 1,2..3\n--- a/src/x.rs\n+++ b/src/x.rs\n@@@ -5,3 -5,3 +5,4 @@@ fn f\n  a\n+ b\n++c\n  d\n";
+
+    #[test]
+    fn the_editor_opens_a_file_of_a_merge_commit() {
+        let mut h = LiveHarness::new();
+        h.screen.select_commit_row(0, &mut h.text);
+        h.deliver(snapshot_with_commit(C_NEW, MERGE_COMMIT_SHOW));
+        assert_eq!(editor_opens(&mut h), vec![("src/x.rs".to_owned(), 5)]);
+    }
+
+    #[test]
+    fn a_prompt_emptied_by_hand_forgets_its_worktree() {
+        let mut h = LiveHarness::new();
+        h.deliver(snapshot_with_two_worktrees());
+        h.screen.quote_selected_diff(); // in main
+        set_prompt(&mut h.screen, ""); // the user deletes it all
+        h.screen.prepare(Size::new(1440.0, 900.0), &mut h.text); // next frame
+        h.screen.sel_wt = 1;
+        h.screen.sync_views(&mut h.text);
+        set_prompt(&mut h.screen, "直して");
+        assert_eq!(send_from(&mut h, 1), vec![(9, "直して".to_owned())]);
+    }
+
+    /// A commit renaming `old.rs` to `new b/file.rs`, whose `diff --git`
+    /// line cannot be split at its ` b/`.
+    const COMMIT_RENAME_WITH_B: &str = "commit aaaaaaa1\nAuthor:     t <t@example.com>\n\n    rename\n\n\
+diff --git a/old.rs b/new b/file.rs\nsimilarity index 80%\nrename from old.rs\nrename to new b/file.rs\n\
+--- a/old.rs\n+++ b/new b/file.rs\t\n@@ -1,2 +1,3 @@\n a\n+b\n c\n";
+
+    #[test]
+    fn a_rename_into_a_path_holding_b_slash_opens_the_new_path() {
+        let mut h = LiveHarness::new();
+        h.screen.select_commit_row(0, &mut h.text);
+        h.deliver(snapshot_with_commit(C_NEW, COMMIT_RENAME_WITH_B));
+        assert_eq!(editor_opens(&mut h), vec![("new b/file.rs".to_owned(), 1)]);
     }
 
     #[test]

@@ -39,6 +39,7 @@ pub(super) enum Action {
     CancelSend,
     ClosePane,
     CycleGrouping,
+    NextTab,
     StartFilter,
     Back,
     TogglePanel(Panel),
@@ -138,6 +139,13 @@ pub(super) const BINDINGS: &[Binding] = &[
         &["G"],
         CycleGrouping,
         "グループを切り替え",
+    ),
+    bind(
+        Browse,
+        K(Key::Char('t')),
+        &["T"],
+        NextTab,
+        "タブを切り替え（運用 / 統計 / マップ / タイムライン）",
     ),
     bind(
         Browse,

@@ -11,13 +11,14 @@ use noa_gpui_platform::{App, AppOptions, Headless, Screen};
 use noa_gpui_scene::Size;
 use noa_gpui_text::TextStore;
 
-use crate::dashboard::Dashboard;
+use crate::dashboard::{Dashboard, Tab};
 use crate::fleet::Grouping;
 use crate::live::{Link, Snapshot};
 
 const USAGE: &str = "usage: agent-dashboard [--demo] [--group=parent|agent|model|none] \
-                     [--filter=QUERY] \
+                     [--tab=ops|analytics|map|timeline] [--filter=QUERY] \
                      [--snapshot=FILE.png [--size=WxH] [--keys=SEQ]]\n  \
+                     --tab: initial view tab (default ops); \
                      --filter: initial filter query (e.g. 'parent:release -state:done'); \
                      --size: snapshot size in logical pixels (default 1440x900; at most \
                      4096 a side and about 8.3 million pixels, e.g. 3840x2160); \
@@ -261,6 +262,7 @@ fn first_live_snapshot() -> Result<Snapshot, String> {
 fn main() -> Result<(), String> {
     let mut snapshot_path = None;
     let mut grouping = Grouping::Orchestrator;
+    let mut tab = Tab::Operations;
     let mut initial_filter = String::new();
     let mut demo = false;
     let mut size = DEFAULT_SIZE;
@@ -271,6 +273,8 @@ fn main() -> Result<(), String> {
         } else if let Some(name) = arg.strip_prefix("--group=") {
             grouping =
                 Grouping::parse(name).ok_or_else(|| format!("unknown group {name:?}\n{USAGE}"))?;
+        } else if let Some(name) = arg.strip_prefix("--tab=") {
+            tab = Tab::parse(name).ok_or_else(|| format!("unknown tab {name:?}\n{USAGE}"))?;
         } else if let Some(query) = arg.strip_prefix("--filter=") {
             initial_filter = query.to_owned();
         } else if let Some(arg) = arg.strip_prefix("--size=") {
@@ -289,6 +293,7 @@ fn main() -> Result<(), String> {
         } else {
             Dashboard::of_snapshot(grouping, first_live_snapshot()?)
         }
+        .with_tab(tab)
         .with_filter(initial_filter);
         snapshot(&path, &mut screen, size, keys)?;
         println!("wrote {}", path.display());
@@ -296,11 +301,19 @@ fn main() -> Result<(), String> {
     }
     App::new(options(), move |setup| {
         if demo {
-            return Box::new(Dashboard::new(grouping).with_filter(initial_filter));
+            return Box::new(
+                Dashboard::new(grouping)
+                    .with_tab(tab)
+                    .with_filter(initial_filter),
+            );
         }
         let waker = setup.waker.clone();
         let channel = live::start(move || waker.wake());
-        Box::new(Dashboard::live(grouping, channel).with_filter(initial_filter))
+        Box::new(
+            Dashboard::live(grouping, channel)
+                .with_tab(tab)
+                .with_filter(initial_filter),
+        )
     })
     .run()
     .map_err(|e| e.to_string())

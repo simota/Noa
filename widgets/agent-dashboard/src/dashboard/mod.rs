@@ -6,8 +6,8 @@ use noa_gpui_core::style::{
     AlignItems, FlexDirection, Rect as LayoutRect, Size as LayoutSize, length, percent,
 };
 use noa_gpui_core::widgets::{
-    ButtonClicked, Chart, Container, Label, LevelIndicator, SelectionChanged, TextChanged,
-    TextField, Truncation,
+    ButtonClicked, Chart, Container, ControlSize, Label, LevelIndicator, SegmentMode,
+    SegmentedControl, SelectionChanged, TextChanged, TextField, Truncation,
 };
 use noa_gpui_core::{
     Appearance, Dirty, Edge, Event, Message, OverlayOptions, Placement, PointerButton, Role, Style,
@@ -20,14 +20,17 @@ use noa_gpui_text::TextStore;
 use crate::fleet::{self, Fleet, Grouping, Need, State, Tier, Worker};
 use crate::live::{Channel, Command, Link, Snapshot};
 
+mod analytics;
 mod cards;
 mod drawer;
 mod filter;
+mod gantt;
 mod graph;
 mod header;
 mod health;
 mod help;
 mod keymap;
+mod mindmap;
 mod pager;
 mod panel;
 mod queue;
@@ -37,9 +40,11 @@ mod timeline;
 mod urgency;
 use cards::{Cards, done, done_caption, quiet_text, running, running_caption};
 use filter::Filter;
+use gantt::TimeScale;
 use graph::graph;
 use header::{HeaderParts, longest, longest_text, match_text, waited_text};
 use keymap::{Action, Mode, Route};
+use mindmap::MapAxis;
 use pager::ListParts;
 use panel::{Panel, empty, history_row, panel};
 use queue::{QueueButtons, queue, queue_since};
@@ -47,8 +52,43 @@ use select::Step;
 use style::{GUTTER, HEADER_HEIGHT, fill_remaining, gap, set_label, set_tag};
 use timeline::{TimelineParts, fill_lanes, span_text, timeline, timeline_span};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tab {
+    #[default]
+    Operations,
+    Analytics,
+    MindMap,
+    Timeline,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 4] = [Tab::Operations, Tab::Analytics, Tab::MindMap, Tab::Timeline];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Tab::Operations => "運用",
+            Tab::Analytics => "統計",
+            Tab::MindMap => "マップ",
+            Tab::Timeline => "タイムライン",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "ops" | "operations" => Some(Tab::Operations),
+            "analytics" | "stats" => Some(Tab::Analytics),
+            "map" | "mindmap" => Some(Tab::MindMap),
+            "timeline" | "gantt" => Some(Tab::Timeline),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct View {
+    tab: Tab,
+    map_axis: MapAxis,
+    time_scale: TimeScale,
     grouping: Grouping,
     /// The queue card shown expanded.
     expanded: Option<u64>,
@@ -74,6 +114,9 @@ struct View {
 impl View {
     fn of(grouping: Grouping) -> Self {
         View {
+            tab: Tab::Operations,
+            map_axis: MapAxis::Orchestrator,
+            time_scale: TimeScale::All,
             grouping,
             expanded: None,
             info_open: false,
@@ -255,6 +298,9 @@ pub struct Registry {
     /// The drawer's send input field and 送信 button.
     send_field: Option<(WidgetId, u64)>,
     send_button: Option<(WidgetId, u64)>,
+    /// Tab-local segmented controls (map axis, timeline scale).
+    axis_control: Option<WidgetId>,
+    scale_control: Option<WidgetId>,
     /// The help overlay and its 閉じる.
     help: Option<(WidgetId, WidgetId)>,
 }
@@ -267,18 +313,21 @@ impl Registry {
         self.marks.clear();
         self.lists = Default::default();
         self.timeline = None;
+        self.axis_control = None;
+        self.scale_control = None;
     }
 }
 
-/// The line under the panels that shows what the last action said, cut at
-/// the window's width. It keeps its height when empty, so a notice moves
-/// nothing.
-fn notice_line(tree: &mut UiTree, root: WidgetId, feed: &Feed) -> WidgetId {
+/// The footer bar under the panels: left notice text (cut at available width)
+/// and right tab switcher (`運用 / 統計 / マップ / タイムライン`). Keeps its
+/// fixed height (`NOTICE_HEIGHT`) so switching notices moves nothing.
+fn notice_line(tree: &mut UiTree, root: WidgetId, feed: &Feed, tab: Tab) -> (WidgetId, WidgetId) {
     let line = tree.insert(
         Some(root),
         Container::new(Style {
             flex_direction: FlexDirection::Row,
             align_items: AlignItems::CENTER,
+            gap: gap(10.0),
             size: LayoutSize {
                 width: percent(1.0),
                 height: length(NOTICE_HEIGHT),
@@ -296,12 +345,20 @@ fn notice_line(tree: &mut UiTree, root: WidgetId, feed: &Feed) -> WidgetId {
         .border(1.0, Role::Separator),
     );
     let slot = tree.insert(Some(line), Container::new(fill_remaining()));
-    tree.insert(
+    let notice = tree.insert(
         Some(slot),
         Label::new(health::initial_notice(feed))
             .font_size(12.0)
             .truncation(Truncation::Tail),
-    )
+    );
+    let selected = Tab::ALL.iter().position(|t| *t == tab).unwrap_or(0);
+    let tab_control = tree.insert(
+        Some(line),
+        SegmentedControl::new(Tab::ALL.map(Tab::title), SegmentMode::SelectOne)
+            .with_selected(&[selected])
+            .control_size(ControlSize::Small),
+    );
+    (notice, tab_control)
 }
 
 fn button_pane(buttons: &[(WidgetId, u64)], source: WidgetId) -> Option<u64> {
@@ -323,6 +380,8 @@ pub struct Dashboard {
     body: WidgetId,
     /// The notice line at the foot of the window (`health::tick`).
     notice: WidgetId,
+    /// The tab switcher in the footer bar.
+    tab_control: WidgetId,
     /// The result file `view.result` shows, as read when 表示 was pressed:
     /// a rebuild shows it again without reading the file.
     preview: Option<(u64, PathBuf, drawer::Preview)>,
@@ -403,6 +462,17 @@ impl Dashboard {
             ..Feed::default()
         };
         Self::start(View::of(grouping), feed)
+    }
+
+    /// Switches to an initial tab (e.g. from `--tab=...`) before the first frame.
+    pub fn with_tab(mut self, tab: Tab) -> Self {
+        if self.view.tab == tab {
+            return self;
+        }
+        let mut text = TextStore::new(Default::default());
+        let view = View { tab, ..self.view };
+        self.change_view(view, &mut text);
+        self
     }
 
     /// Applies an initial filter query (e.g. from `--filter=...`) before the
@@ -926,7 +996,7 @@ impl Dashboard {
                 ..fill_remaining()
             }),
         );
-        let notice = notice_line(&mut tree, root, &feed);
+        let (notice, tab_control) = notice_line(&mut tree, root, &feed, view.tab);
         if refocus {
             tree.set_focus(Some(header.filter_field));
         }
@@ -941,6 +1011,7 @@ impl Dashboard {
             header,
             body,
             notice,
+            tab_control,
             preview,
             drafts: HashMap::new(),
             send_caret: 0,
@@ -1007,39 +1078,73 @@ impl Dashboard {
             output_caption,
             filtering,
         };
-        for (members, style) in rows {
-            if nobody.is_some() {
-                break;
-            }
-            if !members.iter().any(|p| view.shown[*p as usize]) {
-                continue;
-            }
-            let row = tree.insert(
-                Some(body),
-                Container::new(Style {
-                    flex_direction: FlexDirection::Row,
-                    align_items: AlignItems::STRETCH,
-                    gap: gap(GUTTER),
-                    ..style
-                }),
-            );
-            for &member in members.iter().filter(|p| view.shown[**p as usize]) {
-                let id = panel(tree, row, member.style(&view.shown));
-                #[cfg(test)]
-                {
-                    panels[member as usize] = Some(id);
+        if nobody.is_none() {
+            match view.tab {
+                Tab::Operations => {
+                    for (members, style) in rows {
+                        if !members.iter().any(|p| view.shown[*p as usize]) {
+                            continue;
+                        }
+                        let row = tree.insert(
+                            Some(body),
+                            Container::new(Style {
+                                flex_direction: FlexDirection::Row,
+                                align_items: AlignItems::STRETCH,
+                                gap: gap(GUTTER),
+                                ..style
+                            }),
+                        );
+                        for &member in members.iter().filter(|p| view.shown[**p as usize]) {
+                            let id = panel(tree, row, member.style(&view.shown));
+                            #[cfg(test)]
+                            {
+                                panels[member as usize] = Some(id);
+                            }
+                            match member {
+                                Panel::Queue => {
+                                    queue_buttons = queue(
+                                        tree, id, &matching, workers, &view, filtering, registry,
+                                    );
+                                }
+                                Panel::Running => running(tree, id, &matching, cards, registry),
+                                Panel::Done => done(tree, id, &matching, cards, registry),
+                                Panel::Timeline => {
+                                    timeline(
+                                        tree,
+                                        id,
+                                        &matching,
+                                        view.grouping,
+                                        filtering,
+                                        registry,
+                                    );
+                                }
+                                Panel::Graph => graph(tree, id, &feed.fleet, filter, registry),
+                            }
+                        }
+                    }
                 }
-                match member {
-                    Panel::Queue => {
-                        queue_buttons =
-                            queue(tree, id, &matching, workers, &view, filtering, registry);
-                    }
-                    Panel::Running => running(tree, id, &matching, cards, registry),
-                    Panel::Done => done(tree, id, &matching, cards, registry),
-                    Panel::Timeline => {
-                        timeline(tree, id, &matching, view.grouping, filtering, registry);
-                    }
-                    Panel::Graph => graph(tree, id, &feed.fleet, filter, registry),
+                Tab::Analytics => {
+                    analytics::build(tree, body, &matching, output_caption, filtering, registry);
+                }
+                Tab::MindMap => {
+                    registry.axis_control = Some(mindmap::build(
+                        tree,
+                        body,
+                        &feed.fleet,
+                        filter,
+                        view.map_axis,
+                        registry,
+                    ));
+                }
+                Tab::Timeline => {
+                    registry.scale_control = Some(gantt::build(
+                        tree,
+                        body,
+                        &matching,
+                        view.grouping,
+                        view.time_scale,
+                        registry,
+                    ));
                 }
             }
         }
@@ -1591,7 +1696,11 @@ impl Dashboard {
                 .flatten()
         });
         if let Some(pane) = clicked_pane {
-            self.select(Some(pane), text);
+            if self.view.tab == Tab::Operations {
+                self.select(Some(pane), text);
+            } else {
+                self.set_detail(Some(pane), text);
+            }
             return true;
         }
         false
@@ -1672,6 +1781,19 @@ impl Dashboard {
                 };
                 self.change_view(view, text);
                 self.show_notice(format!("グループ: {}", next.title()));
+            }
+            Action::NextTab => {
+                let current = Tab::ALL
+                    .iter()
+                    .position(|t| *t == self.view.tab)
+                    .unwrap_or(0);
+                let next = Tab::ALL[(current + 1) % Tab::ALL.len()];
+                let view = View {
+                    tab: next,
+                    ..self.view
+                };
+                self.change_view(view, text);
+                self.show_notice(format!("表示: {}", next.title()));
             }
             Action::StartFilter => {
                 let field = self.header.filter_field;
@@ -1925,15 +2047,39 @@ impl Screen for Dashboard {
             self.send_caret = caret;
             return;
         }
-        if let Some(SelectionChanged(index)) = message.downcast_ref::<SelectionChanged>()
-            && message.source == self.grouping_control
-        {
-            let view = View {
-                grouping: Grouping::ALL[*index],
-                ..self.view
-            };
-            self.change_view(view, text);
-            return;
+        if let Some(SelectionChanged(index)) = message.downcast_ref::<SelectionChanged>() {
+            if message.source == self.grouping_control {
+                let view = View {
+                    grouping: Grouping::ALL[*index],
+                    ..self.view
+                };
+                self.change_view(view, text);
+                return;
+            }
+            if message.source == self.tab_control {
+                let view = View {
+                    tab: Tab::ALL[*index],
+                    ..self.view
+                };
+                self.change_view(view, text);
+                return;
+            }
+            if self.registry.axis_control == Some(message.source) {
+                let view = View {
+                    map_axis: MapAxis::ALL[*index],
+                    ..self.view
+                };
+                self.change_view(view, text);
+                return;
+            }
+            if self.registry.scale_control == Some(message.source) {
+                let view = View {
+                    time_scale: TimeScale::ALL[*index],
+                    ..self.view
+                };
+                self.change_view(view, text);
+                return;
+            }
         }
         if message.downcast_ref::<ButtonClicked>().is_none() {
             return;

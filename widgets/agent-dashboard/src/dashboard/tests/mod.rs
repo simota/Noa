@@ -23,6 +23,7 @@ mod queue_cards;
 mod rebuild;
 mod relations;
 mod selection;
+mod tabs;
 mod triage;
 mod urgency_steps;
 mod window_sizes;

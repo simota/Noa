@@ -7,11 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.10] - 2026-11-22
+
+A repo theater window that reviews every worktree's diffs beside its panes.
+
 ### Added
 
 - View > Repo Theater (and the command palette's Open Repo Theater) opens the
   repo theater, a separate window that shows every worktree's changed files
   and diffs beside its panes. `Noa.app` ships it as "Noa Repo Theater".
+
+### Changed
+
+- The agent dashboard's window title follows the system locale's language,
+  and its focus notice no longer carries a "mock" prefix.
 
 ## [0.9.9] - 2026-11-22
 

@@ -2084,7 +2084,22 @@ mod tests {
         run_panel(&mut e, 1);
         let brief = &round(&e).moderator_brief.as_ref().unwrap().body;
         assert!(brief.contains("raise it (at most 2)"));
-        moderate(&mut e, r#"{"summary":"far apart","round_limit":3}"#, 2);
+        assert!(brief.contains("unless you raise \"round_limit\""));
+        assert!(brief.contains("leave \"conclusion\" out if you raise"));
+        // Raising the limit and concluding at once would skip the new rounds.
+        moderate(
+            &mut e,
+            r#"{"summary":"far apart","round_limit":2,"conclusion":"undecided"}"#,
+            2,
+        );
+        assert!(!e.session().closed, "contradictory: turned down");
+        assert_eq!(e.session().max_rounds, Some(1));
+        write(
+            &mut e,
+            &p(MODERATOR_ID),
+            r#"{"summary":"far apart","round_limit":3}"#,
+            2,
+        );
         assert!(!e.session().closed, "above the cap: turned down");
         assert_eq!(e.session().max_rounds, Some(1));
         // Raised in the last round, it is no longer the last: no conclusion due.

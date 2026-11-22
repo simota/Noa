@@ -117,6 +117,14 @@ fn rounds_left(session: &Session, round: RoundNo) -> Option<RoundNo> {
 /// What the moderator is told about converging, from the rounds left.
 fn convergence_note(session: &Session, round: RoundNo) -> String {
     match (session.max_rounds, rounds_left(session, round)) {
+        (_, Some(0)) if can_raise_limit(session) => "This is the LAST round under the current \
+             limit: \"conclusion\" is required, unless you raise \"round_limit\" as allowed \
+             below (then leave \"conclusion\" out). Give your answer \
+             to the topic. Where the panel agreed, state it; where it did not, decide it \
+             yourself: weigh the arguments, choose the best-supported position, and say why \
+             and what would change it. Do not leave the topic open or defer it. Do not \
+             propose a debate.\n"
+            .to_owned(),
         (_, Some(0)) => "This is the LAST round: \"conclusion\" is required. Give your answer \
              to the topic. Where the panel agreed, state it; where it did not, decide it \
              yourself: weigh the arguments, choose the best-supported position, and say why \
@@ -141,6 +149,14 @@ fn convergence_note(session: &Session, round: RoundNo) -> String {
     }
 }
 
+/// Whether the moderator may still raise the round limit.
+fn can_raise_limit(session: &Session) -> bool {
+    matches!(
+        (session.max_rounds, session.round_limit_cap()),
+        (Some(max), Some(cap)) if max < cap
+    )
+}
+
 /// When the moderator may move the round limit, and how far; empty for a
 /// discussion with no limit.
 fn limit_change_note(session: &Session, round: RoundNo) -> String {
@@ -155,8 +171,9 @@ fn limit_change_note(session: &Session, round: RoundNo) -> String {
     format!(
         "Only if the discussion clearly cannot converge within the limit ({max}), you may \
          change it with \"round_limit\": {raise}lower it (not below {round}) if more rounds \
-         would not help. Say why in the summary. The new last round still ends in your \
-         conclusion.\n"
+         would not help. Say why in the summary. A \"conclusion\" ends the discussion, so \
+         leave it out whenever the new limit is above {round}; the new last round still \
+         ends in your conclusion.\n"
     )
 }
 
@@ -446,7 +463,13 @@ pub fn moderator_brief(session: &Session, round: RoundNo, reply_path: &Path) -> 
             };
             // Shown in the example only where it is required, so that it is
             // not filled in (ending the discussion) by imitation.
-            let (conclusion, required) = if last {
+            let (conclusion, required) = if last && can_raise_limit(session) {
+                (
+                    "  \"conclusion\": \"…\",\n",
+                    "Only \"summary\" and \"conclusion\" are required (leave \"conclusion\" \
+                     out if you raise \"round_limit\").",
+                )
+            } else if last {
                 (
                     "  \"conclusion\": \"…\",\n",
                     "Only \"summary\" and \"conclusion\" are required.",
@@ -476,7 +499,8 @@ pub fn moderator_brief(session: &Session, round: RoundNo, reply_path: &Path) -> 
              - a panelist with no question gets a default one\n\
              - {}\n\
              - conclusion: your answer to the topic, deciding it yourself where the panel \
-             did not agree; it ends the discussion. Required in the last round\n\
+             did not agree; it ends the discussion. Required in the last round, unless \
+             \"round_limit\" raises the limit past it\n\
              - round_limit: a new round limit, only as section 6 allows; it replaces the \
              current one for the rest of the discussion\n\
              - close: true ends the discussion and needs a \"conclusion\"\n",

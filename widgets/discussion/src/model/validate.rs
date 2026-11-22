@@ -436,6 +436,16 @@ pub fn parse_moderator(
              yourself where the panel did not agree"
         ));
     }
+    // A conclusion ends the discussion: rounds left under a new limit would
+    // never run.
+    if let (Some(_), Some(limit)) = (&conclusion, round_limit)
+        && limit > round
+    {
+        problems.push(format!(
+            "conclusion: leave it out when round_limit ({limit}) leaves rounds after this one \
+             ({round}); a conclusion ends the discussion"
+        ));
+    }
 
     if !problems.is_empty() {
         return Err(ValidationError { problems });

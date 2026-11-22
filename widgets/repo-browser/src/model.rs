@@ -56,6 +56,21 @@ pub struct PaneSummary {
     pub terminal_tail: String,
 }
 
+/// Shells whose line editor would run a submitted prompt as commands.
+const PLAIN_SHELLS: [&str; 10] = [
+    "sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "pwsh",
+];
+
+impl PaneSummary {
+    /// The pane's process name when it is a plain shell (`/bin/zsh` and a
+    /// login shell's `-zsh` included).
+    pub fn plain_shell(&self) -> Option<&str> {
+        let process = self.process.as_deref()?;
+        let name = process.rsplit('/').next()?.trim_start_matches('-');
+        PLAIN_SHELLS.contains(&name).then_some(name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangedFile {
     pub path: String,
@@ -786,6 +801,36 @@ pub fn demo_data(mode: DiffMode) -> RepoData {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plain_shells_are_told_from_agents() {
+        let pane = |process: Option<&str>| super::PaneSummary {
+            pane_id: 1,
+            name: "x".into(),
+            label: None,
+            process: process.map(str::to_owned),
+            activity: super::AgentActivity::None,
+            busy: false,
+            attention: false,
+            terminal_tail: String::new(),
+        };
+        for shell in [
+            "sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "pwsh",
+        ] {
+            assert_eq!(pane(Some(shell)).plain_shell(), Some(shell));
+        }
+        assert_eq!(pane(Some("-zsh")).plain_shell(), Some("zsh"));
+        assert_eq!(pane(Some("/bin/bash")).plain_shell(), Some("bash"));
+        for other in [
+            Some("claude"),
+            Some("codex"),
+            Some("vim"),
+            Some("zshx"),
+            None,
+        ] {
+            assert_eq!(pane(other).plain_shell(), None, "{other:?}");
+        }
+    }
+
     use super::*;
 
     #[test]

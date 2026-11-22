@@ -817,8 +817,9 @@ impl RepoBrowser {
             .or_else(|| wt.primary_pane())
     }
 
-    /// Drops the pick when the worktree changed or its pane disappeared, then
-    /// brings the target display and the terminal tab up to date.
+    /// Drops the pick when the worktree changed or its pane disappeared, pins
+    /// the pane shown instead, then brings the target display and the
+    /// terminal tab up to date.
     fn refresh_target(&mut self, text: &mut TextStore) {
         let cwd = self.current_worktree().map(|w| w.cwd.clone());
         if cwd != self.target_wt {
@@ -830,6 +831,15 @@ impl RepoBrowser {
                 .is_some_and(|w| w.panes.iter().any(|p| p.pane_id == id))
         {
             self.target_pane = None;
+        }
+        // The pane first shown stays the target: a later change of
+        // `primary_pane()` (an agent finishing, another asking) must never
+        // redirect the prompt silently.
+        if self.target_pane.is_none() {
+            self.target_pane = self
+                .current_worktree()
+                .and_then(Worktree::primary_pane)
+                .map(|p| p.pane_id);
         }
         self.rebuild_target(text);
         self.update_terminal();
@@ -851,7 +861,13 @@ impl RepoBrowser {
             .map(|w| w.panes.clone())
             .unwrap_or_default();
         let chosen = self.target().map(|p| p.pane_id);
-        let key = format!("{chosen:?}|{panes:?}");
+        // Only what the display shows: a pane's output changing must not
+        // rebuild the control under a click.
+        let shown: Vec<_> = panes
+            .iter()
+            .map(|p| (p.pane_id, &p.name, &p.process, p.activity))
+            .collect();
+        let key = format!("{chosen:?}|{shown:?}");
         if key == self.target_key {
             return;
         }
@@ -1442,9 +1458,15 @@ impl RepoBrowser {
             );
             actions.push(PaletteAction::OpenShell);
         }
-        if let Some(file) = self.current_file() {
+        // While a commit is shown, the file of its selected diff line.
+        let editor_path = if self.current_commit().is_some() {
+            self.editor_target().ok().map(|(path, _)| path)
+        } else {
+            self.current_file().map(|f| f.path.clone())
+        };
+        if let Some(path) = editor_path {
             commands.push(
-                PaletteCommand::new(format!("エディタで開く: {}", file.path))
+                PaletteCommand::new(format!("エディタで開く: {path}"))
                     .shortcut(EDITOR_SHORTCUT)
                     .keywords("open editor edit vim code"),
             );
@@ -1528,21 +1550,17 @@ impl RepoBrowser {
     }
 
     /// A new Noa tab in the selected worktree running the editor on the
-    /// selected file, at the diff selection's line.
+    /// selected file (the commit's file of the selected line while a commit
+    /// is shown), at the diff selection's line.
     fn open_in_editor(&mut self) {
-        let (Some(cwd), Some(file)) = (
-            self.current_worktree().map(|wt| wt.cwd.clone()),
-            self.current_file(),
-        ) else {
-            self.toast("開くファイルが選択されていません");
+        let (path, line) = match self.editor_target() {
+            Ok(target) => target,
+            Err(why) => return self.toast(why),
+        };
+        // A target always lies in the selected worktree.
+        let Some(cwd) = self.current_worktree().map(|wt| wt.cwd.clone()) else {
             return;
         };
-        if file.status == "D" {
-            self.toast(format!("{} は削除済みのため開けません", file.path));
-            return;
-        }
-        let path = file.path.clone();
-        let line = self.editor_line();
         match &self.source {
             Source::Demo | Source::Snapshot => self.toast(format!(
                 "[DEMO] 新しいタブのエディタで {path}:{line} を開きます"
@@ -1562,19 +1580,76 @@ impl RepoBrowser {
         }
     }
 
-    /// The line the editor opens at: the first selected diff line that has a
-    /// new-side number, else the first hunk's new start, else 1.
-    fn editor_line(&self) -> u32 {
+    /// The (path, line) the editor opens, or why there is nothing to open.
+    /// While a commit is shown it is never the file list's selection.
+    fn editor_target(&self) -> Result<(String, u32), String> {
+        if self.current_commit().is_some() {
+            return self.commit_editor_target();
+        }
+        let file = self
+            .current_file()
+            .ok_or_else(|| NO_FILE_TO_OPEN.to_owned())?;
+        if file.status == "D" {
+            return Err(format!("{} は削除済みのため開けません", file.path));
+        }
+        let lines = self.shown_diff.as_deref().map_or(0, |d| d.lines().count());
+        Ok((file.path.clone(), self.editor_line(0..lines)))
+    }
+
+    /// The commit's file the selected diff line belongs to (from the nearest
+    /// `diff --git` line above it), else its first file, with the line.
+    fn commit_editor_target(&self) -> Result<(String, u32), String> {
+        if self.current_diff_text().is_none() {
+            return Err("コミットの差分を取得しています…".into());
+        }
+        let lines: Vec<&str> = self.shown_diff.as_deref().unwrap_or("").lines().collect();
+        let files: Vec<usize> = (0..lines.len())
+            .filter(|&i| lines[i].starts_with("diff --git "))
+            .collect();
+        let selected = self
+            .tree
+            .get::<LogView>(self.diff_log)
+            .and_then(LogView::selected_lines);
+        let start = selected
+            .and_then(|sel| files.iter().rev().find(|&&i| i <= sel.start).copied())
+            .or_else(|| files.first().copied())
+            .ok_or_else(|| "このコミットに開けるファイルがありません".to_owned())?;
+        let end = files
+            .iter()
+            .find(|&&i| i > start)
+            .copied()
+            .unwrap_or(lines.len());
+        let path = diff_git_new_path(lines[start])
+            .ok_or_else(|| format!("開くファイルのパスを読めません: {}", lines[start]))?;
+        let deleted = lines[start..end]
+            .iter()
+            .take_while(|l| !l.starts_with("@@"))
+            .any(|l| l.starts_with("deleted file mode") || *l == "+++ /dev/null");
+        if deleted {
+            return Err(format!("{path} はこのコミットで削除されたため開けません"));
+        }
+        Ok((path, self.editor_line(start..end)))
+    }
+
+    /// The line the editor opens at, looking only at `section` (line indices
+    /// of the shown diff): the first selected line there that has a new-side
+    /// number, else the section's first hunk's new start, else 1.
+    fn editor_line(&self, section: std::ops::Range<usize>) -> u32 {
         let selected = self
             .tree
             .get::<LogView>(self.diff_log)
             .and_then(LogView::selected_lines);
         let from_selection = selected
+            .map(|sel| sel.start.max(section.start)..sel.end.min(section.end))
+            .filter(|lines| !lines.is_empty())
             .zip(self.gutter.as_ref())
             .and_then(|(lines, gutter)| gutter.first_new_line(lines));
         let first_hunk = || {
-            self.current_diff_text()?
+            self.shown_diff
+                .as_deref()?
                 .lines()
+                .skip(section.start)
+                .take(section.len())
                 .find_map(parse_hunk_header)
                 .map(|(_, new)| new)
         };
@@ -1636,10 +1711,9 @@ impl RepoBrowser {
                 self.prompt_origin = cwd;
             }
             if mixed {
-                let id = self.target().map(|p| format!("#{}", p.pane_id));
+                let origin = self.prompt_origin_name().unwrap_or_default();
                 self.toast(format!(
-                    "この指示は複数の worktree の引用を含みます。送信先は選択中の worktree のペイン{}です",
-                    id.map(|id| format!(" {id}")).unwrap_or_default()
+                    "この指示は複数の worktree の引用を含みます。送信できるのは最初に引用した worktree {origin} からです"
                 ));
             }
             let mut text = current;
@@ -1706,6 +1780,20 @@ impl RepoBrowser {
             .update::<Button, _>(self.clear_btn, |b, cx| b.set_label(cx, label));
     }
 
+    /// The branch of the worktree the prompt's quotes were taken from (its
+    /// cwd when it is no longer listed).
+    fn prompt_origin_name(&self) -> Option<String> {
+        let origin = self.prompt_origin.as_ref()?;
+        let branch = self
+            .raw_data
+            .repos
+            .iter()
+            .flat_map(|r| &r.worktrees)
+            .find(|w| w.cwd == *origin)
+            .map(|w| w.branch.clone());
+        Some(branch.unwrap_or_else(|| origin.clone()))
+    }
+
     fn send_review_prompt(&mut self) {
         let text = self
             .tree
@@ -1716,11 +1804,30 @@ impl RepoBrowser {
             self.toast("送信する指示が空です");
             return;
         }
+        // The quotes describe another worktree's diff: its agent, not this
+        // one's, is the one to receive them.
+        if self.prompt_origin.is_some()
+            && self.prompt_origin.as_ref() != self.current_worktree().map(|w| &w.cwd)
+        {
+            let origin = self.prompt_origin_name().unwrap_or_default();
+            self.toast(format!(
+                "この指示は worktree {origin} の引用から作られています。{origin} に戻って送信するか、指示をクリアしてください"
+            ));
+            return;
+        }
         let Some(pane) = self.target() else {
             self.toast(self.no_pane_message("送信"));
             return;
         };
         let pane_id = pane.pane_id;
+        // A shell would run each line of the prompt (and the diff in it) as
+        // a command.
+        if let Some(shell) = pane.plain_shell() {
+            self.toast(format!(
+                "ペイン #{pane_id} はシェル ({shell}) です。指示はコマンドとして実行されてしまうため送信しません。エージェントのペインを送信先に選んでください"
+            ));
+            return;
+        }
         match &self.source {
             Source::Demo | Source::Snapshot => {
                 self.toast(format!("[DEMO] ペイン #{pane_id} へ指示を送信しました"));
@@ -2176,6 +2283,7 @@ pub(crate) fn shell_escape(s: &str) -> String {
 /// Open a shell in the selected worktree / the selected file in the editor.
 const SHELL_SHORTCUT: Shortcut = Shortcut::command('t');
 const EDITOR_SHORTCUT: Shortcut = Shortcut::command('e');
+const NO_FILE_TO_OPEN: &str = "開くファイルが選択されていません";
 /// Quotes the selected diff lines into the prompt.
 const QUOTE_SHORTCUT: Shortcut = Shortcut::command('l');
 const QUOTE_LEAD: &str = "以下の箇所を修正してください:";
@@ -2335,6 +2443,61 @@ impl Gutter {
             format!("{prefix}L{lo}-L{hi}")
         })
     }
+}
+
+/// The new-side path of a `diff --git a/<old> b/<new>` line, unquoted.
+fn diff_git_new_path(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("diff --git ")?;
+    if let Some(unclosed) = rest.strip_suffix('"') {
+        // A C-quoted `"b/…"`; a `"` inside it is escaped as `\"`, so the
+        // last ` "b/` opens it.
+        let open = unclosed.rfind(" \"b/")?;
+        return c_unquote(&rest[open + 1..])?
+            .strip_prefix("b/")
+            .map(str::to_owned);
+    }
+    // `a/<p> b/<p>`: the two halves are the same path unless renamed.
+    let half = rest.len().checked_sub(5).filter(|n| n % 2 == 0)? / 2;
+    if let (Some("a/"), Some(old), Some(" b/"), Some(new)) = (
+        rest.get(..2),
+        rest.get(2..2 + half),
+        rest.get(2 + half..5 + half),
+        rest.get(5 + half..),
+    ) && old == new
+    {
+        return Some(new.to_owned());
+    }
+    rest.rfind(" b/").map(|i| rest[i + 3..].to_owned())
+}
+
+/// A path git C-quoted (`"…"` with `\"`, `\\`, `\t`, octal bytes, …).
+fn c_unquote(quoted: &str) -> Option<String> {
+    let inner = quoted.strip_prefix('"')?.strip_suffix('"')?;
+    let mut out = Vec::new();
+    let mut bytes = inner.bytes();
+    while let Some(b) = bytes.next() {
+        if b != b'\\' {
+            out.push(b);
+            continue;
+        }
+        let escaped = bytes.next()?;
+        out.push(match escaped {
+            b'a' => 0x07,
+            b'b' => 0x08,
+            b't' => b'\t',
+            b'n' => b'\n',
+            b'v' => 0x0b,
+            b'f' => 0x0c,
+            b'r' => b'\r',
+            b'0'..=b'3' => {
+                let digit = |d: u8| (b'0'..=b'7').contains(&d).then(|| d - b'0');
+                let (mid, low) = (digit(bytes.next()?)?, digit(bytes.next()?)?);
+                ((escaped - b'0') << 6) | (mid << 3) | low
+            }
+            other => other,
+        });
+    }
+    Some(String::from_utf8_lossy(&out).into_owned())
 }
 
 /// The (old, new) start lines of a `@@ -a,b +c,d @@` hunk header.
@@ -3008,7 +3171,8 @@ mod tests {
         assert_eq!(h.screen.target_pane, Some(8));
 
         h.deliver(snapshot_with_panes(vec![pane(7, "zsh", "")]));
-        assert_eq!(h.screen.target_pane, None);
+        // The pick is dropped and the pane now shown is pinned instead.
+        assert_eq!(h.screen.target_pane, Some(7));
         assert_eq!(h.screen.target().unwrap().pane_id, 7);
         assert!(matches!(
             h.screen.last_terminal_key,
@@ -3031,15 +3195,16 @@ mod tests {
         let mut other = snap.data.repos[0].worktrees[0].clone();
         other.cwd = "/repo-wt-b".into();
         other.branch = "b".into();
-        other.panes = vec![pane(8, "claude", ""), pane(9, "zsh", "")];
+        other.panes = vec![pane(9, "zsh", ""), pane(8, "claude", "")];
         snap.data.repos[0].worktrees.push(other);
         h.deliver(snap);
         h.screen.choose_target(1, &mut h.text);
         assert_eq!(h.screen.target_pane, Some(8));
         h.screen.sel_wt = 1;
         h.screen.sync_views(&mut h.text);
-        // Pane 8 is in both worktrees here, but the pick belonged to the first.
-        assert_eq!(h.screen.target_pane, None);
+        // Pane 8 is in both worktrees here, but the pick belonged to the
+        // first: the second's primary pane is pinned instead.
+        assert_eq!(h.screen.target_pane, Some(9));
     }
 
     #[test]
@@ -3061,7 +3226,11 @@ mod tests {
         h.screen.quote_selected_diff();
         assert_eq!(h.screen.toasts.len(), 1, "{:?}", h.screen.toasts);
         assert!(h.screen.toasts[0].contains("複数の worktree"));
-        assert!(h.screen.toasts[0].contains("#9"));
+        assert!(
+            h.screen.toasts[0].contains("worktree main"),
+            "{:?}",
+            h.screen.toasts
+        );
         assert!(prompt_text(&h.screen).contains("[main / a.rs]"));
         assert!(prompt_text(&h.screen).contains("[b / a.rs]"));
     }
@@ -3163,18 +3332,18 @@ mod tests {
         let mut h = LiveHarness::new();
         h.deliver(snapshot(DiffMode::Unstaged, Some(("a.rs", NUMBERED))));
         // Nothing selected: the first hunk's new start.
-        assert_eq!(h.screen.editor_line(), 10);
+        assert_eq!(h.screen.editor_target().unwrap().1, 10);
         // Only a removed line selected: no new-side number, so the hunk start.
         select_lines(&mut h, 5..6);
-        assert_eq!(h.screen.editor_line(), 10);
+        assert_eq!(h.screen.editor_target().unwrap().1, 10);
         // The first selected line with a new-side number wins.
         select_lines(&mut h, 4..9);
-        assert_eq!(h.screen.editor_line(), 10);
+        assert_eq!(h.screen.editor_target().unwrap().1, 10);
         select_lines(&mut h, 7..9);
-        assert_eq!(h.screen.editor_line(), 12);
+        assert_eq!(h.screen.editor_target().unwrap().1, 12);
         // A diff without hunks (a note, or still loading): line 1.
         h.deliver(snapshot(DiffMode::Unstaged, Some(("a.rs", "(差分なし)"))));
-        assert_eq!(h.screen.editor_line(), 1);
+        assert_eq!(h.screen.editor_target().unwrap().1, 1);
     }
 
     #[test]
@@ -3549,6 +3718,243 @@ mod tests {
             log.all_text()
         );
         assert!(log.all_text().contains("+    guard.drop_removed"));
+    }
+
+    // ── Review findings: sending and opening go where they claim ─────────────
+
+    /// The live snapshot with a second worktree `b` (pane #9) of the repo.
+    fn snapshot_with_two_worktrees() -> Snapshot {
+        let mut snap = snapshot(DiffMode::Unstaged, Some(("a.rs", "+a v1")));
+        let mut other = snap.data.repos[0].worktrees[0].clone();
+        other.cwd = "/repo-wt-b".into();
+        other.branch = "b".into();
+        other.panes[0].pane_id = 9;
+        snap.data.repos[0].worktrees.push(other);
+        snap
+    }
+
+    #[test]
+    fn a_prompt_quoted_in_one_worktree_is_not_sent_from_another() {
+        let mut h = LiveHarness::new();
+        h.deliver(snapshot_with_two_worktrees());
+        h.screen.quote_selected_diff();
+        h.screen.sel_wt = 1;
+        h.screen.sync_views(&mut h.text);
+        h.drain();
+        h.screen.toasts.clear();
+        h.screen.send_review_prompt();
+        assert!(sent(&h).is_empty());
+        assert_eq!(h.screen.toasts.len(), 1, "{:?}", h.screen.toasts);
+        assert!(
+            h.screen.toasts[0].contains("worktree main の引用"),
+            "{:?}",
+            h.screen.toasts
+        );
+        // Back in its worktree it goes to that worktree's pane.
+        h.screen.sel_wt = 0;
+        h.screen.sync_views(&mut h.text);
+        h.screen.send_review_prompt();
+        assert_eq!(sent(&h).len(), 1);
+        assert_eq!(h.screen.target().unwrap().pane_id, 7);
+        // Once cleared, a prompt typed in `b` is sent there.
+        h.screen.clear_or_restore_prompt();
+        h.screen.sel_wt = 1;
+        h.screen.sync_views(&mut h.text);
+        set_prompt(&mut h.screen, "直して");
+        h.screen.send_review_prompt();
+        assert_eq!(sent(&h), vec![(9, "直して".to_owned())]);
+    }
+
+    fn agent(id: u64, process: &str, activity: AgentActivity) -> PaneSummary {
+        PaneSummary {
+            process: Some(process.into()),
+            activity,
+            ..pane(id, process, "")
+        }
+    }
+
+    #[test]
+    fn the_target_shown_first_stays_when_the_primary_pane_changes() {
+        let mut h = LiveHarness::new();
+        h.deliver(snapshot_with_panes(vec![agent(
+            8,
+            "claude",
+            AgentActivity::Running,
+        )]));
+        h.deliver(snapshot_with_panes(vec![
+            agent(7, "zsh", AgentActivity::None),
+            agent(8, "claude", AgentActivity::Running),
+        ]));
+        assert_eq!(h.screen.target().unwrap().pane_id, 8);
+        // claude finishes: the primary pane is now the zsh in front.
+        h.deliver(snapshot_with_panes(vec![
+            agent(7, "zsh", AgentActivity::None),
+            agent(8, "claude", AgentActivity::Done),
+        ]));
+        assert_eq!(h.screen.target_pane, Some(8));
+        set_prompt(&mut h.screen, "直して");
+        h.drain();
+        h.screen.send_review_prompt();
+        assert_eq!(sent(&h), vec![(8, "直して".to_owned())]);
+    }
+
+    #[test]
+    fn a_review_prompt_is_never_submitted_to_a_plain_shell() {
+        let mut h = LiveHarness::new();
+        h.deliver(snapshot_with_panes(vec![agent(
+            7,
+            "zsh",
+            AgentActivity::None,
+        )]));
+        set_prompt(&mut h.screen, "```diff\n rm -rf build\n```");
+        h.drain();
+        h.screen.toasts.clear();
+        h.screen.send_review_prompt();
+        assert!(sent(&h).is_empty());
+        assert_eq!(h.screen.toasts.len(), 1, "{:?}", h.screen.toasts);
+        assert!(
+            h.screen.toasts[0].contains("#7 はシェル (zsh)")
+                && h.screen.toasts[0].contains("コマンドとして実行"),
+            "{:?}",
+            h.screen.toasts
+        );
+        assert_eq!(prompt_text(&h.screen), "```diff\n rm -rf build\n```");
+        // Dropped file paths are typed, not submitted, so they still go.
+        h.screen
+            .send_dropped_files(&[PathBuf::from("/tmp/plain.txt")]);
+        assert!(matches!(
+            h.drain().as_slice(),
+            [Command::SendText {
+                pane_id: 7,
+                submit: false,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn pane_output_does_not_rebuild_the_target_control() {
+        let mut h = LiveHarness::new();
+        h.deliver(snapshot_with_panes(vec![
+            pane(7, "zsh", "one\r\n"),
+            pane(8, "claude", "two\r\n"),
+        ]));
+        let seg = h.screen.target_seg.unwrap();
+        h.deliver(snapshot_with_panes(vec![
+            pane(7, "zsh", "one\r\nmore\r\n"),
+            pane(8, "claude", "two\r\nmore\r\n"),
+        ]));
+        assert_eq!(h.screen.target_seg, Some(seg));
+        // The terminal tab still follows the output.
+        assert!(matches!(
+            &h.screen.last_terminal_key,
+            TerminalShown::Pane(7, tail) if tail.contains("more")
+        ));
+        // A pane that changes state is shown again.
+        let mut busy = pane(8, "claude", "");
+        busy.activity = AgentActivity::Running;
+        h.deliver(snapshot_with_panes(vec![pane(7, "zsh", ""), busy]));
+        assert_ne!(h.screen.target_seg, Some(seg));
+    }
+
+    /// `git show` of a commit touching `x` (lines 5-13), `src/y.rs` (14-21)
+    /// and deleting `gone.rs` (22-28).
+    const COMMIT_THREE_FILES: &str = "commit aaaaaaa1\nAuthor:     t <t@example.com>\n\n    newer change\n\n\
+diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -10,3 +10,4 @@ fn f\n ctx\n-old\n+new1\n+new2\n ctx2\n\
+diff --git a/src/y.rs b/src/y.rs\nindex 1..2 100644\n--- a/src/y.rs\n+++ b/src/y.rs\n@@ -1,2 +3,3 @@\n a\n+b\n c\n\
+diff --git a/gone.rs b/gone.rs\ndeleted file mode 100644\nindex 1..0\n--- a/gone.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n";
+
+    fn editor_opens(h: &mut LiveHarness) -> Vec<(String, u32)> {
+        h.drain();
+        h.screen.open_in_editor();
+        open_commands(h.drain())
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::OpenEditor { path, line, .. } => Some((path, line)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_editor_opens_the_commit_file_of_the_selected_line() {
+        let mut h = LiveHarness::new();
+        // b.rs is selected in the file list; it must never be what opens.
+        h.select_file(1);
+        h.screen.select_commit_row(0, &mut h.text);
+        h.deliver(snapshot_with_commit(C_NEW, COMMIT_THREE_FILES));
+        assert_eq!(h.screen.sel_file, 1);
+        // No selection: the first file at its first hunk.
+        assert_eq!(editor_opens(&mut h), vec![("x".to_owned(), 10)]);
+        // A line in the second file, at its new-side number.
+        select_lines(&mut h, 20..21);
+        assert_eq!(editor_opens(&mut h), vec![("src/y.rs".to_owned(), 4)]);
+        // Its hunk header alone: that file's first hunk.
+        select_lines(&mut h, 18..19);
+        assert_eq!(editor_opens(&mut h), vec![("src/y.rs".to_owned(), 3)]);
+        // A selection running into the next file stays in the file it starts in.
+        select_lines(&mut h, 11..21);
+        assert_eq!(editor_opens(&mut h), vec![("x".to_owned(), 11)]);
+        // The commit header: the first file.
+        select_lines(&mut h, 0..2);
+        assert_eq!(editor_opens(&mut h), vec![("x".to_owned(), 10)]);
+        // The palette entry names the same file.
+        select_lines(&mut h, 20..21);
+        h.screen.open_command_palette();
+        let (palette, _) = h.screen.active_palette.clone().unwrap();
+        let titles: Vec<String> = h
+            .screen
+            .tree()
+            .get::<CommandPalette>(palette)
+            .map(|p| p.commands().iter().map(|c| c.title().to_owned()).collect())
+            .unwrap_or_default();
+        assert!(
+            titles.iter().any(|t| t == "エディタで開く: src/y.rs"),
+            "{titles:?}"
+        );
+        assert!(
+            !titles.iter().any(|t| t == "エディタで開く: b.rs"),
+            "{titles:?}"
+        );
+    }
+
+    #[test]
+    fn a_file_the_commit_deleted_is_not_opened() {
+        let mut h = LiveHarness::new();
+        h.screen.select_commit_row(0, &mut h.text);
+        h.deliver(snapshot_with_commit(C_NEW, COMMIT_THREE_FILES));
+        select_lines(&mut h, 28..29);
+        h.screen.toasts.clear();
+        assert!(editor_opens(&mut h).is_empty());
+        assert_eq!(
+            h.screen.toasts,
+            vec!["gone.rs はこのコミットで削除されたため開けません"]
+        );
+        // Still loading: nothing to open yet.
+        h.screen.select_commit_row(1, &mut h.text);
+        h.screen.toasts.clear();
+        assert!(editor_opens(&mut h).is_empty());
+        assert_eq!(h.screen.toasts, vec!["コミットの差分を取得しています…"]);
+    }
+
+    #[test]
+    fn diff_git_lines_name_the_new_path() {
+        let new = |line: &str| diff_git_new_path(line);
+        assert_eq!(new("diff --git a/x b/x").as_deref(), Some("x"));
+        assert_eq!(new("diff --git a/a b/c b/a b/c").as_deref(), Some("a b/c"));
+        assert_eq!(
+            new("diff --git a/old name.rs b/new name.rs").as_deref(),
+            Some("new name.rs")
+        );
+        assert_eq!(
+            new(r#"diff --git "a/\346\227\245 \"q\".rs" "b/\346\227\245 \"q\".rs""#).as_deref(),
+            Some("日 \"q\".rs")
+        );
+        assert_eq!(
+            new(r#"diff --git a/plain "b/t\tab""#).as_deref(),
+            Some("t\tab")
+        );
+        assert_eq!(new("--- a/x"), None);
     }
 
     #[test]

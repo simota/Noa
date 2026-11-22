@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::model::{ChangedFile, CommitInfo, DiffMode};
 
@@ -18,17 +18,74 @@ pub struct WorktreeGitInfo {
     pub note: Option<String>,
 }
 
-fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
+/// `git -C <cwd>` that never writes the index: `git status` would otherwise
+/// refresh and write it back under `index.lock` (the optional lock), and
+/// porcelain `git diff` does the same unless `diff.autoRefreshIndex` is off,
+/// in a worktree someone else may be committing in; this browser only reads.
+fn git_command(cwd: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.arg("--no-optional-locks")
+        .args(["-c", "diff.autoRefreshIndex=false"])
         .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .output()
-        .ok()?;
+        .arg(cwd);
+    cmd
+}
+
+fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
+    let out = git_command(cwd).args(args).output().ok()?;
     if !out.status.success() {
         return None;
     }
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The most of a `git show` or `git diff` the diff view is given.
+pub const DIFF_CAP: usize = 2 * 1024 * 1024;
+
+/// [`run_git`] reading at most `cap` bytes of the output: a longer one is cut
+/// at its last line break within `cap` and ends with a line saying so.
+fn run_git_capped(cwd: &Path, args: &[&str], cap: usize) -> Option<String> {
+    use std::io::Read;
+    let mut child = git_command(cwd)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut bytes = Vec::new();
+    let read = child
+        .stdout
+        .take()
+        .map(|out| out.take(cap as u64 + 1).read_to_end(&mut bytes));
+    // The pipe is closed by now, so a longer output ends with SIGPIPE.
+    let status = child.wait().ok()?;
+    read?.ok()?;
+    if bytes.len() > cap {
+        return Some(truncate_at_line(bytes, cap));
+    }
+    status
+        .success()
+        .then(|| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The first `cap` bytes of `bytes` up to the last line break among them,
+/// followed by a line saying the rest was left out.
+fn truncate_at_line(mut bytes: Vec<u8>, cap: usize) -> String {
+    let cut = bytes[..cap.min(bytes.len())]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(cap.min(bytes.len()), |i| i + 1);
+    bytes.truncate(cut);
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&format!(
+        "(差分が {} MiB を超えたため、以降を省略しました)\n",
+        cap / (1024 * 1024)
+    ));
+    text
 }
 
 fn canonical_or_raw(path: &Path) -> String {
@@ -38,7 +95,11 @@ fn canonical_or_raw(path: &Path) -> String {
         .into_owned()
 }
 
-pub fn inspect_worktree(cwd: &str, mode: DiffMode) -> Option<WorktreeGitInfo> {
+pub fn inspect_worktree(
+    cwd: &str,
+    mode: DiffMode,
+    bases: &mut BaseRefs,
+) -> Option<WorktreeGitInfo> {
     let dir = Path::new(cwd);
     if !dir.is_dir() {
         return None;
@@ -106,7 +167,11 @@ pub fn inspect_worktree(cwd: &str, mode: DiffMode) -> Option<WorktreeGitInfo> {
             .unwrap_or_else(|| "HEAD".into());
     }
 
-    let range = base_range(top);
+    // Only "vs main" compares against the base.
+    let range = (mode == DiffMode::VsMain)
+        .then(|| bases.get(&repo_root, top))
+        .flatten()
+        .map(|base| format!("{}...HEAD", base.name));
     let numstat_args: Vec<&str> = match mode {
         DiffMode::Unstaged => vec!["diff", "--numstat", "-z"],
         DiffMode::Staged => vec!["diff", "--cached", "--numstat", "-z"],
@@ -185,36 +250,77 @@ pub fn inspect_worktree(cwd: &str, mode: DiffMode) -> Option<WorktreeGitInfo> {
 
 /// `<base>...HEAD` for the "vs main" mode.
 fn base_range(dir: &Path) -> Option<String> {
-    Some(format!("{}...HEAD", base_ref(dir)?))
+    Some(format!("{}...HEAD", resolve_base(dir)?.name))
 }
 
-/// The branch the "vs main" mode and the merge prediction compare against:
-/// the local `main`, else the local `master`, else whatever `origin/HEAD`
+/// The branch the "vs main" mode, the merge prediction and the commit list
+/// compare against, with the commit it points at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseRef {
+    pub name: String,
+    pub sha: String,
+}
+
+/// The base of each repository, resolved at most once: one is made per
+/// refresh, so every worktree of a repository compares against the same
+/// commit and git runs once for it, not once per worktree and use.
+#[derive(Debug, Default)]
+pub struct BaseRefs {
+    by_repo: HashMap<String, Option<BaseRef>>,
+    /// How many times a base was resolved with git, for tests.
+    #[cfg(test)]
+    pub(crate) resolutions: usize,
+}
+
+impl BaseRefs {
+    /// The base of the repository at `repo_root`, resolved from `dir` (any
+    /// of its worktrees) the first time it is asked for.
+    pub fn get(&mut self, repo_root: &str, dir: &Path) -> Option<BaseRef> {
+        if let Some(base) = self.by_repo.get(repo_root) {
+            return base.clone();
+        }
+        #[cfg(test)]
+        {
+            self.resolutions += 1;
+        }
+        let base = resolve_base(dir);
+        self.by_repo.insert(repo_root.to_owned(), base.clone());
+        base
+    }
+}
+
+/// The local `main`, else the local `master`, else whatever `origin/HEAD`
 /// points at.
-fn base_ref(dir: &Path) -> Option<String> {
-    ["main", "master"]
-        .into_iter()
-        .find(|name| {
-            run_git(
-                dir,
-                &[
-                    "rev-parse",
-                    "--verify",
-                    "--quiet",
-                    &format!("refs/heads/{name}"),
-                ],
-            )
-            .is_some()
-        })
-        .map(str::to_owned)
-        .or_else(|| {
-            run_git(
-                dir,
-                &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-            )
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty())
-        })
+fn resolve_base(dir: &Path) -> Option<BaseRef> {
+    let sha_of = |rev: &str| {
+        run_git(
+            dir,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{rev}^{{commit}}"),
+            ],
+        )
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+    };
+    for name in ["main", "master"] {
+        if let Some(sha) = sha_of(&format!("refs/heads/{name}")) {
+            return Some(BaseRef {
+                name: name.to_owned(),
+                sha,
+            });
+        }
+    }
+    let name = run_git(
+        dir,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .map(|s| s.trim().to_owned())
+    .filter(|s| !s.is_empty())?;
+    let sha = sha_of(&name)?;
+    Some(BaseRef { name, sha })
 }
 
 /// Every worktree of the repository `dir` is in, as canonical paths, from
@@ -272,18 +378,21 @@ impl MergePredictions {
     /// when there is nothing to predict (the worktree is on the base, or
     /// the repository has no base) or `git merge-tree` could not tell
     /// (git before 2.38, an error).
-    pub fn predict(&mut self, worktree_root: &str, branch: &str) -> Option<Vec<String>> {
+    pub fn predict(
+        &mut self,
+        worktree_root: &str,
+        branch: &str,
+        base: Option<&BaseRef>,
+    ) -> Option<Vec<String>> {
         let dir = Path::new(worktree_root);
-        let base = base_ref(dir)?;
-        if branch == base {
+        let base = base?;
+        if branch == base.name {
             return None;
         }
-        let shas = run_git(
-            dir,
-            &["rev-parse", &format!("{base}^{{commit}}"), "HEAD^{commit}"],
-        )?;
-        let mut shas = shas.lines().map(str::to_owned);
-        let (base_sha, head_sha) = (shas.next()?, shas.next()?);
+        let head_sha = run_git(dir, &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())?;
+        let base_sha = base.sha.clone();
         if let Some(entry) = self.entries.get(worktree_root)
             && entry.base == base_sha
             && entry.head == head_sha
@@ -349,11 +458,8 @@ fn merge_tree_conflicts(dir: &Path, base: &str, head: &str) -> Option<Vec<String
 pub const COMMIT_CAP: usize = 50;
 
 /// The commits on HEAD that the base branch lacks, newest first, capped at
-/// [`COMMIT_CAP`]. Empty when HEAD is on the base or there is no base.
-pub fn branch_commits(dir: &Path) -> Vec<CommitInfo> {
-    let Some(base) = base_ref(dir) else {
-        return Vec::new();
-    };
+/// [`COMMIT_CAP`]. Empty when HEAD is on the base.
+pub fn branch_commits(dir: &Path, base: &str) -> Vec<CommitInfo> {
     let range = format!("{base}..HEAD");
     // `\x1e` opens each record, `\x1f` separates its fields; the file names
     // `--name-only` prints after the header line are only counted.
@@ -413,18 +519,16 @@ pub struct CommitCache {
 }
 
 impl CommitCache {
-    pub fn commits(&mut self, worktree_root: &str) -> Vec<CommitInfo> {
+    /// The commits of `worktree_root` against `base` (none without one).
+    pub fn commits(&mut self, worktree_root: &str, base: Option<&BaseRef>) -> Vec<CommitInfo> {
         let dir = Path::new(worktree_root);
-        let sha_of = |rev: &str| {
-            run_git(dir, &["rev-parse", "--verify", "--quiet", rev])
-                .map(|s| s.trim().to_owned())
-                .filter(|s| !s.is_empty())
-        };
-        let key = base_ref(dir)
-            .and_then(|base| sha_of(&base))
-            .zip(sha_of("HEAD"))
-            .map(|(base, head)| format!("{head} {base}"));
-        let Some(key) = key else {
+        let head = run_git(dir, &["rev-parse", "--verify", "--quiet", "HEAD"])
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
+        let Some((base, key)) = base
+            .zip(head)
+            .map(|(base, head)| (base, format!("{head} {}", base.sha)))
+        else {
             self.entries.remove(worktree_root);
             return Vec::new();
         };
@@ -437,7 +541,7 @@ impl CommitCache {
         {
             self.reads += 1;
         }
-        let commits = branch_commits(dir);
+        let commits = branch_commits(dir, &base.name);
         self.entries
             .insert(worktree_root.to_owned(), (key, commits.clone()));
         commits
@@ -462,7 +566,7 @@ pub fn commit_diff(cwd: &str, sha: &str) -> String {
         sha,
         "--",
     ];
-    match run_git(Path::new(cwd), &args) {
+    match run_git_capped(Path::new(cwd), &args, DIFF_CAP) {
         Some(out) if !out.trim().is_empty() => out,
         _ => format!("(コミットを読めません: {sha})"),
     }
@@ -470,7 +574,9 @@ pub fn commit_diff(cwd: &str, sha: &str) -> String {
 
 pub fn file_diff(cwd: &str, path: &str, mode: DiffMode) -> String {
     let dir = Path::new(cwd);
-    let range = base_range(dir);
+    let range = (mode == DiffMode::VsMain)
+        .then(|| base_range(dir))
+        .flatten();
     // Plain unified diff of exactly `path`: the path is a literal, not a
     // pathspec pattern, and no external diff tool or colour reformats it.
     let mut args: Vec<&str> = vec!["--literal-pathspecs", "diff", "--no-ext-diff", "--no-color"];
@@ -490,7 +596,7 @@ pub fn file_diff(cwd: &str, path: &str, mode: DiffMode) -> String {
     args.push("--");
     args.extend(orig.as_deref());
     args.push(path);
-    let out = run_git(dir, &args).unwrap_or_default();
+    let out = run_git_capped(dir, &args, DIFF_CAP).unwrap_or_default();
     if !out.trim().is_empty() {
         return out;
     }
@@ -719,11 +825,127 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         repo.0.to_str().unwrap()
     }
 
+    /// The base a refresh would resolve for `dir` right now.
+    fn base_of(dir: impl AsRef<Path>) -> Option<BaseRef> {
+        resolve_base(dir.as_ref())
+    }
+
+    /// [`branch_commits`] against the current base; none without one.
+    fn commits_of(dir: &Path) -> Vec<CommitInfo> {
+        base_of(dir).map_or_else(Vec::new, |base| branch_commits(dir, &base.name))
+    }
+
+    #[test]
+    fn the_base_is_resolved_once_per_repository_and_only_for_vs_main() {
+        let repo = temp_repo("base-once", "main");
+        let _cleanup = TempRepo(PathBuf::from(format!("{}-wt", repo.0.display())));
+        let foo = add_worktree(&repo, "foo", "orch/foo");
+        let mut bases = BaseRefs::default();
+        for mode in [DiffMode::Unstaged, DiffMode::Staged] {
+            inspect_worktree(cwd(&repo), mode, &mut bases).unwrap();
+            inspect_worktree(foo.to_str().unwrap(), mode, &mut bases).unwrap();
+        }
+        assert_eq!(bases.resolutions, 0, "a working-tree mode needs no base");
+        let main = inspect_worktree(cwd(&repo), DiffMode::VsMain, &mut bases).unwrap();
+        let other = inspect_worktree(foo.to_str().unwrap(), DiffMode::VsMain, &mut bases).unwrap();
+        assert_eq!(main.repo_root, other.repo_root);
+        assert_eq!(bases.resolutions, 1);
+        let base = bases.get(&main.repo_root, &foo);
+        assert_eq!(base.as_ref().map(|b| b.name.as_str()), Some("main"));
+        assert_eq!(bases.resolutions, 1);
+    }
+
+    #[test]
+    fn reading_never_writes_the_index() {
+        let repo = temp_repo("no-locks", "main");
+        let index = repo.0.join(".git/index");
+        // Same content, another mtime: `git status` refreshes the stat data
+        // and writes the index back unless optional locks are off.
+        std::fs::write(repo.0.join("old.rs"), "fn a() {}\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(repo.0.join("old.rs"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+            .unwrap();
+        let before = std::fs::read(&index).unwrap();
+        let status = [
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "-z",
+            "--untracked-files=all",
+        ];
+        assert!(run_git(&repo.0, &status).is_some());
+        assert_eq!(std::fs::read(&index).unwrap(), before, "index rewritten");
+        // Porcelain `git diff` (numstat, the file diff) leaves it alone too.
+        assert!(run_git(&repo.0, &["diff", "--numstat", "-z"]).is_some());
+        assert!(run_git(&repo.0, &["diff", "--", "old.rs"]).is_some());
+        assert_eq!(
+            std::fs::read(&index).unwrap(),
+            before,
+            "index rewritten by diff"
+        );
+        // The same status without the flag does write it.
+        git(&repo.0, &status);
+        assert_ne!(std::fs::read(&index).unwrap(), before);
+    }
+
+    #[test]
+    fn long_output_is_cut_at_a_line_break_with_a_note() {
+        let text = truncate_at_line(b"one\ntwo\nthree\n".to_vec(), 9);
+        assert_eq!(
+            text,
+            "one\ntwo\n(差分が 0 MiB を超えたため、以降を省略しました)\n"
+        );
+        // A first line longer than the cap is cut inside it.
+        let text = truncate_at_line(b"abcdef".to_vec(), 3);
+        assert!(text.starts_with("abc\n("), "{text}");
+    }
+
+    #[test]
+    fn huge_commit_and_file_diffs_are_capped() {
+        let repo = temp_repo("huge-diff", "main");
+        git(&repo.0, &["checkout", "-q", "-b", "feature"]);
+        let body: String = (0..400_000).map(|i| format!("line {i:08}\n")).collect();
+        assert!(body.len() > DIFF_CAP + DIFF_CAP / 2);
+        commit_file(&repo.0, "big.txt", &body);
+        let check = |diff: &str| {
+            assert!(diff.len() <= DIFF_CAP + 200, "{} bytes", diff.len());
+            let mut lines = diff.lines().rev();
+            assert!(
+                lines.next().unwrap().contains("2 MiB を超えた"),
+                "{}",
+                &diff[diff.len() - 200..]
+            );
+            let last = lines.next().unwrap();
+            assert!(
+                last.len() == "+line 00000000".len() && last.starts_with("+line "),
+                "{last}"
+            );
+        };
+        let sha = commits_of(&repo.0)[0].sha.clone();
+        check(&commit_diff(cwd(&repo), &sha));
+        check(&file_diff(cwd(&repo), "big.txt", DiffMode::VsMain));
+        // A diff under the cap is passed through whole.
+        std::fs::write(
+            repo.0.join("big.txt"),
+            body.replace("line 00000003", "changed"),
+        )
+        .unwrap();
+        let small = file_diff(cwd(&repo), "big.txt", DiffMode::Unstaged);
+        assert!(
+            small.contains("+changed") && !small.contains("MiB"),
+            "{small}"
+        );
+    }
+
     #[test]
     fn staged_rename_uses_new_path_and_shows_diff() {
         let repo = temp_repo("rename", "main");
         git(&repo.0, &["mv", "old.rs", "new.rs"]);
-        let info = inspect_worktree(cwd(&repo), DiffMode::Staged).unwrap();
+        let info =
+            inspect_worktree(cwd(&repo), DiffMode::Staged, &mut BaseRefs::default()).unwrap();
         let paths: Vec<&str> = info.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, vec!["new.rs"]);
         let diff = file_diff(cwd(&repo), "new.rs", DiffMode::Staged);
@@ -735,7 +957,8 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         let repo = temp_repo("quote", "main");
         std::fs::write(repo.0.join("日本語.txt"), "こんにちは\n").unwrap();
         std::fs::write(repo.0.join("old.rs"), "fn b() {}\n").unwrap();
-        let info = inspect_worktree(cwd(&repo), DiffMode::Unstaged).unwrap();
+        let info =
+            inspect_worktree(cwd(&repo), DiffMode::Unstaged, &mut BaseRefs::default()).unwrap();
         let paths: Vec<&str> = info.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, vec!["old.rs", "日本語.txt"]);
         let diff = file_diff(cwd(&repo), "日本語.txt", DiffMode::Unstaged);
@@ -747,8 +970,14 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         let repo = temp_repo("subdir", "main");
         let sub = repo.0.join("a/b");
         std::fs::create_dir_all(&sub).unwrap();
-        let top = inspect_worktree(cwd(&repo), DiffMode::Unstaged).unwrap();
-        let nested = inspect_worktree(sub.to_str().unwrap(), DiffMode::Unstaged).unwrap();
+        let top =
+            inspect_worktree(cwd(&repo), DiffMode::Unstaged, &mut BaseRefs::default()).unwrap();
+        let nested = inspect_worktree(
+            sub.to_str().unwrap(),
+            DiffMode::Unstaged,
+            &mut BaseRefs::default(),
+        )
+        .unwrap();
         assert_eq!(nested.repo_root, top.repo_root);
         assert_eq!(nested.repo_root, canonical_or_raw(&repo.0));
     }
@@ -758,7 +987,8 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         let repo = temp_repo("untracked", "main");
         std::fs::create_dir_all(repo.0.join("new-dir")).unwrap();
         std::fs::write(repo.0.join("new-dir/x.rs"), "fn x() {}\n").unwrap();
-        let info = inspect_worktree(cwd(&repo), DiffMode::Unstaged).unwrap();
+        let info =
+            inspect_worktree(cwd(&repo), DiffMode::Unstaged, &mut BaseRefs::default()).unwrap();
         let paths: Vec<&str> = info.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, vec!["new-dir/x.rs"]);
         let diff = file_diff(cwd(&repo), "new-dir/x.rs", DiffMode::Unstaged);
@@ -776,7 +1006,7 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         git(&repo.0, &["commit", "-q", "-am", "mine"]);
         git(&repo.0, &["merge", "-q", "other"]);
         for mode in [DiffMode::Unstaged, DiffMode::Staged] {
-            let info = inspect_worktree(cwd(&repo), mode).unwrap();
+            let info = inspect_worktree(cwd(&repo), mode, &mut BaseRefs::default()).unwrap();
             let paths: Vec<&str> = info.files.iter().map(|f| f.path.as_str()).collect();
             assert_eq!(paths, vec!["old.rs"], "{mode:?}");
             assert_eq!(info.files[0].status, "U", "{mode:?}");
@@ -789,7 +1019,8 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         git(&repo.0, &["checkout", "-q", "-b", "feature"]);
         std::fs::write(repo.0.join("old.rs"), "fn changed() {}\n").unwrap();
         git(&repo.0, &["commit", "-q", "-am", "change"]);
-        let info = inspect_worktree(cwd(&repo), DiffMode::VsMain).unwrap();
+        let info =
+            inspect_worktree(cwd(&repo), DiffMode::VsMain, &mut BaseRefs::default()).unwrap();
         let paths: Vec<&str> = info.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, vec!["old.rs"]);
         let diff = file_diff(cwd(&repo), "old.rs", DiffMode::VsMain);
@@ -799,14 +1030,17 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
     #[test]
     fn vs_main_without_base_branch_says_so() {
         let repo = temp_repo("nobase", "trunk");
-        let info = inspect_worktree(cwd(&repo), DiffMode::VsMain).unwrap();
+        let info =
+            inspect_worktree(cwd(&repo), DiffMode::VsMain, &mut BaseRefs::default()).unwrap();
         assert!(info.files.is_empty());
         let note = info.note.expect("a note explaining the empty list");
         assert!(note.contains("比較元ブランチ"), "{note}");
         // A repo that has a base has no note.
         let repo = temp_repo("withbase", "main");
         assert_eq!(
-            inspect_worktree(cwd(&repo), DiffMode::VsMain).unwrap().note,
+            inspect_worktree(cwd(&repo), DiffMode::VsMain, &mut BaseRefs::default())
+                .unwrap()
+                .note,
             None
         );
     }
@@ -834,7 +1068,12 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
                 &bare,
                 &["worktree", "add", "-q", "-b", "w", wt.to_str().unwrap()],
             );
-            let info = inspect_worktree(wt.to_str().unwrap(), DiffMode::Unstaged).unwrap();
+            let info = inspect_worktree(
+                wt.to_str().unwrap(),
+                DiffMode::Unstaged,
+                &mut BaseRefs::default(),
+            )
+            .unwrap();
             assert_eq!(info.repo_name, name);
             roots.push(info.repo_root);
         }
@@ -859,8 +1098,12 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
                     name,
                 ],
             );
-            let info =
-                inspect_worktree(sup.0.join(name).to_str().unwrap(), DiffMode::Unstaged).unwrap();
+            let info = inspect_worktree(
+                sup.0.join(name).to_str().unwrap(),
+                DiffMode::Unstaged,
+                &mut BaseRefs::default(),
+            )
+            .unwrap();
             assert_eq!(info.repo_name, name);
             roots.push(info.repo_root);
         }
@@ -879,7 +1122,12 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         std::fs::write(repo.0.join("old.rs"), "fn changed() {}\n").unwrap();
         std::fs::write(repo.0.join("sub/x.rs"), "fn y() {}\n").unwrap();
         let sub = repo.0.join("sub");
-        let info = inspect_worktree(sub.to_str().unwrap(), DiffMode::Unstaged).unwrap();
+        let info = inspect_worktree(
+            sub.to_str().unwrap(),
+            DiffMode::Unstaged,
+            &mut BaseRefs::default(),
+        )
+        .unwrap();
         let got: Vec<(&str, usize)> = info
             .files
             .iter()
@@ -887,7 +1135,12 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
             .collect();
         assert_eq!(got, vec![("old.rs", 1), ("sub/x.rs", 1)]);
         git(&repo.0, &["commit", "-q", "-am", "change"]);
-        let info = inspect_worktree(sub.to_str().unwrap(), DiffMode::VsMain).unwrap();
+        let info = inspect_worktree(
+            sub.to_str().unwrap(),
+            DiffMode::VsMain,
+            &mut BaseRefs::default(),
+        )
+        .unwrap();
         let paths: Vec<&str> = info.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, vec!["old.rs", "sub/x.rs"]);
         let diff = file_diff(&info.worktree_root, "old.rs", DiffMode::VsMain);
@@ -1028,7 +1281,12 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         );
         // Listed the same way from inside the other worktree.
         assert_eq!(list_worktrees(foo.to_str().unwrap()), listed);
-        let info = inspect_worktree(foo.to_str().unwrap(), DiffMode::Unstaged).unwrap();
+        let info = inspect_worktree(
+            foo.to_str().unwrap(),
+            DiffMode::Unstaged,
+            &mut BaseRefs::default(),
+        )
+        .unwrap();
         assert_eq!(info.branch, "orch/foo");
         assert_eq!(info.worktree_root, listed[1]);
     }
@@ -1044,11 +1302,14 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         let mut predictions = MergePredictions::default();
         let root = canonical_or_raw(&wt);
         assert_eq!(
-            predictions.predict(&root, "orch/foo"),
+            predictions.predict(&root, "orch/foo", base_of(&root).as_ref()),
             Some(vec!["old.rs".to_owned()])
         );
         // The base worktree itself has nothing to predict.
-        assert_eq!(predictions.predict(cwd(&repo), "main"), None);
+        assert_eq!(
+            predictions.predict(cwd(&repo), "main", base_of(cwd(&repo)).as_ref()),
+            None
+        );
     }
 
     #[test]
@@ -1060,7 +1321,11 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         commit_file(&repo.0, "old.rs", "fn moved_on() {}\n");
         let mut predictions = MergePredictions::default();
         assert_eq!(
-            predictions.predict(&canonical_or_raw(&wt), "orch/foo"),
+            predictions.predict(
+                &canonical_or_raw(&wt),
+                "orch/foo",
+                base_of(canonical_or_raw(&wt)).as_ref()
+            ),
             Some(Vec::new())
         );
     }
@@ -1073,28 +1338,31 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         commit_file(&wt, "old.rs", "fn theirs() {}\n");
         let root = canonical_or_raw(&wt);
         let mut predictions = MergePredictions::default();
-        let clean = predictions.predict(&root, "orch/foo");
+        let clean = predictions.predict(&root, "orch/foo", base_of(&root).as_ref());
         assert_eq!(clean, Some(Vec::new()));
         // Uncommitted edits move neither commit: still cached.
         std::fs::write(wt.join("old.rs"), "dirty\n").unwrap();
-        assert_eq!(predictions.predict(&root, "orch/foo"), clean);
+        assert_eq!(
+            predictions.predict(&root, "orch/foo", base_of(&root).as_ref()),
+            clean
+        );
         assert_eq!(predictions.runs, 1);
         // The base moving (main commits a clashing change) recomputes it.
         commit_file(&repo.0, "old.rs", "fn ours() {}\n");
         assert_eq!(
-            predictions.predict(&root, "orch/foo"),
+            predictions.predict(&root, "orch/foo", base_of(&root).as_ref()),
             Some(vec!["old.rs".to_owned()])
         );
         assert_eq!(predictions.runs, 2);
         assert_eq!(
-            predictions.predict(&root, "orch/foo"),
+            predictions.predict(&root, "orch/foo", base_of(&root).as_ref()),
             Some(vec!["old.rs".to_owned()])
         );
         assert_eq!(predictions.runs, 2);
         // So does HEAD moving.
         git(&wt, &["checkout", "-q", "--", "old.rs"]);
         commit_file(&wt, "more.rs", "x\n");
-        predictions.predict(&root, "orch/foo");
+        predictions.predict(&root, "orch/foo", base_of(&root).as_ref());
         assert_eq!(predictions.runs, 3);
     }
 
@@ -1113,7 +1381,7 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         std::fs::write(repo.0.join("old.rs"), "fn changed() {}\n").unwrap();
         git(&repo.0, &["add", "."]);
         git(&repo.0, &["commit", "-q", "-m", "second: two files"]);
-        let commits = branch_commits(&repo.0);
+        let commits = commits_of(&repo.0);
         let subjects: Vec<&str> = commits.iter().map(|c| c.subject.as_str()).collect();
         assert_eq!(subjects, vec!["second: two files", "first"]);
         assert_eq!(commits[0].files, 2);
@@ -1127,11 +1395,11 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
     fn branch_commits_is_empty_on_the_base_or_without_one() {
         let repo = temp_repo("on-base", "main");
         commit_msg_file(&repo, "a.rs", "a\n", "on main");
-        assert!(branch_commits(&repo.0).is_empty());
+        assert!(commits_of(&repo.0).is_empty());
         let repo = temp_repo("no-base", "trunk");
         git(&repo.0, &["checkout", "-q", "-b", "feature"]);
         commit_msg_file(&repo, "a.rs", "a\n", "no base to compare");
-        assert!(branch_commits(&repo.0).is_empty());
+        assert!(commits_of(&repo.0).is_empty());
     }
 
     #[test]
@@ -1144,7 +1412,7 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
                 &["commit", "-q", "--allow-empty", "-m", &format!("c{i}")],
             );
         }
-        let commits = branch_commits(&repo.0);
+        let commits = commits_of(&repo.0);
         assert_eq!(commits.len(), COMMIT_CAP);
         assert_eq!(commits[0].subject, format!("c{}", COMMIT_CAP + 1));
         assert_eq!(commits[0].files, 0);
@@ -1157,21 +1425,21 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         commit_msg_file(&repo, "a.rs", "a\n", "one");
         let root = cwd(&repo);
         let mut cache = CommitCache::default();
-        assert_eq!(cache.commits(root).len(), 1);
-        assert_eq!(cache.commits(root).len(), 1);
+        assert_eq!(cache.commits(root, base_of(root).as_ref()).len(), 1);
+        assert_eq!(cache.commits(root, base_of(root).as_ref()).len(), 1);
         assert_eq!(cache.reads, 1);
         // An unstaged edit moves neither HEAD nor the base.
         std::fs::write(repo.0.join("a.rs"), "changed\n").unwrap();
-        assert_eq!(cache.commits(root).len(), 1);
+        assert_eq!(cache.commits(root, base_of(root).as_ref()).len(), 1);
         assert_eq!(cache.reads, 1);
         git(&repo.0, &["commit", "-q", "-am", "two"]);
-        assert_eq!(cache.commits(root).len(), 2);
+        assert_eq!(cache.commits(root, base_of(root).as_ref()).len(), 2);
         assert_eq!(cache.reads, 2);
         // The base moving (here: main gains a commit) changes the list too.
         git(&repo.0, &["checkout", "-q", "main"]);
         commit_msg_file(&repo, "m.rs", "m\n", "main moves");
         git(&repo.0, &["checkout", "-q", "feature"]);
-        assert_eq!(cache.commits(root).len(), 2);
+        assert_eq!(cache.commits(root, base_of(root).as_ref()).len(), 2);
         assert_eq!(cache.reads, 3);
     }
 
@@ -1180,7 +1448,7 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         let repo = temp_repo("show", "main");
         git(&repo.0, &["checkout", "-q", "-b", "feature"]);
         commit_msg_file(&repo, "a.rs", "fn shown() {}\n", "add shown");
-        let commits = branch_commits(&repo.0);
+        let commits = commits_of(&repo.0);
         let diff = commit_diff(cwd(&repo), &commits[0].sha);
         assert!(diff.contains("AuthorDate:"), "{diff}");
         assert!(diff.contains("add shown"), "{diff}");

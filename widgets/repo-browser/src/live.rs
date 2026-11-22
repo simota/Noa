@@ -2,6 +2,7 @@
 //! inspecting local git worktrees for every active pane.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
@@ -18,6 +19,9 @@ const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(4);
 const POLL_WAIT: Duration = Duration::from_millis(250);
 const REFRESH_EVERY: Duration = Duration::from_secs(3);
+/// The least time from one rebuild to the next that a `StateChanged`
+/// notification asks for: agents change state many times a second.
+const NOTIFY_MIN_GAP: Duration = Duration::from_secs(1);
 const SCREEN_MAX_BYTES: usize = 8192;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +145,13 @@ fn run(
 
                 let mut last_refresh = Instant::now() - REFRESH_EVERY;
                 let mut dirty = true;
+                let mut notified = false;
+                let mut last: Option<LastBuild> = None;
+                let deliver = |snapshot: Snapshot| {
+                    let sent = snapshot_tx.send(snapshot).is_ok();
+                    wake();
+                    sent
+                };
 
                 loop {
                     while let Ok(cmd) = command_rx.try_recv() {
@@ -150,14 +161,36 @@ fn run(
                                 mode = m;
                                 dirty = true;
                             }
+                            // Answered at once from the last refresh; the
+                            // worktrees are rescanned on the usual schedule.
                             Command::LoadDiff { cwd, path } => {
-                                selected_file = Some((cwd, path));
                                 selected_commit = None;
-                                dirty = true;
+                                match last.as_mut().filter(|l| l.mode == mode) {
+                                    Some(l) => {
+                                        let diff = git::file_diff(&cwd, &path, mode);
+                                        l.selected_diff = Some((cwd.clone(), path.clone(), diff));
+                                        if !deliver(l.snapshot(can_focus, can_send, None)) {
+                                            return;
+                                        }
+                                    }
+                                    None => dirty = true,
+                                }
+                                selected_file = Some((cwd, path));
                             }
                             Command::LoadCommit { cwd, sha } => {
                                 selected_commit = Some((cwd, sha));
-                                dirty = true;
+                                match &last {
+                                    Some(l) => {
+                                        let commit = commit_entry(
+                                            &mut commit_diff,
+                                            selected_commit.as_ref(),
+                                        );
+                                        if !deliver(l.snapshot(can_focus, can_send, commit)) {
+                                            return;
+                                        }
+                                    }
+                                    None => dirty = true,
+                                }
                             }
                             Command::Focus(pane_id) => {
                                 if let Err(err) = client.focus_pane(pane_id) {
@@ -238,7 +271,7 @@ fn run(
                         }
                     }
 
-                    if dirty || last_refresh.elapsed() >= REFRESH_EVERY {
+                    if rebuild_due(last_refresh.elapsed(), dirty, notified) {
                         let built = build_snapshot(
                             &mut client,
                             mode,
@@ -250,23 +283,18 @@ fn run(
                             Ok((data, selected_diff)) => {
                                 let selected_commit =
                                     commit_entry(&mut commit_diff, selected_commit.as_ref());
-                                if snapshot_tx
-                                    .send(Snapshot {
-                                        data,
-                                        link: Link::Live,
-                                        can_focus,
-                                        can_send,
-                                        diff_mode: mode,
-                                        selected_diff,
-                                        selected_commit,
-                                    })
-                                    .is_err()
-                                {
+                                let build = LastBuild {
+                                    data,
+                                    mode,
+                                    selected_diff,
+                                };
+                                if !deliver(build.snapshot(can_focus, can_send, selected_commit)) {
                                     return;
                                 }
-                                wake();
+                                last = Some(build);
                                 last_refresh = Instant::now();
                                 dirty = false;
+                                notified = false;
                             }
                             Err(err) => {
                                 let _ = snapshot_tx.send(Snapshot {
@@ -285,7 +313,7 @@ fn run(
                     }
 
                     match client.next_notification(POLL_WAIT) {
-                        Ok(Some(_)) => dirty = true,
+                        Ok(Some(_)) => notified = true,
                         Ok(None) => {}
                         Err(err) => {
                             let _ = snapshot_tx.send(Snapshot {
@@ -340,6 +368,41 @@ fn run(
     }
 }
 
+/// Whether the refresh loop rebuilds now, `since_last` after its last
+/// rebuild: at once when the UI asked, every [`REFRESH_EVERY`], and for a
+/// state-change notification no sooner than [`NOTIFY_MIN_GAP`].
+fn rebuild_due(since_last: Duration, dirty: bool, notified: bool) -> bool {
+    dirty || since_last >= REFRESH_EVERY || (notified && since_last >= NOTIFY_MIN_GAP)
+}
+
+/// What the last full refresh built, which a `LoadDiff`/`LoadCommit` is
+/// answered from without rescanning every worktree.
+struct LastBuild {
+    data: RepoData,
+    /// The mode `data` was built in.
+    mode: DiffMode,
+    selected_diff: Option<DiffEntry>,
+}
+
+impl LastBuild {
+    fn snapshot(
+        &self,
+        can_focus: bool,
+        can_send: bool,
+        selected_commit: Option<DiffEntry>,
+    ) -> Snapshot {
+        Snapshot {
+            data: self.data.clone(),
+            link: Link::Live,
+            can_focus,
+            can_send,
+            diff_mode: self.mode,
+            selected_diff: self.selected_diff.clone(),
+            selected_commit,
+        }
+    }
+}
+
 /// `$VISUAL`, else `$EDITOR`, when set and non-blank in this process.
 fn editor_from_env() -> Option<String> {
     ["VISUAL", "EDITOR"]
@@ -386,8 +449,11 @@ fn editor_spawn(
 /// is therefore resolved by the user's login shell: `editor` (from this
 /// process's `$VISUAL`/`$EDITOR`) is used when present, otherwise the script
 /// reads `${VISUAL:-${EDITOR:-vi}}` itself. The script is plain `sh`/`bash`/
-/// `zsh` syntax (not fish). VS Code style editors get `--goto path:LINE`,
-/// everything else `+LINE path`.
+/// `zsh` syntax (not fish). VS Code style editors get `--goto ./path:LINE`,
+/// everything else `+LINE ./path`.
+///
+/// `path` is relative to the worktree root and passed as `./<path>`, so a
+/// file named `+!cmd` or `-S` is never read as an editor command or option.
 fn editor_argv(shell: Option<&str>, path: &str, line: u32, editor: Option<&str>) -> Vec<String> {
     let shell = shell.filter(|s| !s.trim().is_empty()).unwrap_or("/bin/zsh");
     let ed = match editor {
@@ -402,9 +468,19 @@ fn editor_argv(shell: Option<&str>, path: &str, line: u32, editor: Option<&str>)
          code|code-insiders|codium|cursor|windsurf) eval \"exec $ed --goto \\\"\\$f:{line}\\\"\";; \
          *) eval \"exec $ed +{line} \\\"\\$f\\\"\";; \
          esac",
-        f = crate::ui::shell_escape(path),
+        f = crate::ui::shell_escape(&dot_relative(path)),
     );
     vec![shell.to_owned(), "-lc".to_owned(), script]
+}
+
+/// `path` (relative to the worktree root) as `./<path>`; an absolute path,
+/// which cannot be read as an option either, is kept as it is.
+fn dot_relative(path: &str) -> String {
+    if path.starts_with('/') {
+        path.to_owned()
+    } else {
+        format!("./{path}")
+    }
 }
 
 /// Whether pasting `text` into a pane without bracketed paste would act on
@@ -471,6 +547,7 @@ fn build_snapshot(
 ) -> Result<(RepoData, Option<DiffEntry>), ClientError> {
     let panels = client.list_panels()?;
     let mut by_worktree: ByWorktree = HashMap::new();
+    let mut bases = git::BaseRefs::default();
 
     for panel in panels {
         let cwd = panel.cwd.trim();
@@ -480,7 +557,7 @@ fn build_snapshot(
         let info = if let Some((existing, _)) = by_worktree.get(cwd) {
             existing.clone()
         } else {
-            let Some(info) = git::inspect_worktree(cwd, mode) else {
+            let Some(info) = git::inspect_worktree(cwd, mode, &mut bases) else {
                 continue;
             };
             info
@@ -505,8 +582,8 @@ fn build_snapshot(
             .push(summary);
     }
 
-    add_paneless_worktrees(&mut by_worktree, mode);
-    let data = repo_data(by_worktree, merges, commit_cache);
+    add_paneless_worktrees(&mut by_worktree, mode, &mut bases);
+    let data = repo_data(by_worktree, merges, commit_cache, &mut bases);
 
     let selected_diff = selected
         .map(|(cwd, path)| (cwd.clone(), path.clone(), git::file_diff(cwd, path, mode)))
@@ -531,7 +608,7 @@ fn build_snapshot(
 /// Adds every other worktree of each repository a pane is in, from
 /// `git worktree list`, with no panes: a worker's worktree and branch stay
 /// to be reviewed and merged after its pane closed.
-fn add_paneless_worktrees(by_worktree: &mut ByWorktree, mode: DiffMode) {
+fn add_paneless_worktrees(by_worktree: &mut ByWorktree, mode: DiffMode, bases: &mut git::BaseRefs) {
     let mut repos = HashSet::new();
     let anchors: Vec<String> = by_worktree
         .values()
@@ -543,7 +620,7 @@ fn add_paneless_worktrees(by_worktree: &mut ByWorktree, mode: DiffMode) {
             if by_worktree.contains_key(&path) {
                 continue;
             }
-            if let Some(info) = git::inspect_worktree(&path, mode) {
+            if let Some(info) = git::inspect_worktree(&path, mode, bases) {
                 by_worktree
                     .entry(info.worktree_root.clone())
                     .or_insert_with(|| (info, Vec::new()));
@@ -558,15 +635,17 @@ fn repo_data(
     by_worktree: ByWorktree,
     merges: &mut git::MergePredictions,
     commit_cache: &mut git::CommitCache,
+    bases: &mut git::BaseRefs,
 ) -> RepoData {
     merges.retain(|root| by_worktree.contains_key(root));
     let entries = by_worktree
         .into_values()
         .map(|(info, panes)| {
+            let base = bases.get(&info.repo_root, Path::new(&info.worktree_root));
             let merge_conflicts = merges
-                .predict(&info.worktree_root, &info.branch)
+                .predict(&info.worktree_root, &info.branch, base.as_ref())
                 .unwrap_or_default();
-            let commits = commit_cache.commits(&info.worktree_root);
+            let commits = commit_cache.commits(&info.worktree_root, base.as_ref());
             let wt = Worktree {
                 name: info.branch.clone(),
                 cwd: info.worktree_root,
@@ -728,14 +807,17 @@ mod tests {
         std::fs::write(repo.0.join("old.rs"), "main edit\n").unwrap();
         std::fs::write(foo.join("old.rs"), "foo edit\n").unwrap();
 
-        let main = git::inspect_worktree(repo.0.to_str().unwrap(), DiffMode::Unstaged).unwrap();
+        let mut bases = git::BaseRefs::default();
+        let main = git::inspect_worktree(repo.0.to_str().unwrap(), DiffMode::Unstaged, &mut bases)
+            .unwrap();
         let mut by_worktree: ByWorktree = HashMap::new();
         by_worktree.insert(main.worktree_root.clone(), (main, vec![pane(7)]));
-        add_paneless_worktrees(&mut by_worktree, DiffMode::Unstaged);
+        add_paneless_worktrees(&mut by_worktree, DiffMode::Unstaged, &mut bases);
         let data = repo_data(
             by_worktree,
             &mut git::MergePredictions::default(),
             &mut git::CommitCache::default(),
+            &mut bases,
         );
 
         assert_eq!(data.repos.len(), 1);
@@ -749,6 +831,80 @@ mod tests {
         assert!(main.merge_conflicts.is_empty());
         assert_eq!(foo.files[0].conflict_worktrees, vec!["main"]);
         assert_eq!(main.files[0].conflict_worktrees, vec!["orch/foo"]);
+    }
+
+    /// One refresh of `repo` (two worktrees with commits) in `mode`, the way
+    /// `build_snapshot` does it, returning how often a base was resolved.
+    fn base_resolutions_in_one_refresh(repo: &TempRepo, mode: DiffMode) -> usize {
+        let mut bases = git::BaseRefs::default();
+        let main = git::inspect_worktree(repo.0.to_str().unwrap(), mode, &mut bases).unwrap();
+        let mut by_worktree: ByWorktree = HashMap::new();
+        by_worktree.insert(main.worktree_root.clone(), (main, vec![pane(7)]));
+        add_paneless_worktrees(&mut by_worktree, mode, &mut bases);
+        let data = repo_data(
+            by_worktree,
+            &mut git::MergePredictions::default(),
+            &mut git::CommitCache::default(),
+            &mut bases,
+        );
+        let foo = data.repos[0]
+            .worktrees
+            .iter()
+            .find(|w| w.branch == "orch/foo")
+            .unwrap();
+        assert_eq!(foo.commits.len(), 1, "{mode:?}");
+        assert_eq!(foo.merge_conflicts, vec!["old.rs"], "{mode:?}");
+        bases.resolutions
+    }
+
+    #[test]
+    fn a_refresh_resolves_the_base_once_per_repository() {
+        let repo = temp_repo("live-base-once", "main");
+        let _cleanup = TempRepo(format!("{}-wt", repo.0.display()).into());
+        let foo = add_worktree(&repo, "foo", "orch/foo");
+        commit_file(&foo, "old.rs", "fn theirs() {}\n");
+        commit_file(&repo.0, "old.rs", "fn ours() {}\n");
+        add_worktree(&repo, "bar", "orch/bar");
+        for mode in DiffMode::ALL {
+            assert_eq!(base_resolutions_in_one_refresh(&repo, mode), 1, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn notifications_rebuild_at_most_once_a_second() {
+        let ms = Duration::from_millis;
+        // A notification right after a rebuild waits for the gap.
+        assert!(!rebuild_due(ms(0), false, true));
+        assert!(!rebuild_due(ms(999), false, true));
+        assert!(rebuild_due(ms(1000), false, true));
+        // UI commands are not throttled, nor is the 3 s timer.
+        assert!(rebuild_due(ms(0), true, false));
+        assert!(rebuild_due(ms(10), true, true));
+        assert!(!rebuild_due(ms(2999), false, false));
+        assert!(rebuild_due(REFRESH_EVERY, false, false));
+    }
+
+    #[test]
+    fn a_load_is_answered_from_the_last_build() {
+        let last = LastBuild {
+            data: RepoData {
+                repos: vec![crate::model::Repo {
+                    name: "repo".into(),
+                    root: "/repo".into(),
+                    worktrees: Vec::new(),
+                }],
+            },
+            mode: DiffMode::Staged,
+            selected_diff: Some(("/repo".into(), "a.rs".into(), "+new".into())),
+        };
+        let commit = Some(("/repo".into(), "abc".into(), "commit abc".into()));
+        let snap = last.snapshot(true, false, commit.clone());
+        assert_eq!(snap.data, last.data);
+        assert_eq!(snap.diff_mode, DiffMode::Staged);
+        assert_eq!(snap.link, Link::Live);
+        assert!(snap.can_focus && !snap.can_send);
+        assert_eq!(snap.selected_diff, last.selected_diff);
+        assert_eq!(snap.selected_commit, commit);
     }
 
     #[test]
@@ -835,7 +991,7 @@ mod tests {
     fn vi_style_editors_get_plus_line_before_the_path() {
         for name in ["vi", "nvim", "nano", "emacs", "hx", "micro"] {
             let args = run_editor(name, name, Some(""), &[], "src/a.rs", 42);
-            assert_eq!(args, vec!["+42", "src/a.rs"], "{name}");
+            assert_eq!(args, vec!["+42", "./src/a.rs"], "{name}");
         }
     }
 
@@ -843,11 +999,11 @@ mod tests {
     fn vs_code_style_editors_get_goto() {
         for name in ["code", "cursor", "codium"] {
             let args = run_editor(name, name, Some(""), &[], "src/a.rs", 42);
-            assert_eq!(args, vec!["--goto", "src/a.rs:42"], "{name}");
+            assert_eq!(args, vec!["--goto", "./src/a.rs:42"], "{name}");
         }
         // Arguments in $EDITOR stay in front.
         let args = run_editor("wait", "code", Some(" --wait"), &[], "a.rs", 3);
-        assert_eq!(args, vec!["--wait", "--goto", "a.rs:3"]);
+        assert_eq!(args, vec!["--wait", "--goto", "./a.rs:3"]);
     }
 
     #[test]
@@ -857,13 +1013,16 @@ mod tests {
             "$(touch pwned).rs",
             "`touch pwned`.rs",
             "a;b&c|d.rs",
+            // An editor reads `+cmd` as a command and `-S` as an option.
+            "+!touch x",
+            "-S",
         ] {
             let args = run_editor("nasty", "vim", Some(""), &[], path, 7);
-            assert_eq!(args, vec!["+7".to_owned(), path.to_owned()], "{path}");
+            assert_eq!(args, vec!["+7".to_owned(), format!("./{path}")], "{path}");
             let args = run_editor("nasty-code", "code", Some(""), &[], path, 7);
             assert_eq!(
                 args,
-                vec!["--goto".to_owned(), format!("{path}:7")],
+                vec!["--goto".to_owned(), format!("./{path}:7")],
                 "{path}"
             );
         }
@@ -872,9 +1031,9 @@ mod tests {
     #[test]
     fn without_a_process_editor_the_login_shell_reads_visual_then_editor() {
         let args = run_editor("v", "nvim", None, &[("VISUAL", "STUB")], "a.rs", 5);
-        assert_eq!(args, vec!["+5", "a.rs"]);
+        assert_eq!(args, vec!["+5", "./a.rs"]);
         let args = run_editor("e", "code", None, &[("EDITOR", "STUB")], "a.rs", 5);
-        assert_eq!(args, vec!["--goto", "a.rs:5"]);
+        assert_eq!(args, vec!["--goto", "./a.rs:5"]);
         // $VISUAL wins over $EDITOR.
         let args = run_editor(
             "both",
@@ -884,7 +1043,7 @@ mod tests {
             "a.rs",
             5,
         );
-        assert_eq!(args, vec!["+5", "a.rs"]);
+        assert_eq!(args, vec!["+5", "./a.rs"]);
     }
 
     #[test]

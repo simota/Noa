@@ -658,6 +658,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "competition"
+version = "0.0.0"
+dependencies = [
+ "noa-config",
+ "noa-gpui-core",
+ "noa-gpui-platform",
+ "noa-gpui-scene",
+ "noa-gpui-text",
+ "noa-ipc",
+ "objc2-foundation 0.3.2",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -838,21 +853,6 @@ dependencies = [
  "option-ext",
  "redox_users",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "competition"
-version = "0.0.0"
-dependencies = [
- "noa-config",
- "noa-gpui-core",
- "noa-gpui-platform",
- "noa-gpui-scene",
- "noa-gpui-text",
- "noa-ipc",
- "objc2-foundation 0.3.2",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -1832,7 +1832,7 @@ dependencies = [
 
 [[package]]
 name = "noa-config"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1841,7 +1841,7 @@ dependencies = [
 
 [[package]]
 name = "noa-core"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "bitflags 2.13.2",
 ]
@@ -1928,7 +1928,7 @@ dependencies = [
 
 [[package]]
 name = "noa-ipc"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "crossbeam-channel",
  "libc",

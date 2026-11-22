@@ -7,8 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.12] - 2026-11-22
+
+A blind multi-agent competition window, a fuller agent dashboard, a repo
+browser that reviews every worktree, and discussions that reach a conclusion.
+
 ### Added
 
+- View > Competition (and the command palette's Open Competition) opens the
+  competition, a separate window where agents work on the same task blind to
+  each other, with periodic peer reveals and a viewer that compares their
+  artifacts side by side. `Noa.app` ships it, signed, as "Noa Competition".
+- The agent dashboard acts on workers: its drawer sends a message to the
+  selected worker (`S`, needs `input`) and closes its pane (`X`, pressed
+  twice, needs `control`). Nothing is sent to a pane waiting for a
+  permission, an undelivered message comes back as the worker's draft, and
+  both actions are refused on another server instance than the one shown.
+- The agent dashboard's filter takes `field:value` qualifiers (`state:`,
+  `need:`, `agent:`, `model:`, `branch:`, `parent:`, `label:`, `task:`,
+  `result:`) and `-` to negate a term, and new tabs show statistics (統計),
+  a map of workers by orchestrator, branch or state (マップ) and a timeline
+  (タイムライン). `--tab=` and `--filter=` set the initial tab and filter.
+- The agent dashboard's needs-you queue is split into 判断待ち, 要確認 and a
+  folded 参考情報; notices move to a line at the window's foot; the drawer
+  shows the pane id and parent, up to 40 screen lines and, on request, the
+  worker's `$NOA_RESULT` file.
+- A discussion ends within its round limit: briefs count down the rounds
+  left and the last round requires the moderator's conclusion, shown first in
+  the exported result. The moderator may lower the limit or raise it up to
+  twice what the user set when the panel cannot converge.
 - The repo browser opens a new Noa tab in the selected worktree: "ここでシェルを開く"
   (⌘T) starts a shell in its root, and "エディタで開く" (⌘E) opens the
   selected file in `$VISUAL`/`$EDITOR` at the selected diff line. Both are in

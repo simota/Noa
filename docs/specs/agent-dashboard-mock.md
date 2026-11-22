@@ -5,6 +5,7 @@
 - owner: simota
 - scope: `mock/agent-dashboard/` only (a standalone crate with its own
   `[workspace]`; not a member of Noa's workspace)
+- later change: the header and hint-strip changes are specified in `docs/specs/agent-dashboard-improve.md`
 
 ## Goal
 

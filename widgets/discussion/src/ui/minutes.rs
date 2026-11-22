@@ -2,10 +2,10 @@
 //! and next actions, each item linked to its issues.
 
 use noa_gpui_core::style::{FlexDirection, Rect as LayoutRect, Size as LayoutSize, auto, length};
-use noa_gpui_core::widgets::{Container, Label, Tone};
+use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, Tone};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
-use discussion::model::types::{MinuteSection, Session};
+use discussion::model::types::{AgentKind, MinuteSection, Session};
 
 use super::chat::issue_link;
 use super::{Action, caption, gap, heading, scroll_column, tag};
@@ -35,6 +35,30 @@ pub(super) fn insert(
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
     heading(tree, host, "議事録");
+    let small = |label: &str| Button::new(label).control_size(ControlSize::Small);
+    let tools = tree.insert(Some(host), Container::wrapping_row(6.0, 6.0));
+    let copy = tree.insert(Some(tools), small("結果をコピー"));
+    actions.push((copy, Action::CopyResult));
+    let export = tree.insert(Some(tools), small("議事録を書き出す…"));
+    actions.push((export, Action::ExportMinutes));
+    // An implementation needs a repository to work in.
+    let implement = tree.insert(
+        Some(host),
+        Container::wrapping_row(6.0, 6.0).align_items(noa_gpui_core::style::AlignItems::CENTER),
+    );
+    if session.workdir.is_some() {
+        caption(tree, implement, "実装を依頼:");
+        for kind in AgentKind::ALL {
+            let button = tree.insert(Some(implement), small(kind.command()));
+            actions.push((button, Action::Implement(kind)));
+        }
+    } else {
+        caption(
+            tree,
+            implement,
+            "実装の依頼は、作業ディレクトリを指定した議論で使えます",
+        );
+    }
     let list = scroll_column(tree, host, 14.0);
     for section in MinuteSection::ALL {
         let items = session.minutes.section(section);

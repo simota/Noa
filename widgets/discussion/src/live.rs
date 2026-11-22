@@ -64,6 +64,9 @@ pub enum Command {
     Retry,
     /// `UserClose`: end the discussion.
     Close,
+    /// Start an agent of this kind in a new tab, in the working directory,
+    /// on the discussion's result.
+    Implement { agent: AgentKind },
 }
 
 pub struct Channel {
@@ -183,6 +186,7 @@ fn run_commands(
             (Command::DeclineDebate { id }, Some(_)) => Action::DeclineDebate { id },
             (Command::Retry, Some(_)) => Action::Retry,
             (Command::Close, Some(_)) => Action::Close,
+            (Command::Implement { agent }, Some(_)) => Action::Implement { agent },
         };
         if let Some((actions, _)) = &handle {
             let _ = actions.send(action);

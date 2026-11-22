@@ -631,3 +631,74 @@ fn ending_the_discussion_is_one_click_until_it_has_ended() {
     h.deliver(Some(session));
     assert!(!has_widget_for(&h.screen, &Action::Close));
 }
+
+// ── Results ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn copying_the_result_puts_its_markdown_on_the_clipboard() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    let session = crate::demo::session();
+    h.deliver(Some(session.clone()));
+    let copy = widget_for(&h.screen, &Action::CopyResult);
+    click(&mut h.screen, &mut h.text, copy);
+    assert_eq!(
+        h.screen.tree.clipboard().read_text(),
+        Some(discussion::model::export::result_markdown(&session))
+    );
+    assert!(h.screen.toasts.iter().any(|t| t.contains("コピー")));
+}
+
+#[test]
+fn exporting_the_minutes_asks_where_and_writes_the_file() {
+    use noa_gpui_platform::FileDialogResult;
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    let session = crate::demo::session();
+    h.deliver(Some(session.clone()));
+    let export = widget_for(&h.screen, &Action::ExportMinutes);
+    click(&mut h.screen, &mut h.text, export);
+    let dialogs = h.screen.take_file_dialogs();
+    assert_eq!(dialogs.len(), 1);
+    assert!(dialogs[0].save);
+    assert!(
+        dialogs[0].file_name.ends_with("-minutes.md"),
+        "{}",
+        dialogs[0].file_name
+    );
+    let path =
+        std::env::temp_dir().join(format!("noa-discussion-minutes-{}.md", std::process::id()));
+    h.screen
+        .file_dialog_finished(FileDialogResult::Saved(path.clone()), &mut h.text);
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        discussion::model::export::minutes_markdown(&session)
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn an_implementation_pane_is_offered_only_with_a_working_directory() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    let mut session = crate::demo::session();
+    h.deliver(Some(session.clone()));
+    assert!(!has_widget_for(
+        &h.screen,
+        &Action::Implement(AgentKind::Claude)
+    ));
+    session.workdir = Some(std::path::PathBuf::from("/repo"));
+    session.rev += 1;
+    h.deliver(Some(session));
+    for kind in AgentKind::ALL {
+        assert!(has_widget_for(&h.screen, &Action::Implement(kind)));
+    }
+    let codex = widget_for(&h.screen, &Action::Implement(AgentKind::Codex));
+    click(&mut h.screen, &mut h.text, codex);
+    assert_eq!(
+        h.drain(),
+        vec![Command::Implement {
+            agent: AgentKind::Codex
+        }]
+    );
+}

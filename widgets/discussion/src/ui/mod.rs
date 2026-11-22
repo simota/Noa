@@ -27,7 +27,7 @@ use noa_gpui_core::widgets::{
     StatusBar, Tag, TagStyle, Toast, Tone,
 };
 use noa_gpui_core::{Message as UiMessage, Role, Style, Theme, UiTree, WidgetId};
-use noa_gpui_platform::Screen;
+use noa_gpui_platform::{FileDialogRequest, FileDialogResult, Screen};
 use noa_gpui_scene::{Color, Size};
 use noa_gpui_text::TextStore;
 
@@ -64,6 +64,12 @@ pub enum Action {
     Start,
     /// End the discussion: no further round starts.
     Close,
+    /// Put the result (summary, issues, minutes) on the clipboard.
+    CopyResult,
+    /// Save the minutes with every message as a Markdown file.
+    ExportMinutes,
+    /// Start an agent of this kind in the working directory on the result.
+    Implement(AgentKind),
 }
 
 /// What the center pane shows.
@@ -92,6 +98,8 @@ pub struct Discussion {
     /// An intervention sent and not yet seen in the log: the composer keeps
     /// its text until then.
     pending_intervention: Option<String>,
+    /// Save panels to show (`Screen::take_file_dialogs`).
+    file_dialogs: Vec<FileDialogRequest>,
     /// The session (id, rev) and link the panes were last built from.
     built: Option<(Option<(String, u64)>, Link)>,
 
@@ -178,6 +186,7 @@ impl Discussion {
             center: Center::Chat,
             shown_debates: BTreeSet::new(),
             pending_intervention: None,
+            file_dialogs: Vec::new(),
             built: None,
             start,
             meeting,
@@ -455,6 +464,27 @@ impl Discussion {
             Action::Send => self.send_intervention(),
             Action::Start => self.start_session(),
             Action::Close => self.send(Command::Close, "議論を終えます"),
+            Action::CopyResult => {
+                if let Some(session) = &self.session {
+                    let result = discussion::model::export::result_markdown(session);
+                    self.tree.clipboard().write_text(&result);
+                    self.toast("結果をコピーしました");
+                }
+            }
+            Action::ExportMinutes => {
+                if let Some(session) = &self.session {
+                    self.file_dialogs.push(FileDialogRequest {
+                        save: true,
+                        title: "議事録を書き出す".into(),
+                        file_name: format!("{}-minutes.md", session.id),
+                        filters: vec![("Markdown".into(), vec!["md".into()])],
+                    });
+                }
+            }
+            Action::Implement(agent) => self.send(
+                Command::Implement { agent },
+                format!("{} に実装を依頼します（新しいタブ）", agent.command()),
+            ),
         }
     }
 
@@ -592,6 +622,22 @@ impl Screen for Discussion {
 
     fn tree_mut(&mut self) -> &mut UiTree {
         &mut self.tree
+    }
+
+    fn take_file_dialogs(&mut self) -> Vec<FileDialogRequest> {
+        std::mem::take(&mut self.file_dialogs)
+    }
+
+    fn file_dialog_finished(&mut self, result: FileDialogResult, _text: &mut TextStore) {
+        let (FileDialogResult::Saved(path), Some(session)) = (result, &self.session) else {
+            return;
+        };
+        let minutes = discussion::model::export::minutes_markdown(session);
+        let message = match std::fs::write(&path, minutes) {
+            Ok(()) => format!("議事録を書き出しました: {}", path.display()),
+            Err(err) => format!("{} に書き出せません: {err}", path.display()),
+        };
+        self.toast(message);
     }
 
     fn prepare(&mut self, viewport: Size, text: &mut TextStore) -> bool {

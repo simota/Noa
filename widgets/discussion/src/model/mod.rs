@@ -2,6 +2,7 @@
 //! validation of what agents write. Pure: no I/O and no clock.
 
 pub mod brief;
+pub mod export;
 pub mod reduce;
 pub mod types;
 pub mod validate;

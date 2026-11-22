@@ -15,12 +15,14 @@
 //! stay open.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use discussion::engine::{AgentState, Config, Effect, Engine, EngineError, Input, Setup};
+use discussion::model::export;
 use discussion::model::types::{
     AgentKind, DebateId, IssueId, Millis, PartId, Phase, RoundNo, Session, SessionId,
 };
@@ -124,6 +126,11 @@ pub enum Action {
     /// End the discussion: nothing more is sent and no round starts. The
     /// agents' panes stay open.
     Close,
+    /// Start an agent of this kind in a new tab, in the working directory,
+    /// on the discussion's result (written to a task file there).
+    Implement {
+        agent: AgentKind,
+    },
     /// End the runner. The agents' panes stay open.
     Stop,
 }
@@ -250,6 +257,20 @@ fn agent_argv(kind: AgentKind) -> Vec<String> {
         "-c".into(),
         format!("exec {}", kind.command()),
     ]
+}
+
+/// The command that starts `kind` on a first prompt, the way each CLI takes
+/// one: `claude PROMPT`, `codex PROMPT`, `agy -i PROMPT`. The prompt is the
+/// script's `$1`, never spliced into it.
+fn implement_argv(kind: AgentKind, prompt: &str) -> Vec<String> {
+    let mut argv = agent_argv(kind);
+    argv.pop();
+    let script = match kind {
+        AgentKind::Agy => format!("exec {} -i \"$1\"", kind.command()),
+        _ => format!("exec {} \"$1\"", kind.command()),
+    };
+    argv.extend([script, "noa-implement".to_owned(), prompt.to_owned()]);
+    argv
 }
 
 fn agent_state(state: Option<&str>) -> Option<AgentState> {
@@ -617,12 +638,59 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             },
             Action::Retry => Input::UserRetry,
             Action::Close => Input::UserClose,
+            Action::Implement { agent } => {
+                self.implement(agent);
+                return Ok(());
+            }
             Action::Stop => return Ok(()),
         };
         if let Some(why) = self.feed(input)? {
             self.notice(why);
         }
         Ok(())
+    }
+
+    /// Writes the result as a task file under the working directory and
+    /// starts `agent` on it in a new tab there. Refused, with a notice,
+    /// without a working directory or a link to Noa.
+    fn implement(&mut self, agent: AgentKind) {
+        let session = self.engine.session();
+        let Some(workdir) = session.workdir.clone() else {
+            self.notice("実装の依頼には、作業ディレクトリを指定した議論が必要です".to_owned());
+            return;
+        };
+        let task = self.engine.reply_dir().join("implementation.md");
+        let text = export::implementation_task(session, &task);
+        let label = format!("implement · {}", session.id);
+        let written = task
+            .parent()
+            .map_or(Ok(()), fs::create_dir_all)
+            .and_then(|()| fs::write(&task, text));
+        if let Err(err) = written {
+            self.notice(format!("{} を書けません: {err}", task.display()));
+            return;
+        }
+        let Some(conn) = self.conn.as_mut() else {
+            self.notice(
+                "Noa に接続していません。接続が戻ってから、もう一度押してください".to_owned(),
+            );
+            return;
+        };
+        let prompt = format!(
+            "Read {} and implement what it asks. It is the outcome of a moderated \
+             discussion between coding agents.",
+            task.display()
+        );
+        let spec = PaneSpec {
+            argv: implement_argv(agent, &prompt),
+            cwd: workdir,
+            label,
+        };
+        let notice = match conn.spawn(Placement::NewTab, &spec) {
+            Ok(_) => format!("{} に実装を依頼しました（新しいタブ）", agent.command()),
+            Err(err) => format!("実装用のペインを開けません: {err}"),
+        };
+        self.notice(notice);
     }
 
     // ---- the engine ----
@@ -2222,6 +2290,100 @@ mod tests {
         let (_, stored) = Store::open(&rig.dir()).unwrap();
         assert!(stored.closed, "the end is in the log");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn implementing_the_result_starts_an_agent_in_a_new_tab_on_a_task_file() {
+        let root = temp_root("implement");
+        let workdir = temp_root("implement-repo");
+        fs::create_dir_all(&workdir).unwrap();
+        let fake = Fake::new();
+        fake.w().now = 1_000;
+        let mut rig = Rig::open(
+            &fake,
+            Start::New {
+                topic: "Review this repo".into(),
+                workdir: Some(workdir.clone()),
+                max_rounds: None,
+                moderator: AgentKind::Claude,
+                panel: vec![AgentKind::Codex],
+                root: root.clone(),
+            },
+        );
+        rig.step();
+        let before = fake.0.borrow().spawned.len();
+        rig.actions
+            .send(Action::Implement {
+                agent: AgentKind::Codex,
+            })
+            .unwrap();
+        rig.step();
+        let spawned = fake.0.borrow().spawned.clone();
+        assert_eq!(spawned.len(), before + 1);
+        let (placement, spec, _) = spawned.last().unwrap();
+        assert_eq!(*placement, Placement::NewTab);
+        assert_eq!(spec.cwd, workdir);
+        assert!(spec.label.starts_with("implement · "), "{}", spec.label);
+        let task = workdir
+            .join(".noa/discussions")
+            .join(rig.session().id.as_str())
+            .join("implementation.md");
+        assert_eq!(
+            fs::read_to_string(&task).unwrap(),
+            discussion::model::export::implementation_task(rig.session(), &task)
+        );
+        let command = spec.argv.join(" ");
+        assert!(command.contains("exec codex \"$1\""), "{command}");
+        assert!(
+            spec.argv.last().unwrap().contains(task.to_str().unwrap()),
+            "{:?}",
+            spec.argv
+        );
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&workdir);
+    }
+
+    #[test]
+    fn implementing_without_a_working_directory_is_refused() {
+        let root = temp_root("implement-none");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.step();
+        let before = fake.0.borrow().spawned.len();
+        rig.actions
+            .send(Action::Implement {
+                agent: AgentKind::Claude,
+            })
+            .unwrap();
+        rig.step();
+        assert_eq!(fake.0.borrow().spawned.len(), before);
+        assert!(rig.notices().iter().any(|n| n.contains("作業ディレクトリ")));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn each_agent_gets_its_task_the_way_its_cli_takes_a_first_prompt() {
+        let argv = |kind| implement_argv(kind, "do it");
+        assert!(
+            argv(AgentKind::Claude)
+                .join(" ")
+                .contains("exec claude \"$1\"")
+        );
+        assert!(
+            argv(AgentKind::Codex)
+                .join(" ")
+                .contains("exec codex \"$1\"")
+        );
+        assert!(
+            argv(AgentKind::Agy)
+                .join(" ")
+                .contains("exec agy -i \"$1\"")
+        );
+        // The prompt is an argument of its own, never spliced into the script.
+        assert_eq!(
+            argv(AgentKind::Claude).last().map(String::as_str),
+            Some("do it")
+        );
     }
 
     #[test]

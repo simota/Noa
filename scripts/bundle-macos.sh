@@ -63,11 +63,11 @@ case "$MODE" in
   *) echo "usage: $0 [release|debug]" >&2; exit 2 ;;
 esac
 
-# The agent dashboard, the repo browser and the discussion
-# (widgets/agent-dashboard, widgets/repo-browser and widgets/discussion, crates
-# outside the workspace) ship in Noa.app's Contents/Helpers; Noa starts them
-# from View > Agent Dashboard, View > Repo Browser and View > Discussion (or the
-# command palette).
+# The agent dashboard, the repo browser, the discussion and the competition
+# (widgets/agent-dashboard, widgets/repo-browser, widgets/discussion and
+# widgets/competition, crates outside the workspace) ship in Noa.app's
+# Contents/Helpers; Noa starts them from View > Agent Dashboard, View > Repo
+# Browser, View > Discussion and View > Competition (or the command palette).
 for widget in agent-dashboard repo-browser discussion competition; do
   if [ "$PROFILE" = release ]; then
     cargo build --manifest-path "$ROOT/widgets/$widget/Cargo.toml" --locked --release
@@ -178,6 +178,9 @@ if [ -n "${NOA_SIGN_IDENTITY:-}" ]; then
   codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/assets/macos.entitlements.plist" \
     --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/Helpers/Noa Discussion"
+  codesign --force --options runtime --timestamp \
+    --entitlements "$ROOT/assets/macos.entitlements.plist" \
+    --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/Helpers/Noa Competition"
   codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/assets/macos.entitlements.plist" \
     --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/MacOS/Noa"

@@ -192,10 +192,18 @@ pub fn inspect_worktree(
     let mut files = Vec::new();
     match mode {
         DiffMode::VsMain => {
+            let statuses = match &range {
+                Some(range) => parse_name_status(
+                    &run_git(top, &["diff", "--name-status", "-z", range.as_str()])
+                        .unwrap_or_default(),
+                ),
+                None => HashMap::new(),
+            };
             for (path, (added, deleted)) in stats.drain() {
+                let status = statuses.get(&path).map_or("M", String::as_str).to_owned();
                 files.push(ChangedFile {
                     path,
-                    status: "M".into(),
+                    status,
                     added,
                     deleted,
                     diff: String::new(),
@@ -561,6 +569,10 @@ pub fn commit_diff(cwd: &str, sha: &str) -> String {
         "show",
         "--format=fuller",
         "--patch",
+        // `diff.noprefix` / `diff.mnemonicPrefix` would change the
+        // `diff --git a/… b/…` lines the editor reads the file from.
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
         "--no-ext-diff",
         "--no-color",
         sha,
@@ -728,6 +740,25 @@ fn parse_porcelain_v2(text: &str) -> PorcelainStatus {
 
 /// Parses `git diff --numstat -z`. A rename is `added\tdeleted\t` followed by
 /// the old and new paths as separate entries; it is keyed by the new path.
+/// `git diff --name-status -z`: each file's status letter (`A`, `D`, `M`,
+/// `R`, …) by its new path; a rename or copy carries old then new path.
+fn parse_name_status(text: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let mut entries = text.split('\0');
+    while let Some(code) = entries.next() {
+        let Some(letter) = code.chars().next() else {
+            continue;
+        };
+        if matches!(letter, 'R' | 'C') {
+            entries.next();
+        }
+        if let Some(path) = entries.next() {
+            map.insert(path.to_owned(), letter.to_string());
+        }
+    }
+    map
+}
+
 fn parse_numstat(text: &str) -> HashMap<String, (usize, usize)> {
     let mut map = HashMap::new();
     let mut entries = text.split('\0');
@@ -1364,6 +1395,40 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         commit_file(&wt, "more.rs", "x\n");
         predictions.predict(&root, "orch/foo", base_of(&root).as_ref());
         assert_eq!(predictions.runs, 3);
+    }
+
+    #[test]
+    fn vs_main_marks_files_the_branch_deleted_or_added() {
+        let repo = temp_repo("vs-main-status", "main");
+        git(&repo.0, &["checkout", "-q", "-b", "feature"]);
+        std::fs::remove_file(repo.0.join("old.rs")).unwrap();
+        std::fs::write(repo.0.join("new.rs"), "n\n").unwrap();
+        git(&repo.0, &["add", "-A"]);
+        git(&repo.0, &["commit", "-q", "-m", "swap"]);
+        let info =
+            inspect_worktree(cwd(&repo), DiffMode::VsMain, &mut BaseRefs::default()).unwrap();
+        let status = |p: &str| {
+            info.files
+                .iter()
+                .find(|f| f.path == p)
+                .map(|f| f.status.clone())
+        };
+        assert_eq!(status("old.rs").as_deref(), Some("D"), "{:?}", info.files);
+        assert_eq!(status("new.rs").as_deref(), Some("A"), "{:?}", info.files);
+    }
+
+    #[test]
+    fn commit_diff_names_files_with_a_b_prefixes_whatever_the_config() {
+        let repo = temp_repo("noprefix", "main");
+        git(&repo.0, &["config", "diff.noprefix", "true"]);
+        git(&repo.0, &["checkout", "-q", "-b", "feature"]);
+        commit_msg_file(&repo, "x.rs", "x\n", "add x");
+        let sha = run_git(&repo.0, &["rev-parse", "HEAD"]).unwrap();
+        let show = commit_diff(cwd(&repo), sha.trim());
+        assert!(
+            show.lines().any(|l| l == "diff --git a/x.rs b/x.rs"),
+            "{show}"
+        );
     }
 
     fn commit_msg_file(repo: &TempRepo, name: &str, body: &str, msg: &str) {

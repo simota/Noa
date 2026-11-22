@@ -1744,13 +1744,29 @@ impl RepoBrowser {
     fn clear_or_restore_prompt(&mut self) {
         if let Some((prev, origin)) = self.cleared_prompt.take() {
             let current = self.prompt_text();
+            let current_origin = if current.trim().is_empty() {
+                None
+            } else {
+                self.prompt_origin.clone()
+            };
+            // Joining quotes of two worktrees would let one worktree's pane
+            // receive the other's diff, so that restore waits.
+            if let (Some(saved), Some(now)) = (&origin, &current_origin)
+                && saved != now
+            {
+                self.cleared_prompt = Some((prev, origin));
+                self.toast(
+                    "元に戻す指示は別の worktree の引用を含むため、今の指示を送るかクリアしてから戻してください",
+                );
+                return;
+            }
             let restored = if current.trim().is_empty() {
                 prev
             } else {
                 format!("{}\n{current}", prev.trim_end())
             };
             self.set_prompt_text(restored);
-            self.prompt_origin = origin;
+            self.prompt_origin = origin.or(current_origin);
         } else {
             let current = self.prompt_text();
             if current.is_empty() {
@@ -2457,13 +2473,19 @@ fn diff_git_new_path(line: &str) -> Option<String> {
             .map(str::to_owned);
     }
     // `a/<p> b/<p>`: the two halves are the same path unless renamed.
-    let half = rest.len().checked_sub(5).filter(|n| n % 2 == 0)? / 2;
-    if let (Some("a/"), Some(old), Some(" b/"), Some(new)) = (
-        rest.get(..2),
-        rest.get(2..2 + half),
-        rest.get(2 + half..5 + half),
-        rest.get(5 + half..),
-    ) && old == new
+    // A rename whose two paths differ in length has no middle: fall through.
+    if let Some(half) = rest
+        .len()
+        .checked_sub(5)
+        .filter(|n| n % 2 == 0)
+        .map(|n| n / 2)
+        && let (Some("a/"), Some(old), Some(" b/"), Some(new)) = (
+            rest.get(..2),
+            rest.get(2..2 + half),
+            rest.get(2 + half..5 + half),
+            rest.get(5 + half..),
+        )
+        && old == new
     {
         return Some(new.to_owned());
     }
@@ -3731,6 +3753,67 @@ mod tests {
         other.panes[0].pane_id = 9;
         snap.data.repos[0].worktrees.push(other);
         snap
+    }
+
+    /// Sends the prompt from worktree `wt` and returns what reached a pane.
+    fn send_from(h: &mut LiveHarness, wt: usize) -> Vec<(u64, String)> {
+        h.screen.sel_wt = wt;
+        h.screen.sync_views(&mut h.text);
+        h.drain();
+        h.screen.send_review_prompt();
+        sent(h)
+    }
+
+    #[test]
+    fn restoring_a_prompt_from_another_worktree_never_mixes_them() {
+        let mut h = LiveHarness::new();
+        h.deliver(snapshot_with_two_worktrees());
+        h.screen
+            .diff_cache
+            .insert(("/repo-wt-b".into(), "a.rs".into()), "+b v1".into());
+        h.screen.quote_selected_diff(); // in main
+        h.screen.clear_or_restore_prompt(); // clear
+        h.screen.sel_wt = 1;
+        h.screen.sync_views(&mut h.text);
+        h.screen.quote_selected_diff(); // in b
+        h.screen.clear_or_restore_prompt(); // restore
+        for wt in [0, 1] {
+            for (pane, text) in send_from(&mut h, wt) {
+                assert!(
+                    !(text.contains("[main /") && text.contains("[b /")),
+                    "mixed prompt sent to #{pane}: {text}"
+                );
+                assert!(
+                    !text.contains("[b /") || pane == 9,
+                    "b's quote sent to #{pane}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn restoring_typed_text_keeps_the_quotes_worktree() {
+        let mut h = LiveHarness::new();
+        h.deliver(snapshot_with_two_worktrees());
+        set_prompt(&mut h.screen, "メモ");
+        h.screen.clear_or_restore_prompt(); // clear the typed text
+        h.screen.quote_selected_diff(); // quote in main
+        h.screen.clear_or_restore_prompt(); // restore: typed text + main's quote
+        assert!(prompt_text(&h.screen).contains("[main /"));
+        assert!(send_from(&mut h, 1).is_empty(), "main's quote sent from b");
+        assert_eq!(send_from(&mut h, 0).len(), 1);
+    }
+
+    #[test]
+    fn a_rename_of_any_length_names_the_new_path() {
+        assert_eq!(
+            diff_git_new_path("diff --git a/a.rs b/bb.rs").as_deref(),
+            Some("bb.rs")
+        );
+        assert_eq!(
+            diff_git_new_path("diff --git a/old.rs b/new1.rs").as_deref(),
+            Some("new1.rs")
+        );
     }
 
     #[test]

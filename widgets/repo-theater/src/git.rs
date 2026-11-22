@@ -58,18 +58,32 @@ pub fn inspect_worktree(cwd: &str, mode: DiffMode) -> Option<WorktreeGitInfo> {
     } else {
         dir.join(&common_raw)
     };
-    let repo_root = common_path
-        .parent()
-        .map(canonical_or_raw)
-        .unwrap_or_else(|| canonical_or_raw(Path::new(&toplevel)));
-    let repo_name = Path::new(&repo_root)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("repo")
-        .to_owned();
+    // The common dir identifies the repository. Only a `<repo>/.git` common
+    // dir names its parent; a bare repo (`a.git`) or a submodule
+    // (`.git/modules/<name>`) is its own root, so siblings never merge.
+    let common = PathBuf::from(canonical_or_raw(&common_path));
+    let (repo_root, repo_name) = if common.file_name().is_some_and(|n| n == ".git") {
+        let root = common
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or(common.clone());
+        let name = root.file_name().map(|n| n.to_string_lossy().into_owned());
+        (root, name)
+    } else {
+        let name = common.file_name().map(|n| {
+            let n = n.to_string_lossy();
+            n.strip_suffix(".git").unwrap_or(&n).to_owned()
+        });
+        (common.clone(), name)
+    };
+    let repo_root = repo_root.to_string_lossy().into_owned();
+    let repo_name = repo_name.unwrap_or_else(|| "repo".into());
+    // Paths must be relative to the worktree root, whatever the pane's cwd
+    // or `diff.relative` say, so run the listing commands from there.
+    let top = Path::new(&toplevel);
 
     let status_out = run_git(
-        dir,
+        top,
         &[
             "status",
             "--porcelain=v2",
@@ -91,7 +105,7 @@ pub fn inspect_worktree(cwd: &str, mode: DiffMode) -> Option<WorktreeGitInfo> {
             .unwrap_or_else(|| "HEAD".into());
     }
 
-    let range = base_range(dir);
+    let range = base_range(top);
     let numstat_args: Vec<&str> = match mode {
         DiffMode::Unstaged => vec!["diff", "--numstat", "-z"],
         DiffMode::Staged => vec!["diff", "--cached", "--numstat", "-z"],
@@ -105,7 +119,7 @@ pub fn inspect_worktree(cwd: &str, mode: DiffMode) -> Option<WorktreeGitInfo> {
     let numstat_out = if numstat_args.is_empty() {
         String::new()
     } else {
-        run_git(dir, &numstat_args).unwrap_or_default()
+        run_git(top, &numstat_args).unwrap_or_default()
     };
     let mut stats = parse_numstat(&numstat_out);
 
@@ -480,5 +494,88 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
             inspect_worktree(cwd(&repo), DiffMode::VsMain).unwrap().note,
             None
         );
+    }
+
+    fn scratch_dir(name: &str) -> TempRepo {
+        let repo = temp_repo(name, "main");
+        let _ = std::fs::remove_dir_all(&repo.0);
+        std::fs::create_dir_all(&repo.0).unwrap();
+        repo
+    }
+
+    #[test]
+    fn bare_repos_in_one_directory_stay_separate() {
+        let root = scratch_dir("bare");
+        let mut roots = Vec::new();
+        for name in ["a", "b"] {
+            let seed = temp_repo(&format!("seed-{name}"), "main");
+            let bare = root.0.join(format!("{name}.git"));
+            git(
+                &root.0,
+                &["clone", "-q", "--bare", cwd(&seed), bare.to_str().unwrap()],
+            );
+            let wt = root.0.join(format!("{name}-wt"));
+            git(
+                &bare,
+                &["worktree", "add", "-q", "-b", "w", wt.to_str().unwrap()],
+            );
+            let info = inspect_worktree(wt.to_str().unwrap(), DiffMode::Unstaged).unwrap();
+            assert_eq!(info.repo_name, name);
+            roots.push(info.repo_root);
+        }
+        assert_ne!(roots[0], roots[1]);
+    }
+
+    #[test]
+    fn submodules_stay_separate_repos() {
+        let sup = temp_repo("super", "main");
+        let mut roots = Vec::new();
+        for name in ["s1", "s2"] {
+            let seed = temp_repo(&format!("sub-{name}"), "main");
+            git(
+                &sup.0,
+                &[
+                    "-c",
+                    "protocol.file.allow=always",
+                    "submodule",
+                    "add",
+                    "-q",
+                    cwd(&seed),
+                    name,
+                ],
+            );
+            let info =
+                inspect_worktree(sup.0.join(name).to_str().unwrap(), DiffMode::Unstaged).unwrap();
+            assert_eq!(info.repo_name, name);
+            roots.push(info.repo_root);
+        }
+        assert_ne!(roots[0], roots[1]);
+    }
+
+    #[test]
+    fn diff_relative_config_does_not_change_paths() {
+        let repo = temp_repo("relative", "main");
+        git(&repo.0, &["config", "diff.relative", "true"]);
+        std::fs::create_dir_all(repo.0.join("sub")).unwrap();
+        std::fs::write(repo.0.join("sub/x.rs"), "fn x() {}\n").unwrap();
+        git(&repo.0, &["add", "."]);
+        git(&repo.0, &["commit", "-q", "-m", "sub"]);
+        git(&repo.0, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(repo.0.join("old.rs"), "fn changed() {}\n").unwrap();
+        std::fs::write(repo.0.join("sub/x.rs"), "fn y() {}\n").unwrap();
+        let sub = repo.0.join("sub");
+        let info = inspect_worktree(sub.to_str().unwrap(), DiffMode::Unstaged).unwrap();
+        let got: Vec<(&str, usize)> = info
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.added))
+            .collect();
+        assert_eq!(got, vec![("old.rs", 1), ("sub/x.rs", 1)]);
+        git(&repo.0, &["commit", "-q", "-am", "change"]);
+        let info = inspect_worktree(sub.to_str().unwrap(), DiffMode::VsMain).unwrap();
+        let paths: Vec<&str> = info.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["old.rs", "sub/x.rs"]);
+        let diff = file_diff(&info.worktree_root, "old.rs", DiffMode::VsMain);
+        assert!(diff.contains("+fn changed() {}"), "{diff}");
     }
 }

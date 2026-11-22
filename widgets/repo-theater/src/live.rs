@@ -147,19 +147,16 @@ fn run(
                                 let result =
                                     send_steps(&text, submit).into_iter().try_for_each(|step| {
                                         match step {
-                                            SendStep::Type { text: chunk, paste } => {
-                                                // A pane without bracketed paste would
-                                                // still run each line: refuse instead.
-                                                client.send_text_with(
+                                            SendStep::Type { text: chunk, paste } => client
+                                                .send_text_with(
                                                     pane_id,
                                                     &chunk,
                                                     SendTextOptions {
                                                         paste,
                                                         require_paste_mode: paste
-                                                            && chunk.contains('\n'),
+                                                            && needs_paste_mode(&chunk),
                                                     },
-                                                )
-                                            }
+                                                ),
                                             SendStep::Pause(d) => {
                                                 std::thread::sleep(d);
                                                 Ok(())
@@ -172,8 +169,9 @@ fn run(
                                     if submit {
                                         let _ = delivered_tx.send(text);
                                     }
+                                    let what = if submit { "指示" } else { "パス" };
                                     let _ = notice_tx
-                                        .send(format!("ペイン #{pane_id} へ指示を送信しました"));
+                                        .send(format!("ペイン #{pane_id} へ{what}を送信しました"));
                                 }
                                 wake();
                             }
@@ -263,6 +261,15 @@ fn run(
             }
         }
     }
+}
+
+/// Whether pasting `text` into a pane without bracketed paste would act on
+/// it rather than insert it, so the send must be refused there.
+fn needs_paste_mode(text: &str) -> bool {
+    // Without bracketed paste every control character reaches the line
+    // editor as a key: CR/LF run a line, Ctrl-U erases it, ESC starts a
+    // sequence, Tab completes.
+    text.chars().any(char::is_control)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -519,5 +526,15 @@ mod tests {
         let steps = send_steps("fix it", true);
         assert_eq!(steps.len(), 3, "{steps:?}");
         assert_eq!(steps[1], SendStep::Pause(Duration::from_millis(150)));
+    }
+
+    #[test]
+    fn any_control_character_requires_bracketed_paste() {
+        // Ctrl-U then CR: an unbracketed paste would erase the line and run `id`.
+        assert!(needs_paste_mode("/tmp/a\x15id\r"));
+        assert!(needs_paste_mode("line\rnext"));
+        assert!(needs_paste_mode("a\x1b[A"));
+        assert!(needs_paste_mode("a\x7f"));
+        assert!(!needs_paste_mode("'/Users/x/Screen Shot 1.png' 日本語.txt"));
     }
 }

@@ -31,7 +31,12 @@ const DIFF_META_FG: Color = Color::rgba(0.84, 0.76, 0.46, 1.0);
 
 #[derive(Debug, Clone)]
 enum PaletteAction {
-    SelectFile(usize, usize, usize),
+    /// Resolved when chosen: the palette stays open across refreshes.
+    SelectFile {
+        root: String,
+        cwd: String,
+        path: String,
+    },
     FocusPane(u64),
     SwitchDiffMode(DiffMode),
     ToggleInspector,
@@ -47,6 +52,8 @@ enum NodeKind {
 
 enum Source {
     Demo,
+    /// A one-off render of a live snapshot (`--snapshot` without `--demo`).
+    Snapshot,
     Live(Channel),
 }
 
@@ -104,6 +111,9 @@ pub struct RepoTheater {
     recent_commands: RecentCommands,
     last_terminal_key: Option<(u64, String)>,
     pending_browser_path: Option<Vec<usize>>,
+    /// Every toast shown, for tests to inspect.
+    #[cfg(test)]
+    toasts: Vec<String>,
 }
 
 impl RepoTheater {
@@ -124,7 +134,7 @@ impl RepoTheater {
 
     pub fn of_snapshot(snapshot: Snapshot) -> Self {
         let mut theater = Self::build(
-            Source::Demo,
+            Source::Snapshot,
             snapshot.link,
             snapshot.can_focus,
             snapshot.can_send,
@@ -511,6 +521,8 @@ impl RepoTheater {
             recent_commands: RecentCommands::default(),
             last_terminal_key: None,
             pending_browser_path: None,
+            #[cfg(test)]
+            toasts: Vec::new(),
         };
         let mut text = TextStore::new(Default::default());
         theater.sync_views(&mut text);
@@ -831,9 +843,9 @@ impl RepoTheater {
 
         let (badge_label, tone) = match (&self.source, &self.link) {
             (Source::Demo, _) => ("DEMO", Tone::Accent),
-            (Source::Live(_), Link::Live) => ("LIVE", Tone::Success),
-            (Source::Live(_), Link::Connecting) => ("接続中", Tone::Warning),
-            (Source::Live(_), Link::Down(_)) => ("オフライン", Tone::Critical),
+            (_, Link::Live) => ("LIVE", Tone::Success),
+            (_, Link::Connecting) => ("接続中", Tone::Warning),
+            (_, Link::Down(_)) => ("オフライン", Tone::Critical),
         };
         self.tree.insert(
             Some(self.status_leading),
@@ -872,8 +884,8 @@ impl RepoTheater {
         let mut commands = Vec::new();
         let mut actions = Vec::new();
 
-        for (ri, repo) in self.filtered.repos.iter().enumerate() {
-            for (wi, wt) in repo.worktrees.iter().enumerate() {
+        for repo in &self.filtered.repos {
+            for wt in &repo.worktrees {
                 if let Some(pane) = wt.primary_pane() {
                     commands.push(
                         PaletteCommand::new(format!("ペインへ移動: {} ({})", wt.branch, pane.name))
@@ -882,13 +894,17 @@ impl RepoTheater {
                     );
                     actions.push(PaletteAction::FocusPane(pane.pane_id));
                 }
-                for (fi, file) in wt.files.iter().enumerate() {
+                for file in &wt.files {
                     commands.push(
                         PaletteCommand::new(format!("{} {}", file.status, file.path))
                             .detail(format!("{} / {}", repo.name, wt.branch))
                             .keywords(format!("diff file {} {}", repo.name, wt.branch)),
                     );
-                    actions.push(PaletteAction::SelectFile(ri, wi, fi));
+                    actions.push(PaletteAction::SelectFile {
+                        root: repo.root.clone(),
+                        cwd: wt.cwd.clone(),
+                        path: file.path.clone(),
+                    });
                 }
             }
         }
@@ -943,7 +959,7 @@ impl RepoTheater {
         let pane_id = pane.pane_id;
         let pane_name = pane.name.clone();
         match &self.source {
-            Source::Demo => {
+            Source::Demo | Source::Snapshot => {
                 self.toast(format!("[DEMO] ペイン #{pane_id} ({pane_name}) を開きます"))
             }
             Source::Live(ch) => {
@@ -995,7 +1011,7 @@ impl RepoTheater {
         };
         let pane_id = pane.pane_id;
         match &self.source {
-            Source::Demo => {
+            Source::Demo | Source::Snapshot => {
                 self.toast(format!("[DEMO] ペイン #{pane_id} へ指示を送信しました"));
                 self.tree
                     .update::<TextArea, _>(self.prompt_area, |area, cx| area.set_text(cx, ""));
@@ -1029,18 +1045,20 @@ impl RepoTheater {
         };
         let pane_id = pane.pane_id;
         match &self.source {
-            Source::Demo => self.toast(format!("[DEMO] #{pane_id} へ送信: {joined}")),
+            Source::Demo | Source::Snapshot => {
+                self.toast(format!("[DEMO] #{pane_id} へ送信: {joined}"))
+            }
             Source::Live(ch) => {
                 if !self.can_send {
                     self.toast("server-scopes に input が必要です");
                     return;
                 }
+                // The live feed toasts the outcome once the pane answered.
                 ch.send(Command::SendText {
                     pane_id,
                     text: joined.clone(),
                     submit: false,
                 });
-                self.toast(format!("ペイン #{pane_id} へパスを送信しました"));
             }
         }
     }
@@ -1061,6 +1079,7 @@ impl RepoTheater {
                 self.raw_data = demo_data(mode);
                 self.sync_views(text);
             }
+            Source::Snapshot => self.rebuild_diff_view(text),
             Source::Live(ch) => {
                 ch.send(Command::SetDiffMode(mode));
                 self.rebuild_diff_view(text);
@@ -1069,6 +1088,9 @@ impl RepoTheater {
     }
 
     fn toast(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        #[cfg(test)]
+        self.toasts.push(message.clone());
         Toast::new(message).show(&mut self.tree);
     }
 
@@ -1133,14 +1155,28 @@ impl RepoTheater {
 
     fn run_palette_action(&mut self, action: PaletteAction, text: &mut TextStore) {
         match action {
-            PaletteAction::SelectFile(ri, wi, fi) => {
+            PaletteAction::SelectFile { root, cwd, path } => {
+                let found = self.filtered.repos.iter().enumerate().find_map(|(ri, r)| {
+                    if r.root != root {
+                        return None;
+                    }
+                    let wi = r.worktrees.iter().position(|w| w.cwd == cwd)?;
+                    let fi = r.worktrees[wi].files.iter().position(|f| f.path == path)?;
+                    Some((ri, wi, fi))
+                });
+                let Some((ri, wi, fi)) = found else {
+                    self.toast(format!("{path} はもう一覧にありません"));
+                    return;
+                };
                 self.sel_repo = ri;
                 self.sel_wt = wi;
                 self.sel_file = fi;
                 self.sync_views(text);
             }
             PaletteAction::FocusPane(id) => match &self.source {
-                Source::Demo => self.toast(format!("[DEMO] ペイン #{id} にフォーカス")),
+                Source::Demo | Source::Snapshot => {
+                    self.toast(format!("[DEMO] ペイン #{id} にフォーカス"))
+                }
                 Source::Live(ch) => ch.send(Command::Focus(id)),
             },
             PaletteAction::SwitchDiffMode(m) => self.set_diff_mode(m, text),
@@ -1684,5 +1720,60 @@ mod tests {
             .get::<SegmentedControl>(screen.diff_mode_seg)
             .unwrap();
         assert_eq!(seg.selected(), &[false, true, false]);
+    }
+
+    /// The palette action that selects `path` in the palette as it was opened.
+    fn palette_file_action(screen: &RepoTheater, path: &str) -> PaletteAction {
+        let (_, actions) = screen.active_palette.as_ref().unwrap();
+        actions
+            .iter()
+            .find(|a| matches!(a, PaletteAction::SelectFile { path: p, .. } if p == path))
+            .cloned()
+            .unwrap()
+    }
+
+    #[test]
+    fn palette_file_choice_survives_a_refresh_while_open() {
+        let mut h = LiveHarness::new();
+        h.screen.open_command_palette();
+        let choose_b = palette_file_action(&h.screen, "b.rs");
+        let mut snap = snapshot(DiffMode::Unstaged, None);
+        let mut other = snap.data.repos[0].worktrees[0].clone();
+        other.cwd = "/repo-wt-aaa".into();
+        other.branch = "aaa".into();
+        snap.data.repos[0].worktrees.insert(0, other);
+        let files = &mut snap.data.repos[0].worktrees[1].files;
+        let mut first = files[0].clone();
+        first.path = "0.rs".into();
+        files.insert(0, first);
+        h.deliver(snap);
+        h.screen.run_palette_action(choose_b, &mut h.text);
+        assert_eq!(h.screen.current_worktree().unwrap().cwd, CWD);
+        assert_eq!(h.screen.current_file().unwrap().path, "b.rs");
+    }
+
+    #[test]
+    fn live_snapshot_render_shows_link_state() {
+        let screen = RepoTheater::of_snapshot(snapshot(DiffMode::Unstaged, None));
+        let badges: Vec<String> = screen
+            .tree()
+            .children(screen.status_leading)
+            .iter()
+            .filter_map(|id| screen.tree().get::<Badge>(*id).and_then(Badge::label))
+            .collect();
+        assert_eq!(
+            badges.first().map(String::as_str),
+            Some("LIVE"),
+            "{badges:?}"
+        );
+    }
+
+    #[test]
+    fn dropped_paths_toast_only_the_send_result() {
+        let mut h = LiveHarness::new();
+        h.screen.toasts.clear();
+        h.screen
+            .send_dropped_files(&[PathBuf::from("/tmp/plain.txt")]);
+        assert!(h.screen.toasts.is_empty(), "{:?}", h.screen.toasts);
     }
 }

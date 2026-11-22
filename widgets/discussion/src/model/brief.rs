@@ -141,6 +141,25 @@ fn convergence_note(session: &Session, round: RoundNo) -> String {
     }
 }
 
+/// When the moderator may move the round limit, and how far; empty for a
+/// discussion with no limit.
+fn limit_change_note(session: &Session, round: RoundNo) -> String {
+    let (Some(max), Some(cap)) = (session.max_rounds, session.round_limit_cap()) else {
+        return String::new();
+    };
+    let raise = if max < cap {
+        format!("raise it (at most {cap}) if more rounds would settle it, or ")
+    } else {
+        String::new()
+    };
+    format!(
+        "Only if the discussion clearly cannot converge within the limit ({max}), you may \
+         change it with \"round_limit\": {raise}lower it (not below {round}) if more rounds \
+         would not help. Say why in the summary. The new last round still ends in your \
+         conclusion.\n"
+    )
+}
+
 fn section_tree(out: &mut String, heading: &str, session: &Session) {
     out.push_str(heading);
     out.push('\n');
@@ -404,6 +423,7 @@ pub fn moderator_brief(session: &Session, round: RoundNo, reply_path: &Path) -> 
                 }
             }
             out.push_str(&convergence_note(session, round));
+            out.push_str(&limit_change_note(session, round));
             out.push('\n');
 
             out.push_str(MODERATOR_SECTIONS[6]);
@@ -457,6 +477,8 @@ pub fn moderator_brief(session: &Session, round: RoundNo, reply_path: &Path) -> 
              - {}\n\
              - conclusion: your answer to the topic, deciding it yourself where the panel \
              did not agree; it ends the discussion. Required in the last round\n\
+             - round_limit: a new round limit, only as section 6 allows; it replaces the \
+             current one for the rest of the discussion\n\
              - close: true ends the discussion and needs a \"conclusion\"\n",
                 reply_path.display(),
                 optional,
@@ -719,6 +741,7 @@ mod tests {
                     propose_debate: None,
                     verdict: None,
                     conclusion: None,
+                    round_limit: None,
                     close: false,
                 },
             }],

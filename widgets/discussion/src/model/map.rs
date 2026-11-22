@@ -262,6 +262,7 @@ mod tests {
                         propose_debate: None,
                         verdict: None,
                         conclusion: None,
+                        round_limit: None,
                         close: false,
                     },
                 },

@@ -611,6 +611,10 @@ pub struct ModeratorOutput {
     /// whenever `close` is set.
     #[serde(default)]
     pub conclusion: Option<String>,
+    /// The new round limit, when the moderator moved it because the
+    /// discussion could not converge in the rounds left.
+    #[serde(default)]
+    pub round_limit: Option<RoundNo>,
     pub close: bool,
 }
 
@@ -624,6 +628,10 @@ pub struct Session {
     /// The most rounds the discussion runs; after the last one it closes.
     /// `None`: no limit (logs written before limits existed).
     pub max_rounds: Option<RoundNo>,
+    /// The limit the user set. The moderator may move `max_rounds`, but
+    /// never past [`Session::round_limit_cap`].
+    #[serde(default)]
+    pub user_max_rounds: Option<RoundNo>,
     /// Bumped once per applied event batch.
     pub rev: u64,
     pub created_at: Millis,
@@ -638,6 +646,11 @@ pub struct Session {
 }
 
 impl Session {
+    /// The highest round limit the moderator may set: twice the user's.
+    pub fn round_limit_cap(&self) -> Option<RoundNo> {
+        self.user_max_rounds.map(|max| max.saturating_mul(2))
+    }
+
     pub fn participant(&self, id: &PartId) -> Option<&Participant> {
         std::iter::once(&self.moderator)
             .chain(&self.panelists)

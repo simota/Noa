@@ -991,7 +991,12 @@ impl Engine {
             message(
                 MsgKind::Summary,
                 touched,
-                output.summary.clone(),
+                match (self.session.max_rounds, output.round_limit) {
+                    (Some(old), Some(new)) if old != new => {
+                        format!("{}\n\nRound limit: {old} → {new}.", output.summary)
+                    }
+                    _ => output.summary.clone(),
+                },
                 &self.session,
             ),
         ];
@@ -2070,6 +2075,58 @@ mod tests {
         run_panel(&mut e, 3);
         moderate(&mut e, r#"{"summary":"two"}"#, 4);
         assert!(panelist(&e).contains("This is the last round"));
+    }
+
+    #[test]
+    fn the_moderator_may_raise_the_limit_up_to_twice_the_users() {
+        let mut e = engine_with_max_rounds(Some(1));
+        feed(&mut e, Input::Start { now: 0 });
+        run_panel(&mut e, 1);
+        let brief = &round(&e).moderator_brief.as_ref().unwrap().body;
+        assert!(brief.contains("raise it (at most 2)"));
+        moderate(&mut e, r#"{"summary":"far apart","round_limit":3}"#, 2);
+        assert!(!e.session().closed, "above the cap: turned down");
+        assert_eq!(e.session().max_rounds, Some(1));
+        // Raised in the last round, it is no longer the last: no conclusion due.
+        write(
+            &mut e,
+            &p(MODERATOR_ID),
+            r#"{"summary":"far apart","round_limit":2}"#,
+            3,
+        );
+        assert_eq!(e.session().max_rounds, Some(2));
+        assert_eq!(no(&e), 2, "the next round runs");
+        assert!(
+            e.session()
+                .messages
+                .iter()
+                .any(|m| m.kind == MsgKind::Summary && m.body.ends_with("Round limit: 1 → 2."))
+        );
+        run_panel(&mut e, 4);
+        let brief = &round(&e).moderator_brief.as_ref().unwrap().body;
+        assert!(brief.contains("LAST round"));
+        assert!(!brief.contains("raise it"), "the cap is reached");
+        moderate(&mut e, r#"{"summary":"two","conclusion":"Postgres."}"#, 5);
+        assert!(e.session().closed);
+        assert_eq!(e.session().rounds.len(), 2);
+    }
+
+    #[test]
+    fn lowering_the_limit_to_this_round_needs_the_conclusion_now() {
+        let mut e = engine_with_max_rounds(Some(5));
+        feed(&mut e, Input::Start { now: 0 });
+        run_panel(&mut e, 1);
+        moderate(&mut e, r#"{"summary":"stuck","round_limit":1}"#, 2);
+        assert!(!e.session().closed, "no conclusion: turned down");
+        assert_eq!(e.session().max_rounds, Some(5));
+        write(
+            &mut e,
+            &p(MODERATOR_ID),
+            r#"{"summary":"stuck","round_limit":1,"conclusion":"SQLite."}"#,
+            3,
+        );
+        assert!(e.session().closed);
+        assert_eq!(e.session().max_rounds, Some(1));
     }
 
     #[test]

@@ -991,7 +991,12 @@ impl Engine {
             message(
                 MsgKind::Summary,
                 touched,
-                output.summary.clone(),
+                match (self.session.max_rounds, output.round_limit) {
+                    (Some(old), Some(new)) if old != new => {
+                        format!("{}\n\nRound limit: {old} → {new}.", output.summary)
+                    }
+                    _ => output.summary.clone(),
+                },
                 &self.session,
             ),
         ];
@@ -1009,6 +1014,14 @@ impl Engine {
                 verdict: verdict.clone(),
             });
         }
+        if let Some(conclusion) = &output.conclusion {
+            batch.push(message(
+                MsgKind::Conclusion,
+                Vec::new(),
+                conclusion.clone(),
+                &self.session,
+            ));
+        }
         if let Some(proposal) = &output.propose_debate {
             batch.push(Event::DebateProposed {
                 issue: proposal.issue.clone(),
@@ -1022,7 +1035,8 @@ impl Engine {
             round,
             phase: Phase::Closed,
         });
-        if output.close {
+        // A conclusion is the moderator's last word: it ends the discussion.
+        if output.close || output.conclusion.is_some() {
             batch.push(Event::SessionClosed);
         }
         self.commit(out, batch)?;
@@ -1999,7 +2013,7 @@ mod tests {
         moderate(&mut e, r#"{"summary":"one"}"#, 2);
         assert_eq!(no(&e), 2);
         run_panel(&mut e, 3);
-        let out = moderate(&mut e, r#"{"summary":"two"}"#, 4);
+        let out = moderate(&mut e, r#"{"summary":"two","conclusion":"Use SQLite."}"#, 4);
         assert!(e.session().closed);
         assert_eq!(e.session().rounds.len(), 2, "no third round");
         assert!(sends(&out).is_empty());
@@ -2009,10 +2023,14 @@ mod tests {
     }
 
     #[test]
-    fn a_debate_proposed_in_the_last_round_does_not_keep_the_discussion_open() {
+    fn the_last_round_must_end_in_the_moderators_conclusion() {
         let mut e = engine_with_max_rounds(Some(1));
         feed(&mut e, Input::Start { now: 0 });
         run_panel(&mut e, 1);
+        let brief = &round(&e).moderator_brief.as_ref().unwrap().body;
+        assert!(brief.contains("LAST round"));
+        assert!(brief.contains("\"conclusion\": \"…\""));
+        // No conclusion, and a debate there is no round left for: turned down.
         moderate(
             &mut e,
             r#"{"summary":"split",
@@ -2021,7 +2039,118 @@ mod tests {
                 "propose_debate":{"issue":"A","pro":["claude"],"con":["codex"]}}"#,
             2,
         );
-        assert!(e.session().closed, "the last round is over");
+        assert!(!e.session().closed);
+        assert!(e.session().debates.is_empty());
+        let note = round(&e).moderator_brief.as_ref().unwrap();
+        assert!(note.receipt.replied.is_none(), "still waits for a fix");
+        // The panel never agreed: the moderator decides.
+        write(
+            &mut e,
+            &p(MODERATOR_ID),
+            r#"{"summary":"split","conclusion":"Postgres: the ops cost is worth it."}"#,
+            3,
+        );
+        assert!(e.session().closed);
+        assert_eq!(e.session().rounds.len(), 1);
+        let last = e.session().messages.last().unwrap();
+        assert_eq!(last.kind, MsgKind::Conclusion);
+        assert_eq!(last.body, "Postgres: the ops cost is worth it.");
+    }
+
+    #[test]
+    fn briefs_count_down_the_rounds_left() {
+        let mut e = engine_with_max_rounds(Some(3));
+        feed(&mut e, Input::Start { now: 0 });
+        let panelist = |e: &Engine| round(e).brief(&p("claude")).unwrap().body.clone();
+        assert!(panelist(&e).contains("2 rounds are left after this one"));
+        run_panel(&mut e, 1);
+        let moderator = round(&e).moderator_brief.as_ref().unwrap().body.clone();
+        assert!(moderator.contains("2 rounds are left after this one"));
+        assert!(
+            !moderator.contains("\"conclusion\": \"…\""),
+            "not asked for yet"
+        );
+        moderate(&mut e, r#"{"summary":"one"}"#, 2);
+        assert!(panelist(&e).contains("One round is left after this one"));
+        run_panel(&mut e, 3);
+        moderate(&mut e, r#"{"summary":"two"}"#, 4);
+        assert!(panelist(&e).contains("This is the last round"));
+    }
+
+    #[test]
+    fn the_moderator_may_raise_the_limit_up_to_twice_the_users() {
+        let mut e = engine_with_max_rounds(Some(1));
+        feed(&mut e, Input::Start { now: 0 });
+        run_panel(&mut e, 1);
+        let brief = &round(&e).moderator_brief.as_ref().unwrap().body;
+        assert!(brief.contains("raise it (at most 2)"));
+        assert!(brief.contains("unless you raise \"round_limit\""));
+        assert!(brief.contains("leave \"conclusion\" out if you raise"));
+        // Raising the limit and concluding at once would skip the new rounds.
+        moderate(
+            &mut e,
+            r#"{"summary":"far apart","round_limit":2,"conclusion":"undecided"}"#,
+            2,
+        );
+        assert!(!e.session().closed, "contradictory: turned down");
+        assert_eq!(e.session().max_rounds, Some(1));
+        write(
+            &mut e,
+            &p(MODERATOR_ID),
+            r#"{"summary":"far apart","round_limit":3}"#,
+            2,
+        );
+        assert!(!e.session().closed, "above the cap: turned down");
+        assert_eq!(e.session().max_rounds, Some(1));
+        // Raised in the last round, it is no longer the last: no conclusion due.
+        write(
+            &mut e,
+            &p(MODERATOR_ID),
+            r#"{"summary":"far apart","round_limit":2}"#,
+            3,
+        );
+        assert_eq!(e.session().max_rounds, Some(2));
+        assert_eq!(no(&e), 2, "the next round runs");
+        assert!(
+            e.session()
+                .messages
+                .iter()
+                .any(|m| m.kind == MsgKind::Summary && m.body.ends_with("Round limit: 1 → 2."))
+        );
+        run_panel(&mut e, 4);
+        let brief = &round(&e).moderator_brief.as_ref().unwrap().body;
+        assert!(brief.contains("LAST round"));
+        assert!(!brief.contains("raise it"), "the cap is reached");
+        moderate(&mut e, r#"{"summary":"two","conclusion":"Postgres."}"#, 5);
+        assert!(e.session().closed);
+        assert_eq!(e.session().rounds.len(), 2);
+    }
+
+    #[test]
+    fn lowering_the_limit_to_this_round_needs_the_conclusion_now() {
+        let mut e = engine_with_max_rounds(Some(5));
+        feed(&mut e, Input::Start { now: 0 });
+        run_panel(&mut e, 1);
+        moderate(&mut e, r#"{"summary":"stuck","round_limit":1}"#, 2);
+        assert!(!e.session().closed, "no conclusion: turned down");
+        assert_eq!(e.session().max_rounds, Some(5));
+        write(
+            &mut e,
+            &p(MODERATOR_ID),
+            r#"{"summary":"stuck","round_limit":1,"conclusion":"SQLite."}"#,
+            3,
+        );
+        assert!(e.session().closed);
+        assert_eq!(e.session().max_rounds, Some(1));
+    }
+
+    #[test]
+    fn an_early_conclusion_ends_the_discussion() {
+        let mut e = engine_with_max_rounds(Some(5));
+        feed(&mut e, Input::Start { now: 0 });
+        run_panel(&mut e, 1);
+        moderate(&mut e, r#"{"summary":"agreed","conclusion":"SQLite."}"#, 2);
+        assert!(e.session().closed);
         assert_eq!(e.session().rounds.len(), 1);
     }
 
@@ -2221,7 +2350,17 @@ mod tests {
         let mut e = engine();
         feed(&mut e, Input::Start { now: 0 });
         run_panel(&mut e, 1);
-        let out = moderate(&mut e, r#"{"summary":"bye","close":true}"#, 2);
+        moderate(&mut e, r#"{"summary":"bye","close":true}"#, 2);
+        assert!(
+            !e.session().closed,
+            "close without a conclusion is turned down"
+        );
+        let out = write(
+            &mut e,
+            &p(MODERATOR_ID),
+            r#"{"summary":"bye","close":true,"conclusion":"done"}"#,
+            2,
+        );
         assert!(e.session().closed);
         assert!(sends(&out).is_empty());
         assert_eq!(no(&e), 1);

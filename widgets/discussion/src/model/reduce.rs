@@ -160,6 +160,7 @@ pub fn create(batch: &[Event]) -> Result<Session, ReduceError> {
         topic: topic.clone(),
         workdir: workdir.clone(),
         max_rounds: *max_rounds,
+        user_max_rounds: *max_rounds,
         rev: 1,
         created_at: *at,
         moderator: moderator.clone(),
@@ -350,6 +351,9 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
                     since: *round,
                     rev,
                 });
+            }
+            if let Some(limit) = output.round_limit {
+                session.max_rounds = Some(limit);
             }
             round_mut(session, *round)?.outcome = Some(output.clone());
         }

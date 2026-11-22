@@ -67,6 +67,10 @@ struct RawOutput {
     #[serde(default)]
     verdict: Option<RawVerdict>,
     #[serde(default)]
+    conclusion: Option<String>,
+    #[serde(default)]
+    round_limit: Option<RoundNo>,
+    #[serde(default)]
     close: bool,
 }
 
@@ -304,10 +308,39 @@ pub fn parse_moderator(
         }
     }
 
+    let round_limit = raw.round_limit.filter(|&limit| {
+        let before = problems.len();
+        match (session.max_rounds, session.round_limit_cap()) {
+            (Some(_), Some(cap)) => {
+                if limit < round {
+                    problems.push(format!(
+                        "round_limit: {limit} is below this round ({round})"
+                    ));
+                } else if limit > cap {
+                    problems.push(format!(
+                        "round_limit: {limit} is above the most allowed ({cap})"
+                    ));
+                }
+            }
+            _ => problems.push("round_limit: this discussion has no round limit".to_owned()),
+        }
+        problems.len() == before
+    });
+    // The discussion's last round (under the limit as this output leaves
+    // it): nothing can run after it, so it must end in the moderator's
+    // conclusion (and a debate held in it, in a verdict).
+    let last = round_limit
+        .or(session.max_rounds)
+        .is_some_and(|max| round >= max);
     let debate = this_round.debate().and_then(|id| session.debate(id));
     let propose_debate = raw.propose_debate.and_then(|proposal| {
         let before = problems.len();
-        if debate.is_some() {
+        if last {
+            problems.push(
+                "propose_debate: not allowed in the last round, no round is left to hold it"
+                    .to_owned(),
+            );
+        } else if debate.is_some() {
             problems.push("propose_debate: not allowed during a debate round".to_owned());
         } else if session.debates.iter().any(|d| {
             matches!(d.status, DebateStatus::Proposed | DebateStatus::Approved)
@@ -377,11 +410,42 @@ pub fn parse_moderator(
                     "verdict: required, this was the last of {} exchanges of debate {}",
                     debate.max_exchanges, debate.id
                 ));
+            } else if last {
+                problems.push(format!(
+                    "verdict: required, debate {} cannot go on after the last round",
+                    debate.id
+                ));
             }
             None
         }
         (None, None) => None,
     };
+
+    let conclusion = raw
+        .conclusion
+        .map(|c| c.trim().to_owned())
+        .filter(|c| !c.is_empty());
+    if conclusion.is_none() && (last || raw.close) {
+        let why = if last {
+            "this is the last round"
+        } else {
+            "\"close\" is true"
+        };
+        problems.push(format!(
+            "conclusion: required, {why}; give your answer to the topic, deciding it \
+             yourself where the panel did not agree"
+        ));
+    }
+    // A conclusion ends the discussion: rounds left under a new limit would
+    // never run.
+    if let (Some(_), Some(limit)) = (&conclusion, round_limit)
+        && limit > round
+    {
+        problems.push(format!(
+            "conclusion: leave it out when round_limit ({limit}) leaves rounds after this one \
+             ({round}); a conclusion ends the discussion"
+        ));
+    }
 
     if !problems.is_empty() {
         return Err(ValidationError { problems });
@@ -393,6 +457,8 @@ pub fn parse_moderator(
         questions,
         propose_debate,
         verdict,
+        conclusion,
+        round_limit,
         close: raw.close,
     })
 }

@@ -261,6 +261,8 @@ mod tests {
                         questions: Default::default(),
                         propose_debate: None,
                         verdict: None,
+                        conclusion: None,
+                        round_limit: None,
                         close: false,
                     },
                 },

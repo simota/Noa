@@ -43,6 +43,7 @@ fn kind_name(kind: MsgKind) -> &'static str {
         MsgKind::Intervention => "介入",
         MsgKind::Argument => "主張",
         MsgKind::Verdict => "判定",
+        MsgKind::Conclusion => "結論",
     }
 }
 
@@ -73,6 +74,20 @@ pub fn result_markdown(session: &Session) -> String {
     );
     if let Some(workdir) = &session.workdir {
         let _ = writeln!(out, "- 作業ディレクトリ: {}", workdir.display());
+    }
+
+    if let Some(conclusion) = session
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.kind == MsgKind::Conclusion)
+    {
+        let _ = writeln!(
+            out,
+            "\n## 結論\n\n{}（R{}）",
+            conclusion.body.trim(),
+            conclusion.round
+        );
     }
 
     out.push_str("\n## 最新の要約\n\n");

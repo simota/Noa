@@ -1831,7 +1831,7 @@ dependencies = [
 
 [[package]]
 name = "noa-config"
-version = "0.9.10"
+version = "0.9.11"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1840,7 +1840,7 @@ dependencies = [
 
 [[package]]
 name = "noa-core"
-version = "0.9.10"
+version = "0.9.11"
 dependencies = [
  "bitflags 2.13.2",
 ]
@@ -1927,7 +1927,7 @@ dependencies = [
 
 [[package]]
 name = "noa-ipc"
-version = "0.9.10"
+version = "0.9.11"
 dependencies = [
  "crossbeam-channel",
  "libc",

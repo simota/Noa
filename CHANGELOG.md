@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.11] - 2026-11-22
+
+A moderated discussion window where agent panelists debate a topic in panes.
+
 ### Added
 
 - View > Discussion (and the command palette's Open Discussion) opens the

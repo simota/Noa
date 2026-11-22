@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after its pane closes. It predicts which files would conflict when a
   branch is merged into the base (`git merge-tree`, git 2.38 or later) and
   marks them ⛔マージ衝突. The filter takes `no-pane` and `merge-conflict`.
+- The repo browser lists each worktree's commits beyond `main`/`master` in a
+  new "コミット" tab (also in the command palette as "コミット: <sha>
+  <subject>"), so a finished agent's branch can be reviewed commit by commit:
+  choosing one shows its full diff, and a quote from it is headed by the
+  commit's short sha.
 
 ### Changed
 

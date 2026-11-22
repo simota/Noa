@@ -66,6 +66,55 @@ pub struct ChangedFile {
     pub conflict_worktrees: Vec<String>,
 }
 
+/// One commit of a worktree's branch beyond its base branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitInfo {
+    pub sha: String,
+    pub short: String,
+    pub subject: String,
+    pub author: String,
+    /// Author-independent commit time, seconds since the Unix epoch.
+    pub time: i64,
+    /// Files the commit changes.
+    pub files: usize,
+    /// The full `git show` text when it is already known (demo data); empty
+    /// for live commits, whose diff is loaded on demand.
+    pub diff: String,
+}
+
+impl CommitInfo {
+    /// "a1b2c3d 件名" — the commit's one-line title.
+    pub fn title(&self) -> String {
+        format!("{} {}", self.short, self.subject)
+    }
+
+    /// "作者 · 3時間前 · 4 files" — the line under the title.
+    pub fn detail(&self, now: i64) -> String {
+        format!(
+            "{} · {} · {} files",
+            self.author,
+            relative_age(self.time, now),
+            self.files
+        )
+    }
+}
+
+/// How long before `now` a commit made at `time` was, in Japanese ("3時間前").
+pub fn relative_age(time: i64, now: i64) -> String {
+    let secs = now - time;
+    if secs < 60 {
+        return "たった今".into();
+    }
+    let (n, unit) = match secs {
+        s if s < 3600 => (s / 60, "分"),
+        s if s < 86_400 => (s / 3600, "時間"),
+        s if s < 86_400 * 30 => (s / 86_400, "日"),
+        s if s < 86_400 * 365 => (s / (86_400 * 30), "か月"),
+        s => (s / (86_400 * 365), "年"),
+    };
+    format!("{n}{unit}前")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Worktree {
     pub name: String,
@@ -80,6 +129,8 @@ pub struct Worktree {
     /// Paths `git merge-tree` predicts would conflict when this branch is
     /// merged into the base; empty when clean or unknown.
     pub merge_conflicts: Vec<String>,
+    /// Commits on HEAD that the base branch lacks, newest first.
+    pub commits: Vec<CommitInfo>,
     /// Why `files` may be empty for a reason other than "no changes".
     pub note: Option<String>,
 }
@@ -299,6 +350,148 @@ pub fn group_repos(entries: Vec<(String, String, Worktree)>) -> RepoData {
     data
 }
 
+pub fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+fn demo_commit(sha: &str, subject: &str, age_secs: i64, files: usize, body: &str) -> CommitInfo {
+    let time = now_secs() - age_secs;
+    let short = &sha[..7];
+    CommitInfo {
+        sha: sha.into(),
+        short: short.into(),
+        subject: subject.into(),
+        author: "worker".into(),
+        time,
+        files,
+        diff: format!(
+            "commit {sha}\n\
+             Author:     worker <worker@example.com>\n\
+             AuthorDate: {subject_date}\n\
+             Commit:     worker <worker@example.com>\n\
+             CommitDate: {subject_date}\n\
+             \n    {subject}\n\n{body}",
+            subject_date = "Sun Nov 22 14:02:11 2026 +0900",
+        ),
+    }
+}
+
+fn demo_commits_subs() -> Vec<CommitInfo> {
+    vec![
+        demo_commit(
+            "c3d4e5f60718293a4b5c6d7e8f9012345678abcd",
+            "feat(ipc): drop removed panes from subscriber deltas",
+            25 * 60,
+            2,
+            "diff --git a/crates/noa-ipc/src/push.rs b/crates/noa-ipc/src/push.rs\n\
+             index 41a9e12..8b2c091 100644\n\
+             --- a/crates/noa-ipc/src/push.rs\n\
+             +++ b/crates/noa-ipc/src/push.rs\n\
+             @@ -112,9 +112,12 @@ impl Broadcaster {\n\
+              pub fn broadcast_state_delta(\n\
+                  &self,\n\
+             -    changed: Vec<Panel>,\n\
+             +    changed: Vec<ChangedPanel>,\n\
+             +    removed: Vec<u64>,\n\
+              ) {\n\
+                  let guard = self.inner.lock();\n\
+             +    guard.drop_removed(&removed);\n\
+             diff --git a/crates/noa-ipc/src/protocol.rs b/crates/noa-ipc/src/protocol.rs\n\
+             --- a/crates/noa-ipc/src/protocol.rs\n\
+             +++ b/crates/noa-ipc/src/protocol.rs\n\
+             @@ -640,6 +640,8 @@ pub struct StateChangedParams {\n\
+              pub panels: Vec<Panel>,\n\
+             +#[serde(default, skip_serializing_if = \"Vec::is_empty\")]\n\
+             +pub removed_pane_ids: Vec<WireId>,\n\
+              pub dropped: bool,\n",
+        ),
+        demo_commit(
+            "b2c3d4e5f60718293a4b5c6d7e8f9012345678ab",
+            "test(ipc): cover FieldMask filtering",
+            2 * 3600,
+            1,
+            "diff --git a/crates/noa-ipc/tests/push.rs b/crates/noa-ipc/tests/push.rs\n\
+             new file mode 100644\n\
+             --- /dev/null\n\
+             +++ b/crates/noa-ipc/tests/push.rs\n\
+             @@ -0,0 +1,6 @@\n\
+             +#[test]\n\
+             +fn field_mask_hides_unsubscribed_fields() {\n\
+             +    let mask = FieldMask::parse(\"name,cwd\").unwrap();\n\
+             +    assert!(mask.allows(\"cwd\"));\n\
+             +    assert!(!mask.allows(\"preview\"));\n\
+             +}\n",
+        ),
+        demo_commit(
+            "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+            "feat(ipc): add FieldMask to subscriptions",
+            5 * 3600,
+            3,
+            "diff --git a/crates/noa-ipc/src/mask.rs b/crates/noa-ipc/src/mask.rs\n\
+             new file mode 100644\n\
+             --- /dev/null\n\
+             +++ b/crates/noa-ipc/src/mask.rs\n\
+             @@ -0,0 +1,5 @@\n\
+             +pub struct FieldMask(HashSet<String>);\n\
+             +impl FieldMask {\n\
+             +    pub fn allows(&self, field: &str) -> bool {\n\
+             +        self.0.is_empty() || self.0.contains(field)\n\
+             +    }\n",
+        ),
+    ]
+}
+
+fn demo_commits_reconnect() -> Vec<CommitInfo> {
+    vec![demo_commit(
+        "d4e5f60718293a4b5c6d7e8f9012345678abcdef",
+        "fix(ipc): reconnect with backoff after a dropped link",
+        50 * 60,
+        2,
+        "diff --git a/crates/noa-ipc/src/client.rs b/crates/noa-ipc/src/client.rs\n\
+         --- a/crates/noa-ipc/src/client.rs\n\
+         +++ b/crates/noa-ipc/src/client.rs\n\
+         @@ -288,6 +288,9 @@ impl Client {\n\
+         +    pub fn reconnect_with_backoff(&mut self) -> Result<(), ClientError> {\n\
+         +        self.reset_pending();\n\
+         +        self.handshake()\n\
+         +    }\n",
+    )]
+}
+
+fn demo_commits_gpui() -> Vec<CommitInfo> {
+    vec![
+        demo_commit(
+            "e5f60718293a4b5c6d7e8f9012345678abcdef01",
+            "feat(log-view): colour diff lines by prefix",
+            3 * 86_400,
+            1,
+            "diff --git a/crates/ui-core/src/widgets/log_view.rs b/crates/ui-core/src/widgets/log_view.rs\n\
+             new file mode 100644\n\
+             --- /dev/null\n\
+             +++ b/crates/ui-core/src/widgets/log_view.rs\n\
+             @@ -0,0 +1,4 @@\n\
+             +pub fn highlight_diff_line(line: &str) -> Option<Color> {\n\
+             +    if line.starts_with('+') { Some(Color::rgb(0.25, 0.82, 0.45)) } else { None }\n\
+             +}\n",
+        ),
+        demo_commit(
+            "f60718293a4b5c6d7e8f9012345678abcdef0123",
+            "chore: scaffold the diff-highlight widget",
+            4 * 86_400,
+            2,
+            "diff --git a/crates/ui-core/src/widgets/mod.rs b/crates/ui-core/src/widgets/mod.rs\n\
+             --- a/crates/ui-core/src/widgets/mod.rs\n\
+             +++ b/crates/ui-core/src/widgets/mod.rs\n\
+             @@ -10,3 +10,4 @@\n\
+              pub mod label;\n\
+             +pub mod log_view;\n\
+              pub mod panel;\n",
+        ),
+    ]
+}
+
 pub fn demo_data(mode: DiffMode) -> RepoData {
     let suffix = match mode {
         DiffMode::Unstaged => "",
@@ -352,6 +545,7 @@ pub fn demo_data(mode: DiffMode) -> RepoData {
                                         .into(),
                             },
                         ],
+                        commits: demo_commits_subs(),
                         files: vec![
                             ChangedFile {
                                 path: "crates/noa-ipc/src/push.rs".into(),
@@ -425,6 +619,7 @@ pub fn demo_data(mode: DiffMode) -> RepoData {
                                 \x1b[33m? Approve running `cargo test -p noa-ipc`? [y/N]\x1b[0m\r\n"
                                 .into(),
                         }],
+                        commits: demo_commits_reconnect(),
                         files: vec![
                             ChangedFile {
                                 path: "crates/noa-ipc/src/protocol.rs".into(),
@@ -472,6 +667,7 @@ pub fn demo_data(mode: DiffMode) -> RepoData {
                         behind: 1,
                         note: None,
                         merge_conflicts: Vec::new(),
+                        commits: Vec::new(),
                         panes: Vec::new(),
                         files: vec![ChangedFile {
                             path: "docs/specs/noa-server.md".into(),
@@ -513,6 +709,7 @@ pub fn demo_data(mode: DiffMode) -> RepoData {
                                  M docs/FEATURES.md\r\n"
                                 .into(),
                         }],
+                        commits: Vec::new(),
                         files: vec![ChangedFile {
                             path: "docs/FEATURES.md".into(),
                             status: "M".into(),
@@ -555,6 +752,7 @@ pub fn demo_data(mode: DiffMode) -> RepoData {
                             Ready for review.\r\n"
                             .into(),
                     }],
+                    commits: demo_commits_gpui(),
                     files: vec![ChangedFile {
                         path: "crates/ui-core/src/widgets/log_view.rs".into(),
                         status: "A".into(),
@@ -609,6 +807,7 @@ mod tests {
             note: None,
             merge_conflicts: Vec::new(),
             panes: Vec::new(),
+            commits: Vec::new(),
             files: vec![file("src/lib.rs")],
         };
         let mut data = RepoData {

@@ -35,6 +35,8 @@ pub struct Snapshot {
     pub can_send: bool,
     pub diff_mode: DiffMode,
     pub selected_diff: Option<(String, String, String)>,
+    /// (worktree cwd, commit sha, `git show` text) of the commit being viewed.
+    pub selected_commit: Option<(String, String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +46,11 @@ pub enum Command {
     LoadDiff {
         cwd: String,
         path: String,
+    },
+    /// Show one commit of the worktree instead of a file.
+    LoadCommit {
+        cwd: String,
+        sha: String,
     },
     Focus(u64),
     /// A new Noa tab whose shell starts in `cwd` (a worktree root).
@@ -108,6 +115,9 @@ fn run(
     let mut selected_file: Option<(String, String)> = None;
     // Outlives reconnects: merge-tree reruns only when a commit moves.
     let mut merges = git::MergePredictions::default();
+    let mut selected_commit: Option<(String, String)> = None;
+    let mut commit_diff: Option<((String, String), String)> = None;
+    let mut commit_cache = git::CommitCache::default();
 
     let _ = snapshot_tx.send(Snapshot {
         data: RepoData::default(),
@@ -116,6 +126,7 @@ fn run(
         can_send: false,
         diff_mode: mode,
         selected_diff: None,
+        selected_commit: None,
     });
     wake();
 
@@ -141,6 +152,11 @@ fn run(
                             }
                             Command::LoadDiff { cwd, path } => {
                                 selected_file = Some((cwd, path));
+                                selected_commit = None;
+                                dirty = true;
+                            }
+                            Command::LoadCommit { cwd, sha } => {
+                                selected_commit = Some((cwd, sha));
                                 dirty = true;
                             }
                             Command::Focus(pane_id) => {
@@ -223,9 +239,17 @@ fn run(
                     }
 
                     if dirty || last_refresh.elapsed() >= REFRESH_EVERY {
-                        match build_snapshot(&mut client, mode, selected_file.as_ref(), &mut merges)
-                        {
+                        let built = build_snapshot(
+                            &mut client,
+                            mode,
+                            selected_file.as_ref(),
+                            &mut merges,
+                            &mut commit_cache,
+                        );
+                        match built {
                             Ok((data, selected_diff)) => {
+                                let selected_commit =
+                                    commit_entry(&mut commit_diff, selected_commit.as_ref());
                                 if snapshot_tx
                                     .send(Snapshot {
                                         data,
@@ -234,6 +258,7 @@ fn run(
                                         can_send,
                                         diff_mode: mode,
                                         selected_diff,
+                                        selected_commit,
                                     })
                                     .is_err()
                                 {
@@ -251,6 +276,7 @@ fn run(
                                     can_send: false,
                                     diff_mode: mode,
                                     selected_diff: None,
+                                    selected_commit: None,
                                 });
                                 wake();
                                 break;
@@ -269,6 +295,7 @@ fn run(
                                 can_send: false,
                                 diff_mode: mode,
                                 selected_diff: None,
+                                selected_commit: None,
                             });
                             wake();
                             break;
@@ -285,6 +312,7 @@ fn run(
                         can_send: false,
                         diff_mode: mode,
                         selected_diff: None,
+                        selected_commit: None,
                     })
                     .is_err()
                 {
@@ -295,7 +323,11 @@ fn run(
                 while Instant::now() < until {
                     match command_rx.try_recv() {
                         Ok(Command::SetDiffMode(m)) => mode = m,
-                        Ok(Command::LoadDiff { cwd, path }) => selected_file = Some((cwd, path)),
+                        Ok(Command::LoadDiff { cwd, path }) => {
+                            selected_file = Some((cwd, path));
+                            selected_commit = None;
+                        }
+                        Ok(Command::LoadCommit { cwd, sha }) => selected_commit = Some((cwd, sha)),
                         Ok(Command::Refresh) => break,
                         Ok(_) => {}
                         Err(TryRecvError::Disconnected) => return,
@@ -416,12 +448,26 @@ type DiffEntry = (String, String, String);
 
 /// Worktrees by canonical root, with the panes whose cwd is inside each.
 type ByWorktree = HashMap<String, (git::WorktreeGitInfo, Vec<PaneSummary>)>;
+/// The `git show` entry for the viewed commit. A commit never changes, so its
+/// text is read once and kept until another commit is asked for.
+fn commit_entry(
+    memo: &mut Option<((String, String), String)>,
+    wanted: Option<&(String, String)>,
+) -> Option<DiffEntry> {
+    let wanted = wanted?;
+    if memo.as_ref().is_none_or(|(key, _)| key != wanted) {
+        *memo = Some((wanted.clone(), git::commit_diff(&wanted.0, &wanted.1)));
+    }
+    let (_, diff) = memo.as_ref()?;
+    Some((wanted.0.clone(), wanted.1.clone(), diff.clone()))
+}
 
 fn build_snapshot(
     client: &mut Client,
     mode: DiffMode,
     selected: Option<&(String, String)>,
     merges: &mut git::MergePredictions,
+    commit_cache: &mut git::CommitCache,
 ) -> Result<(RepoData, Option<DiffEntry>), ClientError> {
     let panels = client.list_panels()?;
     let mut by_worktree: ByWorktree = HashMap::new();
@@ -460,7 +506,7 @@ fn build_snapshot(
     }
 
     add_paneless_worktrees(&mut by_worktree, mode);
-    let data = repo_data(by_worktree, merges);
+    let data = repo_data(by_worktree, merges, commit_cache);
 
     let selected_diff = selected
         .map(|(cwd, path)| (cwd.clone(), path.clone(), git::file_diff(cwd, path, mode)))
@@ -508,7 +554,11 @@ fn add_paneless_worktrees(by_worktree: &mut ByWorktree, mode: DiffMode) {
 
 /// Groups the worktrees into repositories, each with its predicted merge
 /// conflicts against the base.
-fn repo_data(by_worktree: ByWorktree, merges: &mut git::MergePredictions) -> RepoData {
+fn repo_data(
+    by_worktree: ByWorktree,
+    merges: &mut git::MergePredictions,
+    commit_cache: &mut git::CommitCache,
+) -> RepoData {
     merges.retain(|root| by_worktree.contains_key(root));
     let entries = by_worktree
         .into_values()
@@ -516,6 +566,7 @@ fn repo_data(by_worktree: ByWorktree, merges: &mut git::MergePredictions) -> Rep
             let merge_conflicts = merges
                 .predict(&info.worktree_root, &info.branch)
                 .unwrap_or_default();
+            let commits = commit_cache.commits(&info.worktree_root);
             let wt = Worktree {
                 name: info.branch.clone(),
                 cwd: info.worktree_root,
@@ -526,6 +577,7 @@ fn repo_data(by_worktree: ByWorktree, merges: &mut git::MergePredictions) -> Rep
                 files: info.files,
                 note: info.note,
                 merge_conflicts,
+                commits,
             };
             (info.repo_name, info.repo_root, wt)
         })
@@ -680,7 +732,11 @@ mod tests {
         let mut by_worktree: ByWorktree = HashMap::new();
         by_worktree.insert(main.worktree_root.clone(), (main, vec![pane(7)]));
         add_paneless_worktrees(&mut by_worktree, DiffMode::Unstaged);
-        let data = repo_data(by_worktree, &mut git::MergePredictions::default());
+        let data = repo_data(
+            by_worktree,
+            &mut git::MergePredictions::default(),
+            &mut git::CommitCache::default(),
+        );
 
         assert_eq!(data.repos.len(), 1);
         let wts = &data.repos[0].worktrees;

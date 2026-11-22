@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::model::{ChangedFile, DiffMode};
+use crate::model::{ChangedFile, CommitInfo, DiffMode};
 
 #[derive(Debug, Clone)]
 pub struct WorktreeGitInfo {
@@ -342,6 +342,129 @@ fn merge_tree_conflicts(dir: &Path, base: &str, head: &str) -> Option<Vec<String
             )
         }
         _ => None,
+    }
+}
+
+/// At most this many commits are listed per worktree.
+pub const COMMIT_CAP: usize = 50;
+
+/// The commits on HEAD that the base branch lacks, newest first, capped at
+/// [`COMMIT_CAP`]. Empty when HEAD is on the base or there is no base.
+pub fn branch_commits(dir: &Path) -> Vec<CommitInfo> {
+    let Some(base) = base_ref(dir) else {
+        return Vec::new();
+    };
+    let range = format!("{base}..HEAD");
+    // `\x1e` opens each record, `\x1f` separates its fields; the file names
+    // `--name-only` prints after the header line are only counted.
+    let limit = COMMIT_CAP.to_string();
+    let out = run_git(
+        dir,
+        &[
+            "-c",
+            "log.showSignature=false",
+            "log",
+            "--no-color",
+            "-n",
+            &limit,
+            "--format=%x1e%H%x1f%h%x1f%an%x1f%ct%x1f%s",
+            "--name-only",
+            &range,
+        ],
+    )
+    .unwrap_or_default();
+    parse_commit_log(&out)
+}
+
+fn parse_commit_log(text: &str) -> Vec<CommitInfo> {
+    text.split('\x1e')
+        .filter_map(|record| {
+            let mut lines = record.lines();
+            let mut fields = lines.next()?.splitn(5, '\x1f');
+            let (sha, short, author, time, subject) = (
+                fields.next()?,
+                fields.next()?,
+                fields.next()?,
+                fields.next()?,
+                fields.next()?,
+            );
+            Some(CommitInfo {
+                sha: sha.to_owned(),
+                short: short.to_owned(),
+                subject: subject.to_owned(),
+                author: author.to_owned(),
+                time: time.parse().unwrap_or(0),
+                files: lines.filter(|l| !l.is_empty()).count(),
+                diff: String::new(),
+            })
+        })
+        .collect()
+}
+
+/// Per-worktree memo of [`branch_commits`], so the periodic refresh re-reads
+/// the log only when HEAD or the base branch moved.
+#[derive(Default)]
+pub struct CommitCache {
+    /// worktree root -> ("<HEAD sha> <base sha>", its commits)
+    entries: std::collections::HashMap<String, (String, Vec<CommitInfo>)>,
+    /// How many times the log was actually read.
+    #[cfg(test)]
+    reads: usize,
+}
+
+impl CommitCache {
+    pub fn commits(&mut self, worktree_root: &str) -> Vec<CommitInfo> {
+        let dir = Path::new(worktree_root);
+        let sha_of = |rev: &str| {
+            run_git(dir, &["rev-parse", "--verify", "--quiet", rev])
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+        };
+        let key = base_ref(dir)
+            .and_then(|base| sha_of(&base))
+            .zip(sha_of("HEAD"))
+            .map(|(base, head)| format!("{head} {base}"));
+        let Some(key) = key else {
+            self.entries.remove(worktree_root);
+            return Vec::new();
+        };
+        if let Some((cached, commits)) = self.entries.get(worktree_root)
+            && *cached == key
+        {
+            return commits.clone();
+        }
+        #[cfg(test)]
+        {
+            self.reads += 1;
+        }
+        let commits = branch_commits(dir);
+        self.entries
+            .insert(worktree_root.to_owned(), (key, commits.clone()));
+        commits
+    }
+}
+
+/// `git show` of one commit (header, message and patch), for the diff view.
+pub fn commit_diff(cwd: &str, sha: &str) -> String {
+    // The sha comes from our own listing; refuse anything else so it can
+    // never be read as an option.
+    if sha.is_empty() || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return format!("(不正なコミット指定: {sha})");
+    }
+    let args = [
+        "-c",
+        "log.showSignature=false",
+        "show",
+        "--format=fuller",
+        "--patch",
+        "--no-ext-diff",
+        "--no-color",
+        sha,
+        "--",
+    ];
+    match run_git(Path::new(cwd), &args) {
+        Some(out) if !out.trim().is_empty() => out,
+        _ => format!("(コミットを読めません: {sha})"),
     }
 }
 
@@ -973,5 +1096,97 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         commit_file(&wt, "more.rs", "x\n");
         predictions.predict(&root, "orch/foo");
         assert_eq!(predictions.runs, 3);
+    }
+
+    fn commit_msg_file(repo: &TempRepo, name: &str, body: &str, msg: &str) {
+        std::fs::write(repo.0.join(name), body).unwrap();
+        git(&repo.0, &["add", "."]);
+        git(&repo.0, &["commit", "-q", "-m", msg]);
+    }
+
+    #[test]
+    fn branch_commits_lists_newest_first_with_file_counts() {
+        let repo = temp_repo("commits", "main");
+        git(&repo.0, &["checkout", "-q", "-b", "feature"]);
+        commit_msg_file(&repo, "a.rs", "a\n", "first");
+        std::fs::write(repo.0.join("b.rs"), "b\n").unwrap();
+        std::fs::write(repo.0.join("old.rs"), "fn changed() {}\n").unwrap();
+        git(&repo.0, &["add", "."]);
+        git(&repo.0, &["commit", "-q", "-m", "second: two files"]);
+        let commits = branch_commits(&repo.0);
+        let subjects: Vec<&str> = commits.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(subjects, vec!["second: two files", "first"]);
+        assert_eq!(commits[0].files, 2);
+        assert_eq!(commits[1].files, 1);
+        assert_eq!(commits[0].author, "t");
+        assert!(commits[0].sha.starts_with(&commits[0].short));
+        assert!(commits[0].time >= commits[1].time && commits[1].time > 0);
+    }
+
+    #[test]
+    fn branch_commits_is_empty_on_the_base_or_without_one() {
+        let repo = temp_repo("on-base", "main");
+        commit_msg_file(&repo, "a.rs", "a\n", "on main");
+        assert!(branch_commits(&repo.0).is_empty());
+        let repo = temp_repo("no-base", "trunk");
+        git(&repo.0, &["checkout", "-q", "-b", "feature"]);
+        commit_msg_file(&repo, "a.rs", "a\n", "no base to compare");
+        assert!(branch_commits(&repo.0).is_empty());
+    }
+
+    #[test]
+    fn branch_commits_is_capped() {
+        let repo = temp_repo("cap", "main");
+        git(&repo.0, &["checkout", "-q", "-b", "feature"]);
+        for i in 0..COMMIT_CAP + 2 {
+            git(
+                &repo.0,
+                &["commit", "-q", "--allow-empty", "-m", &format!("c{i}")],
+            );
+        }
+        let commits = branch_commits(&repo.0);
+        assert_eq!(commits.len(), COMMIT_CAP);
+        assert_eq!(commits[0].subject, format!("c{}", COMMIT_CAP + 1));
+        assert_eq!(commits[0].files, 0);
+    }
+
+    #[test]
+    fn commit_cache_rereads_only_when_head_or_base_moves() {
+        let repo = temp_repo("cache", "main");
+        git(&repo.0, &["checkout", "-q", "-b", "feature"]);
+        commit_msg_file(&repo, "a.rs", "a\n", "one");
+        let root = cwd(&repo);
+        let mut cache = CommitCache::default();
+        assert_eq!(cache.commits(root).len(), 1);
+        assert_eq!(cache.commits(root).len(), 1);
+        assert_eq!(cache.reads, 1);
+        // An unstaged edit moves neither HEAD nor the base.
+        std::fs::write(repo.0.join("a.rs"), "changed\n").unwrap();
+        assert_eq!(cache.commits(root).len(), 1);
+        assert_eq!(cache.reads, 1);
+        git(&repo.0, &["commit", "-q", "-am", "two"]);
+        assert_eq!(cache.commits(root).len(), 2);
+        assert_eq!(cache.reads, 2);
+        // The base moving (here: main gains a commit) changes the list too.
+        git(&repo.0, &["checkout", "-q", "main"]);
+        commit_msg_file(&repo, "m.rs", "m\n", "main moves");
+        git(&repo.0, &["checkout", "-q", "feature"]);
+        assert_eq!(cache.commits(root).len(), 2);
+        assert_eq!(cache.reads, 3);
+    }
+
+    #[test]
+    fn commit_diff_shows_the_fuller_header_and_patch() {
+        let repo = temp_repo("show", "main");
+        git(&repo.0, &["checkout", "-q", "-b", "feature"]);
+        commit_msg_file(&repo, "a.rs", "fn shown() {}\n", "add shown");
+        let commits = branch_commits(&repo.0);
+        let diff = commit_diff(cwd(&repo), &commits[0].sha);
+        assert!(diff.contains("AuthorDate:"), "{diff}");
+        assert!(diff.contains("add shown"), "{diff}");
+        assert!(diff.lines().any(|l| l == "+fn shown() {}"), "{diff}");
+        assert!(!diff.contains('\x1b'), "{diff:?}");
+        assert!(commit_diff(cwd(&repo), "--output=x").starts_with("(不正なコミット指定"));
+        assert!(commit_diff(cwd(&repo), "deadbeef").starts_with("(コミットを読めません"));
     }
 }

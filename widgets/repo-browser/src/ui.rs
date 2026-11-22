@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -9,9 +10,10 @@ use noa_gpui_core::widgets::{
     Badge, BrowserPathChanged, BrowserView, Button, ButtonClicked, COMMAND_PALETTE_SHORTCUTS,
     ComboButton, CommandChosen, CommandPalette, Container, ControlSize, EmptyState, FIND_SHORTCUT,
     FileDropZone, FilesDropped, FindBar, Kbd, Label, LogLine, LogView, MenuChosen, MenuItem,
-    OutlineItem, PaletteCommand, PathControl, PathItemClicked, RecentCommands, ScrollView,
-    SegmentMode, SegmentedControl, SelectionChanged, SplitPane, SplitView, StatusBar, TabView,
-    Terminal, TextArea, Toast, TokenField, TokensChanged, Tone, Truncation, drive_find,
+    OutlineItem, PaletteCommand, PathControl, PathItemClicked, RecentCommands, RowSelectionChanged,
+    ScrollView, SegmentMode, SegmentedControl, SelectionChanged, SelectionMode, SplitPane,
+    SplitView, StatusBar, TABLE_HEADER, TabView, TableColumn, TableData, TableView, Terminal,
+    TextArea, Toast, TokenField, TokensChanged, Tone, Truncation, drive_find,
 };
 use noa_gpui_core::{Message, Role, Shortcut, ShortcutPressed, Style, Theme, UiTree, WidgetId};
 use noa_gpui_platform::Screen;
@@ -20,7 +22,8 @@ use noa_gpui_text::TextStore;
 
 use crate::live::{Channel, Command, Link, Snapshot};
 use crate::model::{
-    AgentActivity, ChangedFile, DiffMode, PaneSummary, Repo, RepoData, Worktree, demo_data,
+    AgentActivity, ChangedFile, CommitInfo, DiffMode, PaneSummary, Repo, RepoData, Worktree,
+    demo_data, now_secs,
 };
 
 const DIFF_ADD_FG: Color = Color::rgba(0.45, 0.90, 0.56, 1.0);
@@ -38,6 +41,12 @@ enum PaletteAction {
         root: String,
         cwd: String,
         path: String,
+    },
+    /// Resolved when chosen, like `SelectFile`.
+    SelectCommit {
+        root: String,
+        cwd: String,
+        sha: String,
     },
     FocusPane(u64),
     /// Resolved against the selection when chosen.
@@ -91,6 +100,16 @@ pub struct RepoBrowser {
     /// The diff body the log view holds, so an unchanged refresh keeps its
     /// scroll position and line selection.
     shown_diff: Option<String>,
+    /// The commit (worktree cwd, sha) whose diff the diff view shows instead of
+    /// a file's; `None` while a file is shown.
+    sel_commit: Option<(String, String)>,
+    /// `git show` text of commits already loaded, by (worktree cwd, sha).
+    /// A commit never changes, so entries stay valid across refreshes.
+    commit_diffs: HashMap<(String, String), String>,
+    /// The commit the live feed was last asked to load.
+    requested_commit: Option<(String, String)>,
+    /// What the commit table holds: its rows and the sha selected in it.
+    shown_commits: Option<CommitTableState>,
     /// The line-number gutter in front of each line of `shown_diff`, when it
     /// is a unified diff.
     gutter: Option<Gutter>,
@@ -124,6 +143,8 @@ pub struct RepoBrowser {
     drop_zone: WidgetId,
     side_tabs: WidgetId,
     terminal: WidgetId,
+    commit_head: WidgetId,
+    commit_table: WidgetId,
     quote_btn: WidgetId,
     clear_btn: WidgetId,
     /// Shows which pane receives the prompt; rebuilt when the panes change.
@@ -418,7 +439,7 @@ impl RepoBrowser {
 
         let side_tabs = tree.insert(
             Some(right_wrap),
-            TabView::new(["ライブ端末", "レビュー指示"]),
+            TabView::new(["ライブ端末", "レビュー指示", "コミット"]),
         );
 
         // Tab 0: Live Terminal
@@ -532,6 +553,47 @@ impl RepoBrowser {
                 .min_lines(8),
         );
 
+        // Tab 2: the worktree's commits beyond the base branch
+        let commit_page = tree.insert(
+            Some(side_tabs),
+            Container::new(Style {
+                flex_direction: FlexDirection::Column,
+                flex_grow: 1.0,
+                gap: LayoutSize {
+                    width: length(0.0),
+                    height: length(6.0),
+                },
+                padding: LayoutRect::length(6.0),
+                size: LayoutSize {
+                    width: percent(1.0),
+                    height: percent(1.0),
+                },
+                ..Default::default()
+            }),
+        );
+        let commit_head = tree.insert(
+            Some(commit_page),
+            Container::new(Style {
+                flex_direction: FlexDirection::Row,
+                flex_shrink: 0.0,
+                size: LayoutSize {
+                    width: percent(1.0),
+                    height: auto(),
+                },
+                ..Default::default()
+            }),
+        );
+        let commit_table = tree.insert(
+            Some(commit_page),
+            TableView::new(
+                vec![TableColumn::new("コミット", 360.0).flex(1.0)],
+                CommitRows::default(),
+            )
+            .selection_mode(SelectionMode::Single)
+            .row_height(COMMIT_ROW)
+            .height(commit_table_height(0)),
+        );
+
         // ── Bottom StatusBar ──────────────────────────────────────────────────
         let status_parts = StatusBar::insert(&mut tree, root);
 
@@ -560,6 +622,10 @@ impl RepoBrowser {
             diff_cache: HashMap::new(),
             requested_diff: None,
             shown_diff: None,
+            sel_commit: None,
+            commit_diffs: HashMap::new(),
+            requested_commit: None,
+            shown_commits: None,
             gutter: None,
             browser_size: (BROWSER_HEIGHT, BROWSER_COLUMN),
             sel_repo: 0,
@@ -583,6 +649,8 @@ impl RepoBrowser {
             drop_zone,
             side_tabs,
             terminal,
+            commit_head,
+            commit_table,
             quote_btn,
             clear_btn,
             target_host,
@@ -624,6 +692,50 @@ impl RepoBrowser {
 
     fn current_file(&self) -> Option<&ChangedFile> {
         self.current_worktree()?.files.get(self.sel_file)
+    }
+
+    /// The commit the diff view shows, when it is one of the current
+    /// worktree's.
+    fn current_commit(&self) -> Option<&CommitInfo> {
+        let (cwd, sha) = self.sel_commit.as_ref()?;
+        let wt = self.current_worktree()?;
+        if wt.cwd != *cwd {
+            return None;
+        }
+        wt.commits.iter().find(|c| c.sha == *sha)
+    }
+
+    /// Back to showing the selected file's diff.
+    fn leave_commit(&mut self) {
+        self.sel_commit = None;
+        self.requested_commit = None;
+    }
+
+    /// Shows the commit `sha` of the current worktree in the diff view.
+    fn select_commit(&mut self, sha: String, text: &mut TextStore) {
+        let Some(cwd) = self.current_worktree().map(|w| w.cwd.clone()) else {
+            return;
+        };
+        if self.sel_commit.as_ref() == Some(&(cwd.clone(), sha.clone())) {
+            return;
+        }
+        self.sel_commit = Some((cwd, sha));
+        // The live feed drops its file when asked for a commit and only picks
+        // it up again on a new request, so the file must be requested afresh
+        // once the user goes back to it.
+        self.requested_diff = None;
+        self.sync_views(text);
+    }
+
+    /// A row of the commit table was chosen.
+    fn select_commit_row(&mut self, row: usize, text: &mut TextStore) {
+        let sha = self
+            .current_worktree()
+            .and_then(|w| w.commits.get(row))
+            .map(|c| c.sha.clone());
+        if let Some(sha) = sha {
+            self.select_commit(sha, text);
+        }
     }
 
     fn clamp_selection(&mut self) {
@@ -685,9 +797,13 @@ impl RepoBrowser {
         self.filtered = self.raw_data.filtered(&self.tokens);
         self.restore_selection(key);
         self.clamp_selection();
+        if self.sel_commit.is_some() && self.current_commit().is_none() {
+            self.leave_commit();
+        }
         self.rebuild_browser(text);
         self.rebuild_path_control(text);
         self.rebuild_diff_view(text);
+        self.rebuild_commits(text);
         self.refresh_target(text);
         self.rebuild_status_bar(text);
     }
@@ -885,7 +1001,13 @@ impl RepoBrowser {
                         file.status, file.path, file.added, file.deleted
                     );
                     wt_item = wt_item.child(OutlineItem::new(title));
-                    if ri == self.sel_repo && wi == self.sel_wt && fi == self.sel_file {
+                    // While a commit is shown the worktree is the highlighted
+                    // node, so choosing a file is a change of selection again.
+                    if ri == self.sel_repo
+                        && wi == self.sel_wt
+                        && fi == self.sel_file
+                        && self.sel_commit.is_none()
+                    {
                         selected_path = vec![repo_id, wt_id, file_id];
                     }
                 }
@@ -916,7 +1038,9 @@ impl RepoBrowser {
             crumbs.push(repo.name.clone());
             if let Some(wt) = self.current_worktree() {
                 crumbs.push(wt.branch.clone());
-                if let Some(file) = self.current_file() {
+                if let Some(commit) = self.current_commit() {
+                    crumbs.push(commit.short.clone());
+                } else if let Some(file) = self.current_file() {
                     crumbs.push(file.path.clone());
                 }
             }
@@ -928,9 +1052,19 @@ impl RepoBrowser {
             .insert(Some(self.path_bar_host), PathControl::new(crumbs));
     }
 
-    /// The selected file's diff body: its inline diff, else the live cache.
+    /// The shown diff body: the commit's `git show`, else the selected file's
+    /// inline diff, else the live cache.
     fn current_diff_text(&self) -> Option<String> {
         let wt = self.current_worktree()?;
+        if let Some(commit) = self.current_commit() {
+            if !commit.diff.is_empty() {
+                return Some(commit.diff.clone());
+            }
+            return self
+                .commit_diffs
+                .get(&(wt.cwd.clone(), commit.sha.clone()))
+                .cloned();
+        }
         let file = self.current_file()?;
         if !file.diff.is_empty() {
             return Some(file.diff.clone());
@@ -946,11 +1080,25 @@ impl RepoBrowser {
         // The live feed refreshes only the last requested file, so re-request
         // on every selection change, cached or not.
         let wanted = match (self.current_worktree(), self.current_file()) {
-            (Some(wt), Some(file)) if file.diff.is_empty() => {
+            (Some(wt), Some(file)) if file.diff.is_empty() && self.sel_commit.is_none() => {
                 Some((wt.cwd.clone(), file.path.clone()))
             }
             _ => None,
         };
+        let wanted_commit = self
+            .current_commit()
+            .zip(self.current_worktree())
+            .filter(|(c, _)| c.diff.is_empty())
+            .map(|(c, wt)| (wt.cwd.clone(), c.sha.clone()));
+        if let (Source::Live(ch), Some(key)) = (&self.source, wanted_commit)
+            && self.requested_commit.as_ref() != Some(&key)
+        {
+            ch.send(Command::LoadCommit {
+                cwd: key.0.clone(),
+                sha: key.1.clone(),
+            });
+            self.requested_commit = Some(key);
+        }
         if let (Source::Live(ch), Some(key)) = (&self.source, wanted)
             && self.requested_diff.as_ref() != Some(&key)
         {
@@ -962,13 +1110,28 @@ impl RepoBrowser {
         }
 
         let merge_note = match (self.current_worktree(), self.current_file()) {
-            (Some(wt), Some(file)) if wt.is_merge_conflict(&file.path) => Some(format!(
-                "⛔ ベースへのマージで衝突: {}",
-                wt.merge_conflicts.join(", ")
-            )),
+            (Some(wt), Some(file))
+                if self.current_commit().is_none() && wt.is_merge_conflict(&file.path) =>
+            {
+                Some(format!(
+                    "⛔ ベースへのマージで衝突: {}",
+                    wt.merge_conflicts.join(", ")
+                ))
+            }
             _ => None,
         };
-        let (header_text, conflict_note, diff_text) =
+        let commit_view = self.current_commit().map(|commit| {
+            let text = self
+                .current_diff_text()
+                .unwrap_or_else(|| "コミットを取得しています…".into());
+            (
+                format!("{}  ·  コミット  ({} files)", commit.title(), commit.files),
+                text,
+            )
+        });
+        let (header_text, conflict_note, diff_text) = if let Some((header, text)) = commit_view {
+            (header, None, text)
+        } else {
             match (self.current_worktree(), self.current_file()) {
                 (Some(_), Some(file)) => {
                     let text = self
@@ -1006,7 +1169,8 @@ impl RepoBrowser {
                     None,
                     "(左のカラムブラウザからファイルを選択してください)".into(),
                 ),
-            };
+            }
+        };
 
         self.tree.insert(
             Some(self.diff_header),
@@ -1042,6 +1206,69 @@ impl RepoBrowser {
                 .update::<LogView, _>(self.diff_log, |log, cx| log.set_lines(cx, lines));
             self.shown_diff = Some(diff_text);
         }
+    }
+
+    /// Fills the commit tab with the current worktree's commits.
+    fn rebuild_commits(&mut self, text: &mut TextStore) {
+        let now = now_secs();
+        let (rows, summary) = match self.current_worktree() {
+            Some(wt) => {
+                let rows: Vec<(String, String)> = wt
+                    .commits
+                    .iter()
+                    .map(|c| (c.title(), c.detail(now)))
+                    .collect();
+                let summary = if wt.commits.is_empty() {
+                    "ベースブランチより先のコミットはありません".to_owned()
+                } else if wt.commits.len() >= crate::git::COMMIT_CAP {
+                    format!(
+                        "{}: ベースより先のコミット（新しい順・最新 {} 件まで）",
+                        wt.branch,
+                        wt.commits.len()
+                    )
+                } else {
+                    format!(
+                        "{}: ベースより先のコミット {} 件（新しい順）",
+                        wt.branch,
+                        wt.commits.len()
+                    )
+                };
+                (rows, summary)
+            }
+            None => (Vec::new(), "ワークツリーが選択されていません".into()),
+        };
+        self.clear_children(self.commit_head, text);
+        self.tree.insert(
+            Some(self.commit_head),
+            Label::new(summary)
+                .font_size(12.0)
+                .color(Role::Muted)
+                .wrap(true),
+        );
+
+        let selected = self.current_commit().map(|c| c.sha.clone());
+        let height = commit_table_height(rows.len());
+        self.tree
+            .update::<TableView, _>(self.commit_table, |table, cx| {
+                table.set_height(cx, Some(height))
+            });
+        let state = (rows, selected);
+        if self.shown_commits.as_ref() == Some(&state) {
+            return;
+        }
+        let (rows, selected) = state.clone();
+        let at = selected.as_ref().and_then(|sha| {
+            self.current_worktree()
+                .and_then(|w| w.commits.iter().position(|c| c.sha == *sha))
+        });
+        self.tree
+            .update::<TableView, _>(self.commit_table, |table, cx| {
+                table.set_data(cx, CommitRows { rows });
+                if let Some(at) = at {
+                    table.select_rows(cx, [at]);
+                }
+            });
+        self.shown_commits = Some(state);
     }
 
     fn update_terminal(&mut self) {
@@ -1174,6 +1401,26 @@ impl RepoBrowser {
                         root: repo.root.clone(),
                         cwd: wt.cwd.clone(),
                         path: file.path.clone(),
+                    });
+                }
+            }
+        }
+
+        for repo in &self.filtered.repos {
+            for wt in &repo.worktrees {
+                for commit in &wt.commits {
+                    commands.push(
+                        PaletteCommand::new(format!("コミット: {}", commit.title()))
+                            .detail(format!("{} / {}", repo.name, wt.branch))
+                            .keywords(format!(
+                                "commit log {} {} {}",
+                                commit.sha, commit.author, wt.branch
+                            )),
+                    );
+                    actions.push(PaletteAction::SelectCommit {
+                        root: repo.root.clone(),
+                        cwd: wt.cwd.clone(),
+                        sha: commit.sha.clone(),
                     });
                 }
             }
@@ -1337,14 +1584,24 @@ impl RepoBrowser {
     fn quote_selected_diff(&mut self) {
         let log = self.tree.get::<LogView>(self.diff_log);
         let selected = log.and_then(LogView::selected_lines);
+        // A commit diff spans several files, so a bare line number would not
+        // say which one it is in: the range is left out there.
         let range = selected
             .clone()
             .zip(self.gutter.as_ref())
+            .filter(|_| self.current_commit().is_none())
             .and_then(|(lines, gutter)| gutter.range_label(lines))
             .map(|label| format!(" {label}"))
             .unwrap_or_default();
-        let header = match (self.current_worktree(), self.current_file()) {
-            (Some(wt), Some(f)) => format!("[{} / {}{range}]", wt.branch, f.path),
+        let header = match (
+            self.current_worktree(),
+            self.current_commit(),
+            self.current_file(),
+        ) {
+            (Some(wt), Some(commit), _) => {
+                format!("[{} / commit {}{range}]", wt.branch, commit.short)
+            }
+            (Some(wt), None, Some(f)) => format!("[{} / {}{range}]", wt.branch, f.path),
             _ => "[diff]".into(),
         };
         let snippet = log
@@ -1584,9 +1841,18 @@ impl RepoBrowser {
             self.link = snap.link;
             self.can_focus = snap.can_focus;
             self.can_send = snap.can_send;
+            // A commit's text does not depend on the diff mode, so a snapshot
+            // built in another mode still carries a usable one.
+            let got_commit = snap.selected_commit.is_some();
+            if let Some((cwd, sha, diff)) = snap.selected_commit {
+                self.commit_diffs.insert((cwd, sha), diff);
+            }
             // The UI is the only source of mode changes; a snapshot in another
             // mode was built before the feed saw our SetDiffMode.
             if snap.diff_mode != self.diff_mode {
+                if got_commit {
+                    self.rebuild_diff_view(text);
+                }
                 self.rebuild_status_bar(text);
                 return self.show_notices(notices);
             }
@@ -1623,7 +1889,35 @@ impl RepoBrowser {
                 self.sel_repo = ri;
                 self.sel_wt = wi;
                 self.sel_file = fi;
+                self.leave_commit();
                 self.sync_views(text);
+            }
+            PaletteAction::SelectCommit { root, cwd, sha } => {
+                let found = self.filtered.repos.iter().enumerate().find_map(|(ri, r)| {
+                    if r.root != root {
+                        return None;
+                    }
+                    let wi = r.worktrees.iter().position(|w| w.cwd == cwd)?;
+                    r.worktrees[wi]
+                        .commits
+                        .iter()
+                        .any(|c| c.sha == sha)
+                        .then_some((ri, wi))
+                });
+                let Some((ri, wi)) = found else {
+                    self.toast(format!(
+                        "コミット {} はもう一覧にありません",
+                        short_sha(&sha)
+                    ));
+                    return;
+                };
+                self.sel_repo = ri;
+                self.sel_wt = wi;
+                self.sel_file = 0;
+                self.sel_commit = None;
+                self.select_commit(sha, text);
+                self.tree
+                    .update::<TabView, _>(self.side_tabs, |tabs, cx| tabs.set_selected(cx, 2));
             }
             PaletteAction::FocusPane(id) => match &self.source {
                 Source::Demo | Source::Snapshot => {
@@ -1710,6 +2004,7 @@ impl RepoBrowser {
             if let Some(&last) = path.last()
                 && let Some(kind) = self.node_map.get(last).cloned()
             {
+                self.leave_commit();
                 match kind {
                     NodeKind::Repo(ri) => {
                         self.sel_repo = ri;
@@ -1729,8 +2024,18 @@ impl RepoBrowser {
                 }
                 self.rebuild_path_control(text);
                 self.rebuild_diff_view(text);
+                self.rebuild_commits(text);
                 self.refresh_target(text);
             }
+            return;
+        }
+
+        if message.source == self.commit_table
+            && let Some(RowSelectionChanged {
+                lead: Some(row), ..
+            }) = message.downcast_ref::<RowSelectionChanged>()
+        {
+            self.select_commit_row(*row, text);
             return;
         }
 
@@ -1742,6 +2047,9 @@ impl RepoBrowser {
                 self.sel_file = 0;
             } else if *idx == 1 {
                 self.sel_file = 0;
+            }
+            if *idx <= 1 {
+                self.leave_commit();
             }
             self.sync_views(text);
             return;
@@ -1835,6 +2143,18 @@ impl Screen for RepoBrowser {
     }
 }
 
+const COMMIT_ROW: f32 = 38.0;
+
+/// A tab page is only as tall as its content, so the table is sized to its
+/// rows (header included) up to a cap, beyond which it scrolls.
+fn commit_table_height(rows: usize) -> f32 {
+    (TABLE_HEADER + COMMIT_ROW * rows as f32).clamp(TABLE_HEADER + COMMIT_ROW, 640.0)
+}
+
+fn short_sha(sha: &str) -> &str {
+    sha.get(..7).unwrap_or(sha)
+}
+
 /// Shell-escapes one word: single-quotes it (embedded `'` as `'\''`) unless
 /// it only holds characters no shell treats specially. Mirrors noa-app's
 /// drop/paste escaping.
@@ -1877,6 +2197,29 @@ fn browser_size_for(width: f32, height: f32) -> (f32, f32) {
         height.round().max(1.0),
         (width / 3.0).floor().max(BROWSER_MIN_COLUMN),
     )
+}
+
+/// The commit table's rows (title, detail) and the sha selected in it.
+type CommitTableState = (Vec<(String, String)>, Option<String>);
+
+/// The commit table's rows: a title line and a detail line each.
+#[derive(Default)]
+struct CommitRows {
+    rows: Vec<(String, String)>,
+}
+
+impl TableData for CommitRows {
+    fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+
+    fn cell(&self, row: usize, _column: usize) -> Cow<'_, str> {
+        Cow::Borrowed(self.rows.get(row).map_or("", |r| r.0.as_str()))
+    }
+
+    fn cell_detail(&self, row: usize, _column: usize) -> Option<Cow<'_, str>> {
+        self.rows.get(row).map(|r| Cow::Borrowed(r.1.as_str()))
+    }
 }
 
 /// (old, new) line numbers of one diff line; `None` on a side the line is not on.
@@ -2081,6 +2424,22 @@ mod tests {
 
     const CWD: &str = "/repo";
 
+    const C_NEW: &str = "aaaaaaa1111111111111111111111111111111aa";
+    const C_OLD: &str = "bbbbbbb2222222222222222222222222222222bb";
+    const COMMIT_SHOW: &str = "commit aaaaaaa1\nAuthor:     t <t@example.com>\n\n    newer change\n\ndiff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -10,3 +10,4 @@ fn f\n ctx\n-old\n+new1\n+new2\n ctx2\n";
+
+    fn commit(sha: &str, subject: &str) -> CommitInfo {
+        CommitInfo {
+            sha: sha.into(),
+            short: sha[..7].into(),
+            subject: subject.into(),
+            author: "t".into(),
+            time: now_secs() - 3 * 3600,
+            files: 2,
+            diff: String::new(),
+        }
+    }
+
     fn live_data() -> RepoData {
         let file = |path: &str| ChangedFile {
             path: path.into(),
@@ -2113,6 +2472,7 @@ mod tests {
                         terminal_tail: String::new(),
                     }],
                     files: vec![file("a.rs"), file("b.rs")],
+                    commits: vec![commit(C_NEW, "newer change"), commit(C_OLD, "older change")],
                 }],
             }],
         }
@@ -2126,6 +2486,7 @@ mod tests {
             can_send: true,
             diff_mode: mode,
             selected_diff: selected.map(|(path, diff)| (CWD.into(), path.into(), diff.into())),
+            selected_commit: None,
         }
     }
 
@@ -3033,5 +3394,171 @@ mod tests {
         h.screen.tokens = vec!["merge-conflict".into()];
         h.screen.sync_views(&mut h.text);
         assert_eq!(h.screen.filtered.repos[0].worktrees[0].branch, "orch/foo");
+    }
+
+    fn commit_loads(cmds: &[Command]) -> Vec<String> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                Command::LoadCommit { sha, .. } => Some(sha.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn snapshot_with_commit(sha: &str, show: &str) -> Snapshot {
+        let mut snap = snapshot(DiffMode::Unstaged, Some(("a.rs", "+a v1")));
+        snap.selected_commit = Some((CWD.into(), sha.into(), show.into()));
+        snap
+    }
+
+    #[test]
+    fn selecting_a_commit_loads_its_diff_through_the_feed() {
+        let mut h = LiveHarness::new();
+        h.drain();
+        h.screen.select_commit_row(1, &mut h.text);
+        assert_eq!(commit_loads(&h.drain()), vec![C_OLD]);
+        assert_eq!(h.diff_lines(), vec!["コミットを取得しています…"]);
+        h.deliver(snapshot_with_commit(C_OLD, COMMIT_SHOW));
+        assert!(
+            h.diff_lines()[0].contains("commit aaaaaaa1"),
+            "{:?}",
+            h.diff_lines()
+        );
+        // The gutter numbers the commit's hunks like a file diff's.
+        assert!(
+            h.diff_lines()[11].ends_with("11 │ +new1"),
+            "{:?}",
+            h.diff_lines()
+        );
+        // A periodic snapshot must not ask for the same commit again.
+        h.deliver(snapshot_with_commit(C_OLD, COMMIT_SHOW));
+        assert!(commit_loads(&h.drain()).is_empty());
+        let table = h
+            .screen
+            .tree()
+            .get::<TableView>(h.screen.commit_table)
+            .unwrap();
+        assert_eq!(table.selected_rows(), vec![1]);
+    }
+
+    #[test]
+    fn a_commit_text_from_a_stale_mode_snapshot_is_kept() {
+        let mut h = LiveHarness::new();
+        h.screen.select_commit_row(0, &mut h.text);
+        h.screen.set_diff_mode(DiffMode::Staged, &mut h.text);
+        h.deliver(snapshot_with_commit(C_NEW, COMMIT_SHOW));
+        assert_eq!(h.screen.diff_mode, DiffMode::Staged);
+        assert!(
+            h.diff_lines().iter().any(|l| l.ends_with("+new2")),
+            "{:?}",
+            h.diff_lines()
+        );
+    }
+
+    #[test]
+    fn quoting_from_a_commit_names_its_short_sha() {
+        let mut h = LiveHarness::new();
+        h.screen.select_commit_row(0, &mut h.text);
+        h.deliver(snapshot_with_commit(C_NEW, COMMIT_SHOW));
+        let diff_log = h.screen.diff_log;
+        // Lines 10-11 of the log: `-old`, `+new1`.
+        h.screen
+            .tree
+            .update::<LogView, _>(diff_log, |log, cx| log.select_lines(cx, 10..12));
+        h.screen.quote_selected_diff();
+        assert_eq!(
+            prompt_text(&h.screen),
+            "以下の箇所を修正してください:\n[main / commit aaaaaaa]\n```diff\n-old\n+new1\n```\n"
+        );
+    }
+
+    #[test]
+    fn choosing_a_file_returns_from_the_commit_to_the_file_diff() {
+        let mut h = LiveHarness::new();
+        h.screen.select_commit_row(0, &mut h.text);
+        h.deliver(snapshot_with_commit(C_NEW, COMMIT_SHOW));
+        assert!(h.screen.current_commit().is_some());
+        h.drain();
+        let action = PaletteAction::SelectFile {
+            root: CWD.into(),
+            cwd: CWD.into(),
+            path: "a.rs".into(),
+        };
+        h.screen.run_palette_action(action, &mut h.text);
+        assert!(h.screen.current_commit().is_none());
+        // The feed is asked for the file again, and the commit tab is cleared.
+        assert_eq!(load_diff_paths(&h.drain()), vec!["a.rs"]);
+        assert_eq!(h.diff_lines(), vec!["+a v1"]);
+        let table = h
+            .screen
+            .tree()
+            .get::<TableView>(h.screen.commit_table)
+            .unwrap();
+        assert!(table.selected_rows().is_empty());
+    }
+
+    #[test]
+    fn palette_lists_each_commit_and_jumps_to_it() {
+        let mut h = LiveHarness::new();
+        h.screen.open_command_palette();
+        let (_, actions) = h.screen.active_palette.clone().unwrap();
+        let shas: Vec<&str> = actions
+            .iter()
+            .filter_map(|a| match a {
+                PaletteAction::SelectCommit { sha, .. } => Some(sha.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(shas, vec![C_NEW, C_OLD]);
+        let choose_old = actions
+            .iter()
+            .find(|a| matches!(a, PaletteAction::SelectCommit { sha, .. } if sha == C_OLD))
+            .cloned()
+            .unwrap();
+        h.drain();
+        h.screen.run_palette_action(choose_old, &mut h.text);
+        assert_eq!(h.screen.current_commit().unwrap().subject, "older change");
+        assert_eq!(commit_loads(&h.drain()), vec![C_OLD]);
+        let tabs = h.screen.tree().get::<TabView>(h.screen.side_tabs).unwrap();
+        assert_eq!(tabs.selected(), 2);
+    }
+
+    #[test]
+    fn a_commit_that_vanishes_falls_back_to_the_file() {
+        let mut h = LiveHarness::new();
+        h.screen.select_commit_row(0, &mut h.text);
+        let mut snap = snapshot(DiffMode::Unstaged, Some(("a.rs", "+a v1")));
+        snap.data.repos[0].worktrees[0].commits.clear();
+        h.deliver(snap);
+        assert!(h.screen.sel_commit.is_none());
+        assert_eq!(h.diff_lines(), vec!["+a v1"]);
+    }
+
+    #[test]
+    fn demo_commits_show_their_inline_diff_without_the_feed() {
+        let mut screen = RepoBrowser::demo();
+        let mut text = TextStore::new(Default::default());
+        screen.prepare(Size::new(1440.0, 900.0), &mut text);
+        assert_eq!(screen.current_worktree().unwrap().commits.len(), 3);
+        screen.select_commit_row(0, &mut text);
+        let commit = screen.current_commit().unwrap().clone();
+        let log = screen.tree().get::<LogView>(screen.diff_log).unwrap();
+        assert!(
+            log.all_text().contains(&commit.subject),
+            "{}",
+            log.all_text()
+        );
+        assert!(log.all_text().contains("+    guard.drop_removed"));
+    }
+
+    #[test]
+    fn commit_age_reads_in_japanese() {
+        use crate::model::relative_age;
+        assert_eq!(relative_age(1000, 1030), "たった今");
+        assert_eq!(relative_age(0, 25 * 60), "25分前");
+        assert_eq!(relative_age(0, 3 * 3600 + 5), "3時間前");
+        assert_eq!(relative_age(0, 2 * 86_400), "2日前");
+        assert_eq!(relative_age(0, 60 * 86_400), "2か月前");
+        assert_eq!(relative_age(0, 800 * 86_400), "2年前");
     }
 }

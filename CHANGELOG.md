@@ -31,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `noa.sendText` takes `refuseShell`: the server checks the pane's
   foreground process at that moment and refuses (`-32010`, nothing written)
   when it is a plain shell, where text meant for an agent would run as
-  commands.
+  commands. The repo browser submits review prompts with it.
 
 ### Changed
 

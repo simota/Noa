@@ -248,7 +248,11 @@ fn run(
                                                         paste,
                                                         require_paste_mode: paste
                                                             && needs_paste_mode(&chunk),
-                                                        refuse_shell: false,
+                                                        // A review prompt is for an agent:
+                                                        // Noa checks the real foreground
+                                                        // process now, since the snapshot's
+                                                        // can be seconds old.
+                                                        refuse_shell: submit,
                                                     },
                                                 ),
                                             SendStep::Pause(d) => {

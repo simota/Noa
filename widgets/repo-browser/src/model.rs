@@ -56,18 +56,13 @@ pub struct PaneSummary {
     pub terminal_tail: String,
 }
 
-/// Shells whose line editor would run a submitted prompt as commands.
-const PLAIN_SHELLS: [&str; 10] = [
-    "sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "pwsh",
-];
-
 impl PaneSummary {
     /// The pane's process name when it is a plain shell (`/bin/zsh` and a
     /// login shell's `-zsh` included).
     pub fn plain_shell(&self) -> Option<&str> {
         let process = self.process.as_deref()?;
         let name = process.rsplit('/').next()?.trim_start_matches('-');
-        PLAIN_SHELLS.contains(&name).then_some(name)
+        noa_ipc::is_plain_shell(name).then_some(name)
     }
 }
 

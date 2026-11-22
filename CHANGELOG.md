@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command palette's Open Repo Browser open it, and `Noa.app` ships it as
   "Noa Repo Browser". Its action is `repo-browser.open`; the old
   `repo-theater.open` still works.
+- The repo browser shows old and new line numbers beside each diff line, and
+  a quoted selection names its line range in the review prompt. Its column
+  browser fills its pane and follows it when the pane is resized.
 
 ## [0.9.11] - 2026-11-22
 

@@ -73,6 +73,12 @@ pub struct RepoBrowser {
     /// The diff body the log view holds, so an unchanged refresh keeps its
     /// scroll position and line selection.
     shown_diff: Option<String>,
+    /// The line-number gutter in front of each line of `shown_diff`, when it
+    /// is a unified diff.
+    gutter: Option<Gutter>,
+    /// The browser's height and column width, sized to its pane: BrowserView
+    /// only takes fixed sizes, so it is rebuilt when its pane resizes.
+    browser_size: (f32, f32),
 
     // Current selection into `filtered`.
     sel_repo: usize,
@@ -296,7 +302,7 @@ impl RepoBrowser {
         );
         let browser = tree.insert(
             Some(browser_host),
-            BrowserView::new(Vec::new()).height(240.0),
+            BrowserView::new(Vec::new()).height(BROWSER_HEIGHT),
         );
 
         // Bottom-left: diff view column
@@ -491,6 +497,8 @@ impl RepoBrowser {
             diff_cache: HashMap::new(),
             requested_diff: None,
             shown_diff: None,
+            gutter: None,
+            browser_size: (BROWSER_HEIGHT, BROWSER_COLUMN),
             sel_repo: 0,
             sel_wt: 0,
             sel_file: 0,
@@ -692,7 +700,9 @@ impl RepoBrowser {
 
         self.browser = self.tree.insert(
             Some(self.browser_host),
-            BrowserView::new(items).column_width(310.0).height(240.0),
+            BrowserView::new(items)
+                .column_width(self.browser_size.1)
+                .height(self.browser_size.0),
         );
         self.pending_browser_path = (!selected_path.is_empty()).then_some(selected_path);
     }
@@ -804,7 +814,15 @@ impl RepoBrowser {
         }
 
         if self.shown_diff.as_deref() != Some(diff_text.as_str()) {
-            let lines: Vec<LogLine> = diff_text.lines().map(colorize_diff_line).collect();
+            self.gutter = Gutter::of(&diff_text);
+            let lines: Vec<LogLine> = match &self.gutter {
+                Some(gutter) => diff_text
+                    .lines()
+                    .zip(&gutter.numbers)
+                    .map(|(line, &numbers)| gutter.line(line, numbers))
+                    .collect(),
+                None => diff_text.lines().map(colorize_diff_line).collect(),
+            };
             self.tree
                 .update::<LogView, _>(self.diff_log, |log, cx| log.set_lines(cx, lines));
             self.shown_diff = Some(diff_text);
@@ -973,14 +991,24 @@ impl RepoBrowser {
     }
 
     fn quote_selected_diff(&mut self) {
+        let log = self.tree.get::<LogView>(self.diff_log);
+        let selected = log.and_then(LogView::selected_lines);
+        let range = selected
+            .clone()
+            .zip(self.gutter.as_ref())
+            .and_then(|(lines, gutter)| gutter.range_label(lines))
+            .map(|label| format!(" {label}"))
+            .unwrap_or_default();
         let header = match (self.current_worktree(), self.current_file()) {
-            (Some(wt), Some(f)) => format!("[{} / {}]", wt.branch, f.path),
+            (Some(wt), Some(f)) => format!("[{} / {}{range}]", wt.branch, f.path),
             _ => "[diff]".into(),
         };
-        let snippet = self
-            .tree
-            .get::<LogView>(self.diff_log)
+        let snippet = log
             .and_then(LogView::copy_text)
+            .map(|text| match &self.gutter {
+                Some(gutter) => gutter.strip(&text),
+                None => text,
+            })
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| {
                 self.current_diff_text()
@@ -1326,6 +1354,14 @@ impl Screen for RepoBrowser {
     fn prepare(&mut self, viewport: Size, text: &mut TextStore) -> bool {
         self.poll_live(text);
         let mut changed = self.tree.prepare(viewport, text).is_some();
+        if let Some(host) = self.tree.layout(self.browser_host) {
+            let size = browser_size_for(host.rect.width, host.rect.height);
+            if size != self.browser_size {
+                self.browser_size = size;
+                self.rebuild_browser(text);
+                changed |= self.tree.prepare(viewport, text).is_some();
+            }
+        }
         if let Some(path) = self.pending_browser_path.take()
             && self.browser != self.browser_host
         {
@@ -1359,24 +1395,175 @@ fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-fn colorize_diff_line(line: &str) -> LogLine {
-    if line.starts_with("+++") || line.starts_with("---") || line.starts_with("diff --git") {
-        LogLine::new(line).color(DIFF_META_FG)
-    } else if line.starts_with("@@") {
-        LogLine::new(line)
-            .color(DIFF_HUNK_FG)
-            .background(DIFF_HUNK_BG)
-    } else if line.starts_with('+') {
-        LogLine::new(line)
-            .color(DIFF_ADD_FG)
-            .background(DIFF_ADD_BG)
-    } else if line.starts_with('-') {
-        LogLine::new(line)
-            .color(DIFF_DEL_FG)
-            .background(DIFF_DEL_BG)
-    } else {
-        LogLine::new(line)
+const BROWSER_HEIGHT: f32 = 240.0;
+const BROWSER_COLUMN: f32 = 310.0;
+/// The browser shows three columns (repository, worktree, file) when its
+/// pane is wide enough, and never squeezes a column below this.
+const BROWSER_MIN_COLUMN: f32 = 200.0;
+
+/// The browser's (height, column width) for a pane of `width` x `height`,
+/// rounded to whole pixels so sub-pixel layout jitter does not rebuild it.
+fn browser_size_for(width: f32, height: f32) -> (f32, f32) {
+    (
+        height.round().max(1.0),
+        (width / 3.0).floor().max(BROWSER_MIN_COLUMN),
+    )
+}
+
+/// (old, new) line numbers of one diff line; `None` on a side the line is not on.
+type LineNumbers = (Option<u32>, Option<u32>);
+
+/// The line-number gutter shown in front of a unified diff.
+struct Gutter {
+    /// One entry per line of the diff; both `None` outside a hunk.
+    numbers: Vec<LineNumbers>,
+    /// Digits of each of the two number columns.
+    digits: usize,
+}
+
+impl Gutter {
+    /// `None` when `diff` has no hunk (a note such as "no changes").
+    fn of(diff: &str) -> Option<Self> {
+        let mut numbers = Vec::new();
+        let mut cursor: Option<(u32, u32)> = None;
+        let mut seen_hunk = false;
+        for line in diff.lines() {
+            if let Some(start) = parse_hunk_header(line) {
+                cursor = Some(start);
+                seen_hunk = true;
+                numbers.push((None, None));
+                continue;
+            }
+            if line.starts_with("diff --git") {
+                cursor = None;
+            }
+            let Some((old, new)) = cursor.as_mut() else {
+                numbers.push((None, None));
+                continue;
+            };
+            numbers.push(match line.as_bytes().first() {
+                Some(b'+') => {
+                    *new += 1;
+                    (None, Some(*new - 1))
+                }
+                Some(b'-') => {
+                    *old += 1;
+                    (Some(*old - 1), None)
+                }
+                Some(b'\\') => (None, None),
+                _ => {
+                    *old += 1;
+                    *new += 1;
+                    (Some(*old - 1), Some(*new - 1))
+                }
+            });
+        }
+        if !seen_hunk {
+            return None;
+        }
+        let widest = numbers
+            .iter()
+            .flat_map(|&(o, n)| [o, n])
+            .flatten()
+            .max()
+            .unwrap_or(0);
+        Some(Self {
+            numbers,
+            digits: widest.to_string().len().max(3),
+        })
     }
+
+    /// Characters the gutter puts in front of every line.
+    fn width(&self) -> usize {
+        2 * self.digits + 4
+    }
+
+    fn line(&self, raw: &str, (old, new): LineNumbers) -> LogLine {
+        let num = |n: Option<u32>| n.map(|n| n.to_string()).unwrap_or_default();
+        let text = format!("{:>w$} {:>w$} │ {raw}", num(old), num(new), w = self.digits);
+        let style = match (old, new) {
+            (None, Some(_)) => ADDED,
+            (Some(_), None) => REMOVED,
+            (Some(_), Some(_)) => PLAIN,
+            // Outside a hunk the line is a header, or a hunk's `@@` line.
+            (None, None) => diff_line_style(raw),
+        };
+        styled_line(text, style)
+    }
+
+    /// `text` (lines copied from the log view) without the gutter.
+    fn strip(&self, text: &str) -> String {
+        text.lines()
+            .map(|line| line.chars().skip(self.width()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// "L12-L18" for the new-side lines in `lines`, or "旧L12-L18" when the
+    /// selection only holds removed lines; `None` without numbered lines.
+    fn range_label(&self, lines: std::ops::Range<usize>) -> Option<String> {
+        let picked = self.numbers.get(lines)?;
+        let span = |side: &dyn Fn(&LineNumbers) -> Option<u32>| {
+            let mut it = picked.iter().filter_map(side);
+            let first = it.next()?;
+            Some((first, it.last().unwrap_or(first)))
+        };
+        let (prefix, (lo, hi)) = match span(&|n| n.1) {
+            Some(range) => ("", range),
+            None => ("旧", span(&|n| n.0)?),
+        };
+        Some(if lo == hi {
+            format!("{prefix}L{lo}")
+        } else {
+            format!("{prefix}L{lo}-L{hi}")
+        })
+    }
+}
+
+/// The (old, new) start lines of a `@@ -a,b +c,d @@` hunk header.
+fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
+    let rest = line.strip_prefix("@@ -")?;
+    let (old, rest) = rest.split_once(' ')?;
+    let new = rest.strip_prefix('+')?.split(' ').next()?;
+    let start = |range: &str| range.split(',').next()?.parse::<u32>().ok();
+    Some((start(old)?, start(new)?))
+}
+
+/// A diff line's (text color, background).
+type LineStyle = (Option<Color>, Option<Color>);
+
+const PLAIN: LineStyle = (None, None);
+const ADDED: LineStyle = (Some(DIFF_ADD_FG), Some(DIFF_ADD_BG));
+const REMOVED: LineStyle = (Some(DIFF_DEL_FG), Some(DIFF_DEL_BG));
+
+/// The style of a diff line told apart by its prefix alone.
+fn diff_line_style(line: &str) -> LineStyle {
+    if line.starts_with("+++") || line.starts_with("---") || line.starts_with("diff --git") {
+        (Some(DIFF_META_FG), None)
+    } else if line.starts_with("@@") {
+        (Some(DIFF_HUNK_FG), Some(DIFF_HUNK_BG))
+    } else if line.starts_with('+') {
+        ADDED
+    } else if line.starts_with('-') {
+        REMOVED
+    } else {
+        PLAIN
+    }
+}
+
+fn styled_line(text: String, (color, background): LineStyle) -> LogLine {
+    let mut line = LogLine::new(text);
+    if let Some(color) = color {
+        line = line.color(color);
+    }
+    if let Some(fill) = background {
+        line = line.background(fill);
+    }
+    line
+}
+
+fn colorize_diff_line(line: &str) -> LogLine {
+    styled_line(line.to_owned(), diff_line_style(line))
 }
 
 #[cfg(test)]
@@ -1766,6 +1953,68 @@ mod tests {
             Some("LIVE"),
             "{badges:?}"
         );
+    }
+
+    const NUMBERED: &str = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -10,3 +10,4 @@ fn f\n ctx\n-old\n+new1\n+new2\n ctx2\n";
+
+    #[test]
+    fn gutter_numbers_follow_hunk_headers() {
+        let gutter = Gutter::of(NUMBERED).unwrap();
+        assert_eq!(
+            gutter.numbers,
+            vec![
+                (None, None),
+                (None, None),
+                (None, None),
+                (None, None),
+                (Some(10), Some(10)),
+                (Some(11), None),
+                (None, Some(11)),
+                (None, Some(12)),
+                (Some(12), Some(13)),
+            ]
+        );
+        assert!(Gutter::of("(このワークツリーに差分はありません)").is_none());
+    }
+
+    #[test]
+    fn quoting_numbered_lines_strips_the_gutter_and_names_the_range() {
+        let mut h = LiveHarness::new();
+        h.deliver(snapshot(DiffMode::Unstaged, Some(("a.rs", NUMBERED))));
+        assert!(
+            h.diff_lines()[6].ends_with("11 │ +new1"),
+            "{:?}",
+            h.diff_lines()
+        );
+        let diff_log = h.screen.diff_log;
+        h.screen
+            .tree
+            .update::<LogView, _>(diff_log, |log, cx| log.select_lines(cx, 5..8));
+        h.screen.quote_selected_diff();
+        assert_eq!(
+            prompt_text(&h.screen),
+            "[main / a.rs L11-L12]\n```diff\n-old\n+new1\n+new2\n```\n修正依頼: "
+        );
+
+        h.screen
+            .tree
+            .update::<LogView, _>(diff_log, |log, cx| log.select_lines(cx, 5..6));
+        h.screen.quote_selected_diff();
+        assert!(prompt_text(&h.screen).starts_with("[main / a.rs 旧L11]\n"));
+    }
+
+    #[test]
+    fn browser_follows_its_pane_size() {
+        let mut screen = RepoBrowser::demo();
+        let mut text = TextStore::new(Default::default());
+        screen.prepare(Size::new(1440.0, 900.0), &mut text);
+        let host = screen.tree().layout(screen.browser_host).unwrap().rect;
+        assert_eq!(
+            screen.browser_size,
+            browser_size_for(host.width, host.height)
+        );
+        let browser = screen.tree().layout(screen.browser).unwrap().rect;
+        assert_eq!(browser.height, host.height.round());
     }
 
     #[test]

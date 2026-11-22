@@ -109,6 +109,38 @@ fn section_topic(out: &mut String, heading: &str, session: &Session, round: Roun
     );
 }
 
+/// The rounds left after `round`; `None` when the discussion has no limit.
+fn rounds_left(session: &Session, round: RoundNo) -> Option<RoundNo> {
+    session.max_rounds.map(|max| max.saturating_sub(round))
+}
+
+/// What the moderator is told about converging, from the rounds left.
+fn convergence_note(session: &Session, round: RoundNo) -> String {
+    match (session.max_rounds, rounds_left(session, round)) {
+        (_, Some(0)) => "This is the LAST round: \"conclusion\" is required. Give your answer \
+             to the topic. Where the panel agreed, state it; where it did not, decide it \
+             yourself: weigh the arguments, choose the best-supported position, and say why \
+             and what would change it. Do not leave the topic open or defer it. Do not \
+             propose a debate.\n"
+            .to_owned(),
+        (_, Some(1)) => "One round is left after this one, and it is the last. Ask each \
+             panelist for their final position and the compromise they can accept on every \
+             issue still open or contested. Do not propose a debate. If the issues are \
+             already settled, give the \"conclusion\" now.\n"
+            .to_owned(),
+        (Some(max), Some(left)) => format!(
+            "{left} rounds are left after this one; the discussion must reach a conclusion \
+             by round {max}. Narrow the questions to the issues still open or contested, mark \
+             settled ones agreed, and open no new side issues unless they decide the topic. \
+             If the issues are settled sooner, give the \"conclusion\" now.\n"
+        ),
+        _ => "There is no round limit: give the \"conclusion\" as soon as the issues are \
+             settled, and narrow the questions to what is still open or contested until \
+             then.\n"
+            .to_owned(),
+    }
+}
+
 fn section_tree(out: &mut String, heading: &str, session: &Session) {
     out.push_str(heading);
     out.push('\n');
@@ -268,6 +300,26 @@ pub fn panelist_brief(
                 };
                 let _ = writeln!(out, "Your role in debate {}: {role}.", debate.id);
             }
+            match (session.max_rounds, rounds_left(session, round)) {
+                (_, Some(0)) => out.push_str(
+                    "This is the last round: the moderator concludes the discussion after it. \
+                     Give your final position on each issue still open or contested, and the \
+                     compromise you can accept.\n",
+                ),
+                (_, Some(1)) => out.push_str(
+                    "One round is left after this one, and it is the last. Move toward a \
+                     conclusion: say where you can agree and what compromise you could accept.\n",
+                ),
+                (Some(max), Some(left)) => {
+                    let _ = writeln!(
+                        out,
+                        "{left} rounds are left after this one; the discussion concludes by \
+                         round {max}. Help it converge: focus on the issues still open or \
+                         contested rather than opening new ones."
+                    );
+                }
+                _ => {}
+            }
             let _ = write!(out, "{question}\n\n");
 
             out.push_str(PANELIST_SECTIONS[6]);
@@ -343,28 +395,44 @@ pub fn moderator_brief(session: &Session, round: RoundNo, reply_path: &Path) -> 
                     names(&debate.con),
                     debate.max_exchanges
                 );
-                if exchanges >= usize::from(debate.max_exchanges) {
+                if exchanges >= usize::from(debate.max_exchanges)
+                    || rounds_left(session, round) == Some(0)
+                {
                     out.push_str("This is the last exchange: \"verdict\" is required.\n");
                 } else {
                     out.push_str("Give a \"verdict\" once the debate is settled; otherwise the next exchange runs.\n");
                 }
             }
+            out.push_str(&convergence_note(session, round));
             out.push('\n');
 
             out.push_str(MODERATOR_SECTIONS[6]);
             out.push('\n');
             let panel: Vec<&str> = session.panelist_ids().map(|p| p.as_str()).collect();
             // A debate round may end in a verdict; any other may propose one.
+            let last = rounds_left(session, round) == Some(0);
             let (optional, rule) = if debate.is_some() {
                 (
                     "  \"verdict\": {\"outcome\":\"agreed\",\"rationale\":\"…\"},\n",
                     "verdict: outcome agreed, conditional or deferred; it ends the debate",
                 )
+            } else if last {
+                ("", "propose_debate: not allowed in the last round")
             } else {
                 (
                     "  \"propose_debate\": {\"issue\":\"B\",\"pro\":[\"claude\"],\"con\":[\"codex\"]},\n",
                     "propose_debate: a debate on one issue; it runs once the user approves it",
                 )
+            };
+            // Shown in the example only where it is required, so that it is
+            // not filled in (ending the discussion) by imitation.
+            let (conclusion, required) = if last {
+                (
+                    "  \"conclusion\": \"…\",\n",
+                    "Only \"summary\" and \"conclusion\" are required.",
+                )
+            } else {
+                ("", "Only \"summary\" is required.")
             };
             let _ = write!(
                 out,
@@ -377,9 +445,9 @@ pub fn moderator_brief(session: &Session, round: RoundNo, reply_path: &Path) -> 
              \x20               {{\"op\":\"set_stance\",\"id\":\"B\",\"part\":\"codex\",\"pos\":\"against\",\"basis\":\"m12\"}}],\n\
              \x20 \"minutes_ops\": [{{\"op\":\"add\",\"section\":\"decisions\",\"text\":\"…\",\"issues\":[\"A\"]}}],\n\
              \x20 \"questions\": {{\"codex\": \"…\"}},\n\
-             {}\
+             {}{}\
              \x20 \"close\": false }}\n\n\
-             Only \"summary\" is required. Rules:\n\
+             {} Rules:\n\
              - issue ids: 1-16 letters, digits, '-' or '_'; existing: {}\n\
              - states: open, contested, agreed, conditional, deferred\n\
              - stance pos: for, against, neutral, unknown; \"basis\" is a message id from section 4\n\
@@ -387,9 +455,13 @@ pub fn moderator_brief(session: &Session, round: RoundNo, reply_path: &Path) -> 
              - panelists (for questions, stances and debate sides): {}\n\
              - a panelist with no question gets a default one\n\
              - {}\n\
-             - close: true ends the discussion\n",
+             - conclusion: your answer to the topic, deciding it yourself where the panel \
+             did not agree; it ends the discussion. Required in the last round\n\
+             - close: true ends the discussion and needs a \"conclusion\"\n",
                 reply_path.display(),
                 optional,
+                conclusion,
+                required,
                 issue_ids(session),
                 panel.join(", "),
                 rule,
@@ -646,6 +718,7 @@ mod tests {
                     questions: Default::default(),
                     propose_debate: None,
                     verdict: None,
+                    conclusion: None,
                     close: false,
                 },
             }],

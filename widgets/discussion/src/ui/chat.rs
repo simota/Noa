@@ -216,7 +216,10 @@ pub(super) fn message_card(
     actions: &mut Vec<(WidgetId, Action)>,
 ) -> WidgetId {
     let question = message.kind == MsgKind::Brief;
-    let emphasis = matches!(message.kind, MsgKind::Summary | MsgKind::Verdict);
+    let emphasis = matches!(
+        message.kind,
+        MsgKind::Summary | MsgKind::Verdict | MsgKind::Conclusion
+    );
     let mut card = Container::new(Style {
         flex_direction: FlexDirection::Column,
         flex_shrink: 0.0,

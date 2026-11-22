@@ -67,6 +67,8 @@ struct RawOutput {
     #[serde(default)]
     verdict: Option<RawVerdict>,
     #[serde(default)]
+    conclusion: Option<String>,
+    #[serde(default)]
     close: bool,
 }
 
@@ -304,10 +306,18 @@ pub fn parse_moderator(
         }
     }
 
+    // The discussion's last round: nothing can run after it, so it must end
+    // in the moderator's conclusion (and a debate held in it, in a verdict).
+    let last = session.max_rounds.is_some_and(|max| round >= max);
     let debate = this_round.debate().and_then(|id| session.debate(id));
     let propose_debate = raw.propose_debate.and_then(|proposal| {
         let before = problems.len();
-        if debate.is_some() {
+        if last {
+            problems.push(
+                "propose_debate: not allowed in the last round, no round is left to hold it"
+                    .to_owned(),
+            );
+        } else if debate.is_some() {
             problems.push("propose_debate: not allowed during a debate round".to_owned());
         } else if session.debates.iter().any(|d| {
             matches!(d.status, DebateStatus::Proposed | DebateStatus::Approved)
@@ -377,11 +387,32 @@ pub fn parse_moderator(
                     "verdict: required, this was the last of {} exchanges of debate {}",
                     debate.max_exchanges, debate.id
                 ));
+            } else if last {
+                problems.push(format!(
+                    "verdict: required, debate {} cannot go on after the last round",
+                    debate.id
+                ));
             }
             None
         }
         (None, None) => None,
     };
+
+    let conclusion = raw
+        .conclusion
+        .map(|c| c.trim().to_owned())
+        .filter(|c| !c.is_empty());
+    if conclusion.is_none() && (last || raw.close) {
+        let why = if last {
+            "this is the last round"
+        } else {
+            "\"close\" is true"
+        };
+        problems.push(format!(
+            "conclusion: required, {why}; give your answer to the topic, deciding it \
+             yourself where the panel did not agree"
+        ));
+    }
 
     if !problems.is_empty() {
         return Err(ValidationError { problems });
@@ -393,6 +424,7 @@ pub fn parse_moderator(
         questions,
         propose_debate,
         verdict,
+        conclusion,
         close: raw.close,
     })
 }

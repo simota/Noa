@@ -798,6 +798,7 @@ pub(crate) fn kind_label(kind: MsgKind) -> &'static str {
         MsgKind::Intervention => "介入",
         MsgKind::Argument => "主張",
         MsgKind::Verdict => "判定",
+        MsgKind::Conclusion => "結論",
     }
 }
 

@@ -948,6 +948,87 @@ mod tests {
             .unwrap();
     }
 
+    fn two_contestants() -> Engine {
+        let setup = Setup {
+            request: "Design a music player UI",
+            max_rounds: Some(2),
+            reveal_interval: 5,
+            workdir: None,
+            judge: AgentKind::Agy,
+            panel: &[AgentKind::Claude, AgentKind::Codex],
+        };
+        let (mut engine, _) = Engine::create_in(
+            SessionId::new("comp-test"),
+            setup,
+            Path::new("/tmp/comp-test"),
+            Config::default(),
+            1,
+        )
+        .unwrap();
+        engine.handle(Input::Start { now: 2 }).unwrap();
+        engine
+    }
+
+    fn submission(engine: &mut Engine, part: &str, content: &str, at: Millis) {
+        engine
+            .handle(Input::ReplyFileWritten {
+                round: 1,
+                part: PartId::new(part),
+                content: content.into(),
+                artifacts: vec![],
+                at,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_pane_reopened_before_the_correction_gets_the_whole_brief() {
+        let mut engine = two_contestants();
+        let claude = PartId::new("claude");
+        engine
+            .handle(Input::Sent {
+                round: 1,
+                part: claude.clone(),
+                at: 10,
+            })
+            .unwrap();
+        // An empty report is turned down; the correction is not sent yet when
+        // the agent's pane is started again.
+        submission(&mut engine, "claude", "  ", 20);
+        let out = engine
+            .handle(Input::PaneSpawned {
+                part: claude.clone(),
+                pane_id: 7,
+            })
+            .unwrap();
+        let body = out
+            .effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::SendBrief { part, body, .. } if *part == claude => Some(body),
+                _ => None,
+            })
+            .expect("the brief is sent again");
+        let brief = engine.session().round(1).unwrap().brief(&claude).unwrap();
+        assert_eq!(*body, brief.body);
+    }
+
+    #[test]
+    fn a_reply_taken_without_a_recorded_send_still_lets_the_round_be_judged() {
+        let mut engine = two_contestants();
+        engine
+            .handle(Input::Sent {
+                round: 1,
+                part: PartId::new("codex"),
+                at: 10,
+            })
+            .unwrap();
+        // claude's `Sent` was lost with the link; its report arrives anyway.
+        submission(&mut engine, "claude", "# Summary: done", 20);
+        submission(&mut engine, "codex", "# Summary: done", 21);
+        assert_eq!(engine.session().round(1).unwrap().phase, Phase::Judging);
+    }
+
     #[test]
     fn five_blind_rounds_then_sixth_round_reveals_peer_work() {
         let setup = Setup {

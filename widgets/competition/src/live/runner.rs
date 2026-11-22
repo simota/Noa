@@ -726,6 +726,17 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 continue;
             }
             let now = self.clock.now();
+            // A reply already on disk is taken in (or turned down) once it
+            // settles; pasting the brief again would start a new turn.
+            if self
+                .watches
+                .iter()
+                .any(|w| w.round == pending.round && w.part == pending.part && w.path.exists())
+            {
+                self.sends[idx].queued_at = now;
+                idx += 1;
+                continue;
+            }
             if !self.panes.contains_key(&pending.part) {
                 if pending.spawns >= MAX_SPAWNS {
                     self.sends.remove(idx);
@@ -1225,6 +1236,49 @@ mod tests {
         fake.0.borrow_mut().gone_on_paste = false;
         step(&mut runner, &mut conn);
         assert_eq!(fake.0.borrow().spawned, 4);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_resend_held_through_a_turn_is_dropped_when_the_turn_ends_in_a_reply() {
+        let fake = fake();
+        let root = temp_root();
+        let mut runner = rig(&fake, &root);
+        let mut conn = fake.clone();
+        step(&mut runner, &mut conn);
+        let claude = fake.pane_of(":claude");
+        fake.report(claude, "input", None);
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        assert_eq!(fake.pasted(claude), 1);
+
+        // The turn outlasts the reply limit, so a resend waits for it to end.
+        fake.report(claude, "running", None);
+        step(&mut runner, &mut conn);
+        fake.0.borrow_mut().now += CONFIG.reply_timeout + 1;
+        step(&mut runner, &mut conn);
+
+        // The turn ends with the report written: it is taken in, and the
+        // brief is not pasted into the agent again.
+        let reply = store::reply_path(&runner.engine.reply_dir(), 1, &PartId::new("claude"));
+        fs::write(&reply, "# Summary: done").unwrap();
+        fake.report(claude, "input", None);
+        for _ in 0..3 {
+            step(&mut runner, &mut conn);
+        }
+        fake.0.borrow_mut().now += REPLY_STABLE_FOR + 1;
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        assert_eq!(fake.pasted(claude), 1, "pasted after the agent replied");
+        let brief = runner
+            .engine
+            .session()
+            .round(1)
+            .unwrap()
+            .brief(&PartId::new("claude"))
+            .unwrap()
+            .clone();
+        assert!(brief.receipt.replied.is_some());
         let _ = fs::remove_dir_all(root);
     }
 

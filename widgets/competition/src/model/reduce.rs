@@ -248,6 +248,9 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
             receipt.sent = None;
             receipt.started = None;
             receipt.failed = None;
+            // A retry sends the whole brief: the agent may be a new one that
+            // never saw the output a correction would refer to.
+            receipt.rejected = None;
         }
         Event::BriefFailed { round, to, reason } => {
             let receipt = receipt_mut(session, *round, to)?;
@@ -271,6 +274,9 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
         Event::ReplyAccepted { round, to, at } => {
             let receipt = receipt_mut(session, *round, to)?;
             receipt.replied = Some(*at);
+            // A reply proves the brief arrived, even when the `Sent` was lost
+            // with the link.
+            receipt.sent.get_or_insert(*at);
             receipt.rejected = None;
             receipt.failed = None;
         }

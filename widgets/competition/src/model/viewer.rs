@@ -174,10 +174,11 @@ pub fn render_html(session: &Session, artifact_root: &Path) -> String {
         rounds,
     };
 
-    // Escape `</` so embedded JSON can never close the `<script>` tag.
+    // Escape every `<` so embedded JSON can neither close the `<script>` tag
+    // (`</script>`) nor open a comment that keeps it from closing (`<!--`).
     let json = serde_json::to_string(&data)
         .unwrap_or_else(|_| "{}".to_owned())
-        .replace("</", "<\\/");
+        .replace('<', "\\u003c");
 
     let mut html = String::with_capacity(16_384);
     let _ = write!(
@@ -604,7 +605,7 @@ mod tests {
             Submission {
                 part: PartId::new("claude"),
                 summary: "Design </script><script>alert(1)</script>".into(),
-                body: "Body".into(),
+                body: "Body <!-- <script> unclosed".into(),
                 artifacts: vec![ArtifactFile {
                     rel_path: "index.html".into(),
                     kind: ArtifactKind::Html,
@@ -641,6 +642,9 @@ mod tests {
         assert!(html.contains("Noa Competition Viewer"));
         assert!(html.contains("r1/artifacts/claude/index.html"));
         assert!(!html.contains("</script><script>alert(1)"));
+        // An unclosed `<!--` before `<script` would keep the page's own
+        // `</script>` from ending the data script.
+        assert!(!html.contains("<!-- <script"));
         assert!(html.contains(r#"setAttribute("sandbox", "allow-scripts")"#));
         assert!(!html.contains("allow-same-origin\")"));
     }

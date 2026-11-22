@@ -296,6 +296,10 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
             receipt.retries = receipt.retries.saturating_add(1);
             receipt.sent = None;
             receipt.started = None;
+            // A resend may reach a new agent (its pane was reopened): it
+            // gets the whole brief, not a correction to a reply it never
+            // wrote.
+            receipt.rejected = None;
         }
         Event::BriefFailed { round, to, reason } => {
             receipt_mut(session, *round, to)?.failed = Some(reason.clone());
@@ -311,9 +315,16 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
             let receipt = receipt_mut(session, *round, to)?;
             receipt.retries = receipt.retries.saturating_add(1);
             receipt.rejected = Some(error.clone());
+            // The correction is a new send: until it goes out and the agent
+            // starts on it, the brief is neither sent nor started.
+            receipt.sent = None;
+            receipt.started = None;
         }
         Event::ReplyAccepted { round, to, at } => {
             let receipt = receipt_mut(session, *round, to)?;
+            // A reply proves the brief arrived, even when the send was never
+            // confirmed (the link dropped right after the Enter).
+            receipt.sent.get_or_insert(*at);
             receipt.started.get_or_insert(*at);
             receipt.replied = Some(*at);
             receipt.rejected = None;

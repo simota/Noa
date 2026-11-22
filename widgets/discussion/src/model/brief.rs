@@ -485,13 +485,22 @@ mod tests {
         reduce::apply(session, &[Event::RoundStarted { no, kind, at: 0 }]).unwrap();
     }
 
+    /// Issues `brief` and records it as sent: the next brief to its
+    /// recipient starts where a sent one ended.
     fn issue(brief: &Brief, session: &mut Session, round: RoundNo) {
         reduce::apply(
             session,
-            &[Event::BriefIssued {
-                round,
-                brief: brief.clone(),
-            }],
+            &[
+                Event::BriefIssued {
+                    round,
+                    brief: brief.clone(),
+                },
+                Event::BriefSent {
+                    round,
+                    to: brief.to.clone(),
+                    at: 0,
+                },
+            ],
         )
         .unwrap();
     }

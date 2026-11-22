@@ -313,6 +313,9 @@ struct Pane {
     quiet: Option<(String, Millis)>,
     /// The user was told this pane waits on a prompt (once per hold).
     told_held: bool,
+    /// A brief has been typed into this pane. Before that, `error` is
+    /// Antigravity signing in; after it, a failed turn.
+    briefed: bool,
     /// Keys typed to answer Claude Code's trust prompt on this pane, and
     /// the screen the last one was typed on: the next key waits for the
     /// screen to change, so a slow redraw does not get a key twice.
@@ -331,6 +334,7 @@ impl Pane {
             detail: None,
             quiet: None,
             told_held: false,
+            briefed: false,
             trust_keys: 0,
             trust_screen: None,
         }
@@ -347,7 +351,12 @@ impl Pane {
                 // Antigravity's sign-in. Once the pane has taken a brief,
                 // `error` is a failed turn: the engine resends, and the agent
                 // is back at its input box.
-                || (!self.ready && self.state.as_deref() == Some("error")))
+                || (!self.briefed && self.state.as_deref() == Some("error")))
+    }
+
+    /// Whether the agent's last report says it is working on a turn.
+    fn busy(&self) -> bool {
+        self.seq > 0 && self.state.as_deref() == Some("running")
     }
 
     /// Whether the agent's last report says it waits for input.
@@ -759,10 +768,18 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     /// session's own panes still listed (a resume) are taken back, and
     /// every agent's state is read.
     fn relist(&mut self, views: &[PaneView]) -> Result<(), String> {
+        // A pane is still the agent's only if both its id and its label
+        // match: Noa numbers panes afresh when it restarts, so an id alone
+        // may now name some other pane.
         let gone: Vec<PartId> = self
             .panes
             .iter()
-            .filter(|(_, pane)| !views.iter().any(|v| v.pane_id == pane.id))
+            .filter(|(part, pane)| {
+                let label = self.label(part);
+                !views
+                    .iter()
+                    .any(|v| v.pane_id == pane.id && v.label.as_deref() == Some(label.as_str()))
+            })
             .map(|(part, _)| part.clone())
             .collect();
         for part in gone {
@@ -824,8 +841,14 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         if !pane.held() {
             pane.told_held = false;
         }
-        let Some(state) = agent_state(view.agent_state.as_deref()) else {
-            return Ok(());
+        // Any dialog Noa reports as `blocked` (an approval, or a question
+        // shown with `state: input`) waits on the user, like `permission`.
+        let state = match view.agent_blocked {
+            Some(_) => AgentState::Permission,
+            None => match agent_state(view.agent_state.as_deref()) {
+                Some(state) => state,
+                None => return Ok(()),
+            },
         };
         let at = self.clock.now();
         self.feed(Input::AgentStateChanged { part, state, at })?;
@@ -977,6 +1000,13 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             }
             return Ok(false);
         }
+        // A brief resent while the agent still works on the last one waits
+        // for the turn to end, however ready the pane was before.
+        if pane.busy() {
+            pane.ready = false;
+            pane.quiet = None;
+            return Ok(false);
+        }
         if pane.ready {
             return Ok(true);
         }
@@ -1069,10 +1099,13 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         if !delivery.pasted {
             if !self.ready(conn, &part)? {
                 let now = self.clock.now();
-                let held = self.panes.get(&part).is_some_and(Pane::held);
+                let held = self
+                    .panes
+                    .get(&part)
+                    .is_some_and(|pane| pane.held() || pane.busy());
                 if held {
-                    // The user answers the prompt; the time limit starts
-                    // again from then.
+                    // The user answers the prompt, or the agent ends its
+                    // turn; the time limit starts again from then.
                     delivery.queued = now;
                 } else if now.saturating_sub(delivery.queued) >= READY_LIMIT {
                     self.send_failed(delivery, NoaError::NotReady.to_string())?;
@@ -1081,7 +1114,12 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 return Ok(false);
             }
             match conn.type_text(pane, &delivery.body, true) {
-                Ok(()) => delivery.pasted = true,
+                Ok(()) => {
+                    delivery.pasted = true;
+                    if let Some(pane) = self.panes.get_mut(&part) {
+                        pane.briefed = true;
+                    }
+                }
                 Err(NoaError::NotReady) => {
                     if let Some(pane) = self.panes.get_mut(&part) {
                         pane.ready = false;
@@ -1591,6 +1629,8 @@ mod tests {
         let dir = rig.dir();
         fs::write(store::reply_path(&dir, 1, &p("claude")), "Postgres.").unwrap();
         fs::write(store::reply_path(&dir, 1, &p("codex")), "SQLite.").unwrap();
+        // claude ends its turn, as the real agents report.
+        fake.report(101, "finished");
         rig.until(20, |r| {
             r.session().current_round().unwrap().phase == Phase::Summarizing
         });
@@ -1980,13 +2020,16 @@ mod tests {
         let fake = Fake::new();
         let mut rig = Rig::new(&fake, &root);
         rig.until(40, |r| r.submitted(101) == 1);
-        // Mid-turn the agent asks for an approval, and the reply deadline
-        // passes: the engine resends the brief.
-        fake.report_blocked(101, "permission", "permission", "Bash");
-        fake.w().now += CONFIG.reply_timeout + 1;
+        // The agent writes a reply that is rejected, then asks the user a
+        // question before the correction goes out: the correction waits.
+        fake.report_blocked(101, "input", "question", "Which database?");
+        rig.step();
+        let path = store::reply_path(&rig.dir(), 1, &p("claude"));
+        fs::write(&path, "---\nissues: [Z]\n---\nbody").unwrap();
         for _ in 0..20 {
             rig.step();
         }
+        assert!(rig.receipt(1, "claude").rejected.is_some());
         assert_eq!(rig.submitted(101), 1, "nothing typed into the dialog");
         assert!(rig.notices().iter().any(|n| n.contains("確認待ち")));
         // Answered: the agent is back at its input box.
@@ -2010,6 +2053,142 @@ mod tests {
         }
         assert_eq!(rig.submitted(101), 0);
         assert!(fake.typed(101).is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_retry_after_rejected_replies_does_not_take_the_old_file_again() {
+        let root = temp_root("retry-rejected");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.until(40, |r| r.submitted(101) == 1);
+        let path = store::reply_path(&rig.dir(), 1, &p("claude"));
+        // Three invalid replies: two go back as corrections, the third
+        // fails the brief and stays on disk.
+        for n in 1..=3u8 {
+            fs::write(&path, "---\nissues: [Z]\n---\nbody").unwrap();
+            rig.until(20, |r| {
+                let receipt = r.receipt(1, "claude");
+                receipt.retries >= n.min(2) && (n < 3 || receipt.failed.is_some())
+            });
+        }
+        assert!(rig.receipt(1, "claude").failed.is_some());
+        assert!(path.exists(), "the last invalid reply is left on disk");
+        rig.actions.send(Action::Retry).unwrap();
+        for _ in 0..10 {
+            rig.step();
+        }
+        let receipt = rig.receipt(1, "claude");
+        assert_eq!(receipt.failed, None);
+        assert_eq!(
+            receipt.retries, 0,
+            "the old file was not taken as a new reply"
+        );
+        assert_eq!(receipt.rejected, None);
+        assert!(!path.exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_error_after_a_prompt_on_a_briefed_pane_is_a_failed_turn_and_resent() {
+        let root = temp_root("error-after-prompt");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.until(40, |r| r.submitted(101) == 1);
+        // A rejected reply's correction is held back while a question
+        // dialog is up; then the turn fails after the user answers it: the
+        // agent is back at its input box.
+        fake.report_blocked(101, "input", "question", "Which database?");
+        rig.step();
+        let path = store::reply_path(&rig.dir(), 1, &p("claude"));
+        fs::write(&path, "---\nissues: [Z]\n---\nbody").unwrap();
+        for _ in 0..5 {
+            rig.step();
+        }
+        assert_eq!(rig.submitted(101), 1);
+        fake.report(101, "error");
+        rig.until(20, |r| r.submitted(101) == 2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_resend_waits_while_the_agent_is_still_working() {
+        let root = temp_root("running-resend");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.until(40, |r| r.submitted(101) == 1);
+        fake.report(101, "running");
+        // Still working at the reply deadline: the resend waits.
+        fake.w().now += CONFIG.reply_timeout + 1;
+        for _ in 0..20 {
+            rig.step();
+        }
+        assert_eq!(rig.submitted(101), 1, "nothing typed into a working agent");
+        fake.report(101, "finished");
+        rig.until(10, |r| r.submitted(101) == 2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn after_noa_restarts_a_reused_pane_id_is_not_taken_for_an_agent() {
+        let root = temp_root("reused-id");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.until(40, |r| r.submitted(101) == 1 && r.submitted(102) == 1);
+        // Noa restarts while the link is down: every pane is gone, and a
+        // shell the user opens gets claude's old pane id.
+        fake.w().up = false;
+        rig.step();
+        {
+            let mut w = fake.w();
+            w.panes.clear();
+            w.panes.insert(
+                101,
+                FakePane {
+                    label: "zsh".into(),
+                    paste: true,
+                    screen: FAKE_IDLE.into(),
+                    state: None,
+                    blocked: None,
+                    detail: None,
+                    seq: 0,
+                },
+            );
+            w.typed.clear();
+        }
+        fake.w().up = true;
+        rig.until(60, |r| r.runner.conn.is_some());
+        // claude's brief is due again (no reply in time).
+        fake.w().now += CONFIG.reply_timeout + 1;
+        for _ in 0..40 {
+            rig.step();
+        }
+        assert!(
+            fake.typed(101).is_empty(),
+            "typed into the user's shell: {:?}",
+            fake.typed(101)
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_agent_waiting_on_a_question_does_not_time_out() {
+        let root = temp_root("question-deadline");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.until(40, |r| r.submitted(101) == 1);
+        fake.report(101, "running");
+        rig.step();
+        // A question dialog: Noa reports `input` with `blocked: question`.
+        fake.report_blocked(101, "input", "question", "Which database?");
+        rig.step();
+        fake.w().now += 3 * CONFIG.reply_timeout;
+        for _ in 0..5 {
+            rig.step();
+        }
+        let receipt = rig.receipt(1, "claude");
+        assert_eq!(receipt.retries, 0, "{receipt:?}");
+        assert_eq!(receipt.failed, None);
         let _ = fs::remove_dir_all(&root);
     }
 

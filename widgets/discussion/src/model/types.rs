@@ -451,6 +451,27 @@ pub struct Round {
 }
 
 impl Round {
+    /// The failed briefs a user retry sends again now: panelists' while
+    /// the round still waits for replies, the moderator's while it
+    /// summarizes. Once the round moved on, a failed panelist stays failed.
+    pub fn retryable(&self) -> Vec<PartId> {
+        match self.phase {
+            Phase::Briefing | Phase::Awaiting => self
+                .briefs
+                .iter()
+                .filter(|b| b.receipt.failed.is_some() && b.receipt.replied.is_none())
+                .map(|b| b.to.clone())
+                .collect(),
+            Phase::Summarizing => self
+                .moderator_brief
+                .iter()
+                .filter(|b| b.receipt.failed.is_some())
+                .map(|b| b.to.clone())
+                .collect(),
+            Phase::Closed => Vec::new(),
+        }
+    }
+
     pub fn brief(&self, to: &PartId) -> Option<&Brief> {
         self.briefs
             .iter()
@@ -655,7 +676,10 @@ impl Session {
             .iter()
             .rev()
             .filter(|round| round.no < before)
-            .find_map(|round| round.brief(to))
+            .filter_map(|round| round.brief(to))
+            // A brief that never went out told its agent nothing: the next
+            // one starts where the last one that was sent ended.
+            .find(|brief| brief.receipt.sent.is_some())
     }
 
     /// The display name of a message's author.

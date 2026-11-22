@@ -184,19 +184,21 @@ impl Store {
     /// anywhere else is an error.
     pub fn open(dir: &Path) -> Result<(Store, Session), StoreError> {
         let path = dir.join(EVENTS_FILE);
-        let text = fs::read_to_string(&path)?;
+        // Bytes, not a string: a last line torn inside a multi-byte
+        // character is not valid UTF-8, and is dropped like any torn line.
+        let text = fs::read(&path)?;
         let mut batches = Vec::new();
         let mut kept = 0;
         let mut offset = 0;
         let mut torn = false;
-        for (n, raw) in text.split_inclusive('\n').enumerate() {
-            let complete = raw.ends_with('\n');
+        for (n, raw) in text.split_inclusive(|&b| b == b'\n').enumerate() {
+            let complete = raw.ends_with(b"\n");
             offset += raw.len();
-            if raw.trim().is_empty() {
+            if raw.trim_ascii().is_empty() {
                 kept = offset;
                 continue;
             }
-            match serde_json::from_str::<Vec<Event>>(raw) {
+            match serde_json::from_slice::<Vec<Event>>(raw) {
                 Ok(batch) => {
                     batches.push(batch);
                     kept = offset;
@@ -369,6 +371,30 @@ mod tests {
             .open(dir.join(EVENTS_FILE))
             .unwrap();
         file.write_all(br#"[{"event":"message_po"#).unwrap();
+        drop(file);
+        let (mut store, session) = Store::open(&dir).unwrap();
+        assert_eq!(session.messages.len(), 1);
+        store.append(&posted(2)).unwrap();
+        let (_, session) = Store::open(&dir).unwrap();
+        assert_eq!(session.messages.len(), 2);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_last_line_torn_inside_a_multibyte_character_is_dropped() {
+        let root = temp_root("torn-utf8");
+        let dir = root.join("s");
+        let mut store = Store::create(&dir, &created()).unwrap();
+        store.append(&posted(1)).unwrap();
+        drop(store);
+        // A Japanese reply cut off one byte into "議" (3 bytes in UTF-8).
+        let mut torn = br#"[{"event":"message_posted","body":""#.to_vec();
+        torn.extend_from_slice(&"議".as_bytes()[..1]);
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(dir.join(EVENTS_FILE))
+            .unwrap();
+        file.write_all(&torn).unwrap();
         drop(file);
         let (mut store, session) = Store::open(&dir).unwrap();
         assert_eq!(session.messages.len(), 1);

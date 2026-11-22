@@ -6,6 +6,7 @@
 //! actions, and its updates become snapshots and notices.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use crate::session::runner::{self, Action, SessionHandle, Update};
@@ -106,8 +107,17 @@ fn run_commands(
     notices: Sender<String>,
     wake: Arc<dyn Fn() + Send + Sync>,
 ) {
-    let mut handle: Option<Sender<Action>> = None;
+    // The running session's actions, and whether its runner has ended: a
+    // session that failed to open or stopped leaves the user free to start
+    // another.
+    let mut handle: Option<(Sender<Action>, Arc<AtomicBool>)> = None;
     for cmd in commands {
+        if handle
+            .as_ref()
+            .is_some_and(|(_, ended)| ended.load(Ordering::Acquire))
+        {
+            handle = None;
+        }
         let action = match (cmd, &handle) {
             (
                 Command::Start {
@@ -134,11 +144,12 @@ fn run_commands(
                     },
                     || {},
                 );
-                handle = Some(started.actions());
+                let ended = Arc::new(AtomicBool::new(false));
+                handle = Some((started.actions(), ended.clone()));
                 let (snapshots, notices, wake) = (snapshots.clone(), notices.clone(), wake.clone());
                 std::thread::Builder::new()
                     .name("discussion-updates".into())
-                    .spawn(move || forward_updates(started, snapshots, notices, wake))
+                    .spawn(move || forward_updates(started, ended, snapshots, notices, wake))
                     .expect("spawn discussion-updates thread");
                 continue;
             }
@@ -166,13 +177,13 @@ fn run_commands(
             (Command::DeclineDebate { id }, Some(_)) => Action::DeclineDebate { id },
             (Command::Retry, Some(_)) => Action::Retry,
         };
-        if let Some(handle) = &handle {
-            let _ = handle.send(action);
+        if let Some((actions, _)) = &handle {
+            let _ = actions.send(action);
         }
     }
     // The UI is gone: end the runner (the updates thread holds its handle).
-    if let Some(handle) = handle {
-        let _ = handle.send(Action::Stop);
+    if let Some((actions, _)) = handle {
+        let _ = actions.send(Action::Stop);
     }
 }
 
@@ -180,6 +191,7 @@ fn run_commands(
 /// link) and notices, until the runner ends or the UI is gone.
 fn forward_updates(
     handle: SessionHandle,
+    ended: Arc<AtomicBool>,
     snapshots: Sender<Snapshot>,
     notices: Sender<String>,
     wake: Arc<dyn Fn() + Send + Sync>,
@@ -213,6 +225,9 @@ fn forward_updates(
             Update::Notice(text) => notices.send(text).is_ok(),
             Update::Ended(Ok(())) => break,
             Update::Ended(Err(why)) => {
+                // Before the notice: a start the user tries after seeing it
+                // must not meet the ended session.
+                ended.store(true, Ordering::Release);
                 let _ = notices.send(format!("議論を続けられません: {why}"));
                 let _ = snapshots.send(Snapshot {
                     link: Link::Down(why),
@@ -227,6 +242,7 @@ fn forward_updates(
         }
         wake();
     }
+    ended.store(true, Ordering::Release);
 }
 
 #[cfg(test)]
@@ -253,4 +269,56 @@ pub(crate) fn test_channel() -> (Channel, TestFeed) {
             commands: command_rx,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// The notices that arrive within `wait`.
+    fn notices_within(channel: &Channel, wait: Duration) -> Vec<String> {
+        let mut seen = Vec::new();
+        while let Ok(notice) = channel.notices.recv_timeout(wait) {
+            seen.push(notice);
+        }
+        seen
+    }
+
+    #[test]
+    fn a_start_that_fails_can_be_tried_again() {
+        // A working directory that is a file: the runner stops before it
+        // connects to Noa or stores anything.
+        let file =
+            std::env::temp_dir().join(format!("noa-discussion-not-a-dir-{}", std::process::id()));
+        std::fs::write(&file, "").unwrap();
+        let channel = start(|| {});
+        let start = || Command::Start {
+            topic: "t".into(),
+            workdir: Some(file.clone()),
+            moderator: AgentKind::Claude,
+            panel: vec![AgentKind::Codex],
+        };
+        channel.send(start());
+        let first = notices_within(&channel, Duration::from_millis(500));
+        assert!(
+            first
+                .iter()
+                .any(|n| n.contains("ディレクトリではありません")),
+            "{first:?}"
+        );
+        channel.send(start());
+        let second = notices_within(&channel, Duration::from_millis(500));
+        assert!(
+            !second.iter().any(|n| n.contains("すでに始まっています")),
+            "{second:?}"
+        );
+        assert!(
+            second
+                .iter()
+                .any(|n| n.contains("ディレクトリではありません")),
+            "{second:?}"
+        );
+        let _ = std::fs::remove_file(&file);
+    }
 }

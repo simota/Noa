@@ -185,6 +185,26 @@ fn a_failed_brief_offers_a_retry() {
     assert_eq!(h.drain(), vec![Command::Retry]);
 }
 
+#[test]
+fn no_retry_is_offered_when_the_engine_would_refuse_it() {
+    use discussion::model::types::Phase;
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    // A panelist failed, the others replied, and the moderator is
+    // summarizing: the engine retries only the moderator's brief now.
+    let mut session = crate::demo::session();
+    let round = session.rounds.last_mut().unwrap();
+    round.briefs[2].receipt.failed = Some("pane gone".into());
+    round.phase = Phase::Summarizing;
+    h.deliver(Some(session.clone()));
+    assert!(!has_widget_for(&h.screen, &Action::Retry));
+    // Nor once the round is closed.
+    session.rounds.last_mut().unwrap().phase = Phase::Closed;
+    session.rev += 1;
+    h.deliver(Some(session));
+    assert!(!has_widget_for(&h.screen, &Action::Retry));
+}
+
 // ── Debates ─────────────────────────────────────────────────────────────────
 
 #[test]

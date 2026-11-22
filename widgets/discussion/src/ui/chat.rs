@@ -109,10 +109,8 @@ fn brief_bar(
         tag(tree, row, &format!("⚔ 討論 {id}"), Tone::Warning);
     }
     caption(tree, row, phase_label(round.phase));
-    let mut failed = false;
     for brief in round.briefs.iter().chain(&round.moderator_brief) {
         let delivery = Delivery::of(&brief.receipt);
-        failed |= delivery == Delivery::Failed;
         let (state, tone) = delivery.tag();
         let id = tag(
             tree,
@@ -124,7 +122,8 @@ fn brief_bar(
             tree.set_accessible_label(id, format!("{}: {why}", part_name(&brief.to)));
         }
     }
-    if failed {
+    // Offered only when the engine would take it (the same rule).
+    if !round.retryable().is_empty() {
         spacer(tree, row);
         let retry = tree.insert(
             Some(row),

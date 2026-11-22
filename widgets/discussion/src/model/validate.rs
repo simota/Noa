@@ -457,6 +457,9 @@ pub fn parse_reply(text: &str, session: &Session) -> Result<Reply, ValidationErr
         }
         let mut seen = BTreeSet::new();
         for (n, line) in header.into_iter().enumerate() {
+            // `#` starts a comment, as in the example the brief shows. No
+            // header value (issue ids, message ids, positions) holds one.
+            let line = line.split_once('#').map_or(line, |(before, _)| before);
             if line.trim().is_empty() {
                 continue;
             }
@@ -824,6 +827,39 @@ mod tests {
         assert_eq!(reply.reply_to, vec![MessageId::nth(1)]);
         assert_eq!(reply.stances, vec![(IssueId::new("A"), Position::Against)]);
         assert_eq!(reply.body, "I disagree.\n\nBecause.");
+    }
+
+    #[test]
+    fn the_header_example_in_the_brief_parses_as_written() {
+        let s = session();
+        // The example lines exactly as a panelist's brief shows them, with
+        // their trailing `#` comments.
+        let brief = crate::model::brief::panelist_brief(
+            &s,
+            &PartId::new("claude"),
+            1,
+            "q",
+            std::path::Path::new("/r/claude.md"),
+        );
+        let example: Vec<&str> = brief
+            .body
+            .lines()
+            .filter(|line| {
+                ["issues:", "reply_to:", "stance:"]
+                    .iter()
+                    .any(|k| line.starts_with(k))
+            })
+            .collect();
+        assert_eq!(example.len(), 3, "{}", brief.body);
+        assert!(example.iter().all(|line| line.contains('#')));
+        let text = format!(
+            "---\n{}\n# a note of my own\n---\nI disagree.",
+            example.join("\n")
+        );
+        let reply = parse_reply(&text, &s).unwrap();
+        assert_eq!(reply.issues, vec![IssueId::new("A")]);
+        assert_eq!(reply.reply_to, vec![MessageId::nth(1)]);
+        assert_eq!(reply.stances, vec![(IssueId::new("A"), Position::Against)]);
     }
 
     #[test]

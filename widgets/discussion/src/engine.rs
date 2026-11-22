@@ -225,6 +225,10 @@ pub struct Engine {
     session: Session,
     dir: PathBuf,
     config: Config,
+    /// Agents waiting on the user (an approval) since their last report,
+    /// and when each last stopped waiting: their brief's deadlines do not
+    /// run while they wait. Not stored; a restart starts without it.
+    waiting: BTreeMap<PartId, Option<Millis>>,
 }
 
 impl Engine {
@@ -284,6 +288,7 @@ impl Engine {
             session,
             dir: dir.to_owned(),
             config,
+            waiting: BTreeMap::new(),
         };
         let output = Output {
             batches: vec![batch],
@@ -308,6 +313,7 @@ impl Engine {
             session,
             dir: dir.to_owned(),
             config,
+            waiting: BTreeMap::new(),
         }
     }
 
@@ -334,6 +340,9 @@ impl Engine {
                 self.commit(&mut out, vec![Event::PaneAssigned { part, pane_id }])?;
             }
             Input::Sent { round, part, at } => {
+                // An agent that took a brief is at its input box, not on a
+                // prompt: the deadlines run from this send.
+                self.waiting.remove(&part);
                 if self.open_brief(round, &part).is_some() {
                     self.commit(
                         &mut out,
@@ -695,7 +704,14 @@ impl Engine {
             let Some(sent) = brief.receipt.sent else {
                 continue;
             };
-            let waited = now.saturating_sub(sent);
+            // The deadlines stop while the agent waits on the user, and
+            // run again from when it stopped waiting.
+            let since = match self.waiting.get(&brief.to) {
+                Some(None) => continue,
+                Some(Some(resumed)) => sent.max(*resumed),
+                None => sent,
+            };
+            let waited = now.saturating_sub(since);
             if brief.receipt.started.is_none() && waited >= self.config.start_timeout {
                 due.push((
                     brief.to.clone(),
@@ -721,26 +737,38 @@ impl Engine {
         state: AgentState,
         at: Millis,
     ) -> Result<(), EngineError> {
+        // Every report moves the wait, whatever the brief: a wait that
+        // ended after the reply was taken in must not outlive it.
+        // `None`: waiting now; `Some(at)`: stopped waiting at `at`.
+        match (state, self.waiting.get(part)) {
+            (AgentState::Permission, _) => {
+                self.waiting.insert(part.clone(), None);
+            }
+            (_, Some(None)) => {
+                self.waiting.insert(part.clone(), Some(at));
+            }
+            _ => {}
+        }
         let Some(no) = self.current_no() else {
             return Ok(());
         };
         let Some(brief) = self.open_brief(no, part) else {
             return Ok(());
         };
+        let not_started = brief.receipt.started.is_none();
         // Only a state seen after the send counts.
         if brief.receipt.sent.is_none() {
             return Ok(());
         }
         match state {
-            AgentState::Running | AgentState::Permission if brief.receipt.started.is_none() => self
-                .commit(
-                    out,
-                    vec![Event::BriefStarted {
-                        round: no,
-                        to: part.clone(),
-                        at,
-                    }],
-                ),
+            AgentState::Running | AgentState::Permission if not_started => self.commit(
+                out,
+                vec![Event::BriefStarted {
+                    round: no,
+                    to: part.clone(),
+                    at,
+                }],
+            ),
             AgentState::Error => {
                 self.retry_or_fail(out, no, part, "the agent reported an error".to_owned())
             }
@@ -1039,21 +1067,7 @@ impl Engine {
             return rejected("nothing to retry");
         };
         let no = round.no;
-        let failed: Vec<PartId> = match round.phase {
-            Phase::Briefing | Phase::Awaiting => round
-                .briefs
-                .iter()
-                .filter(|b| b.receipt.failed.is_some() && b.receipt.replied.is_none())
-                .map(|b| b.to.clone())
-                .collect(),
-            Phase::Summarizing => round
-                .moderator_brief
-                .iter()
-                .filter(|b| b.receipt.failed.is_some())
-                .map(|b| b.to.clone())
-                .collect(),
-            Phase::Closed => Vec::new(),
-        };
+        let failed = round.retryable();
         if failed.is_empty() {
             return rejected("nothing to retry");
         }
@@ -1067,6 +1081,11 @@ impl Engine {
         self.commit(out, batch)?;
         for part in &failed {
             if let Some(brief) = self.open_brief(no, part).cloned() {
+                // A brief that failed on rejected replies leaves the last
+                // one on disk; it must not count as the retry's reply.
+                out.effects.push(Effect::ClearReply {
+                    path: brief.reply_path.clone(),
+                });
                 Self::watch(out, no, &brief);
                 Self::send(out, no, &brief);
             }
@@ -1667,6 +1686,209 @@ mod tests {
             last.body.contains("- [m"),
             "interventions are listed in section 5"
         );
+    }
+
+    #[test]
+    fn a_brief_that_was_never_sent_is_not_the_base_of_the_next_one() {
+        let mut e = engine();
+        feed(&mut e, Input::Start { now: 0 });
+        run_panel(&mut e, 1);
+        moderate(&mut e, r#"{"summary":"round one summary"}"#, 2);
+        assert_eq!(no(&e), 2);
+        let r1_through = e
+            .session()
+            .round(1)
+            .unwrap()
+            .brief(&p("agy"))
+            .unwrap()
+            .through
+            .clone();
+        // Round 2: agy's brief never goes out; the others reply.
+        for _ in 0..3 {
+            feed(
+                &mut e,
+                Input::SendFailed {
+                    round: 2,
+                    part: p("agy"),
+                    error: "pane gone".into(),
+                },
+            );
+        }
+        let failed = round(&e).brief(&p("agy")).unwrap().receipt.clone();
+        assert!(failed.failed.is_some() && failed.sent.is_none());
+        for part in [p("claude"), p("codex")] {
+            sent(&mut e, &part, 3);
+            running(&mut e, &part, 3);
+            write(&mut e, &part, &format!("{part} in round 2"), 3);
+        }
+        moderate(&mut e, r#"{"summary":"round two summary"}"#, 4);
+        assert_eq!(no(&e), 3);
+        // agy's round-3 brief starts where its last delivered one ended, so
+        // round 1's summary and everything after reach it.
+        let brief = round(&e).brief(&p("agy")).unwrap();
+        assert_eq!(brief.since, r1_through);
+        assert!(brief.body.contains("round one summary"), "{}", brief.body);
+        assert!(brief.body.contains("round two summary"));
+    }
+
+    /// Round 1 with claude's first reply rejected (an unknown issue).
+    fn rejected_reply() -> Engine {
+        let mut e = engine();
+        feed(&mut e, Input::Start { now: 0 });
+        for part in panel(&e) {
+            sent(&mut e, &part, 0);
+            running(&mut e, &part, 10);
+        }
+        let out = write(&mut e, &p("claude"), "---\nissues: [Z]\n---\nbody", 20);
+        assert_eq!(sends(&out).len(), 1, "the correction goes out");
+        assert!(
+            round(&e)
+                .brief(&p("claude"))
+                .unwrap()
+                .receipt
+                .rejected
+                .is_some()
+        );
+        e
+    }
+
+    #[test]
+    fn a_correction_not_yet_sent_is_sent_again_after_a_restart() {
+        let e = rejected_reply();
+        let mut resumed = Engine::resume(e.session().clone(), Path::new("/d"), CONFIG);
+        let out = feed(&mut resumed, Input::Start { now: 30 });
+        let body = send_to(&out, "claude");
+        assert!(body.contains("unknown issue"), "{body}");
+    }
+
+    #[test]
+    fn a_correction_the_agent_never_starts_on_is_resent_at_the_start_timeout() {
+        let mut e = rejected_reply();
+        sent(&mut e, &p("claude"), 30);
+        // No report that the agent started on the correction.
+        let out = feed(
+            &mut e,
+            Input::Tick {
+                now: 30 + CONFIG.start_timeout,
+            },
+        );
+        assert_eq!(sends(&out).len(), 1, "{out:#?}");
+    }
+
+    #[test]
+    fn an_agent_waiting_on_an_approval_does_not_time_out() {
+        let mut e = engine();
+        feed(&mut e, Input::Start { now: 0 });
+        for part in panel(&e) {
+            sent(&mut e, &part, 0);
+            running(&mut e, &part, 10);
+        }
+        // agy used up its resends, then asks the user for an approval.
+        for n in 1..=2u64 {
+            feed(
+                &mut e,
+                Input::Tick {
+                    now: n * CONFIG.reply_timeout + n,
+                },
+            );
+            sent(&mut e, &p("agy"), n * CONFIG.reply_timeout + n);
+        }
+        assert_eq!(round(&e).brief(&p("agy")).unwrap().receipt.retries, 2);
+        let asked = 2 * CONFIG.reply_timeout + 5;
+        feed(
+            &mut e,
+            Input::AgentStateChanged {
+                part: p("agy"),
+                state: AgentState::Permission,
+                at: asked,
+            },
+        );
+        // The user takes longer than the reply deadline to answer.
+        feed(
+            &mut e,
+            Input::Tick {
+                now: asked + 3 * CONFIG.reply_timeout,
+            },
+        );
+        let receipt = &round(&e).brief(&p("agy")).unwrap().receipt;
+        assert_eq!(receipt.failed, None, "waiting on the user is not a failure");
+    }
+
+    #[test]
+    fn deadlines_paused_for_an_approval_run_again_in_the_next_round() {
+        let mut e = engine();
+        feed(&mut e, Input::Start { now: 0 });
+        for part in panel(&e) {
+            sent(&mut e, &part, 0);
+            running(&mut e, &part, 1);
+        }
+        // agy asks for an approval, gets it, replies, and only then reports
+        // that its turn ended.
+        feed(
+            &mut e,
+            Input::AgentStateChanged {
+                part: p("agy"),
+                state: AgentState::Permission,
+                at: 2,
+            },
+        );
+        for part in panel(&e) {
+            write(&mut e, &part, "ok", 3);
+        }
+        feed(
+            &mut e,
+            Input::AgentStateChanged {
+                part: p("agy"),
+                state: AgentState::Finished,
+                at: 4,
+            },
+        );
+        moderate(&mut e, r#"{"summary":"next"}"#, 5);
+        assert_eq!(no(&e), 2);
+        // Round 2: agy's brief goes out, and agy never starts on it.
+        sent(&mut e, &p("agy"), 10);
+        let out = feed(
+            &mut e,
+            Input::Tick {
+                now: 10 + CONFIG.start_timeout,
+            },
+        );
+        assert!(
+            sends(&out).iter().any(|(part, _)| part.as_str() == "agy"),
+            "the start deadline runs again: {out:#?}"
+        );
+    }
+
+    #[test]
+    fn replies_that_arrive_before_their_send_was_confirmed_still_end_the_round() {
+        let mut e = engine();
+        feed(&mut e, Input::Start { now: 0 });
+        // The link dropped right after each Enter: no `Sent`, but the
+        // agents got their briefs and replied.
+        for part in panel(&e) {
+            write(&mut e, &part, "ok", 5);
+        }
+        assert_eq!(phase(&e), Phase::Summarizing);
+    }
+
+    #[test]
+    fn a_brief_resent_after_a_rejection_carries_the_whole_situation() {
+        let mut e = rejected_reply();
+        sent(&mut e, &p("claude"), 30);
+        // The pane closes (the runner reports it as an agent error): a new
+        // agent gets the resend and knows nothing yet.
+        let out = feed(
+            &mut e,
+            Input::AgentStateChanged {
+                part: p("claude"),
+                state: AgentState::Error,
+                at: 40,
+            },
+        );
+        let body = send_to(&out, "claude");
+        for heading in PANELIST_SECTIONS {
+            assert!(body.contains(heading), "{heading} missing from:\n{body}");
+        }
     }
 
     #[test]

@@ -42,6 +42,14 @@ pub use debate::{DebateTarget, DebateView};
 
 const TREE_WIDTH: f32 = 300.0;
 const MINUTES_WIDTH: f32 = 330.0;
+/// The chat pane never gets narrower than this.
+const CENTER_MIN: f32 = 480.0;
+/// The smallest window the widget is laid out for. The side panes keep
+/// their width, so a narrower window would cut off the minutes pane.
+pub(crate) const MIN_WINDOW: (f64, f64) = (
+    (TREE_WIDTH + CENTER_MIN + MINUTES_WIDTH + 2.0 * noa_gpui_core::widgets::DIVIDER) as f64,
+    600.0,
+);
 
 /// What a clickable widget does.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,7 +174,7 @@ impl Discussion {
             Some(meeting),
             SplitView::horizontal()
                 .pane(SplitPane::fixed(TREE_WIDTH).min(220.0))
-                .pane(SplitPane::flexible().min(480.0))
+                .pane(SplitPane::flexible().min(CENTER_MIN))
                 .pane(SplitPane::fixed(MINUTES_WIDTH).min(240.0)),
         );
         let tree_host = tree.insert(Some(split), pane_column(Role::Surface));
@@ -331,7 +339,14 @@ impl Discussion {
         self.tree
             .insert(Some(self.status_leading), Badge::text(badge).tone(tone));
         if let Link::Down(why) = &self.link {
-            caption(&mut self.tree, self.status_leading, why.clone());
+            // One line in the status bar: a long reason is cut, not spilled.
+            self.tree.insert(
+                Some(self.status_leading),
+                Label::new(why.clone())
+                    .font_size(11.0)
+                    .color(Role::Muted)
+                    .truncation(noa_gpui_core::widgets::Truncation::Tail),
+            );
         }
         let Some(session) = &self.session else {
             return;
@@ -907,6 +922,18 @@ pub(crate) fn caption(tree: &mut UiTree, parent: WidgetId, text: impl Into<Strin
     tree.insert(
         Some(parent),
         Label::new(text).font_size(11.0).color(Role::Muted),
+    )
+}
+
+/// A [`caption`] that wraps: for a sentence that may be longer than its
+/// pane is wide.
+pub(crate) fn note(tree: &mut UiTree, parent: WidgetId, text: impl Into<String>) -> WidgetId {
+    tree.insert(
+        Some(parent),
+        Label::new(text)
+            .font_size(11.0)
+            .color(Role::Muted)
+            .wrap(true),
     )
 }
 

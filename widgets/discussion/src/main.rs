@@ -67,6 +67,7 @@ fn options() -> AppOptions {
     AppOptions {
         title: title(|key| std::env::var(key).ok(), system_language).into(),
         size: (1440.0, 900.0),
+        min_size: Some(ui::MIN_WINDOW),
         ..AppOptions::new("Noa Discussion")
     }
 }

@@ -11,7 +11,7 @@ use noa_gpui_text::TextStore;
 
 use discussion::model::types::{MODERATOR_ID, PartId, Session};
 
-use super::{caption, clear_children, fill, gap, part_name};
+use super::{caption, clear_children, fill, gap, note, part_name};
 
 pub(super) struct Parts {
     recipients_host: WidgetId,
@@ -82,7 +82,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
             .default_button(true)
             .control_size(ControlSize::Small),
     );
-    caption(
+    note(
         tree,
         root,
         "介入はログに残り、次のラウンドのブリーフで全員に届きます。宛先は誰への発言かを示します",

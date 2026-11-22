@@ -147,7 +147,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         Some(card),
         Container::row().align_items(AlignItems::CENTER).gap(8.0),
     );
-    let note = tree.insert(Some(foot), Container::row().grow(1.0));
+    let note = tree.insert(Some(foot), Container::column().grow(1.0));
     let start_button = tree.insert(
         Some(foot),
         Button::new("ディスカッションを開始").default_button(true),
@@ -172,7 +172,7 @@ pub(super) fn rebuild_note(tree: &mut UiTree, parts: &Parts, link: &Link, text: 
         Link::Connecting => "Noa に接続しています…".to_owned(),
         Link::Down(why) => format!("Noa に接続できません: {why}"),
     };
-    caption(tree, parts.note, note);
+    super::note(tree, parts.note, note);
 }
 
 pub(super) fn read(tree: &UiTree, parts: &Parts) -> Form {

@@ -75,6 +75,22 @@ fn the_three_panes_sit_side_by_side() {
 }
 
 #[test]
+fn at_the_smallest_window_every_pane_fits_inside_it() {
+    let (w, h) = MIN_WINDOW;
+    let mut screen = Discussion::demo();
+    let mut text = TextStore::new(Default::default());
+    screen.prepare(Size::new(w as f32, h as f32), &mut text);
+    let [mx, _, mw, _] = rect(&screen.tree, screen.minutes_host);
+    assert!(
+        mx + mw <= w as f32 + 0.5,
+        "minutes pane ends at {}",
+        mx + mw
+    );
+    let [_, y, _, sh] = rect(&screen.tree, screen.composer.send);
+    assert!(y + sh <= h as f32, "send button at {y}+{sh}");
+}
+
+#[test]
 fn the_composer_stays_below_the_chat_in_view() {
     let (screen, _text) = laid_out();
     let [_, y, _, h] = rect(&screen.tree, screen.composer.send);

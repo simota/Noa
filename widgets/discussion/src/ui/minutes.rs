@@ -8,7 +8,7 @@ use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use discussion::model::types::{AgentKind, MinuteSection, Session};
 
 use super::chat::issue_link;
-use super::{Action, caption, gap, heading, scroll_column, tag};
+use super::{Action, caption, gap, heading, note, scroll_column, tag};
 
 pub(crate) fn section_title(section: MinuteSection) -> &'static str {
     match section {
@@ -42,20 +42,20 @@ pub(super) fn insert(
     let export = tree.insert(Some(tools), small("議事録を書き出す…"));
     actions.push((export, Action::ExportMinutes));
     // An implementation needs a repository to work in.
-    let implement = tree.insert(
-        Some(host),
-        Container::wrapping_row(6.0, 6.0).align_items(noa_gpui_core::style::AlignItems::CENTER),
-    );
     if session.workdir.is_some() {
+        let implement = tree.insert(
+            Some(host),
+            Container::wrapping_row(6.0, 6.0).align_items(noa_gpui_core::style::AlignItems::CENTER),
+        );
         caption(tree, implement, "実装を依頼:");
         for kind in AgentKind::ALL {
             let button = tree.insert(Some(implement), small(kind.command()));
             actions.push((button, Action::Implement(kind)));
         }
     } else {
-        caption(
+        note(
             tree,
-            implement,
+            host,
             "実装の依頼は、作業ディレクトリを指定した議論で使えます",
         );
     }

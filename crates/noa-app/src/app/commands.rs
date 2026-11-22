@@ -243,6 +243,9 @@ impl App {
             AppCommand::OpenDiscussion => {
                 self.open_helper_program(crate::helper_program::DISCUSSION)
             }
+            AppCommand::OpenCompetition => {
+                self.open_helper_program(crate::helper_program::COMPETITION)
+            }
             AppCommand::Spawn(command) => crate::commands::spawn_in_background(
                 command,
                 self.focused_pane_cwd().as_deref().map(std::path::Path::new),

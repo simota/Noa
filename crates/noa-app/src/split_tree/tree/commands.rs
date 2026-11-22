@@ -67,6 +67,7 @@ pub fn resolve_pane_command_target(
         | AppCommand::OpenAgentDashboard
         | AppCommand::OpenRepoBrowser
         | AppCommand::OpenDiscussion
+        | AppCommand::OpenCompetition
         | AppCommand::Spawn(_)
         | AppCommand::ToggleSidebar
         | AppCommand::ToggleAutoApprove

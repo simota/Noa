@@ -104,6 +104,10 @@ pub enum AppCommand {
     /// between agents running in Noa's panes, as a program of its own beside
     /// Noa.
     OpenDiscussion,
+    /// Start the competition (`widgets/competition`), a blind multi-agent
+    /// competition with periodic peer reveals and artifact comparison, as a
+    /// program of its own beside Noa.
+    OpenCompetition,
     /// Open the "Theme" picker half of the split theme-settings overlay
     /// (theme-settings-ui R-1, later split into two overlays). Reachable
     /// only from the command palette — deliberately unbound in
@@ -285,6 +289,7 @@ impl AppCommand {
     pub(crate) const OPEN_AGENT_DASHBOARD_MENU_ID: &'static str = "noa.view.open-agent-dashboard";
     pub(crate) const OPEN_REPO_BROWSER_MENU_ID: &'static str = "noa.view.open-repo-browser";
     pub(crate) const OPEN_DISCUSSION_MENU_ID: &'static str = "noa.view.open-discussion";
+    pub(crate) const OPEN_COMPETITION_MENU_ID: &'static str = "noa.view.open-competition";
     pub(crate) const OPEN_SETTINGS_MENU_ID: &'static str = "noa.view.open-settings";
 
     pub(crate) fn menu_id(self) -> &'static str {
@@ -370,6 +375,7 @@ impl AppCommand {
             AppCommand::OpenAgentDashboard => Self::OPEN_AGENT_DASHBOARD_MENU_ID,
             AppCommand::OpenRepoBrowser => Self::OPEN_REPO_BROWSER_MENU_ID,
             AppCommand::OpenDiscussion => Self::OPEN_DISCUSSION_MENU_ID,
+            AppCommand::OpenCompetition => Self::OPEN_COMPETITION_MENU_ID,
         }
     }
 
@@ -444,6 +450,7 @@ impl AppCommand {
             Self::OPEN_AGENT_DASHBOARD_MENU_ID => Some(Self::OpenAgentDashboard),
             Self::OPEN_REPO_BROWSER_MENU_ID => Some(Self::OpenRepoBrowser),
             Self::OPEN_DISCUSSION_MENU_ID => Some(Self::OpenDiscussion),
+            Self::OPEN_COMPETITION_MENU_ID => Some(Self::OpenCompetition),
             Self::OPEN_SETTINGS_MENU_ID => Some(Self::OpenSettings),
             _ => None,
         }
@@ -572,6 +579,7 @@ impl AppCommand {
             Self::OpenAgentDashboard => "agent-dashboard.open",
             Self::OpenRepoBrowser => "repo-browser.open",
             Self::OpenDiscussion => "discussion.open",
+            Self::OpenCompetition => "competition.open",
             Self::OpenThemePicker => "theme.open",
             Self::OpenSettings => "settings.open",
             Self::ToggleProcessMonitor => "process-monitor.toggle",
@@ -669,6 +677,7 @@ impl AppCommand {
             // `repo-theater.open` is the name 0.9.10 shipped it under.
             "repo-browser.open" | "repo-theater.open" => Some(Self::OpenRepoBrowser),
             "discussion.open" => Some(Self::OpenDiscussion),
+            "competition.open" => Some(Self::OpenCompetition),
             "theme.open" | "theme-settings.open" => Some(Self::OpenThemePicker),
             "settings.open" => Some(Self::OpenSettings),
             "process-monitor.toggle" => Some(Self::ToggleProcessMonitor),

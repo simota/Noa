@@ -130,6 +130,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::OpenAgentDashboard => "Open Agent Dashboard",
         AppCommand::OpenRepoBrowser => "Open Repo Browser",
         AppCommand::OpenDiscussion => "Open Discussion",
+        AppCommand::OpenCompetition => "Open Competition",
         // Deviation: the locked spec's literal label is Japanese
         // ("テーマ・設定を開く"), but every existing palette title is English
         // (this whole `match`) — following that established convention
@@ -271,6 +272,9 @@ pub(crate) fn command_palette_description(command: AppCommand) -> &'static str {
         AppCommand::OpenDiscussion => {
             "Hold a moderated discussion between agents running in Noa's panes, in a window of its own."
         }
+        AppCommand::OpenCompetition => {
+            "Run a blind multi-agent competition with periodic peer reveals and artifact comparison, in a window of its own."
+        }
         AppCommand::OpenThemePicker => "Choose a color theme.",
         AppCommand::ToggleProcessMonitor => "Show the processes running in each terminal.",
         AppCommand::NextNotification => "Go to the next session with an unread notification.",
@@ -371,6 +375,7 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::OpenAgentDashboard,
         AppCommand::OpenRepoBrowser,
         AppCommand::OpenDiscussion,
+        AppCommand::OpenCompetition,
         AppCommand::SetTabTitle,
         AppCommand::CloseTab,
         AppCommand::NextTab,
@@ -670,7 +675,8 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         | AppCommand::ToggleProcessMonitor
         | AppCommand::OpenAgentDashboard
         | AppCommand::OpenRepoBrowser
-        | AppCommand::OpenDiscussion => CommandCategory::View,
+        | AppCommand::OpenDiscussion
+        | AppCommand::OpenCompetition => CommandCategory::View,
         AppCommand::Search(_) => CommandCategory::Search,
         AppCommand::ScrollViewport(_) => CommandCategory::Scroll,
         AppCommand::CopyMode(_) => CommandCategory::Clipboard,
@@ -1037,6 +1043,7 @@ mod tests {
             AppCommand::OpenAgentDashboard,
             AppCommand::OpenRepoBrowser,
             AppCommand::OpenDiscussion,
+            AppCommand::OpenCompetition,
         ];
         commands.extend((1..=9).map(AppCommand::SelectTab));
         commands

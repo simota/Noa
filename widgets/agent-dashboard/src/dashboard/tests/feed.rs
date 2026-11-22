@@ -95,7 +95,8 @@ fn a_structural_snapshot_rebuilds_the_screen() {
     worker.detail = "Bash: cargo publish".into();
     dashboard.apply(live(changed.clone(), 1), &mut text);
     let buttons = &dashboard.queue_buttons;
-    assert_eq!(buttons.open.len() + buttons.details.len(), 6);
+    // Five cards: 13 is quiet, folded away under 参考情報.
+    assert_eq!(buttons.open.len() + buttons.details.len(), 5);
     assert!(buttons.details.iter().any(|(_, pane)| *pane == 12));
     assert!(dashboard.needs_update(window()));
     assert!(dashboard.prepare(window(), &mut text));
@@ -148,12 +149,20 @@ fn a_live_screen_follows_its_feed() {
     let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
     assert_eq!(status.text(), "ワーカー 9 · 同期 2 秒前");
 
+    // The click comes a second later: the link state ages, the notice does
+    // not replace it.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     let (open, pane) = dashboard.queue_buttons.open[0];
     let pos = center(&dashboard.tree, open);
     click(&mut dashboard, &mut text, pos);
     assert_eq!(commands.try_recv(), Ok(Command::Focus(pane)));
+    assert_eq!(notice_of(&dashboard), "fix-tests のペインへ移動します");
     let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
-    assert_eq!(status.text(), "fix-tests のペインへ移動します");
+    assert!(
+        status.text().starts_with("ワーカー 9 · 同期 "),
+        "{}",
+        status.text()
+    );
 }
 
 fn text_of(dashboard: &Dashboard, wanted: impl Fn(Pulse) -> bool) -> String {
@@ -227,13 +236,12 @@ fn opening_without_the_control_scope_says_why_and_sends_nothing() {
         commands.try_iter().all(|c| !matches!(c, Command::Focus(_))),
         "a focus the server will refuse is not sent"
     );
-    let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
     assert_eq!(
-        status.text(),
-        "ペインへ移動できません: Noa の server-scopes に control がありません"
+        notice_of(&dashboard),
+        "ペインへ移動できません: Noa の server-scopes に control がありません（例: server-scopes = read,control）"
     );
 
-    // The next snapshot keeps the reason up instead of the link state.
+    // The next snapshot keeps the reason up, beside the link state.
     snapshots
         .send(Snapshot {
             can_focus: false,
@@ -241,8 +249,9 @@ fn opening_without_the_control_scope_says_why_and_sends_nothing() {
         })
         .unwrap();
     dashboard.before_frame(&mut text);
+    assert!(notice_of(&dashboard).contains("control"));
     let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
-    assert!(status.text().contains("control"), "{}", status.text());
+    assert_eq!(status.text(), "ワーカー 9 · 同期 3 秒前");
 }
 
 #[test]
@@ -262,8 +271,10 @@ fn a_focus_the_server_refused_replaces_the_promise_in_the_header() {
         .send("ペインへ移動できません: no such pane".into())
         .unwrap();
     dashboard.before_frame(&mut text);
-    let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
-    assert_eq!(status.text(), "ペインへ移動できません: no such pane");
+    assert_eq!(
+        notice_of(&dashboard),
+        "ペインへ移動できません: no such pane"
+    );
 }
 
 #[test]
@@ -275,9 +286,10 @@ fn the_drawer_worker_is_watched_too() {
     snapshots.send(live(fleet::canned(), 0)).unwrap();
     dashboard.before_frame(&mut text);
     dashboard.prepare(window(), &mut text);
-    // From the end of the order: changelog, lint-pass, docs-sync; no queue
-    // worker on the way, so fix-tests stays expanded.
-    for _ in 0..3 {
+    // From the end of the order: changelog, lint-pass, the quiet 13 (its
+    // queue card folded away), docs-sync; no queue worker on the way, so
+    // fix-tests stays expanded.
+    for _ in 0..4 {
         key(&mut dashboard, &mut text, Key::Char('k'));
     }
     assert_eq!(dashboard.view.selected, Some(12));
@@ -315,8 +327,13 @@ fn a_frame_reads_the_time_once() {
         .send("ペインへ移動できません: no such pane".into())
         .unwrap();
     dashboard.frame(third, &mut text);
-    assert_eq!(status(&dashboard), "ペインへ移動できません: no such pane");
+    assert_eq!(
+        notice_of(&dashboard),
+        "ペインへ移動できません: no such pane"
+    );
+    assert_eq!(status(&dashboard), "古いデータ（同期 1 分前）· ワーカー 9");
     dashboard.frame(third + NOTICE_FOR, &mut text);
+    assert_eq!(notice_of(&dashboard), "");
     // 71 s without an update is stale (AC6).
     assert_eq!(status(&dashboard), "古いデータ（同期 1 分前）· ワーカー 9");
 }

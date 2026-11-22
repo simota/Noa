@@ -192,10 +192,10 @@ fn the_running_panel_says_what_it_hides() {
         Some("下に 1 件")
     );
     assert_eq!(indicator(&dashboard, Panel::Queue), None);
-    assert_eq!(visible_items(&dashboard, Panel::Queue).len(), 5);
+    assert_eq!(visible_items(&dashboard, Panel::Queue).len(), 4);
 }
 
-/// At 1440×900 the running list (512 px) holds one release-0.9.7 row and
+/// At 1440×900 the running list (488 px) holds one release-0.9.7 row and
 /// not the perf-wish group below it: one step shows docs-sync alone in its
 /// row (api-refactor above), the next shows perf-probe.
 #[test]
@@ -257,9 +257,9 @@ fn the_wheel_pages_one_item() {
 
 #[test]
 fn selecting_brings_the_card_into_view() {
-    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    let (mut dashboard, mut text) = laid_out_with_info(Grouping::Orchestrator);
     assert!(!shows(&dashboard, Panel::Running, 13));
-    // J walks the queue first: 14, 19, 15, 16, then perf-probe (13).
+    // J walks the queue first: 14, 15, 16, 19, then perf-probe (13).
     for _ in 0..5 {
         key(&mut dashboard, &mut text, Key::Char('j'));
     }
@@ -340,7 +340,7 @@ fn one_long_wheel_event_pages_as_far_as_short_ones() {
 /// worker that is still selected.
 #[test]
 fn clearing_the_filter_keeps_the_selected_card_in_view() {
-    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    let (mut dashboard, mut text) = laid_out_with_info(Grouping::Orchestrator);
     key(&mut dashboard, &mut text, Key::Char('/'));
     typed(&mut dashboard, &mut text, "/");
     typed(&mut dashboard, &mut text, "perf");
@@ -361,10 +361,10 @@ fn clearing_the_filter_keeps_the_selected_card_in_view() {
 
 #[test]
 fn showing_a_panel_again_shows_the_selected_card() {
-    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    let (mut dashboard, mut text) = laid_out_with_info(Grouping::Orchestrator);
     press(&mut dashboard, &mut text, '2', Modifiers::default());
     assert!(dashboard.registry.lists[Panel::Running as usize].is_none());
-    // J walks the queue: 14, 19, 15, 16, then perf-probe (13).
+    // J walks the queue: 14, 15, 16, 19, then perf-probe (13).
     for _ in 0..5 {
         key(&mut dashboard, &mut text, Key::Char('j'));
     }
@@ -410,21 +410,21 @@ fn the_wheel_does_not_fight_the_selection() {
 }
 
 /// A window made larger shows what now fits above the page: at 1100×700 the
-/// queue hides cards and can be paged; at 1440×900 all five fit again.
+/// queue hides cards and can be paged; at 1440×900 all four fit again.
 #[test]
 fn a_larger_window_pages_back_what_fits() {
     let small = Size::new(1100.0, 700.0);
     let mut dashboard = Dashboard::new(Grouping::Orchestrator);
     let mut text = TextStore::new(Default::default());
     dashboard.prepare(small, &mut text);
-    assert!(visible_items(&dashboard, Panel::Queue).len() < 5);
+    assert!(visible_items(&dashboard, Panel::Queue).len() < 4);
     let pos = over_list(&dashboard, Panel::Queue);
     wheel_at(&mut dashboard, &mut text, small, pos, -40.0);
     assert_eq!(first(&dashboard, Panel::Queue), 1);
 
     dashboard.prepare(window(), &mut text);
     assert_eq!(first(&dashboard, Panel::Queue), 0);
-    assert_eq!(visible_items(&dashboard, Panel::Queue).len(), 5);
+    assert_eq!(visible_items(&dashboard, Panel::Queue).len(), 4);
     assert_eq!(indicator(&dashboard, Panel::Queue), None);
     assert_whole_items(&mut dashboard, &mut text, "1100×700 → 1440×900");
 }
@@ -479,7 +479,7 @@ fn an_unchanged_frame_presents_nothing() {
     assert_whole_items(&mut dashboard, &mut text, "1100×700");
 }
 
-/// Whatever other panels are shown, the demo's queue shows all five cards
+/// Whatever other panels are shown, the demo's queue shows all four cards
 /// at 1440×900 and hides none.
 #[test]
 fn the_whole_queue_shows_with_any_other_panels() {
@@ -495,7 +495,7 @@ fn the_whole_queue_shows_with_any_other_panels() {
         });
         dashboard.prepare(window(), &mut text);
         let what = format!("shown {shown:?}");
-        assert_eq!(visible_items(&dashboard, Panel::Queue).len(), 5, "{what}");
+        assert_eq!(visible_items(&dashboard, Panel::Queue).len(), 4, "{what}");
         assert_eq!(indicator(&dashboard, Panel::Queue), None, "{what}");
         assert_whole_items(&mut dashboard, &mut text, &what);
     }
@@ -626,14 +626,14 @@ fn travel_past_the_end_does_not_eat_the_way_back() {
 }
 
 /// Two columns of cards of two heights, low (247 px) and high (307 px):
-/// L L L H H. At 1440×980 the running list (592 px) holds a low row and a
+/// L L L H H. At 1440×1004 the running list (592 px) holds a low row and a
 /// high row but not two high rows. From the top (rows LL, LH, H) one step
 /// shows LL, HH: everything left, so that is the last page — a further
 /// step would wrap the cards as LH, H and hide the last again. One long
 /// wheel event stops on the same page as short ones.
 #[test]
 fn a_long_wheel_event_stops_at_the_last_page() {
-    let size = Size::new(1440.0, 980.0);
+    let size = Size::new(1440.0, 1004.0);
     let extra = [0, 0, 0, 4, 4];
     let (dashboard, _) = running_at(&extra, size);
     let list = rect(&dashboard.tree, parts(&dashboard, Panel::Running).list);
@@ -670,7 +670,7 @@ fn a_long_wheel_event_stops_at_the_last_page() {
     }
 }
 
-/// One column (1100×1200: the running list is 812 px tall) of a tall card
+/// One column (1100×1200: the running list is 788 px tall) of a tall card
 /// (607 px) and a low one: on the last page the low card shows alone. When
 /// the tall card, hidden above, shrinks in place to fit with it, the page
 /// takes it back and the indicator says nothing is hidden.
@@ -679,7 +679,7 @@ fn an_item_above_that_shrinks_comes_back() {
     let size = Size::new(1100.0, 1200.0);
     let (mut dashboard, mut text) = running_at(&[24, 0], size);
     let list = rect(&dashboard.tree, parts(&dashboard, Panel::Running).list);
-    assert_eq!(list[3], 812.0, "the running list's height");
+    assert_eq!(list[3], 788.0, "the running list's height");
     let pos = over_list(&dashboard, Panel::Running);
     wheel_at(&mut dashboard, &mut text, size, pos, -40.0);
     assert_eq!(shown_panes(&dashboard, Panel::Running), [2]);
@@ -1016,12 +1016,12 @@ fn a_wheel_after_a_selection_turns_from_its_page() {
 
 /// Two columns of cards L L H H (247 and 307 px). At 1440×900 one step
 /// shows L H, H, hiding the last high card (the rows of 307 px do not fit
-/// twice in 512 px). Made 1440×980 (592 px), the page from the second card
+/// twice in 488 px). Made 1440×1004 (592 px), the page from the second card
 /// still does not fit (L H, H: 622 px), but from the first one everything
 /// does (L L, H H: 562 px): the page goes back to it and hides nothing.
 #[test]
 fn a_larger_window_shows_everything_when_an_earlier_page_fits() {
-    let (small, large) = (Size::new(1440.0, 900.0), Size::new(1440.0, 980.0));
+    let (small, large) = (Size::new(1440.0, 900.0), Size::new(1440.0, 1004.0));
     let (mut dashboard, mut text) = running_at(&[0, 0, 4, 4], small);
     let pos = over_list(&dashboard, Panel::Running);
     wheel_at(&mut dashboard, &mut text, small, pos, -WHEEL_STEP);
@@ -1038,6 +1038,6 @@ fn a_larger_window_shows_everything_when_an_earlier_page_fits() {
     assert_eq!(first(&dashboard, Panel::Running), 0);
     assert_eq!(shown_panes(&dashboard, Panel::Running), [1, 2, 3, 4]);
     assert_eq!(indicator(&dashboard, Panel::Running), None);
-    assert_whole_items(&mut dashboard, &mut text, "1440×900 → 1440×980");
+    assert_whole_items(&mut dashboard, &mut text, "1440×900 → 1440×1004");
     assert!(!dashboard.prepare(large, &mut text), "a frame after");
 }

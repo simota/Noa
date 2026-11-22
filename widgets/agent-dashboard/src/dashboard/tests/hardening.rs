@@ -6,14 +6,14 @@
 use std::sync::mpsc::{Receiver, Sender};
 
 use noa_gpui_core::accesskit::{Action as Access, ActionRequest, TreeId};
-use noa_gpui_core::widgets::{Label, TextField};
+use noa_gpui_core::widgets::TextField;
 use noa_gpui_core::{access_id, access_item_id};
 
 use super::*;
 
+/// What the last action said: the notice line.
 fn status_of(dashboard: &Dashboard) -> String {
-    let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
-    status.text().to_owned()
+    notice_of(dashboard)
 }
 
 /// A live screen on the canned fleet, with what it asked of the feed so

@@ -18,15 +18,18 @@ fn key_at(dashboard: &mut Dashboard, text: &mut TextStore, key: Key, size: Size)
     dashboard.prepare(size, text);
 }
 
-/// [`select`] in a window of `size`.
+/// [`select`] in a window of `size`: J, then K when `pane` comes before
+/// the selection.
 fn select_at(dashboard: &mut Dashboard, text: &mut TextStore, pane: u64, size: Size) {
-    for _ in 0..20 {
-        if dashboard.view.selected == Some(pane) {
-            return;
+    for step in ['j', 'k'] {
+        for _ in 0..20 {
+            if dashboard.view.selected == Some(pane) {
+                return;
+            }
+            key_at(dashboard, text, Key::Char(step), size);
         }
-        key_at(dashboard, text, Key::Char('j'), size);
     }
-    panic!("J never selects {pane}");
+    panic!("J / K never select {pane}");
 }
 
 /// The drawer's root, if it is open.

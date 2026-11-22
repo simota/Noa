@@ -11,7 +11,8 @@ fn every_card_needing_you_shows_without_scrolling() {
         let (dashboard, _text) = laid_out(grouping);
         let tree = &dashboard.tree;
         let buttons = &dashboard.queue_buttons;
-        assert_eq!(buttons.open.len() + buttons.details.len(), 5);
+        // The quiet 13 is folded away under 参考情報.
+        assert_eq!(buttons.open.len() + buttons.details.len(), 4);
         for (button, label) in buttons.open.iter().chain(&buttons.details) {
             let card = tree.parent(tree.parent(*button).unwrap()).unwrap();
             let list = tree.parent(card).unwrap();
@@ -57,11 +58,11 @@ fn assert_row_spans(dashboard: &Dashboard, members: &[Panel]) {
 #[test]
 fn all_panels_on_keeps_todays_layout() {
     let expected = [
-        [12.0, 60.0, 400.0, 560.0],
-        [424.0, 60.0, 722.0, 560.0],
-        [1158.0, 60.0, 270.0, 560.0],
-        [12.0, 632.0, 974.0, 256.0],
-        [998.0, 632.0, 430.0, 256.0],
+        [12.0, 60.0, 400.0, 536.0],
+        [424.0, 60.0, 722.0, 536.0],
+        [1158.0, 60.0, 270.0, 536.0],
+        [12.0, 608.0, 974.0, 256.0],
+        [998.0, 608.0, 430.0, 256.0],
     ];
     for grouping in Grouping::ALL {
         let (dashboard, _text) = showing(grouping, [true; 5]);
@@ -103,7 +104,7 @@ fn a_hidden_panel_leaves_its_row_to_the_others() {
         (width - row).abs() <= 0.5,
         "graph is {width} px with timeline off"
     );
-    let body_height = window().height - HEADER_HEIGHT - 2.0 * GUTTER;
+    let body_height = window().height - HEADER_HEIGHT - NOTICE_HEIGHT - 2.0 * GUTTER;
     let (dashboard, _text) = showing(Grouping::Orchestrator, shown_only(&Panel::NOW));
     assert_row_spans(&dashboard, &Panel::HISTORY);
     let id = dashboard.panels[Panel::Timeline as usize].unwrap();
@@ -128,7 +129,8 @@ fn the_queue_fits_with_any_other_panels_hidden() {
             let (dashboard, _text) = showing(grouping, shown_only(&hidden));
             let tree = &dashboard.tree;
             let buttons = &dashboard.queue_buttons;
-            assert_eq!(buttons.open.len() + buttons.details.len(), 5);
+            // The quiet 13 is folded away under 参考情報.
+            assert_eq!(buttons.open.len() + buttons.details.len(), 4);
             for (button, label) in buttons.open.iter().chain(&buttons.details) {
                 let card = tree.parent(tree.parent(*button).unwrap()).unwrap();
                 let list = tree.parent(card).unwrap();
@@ -144,11 +146,11 @@ fn the_queue_fits_with_any_other_panels_hidden() {
 #[test]
 fn each_shortcut_hides_and_restores_its_panel() {
     let expected = [
-        [12.0, 60.0, 400.0, 560.0],
-        [424.0, 60.0, 722.0, 560.0],
-        [1158.0, 60.0, 270.0, 560.0],
-        [12.0, 632.0, 974.0, 256.0],
-        [998.0, 632.0, 430.0, 256.0],
+        [12.0, 60.0, 400.0, 536.0],
+        [424.0, 60.0, 722.0, 536.0],
+        [1158.0, 60.0, 270.0, 536.0],
+        [12.0, 608.0, 974.0, 256.0],
+        [998.0, 608.0, 430.0, 256.0],
     ];
     for modifiers in [Modifiers::default(), Modifiers::on_apple()] {
         for (digit, panel, _) in KEYS {

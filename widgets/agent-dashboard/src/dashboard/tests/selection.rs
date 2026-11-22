@@ -25,7 +25,9 @@ fn walk(dashboard: &mut Dashboard, text: &mut TextStore, key_: Key, n: usize) ->
 
 #[test]
 fn j_and_k_walk_the_panel_order() {
-    let order = [14, 19, 15, 16, 13, 11, 12, 17, 18];
+    // 判断待ち (approvals, then the question), 要確認, then the running and
+    // done cards; the quiet 13 is folded away in the queue.
+    let order = [14, 15, 16, 19, 11, 12, 13, 17, 18];
     let mut back: Vec<u64> = order.iter().rev().copied().skip(1).collect();
     back.push(14);
     for (next, prev) in [
@@ -37,6 +39,16 @@ fn j_and_k_walk_the_panel_order() {
         assert_eq!(walk(&mut dashboard, &mut text, next, 1), [18], "no wrap");
         assert_eq!(walk(&mut dashboard, &mut text, prev, 9), back);
     }
+}
+
+#[test]
+fn an_open_info_section_walks_its_cards_after_the_others() {
+    let (mut dashboard, mut text) = showing(Grouping::Orchestrator, [true; 5]);
+    dashboard.view.info_open = true;
+    let view = dashboard.view;
+    dashboard.rebuilt(view, &mut text);
+    let order = [14, 15, 16, 19, 13, 11, 12, 17, 18];
+    assert_eq!(walk(&mut dashboard, &mut text, Key::Char('j'), 9), order);
 }
 
 fn running_card(dashboard: &Dashboard, pane: u64) -> WidgetId {
@@ -115,6 +127,8 @@ fn the_selection_shows_in_card_lane_and_node() {
     assert_eq!(running_card(&dashboard, 12), card, "the screen was rebuilt");
     assert_eq!(assert_marks(&dashboard, 12), ["bar", "lane", "node"]);
     key(&mut dashboard, &mut text, Key::Char('j'));
+    assert_eq!(dashboard.view.selected, Some(13));
+    key(&mut dashboard, &mut text, Key::Char('j'));
     assert_eq!(dashboard.view.selected, Some(17));
     assert!(marked(&dashboard), "the screen was rebuilt");
     assert_eq!(running_card(&dashboard, 12), card, "the screen was rebuilt");
@@ -148,9 +162,9 @@ fn live_with(snapshot: Snapshot) -> (Dashboard, TextStore, std::sync::mpsc::Rece
     (dashboard, text, commands)
 }
 
+/// What the last action said: the notice line.
 fn status_of(dashboard: &Dashboard) -> String {
-    let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
-    status.text().to_owned()
+    notice_of(dashboard)
 }
 
 fn focused_panes(commands: &std::sync::mpsc::Receiver<Command>) -> Vec<u64> {
@@ -181,7 +195,7 @@ fn enter_opens_the_selected_worker_like_the_open_button() {
     assert!(focused_panes(&commands).is_empty());
     assert_eq!(
         status_of(&dashboard),
-        "ペインへ移動できません: Noa の server-scopes に control がありません"
+        "ペインへ移動できません: Noa の server-scopes に control がありません（例: server-scopes = read,control）"
     );
 
     let (mut dashboard, mut text, commands) = live_with(live(fleet::canned(), 0));
@@ -196,13 +210,54 @@ fn enter_opens_the_selected_worker_like_the_open_button() {
 #[test]
 fn a_vanished_selection_moves_to_its_neighbour() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
-    select(&mut dashboard, &mut text, 13);
+    select(&mut dashboard, &mut text, 11);
+    // Hiding the running panel is the user's own change: the selection
+    // moves to what is now at api-refactor's place, the done panel's first
+    // card.
+    key(&mut dashboard, &mut text, Key::Char('2'));
+    assert_eq!(dashboard.view.selected, Some(17));
+}
+
+#[test]
+fn a_live_update_that_takes_the_selection_selects_nothing() {
+    let (mut dashboard, mut text, commands) = live_with(live(fleet::canned(), 0));
+    select(&mut dashboard, &mut text, 15);
+    key(&mut dashboard, &mut text, Key::Space);
+    assert_eq!(dashboard.view.detail, Some(15));
+    commands.try_iter().for_each(drop);
     let mut fleet = fleet::canned();
-    fleet.workers.retain(|w| w.pane != 13);
+    fleet.workers.retain(|w| w.pane != 15);
     dashboard.apply(live(fleet, 0), &mut text);
     dashboard.prepare(window(), &mut text);
-    // perf-probe was fifth: 14, 19, 15, 16, then api-refactor.
-    assert_eq!(dashboard.view.selected, Some(11));
+    assert_eq!(dashboard.view.selected, None);
+    assert_eq!(dashboard.view.detail, None);
+    assert!(drawer_labels(&dashboard).is_none());
+    let label = label_of_canned(15);
+    assert_eq!(status_of(&dashboard), dropped_text(&label));
+    // Enter, once or again, reaches no pane.
+    key(&mut dashboard, &mut text, Key::Enter);
+    key(&mut dashboard, &mut text, Key::Enter);
+    assert!(focused_panes(&commands).is_empty());
+    assert_eq!(status_of(&dashboard), NOTHING_SELECTED);
+}
+
+#[test]
+fn a_live_update_that_only_reorders_keeps_the_selection() {
+    let (mut dashboard, mut text, commands) = live_with(live(fleet::canned(), 0));
+    select(&mut dashboard, &mut text, 15);
+    commands.try_iter().for_each(drop);
+    let mut fleet = fleet::canned();
+    let fix = fleet.workers.iter_mut().find(|w| w.pane == 15).unwrap();
+    fix.wait_minutes = 3.0;
+    dashboard.apply(live(fleet, 0), &mut text);
+    assert_eq!(dashboard.view.selected, Some(15));
+    key(&mut dashboard, &mut text, Key::Enter);
+    assert_eq!(focused_panes(&commands), [15]);
+}
+
+fn label_of_canned(pane: u64) -> String {
+    let fleet = fleet::canned();
+    fleet.worker(pane).unwrap().label.clone()
 }
 
 #[test]
@@ -270,7 +325,7 @@ fn a_filtered_out_drawer_worker_closes_the_drawer() {
     assert_eq!(dashboard.view.detail, None);
     assert!(drawer_labels(&dashboard).is_none());
     assert_eq!(dashboard.tree.overlays().count(), 0);
-    assert_eq!(dashboard.view.selected, Some(19), "fix-tests' place");
+    assert_eq!(dashboard.view.selected, Some(15), "fix-tests' place");
 }
 
 #[test]
@@ -304,27 +359,28 @@ fn the_queue_cards_keep_the_order_j_walks() {
     let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet::canned(), 0));
     let mut text = TextStore::new(Default::default());
     dashboard.prepare(window(), &mut text);
-    assert_eq!(queue_on_screen(&dashboard), [14, 19, 15, 16, 13]);
+    assert_eq!(queue_on_screen(&dashboard), [14, 15, 16, 19]);
     let card = |d: &Dashboard, pane: u64| {
         let list = d.registry.lists[Panel::Queue as usize].as_ref().unwrap();
         list.items.iter().find(|(_, p)| *p == Some(pane)).unwrap().0
     };
-    let smoke = card(&dashboard, 19);
+    let second = card(&dashboard, 15);
 
-    // Only e2e-smoke's wait grows, past fix-tests' (the same need rank).
+    // Only the second approval's wait grows, past fix-tests' (the same
+    // need).
     let mut fleet = fleet::canned();
     fleet
         .workers
         .iter_mut()
-        .find(|w| w.pane == 19)
+        .find(|w| w.pane == 15)
         .unwrap()
         .wait_minutes = 3.0;
     dashboard.apply(live(fleet, 0), &mut text);
     dashboard.prepare(window(), &mut text);
-    assert_eq!(card(&dashboard, 19), smoke, "updated in place");
+    assert_eq!(card(&dashboard, 15), second, "updated in place");
     let shown = queue_on_screen(&dashboard);
-    assert_eq!(shown, [19, 14, 15, 16, 13]);
-    assert_eq!(dashboard.order()[..5], shown);
+    assert_eq!(shown, [15, 14, 16, 19]);
+    assert_eq!(dashboard.order()[..4], shown);
     key(&mut dashboard, &mut text, Key::Char('j'));
     assert_eq!(
         dashboard.view.selected,
@@ -414,7 +470,17 @@ fn the_queue_comes_back_with_the_selected_card_expanded() {
     select(&mut dashboard, &mut text, 13);
     commands.try_iter().for_each(drop);
 
+    // The quiet 13 has no card while 参考情報 is folded away: the top card
+    // is expanded.
     key(&mut dashboard, &mut text, Key::Char('1'));
+    assert_eq!(dashboard.view.selected, Some(13));
+    assert_eq!(dashboard.queue_buttons.expanded, Some(14));
+
+    // Shown, its card comes back expanded.
+    let toggle = dashboard.queue_buttons.info_toggle.unwrap();
+    let pos = center(&dashboard.tree, toggle);
+    click(&mut dashboard, &mut text, pos);
+    assert!(dashboard.view.info_open);
     assert_eq!(dashboard.view.selected, Some(13));
     assert_eq!(dashboard.queue_buttons.expanded, Some(13));
     assert_eq!(open_panes(&dashboard), [13], "開く is on the selected card");
@@ -434,32 +500,33 @@ fn a_new_top_card_is_expanded_in_place() {
     let (mut dashboard, mut text, commands) = live_with(live(fleet::canned(), 0));
     assert_eq!(dashboard.queue_buttons.expanded, Some(14));
     let cards = queue_cards(&dashboard);
-    // Only e2e-smoke's wait grows, past fix-tests': it is the top card now.
+    // Only the second approval's wait grows, past fix-tests': it is the top
+    // card now.
     let mut fleet = fleet::canned();
-    let smoke = fleet.workers.iter_mut().find(|w| w.pane == 19).unwrap();
-    smoke.wait_minutes = 3.0;
+    let second = fleet.workers.iter_mut().find(|w| w.pane == 15).unwrap();
+    second.wait_minutes = 3.0;
     dashboard.apply(live(fleet.clone(), 0), &mut text);
     dashboard.prepare(window(), &mut text);
 
     assert_eq!(queue_cards(&dashboard), cards, "no rebuild");
-    assert_eq!(queue_on_screen(&dashboard), [19, 14, 15, 16, 13]);
-    assert_eq!(dashboard.queue_buttons.expanded, Some(19));
-    assert_eq!(open_panes(&dashboard), [19]);
+    assert_eq!(queue_on_screen(&dashboard), [15, 14, 16, 19]);
+    assert_eq!(dashboard.queue_buttons.expanded, Some(15));
+    assert_eq!(open_panes(&dashboard), [15]);
     let details: Vec<u64> = dashboard
         .queue_buttons
         .details
         .iter()
         .map(|b| b.1)
         .collect();
-    assert_eq!(details, [14, 15, 16, 13]);
-    assert_eq!(last_watch(&commands), Some(vec![19]));
+    assert_eq!(details, [14, 16, 19]);
+    assert_eq!(last_watch(&commands), Some(vec![15]));
     // What a screen built for this fleet shows (and owns).
     let mut fresh = Dashboard::live(Grouping::Orchestrator, Channel::detached().0);
     let mut fresh_text = TextStore::new(Default::default());
     fresh.prepare(window(), &mut fresh_text);
     fresh.apply(live(fleet, 0), &mut fresh_text);
     fresh.prepare(window(), &mut fresh_text);
-    assert_eq!(fresh.queue_buttons.expanded, Some(19));
+    assert_eq!(fresh.queue_buttons.expanded, Some(15));
     assert_eq!(
         frame_of(dashboard.display_list(), &text),
         frame_of(fresh.display_list(), &fresh_text)
@@ -468,7 +535,7 @@ fn a_new_top_card_is_expanded_in_place() {
 
     // A rebuild for something else keeps it.
     key(&mut dashboard, &mut text, Key::Char('5'));
-    assert_eq!(dashboard.queue_buttons.expanded, Some(19));
+    assert_eq!(dashboard.queue_buttons.expanded, Some(15));
     assert_eq!(last_watch(&commands), None, "the watch did not change");
 }
 

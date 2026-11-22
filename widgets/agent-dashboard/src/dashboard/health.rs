@@ -1,6 +1,7 @@
 //! Connection health in the header (AC6): a dot and a status text that say
 //! whether the link is up, how long ago the server last answered, and when
-//! what is shown is old.
+//! what is shown is old. What the last action said (a notice) has its own
+//! line at the foot of the window, so it never hides the link state.
 
 use std::time::{Duration, Instant};
 
@@ -12,7 +13,7 @@ use crate::fleet::{Fleet, minutes_text, one_line};
 use crate::live::{Link, Snapshot};
 
 use super::header::HeaderParts;
-use super::style::{GRAY, GREEN, ORANGE, RED, YELLOW};
+use super::style::{GRAY, GREEN, ORANGE, RED, YELLOW, set_label};
 use super::{Feed, NOTICE_FOR};
 
 /// A live link whose last answer is this old marks the data stale.
@@ -118,17 +119,16 @@ impl<'a> Seen<'a> {
     }
 }
 
-/// The header's status text at `now`: a fresh notice, else the link state.
+/// The header's status text at `now`: the link state.
 #[cfg(test)]
 pub(super) fn status(feed: &Feed, now: Instant) -> String {
-    status_of(Seen::of(feed), now)
+    link_text(Seen::of(feed), Some(now))
 }
 
-fn status_of(seen: Seen, now: Instant) -> String {
-    if let Some(notice) = notice_at(seen, now) {
-        return one_line(notice);
-    }
-    link_text(seen, Some(now))
+fn notice_text(seen: Seen, now: Option<Instant>) -> String {
+    now.and_then(|now| notice_at(seen, now))
+        .map(one_line)
+        .unwrap_or_default()
 }
 
 /// The notice the header shows at `now`, if one is still fresh.
@@ -148,7 +148,7 @@ fn notice_left(seen: Seen, now: Instant) -> Option<Duration> {
 /// says at `built_at`.
 pub(super) fn initial_status(feed: &Feed) -> String {
     let seen = Seen::of(feed);
-    text_at(seen, built_at(seen))
+    link_text(seen, built_at(seen))
 }
 
 /// The moment a screen that is just being built shows the health of.
@@ -163,14 +163,6 @@ fn built_at(seen: Seen) -> Option<Instant> {
         .map(|at| at + Duration::from_secs(seen.synced_secs));
     let noticed = seen.notice.map(|(_, at)| *at);
     received.max(noticed)
-}
-
-/// `status` at `now`, or the link state with nothing to count from.
-fn text_at(seen: Seen, now: Option<Instant>) -> String {
-    match now {
-        Some(now) => status_of(seen, now),
-        None => link_text(seen, None),
-    }
 }
 
 /// The link state in words. `now` is `None` only when the feed has never
@@ -232,6 +224,7 @@ fn age(seen: Seen, now: Option<Instant>) -> Duration {
 pub(super) fn tick(
     tree: &mut UiTree,
     parts: &HeaderParts,
+    notice: WidgetId,
     feed: &Feed,
     held: Option<(&Snapshot, Instant)>,
     now: Instant,
@@ -241,6 +234,7 @@ pub(super) fn tick(
         None => Seen::of(feed),
     };
     show(tree, parts.health, seen, Some(now));
+    set_label(tree, notice, notice_text(seen, Some(now)));
     if let Some(left) = notice_left(seen, now) {
         tree.update::<Container, _>(parts.health.dot, |_, cx| {
             cx.request_timer(left.as_secs_f64());
@@ -255,12 +249,18 @@ pub(super) fn show_built(tree: &mut UiTree, parts: HealthParts, feed: &Feed) {
     show(tree, parts, seen, built_at(seen));
 }
 
+/// The notice line of a screen that is just being built, as of `built_at`.
+pub(super) fn initial_notice(feed: &Feed) -> String {
+    let seen = Seen::of(feed);
+    notice_text(seen, built_at(seen))
+}
+
 /// Sets the dot's colour, the status text and its colour as of `now`.
 fn show(tree: &mut UiTree, parts: HealthParts, seen: Seen, now: Option<Instant>) {
     let HealthParts { dot, status: label } = parts;
     let health = health(seen, now);
     tree.update::<Container, _>(dot, |c, cx| c.set_background(cx, Some(health.dot().into())));
-    let text = text_at(seen, now);
+    let text = link_text(seen, now);
     tree.update::<Label, _>(label, |l, cx| {
         l.set_text(cx, text);
         match health.text() {

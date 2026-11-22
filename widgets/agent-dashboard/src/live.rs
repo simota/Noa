@@ -1,7 +1,7 @@
 //! The live feed: a thread that holds the control connection to the running
 //! Noa (`noa-ipc`) and sends the dashboard snapshots of its agent panes.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -22,13 +22,15 @@ const PULSE_EVERY: Duration = Duration::from_secs(5);
 /// header's time since the last sync ticks between snapshots.
 const HEARTBEAT: Duration = Duration::from_secs(1);
 const SCREEN_MAX_BYTES: usize = 4000;
-const SCREEN_TAIL_LINES: usize = 6;
+/// The drawer shows this many; a queue card the last of them
+/// (`Worker::card_tail`).
+const SCREEN_TAIL_LINES: usize = 40;
 /// A running pane whose preview has not changed for this long is quiet, as
 /// on the TUI board.
 const QUIET_SECS: f64 = 120.0;
 const BUCKET_SECS: f64 = 5.0;
 const BUCKETS: usize = 12;
-const ALONE: &str = "単独";
+pub(crate) const ALONE: &str = "単独";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Link {
@@ -70,7 +72,7 @@ pub enum Command {
 /// The dashboard's end of the feed.
 pub struct Channel {
     pub snapshots: Receiver<Snapshot>,
-    /// Why a command failed, for the header to show.
+    /// Why a command failed, for the notice line to show.
     pub notices: Receiver<String>,
     commands: Sender<Command>,
     /// Dropped with this end, which ends the heartbeat thread.
@@ -625,8 +627,8 @@ struct Tracker {
     seen: HashMap<u64, Observed>,
     /// Tasks by pane, from each orchestrator's journal (by its surface id).
     journals: HashMap<String, Journal>,
-    /// The done panes known to have left a result file.
-    results: HashSet<u64>,
+    /// The ended panes known to have left a result file, and that file.
+    results: HashMap<u64, PathBuf>,
 }
 
 struct Journal {
@@ -722,24 +724,24 @@ impl Tracker {
         }
     }
 
-    /// Looks again at each done worker's own result file, the one its
+    /// Looks again at each ended worker's own result file (one that failed
+    /// may have written why), the one its
     /// spawner's journal names. The file is there before the worker writes
     /// it, so an empty one is no result; no path in the journal, no result.
     fn read_results(&mut self) {
         self.results = self
             .panels
             .values()
-            .filter(|panel| is_worker(panel) && state_of(panel) == State::Finished)
             .filter(|panel| {
-                let result = self
-                    .spawned(panel)
-                    .and_then(|spawned| spawned.result.as_ref());
-                result.is_some_and(|path| {
-                    let path = Path::new(&panel.cwd).join(path);
-                    std::fs::metadata(path).is_ok_and(|meta| meta.len() > 0)
-                })
+                is_worker(panel) && matches!(state_of(panel), State::Finished | State::Error)
             })
-            .map(|panel| panel.pane_id.0)
+            .filter_map(|panel| {
+                let result = self.spawned(panel)?.result.as_ref()?;
+                let path = Path::new(&panel.cwd).join(result);
+                std::fs::metadata(&path)
+                    .is_ok_and(|meta| meta.len() > 0)
+                    .then_some((panel.pane_id.0, path))
+            })
             .collect();
     }
 
@@ -777,7 +779,7 @@ impl Tracker {
                     &self.panels,
                     self.task(panel),
                     tail,
-                    self.results.contains(&pane),
+                    self.results.get(&pane).cloned(),
                     now,
                 ))
             })
@@ -1095,7 +1097,7 @@ fn worker_of(
     panels: &HashMap<u64, Panel>,
     task: String,
     screen_tail: &[String],
-    has_result: bool,
+    result: Option<PathBuf>,
     now: f64,
 ) -> Worker {
     let pane = panel.pane_id.0;
@@ -1152,7 +1154,8 @@ fn worker_of(
         reports: panel.agent.as_ref().map_or(0, |agent| agent.seq),
         started_minutes: started_secs.map(|secs| secs / 60.0),
         took_minutes,
-        has_result,
+        has_result: result.is_some(),
+        result,
         screen_tail: screen_tail.to_vec(),
         lines_per_tick: if running {
             buckets(&seen.changes, now)
@@ -1492,6 +1495,30 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_failed_worker_shows_its_result() {
+        let cwd = noa_dir("failed-result");
+        let own = cwd.join(".noa").join("result-0a1b2c3d.md");
+        std::fs::write(&own, "why it failed").unwrap();
+        let orchestrator = panel(serde_json::json!({ "paneId": "1", "surfaceId": "s-failed" }));
+        let worker = panel(serde_json::json!({
+            "paneId": "7",
+            "parentPaneId": "1",
+            "cwd": cwd.to_str().unwrap(),
+            "agent": { "seq": 1, "kind": "claude", "state": "running" },
+            "exit": { "code": 1 },
+        }));
+        let mut tracker = Tracker::default();
+        tracker.merge(vec![orchestrator, worker], 1000.0);
+        with_journal(&mut tracker, "s-failed", &spawn_line(7, Some(&own)));
+        tracker.read_results();
+        let fleet = tracker.fleet(1001.0, None);
+        let worker = fleet.worker(7).unwrap();
+        std::fs::remove_dir_all(&cwd).unwrap();
+        assert_eq!(worker.state, State::Error);
+        assert_eq!(worker.result.as_deref(), Some(own.as_path()));
+    }
+
+    #[test]
     fn a_result_is_the_workers_own_file() {
         let cwd = noa_dir("own-result");
         let own = cwd.join(".noa").join("result-review-0a1b2c3d.md");
@@ -1619,9 +1646,15 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_screen_tail_is_the_last_six_lines_with_text() {
+    fn the_screen_tail_is_the_last_lines_with_text() {
         let text = "a\nb\n\nc\nd  \n   \ne\nf\ng\n\n\n";
-        assert_eq!(screen_tail(text), ["b", "c", "d", "e", "f", "g"]);
+        assert_eq!(screen_tail(text), ["a", "b", "c", "d", "e", "f", "g"]);
+        let long: String = (0..SCREEN_TAIL_LINES + 5)
+            .map(|n| format!("{n}\n"))
+            .collect();
+        let tail = screen_tail(&long);
+        assert_eq!(tail.len(), SCREEN_TAIL_LINES);
+        assert_eq!(tail.first().map(String::as_str), Some("5"));
         assert_eq!(screen_tail("x\n"), ["x"]);
         assert!(screen_tail("\n \n").is_empty());
     }

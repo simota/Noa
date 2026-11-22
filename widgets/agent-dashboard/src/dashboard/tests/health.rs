@@ -159,14 +159,14 @@ fn a_lost_link_keeps_the_last_data_marked_stale() {
             .as_ref()
             .map(|parts| parts.items.len())
     };
-    assert_eq!(queue(&dashboard), Some(5));
+    assert_eq!(queue(&dashboard), Some(4));
 
     let lost = base + secs(30);
     dashboard.apply_received(down("接続が切れました"), lost, &mut text);
     dashboard.tick(lost);
     dashboard.prepare(window(), &mut text);
 
-    assert_eq!(queue(&dashboard), Some(5), "the last data stays");
+    assert_eq!(queue(&dashboard), Some(4), "the last data stays");
     assert_eq!(dashboard.feed.fleet.workers.len(), 9);
     let status = status_text(&dashboard);
     assert!(status.starts_with("切断: "), "{status}");
@@ -226,16 +226,21 @@ fn only_a_down_link_keeps_the_old_workers() {
 }
 
 #[test]
-fn a_notice_replaces_the_text_but_not_the_dot() {
+fn a_notice_leaves_the_link_state_readable() {
     let base = Instant::now();
     let (mut dashboard, mut text) = live_at(base, 0);
     let lost = base + secs(30);
     dashboard.apply_received(down("接続が切れました"), lost, &mut text);
     dashboard.show_notice_at("通知です".to_owned(), lost);
-    assert_eq!(status_text(&dashboard), "通知です");
+    assert_eq!(notice_of(&dashboard), "通知です");
+    assert_eq!(
+        status_text(&dashboard),
+        "切断: 古いデータ（30 秒前）· 接続が切れました"
+    );
     assert_eq!(dot_color(&mut dashboard, &mut text), RED);
-    // After `NOTICE_FOR` the health is back.
+    // After `NOTICE_FOR` the notice line is empty again.
     dashboard.tick(lost + NOTICE_FOR);
+    assert_eq!(notice_of(&dashboard), "");
     assert!(status_text(&dashboard).starts_with("切断: "));
 }
 
@@ -264,7 +269,8 @@ fn a_rebuilt_header_starts_on_the_text_tick_will_set() {
     dashboard.apply_received(down("切れた"), lost, &mut text);
     dashboard.show_notice_at("通知".to_owned(), lost);
     dashboard.rebuilt(dashboard.view, &mut text);
-    assert_eq!(status_text(&dashboard), "通知", "a fresh notice stays");
+    assert_eq!(notice_of(&dashboard), "通知", "a fresh notice stays");
+    assert!(status_text(&dashboard).starts_with("切断: "));
 }
 
 /// The colour the status label's text is drawn in.
@@ -410,7 +416,7 @@ fn a_notice_with_line_breaks_shows_on_one_line() {
     let base = Instant::now();
     let (mut dashboard, _text) = live_at(base, 0);
     dashboard.show_notice_at("移動できません:\nno such pane".to_owned(), base);
-    assert_eq!(status_text(&dashboard), "移動できません: no such pane");
+    assert_eq!(notice_of(&dashboard), "移動できません: no such pane");
 }
 
 /// A live screen fed by the test, laid out, that has taken in the canned
@@ -503,7 +509,7 @@ fn a_notice_asks_for_the_frame_that_ends_it() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
     assert_eq!(dashboard.tree.next_timer(), None);
     key(&mut dashboard, &mut text, Key::Enter);
-    assert_eq!(status_text(&dashboard), NOTHING_SELECTED);
+    assert_eq!(notice_of(&dashboard), NOTHING_SELECTED);
     let (_, at) = dashboard.feed.notice.clone().expect("a notice");
     // The tests' tree clock stands at 0: the frame is asked for at the
     // moment the notice ends.
@@ -518,11 +524,12 @@ fn a_notice_asks_for_the_frame_that_ends_it() {
     // A frame that comes a little early asks for what is left.
     let early = at + NOTICE_FOR - Duration::from_millis(250);
     dashboard.frame(early, &mut text);
-    assert_eq!(status_text(&dashboard), NOTHING_SELECTED);
+    assert_eq!(notice_of(&dashboard), NOTHING_SELECTED);
     assert_eq!(dashboard.tree.next_timer(), Some(0.25));
 
-    // The frame the timer brings shows the health again.
+    // The frame the timer brings ends the notice.
     dashboard.frame(at + NOTICE_FOR, &mut text);
+    assert_eq!(notice_of(&dashboard), "");
     assert_eq!(status_text(&dashboard), "ワーカー 9 · ダミーデータ");
 }
 

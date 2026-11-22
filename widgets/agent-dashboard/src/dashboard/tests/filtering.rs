@@ -66,7 +66,8 @@ fn the_filter_applies_to_all_five_panels() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
     slash(&mut dashboard, &mut text);
     typed(&mut dashboard, &mut text, "codex");
-    assert_eq!(panes_in(&dashboard, Panel::Queue), [19, 15, 13]);
+    // 判断待ち, then 要確認; the quiet 13 is folded away under 参考情報.
+    assert_eq!(panes_in(&dashboard, Panel::Queue), [15, 19]);
     assert_eq!(panes_in(&dashboard, Panel::Running), [13]);
     assert!(panes_in(&dashboard, Panel::Done).is_empty());
     let tree = &dashboard.tree;
@@ -143,13 +144,20 @@ fn escape_clears_the_filter_and_enter_keeps_it() {
     assert_eq!(dashboard.tree.focused(), None);
     assert_eq!(dashboard.filter.query, "perf");
     assert_eq!(count_label(&dashboard).as_deref(), Some("1 / 9 件"));
-    assert_eq!(panes_in(&dashboard, Panel::Queue), [13]);
+    // Only the quiet 13 matches: folded away, and the queue says how many
+    // wait on a decision outside the filter.
+    assert!(panes_in(&dashboard, Panel::Queue).is_empty());
+    assert!(dashboard.queue_buttons.info_toggle.is_some());
+    let tree = &dashboard.tree;
+    let queue = dashboard.panels[Panel::Queue as usize].unwrap();
+    let hidden = queue::hidden_text(3);
+    assert!(labels_under(tree, queue).contains(&hidden));
 
     key(&mut dashboard, &mut text, Key::Escape);
     assert_eq!(dashboard.filter.query, "");
     assert_eq!(field(&dashboard).text(), "");
     assert_eq!(count_label(&dashboard), None);
-    assert_eq!(panes_in(&dashboard, Panel::Queue).len(), 5);
+    assert_eq!(panes_in(&dashboard, Panel::Queue).len(), 4);
     assert_eq!(panes_in(&dashboard, Panel::Running).len(), 3);
     assert_eq!(panes_in(&dashboard, Panel::Done).len(), 2);
     assert_eq!(panes_in(&dashboard, Panel::Timeline).len(), 9);
@@ -183,7 +191,7 @@ fn typing_keeps_focus_caret_and_header() {
     typed(&mut dashboard, &mut text, "c");
     typed(&mut dashboard, &mut text, "o");
     assert!(header_marked(&dashboard), "the header was rebuilt");
-    assert_eq!(panes_in(&dashboard, Panel::Queue), [19, 15, 13], "co");
+    assert_eq!(panes_in(&dashboard, Panel::Queue), [15, 19], "co");
     assert_eq!(dashboard.header.filter_field, id);
     assert_eq!(dashboard.tree.focused(), Some(id));
     assert_eq!(field(&dashboard).caret(), 2);

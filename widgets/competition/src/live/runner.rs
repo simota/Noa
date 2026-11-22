@@ -279,6 +279,11 @@ impl Pane {
             || (!self.briefed && self.state.as_deref() == Some("error"))
     }
 
+    /// Whether the agent's last report says it is working on a turn.
+    fn busy(&self) -> bool {
+        self.state.as_deref() == Some("running")
+    }
+
     fn is_claude_trust(&self) -> bool {
         self.blocked.as_deref() == Some("permission")
             && self
@@ -736,12 +741,25 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 idx += 1;
                 continue;
             }
+            // Checked before the pane counts as ready from an earlier brief: a
+            // retry or correction must wait for the agent's turn to end, and a
+            // prompt from a later turn is the user's to answer.
+            if let Some(p) = self.panes.get_mut(&pending.part)
+                && (p.held() || p.busy())
+            {
+                p.ready = false;
+                p.quiet = None;
+            }
             let pane = self.panes[&pending.part].clone();
             if !pane.ready {
                 if self.try_ready(conn, &pending.part, now)? {
                     // Ready now; send on this pass.
                 } else {
-                    let pane_now = &self.panes[&pending.part];
+                    // `try_ready` drops a pane found gone; the next pass starts it again.
+                    let Some(pane_now) = self.panes.get(&pending.part) else {
+                        idx += 1;
+                        continue;
+                    };
                     if pane_now.held() {
                         if !pane_now.told_held {
                             if let Some(p) = self.panes.get_mut(&pending.part) {
@@ -752,6 +770,9 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                                 pending.part
                             ));
                         }
+                        self.sends[idx].queued_at = now;
+                    } else if pane_now.busy() {
+                        // The time limit starts again once the turn ends.
                         self.sends[idx].queued_at = now;
                     } else if now.saturating_sub(pending.queued_at) >= READY_LIMIT {
                         self.sends.remove(idx);
@@ -847,7 +868,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 return Ok(false);
             }
         }
-        if pane.held() {
+        if pane.held() || pane.busy() {
             return Ok(false);
         }
         match conn.paste_ready(pane.id) {
@@ -987,4 +1008,272 @@ fn unique_session_id(root: &Path, now: Millis) -> SessionId {
         suffix += 1;
     }
     candidate
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FakePane {
+        label: String,
+        state: Option<String>,
+        blocked: Option<String>,
+        seq: u64,
+    }
+
+    #[derive(Default)]
+    struct World {
+        now: Millis,
+        next_pane: u64,
+        panes: BTreeMap<u64, FakePane>,
+        events: VecDeque<Changes>,
+        typed: Vec<(u64, String)>,
+        spawned: usize,
+        /// Panes that are gone by the time they are asked for a paste.
+        gone_on_paste: bool,
+    }
+
+    /// A fake Noa and clock sharing one world.
+    #[derive(Clone)]
+    struct Fake(Rc<RefCell<World>>);
+
+    impl Fake {
+        fn view(id: u64, pane: &FakePane) -> PaneView {
+            PaneView {
+                pane_id: id,
+                label: Some(pane.label.clone()),
+                agent_state: pane.state.clone(),
+                agent_seq: pane.seq,
+                agent_blocked: pane.blocked.clone(),
+                agent_detail: None,
+            }
+        }
+
+        fn report(&self, pane: u64, state: &str, blocked: Option<&str>) {
+            let mut w = self.0.borrow_mut();
+            let p = w.panes.get_mut(&pane).unwrap();
+            p.seq += 1;
+            p.state = Some(state.to_owned());
+            p.blocked = blocked.map(str::to_owned);
+            let view = Fake::view(pane, p);
+            w.events.push_back(Changes {
+                panes: vec![view],
+                ..Changes::default()
+            });
+        }
+
+        fn pane_of(&self, label_end: &str) -> u64 {
+            let w = self.0.borrow();
+            *w.panes
+                .iter()
+                .find(|(_, p)| p.label.ends_with(label_end))
+                .unwrap()
+                .0
+        }
+
+        /// The texts pasted into `pane` (the Enter that submits each is left out).
+        fn pasted(&self, pane: u64) -> usize {
+            let w = self.0.borrow();
+            w.typed
+                .iter()
+                .filter(|(p, t)| *p == pane && t != "\r")
+                .count()
+        }
+    }
+
+    impl Clock for Fake {
+        fn now(&self) -> Millis {
+            self.0.borrow().now
+        }
+
+        fn sleep(&self, duration: Duration) {
+            self.0.borrow_mut().now += duration.as_millis() as Millis;
+        }
+    }
+
+    impl Connect for Fake {
+        type Conn = Fake;
+
+        fn connect(&mut self) -> Result<Fake, String> {
+            Ok(self.clone())
+        }
+    }
+
+    impl Noa for Fake {
+        fn panes(&mut self) -> Result<Vec<PaneView>, NoaError> {
+            let w = self.0.borrow();
+            Ok(w.panes.iter().map(|(id, p)| Fake::view(*id, p)).collect())
+        }
+
+        fn changes(&mut self, _wait: Duration) -> Result<Option<Changes>, NoaError> {
+            Ok(self.0.borrow_mut().events.pop_front())
+        }
+
+        fn spawn(&mut self, _placement: Placement, spec: &PaneSpec) -> Result<u64, NoaError> {
+            let mut w = self.0.borrow_mut();
+            let id = w.next_pane;
+            w.next_pane += 1;
+            w.spawned += 1;
+            w.panes.insert(
+                id,
+                FakePane {
+                    label: spec.label.clone(),
+                    state: None,
+                    blocked: None,
+                    seq: 0,
+                },
+            );
+            Ok(id)
+        }
+
+        fn paste_ready(&mut self, pane: u64) -> Result<bool, NoaError> {
+            let mut w = self.0.borrow_mut();
+            if w.gone_on_paste {
+                w.panes.remove(&pane);
+                return Err(NoaError::PaneGone);
+            }
+            Ok(true)
+        }
+
+        fn screen(&mut self, _pane: u64) -> Result<String, NoaError> {
+            Ok("> ".to_owned())
+        }
+
+        fn type_text(&mut self, pane: u64, text: &str, _paste: bool) -> Result<(), NoaError> {
+            self.0.borrow_mut().typed.push((pane, text.to_owned()));
+            Ok(())
+        }
+    }
+
+    const CONFIG: Config = Config {
+        start_timeout: 60_000,
+        reply_timeout: 600_000,
+        max_retries: 2,
+    };
+
+    fn temp_root() -> PathBuf {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "noa-competition-live-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// Runs the runner's loop body once: sends, replies, the tick, one change.
+    fn step(runner: &mut Runner<Fake, Fake>, conn: &mut Fake) {
+        assert!(runner.deliver_sends(conn).is_ok());
+        assert!(runner.poll_replies().is_ok());
+        let now = runner.clock.now();
+        assert!(runner.feed(Input::Tick { now }).is_ok());
+        while let Some(changes) = conn.changes(POLL).unwrap() {
+            assert!(runner.apply_changes(conn, changes).is_ok());
+        }
+    }
+
+    fn rig(fake: &Fake, root: &Path) -> Runner<Fake, Fake> {
+        let (_actions_tx, actions) = mpsc::channel();
+        let (updates, _updates_rx) = mpsc::channel();
+        let start = Start::New {
+            request: "Design a music player UI".into(),
+            workdir: None,
+            max_rounds: Some(2),
+            reveal_interval: 5,
+            judge: AgentKind::Claude,
+            panel: vec![AgentKind::Claude, AgentKind::Codex],
+            root: root.to_owned(),
+        };
+        let mut runner = Runner::open(
+            start,
+            fake.clone(),
+            fake.clone(),
+            CONFIG,
+            actions,
+            updates,
+            Rc::new(|| {}),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let mut conn = fake.clone();
+        assert!(runner.sync_panes(&mut conn).is_ok());
+        assert!(runner.feed(Input::Start { now: 1_000 }).is_ok());
+        runner
+    }
+
+    fn fake() -> Fake {
+        Fake(Rc::new(RefCell::new(World {
+            now: 1_000,
+            next_pane: 100,
+            ..World::default()
+        })))
+    }
+
+    #[test]
+    fn a_pane_gone_while_waiting_for_ready_is_started_again() {
+        let fake = fake();
+        let root = temp_root();
+        let mut runner = rig(&fake, &root);
+        let mut conn = fake.clone();
+        step(&mut runner, &mut conn);
+        assert_eq!(fake.0.borrow().spawned, 2);
+        fake.0.borrow_mut().gone_on_paste = true;
+        step(&mut runner, &mut conn);
+        fake.0.borrow_mut().gone_on_paste = false;
+        step(&mut runner, &mut conn);
+        assert_eq!(fake.0.borrow().spawned, 4);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_resent_brief_waits_while_the_agent_works_or_sits_on_a_prompt() {
+        let fake = fake();
+        let root = temp_root();
+        let mut runner = rig(&fake, &root);
+        let mut conn = fake.clone();
+
+        // The panes are spawned, report that they wait for input, and take
+        // their first brief.
+        step(&mut runner, &mut conn);
+        let claude = fake.pane_of(":claude");
+        fake.report(claude, "input", None);
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        assert_eq!(fake.pasted(claude), 1);
+
+        // The agent works past the reply limit: the engine resends, and the
+        // brief waits for the turn to end instead of landing mid-turn.
+        fake.report(claude, "running", None);
+        step(&mut runner, &mut conn);
+        fake.0.borrow_mut().now += CONFIG.reply_timeout + 1;
+        step(&mut runner, &mut conn);
+        fake.0.borrow_mut().now += READY_LIMIT + 1;
+        step(&mut runner, &mut conn);
+        assert_eq!(fake.pasted(claude), 1, "pasted into a working agent");
+
+        // A prompt shown later in the turn holds it too.
+        fake.report(claude, "permission", Some("permission"));
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        assert_eq!(fake.pasted(claude), 1, "pasted into a prompt");
+
+        // Once the agent is back at its input box, the brief goes out.
+        fake.report(claude, "input", None);
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        assert_eq!(fake.pasted(claude), 2);
+        let brief = runner
+            .engine
+            .session()
+            .current_round()
+            .unwrap()
+            .brief(&PartId::new("claude"))
+            .unwrap();
+        assert!(brief.receipt.failed.is_none());
+
+        let _ = fs::remove_dir_all(root);
+    }
 }

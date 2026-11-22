@@ -100,10 +100,7 @@ pub(super) fn insert(
         Some(outcome) if !outcome.ranking.is_empty() => outcome.ranking.clone(),
         _ => session.contestant_ids().cloned().collect(),
     };
-    let visible: Vec<PartId> = order
-        .into_iter()
-        .filter(|p| filter_part.is_none_or(|f| f == p))
-        .collect();
+    let visible = ranked_visible(order, filter_part);
 
     let columns = tree.insert(
         Some(list),
@@ -119,7 +116,7 @@ pub(super) fn insert(
         }),
     );
 
-    for (rank_idx, part) in visible.iter().enumerate() {
+    for (rank_idx, part) in &visible {
         let is_winner = session.winner.as_ref() == Some(part);
         let col = tree.insert(
             Some(columns),
@@ -235,5 +232,30 @@ pub(super) fn insert(
                 .unwrap_or_else(|| "提出待ち…".to_owned());
             note(tree, col, status);
         }
+    }
+}
+
+/// The contestants shown, in `order`, each with its index in the full order
+/// (its rank once judged), kept when `filter_part` narrows them to one.
+fn ranked_visible(order: Vec<PartId>, filter_part: Option<&PartId>) -> Vec<(usize, PartId)> {
+    order
+        .into_iter()
+        .enumerate()
+        .filter(|(_, p)| filter_part.is_none_or(|f| f == p))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_filtered_contestant_keeps_its_rank() {
+        let order: Vec<PartId> = ["claude", "codex", "agy"].map(PartId::new).into();
+        assert_eq!(
+            ranked_visible(order.clone(), Some(&PartId::new("agy"))),
+            vec![(2, PartId::new("agy"))]
+        );
+        assert_eq!(ranked_visible(order, None).len(), 3);
     }
 }

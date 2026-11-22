@@ -8,7 +8,8 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use super::types::{ArtifactKind, RoundKind, Session};
+use super::types::{ArtifactKind, PartId, RoundKind, RoundNo, Session};
+use crate::store;
 
 #[derive(Serialize)]
 struct ViewerData {
@@ -80,6 +81,19 @@ fn read_text_preview(path: &Path) -> Option<String> {
     }
 }
 
+/// The URL of a round snapshot file, relative to `compare.html`.
+fn file_href(round: RoundNo, part: &PartId, rel_path: &str) -> String {
+    let mut href = format!("r{round}/artifacts/{part}/");
+    for byte in rel_path.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
+            href.push(byte as char);
+        } else {
+            let _ = write!(href, "%{byte:02X}");
+        }
+    }
+    href
+}
+
 /// Build the viewer's HTML document for `session`, referencing artifact
 /// snapshots under `artifact_root` (where `compare.html` will be written).
 pub fn render_html(session: &Session, artifact_root: &Path) -> String {
@@ -97,11 +111,17 @@ pub fn render_html(session: &Session, artifact_root: &Path) -> String {
                             s.artifacts
                                 .iter()
                                 .map(|f| {
-                                    let href =
-                                        format!("r{}/artifacts/{}/{}", r.no, part, f.rel_path);
+                                    let href = file_href(r.no, part, &f.rel_path);
                                     let preview = match f.kind {
                                         ArtifactKind::Code | ArtifactKind::Markdown => {
-                                            read_text_preview(&artifact_root.join(&href))
+                                            read_text_preview(
+                                                &store::artifact_snapshot_dir(
+                                                    artifact_root,
+                                                    r.no,
+                                                    part,
+                                                )
+                                                .join(&f.rel_path),
+                                            )
                                         }
                                         _ => None,
                                     };
@@ -440,7 +460,9 @@ function renderPreview(box, file) {{
     const iframe = document.createElement("iframe");
     iframe.src = file.href;
     iframe.style.width = viewportWidth;
-    iframe.setAttribute("sandbox", "allow-scripts allow-same-origin");
+    // No allow-same-origin: with it, an entry's scripts could reach this
+    // page (`parent.document`) and rewrite scores or other entries.
+    iframe.setAttribute("sandbox", "allow-scripts");
     box.appendChild(iframe);
   }} else if (file.kind === "image" || file.kind === "svg") {{
     const img = document.createElement("img");
@@ -619,5 +641,21 @@ mod tests {
         assert!(html.contains("Noa Competition Viewer"));
         assert!(html.contains("r1/artifacts/claude/index.html"));
         assert!(!html.contains("</script><script>alert(1)"));
+        assert!(html.contains(r#"setAttribute("sandbox", "allow-scripts")"#));
+        assert!(!html.contains("allow-same-origin\")"));
+    }
+
+    #[test]
+    fn hrefs_escape_url_reserved_characters_in_file_names() {
+        let file = ArtifactFile {
+            rel_path: "pages/design#1 v?2%.html".into(),
+            kind: ArtifactKind::Html,
+            bytes: 1,
+        };
+        let part = PartId::new("claude");
+        assert_eq!(
+            file_href(3, &part, &file.rel_path),
+            "r3/artifacts/claude/pages/design%231%20v%3F2%25.html"
+        );
     }
 }

@@ -167,12 +167,15 @@ fn copy_dir_rec(
             if total_bytes.saturating_add(size) > MAX_SNAPSHOT_BYTES {
                 continue;
             }
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            let target = dst_root.join(&rel);
+            // Joined from its components, never by rewriting separators: a
+            // file name may hold `\` (`a\..\..\x` is one name on Unix).
+            let rel_path = path.strip_prefix(root).unwrap_or(&path);
+            let rel = rel_path
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            let target = dst_root.join(rel_path);
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -353,6 +356,23 @@ mod tests {
         assert_eq!(files[1].kind, ArtifactKind::Html);
         assert!(dst.join("index.html").is_file());
         assert!(!dst.join(".git").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_backslash_in_a_file_name_does_not_reach_outside_the_snapshot() {
+        let root = temp_root("escape");
+        let src = entry_dir(&root, &PartId::new("claude"));
+        fs::create_dir_all(&src).unwrap();
+        let name = r"asset\..\..\..\judge.json";
+        fs::write(src.join(name), "{}").unwrap();
+
+        let dst = artifact_snapshot_dir(&root, 1, &PartId::new("claude"));
+        let files = snapshot_artifacts(&src, &dst).unwrap();
+        assert!(!judge_reply_path(&root, 1).exists());
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].rel_path, name);
+        assert!(dst.join(name).is_file());
         fs::remove_dir_all(&root).unwrap();
     }
 }

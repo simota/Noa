@@ -97,6 +97,9 @@ pub enum AppCommand {
     /// Start the agent dashboard (`widgets/agent-dashboard`) as a program of
     /// its own beside Noa.
     OpenAgentDashboard,
+    /// Start the repo theater (`widgets/repo-theater`), the cross-worktree
+    /// diff review window, as a program of its own beside Noa.
+    OpenRepoTheater,
     /// Open the "Theme" picker half of the split theme-settings overlay
     /// (theme-settings-ui R-1, later split into two overlays). Reachable
     /// only from the command palette — deliberately unbound in
@@ -276,6 +279,7 @@ impl AppCommand {
     pub(crate) const TOGGLE_AUTO_APPROVE_MENU_ID: &'static str = "noa.view.toggle-auto-approve";
     pub(crate) const TOGGLE_EMBER_MENU_ID: &'static str = "noa.view.toggle-ember";
     pub(crate) const OPEN_AGENT_DASHBOARD_MENU_ID: &'static str = "noa.view.open-agent-dashboard";
+    pub(crate) const OPEN_REPO_THEATER_MENU_ID: &'static str = "noa.view.open-repo-theater";
     pub(crate) const OPEN_SETTINGS_MENU_ID: &'static str = "noa.view.open-settings";
 
     pub(crate) fn menu_id(self) -> &'static str {
@@ -359,6 +363,7 @@ impl AppCommand {
             AppCommand::ToggleAutoApprove => Self::TOGGLE_AUTO_APPROVE_MENU_ID,
             AppCommand::ToggleEmber => Self::TOGGLE_EMBER_MENU_ID,
             AppCommand::OpenAgentDashboard => Self::OPEN_AGENT_DASHBOARD_MENU_ID,
+            AppCommand::OpenRepoTheater => Self::OPEN_REPO_THEATER_MENU_ID,
         }
     }
 
@@ -431,6 +436,7 @@ impl AppCommand {
             Self::TOGGLE_AUTO_APPROVE_MENU_ID => Some(Self::ToggleAutoApprove),
             Self::TOGGLE_EMBER_MENU_ID => Some(Self::ToggleEmber),
             Self::OPEN_AGENT_DASHBOARD_MENU_ID => Some(Self::OpenAgentDashboard),
+            Self::OPEN_REPO_THEATER_MENU_ID => Some(Self::OpenRepoTheater),
             Self::OPEN_SETTINGS_MENU_ID => Some(Self::OpenSettings),
             _ => None,
         }
@@ -557,6 +563,7 @@ impl AppCommand {
             Self::ToggleAutoApprove => "auto-approve.toggle",
             Self::ToggleEmber => "ember.toggle",
             Self::OpenAgentDashboard => "agent-dashboard.open",
+            Self::OpenRepoTheater => "repo-theater.open",
             Self::OpenThemePicker => "theme.open",
             Self::OpenSettings => "settings.open",
             Self::ToggleProcessMonitor => "process-monitor.toggle",
@@ -651,6 +658,7 @@ impl AppCommand {
             "auto-approve.toggle" => Some(Self::ToggleAutoApprove),
             "ember.toggle" => Some(Self::ToggleEmber),
             "agent-dashboard.open" => Some(Self::OpenAgentDashboard),
+            "repo-theater.open" => Some(Self::OpenRepoTheater),
             "theme.open" | "theme-settings.open" => Some(Self::OpenThemePicker),
             "settings.open" => Some(Self::OpenSettings),
             "process-monitor.toggle" => Some(Self::ToggleProcessMonitor),

@@ -65,6 +65,7 @@ pub fn resolve_pane_command_target(
         | AppCommand::ToggleBackgroundOpacity
         | AppCommand::ToggleEmber
         | AppCommand::OpenAgentDashboard
+        | AppCommand::OpenRepoTheater
         | AppCommand::Spawn(_)
         | AppCommand::ToggleSidebar
         | AppCommand::ToggleAutoApprove

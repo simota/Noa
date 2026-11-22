@@ -63,13 +63,17 @@ case "$MODE" in
   *) echo "usage: $0 [release|debug]" >&2; exit 2 ;;
 esac
 
-# The agent dashboard (widgets/agent-dashboard, a crate outside the workspace)
-# ships in Noa.app's Contents/Helpers; Noa starts it from View > Agent Dashboard.
-if [ "$PROFILE" = release ]; then
-  cargo build --manifest-path "$ROOT/widgets/agent-dashboard/Cargo.toml" --locked --release
-else
-  cargo build --manifest-path "$ROOT/widgets/agent-dashboard/Cargo.toml" --locked
-fi
+# The agent dashboard and the repo theater (widgets/agent-dashboard and
+# widgets/repo-theater, crates outside the workspace) ship in Noa.app's
+# Contents/Helpers; Noa starts them from View > Agent Dashboard and
+# View > Repo Theater (or the command palette).
+for widget in agent-dashboard repo-theater; do
+  if [ "$PROFILE" = release ]; then
+    cargo build --manifest-path "$ROOT/widgets/$widget/Cargo.toml" --locked --release
+  else
+    cargo build --manifest-path "$ROOT/widgets/$widget/Cargo.toml" --locked
+  fi
+done
 
 TARGET_DIR="$TARGET_ROOT/$PROFILE"
 BIN="$TARGET_DIR/Noa"
@@ -77,9 +81,11 @@ APP="$TARGET_DIR/Noa.app"
 CONTENTS="$APP/Contents"
 
 DASHBOARD_BIN="$TARGET_DIR/agent-dashboard"
+THEATER_BIN="$TARGET_DIR/repo-theater"
 
 [ -x "$BIN" ] || { echo "error: binary not found at $BIN" >&2; exit 1; }
 [ -x "$DASHBOARD_BIN" ] || { echo "error: binary not found at $DASHBOARD_BIN" >&2; exit 1; }
+[ -x "$THEATER_BIN" ] || { echo "error: binary not found at $THEATER_BIN" >&2; exit 1; }
 
 # Generate the icon on first run (best effort — the app still bundles without it).
 if [ ! -f "$ROOT/assets/noa.icns" ]; then
@@ -92,8 +98,9 @@ cp "$BIN" "$CONTENTS/MacOS/Noa"
 # Helpers, not MacOS: an executable in Contents/MacOS takes Noa.app as its
 # main bundle (com.simota.noa, its Dock icon and AppleScript dictionary).
 # Named for the product: macOS shows a bare executable's file name as the app
-# name in the menu bar and Dock (crates/noa-app/src/agent_dashboard.rs looks for it).
+# name in the menu bar and Dock (crates/noa-app/src/helper_program.rs looks for it).
 cp "$DASHBOARD_BIN" "$CONTENTS/Helpers/Noa Agent Dashboard"
+cp "$THEATER_BIN" "$CONTENTS/Helpers/Noa Repo Theater"
 cp -RX "$ROOT/assets/wallpapers" "$CONTENTS/Resources/wallpapers"
 
 ICON_KEY=""
@@ -158,6 +165,9 @@ if [ -n "${NOA_SIGN_IDENTITY:-}" ]; then
   codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/assets/macos.entitlements.plist" \
     --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/Helpers/Noa Agent Dashboard"
+  codesign --force --options runtime --timestamp \
+    --entitlements "$ROOT/assets/macos.entitlements.plist" \
+    --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/Helpers/Noa Repo Theater"
   codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/assets/macos.entitlements.plist" \
     --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/MacOS/Noa"

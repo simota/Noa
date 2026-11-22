@@ -40,12 +40,27 @@ const BACKOFF_MAX: Millis = 8_000;
 /// that debounces paste sees two events (`noa +ctl send`'s `SUBMIT_DELAY`).
 const SUBMIT_DELAY: Duration = Duration::from_millis(150);
 /// A fresh pane is ready for its first brief once its agent has reported
-/// something other than `running`, or its screen has shown the same text
-/// this long (`noa +ctl spawn --ready`'s rule)...
+/// that it waits for input (`input` without `blocked`, or `finished`), or
+/// its screen shows an input box and has stayed the same this long
+/// (`noa +ctl spawn --task`'s rule)...
 const QUIET_FOR: Millis = 1_500;
-/// ...or, failing both, this long after it was spawned. A brief whose pane
-/// has not enabled bracketed paste this long after it was queued fails.
+/// ...or, failing both, this long after it was spawned, if it shows an
+/// input box. A brief whose pane is not ready this long after it was queued
+/// fails, unless its agent is held on a prompt (`permission`, `error` or
+/// `blocked`: a trust prompt, a sign-in), which is the user's to answer:
+/// that brief waits, and the user is told once.
 const READY_LIMIT: Millis = 30_000;
+/// What Noa reports for Claude Code's folder trust prompt (`detail`, with
+/// `blocked: permission`), and the choice that trusts the folder. Agents
+/// run in the discussions directory the runner made for them, so the
+/// runner answers this prompt itself.
+const CLAUDE_TRUST_DETAIL: &str = "trust this folder";
+const CLAUDE_TRUST_YES: &str = "Yes, I trust this folder";
+/// Keys typed into one trust prompt before it is left to the user.
+const TRUST_KEYS_MAX: u8 = 4;
+/// How long a typed key may take to show on the trust prompt before the
+/// prompt is left to the user.
+const TRUST_KEY_SHOWS_IN: Millis = 2_000;
 /// A reply file is taken in once its text has stayed the same this long, so
 /// a file still being written is not read half-done.
 const REPLY_STABLE_FOR: Millis = 600;
@@ -286,11 +301,20 @@ struct Pane {
     spawned_at: Millis,
     /// Ready for a brief (see [`QUIET_FOR`]).
     ready: bool,
-    /// The agent's last report count and state.
+    /// The agent's last report count, state, `blocked` and detail.
     seq: u64,
     state: Option<String>,
+    blocked: Option<String>,
+    detail: Option<String>,
     /// The screen text last seen and since when, while waiting for ready.
     quiet: Option<(String, Millis)>,
+    /// The user was told this pane waits on a prompt (once per hold).
+    told_held: bool,
+    /// Keys typed to answer Claude Code's trust prompt on this pane, and
+    /// the screen the last one was typed on: the next key waits for the
+    /// screen to change, so a slow redraw does not get a key twice.
+    trust_keys: u8,
+    trust_screen: Option<(String, Millis)>,
 }
 
 impl Pane {
@@ -301,9 +325,77 @@ impl Pane {
             ready: false,
             seq: 0,
             state: None,
+            blocked: None,
+            detail: None,
             quiet: None,
+            told_held: false,
+            trust_keys: 0,
+            trust_screen: None,
         }
     }
+
+    /// Whether the agent's last report holds it on a prompt the user must
+    /// answer before it can take a brief: Claude Code's folder trust prompt
+    /// reports `permission` + `blocked`, Antigravity reports `error` while it
+    /// signs in.
+    fn held(&self) -> bool {
+        self.seq > 0
+            && (self.blocked.is_some()
+                || matches!(self.state.as_deref(), Some("permission" | "error")))
+    }
+
+    /// Whether the agent's last report says it waits for input.
+    fn idle(&self) -> bool {
+        self.seq > 0
+            && self.blocked.is_none()
+            && matches!(self.state.as_deref(), Some("input" | "finished"))
+    }
+}
+
+/// The key that moves Claude Code's trust prompt toward trusting the
+/// folder: Enter when "Yes, I trust this folder" is selected (`❯`), Down
+/// when another choice is; `None` when the screen shows no such prompt.
+fn trust_key(screen: &str) -> Option<&'static str> {
+    if !screen.contains(CLAUDE_TRUST_YES) {
+        return None;
+    }
+    let selected = screen
+        .lines()
+        .find(|line| line.trim_start().starts_with('❯'))?;
+    Some(if selected.contains(CLAUDE_TRUST_YES) {
+        "\r"
+    } else {
+        "\x1b[B"
+    })
+}
+
+/// Whether the bottom of `screen` shows an agent's input box (the rules of
+/// Claude Code's and Antigravity's) or Codex's `›` input line, as
+/// `noa +ctl` decides before it types a task (`ctl/prompt.rs`).
+fn has_input(screen: &str) -> bool {
+    fn is_rule(line: &str) -> bool {
+        let line = line.trim();
+        line.chars().count() >= 20 && line.chars().all(|ch| matches!(ch, '─' | '━' | '═'))
+    }
+    const BOX_REACH: usize = 12;
+    const CODEX_REACH: usize = 4;
+    let mut lines: Vec<&str> = screen.lines().map(str::trim_end).collect();
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    let boxed = (lines.len().saturating_sub(BOX_REACH)..lines.len()).any(|i| is_rule(lines[i]));
+    let codex = lines
+        .iter()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(CODEX_REACH)
+        .filter_map(|line| line.trim_start().strip_prefix('›'))
+        .any(|rest| {
+            let rest = rest.trim_start();
+            let digits = rest.chars().take_while(char::is_ascii_digit).count();
+            !(digits > 0 && rest[digits..].starts_with('.'))
+        });
+    boxed || codex
 }
 
 /// A brief waiting to be typed into its agent's pane.
@@ -694,6 +786,11 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         }
         pane.seq = view.agent_seq;
         pane.state.clone_from(&view.agent_state);
+        pane.blocked.clone_from(&view.agent_blocked);
+        pane.detail.clone_from(&view.agent_detail);
+        if !pane.held() {
+            pane.told_held = false;
+        }
         let Some(state) = agent_state(view.agent_state.as_deref()) else {
             return Ok(());
         };
@@ -777,7 +874,8 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         }
     }
 
-    /// Whether `part`'s pane is ready for a brief (see [`QUIET_FOR`]).
+    /// Whether `part`'s pane is ready for a brief (see [`QUIET_FOR`]). A
+    /// pane held on a prompt is not, and the user is told once.
     fn ready(&mut self, conn: &mut C::Conn, part: &PartId) -> Result<bool, Fail> {
         let now = self.clock.now();
         let Some(pane) = self.panes.get_mut(part) else {
@@ -786,6 +884,62 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         if pane.ready {
             return Ok(true);
         }
+        if pane.held()
+            && pane.blocked.as_deref() == Some("permission")
+            && pane.detail.as_deref() == Some(CLAUDE_TRUST_DETAIL)
+            && pane.trust_keys < TRUST_KEYS_MAX
+        {
+            let id = pane.id;
+            let seen = pane.trust_screen.clone();
+            let (key, unchanged) = match conn.screen(id) {
+                Ok(text) if seen.as_ref().is_some_and(|(before, _)| *before == text) => {
+                    (None, true)
+                }
+                Ok(text) => (trust_key(&text).map(|key| (key, text)), false),
+                Err(NoaError::Link(why)) => return Err(Fail::Link(why)),
+                Err(_) => (None, false),
+            };
+            let typed_at = seen.map_or(now, |(_, at)| at);
+            if unchanged && now.saturating_sub(typed_at) < TRUST_KEY_SHOWS_IN {
+                // The last key has not shown yet: never type it twice.
+                return Ok(false);
+            }
+            if let Some((key, text)) = key {
+                match conn.type_text(id, key, false) {
+                    Ok(()) => {}
+                    Err(NoaError::Link(why)) => return Err(Fail::Link(why)),
+                    Err(_) => return Ok(false),
+                }
+                if let Some(pane) = self.panes.get_mut(part) {
+                    pane.trust_keys += 1;
+                    pane.trust_screen = Some((text, now));
+                }
+                if key == "\r" {
+                    self.notice(format!(
+                        "{part}: 議論フォルダの信頼確認を自動で承認しました"
+                    ));
+                }
+                return Ok(false);
+            }
+        }
+        let Some(pane) = self.panes.get_mut(part) else {
+            return Ok(false);
+        };
+        if pane.held() {
+            pane.quiet = None;
+            if !pane.told_held {
+                pane.told_held = true;
+                let what = pane
+                    .detail
+                    .clone()
+                    .or_else(|| pane.state.clone())
+                    .unwrap_or_default();
+                self.notice(format!(
+                    "{part} のペインが確認待ちです（{what}）。ペインで答えるとブリーフを送ります"
+                ));
+            }
+            return Ok(false);
+        }
         match conn.paste_ready(pane.id) {
             Ok(true) => {}
             Ok(false) | Err(NoaError::PaneGone | NoaError::NotReady | NoaError::Refused(_)) => {
@@ -793,23 +947,27 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             }
             Err(NoaError::Link(why)) => return Err(Fail::Link(why)),
         }
-        let reported = pane.seq > 0 && pane.state.as_deref() != Some("running");
-        let quiet = match conn.screen(pane.id) {
+        let (quiet, input) = match conn.screen(pane.id) {
             Ok(text) if text.trim().is_empty() => {
                 pane.quiet = None;
-                false
+                (false, false)
             }
-            Ok(text) => match &pane.quiet {
-                Some((seen, since)) if *seen == text => now.saturating_sub(*since) >= QUIET_FOR,
-                _ => {
-                    pane.quiet = Some((text, now));
-                    false
-                }
-            },
+            Ok(text) => {
+                let input = has_input(&text);
+                let quiet = match &pane.quiet {
+                    Some((seen, since)) if *seen == text => now.saturating_sub(*since) >= QUIET_FOR,
+                    _ => {
+                        pane.quiet = Some((text, now));
+                        false
+                    }
+                };
+                (quiet, input)
+            }
             Err(NoaError::Link(why)) => return Err(Fail::Link(why)),
-            Err(_) => false,
+            Err(_) => (false, false),
         };
-        if reported || quiet || now.saturating_sub(pane.spawned_at) >= READY_LIMIT {
+        let waited = now.saturating_sub(pane.spawned_at) >= READY_LIMIT;
+        if pane.idle() || (input && (quiet || waited)) {
             pane.ready = true;
         }
         Ok(pane.ready)
@@ -872,7 +1030,12 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         if !delivery.pasted {
             if !self.ready(conn, &part)? {
                 let now = self.clock.now();
-                if now.saturating_sub(delivery.queued) >= READY_LIMIT {
+                let held = self.panes.get(&part).is_some_and(Pane::held);
+                if held {
+                    // The user answers the prompt; the time limit starts
+                    // again from then.
+                    delivery.queued = now;
+                } else if now.saturating_sub(delivery.queued) >= READY_LIMIT {
                     self.send_failed(delivery, NoaError::NotReady.to_string())?;
                     return Ok(true);
                 }
@@ -983,12 +1146,17 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// An agent at its input box, as Claude Code and Antigravity draw it.
+    const FAKE_IDLE: &str = "welcome\n────────────────────────────────────────\n> \n────────────────────────────────────────\n  status line";
+
     #[derive(Debug, Clone)]
     struct FakePane {
         label: String,
         paste: bool,
         screen: String,
         state: Option<String>,
+        blocked: Option<String>,
+        detail: Option<String>,
         seq: u64,
     }
 
@@ -1031,6 +1199,8 @@ mod tests {
                 label: Some(pane.label.clone()),
                 agent_state: pane.state.clone(),
                 agent_seq: pane.seq,
+                agent_blocked: pane.blocked.clone(),
+                agent_detail: pane.detail.clone(),
             }
         }
 
@@ -1039,6 +1209,23 @@ mod tests {
             let p = w.panes.get_mut(&pane).unwrap();
             p.seq += 1;
             p.state = Some(state.to_owned());
+            p.blocked = None;
+            p.detail = None;
+            let view = Fake::view(pane, p);
+            w.events.push_back(Changes {
+                panes: vec![view],
+                ..Changes::default()
+            });
+        }
+
+        /// A report that holds the agent on a prompt (`blocked`).
+        fn report_blocked(&self, pane: u64, state: &str, blocked: &str, detail: &str) {
+            let mut w = self.w();
+            let p = w.panes.get_mut(&pane).unwrap();
+            p.seq += 1;
+            p.state = Some(state.to_owned());
+            p.blocked = Some(blocked.to_owned());
+            p.detail = Some(detail.to_owned());
             let view = Fake::view(pane, p);
             w.events.push_back(Changes {
                 panes: vec![view],
@@ -1139,8 +1326,10 @@ mod tests {
                 FakePane {
                     label: spec.label.clone(),
                     paste,
-                    screen: "> ".into(),
+                    screen: FAKE_IDLE.into(),
                     state: None,
+                    blocked: None,
+                    detail: None,
                     seq: 0,
                 },
             );
@@ -1277,6 +1466,17 @@ mod tests {
 
         fn updates(&self) -> Vec<Update> {
             self.updates.try_iter().collect()
+        }
+
+        /// The notices sent since the updates were last read.
+        fn notices(&self) -> Vec<String> {
+            self.updates()
+                .into_iter()
+                .filter_map(|update| match update {
+                    Update::Notice(text) => Some(text),
+                    _ => None,
+                })
+                .collect()
         }
 
         fn receipt(&self, round: RoundNo, part: &str) -> discussion::model::types::Receipt {
@@ -1521,6 +1721,140 @@ mod tests {
         assert_eq!(rig.submitted(101), 1);
         assert_eq!(rig.submitted(102), 0);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_pane_held_on_a_prompt_gets_no_brief_until_it_is_answered() {
+        let root = temp_root("held");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.step();
+        // A permission dialog the runner does not answer: a pasted brief
+        // and its Enter would pick its selected choice.
+        fake.report_blocked(101, "permission", "permission", "Bash");
+        fake.w().panes.get_mut(&101).unwrap().screen =
+            "────────────────────────────────────────\n Allow Bash?\n ❯ 1. Yes\n   2. No".into();
+        // Well past READY_LIMIT: still nothing typed, nothing failed.
+        for _ in 0..250 {
+            rig.step();
+        }
+        assert_eq!(rig.submitted(101), 0);
+        assert!(fake.typed(101).is_empty());
+        let receipt = rig.receipt(1, "claude");
+        assert_eq!(receipt.failed, None);
+        let told: Vec<String> = rig
+            .notices()
+            .into_iter()
+            .filter(|n| n.contains("確認待ち"))
+            .collect();
+        assert_eq!(told.len(), 1, "told once: {told:?}");
+        // The user answers; the agent reports it is at its input box.
+        fake.w().panes.get_mut(&101).unwrap().screen = FAKE_IDLE.into();
+        fake.report(101, "input");
+        rig.until(10, |r| r.submitted(101) == 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn claudes_folder_trust_prompt_is_answered_yes_then_the_brief_goes_in() {
+        let root = temp_root("trust");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.step();
+        fake.report_blocked(101, "permission", "permission", CLAUDE_TRUST_DETAIL);
+        let prompt = |selected_yes: bool| {
+            let (no, yes) = if selected_yes {
+                ("  ", "❯ ")
+            } else {
+                ("❯ ", "  ")
+            };
+            format!(
+                "────────────────────────────────────────\n Accessing workspace:\n {no}No, exit\n {yes}Yes, I trust this folder\n Enter to confirm · Esc to cancel"
+            )
+        };
+        fake.w().panes.get_mut(&101).unwrap().screen = prompt(false);
+        rig.step();
+        // Down first: "No, exit" is selected. Never a paste.
+        assert_eq!(fake.typed(101), vec![("\x1b[B".to_owned(), false)]);
+        fake.w().panes.get_mut(&101).unwrap().screen = prompt(true);
+        rig.step();
+        assert_eq!(fake.typed(101).last(), Some(&("\r".to_owned(), false)));
+        assert_eq!(rig.submitted(101), 1, "the Enter answered the prompt");
+        assert_eq!(rig.receipt(1, "claude").sent, None);
+        // Claude Code starts and reports it is idle: the brief goes in.
+        fake.w().panes.get_mut(&101).unwrap().screen = FAKE_IDLE.into();
+        fake.report(101, "input");
+        rig.until(10, |r| r.receipt(1, "claude").sent.is_some());
+        assert!(
+            fake.typed(101)
+                .iter()
+                .any(|(text, paste)| *paste && text.contains("Pick a database"))
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_trust_prompt_that_does_not_go_away_is_left_to_the_user() {
+        let root = temp_root("trust-stuck");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.step();
+        fake.report_blocked(101, "permission", "permission", CLAUDE_TRUST_DETAIL);
+        fake.w().panes.get_mut(&101).unwrap().screen =
+            " ❯ No, exit\n   Yes, I trust this folder\n".into();
+        for _ in 0..20 {
+            rig.step();
+        }
+        // One Down; the screen never shows it, so no second key: the user
+        // is told instead.
+        assert_eq!(fake.typed(101), vec![("\x1b[B".to_owned(), false)]);
+        assert!(rig.notices().iter().any(|n| n.contains("確認待ち")));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn trust_key_moves_to_yes_then_confirms() {
+        assert_eq!(
+            trust_key(" ❯ No, exit\n   Yes, I trust this folder"),
+            Some("\x1b[B")
+        );
+        assert_eq!(
+            trust_key("   No, exit\n ❯ Yes, I trust this folder"),
+            Some("\r")
+        );
+        assert_eq!(trust_key(" ❯ 1. Yes\n   2. No"), None);
+    }
+
+    #[test]
+    fn an_agent_that_reports_an_error_while_it_signs_in_gets_its_brief_after_sign_in() {
+        let root = temp_root("signin");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.step();
+        // Antigravity reports `error` ("Sign in required") while it signs
+        // in, under an input box that drops what is typed meanwhile.
+        fake.report(101, "error");
+        for _ in 0..20 {
+            rig.step();
+        }
+        assert_eq!(rig.submitted(101), 0);
+        assert_eq!(rig.receipt(1, "claude").sent, None);
+        fake.report(101, "finished");
+        rig.until(10, |r| r.submitted(101) == 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn input_is_an_input_box_or_codexs_input_line() {
+        assert!(has_input(FAKE_IDLE));
+        assert!(has_input(
+            "work\n› Ask Codex to do anything\n\n  gpt · 100% left\n"
+        ));
+        assert!(!has_input(
+            "Do you trust the files in this folder?\n› 1. Yes, proceed\n  2. No, exit\n"
+        ));
+        assert!(!has_input("> "));
+        assert!(!has_input("Loading…\n"));
     }
 
     #[test]

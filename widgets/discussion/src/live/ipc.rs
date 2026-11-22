@@ -54,6 +54,12 @@ pub struct PaneView {
     pub agent_state: Option<String>,
     /// How many reports the agent has made (`Panel.agent.seq`).
     pub agent_seq: u64,
+    /// What the agent is blocked on (`Panel.agent.blocked`: `permission` or
+    /// `question`), such as Claude Code's folder trust prompt.
+    pub agent_blocked: Option<String>,
+    /// The report's detail (`Panel.agent.detail`), e.g. `trust this folder`
+    /// or Antigravity's `Sign in required`.
+    pub agent_detail: Option<String>,
 }
 
 /// What one `noa.stateChanged` said.
@@ -182,6 +188,8 @@ fn view(panel: &Panel) -> PaneView {
         label: panel.label.clone(),
         agent_state: panel.agent.as_ref().and_then(|a| a.state.clone()),
         agent_seq: panel.agent.as_ref().map_or(0, |a| a.seq),
+        agent_blocked: panel.agent.as_ref().and_then(|a| a.blocked.clone()),
+        agent_detail: panel.agent.as_ref().and_then(|a| a.detail.clone()),
     }
 }
 

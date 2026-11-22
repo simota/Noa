@@ -72,11 +72,38 @@ pub enum Command {
     /// the same list for the same instance changes nothing.
     Watch(Vec<u64>),
     Focus(u64),
+    /// `pane` of the server `instance` the dashboard showed when the
+    /// message was sent: on another instance (Noa restarted) the same id
+    /// names another pane, and the feed refuses it.
     Send {
+        instance: String,
         pane: u64,
         text: String,
     },
-    Close(u64),
+    /// As `Send`: refused on another instance.
+    Close {
+        instance: String,
+        pane: u64,
+    },
+}
+
+/// A `Command::Send` the feed did not deliver, given back with the server
+/// instance its pane belongs to: on another instance it is nobody's draft.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unsent {
+    pub instance: String,
+    pub pane: u64,
+    pub text: String,
+}
+
+impl Command {
+    /// The server instance a worker action was chosen on.
+    fn instance(&self) -> Option<&str> {
+        match self {
+            Command::Send { instance, .. } | Command::Close { instance, .. } => Some(instance),
+            Command::Watch(_) | Command::Focus(_) => None,
+        }
+    }
 }
 
 /// The dashboard's end of the feed.
@@ -84,9 +111,9 @@ pub struct Channel {
     pub snapshots: Receiver<Snapshot>,
     /// Why a command failed, for the notice line to show.
     pub notices: Receiver<String>,
-    /// Each `Command::Send` the feed did not deliver, given back as
-    /// `(pane, text)` to be the pane's draft again.
-    pub unsent: Receiver<(u64, String)>,
+    /// Each `Command::Send` the feed did not deliver, given back to be the
+    /// pane's draft again.
+    pub unsent: Receiver<Unsent>,
     commands: Sender<Command>,
     /// Dropped with this end, which ends the heartbeat thread.
     _heartbeat: Sender<()>,
@@ -101,19 +128,36 @@ impl Channel {
 
     #[cfg(test)]
     pub fn detached() -> (Self, Sender<Snapshot>, Sender<String>, Receiver<Command>) {
+        let (channel, snapshots, notices, _unsent, commands) = Self::detached_with_unsent();
+        (channel, snapshots, notices, commands)
+    }
+
+    /// `detached`, with the sender the feed gives undelivered messages
+    /// back on (`unsent`).
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    pub fn detached_with_unsent() -> (
+        Self,
+        Sender<Snapshot>,
+        Sender<String>,
+        Sender<Unsent>,
+        Receiver<Command>,
+    ) {
         let (snapshot_tx, snapshots) = mpsc::channel();
         let (commands, command_rx) = mpsc::channel();
         let (notice_tx, notices) = mpsc::channel();
+        let (unsent_tx, unsent) = mpsc::channel();
         (
             Self {
                 snapshots,
                 notices,
-                unsent: mpsc::channel().1,
+                unsent,
                 commands,
                 _heartbeat: mpsc::channel().0,
             },
             snapshot_tx,
             notice_tx,
+            unsent_tx,
             command_rx,
         )
     }
@@ -259,7 +303,7 @@ type Clock = Box<dyn Fn() -> Instant + Send>;
 struct Feed {
     snapshots: Sender<Snapshot>,
     notices: Sender<String>,
-    unsent: Sender<(u64, String)>,
+    unsent: Sender<Unsent>,
     commands: Receiver<Command>,
     wake: Arc<dyn Fn() + Send + Sync>,
     /// The time the feed's intervals and ages are measured in (relists,
@@ -291,7 +335,7 @@ impl Feed {
     fn new(
         snapshots: Sender<Snapshot>,
         notices: Sender<String>,
-        unsent: Sender<(u64, String)>,
+        unsent: Sender<Unsent>,
         commands: Receiver<Command>,
         wake: Arc<dyn Fn() + Send + Sync>,
         clock: Clock,
@@ -365,11 +409,15 @@ impl Feed {
                 Ok(Command::Watch(panes)) => self.watch(panes),
                 Ok(Command::Focus(_)) => {}
                 // The screen sent these before it heard the link was lost.
-                Ok(Command::Send { pane, text }) => {
+                Ok(Command::Send {
+                    instance,
+                    pane,
+                    text,
+                }) => {
                     self.notice("送信できません: Noa に接続していません".to_owned());
-                    self.give_back(pane, text);
+                    self.give_back(instance, pane, text);
                 }
-                Ok(Command::Close(_)) => {
+                Ok(Command::Close { .. }) => {
                     self.notice("ペインを閉じられません: Noa に接続していません".to_owned());
                 }
                 Err(RecvTimeoutError::Timeout) => return true,
@@ -440,13 +488,29 @@ impl Feed {
                     }
                     Err(err) => return Err(err.into()),
                 },
-                Ok(Command::Send { pane, text }) => {
+                // Chosen on an instance Noa no longer is (it restarted): the
+                // same id may name another pane. A message is shown, not
+                // given back: its pane is gone, and no pane here is its.
+                Ok(command) if command.instance().is_some_and(|i| i != client.instance()) => {
+                    let notice = match command {
+                        Command::Send { text, .. } => {
+                            format!("Noa が再起動したため送信しませんでした: {text}")
+                        }
+                        _ => "Noa が再起動したためペインを閉じませんでした".to_owned(),
+                    };
+                    self.notice(notice);
+                }
+                Ok(Command::Send {
+                    instance,
+                    pane,
+                    text,
+                }) => {
                     // Guard against answering a permission dialog that appeared
                     // between the user pressing Enter and the feed sending it.
                     let panels = match client.list_panels() {
                         Ok(panels) => panels,
                         Err(err) => {
-                            self.give_back(pane, text);
+                            self.give_back(instance, pane, text);
                             return Err(err.into());
                         }
                     };
@@ -463,7 +527,7 @@ impl Feed {
                             "承認待ちのペインには安全のため送信しませんでした（開く で直接操作してください）"
                                 .to_owned(),
                         );
-                        self.give_back(pane, text);
+                        self.give_back(instance, pane, text);
                         continue;
                     }
                     match client.send_text(pane, &text, true) {
@@ -482,15 +546,15 @@ impl Feed {
                         }
                         Err(ClientError::Rpc { message, .. }) => {
                             self.notice(format!("送信できません: {message}"));
-                            self.give_back(pane, text);
+                            self.give_back(instance, pane, text);
                         }
                         Err(err) => {
-                            self.give_back(pane, text);
+                            self.give_back(instance, pane, text);
                             return Err(err.into());
                         }
                     }
                 }
-                Ok(Command::Close(pane)) => match client.close_pane(pane) {
+                Ok(Command::Close { pane, .. }) => match client.close_pane(pane) {
                     Ok(()) => {
                         self.last_contact = self.now();
                         self.relist(client)?;
@@ -584,9 +648,13 @@ impl Feed {
 
     /// A message not delivered (the paste never reached the pane), for the
     /// screen to make the pane's draft again.
-    fn give_back(&self, pane: u64, text: String) {
+    fn give_back(&self, instance: String, pane: u64, text: String) {
         // As with `notice`, only a gone dashboard fails this.
-        let _ = self.unsent.send((pane, text));
+        let _ = self.unsent.send(Unsent {
+            instance,
+            pane,
+            text,
+        });
         (self.wake)();
     }
 
@@ -2659,6 +2727,7 @@ pub(crate) mod tests {
         let mut noa = ScriptedNoa::showing("a", "$ ready", &clock);
         commands
             .send(Command::Send {
+                instance: "a".into(),
                 pane: 2,
                 text: "continue".into(),
             })
@@ -2683,6 +2752,7 @@ pub(crate) mod tests {
         }));
         commands
             .send(Command::Send {
+                instance: "a".into(),
                 pane: 2,
                 text: "yes".into(),
             })
@@ -2815,12 +2885,166 @@ pub(crate) mod tests {
         );
     }
 
+    /// An action chosen on one server instance never reaches a pane of
+    /// another: Noa restarted while the feed reconnected, and the new
+    /// instance gave the same pane id to another pane. The message comes
+    /// back as the draft; the close is refused.
+    #[test]
+    fn an_action_chosen_on_one_server_instance_never_reaches_another() {
+        let clock = TestClock::new();
+        let (snapshot_tx, snapshots) = mpsc::channel();
+        let (commands, command_rx) = mpsc::channel();
+        let (notice_tx, notices) = mpsc::channel();
+        let (unsent_tx, unsent) = mpsc::channel();
+        let mut feed = Feed::new(
+            snapshot_tx,
+            notice_tx,
+            unsent_tx,
+            command_rx,
+            Arc::new(|| {}),
+            clock.boxed(),
+        );
+        let channel = Channel {
+            snapshots,
+            notices,
+            unsent,
+            commands,
+            _heartbeat: mpsc::channel().0,
+        };
+        let window = Size::new(1440.0, 900.0);
+        let mut dashboard = Dashboard::live(Grouping::Orchestrator, channel);
+        let mut text = TextStore::new(Default::default());
+        let frame = |dashboard: &mut Dashboard, text: &mut TextStore| {
+            dashboard.before_frame(text);
+            dashboard.prepare(window, text);
+        };
+        let input = |dashboard: &mut Dashboard, text: &mut TextStore, event: Event| {
+            dashboard.dispatch(event, text);
+            dashboard.prepare(window, text);
+        };
+        let modifiers = Modifiers::default();
+        frame(&mut dashboard, &mut text);
+        let mut noa = ScriptedNoa::showing("a", "$ ready", &clock);
+        assert!(matches!(feed.follow(&mut noa), Err(Stop::Lost(_))));
+        frame(&mut dashboard, &mut text);
+        input(
+            &mut dashboard,
+            &mut text,
+            Event::KeyDown {
+                key: Key::Char('j'),
+                modifiers,
+            },
+        );
+        input(
+            &mut dashboard,
+            &mut text,
+            Event::KeyDown {
+                key: Key::Char('s'),
+                modifiers,
+            },
+        );
+        input(&mut dashboard, &mut text, Event::Text("s".into()));
+        input(&mut dashboard, &mut text, Event::Text("yes".into()));
+        input(
+            &mut dashboard,
+            &mut text,
+            Event::KeyDown {
+                key: Key::Enter,
+                modifiers,
+            },
+        );
+        // Noa restarted: instance b, whose pane 2 is another pane.
+        let mut restarted = ScriptedNoa::showing("b", "$ other", &clock);
+        assert!(matches!(feed.follow(&mut restarted), Err(Stop::Lost(_))));
+        assert!(restarted.sent.is_empty(), "{:?}", restarted.sent);
+        frame(&mut dashboard, &mut text);
+        // On b the message is nobody's draft; the notice line shows it.
+        let shown = {
+            let tree = dashboard.tree();
+            labels_under(tree, tree.root().expect("a screen"))
+        };
+        assert!(
+            shown
+                .iter()
+                .any(|l| l == "Noa が再起動したため送信しませんでした: yes"),
+            "{shown:?}"
+        );
+        input(
+            &mut dashboard,
+            &mut text,
+            Event::KeyDown {
+                key: Key::Char('j'),
+                modifiers,
+            },
+        );
+        input(
+            &mut dashboard,
+            &mut text,
+            Event::KeyDown {
+                key: Key::Char('s'),
+                modifiers,
+            },
+        );
+        input(&mut dashboard, &mut text, Event::Text("s".into()));
+        // The filter field and b's pane 2's send field, both empty.
+        assert_eq!(
+            field_texts(dashboard.tree()),
+            ["", ""],
+            "b's pane 2 has no draft"
+        );
+
+        // A close chosen on c, taken by the feed after Noa restarted as d.
+        input(
+            &mut dashboard,
+            &mut text,
+            Event::KeyDown {
+                key: Key::Escape,
+                modifiers,
+            },
+        );
+        let mut noa = ScriptedNoa::showing("c", "$ done", &clock);
+        assert!(matches!(feed.follow(&mut noa), Err(Stop::Lost(_))));
+        frame(&mut dashboard, &mut text);
+        input(
+            &mut dashboard,
+            &mut text,
+            Event::KeyDown {
+                key: Key::Char('j'),
+                modifiers,
+            },
+        );
+        input(
+            &mut dashboard,
+            &mut text,
+            Event::KeyDown {
+                key: Key::Char('x'),
+                modifiers,
+            },
+        );
+        input(
+            &mut dashboard,
+            &mut text,
+            Event::KeyDown {
+                key: Key::Char('x'),
+                modifiers,
+            },
+        );
+        let mut restarted = ScriptedNoa::showing("d", "$ other", &clock);
+        assert!(matches!(feed.follow(&mut restarted), Err(Stop::Lost(_))));
+        assert!(restarted.closed.is_empty(), "{:?}", restarted.closed);
+    }
+
     #[test]
     fn close_command_closes_the_pane_and_relists_at_once() {
         let clock = TestClock::new();
         let (mut feed, published, commands) = held_feed(&clock);
         let mut noa = ScriptedNoa::showing("a", "$ done", &clock);
-        commands.send(Command::Close(2)).unwrap();
+        commands
+            .send(Command::Close {
+                instance: "a".into(),
+                pane: 2,
+            })
+            .unwrap();
         assert!(matches!(feed.follow(&mut noa), Err(Stop::Lost(_))));
         assert_eq!(noa.closed, vec![2]);
         let last = published.try_iter().last().expect("a snapshot");

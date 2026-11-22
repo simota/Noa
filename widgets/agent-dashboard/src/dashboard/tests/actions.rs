@@ -131,6 +131,7 @@ fn send_key_opens_drawer_and_submits_message_with_draft_preservation() {
     assert_eq!(
         sent,
         vec![Command::Send {
+            instance: INSTANCE.to_owned(),
             pane: 11,
             text: "進捗を教えて".to_owned(),
         }]
@@ -187,7 +188,11 @@ fn close_pane_requires_two_step_confirmation_and_supports_cancel() {
     dashboard.select(Some(17), &mut text);
     key(&mut dashboard, &mut text, Key::Char('x'));
     assert_eq!(dashboard.view.confirm_close, Some(17));
-    assert!(commands.try_iter().all(|c| !matches!(c, Command::Close(_))));
+    assert!(
+        commands
+            .try_iter()
+            .all(|c| !matches!(c, Command::Close { .. }))
+    );
 
     // Esc cancels confirmation.
     key(&mut dashboard, &mut text, Key::Escape);
@@ -200,7 +205,7 @@ fn close_pane_requires_two_step_confirmation_and_supports_cancel() {
     let closed: Vec<u64> = commands
         .try_iter()
         .filter_map(|c| match c {
-            Command::Close(pane) => Some(pane),
+            Command::Close { pane, .. } => Some(pane),
             _ => None,
         })
         .collect();
@@ -371,7 +376,7 @@ fn closed(commands: &std::sync::mpsc::Receiver<Command>) -> Vec<u64> {
     commands
         .try_iter()
         .filter_map(|c| match c {
-            Command::Close(pane) => Some(pane),
+            Command::Close { pane, .. } => Some(pane),
             _ => None,
         })
         .collect()
@@ -516,4 +521,63 @@ fn the_send_caret_does_not_carry_over_to_another_workers_draft() {
     let field = dashboard.tree.get::<TextField>(field).unwrap();
     assert_eq!(field.text(), "あいう");
     assert_eq!(field.caret(), "あいう".len());
+}
+
+/// A message the feed gives back while the help is open becomes the draft
+/// under the help: the drawer stays below it and disabled.
+#[test]
+fn a_message_given_back_under_the_help_keeps_the_drawer_shielded() {
+    let (channel, snapshots, _notices, unsent, _commands) = Channel::detached_with_unsent();
+    let mut dashboard = Dashboard::live(Grouping::Orchestrator, channel);
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(window(), &mut text);
+    snapshots.send(live(fleet::canned(), 0)).unwrap();
+    dashboard.before_frame(&mut text);
+    dashboard.prepare(window(), &mut text);
+    dashboard.select(Some(11), &mut text);
+    stroke(&mut dashboard, &mut text, 's');
+    typed(&mut dashboard, &mut text, "msg");
+    key(&mut dashboard, &mut text, Key::Enter);
+    typed(&mut dashboard, &mut text, "?");
+    assert!(dashboard.view.help);
+
+    unsent
+        .send(crate::live::Unsent {
+            instance: INSTANCE.to_owned(),
+            pane: 11,
+            text: "msg".to_owned(),
+        })
+        .unwrap();
+    dashboard.before_frame(&mut text);
+    dashboard.prepare(window(), &mut text);
+
+    let (drawer, _) = dashboard.registry.drawer.expect("drawer");
+    let (help, _) = dashboard.registry.help.expect("help");
+    assert!(
+        !dashboard.tree.is_enabled(drawer),
+        "drawer under help is disabled"
+    );
+    assert_eq!(dashboard.tree.overlays().last(), Some(help), "help on top");
+    assert_eq!(send_field_text(&dashboard), "msg");
+}
+
+/// A message given back for a pane of another server instance is nobody's
+/// draft here: the same id names another pane.
+#[test]
+fn a_message_given_back_for_another_instance_is_dropped() {
+    let (channel, snapshots, _notices, unsent, _commands) = Channel::detached_with_unsent();
+    let mut dashboard = Dashboard::live(Grouping::Orchestrator, channel);
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(window(), &mut text);
+    snapshots.send(live(fleet::canned(), 0)).unwrap();
+    dashboard.before_frame(&mut text);
+    unsent
+        .send(crate::live::Unsent {
+            instance: "before-restart".to_owned(),
+            pane: 11,
+            text: "old".to_owned(),
+        })
+        .unwrap();
+    dashboard.before_frame(&mut text);
+    assert!(dashboard.drafts.is_empty(), "{:?}", dashboard.drafts);
 }

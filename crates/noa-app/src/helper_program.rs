@@ -41,6 +41,12 @@ pub(crate) const DISCUSSION: HelperProgram = HelperProgram {
     crate_name: "discussion",
 };
 
+pub(crate) const COMPETITION: HelperProgram = HelperProgram {
+    title: "Competition",
+    bundled: "Noa Competition",
+    crate_name: "competition",
+};
+
 /// How much of the program's stderr is kept to say why it exited.
 const STDERR_TAIL: usize = 4096;
 
@@ -225,7 +231,7 @@ mod tests {
 
     #[test]
     fn the_dev_build_dirs_are_each_programs_own_crate_target_dirs() {
-        for helper in [AGENT_DASHBOARD, REPO_BROWSER, DISCUSSION] {
+        for helper in [AGENT_DASHBOARD, REPO_BROWSER, DISCUSSION, COMPETITION] {
             let dirs = dev_build_dirs(helper);
             assert_eq!(dirs.len(), 2);
             let crate_dir = format!("widgets/{}/target", helper.crate_name);
@@ -282,6 +288,26 @@ mod tests {
         assert_eq!(
             locate(DISCUSSION, Some(&exe_dir), std::slice::from_ref(&dev)),
             Some(exe_dir.join("Noa Discussion"))
+        );
+        for dir in [exe_dir, dev] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn competition_is_found_by_its_own_binary_name() {
+        let exe_dir = scratch_dir("competition-exe");
+        let dev = scratch_dir("competition-dev");
+        std::fs::write(dev.join(DISCUSSION.crate_name), "").unwrap();
+        assert_eq!(
+            locate(COMPETITION, Some(&exe_dir), std::slice::from_ref(&dev)),
+            None
+        );
+        std::fs::write(exe_dir.join("Noa Competition"), "").unwrap();
+        std::fs::write(dev.join("competition"), "").unwrap();
+        assert_eq!(
+            locate(COMPETITION, Some(&exe_dir), std::slice::from_ref(&dev)),
+            Some(exe_dir.join("Noa Competition"))
         );
         for dir in [exe_dir, dev] {
             let _ = std::fs::remove_dir_all(dir);

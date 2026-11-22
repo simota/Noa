@@ -63,12 +63,12 @@ case "$MODE" in
   *) echo "usage: $0 [release|debug]" >&2; exit 2 ;;
 esac
 
-# The agent dashboard, the repo browser and the discussion
-# (widgets/agent-dashboard, widgets/repo-browser and widgets/discussion, crates
-# outside the workspace) ship in Noa.app's Contents/Helpers; Noa starts them
-# from View > Agent Dashboard, View > Repo Browser and View > Discussion (or the
-# command palette).
-for widget in agent-dashboard repo-browser discussion; do
+# The agent dashboard, the repo browser, the discussion and the competition
+# (widgets/agent-dashboard, widgets/repo-browser, widgets/discussion and
+# widgets/competition, crates outside the workspace) ship in Noa.app's
+# Contents/Helpers; Noa starts them from View > Agent Dashboard, View > Repo
+# Browser, View > Discussion and View > Competition (or the command palette).
+for widget in agent-dashboard repo-browser discussion competition; do
   if [ "$PROFILE" = release ]; then
     cargo build --manifest-path "$ROOT/widgets/$widget/Cargo.toml" --locked --release
   else
@@ -84,11 +84,13 @@ CONTENTS="$APP/Contents"
 DASHBOARD_BIN="$TARGET_DIR/agent-dashboard"
 BROWSER_BIN="$TARGET_DIR/repo-browser"
 DISCUSSION_BIN="$TARGET_DIR/discussion"
+COMPETITION_BIN="$TARGET_DIR/competition"
 
 [ -x "$BIN" ] || { echo "error: binary not found at $BIN" >&2; exit 1; }
 [ -x "$DASHBOARD_BIN" ] || { echo "error: binary not found at $DASHBOARD_BIN" >&2; exit 1; }
 [ -x "$BROWSER_BIN" ] || { echo "error: binary not found at $BROWSER_BIN" >&2; exit 1; }
 [ -x "$DISCUSSION_BIN" ] || { echo "error: binary not found at $DISCUSSION_BIN" >&2; exit 1; }
+[ -x "$COMPETITION_BIN" ] || { echo "error: binary not found at $COMPETITION_BIN" >&2; exit 1; }
 
 # Generate the icon on first run (best effort — the app still bundles without it).
 if [ ! -f "$ROOT/assets/noa.icns" ]; then
@@ -105,6 +107,7 @@ cp "$BIN" "$CONTENTS/MacOS/Noa"
 cp "$DASHBOARD_BIN" "$CONTENTS/Helpers/Noa Agent Dashboard"
 cp "$BROWSER_BIN" "$CONTENTS/Helpers/Noa Repo Browser"
 cp "$DISCUSSION_BIN" "$CONTENTS/Helpers/Noa Discussion"
+cp "$COMPETITION_BIN" "$CONTENTS/Helpers/Noa Competition"
 cp -RX "$ROOT/assets/wallpapers" "$CONTENTS/Resources/wallpapers"
 
 ICON_KEY=""
@@ -175,6 +178,9 @@ if [ -n "${NOA_SIGN_IDENTITY:-}" ]; then
   codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/assets/macos.entitlements.plist" \
     --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/Helpers/Noa Discussion"
+  codesign --force --options runtime --timestamp \
+    --entitlements "$ROOT/assets/macos.entitlements.plist" \
+    --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/Helpers/Noa Competition"
   codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/assets/macos.entitlements.plist" \
     --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/MacOS/Noa"

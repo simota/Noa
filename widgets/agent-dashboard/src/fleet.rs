@@ -1,3 +1,7 @@
+use std::path::PathBuf;
+
+const CARD_TAIL_LINES: usize = 6;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     Running,
@@ -70,11 +74,42 @@ impl Need {
         }
     }
 
+    /// The queue's order: what waits on a decision (an approval, then a
+    /// question), then a failure to look at, then what only informs.
     pub fn rank(self) -> u8 {
         match self {
-            Need::Approval | Need::Failure => 0,
-            Need::Question | Need::Notice => 1,
-            Need::Quiet => 2,
+            Need::Approval => 0,
+            Need::Question => 1,
+            Need::Failure => 2,
+            Need::Notice => 3,
+            Need::Quiet => 4,
+        }
+    }
+
+    pub fn tier(self) -> Tier {
+        match self {
+            Need::Approval | Need::Question => Tier::Decision,
+            Need::Failure => Tier::Check,
+            Need::Notice | Need::Quiet => Tier::Info,
+        }
+    }
+}
+
+/// The queue's sections. 参考情報 asks nobody for anything: it is left out
+/// of the queue's count and folded away until asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    Decision,
+    Check,
+    Info,
+}
+
+impl Tier {
+    pub fn title(self) -> &'static str {
+        match self {
+            Tier::Decision => "判断待ち",
+            Tier::Check => "要確認",
+            Tier::Info => "参考情報",
         }
     }
 }
@@ -109,6 +144,9 @@ pub struct Worker {
     pub took_minutes: Option<f64>,
     /// Whether the worker is known to have left a result file.
     pub has_result: bool,
+    /// That file, when the live feed found it (`$NOA_RESULT`, from its
+    /// spawner's journal): the drawer reads it when asked to.
+    pub result: Option<PathBuf>,
     pub screen_tail: Vec<String>,
     pub lines_per_tick: Vec<f64>,
     pub freshness: f64,
@@ -125,6 +163,13 @@ impl Worker {
             State::Running | State::Finished if self.attention => Some(Need::Notice),
             State::Running | State::Finished => None,
         }
+    }
+
+    /// The last lines of the screen tail, as a queue card shows them (the
+    /// drawer shows the whole tail).
+    pub fn card_tail(&self) -> &[String] {
+        let from = self.screen_tail.len().saturating_sub(CARD_TAIL_LINES);
+        &self.screen_tail[from..]
     }
 
     /// One of the coding agents, which have a model; any other kind is a
@@ -364,6 +409,7 @@ pub fn canned() -> Fleet {
             started_minutes: None,
             took_minutes: None,
             has_result: false,
+            result: None,
             screen_tail: Vec::new(),
             lines_per_tick: vec![
                 2.0, 6.0, 14.0, 9.0, 3.0, 18.0, 22.0, 11.0, 4.0, 7.0, 16.0, 12.0,
@@ -396,6 +442,7 @@ pub fn canned() -> Fleet {
             started_minutes: None,
             took_minutes: None,
             has_result: false,
+            result: None,
             screen_tail: Vec::new(),
             lines_per_tick: vec![1.0, 1.0, 3.0, 2.0, 5.0, 4.0, 2.0, 6.0, 3.0, 5.0, 4.0, 6.0],
             freshness: 5.0,
@@ -426,6 +473,7 @@ pub fn canned() -> Fleet {
             started_minutes: None,
             took_minutes: None,
             has_result: false,
+            result: None,
             screen_tail: lines(&["[3/8] ascii を計測中 …", "（3 分間 出力なし）"]),
             lines_per_tick: vec![
                 19.0, 24.0, 17.0, 21.0, 12.0, 6.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0,
@@ -454,6 +502,7 @@ pub fn canned() -> Fleet {
             started_minutes: None,
             took_minutes: None,
             has_result: false,
+            result: None,
             screen_tail: lines(&[
                 "Bash command",
                 "  rm -rf target/tmp",
@@ -485,6 +534,7 @@ pub fn canned() -> Fleet {
             started_minutes: None,
             took_minutes: None,
             has_result: false,
+            result: None,
             screen_tail: lines(&[
                 "apply_patch crates/noa-config/src/lib.rs",
                 "  +12 -3",
@@ -515,6 +565,7 @@ pub fn canned() -> Fleet {
             started_minutes: None,
             took_minutes: None,
             has_result: false,
+            result: None,
             screen_tail: lines(&[
                 "既定値は A と B のどちらにしますか",
                 "> 1. A（現行どおり）",
@@ -545,6 +596,7 @@ pub fn canned() -> Fleet {
             started_minutes: None,
             took_minutes: None,
             has_result: false,
+            result: None,
             screen_tail: Vec::new(),
             lines_per_tick: Vec::new(),
             freshness: 0.0,
@@ -576,6 +628,7 @@ pub fn canned() -> Fleet {
             started_minutes: None,
             took_minutes: None,
             has_result: false,
+            result: None,
             screen_tail: Vec::new(),
             lines_per_tick: Vec::new(),
             freshness: 0.0,
@@ -602,6 +655,7 @@ pub fn canned() -> Fleet {
             started_minutes: None,
             took_minutes: None,
             has_result: false,
+            result: None,
             screen_tail: lines(&["FAIL scenario 3", "1 failed, 6 passed", "[exited 1]"]),
             lines_per_tick: Vec::new(),
             freshness: 0.0,

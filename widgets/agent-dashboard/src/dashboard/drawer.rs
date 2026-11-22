@@ -1,8 +1,11 @@
 //! The details drawer for any worker (AC8). `Dashboard` opens it on
 //! `View::detail`, reopens it after a rebuild, moves it with the selection,
 //! closes it when the worker goes, and asks the feed for its screen tail;
-//! this module fills the overlay with the worker's state, task, screen tail
-//! and times.
+//! this module fills the overlay with the worker's state, pane, task, screen
+//! tail, result file (read only when asked, `read_result`) and times.
+
+use std::io::Read;
+use std::path::Path;
 
 use noa_gpui_core::clipboard::MemoryClipboard;
 use noa_gpui_core::style::{AlignItems, Rect as LayoutRect, Size as LayoutSize, auto, length};
@@ -20,11 +23,51 @@ use crate::fleet::{Phase, State, Worker, minutes_text};
 use super::graph::mark;
 use super::style::{caption, fill_remaining, gap, phase_color, set_label};
 use super::{Feed, Pulse, Registry};
+use crate::live::Link;
 
 /// What the drawer says where a worker has no screen tail yet: the feed
 /// fetches it (live), or there is none to fetch (demo).
 const TAIL_PENDING: &str = "まだ取得していません";
 const TAIL_NONE: &str = "なし";
+
+/// How much of a result file the drawer reads, and how many of its lines
+/// it shows.
+pub(super) const RESULT_MAX_BYTES: u64 = 16 * 1024;
+pub(super) const RESULT_MAX_LINES: usize = 200;
+
+pub(super) const NEEDS_CONTROL: &str = "ペインへ移動するには Noa の server-scopes に control が必要です（例: server-scopes = read,control）。control はペインの作成と終了にも使われます";
+
+/// A worker's result file as the drawer shows it: its text, and whether it
+/// was cut short (`RESULT_MAX_BYTES`, `RESULT_MAX_LINES`); or why it could
+/// not be read.
+pub(super) type Preview = Result<(String, bool), String>;
+
+/// Reads the start of `path`, which must be a regular file: a FIFO or a
+/// device would block or never end, and a symbolic link may lead out of
+/// the worker's own file.
+pub(super) fn read_result(path: &Path) -> Preview {
+    let meta = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("通常のファイルではありません".to_owned());
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(RESULT_MAX_BYTES).read_to_end(&mut bytes))
+        .map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&bytes);
+    let lines: Vec<&str> = text.lines().take(RESULT_MAX_LINES + 1).collect();
+    let cut = meta.len() > RESULT_MAX_BYTES || lines.len() > RESULT_MAX_LINES;
+    let kept = &lines[..lines.len().min(RESULT_MAX_LINES)];
+    Ok((kept.join("\n"), cut))
+}
+
+/// The drawer's buttons: 開く, 閉じる, and the result's 表示 / 隠す when the
+/// worker has a result file.
+pub(super) struct DrawerButtons {
+    pub(super) open: WidgetId,
+    pub(super) close: WidgetId,
+    pub(super) result: Option<WidgetId>,
+}
 
 fn state_title(state: State) -> &'static str {
     match state {
@@ -431,17 +474,18 @@ fn time_label(tree: &mut UiTree, parent: WidgetId, text: &str) -> WidgetId {
     tree.insert(Some(parent), Label::new(text).font_size(12.0))
 }
 
-/// Fills the drawer overlay `root` for `worker`; returns its 開く and 閉じる
-/// buttons. The time rows register `Pulse::Drawer(pane)` in `reg.pulses`:
-/// the labels of the "時間" column (started, since, took, waited, in that
-/// order) and each phase's row.
+/// Fills the drawer overlay `root` for `worker`, its result file shown as
+/// `preview` when one was read. The time rows register `Pulse::Drawer(pane)`
+/// in `reg.pulses`: the labels of the "時間" column (started, since, took,
+/// waited, in that order) and each phase's row.
 pub(super) fn build(
     tree: &mut UiTree,
     root: WidgetId,
     worker: &Worker,
     feed: &Feed,
+    preview: Option<&Preview>,
     reg: &mut Registry,
-) -> (WidgetId, WidgetId) {
+) -> DrawerButtons {
     let pane = worker.pane;
     let scroll = tree.insert(
         Some(root),
@@ -516,6 +560,18 @@ pub(super) fn build(
         text_line(tree, state, &worker.detail, 3);
     }
 
+    let pane_section = section(tree, scroll, "ペイン");
+    let parent = if worker.orchestrator.is_empty() {
+        "不明"
+    } else {
+        worker.orchestrator.as_str()
+    };
+    text_line(tree, pane_section, &format!("ID {pane} · 親 {parent}"), 2);
+    if feed.link.as_ref() == Some(&Link::Live) && !feed.can_focus {
+        let hint = text_line(tree, pane_section, NEEDS_CONTROL, 4);
+        tree.update::<Label, _>(hint, |l, cx| l.set_color(cx, Role::Muted));
+    }
+
     let task = section(tree, scroll, "依頼");
     let task_text = if worker.task.is_empty() {
         "不明"
@@ -554,6 +610,11 @@ pub(super) fn build(
             );
         }
     }
+
+    let result = worker
+        .result
+        .as_ref()
+        .map(|_| result_section(tree, scroll, preview));
 
     let times = section(tree, scroll, "時間");
     let started = time_label(tree, times, &started_text(worker));
@@ -595,7 +656,60 @@ pub(super) fn build(
         Some(buttons),
         Button::new("閉じる").control_size(ControlSize::Small),
     );
-    (open, close)
+    DrawerButtons {
+        open,
+        close,
+        result,
+    }
+}
+
+/// The result file: a 表示 button, or what was read and a 隠す button.
+/// Returns the button.
+fn result_section(tree: &mut UiTree, parent: WidgetId, preview: Option<&Preview>) -> WidgetId {
+    let column = section(tree, parent, "結果");
+    match preview {
+        None => {}
+        Some(Err(reason)) => {
+            caption(tree, column, format!("読めません: {}", one_line(reason)));
+        }
+        Some(Ok((text, cut))) => {
+            let body = tree.insert(
+                Some(column),
+                Container::new(Style {
+                    flex_direction: noa_gpui_core::style::FlexDirection::Column,
+                    gap: gap(2.0),
+                    padding: LayoutRect::length(8.0),
+                    ..Default::default()
+                })
+                .background(Role::Background)
+                .radius(6.0),
+            );
+            for line in text.lines() {
+                tree.insert(
+                    Some(body),
+                    Label::new(one_line(line))
+                        .font_size(11.0)
+                        .font_family("monospace")
+                        .wrap(true),
+                );
+            }
+            if *cut {
+                let kib = RESULT_MAX_BYTES / 1024;
+                let text =
+                    format!("先頭だけを表示しています（{kib} KiB・{RESULT_MAX_LINES} 行まで）");
+                caption(tree, column, text);
+            }
+        }
+    }
+    let label = if preview.is_some() {
+        "隠す"
+    } else {
+        "表示"
+    };
+    tree.insert(
+        Some(column),
+        Button::new(label).control_size(ControlSize::Small),
+    )
 }
 
 /// Brings one of the drawer's time rows up to date (`Pulse::Drawer`): `id`

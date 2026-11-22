@@ -1,5 +1,4 @@
 use noa_gpui_core::Key;
-use noa_gpui_core::widgets::Label;
 use noa_gpui_core::{Event, Modifiers, PointerButton};
 use noa_gpui_scene::Point;
 
@@ -94,9 +93,9 @@ fn a_press_right_after_a_details_click_hits_the_open_button() {
     dashboard.dispatch(Event::PointerDown { pos, button }, &mut text);
     dashboard.prepare(window(), &mut text);
     dashboard.dispatch(Event::PointerUp { pos, button }, &mut text);
-    let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
+    let notice = notice_of(&dashboard);
     let label = label_of(&dashboard, label);
-    assert!(status.text().contains(label), "{}", status.text());
+    assert!(notice.contains(label), "{notice}");
 }
 
 /// What the window does after input and on the next frame: it redraws only if

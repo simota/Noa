@@ -6,7 +6,7 @@ use crate::fleet::{Fleet, State, Worker};
 use super::View;
 use super::filter::Filter;
 use super::panel::Panel;
-use super::queue::waiting;
+use super::queue::cards;
 
 /// The order the NOW row shows workers in: the queue's cards in its sort,
 /// then the running cards, then the done cards (each in `grouping.split`
@@ -35,7 +35,7 @@ pub(super) fn order(fleet: &Fleet, view: &View, filter: &Filter) -> Vec<u64> {
         return panes;
     }
     if shown(Panel::Queue) {
-        add(waiting(matching.iter().copied())
+        add(cards(matching.iter().copied(), view.info_open)
             .into_iter()
             .map(|(w, _)| w)
             .collect());

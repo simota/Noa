@@ -1,5 +1,5 @@
 use crate::dashboard::keymap::{BINDINGS, Mode, Route, Trigger, route};
-use noa_gpui_core::widgets::{Label, ScrollView};
+use noa_gpui_core::widgets::ScrollView;
 
 use super::*;
 
@@ -154,7 +154,7 @@ fn a_wheel_page_change_reaches_the_next_frame() {
 #[test]
 fn opening_help_cancels_a_press_underneath() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
-    let status = |d: &Dashboard| d.tree.get::<Label>(d.status).unwrap().text().to_owned();
+    let status = notice_of;
     let before = status(&dashboard);
     let (open, pane) = dashboard.queue_buttons.open[0];
     let pos = center(&dashboard.tree, open);

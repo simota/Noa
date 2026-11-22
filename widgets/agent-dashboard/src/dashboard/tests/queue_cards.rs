@@ -37,9 +37,9 @@ fn open_names_the_pane_it_would_go_to() {
     let (button, label) = dashboard.queue_buttons.open[0];
     let pos = center(&dashboard.tree, button);
     click(&mut dashboard, &mut text, pos);
-    let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
+    let notice = notice_of(&dashboard);
     let label = label_of(&dashboard, label);
-    assert!(status.text().contains(label), "{}", status.text());
+    assert!(notice.contains(label), "{notice}");
 }
 
 #[test]

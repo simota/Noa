@@ -7,15 +7,17 @@ use noa_gpui_core::widgets::{
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use noa_gpui_text::TextStore;
 
-use crate::fleet::{Need, Worker, one_line};
+use crate::fleet::{Need, Tier, Worker, one_line};
 
 use super::cards::{branch_tag, model_tag, task_line};
 use super::header::waited_text;
 use super::pager::ListParts;
-use super::panel::{Panel, card_list, indicator, mark_card, nothing_matches, panel_title};
-use super::style::{HINT_STRIP_SHRINK, fill_remaining, gap, joined, need_color, spacer};
+use super::panel::{
+    Panel, card_list, group_header, indicator, mark_card, nothing_matches, panel_title,
+};
+use super::style::{HINT_STRIP_SHRINK, caption, fill_remaining, gap, joined, need_color, spacer};
 use super::urgency;
-use super::{Pulse, Registry};
+use super::{Pulse, Registry, View};
 
 #[derive(Default)]
 pub(super) struct QueueButtons {
@@ -23,6 +25,8 @@ pub(super) struct QueueButtons {
     pub(super) details: Vec<(WidgetId, u64)>,
     /// The card shown expanded, whichever it is.
     pub(super) expanded: Option<u64>,
+    /// The title row's 参考情報 button, which shows or folds those cards.
+    pub(super) info_toggle: Option<WidgetId>,
 }
 
 impl QueueButtons {
@@ -60,57 +64,115 @@ pub(super) fn waiting<'a>(
     waiting
 }
 
+/// The workers with a queue card, in the queue's order: `waiting`, without
+/// 参考情報 while it is folded away (`info_open` false).
+pub(super) fn cards<'a>(
+    workers: impl IntoIterator<Item = &'a Worker>,
+    info_open: bool,
+) -> Vec<(&'a Worker, Need)> {
+    let mut cards = waiting(workers);
+    cards.retain(|(_, need)| info_open || need.tier() != Tier::Info);
+    cards
+}
+
+/// What the queue says when the filter leaves it no card that waits on a
+/// decision while others outside the filter do.
+pub(super) fn hidden_text(n: usize) -> String {
+    format!("該当なし（絞り込みの外に判断待ち {n} 件）")
+}
+
 /// The queue panel over `workers` (those the filter lets through); the
-/// waited total in its title counts `all` workers.
+/// waited total in its title counts `all` workers. Its list holds, in
+/// order: a header and the cards of 判断待ち, the same of 要確認, then, when
+/// `view.info_open`, those of 参考情報, which the title row's button shows
+/// and folds.
 pub(super) fn queue(
     tree: &mut UiTree,
     rail: WidgetId,
     workers: &[&Worker],
     all: &[Worker],
-    expanded: Option<u64>,
+    view: &View,
     filtering: bool,
     reg: &mut Registry,
 ) -> QueueButtons {
+    let info_open = view.info_open;
     let waiting = waiting(workers.iter().copied());
-    let expanded = expanded
-        .filter(|pane| waiting.iter().any(|(w, _)| w.pane == *pane))
-        .or(waiting.first().map(|(worker, _)| worker.pane));
+    let count = |tier: Tier| waiting.iter().filter(|(_, n)| n.tier() == tier).count();
+    let info = count(Tier::Info);
+    let shown = cards(workers.iter().copied(), info_open);
+    let expanded = view
+        .expanded
+        .filter(|pane| shown.iter().any(|(w, _)| w.pane == *pane))
+        .or(shown
+            .iter()
+            .find(|(_, need)| need.tier() != Tier::Info)
+            .map(|(worker, _)| worker.pane));
 
-    let title = panel_title(tree, rail, Panel::Queue, waiting.len(), Tone::Warning);
+    let urgent = waiting.len() - info;
+    let title = panel_title(tree, rail, Panel::Queue, urgent, Tone::Warning);
     let waited = tree.insert(
         Some(title),
         Tag::new(waited_text(all)).style(TagStyle::Outlined),
     );
     reg.pulses.push((waited, Pulse::Waited));
+    let info_toggle = (info > 0).then(|| {
+        tree.insert(
+            Some(title),
+            Button::new(format!("{} {info} 件", Tier::Info.title()))
+                .control_size(ControlSize::Small),
+        )
+    });
     let indicator = indicator(tree, title);
     let list = card_list(tree, rail, 8.0);
-    if filtering && waiting.is_empty() {
-        nothing_matches(tree, list);
+    if filtering && urgent == 0 {
+        let outside = all
+            .iter()
+            .filter(|w| w.need().is_some_and(|n| n.tier() == Tier::Decision))
+            .count();
+        if outside > 0 {
+            caption(tree, list, hidden_text(outside));
+        } else if info == 0 {
+            nothing_matches(tree, list);
+        }
     }
     let mut buttons = QueueButtons {
         expanded,
+        info_toggle,
         ..QueueButtons::default()
     };
     let mut items = Vec::new();
-    for (worker, need) in waiting {
-        let card = queue_card(tree, list, worker, need, reg);
-        if expanded == Some(worker.pane) {
-            buttons
-                .open
-                .push((queue_card_body(tree, card, worker), worker.pane));
-        } else {
-            buttons
-                .details
-                .push((queue_card_summary(tree, card, worker), worker.pane));
+    let mut headers = Vec::new();
+    for tier in [Tier::Decision, Tier::Check, Tier::Info] {
+        let members: Vec<(&Worker, Need)> = shown
+            .iter()
+            .copied()
+            .filter(|(_, need)| need.tier() == tier)
+            .collect();
+        if members.is_empty() {
+            continue;
         }
-        mark_card(tree, card, worker.pane, reg);
-        items.push((card, Some(worker.pane)));
+        let header = group_header(tree, list, tier.title(), members.len());
+        headers.push((header, (items.len()..items.len() + members.len()).collect()));
+        for (worker, need) in members {
+            let card = queue_card(tree, list, worker, need, reg);
+            if expanded == Some(worker.pane) {
+                buttons
+                    .open
+                    .push((queue_card_body(tree, card, worker), worker.pane));
+            } else {
+                buttons
+                    .details
+                    .push((queue_card_summary(tree, card, worker), worker.pane));
+            }
+            mark_card(tree, card, worker.pane, reg);
+            items.push((card, Some(worker.pane)));
+        }
     }
     reg.lists[Panel::Queue as usize] = Some(ListParts {
         list,
         items,
         nested: Vec::new(),
-        headers: Vec::new(),
+        headers,
         indicator,
     });
     buttons
@@ -237,7 +299,7 @@ pub(super) fn queue_card_summary(tree: &mut UiTree, card: WidgetId, worker: &Wor
 pub(super) fn queue_card_body(tree: &mut UiTree, card: WidgetId, worker: &Worker) -> WidgetId {
     task_line(tree, card, worker);
 
-    if !worker.screen_tail.is_empty() {
+    if !worker.card_tail().is_empty() {
         let screen = tree.insert(
             Some(card),
             Container::new(Style {
@@ -249,7 +311,7 @@ pub(super) fn queue_card_body(tree: &mut UiTree, card: WidgetId, worker: &Worker
             .background(Role::Background)
             .radius(6.0),
         );
-        for line in &worker.screen_tail {
+        for line in worker.card_tail() {
             tree.insert(
                 Some(screen),
                 Label::new(one_line(line))

@@ -22,6 +22,7 @@ mod queue_cards;
 mod rebuild;
 mod relations;
 mod selection;
+mod triage;
 mod urgency_steps;
 mod window_sizes;
 
@@ -36,12 +37,29 @@ fn laid_out(grouping: Grouping) -> (Dashboard, TextStore) {
     (dashboard, text)
 }
 
+/// [`laid_out`] with the queue's 参考情報 shown: the quiet 13 has a card.
+fn laid_out_with_info(grouping: Grouping) -> (Dashboard, TextStore) {
+    let mut dashboard = Dashboard::showing(View {
+        info_open: true,
+        ..View::of(grouping)
+    });
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(window(), &mut text);
+    (dashboard, text)
+}
+
 fn click(dashboard: &mut Dashboard, text: &mut TextStore, pos: Point) {
     let button = PointerButton::Primary;
     dashboard.dispatch(Event::PointerMove { pos }, text);
     dashboard.dispatch(Event::PointerDown { pos, button }, text);
     dashboard.dispatch(Event::PointerUp { pos, button }, text);
     dashboard.prepare(window(), text);
+}
+
+/// The notice line at the window's foot.
+fn notice_of(dashboard: &Dashboard) -> String {
+    let label = dashboard.tree.get::<Label>(dashboard.notice).unwrap();
+    label.text().to_owned()
 }
 
 fn label_of(dashboard: &Dashboard, pane: u64) -> &str {

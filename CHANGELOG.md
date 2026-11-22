@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- View > Repo Theater (and the command palette's Open Repo Theater) opens the
+  repo theater, a separate window that shows every worktree's changed files
+  and diffs beside its panes. `Noa.app` ships it as "Noa Repo Theater".
+
 ## [0.9.9] - 2026-11-22
 
 Pane subscriptions that report removals and filter by field, and an agent

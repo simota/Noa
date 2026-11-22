@@ -395,6 +395,12 @@ impl MacosMenu {
                     true,
                     None,
                 ),
+                &MenuItem::with_id(
+                    AppCommand::OpenRepoTheater.menu_id(),
+                    "Repo Theater",
+                    true,
+                    None,
+                ),
                 &auto_approve,
                 &PredefinedMenuItem::separator(),
                 &MenuItem::with_id(

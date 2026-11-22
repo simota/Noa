@@ -234,7 +234,12 @@ impl App {
                 #[cfg(target_os = "macos")]
                 self.toggle_ember();
             }
-            AppCommand::OpenAgentDashboard => self.open_agent_dashboard(),
+            AppCommand::OpenAgentDashboard => {
+                self.open_helper_program(crate::helper_program::AGENT_DASHBOARD)
+            }
+            AppCommand::OpenRepoTheater => {
+                self.open_helper_program(crate::helper_program::REPO_THEATER)
+            }
             AppCommand::Spawn(command) => crate::commands::spawn_in_background(
                 command,
                 self.focused_pane_cwd().as_deref().map(std::path::Path::new),
@@ -372,13 +377,13 @@ impl App {
         self.request_sidebar_redraw();
     }
 
-    /// `agent-dashboard.open`. Why it could not start, or why it exited
-    /// unsuccessfully, is shown as a toast: the dashboard is a separate
-    /// process whose stderr nobody sees.
-    fn open_agent_dashboard(&mut self) {
+    /// `agent-dashboard.open` / `repo-theater.open`. Why it could not start,
+    /// or why it exited unsuccessfully, is shown as a toast: the program is a
+    /// separate process whose stderr nobody sees.
+    fn open_helper_program(&mut self, helper: crate::helper_program::HelperProgram) {
         let proxy = self.proxy.clone();
-        let started = crate::agent_dashboard::open(move |message| {
-            let _ = proxy.send_event(UserEvent::AgentDashboardFailed(message));
+        let started = crate::helper_program::open(helper, move |message| {
+            let _ = proxy.send_event(UserEvent::HelperProgramFailed(message));
         });
         if let Err(message) = started {
             self.show_notice_toast(message);

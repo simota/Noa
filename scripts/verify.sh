@@ -61,18 +61,19 @@ for dep, pkg in bad:
 sys.exit(1 if bad else 0)'
 }
 
-# widgets/agent-dashboard is a crate of its own, outside the workspace. It is built
-# with its tests everywhere; the tests run on macOS only, because some expect
-# the text widths of macOS's system fonts.
+# widgets/agent-dashboard and widgets/repo-theater are crates of their own,
+# outside the workspace. Each is built with its tests everywhere; the tests run
+# on macOS only, because some expect the text widths of macOS's system fonts.
 dashboard=widgets/agent-dashboard/Cargo.toml
-dashboard_check() {
-  cargo build --manifest-path "$dashboard" --locked --all-targets || return
+theater=widgets/repo-theater/Cargo.toml
+widget_check() {
+  cargo build --manifest-path "$1" --locked --all-targets || return
   [ "$os" = Darwin ] || return 0
-  cargo test --manifest-path "$dashboard" --locked
+  cargo test --manifest-path "$1" --locked
 }
-# The packages the dashboard is built from by path: itself and the Noa crates it uses.
-dashboard_uses() {
-  cargo tree --manifest-path "$dashboard" --locked -e normal --prefix none -f '{p}' |
+# The packages a widget is built from by path: itself and the Noa crates it uses.
+widget_uses() {
+  cargo tree --manifest-path "$1" --locked -e normal --prefix none -f '{p}' |
     awk '/ \(\// {print $1}' | sort -u
 }
 
@@ -92,7 +93,8 @@ if [ "$full" = 1 ]; then
   [ "$os" = Linux ] && run clippy cargo clippy --workspace --all-targets --locked -- -D warnings
   run build cargo build --workspace --locked
   run test cargo test --workspace --locked
-  run dashboard dashboard_check
+  run dashboard widget_check "$dashboard"
+  run theater widget_check "$theater"
   run hook-test python3 -I -B scripts/test_noa_agent_hook.py
   run skill-install-test python3 -I -B scripts/test_install_agent_skill.py
   if [ "$os" = Linux ]; then
@@ -100,10 +102,11 @@ if [ "$full" = 1 ]; then
       appstreamcli validate --no-net dist/linux/com.simota.noa.metainfo.xml'
   fi
 elif [ "${#changed[@]}" -gt 0 ]; then
-  pkgs=() hook=0 skill=0 dash=0
+  pkgs=() hook=0 skill=0 dash=0 thea=0
   for path in "${changed[@]}"; do
     p=$(package_of "$path"); [ -n "$p" ] && pkgs+=("$p")
     case $path in widgets/agent-dashboard/*) dash=1 ;; esac
+    case $path in widgets/repo-theater/*) thea=1 ;; esac
     case $path in scripts/noa-agent-hook.py | scripts/test_noa_agent_hook.py) hook=1 ;; esac
     case $path in scripts/install-agent-skill.sh | scripts/test_install_agent_skill.py | skills/*) skill=1 ;; esac
   done
@@ -116,15 +119,22 @@ elif [ "${#changed[@]}" -gt 0 ]; then
     echo "verify: related packages: $(echo $related)"
     [ "$os" = Linux ] && run clippy cargo clippy --locked --all-targets "${args[@]}" -- -D warnings
     run test cargo test --locked "${args[@]}"
-    # Without the dashboard's package list, run its check rather than skip it.
-    if uses=$(dashboard_uses); then
+    # Without a widget's package list, run its check rather than skip it.
+    if uses=$(widget_uses "$dashboard"); then
       for p in "${pkgs[@]}"; do grep -qx "$p" <<<"$uses" && dash=1; done
     else
       echo "verify: cannot list the dashboard's packages; checking it anyway"
       dash=1
     fi
+    if uses=$(widget_uses "$theater"); then
+      for p in "${pkgs[@]}"; do grep -qx "$p" <<<"$uses" && thea=1; done
+    else
+      echo "verify: cannot list the repo theater's packages; checking it anyway"
+      thea=1
+    fi
   fi
-  [ "$dash" = 1 ] && run dashboard dashboard_check
+  [ "$dash" = 1 ] && run dashboard widget_check "$dashboard"
+  [ "$thea" = 1 ] && run theater widget_check "$theater"
   [ "$hook" = 1 ] && run hook-test python3 -I -B scripts/test_noa_agent_hook.py
   [ "$skill" = 1 ] && run skill-install-test python3 -I -B scripts/test_install_agent_skill.py
 fi

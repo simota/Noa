@@ -442,7 +442,7 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::RemoteRequestCompleted { request_id } => {
                 self.handle_remote_request_completed(event_loop, request_id)
             }
-            UserEvent::AgentDashboardFailed(message) => self.show_notice_toast(message),
+            UserEvent::HelperProgramFailed(message) => self.show_notice_toast(message),
             UserEvent::EmberJump(id) => {
                 #[cfg(target_os = "macos")]
                 self.ember_jump(id);

@@ -357,7 +357,27 @@ impl Engine {
                 if self.session.participant(&part).is_none() {
                     return rejected(format!("no participant {part}"));
                 }
-                self.commit(&mut out, vec![Event::PaneAssigned { part, pane_id }])?;
+                self.commit(
+                    &mut out,
+                    vec![Event::PaneAssigned {
+                        part: part.clone(),
+                        pane_id,
+                    }],
+                )?;
+                // A correction still waiting to go out would reach an agent
+                // that never saw the brief: send the whole brief instead.
+                if let Some(no) = self.current_no()
+                    && self
+                        .open_brief(no, &part)
+                        .is_some_and(|b| b.receipt.rejected.is_some() && b.receipt.sent.is_none())
+                {
+                    self.retry_or_fail(
+                        &mut out,
+                        no,
+                        &part,
+                        "the agent's pane was reopened before the correction went out".to_owned(),
+                    )?;
+                }
             }
             Input::Sent { round, part, at } => {
                 // An agent that took a brief is at its input box, not on a
@@ -532,7 +552,7 @@ impl Engine {
     /// Starts the round that follows a closed one (or the first), unless the
     /// session is over or a proposed debate waits for the user.
     fn next_round(&mut self, out: &mut Output, now: Millis) -> Result<(), EngineError> {
-        if self.session.closed || self.session.pending_debate().is_some() {
+        if self.session.closed {
             return Ok(());
         }
         if let Some(round) = self.session.current_round()
@@ -540,13 +560,17 @@ impl Engine {
         {
             return Ok(());
         }
-        // The last round is over: the discussion ends here.
+        // The last round is over: the discussion ends here, even with a
+        // debate proposed in it (there is no round left to hold it in).
         if self
             .session
             .max_rounds
             .is_some_and(|max| self.session.rounds.len() as RoundNo >= max)
         {
             return self.commit(out, vec![Event::SessionClosed]);
+        }
+        if self.session.pending_debate().is_some() {
+            return Ok(());
         }
         let debate = |status| {
             self.session
@@ -1902,6 +1926,32 @@ mod tests {
     }
 
     #[test]
+    fn a_new_pane_before_the_correction_went_out_gets_the_whole_brief() {
+        let mut e = rejected_reply();
+        // The correction is queued, not sent, when the pane closes and the
+        // runner opens a new one for the agent.
+        assert!(
+            round(&e)
+                .brief(&p("claude"))
+                .unwrap()
+                .receipt
+                .sent
+                .is_none()
+        );
+        let out = feed(
+            &mut e,
+            Input::PaneSpawned {
+                part: p("claude"),
+                pane_id: 9,
+            },
+        );
+        let body = send_to(&out, "claude");
+        for heading in PANELIST_SECTIONS {
+            assert!(body.contains(heading), "{heading} missing from:\n{body}");
+        }
+    }
+
+    #[test]
     fn a_brief_resent_after_a_rejection_carries_the_whole_situation() {
         let mut e = rejected_reply();
         sent(&mut e, &p("claude"), 30);
@@ -1956,6 +2006,23 @@ mod tests {
         // A restart does not open another round either.
         let mut resumed = Engine::resume(e.session().clone(), Path::new("/d"), CONFIG);
         assert!(sends(&feed(&mut resumed, Input::Start { now: 5 })).is_empty());
+    }
+
+    #[test]
+    fn a_debate_proposed_in_the_last_round_does_not_keep_the_discussion_open() {
+        let mut e = engine_with_max_rounds(Some(1));
+        feed(&mut e, Input::Start { now: 0 });
+        run_panel(&mut e, 1);
+        moderate(
+            &mut e,
+            r#"{"summary":"split",
+                "issue_ops":[{"op":"add","id":"A","parent":null,"title":"engine"},
+                             {"op":"set_state","id":"A","state":"contested"}],
+                "propose_debate":{"issue":"A","pro":["claude"],"con":["codex"]}}"#,
+            2,
+        );
+        assert!(e.session().closed, "the last round is over");
+        assert_eq!(e.session().rounds.len(), 1);
     }
 
     #[test]

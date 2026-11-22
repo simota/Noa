@@ -123,7 +123,7 @@ fn brief_bar(
         }
     }
     // Offered only when the engine would take it (the same rule).
-    if !round.retryable().is_empty() {
+    if !session.closed && !round.retryable().is_empty() {
         spacer(tree, row);
         let retry = tree.insert(
             Some(row),

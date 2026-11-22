@@ -225,10 +225,12 @@ impl Discussion {
             if !self.shown_debates.insert(debate.id.clone()) {
                 continue;
             }
-            if matches!(
-                debate.status,
-                DebateStatus::Proposed | DebateStatus::Approved | DebateStatus::Active
-            ) {
+            if !session.closed
+                && matches!(
+                    debate.status,
+                    DebateStatus::Proposed | DebateStatus::Approved | DebateStatus::Active
+                )
+            {
                 self.center = Center::Debate(DebateView::of(debate.id.clone()));
             }
         }
@@ -797,6 +799,10 @@ pub(crate) fn is_about(session: &Session, message: &Message, issues: &BTreeSet<I
 
 /// The debate the engine would refuse a new one alongside, if any.
 pub(crate) fn debate_in_play(session: &Session) -> Option<&discussion::model::types::Debate> {
+    // Once the discussion has ended, no debate can start or go on.
+    if session.closed {
+        return None;
+    }
     session.debates.iter().find(|d| {
         matches!(
             d.status,

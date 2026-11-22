@@ -287,6 +287,10 @@ fn agent_state(state: Option<&str>) -> Option<AgentState> {
 /// Whether the engine still waits for `part`'s brief of `round` to be
 /// delivered or answered (the engine's own rule for a brief in play).
 fn in_play(session: &Session, round: RoundNo, part: &PartId) -> bool {
+    // An ended discussion sends nothing, whatever its round's phase says.
+    if session.closed {
+        return false;
+    }
     let Some(current) = session.current_round() else {
         return false;
     };
@@ -1294,6 +1298,7 @@ fn agent_cwd(dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use discussion::model::brief::PANELIST_SECTIONS;
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::fs;
@@ -2384,6 +2389,76 @@ mod tests {
             argv(AgentKind::Claude).last().map(String::as_str),
             Some("do it")
         );
+    }
+
+    #[test]
+    fn a_brief_still_queued_when_the_discussion_ends_is_never_sent() {
+        let root = temp_root("close-queued");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.step();
+        // claude sits on a question, so its first brief waits in the queue.
+        fake.report_blocked(101, "input", "question", "Which database?");
+        for _ in 0..5 {
+            rig.step();
+        }
+        assert_eq!(rig.submitted(101), 0);
+        rig.actions.send(Action::Close).unwrap();
+        rig.step();
+        assert!(rig.session().closed);
+        // The user answers the dialog: the agent is idle, and still nothing
+        // goes in.
+        fake.report(101, "input");
+        for _ in 0..20 {
+            rig.step();
+        }
+        assert!(fake.typed(101).is_empty(), "{:?}", fake.typed(101));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_reopened_pane_gets_the_whole_brief_not_the_pending_correction() {
+        let root = temp_root("reopen-correction");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.until(40, |r| r.submitted(101) == 1);
+        // A rejected reply; the correction waits behind a question dialog.
+        fake.report_blocked(101, "input", "question", "Which database?");
+        rig.step();
+        let path = store::reply_path(&rig.dir(), 1, &p("claude"));
+        fs::write(&path, "---\nissues: [Z]\n---\nbody").unwrap();
+        rig.until(20, |r| r.receipt(1, "claude").rejected.is_some());
+        // The pane closes before the correction goes out.
+        fake.close(101);
+        rig.until(40, |r| {
+            r.fake
+                .0
+                .borrow()
+                .spawned
+                .iter()
+                .filter(|s| s.1.label.starts_with("claude · "))
+                .count()
+                == 2
+        });
+        let new_pane = fake
+            .0
+            .borrow()
+            .spawned
+            .iter()
+            .rev()
+            .find(|s| s.1.label.starts_with("claude · "))
+            .unwrap()
+            .2;
+        rig.until(40, |r| r.submitted(new_pane) == 1);
+        let pasted: Vec<String> = fake
+            .typed(new_pane)
+            .into_iter()
+            .filter(|(_, paste)| *paste)
+            .map(|(text, _)| text)
+            .collect();
+        assert_eq!(pasted.len(), 1);
+        assert!(pasted[0].contains(PANELIST_SECTIONS[0]), "{}", pasted[0]);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

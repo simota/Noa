@@ -718,3 +718,30 @@ fn an_implementation_pane_is_offered_only_with_a_working_directory() {
         }]
     );
 }
+
+#[test]
+fn an_ended_discussion_offers_no_retry_and_no_debate_controls() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    // A failed brief and a proposed debate, then the user ends it.
+    let mut session = with_proposal();
+    let round = session.rounds.last_mut().unwrap();
+    round.briefs[2].receipt.failed = Some("pane gone".into());
+    session.closed = true;
+    h.deliver(Some(session));
+    assert!(!has_widget_for(&h.screen, &Action::Retry));
+    assert!(!has_widget_for(
+        &h.screen,
+        &Action::ShowDebate(DebateId::new("d2"))
+    ));
+    assert_eq!(
+        h.screen.center,
+        Center::Chat,
+        "the proposal does not come up"
+    );
+    // Opened anyway, the proposed debate is read-only.
+    h.screen
+        .run(Action::ShowDebate(DebateId::new("d2")), &mut h.text);
+    assert!(!has_widget_for(&h.screen, &Action::ConfirmDebate));
+    assert!(!has_widget_for(&h.screen, &Action::SwapSides));
+}

@@ -78,6 +78,9 @@ impl DebateView {
     /// Whether the sides may still change: a draft, or a proposal waiting
     /// for the user.
     pub fn editable(&self, session: &Session) -> bool {
+        if session.closed {
+            return false;
+        }
         match &self.target {
             DebateTarget::Draft(_) => true,
             DebateTarget::Existing(_) => self

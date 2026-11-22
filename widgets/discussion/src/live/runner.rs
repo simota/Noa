@@ -41,12 +41,11 @@ const BACKOFF_MAX: Millis = 8_000;
 const SUBMIT_DELAY: Duration = Duration::from_millis(150);
 /// A fresh pane is ready for its first brief once its agent has reported
 /// that it waits for input (`input` without `blocked`, or `finished`), or
-/// its screen shows an input box and has stayed the same this long
-/// (`noa +ctl spawn --task`'s rule)...
+/// its screen shows an input line and has stayed the same this long
+/// (`noa +ctl spawn --task`'s rule).
 const QUIET_FOR: Millis = 1_500;
-/// ...or, failing both, this long after it was spawned, if it shows an
-/// input box. A brief whose pane is not ready this long after it was queued
-/// fails, unless its agent is held on a prompt (`permission`, `error` or
+/// A brief whose pane is not ready this long after it was queued fails,
+/// unless its agent is held on a prompt (`permission`, `error` or
 /// `blocked`: a trust prompt, a sign-in), which is the user's to answer:
 /// that brief waits, and the user is told once.
 const READY_LIMIT: Millis = 30_000;
@@ -303,7 +302,6 @@ fn link(err: NoaError) -> Fail {
 #[derive(Debug, Clone)]
 struct Pane {
     id: u64,
-    spawned_at: Millis,
     /// Ready for a brief (see [`QUIET_FOR`]).
     ready: bool,
     /// The agent's last report count, state, `blocked` and detail.
@@ -323,10 +321,9 @@ struct Pane {
 }
 
 impl Pane {
-    fn new(id: u64, now: Millis) -> Self {
+    fn new(id: u64) -> Self {
         Pane {
             id,
-            spawned_at: now,
             ready: false,
             seq: 0,
             state: None,
@@ -346,7 +343,11 @@ impl Pane {
     fn held(&self) -> bool {
         self.seq > 0
             && (self.blocked.is_some()
-                || matches!(self.state.as_deref(), Some("permission" | "error")))
+                || self.state.as_deref() == Some("permission")
+                // Antigravity's sign-in. Once the pane has taken a brief,
+                // `error` is a failed turn: the engine resends, and the agent
+                // is back at its input box.
+                || (!self.ready && self.state.as_deref() == Some("error")))
     }
 
     /// Whether the agent's last report says it waits for input.
@@ -374,9 +375,12 @@ fn trust_key(screen: &str) -> Option<&'static str> {
     })
 }
 
-/// Whether the bottom of `screen` shows an agent's input box (the rules of
-/// Claude Code's and Antigravity's) or Codex's `›` input line, as
-/// `noa +ctl` decides before it types a task (`ctl/prompt.rs`).
+/// Whether the bottom of `screen` shows an agent's input line: a rule whose
+/// next non-blank line starts with `>` or `❯` (the top of Claude Code's and
+/// Antigravity's input box; in a short pane Claude Code draws no rule
+/// under it), or Codex's `›` input line. A rule alone (a banner) is not an
+/// input box. Neither is a dialog under a rule, whose first line is its
+/// title (`Accessing workspace:`), nor a numbered choice (`❯ 1. Yes`).
 fn has_input(screen: &str) -> bool {
     fn is_rule(line: &str) -> bool {
         let line = line.trim();
@@ -388,18 +392,27 @@ fn has_input(screen: &str) -> bool {
     while lines.last().is_some_and(|line| line.is_empty()) {
         lines.pop();
     }
-    let boxed = (lines.len().saturating_sub(BOX_REACH)..lines.len()).any(|i| is_rule(lines[i]));
+    fn numbered(rest: &str) -> bool {
+        let rest = rest.trim_start();
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        digits > 0 && rest[digits..].starts_with('.')
+    }
+    let tail = &lines[lines.len().saturating_sub(BOX_REACH)..];
+    let boxed = (0..tail.len()).filter(|&i| is_rule(tail[i])).any(|i| {
+        tail[i + 1..]
+            .iter()
+            .map(|line| line.trim_start())
+            .find(|line| !line.is_empty())
+            .and_then(|line| line.strip_prefix('>').or_else(|| line.strip_prefix('❯')))
+            .is_some_and(|rest| !numbered(rest))
+    });
     let codex = lines
         .iter()
         .rev()
         .filter(|line| !line.trim().is_empty())
         .take(CODEX_REACH)
         .filter_map(|line| line.trim_start().strip_prefix('›'))
-        .any(|rest| {
-            let rest = rest.trim_start();
-            let digits = rest.chars().take_while(char::is_ascii_digit).count();
-            !(digits > 0 && rest[digits..].starts_with('.'))
-        });
+        .any(|rest| !numbered(rest));
     boxed || codex
 }
 
@@ -755,7 +768,6 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         for part in gone {
             self.pane_gone(&part)?;
         }
-        let now = self.clock.now();
         let session = self.engine.session();
         let adopt: Vec<(PartId, u64)> = std::iter::once(&session.moderator)
             .chain(&session.panelists)
@@ -770,7 +782,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             })
             .collect();
         for (part, id) in adopt {
-            self.panes.insert(part, Pane::new(id, now));
+            self.panes.insert(part, Pane::new(id));
         }
         for view in views {
             self.observe(view)?;
@@ -873,8 +885,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             };
             match conn.spawn(placement, &spec) {
                 Ok(id) => {
-                    let now = self.clock.now();
-                    self.panes.insert(part.clone(), Pane::new(id, now));
+                    self.panes.insert(part.clone(), Pane::new(id));
                     self.feed(Input::PaneSpawned {
                         part: part.clone(),
                         pane_id: id,
@@ -906,9 +917,6 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         let Some(pane) = self.panes.get_mut(part) else {
             return Ok(false);
         };
-        if pane.ready {
-            return Ok(true);
-        }
         if auto_trust
             && pane.held()
             && pane.blocked.as_deref() == Some("permission")
@@ -951,7 +959,10 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         let Some(pane) = self.panes.get_mut(part) else {
             return Ok(false);
         };
+        // Checked before the pane counts as ready from an earlier brief: an
+        // agent may sit on a prompt by a later round.
         if pane.held() {
+            pane.ready = false;
             pane.quiet = None;
             if !pane.told_held {
                 pane.told_held = true;
@@ -965,6 +976,9 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 ));
             }
             return Ok(false);
+        }
+        if pane.ready {
+            return Ok(true);
         }
         match conn.paste_ready(pane.id) {
             Ok(true) => {}
@@ -992,8 +1006,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             Err(NoaError::Link(why)) => return Err(Fail::Link(why)),
             Err(_) => (false, false),
         };
-        let waited = now.saturating_sub(pane.spawned_at) >= READY_LIMIT;
-        if pane.idle() || (input && (quiet || waited)) {
+        if pane.idle() || (input && quiet) {
             pane.ready = true;
         }
         Ok(pane.ready)
@@ -1962,8 +1975,72 @@ mod tests {
     }
 
     #[test]
+    fn a_pane_that_took_a_brief_and_then_waits_on_a_prompt_gets_no_resend() {
+        let root = temp_root("held-later");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.until(40, |r| r.submitted(101) == 1);
+        // Mid-turn the agent asks for an approval, and the reply deadline
+        // passes: the engine resends the brief.
+        fake.report_blocked(101, "permission", "permission", "Bash");
+        fake.w().now += CONFIG.reply_timeout + 1;
+        for _ in 0..20 {
+            rig.step();
+        }
+        assert_eq!(rig.submitted(101), 1, "nothing typed into the dialog");
+        assert!(rig.notices().iter().any(|n| n.contains("確認待ち")));
+        // Answered: the agent is back at its input box.
+        fake.report(101, "input");
+        rig.until(10, |r| r.submitted(101) == 2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_quiet_screen_without_an_input_line_never_takes_a_brief() {
+        let root = temp_root("no-input");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.step();
+        // No report, and a banner with a rule: once counted as ready after
+        // 30 s.
+        fake.w().panes.get_mut(&101).unwrap().screen =
+            "────────────────────────────────────────\n Loading…".into();
+        for _ in 0..250 {
+            rig.step();
+        }
+        assert_eq!(rig.submitted(101), 0);
+        assert!(fake.typed(101).is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn input_is_an_input_box_or_codexs_input_line() {
         assert!(has_input(FAKE_IDLE));
+        // Claude Code's box, and Antigravity's as read from a real pane.
+        assert!(has_input(
+            "work\n────────────────────────────────────────\n❯ \n────────────────────────────────────────\n  ? for shortcuts"
+        ));
+        assert!(has_input(
+            "────────────────────────────────────────\n> Auto mode: edits & safe commands auto-approved\n────────────────────────────────────────\n♊ Idle discussions"
+        ));
+        // Claude Code in a short pane, as read from a real one: no rule
+        // under its input line.
+        assert!(has_input(
+            "  (ctrl+o to expand)\n\n──────────────────────────────────────\n❯ Try \"write a test for <filepath>\"\n"
+        ));
+        assert!(!has_input(
+            "────────────────────────────────────────\n ❯ 1. Yes\n   2. No"
+        ));
+        // A rule alone, or a dialog under one rule, is not an input box.
+        assert!(!has_input(
+            "────────────────────────────────────────\n Loading…"
+        ));
+        assert!(!has_input(
+            "────────────────────────────────────────\n Accessing workspace:\n ❯ No, exit\n   Yes, I trust this folder\n Enter to confirm"
+        ));
+        assert!(!has_input(
+            "────────────────────────────────────────\n status\n────────────────────────────────────────"
+        ));
         assert!(has_input(
             "work\n› Ask Codex to do anything\n\n  gpt · 100% left\n"
         ));

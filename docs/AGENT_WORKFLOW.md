@@ -389,14 +389,18 @@ folds them again. Closing a worker closes the workers it started. The board pane
 
 `skills/noa-orchestration/` is an agent skill: `SKILL.md` tells an agent when and
 how to orchestrate workers, and `reference.md` is the full `+ctl` reference it
-reads on demand. To make it available to Claude Code, link it into your skills
-directory from a checkout of this repository:
+reads on demand. `skills/noa-factory/` builds on it to run a goal unattended.
+To make every skill under `skills/` available to Claude Code, Codex and agy,
+link them into their skills directories from a checkout of this repository:
 
 ```sh
-scripts/install-agent-skill.sh               # ~/.claude/skills/noa-orchestration
-scripts/install-agent-skill.sh --dir DIR     # another skills directory, e.g. a project's .claude/skills
-scripts/install-agent-skill.sh --uninstall   # remove the link (add --dir DIR for another directory)
+scripts/install-agent-skill.sh                 # ~/.claude/skills, ~/.codex/skills, ~/.gemini/antigravity-cli/skills
+scripts/install-agent-skill.sh --agent codex   # only that agent (repeatable)
+scripts/install-agent-skill.sh --dir DIR       # another skills directory, e.g. a project's .claude/skills
+scripts/install-agent-skill.sh --uninstall     # remove the links (combine with --agent or --dir)
 ```
 
-The skill is a symbolic link to the checkout, so it follows `git pull`. The
-script leaves anything else already at the destination alone.
+With no `--agent` or `--dir`, an agent whose home directory (`~/.claude`,
+`~/.codex`, `~/.gemini/antigravity-cli`) does not exist is skipped. Each skill
+is a symbolic link to the checkout, so it follows `git pull`. The script
+leaves anything else already at the destination alone.

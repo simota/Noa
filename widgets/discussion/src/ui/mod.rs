@@ -23,8 +23,8 @@ use noa_gpui_core::style::{
     Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
 };
 use noa_gpui_core::widgets::{
-    Badge, ButtonClicked, Container, Label, ScrollView, SplitPane, SplitView, StatusBar, Tag,
-    TagStyle, Toast, Tone,
+    Badge, Button, ButtonClicked, Container, ControlSize, Label, ScrollView, SplitPane, SplitView,
+    StatusBar, Tag, TagStyle, Toast, Tone,
 };
 use noa_gpui_core::{Message as UiMessage, Role, Style, Theme, UiTree, WidgetId};
 use noa_gpui_platform::Screen;
@@ -62,6 +62,8 @@ pub enum Action {
     Retry,
     Send,
     Start,
+    /// End the discussion: no further round starts.
+    Close,
 }
 
 /// What the center pane shows.
@@ -337,6 +339,12 @@ impl Discussion {
                 Some(self.status_leading),
                 Badge::text("終了").tone(Tone::Neutral),
             );
+        } else {
+            let end = self.tree.insert(
+                Some(self.status_trailing),
+                Button::new("議論を終える").control_size(ControlSize::Small),
+            );
+            self.actions.push((end, Action::Close));
         }
         caption(
             &mut self.tree,
@@ -446,6 +454,7 @@ impl Discussion {
             Action::Retry => self.send(Command::Retry, "失敗したブリーフを再送します"),
             Action::Send => self.send_intervention(),
             Action::Start => self.start_session(),
+            Action::Close => self.send(Command::Close, "議論を終えます"),
         }
     }
 
@@ -553,6 +562,7 @@ impl Discussion {
             Command::Start {
                 topic: form.topic,
                 workdir,
+                max_rounds: Some(form.max_rounds),
                 moderator: form.moderator,
                 panel: form.panel,
             },

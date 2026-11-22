@@ -96,9 +96,13 @@ fn section_topic(out: &mut String, heading: &str, session: &Session, round: Roun
         _ => "open discussion".to_owned(),
     };
     let panel: Vec<&str> = session.panelist_ids().map(|p| p.as_str()).collect();
+    let of = session
+        .max_rounds
+        .map(|max| format!(" of {max}"))
+        .unwrap_or_default();
     let _ = write!(
         out,
-        "{heading}\nTopic: {}\nRound: {round} ({kind})\nPanelists: {}\nModerator: {}\n\n",
+        "{heading}\nTopic: {}\nRound: {round}{of} ({kind})\nPanelists: {}\nModerator: {}\n\n",
         session.topic,
         panel.join(", "),
         session.moderator.id
@@ -455,6 +459,7 @@ mod tests {
             id: SessionId::new("s"),
             topic: "Pick a database".into(),
             workdir: None,
+            max_rounds: None,
             moderator: p("noa", AgentKind::Claude, Role::Moderator),
             panelists: vec![
                 p("claude", AgentKind::Claude, Role::Panelist),

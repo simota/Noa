@@ -599,6 +599,9 @@ pub struct Session {
     /// The directory (or repository) the agents run in, when the user named
     /// one; `None` runs them in the discussions directory.
     pub workdir: Option<std::path::PathBuf>,
+    /// The most rounds the discussion runs; after the last one it closes.
+    /// `None`: no limit (logs written before limits existed).
+    pub max_rounds: Option<RoundNo>,
     /// Bumped once per applied event batch.
     pub rev: u64,
     pub created_at: Millis,

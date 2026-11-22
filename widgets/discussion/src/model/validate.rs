@@ -564,6 +564,7 @@ mod tests {
             id: SessionId::new("s"),
             topic: "t".into(),
             workdir: None,
+            max_rounds: None,
             moderator: part("noa", AgentKind::Claude, Role::Moderator),
             panelists: vec![
                 part("claude", AgentKind::Claude, Role::Panelist),

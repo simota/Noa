@@ -11,7 +11,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use crate::session::runner::{self, Action, SessionHandle, Update};
 
-use discussion::model::types::{AgentKind, DebateId, IssueId, PartId, Session};
+use discussion::model::types::{AgentKind, DebateId, IssueId, PartId, RoundNo, Session};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Link {
@@ -38,6 +38,8 @@ pub enum Command {
         /// The directory (or repository) the agents run in; `None` for the
         /// discussions directory.
         workdir: Option<std::path::PathBuf>,
+        /// After this many rounds the discussion ends; `None` for no limit.
+        max_rounds: Option<RoundNo>,
         moderator: AgentKind,
         panel: Vec<AgentKind>,
     },
@@ -60,6 +62,8 @@ pub enum Command {
     /// `UserRetry`: send the round's failed briefs again (a failed moderator
     /// halts the round until then).
     Retry,
+    /// `UserClose`: end the discussion.
+    Close,
 }
 
 pub struct Channel {
@@ -123,6 +127,7 @@ fn run_commands(
                 Command::Start {
                     topic,
                     workdir,
+                    max_rounds,
                     moderator,
                     panel,
                 },
@@ -138,6 +143,7 @@ fn run_commands(
                     runner::Start::New {
                         topic,
                         workdir,
+                        max_rounds,
                         moderator,
                         panel,
                         root,
@@ -176,6 +182,7 @@ fn run_commands(
             },
             (Command::DeclineDebate { id }, Some(_)) => Action::DeclineDebate { id },
             (Command::Retry, Some(_)) => Action::Retry,
+            (Command::Close, Some(_)) => Action::Close,
         };
         if let Some((actions, _)) = &handle {
             let _ = actions.send(action);
@@ -296,6 +303,7 @@ mod tests {
         let start = || Command::Start {
             topic: "t".into(),
             workdir: Some(file.clone()),
+            max_rounds: None,
             moderator: AgentKind::Claude,
             panel: vec![AgentKind::Codex],
         };

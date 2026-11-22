@@ -301,6 +301,7 @@ mod tests {
             id: SessionId::new("disc-1"),
             topic: "t".into(),
             workdir: None,
+            max_rounds: None,
             moderator: p("noa", AgentKind::Codex, Role::Moderator),
             panelists: vec![p("claude", AgentKind::Claude, Role::Panelist)],
             at: 1,

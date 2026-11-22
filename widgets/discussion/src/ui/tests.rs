@@ -502,6 +502,7 @@ fn without_a_session_the_start_view_shows_and_starts_one() {
         vec![Command::Start {
             topic: "テストの方針".into(),
             workdir: None,
+            max_rounds: Some(5),
             moderator: AgentKind::Codex,
             panel: vec![AgentKind::Codex, AgentKind::Agy],
         }]
@@ -589,4 +590,44 @@ fn the_start_views_workdir_is_empty_home_relative_or_an_existing_directory() {
             .unwrap_err()
             .contains("ディレクトリではありません")
     );
+}
+
+#[test]
+fn the_round_limit_is_sent_with_the_start() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    h.deliver(None);
+    h.set_text(h.screen.start.topic, "t");
+    let rounds = h.screen.start.max_rounds;
+    h.screen
+        .tree
+        .update::<noa_gpui_core::widgets::NumberInput, _>(rounds, |n, cx| n.set_value(cx, 3.0));
+    let start = h.screen.start.start_button;
+    click(&mut h.screen, &mut h.text, start);
+    let sent = h.drain();
+    assert!(
+        matches!(
+            &sent[..],
+            [Command::Start {
+                max_rounds: Some(3),
+                ..
+            }]
+        ),
+        "{sent:?}"
+    );
+}
+
+#[test]
+fn ending_the_discussion_is_one_click_until_it_has_ended() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    let mut session = crate::demo::session();
+    h.deliver(Some(session.clone()));
+    let end = widget_for(&h.screen, &Action::Close);
+    click(&mut h.screen, &mut h.text, end);
+    assert_eq!(h.drain(), vec![Command::Close]);
+    session.closed = true;
+    session.rev += 1;
+    h.deliver(Some(session));
+    assert!(!has_widget_for(&h.screen, &Action::Close));
 }

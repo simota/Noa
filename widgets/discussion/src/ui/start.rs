@@ -6,14 +6,19 @@ use noa_gpui_core::style::{
     length, percent,
 };
 use noa_gpui_core::widgets::{
-    Button, CheckState, Checkbox, Container, Label, PopUpButton, TextArea, TextField,
+    Button, CheckState, Checkbox, Container, Label, NumberInput, PopUpButton, TextArea, TextField,
 };
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use std::path::PathBuf;
 
 use noa_gpui_text::TextStore;
 
-use discussion::model::types::AgentKind;
+use discussion::model::types::{AgentKind, RoundNo};
+
+/// The round limit the start view offers first.
+pub(crate) const DEFAULT_MAX_ROUNDS: RoundNo = 5;
+/// The highest round limit the start view takes.
+const MAX_MAX_ROUNDS: RoundNo = 50;
 
 use super::{caption, clear_children, gap};
 use crate::live::Link;
@@ -22,6 +27,7 @@ pub(super) struct Parts {
     pub(super) root: WidgetId,
     pub(super) topic: WidgetId,
     pub(super) workdir: WidgetId,
+    pub(super) max_rounds: WidgetId,
     pub(super) moderator: WidgetId,
     /// One checkbox per agent kind, in `AgentKind::ALL` order.
     pub(super) panel: Vec<WidgetId>,
@@ -33,6 +39,8 @@ pub(crate) struct Form {
     pub topic: String,
     /// As typed; empty runs the agents in the discussions directory.
     pub workdir: String,
+    /// After this many rounds the discussion ends.
+    pub max_rounds: RoundNo,
     pub moderator: AgentKind,
     pub panel: Vec<AgentKind>,
 }
@@ -113,6 +121,20 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         Some(left),
         PopUpButton::new(AgentKind::ALL.iter().map(|k| k.command())),
     );
+    let rounds = tree.insert(Some(row), Container::column().gap(6.0));
+    caption(tree, rounds, "ラウンド数の上限");
+    let max_rounds = tree.insert(
+        Some(rounds),
+        NumberInput::new(
+            1.0,
+            f64::from(MAX_MAX_ROUNDS),
+            f64::from(DEFAULT_MAX_ROUNDS),
+        )
+        .step(1.0)
+        .decimals(0)
+        .stepper(true)
+        .width(80.0),
+    );
     let right = tree.insert(Some(row), Container::column().gap(6.0));
     caption(tree, right, "パネリスト");
     let boxes = tree.insert(Some(right), Container::row().gap(14.0));
@@ -134,6 +156,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         root,
         topic,
         workdir,
+        max_rounds,
         moderator,
         panel,
         start_button,
@@ -161,6 +184,11 @@ pub(super) fn read(tree: &UiTree, parts: &Parts) -> Form {
         .get::<TextField>(parts.workdir)
         .map(|f| f.text().trim().to_owned())
         .unwrap_or_default();
+    let max_rounds = tree
+        .get::<NumberInput>(parts.max_rounds)
+        .map_or(DEFAULT_MAX_ROUNDS, |n| {
+            n.value().round().clamp(1.0, f64::from(MAX_MAX_ROUNDS)) as RoundNo
+        });
     let moderator = tree
         .get::<PopUpButton>(parts.moderator)
         .map_or(AgentKind::ALL[0], |p| AgentKind::ALL[p.selected()]);
@@ -176,6 +204,7 @@ pub(super) fn read(tree: &UiTree, parts: &Parts) -> Form {
     Form {
         topic,
         workdir,
+        max_rounds,
         moderator,
         panel,
     }

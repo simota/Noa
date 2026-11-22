@@ -79,6 +79,8 @@ pub enum Start {
         /// The directory (or repository) the agents run in; `None` runs
         /// them in the discussions directory.
         workdir: Option<PathBuf>,
+        /// After this many rounds the discussion ends; `None` for no limit.
+        max_rounds: Option<RoundNo>,
         moderator: AgentKind,
         panel: Vec<AgentKind>,
         root: PathBuf,
@@ -119,6 +121,9 @@ pub enum Action {
     },
     /// Try the current round's failed briefs again.
     Retry,
+    /// End the discussion: nothing more is sent and no round starts. The
+    /// agents' panes stay open.
+    Close,
     /// End the runner. The agents' panes stay open.
     Stop,
 }
@@ -485,6 +490,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             Start::New {
                 topic,
                 workdir,
+                max_rounds,
                 moderator,
                 panel,
                 root,
@@ -504,6 +510,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 let setup = Setup {
                     topic: &topic,
                     workdir,
+                    max_rounds,
                     moderator,
                     panel: &panel,
                 };
@@ -609,6 +616,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 at,
             },
             Action::Retry => Input::UserRetry,
+            Action::Close => Input::UserClose,
             Action::Stop => return Ok(()),
         };
         if let Some(why) = self.feed(input)? {
@@ -1512,6 +1520,7 @@ mod tests {
                 Start::New {
                     topic: "Pick a database".into(),
                     workdir: None,
+                    max_rounds: None,
                     moderator: AgentKind::Claude,
                     panel: vec![AgentKind::Claude, AgentKind::Codex],
                     root: root.to_owned(),
@@ -1885,6 +1894,7 @@ mod tests {
             Start::New {
                 topic: "Review this repo".into(),
                 workdir: Some(workdir.clone()),
+                max_rounds: None,
                 moderator: AgentKind::Claude,
                 panel: vec![AgentKind::Claude, AgentKind::Codex],
                 root: root.clone(),
@@ -1966,6 +1976,7 @@ mod tests {
             Start::New {
                 topic: "Review this repo".into(),
                 workdir: Some(workdir.clone()),
+                max_rounds: None,
                 moderator: AgentKind::Claude,
                 panel: vec![AgentKind::Codex],
                 root: root.clone(),
@@ -1996,6 +2007,7 @@ mod tests {
             Start::New {
                 topic: "t".into(),
                 workdir: Some(missing.clone()),
+                max_rounds: None,
                 moderator: AgentKind::Claude,
                 panel: vec![AgentKind::Codex],
                 root: root.clone(),
@@ -2193,6 +2205,26 @@ mod tests {
     }
 
     #[test]
+    fn closing_from_the_ui_ends_the_session_and_stops_sending() {
+        let root = temp_root("close");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.until(40, |r| r.submitted(101) == 1);
+        rig.actions.send(Action::Close).unwrap();
+        rig.step();
+        assert!(rig.session().closed);
+        // A deadline after the end resends nothing.
+        fake.w().now += CONFIG.reply_timeout + 1;
+        for _ in 0..10 {
+            rig.step();
+        }
+        assert_eq!(rig.submitted(101), 1);
+        let (_, stored) = Store::open(&rig.dir()).unwrap();
+        assert!(stored.closed, "the end is in the log");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn input_is_an_input_box_or_codexs_input_line() {
         assert!(has_input(FAKE_IDLE));
         // Claude Code's box, and Antigravity's as read from a real pane.
@@ -2346,6 +2378,7 @@ mod tests {
             Start::New {
                 topic: "t".into(),
                 workdir: None,
+                max_rounds: None,
                 moderator: AgentKind::Codex,
                 panel: vec![AgentKind::Agy],
                 root: root.clone(),

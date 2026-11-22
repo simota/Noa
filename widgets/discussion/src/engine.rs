@@ -119,6 +119,9 @@ pub enum Input {
     },
     /// Try the current round's failed briefs again.
     UserRetry,
+    /// The user ends the discussion: nothing more is sent, and no round
+    /// starts.
+    UserClose,
     Tick {
         now: Millis,
     },
@@ -212,6 +215,8 @@ pub fn participants(moderator: AgentKind, panel: &[AgentKind]) -> (Participant, 
 #[derive(Debug, Clone)]
 pub struct Setup<'a> {
     pub topic: &'a str,
+    /// The most rounds the discussion runs; `None` for no limit.
+    pub max_rounds: Option<RoundNo>,
     /// The directory (or repository) the agents run in. Their reply files
     /// go under it ([`store::workdir_reply_dir`]), so an agent whose sandbox
     /// writes only inside its working directory can write them.
@@ -246,6 +251,7 @@ impl Engine {
         let setup = Setup {
             topic,
             workdir: None,
+            max_rounds: None,
             moderator,
             panel,
         };
@@ -264,6 +270,7 @@ impl Engine {
         let Setup {
             topic,
             workdir,
+            max_rounds,
             moderator,
             panel,
         } = setup;
@@ -279,6 +286,7 @@ impl Engine {
             id,
             topic: topic.to_owned(),
             workdir,
+            max_rounds,
             moderator,
             panelists,
             at: now,
@@ -331,6 +339,18 @@ impl Engine {
 
     pub fn handle(&mut self, input: Input) -> Result<Output, EngineError> {
         let mut out = Output::default();
+        if self.session.closed {
+            return match input {
+                Input::UserIntervention { .. }
+                | Input::UserApproveDebate { .. }
+                | Input::UserDeclineDebate { .. }
+                | Input::UserStartDebate { .. }
+                | Input::UserRetry
+                | Input::UserClose => rejected("the discussion has ended"),
+                // Reports and ticks after the end move nothing.
+                _ => Ok(out),
+            };
+        }
         match input {
             Input::Start { now } => self.start(&mut out, now)?,
             Input::PaneSpawned { part, pane_id } => {
@@ -406,6 +426,7 @@ impl Engine {
                 at,
             } => self.user_debate(&mut out, issue, pro, con, at)?,
             Input::UserRetry => self.user_retry(&mut out)?,
+            Input::UserClose => self.commit(&mut out, vec![Event::SessionClosed])?,
             Input::Tick { now } => {
                 self.timeouts(&mut out, now)?;
                 self.advance(&mut out)?;
@@ -518,6 +539,14 @@ impl Engine {
             && round.phase != Phase::Closed
         {
             return Ok(());
+        }
+        // The last round is over: the discussion ends here.
+        if self
+            .session
+            .max_rounds
+            .is_some_and(|max| self.session.rounds.len() as RoundNo >= max)
+        {
+            return self.commit(out, vec![Event::SessionClosed]);
         }
         let debate = |status| {
             self.session
@@ -1105,6 +1134,7 @@ mod tests {
         let setup = Setup {
             topic: "Pick a database",
             workdir: Some(PathBuf::from("/repo")),
+            max_rounds: None,
             moderator: AgentKind::Codex,
             panel: &[AgentKind::Claude, AgentKind::Agy],
         };
@@ -1889,6 +1919,76 @@ mod tests {
         for heading in PANELIST_SECTIONS {
             assert!(body.contains(heading), "{heading} missing from:\n{body}");
         }
+    }
+
+    fn engine_with_max_rounds(max_rounds: Option<RoundNo>) -> Engine {
+        let setup = Setup {
+            topic: "Pick a database",
+            workdir: None,
+            max_rounds,
+            moderator: AgentKind::Codex,
+            panel: &[AgentKind::Claude, AgentKind::Codex, AgentKind::Agy],
+        };
+        Engine::create_in(SessionId::new("disc-1"), setup, Path::new("/d"), CONFIG, 0)
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn the_discussion_closes_after_its_last_round() {
+        let mut e = engine_with_max_rounds(Some(2));
+        feed(&mut e, Input::Start { now: 0 });
+        assert!(
+            round(&e)
+                .brief(&p("claude"))
+                .unwrap()
+                .body
+                .contains("Round: 1 of 2")
+        );
+        run_panel(&mut e, 1);
+        moderate(&mut e, r#"{"summary":"one"}"#, 2);
+        assert_eq!(no(&e), 2);
+        run_panel(&mut e, 3);
+        let out = moderate(&mut e, r#"{"summary":"two"}"#, 4);
+        assert!(e.session().closed);
+        assert_eq!(e.session().rounds.len(), 2, "no third round");
+        assert!(sends(&out).is_empty());
+        // A restart does not open another round either.
+        let mut resumed = Engine::resume(e.session().clone(), Path::new("/d"), CONFIG);
+        assert!(sends(&feed(&mut resumed, Input::Start { now: 5 })).is_empty());
+    }
+
+    #[test]
+    fn the_user_ends_the_discussion_mid_round_and_nothing_more_goes_out() {
+        let mut e = engine();
+        feed(&mut e, Input::Start { now: 0 });
+        for part in panel(&e) {
+            sent(&mut e, &part, 0);
+            running(&mut e, &part, 1);
+        }
+        feed(&mut e, Input::UserClose);
+        assert!(e.session().closed);
+        // Late replies, deadlines and retries move nothing.
+        for part in panel(&e) {
+            let out = write(&mut e, &part, "late", 2);
+            assert!(sends(&out).is_empty());
+        }
+        assert_ne!(phase(&e), Phase::Summarizing);
+        let out = feed(
+            &mut e,
+            Input::Tick {
+                now: 10 * CONFIG.reply_timeout,
+            },
+        );
+        assert!(sends(&out).is_empty());
+        assert!(matches!(
+            e.handle(Input::UserClose),
+            Err(EngineError::Rejected(_))
+        ));
+        assert!(matches!(
+            e.handle(Input::UserRetry),
+            Err(EngineError::Rejected(_))
+        ));
     }
 
     #[test]

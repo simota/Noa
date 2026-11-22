@@ -21,6 +21,9 @@ pub enum Event {
         /// Absent in logs written before sessions could name a directory.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workdir: Option<std::path::PathBuf>,
+        /// Absent in logs written before discussions had a round limit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_rounds: Option<RoundNo>,
         moderator: Participant,
         panelists: Vec<Participant>,
         at: Millis,
@@ -142,6 +145,7 @@ pub fn create(batch: &[Event]) -> Result<Session, ReduceError> {
             id,
             topic,
             workdir,
+            max_rounds,
             moderator,
             panelists,
             at,
@@ -155,6 +159,7 @@ pub fn create(batch: &[Event]) -> Result<Session, ReduceError> {
         id: id.clone(),
         topic: topic.clone(),
         workdir: workdir.clone(),
+        max_rounds: *max_rounds,
         rev: 1,
         created_at: *at,
         moderator: moderator.clone(),
@@ -484,6 +489,7 @@ mod tests {
             id: SessionId::new("disc-1"),
             topic: "t".into(),
             workdir: None,
+            max_rounds: None,
             moderator: session.moderator.clone(),
             panelists: Vec::new(),
             at: 1,
@@ -506,6 +512,7 @@ mod tests {
             id: SessionId::new("s"),
             topic: "t".into(),
             workdir: None,
+            max_rounds: None,
             moderator: part("noa", AgentKind::Claude, Role::Moderator),
             panelists: vec![part("claude", AgentKind::Claude, Role::Panelist)],
             at: 5,

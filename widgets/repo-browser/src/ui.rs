@@ -1696,6 +1696,22 @@ impl RepoBrowser {
             (Some(wt), None, Some(f)) => format!("[{} / {}{range}]", wt.branch, f.path),
             _ => "[diff]".into(),
         };
+        let cwd = self
+            .current_worktree()
+            .map(|w| w.cwd.clone())
+            .unwrap_or_default();
+        // The header is what says which worktree a quote came from, and the
+        // same branch and file in two repositories read alike: a header
+        // another worktree already used is told apart by this one's path.
+        let header = if self
+            .quote_origins
+            .get(&header)
+            .is_some_and(|origins| !origins.contains(&cwd))
+        {
+            header.replacen('[', &format!("[{cwd} · "), 1)
+        } else {
+            header
+        };
         let snippet = log
             .and_then(LogView::copy_text)
             .map(|text| match &self.gutter {
@@ -1718,10 +1734,6 @@ impl RepoBrowser {
             self.toast("同じ範囲はすでに引用済みです");
             return;
         }
-        let cwd = self
-            .current_worktree()
-            .map(|w| w.cwd.clone())
-            .unwrap_or_default();
         // One prompt goes to one worktree's pane, so it never holds another
         // worktree's diff.
         let origins = self.origins_of(&current);
@@ -3853,6 +3865,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn same_branch_and_file_in_two_repositories_keep_their_own_origin() {
+        let mut h = LiveHarness::new();
+        let mut snap = snapshot(DiffMode::Unstaged, Some(("a.rs", "+a v1")));
+        let mut other = snap.data.repos[0].clone();
+        other.name = "other".into();
+        other.root = "/other".into();
+        other.worktrees[0].cwd = "/other".into();
+        other.worktrees[0].panes[0].pane_id = 9;
+        snap.data.repos.push(other);
+        h.deliver(snap);
+        h.screen
+            .diff_cache
+            .insert(("/other".into(), "a.rs".into()), "+other".into());
+        h.screen.quote_selected_diff(); // [main / a.rs] in repo
+        h.screen.clear_or_restore_prompt();
+        h.screen.sel_repo = 1;
+        h.screen.sel_wt = 0;
+        h.screen.sync_views(&mut h.text);
+        h.screen.quote_selected_diff(); // the same branch and file in other
+        h.drain();
+        h.screen.send_review_prompt();
+        let sent = sent(&h);
+        assert_eq!(sent.len(), 1, "{:?}", h.screen.toasts);
+        assert_eq!(sent[0].0, 9);
+        assert!(sent[0].1.contains("+other"), "{}", sent[0].1);
     }
 
     #[test]

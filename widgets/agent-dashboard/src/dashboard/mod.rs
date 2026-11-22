@@ -18,7 +18,7 @@ use noa_gpui_scene::{Color, Point, Size};
 use noa_gpui_text::TextStore;
 
 use crate::fleet::{self, Fleet, Grouping, Need, State, Tier, Worker};
-use crate::live::{Channel, Command, Link, Snapshot};
+use crate::live::{Channel, Command, Link, Snapshot, Unsent};
 
 mod analytics;
 mod cards;
@@ -672,15 +672,25 @@ impl Dashboard {
 
     /// Makes each message the feed gave back undelivered its pane's draft
     /// again, before what was typed for that pane since; the drawer shows
-    /// it at once when it is on that pane.
+    /// it at once when it is on that pane. One for a pane of another server
+    /// instance than the one shown is dropped: here its id names another
+    /// pane (`forget_panes`).
     fn take_unsent(&mut self, text: &mut TextStore) {
-        let unsent: Vec<(u64, String)> = self
+        let unsent: Vec<Unsent> = self
             .feed
             .channel
             .as_ref()
             .map(|channel| channel.unsent.try_iter().collect())
             .unwrap_or_default();
-        for (pane, message) in unsent {
+        for Unsent {
+            instance,
+            pane,
+            text: message,
+        } in unsent
+        {
+            if self.feed.instance.as_ref() != Some(&instance) {
+                continue;
+            }
             let draft = match self.drafts.remove(&pane) {
                 Some(newer) => format!("{message} {newer}"),
                 None => message,
@@ -1450,9 +1460,21 @@ impl Dashboard {
             .retain(|(_, pulse)| !matches!(pulse, Pulse::Drawer(_)));
     }
 
+    /// Builds the drawer again. Under an open help (a live update or a
+    /// message given back while it is open) the help is opened again over
+    /// it, so the new drawer lies under the help and is disabled as the
+    /// old one was (`open_help`).
     fn reopen_drawer(&mut self, text: &mut TextStore) {
+        let help = self.view.help;
+        if help {
+            self.close_help(text);
+        }
         self.close_drawer(text);
         self.open_drawer();
+        if help {
+            self.view.help = true;
+            self.open_help();
+        }
         self.lay_out_again(text);
         self.watch();
     }
@@ -1630,22 +1652,24 @@ impl Dashboard {
             self.show_notice("送信するメッセージを入力してください".to_owned());
             return;
         }
-        match &self.feed.channel {
-            Some(_) if self.feed.link != Some(Link::Live) => {
+        match (&self.feed.channel, &self.feed.instance) {
+            (Some(_), _) if self.feed.link != Some(Link::Live) => {
                 self.show_notice("送信できません: Noa に接続していません".to_owned());
                 return;
             }
-            Some(_) if !self.feed.can_input => {
+            (Some(_), _) if !self.feed.can_input => {
                 self.show_notice(format!("送信できません: {}", drawer::NEEDS_INPUT));
                 return;
             }
-            Some(channel) => {
+            (Some(channel), Some(instance)) => {
                 channel.send(Command::Send {
+                    instance: instance.clone(),
                     pane,
                     text: message,
                 });
             }
-            None => {}
+            // A live link always names its instance (`Snapshot::instance`).
+            (Some(_), None) | (None, _) => {}
         }
         self.drafts.remove(&pane);
         self.send_caret = None;
@@ -1697,7 +1721,12 @@ impl Dashboard {
                 );
             }
             Some(channel) => {
-                channel.send(Command::Close(pane));
+                if let Some(instance) = &self.feed.instance {
+                    channel.send(Command::Close {
+                        instance: instance.clone(),
+                        pane,
+                    });
+                }
                 if self.view.detail == Some(pane) {
                     self.reopen_drawer(text);
                 }

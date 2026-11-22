@@ -172,7 +172,7 @@ fn focused_panes(commands: &std::sync::mpsc::Receiver<Command>) -> Vec<u64> {
         .try_iter()
         .filter_map(|c| match c {
             Command::Focus(pane) => Some(pane),
-            Command::Watch(_) | Command::Send { .. } | Command::Close(_) => None,
+            Command::Watch(_) | Command::Send { .. } | Command::Close { .. } => None,
         })
         .collect()
 }
@@ -425,7 +425,7 @@ fn last_watch(commands: &std::sync::mpsc::Receiver<Command>) -> Option<Vec<u64>>
         .try_iter()
         .filter_map(|c| match c {
             Command::Watch(panes) => Some(panes),
-            Command::Focus(_) | Command::Send { .. } | Command::Close(_) => None,
+            Command::Focus(_) | Command::Send { .. } | Command::Close { .. } => None,
         })
         .last()
 }

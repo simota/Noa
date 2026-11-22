@@ -1153,6 +1153,7 @@ impl App {
         };
         crate::startup_trace::mark("pty-spawned");
         let (child_pid, tty_name) = (pty.child_pid(), pty.tty_name());
+        let foreground_probe = pty.foreground_probe();
         let surface_id = pty.spawn_env(SURFACE_ID_ENV).map(str::to_string);
         let child_command = pty.command_line().to_string();
         // Hand the foreground-process probe to the session-metadata worker
@@ -1270,6 +1271,7 @@ impl App {
         );
         surface.child_pid = child_pid;
         surface.tty_name = tty_name;
+        surface.foreground_probe = foreground_probe;
         surface.surface_id = surface_id;
         surface.child_command = Some(child_command);
         surface.wait_after_command = script.is_some_and(|spawn| spawn.wait_after_command);

@@ -131,6 +131,7 @@ impl IpcBackend for TestBackend {
         _text: &str,
         _paste: bool,
         _require_paste_mode: bool,
+        _refuse_shell: bool,
     ) -> Result<(), IpcError> {
         Err(IpcError::Unsupported("send_text"))
     }

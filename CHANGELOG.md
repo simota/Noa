@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The repo browser opens a new Noa tab in the selected worktree: "ここでシェルを開く"
+  (⌘T) starts a shell in its root, and "エディタで開く" (⌘E) opens the
+  selected file in `$VISUAL`/`$EDITOR` at the selected diff line. Both are in
+  the toolbar's split button and the command palette, and work for a worktree
+  without panes.
+- The repo browser builds one review prompt from several places: quoting
+  (⌘L) appends a block per selection instead of replacing the prompt, Clear
+  empties it (and Restore brings it back), and the review tab picks which
+  pane of the worktree receives it, with the live terminal following that pane.
+- The repo browser lists every worktree of each repository a pane is in, not
+  only the ones a pane is in: a worker's worktree stays, marked ペインなし,
+  after its pane closes. It predicts which files would conflict when a
+  branch is merged into the base (`git merge-tree`, git 2.38 or later) and
+  marks them ⛔マージ衝突. The filter takes `no-pane` and `merge-conflict`.
+- The repo browser lists each worktree's commits beyond `main`/`master` in a
+  new "コミット" tab (also in the command palette as "コミット: <sha>
+  <subject>"), so a finished agent's branch can be reviewed commit by commit:
+  choosing one shows its full diff, and a quote from it is headed by the
+  commit's short sha.
+- `noa.sendText` takes `refuseShell`: the server checks the pane's
+  foreground process at that moment and refuses (`-32010`, nothing written)
+  when it is a plain shell, where text meant for an agent would run as
+  commands. The repo browser submits review prompts with it.
+
+### Changed
+
+- The repo theater is now the repo browser: View > Repo Browser and the
+  command palette's Open Repo Browser open it, and `Noa.app` ships it as
+  "Noa Repo Browser". Its action is `repo-browser.open`; the old
+  `repo-theater.open` still works.
+- The repo browser shows old and new line numbers beside each diff line, and
+  a quoted selection names its line range in the review prompt. Its column
+  browser fills its pane and follows it when the pane is resized.
+
 ## [0.9.11] - 2026-11-22
 
 A moderated discussion window where agent panelists debate a topic in panes.

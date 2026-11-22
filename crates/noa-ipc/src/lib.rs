@@ -39,7 +39,7 @@ pub use protocol::{
     AttachParams, AttachResult, Attr, DetachParams, EventKind, FieldMask, GetTextResult,
     ListPanelsResult, PROTOCOL_VERSION, PaneIdResult, Panel, PanelAgent, PanelExit, PanelField,
     PanelSpawn, ResizePaneParams, Row, Span, SpanColor, SpawnConfig, SpawnParams, SplitDirection,
-    SplitPlacement, TextSource, UpdateSubscriptionParams, WireId,
+    SplitPlacement, TextSource, UpdateSubscriptionParams, WireId, is_plain_shell,
 };
 pub use push::{Broadcaster, ChangedPanel, EventMask, PushQueue};
 pub use server::{

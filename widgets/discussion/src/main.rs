@@ -199,7 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn sizes_parse_like_repo_theater() {
+    fn sizes_parse_like_repo_browser() {
         assert_eq!(parse_size("1280x800"), Ok((1280, 800)));
         assert!(parse_size("0x800").is_err());
         assert!(parse_size("1280").is_err());

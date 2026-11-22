@@ -396,8 +396,8 @@ impl MacosMenu {
                     None,
                 ),
                 &MenuItem::with_id(
-                    AppCommand::OpenRepoTheater.menu_id(),
-                    "Repo Theater",
+                    AppCommand::OpenRepoBrowser.menu_id(),
+                    "Repo Browser",
                     true,
                     None,
                 ),

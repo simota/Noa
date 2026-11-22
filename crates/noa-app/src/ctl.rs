@@ -2618,6 +2618,7 @@ impl SendTarget for Session {
         let options = SendTextOptions {
             paste,
             require_paste_mode: false,
+            refuse_shell: false,
         };
         self.send_input(pane, text, options).map(drop)
     }
@@ -2629,6 +2630,7 @@ impl SendTarget for Session {
         let options = SendTextOptions {
             paste: true,
             require_paste_mode: true,
+            refuse_shell: false,
         };
         self.send_input(pane, "", options)
     }

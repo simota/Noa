@@ -1,6 +1,6 @@
 [package]
-name = "repo-theater"
-description = "Cross-worktree repository browser and live diff review theater for Noa, built with noa-gpui and noa-ipc"
+name = "repo-browser"
+description = "Cross-worktree repository browser and live diff review for Noa, built with noa-gpui and noa-ipc"
 version = "0.0.0"
 edition = "2024"
 publish = false

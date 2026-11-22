@@ -19,7 +19,9 @@ use noa_gpui_scene::{Color, Size};
 use noa_gpui_text::TextStore;
 
 use crate::live::{Channel, Command, Link, Snapshot};
-use crate::model::{AgentActivity, ChangedFile, DiffMode, Repo, RepoData, Worktree, demo_data};
+use crate::model::{
+    AgentActivity, ChangedFile, DiffMode, PaneSummary, Repo, RepoData, Worktree, demo_data,
+};
 
 const DIFF_ADD_FG: Color = Color::rgba(0.45, 0.90, 0.56, 1.0);
 const DIFF_ADD_BG: Color = Color::rgba(0.14, 0.36, 0.20, 0.42);
@@ -110,6 +112,10 @@ pub struct RepoBrowser {
     side_tabs: WidgetId,
     terminal: WidgetId,
     quote_btn: WidgetId,
+    clear_btn: WidgetId,
+    /// Shows which pane receives the prompt; rebuilt when the panes change.
+    target_host: WidgetId,
+    target_seg: Option<WidgetId>,
     prompt_area: WidgetId,
     send_btn: WidgetId,
     status_leading: WidgetId,
@@ -120,6 +126,17 @@ pub struct RepoBrowser {
     recent_commands: RecentCommands,
     last_terminal_key: Option<(u64, String)>,
     pending_browser_path: Option<Vec<usize>>,
+    /// The pane the user picked to receive the prompt, while the selected
+    /// worktree stays `target_wt`; `None` means the worktree's primary pane.
+    target_pane: Option<u64>,
+    target_wt: Option<String>,
+    /// What the target display was last built from.
+    target_key: String,
+    /// The worktree (cwd) the prompt was started for.
+    prompt_origin: Option<String>,
+    /// The prompt (and its origin) the last "クリア" emptied. TextArea drops
+    /// its undo history on `set_text`, so the screen keeps one level itself.
+    cleared_prompt: Option<(String, Option<String>)>,
     /// Every toast shown, for tests to inspect.
     #[cfg(test)]
     toasts: Vec<String>,
@@ -429,11 +446,23 @@ impl RepoBrowser {
         tree.insert(
             Some(composer_page),
             Label::new(
-                "選択中のファイル・行範囲を引用し、対象ペインのエージェントへ修正指示を送ります。",
+                "ファイル・行範囲を何度でも引用して指示を組み立て、選んだペインへ送ります (⌘L で引用)。",
             )
             .font_size(12.0)
             .color(Role::Muted)
             .wrap(true),
+        );
+        let target_host = tree.insert(
+            Some(composer_page),
+            Container::new(Style {
+                flex_direction: FlexDirection::Column,
+                flex_shrink: 0.0,
+                gap: LayoutSize {
+                    width: length(0.0),
+                    height: length(6.0),
+                },
+                ..Default::default()
+            }),
         );
         let composer_actions = tree.insert(
             Some(composer_page),
@@ -451,6 +480,10 @@ impl RepoBrowser {
             Some(composer_actions),
             Button::new("選択行を引用").control_size(ControlSize::Small),
         );
+        let clear_btn = tree.insert(
+            Some(composer_actions),
+            Button::new(CLEAR_LABEL).control_size(ControlSize::Small),
+        );
         let send_btn = tree.insert(
             Some(composer_actions),
             Button::new("ペインへ送信")
@@ -466,6 +499,10 @@ impl RepoBrowser {
                 size: LayoutSize {
                     width: percent(1.0),
                     height: auto(),
+                },
+                min_size: LayoutSize {
+                    width: auto(),
+                    height: length(PROMPT_MIN_HEIGHT),
                 },
                 overflow: noa_gpui_core::style::Point {
                     x: Overflow::Hidden,
@@ -492,6 +529,7 @@ impl RepoBrowser {
         tree.add_shortcut(Shortcut::command('b'), toggle_side_btn);
         tree.add_shortcut(SHELL_SHORTCUT, focus_btn);
         tree.add_shortcut(EDITOR_SHORTCUT, focus_btn);
+        tree.add_shortcut(QUOTE_SHORTCUT, quote_btn);
 
         let filtered = raw_data.clone();
         let mut screen = Self {
@@ -531,6 +569,9 @@ impl RepoBrowser {
             side_tabs,
             terminal,
             quote_btn,
+            clear_btn,
+            target_host,
+            target_seg: None,
             prompt_area,
             send_btn,
             status_leading: status_parts.leading,
@@ -539,12 +580,23 @@ impl RepoBrowser {
             recent_commands: RecentCommands::default(),
             last_terminal_key: None,
             pending_browser_path: None,
+            target_pane: None,
+            target_wt: None,
+            target_key: String::new(),
+            prompt_origin: None,
+            cleared_prompt: None,
             #[cfg(test)]
             toasts: Vec::new(),
         };
         let mut text = TextStore::new(Default::default());
         screen.sync_views(&mut text);
         screen
+    }
+
+    /// Opens the review tab with the selected lines quoted (for `--composer`
+    /// snapshots).
+    pub fn show_composer(&mut self) {
+        self.quote_selected_diff();
     }
 
     fn current_repo(&self) -> Option<&Repo> {
@@ -621,8 +673,117 @@ impl RepoBrowser {
         self.rebuild_browser(text);
         self.rebuild_path_control(text);
         self.rebuild_diff_view(text);
-        self.update_terminal();
+        self.refresh_target(text);
         self.rebuild_status_bar(text);
+    }
+
+    /// The pane that receives the prompt: the picked one while it is still in
+    /// the selected worktree, else the worktree's primary pane.
+    fn target(&self) -> Option<&PaneSummary> {
+        let wt = self.current_worktree()?;
+        self.target_pane
+            .and_then(|id| wt.panes.iter().find(|p| p.pane_id == id))
+            .or_else(|| wt.primary_pane())
+    }
+
+    /// Drops the pick when the worktree changed or its pane disappeared, then
+    /// brings the target display and the terminal tab up to date.
+    fn refresh_target(&mut self, text: &mut TextStore) {
+        let cwd = self.current_worktree().map(|w| w.cwd.clone());
+        if cwd != self.target_wt {
+            self.target_wt = cwd;
+            self.target_pane = None;
+        } else if let Some(id) = self.target_pane
+            && !self
+                .current_worktree()
+                .is_some_and(|w| w.panes.iter().any(|p| p.pane_id == id))
+        {
+            self.target_pane = None;
+        }
+        self.rebuild_target(text);
+        self.update_terminal();
+    }
+
+    /// Picks the `idx`-th pane of the selected worktree as the prompt's target.
+    fn choose_target(&mut self, idx: usize, text: &mut TextStore) {
+        self.target_pane = self
+            .current_worktree()
+            .and_then(|w| w.panes.get(idx))
+            .map(|p| p.pane_id);
+        self.rebuild_target(text);
+        self.update_terminal();
+    }
+
+    fn rebuild_target(&mut self, text: &mut TextStore) {
+        let panes: Vec<PaneSummary> = self
+            .current_worktree()
+            .map(|w| w.panes.clone())
+            .unwrap_or_default();
+        let chosen = self.target().map(|p| p.pane_id);
+        let key = format!("{chosen:?}|{panes:?}");
+        if key == self.target_key {
+            return;
+        }
+        self.target_key = key;
+        self.clear_children(self.target_host, text);
+        self.target_seg = None;
+
+        let row = self.tree.insert(
+            Some(self.target_host),
+            Container::new(Style {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::CENTER,
+                flex_shrink: 0.0,
+                gap: LayoutSize {
+                    width: length(6.0),
+                    height: length(0.0),
+                },
+                ..Default::default()
+            }),
+        );
+        self.tree.insert(
+            Some(row),
+            Label::new("送信先:").font_size(12.0).color(Role::Muted),
+        );
+        let Some(pane) = panes.iter().find(|p| Some(p.pane_id) == chosen) else {
+            self.tree.insert(
+                Some(row),
+                Label::new("(ペインなし)")
+                    .font_size(12.0)
+                    .color(Role::Muted),
+            );
+            return;
+        };
+        let process = pane
+            .process
+            .as_deref()
+            .map(|p| format!(" · {p}"))
+            .unwrap_or_default();
+        self.tree.insert(
+            Some(row),
+            Label::new(format!("#{} {}{process}", pane.pane_id, pane.name))
+                .font_size(12.0)
+                .weight(600)
+                .truncation(Truncation::Tail),
+        );
+        let tone = match pane.activity {
+            AgentActivity::None => None,
+            AgentActivity::Running => Some(Tone::Accent),
+            AgentActivity::Waiting => Some(Tone::Warning),
+            AgentActivity::Done => Some(Tone::Success),
+        };
+        if let Some(tone) = tone {
+            self.tree
+                .insert(Some(row), Badge::text(pane.activity.badge()).tone(tone));
+        }
+        if panes.len() > 1 {
+            let selected = panes.iter().position(|p| p.pane_id == pane.pane_id);
+            let labels = panes.iter().map(|p| format!("#{} {}", p.pane_id, p.name));
+            let seg = SegmentedControl::new(labels, SegmentMode::SelectOne)
+                .control_size(ControlSize::Small)
+                .with_selected(&selected.into_iter().collect::<Vec<_>>());
+            self.target_seg = Some(self.tree.insert(Some(self.target_host), seg));
+        }
     }
 
     fn rebuild_browser(&mut self, text: &mut TextStore) {
@@ -840,10 +1001,7 @@ impl RepoBrowser {
     }
 
     fn update_terminal(&mut self) {
-        let next = self.current_worktree().and_then(|wt| {
-            wt.primary_pane()
-                .map(|p| (p.pane_id, p.terminal_tail.clone()))
-        });
+        let next = self.target().map(|p| (p.pane_id, p.terminal_tail.clone()));
         if next == self.last_terminal_key {
             return;
         }
@@ -899,6 +1057,7 @@ impl RepoBrowser {
             (Shortcut::command('f'), "差分検索"),
             (SHELL_SHORTCUT, "シェル"),
             (EDITOR_SHORTCUT, "エディタ"),
+            (QUOTE_SHORTCUT, "引用"),
             (Shortcut::command('b'), "右パネル"),
         ] {
             self.tree
@@ -999,7 +1158,7 @@ impl RepoBrowser {
     }
 
     fn focus_selected_pane(&mut self) {
-        let Some(pane) = self.current_worktree().and_then(Worktree::primary_pane) else {
+        let Some(pane) = self.target() else {
             self.toast("フォーカス対象のペインがありません");
             return;
         };
@@ -1119,12 +1278,94 @@ impl RepoBrowser {
                     .map(|d| d.lines().take(10).collect::<Vec<_>>().join("\n"))
                     .unwrap_or_default()
             });
-        let quote = format!("{header}\n```diff\n{snippet}\n```\n修正依頼: ");
-        self.tree
-            .update::<TextArea, _>(self.prompt_area, |area, cx| area.set_text(cx, quote));
+        let block = format!("{header}\n```diff\n{snippet}\n```\n");
         self.tree
             .update::<TabView, _>(self.side_tabs, |tabs, cx| tabs.set_selected(cx, 1));
         self.tree.set_focus(Some(self.prompt_area));
+
+        let current = self.prompt_text();
+        if current.contains(&block) {
+            self.toast("同じ範囲はすでに引用済みです");
+            return;
+        }
+        let cwd = self.current_worktree().map(|w| w.cwd.clone());
+        let mut next = if current.trim().is_empty() {
+            self.prompt_origin = cwd;
+            format!("{QUOTE_LEAD}\n")
+        } else {
+            let mixed = self.prompt_origin.is_some() && self.prompt_origin != cwd;
+            if self.prompt_origin.is_none() {
+                self.prompt_origin = cwd;
+            }
+            if mixed {
+                let id = self.target().map(|p| format!("#{}", p.pane_id));
+                self.toast(format!(
+                    "この指示は複数の worktree の引用を含みます。送信先は選択中の worktree のペイン{}です",
+                    id.map(|id| format!(" {id}")).unwrap_or_default()
+                ));
+            }
+            let mut text = current;
+            if !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text
+        };
+        next.push_str(&block);
+        self.tree
+            .update::<TextArea, _>(self.prompt_area, |area, cx| area.set_text(cx, next));
+    }
+
+    fn prompt_text(&self) -> String {
+        self.tree
+            .get::<TextArea>(self.prompt_area)
+            .map(|a| a.text().to_owned())
+            .unwrap_or_default()
+    }
+
+    fn set_prompt_text(&mut self, text: String) {
+        self.tree
+            .update::<TextArea, _>(self.prompt_area, |area, cx| area.set_text(cx, text));
+    }
+
+    /// Empties the prompt without asking; pressed again, it brings the text
+    /// back (TextArea has no undo across `set_text`, so one level is kept here).
+    fn clear_or_restore_prompt(&mut self) {
+        if let Some((prev, origin)) = self.cleared_prompt.take() {
+            let current = self.prompt_text();
+            let restored = if current.trim().is_empty() {
+                prev
+            } else {
+                format!("{}\n{current}", prev.trim_end())
+            };
+            self.set_prompt_text(restored);
+            self.prompt_origin = origin;
+        } else {
+            let current = self.prompt_text();
+            if current.is_empty() {
+                return;
+            }
+            self.cleared_prompt = Some((current, self.prompt_origin.take()));
+            self.set_prompt_text(String::new());
+        }
+        self.sync_clear_label();
+    }
+
+    /// The prompt left the screen for good (sent): nothing to restore.
+    fn reset_prompt_state(&mut self) {
+        self.set_prompt_text(String::new());
+        self.prompt_origin = None;
+        self.cleared_prompt = None;
+        self.sync_clear_label();
+    }
+
+    fn sync_clear_label(&mut self) {
+        let label = if self.cleared_prompt.is_some() {
+            RESTORE_LABEL
+        } else {
+            CLEAR_LABEL
+        };
+        self.tree
+            .update::<Button, _>(self.clear_btn, |b, cx| b.set_label(cx, label));
     }
 
     fn send_review_prompt(&mut self) {
@@ -1137,7 +1378,7 @@ impl RepoBrowser {
             self.toast("送信する指示が空です");
             return;
         }
-        let Some(pane) = self.current_worktree().and_then(Worktree::primary_pane) else {
+        let Some(pane) = self.target() else {
             self.toast("送信先のペインがありません");
             return;
         };
@@ -1145,8 +1386,7 @@ impl RepoBrowser {
         match &self.source {
             Source::Demo | Source::Snapshot => {
                 self.toast(format!("[DEMO] ペイン #{pane_id} へ指示を送信しました"));
-                self.tree
-                    .update::<TextArea, _>(self.prompt_area, |area, cx| area.set_text(cx, ""));
+                self.reset_prompt_state();
             }
             Source::Live(ch) => {
                 if !self.can_send {
@@ -1171,7 +1411,7 @@ impl RepoBrowser {
             .map(|p| shell_escape(&p.display().to_string()))
             .collect::<Vec<_>>()
             .join(" ");
-        let Some(pane) = self.current_worktree().and_then(Worktree::primary_pane) else {
+        let Some(pane) = self.target() else {
             self.toast(format!("送信先ペインなし: {joined}"));
             return;
         };
@@ -1256,8 +1496,7 @@ impl RepoBrowser {
                 .get::<TextArea>(self.prompt_area)
                 .map(|a| a.text().trim().to_owned());
             if current.as_deref() == Some(sent.as_str()) {
-                self.tree
-                    .update::<TextArea, _>(self.prompt_area, |area, cx| area.set_text(cx, ""));
+                self.reset_prompt_state();
             }
         }
         if let Some(snap) = latest {
@@ -1356,6 +1595,10 @@ impl RepoBrowser {
                 self.open_in_editor();
                 return;
             }
+            if *sc == QUOTE_SHORTCUT {
+                self.quote_selected_diff();
+                return;
+            }
         }
 
         if message.source == self.focus_btn
@@ -1405,7 +1648,7 @@ impl RepoBrowser {
                 }
                 self.rebuild_path_control(text);
                 self.rebuild_diff_view(text);
-                self.update_terminal();
+                self.refresh_target(text);
             }
             return;
         }
@@ -1438,6 +1681,14 @@ impl RepoBrowser {
             return;
         }
 
+        if let Some(seg) = self.target_seg
+            && message.source == seg
+            && let Some(SelectionChanged(idx)) = message.downcast_ref::<SelectionChanged>()
+        {
+            self.choose_target(*idx, text);
+            return;
+        }
+
         if message.source == self.drop_zone
             && let Some(FilesDropped(paths)) = message.downcast_ref::<FilesDropped>()
         {
@@ -1459,6 +1710,8 @@ impl RepoBrowser {
                 self.toggle_inspector();
             } else if message.source == self.quote_btn {
                 self.quote_selected_diff();
+            } else if message.source == self.clear_btn {
+                self.clear_or_restore_prompt();
             } else if message.source == self.send_btn {
                 self.send_review_prompt();
             }
@@ -1522,6 +1775,13 @@ pub(crate) fn shell_escape(s: &str) -> String {
 /// Open a shell in the selected worktree / the selected file in the editor.
 const SHELL_SHORTCUT: Shortcut = Shortcut::command('t');
 const EDITOR_SHORTCUT: Shortcut = Shortcut::command('e');
+/// Quotes the selected diff lines into the prompt.
+const QUOTE_SHORTCUT: Shortcut = Shortcut::command('l');
+const QUOTE_LEAD: &str = "以下の箇所を修正してください:";
+/// The prompt box would otherwise collapse to one line in the tab page.
+const PROMPT_MIN_HEIGHT: f32 = 220.0;
+const CLEAR_LABEL: &str = "クリア";
+const RESTORE_LABEL: &str = "元に戻す";
 
 const BROWSER_HEIGHT: f32 = 240.0;
 const BROWSER_COLUMN: f32 = 310.0;
@@ -1737,7 +1997,6 @@ mod tests {
     // ── Live-mode regression tests driven through a fake channel ─────────────
 
     use crate::live::{TestFeed, test_channel};
-    use crate::model::PaneSummary;
 
     const CWD: &str = "/repo";
 
@@ -2126,14 +2385,251 @@ mod tests {
         h.screen.quote_selected_diff();
         assert_eq!(
             prompt_text(&h.screen),
-            "[main / a.rs L11-L12]\n```diff\n-old\n+new1\n+new2\n```\n修正依頼: "
+            "以下の箇所を修正してください:\n[main / a.rs L11-L12]\n```diff\n-old\n+new1\n+new2\n```\n"
         );
 
         h.screen
             .tree
             .update::<LogView, _>(diff_log, |log, cx| log.select_lines(cx, 5..6));
         h.screen.quote_selected_diff();
-        assert!(prompt_text(&h.screen).starts_with("[main / a.rs 旧L11]\n"));
+        assert!(prompt_text(&h.screen).ends_with("[main / a.rs 旧L11]\n```diff\n-old\n```\n"));
+    }
+
+    fn pane(id: u64, name: &str, tail: &str) -> PaneSummary {
+        PaneSummary {
+            pane_id: id,
+            name: name.into(),
+            label: None,
+            process: None,
+            activity: AgentActivity::None,
+            busy: false,
+            attention: false,
+            terminal_tail: tail.into(),
+        }
+    }
+
+    /// A snapshot whose only worktree has `panes`.
+    fn snapshot_with_panes(panes: Vec<PaneSummary>) -> Snapshot {
+        let mut snap = snapshot(DiffMode::Unstaged, Some(("a.rs", "+a v1")));
+        snap.data.repos[0].worktrees[0].panes = panes;
+        snap
+    }
+
+    fn select_lines(h: &mut LiveHarness, lines: std::ops::Range<usize>) {
+        let diff_log = h.screen.diff_log;
+        h.screen
+            .tree
+            .update::<LogView, _>(diff_log, |log, cx| log.select_lines(cx, lines));
+    }
+
+    fn sent(h: &LiveHarness) -> Vec<(u64, String)> {
+        h.drain()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::SendText { pane_id, text, .. } => Some((pane_id, text)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn quotes_append_in_order_and_duplicates_are_ignored() {
+        let mut h = LiveHarness::new();
+        h.deliver(snapshot(DiffMode::Unstaged, Some(("a.rs", NUMBERED))));
+        select_lines(&mut h, 5..6);
+        h.screen.quote_selected_diff();
+        select_lines(&mut h, 6..8);
+        h.screen.quote_selected_diff();
+        let two = "以下の箇所を修正してください:\n\
+                   [main / a.rs 旧L11]\n```diff\n-old\n```\n\
+                   [main / a.rs L11-L12]\n```diff\n+new1\n+new2\n```\n";
+        assert_eq!(prompt_text(&h.screen), two);
+
+        h.screen.toasts.clear();
+        select_lines(&mut h, 5..6);
+        h.screen.quote_selected_diff();
+        assert_eq!(prompt_text(&h.screen), two);
+        assert_eq!(h.screen.toasts, vec!["同じ範囲はすでに引用済みです"]);
+    }
+
+    #[test]
+    fn quote_starts_on_a_fresh_line_after_a_typed_remark() {
+        let mut h = LiveHarness::new();
+        set_prompt(&mut h.screen, "メモ");
+        h.screen.quote_selected_diff();
+        assert_eq!(
+            prompt_text(&h.screen),
+            "メモ\n[main / a.rs]\n```diff\n+a v1\n```\n"
+        );
+    }
+
+    fn clear_label(h: &LiveHarness) -> String {
+        h.screen
+            .tree()
+            .get::<Button>(h.screen.clear_btn)
+            .unwrap()
+            .label()
+            .to_owned()
+    }
+
+    #[test]
+    fn clear_empties_the_prompt_and_restores_it_once() {
+        let mut h = LiveHarness::new();
+        h.screen.quote_selected_diff();
+        let quoted = prompt_text(&h.screen);
+        assert_eq!(clear_label(&h), "クリア");
+        h.screen.clear_or_restore_prompt();
+        assert_eq!(prompt_text(&h.screen), "");
+        assert_eq!(clear_label(&h), "元に戻す");
+        // Quoting after a clear starts a new prompt; restoring merges.
+        h.screen.quote_selected_diff();
+        h.screen.clear_or_restore_prompt();
+        assert_eq!(
+            prompt_text(&h.screen),
+            format!("{}\n{quoted}", quoted.trim_end())
+        );
+        assert_eq!(clear_label(&h), "クリア");
+    }
+
+    #[test]
+    fn restore_after_clear_brings_back_the_text() {
+        let mut h = LiveHarness::new();
+        set_prompt(&mut h.screen, "直して");
+        h.screen.clear_or_restore_prompt();
+        assert_eq!(prompt_text(&h.screen), "");
+        h.screen.clear_or_restore_prompt();
+        assert_eq!(prompt_text(&h.screen), "直して");
+        // Clearing an empty prompt does nothing.
+        set_prompt(&mut h.screen, "");
+        h.screen.clear_or_restore_prompt();
+        assert_eq!(clear_label(&h), "クリア");
+    }
+
+    #[test]
+    fn chosen_pane_receives_the_prompt_and_the_terminal_follows() {
+        let mut h = LiveHarness::new();
+        h.deliver(snapshot_with_panes(vec![
+            pane(7, "zsh", "one\r\n"),
+            pane(8, "claude", "two\r\n"),
+        ]));
+        assert_eq!(h.screen.target().unwrap().pane_id, 7);
+        assert_eq!(h.screen.last_terminal_key.as_ref().unwrap().0, 7);
+        assert!(h.screen.target_seg.is_some());
+
+        h.screen.choose_target(1, &mut h.text);
+        assert_eq!(h.screen.target().unwrap().pane_id, 8);
+        assert_eq!(h.screen.last_terminal_key.as_ref().unwrap().0, 8);
+
+        // The pick survives a refresh of the same worktree.
+        h.deliver(snapshot_with_panes(vec![
+            pane(7, "zsh", "one\r\n"),
+            pane(8, "claude", "two\r\nmore\r\n"),
+        ]));
+        assert_eq!(h.screen.target().unwrap().pane_id, 8);
+
+        set_prompt(&mut h.screen, "直して");
+        h.drain();
+        h.screen.send_review_prompt();
+        assert_eq!(sent(&h), vec![(8, "直して".to_owned())]);
+
+        // Focusing and dropped files go to the same pane as the prompt.
+        h.drain();
+        h.screen.focus_selected_pane();
+        h.screen
+            .send_dropped_files(&[PathBuf::from("/tmp/plain.txt")]);
+        let targets: Vec<u64> = h
+            .drain()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::Focus(id) | Command::SendText { pane_id: id, .. } => Some(id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(targets, vec![8, 8]);
+    }
+
+    #[test]
+    fn target_resets_when_its_pane_disappears() {
+        let mut h = LiveHarness::new();
+        h.deliver(snapshot_with_panes(vec![
+            pane(7, "zsh", ""),
+            pane(8, "claude", "two\r\n"),
+        ]));
+        h.screen.choose_target(1, &mut h.text);
+        assert_eq!(h.screen.target_pane, Some(8));
+
+        h.deliver(snapshot_with_panes(vec![pane(7, "zsh", "")]));
+        assert_eq!(h.screen.target_pane, None);
+        assert_eq!(h.screen.target().unwrap().pane_id, 7);
+        assert_eq!(h.screen.last_terminal_key.as_ref().unwrap().0, 7);
+        assert!(h.screen.target_seg.is_none());
+
+        // It does not come back when the pane reappears.
+        h.deliver(snapshot_with_panes(vec![
+            pane(7, "zsh", ""),
+            pane(8, "claude", ""),
+        ]));
+        assert_eq!(h.screen.target().unwrap().pane_id, 7);
+    }
+
+    #[test]
+    fn target_resets_when_another_worktree_is_selected() {
+        let mut h = LiveHarness::new();
+        let mut snap = snapshot_with_panes(vec![pane(7, "zsh", ""), pane(8, "claude", "")]);
+        let mut other = snap.data.repos[0].worktrees[0].clone();
+        other.cwd = "/repo-wt-b".into();
+        other.branch = "b".into();
+        other.panes = vec![pane(8, "claude", ""), pane(9, "zsh", "")];
+        snap.data.repos[0].worktrees.push(other);
+        h.deliver(snap);
+        h.screen.choose_target(1, &mut h.text);
+        assert_eq!(h.screen.target_pane, Some(8));
+        h.screen.sel_wt = 1;
+        h.screen.sync_views(&mut h.text);
+        // Pane 8 is in both worktrees here, but the pick belonged to the first.
+        assert_eq!(h.screen.target_pane, None);
+    }
+
+    #[test]
+    fn quoting_from_another_worktree_warns_that_the_prompt_is_mixed() {
+        let mut h = LiveHarness::new();
+        let mut snap = snapshot(DiffMode::Unstaged, Some(("a.rs", "+a v1")));
+        let mut other = snap.data.repos[0].worktrees[0].clone();
+        other.cwd = "/repo-wt-b".into();
+        other.branch = "b".into();
+        other.panes[0].pane_id = 9;
+        snap.data.repos[0].worktrees.push(other);
+        h.deliver(snap);
+        h.screen.toasts.clear();
+        h.screen.quote_selected_diff();
+        assert!(h.screen.toasts.is_empty());
+
+        h.screen.sel_wt = 1;
+        h.screen.sync_views(&mut h.text);
+        h.screen.quote_selected_diff();
+        assert_eq!(h.screen.toasts.len(), 1, "{:?}", h.screen.toasts);
+        assert!(h.screen.toasts[0].contains("複数の worktree"));
+        assert!(h.screen.toasts[0].contains("#9"));
+        assert!(prompt_text(&h.screen).contains("[main / a.rs]"));
+        assert!(prompt_text(&h.screen).contains("[b / a.rs]"));
+    }
+
+    #[test]
+    fn quote_shortcut_is_shown_in_the_status_bar() {
+        let h = LiveHarness::new();
+        let hints: Vec<String> = h
+            .screen
+            .tree()
+            .children(h.screen.status_trailing)
+            .iter()
+            .filter_map(|id| {
+                h.screen
+                    .tree()
+                    .get::<Label>(*id)
+                    .map(|l| l.text().to_owned())
+            })
+            .collect();
+        assert!(hints.contains(&"引用".to_owned()), "{hints:?}");
     }
 
     #[test]
@@ -2165,13 +2661,6 @@ mod tests {
         cmds.into_iter()
             .filter(|c| matches!(c, Command::OpenShell { .. } | Command::OpenEditor { .. }))
             .collect()
-    }
-
-    fn select_lines(h: &mut LiveHarness, lines: std::ops::Range<usize>) {
-        let diff_log = h.screen.diff_log;
-        h.screen
-            .tree
-            .update::<LogView, _>(diff_log, |log, cx| log.select_lines(cx, lines));
     }
 
     #[test]

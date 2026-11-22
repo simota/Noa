@@ -294,22 +294,37 @@ pub fn demo_data(mode: DiffMode) -> RepoData {
                         ahead: 3,
                         behind: 0,
                         note: None,
-                        panes: vec![PaneSummary {
-                            pane_id: 12,
-                            name: "claude · subs".into(),
-                            label: Some("worker-subs".into()),
-                            process: Some("claude".into()),
-                            activity: AgentActivity::Running,
-                            busy: true,
-                            attention: false,
-                            terminal_tail:
-                                "\x1b[1;36m● Claude Code\x1b[0m  feat/pane-subscriptions\r\n\
+                        panes: vec![
+                            PaneSummary {
+                                pane_id: 12,
+                                name: "claude · subs".into(),
+                                label: Some("worker-subs".into()),
+                                process: Some("claude".into()),
+                                activity: AgentActivity::Running,
+                                busy: true,
+                                attention: false,
+                                terminal_tail:
+                                    "\x1b[1;36m● Claude Code\x1b[0m  feat/pane-subscriptions\r\n\
                                 \x1b[32m✓\x1b[0m cargo test -p noa-ipc (42 passed)\r\n\
                                 \x1b[33m→\x1b[0m Editing crates/noa-ipc/src/push.rs\r\n\
                                   Adding FieldMask filter for state_changed...\r\n\
                                 \x1b[90m[14:22:08] waiting for clippy check\x1b[0m\r\n"
-                                    .into(),
-                        }],
+                                        .into(),
+                            },
+                            PaneSummary {
+                                pane_id: 13,
+                                name: "zsh · subs".into(),
+                                label: None,
+                                process: Some("zsh".into()),
+                                activity: AgentActivity::None,
+                                busy: false,
+                                attention: false,
+                                terminal_tail:
+                                    "\x1b[32msimota@subs\x1b[0m % cargo test -p noa-ipc\r\n\
+                                test result: ok. 42 passed; 0 failed\r\n"
+                                        .into(),
+                            },
+                        ],
                         files: vec![
                             ChangedFile {
                                 path: "crates/noa-ipc/src/push.rs".into(),

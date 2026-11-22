@@ -14,7 +14,7 @@ use noa_gpui_text::TextStore;
 use crate::live::{Link, Snapshot};
 use crate::ui::RepoBrowser;
 
-const USAGE: &str = "usage: repo-browser [--demo] [--snapshot=FILE.png [--size=WxH]]\n  \
+const USAGE: &str = "usage: repo-browser [--demo] [--snapshot=FILE.png [--size=WxH] [--composer]]\n  \
                      live data from the running Noa control server by default; \
                      --demo shows canned multi-worktree data";
 const DEFAULT_SIZE: (u32, u32) = (1440, 900);
@@ -76,6 +76,7 @@ fn render_snapshot(
 fn main() -> Result<(), String> {
     let mut snapshot_path = None;
     let mut demo = false;
+    let mut composer = false;
     let mut size = DEFAULT_SIZE;
 
     for arg in std::env::args().skip(1) {
@@ -83,6 +84,8 @@ fn main() -> Result<(), String> {
             snapshot_path = Some(PathBuf::from(path));
         } else if let Some(raw) = arg.strip_prefix("--size=") {
             size = parse_size(raw)?;
+        } else if arg == "--composer" {
+            composer = true;
         } else if arg == "--demo" {
             demo = true;
         } else if arg == "--help" || arg == "-h" {
@@ -99,6 +102,9 @@ fn main() -> Result<(), String> {
         } else {
             RepoBrowser::of_snapshot(first_live_snapshot()?)
         };
+        if composer {
+            screen.show_composer();
+        }
         render_snapshot(&path, &mut screen, size)?;
         println!("wrote {}", path.display());
         return Ok(());

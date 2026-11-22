@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   selected file in `$VISUAL`/`$EDITOR` at the selected diff line. Both are in
   the toolbar's split button and the command palette, and work for a worktree
   without panes.
+- The repo browser builds one review prompt from several places: quoting
+  (⌘L) appends a block per selection instead of replacing the prompt, Clear
+  empties it (and Restore brings it back), and the review tab picks which
+  pane of the worktree receives it, with the live terminal following that pane.
 
 ### Changed
 

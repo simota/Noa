@@ -124,14 +124,14 @@ pub(super) fn queue(
     });
     let indicator = indicator(tree, title);
     let list = card_list(tree, rail, 8.0);
-    if filtering && urgent == 0 {
+    if filtering {
         let outside = all
             .iter()
             .filter(|w| w.need().is_some_and(|n| n.tier() == Tier::Decision))
             .count();
-        if outside > 0 {
+        if count(Tier::Decision) == 0 && outside > 0 {
             caption(tree, list, hidden_text(outside));
-        } else if info == 0 {
+        } else if waiting.is_empty() {
             nothing_matches(tree, list);
         }
     }

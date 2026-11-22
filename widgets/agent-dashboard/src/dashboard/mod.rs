@@ -1063,8 +1063,11 @@ impl Dashboard {
         self.show_notice(status);
     }
 
-    /// Opens the drawer on `view.detail`, if its worker is shown.
+    /// Opens the drawer on `view.detail`, if its worker is shown. A result
+    /// read for another worker, or before the drawer closed, is not read
+    /// again unasked.
     fn open_drawer(&mut self) {
+        self.view.result = self.view.result.filter(|p| Some(*p) == self.view.detail);
         let Some(pane) = self.view.detail else {
             return;
         };

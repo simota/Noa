@@ -253,3 +253,112 @@ fn the_drawer_shows_more_of_the_screen_than_a_card() {
     assert!(texts.contains(&"line 0".to_owned()), "{texts:?}");
     assert!(texts.contains(&"line 19".to_owned()));
 }
+
+#[test]
+fn a_visible_failure_still_says_how_many_decisions_the_filter_hides() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    key(&mut dashboard, &mut text, Key::Char('/'));
+    typed(&mut dashboard, &mut text, "/");
+    typed(&mut dashboard, &mut text, "e2e-smoke");
+    assert_eq!(queue_panes(&dashboard), [19], "only the failure matches");
+    let hidden = queue::hidden_text(3);
+    assert!(
+        queue_labels(&dashboard).contains(&hidden),
+        "{:?}",
+        queue_labels(&dashboard)
+    );
+}
+
+#[test]
+fn a_result_shown_once_is_not_read_again_without_asking() {
+    let file = TempFile::new("again.md", b"all green\n");
+    let (mut dashboard, mut text) = drawer_on_result(file.0.clone(), true);
+    toggle_result(&mut dashboard, &mut text);
+    assert!(drawer_texts(&dashboard).contains(&"all green".to_owned()));
+    // Away to another worker and back, then closed and opened again.
+    dashboard.set_detail(Some(18), &mut text);
+    dashboard.set_detail(Some(17), &mut text);
+    assert!(!drawer_texts(&dashboard).contains(&"all green".to_owned()));
+    toggle_result(&mut dashboard, &mut text);
+    dashboard.set_detail(None, &mut text);
+    dashboard.set_detail(Some(17), &mut text);
+    assert!(!drawer_texts(&dashboard).contains(&"all green".to_owned()));
+}
+
+#[test]
+fn the_drawer_names_the_direct_parent() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    // fix-tests (14) was spawned by api-refactor (11), under release-0.9.7.
+    dashboard.set_detail(Some(14), &mut text);
+    let parent = label_of(&dashboard, 11).to_owned();
+    let texts = drawer_texts(&dashboard);
+    assert!(texts.contains(&format!("ID 14 · 親 {parent}")), "{texts:?}");
+}
+
+/// The result path swapped back and forth between a regular file and a
+/// FIFO while the drawer reads it: a check of the path before opening it
+/// let the open wait for the FIFO's writer (the 262nd read, when this was
+/// first run), which froze the dashboard.
+#[test]
+fn a_result_swapped_for_a_fifo_never_blocks_the_reader() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, mpsc};
+    let dir = std::env::temp_dir().join(format!("agent-dashboard-race-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("result.md");
+    let regular = dir.join("regular");
+    let fifo = dir.join("fifo");
+    let swap = dir.join("swap");
+    std::fs::write(&regular, b"x").unwrap();
+    std::fs::copy(&regular, &path).unwrap();
+    let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+    assert!(made.unwrap().success());
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let (stop, path) = (stop.clone(), path.clone());
+        let (regular, fifo) = (regular.clone(), fifo.clone());
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                for source in [&fifo, &regular] {
+                    std::fs::hard_link(source, &swap).unwrap();
+                    std::fs::rename(&swap, &path).unwrap();
+                }
+            }
+        })
+    };
+    let (done, finished) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for _ in 0..5_000 {
+            let _ = drawer::read_result(&path);
+            let _ = done.send(());
+        }
+    });
+    let blocked = loop {
+        match finished.recv_timeout(std::time::Duration::from_secs(2)) {
+            Ok(()) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break false,
+            Err(mpsc::RecvTimeoutError::Timeout) => break true,
+        }
+    };
+    stop.store(true, Ordering::Relaxed);
+    swapper.join().unwrap();
+    if blocked {
+        // A writer lets the stuck open return, so the reader can end.
+        drop(std::fs::OpenOptions::new().write(true).open(&fifo));
+    }
+    reader.join().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!blocked, "read_result waited on a FIFO");
+}
+
+#[test]
+fn a_result_behind_a_symbolic_link_is_not_read() {
+    let file = TempFile::new("target.md", b"secret\n");
+    let link = std::env::temp_dir().join(format!("agent-dashboard-{}-link.md", std::process::id()));
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&file.0, &link).unwrap();
+    let read = drawer::read_result(&link);
+    let _ = std::fs::remove_file(&link);
+    assert_eq!(read, Err("通常のファイルではありません".to_owned()));
+}

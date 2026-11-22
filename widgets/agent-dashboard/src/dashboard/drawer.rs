@@ -5,6 +5,7 @@
 //! tail, result file (read only when asked, `read_result`) and times.
 
 use std::io::Read;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use noa_gpui_core::clipboard::MemoryClipboard;
@@ -44,22 +45,41 @@ pub(super) type Preview = Result<(String, bool), String>;
 
 /// Reads the start of `path`, which must be a regular file: a FIFO or a
 /// device would block or never end, and a symbolic link may lead out of
-/// the worker's own file.
+/// the worker's own file. What is checked is the file opened, not the path,
+/// so the path cannot be swapped between the check and the read; the open
+/// itself neither follows a link nor waits for a FIFO's writer.
 pub(super) fn read_result(path: &Path) -> Preview {
-    let meta = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
-    if !meta.is_file() {
-        return Err("通常のファイルではありません".to_owned());
-    }
+    let file = open_regular(path)?;
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .and_then(|file| file.take(RESULT_MAX_BYTES).read_to_end(&mut bytes))
+    file.take(RESULT_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
+    let mut cut = bytes.len() as u64 > RESULT_MAX_BYTES;
+    bytes.truncate(RESULT_MAX_BYTES as usize);
     let text = String::from_utf8_lossy(&bytes);
     let lines: Vec<&str> = text.lines().take(RESULT_MAX_LINES + 1).collect();
-    let cut = meta.len() > RESULT_MAX_BYTES || lines.len() > RESULT_MAX_LINES;
+    cut |= lines.len() > RESULT_MAX_LINES;
     let kept = &lines[..lines.len().min(RESULT_MAX_LINES)];
     Ok((kept.join("\n"), cut))
 }
+
+pub(super) fn open_regular(path: &Path) -> Result<std::fs::File, String> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| match e.raw_os_error() {
+            Some(libc::ELOOP) => NOT_REGULAR.to_owned(),
+            _ => e.to_string(),
+        })?;
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err(NOT_REGULAR.to_owned());
+    }
+    Ok(file)
+}
+
+const NOT_REGULAR: &str = "通常のファイルではありません";
 
 /// The drawer's buttons: 開く, 閉じる, and the result's 表示 / 隠す when the
 /// worker has a result file.
@@ -561,10 +581,13 @@ pub(super) fn build(
     }
 
     let pane_section = section(tree, scroll, "ペイン");
-    let parent = if worker.orchestrator.is_empty() {
-        "不明"
-    } else {
-        worker.orchestrator.as_str()
+    let parent = match worker.parent {
+        Some(pane) => feed
+            .fleet
+            .worker(pane)
+            .map_or_else(|| format!("ペイン {pane}"), |w| one_line(&w.label)),
+        None if worker.orchestrator.is_empty() => "不明".to_owned(),
+        None => one_line(&worker.orchestrator),
     };
     text_line(tree, pane_section, &format!("ID {pane} · 親 {parent}"), 2);
     if feed.link.as_ref() == Some(&Link::Live) && !feed.can_focus {

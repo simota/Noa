@@ -420,3 +420,52 @@ fn a_filter_that_matches_only_folded_cards_says_so() {
         queue_labels(&dashboard)
     );
 }
+
+#[test]
+fn a_result_gone_and_back_is_not_shown_unasked() {
+    let file = TempFile::new("turn-1.md", b"first turn\n");
+    let (mut dashboard, mut text) = drawer_on_result(file.0.clone(), true);
+    toggle_result(&mut dashboard, &mut text);
+    assert!(drawer_texts(&dashboard).contains(&"first turn".to_owned()));
+    // The worker runs again (no result), then finishes with a new one.
+    let mut fleet = dashboard.feed.fleet.clone();
+    let worker = fleet.workers.iter_mut().find(|w| w.pane == 17).unwrap();
+    worker.state = State::Running;
+    worker.result = None;
+    dashboard.apply(live(fleet.clone(), 0), &mut text);
+    let next = TempFile::new("turn-2.md", b"second turn\n");
+    let worker = fleet.workers.iter_mut().find(|w| w.pane == 17).unwrap();
+    worker.state = State::Finished;
+    worker.result = Some(next.0.clone());
+    dashboard.apply(live(fleet, 0), &mut text);
+    let texts = drawer_texts(&dashboard);
+    assert!(!texts.contains(&"first turn".to_owned()), "{texts:?}");
+    assert!(!texts.contains(&"second turn".to_owned()), "{texts:?}");
+}
+
+#[test]
+fn a_lone_agent_has_no_parent_in_the_drawer() {
+    let mut fleet = fleet::canned();
+    for worker in &mut fleet.workers {
+        if worker.pane == 11 {
+            worker.orchestrator = crate::live::ALONE.to_owned();
+            worker.orchestrator_pane = None;
+            worker.parent = None;
+        }
+    }
+    let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet, 0));
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(window(), &mut text);
+    dashboard.set_detail(Some(11), &mut text);
+    let texts = drawer_texts(&dashboard);
+    assert!(texts.contains(&"ID 11 · 親 なし".to_owned()), "{texts:?}");
+}
+
+#[test]
+fn a_cut_result_ends_on_a_whole_character() {
+    let file = TempFile::new("wide.md", "あ".repeat(6000).as_bytes());
+    let (text, cut) = drawer::read_result(&file.0).unwrap();
+    assert!(cut);
+    assert!(!text.contains('\u{FFFD}'), "a split character");
+    assert!(text.len() as u64 > drawer::RESULT_MAX_BYTES - 3);
+}

@@ -24,7 +24,7 @@ use crate::fleet::{Phase, State, Worker, minutes_text};
 use super::graph::mark;
 use super::style::{caption, fill_remaining, gap, phase_color, set_label};
 use super::{Feed, Pulse, Registry};
-use crate::live::Link;
+use crate::live::{ALONE, Link};
 
 /// What the drawer says where a worker has no screen tail yet: the feed
 /// fetches it (live), or there is none to fetch (demo).
@@ -55,7 +55,15 @@ pub(super) fn read_result(path: &Path) -> Preview {
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
     let mut cut = bytes.len() as u64 > RESULT_MAX_BYTES;
-    bytes.truncate(RESULT_MAX_BYTES as usize);
+    if cut {
+        bytes.truncate(RESULT_MAX_BYTES as usize);
+        // A character the limit cut in two is left out whole.
+        if let Err(e) = std::str::from_utf8(&bytes)
+            && e.error_len().is_none()
+        {
+            bytes.truncate(e.valid_up_to());
+        }
+    }
     let text = String::from_utf8_lossy(&bytes);
     let lines: Vec<&str> = text.lines().take(RESULT_MAX_LINES + 1).collect();
     cut |= lines.len() > RESULT_MAX_LINES;
@@ -586,7 +594,9 @@ pub(super) fn build(
             .fleet
             .worker(pane)
             .map_or_else(|| format!("ペイン {pane}"), |w| one_line(&w.label)),
-        None if worker.orchestrator_pane == Some(worker.pane) => "なし".to_owned(),
+        None if worker.orchestrator_pane == Some(worker.pane) || worker.orchestrator == ALONE => {
+            "なし".to_owned()
+        }
         None if worker.orchestrator.is_empty() => "不明".to_owned(),
         None => one_line(&worker.orchestrator),
     };

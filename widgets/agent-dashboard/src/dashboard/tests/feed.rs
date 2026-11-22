@@ -149,13 +149,20 @@ fn a_live_screen_follows_its_feed() {
     let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
     assert_eq!(status.text(), "ワーカー 9 · 同期 2 秒前");
 
+    // The click comes a second later: the link state ages, the notice does
+    // not replace it.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     let (open, pane) = dashboard.queue_buttons.open[0];
     let pos = center(&dashboard.tree, open);
     click(&mut dashboard, &mut text, pos);
     assert_eq!(commands.try_recv(), Ok(Command::Focus(pane)));
     assert_eq!(notice_of(&dashboard), "fix-tests のペインへ移動します");
     let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
-    assert_eq!(status.text(), "ワーカー 9 · 同期 2 秒前");
+    assert!(
+        status.text().starts_with("ワーカー 9 · 同期 "),
+        "{}",
+        status.text()
+    );
 }
 
 fn text_of(dashboard: &Dashboard, wanted: impl Fn(Pulse) -> bool) -> String {

@@ -30,7 +30,7 @@ const SCREEN_TAIL_LINES: usize = 40;
 const QUIET_SECS: f64 = 120.0;
 const BUCKET_SECS: f64 = 5.0;
 const BUCKETS: usize = 12;
-const ALONE: &str = "単独";
+pub(crate) const ALONE: &str = "単独";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Link {
@@ -627,7 +627,7 @@ struct Tracker {
     seen: HashMap<u64, Observed>,
     /// Tasks by pane, from each orchestrator's journal (by its surface id).
     journals: HashMap<String, Journal>,
-    /// The done panes known to have left a result file, and that file.
+    /// The ended panes known to have left a result file, and that file.
     results: HashMap<u64, PathBuf>,
 }
 
@@ -724,14 +724,17 @@ impl Tracker {
         }
     }
 
-    /// Looks again at each done worker's own result file, the one its
+    /// Looks again at each ended worker's own result file (one that failed
+    /// may have written why), the one its
     /// spawner's journal names. The file is there before the worker writes
     /// it, so an empty one is no result; no path in the journal, no result.
     fn read_results(&mut self) {
         self.results = self
             .panels
             .values()
-            .filter(|panel| is_worker(panel) && state_of(panel) == State::Finished)
+            .filter(|panel| {
+                is_worker(panel) && matches!(state_of(panel), State::Finished | State::Error)
+            })
             .filter_map(|panel| {
                 let result = self.spawned(panel)?.result.as_ref()?;
                 let path = Path::new(&panel.cwd).join(result);
@@ -1489,6 +1492,30 @@ pub(crate) mod tests {
         with_journal(&mut tracker, "s-results", journal);
         tracker.read_results();
         tracker.fleet(1001.0, None).worker(7).unwrap().has_result
+    }
+
+    #[test]
+    fn a_failed_worker_shows_its_result() {
+        let cwd = noa_dir("failed-result");
+        let own = cwd.join(".noa").join("result-0a1b2c3d.md");
+        std::fs::write(&own, "why it failed").unwrap();
+        let orchestrator = panel(serde_json::json!({ "paneId": "1", "surfaceId": "s-failed" }));
+        let worker = panel(serde_json::json!({
+            "paneId": "7",
+            "parentPaneId": "1",
+            "cwd": cwd.to_str().unwrap(),
+            "agent": { "seq": 1, "kind": "claude", "state": "running" },
+            "exit": { "code": 1 },
+        }));
+        let mut tracker = Tracker::default();
+        tracker.merge(vec![orchestrator, worker], 1000.0);
+        with_journal(&mut tracker, "s-failed", &spawn_line(7, Some(&own)));
+        tracker.read_results();
+        let fleet = tracker.fleet(1001.0, None);
+        let worker = fleet.worker(7).unwrap();
+        std::fs::remove_dir_all(&cwd).unwrap();
+        assert_eq!(worker.state, State::Error);
+        assert_eq!(worker.result.as_deref(), Some(own.as_path()));
     }
 
     #[test]

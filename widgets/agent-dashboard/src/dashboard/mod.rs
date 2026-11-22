@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use noa_gpui_core::style::{
@@ -304,7 +305,7 @@ pub struct Dashboard {
     notice: WidgetId,
     /// The result file `view.result` shows, as read when 表示 was pressed:
     /// a rebuild shows it again without reading the file.
-    preview: Option<(u64, drawer::Preview)>,
+    preview: Option<(u64, PathBuf, drawer::Preview)>,
     queue_buttons: QueueButtons,
     registry: Registry,
     /// The size the last `prepare` laid the screen out at. A rebuilt screen is
@@ -836,7 +837,7 @@ impl Dashboard {
         feed: Feed,
         filter: Filter,
         refocus: bool,
-        preview: Option<(u64, drawer::Preview)>,
+        preview: Option<(u64, PathBuf, drawer::Preview)>,
     ) -> Self {
         let root = tree.insert(
             None,
@@ -1081,7 +1082,7 @@ impl Dashboard {
     /// again unasked.
     fn open_drawer(&mut self) {
         self.view.result = self.view.result.filter(|p| Some(*p) == self.view.detail);
-        if self.preview.as_ref().map(|(p, _)| *p) != self.view.result {
+        if self.preview.as_ref().map(|(p, _, _)| *p) != self.view.result {
             self.preview = None;
         }
         let Some(pane) = self.view.detail else {
@@ -1115,13 +1116,26 @@ impl Dashboard {
             },
             OverlayOptions::PASSIVE,
         );
+        // A result gone, or another file since (the worker ran again), is
+        // read only when asked for again.
+        let same_file =
+            |(_, path, _): &(u64, PathBuf, drawer::Preview)| worker.result.as_ref() == Some(path);
+        if self
+            .preview
+            .as_ref()
+            .is_some_and(|cached| !same_file(cached))
+            || (self.view.result == Some(pane) && worker.result.is_none())
+        {
+            self.preview = None;
+            self.view.result = None;
+        }
         if self.preview.is_none()
             && self.view.result == Some(pane)
             && let Some(path) = worker.result.as_deref()
         {
-            self.preview = Some((pane, drawer::read_result(path)));
+            self.preview = Some((pane, path.to_owned(), drawer::read_result(path)));
         }
-        let preview = self.preview.as_ref().map(|(_, preview)| preview);
+        let preview = self.preview.as_ref().map(|(_, _, preview)| preview);
         let buttons = drawer::build(
             &mut self.tree,
             root,

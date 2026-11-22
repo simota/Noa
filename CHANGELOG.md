@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.9] - 2026-11-22
+
+Pane subscriptions that report removals and filter by field, and an agent
+dashboard driven from the keyboard.
+
+### Added
+
+- `noa.stateChanged` carries `removedPaneIds` when panes go away.
+  `noa.subscribe` accepts a `fields` filter, and `noa.updateSubscription`
+  changes an existing subscription's events, panes and fields in place.
+- Agent Dashboard: keyboard selection (J / K, arrows, Enter opens the pane),
+  a `/` filter over label, agent, model, branch and task, paging, link health
+  and a details view.
+- `+ctl result --path` prints the path of a worker's result file.
+
+### Changed
+
+- `+ctl spawn --cwd` normalizes the directory it resolves and prints it.
+- The agent dashboard sources move to `widgets/agent-dashboard`.
+
+### Fixed
+
+- `+ctl spawn --task -- codex` types the task into Codex 0.171 instead of
+  returning `"sent":false`, and `--ready` no longer takes Codex's start-up
+  "running" report as ready.
+- The bundled dashboard shows as "Noa Agent Dashboard" in the menu bar and
+  Dock instead of `agent-dashboard-mock`.
+
 ## [0.9.8] - 2026-11-21
 
 A keybind action that starts a program in the background, and an agent

@@ -9,6 +9,7 @@
 mod chat;
 mod composer;
 mod debate;
+mod map;
 mod minutes;
 mod start;
 mod tree;
@@ -78,12 +79,26 @@ pub enum Action {
     ExportMinutes,
     /// Start an agent of this kind in the working directory on the result.
     Implement(AgentKind),
+    /// The center pane's tabs.
+    ShowChat,
+    ShowMap,
+    /// Save the whole map as a PNG.
+    ExportMap,
+}
+
+/// What the save panel that is up was opened for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Export {
+    Minutes,
+    Map,
 }
 
 /// What the center pane shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Center {
     Chat,
+    /// The discussion as a mind map.
+    Map,
     Debate(DebateView),
 }
 
@@ -103,11 +118,15 @@ pub struct Discussion {
     center: Center,
     /// Debates already brought up on their own, so leaving one stays left.
     shown_debates: BTreeSet<DebateId>,
+    /// The map tab's nodes, in the layout's order (empty off the map).
+    map_nodes: Vec<WidgetId>,
     /// An intervention sent and not yet seen in the log: the composer keeps
     /// its text until then.
     pending_intervention: Option<String>,
     /// Save panels to show (`Screen::take_file_dialogs`).
     file_dialogs: Vec<FileDialogRequest>,
+    /// What the last save panel was for.
+    export: Option<Export>,
     /// The session (id, rev) and link the panes were last built from.
     built: Option<(Option<(String, u64)>, Link)>,
 
@@ -193,8 +212,10 @@ impl Discussion {
             filter: None,
             center: Center::Chat,
             shown_debates: BTreeSet::new(),
+            map_nodes: Vec::new(),
             pending_intervention: None,
             file_dialogs: Vec::new(),
+            export: None,
             built: None,
             start,
             meeting,
@@ -287,17 +308,63 @@ impl Discussion {
 
     fn rebuild_center(&mut self, text: &mut TextStore) {
         clear_children(&mut self.tree, self.center_host, text);
+        self.map_nodes.clear();
         let Some(session) = &self.session else {
             return;
         };
         match &self.center {
-            Center::Chat => chat::insert(
-                &mut self.tree,
-                self.center_host,
-                session,
-                self.filter.as_ref(),
-                &mut self.actions,
-            ),
+            Center::Chat | Center::Map => {
+                let tabs = self.tree.insert(
+                    Some(self.center_host),
+                    Container::new(Style {
+                        flex_direction: FlexDirection::Row,
+                        flex_shrink: 0.0,
+                        gap: gap(6.0),
+                        padding: LayoutRect {
+                            left: length(12.0),
+                            right: length(12.0),
+                            top: length(6.0),
+                            bottom: length(6.0),
+                        },
+                        ..Default::default()
+                    }),
+                );
+                let on_map = self.center == Center::Map;
+                for (label, action, current) in [
+                    ("チャット", Action::ShowChat, !on_map),
+                    ("マップ", Action::ShowMap, on_map),
+                ] {
+                    let button = self.tree.insert(
+                        Some(tabs),
+                        Button::new(label)
+                            .control_size(ControlSize::Small)
+                            .default_button(current),
+                    );
+                    self.actions.push((button, action));
+                }
+                if on_map {
+                    spacer(&mut self.tree, tabs);
+                    let save = self.tree.insert(
+                        Some(tabs),
+                        Button::new("画像で保存…").control_size(ControlSize::Small),
+                    );
+                    self.actions.push((save, Action::ExportMap));
+                }
+                let body = self
+                    .tree
+                    .insert(Some(self.center_host), Container::new(fill()));
+                if on_map {
+                    self.map_nodes = map::insert(&mut self.tree, body, session, &mut self.actions);
+                } else {
+                    chat::insert(
+                        &mut self.tree,
+                        body,
+                        session,
+                        self.filter.as_ref(),
+                        &mut self.actions,
+                    );
+                }
+            }
             Center::Debate(view) => debate::insert(
                 &mut self.tree,
                 self.center_host,
@@ -473,9 +540,24 @@ impl Discussion {
             }
             Action::ConfirmDebate => self.confirm_debate(text),
             Action::CancelDebate => self.cancel_debate(text),
-            Action::BackToChat => {
+            Action::BackToChat | Action::ShowChat => {
                 self.center = Center::Chat;
                 self.rebuild(text);
+            }
+            Action::ShowMap => {
+                self.center = Center::Map;
+                self.rebuild(text);
+            }
+            Action::ExportMap => {
+                if let Some(session) = &self.session {
+                    self.export = Some(Export::Map);
+                    self.file_dialogs.push(FileDialogRequest {
+                        save: true,
+                        title: "マップを画像で保存".into(),
+                        file_name: format!("{}-map.png", session.id),
+                        filters: vec![("PNG".into(), vec!["png".into()])],
+                    });
+                }
             }
             Action::Retry => self.send(Command::Retry, "失敗したブリーフを再送します"),
             Action::Send => self.send_intervention(),
@@ -490,6 +572,7 @@ impl Discussion {
             }
             Action::ExportMinutes => {
                 if let Some(session) = &self.session {
+                    self.export = Some(Export::Minutes);
                     self.file_dialogs.push(FileDialogRequest {
                         save: true,
                         title: "議事録を書き出す".into(),
@@ -646,13 +729,23 @@ impl Screen for Discussion {
     }
 
     fn file_dialog_finished(&mut self, result: FileDialogResult, _text: &mut TextStore) {
+        let export = self.export.take();
         let (FileDialogResult::Saved(path), Some(session)) = (result, &self.session) else {
             return;
         };
-        let minutes = discussion::model::export::minutes_markdown(session);
-        let message = match std::fs::write(&path, minutes) {
-            Ok(()) => format!("議事録を書き出しました: {}", path.display()),
-            Err(err) => format!("{} に書き出せません: {err}", path.display()),
+        let message = match export {
+            Some(Export::Minutes) => {
+                let minutes = discussion::model::export::minutes_markdown(session);
+                match std::fs::write(&path, minutes) {
+                    Ok(()) => format!("議事録を書き出しました: {}", path.display()),
+                    Err(err) => format!("{} に書き出せません: {err}", path.display()),
+                }
+            }
+            Some(Export::Map) => match map::save_png(session, &path) {
+                Ok((w, h)) => format!("マップを画像で保存しました（{w}×{h}）: {}", path.display()),
+                Err(err) => format!("{} に保存できません: {err}", path.display()),
+            },
+            None => return,
         };
         self.toast(message);
     }

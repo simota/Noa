@@ -11,7 +11,7 @@ use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use discussion::model::types::{Issue, IssueId, IssueState, Session};
 
 use super::{
-    Action, caption, debate_in_play, gap, heading, outlined, part_name, position_tag,
+    Action, caption, debate_in_play, gap, heading, note, outlined, part_name, position_tag,
     scroll_column, state_tag, tag,
 };
 
@@ -43,7 +43,7 @@ pub(super) fn insert(
             .weight(600)
             .wrap(true),
     );
-    caption(
+    note(
         tree,
         list,
         format!(
@@ -60,7 +60,7 @@ pub(super) fn insert(
     tree.insert(Some(list), Separator::horizontal());
 
     if session.issues.issues.is_empty() {
-        caption(
+        note(
             tree,
             list,
             "論点はまだありません。第 1 ラウンドの要約で司会が立てます",

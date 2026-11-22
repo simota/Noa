@@ -3,6 +3,7 @@
 
 pub mod brief;
 pub mod export;
+pub mod map;
 pub mod reduce;
 pub mod types;
 pub mod validate;

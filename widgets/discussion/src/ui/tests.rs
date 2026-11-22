@@ -745,3 +745,136 @@ fn an_ended_discussion_offers_no_retry_and_no_debate_controls() {
     assert!(!has_widget_for(&h.screen, &Action::ConfirmDebate));
     assert!(!has_widget_for(&h.screen, &Action::SwapSides));
 }
+
+// ── Map ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn the_map_tab_shows_every_issue_and_a_click_filters_the_chat() {
+    let (mut screen, mut text) = laid_out();
+    let map = widget_for(&screen, &Action::ShowMap);
+    click(&mut screen, &mut text, map);
+    assert_eq!(screen.center, Center::Map);
+    // Every issue has a node on the map that opens it.
+    let node_for = |s: &Discussion, issue: &IssueId| {
+        s.actions
+            .iter()
+            .find(|(id, a)| s.map_nodes.contains(id) && *a == Action::Filter(issue.clone()))
+            .map(|(id, _)| *id)
+    };
+    let issues: Vec<IssueId> = screen
+        .session
+        .as_ref()
+        .unwrap()
+        .issues
+        .issues
+        .iter()
+        .map(|i| i.id.clone())
+        .collect();
+    assert!(!issues.is_empty());
+    for issue in &issues {
+        assert!(node_for(&screen, issue).is_some(), "no node for {issue}");
+    }
+    // A map node opens the chat filtered to its issue.
+    let node = node_for(&screen, &i("C")).unwrap();
+    click(&mut screen, &mut text, node);
+    assert_eq!(screen.center, Center::Chat);
+    assert_eq!(screen.filter, Some(i("C")));
+}
+
+#[test]
+fn the_map_lays_its_nodes_out_without_overlap() {
+    let (mut screen, mut text) = laid_out();
+    screen.run(Action::ShowMap, &mut text);
+    screen.prepare(window(), &mut text);
+    let nodes: Vec<[f32; 4]> = screen
+        .map_nodes
+        .iter()
+        .map(|id| rect(&screen.tree, *id))
+        .collect();
+    let session = screen.session.as_ref().unwrap();
+    assert_eq!(
+        nodes.len(),
+        discussion::model::map::layout(session).nodes.len()
+    );
+    for (n, a) in nodes.iter().enumerate() {
+        for b in &nodes[n + 1..] {
+            let apart = a[0] + a[2] <= b[0] + 0.5
+                || b[0] + b[2] <= a[0] + 0.5
+                || a[1] + a[3] <= b[1] + 0.5
+                || b[1] + b[3] <= a[1] + 0.5;
+            assert!(apart, "{a:?} overlaps {b:?}");
+        }
+    }
+    let chat = widget_for(&screen, &Action::ShowChat);
+    click(&mut screen, &mut text, chat);
+    assert_eq!(screen.center, Center::Chat);
+}
+
+#[test]
+fn the_map_scrolls_both_ways() {
+    let (mut screen, mut text) = laid_out();
+    screen.run(Action::ShowMap, &mut text);
+    // A small window: the demo's map is wider and taller than the pane.
+    let small = Size::new(1122.0, 600.0);
+    screen.prepare(small, &mut text);
+    let topic = screen.map_nodes[0];
+    let before = rect(&screen.tree, topic);
+    let pos = Point::new(before[0] + 10.0, before[1] + 10.0);
+    screen.dispatch(
+        Event::Wheel {
+            pos,
+            delta: Point::new(-120.0, -80.0),
+        },
+        &mut text,
+    );
+    screen.prepare(small, &mut text);
+    let after = rect(&screen.tree, topic);
+    assert!(
+        after[0] < before[0] - 1.0,
+        "no horizontal scroll: {before:?} -> {after:?}"
+    );
+    assert!(
+        after[1] < before[1] - 1.0,
+        "no vertical scroll: {before:?} -> {after:?}"
+    );
+}
+
+#[test]
+fn the_map_saves_as_a_png_of_the_whole_map() {
+    use noa_gpui_platform::FileDialogResult;
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    let session = crate::demo::session();
+    h.deliver(Some(session.clone()));
+    // Only on the map.
+    assert!(!has_widget_for(&h.screen, &Action::ExportMap));
+    h.screen.run(Action::ShowMap, &mut h.text);
+    h.screen.prepare(window(), &mut h.text);
+    let save = widget_for(&h.screen, &Action::ExportMap);
+    click(&mut h.screen, &mut h.text, save);
+    let dialogs = h.screen.take_file_dialogs();
+    assert_eq!(dialogs.len(), 1);
+    assert!(dialogs[0].save);
+    assert!(
+        dialogs[0].file_name.ends_with("-map.png"),
+        "{}",
+        dialogs[0].file_name
+    );
+    let path = std::env::temp_dir().join(format!("noa-discussion-map-{}.png", std::process::id()));
+    h.screen
+        .file_dialog_finished(FileDialogResult::Saved(path.clone()), &mut h.text);
+    let png = std::fs::read(&path).unwrap();
+    assert_eq!(&png[1..4], b"PNG");
+    let width = u32::from_be_bytes(png[16..20].try_into().unwrap());
+    let height = u32::from_be_bytes(png[20..24].try_into().unwrap());
+    let map = discussion::model::map::layout(&session);
+    let (w, hgt) = (map.width.ceil() as u32, map.height.ceil() as u32);
+    // At 2x: the whole map, not the part the pane shows.
+    assert_eq!((width, height), (w * 2, hgt * 2));
+    assert!(
+        h.screen.toasts.iter().any(|t| t.contains("画像")),
+        "{:?}",
+        h.screen.toasts
+    );
+    let _ = std::fs::remove_file(&path);
+}

@@ -212,6 +212,20 @@ pub struct Issue {
     pub added_rev: u64,
     /// The session `rev` the issue last changed in (state or a stance).
     pub changed_rev: u64,
+    /// Each state the issue took and the round it took it in, oldest first:
+    /// how the discussion moved on it. Rebuilt from the log on replay.
+    #[serde(default)]
+    pub history: Vec<(RoundNo, IssueState)>,
+}
+
+impl Issue {
+    /// Records `state` as of `round`, unless the issue is already in it.
+    pub fn record(&mut self, round: RoundNo, state: IssueState) {
+        if self.history.last().map(|(_, s)| *s) != Some(state) {
+            self.history.push((round, state));
+        }
+        self.state = state;
+    }
 }
 
 /// The issues in the order they were added; a child always comes after its

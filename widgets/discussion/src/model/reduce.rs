@@ -398,7 +398,7 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
             let Some(issue) = session.issues.get_mut(&issue_id) else {
                 return err(format!("debate {id} on unknown issue {issue_id}"));
             };
-            issue.state = verdict.outcome;
+            issue.record(*round, verdict.outcome);
             issue.changed_rev = rev;
             let section = match verdict.outcome {
                 IssueState::Deferred => MinuteSection::OpenQuestions,
@@ -443,13 +443,14 @@ fn apply_issue_op(session: &mut Session, round: RoundNo, op: &IssueOp) -> Result
                 opened_in: round,
                 added_rev: rev,
                 changed_rev: rev,
+                history: vec![(round, IssueState::Open)],
             });
         }
         IssueOp::SetState { id, state } => {
             let Some(issue) = session.issues.get_mut(id) else {
                 return err(format!("no issue {id}"));
             };
-            issue.state = *state;
+            issue.record(round, *state);
             issue.changed_rev = rev;
         }
         IssueOp::SetStance {
@@ -477,7 +478,9 @@ fn apply_issue_op(session: &mut Session, round: RoundNo, op: &IssueOp) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::types::{AgentKind, Author, MessageId, Position, Role};
+    use crate::model::types::{
+        AgentKind, Author, IssueId, IssueOp, IssueState, MessageId, Position, Role, RoundKind,
+    };
 
     #[test]
     fn a_log_written_before_workdirs_reads_as_none() {
@@ -532,6 +535,53 @@ mod tests {
             body: format!("body {seq}"),
             at: 0,
         }
+    }
+
+    #[test]
+    fn an_issue_keeps_the_rounds_its_state_changed_in() {
+        let mut session = create(&created()).unwrap();
+        let round = |no| Event::RoundStarted {
+            no,
+            kind: RoundKind::Open,
+            at: 0,
+        };
+        let set = |round, state| Event::IssueChanged {
+            round,
+            op: IssueOp::SetState {
+                id: IssueId::new("A"),
+                state,
+            },
+        };
+        apply(
+            &mut session,
+            &[
+                round(1),
+                Event::IssueChanged {
+                    round: 1,
+                    op: IssueOp::Add {
+                        id: IssueId::new("A"),
+                        parent: None,
+                        title: "engine".into(),
+                    },
+                },
+                round(2),
+                set(2, IssueState::Contested),
+                round(3),
+                // The same state again is not a change.
+                set(3, IssueState::Contested),
+                round(4),
+                set(4, IssueState::Agreed),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            session.issues.get(&IssueId::new("A")).unwrap().history,
+            vec![
+                (1, IssueState::Open),
+                (2, IssueState::Contested),
+                (4, IssueState::Agreed)
+            ]
+        );
     }
 
     #[test]

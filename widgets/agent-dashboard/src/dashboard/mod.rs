@@ -302,6 +302,9 @@ pub struct Dashboard {
     body: WidgetId,
     /// The notice line at the foot of the window (`health::tick`).
     notice: WidgetId,
+    /// The result file `view.result` shows, as read when 表示 was pressed:
+    /// a rebuild shows it again without reading the file.
+    preview: Option<(u64, drawer::Preview)>,
     queue_buttons: QueueButtons,
     registry: Registry,
     /// The size the last `prepare` laid the screen out at. A rebuilt screen is
@@ -362,7 +365,7 @@ impl Dashboard {
     fn start(view: View, feed: Feed) -> Self {
         let mut tree = UiTree::new();
         tree.set_theme(Theme::for_appearance(Appearance::Dark));
-        let mut dashboard = Self::build(tree, view, feed, Filter::default(), false);
+        let mut dashboard = Self::build(tree, view, feed, Filter::default(), false, None);
         dashboard.watch();
         dashboard
     }
@@ -798,7 +801,9 @@ impl Dashboard {
         let tree = std::mem::take(&mut self.tree);
         let feed = std::mem::take(&mut self.feed);
         let filter = std::mem::take(&mut self.filter);
-        let old = std::mem::replace(self, Self::build(tree, view, feed, filter, refocus));
+        let preview = self.preview.take();
+        let built = Self::build(tree, view, feed, filter, refocus, preview);
+        let old = std::mem::replace(self, built);
         self.viewport = old.viewport;
         self.watched = old.watched;
         self.wheel_accum = old.wheel_accum;
@@ -825,7 +830,14 @@ impl Dashboard {
     }
 
     /// Builds the screen into `tree`, which has no root or overlay.
-    fn build(mut tree: UiTree, view: View, feed: Feed, filter: Filter, refocus: bool) -> Self {
+    fn build(
+        mut tree: UiTree,
+        view: View,
+        feed: Feed,
+        filter: Filter,
+        refocus: bool,
+        preview: Option<(u64, drawer::Preview)>,
+    ) -> Self {
         let root = tree.insert(
             None,
             Container::new(Style {
@@ -864,6 +876,7 @@ impl Dashboard {
             header,
             body,
             notice,
+            preview,
             queue_buttons: QueueButtons::default(),
             registry,
             viewport: None,
@@ -1068,6 +1081,9 @@ impl Dashboard {
     /// again unasked.
     fn open_drawer(&mut self) {
         self.view.result = self.view.result.filter(|p| Some(*p) == self.view.detail);
+        if self.preview.as_ref().map(|(p, _)| *p) != self.view.result {
+            self.preview = None;
+        }
         let Some(pane) = self.view.detail else {
             return;
         };
@@ -1099,17 +1115,19 @@ impl Dashboard {
             },
             OverlayOptions::PASSIVE,
         );
-        let preview = worker
-            .result
-            .as_deref()
-            .filter(|_| self.view.result == Some(pane))
-            .map(drawer::read_result);
+        if self.preview.is_none()
+            && self.view.result == Some(pane)
+            && let Some(path) = worker.result.as_deref()
+        {
+            self.preview = Some((pane, drawer::read_result(path)));
+        }
+        let preview = self.preview.as_ref().map(|(_, preview)| preview);
         let buttons = drawer::build(
             &mut self.tree,
             root,
             worker,
             &self.feed,
-            preview.as_ref(),
+            preview,
             &mut self.registry,
         );
         self.registry.open_buttons.push((buttons.open, pane));
@@ -1538,6 +1556,7 @@ impl Screen for Dashboard {
         } else if self.registry.result_toggle == Some(source) {
             let shown = self.view.result.is_some() && self.view.result == self.view.detail;
             self.view.result = if shown { None } else { self.view.detail };
+            self.preview = None;
             self.reopen_drawer(text);
         } else if self
             .registry

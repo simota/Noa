@@ -586,6 +586,7 @@ pub(super) fn build(
             .fleet
             .worker(pane)
             .map_or_else(|| format!("ペイン {pane}"), |w| one_line(&w.label)),
+        None if worker.orchestrator_pane == Some(worker.pane) => "なし".to_owned(),
         None if worker.orchestrator.is_empty() => "不明".to_owned(),
         None => one_line(&worker.orchestrator),
     };

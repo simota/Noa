@@ -131,7 +131,7 @@ pub(super) fn queue(
             .count();
         if count(Tier::Decision) == 0 && outside > 0 {
             caption(tree, list, hidden_text(outside));
-        } else if waiting.is_empty() {
+        } else if shown.is_empty() {
             nothing_matches(tree, list);
         }
     }

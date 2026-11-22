@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use noa_gpui_core::widgets::Badge;
 
-use crate::fleet::Tier;
+use crate::fleet::{State, Tier};
 
 use super::*;
 
@@ -361,4 +361,62 @@ fn a_result_behind_a_symbolic_link_is_not_read() {
     let read = drawer::read_result(&link);
     let _ = std::fs::remove_file(&link);
     assert_eq!(read, Err("通常のファイルではありません".to_owned()));
+}
+
+#[test]
+fn a_rebuild_shows_the_result_as_it_was_read() {
+    let file = TempFile::new("kept.md", b"first\n");
+    let (mut dashboard, mut text) = drawer_on_result(file.0.clone(), true);
+    toggle_result(&mut dashboard, &mut text);
+    std::fs::write(&file.0, b"second\n").unwrap();
+    // Another worker changes its state: a structural snapshot rebuilds the
+    // screen, the drawer with it.
+    let mut fleet = dashboard.feed.fleet.clone();
+    fleet
+        .workers
+        .iter_mut()
+        .find(|w| w.pane == 12)
+        .unwrap()
+        .state = State::Permission;
+    dashboard.apply(live(fleet, 0), &mut text);
+    let texts = drawer_texts(&dashboard);
+    assert!(texts.contains(&"first".to_owned()), "{texts:?}");
+    assert!(!texts.contains(&"second".to_owned()), "{texts:?}");
+}
+
+#[test]
+fn a_root_agent_has_no_parent_in_the_drawer() {
+    let mut fleet = fleet::canned();
+    for worker in &mut fleet.workers {
+        if worker.pane == 11 {
+            worker.orchestrator = worker.label.clone();
+            worker.orchestrator_pane = Some(11);
+            worker.parent = None;
+        }
+    }
+    let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet, 0));
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(window(), &mut text);
+    dashboard.set_detail(Some(11), &mut text);
+    let texts = drawer_texts(&dashboard);
+    assert!(texts.contains(&"ID 11 · 親 なし".to_owned()), "{texts:?}");
+}
+
+#[test]
+fn a_filter_that_matches_only_folded_cards_says_so() {
+    let mut fleet = fleet::canned();
+    fleet.workers.retain(|w| !matches!(w.pane, 14..=16));
+    let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet, 0));
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(window(), &mut text);
+    key(&mut dashboard, &mut text, Key::Char('/'));
+    typed(&mut dashboard, &mut text, "/");
+    typed(&mut dashboard, &mut text, "perf-probe");
+    assert!(queue_panes(&dashboard).is_empty());
+    assert!(dashboard.queue_buttons.info_toggle.is_some());
+    assert!(
+        queue_labels(&dashboard).contains(&"該当なし".to_owned()),
+        "{:?}",
+        queue_labels(&dashboard)
+    );
 }

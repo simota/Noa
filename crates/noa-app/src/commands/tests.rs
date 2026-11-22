@@ -627,6 +627,15 @@ fn action_names_map_to_commands() {
         AppCommand::from_action_name("theme-settings.open"),
         Some(AppCommand::OpenThemePicker)
     );
+    // The repo browser shipped as the repo theater in 0.9.10.
+    assert_eq!(
+        AppCommand::OpenRepoBrowser.action_name(),
+        "repo-browser.open"
+    );
+    assert_eq!(
+        AppCommand::from_action_name("repo-theater.open"),
+        Some(AppCommand::OpenRepoBrowser)
+    );
     assert_eq!(AppCommand::from_action_name("nope"), None);
 }
 

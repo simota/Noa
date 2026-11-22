@@ -116,7 +116,7 @@ pub trait Connect {
 }
 
 /// [`Connect`] to the running Noa's control server, found the way
-/// `widgets/repo-theater` finds it: the config's bind/port and token.
+/// `widgets/repo-browser` finds it: the config's bind/port and token.
 #[derive(Debug, Default)]
 pub struct IpcConnect;
 

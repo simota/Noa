@@ -1,6 +1,6 @@
 //! Start a noa-gpui widget program (`widgets/<crate>`, with its own event
 //! loop) beside Noa: the agent dashboard (`agent-dashboard.open`), the repo
-//! theater (`repo-theater.open`) and the discussion (`discussion.open`). They
+//! browser (`repo-browser.open`) and the discussion (`discussion.open`). They
 //! read Noa's panes through the control server, so each runs as a process of
 //! its own.
 
@@ -29,10 +29,10 @@ pub(crate) const AGENT_DASHBOARD: HelperProgram = HelperProgram {
     crate_name: "agent-dashboard",
 };
 
-pub(crate) const REPO_THEATER: HelperProgram = HelperProgram {
-    title: "Repo Theater",
-    bundled: "Noa Repo Theater",
-    crate_name: "repo-theater",
+pub(crate) const REPO_BROWSER: HelperProgram = HelperProgram {
+    title: "Repo Browser",
+    bundled: "Noa Repo Browser",
+    crate_name: "repo-browser",
 };
 
 pub(crate) const DISCUSSION: HelperProgram = HelperProgram {
@@ -225,7 +225,7 @@ mod tests {
 
     #[test]
     fn the_dev_build_dirs_are_each_programs_own_crate_target_dirs() {
-        for helper in [AGENT_DASHBOARD, REPO_THEATER, DISCUSSION] {
+        for helper in [AGENT_DASHBOARD, REPO_BROWSER, DISCUSSION] {
             let dirs = dev_build_dirs(helper);
             assert_eq!(dirs.len(), 2);
             let crate_dir = format!("widgets/{}/target", helper.crate_name);
@@ -250,18 +250,18 @@ mod tests {
     }
 
     #[test]
-    fn repo_theater_is_found_by_its_own_binary_name() {
-        let exe_dir = scratch_dir("theater-exe");
-        let dev = scratch_dir("theater-dev");
+    fn repo_browser_is_found_by_its_own_binary_name() {
+        let exe_dir = scratch_dir("browser-exe");
+        let dev = scratch_dir("browser-dev");
         std::fs::write(dev.join(AGENT_DASHBOARD.crate_name), "").unwrap();
         assert_eq!(
-            locate(REPO_THEATER, Some(&exe_dir), std::slice::from_ref(&dev)),
+            locate(REPO_BROWSER, Some(&exe_dir), std::slice::from_ref(&dev)),
             None
         );
-        std::fs::write(dev.join("repo-theater"), "").unwrap();
+        std::fs::write(dev.join("repo-browser"), "").unwrap();
         assert_eq!(
-            locate(REPO_THEATER, Some(&exe_dir), std::slice::from_ref(&dev)),
-            Some(dev.join("repo-theater"))
+            locate(REPO_BROWSER, Some(&exe_dir), std::slice::from_ref(&dev)),
+            Some(dev.join("repo-browser"))
         );
         for dir in [exe_dir, dev] {
             let _ = std::fs::remove_dir_all(dir);
@@ -272,7 +272,7 @@ mod tests {
     fn discussion_is_found_by_its_own_binary_name() {
         let exe_dir = scratch_dir("discussion-exe");
         let dev = scratch_dir("discussion-dev");
-        std::fs::write(dev.join(REPO_THEATER.crate_name), "").unwrap();
+        std::fs::write(dev.join(REPO_BROWSER.crate_name), "").unwrap();
         assert_eq!(
             locate(DISCUSSION, Some(&exe_dir), std::slice::from_ref(&dev)),
             None

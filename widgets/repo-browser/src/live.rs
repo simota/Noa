@@ -11,7 +11,7 @@ use noa_ipc::{
 };
 
 use crate::git;
-use crate::model::{AgentActivity, DiffMode, PaneSummary, TheaterData, Worktree, group_repos};
+use crate::model::{AgentActivity, DiffMode, PaneSummary, RepoData, Worktree, group_repos};
 
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(4);
@@ -28,7 +28,7 @@ pub enum Link {
 
 #[derive(Debug, Clone)]
 pub struct Snapshot {
-    pub data: TheaterData,
+    pub data: RepoData,
     pub link: Link,
     pub can_focus: bool,
     pub can_send: bool,
@@ -73,9 +73,9 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Channel {
     let (commands, command_rx) = mpsc::channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
     std::thread::Builder::new()
-        .name("repo-theater-live".into())
+        .name("repo-browser-live".into())
         .spawn(move || run(snapshot_tx, notice_tx, delivered_tx, command_rx, wake))
-        .expect("spawn repo-theater-live thread");
+        .expect("spawn repo-browser-live thread");
     Channel {
         snapshots,
         notices,
@@ -96,7 +96,7 @@ fn run(
     let mut selected_file: Option<(String, String)> = None;
 
     let _ = snapshot_tx.send(Snapshot {
-        data: TheaterData::default(),
+        data: RepoData::default(),
         link: Link::Connecting,
         can_focus: false,
         can_send: false,
@@ -200,7 +200,7 @@ fn run(
                             }
                             Err(err) => {
                                 let _ = snapshot_tx.send(Snapshot {
-                                    data: TheaterData::default(),
+                                    data: RepoData::default(),
                                     link: Link::Down(format!("接続が切れました: {err}")),
                                     can_focus: false,
                                     can_send: false,
@@ -218,7 +218,7 @@ fn run(
                         Ok(None) => {}
                         Err(err) => {
                             let _ = snapshot_tx.send(Snapshot {
-                                data: TheaterData::default(),
+                                data: RepoData::default(),
                                 link: Link::Down(format!("切断: {err}")),
                                 can_focus: false,
                                 can_send: false,
@@ -234,7 +234,7 @@ fn run(
             Err(why) => {
                 if snapshot_tx
                     .send(Snapshot {
-                        data: TheaterData::default(),
+                        data: RepoData::default(),
                         link: Link::Down(why),
                         can_focus: false,
                         can_send: false,
@@ -306,7 +306,7 @@ fn build_snapshot(
     client: &mut Client,
     mode: DiffMode,
     selected: Option<&(String, String)>,
-) -> Result<(TheaterData, Option<DiffEntry>), ClientError> {
+) -> Result<(RepoData, Option<DiffEntry>), ClientError> {
     let panels = client.list_panels()?;
     let mut by_worktree: HashMap<String, (git::WorktreeGitInfo, Vec<PaneSummary>)> = HashMap::new();
 

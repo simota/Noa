@@ -444,7 +444,7 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         use std::sync::atomic::{AtomicUsize, Ordering};
         static N: AtomicUsize = AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "repo-theater-{name}-{}-{}",
+            "repo-browser-{name}-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));

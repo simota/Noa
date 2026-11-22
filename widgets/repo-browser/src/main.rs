@@ -12,9 +12,9 @@ use noa_gpui_scene::Size;
 use noa_gpui_text::TextStore;
 
 use crate::live::{Link, Snapshot};
-use crate::ui::RepoTheater;
+use crate::ui::RepoBrowser;
 
-const USAGE: &str = "usage: repo-theater [--demo] [--snapshot=FILE.png [--size=WxH]]\n  \
+const USAGE: &str = "usage: repo-browser [--demo] [--snapshot=FILE.png [--size=WxH]]\n  \
                      live data from the running Noa control server by default; \
                      --demo shows canned multi-worktree data";
 const DEFAULT_SIZE: (u32, u32) = (1440, 900);
@@ -23,9 +23,9 @@ const FIRST_SNAPSHOT_WAIT: Duration = Duration::from_secs(3);
 
 fn options() -> AppOptions {
     AppOptions {
-        title: "Noa · Repo Theater（横断リポジトリ＆差分レビュー）".into(),
+        title: "Noa · Repo Browser（横断リポジトリ＆差分レビュー）".into(),
         size: (1440.0, 900.0),
-        ..AppOptions::new("Noa Repo Theater")
+        ..AppOptions::new("Noa Repo Browser")
     }
 }
 
@@ -95,9 +95,9 @@ fn main() -> Result<(), String> {
 
     if let Some(path) = snapshot_path {
         let mut screen = if demo {
-            RepoTheater::demo()
+            RepoBrowser::demo()
         } else {
-            RepoTheater::of_snapshot(first_live_snapshot()?)
+            RepoBrowser::of_snapshot(first_live_snapshot()?)
         };
         render_snapshot(&path, &mut screen, size)?;
         println!("wrote {}", path.display());
@@ -106,11 +106,11 @@ fn main() -> Result<(), String> {
 
     App::new(options(), move |setup| {
         if demo {
-            return Box::new(RepoTheater::demo());
+            return Box::new(RepoBrowser::demo());
         }
         let waker = setup.waker.clone();
         let channel = live::start(move || waker.wake());
-        Box::new(RepoTheater::live(channel))
+        Box::new(RepoBrowser::live(channel))
     })
     .run()
     .map_err(|e| e.to_string())

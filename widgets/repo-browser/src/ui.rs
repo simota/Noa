@@ -19,7 +19,7 @@ use noa_gpui_scene::{Color, Size};
 use noa_gpui_text::TextStore;
 
 use crate::live::{Channel, Command, Link, Snapshot};
-use crate::model::{AgentActivity, ChangedFile, DiffMode, Repo, TheaterData, Worktree, demo_data};
+use crate::model::{AgentActivity, ChangedFile, DiffMode, Repo, RepoData, Worktree, demo_data};
 
 const DIFF_ADD_FG: Color = Color::rgba(0.45, 0.90, 0.56, 1.0);
 const DIFF_ADD_BG: Color = Color::rgba(0.14, 0.36, 0.20, 0.42);
@@ -57,15 +57,15 @@ enum Source {
     Live(Channel),
 }
 
-pub struct RepoTheater {
+pub struct RepoBrowser {
     tree: UiTree,
     source: Source,
     link: Link,
     can_focus: bool,
     can_send: bool,
     diff_mode: DiffMode,
-    raw_data: TheaterData,
-    filtered: TheaterData,
+    raw_data: RepoData,
+    filtered: RepoData,
     tokens: Vec<String>,
     diff_cache: HashMap<(String, String), String>,
     /// The file the live feed was last asked to keep refreshing.
@@ -116,7 +116,7 @@ pub struct RepoTheater {
     toasts: Vec<String>,
 }
 
-impl RepoTheater {
+impl RepoBrowser {
     pub fn demo() -> Self {
         let data = demo_data(DiffMode::Unstaged);
         Self::build(Source::Demo, Link::Live, true, true, data)
@@ -128,25 +128,25 @@ impl RepoTheater {
             Link::Connecting,
             false,
             false,
-            TheaterData::default(),
+            RepoData::default(),
         )
     }
 
     pub fn of_snapshot(snapshot: Snapshot) -> Self {
-        let mut theater = Self::build(
+        let mut screen = Self::build(
             Source::Snapshot,
             snapshot.link,
             snapshot.can_focus,
             snapshot.can_send,
             snapshot.data,
         );
-        theater.diff_mode = snapshot.diff_mode;
+        screen.diff_mode = snapshot.diff_mode;
         if let Some((cwd, path, diff)) = snapshot.selected_diff {
-            theater.diff_cache.insert((cwd, path), diff);
+            screen.diff_cache.insert((cwd, path), diff);
         }
         let mut text = TextStore::new(Default::default());
-        theater.sync_views(&mut text);
-        theater
+        screen.sync_views(&mut text);
+        screen
     }
 
     fn build(
@@ -154,7 +154,7 @@ impl RepoTheater {
         link: Link,
         can_focus: bool,
         can_send: bool,
-        raw_data: TheaterData,
+        raw_data: RepoData,
     ) -> Self {
         let mut tree = UiTree::new();
         tree.set_theme(Theme::dark());
@@ -274,7 +274,7 @@ impl RepoTheater {
                 .pane(SplitPane::fixed(400.0).min(260.0).rail(36.0)),
         );
 
-        // Left pane: vertical SplitView (BrowserView | Diff Theater)
+        // Left pane: vertical SplitView (BrowserView | diff view)
         let left_split = tree.insert(
             Some(outer_split),
             SplitView::vertical()
@@ -299,7 +299,7 @@ impl RepoTheater {
             BrowserView::new(Vec::new()).height(240.0),
         );
 
-        // Bottom-left: Diff theater column
+        // Bottom-left: diff view column
         let diff_col = tree.insert(
             Some(left_split),
             Container::new(Style {
@@ -478,7 +478,7 @@ impl RepoTheater {
         tree.add_shortcut(Shortcut::command('b'), toggle_side_btn);
 
         let filtered = raw_data.clone();
-        let mut theater = Self {
+        let mut screen = Self {
             tree,
             source,
             link,
@@ -525,8 +525,8 @@ impl RepoTheater {
             toasts: Vec::new(),
         };
         let mut text = TextStore::new(Default::default());
-        theater.sync_views(&mut text);
-        theater
+        screen.sync_views(&mut text);
+        screen
     }
 
     fn current_repo(&self) -> Option<&Repo> {
@@ -783,7 +783,7 @@ impl RepoTheater {
                         .unwrap_or_else(|| "(このワークツリーに差分はありません)".into()),
                 ),
                 _ => (
-                    "差分シアター".into(),
+                    "差分ビュー".into(),
                     None,
                     "(左のカラムブラウザからファイルを選択してください)".into(),
                 ),
@@ -1314,7 +1314,7 @@ impl RepoTheater {
     }
 }
 
-impl Screen for RepoTheater {
+impl Screen for RepoBrowser {
     fn tree(&self) -> &UiTree {
         &self.tree
     }
@@ -1385,7 +1385,7 @@ mod tests {
 
     #[test]
     fn demo_screen_lays_out_and_switches_diff_mode() {
-        let mut screen = RepoTheater::demo();
+        let mut screen = RepoBrowser::demo();
         let mut text = TextStore::new(Default::default());
         screen.prepare(Size::new(1440.0, 900.0), &mut text);
         assert!(screen.tree().layout(screen.outer_split).is_some());
@@ -1398,7 +1398,7 @@ mod tests {
 
     #[test]
     fn command_palette_opens_and_quotes_diff() {
-        let mut screen = RepoTheater::demo();
+        let mut screen = RepoBrowser::demo();
         let mut text = TextStore::new(Default::default());
         screen.prepare(Size::new(1440.0, 900.0), &mut text);
 
@@ -1421,7 +1421,7 @@ mod tests {
 
     const CWD: &str = "/repo";
 
-    fn live_data() -> TheaterData {
+    fn live_data() -> RepoData {
         let file = |path: &str| ChangedFile {
             path: path.into(),
             status: "M".into(),
@@ -1430,7 +1430,7 @@ mod tests {
             diff: String::new(),
             conflict_worktrees: Vec::new(),
         };
-        TheaterData {
+        RepoData {
             repos: vec![Repo {
                 name: "repo".into(),
                 root: CWD.into(),
@@ -1469,7 +1469,7 @@ mod tests {
     }
 
     struct LiveHarness {
-        screen: RepoTheater,
+        screen: RepoBrowser,
         text: TextStore,
         feed: TestFeed,
     }
@@ -1478,7 +1478,7 @@ mod tests {
         fn new() -> Self {
             let (channel, feed) = test_channel();
             let mut h = LiveHarness {
-                screen: RepoTheater::live(channel),
+                screen: RepoBrowser::live(channel),
                 text: TextStore::new(Default::default()),
                 feed,
             };
@@ -1614,7 +1614,7 @@ mod tests {
         );
     }
 
-    fn prompt_text(screen: &RepoTheater) -> String {
+    fn prompt_text(screen: &RepoBrowser) -> String {
         screen
             .tree()
             .get::<TextArea>(screen.prompt_area)
@@ -1623,7 +1623,7 @@ mod tests {
             .to_owned()
     }
 
-    fn set_prompt(screen: &mut RepoTheater, text: &str) {
+    fn set_prompt(screen: &mut RepoBrowser, text: &str) {
         let text = text.to_owned();
         screen
             .tree
@@ -1711,7 +1711,7 @@ mod tests {
 
     #[test]
     fn diff_mode_from_palette_updates_toolbar_segment() {
-        let mut screen = RepoTheater::demo();
+        let mut screen = RepoBrowser::demo();
         let mut text = TextStore::new(Default::default());
         screen.prepare(Size::new(1440.0, 900.0), &mut text);
         screen.run_palette_action(PaletteAction::SwitchDiffMode(DiffMode::Staged), &mut text);
@@ -1723,7 +1723,7 @@ mod tests {
     }
 
     /// The palette action that selects `path` in the palette as it was opened.
-    fn palette_file_action(screen: &RepoTheater, path: &str) -> PaletteAction {
+    fn palette_file_action(screen: &RepoBrowser, path: &str) -> PaletteAction {
         let (_, actions) = screen.active_palette.as_ref().unwrap();
         actions
             .iter()
@@ -1754,7 +1754,7 @@ mod tests {
 
     #[test]
     fn live_snapshot_render_shows_link_state() {
-        let screen = RepoTheater::of_snapshot(snapshot(DiffMode::Unstaged, None));
+        let screen = RepoBrowser::of_snapshot(snapshot(DiffMode::Unstaged, None));
         let badges: Vec<String> = screen
             .tree()
             .children(screen.status_leading)

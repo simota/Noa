@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The repo theater is now the repo browser: View > Repo Browser and the
+  command palette's Open Repo Browser open it, and `Noa.app` ships it as
+  "Noa Repo Browser". Its action is `repo-browser.open`; the old
+  `repo-theater.open` still works.
+
 ## [0.9.11] - 2026-11-22
 
 A moderated discussion window where agent panelists debate a topic in panes.

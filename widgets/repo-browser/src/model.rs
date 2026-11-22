@@ -138,11 +138,11 @@ impl Repo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct TheaterData {
+pub struct RepoData {
     pub repos: Vec<Repo>,
 }
 
-impl TheaterData {
+impl RepoData {
     /// Marks files that are modified in more than one worktree of the same repo.
     pub fn compute_conflicts(&mut self) {
         for repo in &mut self.repos {
@@ -185,7 +185,7 @@ impl TheaterData {
     }
 
     /// Filter repos/worktrees/files according to active token strings.
-    pub fn filtered(&self, tokens: &[String]) -> TheaterData {
+    pub fn filtered(&self, tokens: &[String]) -> RepoData {
         if tokens.is_empty() {
             return self.clone();
         }
@@ -210,7 +210,7 @@ impl TheaterData {
                 });
             }
         }
-        TheaterData { repos }
+        RepoData { repos }
     }
 }
 
@@ -250,7 +250,7 @@ fn worktree_matches(repo: &Repo, wt: &Worktree, tokens: &[String]) -> bool {
 }
 
 /// Group panels by repository key and worktree cwd in deterministic order.
-pub fn group_repos(entries: Vec<(String, String, Worktree)>) -> TheaterData {
+pub fn group_repos(entries: Vec<(String, String, Worktree)>) -> RepoData {
     let mut by_repo: BTreeMap<String, (String, Vec<Worktree>)> = BTreeMap::new();
     for (repo_name, repo_root, wt) in entries {
         let entry = by_repo
@@ -269,19 +269,19 @@ pub fn group_repos(entries: Vec<(String, String, Worktree)>) -> TheaterData {
             }
         })
         .collect();
-    let mut data = TheaterData { repos };
+    let mut data = RepoData { repos };
     data.compute_conflicts();
     data
 }
 
-pub fn demo_data(mode: DiffMode) -> TheaterData {
+pub fn demo_data(mode: DiffMode) -> RepoData {
     let suffix = match mode {
         DiffMode::Unstaged => "",
         DiffMode::Staged => " [staged]",
         DiffMode::VsMain => " [vs main]",
     };
 
-    let mut data = TheaterData {
+    let mut data = RepoData {
         repos: vec![
             Repo {
                 name: "Noa".into(),
@@ -450,7 +450,7 @@ pub fn demo_data(mode: DiffMode) -> TheaterData {
                                  +++ b/docs/FEATURES.md\n\
                                  @@ -118,3 +118,8 @@\n\
                                   - `widgets/agent-dashboard`: agent fleet operations dashboard\n\
-                                 +- `widgets/repo-theater`: cross-worktree browser & live diff theater\n"
+                                 +- `widgets/repo-browser`: cross-worktree browser & live diff review\n"
                             ),
                             conflict_worktrees: Vec::new(),
                         }],
@@ -535,7 +535,7 @@ mod tests {
             panes: Vec::new(),
             files: vec![file("src/lib.rs")],
         };
-        let mut data = TheaterData {
+        let mut data = RepoData {
             repos: vec![Repo {
                 name: "r".into(),
                 root: "/r".into(),

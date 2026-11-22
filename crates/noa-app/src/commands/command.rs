@@ -97,9 +97,9 @@ pub enum AppCommand {
     /// Start the agent dashboard (`widgets/agent-dashboard`) as a program of
     /// its own beside Noa.
     OpenAgentDashboard,
-    /// Start the repo theater (`widgets/repo-theater`), the cross-worktree
+    /// Start the repo browser (`widgets/repo-browser`), the cross-worktree
     /// diff review window, as a program of its own beside Noa.
-    OpenRepoTheater,
+    OpenRepoBrowser,
     /// Start the discussion (`widgets/discussion`), a moderated discussion
     /// between agents running in Noa's panes, as a program of its own beside
     /// Noa.
@@ -283,7 +283,7 @@ impl AppCommand {
     pub(crate) const TOGGLE_AUTO_APPROVE_MENU_ID: &'static str = "noa.view.toggle-auto-approve";
     pub(crate) const TOGGLE_EMBER_MENU_ID: &'static str = "noa.view.toggle-ember";
     pub(crate) const OPEN_AGENT_DASHBOARD_MENU_ID: &'static str = "noa.view.open-agent-dashboard";
-    pub(crate) const OPEN_REPO_THEATER_MENU_ID: &'static str = "noa.view.open-repo-theater";
+    pub(crate) const OPEN_REPO_BROWSER_MENU_ID: &'static str = "noa.view.open-repo-browser";
     pub(crate) const OPEN_DISCUSSION_MENU_ID: &'static str = "noa.view.open-discussion";
     pub(crate) const OPEN_SETTINGS_MENU_ID: &'static str = "noa.view.open-settings";
 
@@ -368,7 +368,7 @@ impl AppCommand {
             AppCommand::ToggleAutoApprove => Self::TOGGLE_AUTO_APPROVE_MENU_ID,
             AppCommand::ToggleEmber => Self::TOGGLE_EMBER_MENU_ID,
             AppCommand::OpenAgentDashboard => Self::OPEN_AGENT_DASHBOARD_MENU_ID,
-            AppCommand::OpenRepoTheater => Self::OPEN_REPO_THEATER_MENU_ID,
+            AppCommand::OpenRepoBrowser => Self::OPEN_REPO_BROWSER_MENU_ID,
             AppCommand::OpenDiscussion => Self::OPEN_DISCUSSION_MENU_ID,
         }
     }
@@ -442,7 +442,7 @@ impl AppCommand {
             Self::TOGGLE_AUTO_APPROVE_MENU_ID => Some(Self::ToggleAutoApprove),
             Self::TOGGLE_EMBER_MENU_ID => Some(Self::ToggleEmber),
             Self::OPEN_AGENT_DASHBOARD_MENU_ID => Some(Self::OpenAgentDashboard),
-            Self::OPEN_REPO_THEATER_MENU_ID => Some(Self::OpenRepoTheater),
+            Self::OPEN_REPO_BROWSER_MENU_ID => Some(Self::OpenRepoBrowser),
             Self::OPEN_DISCUSSION_MENU_ID => Some(Self::OpenDiscussion),
             Self::OPEN_SETTINGS_MENU_ID => Some(Self::OpenSettings),
             _ => None,
@@ -570,7 +570,7 @@ impl AppCommand {
             Self::ToggleAutoApprove => "auto-approve.toggle",
             Self::ToggleEmber => "ember.toggle",
             Self::OpenAgentDashboard => "agent-dashboard.open",
-            Self::OpenRepoTheater => "repo-theater.open",
+            Self::OpenRepoBrowser => "repo-browser.open",
             Self::OpenDiscussion => "discussion.open",
             Self::OpenThemePicker => "theme.open",
             Self::OpenSettings => "settings.open",
@@ -666,7 +666,8 @@ impl AppCommand {
             "auto-approve.toggle" => Some(Self::ToggleAutoApprove),
             "ember.toggle" => Some(Self::ToggleEmber),
             "agent-dashboard.open" => Some(Self::OpenAgentDashboard),
-            "repo-theater.open" => Some(Self::OpenRepoTheater),
+            // `repo-theater.open` is the name 0.9.10 shipped it under.
+            "repo-browser.open" | "repo-theater.open" => Some(Self::OpenRepoBrowser),
             "discussion.open" => Some(Self::OpenDiscussion),
             "theme.open" | "theme-settings.open" => Some(Self::OpenThemePicker),
             "settings.open" => Some(Self::OpenSettings),

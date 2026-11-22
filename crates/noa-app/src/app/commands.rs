@@ -237,8 +237,8 @@ impl App {
             AppCommand::OpenAgentDashboard => {
                 self.open_helper_program(crate::helper_program::AGENT_DASHBOARD)
             }
-            AppCommand::OpenRepoTheater => {
-                self.open_helper_program(crate::helper_program::REPO_THEATER)
+            AppCommand::OpenRepoBrowser => {
+                self.open_helper_program(crate::helper_program::REPO_BROWSER)
             }
             AppCommand::OpenDiscussion => {
                 self.open_helper_program(crate::helper_program::DISCUSSION)
@@ -380,7 +380,7 @@ impl App {
         self.request_sidebar_redraw();
     }
 
-    /// `agent-dashboard.open` / `repo-theater.open` / `discussion.open`. Why
+    /// `agent-dashboard.open` / `repo-browser.open` / `discussion.open`. Why
     /// it could not start, or why it exited unsuccessfully, is shown as a
     /// toast: the program is a separate process whose stderr nobody sees.
     fn open_helper_program(&mut self, helper: crate::helper_program::HelperProgram) {

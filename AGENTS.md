@@ -60,7 +60,7 @@ when no GPU adapter is available.
 - Before a pull request: `scripts/verify.sh --full`. CI runs exactly this on
   macOS and Linux; clippy (`-D warnings`) and desktop-file validation run only
   on Linux, as before. It also builds `widgets/agent-dashboard`,
-  `widgets/repo-theater` and `widgets/discussion`, crates outside the
+  `widgets/repo-browser` and `widgets/discussion`, crates outside the
   workspace, with their tests; the tests run only on macOS (some expect the
   widths of macOS's system fonts). `scripts/verify.sh` runs the same check when
   a change reaches one of these crates or the Noa crates it uses by path.

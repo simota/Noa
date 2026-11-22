@@ -7,11 +7,11 @@ use noa_gpui_core::style::{
 };
 use noa_gpui_core::widgets::{
     Badge, BrowserPathChanged, BrowserView, Button, ButtonClicked, COMMAND_PALETTE_SHORTCUTS,
-    CommandChosen, CommandPalette, Container, ControlSize, EmptyState, FIND_SHORTCUT, FileDropZone,
-    FilesDropped, FindBar, Kbd, Label, LogLine, LogView, OutlineItem, PaletteCommand, PathControl,
-    PathItemClicked, RecentCommands, ScrollView, SegmentMode, SegmentedControl, SelectionChanged,
-    SplitPane, SplitView, StatusBar, TabView, Terminal, TextArea, Toast, TokenField, TokensChanged,
-    Tone, Truncation, drive_find,
+    ComboButton, CommandChosen, CommandPalette, Container, ControlSize, EmptyState, FIND_SHORTCUT,
+    FileDropZone, FilesDropped, FindBar, Kbd, Label, LogLine, LogView, MenuChosen, MenuItem,
+    OutlineItem, PaletteCommand, PathControl, PathItemClicked, RecentCommands, ScrollView,
+    SegmentMode, SegmentedControl, SelectionChanged, SplitPane, SplitView, StatusBar, TabView,
+    Terminal, TextArea, Toast, TokenField, TokensChanged, Tone, Truncation, drive_find,
 };
 use noa_gpui_core::{Message, Role, Shortcut, ShortcutPressed, Style, Theme, UiTree, WidgetId};
 use noa_gpui_platform::Screen;
@@ -38,6 +38,9 @@ enum PaletteAction {
         path: String,
     },
     FocusPane(u64),
+    /// Resolved against the selection when chosen.
+    OpenShell,
+    OpenEditor,
     SwitchDiffMode(DiffMode),
     ToggleInspector,
     Refresh,
@@ -248,9 +251,14 @@ impl RepoBrowser {
         );
         let focus_btn = tree.insert(
             Some(toolbar),
-            Button::new("ペインを開く")
-                .default_button(true)
-                .control_size(ControlSize::Small),
+            ComboButton::new(
+                "ペインを開く",
+                vec![
+                    MenuItem::new("ここでシェルを開く").key(SHELL_SHORTCUT),
+                    MenuItem::new("エディタで開く").key(EDITOR_SHORTCUT),
+                ],
+            )
+            .control_size(ControlSize::Small),
         );
         let toggle_side_btn = tree.insert(
             Some(toolbar),
@@ -482,6 +490,8 @@ impl RepoBrowser {
         tree.add_shortcut(FIND_SHORTCUT, find_bar);
         tree.add_shortcut(Shortcut::command('r'), refresh_btn);
         tree.add_shortcut(Shortcut::command('b'), toggle_side_btn);
+        tree.add_shortcut(SHELL_SHORTCUT, focus_btn);
+        tree.add_shortcut(EDITOR_SHORTCUT, focus_btn);
 
         let filtered = raw_data.clone();
         let mut screen = Self {
@@ -887,6 +897,8 @@ impl RepoBrowser {
         for (sc, text) in [
             (Shortcut::command('k'), "検索"),
             (Shortcut::command('f'), "差分検索"),
+            (SHELL_SHORTCUT, "シェル"),
+            (EDITOR_SHORTCUT, "エディタ"),
             (Shortcut::command('b'), "右パネル"),
         ] {
             self.tree
@@ -933,6 +945,23 @@ impl RepoBrowser {
                     .keywords("diff mode staged unstaged main"),
             );
             actions.push(PaletteAction::SwitchDiffMode(mode));
+        }
+        if let Some(wt) = self.current_worktree() {
+            commands.push(
+                PaletteCommand::new(format!("ここでシェルを開く: {}", wt.branch))
+                    .detail(wt.cwd.clone())
+                    .shortcut(SHELL_SHORTCUT)
+                    .keywords("open shell terminal new tab worktree"),
+            );
+            actions.push(PaletteAction::OpenShell);
+        }
+        if let Some(file) = self.current_file() {
+            commands.push(
+                PaletteCommand::new(format!("エディタで開く: {}", file.path))
+                    .shortcut(EDITOR_SHORTCUT)
+                    .keywords("open editor edit vim code"),
+            );
+            actions.push(PaletteAction::OpenEditor);
         }
         commands.push(
             PaletteCommand::new("右パネルを開閉")
@@ -988,6 +1017,81 @@ impl RepoBrowser {
                 ch.send(Command::Focus(pane_id));
             }
         }
+    }
+
+    /// A new Noa tab with a shell in the selected worktree's root. Works for
+    /// a worktree without panes.
+    fn open_shell_here(&mut self) {
+        let Some(cwd) = self.current_worktree().map(|wt| wt.cwd.clone()) else {
+            self.toast("worktree が選択されていません");
+            return;
+        };
+        match &self.source {
+            Source::Demo | Source::Snapshot => {
+                self.toast(format!("[DEMO] {cwd} で新しいタブのシェルを開きます"))
+            }
+            Source::Live(ch) => {
+                if !self.can_focus {
+                    self.toast("server-scopes に control が必要です");
+                    return;
+                }
+                ch.send(Command::OpenShell { cwd });
+            }
+        }
+    }
+
+    /// A new Noa tab in the selected worktree running the editor on the
+    /// selected file, at the diff selection's line.
+    fn open_in_editor(&mut self) {
+        let (Some(cwd), Some(file)) = (
+            self.current_worktree().map(|wt| wt.cwd.clone()),
+            self.current_file(),
+        ) else {
+            self.toast("開くファイルが選択されていません");
+            return;
+        };
+        if file.status == "D" {
+            self.toast(format!("{} は削除済みのため開けません", file.path));
+            return;
+        }
+        let path = file.path.clone();
+        let line = self.editor_line();
+        match &self.source {
+            Source::Demo | Source::Snapshot => self.toast(format!(
+                "[DEMO] 新しいタブのエディタで {path}:{line} を開きます"
+            )),
+            Source::Live(ch) => {
+                // The editor is a command, which takes `input` on top of `control`.
+                if !self.can_focus {
+                    self.toast("server-scopes に control が必要です");
+                    return;
+                }
+                if !self.can_send {
+                    self.toast("server-scopes に input が必要です");
+                    return;
+                }
+                ch.send(Command::OpenEditor { cwd, path, line });
+            }
+        }
+    }
+
+    /// The line the editor opens at: the first selected diff line that has a
+    /// new-side number, else the first hunk's new start, else 1.
+    fn editor_line(&self) -> u32 {
+        let selected = self
+            .tree
+            .get::<LogView>(self.diff_log)
+            .and_then(LogView::selected_lines);
+        let from_selection = selected
+            .zip(self.gutter.as_ref())
+            .and_then(|(lines, gutter)| gutter.first_new_line(lines));
+        let first_hunk = || {
+            self.current_diff_text()?
+                .lines()
+                .find_map(parse_hunk_header)
+                .map(|(_, new)| new)
+        };
+        from_selection.or_else(first_hunk).unwrap_or(1).max(1)
     }
 
     fn quote_selected_diff(&mut self) {
@@ -1207,6 +1311,8 @@ impl RepoBrowser {
                 }
                 Source::Live(ch) => ch.send(Command::Focus(id)),
             },
+            PaletteAction::OpenShell => self.open_shell_here(),
+            PaletteAction::OpenEditor => self.open_in_editor(),
             PaletteAction::SwitchDiffMode(m) => self.set_diff_mode(m, text),
             PaletteAction::ToggleInspector => self.toggle_inspector(),
             PaletteAction::Refresh => {
@@ -1242,6 +1348,24 @@ impl RepoBrowser {
                 self.toggle_inspector();
                 return;
             }
+            if *sc == SHELL_SHORTCUT {
+                self.open_shell_here();
+                return;
+            }
+            if *sc == EDITOR_SHORTCUT {
+                self.open_in_editor();
+                return;
+            }
+        }
+
+        if message.source == self.focus_btn
+            && let Some(MenuChosen(idx)) = message.downcast_ref::<MenuChosen>()
+        {
+            match idx {
+                0 => self.open_shell_here(),
+                _ => self.open_in_editor(),
+            }
+            return;
         }
 
         if let Some((palette_id, actions)) = &self.active_palette
@@ -1380,7 +1504,7 @@ impl Screen for RepoBrowser {
 /// Shell-escapes one word: single-quotes it (embedded `'` as `'\''`) unless
 /// it only holds characters no shell treats specially. Mirrors noa-app's
 /// drop/paste escaping.
-fn shell_escape(s: &str) -> String {
+pub(crate) fn shell_escape(s: &str) -> String {
     let is_safe = !s.is_empty()
         && s.bytes().all(|b| {
             b.is_ascii_alphanumeric()
@@ -1394,6 +1518,10 @@ fn shell_escape(s: &str) -> String {
     }
     format!("'{}'", s.replace('\'', "'\\''"))
 }
+
+/// Open a shell in the selected worktree / the selected file in the editor.
+const SHELL_SHORTCUT: Shortcut = Shortcut::command('t');
+const EDITOR_SHORTCUT: Shortcut = Shortcut::command('e');
 
 const BROWSER_HEIGHT: f32 = 240.0;
 const BROWSER_COLUMN: f32 = 310.0;
@@ -1497,6 +1625,11 @@ impl Gutter {
             .map(|line| line.chars().skip(self.width()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The first new-side line number among `lines` (a selection).
+    fn first_new_line(&self, lines: std::ops::Range<usize>) -> Option<u32> {
+        self.numbers.get(lines)?.iter().find_map(|&(_, new)| new)
     }
 
     /// "L12-L18" for the new-side lines in `lines`, or "旧L12-L18" when the
@@ -2024,5 +2157,197 @@ mod tests {
         h.screen
             .send_dropped_files(&[PathBuf::from("/tmp/plain.txt")]);
         assert!(h.screen.toasts.is_empty(), "{:?}", h.screen.toasts);
+    }
+
+    // ── Open a shell / the editor in a worktree ──────────────────────────────
+
+    fn open_commands(cmds: Vec<Command>) -> Vec<Command> {
+        cmds.into_iter()
+            .filter(|c| matches!(c, Command::OpenShell { .. } | Command::OpenEditor { .. }))
+            .collect()
+    }
+
+    fn select_lines(h: &mut LiveHarness, lines: std::ops::Range<usize>) {
+        let diff_log = h.screen.diff_log;
+        h.screen
+            .tree
+            .update::<LogView, _>(diff_log, |log, cx| log.select_lines(cx, lines));
+    }
+
+    #[test]
+    fn shell_opens_in_the_worktree_root() {
+        let mut h = LiveHarness::new();
+        h.drain();
+        h.screen.open_shell_here();
+        let sent = open_commands(h.drain());
+        assert!(
+            matches!(sent.as_slice(), [Command::OpenShell { cwd }] if cwd == CWD),
+            "{sent:?}"
+        );
+    }
+
+    #[test]
+    fn shell_opens_for_a_worktree_without_panes() {
+        let mut h = LiveHarness::new();
+        let mut snap = snapshot(DiffMode::Unstaged, None);
+        snap.data.repos[0].worktrees[0].panes.clear();
+        h.deliver(snap);
+        h.drain();
+        h.screen.open_shell_here();
+        assert!(matches!(
+            open_commands(h.drain()).as_slice(),
+            [Command::OpenShell { .. }]
+        ));
+    }
+
+    #[test]
+    fn editor_opens_the_selected_file_at_the_selected_line() {
+        let mut h = LiveHarness::new();
+        h.deliver(snapshot(DiffMode::Unstaged, Some(("a.rs", NUMBERED))));
+        select_lines(&mut h, 5..8);
+        h.drain();
+        h.screen.open_in_editor();
+        let sent = open_commands(h.drain());
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [Command::OpenEditor { cwd, path, line: 11 }] if cwd == CWD && path == "a.rs"
+            ),
+            "{sent:?}"
+        );
+    }
+
+    #[test]
+    fn editor_line_falls_back_to_the_first_hunk_then_one() {
+        let mut h = LiveHarness::new();
+        h.deliver(snapshot(DiffMode::Unstaged, Some(("a.rs", NUMBERED))));
+        // Nothing selected: the first hunk's new start.
+        assert_eq!(h.screen.editor_line(), 10);
+        // Only a removed line selected: no new-side number, so the hunk start.
+        select_lines(&mut h, 5..6);
+        assert_eq!(h.screen.editor_line(), 10);
+        // The first selected line with a new-side number wins.
+        select_lines(&mut h, 4..9);
+        assert_eq!(h.screen.editor_line(), 10);
+        select_lines(&mut h, 7..9);
+        assert_eq!(h.screen.editor_line(), 12);
+        // A diff without hunks (a note, or still loading): line 1.
+        h.deliver(snapshot(DiffMode::Unstaged, Some(("a.rs", "(差分なし)"))));
+        assert_eq!(h.screen.editor_line(), 1);
+    }
+
+    #[test]
+    fn gutter_picks_the_first_new_side_line_of_a_selection() {
+        let gutter = Gutter::of(NUMBERED).unwrap();
+        assert_eq!(gutter.first_new_line(5..8), Some(11));
+        assert_eq!(gutter.first_new_line(5..6), None);
+        assert_eq!(gutter.first_new_line(0..4), None);
+    }
+
+    #[test]
+    fn palette_offers_shell_and_editor_and_runs_them() {
+        let mut h = LiveHarness::new();
+        h.screen.open_command_palette();
+        let (_, actions) = h.screen.active_palette.clone().unwrap();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, PaletteAction::OpenShell))
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, PaletteAction::OpenEditor))
+        );
+        h.drain();
+        h.screen
+            .run_palette_action(PaletteAction::OpenShell, &mut h.text);
+        h.screen
+            .run_palette_action(PaletteAction::OpenEditor, &mut h.text);
+        let sent = open_commands(h.drain());
+        assert!(matches!(
+            sent.as_slice(),
+            [
+                Command::OpenShell { .. },
+                Command::OpenEditor { line: 1, .. }
+            ]
+        ));
+    }
+
+    #[test]
+    fn missing_scopes_toast_instead_of_sending() {
+        let mut h = LiveHarness::new();
+        let mut snap = snapshot(DiffMode::Unstaged, Some(("a.rs", "+a v1")));
+        snap.can_focus = false;
+        h.deliver(snap);
+        h.drain();
+        h.screen.toasts.clear();
+        h.screen.open_shell_here();
+        h.screen.open_in_editor();
+        assert!(open_commands(h.drain()).is_empty());
+        assert_eq!(
+            h.screen.toasts,
+            vec!["server-scopes に control が必要です"; 2]
+        );
+
+        // control without input: a shell opens, the editor command cannot.
+        let mut snap = snapshot(DiffMode::Unstaged, Some(("a.rs", "+a v1")));
+        snap.can_send = false;
+        h.deliver(snap);
+        h.drain();
+        h.screen.toasts.clear();
+        h.screen.open_shell_here();
+        h.screen.open_in_editor();
+        assert!(matches!(
+            open_commands(h.drain()).as_slice(),
+            [Command::OpenShell { .. }]
+        ));
+        assert_eq!(h.screen.toasts, vec!["server-scopes に input が必要です"]);
+    }
+
+    #[test]
+    fn deleted_files_are_not_opened_in_the_editor() {
+        let mut h = LiveHarness::new();
+        let mut snap = snapshot(DiffMode::Unstaged, Some(("a.rs", "+a v1")));
+        snap.data.repos[0].worktrees[0].files[0].status = "D".into();
+        h.deliver(snap);
+        h.drain();
+        h.screen.toasts.clear();
+        h.screen.open_in_editor();
+        assert!(open_commands(h.drain()).is_empty());
+        assert_eq!(h.screen.toasts, vec!["a.rs は削除済みのため開けません"]);
+    }
+
+    #[test]
+    fn server_errors_from_opening_reach_the_toasts() {
+        let mut h = LiveHarness::new();
+        h.screen.toasts.clear();
+        h.feed
+            .notices
+            .send("シェルを開けませんでした: boom".into())
+            .unwrap();
+        h.deliver(snapshot(DiffMode::Unstaged, Some(("a.rs", "+a v1"))));
+        assert_eq!(h.screen.toasts, vec!["シェルを開けませんでした: boom"]);
+    }
+
+    #[test]
+    fn demo_shows_a_toast_instead_of_opening() {
+        let mut screen = RepoBrowser::demo();
+        let mut text = TextStore::new(Default::default());
+        screen.prepare(Size::new(1440.0, 900.0), &mut text);
+        screen.open_shell_here();
+        screen.open_in_editor();
+        assert_eq!(screen.toasts.len(), 2, "{:?}", screen.toasts);
+        assert!(
+            screen.toasts[0].starts_with("[DEMO] "),
+            "{:?}",
+            screen.toasts
+        );
+        assert!(
+            screen.toasts[1].starts_with("[DEMO] "),
+            "{:?}",
+            screen.toasts
+        );
+        assert!(screen.toasts[1].contains(':'), "{:?}", screen.toasts);
     }
 }

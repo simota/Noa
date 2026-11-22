@@ -7,7 +7,8 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use noa_ipc::{
-    Client, ClientError, EventKind, Panel, Scope, ScopeSet, SendTextOptions, TextSource,
+    Client, ClientError, EventKind, Panel, Scope, ScopeSet, SendTextOptions, SpawnConfig,
+    SpawnParams, TextSource,
 };
 
 use crate::git;
@@ -45,6 +46,17 @@ pub enum Command {
         path: String,
     },
     Focus(u64),
+    /// A new Noa tab whose shell starts in `cwd` (a worktree root).
+    OpenShell {
+        cwd: String,
+    },
+    /// A new Noa tab in `cwd` running the editor on `path` (relative to
+    /// `cwd`) at `line`.
+    OpenEditor {
+        cwd: String,
+        path: String,
+        line: u32,
+    },
     SendText {
         pane_id: u64,
         text: String,
@@ -138,6 +150,36 @@ fn run(
                                         .send(format!("ペイン #{pane_id} にフォーカスしました"));
                                     wake();
                                 }
+                            }
+                            Command::OpenShell { cwd } => {
+                                let params = shell_spawn(&cwd);
+                                let notice = match client.spawn_tab(None, &params) {
+                                    Ok(pane_id) => {
+                                        format!(
+                                            "新しいタブでシェルを開きました (ペイン #{pane_id})"
+                                        )
+                                    }
+                                    Err(err) => format!("シェルを開けませんでした: {err}"),
+                                };
+                                let _ = notice_tx.send(notice);
+                                wake();
+                            }
+                            Command::OpenEditor { cwd, path, line } => {
+                                let params = editor_spawn(
+                                    &cwd,
+                                    &path,
+                                    line,
+                                    std::env::var("SHELL").ok().as_deref(),
+                                    editor_from_env().as_deref(),
+                                );
+                                let notice = match client.spawn_tab(None, &params) {
+                                    Ok(pane_id) => format!(
+                                        "新しいタブで {path}:{line} を開きました (ペイン #{pane_id})"
+                                    ),
+                                    Err(err) => format!("エディタを開けませんでした: {err}"),
+                                };
+                                let _ = notice_tx.send(notice);
+                                wake();
                             }
                             Command::SendText {
                                 pane_id,
@@ -261,6 +303,73 @@ fn run(
             }
         }
     }
+}
+
+/// `$VISUAL`, else `$EDITOR`, when set and non-blank in this process.
+fn editor_from_env() -> Option<String> {
+    ["VISUAL", "EDITOR"]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find(|value| !value.trim().is_empty())
+}
+
+/// A new tab (focused: the server's default) with the shell in `cwd`.
+fn shell_spawn(cwd: &str) -> SpawnParams {
+    SpawnParams {
+        config: Some(SpawnConfig {
+            cwd: Some(cwd.to_owned()),
+            ..SpawnConfig::default()
+        }),
+        focus: Some(true),
+        ..SpawnParams::default()
+    }
+}
+
+/// A new tab (focused) in `cwd` running the editor on `path` at `line`.
+fn editor_spawn(
+    cwd: &str,
+    path: &str,
+    line: u32,
+    shell: Option<&str>,
+    editor: Option<&str>,
+) -> SpawnParams {
+    SpawnParams {
+        config: Some(SpawnConfig {
+            command: Some(editor_argv(shell, path, line, editor)),
+            cwd: Some(cwd.to_owned()),
+            ..SpawnConfig::default()
+        }),
+        focus: Some(true),
+        ..SpawnParams::default()
+    }
+}
+
+/// The argv that opens `path` at `line` in the user's editor.
+///
+/// Noa.app starts this widget, so its environment may lack the editor the
+/// user set in their shell rc files (and a `PATH` that finds it). The editor
+/// is therefore resolved by the user's login shell: `editor` (from this
+/// process's `$VISUAL`/`$EDITOR`) is used when present, otherwise the script
+/// reads `${VISUAL:-${EDITOR:-vi}}` itself. The script is plain `sh`/`bash`/
+/// `zsh` syntax (not fish). VS Code style editors get `--goto path:LINE`,
+/// everything else `+LINE path`.
+fn editor_argv(shell: Option<&str>, path: &str, line: u32, editor: Option<&str>) -> Vec<String> {
+    let shell = shell.filter(|s| !s.trim().is_empty()).unwrap_or("/bin/zsh");
+    let ed = match editor {
+        Some(editor) => crate::ui::shell_escape(editor),
+        None => "${VISUAL:-${EDITOR:-vi}}".to_owned(),
+    };
+    // `f` holds the path as one quoted literal; `eval` only re-splits `$ed`,
+    // which may carry arguments ("code --wait").
+    let script = format!(
+        "ed={ed}; f={f}; w=${{ed%% *}}; b=${{w##*/}}; \
+         case $b in \
+         code|code-insiders|codium|cursor|windsurf) eval \"exec $ed --goto \\\"\\$f:{line}\\\"\";; \
+         *) eval \"exec $ed +{line} \\\"\\$f\\\"\";; \
+         esac",
+        f = crate::ui::shell_escape(path),
+    );
+    vec![shell.to_owned(), "-lc".to_owned(), script]
 }
 
 /// Whether pasting `text` into a pane without bracketed paste would act on
@@ -536,5 +645,120 @@ mod tests {
         assert!(needs_paste_mode("a\x1b[A"));
         assert!(needs_paste_mode("a\x7f"));
         assert!(!needs_paste_mode("'/Users/x/Screen Shot 1.png' 日本語.txt"));
+    }
+
+    /// Runs the argv `editor_argv` builds against a stub editor that records
+    /// its arguments one per line, and returns them.
+    fn run_editor(
+        tag: &str,
+        stub_name: &str,
+        editor_suffix: Option<&str>,
+        env: &[(&str, &str)],
+        path: &str,
+        line: u32,
+    ) -> Vec<String> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("rb-editor-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("args.txt");
+        let stub = dir.join(stub_name);
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > {}\n",
+                out.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let editor = editor_suffix.map(|s| format!("{}{s}", stub.display()));
+        let argv = editor_argv(Some("/bin/sh"), path, line, editor.as_deref());
+        let mut cmd = std::process::Command::new(&argv[0]);
+        cmd.args(&argv[1..]).current_dir(&dir);
+        cmd.env_remove("VISUAL").env_remove("EDITOR");
+        for (k, v) in env {
+            cmd.env(k, v.replace("STUB", &stub.display().to_string()));
+        }
+        let status = cmd.status().unwrap();
+        assert!(status.success(), "{argv:?}");
+        let args = std::fs::read_to_string(&out).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        args.lines().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn vi_style_editors_get_plus_line_before_the_path() {
+        for name in ["vi", "nvim", "nano", "emacs", "hx", "micro"] {
+            let args = run_editor(name, name, Some(""), &[], "src/a.rs", 42);
+            assert_eq!(args, vec!["+42", "src/a.rs"], "{name}");
+        }
+    }
+
+    #[test]
+    fn vs_code_style_editors_get_goto() {
+        for name in ["code", "cursor", "codium"] {
+            let args = run_editor(name, name, Some(""), &[], "src/a.rs", 42);
+            assert_eq!(args, vec!["--goto", "src/a.rs:42"], "{name}");
+        }
+        // Arguments in $EDITOR stay in front.
+        let args = run_editor("wait", "code", Some(" --wait"), &[], "a.rs", 3);
+        assert_eq!(args, vec!["--wait", "--goto", "a.rs:3"]);
+    }
+
+    #[test]
+    fn paths_with_spaces_and_quotes_arrive_as_one_argument() {
+        for path in [
+            "dir with space/it's \"q\".rs",
+            "$(touch pwned).rs",
+            "`touch pwned`.rs",
+            "a;b&c|d.rs",
+        ] {
+            let args = run_editor("nasty", "vim", Some(""), &[], path, 7);
+            assert_eq!(args, vec!["+7".to_owned(), path.to_owned()], "{path}");
+            let args = run_editor("nasty-code", "code", Some(""), &[], path, 7);
+            assert_eq!(
+                args,
+                vec!["--goto".to_owned(), format!("{path}:7")],
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn without_a_process_editor_the_login_shell_reads_visual_then_editor() {
+        let args = run_editor("v", "nvim", None, &[("VISUAL", "STUB")], "a.rs", 5);
+        assert_eq!(args, vec!["+5", "a.rs"]);
+        let args = run_editor("e", "code", None, &[("EDITOR", "STUB")], "a.rs", 5);
+        assert_eq!(args, vec!["--goto", "a.rs:5"]);
+        // $VISUAL wins over $EDITOR.
+        let args = run_editor(
+            "both",
+            "hx",
+            None,
+            &[("VISUAL", "STUB"), ("EDITOR", "/nonexistent/editor")],
+            "a.rs",
+            5,
+        );
+        assert_eq!(args, vec!["+5", "a.rs"]);
+    }
+
+    #[test]
+    fn spawn_params_carry_the_worktree_cwd_and_focus() {
+        let shell = shell_spawn("/repo wt");
+        let config = shell.config.as_ref().unwrap();
+        assert_eq!(config.cwd.as_deref(), Some("/repo wt"));
+        assert_eq!(shell.focus, Some(true));
+        // A plain shell needs `control` only; the editor command adds `input`.
+        assert!(!config.needs_input_scope());
+
+        let editor = editor_spawn("/repo wt", "a.rs", 9, Some("/bin/bash"), None);
+        let config = editor.config.as_ref().unwrap();
+        assert_eq!(config.cwd.as_deref(), Some("/repo wt"));
+        let argv = config.command.as_ref().unwrap();
+        assert_eq!((argv[0].as_str(), argv[1].as_str()), ("/bin/bash", "-lc"));
+        assert!(config.needs_input_scope());
+        assert_eq!(editor.focus, Some(true));
+        assert_eq!(editor_argv(None, "a", 1, None)[0], "/bin/zsh");
     }
 }

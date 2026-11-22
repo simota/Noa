@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The repo browser opens a new Noa tab in the selected worktree: "ここでシェルを開く"
+  (⌘T) starts a shell in its root, and "エディタで開く" (⌘E) opens the
+  selected file in `$VISUAL`/`$EDITOR` at the selected diff line. Both are in
+  the toolbar's split button and the command palette, and work for a worktree
+  without panes.
+
 ### Changed
 
 - The repo theater is now the repo browser: View > Repo Browser and the

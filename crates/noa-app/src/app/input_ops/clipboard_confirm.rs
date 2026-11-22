@@ -354,6 +354,22 @@ impl App {
             .unwrap_or(0)
     }
 
+    /// The pane's foreground process name, probed now (`None` for a remote
+    /// pane or once its session ended).
+    pub(in crate::app) fn pane_foreground_process(
+        &self,
+        window_id: WindowId,
+        pane_id: PaneId,
+    ) -> Option<String> {
+        self.windows
+            .get(&window_id)?
+            .surfaces
+            .get(&pane_id)?
+            .foreground_probe
+            .as_ref()?
+            .poll()
+    }
+
     pub(in crate::app) fn bracketed_paste(&self, window_id: WindowId, pane_id: PaneId) -> bool {
         self.windows
             .get(&window_id)

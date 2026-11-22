@@ -99,6 +99,7 @@ impl IpcBackend for MockBackend {
         text: &str,
         paste: bool,
         _require_paste_mode: bool,
+        _refuse_shell: bool,
     ) -> Result<(), IpcError> {
         if self.closed_panes.lock().unwrap().contains(&pane) {
             return Err(IpcError::PaneClosed);

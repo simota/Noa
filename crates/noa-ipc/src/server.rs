@@ -1683,6 +1683,7 @@ fn handle_send_text(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Valu
         &p.text,
         p.paste.unwrap_or(true),
         p.require_paste_mode.unwrap_or(false),
+        p.refuse_shell.unwrap_or(false),
     )?;
     Ok(serde_json::to_value(OkResult::ok()).unwrap())
 }
@@ -2293,6 +2294,7 @@ mod tests {
             _text: &str,
             _paste: bool,
             _require_paste_mode: bool,
+            _refuse_shell: bool,
         ) -> Result<(), IpcError> {
             Err(IpcError::PaneClosed)
         }

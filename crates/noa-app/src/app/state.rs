@@ -1278,6 +1278,10 @@ pub(super) struct Surface {
     /// for remote panes or when the platform reports nothing.
     pub(super) child_pid: Option<u32>,
     pub(super) tty_name: Option<String>,
+    /// The pty's foreground-process probe, for checks that must see the
+    /// process in front right now (`noa.sendText` `refuseShell`). `None` for
+    /// remote panes.
+    pub(super) foreground_probe: Option<noa_pty::ForegroundProcessProbe>,
     /// AppleScript `name override` of this terminal: replaces its title,
     /// and so its tab's while it is focused and the tab has no title of its
     /// own (Ghostty's surface title override).
@@ -1491,6 +1495,7 @@ impl Surface {
             pending_reveal_snapshot: None,
             child_pid: None,
             tty_name: None,
+            foreground_probe: None,
             title_override: None,
             wait_after_command: false,
             exited: false,

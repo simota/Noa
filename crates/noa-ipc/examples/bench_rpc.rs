@@ -59,7 +59,7 @@ impl IpcBackend for Mock {
         Err(IpcError::UnknownPane)
     }
 
-    fn send_text(&self, _: PaneRef, _: &str, _: bool, _: bool) -> Result<(), IpcError> {
+    fn send_text(&self, _: PaneRef, _: &str, _: bool, _: bool, _: bool) -> Result<(), IpcError> {
         Ok(())
     }
 

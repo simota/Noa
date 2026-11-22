@@ -104,6 +104,7 @@ Injects UTF-8 text into the target panel's pty. Include `\n` to send a newline.
 
 - `paste` (optional, default `true`): if the panel is in bracketed paste mode, this is automatically wrapped as a paste (existing behavior).
 - `requirePasteMode` (optional, default `false`): with `paste` true, a panel that has not enabled bracketed paste (DECSET 2004) gets nothing written, and the request fails with **`-32010`** (`pane N has not enabled bracketed paste yet (its program may still be starting); nothing was sent`). The check and the write happen in one step on the UI thread. An empty `text` with this flag writes nothing either way, so it probes whether a just-started program is ready for a multi-line paste. Ignored with `paste:false`, and by servers older than the flag (which then send as usual).
+- `refuseShell` (optional, default `false`): the server probes the panel's foreground process at the moment of the request, and when it is a plain shell (`sh`, `bash`, `zsh`, `fish`, `dash`, `ksh`, `tcsh`, `csh`, `nu`, `pwsh`) nothing is written and the request fails with **`-32010`** (`pane N is at a zsh prompt, where the text would run as commands; nothing was sent`). For text meant for an agent: the panel's `process` field is polled every 1–4 s and can still name an agent that has exited. A panel whose process cannot be probed (a remote panel) is not refused. Applies with either `paste` value; ignored by servers older than the flag (which then send as usual).
 - `paste:false`: raw injection with no bracketed-paste wrapping. The `text`'s UTF-8 byte sequence is written to the pty as-is. To send a bare Enter, use `{"text":"\r","paste":false}` (useful for emulating keypresses into TUI apps).
 - Sending non-empty text that the panel accepts acknowledges its notification, as focusing it does (refused input, such as to an exited panel, leaves it unread): its `attention` (and unread bell) drops, and a subscriber receives that `stateChanged` before the text reaches the pty. A client answering an agent can then wait for its next `attention`.
 
@@ -310,7 +311,7 @@ Changes to `agent.seq`, `process`, and `exit` are pushed in `noa.stateChanged` w
 | `-32007` | attach conflict (the pane already has a reserved or active attach) |
 | `-32008` | attach handshake failure |
 | `-32009` | outcome unknown: a request handed to the UI thread got no result within 2 seconds; it may still execute |
-| `-32010` | not ready: `noa.sendText` with `requirePasteMode` to a pane that has not enabled bracketed paste; nothing was written |
+| `-32010` | not ready: `noa.sendText` with `requirePasteMode` to a pane that has not enabled bracketed paste, or with `refuseShell` to a pane whose foreground process is a plain shell; nothing was written |
 | `-32011` | limit reached: a spawn over its `maxChildren` |
 
 WebSocket close codes: `1008` (an `Origin` that is not allowed, or an attach handshake failure), `1009` (a frame or message over the size limit), `1013` (the connection limit).

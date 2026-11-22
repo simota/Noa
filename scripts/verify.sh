@@ -61,12 +61,12 @@ for dep, pkg in bad:
 sys.exit(1 if bad else 0)'
 }
 
-# widgets/agent-dashboard, widgets/repo-theater and widgets/discussion are
+# widgets/agent-dashboard, widgets/repo-browser and widgets/discussion are
 # crates of their own, outside the workspace. Each is built with its tests
 # everywhere; the tests run on macOS only, because some expect the text widths
 # of macOS's system fonts.
 dashboard=widgets/agent-dashboard/Cargo.toml
-theater=widgets/repo-theater/Cargo.toml
+browser=widgets/repo-browser/Cargo.toml
 discussion=widgets/discussion/Cargo.toml
 widget_check() {
   cargo build --manifest-path "$1" --locked --all-targets || return
@@ -96,7 +96,7 @@ if [ "$full" = 1 ]; then
   run build cargo build --workspace --locked
   run test cargo test --workspace --locked
   run dashboard widget_check "$dashboard"
-  run theater widget_check "$theater"
+  run browser widget_check "$browser"
   run discussion widget_check "$discussion"
   run hook-test python3 -I -B scripts/test_noa_agent_hook.py
   run skill-install-test python3 -I -B scripts/test_install_agent_skill.py
@@ -105,11 +105,11 @@ if [ "$full" = 1 ]; then
       appstreamcli validate --no-net dist/linux/com.simota.noa.metainfo.xml'
   fi
 elif [ "${#changed[@]}" -gt 0 ]; then
-  pkgs=() hook=0 skill=0 dash=0 thea=0 disc=0
+  pkgs=() hook=0 skill=0 dash=0 rb=0 disc=0
   for path in "${changed[@]}"; do
     p=$(package_of "$path"); [ -n "$p" ] && pkgs+=("$p")
     case $path in widgets/agent-dashboard/*) dash=1 ;; esac
-    case $path in widgets/repo-theater/*) thea=1 ;; esac
+    case $path in widgets/repo-browser/*) rb=1 ;; esac
     case $path in widgets/discussion/*) disc=1 ;; esac
     case $path in scripts/noa-agent-hook.py | scripts/test_noa_agent_hook.py) hook=1 ;; esac
     case $path in scripts/install-agent-skill.sh | scripts/test_install_agent_skill.py | skills/*) skill=1 ;; esac
@@ -130,11 +130,11 @@ elif [ "${#changed[@]}" -gt 0 ]; then
       echo "verify: cannot list the dashboard's packages; checking it anyway"
       dash=1
     fi
-    if uses=$(widget_uses "$theater"); then
-      for p in "${pkgs[@]}"; do grep -qx "$p" <<<"$uses" && thea=1; done
+    if uses=$(widget_uses "$browser"); then
+      for p in "${pkgs[@]}"; do grep -qx "$p" <<<"$uses" && rb=1; done
     else
-      echo "verify: cannot list the repo theater's packages; checking it anyway"
-      thea=1
+      echo "verify: cannot list the repo browser's packages; checking it anyway"
+      rb=1
     fi
     if uses=$(widget_uses "$discussion"); then
       for p in "${pkgs[@]}"; do grep -qx "$p" <<<"$uses" && disc=1; done
@@ -144,7 +144,7 @@ elif [ "${#changed[@]}" -gt 0 ]; then
     fi
   fi
   [ "$dash" = 1 ] && run dashboard widget_check "$dashboard"
-  [ "$thea" = 1 ] && run theater widget_check "$theater"
+  [ "$rb" = 1 ] && run browser widget_check "$browser"
   [ "$disc" = 1 ] && run discussion widget_check "$discussion"
   [ "$hook" = 1 ] && run hook-test python3 -I -B scripts/test_noa_agent_hook.py
   [ "$skill" = 1 ] && run skill-install-test python3 -I -B scripts/test_install_agent_skill.py

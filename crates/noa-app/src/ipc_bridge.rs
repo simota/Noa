@@ -265,6 +265,7 @@ pub(crate) enum IpcActionKind {
         text: String,
         paste: bool,
         require_paste_mode: bool,
+        refuse_shell: bool,
     },
     ResizePane {
         pane: PaneRef,
@@ -443,12 +444,14 @@ impl IpcBackend for AppIpcBackend {
         text: &str,
         paste: bool,
         require_paste_mode: bool,
+        refuse_shell: bool,
     ) -> Result<(), IpcError> {
         match self.submit(IpcActionKind::SendText {
             pane,
             text: text.to_string(),
             paste,
             require_paste_mode,
+            refuse_shell,
         })? {
             IpcActionReply::Ok => Ok(()),
             IpcActionReply::NewPane(_) => Ok(()),

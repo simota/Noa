@@ -63,12 +63,12 @@ case "$MODE" in
   *) echo "usage: $0 [release|debug]" >&2; exit 2 ;;
 esac
 
-# The agent dashboard, the repo theater and the discussion
-# (widgets/agent-dashboard, widgets/repo-theater and widgets/discussion, crates
+# The agent dashboard, the repo browser and the discussion
+# (widgets/agent-dashboard, widgets/repo-browser and widgets/discussion, crates
 # outside the workspace) ship in Noa.app's Contents/Helpers; Noa starts them
-# from View > Agent Dashboard, View > Repo Theater and View > Discussion (or the
+# from View > Agent Dashboard, View > Repo Browser and View > Discussion (or the
 # command palette).
-for widget in agent-dashboard repo-theater discussion; do
+for widget in agent-dashboard repo-browser discussion; do
   if [ "$PROFILE" = release ]; then
     cargo build --manifest-path "$ROOT/widgets/$widget/Cargo.toml" --locked --release
   else
@@ -82,12 +82,12 @@ APP="$TARGET_DIR/Noa.app"
 CONTENTS="$APP/Contents"
 
 DASHBOARD_BIN="$TARGET_DIR/agent-dashboard"
-THEATER_BIN="$TARGET_DIR/repo-theater"
+BROWSER_BIN="$TARGET_DIR/repo-browser"
 DISCUSSION_BIN="$TARGET_DIR/discussion"
 
 [ -x "$BIN" ] || { echo "error: binary not found at $BIN" >&2; exit 1; }
 [ -x "$DASHBOARD_BIN" ] || { echo "error: binary not found at $DASHBOARD_BIN" >&2; exit 1; }
-[ -x "$THEATER_BIN" ] || { echo "error: binary not found at $THEATER_BIN" >&2; exit 1; }
+[ -x "$BROWSER_BIN" ] || { echo "error: binary not found at $BROWSER_BIN" >&2; exit 1; }
 [ -x "$DISCUSSION_BIN" ] || { echo "error: binary not found at $DISCUSSION_BIN" >&2; exit 1; }
 
 # Generate the icon on first run (best effort — the app still bundles without it).
@@ -103,7 +103,7 @@ cp "$BIN" "$CONTENTS/MacOS/Noa"
 # Named for the product: macOS shows a bare executable's file name as the app
 # name in the menu bar and Dock (crates/noa-app/src/helper_program.rs looks for it).
 cp "$DASHBOARD_BIN" "$CONTENTS/Helpers/Noa Agent Dashboard"
-cp "$THEATER_BIN" "$CONTENTS/Helpers/Noa Repo Theater"
+cp "$BROWSER_BIN" "$CONTENTS/Helpers/Noa Repo Browser"
 cp "$DISCUSSION_BIN" "$CONTENTS/Helpers/Noa Discussion"
 cp -RX "$ROOT/assets/wallpapers" "$CONTENTS/Resources/wallpapers"
 
@@ -171,7 +171,7 @@ if [ -n "${NOA_SIGN_IDENTITY:-}" ]; then
     --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/Helpers/Noa Agent Dashboard"
   codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/assets/macos.entitlements.plist" \
-    --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/Helpers/Noa Repo Theater"
+    --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/Helpers/Noa Repo Browser"
   codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/assets/macos.entitlements.plist" \
     --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/Helpers/Noa Discussion"

@@ -418,7 +418,7 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::ToggleBackgroundOpacity
         | AppCommand::ToggleEmber
         | AppCommand::OpenAgentDashboard
-        | AppCommand::OpenRepoTheater
+        | AppCommand::OpenRepoBrowser
         | AppCommand::OpenDiscussion
         | AppCommand::Spawn(_)
         | AppCommand::ToggleSidebar
@@ -482,7 +482,7 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::ToggleBackgroundOpacity
         | AppCommand::ToggleEmber
         | AppCommand::OpenAgentDashboard
-        | AppCommand::OpenRepoTheater
+        | AppCommand::OpenRepoBrowser
         | AppCommand::OpenDiscussion
         | AppCommand::Spawn(_)
         | AppCommand::ToggleSidebar => CommandScope::App,

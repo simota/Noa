@@ -1,5 +1,5 @@
 //! The link between the UI and the running discussion: the UI reads
-//! [`Snapshot`]s and sends [`Command`]s over std mpsc, as repo-theater does.
+//! [`Snapshot`]s and sends [`Command`]s over std mpsc, as repo-browser does.
 //!
 //! [`start`] bridges them to the session runner (`crate::session::runner`):
 //! a [`Command::Start`] spawns the runner, later commands become its

@@ -21,6 +21,8 @@ const TOKEN: &str = "orchestration-token";
 const STARTING_PANE: PaneRef = 4;
 /// A pane on the alternate screen.
 const ALT_SCREEN_PANE: PaneRef = 5;
+/// A pane whose foreground process is a plain shell.
+const SHELL_PANE: PaneRef = 6;
 
 #[derive(Default)]
 struct SpawnBackend {
@@ -55,9 +57,13 @@ impl IpcBackend for SpawnBackend {
         text: &str,
         paste: bool,
         require_paste_mode: bool,
+        refuse_shell: bool,
     ) -> Result<(), IpcError> {
         if pane == STARTING_PANE && paste && require_paste_mode {
             return Err(IpcError::NotReady("not in paste mode yet".to_string()));
+        }
+        if pane == SHELL_PANE && refuse_shell {
+            return Err(IpcError::NotReady("a shell is in front".to_string()));
         }
         self.sent
             .lock()
@@ -359,6 +365,7 @@ fn send_text_passes_the_paste_flag_through() {
             SendTextOptions {
                 paste: true,
                 require_paste_mode: true,
+                refuse_shell: false,
             },
         )
         .unwrap();
@@ -371,6 +378,37 @@ fn send_text_passes_the_paste_flag_through() {
             (1, "gated".to_string(), true, true),
         ]
     );
+}
+
+// A send that refuses a shell reaches the backend with the flag: the server
+// probes the foreground process there, and a refusal writes nothing.
+#[test]
+fn a_send_refusing_a_shell_is_refused_as_not_ready() {
+    let (backend, _broadcaster, handle) = start(&["read", "input"]);
+    let mut client = connect(&handle, &["read", "input"]);
+    let options = SendTextOptions {
+        paste: false,
+        require_paste_mode: false,
+        refuse_shell: true,
+    };
+    let refused = client.send_text_with(SHELL_PANE, "\r", options);
+    assert!(matches!(
+        refused,
+        Err(ClientError::Rpc { code: -32010, .. })
+    ));
+    assert!(backend.sent.lock().unwrap().is_empty());
+    client.send_text_with(1, "\r", options).unwrap();
+    assert_eq!(backend.sent.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn plain_shells_are_told_from_other_programs() {
+    for shell in ["zsh", "-zsh", "/bin/bash", "fish", "nu", "pwsh"] {
+        assert!(noa_ipc::is_plain_shell(shell), "{shell}");
+    }
+    for other in ["claude", "codex", "node", "vim", "zshell"] {
+        assert!(!noa_ipc::is_plain_shell(other), "{other}");
+    }
 }
 
 // REL-01: a send that requires paste mode to a pane that has not enabled
@@ -386,6 +424,7 @@ fn a_send_requiring_paste_mode_is_refused_as_not_ready() {
         SendTextOptions {
             paste: true,
             require_paste_mode: true,
+            refuse_shell: false,
         },
     );
 

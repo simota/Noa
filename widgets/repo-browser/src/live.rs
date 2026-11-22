@@ -248,6 +248,7 @@ fn run(
                                                         paste,
                                                         require_paste_mode: paste
                                                             && needs_paste_mode(&chunk),
+                                                        refuse_shell: false,
                                                     },
                                                 ),
                                             SendStep::Pause(d) => {

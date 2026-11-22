@@ -83,12 +83,16 @@ pub trait IpcBackend: Send + Sync + 'static {
     /// pty as-is (see [`crate::protocol::SendTextParams::paste`]).
     /// `require_paste_mode` with `paste`: refuse with [`IpcError::NotReady`],
     /// writing nothing, while the pane has not enabled bracketed paste.
+    /// `refuse_shell`: refuse with [`IpcError::NotReady`], writing nothing,
+    /// when the pane's foreground process, probed now, is a plain shell
+    /// ([`crate::is_plain_shell`]).
     fn send_text(
         &self,
         pane: PaneRef,
         text: &str,
         paste: bool,
         require_paste_mode: bool,
+        refuse_shell: bool,
     ) -> Result<(), IpcError>;
 
     fn focus_pane(&self, pane: PaneRef) -> Result<(), IpcError>;

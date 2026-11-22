@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   <subject>"), so a finished agent's branch can be reviewed commit by commit:
   choosing one shows its full diff, and a quote from it is headed by the
   commit's short sha.
+- `noa.sendText` takes `refuseShell`: the server checks the pane's
+  foreground process at that moment and refuses (`-32010`, nothing written)
+  when it is a plain shell, where text meant for an agent would run as
+  commands.
 
 ### Changed
 

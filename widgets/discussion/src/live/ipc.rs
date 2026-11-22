@@ -266,6 +266,7 @@ impl Noa for IpcNoa {
         let options = SendTextOptions {
             paste: true,
             require_paste_mode: true,
+            refuse_shell: false,
         };
         match self.client.send_text_with(pane, "", options) {
             Ok(()) => Ok(true),
@@ -289,6 +290,7 @@ impl Noa for IpcNoa {
         let options = SendTextOptions {
             paste,
             require_paste_mode: paste && text.chars().any(char::is_control),
+            refuse_shell: false,
         };
         self.client
             .send_text_with(pane, text, options)

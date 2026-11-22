@@ -606,6 +606,27 @@ pub struct SendTextParams {
     /// is never typed into a program that is still starting. Omitted = false.
     #[serde(default)]
     pub require_paste_mode: Option<bool>,
+    /// Write nothing and answer `-32010` (NotReady) when the pane's
+    /// foreground process, probed at the moment of the request, is a plain
+    /// shell ([`crate::is_plain_shell`]): text meant for an agent would run
+    /// there as commands. The panel's `process` field can lag the real
+    /// foreground process by a few seconds, so callers cannot check this
+    /// themselves. A pane whose process cannot be probed (a remote pane) is
+    /// not refused. Omitted = false.
+    #[serde(default)]
+    pub refuse_shell: Option<bool>,
+}
+
+/// Whether `process` (a process name, possibly a path or a login shell's
+/// `-zsh`) is a plain interactive shell, where pasted text followed by Enter
+/// runs as a command line.
+pub fn is_plain_shell(process: &str) -> bool {
+    let name = process.rsplit('/').next().unwrap_or(process);
+    let name = name.strip_prefix('-').unwrap_or(name);
+    matches!(
+        name,
+        "sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "tcsh" | "csh" | "nu" | "pwsh"
+    )
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

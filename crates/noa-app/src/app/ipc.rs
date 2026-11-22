@@ -465,8 +465,12 @@ impl App {
                 text,
                 paste,
                 require_paste_mode,
+                refuse_shell,
             } => {
                 let (window_id, pane_id) = self.resolve_ipc_pane(pane)?;
+                if refuse_shell {
+                    check_not_shell(pane, self.pane_foreground_process(window_id, pane_id))?;
+                }
                 let bytes = if paste {
                     let bracketed = self.bracketed_paste(window_id, pane_id);
                     check_paste_mode(pane, require_paste_mode, bracketed)?;
@@ -1323,6 +1327,22 @@ fn surface_facts(surface: &Surface) -> PanelSurfaceFacts {
             argv: spawn.argv.clone(),
             started_at: spawn.started_at,
         }),
+    }
+}
+
+/// `refuseShell`: text meant for an agent is refused, with nothing written,
+/// while a plain shell is the pane's foreground process (probed now: the
+/// panel's `process` field can lag it by seconds). A pane that cannot be
+/// probed (`None`: remote, or the session ended) is not refused.
+fn check_not_shell(pane: u64, foreground: Option<String>) -> Result<(), noa_ipc::IpcError> {
+    match foreground {
+        Some(process) if noa_ipc::is_plain_shell(&process) => {
+            Err(noa_ipc::IpcError::NotReady(format!(
+                "pane {pane} is at a {process} prompt, where the text would run as commands; \
+                 nothing was sent"
+            )))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -2253,6 +2273,19 @@ mod orchestration_limit_tests {
 
         assert!(check_paste_mode(4, true, true).is_ok());
         assert!(check_paste_mode(4, false, false).is_ok());
+    }
+
+    // refuseShell: a shell in front right now refuses the text; an agent, or
+    // a pane that cannot be probed, does not.
+    #[test]
+    fn a_send_refusing_a_shell_checks_the_process_in_front_now() {
+        let refused = check_not_shell(4, Some("zsh".into())).unwrap_err();
+        assert!(matches!(refused, noa_ipc::IpcError::NotReady(_)));
+        assert_eq!(refused.code().code(), -32010);
+        assert!(refused.to_string().contains("pane 4"));
+        assert!(check_not_shell(4, Some("-bash".into())).is_err());
+        assert!(check_not_shell(4, Some("claude".into())).is_ok());
+        assert!(check_not_shell(4, None).is_ok());
     }
 
     // REL-02: the parent's children are counted on the app's side, exited

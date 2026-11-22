@@ -261,6 +261,7 @@ impl Client {
             SendTextOptions {
                 paste,
                 require_paste_mode: false,
+                refuse_shell: false,
             },
         )
     }
@@ -279,6 +280,9 @@ impl Client {
             serde_json::json!({ "paneId": WireId(pane), "text": text, "paste": options.paste });
         if options.require_paste_mode {
             params["requirePasteMode"] = Value::Bool(true);
+        }
+        if options.refuse_shell {
+            params["refuseShell"] = Value::Bool(true);
         }
         let _: OkResult = self.request("noa.sendText", params)?;
         Ok(())
@@ -1101,6 +1105,10 @@ pub struct SendTextOptions {
     /// Refuse (`-32010`) instead of sending while the pane has not enabled
     /// bracketed paste. Only meaningful with `paste`.
     pub require_paste_mode: bool,
+    /// Refuse (`-32010`) instead of sending while the pane's foreground
+    /// process is a plain shell, probed by the server at the moment of the
+    /// request (`refuseShell`).
+    pub refuse_shell: bool,
 }
 
 #[derive(serde::Deserialize)]

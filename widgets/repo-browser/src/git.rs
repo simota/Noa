@@ -1,5 +1,6 @@
 //! Local git inspection for live worktrees discovered via `noa-ipc`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -182,10 +183,16 @@ pub fn inspect_worktree(cwd: &str, mode: DiffMode) -> Option<WorktreeGitInfo> {
     })
 }
 
-/// `<base>...HEAD` for the "vs main" mode: the local `main`, else the local
-/// `master`, else whatever `origin/HEAD` points at.
+/// `<base>...HEAD` for the "vs main" mode.
 fn base_range(dir: &Path) -> Option<String> {
-    let base = ["main", "master"]
+    Some(format!("{}...HEAD", base_ref(dir)?))
+}
+
+/// The branch the "vs main" mode and the merge prediction compare against:
+/// the local `main`, else the local `master`, else whatever `origin/HEAD`
+/// points at.
+fn base_ref(dir: &Path) -> Option<String> {
+    ["main", "master"]
         .into_iter()
         .find(|name| {
             run_git(
@@ -207,8 +214,135 @@ fn base_range(dir: &Path) -> Option<String> {
             )
             .map(|s| s.trim().to_owned())
             .filter(|s| !s.is_empty())
-        })?;
-    Some(format!("{base}...HEAD"))
+        })
+}
+
+/// Every worktree of the repository `dir` is in, as canonical paths, from
+/// `git worktree list --porcelain`. A bare entry has no checkout and a
+/// prunable one has lost its directory, so neither is listed.
+pub fn list_worktrees(dir: &str) -> Vec<String> {
+    let out = run_git(Path::new(dir), &["worktree", "list", "--porcelain"]).unwrap_or_default();
+    parse_worktree_list(&out)
+        .into_iter()
+        .map(|path| canonical_or_raw(Path::new(&path)))
+        .collect()
+}
+
+/// Parses `git worktree list --porcelain`: blank-line separated records
+/// whose first line is `worktree <path>`, followed by attribute lines such
+/// as `bare` or `prunable <reason>`.
+fn parse_worktree_list(text: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for record in text.split("\n\n") {
+        let mut path = None;
+        let mut skip = false;
+        for line in record.lines() {
+            if let Some(p) = line.strip_prefix("worktree ") {
+                path = Some(p.to_owned());
+            } else if line == "bare" || line == "prunable" || line.starts_with("prunable ") {
+                skip = true;
+            }
+        }
+        if let Some(path) = path.filter(|_| !skip) {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+/// The paths that would conflict if a worktree's branch were merged into the
+/// base, cached per worktree root and keyed by the two commits merged, so
+/// `git merge-tree` only runs again when the base or HEAD moves.
+#[derive(Debug, Default)]
+pub struct MergePredictions {
+    entries: HashMap<String, MergeEntry>,
+    /// How many times `git merge-tree` ran, for tests.
+    runs: usize,
+}
+
+#[derive(Debug)]
+struct MergeEntry {
+    base: String,
+    head: String,
+    conflicts: Option<Vec<String>>,
+}
+
+impl MergePredictions {
+    /// `Some(paths)` that conflict (empty when the merge is clean); `None`
+    /// when there is nothing to predict (the worktree is on the base, or
+    /// the repository has no base) or `git merge-tree` could not tell
+    /// (git before 2.38, an error).
+    pub fn predict(&mut self, worktree_root: &str, branch: &str) -> Option<Vec<String>> {
+        let dir = Path::new(worktree_root);
+        let base = base_ref(dir)?;
+        if branch == base {
+            return None;
+        }
+        let shas = run_git(
+            dir,
+            &["rev-parse", &format!("{base}^{{commit}}"), "HEAD^{commit}"],
+        )?;
+        let mut shas = shas.lines().map(str::to_owned);
+        let (base_sha, head_sha) = (shas.next()?, shas.next()?);
+        if let Some(entry) = self.entries.get(worktree_root)
+            && entry.base == base_sha
+            && entry.head == head_sha
+        {
+            return entry.conflicts.clone();
+        }
+        self.runs += 1;
+        let conflicts = merge_tree_conflicts(dir, &base_sha, &head_sha);
+        self.entries.insert(
+            worktree_root.to_owned(),
+            MergeEntry {
+                base: base_sha,
+                head: head_sha,
+                conflicts: conflicts.clone(),
+            },
+        );
+        conflicts
+    }
+
+    /// Forgets the worktrees `keep` rejects (gone from the browser).
+    pub fn retain(&mut self, keep: impl Fn(&str) -> bool) {
+        self.entries.retain(|root, _| keep(root));
+    }
+}
+
+/// Runs `git merge-tree --write-tree` (git >= 2.38) to merge `head` into
+/// `base` without touching any worktree or ref. Exit status 1 means
+/// conflicts, 0 a clean merge, anything else that git could not tell.
+fn merge_tree_conflicts(dir: &Path, base: &str, head: &str) -> Option<Vec<String>> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            "--no-messages",
+            // NUL-separated, so paths are never C-quoted.
+            "-z",
+            base,
+            head,
+        ])
+        .output()
+        .ok()?;
+    match out.status.code() {
+        Some(0) => Some(Vec::new()),
+        Some(1) => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            // `<tree oid>\0` then one `<path>\0` per conflicted file.
+            Some(
+                text.split('\0')
+                    .skip(1)
+                    .take_while(|path| !path.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+            )
+        }
+        _ => None,
+    }
 }
 
 pub fn file_diff(cwd: &str, path: &str, mode: DiffMode) -> String {
@@ -365,8 +499,8 @@ fn parse_porcelain_v2(text: &str) -> PorcelainStatus {
 
 /// Parses `git diff --numstat -z`. A rename is `added\tdeleted\t` followed by
 /// the old and new paths as separate entries; it is keyed by the new path.
-fn parse_numstat(text: &str) -> std::collections::HashMap<String, (usize, usize)> {
-    let mut map = std::collections::HashMap::new();
+fn parse_numstat(text: &str) -> HashMap<String, (usize, usize)> {
+    let mut map = HashMap::new();
     let mut entries = text.split('\0');
     while let Some(entry) = entries.next() {
         let mut parts = entry.splitn(3, '\t');
@@ -390,7 +524,7 @@ fn parse_numstat(text: &str) -> std::collections::HashMap<String, (usize, usize)
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -417,7 +551,7 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
 
     // ── Regression tests against real temporary repositories ─────────────────
 
-    struct TempRepo(PathBuf);
+    pub(crate) struct TempRepo(pub PathBuf);
 
     impl Drop for TempRepo {
         fn drop(&mut self) {
@@ -425,7 +559,7 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         }
     }
 
-    fn git(dir: &Path, args: &[&str]) {
+    pub(crate) fn git(dir: &Path, args: &[&str]) {
         let out = Command::new("git")
             .arg("-C")
             .arg(dir)
@@ -440,7 +574,7 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         );
     }
 
-    fn temp_repo(name: &str, branch: &str) -> TempRepo {
+    pub(crate) fn temp_repo(name: &str, branch: &str) -> TempRepo {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static N: AtomicUsize = AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
@@ -718,5 +852,126 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         let diff = file_diff(cwd(&repo), "huge.log", DiffMode::Unstaged);
         assert!(diff.len() <= 80 * 1024, "{} bytes", diff.len());
         assert!(diff.starts_with("--- /dev/null"), "{}", &diff[..80]);
+    }
+
+    // ── Every worktree of a repository, and merge-conflict prediction ────────
+
+    /// A worktree of `repo` on a new `branch`, at `<repo>-wt/<name>` the way
+    /// orchestration workers lay theirs out.
+    pub(crate) fn add_worktree(repo: &TempRepo, name: &str, branch: &str) -> PathBuf {
+        let path = PathBuf::from(format!("{}-wt/{name}", repo.0.display()));
+        git(
+            &repo.0,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                path.to_str().unwrap(),
+            ],
+        );
+        path
+    }
+
+    pub(crate) fn commit_file(dir: &Path, file: &str, body: &str) {
+        std::fs::write(dir.join(file), body).unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", file]);
+    }
+
+    #[test]
+    fn worktree_list_skips_bare_and_prunable_entries() {
+        let text = "worktree /r.git\nbare\n\n\
+                    worktree /r-wt/a\nHEAD 1\nbranch refs/heads/a\n\n\
+                    worktree /r-wt/gone\nHEAD 2\ndetached\nprunable gitdir file points to non-existent location\n\n\
+                    worktree /r-wt/locked\nHEAD 3\nbranch refs/heads/l\nlocked\n";
+        assert_eq!(parse_worktree_list(text), vec!["/r-wt/a", "/r-wt/locked"]);
+    }
+
+    #[test]
+    fn every_worktree_of_the_repo_is_listed() {
+        let repo = temp_repo("wtlist", "main");
+        let wt_root = PathBuf::from(format!("{}-wt", repo.0.display()));
+        let _cleanup = TempRepo(wt_root);
+        let foo = add_worktree(&repo, "foo", "orch/foo");
+        let gone = add_worktree(&repo, "gone", "orch/gone");
+        std::fs::remove_dir_all(&gone).unwrap();
+        let listed = list_worktrees(cwd(&repo));
+        assert_eq!(
+            listed,
+            vec![canonical_or_raw(&repo.0), canonical_or_raw(&foo)],
+            "the removed worktree is prunable and left out"
+        );
+        // Listed the same way from inside the other worktree.
+        assert_eq!(list_worktrees(foo.to_str().unwrap()), listed);
+        let info = inspect_worktree(foo.to_str().unwrap(), DiffMode::Unstaged).unwrap();
+        assert_eq!(info.branch, "orch/foo");
+        assert_eq!(info.worktree_root, listed[1]);
+    }
+
+    #[test]
+    fn branch_conflicting_with_main_reports_the_paths() {
+        let repo = temp_repo("merge-conflict", "main");
+        let _cleanup = TempRepo(PathBuf::from(format!("{}-wt", repo.0.display())));
+        let wt = add_worktree(&repo, "foo", "orch/foo");
+        commit_file(&wt, "old.rs", "fn theirs() {}\n");
+        commit_file(&wt, "only-here.rs", "fn new() {}\n");
+        commit_file(&repo.0, "old.rs", "fn ours() {}\n");
+        let mut predictions = MergePredictions::default();
+        let root = canonical_or_raw(&wt);
+        assert_eq!(
+            predictions.predict(&root, "orch/foo"),
+            Some(vec!["old.rs".to_owned()])
+        );
+        // The base worktree itself has nothing to predict.
+        assert_eq!(predictions.predict(cwd(&repo), "main"), None);
+    }
+
+    #[test]
+    fn clean_branch_is_reported_clean() {
+        let repo = temp_repo("merge-clean", "main");
+        let _cleanup = TempRepo(PathBuf::from(format!("{}-wt", repo.0.display())));
+        let wt = add_worktree(&repo, "foo", "orch/foo");
+        commit_file(&wt, "new.rs", "fn new() {}\n");
+        commit_file(&repo.0, "old.rs", "fn moved_on() {}\n");
+        let mut predictions = MergePredictions::default();
+        assert_eq!(
+            predictions.predict(&canonical_or_raw(&wt), "orch/foo"),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn prediction_is_cached_until_a_commit_moves() {
+        let repo = temp_repo("merge-cache", "main");
+        let _cleanup = TempRepo(PathBuf::from(format!("{}-wt", repo.0.display())));
+        let wt = add_worktree(&repo, "foo", "orch/foo");
+        commit_file(&wt, "old.rs", "fn theirs() {}\n");
+        let root = canonical_or_raw(&wt);
+        let mut predictions = MergePredictions::default();
+        let clean = predictions.predict(&root, "orch/foo");
+        assert_eq!(clean, Some(Vec::new()));
+        // Uncommitted edits move neither commit: still cached.
+        std::fs::write(wt.join("old.rs"), "dirty\n").unwrap();
+        assert_eq!(predictions.predict(&root, "orch/foo"), clean);
+        assert_eq!(predictions.runs, 1);
+        // The base moving (main commits a clashing change) recomputes it.
+        commit_file(&repo.0, "old.rs", "fn ours() {}\n");
+        assert_eq!(
+            predictions.predict(&root, "orch/foo"),
+            Some(vec!["old.rs".to_owned()])
+        );
+        assert_eq!(predictions.runs, 2);
+        assert_eq!(
+            predictions.predict(&root, "orch/foo"),
+            Some(vec!["old.rs".to_owned()])
+        );
+        assert_eq!(predictions.runs, 2);
+        // So does HEAD moving.
+        git(&wt, &["checkout", "-q", "--", "old.rs"]);
+        commit_file(&wt, "more.rs", "x\n");
+        predictions.predict(&root, "orch/foo");
+        assert_eq!(predictions.runs, 3);
     }
 }

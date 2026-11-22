@@ -1,7 +1,7 @@
 //! Background live feed connecting to Noa's control server (`noa-ipc`) and
 //! inspecting local git worktrees for every active pane.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
@@ -106,6 +106,8 @@ fn run(
     let mut backoff = BACKOFF_MIN;
     let mut mode = DiffMode::Unstaged;
     let mut selected_file: Option<(String, String)> = None;
+    // Outlives reconnects: merge-tree reruns only when a commit moves.
+    let mut merges = git::MergePredictions::default();
 
     let _ = snapshot_tx.send(Snapshot {
         data: RepoData::default(),
@@ -221,7 +223,8 @@ fn run(
                     }
 
                     if dirty || last_refresh.elapsed() >= REFRESH_EVERY {
-                        match build_snapshot(&mut client, mode, selected_file.as_ref()) {
+                        match build_snapshot(&mut client, mode, selected_file.as_ref(), &mut merges)
+                        {
                             Ok((data, selected_diff)) => {
                                 if snapshot_tx
                                     .send(Snapshot {
@@ -411,13 +414,17 @@ fn send_steps(text: &str, submit: bool) -> Vec<SendStep> {
 
 type DiffEntry = (String, String, String);
 
+/// Worktrees by canonical root, with the panes whose cwd is inside each.
+type ByWorktree = HashMap<String, (git::WorktreeGitInfo, Vec<PaneSummary>)>;
+
 fn build_snapshot(
     client: &mut Client,
     mode: DiffMode,
     selected: Option<&(String, String)>,
+    merges: &mut git::MergePredictions,
 ) -> Result<(RepoData, Option<DiffEntry>), ClientError> {
     let panels = client.list_panels()?;
-    let mut by_worktree: HashMap<String, (git::WorktreeGitInfo, Vec<PaneSummary>)> = HashMap::new();
+    let mut by_worktree: ByWorktree = HashMap::new();
 
     for panel in panels {
         let cwd = panel.cwd.trim();
@@ -452,23 +459,8 @@ fn build_snapshot(
             .push(summary);
     }
 
-    let entries = by_worktree
-        .into_values()
-        .map(|(info, panes)| {
-            let wt = Worktree {
-                name: info.branch.clone(),
-                cwd: info.worktree_root,
-                branch: info.branch,
-                ahead: info.ahead,
-                behind: info.behind,
-                panes,
-                files: info.files,
-                note: info.note,
-            };
-            (info.repo_name, info.repo_root, wt)
-        })
-        .collect();
-    let data = group_repos(entries);
+    add_paneless_worktrees(&mut by_worktree, mode);
+    let data = repo_data(by_worktree, merges);
 
     let selected_diff = selected
         .map(|(cwd, path)| (cwd.clone(), path.clone(), git::file_diff(cwd, path, mode)))
@@ -488,6 +480,57 @@ fn build_snapshot(
         });
 
     Ok((data, selected_diff))
+}
+
+/// Adds every other worktree of each repository a pane is in, from
+/// `git worktree list`, with no panes: a worker's worktree and branch stay
+/// to be reviewed and merged after its pane closed.
+fn add_paneless_worktrees(by_worktree: &mut ByWorktree, mode: DiffMode) {
+    let mut repos = HashSet::new();
+    let anchors: Vec<String> = by_worktree
+        .values()
+        .filter(|(info, _)| repos.insert(info.repo_root.clone()))
+        .map(|(info, _)| info.worktree_root.clone())
+        .collect();
+    for anchor in anchors {
+        for path in git::list_worktrees(&anchor) {
+            if by_worktree.contains_key(&path) {
+                continue;
+            }
+            if let Some(info) = git::inspect_worktree(&path, mode) {
+                by_worktree
+                    .entry(info.worktree_root.clone())
+                    .or_insert_with(|| (info, Vec::new()));
+            }
+        }
+    }
+}
+
+/// Groups the worktrees into repositories, each with its predicted merge
+/// conflicts against the base.
+fn repo_data(by_worktree: ByWorktree, merges: &mut git::MergePredictions) -> RepoData {
+    merges.retain(|root| by_worktree.contains_key(root));
+    let entries = by_worktree
+        .into_values()
+        .map(|(info, panes)| {
+            let merge_conflicts = merges
+                .predict(&info.worktree_root, &info.branch)
+                .unwrap_or_default();
+            let wt = Worktree {
+                name: info.branch.clone(),
+                cwd: info.worktree_root,
+                branch: info.branch,
+                ahead: info.ahead,
+                behind: info.behind,
+                panes,
+                files: info.files,
+                note: info.note,
+                merge_conflicts,
+            };
+            (info.repo_name, info.repo_root, wt)
+        })
+        .collect();
+    group_repos(entries)
 }
 
 fn fetch_pane_tail(client: &mut Client, panel: &Panel) -> String {
@@ -606,6 +649,51 @@ pub(crate) fn test_channel() -> (Channel, TestFeed) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::git::tests::{TempRepo, add_worktree, commit_file, temp_repo};
+
+    fn pane(pane_id: u64) -> PaneSummary {
+        PaneSummary {
+            pane_id,
+            name: "zsh".into(),
+            label: None,
+            process: None,
+            activity: AgentActivity::None,
+            busy: false,
+            attention: false,
+            terminal_tail: String::new(),
+        }
+    }
+
+    #[test]
+    fn worktree_without_a_pane_is_listed_with_its_conflicts() {
+        let repo = temp_repo("live-paneless", "main");
+        let _cleanup = TempRepo(format!("{}-wt", repo.0.display()).into());
+        let foo = add_worktree(&repo, "foo", "orch/foo");
+        commit_file(&foo, "old.rs", "fn theirs() {}\n");
+        commit_file(&repo.0, "old.rs", "fn ours() {}\n");
+        // Both worktrees also have the same file edited, uncommitted.
+        std::fs::write(repo.0.join("old.rs"), "main edit\n").unwrap();
+        std::fs::write(foo.join("old.rs"), "foo edit\n").unwrap();
+
+        let main = git::inspect_worktree(repo.0.to_str().unwrap(), DiffMode::Unstaged).unwrap();
+        let mut by_worktree: ByWorktree = HashMap::new();
+        by_worktree.insert(main.worktree_root.clone(), (main, vec![pane(7)]));
+        add_paneless_worktrees(&mut by_worktree, DiffMode::Unstaged);
+        let data = repo_data(by_worktree, &mut git::MergePredictions::default());
+
+        assert_eq!(data.repos.len(), 1);
+        let wts = &data.repos[0].worktrees;
+        let branches: Vec<&str> = wts.iter().map(|w| w.branch.as_str()).collect();
+        assert_eq!(branches, vec!["main", "orch/foo"]);
+        let (main, foo) = (&wts[0], &wts[1]);
+        assert_eq!(main.panes.len(), 1);
+        assert!(!foo.has_pane());
+        assert_eq!(foo.merge_conflicts, vec!["old.rs"]);
+        assert!(main.merge_conflicts.is_empty());
+        assert_eq!(foo.files[0].conflict_worktrees, vec!["main"]);
+        assert_eq!(main.files[0].conflict_worktrees, vec!["orch/foo"]);
+    }
 
     #[test]
     fn multiline_text_is_never_written_raw() {

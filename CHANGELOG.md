@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (⌘L) appends a block per selection instead of replacing the prompt, Clear
   empties it (and Restore brings it back), and the review tab picks which
   pane of the worktree receives it, with the live terminal following that pane.
+- The repo browser lists every worktree of each repository a pane is in, not
+  only the ones a pane is in: a worker's worktree stays, marked ペインなし,
+  after its pane closes. It predicts which files would conflict when a
+  branch is merged into the base (`git merge-tree`, git 2.38 or later) and
+  marks them ⛔マージ衝突. The filter takes `no-pane` and `merge-conflict`.
 
 ### Changed
 

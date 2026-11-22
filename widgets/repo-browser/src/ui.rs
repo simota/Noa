@@ -55,6 +55,19 @@ enum NodeKind {
     File(usize, usize, usize),
 }
 
+/// What the live terminal tab shows, so an unchanged refresh keeps it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TerminalShown {
+    /// The target pane (picked, else the worktree's primary) and its tail.
+    Pane(u64, String),
+    /// A worktree listed by `git worktree list` with no pane in it.
+    NoPane {
+        branch: String,
+        cwd: String,
+    },
+    Nothing,
+}
+
 enum Source {
     Demo,
     /// A one-off render of a live snapshot (`--snapshot` without `--demo`).
@@ -124,7 +137,7 @@ pub struct RepoBrowser {
     // Active CommandPalette overlay state.
     active_palette: Option<(WidgetId, Vec<PaletteAction>)>,
     recent_commands: RecentCommands,
-    last_terminal_key: Option<(u64, String)>,
+    last_terminal_key: TerminalShown,
     pending_browser_path: Option<Vec<usize>>,
     /// The pane the user picked to receive the prompt, while the selected
     /// worktree stays `target_wt`; `None` means the worktree's primary pane.
@@ -240,9 +253,11 @@ impl RepoBrowser {
 
         let token_field = tree.insert(
             Some(toolbar),
-            TokenField::new("フィルタ (dirty, conflict, agent:waiting…)", 280.0).completions([
+            TokenField::new("フィルタ (dirty, merge-conflict, no-pane…)", 280.0).completions([
                 "dirty",
                 "conflict",
+                "merge-conflict",
+                "no-pane",
                 "agent:running",
                 "agent:waiting",
                 "agent:done",
@@ -578,7 +593,7 @@ impl RepoBrowser {
             status_trailing: status_parts.trailing,
             active_palette: None,
             recent_commands: RecentCommands::default(),
-            last_terminal_key: None,
+            last_terminal_key: TerminalShown::Nothing,
             pending_browser_path: None,
             target_pane: None,
             target_wt: None,
@@ -833,12 +848,23 @@ impl RepoBrowser {
                     format!(" [{}]", act.badge())
                 };
                 let conf = if wt.has_conflict() { " ⚠衝突" } else { "" };
+                let merge = if wt.merge_conflicts.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ⛔マージ衝突 {}", wt.merge_conflicts.len())
+                };
+                let no_pane = if wt.has_pane() {
+                    ""
+                } else {
+                    " · ペインなし"
+                };
                 let ab = if wt.ahead > 0 || wt.behind > 0 {
                     format!(" ↑{}↓{}", wt.ahead, wt.behind)
                 } else {
                     String::new()
                 };
-                let mut wt_item = OutlineItem::new(format!("{}{ab}{act_str}{conf}", wt.branch));
+                let mut wt_item =
+                    OutlineItem::new(format!("{}{ab}{merge}{no_pane}{act_str}{conf}", wt.branch));
 
                 for (fi, file) in wt.files.iter().enumerate() {
                     let file_id = next_id;
@@ -849,8 +875,13 @@ impl RepoBrowser {
                     } else {
                         " ⚠"
                     };
+                    let m = if wt.is_merge_conflict(&file.path) {
+                        " ⛔"
+                    } else {
+                        ""
+                    };
                     let title = format!(
-                        "{} {} (+{}/-{}){c}",
+                        "{} {} (+{}/-{}){m}{c}",
                         file.status, file.path, file.added, file.deleted
                     );
                     wt_item = wt_item.child(OutlineItem::new(title));
@@ -930,6 +961,13 @@ impl RepoBrowser {
             self.requested_diff = Some(key);
         }
 
+        let merge_note = match (self.current_worktree(), self.current_file()) {
+            (Some(wt), Some(file)) if wt.is_merge_conflict(&file.path) => Some(format!(
+                "⛔ ベースへのマージで衝突: {}",
+                wt.merge_conflicts.join(", ")
+            )),
+            _ => None,
+        };
         let (header_text, conflict_note, diff_text) =
             match (self.current_worktree(), self.current_file()) {
                 (Some(_), Some(file)) => {
@@ -977,6 +1015,12 @@ impl RepoBrowser {
                 .weight(600)
                 .truncation(Truncation::Tail),
         );
+        if let Some(note) = merge_note {
+            self.tree.insert(
+                Some(self.diff_header),
+                Badge::text(note).tone(Tone::Critical),
+            );
+        }
         if let Some(note) = conflict_note {
             self.tree.insert(
                 Some(self.diff_header),
@@ -1001,7 +1045,16 @@ impl RepoBrowser {
     }
 
     fn update_terminal(&mut self) {
-        let next = self.target().map(|p| (p.pane_id, p.terminal_tail.clone()));
+        let next = match self.current_worktree() {
+            Some(wt) => match self.target() {
+                Some(p) => TerminalShown::Pane(p.pane_id, p.terminal_tail.clone()),
+                None => TerminalShown::NoPane {
+                    branch: wt.branch.clone(),
+                    cwd: wt.cwd.clone(),
+                },
+            },
+            None => TerminalShown::Nothing,
+        };
         if next == self.last_terminal_key {
             return;
         }
@@ -1009,18 +1062,39 @@ impl RepoBrowser {
         self.tree.update::<Terminal, _>(self.terminal, |term, cx| {
             let _ = term.feed(cx, b"\x1b[2J\x1b[H");
             match &next {
-                Some((_, tail)) if !tail.is_empty() => {
+                TerminalShown::Pane(_, tail) if !tail.is_empty() => {
                     let _ = term.feed(cx, tail.as_bytes());
                 }
-                Some((id, _)) => {
+                TerminalShown::Pane(id, _) => {
                     let msg = format!("Pane #{id} (出力なし)\r\n");
                     let _ = term.feed(cx, msg.as_bytes());
                 }
-                None => {
+                TerminalShown::NoPane { branch, cwd } => {
+                    let msg = format!(
+                        "\x1b[1;33mペインなし\x1b[0m: {branch}\r\n\
+                         この worktree を開いている Noa ペインはありません。\r\n\
+                         ペインを閉じても worktree とブランチは残っています:\r\n  {cwd}\r\n\
+                         差分の確認はできますが、指示の送信とフォーカスはできません。\r\n"
+                    );
+                    let _ = term.feed(cx, msg.as_bytes());
+                }
+                TerminalShown::Nothing => {
                     let _ = term.feed(cx, "(紐づくペインがありません)\r\n".as_bytes());
                 }
             }
         });
+    }
+
+    /// The toast when the selection has no pane to `act` on: a worktree
+    /// listed without a pane says so by name.
+    fn no_pane_message(&self, act: &str) -> String {
+        match self.current_worktree() {
+            Some(wt) if !wt.has_pane() => format!(
+                "{} はペインなしの worktree です（開いているペインがないため{act}できません）",
+                wt.branch
+            ),
+            _ => format!("{act}先のペインがありません"),
+        }
     }
 
     fn rebuild_status_bar(&mut self, text: &mut TextStore) {
@@ -1049,6 +1123,13 @@ impl RepoBrowser {
             self.tree.insert(
                 Some(self.status_leading),
                 Badge::text(format!("⚠ 衝突 {conflicts}")).tone(Tone::Warning),
+            );
+        }
+        let merge_conflicts = self.filtered.merge_conflict_count();
+        if merge_conflicts > 0 {
+            self.tree.insert(
+                Some(self.status_leading),
+                Badge::text(format!("⛔ マージ衝突 {merge_conflicts}")).tone(Tone::Critical),
             );
         }
 
@@ -1159,7 +1240,7 @@ impl RepoBrowser {
 
     fn focus_selected_pane(&mut self) {
         let Some(pane) = self.target() else {
-            self.toast("フォーカス対象のペインがありません");
+            self.toast(self.no_pane_message("フォーカス"));
             return;
         };
         let pane_id = pane.pane_id;
@@ -1379,7 +1460,7 @@ impl RepoBrowser {
             return;
         }
         let Some(pane) = self.target() else {
-            self.toast("送信先のペインがありません");
+            self.toast(self.no_pane_message("送信"));
             return;
         };
         let pane_id = pane.pane_id;
@@ -1412,7 +1493,7 @@ impl RepoBrowser {
             .collect::<Vec<_>>()
             .join(" ");
         let Some(pane) = self.target() else {
-            self.toast(format!("送信先ペインなし: {joined}"));
+            self.toast(format!("{}: {joined}", self.no_pane_message("送信")));
             return;
         };
         let pane_id = pane.pane_id;
@@ -2020,6 +2101,7 @@ mod tests {
                     ahead: 0,
                     behind: 0,
                     note: None,
+                    merge_conflicts: Vec::new(),
                     panes: vec![PaneSummary {
                         pane_id: 7,
                         name: "zsh".into(),
@@ -2513,12 +2595,18 @@ mod tests {
             pane(8, "claude", "two\r\n"),
         ]));
         assert_eq!(h.screen.target().unwrap().pane_id, 7);
-        assert_eq!(h.screen.last_terminal_key.as_ref().unwrap().0, 7);
+        assert!(matches!(
+            h.screen.last_terminal_key,
+            TerminalShown::Pane(7, _)
+        ));
         assert!(h.screen.target_seg.is_some());
 
         h.screen.choose_target(1, &mut h.text);
         assert_eq!(h.screen.target().unwrap().pane_id, 8);
-        assert_eq!(h.screen.last_terminal_key.as_ref().unwrap().0, 8);
+        assert!(matches!(
+            h.screen.last_terminal_key,
+            TerminalShown::Pane(8, _)
+        ));
 
         // The pick survives a refresh of the same worktree.
         h.deliver(snapshot_with_panes(vec![
@@ -2561,7 +2649,10 @@ mod tests {
         h.deliver(snapshot_with_panes(vec![pane(7, "zsh", "")]));
         assert_eq!(h.screen.target_pane, None);
         assert_eq!(h.screen.target().unwrap().pane_id, 7);
-        assert_eq!(h.screen.last_terminal_key.as_ref().unwrap().0, 7);
+        assert!(matches!(
+            h.screen.last_terminal_key,
+            TerminalShown::Pane(7, _)
+        ));
         assert!(h.screen.target_seg.is_none());
 
         // It does not come back when the pane reappears.
@@ -2838,5 +2929,109 @@ mod tests {
             screen.toasts
         );
         assert!(screen.toasts[1].contains(':'), "{:?}", screen.toasts);
+    }
+
+    /// The live snapshot plus a worktree with no pane, `orch/foo`, that also
+    /// edits `a.rs` and is predicted to conflict on it when merged.
+    fn snapshot_with_paneless_worktree() -> Snapshot {
+        let mut snap = snapshot(DiffMode::Unstaged, None);
+        let mut foo = snap.data.repos[0].worktrees[0].clone();
+        foo.cwd = "/repo-wt/foo".into();
+        foo.branch = "orch/foo".into();
+        foo.name = "orch/foo".into();
+        foo.panes.clear();
+        foo.files.truncate(1);
+        foo.merge_conflicts = vec!["a.rs".into()];
+        snap.data.repos[0].worktrees.push(foo);
+        snap.data.compute_conflicts();
+        snap
+    }
+
+    fn badge_labels(screen: &RepoBrowser, parent: WidgetId) -> Vec<String> {
+        screen
+            .tree()
+            .children(parent)
+            .iter()
+            .filter_map(|id| screen.tree().get::<Badge>(*id).and_then(Badge::label))
+            .collect()
+    }
+
+    fn browser_title(screen: &RepoBrowser, kind: impl Fn(&NodeKind) -> bool) -> String {
+        let item = screen.node_map.iter().position(kind).unwrap();
+        let browser = screen.tree().get::<BrowserView>(screen.browser).unwrap();
+        browser.title(item).to_owned()
+    }
+
+    #[test]
+    fn paneless_worktree_is_shown_and_refuses_send_and_focus() {
+        let mut h = LiveHarness::new();
+        h.deliver(snapshot_with_paneless_worktree());
+        h.screen.sel_wt = 1;
+        h.screen.sel_file = 0;
+        h.screen.sync_views(&mut h.text);
+
+        let row = browser_title(&h.screen, |k| matches!(k, NodeKind::Worktree(0, 1)));
+        assert!(row.contains("ペインなし"), "{row}");
+        assert!(row.contains("⛔マージ衝突 1"), "{row}");
+        assert!(row.contains("⚠衝突"), "same-file marking kept: {row}");
+        let file = browser_title(&h.screen, |k| matches!(k, NodeKind::File(0, 1, 0)));
+        assert!(file.contains('⛔') && file.contains('⚠'), "{file}");
+        // The worktree with a pane predicts no merge conflict on its a.rs.
+        let main_file = browser_title(&h.screen, |k| matches!(k, NodeKind::File(0, 0, 0)));
+        assert!(!main_file.contains('⛔'), "{main_file}");
+
+        let header = badge_labels(&h.screen, h.screen.diff_header);
+        assert!(
+            header.iter().any(|b| b.contains("マージで衝突: a.rs")),
+            "{header:?}"
+        );
+        let status = badge_labels(&h.screen, h.screen.status_leading);
+        assert!(status.contains(&"⛔ マージ衝突 1".to_owned()), "{status:?}");
+
+        let term = h.screen.tree().get::<Terminal>(h.screen.terminal).unwrap();
+        let shown: Vec<String> = (0..6).map(|row| term.line_text(row)).collect();
+        assert!(shown[0].contains("ペインなし: orch/foo"), "{shown:?}");
+        assert!(
+            shown.iter().any(|l| l.contains("/repo-wt/foo")),
+            "{shown:?}"
+        );
+
+        h.drain();
+        h.screen.toasts.clear();
+        set_prompt(&mut h.screen, "直して");
+        h.screen.send_review_prompt();
+        h.screen.focus_selected_pane();
+        h.screen
+            .send_dropped_files(&[PathBuf::from("/tmp/plain.txt")]);
+        let sent: Vec<Command> = h
+            .drain()
+            .into_iter()
+            .filter(|c| matches!(c, Command::SendText { .. } | Command::Focus(_)))
+            .collect();
+        assert!(sent.is_empty(), "{sent:?}");
+        assert_eq!(h.screen.toasts.len(), 3, "{:?}", h.screen.toasts);
+        for toast in &h.screen.toasts {
+            assert!(
+                toast.contains("orch/foo はペインなしの worktree"),
+                "{toast}"
+            );
+        }
+        assert!(h.screen.toasts[0].contains("送信できません"));
+        assert!(h.screen.toasts[1].contains("フォーカスできません"));
+        assert_eq!(prompt_text(&h.screen), "直して");
+    }
+
+    #[test]
+    fn no_pane_token_narrows_the_browser() {
+        let mut h = LiveHarness::new();
+        h.deliver(snapshot_with_paneless_worktree());
+        h.screen.tokens = vec!["no-pane".into()];
+        h.screen.sync_views(&mut h.text);
+        let wts = &h.screen.filtered.repos[0].worktrees;
+        assert_eq!(wts.len(), 1);
+        assert_eq!(wts[0].branch, "orch/foo");
+        h.screen.tokens = vec!["merge-conflict".into()];
+        h.screen.sync_views(&mut h.text);
+        assert_eq!(h.screen.filtered.repos[0].worktrees[0].branch, "orch/foo");
     }
 }

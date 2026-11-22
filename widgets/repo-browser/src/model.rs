@@ -24,8 +24,9 @@ impl DiffMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentActivity {
+    #[default]
     None,
     Running,
     Waiting,
@@ -65,15 +66,20 @@ pub struct ChangedFile {
     pub conflict_worktrees: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Worktree {
     pub name: String,
     pub cwd: String,
     pub branch: String,
     pub ahead: usize,
     pub behind: usize,
+    /// Empty for a worktree no Noa pane is in: one listed by
+    /// `git worktree list` whose pane was closed.
     pub panes: Vec<PaneSummary>,
     pub files: Vec<ChangedFile>,
+    /// Paths `git merge-tree` predicts would conflict when this branch is
+    /// merged into the base; empty when clean or unknown.
+    pub merge_conflicts: Vec<String>,
     /// Why `files` may be empty for a reason other than "no changes".
     pub note: Option<String>,
 }
@@ -89,6 +95,14 @@ impl Worktree {
                     .find(|p| p.activity == AgentActivity::Running)
             })
             .or_else(|| self.panes.first())
+    }
+
+    pub fn has_pane(&self) -> bool {
+        !self.panes.is_empty()
+    }
+
+    pub fn is_merge_conflict(&self, path: &str) -> bool {
+        self.merge_conflicts.iter().any(|p| p == path)
     }
 
     pub fn has_conflict(&self) -> bool {
@@ -134,6 +148,10 @@ impl Repo {
             .flat_map(|w| w.files.iter())
             .filter(|f| !f.conflict_worktrees.is_empty())
             .count()
+    }
+
+    pub fn merge_conflict_count(&self) -> usize {
+        self.worktrees.iter().map(|w| w.merge_conflicts.len()).sum()
     }
 }
 
@@ -184,6 +202,11 @@ impl RepoData {
         (repos, worktrees, files, conflicts)
     }
 
+    /// Predicted merge-conflict paths, summed over every worktree.
+    pub fn merge_conflict_count(&self) -> usize {
+        self.repos.iter().map(Repo::merge_conflict_count).sum()
+    }
+
     /// Filter repos/worktrees/files according to active token strings.
     pub fn filtered(&self, tokens: &[String]) -> RepoData {
         if tokens.is_empty() {
@@ -223,6 +246,8 @@ fn worktree_matches(repo: &Repo, wt: &Worktree, tokens: &[String]) -> bool {
         let matched = match t.as_str() {
             "dirty" => !wt.files.is_empty(),
             "conflict" => wt.has_conflict(),
+            "merge-conflict" => !wt.merge_conflicts.is_empty(),
+            "no-pane" => !wt.has_pane(),
             "agent:running" => wt.activity() == AgentActivity::Running,
             "agent:waiting" => wt.activity() == AgentActivity::Waiting,
             "agent:done" => wt.activity() == AgentActivity::Done,
@@ -292,8 +317,10 @@ pub fn demo_data(mode: DiffMode) -> RepoData {
                         cwd: "/Users/simota/repos/github.com/Noa-wt-subs".into(),
                         branch: "feat/pane-subscriptions".into(),
                         ahead: 3,
-                        behind: 0,
+                        behind: 2,
                         note: None,
+                        // main also reworked the broadcaster since this branched.
+                        merge_conflicts: vec!["crates/noa-ipc/src/push.rs".into()],
                         panes: vec![
                             PaneSummary {
                                 pane_id: 12,
@@ -384,6 +411,7 @@ pub fn demo_data(mode: DiffMode) -> RepoData {
                         ahead: 1,
                         behind: 1,
                         note: None,
+                        merge_conflicts: Vec::new(),
                         panes: vec![PaneSummary {
                             pane_id: 19,
                             name: "codex · reconnect".into(),
@@ -434,6 +462,36 @@ pub fn demo_data(mode: DiffMode) -> RepoData {
                             },
                         ],
                     },
+                    // An orchestration worker's worktree whose pane was
+                    // closed: listed by `git worktree list`, waiting for review.
+                    Worktree {
+                        name: "orch/ipc-docs".into(),
+                        cwd: "/Users/simota/repos/github.com/Noa-wt/ipc-docs".into(),
+                        branch: "orch/ipc-docs".into(),
+                        ahead: 2,
+                        behind: 1,
+                        note: None,
+                        merge_conflicts: Vec::new(),
+                        panes: Vec::new(),
+                        files: vec![ChangedFile {
+                            path: "docs/specs/noa-server.md".into(),
+                            status: "M".into(),
+                            added: 4,
+                            deleted: 0,
+                            diff: format!(
+                                "diff --git a/docs/specs/noa-server.md b/docs/specs/noa-server.md{suffix}\n\
+                                 --- a/docs/specs/noa-server.md\n\
+                                 +++ b/docs/specs/noa-server.md\n\
+                                 @@ -52,1 +52,5 @@\n\
+                                  ## Notifications\n\
+                                 +\n\
+                                 +`state_changed` carries `removedPaneIds` for panes that\n\
+                                 +closed since the last delta, filtered by the\n\
+                                 +subscription's pane set.\n"
+                            ),
+                            conflict_worktrees: Vec::new(),
+                        }],
+                    },
                     Worktree {
                         name: "main".into(),
                         cwd: "/Users/simota/repos/github.com/Noa".into(),
@@ -441,6 +499,7 @@ pub fn demo_data(mode: DiffMode) -> RepoData {
                         ahead: 0,
                         behind: 0,
                         note: None,
+                        merge_conflicts: Vec::new(),
                         panes: vec![PaneSummary {
                             pane_id: 3,
                             name: "zsh · Noa".into(),
@@ -482,6 +541,7 @@ pub fn demo_data(mode: DiffMode) -> RepoData {
                     ahead: 2,
                     behind: 0,
                     note: None,
+                    merge_conflicts: Vec::new(),
                     panes: vec![PaneSummary {
                         pane_id: 27,
                         name: "agy · gpui".into(),
@@ -547,6 +607,7 @@ mod tests {
             ahead: 0,
             behind: 0,
             note: None,
+            merge_conflicts: Vec::new(),
             panes: Vec::new(),
             files: vec![file("src/lib.rs")],
         };
@@ -595,6 +656,35 @@ mod tests {
         assert_eq!(
             only_waiting.repos[0].worktrees[0].branch,
             "fix/ipc-reconnect"
+        );
+    }
+
+    #[test]
+    fn no_pane_and_merge_conflict_tokens_pick_their_worktrees() {
+        let data = demo_data(DiffMode::Unstaged);
+        let no_pane = data.filtered(&["no-pane".into()]);
+        let branches: Vec<&str> = no_pane
+            .repos
+            .iter()
+            .flat_map(|r| &r.worktrees)
+            .map(|w| w.branch.as_str())
+            .collect();
+        assert_eq!(branches, vec!["orch/ipc-docs"]);
+
+        let merge = data.filtered(&["Merge-Conflict".into()]);
+        assert_eq!(merge.repos.len(), 1);
+        let wts = &merge.repos[0].worktrees;
+        assert_eq!(wts.len(), 1);
+        assert_eq!(wts[0].branch, "feat/pane-subscriptions");
+        // The token picks worktrees; their file lists are left whole.
+        assert_eq!(wts[0].files.len(), 2);
+        assert_eq!(data.merge_conflict_count(), 1);
+        assert_eq!(merge.merge_conflict_count(), 1);
+
+        assert!(
+            data.filtered(&["no-pane".into(), "merge-conflict".into()])
+                .repos
+                .is_empty()
         );
     }
 }

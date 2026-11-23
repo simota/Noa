@@ -457,6 +457,10 @@ pub(super) fn gone<'a>(
     let mut seen: HashSet<u64> = HashSet::new();
     let mut gone: Vec<Gone> = Vec::new();
     for journal in journals {
+        // An open orchestrator's journal also when it was read from the
+        // journal directory (its workers had all closed before the
+        // dashboard started, so none led to it).
+        let followed = journal.this_instance || spawners.contains_key(&journal.name);
         for record in &journal.records {
             let closed = record.closed_at.is_some();
             if !closed && is_open(record, &journal.name, panels) {
@@ -466,7 +470,7 @@ pub(super) fn gone<'a>(
                 let ours = started.is_none_or(|started| same_spawn(started, record.spawned_at));
                 (ours && *at >= record.spawned_at as f64).then_some(*at)
             });
-            if !closed && left.is_none() && !journal.this_instance {
+            if !closed && left.is_none() && !followed {
                 // Maybe running in another Noa: nothing says it closed.
                 continue;
             }

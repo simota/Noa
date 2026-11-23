@@ -143,6 +143,34 @@ fn a_closed_or_vanished_worker_is_gone_and_an_open_one_is_not() {
     );
 }
 
+/// Every worker closed (not through ctl) before the dashboard started: the
+/// orchestrator's journal is first read from the journal directory, not as
+/// an open orchestrator's. Its pane is open, so its workers are gone.
+#[test]
+fn an_open_orchestrators_journal_read_from_the_directory_counts_its_workers_gone() {
+    let now = NOW;
+    let at = now as u64 - 600;
+    let journals = [Journal::parsed("s1".to_owned(), None, &spawn(4, at, "w"))];
+    let orchestrator =
+        panel(serde_json::json!({ "paneId": "1", "label": "lead", "surfaceId": "s1" }));
+    let panels = super::panels(vec![orchestrator]);
+    let gone = gone(&journals, &panels, &HashMap::new(), now);
+    let panes: Vec<u64> = gone.iter().map(|g| g.record.pane).collect();
+    assert_eq!(panes, [4]);
+    assert_eq!(gone[0].orchestrator_pane, Some(1));
+    // Another Noa's journal (no open pane is its orchestrator) still needs
+    // a close or a pane seen leaving.
+    let others = [Journal::parsed("s2".to_owned(), None, &spawn(4, at, "w"))];
+    assert!(gone_of(&others, &panels, now).is_empty());
+}
+
+fn gone_of(journals: &[Journal], panels: &HashMap<u64, Panel>, now: f64) -> Vec<u64> {
+    gone(journals, panels, &HashMap::new(), now)
+        .iter()
+        .map(|g| g.record.pane)
+        .collect()
+}
+
 /// After Noa restarted, pane 4 is another pane: started long after the
 /// journal's spawn. The journal's worker is gone, the new pane stays live,
 /// and the two are two workers.

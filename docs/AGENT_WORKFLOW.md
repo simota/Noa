@@ -363,7 +363,8 @@ The board's labels are in Japanese when the locale is Japanese (`LC_ALL`,
 language) and in English otherwise.
 Keys: `j`/`k`
 select, `n` jumps to the next worker in the queue, `Enter` opens a worker's live screen and the reports seen since the board
-opened, `g` opens the worker over the lower part of the board, closing any
+opened, with the last task it was sent and the state of its result file (`r`
+there shows the file's text in place of the screen; `j`/`k` scroll it), `g` opens the worker over the lower part of the board, closing any
 other worker it had open (answer prompts there; ⌘⇧I, ctrl+shift+i off macOS,
 folds it and comes back to the board), `s` types a
 message (a paste can span lines) and sends it with Enter, except to a worker

@@ -391,6 +391,19 @@ a terminal, so a script or an agent's tool shell cannot start it by mistake. Wor
 board closed return to the board that `board --open` (or the next `spawn`)
 opens, up to its 20 slots; one that has keyboard focus stays where it is.
 
+The board shows what a worker was asked and whether it reported, from the
+same files `status` and `result` read: the last task in its parent's journal
+(the first 200 characters, as journaled) and its result file (`$NOA_RESULT`:
+the journal's, else `<cwd>/.noa/result-<label>.md` for a plain label). The
+preview's last line says `result written` once the file is non-empty; the
+detail view (`Enter`) has a Task and a Result section (not created, empty
+(not written yet), or N bytes written how long ago, and the path), and `r`
+there swaps the screen box for the file's start (up to 16 KiB and 200 lines;
+`j`/`k` scroll it). Only a regular file is read. The board looks at journals
+and result files every 2 seconds, reads a journal again only when its time or
+length changed, and reads a result's text only while it is shown, so a task
+sent or a report written shows within about 2 seconds.
+
 ### `report STATE [[--] DETAIL]`
 
 Writes an agent-state report for the pane this process runs in. `STATE` is

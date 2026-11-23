@@ -70,22 +70,28 @@ pub(crate) mod heap {
 }
 
 use std::path::PathBuf;
-use std::sync::mpsc::RecvTimeoutError;
-use std::time::{Duration, Instant};
+
+use std::time::Duration;
 
 use noa_gpui_platform::{App, AppOptions, Headless, Screen};
 use noa_gpui_scene::Size;
 use noa_gpui_text::TextStore;
 
-use crate::live::{Link, Snapshot};
-use crate::ui::RepoBrowser;
+use crate::ui::{RepoBrowser, SnapshotView};
 
-const USAGE: &str = "usage: repo-browser [--demo] [--snapshot=FILE.png [--size=WxH] [--composer]]\n  \
+const USAGE: &str = "usage: repo-browser [--demo] [--worktree=PATH] \
+                     [--snapshot=FILE.png [--size=WxH] [--merge | --commit] [--composer]]\n  \
                      live data from the running Noa control server by default; \
-                     --demo shows canned multi-worktree data";
+                     --demo shows canned multi-worktree data;\n  \
+                     --worktree selects the worktree holding PATH;\n  \
+                     --merge shows a predicted merge conflict, --commit the newest commit, \
+                     --composer quotes the selection into the review prompt";
 const DEFAULT_SIZE: (u32, u32) = (1440, 900);
 const SNAPSHOT_SCALE: f32 = 2.0;
 const FIRST_SNAPSHOT_WAIT: Duration = Duration::from_secs(3);
+/// How long a live snapshot waits for the selected file's, commit's or
+/// merge conflict's text after the listing.
+const CONTENT_WAIT: Duration = Duration::from_secs(3);
 
 fn options() -> AppOptions {
     AppOptions {
@@ -104,36 +110,18 @@ fn parse_size(arg: &str) -> Result<(u32, u32), String> {
     }
 }
 
-fn first_live_snapshot() -> Result<Snapshot, String> {
-    let channel = live::start(|| {});
-    let until = Instant::now() + FIRST_SNAPSHOT_WAIT;
-    let mut reason = "Noa から 3 秒以内に応答がありません".to_owned();
-    loop {
-        let left = until.saturating_duration_since(Instant::now());
-        match channel.snapshots.recv_timeout(left) {
-            Ok(snapshot) => match &snapshot.link {
-                Link::Live => return Ok(snapshot),
-                Link::Down(why) => reason.clone_from(why),
-                Link::Connecting => {}
-            },
-            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
-                return Err(reason);
-            }
-        }
-    }
-}
-
+/// Renders `screen` with the text store it was prepared with, if any.
 fn render_snapshot(
     path: &PathBuf,
     screen: &mut dyn Screen,
     size: (u32, u32),
+    text: &mut TextStore,
 ) -> Result<(), String> {
     let mut headless = Headless::new_or_software();
-    let mut text = TextStore::new(Default::default());
     let viewport = Size::new(size.0 as f32, size.1 as f32);
-    screen.prepare(viewport, &mut text);
+    screen.prepare(viewport, text);
     headless
-        .render_screen(screen, &mut text, size, SNAPSHOT_SCALE)
+        .render_screen(screen, text, size, SNAPSHOT_SCALE)
         .map_err(|e| e.to_string())?
         .save_png(path)
         .map_err(|e| format!("write {}: {e}", path.display()))
@@ -143,6 +131,8 @@ fn main() -> Result<(), String> {
     let mut snapshot_path = None;
     let mut demo = false;
     let mut composer = false;
+    let mut view = None;
+    let mut worktree = None;
     let mut size = DEFAULT_SIZE;
 
     for arg in std::env::args().skip(1) {
@@ -150,8 +140,18 @@ fn main() -> Result<(), String> {
             snapshot_path = Some(PathBuf::from(path));
         } else if let Some(raw) = arg.strip_prefix("--size=") {
             size = parse_size(raw)?;
+        } else if let Some(path) = arg.strip_prefix("--worktree=") {
+            if path.trim().is_empty() {
+                return Err(format!("--worktree needs a path\n{USAGE}"));
+            }
+            worktree = Some(path.to_owned());
         } else if arg == "--composer" {
             composer = true;
+        } else if arg == "--merge" || arg == "--commit" {
+            if view.is_some() {
+                return Err(format!("--merge and --commit exclude each other\n{USAGE}"));
+            }
+            view = Some(arg);
         } else if arg == "--demo" {
             demo = true;
         } else if arg == "--help" || arg == "-h" {
@@ -163,26 +163,57 @@ fn main() -> Result<(), String> {
     }
 
     if let Some(path) = snapshot_path {
+        let view = match view.as_deref() {
+            Some("--merge") => SnapshotView::Merge,
+            Some("--commit") => SnapshotView::Commit,
+            _ => SnapshotView::Diff,
+        };
+        // One text store from the first layout to the render.
+        let mut text = TextStore::new(Default::default());
         let mut screen = if demo {
-            RepoBrowser::demo()
+            let mut screen = RepoBrowser::demo();
+            if let Some(path) = worktree {
+                screen.preselect_worktree(path, &mut text);
+            }
+            match view {
+                SnapshotView::Diff => {}
+                SnapshotView::Merge => screen.show_first_merge(&mut text),
+                SnapshotView::Commit => screen.show_first_commit(&mut text),
+            }
+            screen
         } else {
-            RepoBrowser::of_snapshot(first_live_snapshot()?)
+            // The live feed stays connected until the selection's text is in.
+            RepoBrowser::live_snapshot(
+                live::start(|| {}),
+                worktree,
+                view,
+                &mut text,
+                Size::new(size.0 as f32, size.1 as f32),
+                FIRST_SNAPSHOT_WAIT,
+                CONTENT_WAIT,
+            )?
         };
         if composer {
             screen.show_composer();
         }
-        render_snapshot(&path, &mut screen, size)?;
+        render_snapshot(&path, &mut screen, size, &mut text)?;
         println!("wrote {}", path.display());
         return Ok(());
     }
 
     App::new(options(), move |setup| {
-        if demo {
-            return Box::new(RepoBrowser::demo());
+        let mut screen = if demo {
+            RepoBrowser::demo()
+        } else {
+            let waker = setup.waker.clone();
+            let channel = live::start(move || waker.wake());
+            RepoBrowser::live(channel)
+        };
+        if let Some(path) = worktree.take() {
+            // Before the first frame: any text store will do.
+            screen.preselect_worktree(path, &mut TextStore::new(Default::default()));
         }
-        let waker = setup.waker.clone();
-        let channel = live::start(move || waker.wake());
-        Box::new(RepoBrowser::live(channel))
+        Box::new(screen)
     })
     .run()
     .map_err(|e| e.to_string())

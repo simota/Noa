@@ -24,6 +24,52 @@ impl DiffMode {
     }
 }
 
+/// A coding agent CLI the browser can start in a worktree with the review
+/// prompt as its first prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentKind {
+    Claude,
+    Codex,
+    Agy,
+}
+
+impl AgentKind {
+    pub const ALL: [AgentKind; 3] = [AgentKind::Claude, AgentKind::Codex, AgentKind::Agy];
+
+    /// The command that starts it, also its name in the UI.
+    pub fn command(self) -> &'static str {
+        match self {
+            AgentKind::Claude => "claude",
+            AgentKind::Codex => "codex",
+            AgentKind::Agy => "agy",
+        }
+    }
+
+    /// How the launch script execs it with the prompt in `$p` as its first
+    /// prompt, so that a prompt never reads as one of its options or
+    /// subcommands: Claude Code and Codex take it after `--`;
+    /// Antigravity's `-i` (`--prompt-interactive`) takes the next argument as
+    /// its value only when it is no option, so it is joined with `=`.
+    pub fn exec_args(self) -> &'static str {
+        match self {
+            AgentKind::Claude => "claude -- \"$p\"",
+            AgentKind::Codex => "codex -- \"$p\"",
+            AgentKind::Agy => "agy \"--prompt-interactive=$p\"",
+        }
+    }
+
+    /// `prompt` as the agent is given it. Claude Code still runs a
+    /// subcommand named by its prompt after `--` (`claude -- doctor`), so a
+    /// one-word prompt gets a trailing line break, which no command name has.
+    pub fn prompt_text(self, prompt: &str) -> String {
+        let mut text = prompt.to_owned();
+        if self == AgentKind::Claude && !text.contains(char::is_whitespace) {
+            text.push('\n');
+        }
+        text
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentActivity {
     #[default]
@@ -792,6 +838,44 @@ pub fn demo_data(mode: DiffMode) -> RepoData {
     };
     data.compute_conflicts();
     data
+}
+
+/// The predicted merge result of each demo merge conflict, as
+/// (worktree cwd, path, text with conflict markers).
+pub fn demo_merge_previews() -> Vec<(String, String, String)> {
+    vec![(
+        "/Users/simota/repos/github.com/Noa-wt-subs".into(),
+        "crates/noa-ipc/src/push.rs".into(),
+        "use crate::protocol::{ChangedPanel, Panel};\n\
+         \n\
+         impl Broadcaster {\n\
+         \x20   pub fn broadcast_state_delta(\n\
+         \x20       &self,\n\
+         <<<<<<< main\n\
+         \x20       changed: Vec<Panel>,\n\
+         \x20       seq: u64,\n\
+         =======\n\
+         \x20       changed: Vec<ChangedPanel>,\n\
+         \x20       removed: Vec<u64>,\n\
+         >>>>>>> feat/pane-subscriptions\n\
+         \x20   ) {\n\
+         \x20       let guard = self.inner.lock();\n\
+         <<<<<<< main\n\
+         \x20       for sub in guard.subscribers.values() {\n\
+         \x20           sub.enqueue_panels(&changed, seq);\n\
+         =======\n\
+         \x20       for conn in guard.connections.values() {\n\
+         \x20           let panels = conn.filter_panels(&changed);\n\
+         \x20           let removed_ids = conn.filter_removed(&removed);\n\
+         \x20           if !panels.is_empty() || !removed_ids.is_empty() {\n\
+         \x20               conn.enqueue_delta(panels, removed_ids);\n\
+         \x20           }\n\
+         >>>>>>> feat/pane-subscriptions\n\
+         \x20       }\n\
+         \x20   }\n\
+         }\n"
+        .into(),
+    )]
 }
 
 #[cfg(test)]

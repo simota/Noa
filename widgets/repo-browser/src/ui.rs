@@ -3,27 +3,27 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use noa_gpui_core::style::{
-    AlignItems, FlexDirection, Overflow, Rect as LayoutRect, Size as LayoutSize, auto, length,
-    percent,
+    AlignItems, FlexDirection, FlexWrap, Overflow, Rect as LayoutRect, Size as LayoutSize, auto,
+    length, percent,
 };
 use noa_gpui_core::widgets::{
     Badge, BrowserPathChanged, BrowserView, Button, ButtonClicked, COMMAND_PALETTE_SHORTCUTS,
     ComboButton, CommandChosen, CommandPalette, Container, ControlSize, EmptyState, FIND_SHORTCUT,
     FileDropZone, FilesDropped, FindBar, Kbd, Label, LogLine, LogView, MenuChosen, MenuItem,
-    OutlineItem, PaletteCommand, PathControl, PathItemClicked, RecentCommands, RowSelectionChanged,
-    ScrollView, SegmentMode, SegmentedControl, SelectionChanged, SelectionMode, SplitPane,
-    SplitView, StatusBar, TABLE_HEADER, TabView, TableColumn, TableData, TableView, Terminal,
-    TextArea, Toast, TokenField, TokensChanged, Tone, Truncation, drive_find,
+    OutlineItem, PaletteCommand, PathControl, PathItemClicked, PullDownButton, RecentCommands,
+    RowSelectionChanged, ScrollView, SegmentMode, SegmentedControl, SelectionChanged,
+    SelectionMode, SplitPane, SplitView, StatusBar, TABLE_HEADER, TabView, TableColumn, TableData,
+    TableView, Terminal, TextArea, Toast, TokenField, TokensChanged, Tone, Truncation, drive_find,
 };
 use noa_gpui_core::{Message, Role, Shortcut, ShortcutPressed, Style, Theme, UiTree, WidgetId};
 use noa_gpui_platform::Screen;
 use noa_gpui_scene::{Color, Size};
 use noa_gpui_text::TextStore;
 
-use crate::live::{Channel, Command, Link, Snapshot};
+use crate::live::{AGENT_PROMPT_MAX, Channel, Command, Link, agent_prompt_too_large};
 use crate::model::{
-    AgentActivity, ChangedFile, CommitInfo, DiffMode, PaneSummary, Repo, RepoData, Worktree,
-    demo_data, now_secs,
+    AgentActivity, AgentKind, ChangedFile, CommitInfo, DiffMode, PaneSummary, Repo, RepoData,
+    Worktree, demo_data, demo_merge_previews, now_secs,
 };
 
 const DIFF_ADD_FG: Color = Color::rgba(0.45, 0.90, 0.56, 1.0);
@@ -33,6 +33,14 @@ const DIFF_DEL_BG: Color = Color::rgba(0.42, 0.14, 0.16, 0.42);
 const DIFF_HUNK_FG: Color = Color::rgba(0.46, 0.80, 0.98, 1.0);
 const DIFF_HUNK_BG: Color = Color::rgba(0.14, 0.25, 0.38, 0.40);
 const DIFF_META_FG: Color = Color::rgba(0.84, 0.76, 0.46, 1.0);
+/// A merge preview's conflict markers and the two sides they enclose: the
+/// base's (`<<<<<<<` to `=======`), the common ancestor's (diff3 style,
+/// after `|||||||`) and the branch's (`=======` to `>>>>>>>`).
+const MERGE_MARKER_FG: Color = Color::rgba(1.0, 0.62, 0.42, 1.0);
+const MERGE_MARKER_BG: Color = Color::rgba(0.48, 0.20, 0.10, 0.50);
+const MERGE_BASE_BG: Color = Color::rgba(0.14, 0.25, 0.38, 0.40);
+const MERGE_ANCESTOR_BG: Color = Color::rgba(0.30, 0.30, 0.30, 0.35);
+const MERGE_BRANCH_BG: Color = Color::rgba(0.14, 0.36, 0.20, 0.42);
 
 #[derive(Debug, Clone)]
 enum PaletteAction {
@@ -49,6 +57,19 @@ enum PaletteAction {
         sha: String,
     },
     FocusPane(u64),
+    /// Resolved when chosen, like `SelectFile`.
+    ShowMerge {
+        root: String,
+        cwd: String,
+        path: String,
+    },
+    /// Resolved when chosen, like `SelectFile`: the worktree it named when
+    /// the palette opened, never whatever is selected by then.
+    LaunchAgent {
+        agent: AgentKind,
+        root: String,
+        cwd: String,
+    },
     /// Resolved against the selection when chosen.
     OpenShell,
     OpenEditor,
@@ -77,10 +98,18 @@ enum TerminalShown {
     Nothing,
 }
 
+/// What a `--snapshot` shows besides the selected file's diff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotView {
+    Diff,
+    /// `--merge`: a predicted merge conflict.
+    Merge,
+    /// `--commit`: the newest commit.
+    Commit,
+}
+
 enum Source {
     Demo,
-    /// A one-off render of a live snapshot (`--snapshot` without `--demo`).
-    Snapshot,
     Live(Channel),
 }
 
@@ -108,6 +137,25 @@ pub struct RepoBrowser {
     commit_diffs: HashMap<(String, String), String>,
     /// The commit the live feed was last asked to load.
     requested_commit: Option<(String, String)>,
+    /// The predicted merge conflict (worktree cwd, path) the diff view shows
+    /// instead of a file's diff; `None` otherwise.
+    sel_merge: Option<(String, String)>,
+    /// The predicted merge result (conflict markers included) of the merge
+    /// conflict shown, once the live feed answered this showing of it: one
+    /// at a time, so an earlier prediction is never shown as the current
+    /// one and closed previews are not kept.
+    merge_text: Option<((String, String), String)>,
+    /// The demo's merge results, by (worktree cwd, path).
+    demo_merges: HashMap<(String, String), String>,
+    /// The merge conflict the live feed was last asked to load.
+    requested_merge: Option<(String, String)>,
+    /// The id of the last merge preview request; only its answer is shown.
+    merge_request: u64,
+    /// Whether the log view holds a merge preview rather than a diff.
+    shown_merge: bool,
+    /// The worktree `--worktree=PATH` asked for, until a listing can say
+    /// whether it is there.
+    pending_worktree: Option<String>,
     /// What the commit table holds: its rows and the sha selected in it.
     shown_commits: Option<CommitTableState>,
     /// The line-number gutter in front of each line of `shown_diff`, when it
@@ -152,6 +200,10 @@ pub struct RepoBrowser {
     target_seg: Option<WidgetId>,
     prompt_area: WidgetId,
     send_btn: WidgetId,
+    /// Starts an agent in the worktree with the prompt (a menu of agents).
+    agent_btn: WidgetId,
+    /// "マージ衝突を表示" / "差分に戻る" in the diff header, when offered.
+    merge_btn: Option<WidgetId>,
     status_leading: WidgetId,
     status_trailing: WidgetId,
 
@@ -182,7 +234,12 @@ pub struct RepoBrowser {
 impl RepoBrowser {
     pub fn demo() -> Self {
         let data = demo_data(DiffMode::Unstaged);
-        Self::build(Source::Demo, Link::Live, true, true, data)
+        let mut screen = Self::build(Source::Demo, Link::Live, true, true, data);
+        screen.demo_merges = demo_merge_previews()
+            .into_iter()
+            .map(|(cwd, path, text)| ((cwd, path), text))
+            .collect();
+        screen
     }
 
     pub fn live(channel: Channel) -> Self {
@@ -193,23 +250,6 @@ impl RepoBrowser {
             false,
             RepoData::default(),
         )
-    }
-
-    pub fn of_snapshot(snapshot: Snapshot) -> Self {
-        let mut screen = Self::build(
-            Source::Snapshot,
-            snapshot.link,
-            snapshot.can_focus,
-            snapshot.can_send,
-            snapshot.data,
-        );
-        screen.diff_mode = snapshot.diff_mode;
-        if let Some((cwd, path, diff)) = snapshot.selected_diff {
-            screen.diff_cache.insert((cwd, path), diff);
-        }
-        let mut text = TextStore::new(Default::default());
-        screen.sync_views(&mut text);
-        screen
     }
 
     fn build(
@@ -507,9 +547,11 @@ impl RepoBrowser {
             Some(composer_page),
             Container::new(Style {
                 flex_direction: FlexDirection::Row,
+                // The agent menu goes to a second line in a narrow panel.
+                flex_wrap: FlexWrap::Wrap,
                 gap: LayoutSize {
                     width: length(6.0),
-                    height: length(0.0),
+                    height: length(6.0),
                 },
                 flex_shrink: 0.0,
                 ..Default::default()
@@ -528,6 +570,17 @@ impl RepoBrowser {
             Button::new("ペインへ送信")
                 .default_button(true)
                 .control_size(ControlSize::Small),
+        );
+        let agent_btn = tree.insert(
+            Some(composer_actions),
+            PullDownButton::new(
+                "エージェントで送信",
+                AgentKind::ALL
+                    .iter()
+                    .map(|a| MenuItem::new(format!("{} を起動して送信", a.command())))
+                    .collect(),
+            )
+            .control_size(ControlSize::Small),
         );
         let prompt_scroll = tree.insert(
             Some(composer_page),
@@ -628,6 +681,13 @@ impl RepoBrowser {
             sel_commit: None,
             commit_diffs: HashMap::new(),
             requested_commit: None,
+            sel_merge: None,
+            merge_text: None,
+            demo_merges: HashMap::new(),
+            merge_request: 0,
+            requested_merge: None,
+            shown_merge: false,
+            pending_worktree: None,
             shown_commits: None,
             gutter: None,
             browser_size: (BROWSER_HEIGHT, BROWSER_COLUMN),
@@ -660,6 +720,8 @@ impl RepoBrowser {
             target_seg: None,
             prompt_area,
             send_btn,
+            agent_btn,
+            merge_btn: None,
             status_leading: status_parts.leading,
             status_trailing: status_parts.trailing,
             active_palette: None,
@@ -683,6 +745,172 @@ impl RepoBrowser {
     /// snapshots).
     pub fn show_composer(&mut self) {
         self.quote_selected_diff();
+    }
+
+    /// Selects the worktree at `path` (its root, or a directory inside it)
+    /// once the worktrees are known: now for demo data and a one-off
+    /// snapshot, at the first listing from Noa when live. A path no listed
+    /// worktree holds leaves the usual selection and says so.
+    pub fn preselect_worktree(&mut self, path: String, text: &mut TextStore) {
+        self.pending_worktree = Some(path);
+        if !matches!(self.source, Source::Live(_)) {
+            self.apply_pending_worktree(text);
+        }
+    }
+
+    /// The live screen a `--snapshot` renders: Noa's first listing (waited
+    /// for up to `listing_wait`; an error says why none came), the
+    /// worktree `worktree` names, then `view`, and the text the selection
+    /// shows (waited for up to `content_wait`, after which it renders as
+    /// it is).
+    pub fn live_snapshot(
+        channel: Channel,
+        worktree: Option<String>,
+        view: SnapshotView,
+        text: &mut TextStore,
+        viewport: Size,
+        listing_wait: std::time::Duration,
+        content_wait: std::time::Duration,
+    ) -> Result<Self, String> {
+        use std::time::{Duration, Instant};
+        let step = Duration::from_millis(20);
+        let mut screen = Self::live(channel);
+        if let Some(path) = worktree {
+            screen.preselect_worktree(path, text);
+        }
+        let until = Instant::now() + listing_wait;
+        let mut reason = format!(
+            "Noa から {} 秒以内に応答がありません",
+            listing_wait.as_secs()
+        );
+        loop {
+            screen.prepare(viewport, text);
+            match &screen.link {
+                Link::Live if screen.pending_worktree.is_none() => break,
+                Link::Down(why) => reason.clone_from(why),
+                _ => {}
+            }
+            if Instant::now() >= until {
+                return Err(reason);
+            }
+            std::thread::sleep(step);
+        }
+        match view {
+            SnapshotView::Diff => {}
+            SnapshotView::Merge => screen.show_first_merge(text),
+            SnapshotView::Commit => screen.show_first_commit(text),
+        }
+        let until = Instant::now() + content_wait;
+        loop {
+            screen.prepare(viewport, text);
+            if !screen.awaits_content() || Instant::now() >= until {
+                break;
+            }
+            std::thread::sleep(step);
+        }
+        // The selection made once the text was in (`--merge`/`--commit`
+        // select lines of it).
+        match view {
+            SnapshotView::Diff => {}
+            SnapshotView::Merge => screen.select_first_conflict(),
+            SnapshotView::Commit => screen.select_first_hunk(),
+        }
+        Ok(screen)
+    }
+
+    /// Whether the selected file, commit or merge conflict is still waiting
+    /// for its text from the live feed.
+    fn awaits_content(&self) -> bool {
+        let selected = self.current_merge().is_some()
+            || self.current_commit().is_some()
+            || self.current_file().is_some();
+        selected && self.current_diff_text().is_none()
+    }
+
+    fn apply_pending_worktree(&mut self, text: &mut TextStore) {
+        let Some(wanted) = self.pending_worktree.take() else {
+            return;
+        };
+        let Some((ri, wi)) = worktree_holding(&self.filtered, &wanted) else {
+            self.toast(format!(
+                "--worktree の {wanted} は一覧のどの worktree にもありません。通常どおり表示します"
+            ));
+            return;
+        };
+        self.sel_repo = ri;
+        self.sel_wt = wi;
+        self.sel_file = 0;
+        self.leave_commit();
+        self.leave_merge();
+        self.sync_views(text);
+    }
+
+    /// Shows the first predicted merge conflict of the selected worktree
+    /// (else of the first worktree that has one) with its first conflict
+    /// block selected (for `--merge` snapshots).
+    pub fn show_first_merge(&mut self, text: &mut TextStore) {
+        let here = self
+            .current_worktree()
+            .filter(|wt| !wt.merge_conflicts.is_empty())
+            .map(|_| (self.sel_repo, self.sel_wt));
+        let found = here.or_else(|| {
+            self.filtered.repos.iter().enumerate().find_map(|(ri, r)| {
+                let wi = r
+                    .worktrees
+                    .iter()
+                    .position(|w| !w.merge_conflicts.is_empty())?;
+                Some((ri, wi))
+            })
+        });
+        let Some((ri, wi)) = found else {
+            return;
+        };
+        let wt = &self.filtered.repos[ri].worktrees[wi];
+        let path = wt.merge_conflicts[0].clone();
+        self.sel_repo = ri;
+        self.sel_wt = wi;
+        self.sel_file = wt.files.iter().position(|f| f.path == path).unwrap_or(0);
+        self.show_merge(path, text);
+        self.select_first_conflict();
+    }
+
+    /// Selects the shown merge preview's first conflict block.
+    fn select_first_conflict(&mut self) {
+        let shown = self.shown_diff.clone().unwrap_or_default();
+        if let Some(block) = conflict_blocks(&shown).into_iter().next() {
+            self.tree
+                .update::<LogView, _>(self.diff_log, |log, cx| log.select_lines(cx, block));
+        }
+    }
+
+    /// Shows the selected worktree's newest commit with the first hunk of
+    /// its first file selected (for `--commit` snapshots).
+    pub fn show_first_commit(&mut self, text: &mut TextStore) {
+        let Some(sha) = self
+            .current_worktree()
+            .and_then(|w| w.commits.first())
+            .map(|c| c.sha.clone())
+        else {
+            return;
+        };
+        self.select_commit(sha, text);
+        self.tree
+            .update::<TabView, _>(self.side_tabs, |tabs, cx| tabs.set_selected(cx, 2));
+        self.select_first_hunk();
+    }
+
+    /// Selects the lines of the shown diff's first hunk.
+    fn select_first_hunk(&mut self) {
+        let shown = self.shown_diff.clone().unwrap_or_default();
+        let lines: Vec<&str> = shown.lines().collect();
+        let Some(hunk) = lines.iter().position(|l| l.starts_with("@@")) else {
+            return;
+        };
+        let end = (hunk + 1..lines.len())
+            .find(|&i| lines[i].starts_with("@@") || lines[i].starts_with("diff "))
+            .unwrap_or(lines.len());
+        self.tree
+            .update::<LogView, _>(self.diff_log, |log, cx| log.select_lines(cx, hunk + 1..end));
     }
 
     fn current_repo(&self) -> Option<&Repo> {
@@ -714,6 +942,59 @@ impl RepoBrowser {
         self.requested_commit = None;
     }
 
+    /// The path whose predicted merge conflict the diff view shows, when it
+    /// is still one of the current worktree's.
+    fn current_merge(&self) -> Option<&str> {
+        let (cwd, path) = self.sel_merge.as_ref()?;
+        let wt = self.current_worktree()?;
+        (wt.cwd == *cwd && wt.is_merge_conflict(path)).then_some(path.as_str())
+    }
+
+    /// Back from the merge preview to the selected file's diff.
+    fn leave_merge(&mut self) {
+        self.sel_merge = None;
+        self.requested_merge = None;
+        self.merge_text = None;
+    }
+
+    /// Shows the predicted merge result of `path`, conflict markers
+    /// included, for the current worktree.
+    fn show_merge(&mut self, path: String, text: &mut TextStore) {
+        let Some(cwd) = self.current_worktree().map(|w| w.cwd.clone()) else {
+            return;
+        };
+        self.leave_commit();
+        let key = (cwd, path);
+        // Each showing waits for the feed's current prediction.
+        self.merge_text = self
+            .demo_merges
+            .get(&key)
+            .map(|text| (key.clone(), text.clone()));
+        self.requested_merge = None;
+        self.sel_merge = Some(key);
+        // As for a commit: the file is asked for afresh on the way back.
+        self.requested_diff = None;
+        self.sync_views(text);
+    }
+
+    /// The diff header's merge button: into the preview of the selected ⛔
+    /// file, or back to its diff.
+    fn toggle_merge(&mut self, text: &mut TextStore) {
+        if self.current_merge().is_some() {
+            self.leave_merge();
+            self.sync_views(text);
+            return;
+        }
+        let path = self
+            .current_worktree()
+            .zip(self.current_file())
+            .filter(|(wt, f)| wt.is_merge_conflict(&f.path))
+            .map(|(_, f)| f.path.clone());
+        if let Some(path) = path {
+            self.show_merge(path, text);
+        }
+    }
+
     /// Shows the commit `sha` of the current worktree in the diff view.
     fn select_commit(&mut self, sha: String, text: &mut TextStore) {
         let Some(cwd) = self.current_worktree().map(|w| w.cwd.clone()) else {
@@ -722,6 +1003,7 @@ impl RepoBrowser {
         if self.sel_commit.as_ref() == Some(&(cwd.clone(), sha.clone())) {
             return;
         }
+        self.leave_merge();
         self.sel_commit = Some((cwd, sha));
         // The live feed drops its file when asked for a commit and only picks
         // it up again on a new request, so the file must be requested afresh
@@ -802,6 +1084,9 @@ impl RepoBrowser {
         self.clamp_selection();
         if self.sel_commit.is_some() && self.current_commit().is_none() {
             self.leave_commit();
+        }
+        if self.sel_merge.is_some() && self.current_merge().is_none() {
+            self.leave_merge();
         }
         self.rebuild_browser(text);
         self.rebuild_path_control(text);
@@ -956,6 +1241,8 @@ impl RepoBrowser {
         let mut items = Vec::new();
         let mut selected_path = Vec::new();
         let mut next_id = 0usize;
+        // A merge preview of a path the file list lacks highlights the worktree.
+        let merge_path = self.current_merge().map(str::to_owned);
 
         for (ri, repo) in self.filtered.repos.iter().enumerate() {
             let repo_id = next_id;
@@ -1026,6 +1313,7 @@ impl RepoBrowser {
                         && wi == self.sel_wt
                         && fi == self.sel_file
                         && self.sel_commit.is_none()
+                        && merge_path.as_ref().is_none_or(|p| *p == file.path)
                     {
                         selected_path = vec![repo_id, wt_id, file_id];
                     }
@@ -1059,6 +1347,9 @@ impl RepoBrowser {
                 crumbs.push(wt.branch.clone());
                 if let Some(commit) = self.current_commit() {
                     crumbs.push(commit.short.clone());
+                } else if let Some(path) = self.current_merge() {
+                    crumbs.push(path.to_owned());
+                    crumbs.push("⛔merge".into());
                 } else if let Some(file) = self.current_file() {
                     crumbs.push(file.path.clone());
                 }
@@ -1075,6 +1366,10 @@ impl RepoBrowser {
     /// inline diff, else the live cache.
     fn current_diff_text(&self) -> Option<String> {
         let wt = self.current_worktree()?;
+        if let Some(path) = self.current_merge() {
+            let (key, text) = self.merge_text.as_ref()?;
+            return (key.0 == wt.cwd && key.1 == path).then(|| text.clone());
+        }
         if let Some(commit) = self.current_commit() {
             if !commit.diff.is_empty() {
                 return Some(commit.diff.clone());
@@ -1095,11 +1390,15 @@ impl RepoBrowser {
 
     fn rebuild_diff_view(&mut self, text: &mut TextStore) {
         self.clear_children(self.diff_header, text);
+        self.merge_btn = None;
+        let merge_shown = self.current_merge().map(str::to_owned);
 
         // The live feed refreshes only the last requested file, so re-request
         // on every selection change, cached or not.
         let wanted = match (self.current_worktree(), self.current_file()) {
-            (Some(wt), Some(file)) if file.diff.is_empty() && self.sel_commit.is_none() => {
+            (Some(wt), Some(file))
+                if file.diff.is_empty() && self.sel_commit.is_none() && merge_shown.is_none() =>
+            {
                 Some((wt.cwd.clone(), file.path.clone()))
             }
             _ => None,
@@ -1109,6 +1408,21 @@ impl RepoBrowser {
             .zip(self.current_worktree())
             .filter(|(c, _)| c.diff.is_empty())
             .map(|(c, wt)| (wt.cwd.clone(), c.sha.clone()));
+        let wanted_merge = merge_shown
+            .clone()
+            .zip(self.current_worktree())
+            .map(|(path, wt)| (wt.cwd.clone(), path));
+        if let (Source::Live(ch), Some(key)) = (&self.source, wanted_merge)
+            && self.requested_merge.as_ref() != Some(&key)
+        {
+            self.merge_request += 1;
+            ch.send(Command::LoadMergePreview {
+                cwd: key.0.clone(),
+                path: key.1.clone(),
+                request: self.merge_request,
+            });
+            self.requested_merge = Some(key);
+        }
         if let (Source::Live(ch), Some(key)) = (&self.source, wanted_commit)
             && self.requested_commit.as_ref() != Some(&key)
         {
@@ -1128,9 +1442,24 @@ impl RepoBrowser {
             self.requested_diff = Some(key);
         }
 
+        // A ⛔ file offers its merge preview; the preview offers the way back.
+        let merge_button = if merge_shown.is_some() {
+            Some(BACK_TO_DIFF_LABEL)
+        } else {
+            match (self.current_worktree(), self.current_file()) {
+                (Some(wt), Some(file))
+                    if self.current_commit().is_none() && wt.is_merge_conflict(&file.path) =>
+                {
+                    Some(SHOW_MERGE_LABEL)
+                }
+                _ => None,
+            }
+        };
         let merge_note = match (self.current_worktree(), self.current_file()) {
             (Some(wt), Some(file))
-                if self.current_commit().is_none() && wt.is_merge_conflict(&file.path) =>
+                if self.current_commit().is_none()
+                    && merge_shown.is_none()
+                    && wt.is_merge_conflict(&file.path) =>
             {
                 Some(format!(
                     "⛔ ベースへのマージで衝突: {}",
@@ -1148,7 +1477,18 @@ impl RepoBrowser {
                 text,
             )
         });
-        let (header_text, conflict_note, diff_text) = if let Some((header, text)) = commit_view {
+        let merge_view = merge_shown.as_ref().map(|path| {
+            let text = self
+                .current_diff_text()
+                .unwrap_or_else(|| "(マージ結果を予測しています…)".into());
+            (
+                format!("{path}  ·  ⛔ マージ衝突（ベースへのマージ予測・読み取り専用）"),
+                text,
+            )
+        });
+        let (header_text, conflict_note, diff_text) = if let Some((header, text)) = merge_view {
+            (header, None, text)
+        } else if let Some((header, text)) = commit_view {
             (header, None, text)
         } else {
             match (self.current_worktree(), self.current_file()) {
@@ -1204,6 +1544,12 @@ impl RepoBrowser {
                 Badge::text(note).tone(Tone::Critical),
             );
         }
+        if let Some(label) = merge_button {
+            self.merge_btn = Some(self.tree.insert(
+                Some(self.diff_header),
+                Button::new(label).control_size(ControlSize::Small),
+            ));
+        }
         if let Some(note) = conflict_note {
             self.tree.insert(
                 Some(self.diff_header),
@@ -1211,19 +1557,26 @@ impl RepoBrowser {
             );
         }
 
-        if self.shown_diff.as_deref() != Some(diff_text.as_str()) {
-            self.gutter = Gutter::of(&diff_text);
-            let lines: Vec<LogLine> = match &self.gutter {
-                Some(gutter) => diff_text
-                    .lines()
-                    .zip(&gutter.numbers)
-                    .map(|(line, &numbers)| gutter.line(line, numbers))
-                    .collect(),
-                None => diff_text.lines().map(colorize_diff_line).collect(),
+        let is_merge = merge_shown.is_some();
+        if self.shown_diff.as_deref() != Some(diff_text.as_str()) || self.shown_merge != is_merge {
+            let lines: Vec<LogLine> = if is_merge {
+                self.gutter = Gutter::numbered(&diff_text);
+                merge_lines(&diff_text, self.gutter.as_ref())
+            } else {
+                self.gutter = Gutter::of(&diff_text);
+                match &self.gutter {
+                    Some(gutter) => diff_text
+                        .lines()
+                        .enumerate()
+                        .map(|(i, line)| gutter.line(i, line))
+                        .collect(),
+                    None => diff_text.lines().map(colorize_diff_line).collect(),
+                }
             };
             self.tree
                 .update::<LogView, _>(self.diff_log, |log, cx| log.set_lines(cx, lines));
             self.shown_diff = Some(diff_text);
+            self.shown_merge = is_merge;
         }
     }
 
@@ -1320,7 +1673,8 @@ impl RepoBrowser {
                         "\x1b[1;33mペインなし\x1b[0m: {branch}\r\n\
                          この worktree を開いている Noa ペインはありません。\r\n\
                          ペインを閉じても worktree とブランチは残っています:\r\n  {cwd}\r\n\
-                         差分の確認はできますが、指示の送信とフォーカスはできません。\r\n"
+                         差分の確認と「エージェントで送信」はできます。\r\n\
+                         既存ペインへの送信とフォーカスはできません。\r\n"
                     );
                     let _ = term.feed(cx, msg.as_bytes());
                 }
@@ -1451,6 +1805,23 @@ impl RepoBrowser {
             }
         }
 
+        for repo in &self.filtered.repos {
+            for wt in &repo.worktrees {
+                for path in &wt.merge_conflicts {
+                    commands.push(
+                        PaletteCommand::new(format!("マージ衝突を表示: {path}"))
+                            .detail(format!("{} / {}", repo.name, wt.branch))
+                            .keywords(format!("merge conflict preview markers {}", wt.branch)),
+                    );
+                    actions.push(PaletteAction::ShowMerge {
+                        root: repo.root.clone(),
+                        cwd: wt.cwd.clone(),
+                        path: path.clone(),
+                    });
+                }
+            }
+        }
+
         for mode in DiffMode::ALL {
             commands.push(
                 PaletteCommand::new(format!("差分モード切替: {}", mode.label()))
@@ -1466,9 +1837,28 @@ impl RepoBrowser {
                     .keywords("open shell terminal new tab worktree"),
             );
             actions.push(PaletteAction::OpenShell);
+            for agent in AgentKind::ALL {
+                commands.push(
+                    PaletteCommand::new(format!(
+                        "エージェントで送信: {} ({})",
+                        agent.command(),
+                        wt.branch
+                    ))
+                    .detail(format!("新しいタブで起動して指示を渡す · {}", wt.cwd))
+                    .keywords("agent launch start new tab review prompt send claude codex agy"),
+                );
+                actions.push(PaletteAction::LaunchAgent {
+                    agent,
+                    root: self
+                        .current_repo()
+                        .map(|r| r.root.clone())
+                        .unwrap_or_default(),
+                    cwd: wt.cwd.clone(),
+                });
+            }
         }
         // While a commit is shown, the file of its selected diff line.
-        let editor_path = if self.current_commit().is_some() {
+        let editor_path = if self.current_commit().is_some() || self.current_merge().is_some() {
             self.editor_target().ok().map(|(path, _)| path)
         } else {
             self.current_file().map(|f| f.path.clone())
@@ -1524,7 +1914,7 @@ impl RepoBrowser {
         let pane_id = pane.pane_id;
         let pane_name = pane.name.clone();
         match &self.source {
-            Source::Demo | Source::Snapshot => {
+            Source::Demo => {
                 self.toast(format!("[DEMO] ペイン #{pane_id} ({pane_name}) を開きます"))
             }
             Source::Live(ch) => {
@@ -1545,9 +1935,7 @@ impl RepoBrowser {
             return;
         };
         match &self.source {
-            Source::Demo | Source::Snapshot => {
-                self.toast(format!("[DEMO] {cwd} で新しいタブのシェルを開きます"))
-            }
+            Source::Demo => self.toast(format!("[DEMO] {cwd} で新しいタブのシェルを開きます")),
             Source::Live(ch) => {
                 if !self.can_focus {
                     self.toast("server-scopes に control が必要です");
@@ -1571,7 +1959,7 @@ impl RepoBrowser {
             return;
         };
         match &self.source {
-            Source::Demo | Source::Snapshot => self.toast(format!(
+            Source::Demo => self.toast(format!(
                 "[DEMO] 新しいタブのエディタで {path}:{line} を開きます"
             )),
             Source::Live(ch) => {
@@ -1595,6 +1983,21 @@ impl RepoBrowser {
         if self.current_commit().is_some() {
             return self.commit_editor_target();
         }
+        // The preview's line numbers are the merged result's, not the
+        // worktree file's: it opens at the top.
+        if let Some(path) = self.current_merge() {
+            // Only the worktree's own copy opens, and this branch may have
+            // deleted the file the preview shows.
+            let cwd = self.current_worktree().map_or("", |w| w.cwd.as_str());
+            if matches!(self.source, Source::Live(_))
+                && std::fs::symlink_metadata(std::path::Path::new(cwd).join(path)).is_err()
+            {
+                return Err(format!(
+                    "{path} はこの worktree にないため開けません（マージ結果はプレビューのみ）"
+                ));
+            }
+            return Ok((path.to_owned(), 1));
+        }
         let file = self
             .current_file()
             .ok_or_else(|| NO_FILE_TO_OPEN.to_owned())?;
@@ -1612,14 +2015,7 @@ impl RepoBrowser {
             return Err("コミットの差分を取得しています…".into());
         }
         let lines: Vec<&str> = self.shown_diff.as_deref().unwrap_or("").lines().collect();
-        let files: Vec<usize> = (0..lines.len())
-            // A merge commit's files are combined diffs (`diff --cc`).
-            .filter(|&i| {
-                ["diff --git ", "diff --cc ", "diff --combined "]
-                    .iter()
-                    .any(|p| lines[i].starts_with(p))
-            })
-            .collect();
+        let files = file_starts(&lines);
         let selected = self
             .tree
             .get::<LogView>(self.diff_log)
@@ -1673,29 +2069,86 @@ impl RepoBrowser {
         from_selection.or_else(first_hunk).unwrap_or(1).max(1)
     }
 
+    /// The commit file a selection of the shown commit diff lies in, with
+    /// its range label: `None` when it starts outside a file or runs into
+    /// the next one (the header then names the commit alone).
+    fn commit_quote_target(
+        &self,
+        selected: std::ops::Range<usize>,
+    ) -> Option<(String, Option<String>)> {
+        let lines: Vec<&str> = self.shown_diff.as_deref()?.lines().collect();
+        let starts = file_starts(&lines);
+        let start = starts
+            .iter()
+            .rev()
+            .find(|&&i| i <= selected.start)
+            .copied()?;
+        let end = starts
+            .iter()
+            .find(|&&i| i > start)
+            .copied()
+            .unwrap_or(lines.len());
+        if selected.end > end {
+            return None;
+        }
+        let path = section_new_path(&lines[start..end])?;
+        let range = self
+            .gutter
+            .as_ref()
+            .and_then(|gutter| gutter.range_label(selected));
+        Some((path, range))
+    }
+
     fn quote_selected_diff(&mut self) {
+        // A merge preview is quoted only once the current prediction is in:
+        // an earlier one would be cited as this one.
+        if self.current_merge().is_some() && self.current_diff_text().is_none() {
+            self.toast("マージ結果を取得しています。表示されてから引用してください");
+            return;
+        }
         let log = self.tree.get::<LogView>(self.diff_log);
         let selected = log.and_then(LogView::selected_lines);
-        // A commit diff spans several files, so a bare line number would not
-        // say which one it is in: the range is left out there.
-        let range = selected
-            .clone()
-            .zip(self.gutter.as_ref())
-            .filter(|_| self.current_commit().is_none())
-            .and_then(|(lines, gutter)| gutter.range_label(lines))
-            .map(|label| format!(" {label}"))
-            .unwrap_or_default();
+        let range_of = |label: Option<String>| label.map(|l| format!(" {l}")).unwrap_or_default();
+        let range = range_of(
+            selected
+                .clone()
+                .zip(self.gutter.as_ref())
+                .and_then(|(lines, gutter)| gutter.range_label(lines)),
+        );
+        let merge = self.current_merge();
         let header = match (
             self.current_worktree(),
             self.current_commit(),
             self.current_file(),
         ) {
-            (Some(wt), Some(commit), _) => {
-                format!("[{} / commit {}{range}]", wt.branch, commit.short)
+            (Some(wt), _, _) if merge.is_some() => {
+                format!(
+                    "[{} / {} ⛔merge{range}]",
+                    wt.branch,
+                    header_path(merge.unwrap_or_default())
+                )
             }
-            (Some(wt), None, Some(f)) => format!("[{} / {}{range}]", wt.branch, f.path),
+            // A commit diff spans several files, so a line range is only
+            // given with the file the selection lies in.
+            (Some(wt), Some(commit), _) => {
+                match selected.clone().and_then(|s| self.commit_quote_target(s)) {
+                    Some((path, range)) => format!(
+                        "[{} / commit {} · {}{}]",
+                        wt.branch,
+                        commit.short,
+                        header_path(&path),
+                        range_of(range)
+                    ),
+                    None => format!("[{} / commit {}]", wt.branch, commit.short),
+                }
+            }
+            (Some(wt), None, Some(f)) => {
+                format!("[{} / {}{range}]", wt.branch, header_path(&f.path))
+            }
             _ => "[diff]".into(),
         };
+        // A merge preview is the file itself, not a diff.
+        let fence = if merge.is_some() { "```" } else { "```diff" };
         let cwd = self
             .current_worktree()
             .map(|w| w.cwd.clone())
@@ -1708,23 +2161,25 @@ impl RepoBrowser {
             .get(&header)
             .is_some_and(|origins| !origins.contains(&cwd))
         {
-            header.replacen('[', &format!("[{cwd} · "), 1)
+            header.replacen('[', &format!("[{} · ", header_path(&cwd)), 1)
         } else {
             header
         };
+        // Selected lines are quoted as they are, blank ones included; only
+        // without a selection is the start of the text quoted instead.
         let snippet = log
             .and_then(LogView::copy_text)
+            .filter(|_| selected.is_some())
             .map(|text| match &self.gutter {
                 Some(gutter) => gutter.strip(&text),
                 None => text,
             })
-            .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| {
                 self.current_diff_text()
                     .map(|d| d.lines().take(10).collect::<Vec<_>>().join("\n"))
                     .unwrap_or_default()
             });
-        let block = format!("{header}\n```diff\n{snippet}\n```\n");
+        let block = format!("{header}\n{fence}\n{snippet}\n```\n");
         self.tree
             .update::<TabView, _>(self.side_tabs, |tabs, cx| tabs.set_selected(cx, 1));
         self.tree.set_focus(Some(self.prompt_area));
@@ -1808,6 +2263,14 @@ impl RepoBrowser {
         self.sync_clear_label();
     }
 
+    /// Empties the prompt an agent was started with into the restore slot,
+    /// keeping which worktree its quotes are from.
+    fn stash_launched_prompt(&mut self) {
+        self.cleared_prompt = Some(self.prompt_text());
+        self.set_prompt_text(String::new());
+        self.sync_clear_label();
+    }
+
     /// The prompt left the screen for good (sent): nothing to restore.
     fn reset_prompt_state(&mut self) {
         self.set_prompt_text(String::new());
@@ -1851,15 +2314,12 @@ impl RepoBrowser {
             .join(", ")
     }
 
-    fn send_review_prompt(&mut self) {
-        let text = self
-            .tree
-            .get::<TextArea>(self.prompt_area)
-            .map(|a| a.text().trim().to_owned())
-            .unwrap_or_default();
+    /// The trimmed prompt when it may go to the selected worktree, else why
+    /// not (it is empty, or quotes another worktree).
+    fn prompt_for_here(&self) -> Result<String, String> {
+        let text = self.prompt_text().trim().to_owned();
         if text.is_empty() {
-            self.toast("送信する指示が空です");
-            return;
+            return Err("送信する指示が空です".into());
         }
         // The quotes describe another worktree's diff: its agent, not this
         // one's, is the one to receive them.
@@ -1867,13 +2327,26 @@ impl RepoBrowser {
         let here = self.current_worktree().map(|w| w.cwd.clone());
         if !origins.is_empty() && here.is_none_or(|cwd| origins != BTreeSet::from([cwd])) {
             let origin = self.origin_names(&origins);
-            self.toast(format!(
+            return Err(format!(
                 "この指示は worktree {origin} の引用から作られています。{origin} に戻って送信するか、指示をクリアしてください"
             ));
-            return;
         }
+        Ok(text)
+    }
+
+    fn send_review_prompt(&mut self) {
+        let text = match self.prompt_for_here() {
+            Ok(text) => text,
+            Err(why) => return self.toast(why),
+        };
         let Some(pane) = self.target() else {
-            self.toast(self.no_pane_message("送信"));
+            let mut why = self.no_pane_message("送信");
+            if self.current_worktree().is_some() {
+                why.push_str(
+                    "。「エージェントで送信」なら新しいタブでエージェントを起動して渡せます",
+                );
+            }
+            self.toast(why);
             return;
         };
         let pane_id = pane.pane_id;
@@ -1886,7 +2359,7 @@ impl RepoBrowser {
             return;
         }
         match &self.source {
-            Source::Demo | Source::Snapshot => {
+            Source::Demo => {
                 self.toast(format!("[DEMO] ペイン #{pane_id} へ指示を送信しました"));
                 self.reset_prompt_state();
             }
@@ -1899,6 +2372,51 @@ impl RepoBrowser {
                     pane_id,
                     text,
                     submit: true,
+                });
+            }
+        }
+    }
+
+    /// Starts `agent` in a new focused tab in the selected worktree's root,
+    /// with the prompt as its first prompt. Works for a worktree without
+    /// panes. The prompt is cleared once Noa accepted the spawn.
+    fn launch_agent(&mut self, agent: AgentKind) {
+        let text = match self.prompt_for_here() {
+            Ok(text) => text,
+            Err(why) => return self.toast(why),
+        };
+        let Some(cwd) = self.current_worktree().map(|wt| wt.cwd.clone()) else {
+            self.toast("worktree が選択されていません");
+            return;
+        };
+        if agent_prompt_too_large(&text) {
+            self.toast(format!(
+                "指示が大きすぎるためエージェントに渡せません（{} KiB）。引用を減らして {} KiB 未満にしてください",
+                text.len().div_ceil(1024),
+                (AGENT_PROMPT_MAX + 1) / 1024
+            ));
+            return;
+        }
+        let name = agent.command();
+        match &self.source {
+            Source::Demo => {
+                self.toast(format!(
+                    "[DEMO] {cwd} で新しいタブに {name} を起動し、指示を渡します"
+                ));
+                self.stash_launched_prompt();
+            }
+            Source::Live(ch) => {
+                // The agent is a command, which takes `input` on top of `control`.
+                if !self.can_focus || !self.can_send {
+                    self.toast(format!(
+                        "{name} を起動するには server-scopes に control と input が必要です"
+                    ));
+                    return;
+                }
+                ch.send(Command::LaunchAgent {
+                    cwd,
+                    agent,
+                    prompt: text,
                 });
             }
         }
@@ -1919,9 +2437,7 @@ impl RepoBrowser {
         };
         let pane_id = pane.pane_id;
         match &self.source {
-            Source::Demo | Source::Snapshot => {
-                self.toast(format!("[DEMO] #{pane_id} へ送信: {joined}"))
-            }
+            Source::Demo => self.toast(format!("[DEMO] #{pane_id} へ送信: {joined}")),
             Source::Live(ch) => {
                 if !self.can_send {
                     self.toast("server-scopes に input が必要です");
@@ -1953,7 +2469,6 @@ impl RepoBrowser {
                 self.raw_data = demo_data(mode);
                 self.sync_views(text);
             }
-            Source::Snapshot => self.rebuild_diff_view(text),
             Source::Live(ch) => {
                 ch.send(Command::SetDiffMode(mode));
                 self.rebuild_diff_view(text);
@@ -1979,6 +2494,7 @@ impl RepoBrowser {
         let mut latest = None;
         let mut notices = Vec::new();
         let mut delivered = Vec::new();
+        let mut launched = Vec::new();
         if let Source::Live(ch) = &self.source {
             while let Ok(snap) = ch.snapshots.try_recv() {
                 latest = Some(snap);
@@ -1988,6 +2504,17 @@ impl RepoBrowser {
             }
             while let Ok(sent) = ch.delivered.try_recv() {
                 delivered.push(sent);
+            }
+            while let Ok(sent) = ch.launched.try_recv() {
+                launched.push(sent);
+            }
+        }
+        // Noa made the agent's tab, which does not say the agent started in
+        // it (it may be missing from the login shell's PATH): the prompt
+        // leaves the box but stays one "元に戻す" away.
+        for sent in launched {
+            if self.prompt_text().trim() == sent {
+                self.stash_launched_prompt();
             }
         }
         // Clear the prompt only once the pane took it, and only if it was not
@@ -2011,10 +2538,18 @@ impl RepoBrowser {
             if let Some((cwd, sha, diff)) = snap.selected_commit {
                 self.commit_diffs.insert((cwd, sha), diff);
             }
+            // Nor does a merge preview's.
+            let got_merge = snap.selected_merge.is_some();
+            if let Some((cwd, path, merged, request)) = snap.selected_merge {
+                let key = (cwd, path);
+                if request == self.merge_request && self.sel_merge.as_ref() == Some(&key) {
+                    self.merge_text = Some((key, merged));
+                }
+            }
             // The UI is the only source of mode changes; a snapshot in another
             // mode was built before the feed saw our SetDiffMode.
             if snap.diff_mode != self.diff_mode {
-                if got_commit {
+                if got_commit || got_merge {
                     self.rebuild_diff_view(text);
                 }
                 self.rebuild_status_bar(text);
@@ -2025,6 +2560,11 @@ impl RepoBrowser {
                 self.diff_cache.insert((cwd, path), diff);
             }
             self.sync_views(text);
+            // Whether `--worktree` names a listed worktree is known once Noa
+            // answered with the listing.
+            if self.link == Link::Live {
+                self.apply_pending_worktree(text);
+            }
         }
         self.show_notices(notices);
     }
@@ -2054,6 +2594,7 @@ impl RepoBrowser {
                 self.sel_wt = wi;
                 self.sel_file = fi;
                 self.leave_commit();
+                self.leave_merge();
                 self.sync_views(text);
             }
             PaletteAction::SelectCommit { root, cwd, sha } => {
@@ -2083,10 +2624,48 @@ impl RepoBrowser {
                 self.tree
                     .update::<TabView, _>(self.side_tabs, |tabs, cx| tabs.set_selected(cx, 2));
             }
-            PaletteAction::FocusPane(id) => match &self.source {
-                Source::Demo | Source::Snapshot => {
-                    self.toast(format!("[DEMO] ペイン #{id} にフォーカス"))
+            PaletteAction::ShowMerge { root, cwd, path } => {
+                let found = self.filtered.repos.iter().enumerate().find_map(|(ri, r)| {
+                    if r.root != root {
+                        return None;
+                    }
+                    let wi = r.worktrees.iter().position(|w| w.cwd == cwd)?;
+                    let wt = &r.worktrees[wi];
+                    wt.is_merge_conflict(&path)
+                        .then(|| (ri, wi, wt.files.iter().position(|f| f.path == path)))
+                });
+                let Some((ri, wi, fi)) = found else {
+                    self.toast(format!("{path} のマージ衝突はもう予測されていません"));
+                    return;
+                };
+                self.sel_repo = ri;
+                self.sel_wt = wi;
+                self.sel_file = fi.unwrap_or(0);
+                self.show_merge(path, text);
+            }
+            PaletteAction::LaunchAgent { agent, root, cwd } => {
+                let found = self.filtered.repos.iter().enumerate().find_map(|(ri, r)| {
+                    let wi = r.worktrees.iter().position(|w| w.cwd == cwd)?;
+                    (r.root == root).then_some((ri, wi))
+                });
+                let Some((ri, wi)) = found else {
+                    self.toast(format!(
+                        "worktree {cwd} はもう一覧にないため、エージェントを起動しません"
+                    ));
+                    return;
+                };
+                if (ri, wi) != (self.sel_repo, self.sel_wt) {
+                    self.sel_repo = ri;
+                    self.sel_wt = wi;
+                    self.sel_file = 0;
+                    self.leave_commit();
+                    self.leave_merge();
+                    self.sync_views(text);
                 }
+                self.launch_agent(agent);
+            }
+            PaletteAction::FocusPane(id) => match &self.source {
+                Source::Demo => self.toast(format!("[DEMO] ペイン #{id} にフォーカス")),
                 Source::Live(ch) => ch.send(Command::Focus(id)),
             },
             PaletteAction::OpenShell => self.open_shell_here(),
@@ -2150,6 +2729,15 @@ impl RepoBrowser {
             return;
         }
 
+        if message.source == self.agent_btn
+            && let Some(MenuChosen(idx)) = message.downcast_ref::<MenuChosen>()
+        {
+            if let Some(&agent) = AgentKind::ALL.get(*idx) {
+                self.launch_agent(agent);
+            }
+            return;
+        }
+
         if let Some((palette_id, actions)) = &self.active_palette
             && message.source == *palette_id
             && let Some(CommandChosen(idx)) = message.downcast_ref::<CommandChosen>()
@@ -2169,6 +2757,7 @@ impl RepoBrowser {
                 && let Some(kind) = self.node_map.get(last).cloned()
             {
                 self.leave_commit();
+                self.leave_merge();
                 match kind {
                     NodeKind::Repo(ri) => {
                         self.sel_repo = ri;
@@ -2214,6 +2803,10 @@ impl RepoBrowser {
             }
             if *idx <= 1 {
                 self.leave_commit();
+            }
+            // The file crumb of a merge preview goes back to the file's diff.
+            if *idx <= 2 {
+                self.leave_merge();
             }
             self.sync_views(text);
             return;
@@ -2267,6 +2860,8 @@ impl RepoBrowser {
                 self.clear_or_restore_prompt();
             } else if message.source == self.send_btn {
                 self.send_review_prompt();
+            } else if self.merge_btn == Some(message.source) {
+                self.toggle_merge(text);
             }
         }
     }
@@ -2315,6 +2910,87 @@ fn commit_table_height(rows: usize) -> f32 {
     (TABLE_HEADER + COMMIT_ROW * rows as f32).clamp(TABLE_HEADER + COMMIT_ROW, 640.0)
 }
 
+/// The (repo, worktree) indices of the listed worktree that holds `path`:
+/// its root or a directory inside it, compared as given and resolved, the
+/// innermost worktree winning (one can be nested in another's directory).
+fn worktree_holding(data: &RepoData, path: &str) -> Option<(usize, usize)> {
+    let given = std::path::Path::new(path);
+    // Where the path really is when it exists; else where it reads.
+    let wanted = std::fs::canonicalize(given).unwrap_or_else(|_| lexically_normal(given));
+    let inside = |root: &str| wanted.starts_with(root);
+    data.repos
+        .iter()
+        .enumerate()
+        .flat_map(|(ri, r)| {
+            r.worktrees
+                .iter()
+                .enumerate()
+                .map(move |(wi, w)| (ri, wi, w))
+        })
+        .filter(|(_, _, w)| !w.cwd.is_empty() && inside(&w.cwd))
+        .max_by_key(|(_, _, w)| w.cwd.len())
+        .map(|(ri, wi, _)| (ri, wi))
+}
+
+/// `path`, which does not exist, made absolute with `.` and `..` worked
+/// out by name, then with its longest existing ancestor resolved.
+fn lexically_normal(path: &std::path::Path) -> PathBuf {
+    use std::path::Component;
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    let mut out = PathBuf::new();
+    for part in absolute.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    // The part that exists, resolved, then the rest by name.
+    let mut tail = Vec::new();
+    let mut head = out.as_path();
+    while let Some(parent) = head.parent() {
+        if let Ok(real) = std::fs::canonicalize(head) {
+            return tail.iter().rev().fold(real, |path, part| path.join(part));
+        }
+        tail.extend(head.file_name());
+        head = parent;
+    }
+    out
+}
+
+/// `path` as a quote header names it: on one line, since a prompt's
+/// worktree is read from its header lines. A path holding a control
+/// character (a line break) is C-quoted the way git quotes it.
+fn header_path(path: &str) -> Cow<'_, str> {
+    if !path.contains(char::is_control) {
+        return Cow::Borrowed(path);
+    }
+    let mut out = String::from('"');
+    for c in path.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                let mut buf = [0; 4];
+                for b in c.encode_utf8(&mut buf).bytes() {
+                    out.push_str(&format!("\\{b:03o}"));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    Cow::Owned(out)
+}
+
 fn short_sha(sha: &str) -> &str {
     sha.get(..7).unwrap_or(sha)
 }
@@ -2346,6 +3022,8 @@ const QUOTE_SHORTCUT: Shortcut = Shortcut::command('l');
 const QUOTE_LEAD: &str = "以下の箇所を修正してください:";
 /// The prompt box would otherwise collapse to one line in the tab page.
 const PROMPT_MIN_HEIGHT: f32 = 220.0;
+const SHOW_MERGE_LABEL: &str = "マージ衝突を表示";
+const BACK_TO_DIFF_LABEL: &str = "差分に戻る";
 const CLEAR_LABEL: &str = "クリア";
 const RESTORE_LABEL: &str = "元に戻す";
 
@@ -2390,30 +3068,71 @@ impl TableData for CommitRows {
 /// (old, new) line numbers of one diff line; `None` on a side the line is not on.
 type LineNumbers = (Option<u32>, Option<u32>);
 
-/// The line-number gutter shown in front of a unified diff.
+/// The line-number gutter shown in front of a unified diff, or of a plain
+/// file (a merge preview), whose lines are numbered in one column.
 struct Gutter {
-    /// One entry per line of the diff; both `None` outside a hunk.
+    /// One entry per line of the diff; both `None` outside a hunk. A plain
+    /// file's lines are all new-side lines.
     numbers: Vec<LineNumbers>,
+    /// For each line in a combined diff's hunk (a merge commit), its number
+    /// of parent columns, by which it is styled; 0 elsewhere.
+    combined: Vec<usize>,
     /// Digits of each of the two number columns.
     digits: usize,
+    /// One number column (a plain file) instead of two.
+    single: bool,
 }
 
 impl Gutter {
     /// `None` when `diff` has no hunk (a note such as "no changes").
     fn of(diff: &str) -> Option<Self> {
         let mut numbers = Vec::new();
+        let mut combined = Vec::new();
         let mut cursor: Option<(u32, u32)> = None;
+        // In a merge commit's combined diff: (parents, next new-side line).
+        let mut combined_cursor: Option<(usize, u32)> = None;
         let mut seen_hunk = false;
         for line in diff.lines() {
             if let Some(start) = parse_hunk_header(line) {
                 cursor = Some(start);
+                combined_cursor = None;
                 seen_hunk = true;
                 numbers.push((None, None));
+                combined.push(0);
                 continue;
             }
-            if line.starts_with("diff --git") {
+            if let Some(start) = combined_hunk_new_start(line) {
+                // `@@@` for two parents: one `@` more than there are parents.
+                let parents = line.bytes().take_while(|&b| b == b'@').count() - 1;
+                combined_cursor = Some((parents, start));
                 cursor = None;
+                seen_hunk = true;
+                numbers.push((None, None));
+                combined.push(0);
+                continue;
             }
+            if ["diff --git", "diff --cc", "diff --combined"]
+                .iter()
+                .any(|p| line.starts_with(p))
+            {
+                cursor = None;
+                combined_cursor = None;
+            }
+            if let Some((parents, new)) = combined_cursor.as_mut() {
+                // One column per parent: a line is in the result unless a
+                // parent column says it was removed.
+                let prefix = line.get(..*parents).unwrap_or(line);
+                let in_result = !prefix.contains('-') && !line.starts_with('\\');
+                numbers.push(if in_result {
+                    *new += 1;
+                    (None, Some(*new - 1))
+                } else {
+                    (None, None)
+                });
+                combined.push(*parents);
+                continue;
+            }
+            combined.push(0);
             let Some((old, new)) = cursor.as_mut() else {
                 numbers.push((None, None));
                 continue;
@@ -2446,19 +3165,59 @@ impl Gutter {
             .unwrap_or(0);
         Some(Self {
             numbers,
+            combined,
             digits: widest.to_string().len().max(3),
+            single: false,
+        })
+    }
+
+    /// The gutter of a plain file numbered from 1; `None` for a one-line
+    /// note such as "(… not found)".
+    fn numbered(text: &str) -> Option<Self> {
+        let count = text.lines().count();
+        if count == 0 || (count == 1 && text.starts_with('(')) {
+            return None;
+        }
+        Some(Self {
+            numbers: (1..=count as u32).map(|n| (None, Some(n))).collect(),
+            combined: vec![0; count],
+            digits: count.to_string().len().max(3),
+            single: true,
         })
     }
 
     /// Characters the gutter puts in front of every line.
     fn width(&self) -> usize {
-        2 * self.digits + 4
+        if self.single {
+            self.digits + 3
+        } else {
+            2 * self.digits + 4
+        }
     }
 
-    fn line(&self, raw: &str, (old, new): LineNumbers) -> LogLine {
+    /// A plain file's line `n` behind its one-column gutter.
+    fn numbered_line(&self, raw: &str, n: Option<u32>, style: LineStyle) -> LogLine {
+        let num = n.map(|n| n.to_string()).unwrap_or_default();
+        styled_line(format!("{num:>w$} │ {raw}", w = self.digits), style)
+    }
+
+    /// Line `i` of the diff, `raw`, behind its gutter.
+    fn line(&self, i: usize, raw: &str) -> LogLine {
+        let (old, new) = self.numbers[i];
         let num = |n: Option<u32>| n.map(|n| n.to_string()).unwrap_or_default();
         let text = format!("{:>w$} {:>w$} │ {raw}", num(old), num(new), w = self.digits);
         let style = match (old, new) {
+            // A combined diff's line: added or removed by its parent columns.
+            _ if self.combined[i] > 0 => {
+                let prefix = raw.get(..self.combined[i]).unwrap_or(raw);
+                if prefix.contains('-') {
+                    REMOVED
+                } else if prefix.contains('+') {
+                    ADDED
+                } else {
+                    PLAIN
+                }
+            }
             (None, Some(_)) => ADDED,
             (Some(_), None) => REMOVED,
             (Some(_), Some(_)) => PLAIN,
@@ -2500,6 +3259,18 @@ impl Gutter {
             format!("{prefix}L{lo}-L{hi}")
         })
     }
+}
+
+/// The indices of the lines that open a file's section of a commit diff (a
+/// merge commit's files are combined diffs, `diff --cc`).
+fn file_starts(lines: &[&str]) -> Vec<usize> {
+    (0..lines.len())
+        .filter(|&i| {
+            ["diff --git ", "diff --cc ", "diff --combined "]
+                .iter()
+                .any(|p| lines[i].starts_with(p))
+        })
+        .collect()
 }
 
 /// The new-side path of a `diff --git a/<old> b/<new>` line, unquoted.
@@ -2645,6 +3416,123 @@ fn colorize_diff_line(line: &str) -> LogLine {
     styled_line(line.to_owned(), diff_line_style(line))
 }
 
+/// The style of each line of a merge preview: conflict markers stand out,
+/// and the lines between them are tinted by the side they come from.
+fn merge_line_styles(text: &str) -> Vec<LineStyle> {
+    const MARKER: LineStyle = (Some(MERGE_MARKER_FG), Some(MERGE_MARKER_BG));
+    merge_sides(text)
+        .into_iter()
+        .map(|side| match side {
+            MergeSide::Marker => MARKER,
+            MergeSide::Outside => PLAIN,
+            MergeSide::Base => (None, Some(MERGE_BASE_BG)),
+            MergeSide::Ancestor => (None, Some(MERGE_ANCESTOR_BG)),
+            MergeSide::Branch => (None, Some(MERGE_BRANCH_BG)),
+        })
+        .collect()
+}
+
+/// Where a line of a merge preview lies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MergeSide {
+    Outside,
+    /// A conflict marker line.
+    Marker,
+    /// Between `<<<<<<<` and `|||||||`/`=======`: the base branch's lines.
+    Base,
+    /// diff3 style, between `|||||||` and `=======`: the common ancestor's.
+    Ancestor,
+    /// Between `=======` and `>>>>>>>`: the merged branch's lines.
+    Branch,
+}
+
+/// The conflict marker `line` is, as (its character, its length): a run of
+/// one of `<|=>` followed by nothing or a space and a label (`=======`
+/// takes no label), as git writes them at the `conflict-marker-size` of the
+/// file (7 unless an attribute says otherwise).
+fn merge_marker(line: &str) -> Option<(u8, usize)> {
+    let c = *line.as_bytes().first()?;
+    if !matches!(c, b'<' | b'|' | b'=' | b'>') {
+        return None;
+    }
+    let len = line.bytes().take_while(|&b| b == c).count();
+    let rest = &line[len..];
+    let fits = if c == b'=' {
+        rest.is_empty()
+    } else {
+        rest.is_empty() || rest.starts_with(' ')
+    };
+    fits.then_some((c, len))
+}
+
+/// The side each line of a merge preview lies on, with the marker
+/// character of each marker line. A block opens with a run of `<` and every
+/// other marker of it must be a run of the same length, so a line such as
+/// `======= title` inside a side, or markers of another length, are content.
+fn merge_scan(text: &str) -> Vec<(MergeSide, Option<u8>)> {
+    let mut side = MergeSide::Outside;
+    let mut size = 0;
+    text.lines()
+        .map(|line| {
+            let marker = merge_marker(line);
+            let is = |c: u8| marker == Some((c, size));
+            let (next, this) = match side {
+                MergeSide::Outside => match marker {
+                    Some((b'<', len)) => {
+                        size = len;
+                        (MergeSide::Base, (MergeSide::Marker, Some(b'<')))
+                    }
+                    _ => (MergeSide::Outside, (MergeSide::Outside, None)),
+                },
+                MergeSide::Base if is(b'|') => {
+                    (MergeSide::Ancestor, (MergeSide::Marker, Some(b'|')))
+                }
+                MergeSide::Base | MergeSide::Ancestor if is(b'=') => {
+                    (MergeSide::Branch, (MergeSide::Marker, Some(b'=')))
+                }
+                MergeSide::Branch if is(b'>') => {
+                    (MergeSide::Outside, (MergeSide::Marker, Some(b'>')))
+                }
+                other => (other, (other, None)),
+            };
+            side = next;
+            this
+        })
+        .collect()
+}
+
+fn merge_sides(text: &str) -> Vec<MergeSide> {
+    merge_scan(text).into_iter().map(|(side, _)| side).collect()
+}
+
+/// The line ranges of the complete conflict blocks of a merge preview,
+/// markers included.
+fn conflict_blocks(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut blocks = Vec::new();
+    let mut open = None;
+    for (i, (_, marker)) in merge_scan(text).into_iter().enumerate() {
+        match marker {
+            Some(b'<') => open = Some(i),
+            Some(b'>') => blocks.extend(open.take().map(|start| start..i + 1)),
+            _ => {}
+        }
+    }
+    blocks
+}
+
+/// The log lines of a merge preview, numbered when `gutter` is given.
+fn merge_lines(text: &str, gutter: Option<&Gutter>) -> Vec<LogLine> {
+    let styles = merge_line_styles(text);
+    text.lines()
+        .zip(styles)
+        .enumerate()
+        .map(|(i, (line, style))| match gutter {
+            Some(gutter) => gutter.numbered_line(line, gutter.numbers[i].1, style),
+            None => styled_line(line.to_owned(), style),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2682,7 +3570,7 @@ mod tests {
 
     // ── Live-mode regression tests driven through a fake channel ─────────────
 
-    use crate::live::{TestFeed, test_channel};
+    use crate::live::{Snapshot, TestFeed, test_channel};
 
     const CWD: &str = "/repo";
 
@@ -2749,6 +3637,7 @@ mod tests {
             diff_mode: mode,
             selected_diff: selected.map(|(path, diff)| (CWD.into(), path.into(), diff.into())),
             selected_commit: None,
+            selected_merge: None,
         }
     }
 
@@ -3038,7 +3927,9 @@ mod tests {
 
     #[test]
     fn live_snapshot_render_shows_link_state() {
-        let screen = RepoBrowser::of_snapshot(snapshot(DiffMode::Unstaged, None));
+        let mut h = LiveHarness::new();
+        h.deliver(snapshot(DiffMode::Unstaged, None));
+        let screen = h.screen;
         let badges: Vec<String> = screen
             .tree()
             .children(screen.status_leading)
@@ -3735,7 +4626,7 @@ mod tests {
         h.screen.quote_selected_diff();
         assert_eq!(
             prompt_text(&h.screen),
-            "以下の箇所を修正してください:\n[main / commit aaaaaaa]\n```diff\n-old\n+new1\n```\n"
+            "以下の箇所を修正してください:\n[main / commit aaaaaaa · x L11]\n```diff\n-old\n+new1\n```\n"
         );
     }
 
@@ -4274,6 +5165,911 @@ diff --git a/gone.rs b/gone.rs\ndeleted file mode 100644\nindex 1..0\n--- a/gone
         assert_eq!(relative_age(0, 800 * 86_400), "2年前");
     }
 
+    // ── Starting an agent in a worktree with the review prompt ───────────────
+
+    /// Feeds `events` to the tree as the platform would and handles the
+    /// messages they produce.
+    fn dispatch(h: &mut LiveHarness, events: Vec<noa_gpui_core::Event>) {
+        for event in events {
+            h.screen.tree.dispatch(event, &mut h.text);
+            for message in h.screen.tree.take_messages() {
+                h.screen.handle_message(&message, &mut h.text);
+            }
+            h.screen.prepare(Size::new(1440.0, 900.0), &mut h.text);
+        }
+    }
+
+    fn key(key: noa_gpui_core::Key) -> noa_gpui_core::Event {
+        noa_gpui_core::Event::KeyDown {
+            key,
+            modifiers: Default::default(),
+        }
+    }
+
+    /// Chooses item `idx` of the "エージェントで送信" menu with the keyboard.
+    fn choose_agent(h: &mut LiveHarness, idx: usize) {
+        use noa_gpui_core::Key;
+        // The button is on the review tab, which must be shown to take focus.
+        let tabs = h.screen.side_tabs;
+        h.screen
+            .tree
+            .update::<TabView, _>(tabs, |tabs, cx| tabs.set_selected(cx, 1));
+        h.screen.prepare(Size::new(1440.0, 900.0), &mut h.text);
+        h.screen.tree.set_focus(Some(h.screen.agent_btn));
+        assert_eq!(h.screen.tree.focused(), Some(h.screen.agent_btn));
+        // The menu opens with nothing highlighted: the first ArrowDown
+        // highlights the first item.
+        let mut events = vec![key(Key::Space)];
+        events.extend((0..=idx).map(|_| key(Key::ArrowDown)));
+        events.push(key(Key::Enter));
+        dispatch(h, events);
+    }
+
+    fn launches(h: &LiveHarness) -> Vec<(String, AgentKind, String)> {
+        h.drain()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::LaunchAgent { cwd, agent, prompt } => Some((cwd, agent, prompt)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The live screen with the pane-less worktree `orch/foo` selected.
+    fn harness_on_paneless_worktree() -> LiveHarness {
+        let mut h = LiveHarness::new();
+        h.deliver(snapshot_with_paneless_worktree());
+        h.screen.sel_wt = 1;
+        h.screen.sel_file = 0;
+        h.screen.sync_views(&mut h.text);
+        h.drain();
+        h.screen.toasts.clear();
+        h
+    }
+
+    #[test]
+    fn the_agent_menu_starts_the_agent_in_a_paneless_worktree_with_the_prompt() {
+        let mut h = harness_on_paneless_worktree();
+        h.screen.quote_selected_diff();
+        let mut prompt = prompt_text(&h.screen);
+        prompt.push_str("  直して\n\n");
+        set_prompt(&mut h.screen, &prompt);
+        choose_agent(&mut h, 1);
+        assert_eq!(
+            launches(&h),
+            vec![(
+                "/repo-wt/foo".to_owned(),
+                AgentKind::Codex,
+                prompt.trim().to_owned()
+            )]
+        );
+        // Kept until Noa made the tab, then moved to the restore slot: the
+        // tab says nothing yet of whether the agent started in it.
+        assert_eq!(prompt_text(&h.screen), prompt);
+        h.feed.launched.send(prompt.trim().to_owned()).unwrap();
+        let notice = "新しいタブで codex を起動しました (ペイン #42)。起動しなかったときは「元に戻す」で指示を戻せます";
+        h.feed.notices.send(notice.into()).unwrap();
+        h.deliver(snapshot_with_paneless_worktree());
+        assert_eq!(prompt_text(&h.screen), "");
+        assert_eq!(h.screen.toasts, vec![notice]);
+        assert_eq!(clear_label(&h), "元に戻す");
+        // Restored whole, still tied to its worktree: it can go again.
+        h.screen.clear_or_restore_prompt();
+        assert_eq!(prompt_text(&h.screen), prompt);
+        h.screen.launch_agent(AgentKind::Claude);
+        assert_eq!(launches(&h).len(), 1);
+    }
+
+    #[test]
+    fn each_agent_of_the_menu_and_the_palette_is_started() {
+        for (idx, agent) in AgentKind::ALL.into_iter().enumerate() {
+            let mut h = harness_on_paneless_worktree();
+            set_prompt(&mut h.screen, "直して");
+            choose_agent(&mut h, idx);
+            assert_eq!(
+                launches(&h),
+                vec![("/repo-wt/foo".to_owned(), agent, "直して".to_owned())]
+            );
+        }
+        // Through the palette as a user picks an entry: typed, then Enter.
+        for agent in AgentKind::ALL {
+            let mut h = harness_on_paneless_worktree();
+            set_prompt(&mut h.screen, "直して");
+            choose_in_palette(&mut h, &format!("エージェントで送信: {}", agent.command()));
+            assert_eq!(
+                launches(&h),
+                vec![("/repo-wt/foo".to_owned(), agent, "直して".to_owned())],
+                "{agent:?}"
+            );
+        }
+    }
+
+    /// Opens the palette (as ⌘K does), types `query` and presses Enter.
+    fn choose_in_palette(h: &mut LiveHarness, query: &str) {
+        h.screen.open_command_palette();
+        h.screen.prepare(Size::new(1440.0, 900.0), &mut h.text);
+        dispatch(
+            h,
+            vec![
+                noa_gpui_core::Event::Text(query.to_owned()),
+                key(noa_gpui_core::Key::Enter),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_paneless_send_points_at_the_agent_menu() {
+        let mut h = harness_on_paneless_worktree();
+        set_prompt(&mut h.screen, "直して");
+        h.screen.send_review_prompt();
+        assert!(h.drain().is_empty());
+        assert_eq!(h.screen.toasts.len(), 1);
+        assert!(
+            h.screen.toasts[0].contains("「エージェントで送信」"),
+            "{:?}",
+            h.screen.toasts
+        );
+    }
+
+    #[test]
+    fn starting_an_agent_needs_control_and_input() {
+        for (can_focus, can_send) in [(false, true), (true, false), (false, false)] {
+            let mut h = harness_on_paneless_worktree();
+            let mut snap = snapshot_with_paneless_worktree();
+            snap.can_focus = can_focus;
+            snap.can_send = can_send;
+            h.deliver(snap);
+            h.drain();
+            h.screen.toasts.clear();
+            set_prompt(&mut h.screen, "直して");
+            h.screen.launch_agent(AgentKind::Claude);
+            assert!(launches(&h).is_empty());
+            assert_eq!(
+                h.screen.toasts,
+                vec!["claude を起動するには server-scopes に control と input が必要です"]
+            );
+            assert_eq!(prompt_text(&h.screen), "直して");
+        }
+    }
+
+    #[test]
+    fn an_empty_oversized_or_foreign_prompt_starts_no_agent() {
+        let mut h = harness_on_paneless_worktree();
+        set_prompt(&mut h.screen, "  \n ");
+        h.screen.launch_agent(AgentKind::Claude);
+        assert_eq!(h.screen.toasts, vec!["送信する指示が空です"]);
+
+        h.screen.toasts.clear();
+        let huge = "x".repeat(AGENT_PROMPT_MAX + 1);
+        set_prompt(&mut h.screen, &huge);
+        h.screen.launch_agent(AgentKind::Claude);
+        assert_eq!(h.screen.toasts.len(), 1);
+        assert!(
+            h.screen.toasts[0].contains("128 KiB 未満"),
+            "{:?}",
+            h.screen.toasts
+        );
+        assert_eq!(prompt_text(&h.screen), huge);
+        // Exactly at the limit it goes.
+        set_prompt(&mut h.screen, &"x".repeat(AGENT_PROMPT_MAX));
+        h.screen.launch_agent(AgentKind::Claude);
+        assert_eq!(launches(&h).len(), 1);
+
+        // Quotes of the other worktree are for its agent, not a new one here.
+        let mut h = harness_on_paneless_worktree();
+        h.screen.sel_wt = 0;
+        h.screen.sync_views(&mut h.text);
+        h.screen.quote_selected_diff();
+        h.screen.sel_wt = 1;
+        h.screen.sync_views(&mut h.text);
+        h.drain();
+        h.screen.toasts.clear();
+        h.screen.launch_agent(AgentKind::Claude);
+        assert!(launches(&h).is_empty());
+        assert!(
+            h.screen.toasts[0].contains("worktree main の引用"),
+            "{:?}",
+            h.screen.toasts
+        );
+    }
+
+    #[test]
+    fn a_failed_spawn_keeps_the_prompt() {
+        let mut h = harness_on_paneless_worktree();
+        set_prompt(&mut h.screen, "直して");
+        h.screen.launch_agent(AgentKind::Claude);
+        h.feed
+            .notices
+            .send("claude を起動できませんでした: refused".into())
+            .unwrap();
+        h.deliver(snapshot_with_paneless_worktree());
+        assert_eq!(prompt_text(&h.screen), "直して");
+        assert_eq!(
+            h.screen.toasts,
+            vec!["claude を起動できませんでした: refused"]
+        );
+    }
+
+    #[test]
+    fn demo_starts_no_agent_but_says_what_it_would_do() {
+        let mut screen = RepoBrowser::demo();
+        let mut text = TextStore::new(Default::default());
+        screen.prepare(Size::new(1440.0, 900.0), &mut text);
+        set_prompt(&mut screen, "直して");
+        screen.launch_agent(AgentKind::Claude);
+        assert_eq!(screen.toasts.len(), 1);
+        assert!(
+            screen.toasts[0].starts_with("[DEMO] ") && screen.toasts[0].contains("claude"),
+            "{:?}",
+            screen.toasts
+        );
+        assert_eq!(prompt_text(&screen), "");
+    }
+
+    // ── Predicted merge conflicts ─────────────────────────────────────────────
+
+    const MERGED: &str = "fn keep() {}\n<<<<<<< main\nfn ours() {}\n=======\nfn theirs() {}\n>>>>>>> orch/foo\nfn tail() {}\n";
+
+    fn merge_loads(cmds: &[Command]) -> Vec<(String, String)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                Command::LoadMergePreview { cwd, path, .. } => Some((cwd.clone(), path.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The feed's answer to the screen's latest merge preview request.
+    fn snapshot_with_merge(h: &LiveHarness, text: &str) -> Snapshot {
+        let mut snap = snapshot_with_paneless_worktree();
+        snap.selected_merge = Some((
+            "/repo-wt/foo".into(),
+            "a.rs".into(),
+            text.into(),
+            h.screen.merge_request,
+        ));
+        snap
+    }
+
+    /// Clicks the diff header's merge button through the tree.
+    fn press_merge_button(h: &mut LiveHarness) {
+        let button = h.screen.merge_btn.expect("merge button offered");
+        h.screen.tree.set_focus(Some(button));
+        dispatch(h, vec![key(noa_gpui_core::Key::Space)]);
+    }
+
+    fn merge_button_label(h: &LiveHarness) -> Option<String> {
+        let id = h.screen.merge_btn?;
+        Some(h.screen.tree().get::<Button>(id)?.label().to_owned())
+    }
+
+    #[test]
+    fn a_conflicting_file_shows_its_merge_result_with_markers() {
+        let mut h = harness_on_paneless_worktree();
+        assert_eq!(merge_button_label(&h).as_deref(), Some("マージ衝突を表示"));
+        press_merge_button(&mut h);
+        assert_eq!(
+            merge_loads(&h.drain()),
+            vec![("/repo-wt/foo".to_owned(), "a.rs".to_owned())]
+        );
+        assert_eq!(h.diff_lines(), vec!["(マージ結果を予測しています…)"]);
+        h.deliver(snapshot_with_merge(&h, MERGED));
+        let lines = h.diff_lines();
+        assert_eq!(lines.len(), 7, "{lines:?}");
+        assert_eq!(lines[1], "  2 │ <<<<<<< main");
+        assert_eq!(lines[4], "  5 │ fn theirs() {}");
+        assert_eq!(merge_button_label(&h).as_deref(), Some("差分に戻る"));
+        let crumbs = h.screen.tree().get::<PathControl>(h.screen.path_control);
+        assert!(crumbs.is_some());
+        // A periodic snapshot does not ask again.
+        h.deliver(snapshot_with_merge(&h, MERGED));
+        assert!(merge_loads(&h.drain()).is_empty());
+
+        // Back to the diff: the file is asked for again.
+        press_merge_button(&mut h);
+        assert_eq!(load_diff_paths(&h.drain()), vec!["a.rs"]);
+        assert_eq!(merge_button_label(&h).as_deref(), Some("マージ衝突を表示"));
+    }
+
+    #[test]
+    fn quoting_a_merge_preview_names_branch_path_and_merge() {
+        let mut h = harness_on_paneless_worktree();
+        press_merge_button(&mut h);
+        h.deliver(snapshot_with_merge(&h, MERGED));
+        select_lines(&mut h, 1..6);
+        h.screen.quote_selected_diff();
+        assert_eq!(
+            prompt_text(&h.screen),
+            "以下の箇所を修正してください:\n[orch/foo / a.rs ⛔merge L2-L6]\n```\n\
+             <<<<<<< main\nfn ours() {}\n=======\nfn theirs() {}\n>>>>>>> orch/foo\n```\n"
+        );
+    }
+
+    #[test]
+    fn merge_previews_are_offered_in_the_palette_even_for_unlisted_files() {
+        let mut h = harness_on_paneless_worktree();
+        let mut snap = snapshot_with_paneless_worktree();
+        snap.data.repos[0].worktrees[1].merge_conflicts = vec!["a.rs".into(), "gone.rs".into()];
+        h.deliver(snap);
+        h.screen.sel_wt = 0;
+        h.screen.sync_views(&mut h.text);
+        h.screen.open_command_palette();
+        let (_, actions) = h.screen.active_palette.clone().unwrap();
+        let gone = actions
+            .iter()
+            .find(|a| matches!(a, PaletteAction::ShowMerge { path, .. } if path == "gone.rs"))
+            .cloned()
+            .unwrap();
+        h.drain();
+        h.screen.run_palette_action(gone, &mut h.text);
+        assert_eq!(h.screen.current_worktree().unwrap().branch, "orch/foo");
+        assert_eq!(h.screen.current_merge(), Some("gone.rs"));
+        assert_eq!(
+            merge_loads(&h.drain()),
+            vec![("/repo-wt/foo".to_owned(), "gone.rs".to_owned())]
+        );
+        // The worktree, not an unrelated file, is the highlighted node.
+        assert_eq!(
+            h.screen.pending_browser_path.as_ref().map(Vec::len),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn a_merge_conflict_that_resolves_falls_back_to_the_diff() {
+        let mut h = harness_on_paneless_worktree();
+        press_merge_button(&mut h);
+        h.deliver(snapshot_with_merge(&h, MERGED));
+        let mut snap = snapshot_with_paneless_worktree();
+        snap.data.repos[0].worktrees[1].merge_conflicts.clear();
+        h.deliver(snap);
+        assert!(h.screen.current_merge().is_none());
+        assert!(h.screen.merge_btn.is_none());
+        assert_eq!(load_diff_paths(&h.drain()), vec!["a.rs"]);
+    }
+
+    #[test]
+    fn merge_notes_are_shown_without_a_gutter() {
+        let mut h = harness_on_paneless_worktree();
+        press_merge_button(&mut h);
+        h.deliver(snapshot_with_merge(
+            &h,
+            "(予測したマージ結果を読めません: a.rs)",
+        ));
+        assert_eq!(
+            h.diff_lines(),
+            vec!["(予測したマージ結果を読めません: a.rs)"]
+        );
+        assert!(h.screen.gutter.is_none());
+    }
+
+    #[test]
+    fn merge_lines_are_styled_by_side() {
+        let styles = merge_line_styles(
+            "a\n<<<<<<< main\nours\n||||||| base\nanc\n=======\ntheirs\n>>>>>>> b\nz\n======= not a marker\n",
+        );
+        let marker = (Some(MERGE_MARKER_FG), Some(MERGE_MARKER_BG));
+        assert_eq!(
+            styles,
+            vec![
+                PLAIN,
+                marker,
+                (None, Some(MERGE_BASE_BG)),
+                marker,
+                (None, Some(MERGE_ANCESTOR_BG)),
+                marker,
+                (None, Some(MERGE_BRANCH_BG)),
+                marker,
+                PLAIN,
+                PLAIN,
+            ]
+        );
+    }
+
+    #[test]
+    fn demo_shows_its_merge_preview_without_the_feed() {
+        // As `--merge` does it: before the first frame.
+        let mut screen = RepoBrowser::demo();
+        screen.show_first_merge(&mut TextStore::new(Default::default()));
+        assert_eq!(screen.current_merge(), Some("crates/noa-ipc/src/push.rs"));
+        let log = screen.tree().get::<LogView>(screen.diff_log).unwrap();
+        assert!(
+            log.all_text().contains("<<<<<<< main"),
+            "{}",
+            log.all_text()
+        );
+        assert!(log.selected_lines().is_some());
+        screen.show_composer();
+        assert!(
+            prompt_text(&screen)
+                .contains("[feat/pane-subscriptions / crates/noa-ipc/src/push.rs ⛔merge L6-L12]"),
+            "{}",
+            prompt_text(&screen)
+        );
+    }
+
+    // ── Commit quotes name their file ─────────────────────────────────────────
+
+    #[test]
+    fn quoting_inside_one_commit_file_names_its_path_and_new_lines() {
+        let mut h = LiveHarness::new();
+        h.screen.select_commit_row(0, &mut h.text);
+        h.deliver(snapshot_with_commit(C_NEW, COMMIT_THREE_FILES));
+        let header = |h: &mut LiveHarness, lines: std::ops::Range<usize>| {
+            set_prompt(&mut h.screen, "");
+            h.screen.quote_origins.clear();
+            select_lines(h, lines);
+            h.screen.quote_selected_diff();
+            prompt_text(&h.screen).lines().nth(1).unwrap().to_owned()
+        };
+        // `+b` of src/y.rs, new line 4.
+        assert_eq!(
+            header(&mut h, 20..21),
+            "[main / commit aaaaaaa · src/y.rs L4]"
+        );
+        assert_eq!(
+            header(&mut h, 19..22),
+            "[main / commit aaaaaaa · src/y.rs L3-L5]"
+        );
+        // Only the removed line of the deleted file: its old line.
+        assert_eq!(
+            header(&mut h, 28..29),
+            "[main / commit aaaaaaa · gone.rs 旧L1]"
+        );
+        // A file's header lines alone: the path without a range.
+        assert_eq!(header(&mut h, 14..16), "[main / commit aaaaaaa · src/y.rs]");
+        // Across two files, or from the commit header: today's header.
+        assert_eq!(header(&mut h, 11..21), "[main / commit aaaaaaa]");
+        assert_eq!(header(&mut h, 0..6), "[main / commit aaaaaaa]");
+    }
+
+    // ── --worktree=PATH ───────────────────────────────────────────────────────
+
+    #[test]
+    fn the_worktree_given_at_launch_is_selected() {
+        for path in [
+            "/Users/simota/repos/github.com/Noa-wt/ipc-docs",
+            "/Users/simota/repos/github.com/Noa-wt/ipc-docs/",
+            "/Users/simota/repos/github.com/Noa-wt/ipc-docs/docs/specs",
+        ] {
+            let mut screen = RepoBrowser::demo();
+            screen.preselect_worktree(path.into(), &mut TextStore::new(Default::default()));
+            assert_eq!(
+                screen.current_worktree().unwrap().branch,
+                "orch/ipc-docs",
+                "{path}"
+            );
+            assert!(screen.toasts.is_empty(), "{:?}", screen.toasts);
+        }
+    }
+
+    #[test]
+    fn an_unknown_launch_worktree_starts_as_usual_with_a_notice() {
+        let mut screen = RepoBrowser::demo();
+        screen.preselect_worktree(
+            "/nowhere/else".into(),
+            &mut TextStore::new(Default::default()),
+        );
+        assert_eq!(
+            screen.current_worktree().unwrap().branch,
+            "feat/pane-subscriptions"
+        );
+        assert_eq!(screen.toasts.len(), 1);
+        assert!(
+            screen.toasts[0].contains("/nowhere/else"),
+            "{:?}",
+            screen.toasts
+        );
+        // A sibling whose name only starts the same is not inside it.
+        let mut screen = RepoBrowser::demo();
+        screen.preselect_worktree(
+            "/Users/simota/repos/github.com/Noa-wt-subsidiary".into(),
+            &mut TextStore::new(Default::default()),
+        );
+        assert_eq!(screen.toasts.len(), 1, "{:?}", screen.toasts);
+    }
+
+    #[test]
+    fn a_live_launch_worktree_waits_for_the_first_listing() {
+        let (channel, feed) = test_channel();
+        let mut h = LiveHarness {
+            screen: RepoBrowser::live(channel),
+            text: TextStore::new(Default::default()),
+            feed,
+        };
+        h.screen
+            .preselect_worktree("/repo-wt/foo/src".into(), &mut h.text);
+        let mut connecting = snapshot(DiffMode::Unstaged, None);
+        connecting.link = Link::Connecting;
+        connecting.data = RepoData::default();
+        h.deliver(connecting);
+        assert!(h.screen.toasts.is_empty());
+        h.deliver(snapshot_with_paneless_worktree());
+        assert_eq!(h.screen.current_worktree().unwrap().branch, "orch/foo");
+        assert!(h.screen.toasts.is_empty(), "{:?}", h.screen.toasts);
+        // Only the first listing decides: later ones keep the user's choice.
+        h.screen.sel_wt = 0;
+        h.screen.sync_views(&mut h.text);
+        h.deliver(snapshot_with_paneless_worktree());
+        assert_eq!(h.screen.current_worktree().unwrap().branch, "main");
+
+        let (channel, feed) = test_channel();
+        let mut h = LiveHarness {
+            screen: RepoBrowser::live(channel),
+            text: TextStore::new(Default::default()),
+            feed,
+        };
+        h.screen
+            .preselect_worktree("/elsewhere".into(), &mut h.text);
+        h.deliver(snapshot_with_paneless_worktree());
+        assert_eq!(h.screen.current_worktree().unwrap().branch, "main");
+        assert_eq!(h.screen.toasts.len(), 1, "{:?}", h.screen.toasts);
+    }
+
+    #[test]
+    fn the_innermost_worktree_holding_a_path_wins() {
+        let mut data = live_data();
+        let mut inner = data.repos[0].worktrees[0].clone();
+        inner.cwd = "/repo/.worktrees/x".into();
+        inner.branch = "x".into();
+        data.repos[0].worktrees.push(inner);
+        assert_eq!(
+            worktree_holding(&data, "/repo/.worktrees/x/src"),
+            Some((0, 1))
+        );
+        assert_eq!(worktree_holding(&data, "/repo/src"), Some((0, 0)));
+        assert_eq!(worktree_holding(&data, "/repository"), None);
+    }
+
+    // ── Review fixes ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_palette_agent_entry_starts_in_the_worktree_it_named() {
+        let mut h = harness_on_paneless_worktree();
+        set_prompt(&mut h.screen, "直して");
+        h.screen.open_command_palette();
+        let (_, actions) = h.screen.active_palette.clone().unwrap();
+        let entry = actions
+            .iter()
+            .find(|a| {
+                matches!(
+                    a,
+                    PaletteAction::LaunchAgent {
+                        agent: AgentKind::Codex,
+                        ..
+                    }
+                )
+            })
+            .cloned()
+            .unwrap();
+        // orch/foo goes from the listing while the palette is open.
+        let mut snap = snapshot_with_paneless_worktree();
+        snap.data.repos[0].worktrees.truncate(1);
+        h.deliver(snap);
+        h.drain();
+        h.screen.toasts.clear();
+        h.screen.run_palette_action(entry.clone(), &mut h.text);
+        assert!(launches(&h).is_empty());
+        assert!(
+            h.screen.toasts[0].contains("/repo-wt/foo"),
+            "{:?}",
+            h.screen.toasts
+        );
+        // Back, but main is selected by then: the entry still means orch/foo.
+        h.deliver(snapshot_with_paneless_worktree());
+        h.screen.sel_wt = 0;
+        h.screen.sync_views(&mut h.text);
+        h.drain();
+        h.screen.run_palette_action(entry, &mut h.text);
+        assert_eq!(
+            launches(&h),
+            vec![(
+                "/repo-wt/foo".to_owned(),
+                AgentKind::Codex,
+                "直して".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_quoted_path_with_a_line_break_keeps_its_worktree() {
+        let mut h = LiveHarness::new();
+        let mut snap = snapshot_with_paneless_worktree();
+        snap.data.repos[0].worktrees[1].merge_conflicts = vec!["a\nb.rs".into()];
+        h.deliver(snap.clone());
+        h.screen.sel_wt = 1;
+        h.screen.sync_views(&mut h.text);
+        h.screen.show_merge("a\nb.rs".into(), &mut h.text);
+        let mut answer = snap.clone();
+        answer.selected_merge = Some((
+            "/repo-wt/foo".into(),
+            "a\nb.rs".into(),
+            "x\n".into(),
+            h.screen.merge_request,
+        ));
+        h.deliver(answer);
+        select_lines(&mut h, 0..1);
+        h.screen.quote_selected_diff();
+        let prompt = prompt_text(&h.screen);
+        assert!(
+            prompt.contains("[orch/foo / \"a\\nb.rs\" ⛔merge L1]\n"),
+            "{prompt}"
+        );
+        // The quote still belongs to orch/foo: main's pane may not take it.
+        h.screen.sel_wt = 0;
+        h.screen.sync_views(&mut h.text);
+        h.drain();
+        h.screen.toasts.clear();
+        h.screen.send_review_prompt();
+        assert!(sent(&h).is_empty());
+        assert!(
+            h.screen.toasts[0].contains("orch/foo"),
+            "{:?}",
+            h.screen.toasts
+        );
+        assert_eq!(header_path("plain.rs"), "plain.rs");
+        assert_eq!(header_path("t\tab\"\\"), "\"t\\tab\\\"\\\\\"");
+    }
+
+    #[test]
+    fn choosing_another_file_in_the_palette_leaves_the_merge_preview() {
+        let mut h = harness_on_paneless_worktree();
+        let mut snap = snapshot_with_paneless_worktree();
+        snap.data.repos[0].worktrees[1].files = live_data().repos[0].worktrees[0].files.clone();
+        h.deliver(snap);
+        press_merge_button(&mut h);
+        assert_eq!(h.screen.current_merge(), Some("a.rs"));
+        h.drain();
+        let action = PaletteAction::SelectFile {
+            root: CWD.into(),
+            cwd: "/repo-wt/foo".into(),
+            path: "b.rs".into(),
+        };
+        h.screen.run_palette_action(action, &mut h.text);
+        assert_eq!(h.screen.current_merge(), None);
+        assert_eq!(h.screen.current_file().unwrap().path, "b.rs");
+        assert_eq!(load_diff_paths(&h.drain()), vec!["b.rs"]);
+    }
+
+    #[test]
+    fn the_launch_worktree_is_where_the_path_really_is() {
+        let base = std::env::temp_dir().join(format!("rb-wtpath-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        let inner = repo.join(".worktrees/x");
+        let spaced = base.join("wt ");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::create_dir_all(&spaced).unwrap();
+        // Resolved, so `/var` being a link on macOS hides nothing.
+        let base = std::fs::canonicalize(&base).unwrap();
+        let (repo, inner, spaced) = (
+            base.join("repo"),
+            base.join("repo/.worktrees/x"),
+            base.join("wt "),
+        );
+        let real = |p: &std::path::Path| {
+            std::fs::canonicalize(p)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned()
+        };
+        let mut data = live_data();
+        let wt = data.repos[0].worktrees[0].clone();
+        data.repos[0].worktrees = [real(&repo), real(&inner), real(&spaced)]
+            .into_iter()
+            .map(|cwd| Worktree { cwd, ..wt.clone() })
+            .collect();
+        let at = |p: std::path::PathBuf| worktree_holding(&data, p.to_str().unwrap());
+        // Up out of x by `..`: repo, though x's name is the longer match.
+        assert_eq!(at(inner.join("../..")), Some((0, 0)));
+        assert_eq!(at(inner.join("src/..")), Some((0, 1)));
+        // A trailing space is part of the name.
+        assert_eq!(at(spaced.clone()), Some((0, 2)));
+        // A path that does not exist is read by name, `..` included.
+        assert_eq!(at(inner.join("gone/../../..")), Some((0, 0)));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_reopened_merge_preview_waits_for_the_current_prediction() {
+        let mut h = harness_on_paneless_worktree();
+        press_merge_button(&mut h);
+        h.deliver(snapshot_with_merge(&h, MERGED));
+        let first = h.screen.merge_request;
+        press_merge_button(&mut h);
+        press_merge_button(&mut h);
+        assert!(h.screen.merge_request > first);
+        // The earlier prediction is not shown, nor quoted, as this one.
+        assert_eq!(h.diff_lines(), vec!["(マージ結果を予測しています…)"]);
+        h.screen.toasts.clear();
+        set_prompt(&mut h.screen, "");
+        h.screen.quote_selected_diff();
+        assert_eq!(prompt_text(&h.screen), "");
+        assert!(
+            h.screen.toasts[0].contains("取得しています"),
+            "{:?}",
+            h.screen.toasts
+        );
+        // An answer to the earlier request is ignored; the current one shows.
+        let mut stale = snapshot_with_paneless_worktree();
+        stale.selected_merge = Some(("/repo-wt/foo".into(), "a.rs".into(), MERGED.into(), first));
+        h.deliver(stale);
+        assert_eq!(h.diff_lines(), vec!["(マージ結果を予測しています…)"]);
+        h.deliver(snapshot_with_merge(
+            &h,
+            "<<<<<<< main\nnew\n=======\nb\n>>>>>>> x\n",
+        ));
+        assert_eq!(h.diff_lines()[1], "  2 │ new");
+        // Leaving keeps nothing.
+        press_merge_button(&mut h);
+        assert!(h.screen.merge_text.is_none());
+    }
+
+    #[test]
+    fn a_selected_blank_line_is_quoted_as_it_is() {
+        let mut h = harness_on_paneless_worktree();
+        press_merge_button(&mut h);
+        h.deliver(snapshot_with_merge(&h, "one\n\nthree\n"));
+        select_lines(&mut h, 1..2);
+        h.screen.quote_selected_diff();
+        assert_eq!(
+            prompt_text(&h.screen),
+            "以下の箇所を修正してください:\n[orch/foo / a.rs ⛔merge L2]\n```\n\n```\n"
+        );
+    }
+
+    #[test]
+    fn conflict_markers_are_read_at_their_length() {
+        let marker = (Some(MERGE_MARKER_FG), Some(MERGE_MARKER_BG));
+        let base = (None, Some(MERGE_BASE_BG));
+        let branch = (None, Some(MERGE_BRANCH_BG));
+        // `conflict-marker-size=5`.
+        let five = "<<<<< main\nours\n=====\ntheirs\n>>>>> b\n";
+        assert_eq!(
+            merge_line_styles(five),
+            vec![marker, base, marker, branch, marker]
+        );
+        assert_eq!(conflict_blocks(five), vec![0..5]);
+        // A side's own `======= title` or a longer run is content.
+        let text = "<<<<<<< main\n======= title\n========\nours\n=======\ntheirs\n>>>>>>>> no\n>>>>>>> b\n";
+        assert_eq!(
+            merge_line_styles(text),
+            vec![marker, base, base, base, marker, branch, branch, marker]
+        );
+        assert_eq!(conflict_blocks(text), vec![0..8]);
+        // Unclosed blocks are no block.
+        assert!(conflict_blocks("<<<<<<< a\nx\n=======\n").is_empty());
+    }
+
+    #[test]
+    fn a_merge_commit_quote_names_the_new_line() {
+        let mut h = LiveHarness::new();
+        h.screen.select_commit_row(0, &mut h.text);
+        h.deliver(snapshot_with_commit(C_NEW, MERGE_COMMIT_SHOW));
+        // `++c` is line 13 of the log, line 7 of the result.
+        select_lines(&mut h, 13..14);
+        h.screen.quote_selected_diff();
+        assert!(
+            prompt_text(&h.screen)
+                .contains("[main / commit aaaaaaa · src/x.rs L7]\n```diff\n++c\n```"),
+            "{}",
+            prompt_text(&h.screen)
+        );
+        let gutter = Gutter::of(MERGE_COMMIT_SHOW).unwrap();
+        assert_eq!(
+            gutter.numbers[11..15],
+            [
+                (None, Some(5)),
+                (None, Some(6)),
+                (None, Some(7)),
+                (None, Some(8))
+            ]
+        );
+        // A line one parent removed is not in the result.
+        let removed = Gutter::of("diff --cc f\n@@@ -1,2 -1,2 +1,1 @@@\n- a\n  b\n").unwrap();
+        assert_eq!(removed.numbers[2..4], [(None, None), (None, Some(1))]);
+    }
+
+    #[test]
+    fn the_editor_opens_a_merge_preview_file_only_if_the_worktree_has_it() {
+        let dir = std::env::temp_dir().join(format!("rb-merge-ed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = std::fs::canonicalize(&dir)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let mut snap = snapshot_with_paneless_worktree();
+        snap.data.repos[0].worktrees[1].cwd = cwd.clone();
+        snap.data.repos[0].worktrees[1].merge_conflicts = vec!["a.rs".into(), "gone.rs".into()];
+        let mut h = LiveHarness::new();
+        h.deliver(snap);
+        h.screen.sel_wt = 1;
+        h.screen.sync_views(&mut h.text);
+        std::fs::write(dir.join("a.rs"), "x").unwrap();
+        h.screen.show_merge("a.rs".into(), &mut h.text);
+        assert_eq!(editor_opens(&mut h), vec![("a.rs".to_owned(), 1)]);
+        // This branch deleted it: the preview shows main's, the worktree has none.
+        h.screen.show_merge("gone.rs".into(), &mut h.text);
+        h.screen.toasts.clear();
+        assert!(editor_opens(&mut h).is_empty());
+        assert!(
+            h.screen.toasts[0].contains("gone.rs はこの worktree にない"),
+            "{:?}",
+            h.screen.toasts
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_live_snapshot_waits_for_the_text_it_selects() {
+        let (channel, feed) = test_channel();
+        let TestFeed {
+            snapshots,
+            commands,
+            ..
+        } = feed;
+        // The feed: the listing at once, then each commit asked for.
+        let worker = std::thread::spawn(move || {
+            let mut first = snapshot_with_paneless_worktree();
+            first.selected_diff = Some((CWD.into(), "a.rs".into(), "+a".into()));
+            snapshots.send(first).unwrap();
+            while let Ok(cmd) = commands.recv_timeout(std::time::Duration::from_secs(5)) {
+                if let Command::LoadCommit { cwd, sha } = cmd {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    let mut snap = snapshot_with_paneless_worktree();
+                    snap.selected_commit = Some((cwd, sha, COMMIT_THREE_FILES.into()));
+                    snapshots.send(snap).unwrap();
+                    return;
+                }
+            }
+        });
+        let mut text = TextStore::new(Default::default());
+        let mut screen = RepoBrowser::live_snapshot(
+            channel,
+            Some("/repo-wt/foo".into()),
+            SnapshotView::Commit,
+            &mut text,
+            Size::new(1440.0, 900.0),
+            std::time::Duration::from_secs(3),
+            std::time::Duration::from_secs(3),
+        )
+        .unwrap();
+        worker.join().unwrap();
+        assert_eq!(screen.current_worktree().unwrap().branch, "orch/foo");
+        let log = screen.tree().get::<LogView>(screen.diff_log).unwrap();
+        assert!(log.all_text().contains("+new1"), "{}", log.all_text());
+        // The first hunk is selected, so `--composer` quotes it.
+        screen.show_composer();
+        assert!(
+            prompt_text(&screen).contains("[orch/foo / commit aaaaaaa · x L10-L13]"),
+            "{}",
+            prompt_text(&screen)
+        );
+    }
+
+    #[test]
+    fn a_live_snapshot_without_noa_says_why() {
+        let (channel, feed) = test_channel();
+        let mut down = snapshot(DiffMode::Unstaged, None);
+        down.link = Link::Down("server-enable がオフです".into());
+        feed.snapshots.send(down).unwrap();
+        let err = RepoBrowser::live_snapshot(
+            channel,
+            None,
+            SnapshotView::Diff,
+            &mut TextStore::new(Default::default()),
+            Size::new(1440.0, 900.0),
+            std::time::Duration::from_millis(200),
+            std::time::Duration::from_millis(200),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(err, "server-enable がオフです");
+    }
+
     /// A unified diff of about `bytes`, in hunks of 40 lines.
     fn synthetic_diff(bytes: usize) -> String {
         let mut diff = String::from(
@@ -4334,8 +6130,8 @@ diff --git a/gone.rs b/gone.rs\ndeleted file mode 100644\nindex 1..0\n--- a/gone
                     let (n, ms, a, p) = timed(|| {
                         let gutter = Gutter::of(&big).unwrap();
                         big.lines()
-                            .zip(&gutter.numbers)
-                            .map(|(line, &numbers)| gutter.line(line, numbers))
+                            .enumerate()
+                            .map(|(i, line)| gutter.line(i, line))
                             .count()
                     });
                     assert_eq!(n, lines);

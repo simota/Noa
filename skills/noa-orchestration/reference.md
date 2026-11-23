@@ -312,7 +312,8 @@ when known `label`, `state`, `seq`, `blocked`, `exit`, `branch`; from the
 journal `tier`, `argv` (else Noa's `spawn.argv`), `lastTask` (the last text sent
 that was not an answer), `lastSentSeq` (the `seq` before the last send),
 `lastOutcome` (`{reason,seq,ts}`), `answers` (a count), `result` (where
-`close --prune` moved it, after a prune), `worktree`.
+`close --prune` moved it, after a prune), `worktree`, `retryOf` (the pane a
+`retry` replaced).
 A worktree worker also gets `ahead` (commits on its branch that your `HEAD`
 lacks) and `dirty` (uncommitted changes in its worktree), each left out when
 git cannot say. Then the journal's workers that are no longer listed:
@@ -327,8 +328,9 @@ oldest first: `{"ts":…,"paneId":"…","label"?:…,"text":…,"screen":…}`, 
 **Journal.** Each `+ctl` command run in a Noa pane appends to
 `<data-dir>/noa/ctl/<NOA_SURFACE_ID>.jsonl` (`~/Library/Application
 Support/noa/ctl/` on macOS), one line per event: `spawn`, `send` (written only
-once typed; its first 200 characters), `outcome` (each wait line with a
-`reason`), `close`. Over 4 MiB it loses its oldest half. A new journal is
+once typed; its first 200 characters as `text`, `bytes`, `raw`, and the whole
+text as `full` when it is longer than that and at most 64 KiB, for `retry`),
+`outcome` (each wait line with a `reason`), `close`. Over 4 MiB it loses its oldest half. A new journal is
 0600, in a 0700 `ctl/` when that is new too (existing ones are not chmod-ed);
 appends and the halving hold a lock on `<NOA_SURFACE_ID>.jsonl.lock` beside it.
 A journal that cannot be written warns once (`warning: cannot write the journal …; carrying on
@@ -379,6 +381,58 @@ inside another worktree (`<repo>-wt/A-wt/L`) is not found this way.
 A pane that went away between the listing and its close (`"gone":true`) is pruned
 the same way. Merge the
 branch first, or read what would be lost before removing it by hand.
+
+### `retry PANE [--tier light|standard|deep] [--task TEXT | --task-file F] [--ready SECS] [wait options] [--no-board]`
+
+Starts one of this pane's `claude`, `codex` or `agy` workers again, for a
+result that failed your check: one command for `close` (no `--prune`), `spawn`
+in the same directory under the same label, and `send` with the task. PANE must
+be a worker this pane's journal recorded a spawn of (listed or already gone);
+any other is refused (exit 1, `pane N is not a worker this pane spawned`). Each
+of these is also exit 1 with nothing closed or started:
+
+- PANE is listed and its agent is `running`: wait for its turn to end, or
+  `close` it first (a gone worker is retried from the journal).
+- No command is known (journal `argv`, else Noa's `spawn.argv`), or it is not
+  `claude`, `codex` or `agy`: the task has to be typed.
+- `--tier` on a command that picks its own model or effort (as `spawn --tier`
+  refuses it), or the old tier's flags are not right after the program.
+- No task: without `--task`/`--task-file`, the old worker's last task is sent,
+  which is the last `send` that was not `--answer`, not `--raw` keys, not empty,
+  whole from the journal (`full`). One the journal kept only the start of (over
+  64 KiB, or sent by an older `+ctl`) asks for `--task-file`. After follow-up
+  sends, the last one is all it has: pass the whole task with `--task-file`.
+- The directory is gone (a pruned worktree) or the program is not on `PATH`.
+- The text with its preface is over 250 KiB.
+
+Then it closes PANE if it is still listed (journaled as a `close`, not printed,
+never pruned) and spawns:
+
+- Command: the journal's `argv` with the old `--tier`'s flags removed, then
+  `--tier`'s added (default: the old tier again; none when it had none).
+- Directory and label: the old worker's cwd and label. No worktree is made:
+  a `spawn --worktree` worker goes on in its worktree and on `orch/LABEL`, so
+  `close --prune` later finds it as before. Its `--env`, `--no-wait-after` and
+  `--focus` are not in the journal and are not carried over.
+- Task: a preface, a `---` line, then the task. The preface says a previous
+  worker (pane N; its program and tier, or the model it named) worked on this
+  task in this directory and stopped (`its last outcome: <reason>` when the
+  journal has one); its changes, committed or not, are still here, so check
+  `git status` and `git log` first and build on them; and `Its report: <path>`
+  when its result file holds one. Retrying a retry replaces the earlier
+  preface instead of stacking it.
+- From there it is `spawn --task`: `--ready` (default 30), the wait options
+  `--for`, `--all`, `--timeout`, `--tail`, `--stall`, `--settle`,
+  `--no-board`, `"sent"`, the wait lines and exit status. The new worker gets
+  a result file of its own (`result-LABEL-<8 hex>.md` while the old one is
+  there).
+
+The spawn line has `"retryOf":"N"`, `"tier"` when set, and `"worktree"` and
+`"branch"` when the old worker had them; the journal's `spawn` has them too, so
+`status` shows `retryOf` and the worktree's `ahead`/`dirty`. When the spawn
+fails after the close (no spawn line printed), PANE stays closed with its work
+in the directory, and `retry PANE` again starts from the journal; once a spawn
+line was printed, the new worker exists: go on with it, not with PANE.
 
 ### `board [--of PANE]`, `board --open [--split right|down | --tab]`
 

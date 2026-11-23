@@ -123,7 +123,8 @@ impl Prefs {
             "shown": shown,
             "mapAxis": axis_name(self.map_axis),
             "timeScale": scale_name(self.time_scale),
-            "filter": self.filter,
+            // Cut as a read cuts it: a view written is read back whole.
+            "filter": self.filter.chars().take(FILTER_MAX_CHARS).collect::<String>(),
         })
     }
 
@@ -213,31 +214,76 @@ fn read(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
+/// How many temporary names `write` tries before it gives up.
+const TEMP_TRIES: usize = 8;
+
+/// A temporary name nobody can guess: the process's random hash keys over
+/// the time, the pid and a count.
+fn random_name() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    hasher.write_u128(nanos);
+    hasher.write_u32(std::process::id());
+    hasher.write_u64(COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    format!("{:016x}", hasher.finish())
+}
+
 /// Writes through a temporary file renamed over `path`, so a reader (or a
 /// crash) never sees half a view. The directory is made `0700`, the file
 /// `0600`: the filter can name branches and tasks.
 fn write(path: &Path, value: &serde_json::Value) -> std::io::Result<()> {
+    write_with(path, value, random_name)
+}
+
+/// `write`, its temporary file named `<path>.<name>.tmp` by `names`. The
+/// file is made new (`create_new`, which follows no link): a name taken,
+/// by anything, is passed over for the next. The file is removed when
+/// anything after its creation fails.
+fn write_with(
+    path: &Path,
+    value: &serde_json::Value,
+    mut names: impl FnMut() -> String,
+) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(dir)?;
-    let mut temp = path.as_os_str().to_owned();
-    temp.push(format!(".{}.tmp", std::process::id()));
-    let temp = PathBuf::from(temp);
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&temp)?;
+    let (temp, mut file) = (0..TEMP_TRIES)
+        .find_map(|_| {
+            let mut temp = path.as_os_str().to_owned();
+            temp.push(format!(".{}.tmp", names()));
+            let temp = PathBuf::from(temp);
+            let opened = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temp);
+            match opened {
+                Ok(file) => Some(Ok((temp, file))),
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(err) => Some(Err(err)),
+            }
+        })
+        .unwrap_or_else(|| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "no free temporary name",
+            ))
+        })?;
     let mut text = value.to_string();
     text.push('\n');
-    file.write_all(text.as_bytes())?;
+    let written = file.write_all(text.as_bytes());
     drop(file);
-    std::fs::rename(&temp, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&temp);
-    })
+    written
+        .and_then(|()| std::fs::rename(&temp, path))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&temp);
+        })
 }
 
 #[cfg(test)]
@@ -344,6 +390,65 @@ mod tests {
         assert_eq!(prefs.grouping, Grouping::Model, "no --group: the saved one");
         assert_eq!(prefs.filter, "", "an empty --filter clears the saved one");
         assert_eq!(prefs.map_axis, MapAxis::Branch);
+    }
+
+    /// Review #4: a link waiting at the temporary file's old, predictable
+    /// name (`<path>.<pid>.tmp`) is not written through.
+    #[test]
+    fn a_link_at_the_temporary_name_is_left_alone() {
+        let path = temp("tmp-link");
+        let dir = path.parent().unwrap();
+        std::fs::create_dir_all(dir).unwrap();
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, "keep").unwrap();
+        let mut planted = path.as_os_str().to_owned();
+        planted.push(format!(".{}.tmp", std::process::id()));
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+        PrefsStore::at(path.clone()).save(&sample());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        assert_eq!(PrefsStore::at(path.clone()).load(), sample());
+        std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+    }
+
+    /// Review #4: a name taken is passed over for the next, and no
+    /// temporary file is left.
+    #[test]
+    fn a_taken_temporary_name_is_passed_over() {
+        let path = temp("tmp-taken");
+        let dir = path.parent().unwrap();
+        std::fs::create_dir_all(dir).unwrap();
+        let taken = dir.join("view.json.taken.tmp");
+        std::fs::write(&taken, "someone's").unwrap();
+        let mut names = ["taken", "free"].into_iter().map(str::to_owned);
+        write_with(&path, &sample().to_json(), || names.next().unwrap()).unwrap();
+        assert_eq!(std::fs::read_to_string(&taken).unwrap(), "someone's");
+        assert_eq!(PrefsStore::at(path.clone()).load(), sample());
+        assert!(
+            !dir.join("view.json.free.tmp").exists(),
+            "renamed into place"
+        );
+        // A failed write removes the file it made: here the rename onto a
+        // directory fails.
+        let blocked = dir.join("blocked");
+        std::fs::create_dir_all(blocked.join("inside")).unwrap();
+        let mut names = std::iter::once("mine".to_owned());
+        assert!(write_with(&blocked, &sample().to_json(), || names.next().unwrap()).is_err());
+        assert!(!dir.join("blocked.mine.tmp").exists());
+        std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+    }
+
+    /// Review #12: a view with a long filter is read back whole, its
+    /// filter cut as a read cuts it.
+    #[test]
+    fn a_view_saved_with_a_long_filter_reads_back() {
+        let path = temp("long-filter");
+        let mut long = sample();
+        long.filter = "x".repeat(70_000);
+        PrefsStore::at(path.clone()).save(&long);
+        let read = PrefsStore::at(path.clone()).load();
+        assert_eq!(read.tab, Tab::Timeline);
+        assert_eq!(read.filter, "x".repeat(FILTER_MAX_CHARS));
+        std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap()).unwrap();
     }
 
     #[test]

@@ -114,6 +114,7 @@ fn with_no_workers_the_body_says_why() {
         synced_secs: 0,
         can_focus: false,
         can_input: false,
+        safe_send: true,
         instance: None,
     };
     let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, down);

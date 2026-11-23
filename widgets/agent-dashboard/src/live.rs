@@ -59,6 +59,10 @@ pub struct Snapshot {
     pub can_focus: bool,
     /// Whether Noa granted the `input` scope `noa.sendText` needs.
     pub can_input: bool,
+    /// Whether this Noa is known to refuse a message for a pane back at its
+    /// shell (`refuseShell`, Noa 0.9.12 and later). Without that, the
+    /// dashboard sends nothing: the text would run there as a command line.
+    pub safe_send: bool,
     /// The server instance the fleet's pane ids belong to
     /// (`Client::server_instance_id`); `None` while the link is down. A
     /// restarted Noa gives its ids out again, to other panes.
@@ -91,13 +95,24 @@ pub enum Command {
         instance: String,
         pane: u64,
     },
-    /// Closes each of `panes` that has still ended (finished or failed)
-    /// when the feed comes to it, then lists the panes once. As `Close`:
-    /// refused on another instance.
+    /// Closes each of `targets` that is still as the dashboard confirmed
+    /// it (ended, the same state and report count) when the feed comes to
+    /// it, then lists the panes once. As `Close`: refused on another
+    /// instance.
     CloseMany {
         instance: String,
-        panes: Vec<u64>,
+        targets: Vec<CloseTarget>,
     },
+}
+
+/// A pane a bulk close takes, as the dashboard showed it when the close
+/// was confirmed: its state and its agent's report count (`Worker::reports`,
+/// `agent.seq`), which any new report moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CloseTarget {
+    pub pane: u64,
+    pub state: State,
+    pub seq: u64,
 }
 
 /// A `Command::Send` the feed did not deliver, given back with the server
@@ -259,6 +274,8 @@ trait Noa {
     fn instance(&self) -> &str;
     fn can_focus(&self) -> bool;
     fn can_input(&self) -> bool;
+    /// Whether the server honours `refuseShell` (`Connection`).
+    fn refuses_shell(&self) -> bool;
     fn list_panels(&mut self) -> Result<Vec<Panel>, ClientError>;
     /// Subscribes to every pane's state changes.
     fn subscribe(&mut self) -> Result<(), ClientError>;
@@ -283,33 +300,47 @@ trait Noa {
     fn screen(&mut self, pane: u64) -> Result<String, ClientError>;
 }
 
-impl Noa for Client {
+/// A control connection, with what its `noa.hello` said of the server's
+/// version (`server_version`).
+struct Connection {
+    client: Client,
+    /// The server is Noa `REFUSE_SHELL_SINCE` or later.
+    refuses_shell: bool,
+}
+
+impl Noa for Connection {
     fn instance(&self) -> &str {
-        self.server_instance_id()
+        self.client.server_instance_id()
     }
 
     fn can_focus(&self) -> bool {
-        self.granted_scopes().contains(Scope::Control)
+        self.client.granted_scopes().contains(Scope::Control)
     }
 
     fn can_input(&self) -> bool {
-        self.granted_scopes().contains(Scope::Input)
+        self.client.granted_scopes().contains(Scope::Input)
+    }
+
+    fn refuses_shell(&self) -> bool {
+        self.refuses_shell
     }
 
     fn list_panels(&mut self) -> Result<Vec<Panel>, ClientError> {
-        Client::list_panels(self)
+        self.client.list_panels()
     }
 
     fn subscribe(&mut self) -> Result<(), ClientError> {
-        Client::subscribe(self, &[EventKind::StateChanged], None).map(drop)
+        self.client
+            .subscribe(&[EventKind::StateChanged], None)
+            .map(drop)
     }
 
     fn next_notification(&mut self, wait: Duration) -> Result<Option<Notification>, ClientError> {
-        Client::next_notification(self, wait)
+        self.client.next_notification(wait)
     }
 
     fn focus_pane(&mut self, pane: u64) -> Result<(), ClientError> {
-        Client::focus_pane(self, pane)
+        self.client.focus_pane(pane)
     }
 
     fn send_text(
@@ -324,17 +355,71 @@ impl Noa for Client {
             require_paste_mode: false,
             refuse_shell,
         };
-        Client::send_text_with(self, pane, text, options)
+        self.client.send_text_with(pane, text, options)
     }
 
     fn close_pane(&mut self, pane: u64) -> Result<(), ClientError> {
-        Client::close_pane(self, pane)
+        self.client.close_pane(pane)
     }
 
     fn screen(&mut self, pane: u64) -> Result<String, ClientError> {
-        let result = self.get_text(pane, TextSource::Screen, Some(SCREEN_MAX_BYTES))?;
+        let result = self
+            .client
+            .get_text(pane, TextSource::Screen, Some(SCREEN_MAX_BYTES))?;
         Ok(result.text)
     }
+}
+
+/// The first Noa whose `noa.sendText` honours `refuseShell` (#229): an
+/// older one ignores the field and types the text into the shell.
+const REFUSE_SHELL_SINCE: (u64, u64, u64) = (0, 9, 12);
+
+/// Whether `version` (`noa.hello`'s `serverVersion`, Noa's own version) is
+/// `REFUSE_SHELL_SINCE` or later. A version that does not parse is not.
+fn honours_refuse_shell(version: &str) -> bool {
+    let core = version.split(['-', '+']).next().unwrap_or("");
+    let parts: Vec<u64> = core.split('.').map_while(|n| n.parse().ok()).collect();
+    match parts[..] {
+        [major, minor, patch] => (major, minor, patch) >= REFUSE_SHELL_SINCE,
+        _ => false,
+    }
+}
+
+/// The server's version from a `noa.hello` of our own: `noa_ipc::Client`
+/// reads it but does not keep it. `None` when it cannot be read.
+fn server_version(url: &str, token: &str) -> Option<String> {
+    use tungstenite::stream::MaybeTlsStream;
+    let (mut socket, _) = tungstenite::connect(url).ok()?;
+    if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .ok()?;
+    }
+    let hello = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "noa.hello",
+        "params": {
+            "protocolVersion": noa_ipc::PROTOCOL_VERSION,
+            "token": token,
+            "scopes": ["read"],
+        },
+    });
+    socket
+        .send(tungstenite::Message::Text(hello.to_string()))
+        .ok()?;
+    let version = loop {
+        let tungstenite::Message::Text(text) = socket.read().ok()? else {
+            continue;
+        };
+        let reply: serde_json::Value = serde_json::from_str(&text).ok()?;
+        if reply["id"] == 1 {
+            break reply["result"]["serverVersion"].as_str().map(str::to_owned);
+        }
+    };
+    let _ = socket.close(None);
+    version
 }
 
 /// Where the feed reads the time: `Instant::now`, or a test's own clock.
@@ -429,6 +514,7 @@ impl Feed {
                 synced_secs: 0,
                 can_focus: false,
                 can_input: false,
+                safe_send: false,
                 instance: None,
             };
             if self.publish(down).is_err() || !self.pause(backoff) {
@@ -558,6 +644,11 @@ impl Feed {
                     self.last_list = self.now();
                     self.last_contact = self.last_list;
                     self.tracker.replace(panels, unix_now());
+                    if !client.refuses_shell() {
+                        self.notice(UNSAFE_SEND.to_owned());
+                        self.give_back(instance, pane, text);
+                        continue;
+                    }
                     if self
                         .tracker
                         .panels
@@ -616,43 +707,55 @@ impl Feed {
                     }
                     Err(err) => return Err(err.into()),
                 },
-                Ok(Command::CloseMany { panes, .. }) => self.close_many(client, &panes)?,
+                Ok(Command::CloseMany { targets, .. }) => self.close_many(client, &targets)?,
                 Err(TryRecvError::Empty) => return Ok(()),
                 Err(TryRecvError::Disconnected) => return Err(Stop::Gone),
             }
         }
     }
 
-    /// Closes each of `panes` that is still an ended worker now: one sent a
-    /// message since the dashboard chose it may be running again, and one
-    /// waiting on a person is never closed unseen. The panes are listed
-    /// first for that, as before a message is sent, and once more at the
-    /// end, so the closed ones leave the dashboard at once.
-    fn close_many(&mut self, client: &mut impl Noa, panes: &[u64]) -> Result<(), Stop> {
-        let panels = client.list_panels()?;
-        self.last_list = self.now();
-        self.last_contact = self.last_list;
-        self.tracker.replace(panels, unix_now());
-        let mut skipped = 0;
+    /// Closes each of `targets` that is still as the dashboard confirmed
+    /// it: an ended worker in the same state with the same report count.
+    /// Each pane is read again right before it is closed, so one given more
+    /// work meanwhile (by another client, or a message sent here) is left
+    /// open. A pane can still change between that read and its close: only
+    /// a close the server makes conditional on the state would rule that
+    /// out. The panes are listed once more at the end, so the closed ones
+    /// leave the dashboard at once.
+    fn close_many(&mut self, client: &mut impl Noa, targets: &[CloseTarget]) -> Result<(), Stop> {
+        let mut changed: Vec<String> = Vec::new();
         let mut failed: Vec<String> = Vec::new();
-        for &pane in panes {
-            let ended = self.tracker.panels.get(&pane).is_some_and(|panel| {
-                is_worker(panel) && matches!(state_of(panel), State::Finished | State::Error)
-            });
-            if !ended {
-                skipped += 1;
+        for target in targets {
+            let panels = client.list_panels()?;
+            self.last_list = self.now();
+            self.last_contact = self.last_list;
+            self.tracker.replace(panels, unix_now());
+            let Some(panel) = self.tracker.panels.get(&target.pane) else {
+                // Gone already: nothing to close.
+                continue;
+            };
+            let state = state_of(panel);
+            let seq = panel.agent.as_ref().map_or(0, |agent| agent.seq);
+            let unchanged = is_worker(panel)
+                && matches!(state, State::Finished | State::Error)
+                && state == target.state
+                && seq == target.seq;
+            if !unchanged {
+                changed.push(name_of(panel));
                 continue;
             }
-            match client.close_pane(pane) {
+            match client.close_pane(target.pane) {
                 Ok(()) => self.last_contact = self.now(),
                 Err(ClientError::Rpc { message, .. }) => failed.push(message),
                 Err(err) => return Err(err.into()),
             }
         }
         self.relist(client)?;
-        if skipped > 0 {
+        if !changed.is_empty() {
             self.notice(format!(
-                "{skipped} 件は終了した状態でなくなったため閉じませんでした"
+                "{} 件は確認した後に状態が変わったため閉じませんでした: {}",
+                changed.len(),
+                changed.join("、")
             ));
         }
         if let Some(first) = failed.first() {
@@ -731,6 +834,7 @@ impl Feed {
             synced_secs: now.saturating_duration_since(self.last_contact).as_secs(),
             can_focus: client.can_focus(),
             can_input: client.can_input(),
+            safe_send: client.refuses_shell(),
             instance: Some(client.instance().to_owned()),
         })?;
         // From now on the dashboard can have this instance's panes to
@@ -765,9 +869,10 @@ impl Feed {
     }
 }
 
-/// A control connection to the Noa this user's config names, with the
-/// `read` and `control` scopes only.
-fn connect() -> Result<Client, String> {
+/// A control connection to the Noa this user's config names, asking for
+/// the `read`, `control` and `input` scopes, and whether that Noa honours
+/// `refuseShell` (its version, from a hello of our own).
+fn connect() -> Result<Connection, String> {
     let (config, _diagnostics) =
         noa_config::load_startup_config(noa_config::ConfigOverrides::default())
             .map_err(|err| format!("設定を読めません: {err:#}"))?;
@@ -787,7 +892,7 @@ fn connect() -> Result<Client, String> {
         }
     };
     let url = control_url(&config.server_bind, config.server_port);
-    Client::connect(
+    let client = Client::connect(
         &url,
         &token,
         ScopeSet::from_strings(["read", "control", "input"]),
@@ -795,8 +900,17 @@ fn connect() -> Result<Client, String> {
     .map_err(|err| match err {
         ClientError::Rpc { .. } => rpc_reason(&err),
         other => format!("{url} に接続できません: {other}"),
+    })?;
+    let refuses_shell = server_version(&url, &token).is_some_and(|v| honours_refuse_shell(&v));
+    Ok(Connection {
+        client,
+        refuses_shell,
     })
 }
+
+/// Why nothing is sent to a Noa not known to honour `refuseShell`.
+pub(crate) const UNSAFE_SEND: &str =
+    "送信しません: この Noa はシェルに戻ったペインへの送信を防げません（Noa 0.9.12 以降が必要）";
 
 /// What the notice line says when Noa refused a message because the pane
 /// is back at its shell (`refused_as_shell`): the message is the draft again.
@@ -1041,7 +1155,8 @@ impl Tracker {
                 continue;
             }
             let text = std::fs::read_to_string(&path).unwrap_or_default();
-            let journal = Journal::parsed(journal::file_name(&surface), stamp, &text);
+            let journal =
+                Journal::parsed(journal::file_name(&surface), stamp, &text).of_this_instance();
             self.journals.insert(surface, journal);
         }
     }
@@ -1485,6 +1600,7 @@ pub(crate) mod tests {
     mod actions;
     mod closed;
     mod performance;
+    mod review;
 
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -1779,7 +1895,7 @@ pub(crate) mod tests {
     }
 
     fn with_journal(tracker: &mut Tracker, surface: &str, text: &str) {
-        let journal = Journal::parsed(journal::file_name(surface), None, text);
+        let journal = Journal::parsed(journal::file_name(surface), None, text).of_this_instance();
         tracker.journals.insert(surface.to_owned(), journal);
     }
 
@@ -2390,6 +2506,9 @@ pub(crate) mod tests {
         feed.shown = Some(instance.to_owned());
     }
 
+    /// What another client does to the panels left after a pane closed.
+    type AfterClose = Box<dyn FnMut(u64, &mut Vec<Panel>)>;
+
     /// A Noa that answers from a script: the panels it lists and the
     /// screens it shows. Its connection is lost once it has waited
     /// `waits` times for a notification. Its answers take no time on the
@@ -2420,8 +2539,13 @@ pub(crate) mod tests {
         /// number is how many writes go through first (an agent that exits
         /// between the paste and the Enter).
         shells: HashMap<u64, usize>,
+        /// Whether this Noa honours `refuseShell` (an older one does not).
+        refuses_shell_known: bool,
         /// The panes asked to be closed, in order.
         closed: Vec<u64>,
+        /// Runs after each pane closed, on the panels left: what another
+        /// client does to them meanwhile.
+        after_close: Option<AfterClose>,
         /// The panes whose screens were asked for, in order.
         fetched: Vec<u64>,
         /// Runs during each wait for a notification, as what the window
@@ -2451,7 +2575,9 @@ pub(crate) mod tests {
                 sent: Vec::new(),
                 refuse_shell: Vec::new(),
                 shells: HashMap::new(),
+                refuses_shell_known: true,
                 closed: Vec::new(),
+                after_close: None,
                 fetched: Vec::new(),
                 on_wait: None,
             }
@@ -2469,6 +2595,10 @@ pub(crate) mod tests {
 
         fn can_input(&self) -> bool {
             true
+        }
+
+        fn refuses_shell(&self) -> bool {
+            self.refuses_shell_known
         }
 
         fn list_panels(&mut self) -> Result<Vec<Panel>, ClientError> {
@@ -2531,6 +2661,9 @@ pub(crate) mod tests {
         fn close_pane(&mut self, pane: u64) -> Result<(), ClientError> {
             self.closed.push(pane);
             self.panels.retain(|panel| panel.pane_id.0 != pane);
+            if let Some(after) = &mut self.after_close {
+                after(pane, &mut self.panels);
+            }
             Ok(())
         }
 

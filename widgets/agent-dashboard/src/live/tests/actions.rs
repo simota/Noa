@@ -227,31 +227,49 @@ fn ended_and_not(instance: &str, clock: &TestClock) -> ScriptedNoa {
     noa
 }
 
+/// A bulk close of `panes` as the dashboard confirms it: each as
+/// `ended_and_not` lists it ended — 3 finished, 4 failed, any other
+/// finished (it was, when the dashboard showed it) — with report count 1.
 fn close_many(commands: &Sender<Command>, instance: &str, panes: &[u64]) {
+    let targets = panes
+        .iter()
+        .map(|&pane| CloseTarget {
+            pane,
+            state: if pane == 4 {
+                State::Error
+            } else {
+                State::Finished
+            },
+            seq: 1,
+        })
+        .collect();
     commands
         .send(Command::CloseMany {
             instance: instance.into(),
-            panes: panes.to_vec(),
+            targets,
         })
         .unwrap();
 }
 
 #[test]
-fn a_bulk_close_closes_only_what_has_ended_and_lists_once_after() {
+fn a_bulk_close_closes_only_what_is_as_confirmed_and_lists_once_after() {
     let clock = TestClock::new();
     let (mut feed, published, commands, notices, _unsent) = told_feed(&clock);
     let mut noa = ended_and_not("a", &clock);
     close_many(&commands, "a", &[2, 3, 4, 5]);
     assert!(matches!(feed.follow(&mut noa), Err(Stop::Lost(_))));
     assert_eq!(noa.closed, [3, 4]);
-    // The first list on connecting, the state check before closing, and
-    // the one list after.
-    assert_eq!(noa.lists, 3);
+    // The first list on connecting, one right before each pane, and the
+    // one list after.
+    assert_eq!(noa.lists, 6);
     let last = published.try_iter().last().expect("a snapshot");
     let left: Vec<u64> = last.fleet.workers.iter().map(|w| w.pane).collect();
     assert_eq!(left, [2, 5]);
     let said: Vec<String> = notices.try_iter().collect();
-    assert_eq!(said, ["2 件は終了した状態でなくなったため閉じませんでした"]);
+    assert_eq!(
+        said,
+        ["2 件は確認した後に状態が変わったため閉じませんでした: claude、w5"]
+    );
 }
 
 #[test]
@@ -274,4 +292,130 @@ fn a_bulk_close_while_the_link_is_down_is_refused() {
     assert!(feed.pause(Duration::from_millis(1)));
     let said: Vec<String> = notices.try_iter().collect();
     assert_eq!(said, ["ペインを閉じられません: Noa に接続していません"]);
+}
+
+/// Review #1: another client gives pane 4 more work while pane 3 closes
+/// (it runs again, or it already finished that work too: its report count
+/// moved). Each pane is read again right before it is closed, and one
+/// whose state or report count is not what the dashboard confirmed stays.
+#[test]
+fn a_pane_given_work_during_a_bulk_close_is_not_closed() {
+    for (state, seq) in [("running", 2), ("finished", 2)] {
+        let clock = TestClock::new();
+        let (mut feed, _published, commands, notices, _unsent) = told_feed(&clock);
+        let mut noa = ended_and_not("a", &clock);
+        noa.after_close = Some(Box::new(move |closed, panels| {
+            if closed == 3
+                && let Some(four) = panels.iter_mut().find(|p| p.pane_id.0 == 4)
+            {
+                four.exit = None;
+                let agent = four.agent.as_mut().unwrap();
+                agent.state = Some(state.to_owned());
+                agent.seq = seq;
+            }
+        }));
+        close_many(&commands, "a", &[3, 4]);
+        assert!(matches!(feed.follow(&mut noa), Err(Stop::Lost(_))));
+        assert_eq!(noa.closed, [3], "{state} seq {seq}");
+        let said: Vec<String> = notices.try_iter().collect();
+        assert_eq!(
+            said,
+            ["1 件は確認した後に状態が変わったため閉じませんでした: w4"]
+        );
+    }
+}
+
+#[test]
+fn only_a_noa_from_0_9_12_is_known_to_refuse_a_shell() {
+    for (version, honours) in [
+        ("0.9.12", true),
+        ("0.9.14", true),
+        ("0.9.12-dev", true),
+        ("0.10.0", true),
+        ("1.0.0", true),
+        ("0.9.11", false),
+        ("0.8.40", false),
+        ("0.9", false),
+        ("", false),
+        ("garbage", false),
+    ] {
+        assert_eq!(honours_refuse_shell(version), honours, "{version}");
+    }
+}
+
+/// Review #3: a Noa not known to honour `refuseShell` (older, or its
+/// version unread) gets no message: it would type it into a shell.
+#[test]
+fn nothing_is_sent_to_a_noa_that_may_type_into_a_shell() {
+    let clock = TestClock::new();
+    let (mut feed, published, commands, notices, unsent) = told_feed(&clock);
+    let mut noa = ScriptedNoa::showing("a", "$ ready", &clock);
+    noa.refuses_shell_known = false;
+    send(&commands, "go on");
+    assert!(matches!(feed.follow(&mut noa), Err(Stop::Lost(_))));
+    assert!(noa.sent.is_empty(), "{:?}", noa.sent);
+    assert_eq!(unsent.try_recv().unwrap().text, "go on");
+    let said: Vec<String> = notices.try_iter().collect();
+    assert_eq!(said, [UNSAFE_SEND]);
+    let last = published.try_iter().last().unwrap();
+    assert!(!last.safe_send, "the dashboard is told");
+}
+
+/// The dashboard does not even ask: the drawer says why, and S's Enter
+/// keeps the draft.
+#[test]
+fn the_dashboard_sends_nothing_to_a_noa_that_may_type_into_a_shell() {
+    let clock = TestClock::new();
+    let mut screen = Bench::new(&clock);
+    let mut noa = ScriptedNoa::showing("a", "$ ready", &clock);
+    noa.refuses_shell_known = false;
+    screen.follow(&mut noa);
+    screen.key(Key::Char('j'));
+    screen.letter('s');
+    screen.input(Event::Text("deploy".into()));
+    screen.key(Key::Enter);
+    let labels = screen.labels();
+    assert!(
+        labels.iter().filter(|l| *l == UNSAFE_SEND).count() >= 2,
+        "{labels:?}"
+    );
+    assert!(field_texts(screen.dashboard.tree()).contains(&"deploy".to_owned()));
+    let mut noa = ScriptedNoa::showing("a", "$ ready", &clock);
+    noa.refuses_shell_known = false;
+    screen.follow(&mut noa);
+    assert!(noa.sent.is_empty());
+}
+
+/// The version comes from a `noa.hello` of our own, over a real socket.
+#[test]
+fn the_server_version_is_read_from_a_hello() {
+    let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        // A sandbox without loopback binding: nothing to test against.
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("skipped: cannot bind a loopback port here: {err}");
+            return;
+        }
+        Err(err) => panic!("{err}"),
+    };
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut socket = tungstenite::accept(stream).unwrap();
+        let hello: serde_json::Value =
+            serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(hello["method"], "noa.hello");
+        assert_eq!(hello["params"]["token"], "secret");
+        let reply = serde_json::json!({
+            "jsonrpc": "2.0", "id": hello["id"],
+            "result": { "protocolVersion": 3, "grantedScopes": ["read"], "serverVersion": "0.9.14" },
+        });
+        socket
+            .send(tungstenite::Message::Text(reply.to_string()))
+            .unwrap();
+        let _ = socket.read();
+    });
+    let version = server_version(&format!("ws://127.0.0.1:{port}/"), "secret");
+    server.join().unwrap();
+    assert_eq!(version.as_deref(), Some("0.9.14"));
 }

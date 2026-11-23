@@ -153,6 +153,7 @@ fn live(fleet: Fleet, synced_secs: u64) -> Snapshot {
         synced_secs,
         can_focus: true,
         can_input: true,
+        safe_send: true,
         instance: Some(INSTANCE.to_owned()),
     }
 }

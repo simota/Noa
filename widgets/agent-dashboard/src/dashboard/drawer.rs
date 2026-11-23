@@ -812,6 +812,9 @@ pub(super) fn build(
         if feed.link.as_ref() == Some(&Link::Live) && !feed.can_input {
             let hint = text_line(tree, send_section, NEEDS_INPUT, 3);
             tree.update::<Label, _>(hint, |l, cx| l.set_color(cx, Role::Muted));
+        } else if feed.link.as_ref() == Some(&Link::Live) && !feed.safe_send {
+            let hint = text_line(tree, send_section, crate::live::UNSAFE_SEND, 3);
+            tree.update::<Label, _>(hint, |l, cx| l.set_color(cx, Role::Muted));
         }
         (Some(field), Some(send))
     };

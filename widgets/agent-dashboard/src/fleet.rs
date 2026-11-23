@@ -158,6 +158,11 @@ pub struct Worker {
 
 impl Worker {
     pub fn need(&self) -> Option<Need> {
+        // Its pane is gone: there is nothing left to act on, a failure
+        // included (it stays failed in the statistics).
+        if self.is_closed() {
+            return None;
+        }
         match self.state {
             State::Permission => Some(Need::Approval),
             State::Error => Some(Need::Failure),

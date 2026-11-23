@@ -101,6 +101,8 @@ fn nothing_reaches_the_pane_of_a_closed_worker() {
     // A bulk close leaves them out: their panes are gone already.
     key(&mut dashboard, &mut text, Key::Escape);
     for _ in 0..2 {
+        // Shift up between the presses (review #2).
+        dashboard.dispatch(Event::ModifiersChanged(Modifiers::default()), &mut text);
         dashboard.dispatch(
             Event::KeyDown {
                 key: Key::Char('x'),
@@ -116,7 +118,9 @@ fn nothing_reaches_the_pane_of_a_closed_worker() {
     let many: Vec<Vec<u64>> = sent(&commands)
         .into_iter()
         .filter_map(|c| match c {
-            Command::CloseMany { panes, .. } => Some(panes),
+            Command::CloseMany { targets, .. } => {
+                Some(targets.iter().map(|t| t.pane).collect::<Vec<u64>>())
+            }
             _ => None,
         })
         .collect();
@@ -167,4 +171,27 @@ fn closed_workers_count_in_the_statistics() {
     let running = |m: &analytics::FleetMetrics| m.phase_minutes[0].1;
     assert_eq!(running(&after), running(&before) + 18.0);
     assert_ne!(after.avg_took_minutes, before.avg_took_minutes);
+}
+
+/// Review #8: a closed failure stays failed — in the statistics and the
+/// state filter — yet is shown done (tagged 失敗) and not queued.
+#[test]
+fn a_closed_failure_is_shown_done_and_counted_failed() {
+    let mut fleet = fleet::canned_with_closed();
+    let bench = fleet.workers.iter_mut().find(|w| w.pane == BENCH).unwrap();
+    bench.state = State::Error;
+    let dashboard = Dashboard::of_snapshot(Grouping::Flat, live(fleet.clone(), 0));
+    let done = dashboard.panels[Panel::Done as usize].unwrap();
+    let tags = tags_under(&dashboard.tree, done);
+    assert!(tags.iter().any(|t| t == "失敗"), "{tags:?}");
+    let queue = dashboard.panels[Panel::Queue as usize].unwrap();
+    assert!(
+        !labels_under(&dashboard.tree, queue)
+            .iter()
+            .any(|l| l == "bench-ascii")
+    );
+    assert!(dashboard.order().contains(&BENCH), "J / K reach it");
+    let metrics = analytics::compute_metrics(&fleet.workers.iter().collect::<Vec<_>>());
+    assert_eq!(metrics.error, 2, "e2e-smoke and bench-ascii");
+    assert!(matches(fleet.worker(BENCH).unwrap(), "state:error"));
 }

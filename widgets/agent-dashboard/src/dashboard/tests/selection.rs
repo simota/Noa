@@ -608,6 +608,7 @@ fn another_server_instance_forgets_the_chosen_panes() {
         synced_secs: 0,
         can_focus: false,
         can_input: false,
+        safe_send: true,
         instance: None,
     };
     snapshots.send(down).unwrap();

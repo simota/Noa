@@ -20,6 +20,7 @@ fn down(reason: &str) -> Snapshot {
         synced_secs: 0,
         can_focus: false,
         can_input: false,
+        safe_send: true,
         instance: None,
     }
 }

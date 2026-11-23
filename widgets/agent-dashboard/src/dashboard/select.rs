@@ -4,6 +4,7 @@
 use crate::fleet::{Fleet, State, Worker};
 
 use super::View;
+use super::cards::shows_done;
 use super::filter::Filter;
 use super::panel::Panel;
 use super::queue::cards;
@@ -44,7 +45,8 @@ pub(super) fn order(fleet: &Fleet, view: &View, filter: &Filter) -> Vec<u64> {
         add(flat(view, in_state(State::Running)));
     }
     if shown(Panel::Done) {
-        add(flat(view, in_state(State::Finished)));
+        let done = matching.iter().copied().filter(|w| shows_done(w));
+        add(flat(view, done));
     }
     panes
 }

@@ -18,7 +18,7 @@ use noa_gpui_scene::{Color, Point, Size};
 use noa_gpui_text::TextStore;
 
 use crate::fleet::{self, Fleet, Grouping, Need, State, Tier, Worker};
-use crate::live::{Channel, Command, Link, Snapshot, Unsent};
+use crate::live::{Channel, CloseTarget, Command, Link, Snapshot, Unsent};
 
 mod analytics;
 mod cards;
@@ -54,12 +54,16 @@ use select::Step;
 use style::{GUTTER, HEADER_HEIGHT, fill_remaining, gap, set_label, set_tag};
 use timeline::{TimelineParts, fill_lanes, span_text, timeline, timeline_span};
 
-/// The unsent messages a rebuild carries over (`Dashboard::drafts`,
-/// `Dashboard::send_caret`), so the drawer is built with its draft at once.
+/// What a rebuild carries over to the drawer it builds: the unsent
+/// messages (`Dashboard::drafts`, `Dashboard::send_caret`), so the drawer
+/// shows its draft at once, and a bulk close waiting for its second press.
 #[derive(Default)]
 struct Drafts {
     text: HashMap<u64, String>,
     caret: Option<(u64, usize)>,
+    /// The bulk close waiting for its second press (`Dashboard::close_ended`):
+    /// the drawer's button says so from its first build.
+    close_ended: Option<Vec<u64>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -182,6 +186,8 @@ struct Feed {
     can_focus: bool,
     /// The live feed's `Snapshot::can_input`.
     can_input: bool,
+    /// The live feed's `Snapshot::safe_send`.
+    safe_send: bool,
     /// The server instance the shown pane ids belong to (the last
     /// `Snapshot::instance` that named one).
     instance: Option<String>,
@@ -241,6 +247,7 @@ impl Feed {
         self.synced_secs = snapshot.synced_secs;
         self.can_focus = snapshot.can_focus;
         self.can_input = snapshot.can_input;
+        self.safe_send = snapshot.safe_send;
         if snapshot.instance.is_some() {
             self.instance = snapshot.instance;
         }
@@ -492,6 +499,10 @@ pub struct Dashboard {
     /// The ended workers a first ⇧X (or まとめて閉じる) named, waiting for
     /// the second press to close them all (`request_close_ended`).
     close_ended: Option<Vec<u64>>,
+    /// Shift came up since `close_ended` was armed. The platform marks no
+    /// key repeat and sends no key release, so ⇧X held down sends ⇧X again
+    /// and again: only one after Shift came up is a second press.
+    shift_up: bool,
     /// The filter field had the focus when the input being handled began:
     /// a rebuild that input causes focuses the new field. For a release,
     /// what counts is the press: a press moves the focus to what it hits
@@ -1156,6 +1167,7 @@ impl Dashboard {
         let drafts = Drafts {
             text: std::mem::take(&mut self.drafts),
             caret: self.send_caret,
+            close_ended: self.close_ended.take(),
         };
         let mut built = Self::build(tree, view, feed, filter, refocus, preview, drafts);
         if refocus_send && let Some((id, _)) = built.registry.send_field {
@@ -1171,7 +1183,7 @@ impl Dashboard {
         }
         self.held = old.held;
         self.close_until = old.close_until;
-        self.close_ended = old.close_ended;
+        self.shift_up = old.shift_up;
         self.filter_had_focus = old.filter_had_focus;
         self.pressed_in_filter = old.pressed_in_filter;
         self.prefs_store = old.prefs_store;
@@ -1252,7 +1264,8 @@ impl Dashboard {
             held: Vec::new(),
             shielded: Vec::new(),
             close_until: None,
-            close_ended: None,
+            close_ended: drafts.close_ended,
+            shift_up: false,
             filter_had_focus: false,
             pressed_in_filter: false,
             prefs_store: None,
@@ -1546,8 +1559,12 @@ impl Dashboard {
         let preview = self.preview.as_ref().map(|(_, _, preview)| preview);
         let draft = self.drafts.get(&pane).map_or("", String::as_str);
         let confirm_close = self.view.confirm_close == Some(pane);
-        let ended = self.ended_workers().len();
-        let close_ended = (ended > 0).then_some((ended, self.close_ended.is_some()));
+        let ended_workers = self.ended_workers();
+        let ended = ended_workers.len();
+        // Armed only for the workers it named: for others the next click
+        // names them again (`request_close_ended`), and the button says so.
+        let armed = self.close_ended.as_ref() == Some(&ended_workers);
+        let close_ended = (ended > 0).then_some((ended, armed));
         let buttons = drawer::build(
             &mut self.tree,
             root,
@@ -1814,6 +1831,10 @@ impl Dashboard {
                 self.show_notice(format!("送信できません: {}", drawer::NEEDS_INPUT));
                 return;
             }
+            (Some(_), _) if !self.feed.safe_send => {
+                self.show_notice(crate::live::UNSAFE_SEND.to_owned());
+                return;
+            }
             (Some(channel), Some(instance)) => {
                 channel.send(Command::Send {
                     instance: instance.clone(),
@@ -1922,7 +1943,10 @@ impl Dashboard {
     /// Two-step confirmation to close every ended worker the filter shows
     /// (`ended_workers`). The first press names them; the second closes
     /// them when they are still the same, and else names the new ones.
-    fn request_close_ended(&mut self, text: &mut TextStore) {
+    ///
+    /// `pressed_again`: whether this is a second press, not ⇧X held down
+    /// (`shift_up`); a click always is.
+    fn request_close_ended(&mut self, pressed_again: bool, text: &mut TextStore) {
         let ended = self.ended_workers();
         let single = self.view.confirm_close.take();
         if ended.is_empty() {
@@ -1934,16 +1958,21 @@ impl Dashboard {
             self.show_notice("まとめて閉じる完了・失敗のワーカーはありません".to_owned());
             return;
         }
+        if self.close_ended.as_ref() == Some(&ended) && !pressed_again {
+            // The key repeating while held: still the first press.
+            return;
+        }
         if self.close_ended.as_ref() != Some(&ended) {
             let names = bulk_names(&self.feed.fleet, &ended);
             let count = ended.len();
             self.close_ended = Some(ended);
+            self.shift_up = false;
             self.close_until = Some(Instant::now() + NOTICE_FOR);
             if self.view.detail.is_some() {
                 self.reopen_drawer(text);
             }
             self.show_notice(format!(
-                "完了・失敗の {count} 件を閉じますか？ {names} — もう一度 ⇧X または「本当にまとめて閉じる」で実行（Esc でキャンセル）"
+                "完了・失敗の {count} 件を閉じますか？ {names} — もう一度 ⇧X または「本当にまとめて閉じる」で実行（⇧X は Shift を離してから。Esc でキャンセル）"
             ));
             return;
         }
@@ -1961,10 +1990,20 @@ impl Dashboard {
                 );
             }
             Some(channel) => {
+                // Each as shown now: the feed leaves one that changed since.
+                let targets = ended
+                    .iter()
+                    .filter_map(|pane| self.feed.fleet.worker(*pane))
+                    .map(|worker| CloseTarget {
+                        pane: worker.pane,
+                        state: worker.state,
+                        seq: worker.reports,
+                    })
+                    .collect();
                 if let Some(instance) = &self.feed.instance {
                     channel.send(Command::CloseMany {
                         instance: instance.clone(),
-                        panes: ended,
+                        targets,
                     });
                 }
                 self.show_notice(format!("{count} 件のペインを閉じます"));
@@ -2163,7 +2202,7 @@ impl Dashboard {
                 Some(pane) => self.request_close_pane(pane, text),
                 None => self.show_notice(NOTHING_SELECTED.to_owned()),
             },
-            Action::CloseEnded => self.request_close_ended(text),
+            Action::CloseEnded => self.request_close_ended(self.shift_up, text),
             Action::CycleGrouping => {
                 let current = Grouping::ALL
                     .iter()
@@ -2325,6 +2364,11 @@ impl Screen for Dashboard {
         let Some(event) = self.track_press(event) else {
             return;
         };
+        if let Event::ModifiersChanged(modifiers) = &event
+            && !modifiers.shift
+        {
+            self.shift_up = true;
+        }
         let mode = self.mode();
         let in_filter = mode == Mode::Filter;
         let (press, release) = match event {
@@ -2573,7 +2617,7 @@ impl Dashboard {
             .close_ended_button
             .is_some_and(|(id, _)| id == source)
         {
-            self.request_close_ended(text);
+            self.request_close_ended(true, text);
         } else if self
             .registry
             .drawer

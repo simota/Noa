@@ -16,7 +16,7 @@ use noa_ipc::Panel;
 
 use crate::fleet::{Phase, State, Worker, minutes_text};
 
-use super::{Spawned, is_worker, model_and_effort, name_of};
+use super::{Spawned, is_worker, model_and_effort, name_of, placement};
 
 /// A worker is shown as closed for this long after it closed (or, when
 /// that is not known, after it was spawned).
@@ -85,17 +85,35 @@ pub(super) struct Journal {
     pub(super) stamp: Option<(SystemTime, u64)>,
     pub(super) records: Vec<Record>,
     pub(super) spawns: HashMap<u64, Spawned>,
+    /// The result files a `close --prune` moved, from where to where, the
+    /// workers of other spawners' included (theirs name no pane here).
+    pub(super) moves: Vec<(PathBuf, PathBuf)>,
+    /// An open orchestrator's journal, of the Noa the feed follows. Any
+    /// other (the journal directory's) may be another Noa's, sharing the
+    /// data directory, or from before a restart: a record there counts as
+    /// closed only when it says so, or the feed saw its pane leave.
+    pub(super) this_instance: bool,
 }
 
 impl Journal {
     pub(super) fn parsed(name: String, stamp: Option<(SystemTime, u64)>, text: &str) -> Self {
-        let records = records(text);
+        let (records, moves) = parse(text);
         let spawns = spawns(&records);
         Journal {
             name,
             stamp,
             records,
             spawns,
+            moves,
+            this_instance: false,
+        }
+    }
+
+    /// The journal as an open orchestrator's (`this_instance`).
+    pub(super) fn of_this_instance(self) -> Self {
+        Journal {
+            this_instance: true,
+            ..self
         }
     }
 }
@@ -129,7 +147,14 @@ fn text_of(event: &serde_json::Value, key: &str) -> Option<String> {
 /// another event attaches to the latest record of its pane, and one for a
 /// pane never spawned here (`send --any-pane`, a mistyped `close`) to none.
 /// A line that does not parse is skipped.
+#[cfg(test)]
 pub(super) fn records(text: &str) -> Vec<Record> {
+    parse(text).0
+}
+
+/// The records of `text` (`records`), and every result move it journals.
+fn parse(text: &str) -> (Vec<Record>, Vec<(PathBuf, PathBuf)>) {
+    let mut moves: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut records: Vec<Record> = Vec::new();
     let mut latest: HashMap<u64, usize> = HashMap::new();
     for line in text.lines() {
@@ -139,6 +164,9 @@ pub(super) fn records(text: &str) -> Vec<Record> {
         let ts = event["ts"].as_u64().unwrap_or(0);
         // `close --prune` moved other workers' results too.
         for moved in event["worktree"]["moved"].as_array().into_iter().flatten() {
+            if let (Some(from), Some(to)) = (moved["from"].as_str(), moved["to"].as_str()) {
+                moves.push((PathBuf::from(from), PathBuf::from(to)));
+            }
             let pane = moved["paneId"].as_str().and_then(|id| id.parse().ok());
             if let (Some(at), Some(to)) = (pane.and_then(|p| latest.get(&p)), moved["to"].as_str())
             {
@@ -186,7 +214,9 @@ pub(super) fn records(text: &str) -> Vec<Record> {
                 }
             }
             Some("close") => {
-                record.closed_at = Some(ts);
+                // `+ctl close` journals a close of a pane already gone too
+                // (a retried prune): the first one is when it closed.
+                record.closed_at.get_or_insert(ts);
                 if let Some(result) = event["worktree"]["result"].as_str() {
                     record.moved_to = Some(PathBuf::from(result));
                 }
@@ -194,7 +224,7 @@ pub(super) fn records(text: &str) -> Vec<Record> {
             _ => {}
         }
     }
-    records
+    (records, moves)
 }
 
 /// Each pane's latest record, as a live worker takes it: its task and the
@@ -223,11 +253,16 @@ fn read_tail(path: &Path) -> Option<String> {
         .ok()?;
     let len = file.metadata().ok().filter(|meta| meta.is_file())?.len();
     let from = len.saturating_sub(ARCHIVE_READ_BYTES);
-    file.seek(SeekFrom::Start(from)).ok()?;
+    // From the byte before, when there is one: a line that starts exactly
+    // where the read does is whole when that byte ends a line.
+    let before = from.min(1);
+    file.seek(SeekFrom::Start(from - before)).ok()?;
     let mut bytes = Vec::new();
-    file.take(ARCHIVE_READ_BYTES).read_to_end(&mut bytes).ok()?;
-    if from > 0 {
-        // The first line was cut: it starts before what was read.
+    file.take(ARCHIVE_READ_BYTES + before)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if before > 0 {
+        // Drops the byte before and whatever of a cut line follows it.
         let start = bytes
             .iter()
             .position(|b| *b == b'\n')
@@ -341,12 +376,16 @@ fn is_open(record: &Record, journal: &str, panels: &HashMap<u64, Panel>) -> bool
     if !is_worker(panel) {
         return false;
     }
-    if let Some(spawn) = &panel.spawn {
-        return same_spawn(spawn.started_at, record.spawned_at);
-    }
+    // A spawner known to be another is decisive: two spawns can be close
+    // in time (Noa restarted at once).
     let parent = panel.parent_pane_id.and_then(|id| panels.get(&id.0));
-    match parent.and_then(|parent| parent.surface_id.as_deref()) {
-        Some(surface) => file_name(surface) == journal,
+    if let Some(surface) = parent.and_then(|parent| parent.surface_id.as_deref())
+        && file_name(surface) != journal
+    {
+        return false;
+    }
+    match &panel.spawn {
+        Some(spawn) => same_spawn(spawn.started_at, record.spawned_at),
         None => true,
     }
 }
@@ -364,6 +403,9 @@ pub(super) struct Gone {
     pub(super) result: Option<PathBuf>,
     pub(super) orchestrator: String,
     pub(super) orchestrator_pane: Option<u64>,
+    /// The worker that spawned it, when that one hangs under another (as
+    /// `placement` places a live grandchild).
+    pub(super) parent: Option<u64>,
 }
 
 /// The key a closed worker is shown under: its journal, pane and spawn,
@@ -400,6 +442,14 @@ pub(super) fn gone<'a>(
     now: f64,
 ) -> Vec<Gone> {
     let spawners = open_spawners(panels);
+    let journals: Vec<&Journal> = journals.into_iter().collect();
+    // Moves are found across journals: a prune moves other spawners'
+    // results too.
+    let moves: HashMap<&Path, &Path> = journals
+        .iter()
+        .flat_map(|journal| &journal.moves)
+        .map(|(from, to)| (from.as_path(), to.as_path()))
+        .collect();
     let mut seen: HashSet<u64> = HashSet::new();
     let mut gone: Vec<Gone> = Vec::new();
     for journal in journals {
@@ -412,6 +462,10 @@ pub(super) fn gone<'a>(
                 let ours = started.is_none_or(|started| same_spawn(started, record.spawned_at));
                 (ours && *at >= record.spawned_at as f64).then_some(*at)
             });
+            if !closed && left.is_none() && !journal.this_instance {
+                // Maybe running in another Noa: nothing says it closed.
+                continue;
+            }
             let ended_at = record.closed_at.map(|ts| ts as f64).or(left);
             let last = ended_at.unwrap_or(record.spawned_at as f64);
             if now - last > CLOSED_MAX_AGE_SECS {
@@ -422,21 +476,35 @@ pub(super) fn gone<'a>(
             if !seen.insert(key) {
                 continue;
             }
-            let (orchestrator, orchestrator_pane) = match spawners.get(&journal.name) {
-                Some(panel) => (name_of(panel), Some(panel.pane_id.0)),
+            let (orchestrator, orchestrator_pane, parent) = match spawners.get(&journal.name) {
+                // A worker under another: its child hangs as a live
+                // grandchild does, under the chain's root.
+                Some(panel) if is_worker(panel) && panel.parent_pane_id.is_some() => {
+                    let spawner = panel.pane_id.0;
+                    let placed = placement(spawner, panels);
+                    (placed.orchestrator, placed.root, Some(spawner))
+                }
+                Some(panel) => (name_of(panel), Some(panel.pane_id.0), None),
                 None => {
                     let tail: String = journal.name.chars().rev().take(4).collect();
                     let tail: String = tail.chars().rev().collect();
-                    (format!("閉じた親 {tail}"), None)
+                    (format!("閉じた親 {tail}"), None, None)
                 }
             };
+            let result = record
+                .result_path()
+                .map(|path| match moves.get(path.as_path()) {
+                    Some(to) if record.moved_to.is_none() => to.to_path_buf(),
+                    _ => path,
+                });
             gone.push(Gone {
                 key,
-                result: record.result_path().filter(|path| has_content(path)),
+                result: result.filter(|path| has_content(path)),
                 record: record.clone(),
                 ended_at,
                 orchestrator,
                 orchestrator_pane,
+                parent,
             });
         }
     }
@@ -486,8 +554,14 @@ pub(super) fn closed_worker(gone: &Gone, now: f64) -> Worker {
         effort,
         orchestrator: gone.orchestrator.clone(),
         orchestrator_pane: gone.orchestrator_pane,
-        parent: None,
-        state: State::Finished,
+        parent: gone.parent,
+        // A closed worker is done, or failed when its last outcome says so:
+        // closing a pane is not the task's success.
+        state: if record.outcome.as_deref() == Some("error") {
+            State::Error
+        } else {
+            State::Finished
+        },
         attention: false,
         task: record.task.clone(),
         detail: record

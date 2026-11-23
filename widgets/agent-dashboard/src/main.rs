@@ -212,7 +212,11 @@ fn parse_keys(seq: &str) -> Result<Vec<Event>, String> {
             let (key, text) = named_key("Space").expect("Space is a named key");
             typed(key, text, false, &mut events);
         } else if let Some(base) = shifted_base(c) {
+            // Shift goes down for the key and up after it, as the
+            // platform reports it (a held key repeats without either).
+            events.push(Event::ModifiersChanged(modifiers(true)));
             typed(Key::Char(base), Some(&c.to_string()), true, &mut events);
+            events.push(Event::ModifiersChanged(modifiers(false)));
         } else {
             typed(Key::Char(c), Some(&c.to_string()), false, &mut events);
         }
@@ -440,21 +444,25 @@ mod tests {
         );
     }
 
+    /// Shift held down for a shifted character, and up after it.
+    fn shifted(base: char, c: &str) -> Vec<Event> {
+        vec![
+            Event::ModifiersChanged(modifiers(true)),
+            key_down(Key::Char(base), true),
+            text(c),
+            Event::ModifiersChanged(modifiers(false)),
+        ]
+    }
+
     #[test]
     fn shifted_characters_report_their_unshifted_key() {
-        assert_eq!(
-            keys("?"),
-            events(vec![key_down(Key::Char('/'), true), text("?")])
-        );
-        assert_eq!(
-            keys("J"),
-            events(vec![key_down(Key::Char('j'), true), text("J")])
-        );
+        assert_eq!(keys("?"), events(shifted('/', "?")));
+        assert_eq!(keys("J"), events(shifted('j', "J")));
     }
 
     #[test]
     fn a_lone_less_than_is_a_character() {
-        let lt = vec![key_down(Key::Char(','), true), text("<")];
+        let lt = shifted(',', "<");
         assert_eq!(keys("<"), events(lt.clone()));
         assert_eq!(keys("a<b"), {
             let mut e = vec![key_down(Key::Char('a'), false), text("a")];
@@ -472,10 +480,12 @@ mod tests {
         let mut e = Vec::new();
         for c in s.chars() {
             match shifted_base(c) {
-                Some(base) => e.push(key_down(Key::Char(base), true)),
-                None => e.push(key_down(Key::Char(c), false)),
+                Some(base) => e.extend(shifted(base, &c.to_string())),
+                None => {
+                    e.push(key_down(Key::Char(c), false));
+                    e.push(text(&c.to_string()));
+                }
             }
-            e.push(text(&c.to_string()));
         }
         e
     }

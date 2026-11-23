@@ -6,8 +6,8 @@ use std::time::{Duration, SystemTime};
 
 use super::*;
 use crate::live::journal::{
-    ARCHIVE_FILES, ARCHIVE_READ_BYTES, ARCHIVE_SCAN_SECS, Archive, CLOSED_MAX, Journal, file_name,
-    gone, records,
+    ARCHIVE_FILES, ARCHIVE_READ_BYTES, ARCHIVE_SCAN_SECS, Archive, CLOSED_MAX, CLOSED_MAX_AGE_SECS,
+    Journal, file_name, gone, records,
 };
 
 const NOW: f64 = 1_000_000.0;
@@ -44,8 +44,9 @@ fn dir(name: &str) -> PathBuf {
     dir
 }
 
+/// An open orchestrator's journal: of the Noa the feed follows.
 fn journal(name: &str, text: &str) -> Journal {
-    Journal::parsed(name.to_owned(), None, text)
+    Journal::parsed(name.to_owned(), None, text).of_this_instance()
 }
 
 /// A worker pane spawned by 1, started at `started_at`.
@@ -168,6 +169,14 @@ fn a_pane_id_given_out_again_is_another_worker() {
     assert_eq!(old.label, "old");
     assert_eq!(old.orchestrator, "閉じた親 -old", "its spawner is not open");
 
+    // No spawner known for the open pane: its start decides.
+    let mut tracker = Tracker::default();
+    tracker.merge(vec![open_worker("4", at + 1800)], NOW);
+    assert_eq!(
+        gone(&journals, &tracker.panels, &tracker.vanished, NOW).len(),
+        1
+    );
+
     // The same spawn, started a moment before it was journaled: one worker.
     let mut tracker = Tracker::default();
     tracker.merge(vec![open_worker("4", at - 3)], NOW);
@@ -181,22 +190,60 @@ fn a_pane_id_given_out_again_is_another_worker() {
     assert_ne!(gone[0].key, gone[1].key);
 }
 
+/// Review #14: the age limit on its own, with fewer records than the cap.
+/// A record's age is from its close, else its spawn.
 #[test]
-fn only_the_last_day_and_the_newest_fifty_are_shown() {
-    let now = NOW;
-    let mut text = spawn(1, now as u64 - 90_000, "too-old");
-    for pane in 2..(CLOSED_MAX as u64 + 10) {
-        text.push_str(&spawn(pane, now as u64 - 1000 + pane, &format!("w{pane}")));
+fn only_the_last_day_is_shown() {
+    let now = NOW as u64;
+    let day = CLOSED_MAX_AGE_SECS as u64;
+    let text = [
+        spawn(1, now - day - 100, "closed-inside"),
+        close(1, now - day + 1),
+        spawn(2, now - day - 100, "closed-outside"),
+        close(2, now - day - 1),
+        spawn(3, now - day - 1, "spawned-outside"),
+        spawn(4, now - day + 1, "spawned-inside"),
+        spawn(5, now - 5 * day, "long-run-closed-now"),
+        close(5, now - 10),
+    ]
+    .concat();
+    let gone = gone(
+        &[journal("s", &text)],
+        &HashMap::new(),
+        &HashMap::new(),
+        NOW,
+    );
+    let mut labels: Vec<&str> = gone
+        .iter()
+        .filter_map(|g| g.record.label.as_deref())
+        .collect();
+    labels.sort_unstable();
+    assert_eq!(
+        labels,
+        ["closed-inside", "long-run-closed-now", "spawned-inside"]
+    );
+}
+
+#[test]
+fn at_most_the_newest_fifty_are_shown() {
+    let now = NOW as u64;
+    let mut text = String::new();
+    for pane in 1..=(CLOSED_MAX as u64 + 10) {
+        text.push_str(&spawn(pane, now - 1000 + pane, &format!("w{pane}")));
     }
-    let journals = [journal("s", &text)];
-    let gone = gone(&journals, &HashMap::new(), &HashMap::new(), now);
+    let gone = gone(
+        &[journal("s", &text)],
+        &HashMap::new(),
+        &HashMap::new(),
+        NOW,
+    );
     assert_eq!(gone.len(), CLOSED_MAX);
-    assert!(gone.iter().all(|g| g.record.pane != 1));
     assert_eq!(
         gone[0].record.pane,
-        CLOSED_MAX as u64 + 9,
+        CLOSED_MAX as u64 + 10,
         "the newest first"
     );
+    assert_eq!(gone[CLOSED_MAX - 1].record.pane, 11, "the oldest kept");
 }
 
 #[test]
@@ -436,5 +483,37 @@ fn a_pane_seen_leaving_ends_at_that_time() {
         .find(|w| w.is_closed())
         .expect("closed");
     assert_eq!(worker.closed_pane, Some(2));
-    assert!(worker.took_minutes.is_some(), "{worker:?}");
+    // It left between the spawn and now: not at the spawn.
+    let took = worker.took_minutes.expect("its end is known") * 60.0;
+    let upper = unix_seconds() - at as f64;
+    assert!(took > 30.0 && took <= upper, "{took} s, at most {upper} s");
+}
+
+/// Review #16: the end is the time `replace` saw the pane leave, to the
+/// second, and the times follow from it.
+#[test]
+fn the_end_of_a_pane_seen_leaving_is_when_it_left() {
+    let started = 10_000;
+    let spawned = started + 2;
+    let left = 10_600.0;
+    let lead = panel(serde_json::json!({ "paneId": "1", "surfaceId": "s-lead" }));
+    let mut tracker = Tracker::default();
+    tracker.replace(vec![lead.clone(), open_worker("2", started)], 10_100.0);
+    tracker.replace(vec![lead], left);
+    assert_eq!(tracker.vanished[&2], (left, Some(started)));
+    let journals = [journal(&file_name("s-lead"), &spawn(2, spawned, "a"))];
+    let now = left + 300.0;
+    tracker.gone = gone(&journals, &tracker.panels, &tracker.vanished, now);
+    let fleet = tracker.fleet(now, None);
+    let worker = fleet.workers.iter().find(|w| w.is_closed()).unwrap();
+    assert_eq!(tracker.gone[0].ended_at, Some(left));
+    assert_eq!(worker.took_minutes, Some((left - spawned as f64) / 60.0));
+    assert_eq!(worker.since, "5 分前に閉じた");
+    assert_eq!(
+        worker.phases,
+        [
+            (Phase::Running, (left - spawned as f64) / 60.0),
+            (Phase::Ended, 5.0)
+        ]
+    );
 }

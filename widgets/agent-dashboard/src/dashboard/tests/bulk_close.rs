@@ -7,8 +7,22 @@ use noa_gpui_core::widgets::Button;
 
 use super::*;
 
-/// ⇧X as the platform sends it: the key `x` with Shift held, then "X".
+/// ⇧X as the platform sends it: Shift goes down, the key `x` with Shift
+/// held and its text "X", then Shift comes up.
 fn shift_x(dashboard: &mut Dashboard, text: &mut TextStore) {
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    dashboard.dispatch(Event::ModifiersChanged(shift), text);
+    repeat_x(dashboard, text);
+    dashboard.dispatch(Event::ModifiersChanged(Modifiers::default()), text);
+    dashboard.prepare(window(), text);
+}
+
+/// What ⇧X held down sends again and again: the key and its text, with no
+/// change of the modifiers in between.
+fn repeat_x(dashboard: &mut Dashboard, text: &mut TextStore) {
     let modifiers = Modifiers {
         shift: true,
         ..Modifiers::default()
@@ -46,9 +60,16 @@ fn closed_many(commands: &Receiver<Command>) -> Vec<Vec<u64>> {
     commands
         .try_iter()
         .filter_map(|c| match c {
-            Command::CloseMany { instance, panes } => {
+            Command::CloseMany { instance, targets } => {
                 assert_eq!(instance, INSTANCE);
-                Some(panes)
+                // Each as the dashboard showed it (review #1).
+                let canned = fleet::canned();
+                for target in &targets {
+                    if let Some(shown) = canned.worker(target.pane) {
+                        assert_eq!((target.state, target.seq), (shown.state, shown.reports));
+                    }
+                }
+                Some(targets.iter().map(|t| t.pane).collect())
             }
             Command::Close { .. } => panic!("a bulk close sends no single close"),
             _ => None,
@@ -211,4 +232,96 @@ fn a_down_link_or_no_control_scope_closes_nothing() {
         "{}",
         notice_of(&dashboard)
     );
+}
+
+/// Review #5: a rebuild while a bulk close waits (a worker came, the ended
+/// ones are the same) keeps the drawer's button saying what its next click
+/// does.
+#[test]
+fn a_rebuild_keeps_the_armed_button_armed() {
+    let (mut dashboard, mut text, snapshots, commands) = live_canned();
+    dashboard.select(Some(11), &mut text);
+    key(&mut dashboard, &mut text, Key::Space);
+    let (button, _) = dashboard.close_ended_button.unwrap();
+    let pos = center(&dashboard.tree, button);
+    click(&mut dashboard, &mut text, pos);
+    let mut fleet = fleet::canned();
+    let mut newcomer = fleet.workers[0].clone();
+    newcomer.pane = 30;
+    newcomer.label = "newcomer".into();
+    fleet.workers.push(newcomer);
+    snapshots.send(live(fleet, 0)).unwrap();
+    dashboard.before_frame(&mut text);
+    dashboard.prepare(window(), &mut text);
+    let (button, _) = dashboard.close_ended_button.expect("still offered");
+    let armed = dashboard.tree.get::<Button>(button).unwrap();
+    assert_eq!(armed.label(), "本当にまとめて閉じる（3 件）");
+    assert!(closed_many(&commands).is_empty());
+
+    // Other ended workers since: the button asks again.
+    let mut fleet = fleet::canned();
+    fleet.workers.retain(|w| w.pane != 18);
+    snapshots.send(live(fleet, 0)).unwrap();
+    dashboard.before_frame(&mut text);
+    dashboard.prepare(window(), &mut text);
+    let (button, _) = dashboard.close_ended_button.unwrap();
+    let label = dashboard
+        .tree
+        .get::<Button>(button)
+        .unwrap()
+        .label()
+        .to_owned();
+    assert_eq!(label, "完了・失敗をまとめて閉じる（2 件）");
+}
+
+/// Review #15: a link that went down after the workers were shown: two
+/// presses close nothing and say why.
+#[test]
+fn a_bulk_close_while_the_link_is_down_closes_nothing() {
+    let (mut dashboard, mut text, snapshots, commands) = live_canned();
+    snapshots
+        .send(Snapshot {
+            fleet: Fleet::default(),
+            link: Link::Down("gone".into()),
+            synced_secs: 0,
+            can_focus: false,
+            can_input: false,
+            safe_send: false,
+            instance: None,
+        })
+        .unwrap();
+    dashboard.before_frame(&mut text);
+    dashboard.prepare(window(), &mut text);
+    assert!(
+        dashboard.feed.fleet.worker(17).is_some(),
+        "the workers stay shown"
+    );
+    shift_x(&mut dashboard, &mut text);
+    shift_x(&mut dashboard, &mut text);
+    assert!(closed_many(&commands).is_empty());
+    assert_eq!(
+        notice_of(&dashboard),
+        "ペインを閉じられません: Noa に接続していません"
+    );
+}
+
+/// Review #2: holding ⇧X down (key repeat) never confirms: the platform
+/// marks no repeat, so a second press counts only after Shift came up.
+#[test]
+fn holding_shift_x_down_closes_nothing() {
+    let (mut dashboard, mut text, _snapshots, commands) = live_canned();
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    dashboard.dispatch(Event::ModifiersChanged(shift), &mut text);
+    for _ in 0..20 {
+        repeat_x(&mut dashboard, &mut text);
+    }
+    assert!(closed_many(&commands).is_empty());
+    assert!(dashboard.close_ended.is_some(), "still waiting for a press");
+    // Shift up, then a press: that one confirms.
+    dashboard.dispatch(Event::ModifiersChanged(Modifiers::default()), &mut text);
+    shift_x(&mut dashboard, &mut text);
+    assert_eq!(closed_many(&commands), [vec![17, 18, 19]]);
 }

@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.14] - 2026-11-23
+
+An animated split zoom, fixes for the seven High findings from the
+2026-11-23 scans, and a fifth whole-repo performance pass.
+
+### Added
+
+- Toggling split zoom animates: the zoomed pane grows from (or shrinks back
+  to) its split rect with a clip reveal while its siblings fade, and Reduce
+  Motion skips the tween. A zoomed tab shows a zoom mark in its title.
+
+### Fixed
+
+- `noa.getText` with `source=screen` reads the live screen rows even when the
+  viewport is scrolled back.
+- Agent-CLI auto approval rescans prompts already on screen when it is turned
+  on or retargeted.
+- The sidebar, session store, IPC and auto approval detect a pane's agent the
+  same way.
+- macOS modal overlays are exposed to VoiceOver, and accessibility focus moves
+  into them.
+- The settings panel reloads the saved config after a save, and Reset undoes
+  only the directives it edited.
+- Copying a large selection builds the text on a worker thread instead of
+  blocking the UI.
+
+### Performance
+
+- `noa.listPanels` and push notifications are serialized without an
+  intermediate JSON tree, and the published listing is shared across requests
+  instead of copied.
+- The repo browser runs fewer git processes per refresh (HEAD from the status
+  it already reads, one diff for "vs main", each pane cwd inspected once).
+- The competition preview caches inlined assets (about 11x faster on a
+  realistic page) and the viewer caches closed rounds; the discussion and
+  dashboard widgets cut clones and redundant rebuilds.
+
 ## [0.9.13] - 2026-11-23
 
 Competitions judged from what the viewer shows, and a model and effort

@@ -9,8 +9,10 @@ use noa_core::{CellAttrs, Color, DEFAULT_GRID_PADDING, PixelSize, Rgb};
 use noa_font::FontGrid;
 use noa_grid::{Cell, Cursor, Row};
 use noa_render::{
-    FrameSnapshot, PaneFrame, PaneId, PaneRect, Renderer, SplitZoomFx, Theme, Uniforms,
+    BackgroundImage, BackgroundImageFit, BackgroundImagePosition, FrameSnapshot, PaneFrame, PaneId,
+    PaneRect, Renderer, SplitZoomFx, Theme, Uniforms,
 };
+use std::sync::Arc;
 
 const W: u32 = 240;
 const H: u32 = 64;
@@ -293,4 +295,158 @@ fn split_zoom_fx_fades_siblings_underlays_the_clip_and_anchors_content() {
         err.is_none(),
         "wgpu validation error during split-zoom fx draws: {err:?}"
     );
+}
+
+fn new_renderer(device: &wgpu::Device, queue: &wgpu::Queue, font: &mut FontGrid) -> Renderer {
+    let mut renderer = Renderer::new(
+        device,
+        queue,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        font,
+        DEFAULT_GRID_PADDING,
+    )
+    .expect("build renderer");
+    renderer.resize(PixelSize { w: W, h: H });
+    renderer
+}
+
+/// The fx used by the underlay base tests and the revealed area it checks:
+/// inside the clip, outside the zoomed pane's tile, past the zoomed pane's
+/// one green cell, so every pixel there sits on a default-background cell.
+fn underlay_fx(font: &FontGrid) -> (SplitZoomFx, std::ops::Range<u32>) {
+    let fx = SplitZoomFx {
+        pane: ZOOMED,
+        clip: CLIP,
+        content_origin: (CLIP.x, CLIP.y),
+        sibling_alpha: 0.5,
+    };
+    let x0 = (fx.content_origin.0 as f32 + DEFAULT_GRID_PADDING.left + font.metrics().cell_w).ceil()
+        as u32
+        + 2;
+    assert!(x0 < SIBLING_TILE.right());
+    (fx, x0..SIBLING_TILE.right())
+}
+
+/// Draws the mid-transition frame and, as the reference, the zoomed pane
+/// alone at the full rect with no fx: there the revealed area shows only the
+/// frame's base. Returns `(tween, reference)`.
+fn draw_tween_and_reference(
+    renderer: &mut Renderer,
+    font: &mut FontGrid,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    fx: SplitZoomFx,
+) -> (Vec<u8>, Vec<u8>) {
+    let sibling = sibling_snapshot();
+    let zoomed = zoomed_snapshot();
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let tween = draw(
+        renderer,
+        font,
+        device,
+        queue,
+        &frames(&sibling, &zoomed, FULL),
+        Some(fx),
+    );
+    let alone = [PaneFrame {
+        pane: ZOOMED,
+        rect: FULL,
+        snapshot: &zoomed,
+    }];
+    let reference = draw(renderer, font, device, queue, &alone, None);
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll split-zoom draws");
+    let err = pollster::block_on(error_scope.pop());
+    assert!(err.is_none(), "wgpu validation error: {err:?}");
+    (tween, reference)
+}
+
+/// A backdrop rect entirely outside the target makes the base a transparent
+/// clear with no fill; the underlay must restore that transparency, not
+/// paint the revealed area with the opaque background color.
+#[test]
+fn split_zoom_underlay_keeps_the_transparent_base_of_an_offscreen_backdrop() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping split-zoom offscreen-backdrop test");
+        return;
+    };
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let mut renderer = new_renderer(&device, &queue, &mut font);
+    renderer.set_backdrop_rect(Some(PaneRect::new(W, 0, 40, H)));
+    let (fx, xs) = underlay_fx(&font);
+
+    let (tween, reference) =
+        draw_tween_and_reference(&mut renderer, &mut font, &device, &queue, fx);
+    for y in 0..H {
+        for x in xs.clone() {
+            assert_eq!(
+                pixel(&reference, x, y),
+                [0, 0, 0, 0],
+                "the base is transparent at ({x}, {y})"
+            );
+            assert_eq!(
+                pixel(&tween, x, y),
+                [0, 0, 0, 0],
+                "the underlay must keep the transparent base at ({x}, {y})"
+            );
+        }
+    }
+}
+
+/// With no backdrop and a terminal background image, the underlay redraws
+/// the image over the revealed area: those pixels equal the same pixels of a
+/// frame drawn without fx, not a flat background color.
+#[test]
+fn split_zoom_underlay_restores_the_background_image() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping split-zoom background-image test");
+        return;
+    };
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let mut renderer = new_renderer(&device, &queue, &mut font);
+    // Four vertical stripes stretched (and linearly filtered) over the whole
+    // target, so the revealed area holds a blue-to-magenta gradient.
+    let stripes = [
+        [255u8, 255, 0, 255],
+        [0, 0, 255, 255],
+        [255, 0, 255, 255],
+        [0, 255, 255, 255],
+    ];
+    renderer.set_background_image(
+        &device,
+        &queue,
+        Some(BackgroundImage {
+            rgba: Arc::from(stripes.concat()),
+            width: 4,
+            height: 1,
+            fit: BackgroundImageFit::Stretch,
+            position: BackgroundImagePosition::Center,
+            repeat: false,
+            opacity: 1.0,
+        }),
+    );
+    let (fx, xs) = underlay_fx(&font);
+
+    let (tween, reference) =
+        draw_tween_and_reference(&mut renderer, &mut font, &device, &queue, fx);
+    let (left, right) = (
+        pixel(&reference, xs.start, H / 2),
+        pixel(&reference, xs.end - 1, H / 2),
+    );
+    assert!(
+        left[2] > 150 && left != right,
+        "the reference must show the image's gradient in the revealed area: {left:?} .. {right:?}"
+    );
+    for y in 0..H {
+        for x in xs.clone() {
+            assert_eq!(
+                pixel(&tween, x, y),
+                pixel(&reference, x, y),
+                "the underlay must restore the background image at ({x}, {y})"
+            );
+        }
+    }
 }

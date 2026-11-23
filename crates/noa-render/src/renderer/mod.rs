@@ -1156,11 +1156,8 @@ impl Renderer {
         self.prepare_overlay_instances(&plan);
         self.upload_instances(device, queue);
         let image_draws = self.build_frame_image_draws(device, queue, &uniform_layout);
-        let backdrop = self.backdrop_rect.and_then(|rect| {
-            let w = rect.w.min(self.viewport.w.saturating_sub(rect.x));
-            let h = rect.h.min(self.viewport.h.saturating_sub(rect.y));
-            (w > 0 && h > 0).then_some(PaneRect::new(rect.x, rect.y, w, h))
-        });
+        let base = FrameBase::resolve(self.backdrop_rect, self.viewport);
+        let backdrop = base.backdrop();
         // Background image: one quad below everything, resolved against the
         // area the background covers — the backdrop when there is one, the
         // whole viewport otherwise (recomputes on resize — spec AC-13/14).
@@ -1199,7 +1196,7 @@ impl Renderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(if self.backdrop_rect.is_some() {
+                        load: wgpu::LoadOp::Clear(if base.clears_transparent() {
                             wgpu::Color::TRANSPARENT
                         } else {
                             background
@@ -1261,7 +1258,7 @@ impl Renderer {
                             &mut pass,
                             pipeline,
                             *rect,
-                            backdrop,
+                            base,
                             background,
                             bg_image_draw.as_ref(),
                         );
@@ -1330,38 +1327,41 @@ impl Renderer {
     }
 
     /// [`DrawOp::ZoomUnderlay`]: put back over `rect` what the frame's base
-    /// drew there before any pane, replacing what siblings drew since. That
-    /// is the background fill (inside the backdrop when there is one; outside
-    /// it the base is the transparent clear) and then the background image,
-    /// with the same viewport the base used. Ends with the full viewport set.
+    /// drew there before any pane, replacing what siblings drew since. The
+    /// steps come from the same [`FrameBase`] the base was drawn from (see
+    /// [`FrameBase::underlay_steps`]); the background image is redrawn with
+    /// the viewport the base used. Ends with the full viewport set.
     fn draw_zoom_underlay(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
         pipeline: &wgpu::RenderPipeline,
         rect: PaneRect,
-        backdrop: Option<PaneRect>,
+        base: FrameBase,
         background: wgpu::Color,
         bg_image_draw: Option<&crate::background_image::BgImageDraws>,
     ) {
         if rect.w == 0 || rect.h == 0 {
             return;
         }
+        let steps = base.underlay_steps(rect);
         pass.set_pipeline(pipeline);
-        let filled = match backdrop {
-            Some(backdrop) => {
-                pass.set_scissor_rect(rect.x, rect.y, rect.w, rect.h);
-                pass.set_blend_constant(wgpu::Color::TRANSPARENT);
-                pass.draw(0..3, 0..1);
-                rect.intersect(backdrop)
-            }
-            None => rect,
-        };
-        if filled.w == 0 || filled.h == 0 {
-            return;
-        }
-        pass.set_scissor_rect(filled.x, filled.y, filled.w, filled.h);
-        pass.set_blend_constant(background);
+        pass.set_scissor_rect(rect.x, rect.y, rect.w, rect.h);
+        pass.set_blend_constant(if steps.clear_transparent {
+            wgpu::Color::TRANSPARENT
+        } else {
+            background
+        });
         pass.draw(0..3, 0..1);
+        if let Some(fill) = steps.fill {
+            pass.set_scissor_rect(fill.x, fill.y, fill.w, fill.h);
+            pass.set_blend_constant(background);
+            pass.draw(0..3, 0..1);
+        }
+        let Some(image) = steps.image_scissor else {
+            return;
+        };
+        pass.set_scissor_rect(image.x, image.y, image.w, image.h);
+        let backdrop = base.backdrop();
         if let Some(backdrop) = backdrop {
             pass.set_viewport(
                 backdrop.x as f32,
@@ -1694,6 +1694,87 @@ impl Renderer {
     #[cfg(test)]
     fn cell_instance_len_for_test(&self) -> usize {
         self.cell_instance_len
+    }
+}
+
+/// What a frame draws before any pane, decided once per frame from the
+/// backdrop rect and the target size. The base clear, the backdrop fill, the
+/// background image and every [`DrawOp::ZoomUnderlay`] all follow this one
+/// decision, so an underlay restores exactly the base's pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrameBase {
+    /// No backdrop rect: the whole target is cleared to the background and
+    /// the background image spans it.
+    Opaque,
+    /// A backdrop rect, clipped to the target: transparent clear, then the
+    /// background fill and image confined to this rect.
+    Backdrop(PaneRect),
+    /// A backdrop rect lying entirely outside the target: transparent clear,
+    /// no fill; the background image spans the whole target.
+    Transparent,
+}
+
+/// How [`DrawOp::ZoomUnderlay`] replays a [`FrameBase`] over one rect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UnderlaySteps {
+    /// The rect is first overwritten with transparent (`true`) or with the
+    /// background color (`false`), as the base clear did.
+    clear_transparent: bool,
+    /// Then the background fill over this part of it (the backdrop's share).
+    fill: Option<PaneRect>,
+    /// Then the background image, scissored to this part of it.
+    image_scissor: Option<PaneRect>,
+}
+
+impl FrameBase {
+    fn resolve(backdrop_rect: Option<PaneRect>, viewport: PixelSize) -> Self {
+        let Some(rect) = backdrop_rect else {
+            return Self::Opaque;
+        };
+        let w = rect.w.min(viewport.w.saturating_sub(rect.x));
+        let h = rect.h.min(viewport.h.saturating_sub(rect.y));
+        if w > 0 && h > 0 {
+            Self::Backdrop(PaneRect::new(rect.x, rect.y, w, h))
+        } else {
+            Self::Transparent
+        }
+    }
+
+    /// The visible backdrop the fill and the background image are confined to.
+    fn backdrop(self) -> Option<PaneRect> {
+        match self {
+            Self::Backdrop(rect) => Some(rect),
+            Self::Opaque | Self::Transparent => None,
+        }
+    }
+
+    /// Whether the frame clears to transparent rather than the background.
+    fn clears_transparent(self) -> bool {
+        !matches!(self, Self::Opaque)
+    }
+
+    fn underlay_steps(self, rect: PaneRect) -> UnderlaySteps {
+        let non_empty = |r: PaneRect| (r.w > 0 && r.h > 0).then_some(r);
+        match self {
+            Self::Opaque => UnderlaySteps {
+                clear_transparent: false,
+                fill: None,
+                image_scissor: non_empty(rect),
+            },
+            Self::Backdrop(backdrop) => {
+                let inside = non_empty(rect.intersect(backdrop));
+                UnderlaySteps {
+                    clear_transparent: true,
+                    fill: inside,
+                    image_scissor: inside,
+                }
+            }
+            Self::Transparent => UnderlaySteps {
+                clear_transparent: true,
+                fill: None,
+                image_scissor: non_empty(rect),
+            },
+        }
     }
 }
 

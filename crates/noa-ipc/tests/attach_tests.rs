@@ -76,8 +76,8 @@ impl TestBackend {
 }
 
 impl IpcBackend for TestBackend {
-    fn list_panels(&self) -> Vec<Panel> {
-        vec![Panel {
+    fn list_panels(&self) -> Arc<Vec<Panel>> {
+        Arc::new(vec![Panel {
             window_group_id: WireId(1),
             window_id: WireId(1),
             pane_id: WireId(1),
@@ -95,7 +95,7 @@ impl IpcBackend for TestBackend {
             parent_pane_id: None,
             label: None,
             spawn: None,
-        }]
+        }])
     }
 
     fn get_text(

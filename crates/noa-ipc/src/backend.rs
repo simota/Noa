@@ -3,6 +3,8 @@
 //! analog — this mirrors the pattern the AppleScript bridge already uses
 //! (`EventLoopProxy` for mutation, a shared snapshot for reads).
 
+use std::sync::Arc;
+
 use crate::AttachOutputSender;
 use crate::error::IpcError;
 use crate::protocol::{Panel, Row, SpawnParams, SplitDirection, TextSource};
@@ -62,7 +64,9 @@ pub struct GridResult {
 /// Implementations must not block on network I/O; the server calls these
 /// synchronously from a connection thread.
 pub trait IpcBackend: Send + Sync + 'static {
-    fn list_panels(&self) -> Vec<Panel>;
+    /// The listing, shared: a backend that publishes snapshots hands out a
+    /// reference to the current one instead of a copy per request.
+    fn list_panels(&self) -> Arc<Vec<Panel>>;
 
     fn get_text(
         &self,

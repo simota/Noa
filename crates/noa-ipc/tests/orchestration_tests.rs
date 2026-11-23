@@ -32,8 +32,8 @@ struct SpawnBackend {
 }
 
 impl IpcBackend for SpawnBackend {
-    fn list_panels(&self) -> Vec<Panel> {
-        vec![panel(1, 0)]
+    fn list_panels(&self) -> Arc<Vec<Panel>> {
+        Arc::new(vec![panel(1, 0)])
     }
 
     fn get_text(&self, pane: PaneRef, _: TextSource, _: usize) -> Result<TextResult, IpcError> {

@@ -37,8 +37,8 @@ struct MockBackend {
 }
 
 impl IpcBackend for MockBackend {
-    fn list_panels(&self) -> Vec<Panel> {
-        self.panels.lock().unwrap().clone()
+    fn list_panels(&self) -> Arc<Vec<Panel>> {
+        Arc::new(self.panels.lock().unwrap().clone())
     }
 
     fn get_text(

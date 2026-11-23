@@ -1363,6 +1363,12 @@ struct SuccessEnvelope<'a, R> {
     result: &'a R,
 }
 
+/// [`ListPanelsResult`], written from the backend's shared listing.
+#[derive(serde::Serialize)]
+struct ListPanelsReply<'a> {
+    panels: &'a [Panel],
+}
+
 /// `result` is a `Value`, or a type whose fields are declared in sorted key
 /// order (as [`ListPanelsResult`]'s are), so the bytes are the `Value`'s.
 fn success_response<R: serde::Serialize>(id: &Value, result: &R) -> String {
@@ -1515,8 +1521,8 @@ fn dispatch(
         return Some(match require_scope(session, Scope::Read) {
             Ok(()) => success_response(
                 &id,
-                &ListPanelsResult {
-                    panels: backend.list_panels(),
+                &ListPanelsReply {
+                    panels: &backend.list_panels(),
                 },
             ),
             Err(fail) => error_response(id, fail.code, &fail.message),
@@ -2125,8 +2131,8 @@ mod tests {
 
     struct ListingBackend(Vec<Panel>);
     impl IpcBackend for ListingBackend {
-        fn list_panels(&self) -> Vec<Panel> {
-            self.0.clone()
+        fn list_panels(&self) -> Arc<Vec<Panel>> {
+            Arc::new(self.0.clone())
         }
         fn get_text(
             &self,
@@ -2528,8 +2534,8 @@ mod tests {
     /// Minimal backend for lifecycle-only tests: no RPC is ever dispatched.
     struct NoopBackend;
     impl IpcBackend for NoopBackend {
-        fn list_panels(&self) -> Vec<Panel> {
-            Vec::new()
+        fn list_panels(&self) -> Arc<Vec<Panel>> {
+            Arc::default()
         }
         fn get_text(
             &self,

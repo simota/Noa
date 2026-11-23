@@ -185,6 +185,10 @@ pub(super) struct FloatGeometry {
     window: PaneRectApp,
     panes: Vec<(PaneId, PaneRectApp)>,
     zoomed: Option<PaneId>,
+    /// A split zoom transition is in flight: pane-anchored floats hide for
+    /// its whole length (they draw unclipped and unfaded above the panes)
+    /// and are re-placed by the relayout that ends it.
+    pane_anchors_hidden: bool,
     pub(super) metrics: FloatMetrics,
 }
 
@@ -195,7 +199,7 @@ impl FloatGeometry {
             window: self.window,
             panes: &self.panes,
             zoomed: self.zoomed,
-            pane_anchors_hidden: false,
+            pane_anchors_hidden: self.pane_anchors_hidden,
         }
     }
 }
@@ -491,6 +495,7 @@ pub(super) fn float_geometry(
         window: bounds,
         panes,
         zoomed: state.zoomed,
+        pane_anchors_hidden: state.live_split_zoom_anim().is_some(),
         metrics: float_metrics(metrics, padding),
     }
 }
@@ -1672,7 +1677,7 @@ impl App {
         if let FloatAnchor::Pane(pane) = anchor
             && state.zoomed.is_some_and(|zoomed| zoomed != pane)
         {
-            state.zoomed = None;
+            state.set_zoom_instant(None);
         }
         if collapsed {
             state.floats.toggle_collapse(id);

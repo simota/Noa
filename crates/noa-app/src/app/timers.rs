@@ -3,6 +3,33 @@
 
 use super::*;
 
+/// What one window's split zoom tween needs at `now`
+/// (`docs/specs/split-zoom-animation.md`, AC3 and "Frames").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SplitZoomTick {
+    /// No tween in flight: no frame and no wake-up, so an idle window stops
+    /// drawing.
+    Idle,
+    /// Still moving: draw another frame after each present, and wake at
+    /// `end` to finish it.
+    Running { end: Instant },
+    /// Ran its full length: clear it and relayout once (an unzoom's single
+    /// grid resize to the tile).
+    Finish,
+}
+
+/// The tick decision for a live tween (`WindowState::live_split_zoom_anim`).
+pub(super) fn split_zoom_tick(
+    anim: Option<split_tree::SplitZoomAnim>,
+    now: Instant,
+) -> SplitZoomTick {
+    match anim {
+        None => SplitZoomTick::Idle,
+        Some(anim) if anim.done(now) => SplitZoomTick::Finish,
+        Some(anim) => SplitZoomTick::Running { end: anim.end() },
+    }
+}
+
 /// Whether cached cursor state (see `Surface::cursor_blink_state`) is
 /// currently blink-eligible: visible, at the live viewport (not scrolled into
 /// scrollback), and rendered in one of the `Blinking*` DECSCUSR styles.
@@ -670,6 +697,41 @@ impl App {
         next
     }
 
+    /// End every split zoom tween that has run its length: drop it, relayout
+    /// the window once (for an unzoom, the one grid resize to the tile; for
+    /// either direction, pane-anchored floats are placed again) and draw the
+    /// settled frame. Runs from `about_to_wait`, not `redraw`, so a tween
+    /// still finishes while its window is occluded. Returns the earliest
+    /// running tween's end; `None` with no tween in flight, so an idle
+    /// window adds no wake-up.
+    pub(super) fn tick_split_zoom_anims(&mut self) -> Option<Instant> {
+        let now = Instant::now();
+        let mut next: Option<Instant> = None;
+        let mut finished = Vec::new();
+        for (window_id, state) in &mut self.windows {
+            // A tween whose pane left this tree (moved to another tab
+            // mid-shrink) is simply forgotten.
+            state.split_zoom_anim = state.live_split_zoom_anim();
+            match split_zoom_tick(state.split_zoom_anim, now) {
+                SplitZoomTick::Idle => {}
+                SplitZoomTick::Running { end } => {
+                    next = Some(next.map_or(end, |n| n.min(end)));
+                }
+                SplitZoomTick::Finish => finished.push(*window_id),
+            }
+        }
+        for window_id in finished {
+            let Some(state) = self.windows.get_mut(&window_id) else {
+                continue;
+            };
+            state.split_zoom_anim = None;
+            let window = state.window.clone();
+            self.relayout_and_resize_window(window_id);
+            window.request_redraw();
+        }
+        next
+    }
+
     /// Wake the Session Overview once the earliest throttle-blocked dirty tile
     /// becomes due.
     pub(super) fn tick_overview_backlog(&mut self) -> Option<Instant> {
@@ -706,10 +768,13 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        LIVE_WALLPAPER_FADE_DURATION, cursor_blink_focus_gate, cursor_blink_idle_elapsed,
-        cursor_blink_state_wants_blink, live_wallpaper_fade_progress, live_wallpaper_timer_step,
+        LIVE_WALLPAPER_FADE_DURATION, SplitZoomTick, cursor_blink_focus_gate,
+        cursor_blink_idle_elapsed, cursor_blink_state_wants_blink, live_wallpaper_fade_progress,
+        live_wallpaper_timer_step, split_zoom_tick,
     };
+    use crate::anim::DUR_SPLIT_ZOOM;
     use crate::app::state::CursorBlinkState;
+    use crate::split_tree::{PaneId, SplitZoomAnim};
     use noa_grid::CursorStyle;
     use std::time::{Duration, Instant};
 
@@ -933,5 +998,43 @@ mod tests {
             live_wallpaper_fade_progress(now, now, Duration::ZERO),
             (1.0, true)
         );
+    }
+
+    /// A tween runs, then finishes exactly once, and an idle window asks
+    /// for nothing: no frame and no wake-up once the tween is cleared.
+    #[test]
+    fn split_zoom_tick_runs_finishes_then_goes_idle() {
+        let t0 = Instant::now();
+        let anim = SplitZoomAnim::zoom_in(PaneId::new(1), t0);
+        assert_eq!(
+            split_zoom_tick(Some(anim), t0),
+            SplitZoomTick::Running {
+                end: t0 + DUR_SPLIT_ZOOM
+            }
+        );
+        assert_eq!(
+            split_zoom_tick(Some(anim), t0 + DUR_SPLIT_ZOOM - Duration::from_millis(1)),
+            SplitZoomTick::Running {
+                end: t0 + DUR_SPLIT_ZOOM
+            }
+        );
+        assert_eq!(
+            split_zoom_tick(Some(anim), t0 + DUR_SPLIT_ZOOM),
+            SplitZoomTick::Finish
+        );
+        // The tick clears the tween on `Finish`; from then on nothing is due.
+        assert_eq!(
+            split_zoom_tick(None, t0 + DUR_SPLIT_ZOOM),
+            SplitZoomTick::Idle
+        );
+    }
+
+    /// A reversal right at the start has nothing to travel back: it is due
+    /// at once rather than holding the window in the frame loop.
+    #[test]
+    fn split_zoom_tick_finishes_a_zero_length_reversal_at_once() {
+        let t0 = Instant::now();
+        let back = SplitZoomAnim::zoom_in(PaneId::new(1), t0).reversed(t0);
+        assert_eq!(split_zoom_tick(Some(back), t0), SplitZoomTick::Finish);
     }
 }

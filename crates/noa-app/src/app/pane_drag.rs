@@ -42,7 +42,7 @@ impl App {
             if !outcome.swapped {
                 return false;
             }
-            state.zoomed = outcome.zoomed;
+            state.set_zoom_instant(outcome.zoomed);
             // P1 audit (pane-dnd review round 7): a drag can start from a
             // pane other than the tab's currently focused one (the pointer
             // just needs to be over *some* pane to claim the drag), so this
@@ -107,7 +107,7 @@ impl App {
             if outcome.move_result.is_err() {
                 return false;
             }
-            state.zoomed = outcome.zoomed;
+            state.set_zoom_instant(outcome.zoomed);
             // P1 audit (pane-dnd review round 7): same hazard as
             // `commit_pane_swap` above — `source` need not be the tab's
             // currently focused pane, so this unconditional focus hand-off

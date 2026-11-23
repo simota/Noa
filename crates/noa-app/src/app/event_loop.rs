@@ -595,6 +595,7 @@ impl ApplicationHandler<UserEvent> for App {
         let memory_trim_deadline = self.tick_memory_trim();
         let bg_refresh_wake_deadline = self.tick_bg_refresh_wake();
         let scrollback_checkpoint_deadline = self.tick_scrollback_checkpoint();
+        let split_zoom_deadline = self.tick_split_zoom_anims();
         let deadline = [
             blink_deadline,
             resize_throttle_deadline,
@@ -612,6 +613,7 @@ impl ApplicationHandler<UserEvent> for App {
             memory_trim_deadline,
             bg_refresh_wake_deadline,
             scrollback_checkpoint_deadline,
+            split_zoom_deadline,
         ]
         .into_iter()
         .flatten()

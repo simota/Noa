@@ -12,7 +12,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use noa_ipc::{Client, ClientError, Panel, PanelSpawn, TextSource};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::{EXIT_OK, Failure, HOLD_BANNER, SUBMIT_DELAY};
+use super::result::{self, StartError};
+use super::{EXIT_OK, Failure, HOLD_BANNER, SUBMIT_DELAY, journal};
+
+mod insight;
+
+use insight::{FileState, Insight, ResultFile, Task};
 
 /// How often the pane list is read again.
 const LIST_EVERY: Duration = Duration::from_millis(500);
@@ -554,6 +559,15 @@ pub(crate) struct Board {
     /// The Unix time at the last listing, and when it was read: what
     /// `Panel.spawn.startedAt` is told against (U9).
     wall: Option<(u64, Instant)>,
+    /// Each worker's task and result file (D18), from files read at most
+    /// every [`insight::FILES_EVERY`].
+    insight: Insight,
+    /// The detail view shows the result file's text in place of the
+    /// screen (`r`), scrolled this many lines, as far as it can go (set as
+    /// it is drawn).
+    result_shown: bool,
+    result_scroll: usize,
+    result_reach: Cell<usize>,
 }
 
 impl Board {
@@ -592,7 +606,28 @@ impl Board {
             needs_seen: HashSet::new(),
             lang: Lang::Ja,
             wall: None,
+            insight: Insight::default(),
+            result_shown: false,
+            result_scroll: 0,
+            result_reach: Cell::new(0),
         }
+    }
+
+    /// Look at the workers' journals and result files when it is time, and
+    /// read the result shown in the detail view when it changed (D18).
+    /// Returns whether the frame may have changed.
+    pub(crate) fn refresh_files(&mut self, now: Instant) -> bool {
+        let panes: Vec<u64> = self.listed().map(|panel| panel.pane_id.0).collect();
+        let show = match self.view {
+            View::Detail(pane) if self.result_shown => Some(pane),
+            _ => None,
+        };
+        self.insight.refresh(&self.panels, &panes, show, now)
+    }
+
+    /// Whether the detail view shows a result file in place of the screen.
+    fn showing_result(&self) -> bool {
+        self.result_shown && matches!(self.view, View::Detail(_))
     }
 
     /// The last thing `panel` said: for a failed process its last line of
@@ -1573,14 +1608,36 @@ impl Board {
                     Key::Char(digit @ '0'..='9') => {
                         self.type_digit(digit as usize - '0' as usize, at)
                     }
+                    // A result shown in the detail view scrolls (D18).
+                    Key::Char('j') | Key::Down if self.showing_result() => {
+                        self.result_scroll = (self.result_scroll + 1).min(self.result_reach.get());
+                    }
+                    Key::Char('k') | Key::Up if self.showing_result() => {
+                        self.result_scroll = self.result_scroll.saturating_sub(1);
+                    }
                     Key::Char('j') | Key::Down => self.move_selection(1),
                     Key::Char('k') | Key::Up => self.move_selection(-1),
+                    // Only for a worker whose files were looked at (not the
+                    // orchestrator heading the queue).
+                    Key::Char('r')
+                        if matches!(self.view, View::Detail(pane)
+                            if self.insight.result(pane).is_some()) =>
+                    {
+                        self.result_shown = !self.result_shown;
+                        self.result_scroll = 0;
+                    }
                     Key::Enter | Key::Char('l') | Key::Right => {
                         if let Some(pane) = self.selected {
                             self.view = View::Detail(pane);
+                            self.result_shown = false;
+                            self.result_scroll = 0;
                         }
                     }
-                    Key::Esc | Key::Char('h') | Key::Left => self.view = View::List,
+                    Key::Esc | Key::Char('h') | Key::Left => {
+                        self.view = View::List;
+                        self.result_shown = false;
+                        self.result_scroll = 0;
+                    }
                     Key::Char('g') => return self.target().map(Action::Focus),
                     Key::Char('s') => {
                         if let Some(pane) = self.target() {
@@ -2304,6 +2361,35 @@ fn cut_styled(text: &str, width: usize) -> String {
     out
 }
 
+/// `body` (lines, each dimmed or plain) in a box `cols` wide with
+/// `height` rows inside, its borders in `border`; what does not fit is cut.
+fn boxed(body: &[(Option<Rgb>, String)], cols: usize, height: usize, border: Rgb) -> Vec<String> {
+    let inner = cols - 4;
+    let mut out = Vec::with_capacity(height + 2);
+    let mut top = Line::default();
+    top.fg(border, &format!(" ┌{}┐", "─".repeat(cols - 3)));
+    out.push(top.finish(cols));
+    for index in 0..height {
+        let (color, text) = body
+            .get(index)
+            .map_or((None, ""), |(color, text)| (*color, text.as_str()));
+        let text = fit(text, inner.saturating_sub(1));
+        let mut line = Line::default();
+        line.fg(border, " │ ");
+        match color {
+            Some(color) => line.fg(color, &text),
+            None => line.plain(&text),
+        };
+        line.plain(&" ".repeat(inner.saturating_sub(1 + text.width())));
+        line.fg(border, " │");
+        out.push(line.finish(cols));
+    }
+    let mut bottom = Line::default();
+    bottom.fg(border, &format!(" └{}┘", "─".repeat(cols - 3)));
+    out.push(bottom.finish(cols));
+    out
+}
+
 /// Strip control characters a screen line may carry.
 fn clean(s: &str) -> String {
     s.chars().filter(|ch| !ch.is_control()).collect()
@@ -2325,7 +2411,12 @@ fn ago(at: Option<Instant>, now: Instant, lang: Lang) -> String {
     let Some(at) = at else {
         return lang.pick("開始時", "at start").to_string();
     };
-    let span = duration_text(now.saturating_duration_since(at), lang);
+    span_ago(now.saturating_duration_since(at), lang)
+}
+
+/// "10 秒前" ("10s ago") for a span already measured.
+fn span_ago(span: Duration, lang: Lang) -> String {
+    let span = duration_text(span, lang);
     lang.pick(format!("{span}前"), format!("{span} ago"))
 }
 
@@ -2600,7 +2691,7 @@ impl Board {
             );
         let mut lines = vec![Line::default().finish(cols)];
         let l = |ja, en| self.lang.pick(ja, en);
-        let keys: [(&str, &str); 15] = [
+        let keys: [(&str, &str); 16] = [
             ("j k ↑ ↓", l("ワーカーを選ぶ", "select a worker")),
             (
                 "1–20",
@@ -2625,7 +2716,17 @@ impl Board {
             ),
             (
                 "Enter l →",
-                l("詳細(画面と報告の履歴)", "details (screen and reports)"),
+                l(
+                    "詳細(タスク・結果ファイル・画面・報告の履歴)",
+                    "details (task, result file, screen and reports)",
+                ),
+            ),
+            (
+                "r",
+                l(
+                    "詳細で画面と結果ファイルの中身を切り替える(中身は j/k でスクロール)",
+                    "in details: switch between the screen and the result file (j/k scroll it)",
+                ),
             ),
             ("Esc h ←", l("一覧に戻る", "back to the list")),
             (
@@ -3255,6 +3356,13 @@ impl Board {
             let report = self.lang.pick("報告", "report");
             meta.fg(DIM, &format!(" · {report} {}", agent.seq));
         }
+        // That it wrote its result file (D18), where it fits.
+        if self.insight.result(pane).is_some_and(ResultFile::written) {
+            let written = self.lang.pick("結果あり", "result written");
+            if meta.width + 3 + written.width() < cols {
+                meta.fg(DIM, " · ").fg(GREEN, written);
+            }
+        }
         // Its model, effort and start (U9), each whole where it fits.
         for fact in self.spawn_facts(panel, now) {
             if meta.width + 3 + fact.width() < cols {
@@ -3588,6 +3696,10 @@ impl Board {
             }
         }
 
+        // What it was asked to do and what it wrote back (D18).
+        lines.extend(self.task_lines(pane, cols, rows));
+        lines.extend(self.result_lines(pane, cols, now));
+
         let history: &[Report] = self.history.get(&pane).map(Vec::as_slice).unwrap_or(&[]);
         let history_rows = history.len().clamp(1, 6);
         // Title + box borders + history title + rows + gap, and the footer
@@ -3596,39 +3708,29 @@ impl Board {
             .saturating_sub(lines.len() + 4 + 2 + history_rows + 1)
             .max(3);
 
-        let mut title = Line::default();
-        title.plain(" ").bold(self.lang.pick("画面", "Screen")).fg(
-            DIM,
-            self.lang
-                .pick("  ライブ · 読み取り専用", "  live · read-only"),
-        );
-        lines.push(title.finish(cols));
         let border = if status.group() == Group::Needs {
             status.color()
         } else {
             BORDER
         };
-        let inner = cols - 4;
-        let mut top = Line::default();
-        top.fg(border, &format!(" ┌{}┐", "─".repeat(cols - 3)));
-        lines.push(top.finish(cols));
-        let screen = self.screens.get(&pane).cloned().unwrap_or_default();
-        let skip = screen.len().saturating_sub(screen_rows);
-        for index in 0..screen_rows {
-            let text = screen
-                .get(skip + index)
-                .map(|s| clean(s))
-                .unwrap_or_default();
-            let text = fit(&text, inner.saturating_sub(1));
-            let mut line = Line::default();
-            line.fg(border, " │ ").plain(&text);
-            line.plain(&" ".repeat(inner.saturating_sub(1 + text.width())));
-            line.fg(border, " │");
-            lines.push(line.finish(cols));
+        if self.result_shown {
+            lines.extend(self.result_box(pane, cols, screen_rows, now));
+        } else {
+            let mut title = Line::default();
+            title.plain(" ").bold(self.lang.pick("画面", "Screen")).fg(
+                DIM,
+                self.lang
+                    .pick("  ライブ · 読み取り専用", "  live · read-only"),
+            );
+            lines.push(title.finish(cols));
+            let screen = self.screens.get(&pane).map(Vec::as_slice).unwrap_or(&[]);
+            let skip = screen.len().saturating_sub(screen_rows);
+            let body: Vec<(Option<Rgb>, String)> = screen[skip..]
+                .iter()
+                .map(|line| (None, clean(line)))
+                .collect();
+            lines.extend(boxed(&body, cols, screen_rows, border));
         }
-        let mut bottom = Line::default();
-        bottom.fg(border, &format!(" └{}┘", "─".repeat(cols - 3)));
-        lines.push(bottom.finish(cols));
 
         let mut title = Line::default();
         title
@@ -3669,6 +3771,243 @@ impl Board {
             lines.push(line.finish(cols));
         }
         lines
+    }
+
+    /// The detail view's task section (D18): the last task the worker was
+    /// sent, on up to three lines (fewer in a short pane), or why there is
+    /// none. Nothing before the files were first looked at.
+    fn task_lines(&self, pane: u64, cols: usize, rows: usize) -> Vec<String> {
+        let Some(task) = self.insight.task(pane) else {
+            return Vec::new();
+        };
+        let l = |ja, en| self.lang.pick(ja, en);
+        let mut title = Line::default();
+        title.plain(" ").bold(l("タスク", "Task"));
+        let why = match task {
+            Task::Sent {
+                text,
+                cut,
+                retry_of,
+            } => {
+                if let Some(old) = retry_of {
+                    title.fg(
+                        DIM,
+                        &self.lang.pick(
+                            format!("  ペイン {old} の再試行"),
+                            format!("  retry of pane {old}"),
+                        ),
+                    );
+                }
+                if *cut {
+                    let n = journal::TEXT_CHARS;
+                    title.fg(
+                        DIM,
+                        &self.lang.pick(
+                            format!("  先頭 {n} 文字で切れています"),
+                            format!("  cut at the first {n} characters"),
+                        ),
+                    );
+                }
+                let mut out = vec![title.finish(cols)];
+                let flat: String = text
+                    .chars()
+                    .map(|ch| if ch == '\n' { '⏎' } else { ch })
+                    .collect();
+                let width = cols.saturating_sub(4);
+                let max = match rows {
+                    0..24 => 1,
+                    24..32 => 2,
+                    _ => 3,
+                };
+                let mut parts = wrap(&clean(&flat), width);
+                if parts.len() > max {
+                    parts.truncate(max);
+                    let last = &mut parts[max - 1];
+                    *last = fit(&format!("{last}…"), width);
+                }
+                for part in parts {
+                    let mut line = Line::default();
+                    line.plain("   ").plain(&part);
+                    out.push(line.finish(cols));
+                }
+                return out;
+            }
+            Task::NotSent => l("タスクはまだ送られていません", "no task sent").to_string(),
+            Task::NotJournaled => l(
+                "ジャーナルにこのワーカーの記録がありません",
+                "not in the journal",
+            )
+            .to_string(),
+            Task::NoJournal => l(
+                "ジャーナルがありません(親ペインが一覧にありません)",
+                "no journal (its parent pane is not listed)",
+            )
+            .to_string(),
+            Task::JournalMissing => {
+                l("ジャーナルが見つかりません", "journal not found").to_string()
+            }
+            Task::JournalUnreadable(err) => self.lang.pick(
+                format!("ジャーナルを読めません: {}", clean(err)),
+                format!("cannot read the journal: {}", clean(err)),
+            ),
+        };
+        title.plain("  ").fg(DIM, &why);
+        vec![title.finish(cols)]
+    }
+
+    /// What a result file's state says, and in which colour: written (how
+    /// much, how long ago) or why there is nothing to read.
+    fn result_state(&self, state: &FileState, now: Instant) -> (Rgb, String) {
+        let l = |ja: &str, en: &str| self.lang.pick(ja, en).to_string();
+        match state {
+            FileState::Written {
+                bytes, age, seen, ..
+            } => {
+                let when = span_ago(*age + now.saturating_duration_since(*seen), self.lang);
+                let text = self.lang.pick(
+                    format!("{bytes} バイト · {when}に書かれました"),
+                    format!("{bytes} bytes · written {when}"),
+                );
+                (GREEN, text)
+            }
+            FileState::Missing => (DIM, l("まだ作られていません", "not created")),
+            FileState::Empty => (
+                DIM,
+                l("空です(まだ書かれていません)", "empty (not written yet)"),
+            ),
+            FileState::NotRegular => (
+                DIM,
+                l(
+                    "通常のファイルではないので読みません",
+                    "not a regular file; not read",
+                ),
+            ),
+            FileState::Unreadable(err) => (
+                DIM,
+                self.lang.pick(
+                    format!("読めません: {}", clean(err)),
+                    format!("cannot read it: {}", clean(err)),
+                ),
+            ),
+        }
+    }
+
+    /// The detail view's result section (D18): the state of the worker's
+    /// `$NOA_RESULT` and its path.
+    fn result_lines(&self, pane: u64, cols: usize, now: Instant) -> Vec<String> {
+        let Some(file) = self.insight.result(pane) else {
+            return Vec::new();
+        };
+        let mut title = Line::default();
+        title
+            .plain(" ")
+            .bold(self.lang.pick("結果", "Result"))
+            .plain("  ");
+        let ResultFile::Known(path, state) = file else {
+            title.fg(
+                DIM,
+                self.lang.pick(
+                    "結果ファイルが分かりません(ジャーナルになく、ラベルもありません)",
+                    "no known result file (not journaled, no plain label)",
+                ),
+            );
+            return vec![title.finish(cols)];
+        };
+        let (color, text) = self.result_state(state, now);
+        title.fg(color, &text);
+        if file.written() {
+            let hint = if self.result_shown {
+                self.lang.pick(" · r で画面", " · r: screen")
+            } else {
+                self.lang.pick(" · r で表示", " · r: show")
+            };
+            title.fg(DIM, hint);
+        }
+        let mut out = vec![title.finish(cols)];
+        let width = cols.saturating_sub(4);
+        let mut parts = wrap(&clean(&path.to_string_lossy()), width);
+        if parts.len() > 2 {
+            parts.truncate(2);
+            parts[1] = fit(&format!("{}…", parts[1]), width);
+        }
+        for part in parts {
+            let mut line = Line::default();
+            line.plain("   ").fg(DIM, &part);
+            out.push(line.finish(cols));
+        }
+        out
+    }
+
+    /// The result file's text in place of the screen box (`r`, D18),
+    /// scrolled by `result_scroll`: a title, then a box of `height` rows.
+    fn result_box(&self, pane: u64, cols: usize, height: usize, now: Instant) -> Vec<String> {
+        let l = |ja, en| self.lang.pick(ja, en);
+        let dim = |text: String| (Some(DIM), text);
+        let mut body: Vec<(Option<Rgb>, String)> = Vec::new();
+        match self.insight.result(pane) {
+            None => body.push(dim(l("読んでいます…", "reading…").to_string())),
+            Some(ResultFile::Unknown) => {
+                body.push(dim(
+                    l("結果ファイルが分かりません", "no known result file").to_string()
+                ))
+            }
+            Some(ResultFile::Known(_, state)) if !matches!(state, FileState::Written { .. }) => {
+                body.push(dim(self.result_state(state, now).1));
+            }
+            Some(ResultFile::Known(..)) => {
+                match self.insight.shown(pane).map(|shown| &shown.text) {
+                    None => body.push(dim(l("読んでいます…", "reading…").to_string())),
+                    Some(Err(StartError::NotRegular)) => body.push(dim(l(
+                        "通常のファイルではないので読みません",
+                        "not a regular file; not read",
+                    )
+                    .to_string())),
+                    Some(Err(StartError::Io(err))) => body.push(dim(self.lang.pick(
+                        format!("読めません: {}", clean(err)),
+                        format!("cannot read it: {}", clean(err)),
+                    ))),
+                    Some(Ok((text, cut))) => {
+                        let width = cols.saturating_sub(5);
+                        for line in text.lines() {
+                            let line = clean(&line.replace('\t', "    "));
+                            body.extend(wrap(&line, width).into_iter().map(|part| (None, part)));
+                        }
+                        if text.is_empty() {
+                            body.push(dim(l("空です", "empty").to_string()));
+                        }
+                        if *cut {
+                            let kib = result::START_BYTES / 1024;
+                            let lines = result::START_LINES;
+                            body.push(dim(self.lang.pick(
+                                format!("… 先頭だけを表示しています({kib} KiB・{lines} 行まで)"),
+                                format!(
+                                    "… only the start is shown (up to {kib} KiB, {lines} lines)"
+                                ),
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        let reach = body.len().saturating_sub(height);
+        self.result_reach.set(reach);
+        let offset = self.result_scroll.min(reach);
+        let mut title = Line::default();
+        title.plain(" ").bold(l("結果ファイル", "Result file"));
+        if body.len() > height {
+            let (from, to, all) = (offset + 1, (offset + height).min(body.len()), body.len());
+            title.fg(
+                DIM,
+                &self.lang.pick(
+                    format!("  {from}–{to} / {all} 行 · j/k でスクロール ·"),
+                    format!("  lines {from}–{to} of {all} · j/k scroll ·"),
+                ),
+            );
+        }
+        title.fg(DIM, l("  r で画面に戻る", "  r: back to the screen"));
+        let mut out = vec![title.finish(cols)];
+        out.extend(boxed(&body[offset..], cols, height, BORDER));
+        out
     }
 
     fn footer(&self, cols: usize, help_cut: bool) -> String {
@@ -3751,8 +4090,14 @@ impl Board {
                             keys.push(("Space", what, what));
                         }
                     }
+                    View::Detail(_) if self.result_shown => keys.extend([
+                        ("Esc", l("一覧", "list"), l("一覧", "list")),
+                        ("r", l("画面", "screen"), l("画面", "screen")),
+                        ("j/k", l("スクロール", "scroll"), l("スクロール", "scroll")),
+                    ]),
                     View::Detail(_) => keys.extend([
                         ("Esc", l("一覧", "list"), l("一覧", "list")),
+                        ("r", l("結果", "result"), l("結果", "result")),
                         ("j/k", l("前後", "prev/next"), l("前後", "prev/next")),
                     ]),
                 }
@@ -4155,6 +4500,8 @@ fn run_until_quit(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
             screens_at = Some(now);
             dirty = true;
         }
+        // Journals and result files, at most every few seconds (D18).
+        dirty |= board.refresh_files(now);
         let current = Screen::size();
         if current != size {
             size = current;
@@ -7617,6 +7964,394 @@ mod tests {
             t0 + Duration::from_secs(2),
         );
         assert_eq!(board.history[&2].len(), 1);
+    }
+
+    // D18: the board shows each worker's task (its parent's journal) and
+    // its result file ($NOA_RESULT).
+
+    fn insight_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("noa-board-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("repo").join(".noa")).unwrap();
+        dir.canonicalize().unwrap()
+    }
+
+    /// Orchestrator 1 (surface `orch`) and its worker 2 (`api`) working in
+    /// `<dir>/repo`, on a board whose journals are under `dir`.
+    fn insight_board(dir: &std::path::Path) -> Board {
+        let mut orchestrator = worker(1, 0, "orch", None, 0);
+        orchestrator.parent_pane_id = None;
+        orchestrator.agent = None;
+        orchestrator.surface_id = Some("orch".to_string());
+        let mut api = worker(2, 1, "api", Some("running"), 3);
+        api.cwd = dir.join("repo").to_string_lossy().into_owned();
+        let mut board = Board::new(Some(1), Some(8));
+        board.insight.root = Some(dir.to_path_buf());
+        board.update(vec![orchestrator, api], Instant::now());
+        board
+    }
+
+    fn journal_at(dir: &std::path::Path) -> std::path::PathBuf {
+        let path = noa_config::ctl_journal_path_in(dir, "orch");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        path
+    }
+
+    fn write_journal(dir: &std::path::Path, events: &[serde_json::Value]) -> std::path::PathBuf {
+        let path = journal_at(dir);
+        let text: String = events.iter().map(|event| format!("{event}\n")).collect();
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    fn result_at(dir: &std::path::Path) -> std::path::PathBuf {
+        dir.join("repo").join(".noa").join("result-api.md")
+    }
+
+    fn spawn_and_send(dir: &std::path::Path, task: &str) -> std::path::PathBuf {
+        let result = result_at(dir);
+        write_journal(
+            dir,
+            &[
+                serde_json::json!({"ev": "spawn", "ts": 1, "pane": 2, "label": "api",
+                    "result": result.to_string_lossy()}),
+                serde_json::json!({"ev": "send", "ts": 2, "pane": 2, "text": task,
+                    "seqBefore": 0}),
+            ],
+        )
+    }
+
+    fn assert_widths(board: &Board, cols: usize, rows: usize, now: Instant) {
+        for line in board.render(cols, rows, now) {
+            assert_eq!(visible(&line).width(), cols, "{cols}×{rows}: {line:?}");
+        }
+    }
+
+    #[test]
+    fn a_retried_worker_shows_its_whole_task_without_the_preface() {
+        let dir = insight_dir("retry");
+        let result = result_at(&dir);
+        let task = format!("Fix the login bug {}", "x".repeat(300));
+        let sent = crate::ctl::retry::compose(
+            &crate::ctl::retry::preface(7, "claude, tier light", Some("finished"), None),
+            &task,
+        );
+        write_journal(
+            &dir,
+            &[
+                serde_json::json!({"ev": "spawn", "ts": 1, "pane": 2, "label": "api",
+                    "result": result.to_string_lossy(), "retryOf": "7"}),
+                serde_json::json!({"ev": "send", "ts": 2, "pane": 2,
+                    "text": journal::clip(&sent), "full": sent,
+                    "bytes": sent.len(), "seqBefore": 0}),
+            ],
+        );
+        let mut board = insight_board(&dir);
+        board.refresh_files(Instant::now());
+        assert_eq!(
+            board.insight.task(2).cloned(),
+            Some(Task::Sent {
+                text: task,
+                cut: false,
+                retry_of: Some(7),
+            })
+        );
+        board.lang = Lang::En;
+        board.view = View::Detail(2);
+        let all = rendered(&board, 80, 30, Instant::now());
+        assert!(all.contains("retry of pane 7"), "{all}");
+        assert!(all.contains("Fix the login bug"), "{all}");
+        assert!(!all.contains("Retry: a previous worker"), "{all}");
+        assert!(!all.contains("cut at the first"), "{all}");
+        assert_widths(&board, 80, 30, Instant::now());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_detail_shows_the_task_and_the_result_file() {
+        let dir = insight_dir("detail");
+        spawn_and_send(&dir, "Fix the login bug in the api crate");
+        let result = result_at(&dir);
+        std::fs::write(&result, "## Done\nAll tests pass.\n").unwrap();
+        let mut board = insight_board(&dir);
+        let t0 = Instant::now();
+        assert!(board.refresh_files(t0));
+        board.key(Key::Enter);
+        assert_eq!(board.view, View::Detail(2));
+        let all = rendered(&board, 80, 30, t0);
+        assert!(all.contains("タスク"), "{all}");
+        assert!(all.contains("Fix the login bug in the api crate"), "{all}");
+        assert!(
+            all.contains("結果  24 バイト · 0 秒前に書かれました · r で表示"),
+            "{all}"
+        );
+        assert!(all.contains(&result.to_string_lossy().to_string()), "{all}");
+        // The screen is still there below.
+        assert!(all.contains("画面"), "{all}");
+        for (cols, rows) in [(80, 30), (80, 20), (40, 16), (MIN_COLS, MIN_ROWS)] {
+            assert_widths(&board, cols, rows, t0);
+        }
+        board.lang = Lang::En;
+        let all = rendered(&board, 80, 30, t0 + Duration::from_secs(90));
+        assert!(all.contains("Task"), "{all}");
+        assert!(
+            all.contains("Result  24 bytes · written 1m ago · r: show"),
+            "{all}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_task_cut_by_the_journal_says_so_and_wraps_to_a_few_lines() {
+        let dir = insight_dir("cut");
+        // As long as the journal keeps (`journal::clip`).
+        let long = "word ".repeat(40);
+        assert_eq!(long.chars().count(), journal::TEXT_CHARS);
+        spawn_and_send(&dir, &long);
+        let mut board = insight_board(&dir);
+        let t0 = Instant::now();
+        board.refresh_files(t0);
+        board.key(Key::Enter);
+        let all = rendered(&board, 80, 40, t0);
+        assert!(all.contains("先頭 200 文字で切れています"), "{all}");
+        let task_lines = all
+            .lines()
+            .filter(|line| line.starts_with("   word"))
+            .count();
+        assert_eq!(task_lines, 3, "{all}");
+        // A short pane keeps one line of it.
+        let all = rendered(&board, 80, 20, t0);
+        let task_lines = all
+            .lines()
+            .filter(|line| line.starts_with("   word"))
+            .count();
+        assert_eq!(task_lines, 1, "{all}");
+        assert!(all.contains("…"), "{all}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_and_unreadable_files_are_said_briefly() {
+        let dir = insight_dir("reasons");
+        let mut board = insight_board(&dir);
+        let t0 = Instant::now();
+        board.key(Key::Enter);
+        // No journal yet; the result file is found by its label, missing.
+        board.refresh_files(t0);
+        let all = rendered(&board, 80, 30, t0);
+        assert!(all.contains("ジャーナルが見つかりません"), "{all}");
+        assert!(all.contains("まだ作られていません"), "{all}");
+        // Spawned, nothing sent, the result reserved but empty.
+        let result = result_at(&dir);
+        std::fs::write(&result, "").unwrap();
+        write_journal(
+            &dir,
+            &[serde_json::json!({"ev": "spawn", "ts": 1, "pane": 2,
+                "result": result.to_string_lossy()})],
+        );
+        board.refresh_files(t0 + Duration::from_secs(3));
+        let all = rendered(&board, 80, 30, t0);
+        assert!(all.contains("タスクはまだ送られていません"), "{all}");
+        assert!(all.contains("空です(まだ書かれていません)"), "{all}");
+        board.lang = Lang::En;
+        let all = rendered(&board, 80, 30, t0);
+        assert!(all.contains("no task sent"), "{all}");
+        assert!(all.contains("empty (not written yet)"), "{all}");
+        // A FIFO in its place is never opened (it would block the board).
+        std::fs::remove_file(&result).unwrap();
+        let c_path = std::ffi::CString::new(result.to_string_lossy().as_bytes()).unwrap();
+        // SAFETY: mkfifo reads the NUL-terminated path only.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        board.refresh_files(t0 + Duration::from_secs(6));
+        board.key(Key::Char('r'));
+        board.refresh_files(t0 + Duration::from_secs(6));
+        let all = rendered(&board, 80, 30, t0);
+        assert!(all.contains("not a regular file; not read"), "{all}");
+        // A worker of a parent the board does not list has no journal.
+        let mut lone = Board::new(None, None);
+        lone.insight.root = Some(dir.clone());
+        lone.update(vec![worker(5, 4, "x", Some("running"), 1)], t0);
+        lone.refresh_files(t0);
+        lone.key(Key::Enter);
+        let all = rendered(&lone, 80, 30, t0);
+        assert!(all.contains("ジャーナルがありません"), "{all}");
+        // Panes whose files the board never looked at take no `r`.
+        let mut fresh = Board::new(Some(1), Some(8));
+        fresh.update(sample(), t0);
+        fresh.key(Key::Enter);
+        fresh.key(Key::Char('r'));
+        assert!(!fresh.result_shown);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn r_shows_the_result_and_j_k_scroll_it() {
+        let dir = insight_dir("toggle");
+        spawn_and_send(&dir, "write the report");
+        let text: String = (1..=60).map(|n| format!("result line {n}\n")).collect();
+        std::fs::write(result_at(&dir), text).unwrap();
+        let mut board = insight_board(&dir);
+        board.set_screen(2, "screen text here\n");
+        let t0 = Instant::now();
+        board.refresh_files(t0);
+        // `r` does nothing in the list.
+        board.key(Key::Char('r'));
+        assert!(!board.result_shown);
+        board.key(Key::Enter);
+        let all = rendered(&board, 80, 30, t0);
+        assert!(all.contains("screen text here"), "{all}");
+        assert!(all.lines().last().unwrap().contains("r 結果"), "{all}");
+
+        board.key(Key::Char('r'));
+        // Read only once shown, by the next refresh, before the frame.
+        assert!(board.insight.shown(2).is_none());
+        assert!(board.refresh_files(t0 + Duration::from_millis(100)));
+        let all = rendered(&board, 80, 30, t0);
+        assert!(all.contains("結果ファイル"), "{all}");
+        assert!(all.contains("result line 1 "), "{all}");
+        assert!(!all.contains("screen text here"), "{all}");
+        assert!(
+            all.lines().last().unwrap().contains("j/k スクロール"),
+            "{all}"
+        );
+        for (cols, rows) in [(80, 30), (40, 16), (MIN_COLS, MIN_ROWS)] {
+            assert_widths(&board, cols, rows, t0);
+        }
+        rendered(&board, 80, 30, t0);
+        board.key(Key::Char('j'));
+        board.key(Key::Down);
+        let all = rendered(&board, 80, 30, t0);
+        assert!(!all.contains("result line 2 "), "{all}");
+        assert!(all.contains("result line 3 "), "{all}");
+        // j/k scroll, not step to another worker.
+        assert_eq!(board.view, View::Detail(2));
+        board.key(Key::Char('k'));
+        board.key(Key::Up);
+        board.key(Key::Up);
+        assert_eq!(board.result_scroll, 0);
+        // No further than the end.
+        for _ in 0..200 {
+            board.key(Key::Char('j'));
+        }
+        let all = rendered(&board, 80, 30, t0);
+        assert!(all.contains("result line 60"), "{all}");
+        assert_eq!(board.result_scroll, board.result_reach.get());
+
+        // A rewritten result is read again; an unchanged one is not.
+        std::fs::write(result_at(&dir), "short now\n").unwrap();
+        board.refresh_files(t0 + Duration::from_secs(3));
+        let all = rendered(&board, 80, 30, t0);
+        assert!(all.contains("short now"), "{all}");
+
+        board.key(Key::Char('r'));
+        let all = rendered(&board, 80, 30, t0);
+        assert!(all.contains("screen text here"), "{all}");
+        board.key(Key::Char('r'));
+        board.key(Key::Esc);
+        assert_eq!(board.view, View::List);
+        assert!(!board.result_shown);
+        board.refresh_files(t0 + Duration::from_secs(3));
+        assert!(board.insight.shown(2).is_none());
+        board.lang = Lang::En;
+        board.key(Key::Enter);
+        let footer = rendered(&board, 80, 30, t0);
+        assert!(
+            footer.lines().last().unwrap().contains("r result"),
+            "{footer}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_preview_says_when_a_result_was_written() {
+        let dir = insight_dir("preview");
+        spawn_and_send(&dir, "task");
+        let result = result_at(&dir);
+        std::fs::write(&result, "").unwrap();
+        let mut board = insight_board(&dir);
+        let t0 = Instant::now();
+        board.refresh_files(t0);
+        assert!(!rendered(&board, 80, 24, t0).contains("結果あり"));
+        std::fs::write(&result, "done\n").unwrap();
+        // Looked at again only after a while.
+        board.refresh_files(t0 + Duration::from_millis(500));
+        assert!(!rendered(&board, 80, 24, t0).contains("結果あり"));
+        board.refresh_files(t0 + Duration::from_secs(3));
+        let all = rendered(&board, 80, 24, t0);
+        let meta = line_with(&all, "結果あり");
+        assert!(meta.contains("報告 3 · 結果あり"), "{meta}");
+        board.lang = Lang::En;
+        assert!(rendered(&board, 80, 24, t0).contains("report 3 · result written"));
+        for cols in [120, 80, 60, 40, 30, MIN_COLS] {
+            assert_widths(&board, cols, 24, t0);
+            assert_widths(&board, cols, 10, t0);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unchanged_journal_is_not_read_again() {
+        let dir = insight_dir("cache");
+        let path = spawn_and_send(&dir, "first task");
+        let mut board = insight_board(&dir);
+        let t0 = Instant::now();
+        board.refresh_files(t0);
+        let task = |board: &Board| board.insight.task(2).cloned();
+        let sent = |text: &str| {
+            Some(Task::Sent {
+                text: text.to_string(),
+                cut: false,
+                retry_of: None,
+            })
+        };
+        assert_eq!(task(&board), sent("first task"));
+        // Same length and time: taken as unchanged, so not read.
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.replace("first task", "other task")).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        board.refresh_files(t0 + Duration::from_secs(3));
+        assert_eq!(task(&board), sent("first task"));
+        // A new line changes its length: read again.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({"ev": "send", "ts": 3, "pane": 2, "text": "second task"})
+        )
+        .unwrap();
+        board.refresh_files(t0 + Duration::from_secs(4));
+        // Not yet: files are looked at every two seconds.
+        assert_eq!(task(&board), sent("first task"));
+        board.refresh_files(t0 + Duration::from_secs(6));
+        assert_eq!(task(&board), sent("second task"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_help_says_what_r_does_in_both_languages() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(sample(), Instant::now());
+        board.key(Key::Char('?'));
+        let all = rendered(&board, 100, 40, Instant::now());
+        assert!(
+            all.contains("詳細で画面と結果ファイルの中身を切り替える"),
+            "{all}"
+        );
+        board.lang = Lang::En;
+        let all = rendered(&board, 100, 40, Instant::now());
+        assert!(
+            all.contains("in details: switch between the screen and the result file"),
+            "{all}"
+        );
     }
 }
 

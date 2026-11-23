@@ -176,24 +176,20 @@ pub fn inspect_worktree(
         .then(|| bases.get(&repo_root, top))
         .flatten()
         .map(|base| format!("{}...HEAD", base.name));
-    // "vs main" also needs each file's status letter, which `--raw` prints
-    // ahead of the counts in the same git.
-    let numstat_args: Vec<&str> = match mode {
-        DiffMode::Unstaged => vec!["diff", "--numstat", "-z"],
-        DiffMode::Staged => vec!["diff", "--cached", "--numstat", "-z"],
-        DiffMode::VsMain => match &range {
-            Some(range) => vec!["diff", "--raw", "--numstat", "-z", range.as_str()],
-            None => Vec::new(),
-        },
-    };
     let note = (mode == DiffMode::VsMain && range.is_none())
         .then(|| "比較元ブランチ (main / master / origin/HEAD) が見つかりません".to_owned());
-    let numstat_out = if numstat_args.is_empty() {
-        String::new()
-    } else {
-        run_git(top, &numstat_args).unwrap_or_default()
+    let numstat = |args: &[&str]| parse_numstat(run_git(top, args).unwrap_or_default().split('\0'));
+    let (statuses, mut stats) = match mode {
+        DiffMode::Unstaged => (HashMap::new(), numstat(&["diff", "--numstat", "-z"])),
+        DiffMode::Staged => (
+            HashMap::new(),
+            numstat(&["diff", "--cached", "--numstat", "-z"]),
+        ),
+        DiffMode::VsMain => match &range {
+            Some(range) => vs_main_changes(top, range),
+            None => (HashMap::new(), HashMap::new()),
+        },
     };
-    let (statuses, mut stats) = parse_raw_numstat(&numstat_out);
 
     let mut files = Vec::new();
     match mode {
@@ -774,6 +770,60 @@ fn parse_porcelain_v2(text: &str) -> PorcelainStatus {
     }
 }
 
+/// Each file's status letter and line counts between `range`'s ends, from
+/// one `git diff --raw --numstat -z`. When that fails or its records do not
+/// pair up, the two gits main runs decide instead, `--numstat` for the
+/// counts and `--name-status` for the letters, each failure read as no
+/// output as there.
+fn vs_main_changes(
+    top: &Path,
+    range: &str,
+) -> (HashMap<String, String>, HashMap<String, (usize, usize)>) {
+    vs_main_changes_with(|args| run_git(top, args), range)
+}
+
+/// [`vs_main_changes`] running git through `git`.
+fn vs_main_changes_with(
+    git: impl Fn(&[&str]) -> Option<String>,
+    range: &str,
+) -> (HashMap<String, String>, HashMap<String, (usize, usize)>) {
+    if let Some(out) = git(&["diff", "--raw", "--numstat", "-z", range]) {
+        let (statuses, stats) = parse_raw_numstat(&out);
+        let paired =
+            statuses.len() == stats.len() && stats.keys().all(|p| statuses.contains_key(p));
+        if paired && (out.is_empty() || !stats.is_empty()) {
+            return (statuses, stats);
+        }
+    }
+    let stats = parse_numstat(
+        git(&["diff", "--numstat", "-z", range])
+            .unwrap_or_default()
+            .split('\0'),
+    );
+    let statuses =
+        parse_name_status(&git(&["diff", "--name-status", "-z", range]).unwrap_or_default());
+    (statuses, stats)
+}
+
+/// `git diff --name-status -z`: each file's status letter (`A`, `D`, `M`,
+/// `R`, …) by its new path; a rename or copy carries old then new path.
+fn parse_name_status(text: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let mut entries = text.split('\0');
+    while let Some(code) = entries.next() {
+        let Some(letter) = code.chars().next() else {
+            continue;
+        };
+        if matches!(letter, 'R' | 'C') {
+            entries.next();
+        }
+        if let Some(path) = entries.next() {
+            map.insert(path.to_owned(), letter.to_string());
+        }
+    }
+    map
+}
+
 /// Parses `git diff [--raw] --numstat -z`: each file's status letter (`A`,
 /// `D`, `M`, `R`, …) from the `--raw` records, which come first, and its
 /// added and deleted line counts from the numstat ones, both by new path.
@@ -848,6 +898,67 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         assert_eq!(parsed.files[0], ("src/main.rs".into(), ('.', 'M')));
         assert_eq!(parsed.files[1], ("src/new.rs".into(), ('A', '.')));
         assert_eq!(parsed.files[2], ("notes.txt".into(), ('?', '?')));
+    }
+
+    #[test]
+    fn vs_main_falls_back_to_numstat_and_name_status() {
+        use std::cell::RefCell;
+        const RAW: &str = "diff --raw --numstat -z b...HEAD";
+        const NUMSTAT: &str = "diff --numstat -z b...HEAD";
+        const NAMES: &str = "diff --name-status -z b...HEAD";
+        let run = |answers: &[(&str, &str)]| {
+            let asked = RefCell::new(Vec::new());
+            let (statuses, stats) = vs_main_changes_with(
+                |args| {
+                    let args = args.join(" ");
+                    let answer = answers
+                        .iter()
+                        .find(|(a, _)| *a == args)
+                        .map(|(_, out)| (*out).to_owned());
+                    asked.borrow_mut().push(args);
+                    answer
+                },
+                "b...HEAD",
+            );
+            let mut statuses: Vec<_> = statuses.into_iter().collect();
+            statuses.sort();
+            let mut stats: Vec<_> = stats.into_iter().collect();
+            stats.sort();
+            (statuses, stats, asked.into_inner())
+        };
+        let s = |p: &str, l: &str| (p.to_owned(), l.to_owned());
+        let n = |p: &str, a, d| (p.to_owned(), (a, d));
+
+        // The combined git answers: nothing else runs.
+        let raw = ":000000 100644 0 1 A\0a\0:100644 000000 1 0 D\0d\03\t0\ta\00\t2\td\0";
+        let (statuses, stats, asked) = run(&[(RAW, raw)]);
+        assert_eq!(statuses, [s("a", "A"), s("d", "D")]);
+        assert_eq!(stats, [n("a", 3, 0), n("d", 0, 2)]);
+        assert_eq!(asked, [RAW]);
+        // An empty diff is an answer too.
+        assert_eq!(run(&[(RAW, "")]).2, [RAW]);
+        // It fails: main's two gits decide, a failed one reading as empty.
+        let numstat = "3\t0\ta\00\t2\td\0";
+        let (statuses, stats, asked) = run(&[(NUMSTAT, numstat), (NAMES, "A\0a\0D\0d\0")]);
+        assert_eq!(statuses, [s("a", "A"), s("d", "D")]);
+        assert_eq!(stats, [n("a", 3, 0), n("d", 0, 2)]);
+        assert_eq!(asked, [RAW, NUMSTAT, NAMES]);
+        let (statuses, stats, _) = run(&[(NUMSTAT, numstat)]);
+        assert!(statuses.is_empty(), "every file then shows as M");
+        assert_eq!(stats, [n("a", 3, 0), n("d", 0, 2)]);
+        let (_, stats, _) = run(&[(NAMES, "A\0a\0")]);
+        assert!(stats.is_empty());
+        // Records that do not pair up, or an answer with no counts, are
+        // asked again the old way.
+        for odd in [
+            ":000000 100644 0 1 A\0a\03\t0\ta\00\t2\td\0",
+            "3\t0\ta\0",
+            "junk",
+        ] {
+            let (_, stats, asked) = run(&[(RAW, odd), (NUMSTAT, numstat), (NAMES, "")]);
+            assert_eq!(stats, [n("a", 3, 0), n("d", 0, 2)], "{odd:?}");
+            assert_eq!(asked, [RAW, NUMSTAT, NAMES], "{odd:?}");
+        }
     }
 
     #[test]

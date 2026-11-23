@@ -565,6 +565,13 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             Start::Resume { dir } => {
                 let (store, session) = Store::open(&dir)
                     .map_err(|e| format!("{} を開けません: {e}", dir.display()))?;
+                // The setup is written into the login shell's script, so a
+                // log edited by hand gets the same check a new session does.
+                for part in std::iter::once(&session.moderator).chain(&session.panelists) {
+                    part.setup
+                        .check(part.kind)
+                        .map_err(|why| format!("{} を再開できません: {why}", dir.display()))?;
+                }
                 (Engine::resume(session, &dir, config), store)
             }
         };
@@ -2560,6 +2567,57 @@ mod tests {
             rig.step();
         }
         assert_eq!(rig.submitted(101), 1, "a sent brief was sent again");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_resumed_session_whose_log_holds_a_bad_model_is_refused() {
+        let root = temp_root("resume-bad-setup");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.step();
+        let dir = rig.dir();
+        rig.actions.send(Action::Stop).unwrap();
+        assert!(!rig.runner.step().unwrap());
+        drop(rig);
+        // The model name in the log is written into the login shell's script.
+        let log = dir.join(store::EVENTS_FILE);
+        let text = fs::read_to_string(&log).unwrap();
+        let tampered = text.replacen(
+            r#""role":"moderator""#,
+            r#""role":"moderator","setup":{"model":"opus; touch pwned"}"#,
+            1,
+        );
+        assert_ne!(tampered, text);
+        fs::write(&log, tampered).unwrap();
+        // The moderator's pane is gone, so resuming starts it again.
+        fake.w().panes.remove(&100);
+
+        let (_actions, action_rx) = mpsc::channel();
+        let (update_tx, _updates) = mpsc::channel();
+        let opened = Runner::open(
+            Start::Resume { dir },
+            fake.clone(),
+            fake.clone(),
+            CONFIG,
+            action_rx,
+            update_tx,
+            Rc::new(|| {}),
+        );
+        let before = fake.0.borrow().spawned.len();
+        match opened {
+            Err(why) => assert!(why.contains("opus; touch pwned"), "{why}"),
+            Ok(mut runner) => {
+                for _ in 0..20 {
+                    let _ = runner.step();
+                }
+                let argv: Vec<_> = fake.0.borrow().spawned[before..]
+                    .iter()
+                    .map(|(_, spec, _)| spec.argv.last().cloned())
+                    .collect();
+                panic!("resumed and started {argv:?}");
+            }
+        }
         let _ = fs::remove_dir_all(&root);
     }
 

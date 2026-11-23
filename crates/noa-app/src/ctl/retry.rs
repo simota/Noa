@@ -71,6 +71,13 @@ pub(crate) fn plan(
             "pane {old} is working; wait for its turn to end, or close it first. Nothing was done"
         ));
     }
+    // `spawn` refuses `--no-board` from a worker (D10); refused here, the
+    // old pane is not closed for a spawn that cannot happen.
+    let is_worker = panels
+        .iter()
+        .any(|panel| panel.pane_id.0 == own && panel.parent_pane_id.is_some());
+    super::spawn_opens_board(is_worker, args.board)
+        .map_err(|message| format!("{message}. Nothing was done"))?;
     let argv = worker
         .argv
         .as_ref()
@@ -488,6 +495,19 @@ mod tests {
         // Neither the journal nor a listing knows one.
         let refused = plan_of(&[], None, &[bare], &[listed(12, 1, None)]).unwrap_err();
         assert!(refused.contains("without a command"), "{refused}");
+    }
+
+    #[test]
+    fn a_worker_cannot_retry_its_own_worker_without_the_board() {
+        // This pane (1) is itself a worker of pane 9.
+        let panels = [listed(12, 1, Some("finished")), listed(1, 9, None)];
+        let error = plan_of(&["--no-board"], None, &[worker(12)], &panels).unwrap_err();
+        assert!(error.contains("--no-board"), "{error}");
+        assert!(error.contains("Nothing was done"), "{error}");
+        // With the board, or from an orchestrator, it plans as usual.
+        assert!(plan_of(&[], None, &[worker(12)], &panels).is_ok());
+        let alone = [listed(12, 1, Some("finished"))];
+        assert!(plan_of(&["--no-board"], None, &[worker(12)], &alone).is_ok());
     }
 
     #[test]

@@ -404,6 +404,7 @@ of these is also exit 1 with nothing closed or started:
   sends, the last one is all it has: pass the whole task with `--task-file`.
 - The directory is gone (a pruned worktree) or the program is not on `PATH`.
 - The text with its preface is over 250 KiB.
+- `--no-board` from a pane that is itself a worker (as `spawn` refuses it).
 
 Then it closes PANE if it is still listed (journaled as a `close`, not printed,
 never pruned) and spawns:

@@ -344,6 +344,10 @@ pub(super) struct WindowState {
     /// capable of transparency.
     pub(super) created_transparent: bool,
     pub(super) title: String,
+    /// Whether the label last pushed for this tab carried the zoom mark
+    /// (`zoom_tab_title`). `title` stays the raw resolved title; this mirror
+    /// is what `refresh_window_title` compares `zoomed.is_some()` against.
+    pub(super) title_zoom_mark: bool,
     /// A user-set tab title (tab-title REQ-TTL-2/5). While `Some`, it masks
     /// the shell-driven title on the native tab label and overview tile;
     /// `Terminal.title` keeps tracking OSC 0/2 underneath so clearing the

@@ -333,22 +333,29 @@ impl App {
         let Some(state) = self.windows.get_mut(&window_id) else {
             return;
         };
-        if let Some(title) = tab_title_update(&state.title, &title) {
+        // The zoom mark is a label decoration: `state.title` keeps the raw
+        // resolved title, `title_zoom_mark` mirrors what was pushed.
+        let zoomed = state.zoomed.is_some();
+        if title_push_needed(&state.title, &title, state.title_zoom_mark, zoomed) {
             // A tab behind another in a shared OS window (`linux_tabs`) owns
-            // only its tab bar label, which the front tab paints.
+            // only its tab bar label, which the front tab paints (from the
+            // raw title and `zoomed`, so only the mirrors move here).
             if state.background_tab {
                 state.title = title;
+                state.title_zoom_mark = zoomed;
                 state.window.request_redraw();
                 return;
             }
-            state.window.set_title(&title);
+            let label = zoom_tab_title(&title, zoomed);
+            state.window.set_title(&label);
             // `set_title` alone updates the titlebar but not an already-laid-out
             // native tab button (AppKit caches its label at layout time), so
             // also push the resolved title onto the NSWindowTab. Runs on the
             // main (window-owning) thread — same as every other macos_window
             // call from this handler; a no-op off macOS.
-            crate::macos_window::set_native_tab_title(&state.window, &title);
+            crate::macos_window::set_native_tab_title(&state.window, &label);
             state.title = title;
+            state.title_zoom_mark = zoomed;
         }
     }
 

@@ -179,6 +179,39 @@ pub(crate) fn tab_title_update(applied: &str, resolved: &str) -> Option<String> 
     (applied != resolved).then(|| resolved.to_string())
 }
 
+/// Prefix of a zoomed tab's title: U+2922 (north-east and south-west arrow)
+/// plus a space. A text glyph rather than an AppKit symbol so the one title
+/// channel (`set_title` / `set_native_tab_title`, and Noa's own tab bar off
+/// macOS) carries it.
+pub(crate) const ZOOM_TAB_MARK: &str = "\u{2922} ";
+
+/// `title` as a tab shows it: with [`ZOOM_TAB_MARK`] in front while its split
+/// is zoomed. The raw title (`state.title`) stays undecorated for the other
+/// readers (Set Tab Title prefill, AppleScript, overview labels); only the
+/// pushed label carries the mark. A title that already starts with the mark
+/// is not marked twice.
+pub(crate) fn zoom_tab_title(title: &str, zoomed: bool) -> std::borrow::Cow<'_, str> {
+    if zoomed && !title.starts_with(ZOOM_TAB_MARK) {
+        std::borrow::Cow::Owned(format!("{ZOOM_TAB_MARK}{title}"))
+    } else {
+        std::borrow::Cow::Borrowed(title)
+    }
+}
+
+/// Whether `refresh_window_title` must push a label: the raw resolved title
+/// changed against the applied mirror (`tab_title_update`), or the zoom mark
+/// the pushed label carries no longer matches the zoom state. Zoom toggles
+/// change neither the title nor the shell state, so the mark needs its own
+/// mirror comparison.
+pub(crate) fn title_push_needed(
+    raw_prev: &str,
+    raw_new: &str,
+    mark_prev: bool,
+    mark_new: bool,
+) -> bool {
+    tab_title_update(raw_prev, raw_new).is_some() || mark_prev != mark_new
+}
+
 /// Build the dynamic title from the focused pane's live state. It takes over
 /// once the shell's OSC 0/2 title goes stale (see [`resolved_tab_title`]) and
 /// mirrors the sidebar card's naming (via the shared [`crate::sidebar::cwd_tail`])

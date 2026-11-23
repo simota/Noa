@@ -627,7 +627,10 @@ impl App {
         self.native_tab_title_flush_deadline = None;
         for state in self.windows.values() {
             if !state.title.is_empty() {
-                crate::macos_window::set_native_tab_title(&state.window, &state.title);
+                crate::macos_window::set_native_tab_title(
+                    &state.window,
+                    &zoom_tab_title(&state.title, state.title_zoom_mark),
+                );
             }
         }
         None

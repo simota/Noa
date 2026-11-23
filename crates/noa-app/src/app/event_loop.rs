@@ -69,6 +69,19 @@ fn pointer_needs_reresolve(scripted: bool, hover_changed: bool, zoom_tween_live:
     !scripted && (hover_changed || zoom_tween_live)
 }
 
+/// Whether a press's own focus step moved the pane layout under a pointer at
+/// rest, leaving the cell the press resolved before it stale. Focusing a
+/// sibling still visible during a zoom-in tween re-zooms to it instantly,
+/// which moves that pane's grid to the content rect's origin (split-zoom
+/// "Pointer"). A scripted event names its cell and never re-resolves.
+fn press_focus_moved_layout(
+    scripted: bool,
+    zoomed_before: Option<PaneId>,
+    zoomed_after: Option<PaneId>,
+) -> bool {
+    !scripted && zoomed_before != zoomed_after
+}
+
 impl App {
     /// The pane a scripted mouse event being delivered in `state` names
     /// (agent-automation REQ-011). It outranks a live left-button capture
@@ -76,6 +89,23 @@ impl App {
     fn script_target(&self, state: &WindowState) -> Option<PaneId> {
         self.script_mouse_pane
             .filter(|pane| state.contains_pane(*pane))
+    }
+
+    /// Focus the pane a button press landed on. When that focus re-zoomed
+    /// the split layout, the pointer is resolved again so the press selects
+    /// and reports the cell now drawn under it, not the one it hit before.
+    fn focus_pane_for_press(&mut self, window_id: WindowId, pane_id: PaneId, scripted: bool) {
+        let zoomed = |app: &Self| app.windows.get(&window_id).and_then(|tab| tab.zoomed);
+        let before = zoomed(self);
+        self.focus_pane(window_id, pane_id);
+        if press_focus_moved_layout(scripted, before, zoomed(self))
+            && let Some(position) = self
+                .windows
+                .get(&window_id)
+                .and_then(|tab| tab.last_mouse_physical_position)
+        {
+            self.on_cursor_moved(window_id, position);
+        }
     }
 
     /// Pane-dnd P1-1 remediation (`docs/specs/pane-dnd.md` L2(e)): re-resolve
@@ -2086,7 +2116,7 @@ impl App {
         }
 
         if button == MouseButton::Left && state == ElementState::Pressed {
-            self.focus_pane(window_id, pane_id);
+            self.focus_pane_for_press(window_id, pane_id, scripted.is_some());
         }
 
         let (tracking, format, capture_shift) = self.mouse_report_modes(window_id, pane_id);
@@ -2140,7 +2170,7 @@ impl App {
         if button == MouseButton::Right {
             if state == ElementState::Pressed {
                 self.focused = Some(window_id);
-                self.focus_pane(window_id, pane_id);
+                self.focus_pane_for_press(window_id, pane_id, scripted.is_some());
                 if self.right_click(window_id, pane_id) {
                     #[cfg(target_os = "macos")]
                     {
@@ -2156,7 +2186,7 @@ impl App {
 
         if button == MouseButton::Middle {
             if state == ElementState::Pressed {
-                self.focus_pane(window_id, pane_id);
+                self.focus_pane_for_press(window_id, pane_id, scripted.is_some());
                 self.middle_click(window_id, pane_id);
             }
             return;
@@ -2682,5 +2712,37 @@ mod focus_loss_tests {
         assert!(pointer_needs_reresolve(false, true, false));
         assert!(!pointer_needs_reresolve(false, false, false));
         assert!(!pointer_needs_reresolve(true, true, true));
+    }
+
+    // Codex review: left|right split, left pane zooming in. A press on the
+    // right pane, still visible beside the growing clip, resolves its cell
+    // from the right tile's origin; the press then focuses the right pane,
+    // which re-zooms to it instantly and moves its grid to the content
+    // rect's origin. The cell under the pointer changes, so the press must
+    // re-resolve before it starts a selection or sends a mouse report.
+    #[test]
+    fn a_press_that_re_zooms_re_resolves_the_pointer() {
+        use crate::anim::DUR_SPLIT_ZOOM;
+        use crate::split_tree::{
+            HitTarget, Point, Rect, SplitZoomAnim, hit_test, pane_mapping_rect,
+            transition_hit_layout, zoom_frame,
+        };
+        let (left, right) = (PaneId::new(1), PaneId::new(2));
+        let bounds = Rect::new(0, 0, 800, 600);
+        let (left_tile, right_tile) = (Rect::new(0, 0, 400, 600), Rect::new(400, 0, 400, 600));
+        let start = std::time::Instant::now();
+        let anim = SplitZoomAnim::zoom_in(left, start);
+        let frame = zoom_frame(&anim, left_tile, bounds, start + DUR_SPLIT_ZOOM / 4);
+        let pointer = Point::new(780, 300);
+        let layout = transition_hit_layout(&[(left, left_tile), (right, right_tile)], &frame);
+        assert_eq!(hit_test(&layout, pointer), Some(HitTarget::Pane(right)));
+        let col = |rect: Rect| (pointer.x - rect.x) / 10;
+        let at_press = col(pane_mapping_rect(right, right_tile, &frame));
+        let after_focus = col(bounds);
+        assert_ne!(at_press, after_focus);
+        assert!(press_focus_moved_layout(false, Some(left), Some(right)));
+        assert!(!press_focus_moved_layout(false, Some(left), Some(left)));
+        assert!(!press_focus_moved_layout(false, None, None));
+        assert!(!press_focus_moved_layout(true, Some(left), Some(right)));
     }
 }

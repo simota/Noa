@@ -1493,7 +1493,18 @@ pub(crate) fn check_spawn(
             return Err(format!("--cwd {given:?}{resolved} is not a directory"));
         }
     }
-    if let (Some(program), Some(path)) = (spawn.command.first(), path)
+    if let Some(program) = spawn.command.first()
+        && std::path::Path::new(program).is_absolute()
+    {
+        // `retry` closes the old worker after this check, so a program
+        // removed since it was started must be refused here. A relative
+        // path stays the worker's to resolve.
+        if !is_executable(std::path::Path::new(program)) {
+            return Err(format!(
+                "command not found: {program:?} is not an executable file"
+            ));
+        }
+    } else if let (Some(program), Some(path)) = (spawn.command.first(), path)
         && !program.contains('/')
         && !on_path(program, path, cwd.as_deref().map(std::path::Path::new))
     {
@@ -6913,6 +6924,37 @@ mod tests {
         assert!(file.starts_with(r#"--cwd "file" (resolved to "#), "{file}");
         assert!(file.ends_with("is not a directory"), "{file}");
         let _ = std::fs::remove_dir_all(here);
+    }
+
+    // Review finding: a program given by its absolute path
+    // (`/opt/bin/claude`) was not checked, so `retry` closed the old worker
+    // for a spawn that failed.
+    #[cfg(unix)]
+    #[test]
+    fn a_program_given_by_path_must_be_an_executable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = temp_dir("bypath");
+        let tool = bin.join("tool");
+        std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(bin.join("data"), "").unwrap();
+        let check = |command: &str| {
+            check_spawn(
+                &spawn_args(None, &[command]),
+                Some(bin.clone()),
+                Some("/usr/bin"),
+            )
+        };
+        assert_eq!(check(&tool.to_string_lossy()), Ok(()));
+        let gone = bin.join("gone").to_string_lossy().into_owned();
+        assert_eq!(
+            check(&gone),
+            Err(format!(
+                "command not found: {gone:?} is not an executable file"
+            ))
+        );
+        assert!(check(&bin.join("data").to_string_lossy()).is_err());
+        let _ = std::fs::remove_dir_all(bin);
     }
 
     // Review finding (F4): a command missing from the worker's PATH came

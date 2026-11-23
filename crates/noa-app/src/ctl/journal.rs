@@ -212,8 +212,11 @@ pub(crate) fn full(text: &str) -> Option<&str> {
 
 /// The whole text a `send` event kept: `full`, else `text` when `bytes`
 /// says it was not cut. `None` when only its start was kept (over
-/// [`FULL_TEXT_BYTES`], or written before `full` was).
+/// [`FULL_TEXT_BYTES`]), or the event is from an older `+ctl`, which did
+/// not journal `raw` (or `full`).
 fn whole_text(event: &serde_json::Value) -> Option<String> {
+    // An older `+ctl` journaled no `raw`: its `--raw` keys look like a task.
+    event.get("raw")?;
     if let Some(full) = event["full"].as_str() {
         return Some(full.to_string());
     }
@@ -741,7 +744,7 @@ mod tests {
     }
 
     // A journal from before `full` kept only the first 200 characters: a
-    // longer task there is not known whole, a shorter one is.
+    // task there is not known whole.
     #[test]
     fn an_older_journals_cut_task_is_not_taken_for_whole() {
         let long = "y".repeat(TEXT_CHARS + 1);
@@ -754,8 +757,29 @@ mod tests {
             })
         ));
         assert_eq!(workers(&events)[0].task, None);
-        // `sample`'s "do it" was sent whole.
-        assert_eq!(workers(&sample())[0].task.as_deref(), Some("do it"));
+        // Nor `sample`'s short "do it": without `raw`, keys look the same.
+        assert_eq!(workers(&sample())[0].task, None);
+    }
+
+    // Review finding: an older `+ctl` journaled no `raw`, so its `--raw`
+    // keys (an Esc) were taken for the whole task.
+    #[test]
+    fn an_older_journals_send_is_not_taken_for_the_whole_task() {
+        let events = parse_events(&format!(
+            "{}\n{}\n{}\n",
+            r#"{"ev":"spawn","ts":1,"pane":4}"#,
+            serde_json::json!({
+                "ev": "send", "ts": 2, "pane": 4, "seqBefore": 0,
+                "text": "fix the test", "bytes": 12, "answer": false,
+            }),
+            serde_json::json!({
+                "ev": "send", "ts": 3, "pane": 4, "seqBefore": 2,
+                "text": "\u{1b}", "bytes": 1, "answer": false,
+            })
+        ));
+        let worker = &workers(&events)[0];
+        assert_eq!(worker.task, None);
+        assert_eq!(worker.last_task.as_deref(), Some("\u{1b}"));
     }
 
     #[test]

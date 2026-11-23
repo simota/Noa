@@ -1368,8 +1368,13 @@ impl Board {
         }
         self.past = 0;
         self.selected = Some(pane);
-        if let View::Detail(_) = self.view {
+        if let View::Detail(open) = self.view
+            && open != pane
+        {
+            // Another pane opens on its screen, as with Enter (D18).
             self.view = View::Detail(pane);
+            self.result_shown = false;
+            self.result_scroll = 0;
         }
     }
 
@@ -1613,7 +1618,12 @@ impl Board {
                         self.result_scroll = (self.result_scroll + 1).min(self.result_reach.get());
                     }
                     Key::Char('k') | Key::Up if self.showing_result() => {
-                        self.result_scroll = self.result_scroll.saturating_sub(1);
+                        // From the end the last frame showed: a result
+                        // read again may be shorter than the kept scroll.
+                        self.result_scroll = self
+                            .result_scroll
+                            .min(self.result_reach.get())
+                            .saturating_sub(1);
                     }
                     Key::Char('j') | Key::Down => self.move_selection(1),
                     Key::Char('k') | Key::Up => self.move_selection(-1),
@@ -8057,7 +8067,7 @@ mod tests {
                     "result": result.to_string_lossy(), "retryOf": "7"}),
                 serde_json::json!({"ev": "send", "ts": 2, "pane": 2,
                     "text": journal::clip(&sent), "full": sent,
-                    "bytes": sent.len(), "seqBefore": 0}),
+                    "bytes": sent.len(), "raw": false, "seqBefore": 0}),
             ],
         );
         let mut board = insight_board(&dir);
@@ -8201,6 +8211,71 @@ mod tests {
         fresh.key(Key::Enter);
         fresh.key(Key::Char('r'));
         assert!(!fresh.result_shown);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Review finding: moving to another pane in the detail view (a digit,
+    // `n`, a listing) kept the result shown and its scroll.
+    #[test]
+    fn another_pane_in_the_detail_view_opens_on_its_screen() {
+        let dir = insight_dir("move");
+        spawn_and_send(&dir, "write the report");
+        let text: String = (1..=60).map(|n| format!("result line {n}\n")).collect();
+        std::fs::write(result_at(&dir), text).unwrap();
+        let mut board = insight_board(&dir);
+        let t0 = Instant::now();
+        board.refresh_files(t0);
+        board.select(2);
+        board.key(Key::Enter);
+        board.key(Key::Char('r'));
+        board.refresh_files(t0 + Duration::from_millis(100));
+        rendered(&board, 80, 30, t0);
+        board.key(Key::Char('j'));
+        assert!(board.result_shown);
+        assert_eq!(board.result_scroll, 1);
+
+        board.select(1);
+        assert_eq!(board.view, View::Detail(1));
+        assert!(!board.result_shown);
+        assert_eq!(board.result_scroll, 0);
+        // Selecting the pane already open keeps its result.
+        board.select(1);
+        board.view = View::Detail(2);
+        board.result_shown = true;
+        board.select(2);
+        assert!(board.result_shown);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Review finding: after a result got shorter, `k` did not move until the
+    // kept scroll came under the new end.
+    #[test]
+    fn k_scrolls_up_at_once_after_the_result_got_shorter() {
+        let dir = insight_dir("shorter");
+        spawn_and_send(&dir, "write the report");
+        let text: String = (1..=60).map(|n| format!("result line {n}\n")).collect();
+        std::fs::write(result_at(&dir), text).unwrap();
+        let mut board = insight_board(&dir);
+        let t0 = Instant::now();
+        board.refresh_files(t0);
+        board.select(2);
+        board.key(Key::Enter);
+        board.key(Key::Char('r'));
+        board.refresh_files(t0 + Duration::from_millis(100));
+        rendered(&board, 80, 30, t0);
+        for _ in 0..100 {
+            board.key(Key::Char('j'));
+        }
+        let long_reach = board.result_reach.get();
+
+        let text: String = (1..=30).map(|n| format!("result line {n}\n")).collect();
+        std::fs::write(result_at(&dir), text).unwrap();
+        board.refresh_files(t0 + Duration::from_secs(3));
+        rendered(&board, 80, 30, t0);
+        let reach = board.result_reach.get();
+        assert!(reach > 0 && reach < long_reach, "{reach} {long_reach}");
+        board.key(Key::Char('k'));
+        assert_eq!(board.result_scroll, reach - 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

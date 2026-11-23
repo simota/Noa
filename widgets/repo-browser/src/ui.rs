@@ -4273,4 +4273,118 @@ diff --git a/gone.rs b/gone.rs\ndeleted file mode 100644\nindex 1..0\n--- a/gone
         assert_eq!(relative_age(0, 60 * 86_400), "2か月前");
         assert_eq!(relative_age(0, 800 * 86_400), "2年前");
     }
+
+    /// A unified diff of about `bytes`, in hunks of 40 lines.
+    fn synthetic_diff(bytes: usize) -> String {
+        let mut diff = String::from(
+            "diff --git a/big.rs b/big.rs\nindex 1..2 100644\n--- a/big.rs\n+++ b/big.rs\n",
+        );
+        let mut line = 1;
+        while diff.len() < bytes {
+            diff.push_str(&format!("@@ -{line},30 +{line},30 @@ fn f{line}() {{\n"));
+            for i in 0..40 {
+                let body = format!("    let value_{i} = compute({line}, {i}); // context\n");
+                diff.push(match i % 4 {
+                    1 => '-',
+                    2 => '+',
+                    _ => ' ',
+                });
+                diff.push_str(&body);
+            }
+            line += 30;
+        }
+        diff
+    }
+
+    fn timed<T>(f: impl FnOnce() -> T) -> (T, f64, usize, usize) {
+        let t = std::time::Instant::now();
+        let (out, allocs, peak) = crate::heap::measure(f);
+        (out, t.elapsed().as_secs_f64() * 1000.0, allocs, peak)
+    }
+
+    fn report(name: &str, mut runs: Vec<(f64, usize, usize)>) {
+        runs.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let (ms, allocs, peak) = runs[runs.len() / 2];
+        println!(
+            "bench_ui {name}: median {ms:.2} ms (min {:.2}, max {:.2}), allocations {allocs}, peak heap {peak} B ({} runs)",
+            runs[0].0,
+            runs[runs.len() - 1].0,
+            runs.len()
+        );
+    }
+
+    /// Times what the UI thread does with a large diff: building its lines,
+    /// a periodic snapshot that changes nothing, and moving the selection
+    /// between two files. `REPO_BROWSER_BENCH_RUNS` runs each (default 10).
+    #[test]
+    #[ignore = "benchmark: cargo test -- --ignored --nocapture bench_ui"]
+    fn bench_ui() {
+        // At least one run, so there is a median to report.
+        let runs: usize = std::env::var("REPO_BROWSER_BENCH_RUNS")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(10)
+            .max(1);
+        let big = synthetic_diff(crate::git::DIFF_CAP);
+        let lines = big.lines().count();
+        report(
+            &format!("gutter_and_lines ({} B, {lines} lines)", big.len()),
+            (0..runs)
+                .map(|_| {
+                    let (n, ms, a, p) = timed(|| {
+                        let gutter = Gutter::of(&big).unwrap();
+                        big.lines()
+                            .zip(&gutter.numbers)
+                            .map(|(line, &numbers)| gutter.line(line, numbers))
+                            .count()
+                    });
+                    assert_eq!(n, lines);
+                    (ms, a, p)
+                })
+                .collect(),
+        );
+
+        let mut h = LiveHarness::new();
+        let snap = || snapshot(DiffMode::Unstaged, Some(("a.rs", big.as_str())));
+        report(
+            "first_large_snapshot",
+            (0..runs)
+                .map(|i| {
+                    // Alternate the text so each delivery shows a new diff.
+                    let text = if i % 2 == 0 {
+                        big.clone()
+                    } else {
+                        format!("{big} ")
+                    };
+                    let s = snapshot(DiffMode::Unstaged, Some(("a.rs", text.as_str())));
+                    let (_, ms, a, p) = timed(|| h.deliver(s));
+                    (ms, a, p)
+                })
+                .collect(),
+        );
+        h.deliver(snap());
+        report(
+            "unchanged_snapshot",
+            (0..runs)
+                .map(|_| {
+                    let s = snap();
+                    let (_, ms, a, p) = timed(|| h.deliver(s));
+                    (ms, a, p)
+                })
+                .collect(),
+        );
+        report(
+            "select_other_file_and_back",
+            (0..runs)
+                .map(|_| {
+                    let (_, ms, a, p) = timed(|| {
+                        h.select_file(1);
+                        h.select_file(0);
+                    });
+                    (ms, a, p)
+                })
+                .collect(),
+        );
+        assert_eq!(h.diff_lines().len(), lines);
+    }
 }

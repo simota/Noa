@@ -5,6 +5,7 @@
 //! `UserEvent::IpcAction` (DEC-C).
 
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use super::applescript::{ScriptSpawn, usable_cwd};
 use super::state::{IpcSpawn, Orchestration};
@@ -295,7 +296,7 @@ impl App {
                 ));
                 terminals.insert(key, surface.terminal.clone());
             }
-            let previous = std::mem::replace(&mut shared.panels, panels);
+            let previous = std::mem::replace(&mut shared.panels, Arc::new(panels));
             shared.terminals = terminals;
             let stale_attach_keys = stale_registry_keys(shared.attach_panes.keys(), &live_keys);
             for key in stale_attach_keys {
@@ -331,7 +332,7 @@ impl App {
             let shared = &mut *guard;
             let registry = &shared.registry;
             state_delta(
-                previous_panels,
+                &previous_panels,
                 &shared.panels,
                 &mut shared.unlisted_live,
                 |id| registry.resolve(id).is_some(),
@@ -1116,7 +1117,7 @@ impl StateDelta {
 /// ascending id order after the others, on the first diff where it is no
 /// longer `live`, and dropped from the set if it is listed again.
 fn state_delta(
-    previous: Vec<Panel>,
+    previous: &[Panel],
     current: &[Panel],
     unlisted_live: &mut HashSet<u64>,
     live: impl Fn(u64) -> bool,
@@ -1145,8 +1146,8 @@ fn state_delta(
     closed_unlisted.sort_unstable();
     unlisted_live.retain(|&id| live(id));
     removed.extend(closed_unlisted);
-    let previous_by_id: HashMap<u64, Panel> = previous
-        .into_iter()
+    let previous_by_id: HashMap<u64, &Panel> = previous
+        .iter()
         .map(|panel| (panel.pane_id.0, panel))
         .collect();
     let changed = current
@@ -1756,7 +1757,7 @@ mod diff_tests {
             panel(2, "running", &["a"]),
             panel(5, "permission", &[]),
         ];
-        let delta = state_delta(previous.clone(), &current, &mut HashSet::new(), closed);
+        let delta = state_delta(&previous.clone(), &current, &mut HashSet::new(), closed);
         assert_eq!(ids(&delta.changed), [7, 3, 5]);
         assert_eq!(delta.changed[1].panel, current[2]);
         // An added panel carries every field; a changed one only what moved.
@@ -1767,18 +1768,18 @@ mod diff_tests {
         );
         assert_eq!(delta.changed[2].fields, FieldMask::ALL);
         assert_eq!(delta.removed, [9]);
-        assert!(state_delta(current.clone(), &current, &mut HashSet::new(), closed).is_empty());
-        let added = state_delta(Vec::new(), &current, &mut HashSet::new(), closed);
+        assert!(state_delta(&current.clone(), &current, &mut HashSet::new(), closed).is_empty());
+        let added = state_delta(&Vec::new(), &current, &mut HashSet::new(), closed);
         assert_eq!(ids(&added.changed), [7, 4, 3, 2, 5]);
         assert!(added.changed.iter().all(|c| c.fields == FieldMask::ALL));
         assert!(added.removed.is_empty());
-        let emptied = state_delta(previous, &[], &mut HashSet::new(), closed);
+        let emptied = state_delta(&previous, &[], &mut HashSet::new(), closed);
         assert!(emptied.changed.is_empty());
         assert_eq!(emptied.removed, [2, 3, 4, 9]);
         // A pane listed twice is compared against the last of its ids.
         let twice = vec![panel(2, "running", &["a"]), panel(2, "finished", &[])];
         let delta = state_delta(
-            twice,
+            &twice,
             &[panel(2, "running", &["a"])],
             &mut HashSet::new(),
             closed,
@@ -1799,7 +1800,7 @@ mod diff_tests {
         ];
         let current = vec![panel(2, "running", &[])];
         // 3 left the listing with its Surface alive; 4 closed.
-        let delta = state_delta(previous, &current, &mut HashSet::new(), |id| id == 3);
+        let delta = state_delta(&previous, &current, &mut HashSet::new(), |id| id == 3);
         assert!(delta.changed.is_empty());
         assert_eq!(delta.removed, [4]);
         assert!(!delta.is_empty(), "a removal-only delta is still sent");
@@ -1810,7 +1811,7 @@ mod diff_tests {
         let mut unlisted = HashSet::new();
         // Sync 1: 3 leaves the listing while its Surface lives on.
         let delta = state_delta(
-            vec![panel(2, "running", &[]), panel(3, "running", &[])],
+            &[panel(2, "running", &[]), panel(3, "running", &[])],
             &[panel(2, "running", &[])],
             &mut unlisted,
             |id| id == 3,
@@ -1818,7 +1819,7 @@ mod diff_tests {
         assert!(delta.removed.is_empty());
         // Sync 2: still alive and unlisted: nothing to report yet.
         let delta = state_delta(
-            vec![panel(2, "running", &[])],
+            &[panel(2, "running", &[])],
             &[panel(2, "running", &[])],
             &mut unlisted,
             |id| id == 3,
@@ -1826,7 +1827,7 @@ mod diff_tests {
         assert!(delta.is_empty());
         // Sync 3: 3 closes while unlisted. Neither listing holds it.
         let delta = state_delta(
-            vec![panel(2, "running", &[])],
+            &[panel(2, "running", &[])],
             &[panel(2, "running", &[])],
             &mut unlisted,
             closed,
@@ -1838,9 +1839,9 @@ mod diff_tests {
     #[test]
     fn an_unlisted_pane_listed_again_is_an_addition_and_not_removed_later() {
         let mut unlisted = HashSet::new();
-        state_delta(vec![panel(3, "running", &[])], &[], &mut unlisted, |_| true);
+        state_delta(&[panel(3, "running", &[])], &[], &mut unlisted, |_| true);
         let back = state_delta(
-            Vec::new(),
+            &Vec::new(),
             &[panel(3, "running", &[])],
             &mut unlisted,
             |_| true,
@@ -1848,7 +1849,7 @@ mod diff_tests {
         assert_eq!(ids(&back.changed), [3]);
         assert!(unlisted.is_empty());
         // Its later close is a plain previous-listing removal, reported once.
-        let gone = state_delta(vec![panel(3, "running", &[])], &[], &mut unlisted, closed);
+        let gone = state_delta(&[panel(3, "running", &[])], &[], &mut unlisted, closed);
         assert_eq!(gone.removed, [3]);
     }
 
@@ -1861,7 +1862,7 @@ mod diff_tests {
             panel(6, "running", &[]),
         ];
         let delta = state_delta(
-            previous,
+            &previous,
             &[panel(2, "running", &[])],
             &mut HashSet::new(),
             closed,
@@ -1916,7 +1917,7 @@ mod diff_perf {
         };
         run("copy then diff (before)", &mut |panels| {
             let previous = std::mem::replace(&mut *shared.lock(), panels.clone());
-            state_delta(previous, &panels, &mut HashSet::new(), |_| true)
+            state_delta(&previous, &panels, &mut HashSet::new(), |_| true)
                 .changed
                 .len()
         });
@@ -1934,7 +1935,7 @@ mod diff_perf {
             }
             let delta = {
                 let shared = shared.lock();
-                state_delta(previous, &shared, &mut HashSet::new(), |_| true)
+                state_delta(&previous, &shared, &mut HashSet::new(), |_| true)
             };
             delta.changed.len()
         });

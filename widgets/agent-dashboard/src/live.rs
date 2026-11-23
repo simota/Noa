@@ -626,7 +626,7 @@ impl Feed {
         let fleet = self.tracker.fleet(unix_now(), Some(&tails));
         let now = self.now();
         let due = sent.as_ref().is_none_or(|(last, at)| {
-            !last.same_structure(&fleet) || now.saturating_duration_since(*at) >= PULSE_EVERY
+            now.saturating_duration_since(*at) >= PULSE_EVERY || !last.same_structure(&fleet)
         });
         if !due {
             return Ok(());
@@ -1362,6 +1362,8 @@ fn worker_of(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    mod performance;
+
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -2274,6 +2276,9 @@ pub(crate) mod tests {
     /// `waits` times for a notification. Its answers take no time on the
     /// test's clock unless a test says how long they take.
     struct ScriptedNoa {
+        lists: usize,
+        subscriptions: usize,
+        push_panel: Option<Panel>,
         instance: String,
         panels: Vec<Panel>,
         screens: HashMap<u64, String>,
@@ -2305,6 +2310,9 @@ pub(crate) mod tests {
         fn showing(instance: &str, screen: &str, clock: &TestClock) -> Self {
             let orchestrator = panel(serde_json::json!({ "paneId": "1", "label": "release" }));
             ScriptedNoa {
+                lists: 0,
+                subscriptions: 0,
+                push_panel: None,
                 instance: instance.to_owned(),
                 panels: vec![orchestrator, running_agent("2", "1", "a")],
                 screens: HashMap::from([(2, screen.to_owned())]),
@@ -2336,10 +2344,12 @@ pub(crate) mod tests {
         }
 
         fn list_panels(&mut self) -> Result<Vec<Panel>, ClientError> {
+            self.lists += 1;
             Ok(self.panels.clone())
         }
 
         fn subscribe(&mut self) -> Result<(), ClientError> {
+            self.subscriptions += 1;
             self.clock.advance(self.subscribe_takes);
             Ok(())
         }
@@ -2353,7 +2363,14 @@ pub(crate) mod tests {
             if let Some(on_wait) = &mut self.on_wait {
                 on_wait();
             }
-            Ok(None)
+            Ok(self
+                .push_panel
+                .clone()
+                .map(|panel| Notification::StateChanged {
+                    panels: vec![panel],
+                    removed_pane_ids: vec![],
+                    dropped: false,
+                }))
         }
 
         fn focus_pane(&mut self, pane: u64) -> Result<(), ClientError> {
@@ -2621,6 +2638,31 @@ pub(crate) mod tests {
             "3's tail on its card: {:?}",
             shown()
         );
+    }
+
+    #[test]
+    fn structural_changes_publish_between_pulses_and_restart_the_deadline() {
+        let clock = TestClock::new();
+        let (mut feed, snapshots, _commands) = held_feed(&clock);
+        let mut server = ScriptedNoa::showing("instance", "building", &clock);
+        feed.tracker.replace(server.panels.clone(), unix_now());
+        let mut sent = None;
+        let mut tick = |feed: &mut Feed, server: &ScriptedNoa| {
+            assert!(feed.send_if_due(server, &mut sent).is_ok());
+            snapshots.try_recv().ok()
+        };
+        assert!(tick(&mut feed, &server).is_some());
+        clock.advance(Duration::from_secs(2));
+        server.panels[1].label = Some("renamed".into());
+        feed.tracker
+            .merge(vec![server.panels[1].clone()], unix_now());
+        let update = tick(&mut feed, &server).unwrap();
+        assert_eq!(update.fleet.worker(2).unwrap().label, "renamed");
+        clock.advance(PULSE_EVERY - Duration::from_millis(1));
+        assert!(tick(&mut feed, &server).is_none());
+        clock.advance(Duration::from_millis(1));
+        assert!(tick(&mut feed, &server).is_some());
+        assert!(tick(&mut feed, &server).is_none());
     }
 
     #[test]

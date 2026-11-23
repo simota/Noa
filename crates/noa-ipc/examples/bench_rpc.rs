@@ -34,13 +34,14 @@ const SCREEN_COLS: usize = 120;
 const SCREEN_ROWS: usize = 40;
 
 struct Mock {
-    panels: Vec<Panel>,
+    /// Shared like the app's published snapshot.
+    panels: Arc<Vec<Panel>>,
     screen: String,
 }
 
 impl IpcBackend for Mock {
-    fn list_panels(&self) -> Vec<Panel> {
-        self.panels.clone()
+    fn list_panels(&self) -> Arc<Vec<Panel>> {
+        Arc::clone(&self.panels)
     }
 
     fn get_text(&self, pane: PaneRef, _: TextSource, _: usize) -> Result<TextResult, IpcError> {
@@ -147,7 +148,7 @@ fn start(panels: usize) -> noa_ipc::ServerHandle {
     list[0].parent_pane_id = None;
     list.extend((2..=panels as u64).map(worker));
     let backend = Arc::new(Mock {
-        panels: list,
+        panels: Arc::new(list),
         screen: screen(),
     });
     Server::start(

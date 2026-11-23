@@ -22,7 +22,7 @@ pub enum Link {
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     pub link: Link,
-    pub session: Option<Session>,
+    pub session: Option<Arc<Session>>,
     /// Root directory holding `entries/<part>/`, `r<N>/artifacts/`, and `compare.html`.
     pub artifact_root: Option<PathBuf>,
 }
@@ -193,7 +193,7 @@ fn forward_updates(
                 session: next,
                 artifact_root: root,
             } => {
-                session = Some(*next);
+                session = Some(next);
                 artifact_root = Some(root);
                 snapshots
                     .send(Snapshot {

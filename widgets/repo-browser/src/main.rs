@@ -3,6 +3,72 @@ mod live;
 mod model;
 mod ui;
 
+/// Heap use of test builds, for the benchmarks' allocation figures. The
+/// counts are process-wide: read them with the benchmark running alone.
+#[cfg(test)]
+pub(crate) mod heap {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+
+    struct Counting;
+
+    static LIVE: AtomicUsize = AtomicUsize::new(0);
+    static PEAK: AtomicUsize = AtomicUsize::new(0);
+    static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+
+    fn grew(by: usize) {
+        let live = LIVE.fetch_add(by, Relaxed) + by;
+        PEAK.fetch_max(live, Relaxed);
+    }
+
+    // SAFETY: every call is passed on to `System` unchanged.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let ptr = unsafe { System.alloc(layout) };
+            if !ptr.is_null() {
+                ALLOCS.fetch_add(1, Relaxed);
+                grew(layout.size());
+            }
+            ptr
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) };
+            LIVE.fetch_sub(layout.size(), Relaxed);
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let new = unsafe { System.realloc(ptr, layout, new_size) };
+            if !new.is_null() {
+                ALLOCS.fetch_add(1, Relaxed);
+                if new_size >= layout.size() {
+                    grew(new_size - layout.size());
+                } else {
+                    LIVE.fetch_sub(layout.size() - new_size, Relaxed);
+                }
+            }
+            new
+        }
+    }
+
+    #[global_allocator]
+    static COUNTING: Counting = Counting;
+
+    /// `f()` with the allocations it made and its peak heap use above what
+    /// was live when it started, in bytes.
+    pub fn measure<T>(f: impl FnOnce() -> T) -> (T, usize, usize) {
+        let start = LIVE.load(Relaxed);
+        PEAK.store(start, Relaxed);
+        let allocs = ALLOCS.load(Relaxed);
+        let out = f();
+        (
+            out,
+            ALLOCS.load(Relaxed) - allocs,
+            PEAK.load(Relaxed).saturating_sub(start),
+        )
+    }
+}
+
 use std::path::PathBuf;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};

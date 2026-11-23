@@ -27,7 +27,7 @@ pub enum Link {
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     pub link: Link,
-    pub session: Option<Session>,
+    pub session: Option<Arc<Session>>,
 }
 
 /// What the user asked for. Each maps onto one engine input (named in the
@@ -214,7 +214,7 @@ fn forward_updates(
     for update in &handle.updates {
         let sent = match update {
             Update::Session(next) => {
-                session = Some(*next);
+                session = Some(next);
                 snapshots
                     .send(Snapshot {
                         link: link.clone(),

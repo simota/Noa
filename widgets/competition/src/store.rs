@@ -212,6 +212,19 @@ pub fn write_viewer(base_dir: &Path, session: &Session) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Like [`write_viewer`], reusing cached artifact previews across refreshes.
+pub fn write_viewer_cached(
+    base_dir: &Path,
+    session: &Session,
+    cache: &mut crate::model::viewer::ViewerCache,
+) -> io::Result<PathBuf> {
+    fs::create_dir_all(base_dir)?;
+    let path = viewer_path(base_dir);
+    let html = crate::model::viewer::render_html_cached(session, base_dir, cache);
+    fs::write(&path, html)?;
+    Ok(path)
+}
+
 #[derive(Debug)]
 pub enum StoreError {
     Io(io::Error),

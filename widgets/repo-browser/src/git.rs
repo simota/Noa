@@ -95,24 +95,28 @@ fn canonical_or_raw(path: &Path) -> String {
         .into_owned()
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread called [`inspect_worktree`], for tests.
+    pub(crate) static INSPECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub fn inspect_worktree(
     cwd: &str,
     mode: DiffMode,
     bases: &mut BaseRefs,
 ) -> Option<WorktreeGitInfo> {
+    #[cfg(test)]
+    INSPECTIONS.with(|n| n.set(n.get() + 1));
     let dir = Path::new(cwd);
     if !dir.is_dir() {
         return None;
     }
-    let toplevel = run_git(dir, &["rev-parse", "--show-toplevel"])?
-        .trim()
-        .to_owned();
+    let (toplevel, common_raw) = top_and_common_dir(dir)?;
     if toplevel.is_empty() {
         return None;
     }
-    let common_raw = run_git(dir, &["rev-parse", "--git-common-dir"])
-        .map(|s| s.trim().to_owned())
-        .unwrap_or_else(|| ".git".into());
+    let common_raw = common_raw.unwrap_or_else(|| ".git".into());
     // A relative `--git-common-dir` is relative to the directory git ran in,
     // not to the worktree top level.
     let common_path = if Path::new(&common_raw).is_absolute() {
@@ -172,33 +176,24 @@ pub fn inspect_worktree(
         .then(|| bases.get(&repo_root, top))
         .flatten()
         .map(|base| format!("{}...HEAD", base.name));
-    let numstat_args: Vec<&str> = match mode {
-        DiffMode::Unstaged => vec!["diff", "--numstat", "-z"],
-        DiffMode::Staged => vec!["diff", "--cached", "--numstat", "-z"],
-        DiffMode::VsMain => match &range {
-            Some(range) => vec!["diff", "--numstat", "-z", range.as_str()],
-            None => Vec::new(),
-        },
-    };
     let note = (mode == DiffMode::VsMain && range.is_none())
         .then(|| "比較元ブランチ (main / master / origin/HEAD) が見つかりません".to_owned());
-    let numstat_out = if numstat_args.is_empty() {
-        String::new()
-    } else {
-        run_git(top, &numstat_args).unwrap_or_default()
+    let numstat = |args: &[&str]| parse_numstat(run_git(top, args).unwrap_or_default().split('\0'));
+    let (statuses, mut stats) = match mode {
+        DiffMode::Unstaged => (HashMap::new(), numstat(&["diff", "--numstat", "-z"])),
+        DiffMode::Staged => (
+            HashMap::new(),
+            numstat(&["diff", "--cached", "--numstat", "-z"]),
+        ),
+        DiffMode::VsMain => match &range {
+            Some(range) => vs_main_changes(top, range),
+            None => (HashMap::new(), HashMap::new()),
+        },
     };
-    let mut stats = parse_numstat(&numstat_out);
 
     let mut files = Vec::new();
     match mode {
         DiffMode::VsMain => {
-            let statuses = match &range {
-                Some(range) => parse_name_status(
-                    &run_git(top, &["diff", "--name-status", "-z", range.as_str()])
-                        .unwrap_or_default(),
-                ),
-                None => HashMap::new(),
-            };
             for (path, (added, deleted)) in stats.drain() {
                 let status = statuses.get(&path).map_or("M", String::as_str).to_owned();
                 files.push(ChangedFile {
@@ -254,6 +249,37 @@ pub fn inspect_worktree(
         files,
         note,
     })
+}
+
+/// `git rev-parse --show-toplevel` and `--git-common-dir` (`None` if that
+/// one fails) of `dir`, trimmed; `None` outside a work tree.
+fn top_and_common_dir(dir: &Path) -> Option<(String, Option<String>)> {
+    top_and_common_dir_with(|args| run_git(dir, args))
+}
+
+/// [`top_and_common_dir`] running git through `git`. One git asks for both;
+/// whenever its answer is not exactly an absolute top level and a common
+/// dir, one per line (it failed, or a path holds a line break), the two are
+/// asked one at a time, so the result is always what those two calls give.
+fn top_and_common_dir_with(
+    git: impl Fn(&[&str]) -> Option<String>,
+) -> Option<(String, Option<String>)> {
+    if let Some(both) = git(&["rev-parse", "--show-toplevel", "--git-common-dir"]) {
+        let lines: Vec<&str> = both
+            .strip_suffix('\n')
+            .unwrap_or(&both)
+            .split('\n')
+            .collect();
+        if let [top, common] = lines[..]
+            && Path::new(top.trim()).is_absolute()
+            && !common.trim().is_empty()
+        {
+            return Some((top.trim().to_owned(), Some(common.trim().to_owned())));
+        }
+    }
+    let top = git(&["rev-parse", "--show-toplevel"])?.trim().to_owned();
+    let common = git(&["rev-parse", "--git-common-dir"]).map(|s| s.trim().to_owned());
+    Some((top, common))
 }
 
 /// `<base>...HEAD` for the "vs main" mode.
@@ -418,6 +444,12 @@ impl MergePredictions {
             },
         );
         conflicts
+    }
+
+    /// How many times `git merge-tree` ran.
+    #[cfg(test)]
+    pub(crate) fn runs(&self) -> usize {
+        self.runs
     }
 
     /// Forgets the worktrees `keep` rejects (gone from the browser).
@@ -738,8 +770,41 @@ fn parse_porcelain_v2(text: &str) -> PorcelainStatus {
     }
 }
 
-/// Parses `git diff --numstat -z`. A rename is `added\tdeleted\t` followed by
-/// the old and new paths as separate entries; it is keyed by the new path.
+/// Each file's status letter and line counts between `range`'s ends, from
+/// one `git diff --raw --numstat -z`. When that fails or its records do not
+/// pair up, the two gits main runs decide instead, `--numstat` for the
+/// counts and `--name-status` for the letters, each failure read as no
+/// output as there.
+fn vs_main_changes(
+    top: &Path,
+    range: &str,
+) -> (HashMap<String, String>, HashMap<String, (usize, usize)>) {
+    vs_main_changes_with(|args| run_git(top, args), range)
+}
+
+/// [`vs_main_changes`] running git through `git`.
+fn vs_main_changes_with(
+    git: impl Fn(&[&str]) -> Option<String>,
+    range: &str,
+) -> (HashMap<String, String>, HashMap<String, (usize, usize)>) {
+    if let Some(out) = git(&["diff", "--raw", "--numstat", "-z", range]) {
+        let (statuses, stats) = parse_raw_numstat(&out);
+        let paired =
+            statuses.len() == stats.len() && stats.keys().all(|p| statuses.contains_key(p));
+        if paired && (out.is_empty() || !stats.is_empty()) {
+            return (statuses, stats);
+        }
+    }
+    let stats = parse_numstat(
+        git(&["diff", "--numstat", "-z", range])
+            .unwrap_or_default()
+            .split('\0'),
+    );
+    let statuses =
+        parse_name_status(&git(&["diff", "--name-status", "-z", range]).unwrap_or_default());
+    (statuses, stats)
+}
+
 /// `git diff --name-status -z`: each file's status letter (`A`, `D`, `M`,
 /// `R`, …) by its new path; a rename or copy carries old then new path.
 fn parse_name_status(text: &str) -> HashMap<String, String> {
@@ -759,9 +824,35 @@ fn parse_name_status(text: &str) -> HashMap<String, String> {
     map
 }
 
-fn parse_numstat(text: &str) -> HashMap<String, (usize, usize)> {
+/// Parses `git diff [--raw] --numstat -z`: each file's status letter (`A`,
+/// `D`, `M`, `R`, …) from the `--raw` records, which come first, and its
+/// added and deleted line counts from the numstat ones, both by new path.
+fn parse_raw_numstat(text: &str) -> (HashMap<String, String>, HashMap<String, (usize, usize)>) {
+    let mut statuses = HashMap::new();
+    let mut entries = text.split('\0').peekable();
+    // `:<modes> <oids> <status>` then the path, or the old and the new path
+    // of a rename or copy, each its own entry.
+    while let Some(raw) = entries.next_if(|entry| entry.starts_with(':')) {
+        let Some(letter) = raw.rsplit(' ').next().and_then(|code| code.chars().next()) else {
+            continue;
+        };
+        if matches!(letter, 'R' | 'C') {
+            entries.next();
+        }
+        if let Some(path) = entries.next() {
+            statuses.insert(path.to_owned(), letter.to_string());
+        }
+    }
+    (statuses, parse_numstat(entries))
+}
+
+/// Parses `git diff --numstat -z` entries. A rename is `added\tdeleted\t`
+/// followed by the old and new paths as separate entries; it is keyed by
+/// the new path.
+fn parse_numstat<'a>(
+    mut entries: impl Iterator<Item = &'a str>,
+) -> HashMap<String, (usize, usize)> {
     let mut map = HashMap::new();
-    let mut entries = text.split('\0');
     while let Some(entry) = entries.next() {
         let mut parts = entry.splitn(3, '\t');
         let (Some(a), Some(d), Some(p)) = (parts.next(), parts.next(), parts.next()) else {
@@ -807,6 +898,100 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         assert_eq!(parsed.files[0], ("src/main.rs".into(), ('.', 'M')));
         assert_eq!(parsed.files[1], ("src/new.rs".into(), ('A', '.')));
         assert_eq!(parsed.files[2], ("notes.txt".into(), ('?', '?')));
+    }
+
+    #[test]
+    fn vs_main_falls_back_to_numstat_and_name_status() {
+        use std::cell::RefCell;
+        const RAW: &str = "diff --raw --numstat -z b...HEAD";
+        const NUMSTAT: &str = "diff --numstat -z b...HEAD";
+        const NAMES: &str = "diff --name-status -z b...HEAD";
+        let run = |answers: &[(&str, &str)]| {
+            let asked = RefCell::new(Vec::new());
+            let (statuses, stats) = vs_main_changes_with(
+                |args| {
+                    let args = args.join(" ");
+                    let answer = answers
+                        .iter()
+                        .find(|(a, _)| *a == args)
+                        .map(|(_, out)| (*out).to_owned());
+                    asked.borrow_mut().push(args);
+                    answer
+                },
+                "b...HEAD",
+            );
+            let mut statuses: Vec<_> = statuses.into_iter().collect();
+            statuses.sort();
+            let mut stats: Vec<_> = stats.into_iter().collect();
+            stats.sort();
+            (statuses, stats, asked.into_inner())
+        };
+        let s = |p: &str, l: &str| (p.to_owned(), l.to_owned());
+        let n = |p: &str, a, d| (p.to_owned(), (a, d));
+
+        // The combined git answers: nothing else runs.
+        let raw = ":000000 100644 0 1 A\0a\0:100644 000000 1 0 D\0d\03\t0\ta\00\t2\td\0";
+        let (statuses, stats, asked) = run(&[(RAW, raw)]);
+        assert_eq!(statuses, [s("a", "A"), s("d", "D")]);
+        assert_eq!(stats, [n("a", 3, 0), n("d", 0, 2)]);
+        assert_eq!(asked, [RAW]);
+        // An empty diff is an answer too.
+        assert_eq!(run(&[(RAW, "")]).2, [RAW]);
+        // It fails: main's two gits decide, a failed one reading as empty.
+        let numstat = "3\t0\ta\00\t2\td\0";
+        let (statuses, stats, asked) = run(&[(NUMSTAT, numstat), (NAMES, "A\0a\0D\0d\0")]);
+        assert_eq!(statuses, [s("a", "A"), s("d", "D")]);
+        assert_eq!(stats, [n("a", 3, 0), n("d", 0, 2)]);
+        assert_eq!(asked, [RAW, NUMSTAT, NAMES]);
+        let (statuses, stats, _) = run(&[(NUMSTAT, numstat)]);
+        assert!(statuses.is_empty(), "every file then shows as M");
+        assert_eq!(stats, [n("a", 3, 0), n("d", 0, 2)]);
+        let (_, stats, _) = run(&[(NAMES, "A\0a\0")]);
+        assert!(stats.is_empty());
+        // Records that do not pair up, or an answer with no counts, are
+        // asked again the old way.
+        for odd in [
+            ":000000 100644 0 1 A\0a\03\t0\ta\00\t2\td\0",
+            "3\t0\ta\0",
+            "junk",
+        ] {
+            let (_, stats, asked) = run(&[(RAW, odd), (NUMSTAT, numstat), (NAMES, "")]);
+            assert_eq!(stats, [n("a", 3, 0), n("d", 0, 2)], "{odd:?}");
+            assert_eq!(asked, [RAW, NUMSTAT, NAMES], "{odd:?}");
+        }
+    }
+
+    #[test]
+    fn raw_records_give_the_status_and_numstat_the_counts() {
+        let sample = ":100644 100644 422c2b7 7be73ce M\0a\0\
+:000000 100644 0000000 8ba3a16 A\0:colon\0\
+:100644 100644 587be6b 587be6b R100\0old\0new\0\
+:100644 100644 587be6b 587be6b C075\0src\0copy\0\
+2\t1\ta\0-\t-\t:colon\00\t0\t\0old\0new\03\t0\t\0src\0copy\0";
+        let (statuses, stats) = parse_raw_numstat(sample);
+        let mut statuses: Vec<_> = statuses.into_iter().collect();
+        statuses.sort();
+        let s = |a: &str, b: &str| (a.to_owned(), b.to_owned());
+        assert_eq!(
+            statuses,
+            vec![s(":colon", "A"), s("a", "M"), s("copy", "C"), s("new", "R")]
+        );
+        let mut stats: Vec<_> = stats.into_iter().collect();
+        stats.sort();
+        let n = |p: &str, a, d| (p.to_owned(), (a, d));
+        assert_eq!(
+            stats,
+            vec![
+                n(":colon", 0, 0),
+                n("a", 2, 1),
+                n("copy", 3, 0),
+                n("new", 0, 0)
+            ]
+        );
+        // Plain numstat has no raw records.
+        let (statuses, stats) = parse_raw_numstat("1\t2\tx\0");
+        assert!(statuses.is_empty());
+        assert_eq!(stats.get("x"), Some(&(1, 2)));
     }
 
     // ── Regression tests against real temporary repositories ─────────────────
@@ -994,6 +1179,111 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         assert_eq!(paths, vec!["old.rs", "日本語.txt"]);
         let diff = file_diff(cwd(&repo), "日本語.txt", DiffMode::Unstaged);
         assert!(diff.contains("+こんにちは"), "{diff}");
+    }
+
+    #[test]
+    fn a_directory_outside_any_repository_is_not_a_worktree() {
+        let dir = scratch_dir("not-a-repo");
+        let mut bases = BaseRefs::default();
+        assert!(inspect_worktree(cwd(&dir), DiffMode::Unstaged, &mut bases).is_none());
+        let gone = dir.0.join("missing");
+        assert!(inspect_worktree(gone.to_str().unwrap(), DiffMode::Unstaged, &mut bases).is_none());
+        // A bare repository has no work tree to inspect.
+        let seed = temp_repo("bare-seed", "main");
+        let bare = dir.0.join("r.git");
+        git(
+            &dir.0,
+            &["clone", "-q", "--bare", cwd(&seed), bare.to_str().unwrap()],
+        );
+        assert!(inspect_worktree(bare.to_str().unwrap(), DiffMode::Unstaged, &mut bases).is_none());
+    }
+
+    #[test]
+    fn worktree_info_names_the_repository_and_canonical_roots() {
+        let repo = temp_repo("names", "main");
+        let _cleanup = TempRepo(PathBuf::from(format!("{}-wt", repo.0.display())));
+        let foo = add_worktree(&repo, "foo", "orch/foo");
+        std::fs::create_dir_all(foo.join("a b")).unwrap();
+        let info = inspect_worktree(
+            foo.join("a b").to_str().unwrap(),
+            DiffMode::Unstaged,
+            &mut BaseRefs::default(),
+        )
+        .unwrap();
+        assert_eq!(info.repo_root, canonical_or_raw(&repo.0));
+        assert_eq!(
+            info.repo_name,
+            repo.0.file_name().unwrap().to_string_lossy()
+        );
+        assert_eq!(info.worktree_root, canonical_or_raw(&foo));
+        assert_eq!(info.branch, "orch/foo");
+    }
+
+    #[test]
+    fn top_and_common_dir_falls_back_to_one_call_each() {
+        use std::cell::RefCell;
+        const BOTH: &str = "rev-parse --show-toplevel --git-common-dir";
+        const TOP: &str = "rev-parse --show-toplevel";
+        const COMMON: &str = "rev-parse --git-common-dir";
+        // A fake git answering each argument list from `answers` (a missing
+        // one fails), recording what was asked.
+        let run = |answers: &[(&str, &str)]| {
+            let asked = RefCell::new(Vec::new());
+            let result = top_and_common_dir_with(|args| {
+                let args = args.join(" ");
+                let answer = answers
+                    .iter()
+                    .find(|(a, _)| *a == args)
+                    .map(|(_, out)| (*out).to_owned());
+                asked.borrow_mut().push(args);
+                answer
+            });
+            (result, asked.into_inner())
+        };
+        let some =
+            |top: &str, common: Option<&str>| Some((top.to_owned(), common.map(str::to_owned)));
+
+        // The combined call answers: nothing else runs.
+        let (result, asked) = run(&[(BOTH, "/w\n/r/.git\n")]);
+        assert_eq!(result, some("/w", Some("/r/.git")));
+        assert_eq!(asked, [BOTH]);
+        // It fails: the two calls decide, each failure as main treats it.
+        let (result, asked) = run(&[(TOP, "/w\n"), (COMMON, ".git\n")]);
+        assert_eq!(result, some("/w", Some(".git")));
+        assert_eq!(asked, [BOTH, TOP, COMMON]);
+        assert_eq!(run(&[(TOP, "/w\n")]).0, some("/w", None));
+        assert_eq!(run(&[(COMMON, ".git\n")]).0, None);
+        // Unexpected answers (not two lines, no absolute top level, an empty
+        // common dir) are asked again one at a time.
+        for odd in ["/a\nb\n/r/.git\n", "x\n/r/.git\n", "/w\n\n", "/w\n"] {
+            let (result, asked) = run(&[(BOTH, odd), (TOP, "/w\n"), (COMMON, "/r/.git\n")]);
+            assert_eq!(result, some("/w", Some("/r/.git")), "{odd:?}");
+            assert_eq!(asked, [BOTH, TOP, COMMON], "{odd:?}");
+        }
+    }
+
+    #[test]
+    fn a_worktree_whose_path_holds_a_line_break_is_inspected() {
+        let root = scratch_dir("newline");
+        let seed = temp_repo("newline-seed", "main");
+        let odd = root.0.join("a\nb ");
+        git(&root.0, &["clone", "-q", cwd(&seed), odd.to_str().unwrap()]);
+        let info = inspect_worktree(
+            odd.to_str().unwrap(),
+            DiffMode::Unstaged,
+            &mut BaseRefs::default(),
+        )
+        .unwrap();
+        // `git rev-parse` output is trimmed, the top level's trailing space
+        // with it, so the status cannot run there and lists nothing.
+        assert_eq!(
+            info.worktree_root,
+            format!("{}/a\nb", canonical_or_raw(&root.0))
+        );
+        assert_eq!(info.repo_name, "a\nb ");
+        assert_eq!(info.repo_root, canonical_or_raw(&odd));
+        assert_eq!(info.branch, "main");
+        assert!(info.files.is_empty());
     }
 
     #[test]
@@ -1398,6 +1688,37 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
     }
 
     #[test]
+    fn an_unreadable_head_commit_is_not_predicted_or_cached() {
+        let repo = temp_repo("merge-missing", "main");
+        let _cleanup = TempRepo(PathBuf::from(format!("{}-wt", repo.0.display())));
+        let wt = add_worktree(&repo, "foo", "orch/foo");
+        commit_file(&wt, "old.rs", "fn theirs() {}\n");
+        commit_file(&repo.0, "old.rs", "fn ours() {}\n");
+        let root = canonical_or_raw(&wt);
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&wt)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        let sha = String::from_utf8(out.stdout).unwrap().trim().to_owned();
+        let object = repo.0.join(".git/objects").join(&sha[..2]).join(&sha[2..]);
+        let aside = object.with_extension("aside");
+        std::fs::rename(&object, &aside).unwrap();
+        let mut predictions = MergePredictions::default();
+        assert_eq!(
+            predictions.predict(&root, "orch/foo", base_of(&root).as_ref()),
+            None
+        );
+        // Once the object is back, the conflict shows: nothing was cached.
+        std::fs::rename(&aside, &object).unwrap();
+        assert_eq!(
+            predictions.predict(&root, "orch/foo", base_of(&root).as_ref()),
+            Some(vec!["old.rs".to_owned()])
+        );
+    }
+
+    #[test]
     fn vs_main_marks_files_the_branch_deleted_or_added() {
         let repo = temp_repo("vs-main-status", "main");
         git(&repo.0, &["checkout", "-q", "-b", "feature"]);
@@ -1415,6 +1736,45 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         };
         assert_eq!(status("old.rs").as_deref(), Some("D"), "{:?}", info.files);
         assert_eq!(status("new.rs").as_deref(), Some("A"), "{:?}", info.files);
+    }
+
+    #[test]
+    fn vs_main_reports_every_kind_of_change() {
+        let repo = temp_repo("vs-main-kinds", "main");
+        // Renames are expected paired, whatever the user's config says.
+        git(&repo.0, &["config", "diff.renames", "true"]);
+        let lines: String = (0..20).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(repo.0.join("moved.rs"), &lines).unwrap();
+        std::fs::write(repo.0.join("gone.rs"), "g\n").unwrap();
+        std::fs::write(repo.0.join("bin.dat"), b"\x00\x01\x02").unwrap();
+        git(&repo.0, &["add", "."]);
+        git(&repo.0, &["commit", "-q", "-m", "base"]);
+        git(&repo.0, &["checkout", "-q", "-b", "feature"]);
+        git(&repo.0, &["mv", "moved.rs", ":renamed to.rs"]);
+        std::fs::write(repo.0.join(":renamed to.rs"), lines.replace("line 3\n", "")).unwrap();
+        std::fs::remove_file(repo.0.join("gone.rs")).unwrap();
+        std::fs::write(repo.0.join("bin.dat"), b"\x00\x03").unwrap();
+        std::fs::write(repo.0.join("old.rs"), "fn b() {}\nfn c() {}\n").unwrap();
+        std::fs::write(repo.0.join("日本語 new.txt"), "a\nb\n").unwrap();
+        git(&repo.0, &["add", "-A"]);
+        git(&repo.0, &["commit", "-q", "-m", "change"]);
+        let info =
+            inspect_worktree(cwd(&repo), DiffMode::VsMain, &mut BaseRefs::default()).unwrap();
+        let got: Vec<String> = info
+            .files
+            .iter()
+            .map(|f| format!("{} {} +{}-{}", f.status, f.path, f.added, f.deleted))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                "R :renamed to.rs +0-1",
+                "M bin.dat +0-0",
+                "D gone.rs +0-1",
+                "M old.rs +2-1",
+                "A 日本語 new.txt +2-0",
+            ]
+        );
     }
 
     #[test]

@@ -295,6 +295,8 @@ pub struct Registry {
     drawer: Option<(WidgetId, WidgetId)>,
     /// The drawer's ペインを閉じる / 本当に閉じる button.
     close_pane_button: Option<(WidgetId, u64)>,
+    /// The drawer's まとめて閉じる button, with the count it names.
+    close_ended_button: Option<(WidgetId, usize)>,
     /// The drawer's result 表示 / 隠す.
     result_toggle: Option<WidgetId>,
     /// The drawer's result 再読込 button.
@@ -385,6 +387,27 @@ fn button_pane(buttons: &[(WidgetId, u64)], source: WidgetId) -> Option<u64> {
     QueueButtons::worker(buttons, source)
 }
 
+/// How many workers a bulk close names by label before it counts the rest.
+const BULK_NAMED: usize = 5;
+
+/// The labels of `panes` for a bulk close's confirmation: the first
+/// `BULK_NAMED`, then how many more.
+fn bulk_names(fleet: &Fleet, panes: &[u64]) -> String {
+    let labels: Vec<String> = panes
+        .iter()
+        .filter_map(|pane| fleet.worker(*pane))
+        .take(BULK_NAMED)
+        .map(|w| fleet::one_line(&w.label))
+        .collect();
+    let rest = panes.len().saturating_sub(labels.len());
+    let named = labels.join("、");
+    if rest > 0 {
+        format!("{named} ほか {rest} 件")
+    } else {
+        named
+    }
+}
+
 pub struct Dashboard {
     tree: UiTree,
     view: View,
@@ -432,9 +455,12 @@ pub struct Dashboard {
     /// What the open help disabled under it, to enable again when it
     /// closes (`open_help`).
     shielded: Vec<WidgetId>,
-    /// When the close `view.confirm_close` waits for ends unconfirmed: as
-    /// its notice does (`NOTICE_FOR`).
+    /// When the close `view.confirm_close` (or `close_ended`) waits for
+    /// ends unconfirmed: as its notice does (`NOTICE_FOR`).
     close_until: Option<Instant>,
+    /// The ended workers a first ⇧X (or まとめて閉じる) named, waiting for
+    /// the second press to close them all (`request_close_ended`).
+    close_ended: Option<Vec<u64>>,
     /// The filter field had the focus when the input being handled began:
     /// a rebuild that input causes focuses the new field. For a release,
     /// what counts is the press: a press moves the focus to what it hits
@@ -623,6 +649,7 @@ impl Dashboard {
         self.view.detail = None;
         self.view.result = None;
         self.view.confirm_close = None;
+        self.close_ended = None;
         self.view.expanded = None;
         self.drafts.clear();
         self.send_caret = None;
@@ -1049,6 +1076,7 @@ impl Dashboard {
         }
         self.held = old.held;
         self.close_until = old.close_until;
+        self.close_ended = old.close_ended;
         self.filter_had_focus = old.filter_had_focus;
         self.pressed_in_filter = old.pressed_in_filter;
         self.watch();
@@ -1128,6 +1156,7 @@ impl Dashboard {
             held: Vec::new(),
             shielded: Vec::new(),
             close_until: None,
+            close_ended: None,
             filter_had_focus: false,
             pressed_in_filter: false,
             #[cfg(test)]
@@ -1416,6 +1445,8 @@ impl Dashboard {
         let preview = self.preview.as_ref().map(|(_, _, preview)| preview);
         let draft = self.drafts.get(&pane).map_or("", String::as_str);
         let confirm_close = self.view.confirm_close == Some(pane);
+        let ended = self.ended_workers().len();
+        let close_ended = (ended > 0).then_some((ended, self.close_ended.is_some()));
         let buttons = drawer::build(
             &mut self.tree,
             root,
@@ -1429,11 +1460,13 @@ impl Dashboard {
                     _ => draft.len(),
                 },
                 confirm_close,
+                close_ended,
             },
             &mut self.registry,
         );
         self.registry.open_buttons.push((buttons.open, pane));
         self.registry.close_pane_button = Some((buttons.close_pane, pane));
+        self.registry.close_ended_button = buttons.close_ended.map(|id| (id, ended));
         self.registry.drawer = Some((root, buttons.close));
         self.registry.result_toggle = buttons.result;
         self.registry.result_reload = buttons.result_reload;
@@ -1449,6 +1482,7 @@ impl Dashboard {
         }
         self.registry.open_buttons.clear();
         self.registry.close_pane_button = None;
+        self.registry.close_ended_button = None;
         self.registry.result_toggle = None;
         self.registry.result_reload = None;
         self.registry.result_copy = None;
@@ -1493,7 +1527,9 @@ impl Dashboard {
         let root = self.tree.open_overlay(
             Container::new(Style {
                 flex_direction: FlexDirection::Column,
-                gap: gap(6.0),
+                // 5, not more: every row then fits the smallest window
+                // (1100 x 700) with the ⇧X row too.
+                gap: gap(5.0),
                 padding: LayoutRect::length(16.0),
                 size: LayoutSize {
                     width: length(HELP_WIDTH),
@@ -1567,7 +1603,15 @@ impl Dashboard {
         let detail = self.view.detail;
         self.filter = Filter { query, caret };
         self.reselect(&old, Vanish::Neighbour);
-        if self.view.detail != detail {
+        // Other workers to close at once: a close armed for the old ones is
+        // taken back, and the drawer's button names the new count.
+        let ended = self.ended_workers();
+        let disarmed = self.close_ended.take_if(|armed| *armed != ended).is_some();
+        let stale = self
+            .registry
+            .close_ended_button
+            .map_or(!ended.is_empty(), |(_, count)| count != ended.len());
+        if self.view.detail != detail || (self.view.detail.is_some() && (disarmed || stale)) {
             self.close_drawer(text);
             self.open_drawer();
         }
@@ -1692,6 +1736,12 @@ impl Dashboard {
             return;
         };
         let label = worker.label.clone();
+        if self.close_ended.take().is_some()
+            && self.view.detail.is_some_and(|detail| detail != pane)
+        {
+            // Its drawer no longer says 本当にまとめて閉じる.
+            self.reopen_drawer(text);
+        }
         if self.view.confirm_close != Some(pane) {
             self.view.confirm_close = Some(pane);
             self.close_until = Some(Instant::now() + NOTICE_FOR);
@@ -1740,6 +1790,86 @@ impl Dashboard {
                 self.rebuilt(self.view, text);
                 self.show_notice(format!("{label} のペインを閉じました"));
             }
+        }
+    }
+
+    /// The workers ⇧X closes: those the filter shows that have ended
+    /// (finished or failed), in the fleet's order. One running or waiting
+    /// on a person is never among them.
+    fn ended_workers(&self) -> Vec<u64> {
+        self.feed
+            .fleet
+            .workers
+            .iter()
+            .filter(|w| w.can_close_unseen() && self.filter.matches(w))
+            .map(|w| w.pane)
+            .collect()
+    }
+
+    /// Two-step confirmation to close every ended worker the filter shows
+    /// (`ended_workers`). The first press names them; the second closes
+    /// them when they are still the same, and else names the new ones.
+    fn request_close_ended(&mut self, text: &mut TextStore) {
+        let ended = self.ended_workers();
+        let single = self.view.confirm_close.take();
+        if ended.is_empty() {
+            self.close_ended = None;
+            self.close_until = None;
+            if single.is_some() && single == self.view.detail {
+                self.reopen_drawer(text);
+            }
+            self.show_notice("まとめて閉じる完了・失敗のワーカーはありません".to_owned());
+            return;
+        }
+        if self.close_ended.as_ref() != Some(&ended) {
+            let names = bulk_names(&self.feed.fleet, &ended);
+            let count = ended.len();
+            self.close_ended = Some(ended);
+            self.close_until = Some(Instant::now() + NOTICE_FOR);
+            if self.view.detail.is_some() {
+                self.reopen_drawer(text);
+            }
+            self.show_notice(format!(
+                "完了・失敗の {count} 件を閉じますか？ {names} — もう一度 ⇧X または「本当にまとめて閉じる」で実行（Esc でキャンセル）"
+            ));
+            return;
+        }
+        self.close_ended = None;
+        self.close_until = None;
+        let count = ended.len();
+        match &self.feed.channel {
+            Some(_) if self.feed.link != Some(Link::Live) => {
+                self.show_notice("ペインを閉じられません: Noa に接続していません".to_owned());
+            }
+            Some(_) if !self.feed.can_focus => {
+                self.show_notice(
+                    "ペインを閉じられません: Noa の server-scopes に control がありません（例: server-scopes = read,control）"
+                        .to_owned(),
+                );
+            }
+            Some(channel) => {
+                if let Some(instance) = &self.feed.instance {
+                    channel.send(Command::CloseMany {
+                        instance: instance.clone(),
+                        panes: ended,
+                    });
+                }
+                self.show_notice(format!("{count} 件のペインを閉じます"));
+            }
+            None => {
+                let old = self.order();
+                self.feed.fleet.workers.retain(|w| !ended.contains(&w.pane));
+                for pane in &ended {
+                    self.drafts.remove(pane);
+                }
+                self.reselect(&old, Vanish::Neighbour);
+                self.rebuilt(self.view, text);
+                self.show_notice(format!("{count} 件のペインを閉じました"));
+                return;
+            }
+        }
+        if self.view.detail.is_some() {
+            self.reopen_drawer(text);
         }
     }
 
@@ -1842,16 +1972,19 @@ impl Dashboard {
     /// ペインを閉じる again.
     fn disarm_close(&mut self, text: &mut TextStore) {
         self.close_until = None;
-        if let Some(pane) = self.view.confirm_close.take()
-            && self.view.detail == Some(pane)
-        {
+        let bulk = self.close_ended.take().is_some();
+        let single = self.view.confirm_close.take();
+        if self.view.detail.is_some() && (bulk || single == self.view.detail) {
             self.reopen_drawer(text);
         }
     }
 
     fn act(&mut self, action: Action, text: &mut TextStore) {
         // Only the second X confirms a close (Esc says it was cancelled).
-        if !matches!(action, Action::ClosePane | Action::Back) {
+        if !matches!(
+            action,
+            Action::ClosePane | Action::CloseEnded | Action::Back
+        ) {
             self.disarm_close(text);
         }
         match action {
@@ -1917,6 +2050,7 @@ impl Dashboard {
                 Some(pane) => self.request_close_pane(pane, text),
                 None => self.show_notice(NOTHING_SELECTED.to_owned()),
             },
+            Action::CloseEnded => self.request_close_ended(text),
             Action::CycleGrouping => {
                 let current = Grouping::ALL
                     .iter()
@@ -1953,7 +2087,13 @@ impl Dashboard {
                 self.filter.caret = self.filter.query.len();
             }
             Action::Back => {
-                if let Some(pane) = self.view.confirm_close.take() {
+                if self.close_ended.take().is_some() {
+                    self.close_until = None;
+                    if self.view.detail.is_some() {
+                        self.reopen_drawer(text);
+                    }
+                    self.show_notice("まとめて閉じるのをキャンセルしました".to_owned());
+                } else if let Some(pane) = self.view.confirm_close.take() {
                     if self.view.detail == Some(pane) {
                         self.reopen_drawer(text);
                     }
@@ -2239,15 +2379,24 @@ impl Screen for Dashboard {
         let confirms = self
             .registry
             .close_pane_button
-            .is_some_and(|(id, _)| id == source);
-        let disarmed = if confirms {
-            None
+            .is_some_and(|(id, _)| id == source)
+            || self
+                .registry
+                .close_ended_button
+                .is_some_and(|(id, _)| id == source);
+        let (disarmed, bulk) = if confirms {
+            (None, false)
         } else {
             self.close_until = None;
-            self.view.confirm_close.take()
+            (
+                self.view.confirm_close.take(),
+                self.close_ended.take().is_some(),
+            )
         };
         self.click(source, text);
-        if disarmed.is_some() && disarmed == self.view.detail {
+        if (disarmed.is_some() && disarmed == self.view.detail)
+            || (bulk && self.view.detail.is_some())
+        {
             self.reopen_drawer(text);
         }
     }
@@ -2297,6 +2446,12 @@ impl Dashboard {
             .filter(|(id, _)| *id == source)
         {
             self.request_close_pane(pane, text);
+        } else if self
+            .registry
+            .close_ended_button
+            .is_some_and(|(id, _)| id == source)
+        {
+            self.request_close_ended(text);
         } else if self
             .registry
             .drawer

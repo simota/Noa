@@ -88,6 +88,13 @@ pub enum Command {
         instance: String,
         pane: u64,
     },
+    /// Closes each of `panes` that has still ended (finished or failed)
+    /// when the feed comes to it, then lists the panes once. As `Close`:
+    /// refused on another instance.
+    CloseMany {
+        instance: String,
+        panes: Vec<u64>,
+    },
 }
 
 /// A `Command::Send` the feed did not deliver, given back with the server
@@ -103,7 +110,9 @@ impl Command {
     /// The server instance a worker action was chosen on.
     fn instance(&self) -> Option<&str> {
         match self {
-            Command::Send { instance, .. } | Command::Close { instance, .. } => Some(instance),
+            Command::Send { instance, .. }
+            | Command::Close { instance, .. }
+            | Command::CloseMany { instance, .. } => Some(instance),
             Command::Watch(_) | Command::Focus(_) => None,
         }
     }
@@ -440,7 +449,7 @@ impl Feed {
                     self.notice("送信できません: Noa に接続していません".to_owned());
                     self.give_back(instance, pane, text);
                 }
-                Ok(Command::Close { .. }) => {
+                Ok(Command::Close { .. } | Command::CloseMany { .. }) => {
                     self.notice("ペインを閉じられません: Noa に接続していません".to_owned());
                 }
                 Err(RecvTimeoutError::Timeout) => return true,
@@ -598,10 +607,52 @@ impl Feed {
                     }
                     Err(err) => return Err(err.into()),
                 },
+                Ok(Command::CloseMany { panes, .. }) => self.close_many(client, &panes)?,
                 Err(TryRecvError::Empty) => return Ok(()),
                 Err(TryRecvError::Disconnected) => return Err(Stop::Gone),
             }
         }
+    }
+
+    /// Closes each of `panes` that is still an ended worker now: one sent a
+    /// message since the dashboard chose it may be running again, and one
+    /// waiting on a person is never closed unseen. The panes are listed
+    /// first for that, as before a message is sent, and once more at the
+    /// end, so the closed ones leave the dashboard at once.
+    fn close_many(&mut self, client: &mut impl Noa, panes: &[u64]) -> Result<(), Stop> {
+        let panels = client.list_panels()?;
+        self.last_list = self.now();
+        self.last_contact = self.last_list;
+        self.tracker.replace(panels, unix_now());
+        let mut skipped = 0;
+        let mut failed: Vec<String> = Vec::new();
+        for &pane in panes {
+            let ended = self.tracker.panels.get(&pane).is_some_and(|panel| {
+                is_worker(panel) && matches!(state_of(panel), State::Finished | State::Error)
+            });
+            if !ended {
+                skipped += 1;
+                continue;
+            }
+            match client.close_pane(pane) {
+                Ok(()) => self.last_contact = self.now(),
+                Err(ClientError::Rpc { message, .. }) => failed.push(message),
+                Err(err) => return Err(err.into()),
+            }
+        }
+        self.relist(client)?;
+        if skipped > 0 {
+            self.notice(format!(
+                "{skipped} 件は終了した状態でなくなったため閉じませんでした"
+            ));
+        }
+        if let Some(first) = failed.first() {
+            self.notice(format!(
+                "{} 件のペインを閉じられませんでした: {first}",
+                failed.len()
+            ));
+        }
+        Ok(())
     }
 
     /// A `Watch` from the dashboard: panes of the instance it was last

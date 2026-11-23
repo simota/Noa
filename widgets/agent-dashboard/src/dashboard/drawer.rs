@@ -96,6 +96,8 @@ const NOT_REGULAR: &str = "通常のファイルではありません";
 pub(super) struct DrawerButtons {
     pub(super) open: WidgetId,
     pub(super) close_pane: WidgetId,
+    /// まとめて閉じる, when the filter shows ended workers.
+    pub(super) close_ended: Option<WidgetId>,
     pub(super) close: WidgetId,
     pub(super) result: Option<WidgetId>,
     pub(super) result_reload: Option<WidgetId>,
@@ -534,6 +536,10 @@ pub(super) struct DrawerInput<'a> {
     pub(super) draft: &'a str,
     pub(super) send_caret: usize,
     pub(super) confirm_close: bool,
+    /// How many ended workers the filter shows (a bulk close's targets),
+    /// and whether a first press armed their close; `None` when there are
+    /// none.
+    pub(super) close_ended: Option<(usize, bool)>,
 }
 
 /// Fills the drawer overlay `root` for `input.worker`, its result file shown as
@@ -553,6 +559,7 @@ pub(super) fn build(
         draft,
         send_caret,
         confirm_close,
+        close_ended,
     } = input;
     let pane = worker.pane;
     let scroll = tree.insert(
@@ -789,6 +796,27 @@ pub(super) fn build(
         (Some(field), Some(send))
     };
 
+    // The bulk close acts on the filter's workers, not this one: a row of
+    // its own above this worker's buttons.
+    let close_ended = close_ended.map(|(count, armed)| {
+        let row = tree.insert(
+            Some(root),
+            Container::row().align_items(AlignItems::CENTER).gap(8.0),
+        );
+        spacer(tree, row);
+        let label = if armed {
+            format!("本当にまとめて閉じる（{count} 件）")
+        } else {
+            format!("完了・失敗をまとめて閉じる（{count} 件）")
+        };
+        tree.insert(
+            Some(row),
+            Button::new(label)
+                .control_size(ControlSize::Small)
+                .selected(armed),
+        )
+    });
+
     // The buttons stay below the scrolling content, always reachable.
     let buttons = tree.insert(
         Some(root),
@@ -830,6 +858,7 @@ pub(super) fn build(
     DrawerButtons {
         open,
         close_pane,
+        close_ended,
         close,
         result,
         result_reload,

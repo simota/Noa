@@ -38,6 +38,7 @@ pub(super) enum Action {
     SubmitSend,
     CancelSend,
     ClosePane,
+    CloseEnded,
     CycleGrouping,
     NextTab,
     StartFilter,
@@ -134,6 +135,15 @@ pub(super) const BINDINGS: &[Binding] = &[
         &["X"],
         ClosePane,
         "選んだワーカーのペインを閉じる（2 回で確認）",
+    ),
+    // On its text, as S is: Shift+X is the key `x` with Shift held, which
+    // no `Key` binding takes, then the text "X".
+    bind(
+        Browse,
+        T("X"),
+        &["⇧X"],
+        CloseEnded,
+        "絞り込み中の完了・失敗をまとめて閉じる（2 回で確認）",
     ),
     bind(
         Browse,

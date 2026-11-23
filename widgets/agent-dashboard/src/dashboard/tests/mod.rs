@@ -6,6 +6,7 @@ use noa_gpui_scene::{Border, DisplayList, DrawCommand, Point, Size};
 use super::*;
 
 mod actions;
+mod bulk_close;
 mod details;
 mod feed;
 mod filtering;

@@ -40,7 +40,10 @@ fn last_watch(commands: &Receiver<Command>) -> Option<Vec<u64>> {
         .try_iter()
         .filter_map(|c| match c {
             Command::Watch(panes) => Some(panes),
-            Command::Focus(_) | Command::Send { .. } | Command::Close { .. } => None,
+            Command::Focus(_)
+            | Command::Send { .. }
+            | Command::Close { .. }
+            | Command::CloseMany { .. } => None,
         })
         .last()
 }
@@ -50,7 +53,10 @@ fn focused_panes(commands: &Receiver<Command>) -> Vec<u64> {
         .try_iter()
         .filter_map(|c| match c {
             Command::Focus(pane) => Some(pane),
-            Command::Watch(_) | Command::Send { .. } | Command::Close { .. } => None,
+            Command::Watch(_)
+            | Command::Send { .. }
+            | Command::Close { .. }
+            | Command::CloseMany { .. } => None,
         })
         .collect()
 }

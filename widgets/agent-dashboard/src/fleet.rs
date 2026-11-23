@@ -172,6 +172,13 @@ impl Worker {
         &self.screen_tail[from..]
     }
 
+    /// Whether a bulk close may take the worker without anyone looking at
+    /// it: it has ended (finished or failed). One running, or waiting on a
+    /// person for an approval or an answer, never.
+    pub fn can_close_unseen(&self) -> bool {
+        matches!(self.state, State::Finished | State::Error)
+    }
+
     /// One of the coding agents, which have a model; any other kind is a
     /// plain command.
     pub fn is_agent(&self) -> bool {

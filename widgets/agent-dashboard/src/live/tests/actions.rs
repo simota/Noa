@@ -202,3 +202,76 @@ fn a_message_refused_at_a_shell_is_the_draft_again_with_a_notice() {
     let labels = screen.labels();
     assert!(labels.iter().any(|l| l == SHELL_SEND_REFUSED), "{labels:?}");
 }
+
+/// Pane 1 orchestrates 2 (running), 3 (finished), 4 (failed) and 5
+/// (waiting for an approval).
+fn ended_and_not(instance: &str, clock: &TestClock) -> ScriptedNoa {
+    let mut noa = ScriptedNoa::showing(instance, "$ ready", clock);
+    let worker = |pane: &str, state: &str, exit: Option<i64>| {
+        let mut value = serde_json::json!({
+            "paneId": pane,
+            "parentPaneId": "1",
+            "label": format!("w{pane}"),
+            "agent": { "seq": 1, "kind": "claude", "state": state },
+        });
+        if let Some(code) = exit {
+            value["exit"] = serde_json::json!({ "code": code });
+        }
+        panel(value)
+    };
+    noa.panels.extend([
+        worker("3", "finished", None),
+        worker("4", "running", Some(2)),
+        worker("5", "permission", None),
+    ]);
+    noa
+}
+
+fn close_many(commands: &Sender<Command>, instance: &str, panes: &[u64]) {
+    commands
+        .send(Command::CloseMany {
+            instance: instance.into(),
+            panes: panes.to_vec(),
+        })
+        .unwrap();
+}
+
+#[test]
+fn a_bulk_close_closes_only_what_has_ended_and_lists_once_after() {
+    let clock = TestClock::new();
+    let (mut feed, published, commands, notices, _unsent) = told_feed(&clock);
+    let mut noa = ended_and_not("a", &clock);
+    close_many(&commands, "a", &[2, 3, 4, 5]);
+    assert!(matches!(feed.follow(&mut noa), Err(Stop::Lost(_))));
+    assert_eq!(noa.closed, [3, 4]);
+    // The first list on connecting, the state check before closing, and
+    // the one list after.
+    assert_eq!(noa.lists, 3);
+    let last = published.try_iter().last().expect("a snapshot");
+    let left: Vec<u64> = last.fleet.workers.iter().map(|w| w.pane).collect();
+    assert_eq!(left, [2, 5]);
+    let said: Vec<String> = notices.try_iter().collect();
+    assert_eq!(said, ["2 件は終了した状態でなくなったため閉じませんでした"]);
+}
+
+#[test]
+fn a_bulk_close_chosen_on_another_instance_closes_nothing() {
+    let clock = TestClock::new();
+    let (mut feed, _published, commands, notices, _unsent) = told_feed(&clock);
+    let mut restarted = ended_and_not("b", &clock);
+    close_many(&commands, "a", &[3, 4]);
+    assert!(matches!(feed.follow(&mut restarted), Err(Stop::Lost(_))));
+    assert!(restarted.closed.is_empty(), "{:?}", restarted.closed);
+    let said: Vec<String> = notices.try_iter().collect();
+    assert_eq!(said, ["Noa が再起動したためペインを閉じませんでした"]);
+}
+
+#[test]
+fn a_bulk_close_while_the_link_is_down_is_refused() {
+    let clock = TestClock::new();
+    let (mut feed, _published, commands, notices, _unsent) = told_feed(&clock);
+    close_many(&commands, "a", &[3]);
+    assert!(feed.pause(Duration::from_millis(1)));
+    let said: Vec<String> = notices.try_iter().collect();
+    assert_eq!(said, ["ペインを閉じられません: Noa に接続していません"]);
+}

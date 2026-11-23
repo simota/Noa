@@ -66,7 +66,7 @@ pub fn spawn(wake: impl Fn() + Send + 'static) -> Receiver<Installed> {
 fn script() -> String {
     let names = AgentKind::ALL.map(AgentKind::command).join(" ");
     format!(
-        "for c in {names}; do command -v \"$c\" >/dev/null 2>&1 && printf \"{MARKER}%s\\n\" \"$c\"; done; exit 0"
+        "for c in {names}; do command -v \"$c\" >/dev/null 2>&1 && printf \"\\n{MARKER}%s\\n\" \"$c\"; done; exit 0"
     )
 }
 
@@ -174,7 +174,7 @@ mod tests {
         assert_eq!(
             script(),
             "for c in claude codex agy; do command -v \"$c\" >/dev/null 2>&1 \
-             && printf \"noa-agent:%s\\n\" \"$c\"; done; exit 0"
+             && printf \"\\nnoa-agent:%s\\n\" \"$c\"; done; exit 0"
         );
     }
 
@@ -198,6 +198,28 @@ mod tests {
             parse(&String::from_utf8_lossy(&out.stdout)),
             [AgentKind::Codex, AgentKind::Agy]
         );
+    }
+
+    /// An rc file that prints without a trailing newline (a terminal-title
+    /// escape, say) must not swallow the first marker.
+    #[test]
+    fn output_left_without_a_newline_does_not_hide_the_first_agent() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "discussion-installed-nl-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("codex");
+        std::fs::write(&path, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut shell = Command::new("/bin/sh");
+        shell
+            .args(["-c", &format!("printf '\\033]0;title\\007'; {}", script())])
+            .env("PATH", &dir);
+        let got = run(shell);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(got, Installed::Found(vec![AgentKind::Codex]));
     }
 
     #[test]

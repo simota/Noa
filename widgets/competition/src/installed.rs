@@ -58,7 +58,7 @@ pub fn spawn(wake: impl Fn() + Send + 'static) -> Receiver<Installed> {
 fn probe_script() -> String {
     let names: Vec<&str> = AgentKind::ALL.iter().map(|k| k.command()).collect();
     format!(
-        "for c in {}; do command -v \"$c\" >/dev/null 2>&1 && printf \"{MARKER}%s\\n\" \"$c\"; done; exit 0",
+        "for c in {}; do command -v \"$c\" >/dev/null 2>&1 && printf \"\\n{MARKER}%s\\n\" \"$c\"; done; exit 0",
         names.join(" ")
     )
 }
@@ -180,6 +180,30 @@ mod tests {
             run("/bin/sh", script, Duration::from_secs(5)),
             Installed::Found(vec![AgentKind::Claude, AgentKind::Codex])
         );
+    }
+
+    /// An rc file that prints without a trailing newline (a terminal-title
+    /// escape, say) must not swallow the first marker.
+    #[cfg(unix)]
+    #[test]
+    fn output_left_without_a_newline_does_not_hide_the_first_agent() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "competition-installed-nl-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("codex");
+        std::fs::write(&path, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = format!(
+            "PATH='{}'; printf '\\033]0;title\\007'; {}",
+            dir.display(),
+            probe_script()
+        );
+        let got = run("/bin/sh", &script, Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(got, Installed::Found(vec![AgentKind::Codex]));
     }
 
     #[cfg(unix)]

@@ -83,9 +83,20 @@ fn list_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> io::
 
 /// Checks `snapshot_dir` and writes the results under `out_dir`.
 pub fn inspect(snapshot_dir: &Path, out_dir: &Path) -> io::Result<Inspection> {
-    fs::create_dir_all(out_dir)?;
     let preview = preview::write(snapshot_dir)?;
-    let chrome = shots::find_chrome();
+    inspect_with(snapshot_dir, out_dir, preview, shots::find_chrome())
+}
+
+/// [`inspect`] with the viewer copy already written by [`preview::write`]:
+/// the runner writes it before accepting a submission, so the comparison
+/// viewer frames it at once, and leaves the screenshots to a thread.
+pub fn inspect_with(
+    snapshot_dir: &Path,
+    out_dir: &Path,
+    preview: Option<preview::Preview>,
+    chrome: Option<PathBuf>,
+) -> io::Result<Inspection> {
+    fs::create_dir_all(out_dir)?;
     let shot_results = match (&preview, &chrome) {
         (Some(p), Some(chrome)) => shots::capture(chrome, &p.page, out_dir),
         _ => Vec::new(),

@@ -10,6 +10,7 @@ use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Viewports captured for every entry: desktop, tablet, narrow phone.
@@ -115,10 +116,14 @@ fn capture_one(
     (width, height): (u32, u32),
 ) -> io::Result<PathBuf> {
     let _ = std::fs::remove_file(out);
-    // A throwaway profile, so a Chrome the user has open is never touched.
+    // A throwaway profile, so a Chrome the user has open is never touched,
+    // and one per capture: entries are checked on threads of their own, and
+    // a shared profile would frame (and clean up) another entry's page.
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     let profile = std::env::temp_dir().join(format!(
-        "noa-competition-shot-{}-{width}x{height}",
-        std::process::id()
+        "noa-competition-shot-{}-{}-{width}x{height}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     // Frame the page the way `compare.html` does: a sandboxed iframe of the
     // requested size. Desktop Chrome's headless mode keeps the window at
@@ -204,6 +209,51 @@ mod tests {
             file_url(&cwd.join("checks/snapshot/.preview/index.html"))
         );
         assert!(url.starts_with("file:///"), "{url}");
+    }
+
+    /// Two entries captured at once must not share a browser profile: the
+    /// frame page lives there, so a shared one frames the other entry.
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_captures_frame_their_own_page() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir =
+            std::env::temp_dir().join(format!("noa-competition-shots-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A fake browser: waits, then "screenshots" the frame page it was
+        // given by copying the profile's frame.html to the output.
+        let browser = dir.join("fake-chrome");
+        std::fs::write(
+            &browser,
+            "#!/bin/sh\nfor a; do case $a in --user-data-dir=*) p=${a#*=};; \
+             --screenshot=*) s=${a#*=};; esac; done\nsleep 0.3\ncp \"$p/frame.html\" \"$s\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&browser, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let runs: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|name| {
+                let page = dir.join(name).join("index.html");
+                std::fs::create_dir_all(page.parent().unwrap()).unwrap();
+                std::fs::write(&page, name).unwrap();
+                let out = dir.join(format!("out-{name}"));
+                let browser = browser.clone();
+                std::thread::spawn(move || (page.clone(), capture(&browser, &page, &out)))
+            })
+            .collect();
+        for run in runs {
+            let (page, results) = run.join().unwrap();
+            for result in results {
+                let shot = result.expect("capture");
+                let framed = std::fs::read_to_string(&shot).unwrap();
+                assert!(
+                    framed.contains(&file_url(&page)),
+                    "{shot:?} framed {framed}"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

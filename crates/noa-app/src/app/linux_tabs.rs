@@ -240,12 +240,13 @@ impl App {
         let titles = siblings
             .iter()
             .map(|id| {
-                self.windows
-                    .get(id)
+                let state = self.windows.get(id);
+                let title = state
                     .map(|state| state.title.as_str())
                     .filter(|title| !title.is_empty())
-                    .unwrap_or("Noa")
-                    .to_string()
+                    .unwrap_or("Noa");
+                let zoomed = state.is_some_and(|state| state.zoomed.is_some());
+                zoom_tab_title(title, zoomed).into_owned()
             })
             .collect();
         Some((titles, active))

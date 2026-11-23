@@ -2409,3 +2409,40 @@ fn resolve_proxy_icon_path_gates_on_config_visibility_only() {
     assert_eq!(resolve_proxy_icon_path(false, Some("/a")), None);
     assert_eq!(resolve_proxy_icon_path(true, None), None);
 }
+
+#[test]
+fn zoom_tab_title_marks_only_while_zoomed() {
+    assert_eq!(zoom_tab_title("cargo — noa", true), "\u{2922} cargo — noa");
+    assert_eq!(zoom_tab_title("cargo — noa", false), "cargo — noa");
+}
+
+#[test]
+fn zoom_tab_title_handles_an_empty_title() {
+    assert_eq!(zoom_tab_title("", true), ZOOM_TAB_MARK);
+    assert_eq!(zoom_tab_title("", false), "");
+}
+
+#[test]
+fn zoom_tab_title_never_doubles_the_mark() {
+    let marked = zoom_tab_title("zsh", true).into_owned();
+    assert_eq!(zoom_tab_title(&marked, true), marked.as_str());
+    // Unzoomed, a title is passed through untouched, mark or not.
+    assert_eq!(zoom_tab_title(&marked, false), marked.as_str());
+}
+
+#[test]
+fn title_push_needed_fires_on_a_raw_title_or_a_mark_change() {
+    // Steady state: nothing to push.
+    assert!(!title_push_needed("zsh", "zsh", false, false));
+    assert!(!title_push_needed("zsh", "zsh", true, true));
+    // Raw title changed, mark unchanged.
+    assert!(title_push_needed("zsh", "vim", false, false));
+    assert!(title_push_needed("zsh", "vim", true, true));
+    // Zoom toggled with the title unchanged: on, then off.
+    assert!(title_push_needed("zsh", "zsh", false, true));
+    assert!(title_push_needed("zsh", "zsh", true, false));
+    // Both changed.
+    assert!(title_push_needed("zsh", "vim", false, true));
+    // An emptied mirror (`linux_tabs` forced re-resolve) pushes regardless.
+    assert!(title_push_needed("", "zsh", false, false));
+}

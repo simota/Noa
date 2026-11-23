@@ -435,6 +435,7 @@ impl App {
                 occluded: false,
                 background_tab: false,
                 title: "Scratch Terminal".to_string(),
+                title_zoom_mark: false,
                 title_override: None,
                 proxy_icon_cwd: None,
                 last_touchpad_stage: 0,

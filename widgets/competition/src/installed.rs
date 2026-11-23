@@ -58,7 +58,7 @@ pub fn spawn(wake: impl Fn() + Send + 'static) -> Receiver<Installed> {
 fn probe_script() -> String {
     let names: Vec<&str> = AgentKind::ALL.iter().map(|k| k.command()).collect();
     format!(
-        "for c in {}; do command -v \"$c\" >/dev/null 2>&1 && printf \"{MARKER}%s\\n\" \"$c\"; done",
+        "for c in {}; do command -v \"$c\" >/dev/null 2>&1 && printf \"{MARKER}%s\\n\" \"$c\"; done; exit 0",
         names.join(" ")
     )
 }
@@ -94,9 +94,9 @@ fn run(shell: &str, script: &str, timeout: Duration) -> Installed {
         });
     }
     let deadline = Instant::now() + timeout;
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
             Ok(None) => {
                 let _ = child.kill();
@@ -112,6 +112,14 @@ fn run(shell: &str, script: &str, timeout: Duration) -> Installed {
                 return Installed::Unknown(format!("{shell} の終了を確認できません: {e}"));
             }
         }
+    };
+    // The probe ends with `exit 0`: anything else means the shell could
+    // not run it (a syntax it does not take, a failing rc file).
+    if !status.success() {
+        return Installed::Unknown(match status.code() {
+            Some(code) => format!("ログインシェルで確認できませんでした（終了コード {code}）"),
+            None => "ログインシェルで確認できませんでした（シグナルで終了）".to_owned(),
+        });
     }
     let _ = done_rx.recv_timeout(DRAIN);
     let bytes = out.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -181,6 +189,29 @@ mod tests {
         let got = run("/bin/sh", "sleep 30", Duration::from_millis(200));
         assert!(matches!(got, Installed::Unknown(_)), "{got:?}");
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_that_fails_is_unknown_not_empty() {
+        let got = run("/bin/sh", "if then fi", Duration::from_secs(5));
+        assert!(
+            matches!(&got, Installed::Unknown(why) if why.contains("終了コード")),
+            "{got:?}"
+        );
+        let got = run("/bin/sh", "exit 3", Duration::from_secs(5));
+        assert_eq!(
+            got,
+            Installed::Unknown("ログインシェルで確認できませんでした（終了コード 3）".into())
+        );
+        assert_eq!(
+            run(
+                "/bin/sh",
+                "echo noa-agent:codex; exit 0",
+                Duration::from_secs(5)
+            ),
+            Installed::Found(vec![AgentKind::Codex])
+        );
     }
 
     #[test]

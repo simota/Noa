@@ -4319,10 +4319,12 @@ diff --git a/gone.rs b/gone.rs\ndeleted file mode 100644\nindex 1..0\n--- a/gone
     #[test]
     #[ignore = "benchmark: cargo test -- --ignored --nocapture bench_ui"]
     fn bench_ui() {
+        // At least one run, so there is a median to report.
         let runs: usize = std::env::var("REPO_BROWSER_BENCH_RUNS")
             .ok()
             .and_then(|n| n.parse().ok())
-            .unwrap_or(10);
+            .unwrap_or(10)
+            .max(1);
         let big = synthetic_diff(crate::git::DIFF_CAP);
         let lines = big.lines().count();
         report(

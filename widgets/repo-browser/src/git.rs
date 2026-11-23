@@ -1741,6 +1741,8 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
     #[test]
     fn vs_main_reports_every_kind_of_change() {
         let repo = temp_repo("vs-main-kinds", "main");
+        // Renames are expected paired, whatever the user's config says.
+        git(&repo.0, &["config", "diff.renames", "true"]);
         let lines: String = (0..20).map(|i| format!("line {i}\n")).collect();
         std::fs::write(repo.0.join("moved.rs"), &lines).unwrap();
         std::fs::write(repo.0.join("gone.rs"), "g\n").unwrap();

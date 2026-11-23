@@ -927,7 +927,14 @@ mod tests {
         let detached = format!("{}-wt/detached", repo.0.display());
         crate::git::tests::git(&repo.0, &["worktree", "add", "-q", "--detach", &detached]);
         let unborn = format!("{}-wt/unborn", repo.0.display());
-        crate::git::tests::git(&repo.0, &["worktree", "add", "-q", "--orphan", &unborn]);
+        // An orphan worktree without `git worktree add --orphan` (Git 2.42+):
+        // a detached one switched to a new unborn branch, emptied.
+        crate::git::tests::git(&repo.0, &["worktree", "add", "-q", "--detach", &unborn]);
+        crate::git::tests::git(
+            Path::new(&unborn),
+            &["checkout", "-q", "--orphan", "unborn"],
+        );
+        crate::git::tests::git(Path::new(&unborn), &["rm", "-rfq", "."]);
         std::fs::write(Path::new(&unborn).join("u.rs"), "u\n").unwrap();
         std::fs::create_dir_all(repo.0.join("sub")).unwrap();
         let sub = repo.0.join("sub");
@@ -1157,10 +1164,12 @@ mod tests {
     fn bench_refresh() {
         let dir = std::env::var("REPO_BROWSER_BENCH_DIR")
             .unwrap_or_else(|_| env!("CARGO_MANIFEST_DIR").to_owned());
+        // At least one run, so there is a median to report.
         let runs: usize = std::env::var("REPO_BROWSER_BENCH_RUNS")
             .ok()
             .and_then(|n| n.parse().ok())
-            .unwrap_or(10);
+            .unwrap_or(10)
+            .max(1);
         let panes: u64 = std::env::var("REPO_BROWSER_BENCH_PANES")
             .ok()
             .and_then(|n| n.parse().ok())

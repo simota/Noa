@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use crate::model::brief;
 use crate::model::reduce::{self, Event, ReduceError};
 use crate::model::types::{
-    AgentKind, ArtifactFile, Author, Brief, JUDGE_ID, Message, Millis, MsgKind, PartId,
+    AgentChoice, ArtifactFile, Author, Brief, JUDGE_ID, Message, Millis, MsgKind, PartId,
     Participant, Phase, Role, RoundKind, RoundNo, Session, SessionId, Submission,
 };
 use crate::model::validate;
@@ -149,9 +149,10 @@ fn rejected<T>(why: impl Into<String>) -> Result<T, EngineError> {
     Err(EngineError::Rejected(why.into()))
 }
 
-pub fn participants(judge: AgentKind, panel: &[AgentKind]) -> (Participant, Vec<Participant>) {
+pub fn participants(judge: &AgentChoice, panel: &[AgentChoice]) -> (Participant, Vec<Participant>) {
     let mut contestants: Vec<Participant> = Vec::with_capacity(panel.len());
-    for &kind in panel {
+    for choice in panel {
+        let kind = choice.kind;
         let seen = contestants.iter().filter(|p| p.kind == kind).count();
         let id = match seen {
             0 => kind.command().to_owned(),
@@ -162,13 +163,15 @@ pub fn participants(judge: AgentKind, panel: &[AgentKind]) -> (Participant, Vec<
             kind,
             role: Role::Contestant,
             pane_id: None,
+            setup: choice.setup.clone(),
         });
     }
     let judge = Participant {
         id: PartId::new(JUDGE_ID),
-        kind: judge,
+        kind: judge.kind,
         role: Role::Judge,
         pane_id: None,
+        setup: judge.setup.clone(),
     };
     (judge, contestants)
 }
@@ -179,8 +182,8 @@ pub struct Setup<'a> {
     pub max_rounds: Option<RoundNo>,
     pub reveal_interval: RoundNo,
     pub workdir: Option<PathBuf>,
-    pub judge: AgentKind,
-    pub panel: &'a [AgentKind],
+    pub judge: AgentChoice,
+    pub panel: &'a [AgentChoice],
 }
 
 #[derive(Debug, Clone)]
@@ -206,7 +209,12 @@ impl Engine {
         if setup.panel.len() < 2 {
             return rejected("コンペティションには2体以上の参加パネルが必要です");
         }
-        let (judge, contestants) = participants(setup.judge, setup.panel);
+        for choice in std::iter::once(&setup.judge).chain(setup.panel) {
+            if let Err(why) = choice.setup.check(choice.kind) {
+                return rejected(why);
+            }
+        }
+        let (judge, contestants) = participants(&setup.judge, setup.panel);
         let batch = vec![Event::Created {
             id,
             request: request.to_owned(),
@@ -884,7 +892,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::types::ArtifactKind;
+    use crate::model::types::{AgentKind, ArtifactKind};
 
     fn run_one_round(engine: &mut Engine, round: RoundNo, close: bool) {
         for part in [PartId::new("claude"), PartId::new("codex")] {
@@ -954,8 +962,8 @@ mod tests {
             max_rounds: Some(2),
             reveal_interval: 5,
             workdir: None,
-            judge: AgentKind::Agy,
-            panel: &[AgentKind::Claude, AgentKind::Codex],
+            judge: AgentKind::Agy.into(),
+            panel: &[AgentKind::Claude.into(), AgentKind::Codex.into()],
         };
         let (mut engine, _) = Engine::create_in(
             SessionId::new("comp-test"),
@@ -1036,8 +1044,8 @@ mod tests {
             max_rounds: Some(10),
             reveal_interval: 5,
             workdir: None,
-            judge: AgentKind::Agy,
-            panel: &[AgentKind::Claude, AgentKind::Codex],
+            judge: AgentKind::Agy.into(),
+            panel: &[AgentKind::Claude.into(), AgentKind::Codex.into()],
         };
         let (mut engine, _) = Engine::create_in(
             SessionId::new("comp-test"),

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use competition::model::types::{AgentKind, PartId, RoundNo, Session};
+use competition::model::types::{AgentChoice, AgentKind, PartId, RoundNo, Session};
 
 use crate::session::runner::{self, Action, SessionHandle, Update};
 
@@ -34,8 +34,8 @@ pub enum Command {
         workdir: Option<PathBuf>,
         max_rounds: Option<RoundNo>,
         reveal_interval: RoundNo,
-        judge: AgentKind,
-        panel: Vec<AgentKind>,
+        judge: AgentChoice,
+        panel: Vec<AgentChoice>,
     },
     Intervene {
         to: Vec<PartId>,

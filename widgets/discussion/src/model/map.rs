@@ -219,6 +219,7 @@ mod tests {
             kind: AgentKind::Claude,
             role,
             pane_id: None,
+            setup: Default::default(),
         };
         let mut s = reduce::create(&[Event::Created {
             id: SessionId::new("s"),

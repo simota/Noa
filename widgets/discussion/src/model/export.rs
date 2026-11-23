@@ -211,8 +211,8 @@ mod tests {
             topic: "Pick a database",
             workdir: Some(PathBuf::from("/repo")),
             max_rounds: Some(5),
-            moderator: AgentKind::Claude,
-            panel: &[AgentKind::Claude, AgentKind::Codex],
+            moderator: AgentKind::Claude.into(),
+            panel: &[AgentKind::Claude.into(), AgentKind::Codex.into()],
         };
         let config = Config {
             start_timeout: 1_000,

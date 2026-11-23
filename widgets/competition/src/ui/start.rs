@@ -8,12 +8,15 @@ use noa_gpui_core::style::{
     length, percent,
 };
 use noa_gpui_core::widgets::{
-    Button, CheckState, Checkbox, Container, Label, NumberInput, PopUpButton, TextArea, TextField,
+    Button, CheckState, Checkbox, ComboBox, Container, Label, NumberInput, PopUpButton, TextArea,
+    TextField,
 };
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use noa_gpui_text::TextStore;
 
-use competition::model::types::{AgentKind, DEFAULT_MAX_ROUNDS, DEFAULT_REVEAL_INTERVAL, RoundNo};
+use competition::model::types::{
+    AgentChoice, AgentKind, AgentSetup, DEFAULT_MAX_ROUNDS, DEFAULT_REVEAL_INTERVAL, RoundNo,
+};
 
 use super::{caption, clear_children, gap};
 use crate::live::Link;
@@ -28,7 +31,11 @@ pub(super) struct Parts {
     pub(super) max_rounds: WidgetId,
     pub(super) reveal_interval: WidgetId,
     pub(super) judge: WidgetId,
+    /// The model and effort of the judge; rebuilt when its kind changes.
+    pub(super) judge_setup: SetupParts,
     pub(super) panel: Vec<WidgetId>,
+    /// The model and effort of each panel checkbox, in the same order.
+    pub(super) panel_setup: Vec<SetupParts>,
     pub(super) start_button: WidgetId,
     note: WidgetId,
 }
@@ -38,8 +45,8 @@ pub(crate) struct Form {
     pub workdir: String,
     pub max_rounds: RoundNo,
     pub reveal_interval: RoundNo,
-    pub judge: AgentKind,
-    pub panel: Vec<AgentKind>,
+    pub judge: AgentChoice,
+    pub panel: Vec<AgentChoice>,
 }
 
 pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
@@ -116,13 +123,6 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         Some(card),
         Container::row().align_items(AlignItems::START).gap(20.0),
     );
-    let judge_col = tree.insert(Some(row), Container::column().gap(6.0));
-    caption(tree, judge_col, "審判 (Judge)");
-    let judge = tree.insert(
-        Some(judge_col),
-        PopUpButton::new(AgentKind::ALL.iter().map(|k| k.command())),
-    );
-
     let rounds_col = tree.insert(Some(row), Container::column().gap(6.0));
     caption(tree, rounds_col, "ラウンド上限");
     let max_rounds = tree.insert(
@@ -153,13 +153,24 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         .width(80.0),
     );
 
-    let panel_col = tree.insert(Some(row), Container::column().gap(6.0));
-    caption(tree, panel_col, "参加パネル（2体以上）");
-    let boxes = tree.insert(Some(panel_col), Container::row().gap(12.0));
-    let panel = AgentKind::ALL
-        .iter()
-        .map(|kind| tree.insert(Some(boxes), Checkbox::new(kind.command()).checked(true)))
-        .collect();
+    let judge_col = tree.insert(Some(card), Container::column().gap(6.0));
+    caption(
+        tree,
+        judge_col,
+        "審判 (Judge) のエージェント・モデル・エフォート",
+    );
+    let judge_row = tree.insert(
+        Some(judge_col),
+        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+    );
+    let judge = tree.insert(
+        Some(judge_row),
+        PopUpButton::new(AgentKind::ALL.iter().map(|k| k.command())),
+    );
+    let judge_setup = insert_setup(tree, judge_row, AgentKind::ALL[0]);
+
+    let (panel, panel_setup) =
+        insert_panel(tree, card, "参加パネル（2体以上）・モデル・エフォート");
 
     let foot = tree.insert(
         Some(card),
@@ -177,10 +188,113 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         max_rounds,
         reveal_interval,
         judge,
+        judge_setup,
         panel,
+        panel_setup,
         start_button,
         note,
     }
+}
+
+/// The model box and effort menu of one agent.
+pub(super) struct SetupParts {
+    /// Holds the two controls, so they can be rebuilt for another kind.
+    host: WidgetId,
+    pub(super) model: WidgetId,
+    pub(super) effort: WidgetId,
+}
+
+const DEFAULT_MODEL: &str = "既定のモデル";
+const DEFAULT_EFFORT: &str = "既定のエフォート";
+
+/// A model box suggesting `kind`'s models (any name may be typed; empty
+/// is the CLI's default) and an effort menu of `kind`'s levels.
+fn insert_setup(tree: &mut UiTree, parent: WidgetId, kind: AgentKind) -> SetupParts {
+    let host = tree.insert(
+        Some(parent),
+        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+    );
+    let (model, effort) = insert_setup_controls(tree, host, kind);
+    SetupParts {
+        host,
+        model,
+        effort,
+    }
+}
+
+fn insert_setup_controls(
+    tree: &mut UiTree,
+    host: WidgetId,
+    kind: AgentKind,
+) -> (WidgetId, WidgetId) {
+    let model = tree.insert(
+        Some(host),
+        ComboBox::new(kind.models().iter().copied(), 190.0).placeholder(DEFAULT_MODEL),
+    );
+    let effort = tree.insert(
+        Some(host),
+        PopUpButton::new(std::iter::once(DEFAULT_EFFORT).chain(kind.efforts().iter().copied())),
+    );
+    (model, effort)
+}
+
+/// One row per agent kind: whether it takes part, and its model and effort.
+fn insert_panel(
+    tree: &mut UiTree,
+    card: WidgetId,
+    title: &str,
+) -> (Vec<WidgetId>, Vec<SetupParts>) {
+    let column = tree.insert(Some(card), Container::column().gap(6.0));
+    caption(tree, column, title);
+    AgentKind::ALL
+        .iter()
+        .map(|&kind| {
+            let row = tree.insert(
+                Some(column),
+                Container::row().align_items(AlignItems::CENTER).gap(10.0),
+            );
+            let check = tree.insert(
+                Some(row),
+                Container::new(Style {
+                    size: LayoutSize {
+                        width: length(84.0),
+                        height: auto(),
+                    },
+                    ..Default::default()
+                }),
+            );
+            let check = tree.insert(Some(check), Checkbox::new(kind.command()).checked(true));
+            (check, insert_setup(tree, row, kind))
+        })
+        .unzip()
+}
+
+/// Rebuilds the judge's model and effort controls for the kind now
+/// picked, when it changed: each kind has its own models and levels.
+pub(super) fn judge_kind_changed(tree: &mut UiTree, parts: &mut Parts, text: &mut TextStore) {
+    let kind = selected_kind(tree, parts.judge);
+    clear_children(tree, parts.judge_setup.host, text);
+    let (model, effort) = insert_setup_controls(tree, parts.judge_setup.host, kind);
+    parts.judge_setup.model = model;
+    parts.judge_setup.effort = effort;
+}
+
+fn selected_kind(tree: &UiTree, popup: WidgetId) -> AgentKind {
+    tree.get::<PopUpButton>(popup)
+        .map_or(AgentKind::ALL[0], |p| AgentKind::ALL[p.selected()])
+}
+
+fn read_setup(tree: &UiTree, parts: &SetupParts, kind: AgentKind) -> AgentSetup {
+    let model = tree
+        .get::<ComboBox>(parts.model)
+        .map(|c| c.text().trim().to_owned())
+        .filter(|m| !m.is_empty());
+    let effort = tree
+        .get::<PopUpButton>(parts.effort)
+        .and_then(|p| p.selected().checked_sub(1))
+        .and_then(|i| kind.efforts().get(i))
+        .map(|e| (*e).to_owned());
+    AgentSetup { model, effort }
 }
 
 pub(super) fn rebuild_note(tree: &mut UiTree, parts: &Parts, link: &Link, text: &mut TextStore) {
@@ -212,17 +326,23 @@ pub(super) fn read(tree: &UiTree, parts: &Parts) -> Form {
         .map_or(DEFAULT_REVEAL_INTERVAL, |n| {
             n.value().round().clamp(0.0, f64::from(MAX_REVEAL_INTERVAL)) as RoundNo
         });
-    let judge = tree
-        .get::<PopUpButton>(parts.judge)
-        .map_or(AgentKind::ALL[0], |p| AgentKind::ALL[p.selected()]);
+    let kind = selected_kind(tree, parts.judge);
+    let judge = AgentChoice {
+        kind,
+        setup: read_setup(tree, &parts.judge_setup, kind),
+    };
     let panel = AgentKind::ALL
         .iter()
         .zip(&parts.panel)
-        .filter(|(_, id)| {
+        .zip(&parts.panel_setup)
+        .filter(|((_, id), _)| {
             tree.get::<Checkbox>(**id)
                 .is_some_and(|c| c.state() == CheckState::On)
         })
-        .map(|(kind, _)| *kind)
+        .map(|((&kind, _), setup)| AgentChoice {
+            kind,
+            setup: read_setup(tree, setup, kind),
+        })
         .collect();
     Form {
         request,

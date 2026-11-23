@@ -11,7 +11,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use crate::session::runner::{self, Action, SessionHandle, Update};
 
-use discussion::model::types::{AgentKind, DebateId, IssueId, PartId, RoundNo, Session};
+use discussion::model::types::{
+    AgentChoice, AgentKind, DebateId, IssueId, PartId, RoundNo, Session,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Link {
@@ -40,8 +42,8 @@ pub enum Command {
         workdir: Option<std::path::PathBuf>,
         /// After this many rounds the discussion ends; `None` for no limit.
         max_rounds: Option<RoundNo>,
-        moderator: AgentKind,
-        panel: Vec<AgentKind>,
+        moderator: AgentChoice,
+        panel: Vec<AgentChoice>,
     },
     /// `UserIntervention`; `to` empty means everyone.
     Intervene { to: Vec<PartId>, body: String },
@@ -308,8 +310,8 @@ mod tests {
             topic: "t".into(),
             workdir: Some(file.clone()),
             max_rounds: None,
-            moderator: AgentKind::Claude,
-            panel: vec![AgentKind::Codex],
+            moderator: AgentKind::Claude.into(),
+            panel: vec![AgentKind::Codex.into()],
         };
         channel.send(start());
         let first = notices_within(&channel, Duration::from_millis(500));

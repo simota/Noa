@@ -572,6 +572,7 @@ mod tests {
             kind,
             role,
             pane_id: None,
+            setup: Default::default(),
         };
         reduce::create(&[Event::Created {
             id: SessionId::new("s"),

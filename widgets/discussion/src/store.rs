@@ -296,6 +296,7 @@ mod tests {
             kind,
             role,
             pane_id: None,
+            setup: Default::default(),
         };
         vec![Event::Created {
             id: SessionId::new("disc-1"),

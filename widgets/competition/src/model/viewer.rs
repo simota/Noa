@@ -688,6 +688,7 @@ mod tests {
                     kind: AgentKind::Claude,
                     role: Role::Judge,
                     pane_id: None,
+                    setup: Default::default(),
                 },
                 contestants: vec![],
                 messages: vec![],
@@ -709,6 +710,7 @@ mod tests {
             kind,
             role,
             pane_id: None,
+            setup: Default::default(),
         };
         let mut subs = BTreeMap::new();
         subs.insert(

@@ -11,6 +11,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::model::reduce::{self, Event, ReduceError};
 use crate::model::types::{Millis, PartId, RoundNo, Session, SessionId};
@@ -161,19 +162,49 @@ fn line(batch: &[Event]) -> io::Result<Vec<u8>> {
     Ok(line)
 }
 
+/// How long a lock found taken is waited for before the log counts as
+/// running elsewhere. A `flock` lock belongs to the open file, and a child
+/// process being started on another thread holds a copy of every open file
+/// of this process until its exec closes them: for that moment it holds
+/// the lock of a log just closed, or the shared lock of an [`is_busy`]
+/// probe. The moment lasts microseconds, longer on a loaded machine.
+pub const LOCK_GRACE: Duration = Duration::from_secs(2);
+const LOCK_POLL: Duration = Duration::from_millis(5);
+
 /// Takes the log's exclusive lock, held until the file is closed.
 fn lock(file: &File) -> Result<(), StoreError> {
-    match file.try_lock() {
-        Ok(()) => Ok(()),
-        Err(fs::TryLockError::WouldBlock) => Err(StoreError::Busy),
-        Err(fs::TryLockError::Error(e)) => Err(StoreError::Io(e)),
+    let until = Instant::now() + LOCK_GRACE;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(fs::TryLockError::WouldBlock) if Instant::now() < until => {
+                std::thread::sleep(LOCK_POLL);
+            }
+            Err(fs::TryLockError::WouldBlock) => return Err(StoreError::Busy),
+            Err(fs::TryLockError::Error(e)) => return Err(StoreError::Io(e)),
+        }
     }
 }
 
-/// Whether a runner holds `dir`'s log open right now.
+/// Whether a runner holds `dir`'s log open right now. Looked at once: a
+/// lock held for an instant by a starting child (see [`LOCK_GRACE`]) can
+/// show a log busy that is not, so a decision uses [`held_elsewhere`].
 pub fn is_busy(dir: &Path) -> bool {
     File::open(dir.join(EVENTS_FILE))
         .is_ok_and(|file| matches!(file.try_lock_shared(), Err(fs::TryLockError::WouldBlock)))
+}
+
+/// Whether `dir`'s log stays locked for [`LOCK_GRACE`]: a runner holds it,
+/// not a child that was starting when it was looked at.
+pub fn held_elsewhere(dir: &Path) -> bool {
+    let until = Instant::now() + LOCK_GRACE;
+    while is_busy(dir) {
+        if Instant::now() >= until {
+            return true;
+        }
+        std::thread::sleep(LOCK_POLL);
+    }
+    false
 }
 
 /// A log as read: its complete batches, how many bytes they take, and
@@ -575,7 +606,7 @@ mod tests {
         // Reading it stays possible.
         assert!(load(&dir).is_ok());
         drop(created);
-        assert!(!is_busy(&dir));
+        assert!(!held_elsewhere(&dir));
         let (first, _) = Store::open(&dir).unwrap();
         assert!(matches!(Store::open(&dir), Err(StoreError::Busy)));
         drop(first);

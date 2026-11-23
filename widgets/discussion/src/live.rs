@@ -282,7 +282,7 @@ fn run_commands(
                 }
             }
             Command::Resume { dir } => {
-                if discussion::store::is_busy(&dir) {
+                if discussion::store::held_elsewhere(&dir) {
                     out.notice(format!("{} は別のウィンドウで実行中です", dir.display()));
                     continue;
                 }
@@ -353,7 +353,7 @@ fn resume_to_extend(
     out: &Out,
     spawn_session: &impl Fn(runner::Start) -> SessionHandle,
 ) -> Option<Running> {
-    if discussion::store::is_busy(&dir) {
+    if discussion::store::held_elsewhere(&dir) {
         out.notice(format!("{} は別のウィンドウで実行中です", dir.display()));
         return None;
     }
@@ -900,7 +900,12 @@ mod tests {
         // Another window's runner holds it.
         let held = discussion::store::Store::open(&going).unwrap();
         channel.send(Command::Resume { dir: going.clone() });
-        let notices = notices_within(&channel, Duration::from_millis(300));
+        // A held log is told apart from a starting child's hold only after
+        // `LOCK_GRACE`.
+        let notices = notices_within(
+            &channel,
+            discussion::store::LOCK_GRACE + Duration::from_secs(1),
+        );
         assert!(
             notices.iter().any(|n| n.contains("別のウィンドウで実行中")),
             "{notices:?}"

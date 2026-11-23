@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 pub const DUR_FAST: Duration = Duration::from_millis(120);
 /// Base transition (spatial movement: zoom, slide-adjacent moves).
 pub const DUR_BASE: Duration = Duration::from_millis(150);
+/// Split-zoom clip reveal (zoom-in, unzoom, both ways of the sibling fade).
+pub const DUR_SPLIT_ZOOM: Duration = Duration::from_millis(400);
 pub const DUR_EMBER_ENTER: Duration = Duration::from_millis(400);
 pub const DUR_EMBER_EXIT: Duration = Duration::from_millis(300);
 
@@ -51,6 +53,11 @@ impl Tween {
         ))
     }
 
+    /// The instant the tween finishes.
+    pub fn end(&self) -> Instant {
+        self.start + self.duration
+    }
+
     /// Whether the tween has run its full duration at `now`.
     pub fn done(&self, now: Instant) -> bool {
         now.duration_since(self.start) >= self.duration
@@ -88,6 +95,17 @@ mod tests {
         let end = start + Duration::from_millis(100);
         assert_eq!(tween.progress(end), 1.0);
         assert!(tween.done(end));
+    }
+
+    #[test]
+    fn tween_end_is_start_plus_duration() {
+        let start = Instant::now();
+        let tween = Tween::new(start, Duration::from_millis(400));
+        assert_eq!(tween.end(), start + Duration::from_millis(400));
+        assert!(tween.done(tween.end()));
+        assert!(!tween.done(tween.end() - Duration::from_millis(1)));
+        assert_eq!(DUR_SPLIT_ZOOM, Duration::from_millis(400));
+        assert_eq!(DUR_BASE, Duration::from_millis(150));
     }
 
     #[test]

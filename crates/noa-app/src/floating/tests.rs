@@ -26,6 +26,7 @@ fn layout(panes: &[(PaneId, Rect)]) -> FloatLayout<'_> {
         window: AREA,
         panes,
         zoomed: None,
+        pane_anchors_hidden: false,
     }
 }
 
@@ -191,6 +192,42 @@ fn tc_007_pane_float_hides_while_another_pane_is_zoomed() {
 }
 
 #[test]
+fn pane_anchors_hidden_hides_pane_floats_but_not_tab_or_window_floats() {
+    let mut set = FloatSet::default();
+    let pane_float = float_at(&mut set, 1, A, &SPLIT, Rect::new(50, 100, 300, 200));
+    let tab_float = float_at(&mut set, 2, A, &SPLIT, Rect::new(10, 10, 300, 200));
+    set.cycle_anchor(tab_float, &layout(&SPLIT), M).unwrap();
+    let hidden = FloatLayout {
+        pane_anchors_hidden: true,
+        ..layout(&SPLIT)
+    };
+    assert!(!set.is_visible(pane_float, &hidden, M));
+    assert!(set.is_visible(tab_float, &hidden, M));
+    let shown: Vec<_> = set.draw_order(&hidden, M).iter().map(|p| p.id).collect();
+    assert_eq!(shown, vec![tab_float]);
+    assert!(set.is_visible(pane_float, &layout(&SPLIT), M));
+}
+
+#[test]
+fn pane_anchors_hidden_keeps_cycle_anchor_off_hidden_panes() {
+    let mut set = FloatSet::default();
+    let float = float_at(&mut set, 1, A, &SPLIT, Rect::new(100, 100, 300, 200));
+    set.cycle_anchor(float, &layout(&SPLIT), M).unwrap();
+    set.cycle_anchor(float, &layout(&SPLIT), M).unwrap();
+    assert_eq!(set.get(float).unwrap().anchor, FloatAnchor::Window);
+    let hidden = FloatLayout {
+        pane_anchors_hidden: true,
+        ..layout(&SPLIT)
+    };
+
+    // The centre (250, 200) lies over A, but A's floats are hidden.
+    assert_eq!(set.cycle_anchor(float, &hidden, M), Ok(None));
+    assert_eq!(set.get(float).unwrap().anchor, FloatAnchor::Window);
+    assert!(set.is_visible(float, &hidden, M));
+    assert_eq!(outer(&set, float, &SPLIT), Rect::new(100, 100, 300, 200));
+}
+
+#[test]
 fn tc_008_cycle_anchor_keeps_the_screen_rect_and_picks_the_pane_under_the_centre() {
     let mut set = FloatSet::default();
     let float = float_at(&mut set, 1, A, &SPLIT, Rect::new(100, 100, 300, 200));
@@ -247,6 +284,7 @@ fn tc_009_anchor_resize_applies_ratio_then_minimum_without_rewriting_the_ratio()
         window: small[0].1,
         panes: &small,
         zoomed: None,
+        pane_anchors_hidden: false,
     };
     assert_eq!(
         set.placed(float, &small_layout, M).unwrap().outer,
@@ -773,6 +811,7 @@ fn review_4_resize_drag_survives_an_anchor_that_moved_past_the_start_rect() {
         window: shifted,
         panes: &panes,
         zoomed: None,
+        pane_anchors_hidden: false,
     };
     set.drag_to(&held, Point::new(700, 200), &moved, M);
     let rect = set.placed(float, &moved, M).unwrap().outer;
@@ -949,6 +988,7 @@ fn review3_9_collapsing_a_minimum_sized_float_keeps_its_top_edge() {
         window: small[0].1,
         panes: &small,
         zoomed: None,
+        pane_anchors_hidden: false,
     };
     let normal = set.placed(float, &small_layout, M).unwrap().outer;
     assert_eq!((normal.y, normal.h), (220, 80));
@@ -1016,6 +1056,7 @@ fn review4_4_a_dragged_collapsed_strip_restores_where_it_was_saved() {
         window: small[0].1,
         panes: &small,
         zoomed: None,
+        pane_anchors_hidden: false,
     };
     let mut restored = FloatSet::default();
     for record in set.records_on(FloatAnchor::Pane(A), |_| None) {

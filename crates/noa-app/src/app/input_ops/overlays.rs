@@ -81,30 +81,42 @@ impl App {
         else {
             return;
         };
-        let Some((selected_text, targets)) =
-            self.send_selection_picker_payload_and_targets(source_window_id, source_pane)
+        let Some(snapshot) = self
+            .windows
+            .get(&source_window_id)
+            .and_then(|state| state.surfaces.get(&source_pane))
+            .and_then(|surface| surface.terminal.lock().active().selection_snapshot())
         else {
             return;
         };
-
-        self.show_send_selection_picker(source_window_id, source_pane, selected_text, targets);
+        self.open_send_selection_picker_with_payload(source_window_id, source_pane, snapshot);
     }
 
     pub(in crate::app) fn open_send_selection_picker_with_payload(
         &mut self,
         source_window_id: WindowId,
         source_pane: PaneId,
-        selected_text: String,
+        snapshot: noa_grid::SelectionSnapshot,
     ) {
-        if selected_text.is_empty() {
+        if self
+            .available_send_selection_targets(source_window_id, source_pane)
+            .is_none()
+        {
             return;
         }
-        let Some(targets) = self.available_send_selection_targets(source_window_id, source_pane)
-        else {
-            return;
-        };
-
-        self.show_send_selection_picker(source_window_id, source_pane, selected_text, targets);
+        self.queue_text_work(
+            move || snapshot.into_text(),
+            move |app, _, text| {
+                if let Some(text) = text
+                    && app.resolve_pane_command_target(AppCommand::SendSelectionToPane)
+                        == Some((source_window_id, source_pane))
+                    && let Some(targets) =
+                        app.available_send_selection_targets(source_window_id, source_pane)
+                {
+                    app.show_send_selection_picker(source_window_id, source_pane, text, targets);
+                }
+            },
+        );
     }
 
     fn show_send_selection_picker(
@@ -131,25 +143,13 @@ impl App {
         source_window_id: WindowId,
         source_pane: PaneId,
     ) -> bool {
-        self.send_selection_picker_payload_and_targets(source_window_id, source_pane)
+        self.available_send_selection_targets(source_window_id, source_pane)
             .is_some()
-    }
-
-    fn send_selection_picker_payload_and_targets(
-        &self,
-        source_window_id: WindowId,
-        source_pane: PaneId,
-    ) -> Option<(String, Vec<SendSelectionTarget>)> {
-        let targets = self.available_send_selection_targets(source_window_id, source_pane)?;
-
-        let selected_text = self
-            .windows
-            .get(&source_window_id)
-            .and_then(|state| state.surfaces.get(&source_pane))
-            .and_then(|surface| surface.terminal.lock().selected_text());
-        let selected_text = selected_text.filter(|text| !text.is_empty())?;
-
-        Some((selected_text, targets))
+            && self
+                .windows
+                .get(&source_window_id)
+                .and_then(|state| state.surfaces.get(&source_pane))
+                .is_some_and(|surface| surface.terminal.lock().active().has_selected_text())
     }
 
     fn available_send_selection_targets(

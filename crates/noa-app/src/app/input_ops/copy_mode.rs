@@ -105,9 +105,9 @@ fn exit_copy_mode_terminal(terminal: &Arc<Mutex<Terminal>>) -> bool {
 fn repair_and_capture_copy_mode_selection(
     state: &mut noa_grid::CopyModeState,
     terminal: &mut Terminal,
-) -> Option<String> {
+) -> Option<noa_grid::SelectionSnapshot> {
     state.repair_eviction(terminal);
-    terminal.selected_text()
+    terminal.active().selection_snapshot()
 }
 
 fn copy_mode_fixed_key(key: &Key, modifiers: ModifiersState) -> Option<CopyModeFixedKey> {
@@ -230,7 +230,7 @@ impl App {
                     repair_and_capture_copy_mode_selection(&mut session.state, &mut terminal)
                 });
                 if let Some(text) = selected_text {
-                    self.write_text_to_clipboard(&text);
+                    self.copy_snapshot(text, noa_config::CopyOnSelect::Clipboard);
                 }
                 true
             }
@@ -524,7 +524,7 @@ impl App {
                         repair_and_capture_copy_mode_selection(&mut session.state, &mut terminal)
                     });
                     if let Some(text) = selected_text {
-                        self.write_text_to_clipboard(&text);
+                        self.copy_snapshot(text, noa_config::CopyOnSelect::Clipboard);
                     }
                     self.end_copy_mode();
                 }
@@ -907,7 +907,10 @@ mod tests {
         let captured = repair_and_capture_copy_mode_selection(&mut state, &mut terminal);
 
         assert!(captured.is_some());
-        assert_eq!(terminal.selected_text(), captured);
+        assert_eq!(
+            terminal.selected_text(),
+            captured.and_then(noa_grid::SelectionSnapshot::into_text)
+        );
         assert_eq!(
             terminal.active().selection,
             Some(noa_grid::Selection::new(
@@ -922,10 +925,7 @@ mod tests {
         let mut terminal = Terminal::new(GridSize::new(8, 2));
         let mut state = noa_grid::CopyModeState::enter(&mut terminal).expect("copy mode");
 
-        assert_eq!(
-            repair_and_capture_copy_mode_selection(&mut state, &mut terminal),
-            None
-        );
+        assert!(repair_and_capture_copy_mode_selection(&mut state, &mut terminal).is_none());
     }
 
     #[test]
@@ -939,7 +939,12 @@ mod tests {
         let captured = repair_and_capture_copy_mode_selection(&mut state, &mut terminal);
         terminal.exit_copy_mode();
 
-        assert_eq!(captured.as_deref(), Some("ab"));
+        assert_eq!(
+            captured
+                .and_then(noa_grid::SelectionSnapshot::into_text)
+                .as_deref(),
+            Some("ab")
+        );
         assert_eq!(terminal.selected_text(), None);
     }
 }

@@ -85,6 +85,7 @@ mod font_cache;
 mod helpers;
 mod idle_ember;
 mod input_ops;
+mod text_worker;
 pub(crate) use input_ops::ime_trace_enabled;
 mod ipc;
 mod lifecycle;
@@ -308,6 +309,7 @@ pub struct App {
     /// The open search prompt (Cmd+F), if any — see [`SearchPromptSession`].
     search_prompt: Option<SearchPromptSession>,
     search_worker: Option<crate::search_worker::SearchWorker>,
+    text_worker: Option<text_worker::TextWorker>,
     /// Keyboard copy mode, bound to exactly one focused window/pane.
     copy_mode: Option<CopyModeSession>,
     /// Physical presses consumed by copy mode whose matching Kitty release
@@ -923,6 +925,7 @@ impl App {
             next_path_probe_generation: 0,
             search_prompt: None,
             search_worker: None,
+            text_worker: None,
             copy_mode: None,
             copy_mode_suppressed_releases: HashSet::new(),
             copy_mode_suppressed_repeats: HashSet::new(),

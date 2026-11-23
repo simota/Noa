@@ -164,65 +164,96 @@ impl App {
             let Some((window_id, pane_id)) = self.resolve_pane_command_target(command) else {
                 return;
             };
-            if let Some(panel) = &self.text_panel {
-                if !panel.can_close() {
-                    return;
-                }
-                if let Some((pane, text)) = panel.draft() {
-                    self.prompt_drafts.insert(pane, text);
-                }
-            }
-            let id = Self::session_card_id(window_id, pane_id);
-            let card = self.session_store.get(&id);
-            let process = card.and_then(|card| card.process.clone());
-            let context = card
-                .map(|card| {
-                    format!(
-                        "{} · {} · {}",
-                        card.display_name(),
-                        card.branch.as_deref().unwrap_or(""),
-                        card.cwd
-                    )
-                })
-                .unwrap_or_else(|| "Terminal".to_string());
-            let title = format!(
-                "{} — {}",
-                if editable {
-                    "Compose Prompt"
-                } else {
-                    "Output Snapshot"
-                },
-                context
-                    .chars()
-                    .filter(|c| !c.is_control())
-                    .take(160)
-                    .collect::<String>()
-            );
-            let text = if editable {
-                self.prompt_drafts
-                    .get(&pane_id)
-                    .filter(|text| !text.is_empty())
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        self.windows
-                            .get(&window_id)
-                            .and_then(|state| state.surfaces.get(&pane_id))
-                            .and_then(|surface| surface.terminal.lock().selected_text())
-                            .map(|selection| quote_selection(&selection))
-                            .unwrap_or_default()
-                    })
+            let snapshot = self
+                .windows
+                .get(&window_id)
+                .and_then(|state| state.surfaces.get(&pane_id))
+                .and_then(|surface| surface.terminal.lock().active().selection_snapshot());
+            if let Some(snapshot) = snapshot {
+                self.queue_text_work(
+                    move || snapshot.into_text(),
+                    move |app, _, selection| {
+                        if app.resolve_pane_command_target(command) == Some((window_id, pane_id)) {
+                            app.show_text_panel(window_id, pane_id, editable, selection);
+                        }
+                    },
+                );
             } else {
-                let Some(surface) = self
-                    .windows
-                    .get(&window_id)
-                    .and_then(|state| state.surfaces.get(&pane_id))
-                else {
-                    return;
-                };
-                let mut terminal = surface.terminal.lock();
-                let fullscreen = terminal.active_is_alt;
-                terminal.selected_text().unwrap_or_else(|| {
-                    terminal
+                self.show_text_panel(window_id, pane_id, editable, None);
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = editable;
+            log::warn!("text panels require macOS");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn show_text_panel(
+        &mut self,
+        window_id: WindowId,
+        pane_id: PaneId,
+        editable: bool,
+        selection: Option<String>,
+    ) {
+        if let Some(panel) = &self.text_panel {
+            if !panel.can_close() {
+                return;
+            }
+            if let Some((pane, text)) = panel.draft() {
+                self.prompt_drafts.insert(pane, text);
+            }
+        }
+        let id = Self::session_card_id(window_id, pane_id);
+        let card = self.session_store.get(&id);
+        let process = card.and_then(|card| card.process.clone());
+        let context = card
+            .map(|card| {
+                format!(
+                    "{} · {} · {}",
+                    card.display_name(),
+                    card.branch.as_deref().unwrap_or(""),
+                    card.cwd
+                )
+            })
+            .unwrap_or_else(|| "Terminal".to_string());
+        let title = format!(
+            "{} — {}",
+            if editable {
+                "Compose Prompt"
+            } else {
+                "Output Snapshot"
+            },
+            context
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(160)
+                .collect::<String>()
+        );
+        let text = if editable {
+            self.prompt_drafts
+                .get(&pane_id)
+                .filter(|text| !text.is_empty())
+                .cloned()
+                .unwrap_or_else(|| {
+                    selection
+                        .map(|selection| quote_selection(&selection))
+                        .unwrap_or_default()
+                })
+        } else if let Some(text) = selection {
+            text
+        } else {
+            let Some(surface) = self
+                .windows
+                .get(&window_id)
+                .and_then(|state| state.surfaces.get(&pane_id))
+            else {
+                return;
+            };
+            let mut terminal = surface.terminal.lock();
+            let fullscreen = terminal.active_is_alt;
+            terminal
                         .scrollback_text_tail(crate::text_panel::TEXT_LIMIT - 256)
                         .map(|(text, truncated)| {
                             if fullscreen {
@@ -234,29 +265,22 @@ impl App {
                             }
                         })
                         .unwrap_or_default()
-                })
-            };
-            match crate::text_panel::TextPanel::open(
-                &title,
-                &text,
-                if editable {
-                    crate::text_panel::TextPanelMode::Compose
-                } else {
-                    crate::text_panel::TextPanelMode::Output
-                },
-                window_id,
-                pane_id,
-                process,
-                self.proxy.clone(),
-            ) {
-                Ok(panel) => self.text_panel = Some(panel),
-                Err(err) => log::warn!("could not open text panel: {err}"),
-            }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = editable;
-            log::warn!("text panels require macOS");
+        };
+        match crate::text_panel::TextPanel::open(
+            &title,
+            &text,
+            if editable {
+                crate::text_panel::TextPanelMode::Compose
+            } else {
+                crate::text_panel::TextPanelMode::Output
+            },
+            window_id,
+            pane_id,
+            process,
+            self.proxy.clone(),
+        ) {
+            Ok(panel) => self.text_panel = Some(panel),
+            Err(err) => log::warn!("could not open text panel: {err}"),
         }
     }
 

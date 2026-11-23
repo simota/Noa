@@ -461,6 +461,8 @@ impl Page {
     /// Fill `out` with local row `local`, padding trimmed trailing cells back
     /// to `cols` with default blanks. Reuses `out`'s allocation.
     fn materialize_row_into(&self, local: usize, out: &mut Row) {
+        #[cfg(test)]
+        ROW_READS.set(ROW_READS.get() + 1);
         let meta = &self.rows[local];
         let start = meta.offset as usize;
         let len = meta.len as usize;
@@ -1081,6 +1083,7 @@ unsafe fn arena_unmap(ptr: *mut u8, bytes: usize) {
 struct PageSlot {
     cols: u16,
     rows: usize,
+    has_text: bool,
     /// Uncompressed accounting size: compression never changes how much
     /// history `scrollback-limit` keeps.
     bytes: usize,
@@ -1089,19 +1092,17 @@ struct PageSlot {
     body: Mutex<PageBody>,
 }
 
+#[derive(Clone)]
 enum PageBody {
     /// Shared so a reader takes it from under the lock and works without
     /// holding the lock (a search visiting a whole page, a compression pass).
     Resident(Arc<Page>),
-    Compressed(CompressedPage),
+    Compressed(Arc<CompressedPage>),
 }
 
 struct CompressedPage {
     /// Deflated serialization (see [`CompressedPage::encode`]).
     data: Box<[u8]>,
-    /// Whether any cell holds text, so [`PagedScrollback::has_text`] need
-    /// not decompress.
-    has_text: bool,
 }
 
 impl PageSlot {
@@ -1109,6 +1110,7 @@ impl PageSlot {
         PageSlot {
             cols: page.cols,
             rows: page.rows.len(),
+            has_text: page.cells.iter().any(PackedCell::has_text),
             bytes: page.bytes,
             decompressed,
             body: Mutex::new(PageBody::Resident(Arc::new(page))),
@@ -1141,10 +1143,13 @@ impl PageSlot {
         f(&self.resident())
     }
 
-    fn has_text(&self) -> bool {
-        match &*self.lock() {
-            PageBody::Resident(page) => page.cells.iter().any(PackedCell::has_text),
-            PageBody::Compressed(compressed) => compressed.has_text,
+    /// A sequential snapshot scan needs each page only once. Decode privately
+    /// so it neither holds the slot lock nor warms the terminal's entire history.
+    fn snapshot_page(&self) -> Arc<Page> {
+        let body = self.lock().clone();
+        match body {
+            PageBody::Resident(page) => page,
+            PageBody::Compressed(compressed) => Arc::new(compressed.decode(self.cols, self.bytes)),
         }
     }
 
@@ -1163,7 +1168,7 @@ impl PageSlot {
         let compressed = CompressedPage::encode(&page);
         let mut body = self.lock();
         if matches!(&*body, PageBody::Resident(current) if Arc::ptr_eq(current, &page)) {
-            *body = PageBody::Compressed(compressed);
+            *body = PageBody::Compressed(Arc::new(compressed));
         }
     }
 
@@ -1239,10 +1244,7 @@ impl CompressedPage {
             .finish()
             .expect("deflating into a Vec cannot fail")
             .into_boxed_slice();
-        CompressedPage {
-            data,
-            has_text: page.cells.iter().any(PackedCell::has_text),
-        }
+        CompressedPage { data }
     }
 
     fn decode(&self, cols: u16, bytes: usize) -> Page {
@@ -2082,7 +2084,7 @@ impl PagedScrollback {
                 .any(|cell| !cell.is_blank()),
             DeferredRow::Span(span) => span.has_text(arena),
         };
-        self.pages.iter().any(|slot| slot.has_text())
+        self.pages.iter().any(|slot| slot.has_text)
             || self
                 .open
                 .as_ref()
@@ -2267,9 +2269,11 @@ impl PagedScrollback {
 
 // ── Batch packing worker pool ───────────────────────────────────────
 
-/// Immutable search input: packed pages and the sealing batch are shared;
+/// Immutable text input: packed pages and the sealing batch are shared;
 /// only the bounded pending suffix is copied while holding the terminal lock.
 pub(crate) struct HistorySnapshot {
+    first_row: usize,
+    range: Range<usize>,
     pages: Vec<Arc<PageSlot>>,
     open: Option<Arc<Page>>,
     sealing: Option<Arc<SealBatch>>,
@@ -2279,43 +2283,89 @@ pub(crate) struct HistorySnapshot {
 
 impl PagedScrollback {
     pub(crate) fn search_snapshot(&self) -> HistorySnapshot {
+        self.snapshot_range(0..self.len())
+    }
+
+    pub(crate) fn snapshot_range(&self, range: Range<usize>) -> HistorySnapshot {
+        let first = self
+            .page_row_ends
+            .partition_point(|&end| end <= self.first_page_start + range.start);
+        let last = self
+            .page_row_ends
+            .partition_point(|&end| end < self.first_page_start + range.end);
+        let open_start = self
+            .page_row_ends
+            .back()
+            .copied()
+            .unwrap_or(self.first_page_start)
+            - self.first_page_start;
+        let pending_start = self.len() - self.pending.len();
+        let pending = range.end > pending_start;
         HistorySnapshot {
-            pages: self.pages.iter().cloned().collect(),
-            open: self.open.clone(),
-            sealing: self.sealing.clone(),
-            pending: self.pending.iter().cloned().collect(),
-            span_bytes: self.pending_span_bytes.clone(),
+            first_row: first
+                .checked_sub(1)
+                .map_or(0, |i| self.page_row_ends[i] - self.first_page_start),
+            pages: self
+                .pages
+                .range(first..(last + 1).min(self.pages.len()))
+                .cloned()
+                .collect(),
+            open: self
+                .open
+                .as_ref()
+                .filter(|_| range.end > open_start)
+                .cloned(),
+            sealing: self
+                .sealing
+                .as_ref()
+                .filter(|_| range.end > self.packed_rows())
+                .cloned(),
+            pending: if pending {
+                self.pending.iter().cloned().collect()
+            } else {
+                Vec::new()
+            },
+            span_bytes: if pending {
+                self.pending_span_bytes.clone()
+            } else {
+                Vec::new()
+            },
+            range,
         }
     }
 }
 
+#[cfg(test)]
+thread_local! { pub(crate) static ROW_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 impl HistorySnapshot {
     pub(crate) fn for_each_row(&self, mut visit: impl FnMut(usize, &Row) -> bool) -> bool {
         let mut row = empty_row();
-        let mut y = 0;
-        for slot in &self.pages {
-            let finished = slot.with_page(|page| {
-                for local in 0..page.rows.len() {
-                    page.materialize_row_into(local, &mut row);
-                    if !visit(y, &row) {
-                        return false;
-                    }
-                    y += 1;
-                }
-                true
-            });
-            if !finished {
-                return false;
-            }
-        }
-        if let Some(page) = &self.open {
-            for local in 0..page.rows.len() {
+        let mut base = self.first_row;
+        let local_rows = |base: usize, len: usize| {
+            self.range.start.saturating_sub(base).min(len)
+                ..self.range.end.saturating_sub(base).min(len)
+        };
+        let mut visit_page = |page: &Page, base| {
+            for local in local_rows(base, page.rows.len()) {
                 page.materialize_row_into(local, &mut row);
-                if !visit(y, &row) {
+                if !visit(base + local, &row) {
                     return false;
                 }
-                y += 1;
             }
+            true
+        };
+        for slot in &self.pages {
+            if !visit_page(&slot.snapshot_page(), base) {
+                return false;
+            }
+            base += slot.rows;
+        }
+        if let Some(page) = &self.open {
+            if !visit_page(page, base) {
+                return false;
+            }
+            base += page.rows.len();
         }
         let sealing = self
             .sealing
@@ -2325,19 +2375,19 @@ impl HistorySnapshot {
             self.pending.as_slice(),
             self.span_bytes.as_slice(),
         ))) {
-            for deferred in rows {
-                let current = match deferred {
+            for local in local_rows(base, rows.len()) {
+                let current = match &rows[local] {
                     DeferredRow::Cells(cells) => cells,
                     DeferredRow::Span(span) => {
                         span.materialize_into(arena, &mut row);
                         &row
                     }
                 };
-                if !visit(y, current) {
+                if !visit(base + local, current) {
                     return false;
                 }
-                y += 1;
             }
+            base += rows.len();
         }
         true
     }
@@ -2841,6 +2891,19 @@ mod tests {
         }
         assert!(sb.pages.iter().all(|slot| slot.is_compressed()));
         assert!(!sb.take_decompressed());
+        // A copy crossing a page boundary reads only the requested rows, and
+        // keeps both compressed originals cold for the terminal.
+        let boundary = sb.pages[1].rows + sb.pages[0].rows;
+        let range = boundary - 1..boundary + 1;
+        let snapshot = sb.snapshot_range(range.clone());
+        ROW_READS.set(0);
+        assert!(snapshot.for_each_row(|y, row| {
+            assert_eq!((&row.cells, row.wrapped), (&before[y].0, before[y].1));
+            assert!(range.contains(&y));
+            true
+        }));
+        assert_eq!(ROW_READS.get(), 2);
+        assert!(sb.pages.iter().all(|slot| slot.is_compressed()));
         // Accounting, row lookup and the text check work without a read.
         assert_eq!(sb.bytes(), bytes);
         assert!(sb.has_text());

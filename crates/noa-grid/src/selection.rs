@@ -1,6 +1,62 @@
 //! Terminal selection state.
 
+use crate::{Row, Screen, scrollback::HistorySnapshot};
 use noa_core::Point;
+
+/// The selected rows at command time. Reading the text needs no terminal
+/// lock, even if output, eviction or a screen switch follows the selection.
+pub struct SelectionSnapshot {
+    pub(crate) selection: Selection,
+    pub(crate) history: Option<HistorySnapshot>,
+    pub(crate) first_live: usize,
+    pub(crate) live: Vec<Row>,
+}
+
+impl SelectionSnapshot {
+    pub fn into_text(self) -> Option<String> {
+        let (start, end) = self.selection.normalized();
+        let mut text = String::new();
+        let mut previous_wrapped = false;
+        let mut append = |y, row: &Row| {
+            append_selection_row(start, end, y, row, &mut previous_wrapped, &mut text);
+            true
+        };
+        if let Some(history) = self.history {
+            history.for_each_row(&mut append);
+        }
+        for (i, row) in self.live.iter().enumerate() {
+            append(self.first_live + i, row);
+        }
+        (!text.is_empty()).then_some(text)
+    }
+}
+
+pub(crate) fn append_selection_row(
+    start: SelectionPoint,
+    end: SelectionPoint,
+    y: usize,
+    row: &Row,
+    previous_wrapped: &mut bool,
+    text: &mut String,
+) {
+    if let Some(last) = row.cells.len().checked_sub(1) {
+        let left = if y == start.y {
+            usize::from(start.x).min(last)
+        } else {
+            0
+        };
+        let right = if y == end.y {
+            usize::from(end.x).min(last)
+        } else {
+            last
+        };
+        if y > start.y && !*previous_wrapped {
+            text.push('\n');
+        }
+        Screen::push_selected_row_text(row, left, right, text);
+        *previous_wrapped = row.wrapped;
+    }
+}
 
 /// A cell coordinate in the screen's combined row storage.
 ///

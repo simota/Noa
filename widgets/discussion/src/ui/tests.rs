@@ -165,10 +165,10 @@ fn clicking_the_same_issue_again_or_clear_shows_everything() {
 fn a_filter_on_an_issue_that_is_gone_falls_back() {
     let (mut screen, mut text) = laid_out();
     screen.run(Action::Filter(i("D")), &mut text);
-    let mut session = screen.session.clone().unwrap();
+    let mut session = (**screen.session.as_ref().unwrap()).clone();
     session.issues.issues.retain(|issue| issue.id != i("D"));
     session.rev += 1;
-    screen.session = Some(session);
+    screen.session = Some(std::sync::Arc::new(session));
     screen.rebuild(&mut text);
     assert_eq!(screen.filter, None);
 }
@@ -411,7 +411,7 @@ impl Harness {
             .snapshots
             .send(Snapshot {
                 link: Link::Live,
-                session,
+                session: session.map(std::sync::Arc::new),
             })
             .unwrap();
         self.screen.prepare(window(), &mut self.text);
@@ -631,12 +631,12 @@ fn the_status_bar_shows_the_link() {
     assert_eq!(status_badges(&screen)[0], "DEMO");
     let down = Discussion::of_snapshot(Snapshot {
         link: Link::Down("refused".into()),
-        session: Some(crate::demo::session()),
+        session: Some(std::sync::Arc::new(crate::demo::session())),
     });
     assert_eq!(status_badges(&down)[0], "オフライン");
     let live = Discussion::of_snapshot(Snapshot {
         link: Link::Live,
-        session: Some(crate::demo::session()),
+        session: Some(std::sync::Arc::new(crate::demo::session())),
     });
     assert_eq!(status_badges(&live)[0], "LIVE");
 }
@@ -984,13 +984,13 @@ fn scrolled_across_an_update(
     );
     h.screen.prepare(size, &mut h.text);
     let before = scroll_position(&h.screen.tree, scroll);
-    let mut session = h.screen.session.clone().unwrap();
+    let mut session = (**h.screen.session.as_ref().unwrap()).clone();
     session.rev += 1;
     h.feed
         .snapshots
         .send(Snapshot {
             link: Link::Live,
-            session: Some(session),
+            session: Some(std::sync::Arc::new(session)),
         })
         .unwrap();
     h.screen.prepare(size, &mut h.text);

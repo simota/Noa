@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -149,7 +150,7 @@ pub enum Link {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Update {
     /// The session after a change (sent first once it is open).
-    Session(Box<Session>),
+    Session(Arc<Session>),
     Link(Link),
     /// Something to show briefly: a refused action, a pane that closed.
     Notice(String),
@@ -643,7 +644,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     }
 
     fn publish(&mut self) {
-        let session = Box::new(self.engine.session().clone());
+        let session = Arc::new(self.engine.session().clone());
         self.update(Update::Session(session));
     }
 
@@ -1125,6 +1126,10 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             }
             Err(NoaError::Link(why)) => return Err(Fail::Link(why)),
         }
+        if pane.idle() {
+            pane.ready = true;
+            return Ok(true);
+        }
         let (quiet, input) = match conn.screen(pane.id) {
             Ok(text) if text.trim().is_empty() => {
                 pane.quiet = None;
@@ -1144,7 +1149,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             Err(NoaError::Link(why)) => return Err(Fail::Link(why)),
             Err(_) => (false, false),
         };
-        if pane.idle() || (input && quiet) {
+        if input && quiet {
             pane.ready = true;
         }
         Ok(pane.ready)
@@ -1360,6 +1365,10 @@ mod tests {
         events: VecDeque<Changes>,
         typed: Vec<(u64, String, bool)>,
         spawned: Vec<(Placement, PaneSpec, u64)>,
+        rpc_panes: usize,
+        rpc_changes: usize,
+        rpc_paste_ready: usize,
+        rpc_screen: usize,
     }
 
     /// A fake Noa, its connector and the clock, sharing one world.
@@ -1485,6 +1494,7 @@ mod tests {
     impl Noa for Fake {
         fn panes(&mut self) -> Result<Vec<PaneView>, NoaError> {
             self.up()?;
+            self.w().rpc_panes += 1;
             let w = self.0.borrow();
             Ok(w.panes.iter().map(|(id, p)| Fake::view(*id, p)).collect())
         }
@@ -1492,6 +1502,7 @@ mod tests {
         fn changes(&mut self, wait: Duration) -> Result<Option<Changes>, NoaError> {
             self.up()?;
             let mut w = self.w();
+            w.rpc_changes += 1;
             w.now += wait.as_millis() as Millis;
             Ok(w.events.pop_front())
         }
@@ -1535,6 +1546,7 @@ mod tests {
 
         fn paste_ready(&mut self, pane: u64) -> Result<bool, NoaError> {
             self.up()?;
+            self.w().rpc_paste_ready += 1;
             let w = self.0.borrow();
             w.panes
                 .get(&pane)
@@ -1544,6 +1556,7 @@ mod tests {
 
         fn screen(&mut self, pane: u64) -> Result<String, NoaError> {
             self.up()?;
+            self.w().rpc_screen += 1;
             let w = self.0.borrow();
             w.panes
                 .get(&pane)
@@ -2794,5 +2807,67 @@ mod tests {
         assert_eq!(codex.unwrap(), "-m opus -c model_reasoning_effort=high");
         let plain = agent_argv(AgentKind::Agy, &AgentSetup::default());
         assert_eq!(run_under_csh(&plain, AgentKind::Agy).unwrap(), "");
+    }
+
+    #[test]
+    fn idle_pane_becomes_ready_without_capturing_screen() {
+        let root = temp_root("idle-no-screen");
+        let fake = Fake::new();
+        let mut rig = Rig::open(
+            &fake,
+            Start::New {
+                topic: "Pick a database".into(),
+                workdir: None,
+                max_rounds: None,
+                moderator: AgentKind::Agy.into(),
+                panel: vec![AgentKind::Claude.into()],
+                root: root.clone(),
+            },
+        );
+        rig.step();
+        let claude = fake.pane_of("claude · ");
+        let screen_before = fake.0.borrow().rpc_screen;
+        fake.report(claude, "input");
+        rig.until(10, |r| r.submitted(claude) == 1);
+        assert_eq!(
+            fake.0.borrow().rpc_screen,
+            screen_before,
+            "idle pane should not trigger screen capture RPCs"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[ignore = "perf probe: counts IPC calls per tick"]
+    fn probe_ipc_counts_per_tick() {
+        let root = temp_root("ipc-probe");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.step();
+        fake.report(101, "input");
+        fake.report(102, "input");
+        rig.until(10, |r| r.submitted(101) == 1 && r.submitted(102) == 1);
+        let (startup_panes, startup_paste, startup_screen, startup_changes) = {
+            let w = fake.0.borrow();
+            (w.rpc_panes, w.rpc_paste_ready, w.rpc_screen, w.rpc_changes)
+        };
+        for _ in 0..100 {
+            rig.step();
+        }
+        let (steady_panes, steady_paste, steady_screen, steady_changes) = {
+            let w = fake.0.borrow();
+            (
+                w.rpc_panes - startup_panes,
+                w.rpc_paste_ready - startup_paste,
+                w.rpc_screen - startup_screen,
+                w.rpc_changes - startup_changes,
+            )
+        };
+        println!(
+            "discussion runner IPC counts:\n  \
+             startup (2 idle panelists): panes={startup_panes} paste_ready={startup_paste} screen={startup_screen} changes={startup_changes}\n  \
+             steady-state (100 ticks):   panes={steady_panes} paste_ready={steady_paste} screen={steady_screen} changes={steady_changes}"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 }

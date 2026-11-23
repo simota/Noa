@@ -3,6 +3,8 @@
 //! that belong to an issue as leaves under it. Pure layout: every node gets
 //! a rectangle, every edge joins a parent to a child.
 
+use std::collections::HashMap;
+
 use super::types::{IssueId, MinuteSection, Session};
 
 /// Node sizes and spacing, in logical pixels.
@@ -72,26 +74,36 @@ pub struct MindMap {
 struct Draft {
     kind: NodeKind,
     children: Vec<Draft>,
+    span: f32,
 }
 
 impl Draft {
-    fn size(&self) -> (f32, f32) {
-        match self.kind {
+    fn new(kind: NodeKind, children: Vec<Draft>) -> Self {
+        let own = Self::size_of(&kind).1;
+        let span = if children.is_empty() {
+            own
+        } else {
+            let child_span: f32 = children.iter().map(|c| c.span).sum::<f32>()
+                + ROW_GAP * (children.len() - 1) as f32;
+            own.max(child_span)
+        };
+        Self {
+            kind,
+            children,
+            span,
+        }
+    }
+
+    fn size_of(kind: &NodeKind) -> (f32, f32) {
+        match kind {
             NodeKind::Topic => (TOPIC_W, TOPIC_H),
             NodeKind::Issue(_) => (ISSUE_W, ISSUE_H),
             NodeKind::Minute { .. } => (LEAF_W, LEAF_H),
         }
     }
 
-    /// The height this node and everything under it take.
-    fn span(&self) -> f32 {
-        let own = self.size().1;
-        if self.children.is_empty() {
-            return own;
-        }
-        let children: f32 = self.children.iter().map(Draft::span).sum::<f32>()
-            + ROW_GAP * (self.children.len() - 1) as f32;
-        own.max(children)
+    fn size(&self) -> (f32, f32) {
+        Self::size_of(&self.kind)
     }
 }
 
@@ -106,86 +118,91 @@ fn column_x(depth: usize) -> f32 {
 /// The map of `session`. A minutes item hangs under the first issue it
 /// names, or under the topic when it names none.
 pub fn layout(session: &Session) -> MindMap {
-    let mut leaves: Vec<(Option<IssueId>, NodeKind)> = Vec::new();
+    let issues = &session.issues.issues;
+    let n = issues.len();
+    let mut by_id: HashMap<&str, usize> = HashMap::with_capacity(n);
+    for (idx, issue) in issues.iter().enumerate() {
+        by_id.insert(issue.id.as_str(), idx);
+    }
+    let mut roots = Vec::new();
+    let mut issue_children: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (idx, issue) in issues.iter().enumerate() {
+        match &issue.parent {
+            None => roots.push(idx),
+            Some(parent) => {
+                if let Some(&pidx) = by_id.get(parent.as_str()) {
+                    issue_children[pidx].push(idx);
+                }
+            }
+        }
+    }
+    let mut issue_leaves: Vec<Vec<NodeKind>> = vec![Vec::new(); n];
+    let mut topic_leaves: Vec<NodeKind> = Vec::new();
     for section in MinuteSection::ALL {
         for item in session.minutes.section(section) {
-            let issue = item
-                .issues
-                .iter()
-                .find(|id| session.issues.contains(id))
-                .cloned();
-            leaves.push((
-                issue,
-                NodeKind::Minute {
-                    section,
-                    text: item.text.clone(),
-                },
-            ));
+            let kind = NodeKind::Minute {
+                section,
+                text: item.text.clone(),
+            };
+            if let Some(&idx) = item.issues.iter().find_map(|id| by_id.get(id.as_str())) {
+                issue_leaves[idx].push(kind);
+            } else {
+                topic_leaves.push(kind);
+            }
         }
     }
-    fn issue_draft(
-        session: &Session,
-        id: &IssueId,
-        leaves: &[(Option<IssueId>, NodeKind)],
-    ) -> Draft {
-        let mut children: Vec<Draft> = session
-            .issues
-            .children(id)
-            .map(|child| issue_draft(session, &child.id, leaves))
-            .collect();
-        children.extend(
-            leaves
-                .iter()
-                .filter(|(issue, _)| issue.as_ref() == Some(id))
-                .map(|(_, kind)| Draft {
-                    kind: kind.clone(),
-                    children: Vec::new(),
-                }),
-        );
-        Draft {
-            kind: NodeKind::Issue(id.clone()),
-            children,
-        }
-    }
-    let mut children: Vec<Draft> = session
-        .issues
-        .roots()
-        .map(|issue| issue_draft(session, &issue.id, &leaves))
-        .collect();
-    children.extend(
-        leaves
-            .iter()
-            .filter(|(issue, _)| issue.is_none())
-            .map(|(_, kind)| Draft {
-                kind: kind.clone(),
-                children: Vec::new(),
-            }),
-    );
-    let root = Draft {
-        kind: NodeKind::Topic,
-        children,
-    };
 
+    fn issue_draft(
+        idx: usize,
+        issues: &[super::types::Issue],
+        issue_children: &[Vec<usize>],
+        issue_leaves: &mut [Vec<NodeKind>],
+    ) -> Draft {
+        let mut children: Vec<Draft> = issue_children[idx]
+            .iter()
+            .map(|&child| issue_draft(child, issues, issue_children, issue_leaves))
+            .collect();
+        for kind in std::mem::take(&mut issue_leaves[idx]) {
+            children.push(Draft::new(kind, Vec::new()));
+        }
+        Draft::new(NodeKind::Issue(issues[idx].id.clone()), children)
+    }
+
+    let mut children: Vec<Draft> = roots
+        .iter()
+        .map(|&idx| issue_draft(idx, issues, &issue_children, &mut issue_leaves))
+        .collect();
+    for kind in topic_leaves {
+        children.push(Draft::new(kind, Vec::new()));
+    }
+    let root = Draft::new(NodeKind::Topic, children);
+
+    let total_nodes = 1
+        + n
+        + MinuteSection::ALL
+            .iter()
+            .map(|s| session.minutes.section(*s).len())
+            .sum::<usize>();
     let mut map = MindMap {
-        nodes: Vec::new(),
-        edges: Vec::new(),
+        nodes: Vec::with_capacity(total_nodes),
+        edges: Vec::with_capacity(total_nodes.saturating_sub(1)),
         width: 0.0,
-        height: root.span() + 2.0 * MARGIN,
+        height: root.span + 2.0 * MARGIN,
     };
-    place(&root, 0, MARGIN, None, &mut map);
+    place(root, 0, MARGIN, None, &mut map);
     map.width = map.nodes.iter().map(|n| n.x + n.w).fold(0.0, f32::max) + MARGIN;
     map
 }
 
-/// Places `draft` in the band of height `draft.span()` starting at `top`:
+/// Places `draft` in the band of height `draft.span` starting at `top`:
 /// the node at the top of its band, level with its first child, and the
 /// children stacked below one another. The topic so opens where the map
 /// starts, however many issues there are.
-fn place(draft: &Draft, depth: usize, top: f32, parent: Option<usize>, map: &mut MindMap) {
+fn place(draft: Draft, depth: usize, top: f32, parent: Option<usize>, map: &mut MindMap) {
     let (w, h) = draft.size();
     let index = map.nodes.len();
     map.nodes.push(Node {
-        kind: draft.kind.clone(),
+        kind: draft.kind,
         depth,
         x: column_x(depth),
         y: top,
@@ -199,9 +216,10 @@ fn place(draft: &Draft, depth: usize, top: f32, parent: Option<usize>, map: &mut
         });
     }
     let mut y = top;
-    for child in &draft.children {
+    for child in draft.children {
+        let span = child.span;
         place(child, depth + 1, y, Some(index), map);
-        y += child.span() + ROW_GAP;
+        y += span + ROW_GAP;
     }
 }
 
@@ -366,5 +384,56 @@ mod tests {
         assert_eq!(map.nodes.len(), 1);
         assert!(map.edges.is_empty());
         assert_eq!(map.width, MARGIN + TOPIC_W + MARGIN);
+    }
+
+    #[test]
+    fn deep_issue_tree_positions_and_edges_are_exact() {
+        let mut s = session();
+        let add = |id: &str, parent: Option<&str>| IssueOp::Add {
+            id: IssueId::new(id),
+            parent: parent.map(IssueId::new),
+            title: format!("issue {id}"),
+        };
+        reduce::apply(
+            &mut s,
+            &[
+                Event::IssueChanged {
+                    round: 1,
+                    op: add("A1a", Some("A1")),
+                },
+                Event::IssueChanged {
+                    round: 1,
+                    op: add("A1a1", Some("A1a")),
+                },
+                Event::IssueChanged {
+                    round: 1,
+                    op: add("A2", Some("A")),
+                },
+            ],
+        )
+        .unwrap();
+        let map = layout(&s);
+        assert_eq!(map.nodes.len(), 10);
+        assert_eq!(map.edges.len(), 9);
+        // Pin exact coordinates of every node in depth-first order.
+        let coords: Vec<(usize, f32, f32)> =
+            map.nodes.iter().map(|n| (n.depth, n.x, n.y)).collect();
+        assert_eq!(
+            coords,
+            vec![
+                (0, 20.0, 20.0),
+                (1, 296.0, 20.0),
+                (2, 612.0, 20.0),
+                (3, 928.0, 20.0),
+                (4, 1244.0, 20.0),
+                (3, 928.0, 138.0),
+                (2, 612.0, 200.0),
+                (2, 612.0, 318.0),
+                (1, 296.0, 380.0),
+                (1, 296.0, 498.0),
+            ]
+        );
+        assert_eq!(map.width, 1524.0);
+        assert_eq!(map.height, 566.0);
     }
 }

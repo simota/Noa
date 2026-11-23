@@ -40,7 +40,9 @@
   /* "#install-linux" and "#install-source" open that method's panel (the
      panels share one name, so the others close) and move focus to it. */
   const openInstall = (hash, focus) => {
-    const d = hash && hash.startsWith("#install-") ? document.querySelector(hash) : null;
+    /* getElementById, not querySelector: a hash is not a valid selector in general
+       ("#install-a/b"), and a SyntaxError here would stop the rest of this script. */
+    const d = hash && hash.startsWith("#install-") ? document.getElementById(hash.slice(1)) : null;
     if (!d || d.tagName !== "DETAILS") return false;
     d.open = true;
     if (focus) {

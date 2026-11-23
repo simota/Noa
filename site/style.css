@@ -307,14 +307,14 @@ p { margin: 0; }
 .install__intro > p { color: var(--text-2); }
 .install__noa { margin: 28px 0 0; width: 180px; }
 .install__noa figcaption { margin-top: 8px; font: italic .86rem var(--mono); color: var(--muted); }
-.acc { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
-.acc details { min-width: 0; }
-.acc details { border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); }
-.acc details[open] { border-color: var(--line-2); }
-.acc summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; padding: 16px 20px; cursor: pointer; list-style: none; border-radius: var(--r); }
-.acc summary::-webkit-details-marker { display: none; }
-.acc summary::before { content: "+"; font: 700 1rem var(--mono); color: var(--accent); width: 1ch; }
-.acc details[open] summary::before { content: "−"; }
+.install-acc { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
+.install-acc details { min-width: 0; }
+.install-acc details { border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); }
+.install-acc details[open] { border-color: var(--line-2); }
+.install-acc summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; padding: 16px 20px; cursor: pointer; list-style: none; border-radius: var(--r); }
+.install-acc summary::-webkit-details-marker { display: none; }
+.install-acc summary::before { content: "+"; font: 700 1rem var(--mono); color: var(--accent); width: 1ch; }
+.install-acc details[open] summary::before { content: "−"; }
 .acc__t { font: 700 1rem var(--mono); }
 .acc__s { font-size: .84rem; color: var(--muted); }
 .acc__body { padding: 0 20px 20px; min-width: 0; }

@@ -153,11 +153,11 @@ test screen::reflow::wraps_cjk ... ok
         <div class="quick">
           <p class="quick__label" id="quick-label">From Ghostty in two steps · Apple Silicon · or <a href="#install-linux">Linux tarball</a> · <a href="#install-source">from source</a></p>
           <div class="codebox">
-<pre class="code code--quick"><code id="cmd-hero">brew tap simota/noa https://github.com/simota/Noa.git
-brew install --cask simota/noa/noa
+<pre class="code code--quick"><code id="cmd-hero"><span id="cmd-hero-install">brew tap simota/noa https://github.com/simota/Noa.git
+brew install --cask simota/noa/noa</span>
 <span class="c"># optional: bring your Ghostty config</span>
 /Applications/Noa.app/Contents/MacOS/Noa --import-ghostty-config</code></pre>
-            <button class="copy" type="button" data-copy="cmd-hero" aria-label="Copy the quick-start commands">Copy</button>
+            <button class="copy" type="button" data-copy="cmd-hero-install" aria-label="Copy the two install commands">Copy</button>
           </div>
         </div>
       </div>
@@ -497,7 +497,7 @@ test kitty::push_pop_flags .... <span class="p1">FAILED</span>
             <figcaption>“…done. next.”</figcaption>
           </figure>
         </div>
-        <div class="acc">
+        <div class="install-acc">
           <details name="install" id="install-macos" open>
             <summary><span class="acc__t">macOS</span><span class="acc__s">Homebrew · Apple Silicon · macOS 13+</span></summary>
             <div class="acc__body">

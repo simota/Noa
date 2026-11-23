@@ -2,7 +2,9 @@
 //!
 //! Information isolation is enforced here:
 //! - In `RoundKind::Blind`, a contestant brief NEVER includes peer submissions,
-//!   peer artifact directories, peer feedback, or peer scores.
+//!   peer artifact directories, peer feedback, or peer identities. It does
+//!   carry the contestant's own rank and its point gap to the leader (or lead
+//!   over the runner-up), to keep the pressure on.
 //! - In `RoundKind::Reveal` (every `reveal_interval` completed rounds), the
 //!   brief adds a Peer Showcase section containing the prior round's peer
 //!   submissions, artifact snapshot paths, and the judge's round overview.
@@ -172,6 +174,9 @@ pub fn contestant_brief(
             let _ = writeln!(body, "- Strengths: {}", ev.strengths);
         }
         let _ = writeln!(body, "- Feedback to address: {}", ev.feedback);
+        if let Some(standing) = standing_line(session, to, ev_round) {
+            let _ = writeln!(body, "- {standing}");
+        }
     }
     body.push('\n');
 
@@ -227,7 +232,22 @@ pub fn contestant_brief(
     }
     body.push('\n');
 
-    let _ = writeln!(body, "## 6. How to submit");
+    let _ = writeln!(body, "## 6. How to compete");
+    let _ = writeln!(
+        body,
+        "- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone."
+    );
+    let _ = writeln!(
+        body,
+        "- Every round, also make at least one improvement nobody asked for: the change you expect to raise your score most. Prefer one bold, verified change over many small fixes."
+    );
+    let _ = writeln!(
+        body,
+        "- In your report, add a `## Beyond feedback` section naming that change and why you expect it to win points."
+    );
+    body.push('\n');
+
+    let _ = writeln!(body, "## 7. How to submit");
     let _ = writeln!(
         body,
         "1. Write or update your deliverables in: {}",
@@ -258,6 +278,34 @@ pub fn contestant_brief(
         reply_path: reply_path.to_owned(),
         receipt: Receipt::default(),
     }
+}
+
+/// `to`'s rank after round `round`, and the gap to the leader or the lead over
+/// the runner-up. Peers stay anonymous: only positions and point gaps.
+fn standing_line(session: &Session, to: &PartId, round: RoundNo) -> Option<String> {
+    let outcome = session.round(round)?.outcome.as_ref()?;
+    let pos = outcome.ranking.iter().position(|p| p == to)?;
+    let score_at = |i: usize| {
+        outcome
+            .ranking
+            .get(i)
+            .and_then(|p| outcome.evaluations.get(p))
+            .map(|e| i32::from(e.score))
+    };
+    let mine = score_at(pos)?;
+    let n = outcome.ranking.len();
+    let gap = if pos == 0 {
+        match score_at(1) {
+            Some(next) => format!("you lead by {} point(s)", mine - next),
+            None => "you lead".to_owned(),
+        }
+    } else {
+        format!("{} point(s) behind the leader", score_at(0)? - mine)
+    };
+    Some(format!(
+        "Standing after R{round}: rank {} of {n}, {gap}.",
+        pos + 1
+    ))
 }
 
 /// Build the brief for the judge to evaluate all submissions in `round`.
@@ -349,6 +397,10 @@ pub fn judge_brief(
     let _ = writeln!(
         body,
         "- Derive each contestant's `feedback` only from gaps between their own deliverable and the user's request. Do NOT suggest a feature, approach, layout, wording, or fix because you saw it in another contestant's work (this round or earlier), even unnamed or paraphrased; ideas are shared only through peer-reveal rounds. If a gap is evident only by comparison with a peer, leave it out."
+    );
+    let _ = writeln!(
+        body,
+        "- Score against an absolute bar for the request, not against the previous round: an entry that only applies last round's feedback without raising its impact should not gain points. Reward bold, verified improvements the contestant initiated (see its `## Beyond feedback` section)."
     );
     let _ = writeln!(
         body,
@@ -522,6 +574,21 @@ mod tests {
         assert!(!brief.body.contains("Peer showcase"));
         assert!(brief.body.contains("Tighten hero spacing"));
         assert!(!brief.body.contains("Add product cards"));
+        assert!(
+            brief
+                .body
+                .contains("Standing after R3: rank 2 of 2, 2 point(s) behind the leader.")
+        );
+        assert!(brief.body.contains("## Beyond feedback"));
+        let leader = contestant_brief(
+            &s,
+            &PartId::new("codex"),
+            4,
+            &PathBuf::from("/tmp/entries/codex"),
+            &PathBuf::from("/tmp/comp"),
+            &PathBuf::from("/tmp/comp/r4/report-codex.md"),
+        );
+        assert!(leader.body.contains("rank 1 of 2, you lead by 2 point(s)"));
     }
 
     #[test]
@@ -533,12 +600,29 @@ mod tests {
             &PathBuf::from("/tmp/comp"),
             &PathBuf::from("/tmp/comp/r4/judge.json"),
         );
-        assert!(brief.body.contains("`strengths` and `feedback` are delivered privately"));
-        assert!(brief.body.contains("because you saw it in another contestant's work"));
-        assert!(brief.body.contains("based only on this entry vs the request"));
+        assert!(
+            brief
+                .body
+                .contains("`strengths` and `feedback` are delivered privately")
+        );
+        assert!(
+            brief
+                .body
+                .contains("because you saw it in another contestant's work")
+        );
+        assert!(
+            brief
+                .body
+                .contains("based only on this entry vs the request")
+        );
         assert!(brief.body.contains("at most 3 items"));
+        assert!(brief.body.contains("absolute bar for the request"));
         assert!(brief.body.contains("environment cannot run"));
-        assert!(brief.body.contains("claims of that contestant's previous report"));
+        assert!(
+            brief
+                .body
+                .contains("claims of that contestant's previous report")
+        );
     }
 
     #[test]

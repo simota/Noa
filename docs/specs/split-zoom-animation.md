@@ -11,8 +11,11 @@ and a zoomed tab shows a zoom icon in its tab title.
 Decided by the maintainer (not reopened here):
 
 - Zoom-in resizes the zoomed pane's grid to the full content rect at once;
-  only the visible rect (scissor) animates from the pane's tile rect to the
-  full rect. Text is never scaled.
+  the visible rect (scissor) animates from the pane's tile rect to the full
+  rect. Text is never scaled.
+- (Revision, approved mockup) The pane's content is anchored to the clip's
+  top-left corner: it slides with the clip origin, so the grid's top-left is
+  what shows first, never its middle.
 - Unzoom shrinks the visible rect from full to tile. The grid keeps its zoomed
   size during the shrink and is resized to the tile once, when the animation
   ends (one SIGWINCH).
@@ -154,11 +157,18 @@ P (0 = tile rect, siblings opaque; 1 = full rect, siblings gone).
   or `400 ms × (1 − r(now))` (reversing an unzoom): exactly the distance
   already travelled.
 
-Content is anchored at the *grid* rect: the zoomed pane's uniform keeps using
-`surface.rect` (= `bounds` while zoomed or shrinking); only the scissor moves.
-So the reveal uncovers the already-resized grid in place. Text never moves or
-scales during the tween. The only content jump is the one reflow at the end
-of an unzoom, which today's instant unzoom also has.
+Content is anchored to the clip's top-left corner (decided by the approved
+mockup). During a tween P's grid already has its zoomed size
+(`surface.rect = bounds`, `w × h` of the full rect), but it is drawn at
+`content(r) = Rect(clip(r).x, clip(r).y, bounds.w, bounds.h)`: the full-size
+grid translated so that its origin is the clip origin. The content therefore
+slides from the tile origin to the full origin on zoom-in, and back on unzoom.
+The first thing visible in the clip is always the grid's top-left, never its
+middle. Text never scales; it only translates, by whole pixels (the clip
+origin is rounded). The clip cuts the grid's right and bottom. At `r = 1`
+`content = bounds` (the steady zoomed state). At `r = 0` the origin is the tile
+origin, which is where the tile-sized grid is drawn after the end-of-unzoom
+reflow, so that reflow changes the grid's size but not its origin.
 
 State: `WindowState` gains `split_zoom_anim: Option<SplitZoomAnim>` next to
 `zoomed`. `zoomed` stays the *logical* zoom and changes at toggle time, as
@@ -168,7 +178,7 @@ today. Three derived values come from pure functions:
 |---|---|---|
 | `grid_zoomed(zoomed, anim)` | `zoomed.or(anim.pane)` | resize targets (layout.rs:134) |
 | `draw_zoomed(zoomed, anim)` | `None` while `anim` is live, else `zoomed` | snapshot set (render.rs:559, 621) and `draw_rebuilt_panes`' `zoomed` |
-| `zoom_frame(anim, tile, bounds, now)` | `{ pane, clip, sibling_alpha }` | renderer, hit-test, float and thumb suppression |
+| `zoom_frame(anim, tile, bounds, now)` | `{ pane, clip, content, sibling_alpha }`, `content` as above | renderer (scissor = `clip`, uniform/image origin = `content`), hit-test and cell mapping, float and thumb suppression |
 
 ## Approach per acceptance criterion
 
@@ -179,11 +189,16 @@ today. Three derived values come from pure functions:
 reduce_motion, now)` (pure, below) and stores the result before the existing
 `relayout_and_resize_window` call. Because `grid_zoomed` is `Some(P)`, the
 relayout resizes P's grid to `bounds` immediately (leading edge of the
-throttle), exactly as today, and `surface.rect = bounds`.
+throttle), exactly as today, and `surface.rect = bounds`. On the first frame
+`r = 0`: the clip is P's tile and the grid's top-left sits at the tile origin,
+so P looks as before the toggle, but now holds a full-size grid cut by its
+tile. As `r` grows, the clip grows and the content slides with the clip's
+top-left corner to the full origin.
 
 Renderer (noa-render):
 
-- New public `SplitZoomFx { pane: PaneId, clip: PaneRect, sibling_alpha: f32 }`
+- New public `SplitZoomFx { pane: PaneId, clip: PaneRect, content_origin:
+  (u32, u32), sibling_alpha: f32 }`
   and `Renderer::set_split_zoom_fx(Option<SplitZoomFx>)`, a setter stored on
   the renderer like `overlays`/`backdrop_rect`, so `draw_rebuilt_panes` keeps
   its signature. The app calls it once per frame before `draw_rebuilt_panes`:
@@ -197,6 +212,22 @@ Renderer (noa-render):
   with `rect = clip ∩ layout_rect(P)`; then P's `PaneCells` with
   `scissor = rect`. `Dividers { rects: [] }` and no `FocusIndicator` (as when
   zoomed). Overlay groups are unchanged and still drawn after.
+- Content origin: `draw_panes` derives a *uniform layout* from `layout` in
+  which P's rect `R` becomes `PaneRect::new(content_origin.0,
+  content_origin.1, R.w, R.h)`. That rect is translated, not resized. The
+  uniform layout feeds `upload_uniforms` (mod.rs:1434-1460) and
+  `build_frame_image_draws` (mod.rs:1295-1316, which resolves kitty images
+  against the draw-time pane rect). The plan keeps the real `layout`, so the
+  scissor is `clip ∩ R`. The uniform field that moves is
+  `Uniforms::grid_padding`: `populate_pane_uniform` writes `pane_y + top` into
+  `.x` and `pane_x + left` into `.w` (instance.rs:131-136). The vertex shader
+  places cells at `(grid_padding.w, grid_padding.x)` (cell.wgsl:105) and reads
+  no other `grid_padding` component. `grid_size` and the balanced padding
+  (`pane_grid_padding`, mod.rs:636-644) depend only on `R.w`/`R.h`, so they
+  are unchanged. The right/bottom components are written clamped with
+  `.max(0.0)` (instance.rs:133-134) and are unused, so a translated rect that
+  runs past the window edge is harmless. No struct or layout change comes
+  from this: it is the same field with a different origin.
 - `ZoomUnderlay` is needed because default-bg cells draw no quad
   (cell.rs:241-244): without it, siblings drawn earlier would show through
   P's revealed area. It runs `backdrop_pipeline` with blend constant =
@@ -242,11 +273,17 @@ Renderer (noa-render):
   relayout, and any other relayout during the shrink (window resize, font
   size, sidebar), keeps P at `bounds`. P's grid size is unchanged, so
   `apply_pane_grid_resize` sends no winsize (resize.rs:119-125). No SIGWINCH.
+- During the shrink the clip goes from `bounds` to the tile, and the
+  full-size content slides with the clip's top-left corner from the full
+  origin to the tile origin. Its right and bottom are cut by the shrinking
+  clip; the top-left cells stay visible throughout.
 - Finish: a new `tick_split_zoom_anims()` in `about_to_wait`'s deadline list
   (event_loop.rs:575-617) finds every window whose tween is `done(now)`. It
   sets `split_zoom_anim = None`, calls `relayout_and_resize_window` once, and
   requests a redraw. For an unzoom that relayout is the single grid resize to
-  the tile rect (one SIGWINCH, through the same throttle). For a zoom-in it
+  the tile rect (one SIGWINCH, through the same throttle). The content
+  origin is already the tile origin at `r = 0`, so the finish frame changes
+  the grid's size (reflow) but not where its top-left is drawn. For a zoom-in it
   changes no split pane's grid, so no winsize is sent. It still re-places
   pane-anchored floats (see "Surrounding behaviour during the tween"). The tick returns the earliest
   live tween's end instant (`Tween::end`, new) as its deadline. With no tween
@@ -328,16 +365,27 @@ already runs resizes by the new `grid_zoomed`.
   (`zoom_in`, `unzoom`, `pane`, `reveal(now)`, `reversed(now)`, `done(now)`,
   `end()`), `lerp_rect`, `ZoomFrame` + `zoom_frame`, `next_split_zoom_anim`,
   `grid_zoomed`, `draw_zoomed`, `live_split_zoom_anim`, and
-  `transition_hit_layout(layout, frame)`. The last returns the hit layout with
-  P's rect replaced by `frame.clip` and P moved first.
+  `transition_hit_layout(layout, frame)` and
+  `pane_mapping_rect(pane, surface_rect, frame)`. `zoom_frame` returns
+  `content = Rect(clip.x, clip.y, bounds.w, bounds.h)` next to `clip`.
+  `transition_hit_layout` returns the hit layout with P's rect replaced by
+  `frame.clip` (what is visible) and P moved first.
+  `pane_mapping_rect` returns `frame.content` for `frame.pane` and
+  `surface_rect` for every other pane; it is the rect pointer code maps
+  window pixels to grid cells with.
 - Unit tests (inline `#[cfg(test)]`): rect lerp endpoints and monotone,
-  separately rounded edges; `reveal` at 0 / mid / end and `done`; sibling
+  separately rounded edges; `content` origin equals the clip origin at every
+  `r`, its size is `bounds`' size, and it equals the tile origin at `r = 0`
+  and `bounds` at `r = 1`; `reveal` at 0 / mid / end and `done`; sibling
   alpha = 1 − r; reversal starts at the current `r` and lasts
   `400 ms × distance`, also tested at r = 0 and r = 1; every row of the AC4
   table, including `reduce_motion`; `grid_zoomed` keeps P through the shrink
   and releases it after; `draw_zoomed` is `None` while live;
   `live_split_zoom_anim` drops a closed pane; `transition_hit_layout` puts P
-  first with the clip.
+  first with the clip; `pane_mapping_rect` gives P the content rect and leaves
+  siblings on `surface_rect`. A worked mapping case: a point at
+  `clip.origin + padding` maps to cell (0, 0) of P during the tween, while
+  `surface.rect` would map it to a cell well inside the grid.
 
 ### AC8: checks and docs
 
@@ -352,6 +400,11 @@ already runs resizes by the new `grid_zoomed`.
   pixels: inside the clip but outside P's tile there is no sibling glyph
   (underlay works), and a sibling pixel outside the clip lies strictly
   between the background color and the opaque sibling color (alpha works).
+  P has a distinct glyph in cell (0, 0) and the clip's origin differs from
+  the full rect's origin. The glyph's pixels must appear at
+  `content_origin + padding` and not at `R`'s origin + padding (the content
+  origin reaches the uniform). A kitty image placed at P's (0, 0) moves the
+  same way (the uniform layout reaches the image draws).
   A second draw of the same layout with `fx = None` must read back the
   same pixels as the existing unzoomed split draw (`pane_alpha` = 1 is a
   no-op). A `size_of::<Uniforms>() == 160` assertion
@@ -380,10 +433,16 @@ already runs resizes by the new `grid_zoomed`.
 - **Dividers and focus ring**: suppressed during the tween (AC1 plan). After an
   unzoom they appear on the finish frame.
 - **Pointer**: during a tween the hit layout is
-  `transition_hit_layout(visible layout, frame)`. Cell mapping still uses
-  `surface.rect`, which is exactly where P's content is drawn, so a click in
-  the visible part of P hits the cell under it. Divider drags are refused
-  while a tween is live (extend pointer.rs:137 with the anim check).
+  `transition_hit_layout(visible layout, frame)` (P's visible clip first).
+  Cell mapping for P must use the content origin, not `surface.rect`:
+  `pane_cell_in` and `pane_pixel_in` (pointer.rs:214-245) subtract
+  `surface.rect.x/y` today. During a tween they take their rect from
+  `pane_mapping_rect(pane, surface.rect, frame)`, which is P's content rect
+  (clip origin, full size). Padding is unchanged, because it is computed from
+  the rect's size. A click on the visible part of P then hits the cell drawn
+  under it, and SGR mouse reports and selection get the same cell. Siblings
+  keep `surface.rect`. Divider drags are refused while a tween is live
+  (extend pointer.rs:137 with the anim check).
 - **Frames**: after presenting, `redraw` requests another redraw while the
   window's tween is live (the overview pattern, overview/render.rs:1174-1182).
   After the finish nothing re-requests, so an idle window stops drawing. The
@@ -440,6 +499,14 @@ winit in noa-app; the pure module is neither.
 - **Glyph coverage of `⤢`**: AppKit falls back to a system symbol font. Off
   macOS, the tab bar uses Noa's font stack with fallback discovery. If it is
   missing there, it shows as tofu (manual check on Linux).
+- **IME and native overlay anchors** still use `surface.rect` during a tween.
+  `update_focused_ime_cursor_area` (`crates/noa-app/src/app/input_ops/ime.rs:198`)
+  runs every redraw (render.rs:505), and the macOS overlay cards take
+  `focused_rect` from the snapshot rect (render.rs:1033-1039). So for
+  at most 400 ms an IME candidate window or an open palette card is placed
+  for the content's final origin, not its sliding one. A palette or IME
+  composition rarely overlaps a zoom toggle, and moving them per frame would
+  put AppKit calls in the frame loop. Left as is; not in any unit.
 - **Overview tiles** render whatever the pane renderer last drew. A tile
   captured mid-tween shows the intermediate frame until its next refresh.
 
@@ -454,16 +521,22 @@ Owns: `crates/noa-render/src/instance.rs`, `src/shaders/cell.wgsl`,
 `src/draw_plan.rs`, `src/renderer/mod.rs`, `src/lib.rs`,
 `tests/pipeline.rs`, `tests/pipeline/split_zoom.rs`.
 
-Builds `pane_alpha` (AC2 renderer half), `SplitZoomFx` +
-`set_split_zoom_fx`, `build_draw_plan_with_zoom_fx` + `DrawOp::ZoomUnderlay`,
-image-band skip below alpha 1, and the pipeline test (AC8).
+Builds `pane_alpha` (AC2 renderer half), `SplitZoomFx` (with
+`content_origin`) + `set_split_zoom_fx`, `build_draw_plan_with_zoom_fx` +
+`DrawOp::ZoomUnderlay`, the uniform layout that moves P's
+`Uniforms::grid_padding` `.x`/`.w` origin and its image quads to
+`content_origin` (AC1), image-band skip below alpha 1, and the pipeline test
+(AC8).
 
 Done when: new `draw_plan.rs` unit tests pass. They cover the fx plan order
 (siblings, underlay, P last), the clip ∩ rect scissor, no dividers or ring,
 `fx = None` identical to `build_draw_plan_with_overlays` across the existing
 exhaustive combinations (draw_plan.rs:570-603 style), and fx naming an absent
-pane falling back to the plain plan. `tests/pipeline/split_zoom.rs` passes on
-a GPU machine. `scripts/verify.sh` is green for noa-render and its dependents
+pane falling back to the plain plan. A `populate_pane_uniform` unit test
+checks that a rect translated by `(dx, dy)` changes only `grid_padding.x`
+(by `dy`) and `.w` (by `dx`) among the fields the shader reads, and leaves
+`grid_size` unchanged. `tests/pipeline/split_zoom.rs` (including the
+content-origin glyph and image checks) passes on a GPU machine. `scripts/verify.sh` is green for noa-render and its dependents
 (noa-app must still build; its behaviour is unchanged because it never sets
 the fx).
 
@@ -520,7 +593,9 @@ builds: the `split_zoom_anim` field and `set_zoom_instant`; the toggle with
 reduce motion; `grid_zoomed` at layout.rs:134; `draw_zoomed` at render.rs:559,
 621 and 941-948; `set_split_zoom_fx` per frame; thumb suppression; the
 redraw-while-live request; `tick_split_zoom_anims` in `about_to_wait`;
-`transition_hit_layout` and the divider-drag refusal in pointer.rs; float
+`transition_hit_layout`, `pane_mapping_rect` in `pane_cell_in`/`pane_pixel_in`
+and the divider-drag refusal in pointer.rs; `content_origin` from
+`zoom_frame` into `SplitZoomFx`; float
 hiding through `float_geometry`; replacing every implicit `zoomed =` with
 `set_zoom_instant`; and the docs (AC8).
 
@@ -529,7 +604,9 @@ sandbox-only failures, if any). The grep check in AC5 holds. With the window
 idle after a toggle, no further redraws are requested and `about_to_wait`
 returns `ControlFlow::Wait` once the tween ends (check with
 `NOA_LATENCY_TRACE` or a debug log). A manual-visual pass covers: zoom-in
-reveal, unzoom shrink with exactly one SIGWINCH (`trap 'echo WINCH' WINCH`
+reveal with the content sliding from the tile origin (the grid's top-left
+visible first), clicking and selecting in P mid-tween, unzoom shrink with
+exactly one SIGWINCH (`trap 'echo WINCH' WINCH`
 in the pane prints once, after the shrink), reversal mid-tween, Reduce Motion
 on (instant), Cmd+W on a zoomed pane (instant), new split while zoomed
 (instant), a pane-anchored float, and a scrolled pane's thumb. The PR states
@@ -541,10 +618,8 @@ these were checked by hand.
    Symbol via `NSWindowTab.attributedTitle` would look native but is a
    second, AppKit-only path whose interaction with the `setTitle:` re-assert
    (timers.rs:619-633) is unverified.
-2. Content anchoring: this spec keeps P's content at its grid (full) rect and
-   moves only the scissor, so a non-top-left pane reveals the middle of its
-   new grid first. The alternative, translating content with the clip origin,
-   moves text during the tween. The decision said only the visible rect
-   animates, so the default is the former.
+2. ~~Content anchoring~~ **Decided (approved mockup):** P's content is
+   anchored to the clip's top-left corner and slides with it; the grid's
+   top-left is always what shows first. See Model, AC1, AC3, Pointer.
 3. Should pane-anchored floats fade with their anchor instead of hiding for
    400 ms? That would need alpha on overlay groups (a second renderer change).

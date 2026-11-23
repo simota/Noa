@@ -76,6 +76,14 @@ pub fn artifact_snapshot_dir(base_dir: &Path, round: RoundNo, part: &PartId) -> 
         .join(part.as_str())
 }
 
+/// `<base>/r<N>/checks/<part>/`: the snapshot check (manifest and
+/// viewer-condition screenshots) of `part`'s round-`round` entry.
+pub fn checks_dir(base_dir: &Path, round: RoundNo, part: &PartId) -> PathBuf {
+    round_dir(base_dir, round)
+        .join("checks")
+        .join(part.as_str())
+}
+
 /// Path to the standalone HTML comparison viewer.
 pub fn viewer_path(base_dir: &Path) -> PathBuf {
     base_dir.join(VIEWER_FILE)

@@ -9,7 +9,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use super::types::{ArtifactKind, PartId, RoundKind, RoundNo, Session};
-use crate::store;
+use crate::{preview, store};
 
 #[derive(Serialize)]
 struct ViewerData {
@@ -37,6 +37,12 @@ struct ViewerEntry {
     score: Option<u8>,
     strengths: String,
     feedback: String,
+    /// "basis: claim" lines the judge scored on.
+    evidence: Vec<String>,
+    /// How a later round corrected this score, if it did.
+    amended: Option<String>,
+    /// "axis score/max" lines, when the judge split the score.
+    breakdown: Vec<String>,
     summary: String,
     report: String,
     files: Vec<ViewerFile>,
@@ -47,6 +53,9 @@ struct ViewerFile {
     rel_path: String,
     /// Relative URL from `compare.html` to the round snapshot file.
     href: String,
+    /// What the preview frame loads instead of `href`: the generated
+    /// self-contained copy of a root `index.html`, when one exists.
+    frame_href: Option<String>,
     kind: &'static str,
     bytes: u64,
     /// Inline preview text for code/markdown files (truncated for large files).
@@ -125,9 +134,28 @@ pub fn render_html(session: &Session, artifact_root: &Path) -> String {
                                         }
                                         _ => None,
                                     };
+                                    let frame_href = (f.rel_path == preview::ENTRY_PAGE
+                                        && preview::preview_path(&store::artifact_snapshot_dir(
+                                            artifact_root,
+                                            r.no,
+                                            part,
+                                        ))
+                                        .is_file())
+                                    .then(|| {
+                                        file_href(
+                                            r.no,
+                                            part,
+                                            &format!(
+                                                "{}/{}",
+                                                preview::PREVIEW_DIR,
+                                                preview::ENTRY_PAGE
+                                            ),
+                                        )
+                                    });
                                     ViewerFile {
                                         rel_path: f.rel_path.clone(),
                                         href,
+                                        frame_href,
                                         kind: artifact_kind_tag(f.kind),
                                         bytes: f.bytes,
                                         preview,
@@ -141,6 +169,28 @@ pub fn render_html(session: &Session, artifact_root: &Path) -> String {
                         score: ev.map(|e| e.score),
                         strengths: ev.map(|e| e.strengths.clone()).unwrap_or_default(),
                         feedback: ev.map(|e| e.feedback.clone()).unwrap_or_default(),
+                        evidence: ev
+                            .map(|e| {
+                                e.evidence
+                                    .iter()
+                                    .map(|item| format!("{}: {}", item.basis.as_str(), item.claim))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        breakdown: ev
+                            .map(|e| {
+                                e.breakdown
+                                    .iter()
+                                    .map(|a| format!("{} {}/{}", a.axis, a.score, a.max))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        amended: ev.and_then(|e| e.amended.as_ref()).map(|note| {
+                            format!(
+                                "R{} で {} → 訂正: {}",
+                                note.by_round, note.from, note.reason
+                            )
+                        }),
                         summary: sub.map(|s| s.summary.clone()).unwrap_or_default(),
                         report: sub.map(|s| s.body.clone()).unwrap_or_default(),
                         files,
@@ -315,10 +365,18 @@ pub fn render_html(session: &Session, artifact_root: &Path) -> String {
     background: #0b0d12;
     min-height: 360px;
     display: flex;
-    align-items: center;
-    justify-content: center;
+    /* `safe`: a frame wider than the box scrolls instead of clipping left. */
+    align-items: safe center;
+    justify-content: safe center;
     overflow: auto;
     position: relative;
+  }}
+  .frame-note {{
+    position: absolute;
+    right: 8px;
+    bottom: 6px;
+    font-size: 11px;
+    color: var(--muted);
   }}
   .preview-box iframe {{
     border: 0;
@@ -389,9 +447,10 @@ pub fn render_html(session: &Session, artifact_root: &Path) -> String {
   <div class="controls">
     <label for="roundSelect" style="font-size:12px;color:var(--muted)">ラウンド:</label>
     <select id="roundSelect"></select>
-    <button data-vp="100%" class="active">PC (100%)</button>
-    <button data-vp="768px">Tablet (768px)</button>
-    <button data-vp="390px">Mobile (390px)</button>
+    <button data-vp="100%" class="active">幅いっぱい</button>
+    <button data-vp="1440x900">1440×900</button>
+    <button data-vp="768x1024">768×1024</button>
+    <button data-vp="320x568">320×568</button>
   </div>
 </header>
 <div id="banner" class="banner"></div>
@@ -400,6 +459,12 @@ pub fn render_html(session: &Session, artifact_root: &Path) -> String {
 <script>
 const DATA = {json};
 let viewportWidth = "100%";
+let viewportHeight = "460px";
+// The sizes the judge's screenshots use: width × height, height = first view.
+function applyViewport(frame) {{
+  frame.style.width = viewportWidth;
+  frame.style.height = viewportHeight;
+}}
 const selectedFile = {{}};
 
 const roundSelect = document.getElementById("roundSelect");
@@ -412,9 +477,11 @@ modal.addEventListener("click", () => modal.classList.remove("open"));
 document.getElementById("request").textContent = DATA.request || "";
 document.querySelectorAll("button[data-vp]").forEach(btn => {{
   btn.addEventListener("click", () => {{
-    viewportWidth = btn.dataset.vp;
+    const [w, h] = btn.dataset.vp.split("x");
+    viewportWidth = h ? w + "px" : w;
+    viewportHeight = h ? h + "px" : "460px";
     document.querySelectorAll("button[data-vp]").forEach(b => b.classList.toggle("active", b === btn));
-    document.querySelectorAll(".preview-box iframe").forEach(f => f.style.width = viewportWidth);
+    document.querySelectorAll(".preview-box iframe").forEach(applyViewport);
   }});
 }});
 
@@ -441,7 +508,8 @@ function pickDefaultFile(entry) {{
   if (selectedFile[key] && entry.files.some(f => f.rel_path === selectedFile[key])) {{
     return selectedFile[key];
   }}
-  const visual = entry.files.find(f => f.kind === "html")
+  const visual = entry.files.find(f => f.rel_path === "index.html")
+    || entry.files.find(f => f.kind === "html")
     || entry.files.find(f => f.kind === "image" || f.kind === "svg")
     || entry.files[0];
   return visual ? visual.rel_path : null;
@@ -459,12 +527,20 @@ function renderPreview(box, file) {{
   }}
   if (file.kind === "html") {{
     const iframe = document.createElement("iframe");
-    iframe.src = file.href;
-    iframe.style.width = viewportWidth;
+    iframe.src = file.frame_href || file.href;
+    applyViewport(iframe);
     // No allow-same-origin: with it, an entry's scripts could reach this
     // page (`parent.document`) and rewrite scores or other entries.
     iframe.setAttribute("sandbox", "allow-scripts");
     box.appendChild(iframe);
+    if (file.frame_href) {{
+      const note = document.createElement("a");
+      note.className = "frame-note";
+      note.href = file.href;
+      note.target = "_blank";
+      note.textContent = "自動インライン版を表示中 · 元の index.html";
+      box.appendChild(note);
+    }}
   }} else if (file.kind === "image" || file.kind === "svg") {{
     const img = document.createElement("img");
     img.src = file.href;
@@ -566,6 +642,9 @@ function renderRound(idx) {{
     addBlock("サマリー", entry.summary, false);
     addBlock("評価された点", entry.strengths, false);
     addBlock("審判フィードバック", entry.feedback, false);
+    addBlock("観点別の内訳", entry.breakdown.join(" · "), false);
+    addBlock("スコア訂正", entry.amended, false);
+    addBlock("採点の根拠", entry.evidence.join("\n"), true);
     addBlock("提出レポート", entry.report, true);
     card.appendChild(meta);
 
@@ -639,6 +718,24 @@ mod tests {
             closed: false,
         };
         let html = render_html(&session, Path::new("/nonexistent"));
+        assert!(
+            html.contains("\"frame_href\":null"),
+            "no preview, no frame copy"
+        );
+
+        // With a generated preview, the frame loads it instead of the raw page.
+        let root = std::env::temp_dir().join(format!("competition-viewer-{}", std::process::id()));
+        let preview = crate::preview::preview_path(&store::artifact_snapshot_dir(
+            &root,
+            1,
+            &PartId::new("claude"),
+        ));
+        std::fs::create_dir_all(preview.parent().unwrap()).unwrap();
+        std::fs::write(&preview, "<p>inlined</p>").unwrap();
+        let framed = render_html(&session, &root);
+        assert!(framed.contains("\"frame_href\":\"r1/artifacts/claude/.preview/index.html\""));
+        let _ = std::fs::remove_dir_all(&root);
+
         assert!(html.contains("Noa Competition Viewer"));
         assert!(html.contains("r1/artifacts/claude/index.html"));
         assert!(!html.contains("</script><script>alert(1)"));

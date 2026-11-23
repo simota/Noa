@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use super::types::{
-    Brief, JudgeOutput, Message, Millis, PartId, Participant, Phase, Receipt, Round, RoundKind,
-    RoundNo, Session, SessionId, Submission,
+    AmendNote, Brief, JudgeOutput, Message, Millis, PartId, Participant, Phase, Receipt, Round,
+    RoundKind, RoundNo, Session, SessionId, Submission,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -289,6 +289,31 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
             round_mut(session, *round)?.phase = *phase;
         }
         Event::JudgeAccepted { round, output } => {
+            for amendment in &output.amendments {
+                if amendment.round >= *round {
+                    return err(format!(
+                        "round {round} cannot amend round {}",
+                        amendment.round
+                    ));
+                }
+                let ev = round_mut(session, amendment.round)?
+                    .outcome
+                    .as_mut()
+                    .and_then(|o| o.evaluations.get_mut(&amendment.part));
+                let Some(ev) = ev else {
+                    return err(format!(
+                        "no R{} evaluation of {} to amend",
+                        amendment.round, amendment.part
+                    ));
+                };
+                let from = ev.amended.as_ref().map_or(ev.score, |note| note.from);
+                ev.score = amendment.score;
+                ev.amended = Some(AmendNote {
+                    from,
+                    by_round: *round,
+                    reason: amendment.reason.clone(),
+                });
+            }
             if let Some(winner) = &output.winner {
                 session.winner = Some(winner.clone());
             }

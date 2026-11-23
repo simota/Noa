@@ -13,6 +13,7 @@ use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use competition::check;
 use competition::engine::{AgentState, Config, Effect, Engine, EngineError, Input, Setup};
 use competition::model::export;
 use competition::model::types::{AgentKind, Millis, PartId, Phase, RoundNo, Session, SessionId};
@@ -977,7 +978,11 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 let src = store::entry_dir(&reply_dir, &part);
                 let dst = store::artifact_snapshot_dir(&reply_dir, round, &part);
                 match store::snapshot_artifacts(&src, &dst) {
-                    Ok(files) => files,
+                    Ok(files) => {
+                        let checks = store::checks_dir(&reply_dir, round, &part);
+                        self.check_snapshot(&part, &dst, &checks);
+                        files
+                    }
                     Err(e) => {
                         self.notice(format!(
                             "{part} の成果物スナップショットに失敗しました: {e}"
@@ -997,6 +1002,23 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             })?;
         }
         Ok(())
+    }
+
+    /// Runs the snapshot check (viewer copy, screenshots, manifest) on a
+    /// submitted entry. Problems are reported but never block the submission.
+    fn check_snapshot(&self, part: &PartId, snapshot: &Path, out: &Path) {
+        match check::inspect(snapshot, out) {
+            Ok(inspection) => {
+                let problems = inspection.problems();
+                if !problems.is_empty() {
+                    self.notice(format!(
+                        "{part} のスナップショット確認で問題: {}",
+                        problems.join(" / ")
+                    ));
+                }
+            }
+            Err(e) => self.notice(format!("{part} のスナップショット確認に失敗しました: {e}")),
+        }
     }
 
     fn all_parts(&self) -> Vec<PartId> {

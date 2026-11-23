@@ -51,6 +51,64 @@ fn user_interventions_for<'a>(
         .collect()
 }
 
+/// How deliverables reach the comparison viewer. Told to contestants and
+/// repeated to the judge, so both work from the same rules.
+const VIEWER_RULES: [&str; 3] = [
+    "If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.",
+    "The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.",
+    "The viewer still frames that copy in an iframe with `sandbox=\"allow-scripts\"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.",
+];
+
+/// Where facts may come from. Told to contestants and repeated to the judge.
+const SOURCE_RULE: &str = "Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.";
+
+/// The rules both sides share: how the viewer shows an entry, how it is
+/// captured, and where facts may come from.
+fn shared_rules() -> Vec<String> {
+    let mut rules: Vec<String> = VIEWER_RULES.iter().map(|r| (*r).to_owned()).collect();
+    rules.push(format!(
+        "What the viewer copy inlines: {}",
+        crate::preview::INLINE_RULES
+    ));
+    rules.push(format!(
+        "Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: {}",
+        crate::shots::CONDITIONS
+    ));
+    rules.push(SOURCE_RULE.to_owned());
+    rules
+}
+
+/// The command a contestant runs to check its entry before submitting.
+fn check_command(entry_dir: &Path) -> String {
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "competition".to_owned());
+    format!("\"{exe}\" --check=\"{}\"", entry_dir.display())
+}
+
+/// The judge's published checklist for `round`, as brief lines.
+fn checklist_lines(session: &Session, round: RoundNo) -> String {
+    match session.checklist_before(round) {
+        Some((from, items)) => {
+            let mut out = format!("The judge's checklist (published with the R{from} judgment):\n");
+            for item in items {
+                let _ = writeln!(out, "- {item}");
+            }
+            out
+        }
+        None => "The judge publishes its checklist with the round-1 judgment.\n".to_owned(),
+    }
+}
+
+/// Report and improvement rules every contestant gets, repeated to the judge.
+const CONTESTANT_RULES: [&str; 5] = [
+    "The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.",
+    "Every round, make at least one improvement nobody asked for and name it in a `## Beyond feedback` section of the report.",
+    "In peer-reveal rounds, open at least one peer's deliverable and add a `## Peer review` section listing each idea adopted or not adopted, with the reason.",
+    "Start the report with a one-line summary, describe what changed and why, and list the key files.",
+    "Write the report in the language of the request and mark anything not verified as unverified.",
+];
+
 /// Build the brief for contestant `to` in `round`.
 ///
 /// `entry_dir` is `to`'s private working output directory (`entries/<to>/`).
@@ -123,14 +181,16 @@ pub fn contestant_brief(
         "- Create or refine all your deliverables (designs, HTML/CSS/JS, SVG, images, code, docs) ONLY inside your private output directory: {}",
         entry_dir.display()
     );
+    for rule in shared_rules() {
+        let _ = writeln!(body, "- {rule}");
+    }
     let _ = writeln!(
         body,
-        "- If your deliverable is a UI or visual design, include a self-contained `index.html` (or SVG/PNG files) in your output directory so it can be previewed directly in the comparison viewer."
+        "- Before you submit, run the same check on your output directory: {}. It prints the viewer copy, the screenshots and the manifest, and lists what could not be inlined. If it cannot run in your environment, say so in the report and mark what it would have shown as unverified.",
+        check_command(entry_dir)
     );
-    let _ = writeln!(
-        body,
-        "- The comparison viewer embeds `index.html` in an iframe with `sandbox=\"allow-scripts\"` (an opaque origin: popups and same-origin APIs are blocked, and clipboard access and local file references may fail). Make the preview hold up under those limits, or add a separate self-contained preview with inlined assets and name it in your report."
-    );
+    body.push('\n');
+    body.push_str(&checklist_lines(session, round));
     match kind {
         RoundKind::Blind => {
             let _ = writeln!(
@@ -164,12 +224,45 @@ pub fn contestant_brief(
             .join("artifacts")
             .join(to.as_str());
         body.push_str(&format_artifacts(prev_sub, &snap));
+        let checks = reply_dir
+            .join(format!("r{prev_round}"))
+            .join("checks")
+            .join(to.as_str());
+        let _ = writeln!(
+            body,
+            "  What the judge saw (viewer-copy screenshots and manifest): {}",
+            checks.display()
+        );
     } else {
         let _ = writeln!(body, "(this is your first round; start fresh)");
     }
     if let Some((ev_round, ev)) = session.latest_evaluation_before(to, round) {
         let _ = writeln!(body, "\nJudge evaluation of your R{ev_round} entry:");
         let _ = writeln!(body, "- Score: {}/100", ev.score);
+        for axis in &ev.breakdown {
+            let _ = writeln!(body, "  - {}: {}/{}", axis.axis, axis.score, axis.max);
+        }
+        // Corrections the latest judgment made to any of `to`'s scores.
+        for r in session.rounds.iter().filter(|r| r.no <= ev_round) {
+            if let Some(note) = r
+                .outcome
+                .as_ref()
+                .and_then(|o| o.evaluations.get(to))
+                .and_then(|e| e.amended.as_ref())
+                .filter(|n| n.by_round == ev_round)
+            {
+                let now = r
+                    .outcome
+                    .as_ref()
+                    .and_then(|o| o.evaluations.get(to))
+                    .map_or(0, |e| e.score);
+                let _ = writeln!(
+                    body,
+                    "- Score correction: your R{} score went from {}/100 to {now}/100 ({}).",
+                    r.no, note.from, note.reason
+                );
+            }
+        }
         if !ev.strengths.is_empty() {
             let _ = writeln!(body, "- Strengths: {}", ev.strengths);
         }
@@ -204,13 +297,22 @@ pub fn contestant_brief(
                         .map(|e| format!(" — score {}/100", e.score))
                         .unwrap_or_default();
                     let _ = writeln!(body, "### Peer: {peer} (R{prev}{score})");
+                    let round_dir = reply_dir.join(format!("r{prev}"));
+                    let _ = writeln!(
+                        body,
+                        "Screenshots and manifest (start here): {}",
+                        round_dir.join("checks").join(peer.as_str()).display()
+                    );
                     let _ = writeln!(body, "Summary: {}", sub.summary);
-                    let snap = reply_dir
-                        .join(format!("r{prev}"))
-                        .join("artifacts")
-                        .join(peer.as_str());
-                    body.push_str(&format_artifacts(sub, &snap));
-                    let _ = writeln!(body, "Report:\n{}\n", sub.body.trim());
+                    body.push_str(&format_artifacts(
+                        sub,
+                        &round_dir.join("artifacts").join(peer.as_str()),
+                    ));
+                    let _ = writeln!(
+                        body,
+                        "Full report: {}\n",
+                        crate::store::reply_path(reply_dir, prev, peer).display()
+                    );
                 }
             }
             if !any_peer {
@@ -232,19 +334,31 @@ pub fn contestant_brief(
     }
     body.push('\n');
 
+    let is_last = session.max_rounds.is_some_and(|max| round >= max);
     let _ = writeln!(body, "## 6. How to compete");
     let _ = writeln!(
         body,
         "- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone."
     );
-    let _ = writeln!(
-        body,
-        "- Every round, also make at least one improvement nobody asked for: the change you expect to raise your score most. Prefer one bold, verified change over many small fixes."
-    );
-    let _ = writeln!(
-        body,
-        "- In your report, add a `## Beyond feedback` section naming that change and why you expect it to win points."
-    );
+    if is_last {
+        let _ = writeln!(
+            body,
+            "- FINAL ROUND: finish rather than experiment. Close every open feedback item, verify everything you can, and leave no regression; a new idea is welcome only if you can verify it fully this round."
+        );
+        let _ = writeln!(
+            body,
+            "- In your report, add a `## Beyond feedback` section naming the finishing work nobody asked for and why it raises the final result."
+        );
+    } else {
+        let _ = writeln!(
+            body,
+            "- Every round, also make at least one improvement nobody asked for: the change you expect to raise your score most. Prefer one bold, verified change over many small fixes."
+        );
+        let _ = writeln!(
+            body,
+            "- In your report, add a `## Beyond feedback` section naming that change and why you expect it to win points."
+        );
+    }
     body.push('\n');
 
     let _ = writeln!(body, "## 7. How to submit");
@@ -344,6 +458,23 @@ pub fn judge_brief(
                     .join("artifacts")
                     .join(part.as_str());
                 body.push_str(&format_artifacts(sub, &snap));
+                if sub.artifacts.iter().any(|f| f.rel_path == "index.html") {
+                    let shots = reply_dir
+                        .join(format!("r{round}"))
+                        .join("checks")
+                        .join(part.as_str());
+                    let _ = writeln!(
+                        body,
+                        "  Viewer copy: {}\n  Screenshots of the viewer copy ({}) and manifest.md: {}",
+                        snap.join(".preview").join("index.html").display(),
+                        crate::shots::VIEWPORTS
+                            .iter()
+                            .map(|&v| crate::shots::file_name(v))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        shots.display()
+                    );
+                }
                 let _ = writeln!(body, "Report:\n{}\n", sub.body.trim());
             } else {
                 let _ = writeln!(body, "(did not submit in R{round})\n");
@@ -381,7 +512,41 @@ pub fn judge_brief(
     }
     body.push('\n');
 
-    let _ = writeln!(body, "## 4. Judging rules");
+    let _ = writeln!(body, "## 4. Rules the contestants were given");
+    for rule in shared_rules()
+        .iter()
+        .map(String::as_str)
+        .chain(CONTESTANT_RULES)
+    {
+        let _ = writeln!(body, "- {rule}");
+    }
+    let _ = writeln!(
+        body,
+        "- Contestants can run the same snapshot check on their entry before submitting (`--check`)."
+    );
+    body.push_str(&checklist_lines(session, round));
+    body.push('\n');
+
+    let _ = writeln!(body, "## 5. Judging rules");
+    let _ = writeln!(
+        body,
+        "- Judge visual entries from the viewer copy and its screenshots listed above: they show what the comparison viewer shows. If the screenshots are missing, capture the viewer copy yourself under the conditions in section 4. Do not penalize what the rules in section 4 allow. Results in a contestant's check output or in `r<N>/checks/` count as measured."
+    );
+    if round <= 1 {
+        let _ = writeln!(
+            body,
+            "- Publish your checklist in `checklist`: the concrete checks you will apply for the rest of the competition (viewports, what counts as the first view, thresholds such as minimum text size, accessibility bar). Contestants see it from round 2."
+        );
+    } else {
+        let _ = writeln!(
+            body,
+            "- Apply the published checklist in section 4. Do not score a check that is not on it. To add or change a check, send the full new list in `checklist` and name the change in `overview`; it applies from the next round."
+        );
+    }
+    let _ = writeln!(
+        body,
+        "- When the request weights its criteria, fill each evaluation's `breakdown` with one entry per criterion (its points and maximum); the points must add up to `score`. The contestant sees its own breakdown."
+    );
     let _ = writeln!(
         body,
         "- Inspect the actual artifact files in each contestant's snapshot directory above, not just their self-report."
@@ -414,6 +579,14 @@ pub fn judge_brief(
         body,
         "- Compare each report's claims with the files, and with the claims of that contestant's previous report; name any claim the files contradict in that contestant's `feedback`."
     );
+    let _ = writeln!(
+        body,
+        "- List in each evaluation's `evidence` the concrete claims your score rests on, each with `basis`: \"measured\" (you checked it in the files or screenshots), \"self_reported\" (taken from the report without re-checking), or \"unverified\". Never present a self-reported number as measured."
+    );
+    let _ = writeln!(
+        body,
+        "- If you find that an earlier round's score rested on a wrong basis (a misread rule, the wrong rendering), correct it in `amendments` with the round, contestant, corrected score and reason, instead of only mentioning it in prose."
+    );
     if is_last {
         let _ = writeln!(
             body,
@@ -427,7 +600,7 @@ pub fn judge_brief(
     }
     body.push('\n');
 
-    let _ = writeln!(body, "## 5. Your JSON output");
+    let _ = writeln!(body, "## 6. Your JSON output");
     let _ = writeln!(
         body,
         "Write ONLY valid JSON (no prose around it) to: {}\n",
@@ -435,7 +608,7 @@ pub fn judge_brief(
     );
     let _ = writeln!(
         body,
-        "{{\n  \"overview\": \"1-3 sentence round overview comparing progress\",\n  \"evaluations\": {{\n    \"<contestant_id>\": {{\n      \"score\": 85,\n      \"strengths\": \"Key strengths of this entry\",\n      \"feedback\": \"Concrete private feedback for next round, based only on this entry vs the request (no peer ideas)\"\n    }}\n  }},\n  \"ranking\": [\"<best_id>\", \"<second_id>\"],\n  \"winner\": null,\n  \"final_verdict\": null,\n  \"close\": false\n}}"
+        "{{\n  \"overview\": \"1-3 sentence round overview comparing progress\",\n  \"evaluations\": {{\n    \"<contestant_id>\": {{\n      \"score\": 85,\n      \"strengths\": \"Key strengths of this entry\",\n      \"feedback\": \"Concrete private feedback for next round, based only on this entry vs the request (no peer ideas)\",\n      \"breakdown\": [\n        {{ \"axis\": \"<criterion>\", \"score\": 50, \"max\": 60 }},\n        {{ \"axis\": \"<criterion>\", \"score\": 35, \"max\": 40 }}\n      ],\n      \"evidence\": [\n        {{ \"claim\": \"index.html is 19,018 bytes\", \"basis\": \"measured\" }},\n        {{ \"claim\": \"0 axe violations\", \"basis\": \"self_reported\" }}\n      ]\n    }}\n  }},\n  \"ranking\": [\"<best_id>\", \"<second_id>\"],\n  \"checklist\": [\"<check>\"],\n  \"amendments\": [],\n  \"winner\": null,\n  \"final_verdict\": null,\n  \"close\": false\n}}\n\nAn amendment looks like: {{ \"round\": 2, \"contestant\": \"<id>\", \"score\": 80, \"reason\": \"why the R2 score was wrong\" }}"
     );
 
     Brief {
@@ -459,8 +632,8 @@ pub fn correction_note(to: &PartId, error: &str, reply_path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::model::types::{
-        AgentKind, ArtifactFile, ArtifactKind, EntryEvaluation, JUDGE_ID, JudgeOutput, Participant,
-        Phase, Role, Round, SessionId,
+        AgentKind, AmendNote, ArtifactFile, ArtifactKind, AxisScore, EntryEvaluation, JUDGE_ID,
+        JudgeOutput, Participant, Phase, Role, Round, SessionId,
     };
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -527,6 +700,9 @@ mod tests {
                     score: 70 + no as u8,
                     strengths: "Warm palette".into(),
                     feedback: "Tighten hero spacing".into(),
+                    evidence: Vec::new(),
+                    amended: None,
+                    breakdown: Vec::new(),
                 },
             );
             evaluations.insert(
@@ -535,6 +711,9 @@ mod tests {
                     score: 72 + no as u8,
                     strengths: "Crisp typography".into(),
                     feedback: "Add product cards".into(),
+                    evidence: Vec::new(),
+                    amended: None,
+                    breakdown: Vec::new(),
                 },
             );
             s.rounds.push(Round {
@@ -552,6 +731,8 @@ mod tests {
                     winner: None,
                     final_verdict: None,
                     close: false,
+                    amendments: Vec::new(),
+                    checklist: Vec::new(),
                 }),
             });
         }
@@ -626,6 +807,124 @@ mod tests {
     }
 
     #[test]
+    fn judge_brief_repeats_contestant_rules_and_points_at_viewer_screenshots() {
+        let s = sample_session();
+        let brief = judge_brief(
+            &s,
+            4,
+            &PathBuf::from("/tmp/comp"),
+            &PathBuf::from("/tmp/comp/r4/judge.json"),
+        );
+        assert!(
+            brief
+                .body
+                .contains("## 4. Rules the contestants were given")
+        );
+        for rule in shared_rules()
+            .iter()
+            .map(String::as_str)
+            .chain(CONTESTANT_RULES)
+        {
+            assert!(brief.body.contains(rule), "missing rule: {rule}");
+        }
+        assert!(
+            brief
+                .body
+                .contains("Viewer copy: /tmp/comp/r4/artifacts/claude/.preview/index.html")
+        );
+        assert!(brief.body.contains(
+            "1440x900.png, 768x1024.png, 320x568.png) and manifest.md: /tmp/comp/r4/checks/claude"
+        ));
+        assert!(brief.body.contains("\"basis\": \"self_reported\""));
+        assert!(brief.body.contains("`amendments`"));
+    }
+
+    #[test]
+    fn contestant_brief_carries_checklist_breakdown_correction_and_check_command() {
+        let mut s = sample_session();
+        let claude = PartId::new("claude");
+        let first = s.round_mut(1).unwrap().outcome.as_mut().unwrap();
+        first.checklist = vec!["320x568: no horizontal scroll".into()];
+        first.evaluations.get_mut(&claude).unwrap().amended = Some(AmendNote {
+            from: 60,
+            by_round: 3,
+            reason: "judged without its stylesheet".into(),
+        });
+        let third = s.round_mut(3).unwrap().outcome.as_mut().unwrap();
+        third.evaluations.get_mut(&claude).unwrap().breakdown = vec![AxisScore {
+            axis: "accuracy".into(),
+            score: 20,
+            max: 25,
+        }];
+        let brief = contestant_brief(
+            &s,
+            &claude,
+            4,
+            &PathBuf::from("/tmp/entries/claude"),
+            &PathBuf::from("/tmp/comp"),
+            &PathBuf::from("/tmp/comp/r4/report-claude.md"),
+        );
+        let body = &brief.body;
+        assert!(
+            body.contains(
+                "checklist (published with the R1 judgment):\n- 320x568: no horizontal scroll"
+            ),
+            "{body}"
+        );
+        assert!(body.contains("  - accuracy: 20/25"), "{body}");
+        assert!(
+            body.contains(
+                "your R1 score went from 60/100 to 71/100 (judged without its stylesheet)"
+            ),
+            "{body}"
+        );
+        assert!(body.contains("--check=\"/tmp/entries/claude\""), "{body}");
+        assert!(body.contains(
+            "What the judge saw (viewer-copy screenshots and manifest): /tmp/comp/r3/checks/claude"
+        ));
+        assert!(!body.contains("FINAL ROUND"));
+
+        s.max_rounds = Some(4);
+        let last = contestant_brief(
+            &s,
+            &claude,
+            4,
+            &PathBuf::from("/tmp/entries/claude"),
+            &PathBuf::from("/tmp/comp"),
+            &PathBuf::from("/tmp/comp/r4/report-claude.md"),
+        );
+        assert!(
+            last.body
+                .contains("FINAL ROUND: finish rather than experiment")
+        );
+        assert!(!last.body.contains("Prefer one bold, verified change"));
+    }
+
+    #[test]
+    fn judge_publishes_its_checklist_in_round_one_and_keeps_it_after() {
+        let s = sample_session();
+        let first = judge_brief(
+            &s,
+            1,
+            &PathBuf::from("/tmp/comp"),
+            &PathBuf::from("/tmp/comp/r1/judge.json"),
+        );
+        assert!(first.body.contains("Publish your checklist in `checklist`"));
+        let later = judge_brief(
+            &s,
+            4,
+            &PathBuf::from("/tmp/comp"),
+            &PathBuf::from("/tmp/comp/r4/judge.json"),
+        );
+        assert!(
+            later
+                .body
+                .contains("Do not score a check that is not on it")
+        );
+        assert!(later.body.contains("`breakdown`"));
+    }
+
+    #[test]
     fn contestant_briefs_carry_viewer_language_and_peer_review_rules() {
         let s = sample_session();
         let blind = contestant_brief(
@@ -663,7 +962,17 @@ mod tests {
         );
         assert!(brief.body.contains("PEER REVEAL"));
         assert!(brief.body.contains("Peer showcase (round 5"));
-        assert!(brief.body.contains("Codex secret strategy R5"));
+        // Peers' screenshots come first; the full report is a file to open.
+        let shots = brief
+            .body
+            .find("Screenshots and manifest (start here): /tmp/comp/r5/checks/codex")
+            .unwrap();
+        let report = brief
+            .body
+            .find("Full report: /tmp/comp/r5/report-codex.md")
+            .unwrap();
+        assert!(shots < report);
+        assert!(!brief.body.contains("Codex secret strategy R5"));
         assert!(brief.body.contains("R5 ranking: codex > claude"));
     }
 }

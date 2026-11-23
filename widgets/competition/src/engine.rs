@@ -1066,6 +1066,6 @@ mod tests {
         assert_eq!(r6.kind, RoundKind::Reveal);
         let claude_r6 = &r6.brief(&PartId::new("claude")).unwrap().body;
         assert!(claude_r6.contains("Peer showcase (round 5"));
-        assert!(claude_r6.contains("Details from codex R5."));
+        assert!(claude_r6.contains("r5/report-codex.md"));
     }
 }

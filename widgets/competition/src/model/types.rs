@@ -196,6 +196,82 @@ pub struct EntryEvaluation {
     pub strengths: String,
     /// Actionable improvement feedback sent privately to this contestant.
     pub feedback: String,
+    /// The concrete claims the judge relied on, each marked with how it was
+    /// established. Shown in the UI; never sent to contestants.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<Evidence>,
+    /// Set when a later round's judgment corrected this score.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amended: Option<AmendNote>,
+    /// The score split over the request's weighted criteria, when it has any.
+    /// Sent to the contestant with its feedback.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub breakdown: Vec<AxisScore>,
+}
+
+/// Points on one weighted criterion of the request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AxisScore {
+    pub axis: String,
+    pub score: u8,
+    pub max: u8,
+}
+
+/// How the judge established a claim it scored on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceBasis {
+    /// The judge measured or inspected it in the artifacts.
+    Measured,
+    /// Taken from the contestant's report without re-checking.
+    SelfReported,
+    /// Neither measured nor reported; stated as an open question.
+    Unverified,
+}
+
+impl EvidenceBasis {
+    pub const ALL: [EvidenceBasis; 3] = [
+        EvidenceBasis::Measured,
+        EvidenceBasis::SelfReported,
+        EvidenceBasis::Unverified,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EvidenceBasis::Measured => "measured",
+            EvidenceBasis::SelfReported => "self_reported",
+            EvidenceBasis::Unverified => "unverified",
+        }
+    }
+}
+
+/// One claim behind a score, with its basis.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Evidence {
+    pub claim: String,
+    pub basis: EvidenceBasis,
+}
+
+/// A judge's correction of an earlier round's score.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Amendment {
+    /// The earlier, already judged round being corrected.
+    pub round: RoundNo,
+    pub part: PartId,
+    /// The corrected score, 0..=100.
+    pub score: u8,
+    /// Why the original score was wrong.
+    pub reason: String,
+}
+
+/// What an amendment changed, kept on the corrected evaluation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AmendNote {
+    /// The score before the correction.
+    pub from: u8,
+    /// The round whose judgment made the correction.
+    pub by_round: RoundNo,
+    pub reason: String,
 }
 
 /// The judge's validated output for a round.
@@ -216,6 +292,13 @@ pub struct JudgeOutput {
     /// Set true to end the competition early.
     #[serde(default)]
     pub close: bool,
+    /// Corrections to earlier rounds' scores, applied when this output is accepted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub amendments: Vec<Amendment>,
+    /// The concrete checks the judge applies, published to every contestant.
+    /// Set in round 1; a later non-empty list replaces it from the next round.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checklist: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -469,6 +552,21 @@ impl Session {
         } else {
             self.contestant_ids().cloned().collect()
         }
+    }
+
+    /// The judge's published checklist in force for `round`: the latest
+    /// non-empty one from a judged round before it, with that round.
+    pub fn checklist_before(&self, round: RoundNo) -> Option<(RoundNo, &[String])> {
+        self.rounds
+            .iter()
+            .rev()
+            .filter(|r| r.no < round)
+            .find_map(|r| {
+                r.outcome
+                    .as_ref()
+                    .filter(|o| !o.checklist.is_empty())
+                    .map(|o| (r.no, o.checklist.as_slice()))
+            })
     }
 
     /// Latest judge feedback for `part` from any round before `before`.

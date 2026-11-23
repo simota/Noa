@@ -371,12 +371,27 @@ impl Store {
     }
 }
 
+/// How long a lock found taken is waited for before the log counts as
+/// running elsewhere. A `flock` lock belongs to the open file, and a child
+/// process being started on another thread holds a copy of every open file
+/// of this process until its exec closes them: for that moment it holds
+/// the lock of a log just closed, or the shared lock of an [`is_busy`]
+/// probe. The moment lasts microseconds, longer on a loaded machine.
+pub const LOCK_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
 /// Takes the log's exclusive lock, held until the file is closed.
 fn lock(file: &File) -> Result<(), StoreError> {
-    match file.try_lock() {
-        Ok(()) => Ok(()),
-        Err(fs::TryLockError::WouldBlock) => Err(StoreError::Busy),
-        Err(fs::TryLockError::Error(e)) => Err(StoreError::Io(e)),
+    let until = std::time::Instant::now() + LOCK_GRACE;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(fs::TryLockError::WouldBlock) if std::time::Instant::now() < until => {
+                std::thread::sleep(LOCK_POLL);
+            }
+            Err(fs::TryLockError::WouldBlock) => return Err(StoreError::Busy),
+            Err(fs::TryLockError::Error(e)) => return Err(StoreError::Io(e)),
+        }
     }
 }
 
@@ -452,7 +467,9 @@ pub fn may_run_unlocked(dir: &Path) -> bool {
         .is_ok_and(|at| at.elapsed().is_ok_and(|age| age < LEGACY_QUIET))
 }
 
-/// Whether a runner holds `dir`'s log open right now.
+/// Whether a runner holds `dir`'s log open right now. Looked at once: a
+/// lock held for an instant by a starting child (see [`LOCK_GRACE`]) can
+/// show a log busy that is not, which only the list shows.
 pub fn is_busy(dir: &Path) -> bool {
     File::open(dir.join(EVENTS_FILE))
         .is_ok_and(|file| matches!(file.try_lock_shared(), Err(fs::TryLockError::WouldBlock)))
@@ -687,13 +704,8 @@ mod tests {
         assert!(list_sessions(&root, 10)[0].summary.as_ref().unwrap().busy);
         assert!(matches!(Store::open(&dir), Err(StoreError::Busy)));
         drop(store);
-        // A process another test forks in this instant inherits the open
-        // file (and its lock) until it execs.
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while is_busy(&dir) && std::time::Instant::now() < until {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert!(!is_busy(&dir));
+        // Opening waits out a starting child's hold (`LOCK_GRACE`); the
+        // probe does not, so it is not asserted on here.
         let (_reopened, session) = Store::open(&dir).unwrap();
         assert_eq!(session.request, "x");
         fs::remove_dir_all(&root).unwrap();
@@ -747,6 +759,59 @@ mod tests {
         let (_store, _) = Store::open(&dir).unwrap();
         assert!(dir.join(LOCKS_FILE).exists());
         assert!(!may_run_unlocked(&dir));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A child process being started holds a copy of the log's open file
+    /// (and so its lock) until it execs: a dup of the file stands in for
+    /// it, let go of shortly after the store closes.
+    #[test]
+    fn a_lock_held_for_a_moment_by_a_starting_child_is_waited_for() {
+        let root = temp_root("child");
+        let (store, dir) = create(&root, "comp-13", "x");
+        let child_copy = store.file.try_clone().unwrap();
+        drop(store);
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            drop(child_copy);
+        });
+        let opened = Store::open(&dir);
+        release.join().unwrap();
+        assert!(opened.is_ok(), "{:?}", opened.err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The race itself: a log closed and opened again (with a busy probe in
+    /// between, as the tests' `wait_unlocked` does) while another thread
+    /// keeps starting processes. Run by hand:
+    /// `cargo test --offline --lib -- --ignored a_log_reopened_while_processes_start`.
+    #[test]
+    #[ignore = "stress: starts processes for a few seconds"]
+    fn a_log_reopened_while_processes_start_is_never_busy() {
+        let root = temp_root("stress");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let spawner = std::thread::spawn({
+            let stop = stop.clone();
+            move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = std::process::Command::new("/usr/bin/true").status();
+                }
+            }
+        });
+        let (store, dir) = create(&root, "comp-14", "x");
+        drop(store);
+        let mut failures = 0;
+        for _ in 0..3000 {
+            let _ = is_busy(&dir);
+            match Store::open(&dir) {
+                Ok(store) => drop(store),
+                Err(StoreError::Busy) => failures += 1,
+                Err(e) => panic!("{e}"),
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        spawner.join().unwrap();
+        assert_eq!(failures, 0, "a starting child's hold counted as busy");
         fs::remove_dir_all(&root).unwrap();
     }
 }

@@ -1649,11 +1649,19 @@ mod tests {
             .collect()
     }
 
-    /// Waits for `dir`'s log to be unlocked: a process another test forks
-    /// just then inherits the open log (and its lock) until it execs.
+    /// Waits for `dir`'s log to be unlocked. A child process another test
+    /// starts just then holds a copy of the closed log (and its lock) until
+    /// it execs; `Store::open` waits that out too (`store::LOCK_GRACE`).
+    /// Fails the test when it is still locked after 10 s: then something
+    /// really holds it, which no test here should.
     fn wait_unlocked(dir: &Path) {
-        let until = std::time::Instant::now() + Duration::from_secs(2);
-        while store::is_busy(dir) && std::time::Instant::now() < until {
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        while store::is_busy(dir) {
+            assert!(
+                std::time::Instant::now() < until,
+                "{} is still locked 10 s after its runner closed",
+                dir.display()
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
     }

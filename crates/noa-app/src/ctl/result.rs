@@ -202,6 +202,62 @@ pub(crate) fn read(
     }
 }
 
+/// How much of a result file [`read_start`] reads, and how many of its
+/// lines it keeps (as the Agent Dashboard's drawer does).
+pub(crate) const START_BYTES: u64 = 16 * 1024;
+pub(crate) const START_LINES: usize = 200;
+
+/// Why [`read_start`] read nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum StartError {
+    /// A FIFO, a device, a directory or a symbolic link: never read.
+    NotRegular,
+    Io(String),
+}
+
+/// The start of the result file at `path` (`+ctl board`, D18): at most
+/// [`START_BYTES`] and [`START_LINES`] of it, and whether it was cut. Only
+/// a regular file is read: a FIFO would block the board and a device may
+/// never end. What is checked is the file opened, not the path, and the
+/// open neither follows a link nor waits for a FIFO's writer.
+pub(crate) fn read_start(path: &Path) -> Result<(String, bool), StartError> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|err| match err.raw_os_error() {
+            Some(libc::ELOOP) => StartError::NotRegular,
+            _ => StartError::Io(err.to_string()),
+        })?;
+    let meta = file
+        .metadata()
+        .map_err(|err| StartError::Io(err.to_string()))?;
+    if !meta.is_file() {
+        return Err(StartError::NotRegular);
+    }
+    let mut bytes = Vec::new();
+    file.take(START_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|err| StartError::Io(err.to_string()))?;
+    let mut cut = bytes.len() as u64 > START_BYTES;
+    if cut {
+        bytes.truncate(START_BYTES as usize);
+        // A character the limit cut in two is left out whole.
+        if let Err(err) = std::str::from_utf8(&bytes)
+            && err.error_len().is_none()
+        {
+            bytes.truncate(err.valid_up_to());
+        }
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let lines: Vec<&str> = text.lines().take(START_LINES + 1).collect();
+    cut |= lines.len() > START_LINES;
+    let kept = &lines[..lines.len().min(START_LINES)];
+    Ok((kept.join("\n"), cut))
+}
+
 /// `+ctl result --path`: the path and a newline. Touches no file, so an
 /// existing, empty or missing file all give the same line.
 pub(crate) fn write_path(out: &mut impl std::io::Write, path: &Path) -> std::io::Result<()> {
@@ -375,6 +431,41 @@ mod tests {
         assert!(read(1, &first, None).unwrap_err().contains("no result yet"));
         std::fs::write(&first, "done\n").unwrap();
         assert!(written_since(&first, long_ago).is_some());
+    }
+
+    #[test]
+    fn the_start_of_a_result_is_bounded_and_only_a_regular_file_is_read() {
+        let dir = temp_dir("start");
+        let path = dir.join("r.md");
+        std::fs::write(&path, "one\ntwo\n").unwrap();
+        assert_eq!(read_start(&path).unwrap(), ("one\ntwo".to_string(), false));
+        // Cut at the line limit.
+        let many: String = (0..START_LINES + 5).map(|n| format!("{n}\n")).collect();
+        std::fs::write(&path, many).unwrap();
+        let (text, cut) = read_start(&path).unwrap();
+        assert!(cut);
+        assert_eq!(text.lines().count(), START_LINES);
+        // Cut at the byte limit, never inside a character.
+        std::fs::write(&path, "あ".repeat(START_BYTES as usize)).unwrap();
+        let (text, cut) = read_start(&path).unwrap();
+        assert!(cut);
+        assert!(text.len() as u64 <= START_BYTES);
+        assert!(text.chars().all(|ch| ch == 'あ'));
+        // A directory, a FIFO (which would block) and a link are refused.
+        assert_eq!(read_start(&dir), Err(StartError::NotRegular));
+        let fifo = dir.join("fifo");
+        let c_path = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+        // SAFETY: mkfifo reads the NUL-terminated path only.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        assert_eq!(read_start(&fifo), Err(StartError::NotRegular));
+        let link = dir.join("link.md");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert_eq!(read_start(&link), Err(StartError::NotRegular));
+        assert!(matches!(
+            read_start(&dir.join("missing.md")),
+            Err(StartError::Io(_))
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

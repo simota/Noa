@@ -106,15 +106,11 @@ pub fn inspect_worktree(
     if !dir.is_dir() {
         return None;
     }
-    let toplevel = run_git(dir, &["rev-parse", "--show-toplevel"])?
-        .trim()
-        .to_owned();
+    let (toplevel, common_raw) = top_and_common_dir(dir)?;
     if toplevel.is_empty() {
         return None;
     }
-    let common_raw = run_git(dir, &["rev-parse", "--git-common-dir"])
-        .map(|s| s.trim().to_owned())
-        .unwrap_or_else(|| ".git".into());
+    let common_raw = common_raw.unwrap_or_else(|| ".git".into());
     // A relative `--git-common-dir` is relative to the directory git ran in,
     // not to the worktree top level.
     let common_path = if Path::new(&common_raw).is_absolute() {
@@ -267,6 +263,28 @@ fn head_commit(dir: &Path) -> Option<String> {
     run_git(dir, &["rev-parse", "--verify", "--quiet", "HEAD"])
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
+}
+
+/// `git rev-parse --show-toplevel` and `--git-common-dir` (`None` if that
+/// one fails) of `dir`, trimmed; `None` outside a work tree.
+fn top_and_common_dir(dir: &Path) -> Option<(String, Option<String>)> {
+    // One git for both. It fails exactly when `--show-toplevel` does, as
+    // `--git-common-dir` cannot fail once a work tree was found.
+    let both = run_git(dir, &["rev-parse", "--show-toplevel", "--git-common-dir"])?;
+    let lines: Vec<&str> = both
+        .strip_suffix('\n')
+        .unwrap_or(&both)
+        .split('\n')
+        .collect();
+    if let [top, common] = lines[..] {
+        return Some((top.trim().to_owned(), Some(common.trim().to_owned())));
+    }
+    // A path holding a line break: ask one at a time, each answer whole.
+    let top = run_git(dir, &["rev-parse", "--show-toplevel"])?
+        .trim()
+        .to_owned();
+    let common = run_git(dir, &["rev-parse", "--git-common-dir"]).map(|s| s.trim().to_owned());
+    Some((top, common))
 }
 
 /// `<base>...HEAD` for the "vs main" mode.
@@ -1106,6 +1124,30 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         );
         assert_eq!(info.worktree_root, canonical_or_raw(&foo));
         assert_eq!(info.branch, "orch/foo");
+    }
+
+    #[test]
+    fn a_worktree_whose_path_holds_a_line_break_is_inspected() {
+        let root = scratch_dir("newline");
+        let seed = temp_repo("newline-seed", "main");
+        let odd = root.0.join("a\nb ");
+        git(&root.0, &["clone", "-q", cwd(&seed), odd.to_str().unwrap()]);
+        let info = inspect_worktree(
+            odd.to_str().unwrap(),
+            DiffMode::Unstaged,
+            &mut BaseRefs::default(),
+        )
+        .unwrap();
+        // `git rev-parse` output is trimmed, the top level's trailing space
+        // with it, so the status cannot run there and lists nothing.
+        assert_eq!(
+            info.worktree_root,
+            format!("{}/a\nb", canonical_or_raw(&root.0))
+        );
+        assert_eq!(info.repo_name, "a\nb ");
+        assert_eq!(info.repo_root, canonical_or_raw(&odd));
+        assert_eq!((info.branch.as_str(), info.head), ("main", None));
+        assert!(info.files.is_empty());
     }
 
     #[test]

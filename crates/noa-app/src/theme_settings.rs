@@ -31,11 +31,9 @@ pub(crate) use rows::{
     background_image_position_value, format_server_status, settings_row_display_value,
 };
 pub(crate) use sample::{Swatch, sample_swatches};
-#[allow(unused_imports)]
-pub(crate) use state::ConfigWriteFn;
 #[cfg(test)]
 pub(crate) use state::take_scan_count;
-pub(crate) use state::{ThemeSettings, WHEEL_ROW_THRESHOLD, revert_updates};
+pub(crate) use state::{ThemeSettings, WHEEL_ROW_THRESHOLD};
 
 #[cfg(test)]
 mod tests;

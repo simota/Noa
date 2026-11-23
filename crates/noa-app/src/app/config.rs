@@ -305,6 +305,12 @@ impl std::fmt::Debug for AppConfig {
 }
 
 impl AppConfig {
+    pub(super) fn apply_default_cursor_style(&self, terminal: &mut noa_grid::Terminal) {
+        let style =
+            resolve_cursor_style(self.cursor_style, self.cursor_style_blink).unwrap_or_default();
+        terminal.set_default_cursor_style(style);
+    }
+
     pub fn from_startup(
         config: noa_config::StartupConfig,
         cli_grid_override: bool,

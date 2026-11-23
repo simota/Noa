@@ -18,7 +18,8 @@ pub use import::{
 };
 pub use parser::{Diagnostic, Directive, parse_directives, parse_overrides};
 pub use writer::{
-    apply_updates, resolve_symlinks as resolve_config_symlinks, write_config_updates,
+    ConfigUndo, apply_updates, resolve_symlinks as resolve_config_symlinks, write_config_updates,
+    write_config_updates_with_undo,
 };
 
 pub const DEFAULT_COLS: u16 = 80;

@@ -1,6 +1,6 @@
 # Split zoom animation and tab zoom indicator
 
-Status: design, not built.
+Status: implemented (2026-11-23); look and feel not yet checked by hand.
 
 ## Goal
 

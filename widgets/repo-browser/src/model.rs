@@ -45,16 +45,28 @@ impl AgentKind {
         }
     }
 
-    /// The arguments that start it interactively with `prompt` as the first
-    /// prompt: Claude Code and Codex take it as their positional argument,
-    /// Antigravity after `-i` (as the competition widget starts them).
-    pub fn prompt_args(self, prompt: &str) -> Vec<String> {
-        let mut args = Vec::new();
-        if self == AgentKind::Agy {
-            args.push("-i".to_owned());
+    /// How the launch script execs it with the prompt in `$p` as its first
+    /// prompt, so that a prompt never reads as one of its options or
+    /// subcommands: Claude Code and Codex take it after `--`;
+    /// Antigravity's `-i` (`--prompt-interactive`) takes the next argument as
+    /// its value only when it is no option, so it is joined with `=`.
+    pub fn exec_args(self) -> &'static str {
+        match self {
+            AgentKind::Claude => "claude -- \"$p\"",
+            AgentKind::Codex => "codex -- \"$p\"",
+            AgentKind::Agy => "agy \"--prompt-interactive=$p\"",
         }
-        args.push(prompt.to_owned());
-        args
+    }
+
+    /// `prompt` as the agent is given it. Claude Code still runs a
+    /// subcommand named by its prompt after `--` (`claude -- doctor`), so a
+    /// one-word prompt gets a trailing line break, which no command name has.
+    pub fn prompt_text(self, prompt: &str) -> String {
+        let mut text = prompt.to_owned();
+        if self == AgentKind::Claude && !text.contains(char::is_whitespace) {
+            text.push('\n');
+        }
+        text
     }
 }
 

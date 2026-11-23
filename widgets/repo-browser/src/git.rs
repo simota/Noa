@@ -421,8 +421,11 @@ struct MergeEntry {
 struct MergeOutcome {
     /// The merged tree it wrote, conflict markers in the conflicted files.
     tree: String,
-    /// The conflicted paths; empty for a clean merge.
+    /// The conflicted paths as shown ([`display_path`]); empty for a clean
+    /// merge.
     conflicts: Vec<String>,
+    /// The same paths as git named them, byte for byte.
+    raw: Vec<Vec<u8>>,
 }
 
 impl MergePredictions {
@@ -471,6 +474,15 @@ impl MergePredictions {
         Some(outcome.tree.as_str())
     }
 
+    /// The path git named that `shown` (one of the conflicted paths as
+    /// [`display_path`] shows them) stands for, in `worktree_root`'s last
+    /// prediction.
+    pub fn raw_path(&self, worktree_root: &str, shown: &str) -> Option<Vec<u8>> {
+        let outcome = self.entries.get(worktree_root)?.outcome.as_ref()?;
+        let at = outcome.conflicts.iter().position(|p| p == shown)?;
+        outcome.raw.get(at).cloned()
+    }
+
     /// Drops the prediction for `worktree_root`, so the next one runs
     /// `git merge-tree` again (its tree object was pruned).
     pub fn forget(&mut self, worktree_root: &str) {
@@ -513,22 +525,57 @@ fn merge_tree(dir: &Path, base: &str, head: &str) -> Option<MergeOutcome> {
         Some(1) => false,
         _ => return None,
     };
-    let text = String::from_utf8_lossy(&out.stdout);
     // `<tree oid>\0` then, on a conflict, one `<path>\0` per conflicted file.
-    let mut fields = text.split('\0');
-    let tree = fields.next()?.trim().to_owned();
+    // Paths are kept as bytes: a name need not be UTF-8.
+    let mut fields = out.stdout.split(|&b| b == 0);
+    let tree = std::str::from_utf8(fields.next()?).ok()?.trim().to_owned();
     if !is_object_id(&tree) {
         return None;
     }
-    let conflicts = if clean {
+    let raw: Vec<Vec<u8>> = if clean {
         Vec::new()
     } else {
         fields
             .take_while(|path| !path.is_empty())
-            .map(str::to_owned)
+            .map(<[u8]>::to_vec)
             .collect()
     };
-    Some(MergeOutcome { tree, conflicts })
+    let conflicts = raw.iter().map(|p| display_path(p)).collect();
+    Some(MergeOutcome {
+        tree,
+        conflicts,
+        raw,
+    })
+}
+
+/// A path git named, as the browser shows and keys it: a UTF-8 name as it
+/// is, any other C-quoted the way git quotes it (`"a\377b"`), so that two
+/// different names never read alike.
+pub fn display_path(raw: &[u8]) -> String {
+    if let Ok(name) = std::str::from_utf8(raw) {
+        return name.to_owned();
+    }
+    let mut out = String::from('"');
+    for chunk in raw.utf8_chunks() {
+        for c in chunk.valid().chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                c if c.is_control() => {
+                    let mut buf = [0; 4];
+                    for b in c.encode_utf8(&mut buf).bytes() {
+                        out.push_str(&format!("\\{b:03o}"));
+                    }
+                }
+                c => out.push(c),
+            }
+        }
+        for b in chunk.invalid() {
+            out.push_str(&format!("\\{b:03o}"));
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Whether `s` is a full object id (SHA-1 or SHA-256), so it is never read
@@ -541,30 +588,41 @@ fn is_object_id(s: &str) -> bool {
 /// holds it, conflict markers included, capped like a diff; a note instead
 /// for a path the tree lacks, a binary file or a submodule. `None` when the
 /// tree cannot be read (its object was pruned), so it is predicted again.
-pub fn merge_preview(dir: &Path, tree: &str, path: &str) -> Option<String> {
+pub fn merge_preview(dir: &Path, tree: &str, raw_path: &[u8]) -> Option<String> {
+    use std::os::unix::ffi::OsStrExt;
     if !is_object_id(tree) {
         return None;
     }
-    // `ls-tree` takes the path as a literal pathspec (never `<tree>:<path>`
-    // revision syntax), and fails when the tree object is gone.
-    let listing = run_git(
-        dir,
-        &[
+    let path = display_path(raw_path);
+    // `ls-tree` takes the path, as git named it, as a literal pathspec
+    // (never `<tree>:<path>` revision syntax), and fails when the tree
+    // object is gone.
+    let out = git_command(dir)
+        .args([
             "--literal-pathspecs",
             "ls-tree",
             "-z",
             "--full-tree",
             tree,
             "--",
-            path,
-        ],
-    )?;
+        ])
+        .arg(std::ffi::OsStr::from_bytes(raw_path))
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
     // `<mode> SP <type> SP <oid> TAB <path>`
-    let entry = listing
-        .split('\0')
-        .filter_map(|record| record.split_once('\t'))
-        .find(|(_, name)| *name == path)
-        .map(|(meta, _)| meta.split(' ').collect::<Vec<_>>());
+    let entry = out
+        .stdout
+        .split(|&b| b == 0)
+        .filter_map(|record| {
+            let tab = record.iter().position(|&b| b == b'\t')?;
+            (record[tab + 1..] == *raw_path).then(|| String::from_utf8_lossy(&record[..tab]))
+        })
+        .next()
+        .map(|meta| meta.split(' ').map(str::to_owned).collect::<Vec<_>>());
     let Some([_mode, kind, oid]) = entry.as_deref() else {
         return Some(format!(
             "(マージ結果にこのパスはありません。削除と変更の衝突などで、どちらかの側が削除しています: {path})"
@@ -1846,7 +1904,7 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         let tree = predictions.tree(&root).unwrap().to_owned();
         assert!(is_object_id(&tree), "{tree}");
         let dir = Path::new(&root);
-        let merged = merge_preview(dir, &tree, "old.rs").unwrap();
+        let merged = merge_preview(dir, &tree, b"old.rs").unwrap();
         for part in [
             "<<<<<<< ",
             "fn ours() {}",
@@ -1858,16 +1916,16 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         }
         // A file only the branch changed merges cleanly into the tree.
         assert_eq!(
-            merge_preview(dir, &tree, "only-here.rs").unwrap(),
+            merge_preview(dir, &tree, b"only-here.rs").unwrap(),
             "fn new() {}\n"
         );
-        let absent = merge_preview(dir, &tree, "nowhere.rs").unwrap();
+        let absent = merge_preview(dir, &tree, b"nowhere.rs").unwrap();
         assert!(absent.contains("ありません"), "{absent}");
         // Reading it is read-only.
         assert_eq!(porcelain_status(dir), "");
         // An id that is no object id is never handed to git.
-        assert_eq!(merge_preview(dir, "--output=x", "old.rs"), None);
-        assert_eq!(merge_preview(dir, "HEAD", "old.rs"), None);
+        assert_eq!(merge_preview(dir, "--output=x", b"old.rs"), None);
+        assert_eq!(merge_preview(dir, "HEAD", b"old.rs"), None);
     }
 
     #[test]
@@ -1880,13 +1938,13 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
             .join(&tree[..2])
             .join(&tree[2..]);
         std::fs::remove_file(&object).unwrap();
-        assert_eq!(merge_preview(Path::new(&root), &tree, "old.rs"), None);
+        assert_eq!(merge_preview(Path::new(&root), &tree, b"old.rs"), None);
         predictions.forget(&root);
         assert_eq!(predictions.tree(&root), None);
         // Predicting again writes the same tree back.
         predictions.predict(&root, "orch/foo", base_of(&root).as_ref());
         assert_eq!(predictions.tree(&root), Some(tree.as_str()));
-        assert!(merge_preview(Path::new(&root), &tree, "old.rs").is_some());
+        assert!(merge_preview(Path::new(&root), &tree, b"old.rs").is_some());
         assert_eq!(predictions.runs, 2);
     }
 
@@ -1904,9 +1962,69 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         );
         let tree = predictions.tree(&root).unwrap();
         assert_eq!(
-            merge_preview(Path::new(&root), tree, "new.rs").unwrap(),
+            merge_preview(Path::new(&root), tree, b"new.rs").unwrap(),
             "fn new() {}\n"
         );
+    }
+
+    /// Commits `body` at the path `raw` (any bytes) without the file on disk,
+    /// which a file system such as APFS would refuse to name.
+    fn commit_raw_path(dir: &Path, raw: &[u8], body: &str) {
+        use std::io::Write;
+        use std::os::unix::ffi::OsStrExt;
+        let mut hash = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["hash-object", "-w", "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        hash.stdin
+            .take()
+            .unwrap()
+            .write_all(body.as_bytes())
+            .unwrap();
+        let oid = String::from_utf8(hash.wait_with_output().unwrap().stdout).unwrap();
+        let mut info = format!("100644,{},", oid.trim()).into_bytes();
+        info.extend_from_slice(raw);
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["update-index", "--add", "--cacheinfo"])
+            .arg(std::ffi::OsStr::from_bytes(&info))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        git(dir, &["commit", "-q", "-m", "raw"]);
+    }
+
+    #[test]
+    fn a_conflicted_name_that_is_not_utf8_is_read_as_git_named_it() {
+        let repo = temp_repo("merge-raw-name", "main");
+        let _cleanup = TempRepo(PathBuf::from(format!("{}-wt", repo.0.display())));
+        let wt = add_worktree(&repo, "foo", "orch/foo");
+        let raw = b"bad\xffname.rs";
+        commit_raw_path(&wt, raw, "fn theirs() {}\n");
+        commit_raw_path(&repo.0, raw, "fn ours() {}\n");
+        // A UTF-8 name that the lossy reading of `raw` would turn into.
+        commit_raw_path(&wt, "bad\u{fffd}name.rs".as_bytes(), "decoy\n");
+        let root = canonical_or_raw(&wt);
+        let mut predictions = MergePredictions::default();
+        let conflicts = predictions
+            .predict(&root, "orch/foo", base_of(&root).as_ref())
+            .unwrap();
+        assert_eq!(conflicts, vec![r#""bad\377name.rs""#]);
+        assert_eq!(display_path(b"plain.rs"), "plain.rs");
+        let back = predictions.raw_path(&root, &conflicts[0]).unwrap();
+        assert_eq!(back, raw);
+        let tree = predictions.tree(&root).unwrap();
+        let merged = merge_preview(Path::new(&root), tree, &back).unwrap();
+        assert!(
+            merged.contains("fn ours() {}") && merged.contains("fn theirs() {}"),
+            "{merged}"
+        );
+        assert!(!merged.contains("decoy"), "{merged}");
     }
 
     #[test]
@@ -1933,9 +2051,9 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         conflicts.sort();
         assert_eq!(conflicts, vec!["big.txt", "img.bin"]);
         let tree = predictions.tree(&root).unwrap();
-        let binary = merge_preview(Path::new(&root), tree, "img.bin").unwrap();
+        let binary = merge_preview(Path::new(&root), tree, b"img.bin").unwrap();
         assert!(binary.contains("バイナリ"), "{binary}");
-        let capped = merge_preview(Path::new(&root), tree, "big.txt").unwrap();
+        let capped = merge_preview(Path::new(&root), tree, b"big.txt").unwrap();
         assert!(capped.len() <= DIFF_CAP + 200, "{}", capped.len());
         assert!(capped.starts_with("<<<<<<< "), "{}", &capped[..40]);
         assert!(capped.trim_end().ends_with("以降を省略しました)"));

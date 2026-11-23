@@ -43,10 +43,12 @@ pub struct Snapshot {
     pub selected_diff: Option<(String, String, String)>,
     /// (worktree cwd, commit sha, `git show` text) of the commit being viewed.
     pub selected_commit: Option<(String, String, String)>,
-    /// (worktree cwd, path, predicted merge result) of the merge conflict
-    /// being viewed.
-    pub selected_merge: Option<(String, String, String)>,
+    /// The predicted merge result of the merge conflict being viewed.
+    pub selected_merge: Option<MergeAnswer>,
 }
+
+/// (worktree cwd, path, predicted merge result, the request it answers).
+pub type MergeAnswer = (String, String, String, u64);
 
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -79,7 +81,7 @@ pub enum Command {
         submit: bool,
     },
     /// A new focused Noa tab in `cwd` (a worktree root) running `agent` with
-    /// `prompt` as its first prompt. Reported on `delivered` once Noa
+    /// `prompt` as its first prompt. Reported on `launched` once Noa
     /// accepted the spawn.
     LaunchAgent {
         cwd: String,
@@ -91,6 +93,9 @@ pub enum Command {
     LoadMergePreview {
         cwd: String,
         path: String,
+        /// Echoed in the answer, so the UI takes only the answer to its
+        /// latest request.
+        request: u64,
     },
 }
 
@@ -99,6 +104,9 @@ pub struct Channel {
     pub notices: Receiver<String>,
     /// Review prompts (`SendText { submit: true }`) the pane accepted.
     pub delivered: Receiver<String>,
+    /// Prompts an agent was started with (`LaunchAgent`): Noa made the tab,
+    /// which does not yet say the agent started in it.
+    pub launched: Receiver<String>,
     commands: Sender<Command>,
 }
 
@@ -112,27 +120,45 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Channel {
     let (snapshot_tx, snapshots) = mpsc::channel();
     let (notice_tx, notices) = mpsc::channel();
     let (delivered_tx, delivered) = mpsc::channel();
+    let (launched_tx, launched) = mpsc::channel();
     let (commands, command_rx) = mpsc::channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
+    let outbox = Outbox {
+        notices: notice_tx,
+        delivered: delivered_tx,
+        launched: launched_tx,
+    };
     std::thread::Builder::new()
         .name("repo-browser-live".into())
-        .spawn(move || run(snapshot_tx, notice_tx, delivered_tx, command_rx, wake))
+        .spawn(move || run(snapshot_tx, outbox, command_rx, wake))
         .expect("spawn repo-browser-live thread");
     Channel {
         snapshots,
         notices,
         delivered,
+        launched,
         commands,
     }
 }
 
+/// What the feed reports besides snapshots.
+struct Outbox {
+    notices: Sender<String>,
+    delivered: Sender<String>,
+    launched: Sender<String>,
+}
+
 fn run(
     snapshot_tx: Sender<Snapshot>,
-    notice_tx: Sender<String>,
-    delivered_tx: Sender<String>,
+    outbox: Outbox,
     command_rx: Receiver<Command>,
     wake: Arc<dyn Fn() + Send + Sync>,
 ) {
+    let Outbox {
+        notices: notice_tx,
+        delivered: delivered_tx,
+        launched: launched_tx,
+    } = outbox;
     let mut backoff = BACKOFF_MIN;
     let mut mode = DiffMode::Unstaged;
     let mut selected_file: Option<(String, String)> = None;
@@ -141,7 +167,7 @@ fn run(
     let mut selected_commit: Option<(String, String)> = None;
     let mut commit_diff: Option<((String, String), String)> = None;
     let mut commit_cache = git::CommitCache::default();
-    let mut selected_merge: Option<(String, String)> = None;
+    let mut selected_merge: Option<(String, String, u64)> = None;
     let mut merge_memo: Option<MergeMemo> = None;
 
     let _ = snapshot_tx.send(Snapshot {
@@ -216,8 +242,8 @@ fn run(
                                     None => dirty = true,
                                 }
                             }
-                            Command::LoadMergePreview { cwd, path } => {
-                                selected_merge = Some((cwd, path));
+                            Command::LoadMergePreview { cwd, path, request } => {
+                                selected_merge = Some((cwd, path, request));
                                 selected_commit = None;
                                 match &last {
                                     Some(l) => {
@@ -275,23 +301,29 @@ fn run(
                                 wake();
                             }
                             Command::LaunchAgent { cwd, agent, prompt } => {
-                                let params = agent_spawn(
-                                    &cwd,
-                                    agent,
-                                    &prompt,
-                                    std::env::var("SHELL").ok().as_deref(),
-                                );
-                                let notice = match client.spawn_tab(None, &params) {
-                                    Ok(pane_id) => {
-                                        let _ = delivered_tx.send(prompt);
-                                        format!(
-                                            "新しいタブで {} を起動し、指示を渡しました (ペイン #{pane_id})",
-                                            agent.command()
-                                        )
+                                let shell = std::env::var("SHELL").ok();
+                                let notice = match prompt_dir().and_then(|dir| {
+                                    prepare_launch(&cwd, agent, &prompt, shell.as_deref(), &dir)
+                                }) {
+                                    Err(why) => {
+                                        format!("{} を起動できませんでした: {why}", agent.command())
                                     }
-                                    Err(err) => {
-                                        format!("{} を起動できませんでした: {err}", agent.command())
-                                    }
+                                    Ok(launch) => match client.spawn_tab(None, &launch.params) {
+                                        Ok(pane_id) => {
+                                            let _ = launched_tx.send(prompt);
+                                            format!(
+                                                "新しいタブで {} を起動しました (ペイン #{pane_id})。起動しなかったときは「元に戻す」で指示を戻せます",
+                                                agent.command()
+                                            )
+                                        }
+                                        Err(err) => {
+                                            let _ = std::fs::remove_file(&launch.prompt_file);
+                                            format!(
+                                                "{} を起動できませんでした: {err}",
+                                                agent.command()
+                                            )
+                                        }
+                                    },
                                 };
                                 let _ = notice_tx.send(notice);
                                 wake();
@@ -444,8 +476,8 @@ fn run(
                             selected_commit = Some((cwd, sha));
                             selected_merge = None;
                         }
-                        Ok(Command::LoadMergePreview { cwd, path }) => {
-                            selected_merge = Some((cwd, path));
+                        Ok(Command::LoadMergePreview { cwd, path, request }) => {
+                            selected_merge = Some((cwd, path, request));
                             selected_commit = None;
                         }
                         Ok(Command::Refresh) => break,
@@ -482,7 +514,7 @@ impl LastBuild {
         can_focus: bool,
         can_send: bool,
         selected_commit: Option<DiffEntry>,
-        selected_merge: Option<DiffEntry>,
+        selected_merge: Option<MergeAnswer>,
     ) -> Snapshot {
         Snapshot {
             data: self.data.clone(),
@@ -567,55 +599,164 @@ fn editor_argv(shell: Option<&str>, path: &str, line: u32, editor: Option<&str>)
     vec![shell.to_owned(), "-lc".to_owned(), script]
 }
 
-/// The most bytes of a prompt handed to an agent as its argument: one argv
-/// string must stay under Linux's 128 KiB `MAX_ARG_STRLEN` (macOS takes
-/// more).
+/// The most bytes of a prompt an agent is started with: the launch script
+/// hands it to the agent as one argument.
 pub const AGENT_PROMPT_MAX: usize = 128 * 1024 - 1;
-/// The most bytes the prompt may take JSON-escaped: Noa's control server
-/// reads frames of at most 256 KiB, which also hold the rest of the request.
-const AGENT_PROMPT_MAX_ESCAPED: usize = 200 * 1024;
 
 /// Whether `prompt` is too large to start an agent with.
 pub fn agent_prompt_too_large(prompt: &str) -> bool {
     prompt.len() > AGENT_PROMPT_MAX
-        || serde_json::to_string(prompt).map_or(true, |s| s.len() > AGENT_PROMPT_MAX_ESCAPED)
 }
 
-/// A new tab (focused) in `cwd` running `agent` with `prompt` as its first
-/// prompt.
-fn agent_spawn(cwd: &str, agent: AgentKind, prompt: &str, shell: Option<&str>) -> SpawnParams {
-    SpawnParams {
+/// The label of a tab this browser starts an agent in. A label makes Noa
+/// keep the tab's starting directory, so the pane is listed in its
+/// worktree before the shell or agent reports one.
+fn agent_label(agent: AgentKind) -> String {
+    format!("repo-browser:{}", agent.command())
+}
+
+/// A tab ready to be spawned, and the private file its script reads the
+/// prompt from (removed by the script, or by the caller when the spawn
+/// fails).
+struct AgentLaunch {
+    params: SpawnParams,
+    prompt_file: PathBuf,
+}
+
+/// The tab that starts `agent` in the worktree `cwd` with `prompt`, which
+/// is written to a private file in `dir` rather than put on the command
+/// line: Noa keeps a tab's spawn argv for as long as the tab lives and
+/// lists it to every client. Fails when `cwd` is no directory (the worktree
+/// was removed): Noa would otherwise start the tab somewhere else.
+fn prepare_launch(
+    cwd: &str,
+    agent: AgentKind,
+    prompt: &str,
+    shell: Option<&str>,
+    dir: &Path,
+) -> Result<AgentLaunch, String> {
+    if !Path::new(cwd).is_dir() {
+        return Err(format!(
+            "worktree {cwd} がありません（削除されたか移動しました）"
+        ));
+    }
+    let prompt_file = write_prompt_file(dir, &agent.prompt_text(prompt))
+        .map_err(|err| format!("指示を一時ファイルに書けません: {err}"))?;
+    let params = SpawnParams {
         config: Some(SpawnConfig {
-            command: Some(agent_argv(shell, agent, prompt)),
+            command: Some(agent_argv(shell, agent, cwd, &prompt_file)),
             cwd: Some(cwd.to_owned()),
             ..SpawnConfig::default()
         }),
+        label: Some(agent_label(agent)),
         focus: Some(true),
         ..SpawnParams::default()
-    }
+    };
+    Ok(AgentLaunch {
+        params,
+        prompt_file,
+    })
 }
 
-/// `exec AGENT "$@"` through the user's login shell, so the agent is found on
-/// the `PATH` their rc files set, with the agent's arguments (the prompt among
-/// them) as the script's positional parameters (`$0` is `noa-review`): the
-/// prompt is one argv element and never part of the script.
-///
-/// `"$@"` is POSIX syntax that fish and csh do not take, so `$SHELL` is used
-/// only when it is a POSIX shell, else `/bin/zsh`.
-fn agent_argv(shell: Option<&str>, agent: AgentKind, prompt: &str) -> Vec<String> {
+/// The private directory (0700, in the temp directory) where prompts wait
+/// for their launch scripts.
+fn prompt_dir() -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join("noa-repo-browser-prompts");
+    private_dir(&dir).map_err(|err| format!("{}: {err}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Makes `dir` a directory only its owner can enter: created 0700, or, if
+/// it is there, a real directory (no symlink) set to 0700, which only its
+/// owner may do.
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => return Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(err) => return Err(err),
+    }
+    if !std::fs::symlink_metadata(dir)?.is_dir() {
+        return Err(std::io::Error::other("not a directory"));
+    }
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
+/// How long a prompt file may wait for a launch script that never ran (Noa
+/// quit first) before a later launch removes it.
+const STALE_PROMPT: Duration = Duration::from_secs(3600);
+
+/// Writes `prompt` to a new file only its owner can read (0600) in `dir`,
+/// first removing prompt files older than [`STALE_PROMPT`].
+fn write_prompt_file(dir: &Path, prompt: &str) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > STALE_PROMPT);
+        if stale && entry.file_name().to_string_lossy().starts_with("prompt-") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let path = dir.join(format!(
+        "prompt-{}-{nanos}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
+    file.write_all(prompt.as_bytes())?;
+    Ok(path)
+}
+
+/// The launch script, run by the user's login shell (so the agent is found
+/// on the `PATH` their rc files set) as `-c SCRIPT noa-review WORKTREE
+/// PROMPT_FILE`. It reads the prompt from the file and removes it, enters
+/// the worktree (an rc file may have moved elsewhere; an alias or function
+/// named `cd` is checked against), and execs the agent with the prompt as
+/// one argument, which is a variable here and never part of the script.
+fn launch_script(agent: AgentKind) -> String {
+    format!(
+        "p=$(command cat -- \"$2\" && printf x); s=$?; command rm -f -- \"$2\"; \
+         if [ \"$s\" -ne 0 ]; then printf '%s\\n' \"repo-browser: 指示を読めません: $2\" >&2; exit 1; fi; \
+         p=${{p%x}}; \
+         CDPATH= \\cd -- \"$1\" 2>/dev/null && [ . -ef \"$1\" ] || \
+         {{ printf '%s\\n' \"repo-browser: worktree がありません: $1\" >&2; exit 1; }}; \
+         exec {}",
+        agent.exec_args()
+    )
+}
+
+/// The argv of the tab: `launch_script` through the user's login shell.
+/// `"$@"`-style positional parameters are POSIX syntax that fish and csh do
+/// not take, so `$SHELL` is used only when it is a POSIX shell, else
+/// `/bin/zsh`.
+fn agent_argv(shell: Option<&str>, agent: AgentKind, cwd: &str, prompt_file: &Path) -> Vec<String> {
     let shell = shell
         .filter(|s| s.starts_with('/') && is_posix_shell(s))
         .unwrap_or("/bin/zsh");
-    let mut argv = vec![
+    vec![
         shell.to_owned(),
         "-l".to_owned(),
         "-i".to_owned(),
         "-c".to_owned(),
-        format!("exec {} \"$@\"", agent.command()),
+        launch_script(agent),
         "noa-review".to_owned(),
-    ];
-    argv.extend(agent.prompt_args(prompt));
-    argv
+        cwd.to_owned(),
+        prompt_file.to_string_lossy().into_owned(),
+    ]
 }
 
 fn is_posix_shell(path: &str) -> bool {
@@ -700,12 +841,12 @@ type MergeMemo = ((String, String, String), String);
 /// predicted afresh once, as is a worktree with no prediction yet.
 fn merge_entry(
     memo: &mut Option<MergeMemo>,
-    wanted: Option<&(String, String)>,
+    wanted: Option<&(String, String, u64)>,
     merges: &mut git::MergePredictions,
     data: &RepoData,
-) -> Option<DiffEntry> {
-    let (cwd, path) = wanted?;
-    let entry = |text: String| Some((cwd.clone(), path.clone(), text));
+) -> Option<MergeAnswer> {
+    let (cwd, path, request) = wanted?;
+    let entry = |text: String| Some((cwd.clone(), path.clone(), text, *request));
     let mut predicted_again = false;
     loop {
         let Some(tree) = merges.tree(cwd).map(str::to_owned) else {
@@ -723,7 +864,11 @@ fn merge_entry(
         {
             return entry(text.clone());
         }
-        match git::merge_preview(Path::new(cwd), &key.2, path) {
+        // The name git gave, which the shown one may only quote.
+        let raw = merges
+            .raw_path(cwd, path)
+            .unwrap_or_else(|| path.as_bytes().to_vec());
+        match git::merge_preview(Path::new(cwd), &key.2, &raw) {
             Some(text) => {
                 *memo = Some((key, text.clone()));
                 return entry(text);
@@ -1004,6 +1149,7 @@ pub(crate) struct TestFeed {
     pub snapshots: Sender<Snapshot>,
     pub notices: Sender<String>,
     pub delivered: Sender<String>,
+    pub launched: Sender<String>,
     pub commands: Receiver<Command>,
 }
 
@@ -1012,18 +1158,21 @@ pub(crate) fn test_channel() -> (Channel, TestFeed) {
     let (snapshot_tx, snapshots) = mpsc::channel();
     let (notice_tx, notices) = mpsc::channel();
     let (delivered_tx, delivered) = mpsc::channel();
+    let (launched_tx, launched) = mpsc::channel();
     let (commands, command_rx) = mpsc::channel();
     (
         Channel {
             snapshots,
             notices,
             delivered,
+            launched,
             commands,
         },
         TestFeed {
             snapshots: snapshot_tx,
             notices: notice_tx,
             delivered: delivered_tx,
+            launched: launched_tx,
             commands: command_rx,
         },
     )
@@ -1452,7 +1601,7 @@ mod tests {
             selected_diff: Some(("/repo".into(), "a.rs".into(), "+new".into())),
         };
         let commit = Some(("/repo".into(), "abc".into(), "commit abc".into()));
-        let merge = Some(("/repo".into(), "a.rs".into(), "<<<<<<< main".into()));
+        let merge = Some(("/repo".into(), "a.rs".into(), "<<<<<<< main".into(), 3));
         let snap = last.snapshot(true, false, commit.clone(), merge.clone());
         assert_eq!(snap.data, last.data);
         assert_eq!(snap.diff_mode, DiffMode::Staged);
@@ -1602,78 +1751,287 @@ mod tests {
         assert_eq!(args, vec!["+5", "./a.rs"]);
     }
 
-    /// Runs the script half of `agent_argv` (`-c SCRIPT $0 ARGS…`) with
-    /// `/bin/sh` and a stub `agent` first on `PATH` that records its
-    /// arguments one per NUL-terminated record; returns them.
-    fn run_agent(tag: &str, agent: AgentKind, prompt: &str) -> Vec<String> {
-        use std::os::unix::fs::PermissionsExt;
+    /// A scratch directory removed when dropped.
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch(tag: &str) -> Scratch {
         let dir = std::env::temp_dir().join(format!("rb-agent-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let out = dir.join("args");
-        let stub = dir.join(agent.command());
+        Scratch(std::fs::canonicalize(&dir).unwrap())
+    }
+
+    /// What one launch did: the stub agent's arguments (`None` when it
+    /// never ran), the directory it ran in, and the launch shell's status.
+    struct Ran {
+        args: Option<Vec<String>>,
+        cwd: Option<String>,
+        ok: bool,
+    }
+
+    /// Prepares the launch of `agent` in `worktree` with `prompt` and runs
+    /// its argv with `shell` (whose `-l -i` are dropped: no rc files in a
+    /// test), with a stub `agent` first on `PATH` that records its
+    /// arguments and working directory.
+    fn launch(
+        s: &Scratch,
+        shell: &str,
+        agent: AgentKind,
+        worktree: &Path,
+        prompt: &str,
+    ) -> (AgentLaunch, Ran) {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = s.0.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let out = s.0.join("args");
+        let at = s.0.join("cwd");
+        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_file(&at);
+        let stub = bin.join(agent.command());
         std::fs::write(
             &stub,
             format!(
-                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\0' \"$a\"; done > '{}'\n",
+                "#!/bin/sh\npwd -P > '{}'\nfor a in \"$@\"; do printf '%s\\0' \"$a\"; done > '{}'\n",
+                at.display(),
                 out.display()
             ),
         )
         .unwrap();
         std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let argv = agent_argv(Some("/bin/zsh"), agent, prompt);
-        assert_eq!(argv[..4], ["/bin/zsh", "-l", "-i", "-c"]);
-        assert!(
-            !argv[4].contains(prompt),
-            "the prompt is never in the script"
-        );
-        let status = std::process::Command::new("/bin/sh")
+        let prompts = s.0.join("prompts");
+        private_dir(&prompts).unwrap();
+        let launch = prepare_launch(
+            worktree.to_str().unwrap(),
+            agent,
+            prompt,
+            Some(shell),
+            &prompts,
+        )
+        .unwrap();
+        let argv = launch
+            .params
+            .config
+            .as_ref()
+            .unwrap()
+            .command
+            .clone()
+            .unwrap();
+        assert_eq!(argv[..4], [shell, "-l", "-i", "-c"]);
+        let status = std::process::Command::new(shell)
             .arg("-c")
             .args(&argv[4..])
-            .current_dir(&dir)
-            .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
+            .current_dir(&s.0)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
             .status()
             .unwrap();
-        assert!(status.success(), "{argv:?}");
-        let args = std::fs::read(&out).unwrap();
-        let pwned = dir.join("pwned").exists();
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(!pwned, "the prompt ran as a command");
-        String::from_utf8(args)
-            .unwrap()
-            .split_terminator('\0')
-            .map(str::to_owned)
-            .collect()
+        let args = std::fs::read(&out).ok().map(|bytes| {
+            String::from_utf8(bytes)
+                .unwrap()
+                .split_terminator('\0')
+                .map(str::to_owned)
+                .collect()
+        });
+        let cwd = std::fs::read_to_string(&at)
+            .ok()
+            .map(|c| c.trim_end().to_owned());
+        (
+            launch,
+            Ran {
+                args,
+                cwd,
+                ok: status.success(),
+            },
+        )
+    }
+
+    const NASTY: &str = "[main / a.rs L3]\n```diff\n+x\n```\n\
+                         $(touch pwned) `touch pwned` \"$@\" \"$p\" '; touch pwned; '\n-v --help\n直して\n\n";
+
+    #[test]
+    fn the_prompt_reaches_the_agent_as_its_prompt_and_never_as_the_command_line() {
+        let s = scratch("prompt");
+        let wt = s.0.join("wt dir");
+        std::fs::create_dir_all(&wt).unwrap();
+        for shell in ["/bin/sh", "/bin/zsh"] {
+            for (agent, want) in [
+                (AgentKind::Claude, vec!["--".to_owned(), NASTY.to_owned()]),
+                (AgentKind::Codex, vec!["--".to_owned(), NASTY.to_owned()]),
+                (
+                    AgentKind::Agy,
+                    vec![format!("--prompt-interactive={NASTY}")],
+                ),
+            ] {
+                let (launch, ran) = launch(&s, shell, agent, &wt, NASTY);
+                assert!(ran.ok, "{shell} {agent:?}");
+                assert_eq!(ran.args, Some(want), "{shell} {agent:?}");
+                assert_eq!(ran.cwd.as_deref(), wt.to_str(), "{shell} {agent:?}");
+                // Never on the command line Noa keeps and lists.
+                let argv = launch.params.config.unwrap().command.unwrap();
+                assert!(argv.iter().all(|a| !a.contains("touch pwned")), "{argv:?}");
+                // Read once and removed.
+                assert!(!launch.prompt_file.exists());
+                assert!(!s.0.join("pwned").exists() && !wt.join("pwned").exists());
+            }
+        }
     }
 
     #[test]
-    fn the_prompt_reaches_the_agent_as_one_argument() {
-        let prompt = "[main / a.rs L3]\n```diff\n+x\n```\n\
-                      $(touch pwned) `touch pwned` \"$@\" '; touch pwned; '\n-v --help\n直して";
-        for agent in [AgentKind::Claude, AgentKind::Codex] {
-            assert_eq!(run_agent(agent.command(), agent, prompt), vec![prompt]);
-        }
-        // Antigravity takes its first prompt after `-i`.
+    fn option_or_subcommand_like_prompts_stay_prompts() {
+        let s = scratch("options");
+        let wt = s.0.join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        let args = |agent, prompt| launch(&s, "/bin/sh", agent, &wt, prompt).1.args.unwrap();
+        // After `--` (`codex -- --help` starts a session with that prompt).
+        assert_eq!(args(AgentKind::Codex, "--help"), ["--", "--help"]);
+        assert_eq!(args(AgentKind::Codex, "doctor"), ["--", "doctor"]);
+        // `claude -- doctor` still runs `doctor`; a line break makes it no
+        // command name.
+        assert_eq!(args(AgentKind::Claude, "doctor"), ["--", "doctor\n"]);
+        assert_eq!(args(AgentKind::Claude, "--resume"), ["--", "--resume\n"]);
+        assert_eq!(args(AgentKind::Claude, "two words"), ["--", "two words"]);
+        // `agy -i --help` prints the help; `=` makes it the prompt.
         assert_eq!(
-            run_agent("agy", AgentKind::Agy, prompt),
-            vec!["-i".to_owned(), prompt.to_owned()]
+            args(AgentKind::Agy, "--help"),
+            ["--prompt-interactive=--help"]
         );
-        // A prompt that looks like an option is still one argument.
+    }
+
+    #[test]
+    fn a_worktree_that_is_gone_starts_nothing() {
+        let s = scratch("gone");
+        let prompts = s.0.join("prompts");
+        private_dir(&prompts).unwrap();
+        let missing = s.0.join("removed");
+        let err = prepare_launch(
+            missing.to_str().unwrap(),
+            AgentKind::Claude,
+            "p",
+            None,
+            &prompts,
+        )
+        .err()
+        .unwrap();
+        assert!(err.contains("がありません"), "{err}");
         assert_eq!(
-            run_agent("dash", AgentKind::Claude, "--resume"),
-            vec!["--resume"]
+            std::fs::read_dir(&prompts).unwrap().count(),
+            0,
+            "no prompt file left"
         );
+        // Removed after the launch was prepared: the script stops before
+        // the agent, and still removes the prompt.
+        let wt = s.0.join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        let bin = s.0.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let launch = prepare_launch(
+            wt.to_str().unwrap(),
+            AgentKind::Codex,
+            "p",
+            Some("/bin/sh"),
+            &prompts,
+        )
+        .unwrap();
+        std::fs::remove_dir(&wt).unwrap();
+        let argv = launch
+            .params
+            .config
+            .as_ref()
+            .unwrap()
+            .command
+            .clone()
+            .unwrap();
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .args(&argv[4..])
+            .current_dir(&s.0)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .output()
+            .unwrap();
+        assert!(!status.status.success());
+        assert!(String::from_utf8_lossy(&status.stderr).contains("worktree がありません"));
+        assert!(!launch.prompt_file.exists());
+    }
+
+    #[test]
+    fn a_cd_function_cannot_send_the_agent_elsewhere() {
+        let s = scratch("cdfn");
+        let wt = s.0.join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        // As a `cd` alias would from an rc file: the escaped `\cd` skips an
+        // alias, and the directory is checked afterwards whatever ran.
+        let (_, ran) = launch(&s, "/bin/zsh", AgentKind::Codex, &wt, "p");
+        assert_eq!(ran.cwd.as_deref(), wt.to_str());
+        let script = launch_script(AgentKind::Codex);
+        let prompts = s.0.join("prompts");
+        let launch =
+            prepare_launch(wt.to_str().unwrap(), AgentKind::Codex, "p", None, &prompts).unwrap();
+        let file = launch.prompt_file.to_str().unwrap().to_owned();
+        let out = std::process::Command::new("/bin/zsh")
+            .args([
+                "-f",
+                "-c",
+                &format!("cd() {{ builtin cd /; }}; {script}"),
+                "noa-review",
+                wt.to_str().unwrap(),
+                &file,
+            ])
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "a cd that goes elsewhere is refused");
+        assert!(!launch.prompt_file.exists());
+    }
+
+    #[test]
+    fn prompt_files_are_private_and_stale_ones_go() {
+        use std::os::unix::fs::PermissionsExt;
+        let s = scratch("private");
+        let dir = s.0.join("prompts");
+        private_dir(&dir).unwrap();
+        // An existing directory others could enter is made private again.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        private_dir(&dir).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        let file = write_prompt_file(&dir, "直して").unwrap();
+        assert_eq!(mode(&file), 0o600);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "直して");
+        // A symlink is no private directory.
+        let link = s.0.join("link");
+        std::os::unix::fs::symlink(&s.0, &link).unwrap();
+        assert!(private_dir(&link).is_err());
+        // A file older than an hour, left by a launch that never ran, goes.
+        let old = dir.join("prompt-old");
+        std::fs::write(&old, "x").unwrap();
+        let hour_ago = std::time::SystemTime::now() - STALE_PROMPT - Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(hour_ago)
+            .unwrap();
+        write_prompt_file(&dir, "next").unwrap();
+        assert!(!old.exists());
+        assert!(file.exists(), "a fresh one stays");
     }
 
     #[test]
     fn agents_start_from_a_posix_login_shell() {
-        let shell = |s: Option<&str>| agent_argv(s, AgentKind::Claude, "p")[0].clone();
+        let shell =
+            |s: Option<&str>| agent_argv(s, AgentKind::Claude, "/wt", Path::new("/f"))[0].clone();
         assert_eq!(shell(Some("/bin/bash")), "/bin/bash");
         assert_eq!(
             shell(Some("/opt/homebrew/bin/zsh")),
             "/opt/homebrew/bin/zsh"
         );
-        // `"$@"` means nothing to fish or csh; a relative or empty one is no path.
+        // `$1`-style parameters mean nothing to fish or csh; a relative or
+        // empty one is no path.
         for other in [
             Some("/opt/homebrew/bin/fish"),
             Some("/bin/tcsh"),
@@ -1683,27 +2041,35 @@ mod tests {
         ] {
             assert_eq!(shell(other), "/bin/zsh", "{other:?}");
         }
-        let argv = agent_argv(None, AgentKind::Codex, "p");
-        assert_eq!(argv[4..], ["exec codex \"$@\"", "noa-review", "p"]);
+        let argv = agent_argv(None, AgentKind::Codex, "/wt", Path::new("/f"));
+        assert_eq!(argv[5..], ["noa-review", "/wt", "/f"]);
     }
 
     #[test]
-    fn agent_spawn_runs_in_the_worktree_focused_and_needs_input() {
-        let params = agent_spawn("/repo wt", AgentKind::Claude, "直して", Some("/bin/bash"));
+    fn agent_tabs_run_in_the_worktree_focused_labelled_and_need_input() {
+        let s = scratch("spawn");
+        let prompts = s.0.join("prompts");
+        private_dir(&prompts).unwrap();
+        let wt = s.0.to_str().unwrap();
+        let launch =
+            prepare_launch(wt, AgentKind::Claude, "直して", Some("/bin/bash"), &prompts).unwrap();
+        let params = launch.params;
         let config = params.config.as_ref().unwrap();
-        assert_eq!(config.cwd.as_deref(), Some("/repo wt"));
+        assert_eq!(config.cwd.as_deref(), Some(wt));
         assert_eq!(params.focus, Some(true));
         assert!(config.needs_input_scope());
-        assert_eq!(config.command.as_ref().unwrap().last().unwrap(), "直して");
+        // A label makes Noa list the tab in its worktree before the shell
+        // reports a directory (it keeps the spawn cwd for labelled tabs).
+        assert_eq!(params.label.as_deref(), Some("repo-browser:claude"));
+        assert!(params.label.unwrap().len() <= noa_ipc::protocol::MAX_SPAWN_LABEL_BYTES);
     }
 
     #[test]
-    fn prompts_beyond_one_argument_or_one_frame_are_too_large() {
+    fn prompts_beyond_the_cap_are_too_large() {
         assert!(!agent_prompt_too_large(&"x".repeat(AGENT_PROMPT_MAX)));
         assert!(agent_prompt_too_large(&"x".repeat(AGENT_PROMPT_MAX + 1)));
-        // Within the argv limit, but twice that once JSON-escaped.
-        assert!(agent_prompt_too_large(&"\"".repeat(110 * 1024)));
-        assert!(!agent_prompt_too_large(&"日本語\n".repeat(10_000)));
+        // Nothing of it crosses the control connection, so escaping is free.
+        assert!(!agent_prompt_too_large(&"\"".repeat(110 * 1024)));
     }
 
     #[test]
@@ -1723,10 +2089,14 @@ mod tests {
         );
         let foo_root = data.repos[0].worktrees[1].cwd.clone();
         assert_eq!(data.repos[0].worktrees[1].merge_conflicts, vec!["old.rs"]);
-        let wanted = (foo_root.clone(), "old.rs".to_owned());
+        let wanted = (foo_root.clone(), "old.rs".to_owned(), 5);
         let mut memo = None;
-        let (cwd, path, text) = merge_entry(&mut memo, Some(&wanted), &mut merges, &data).unwrap();
-        assert_eq!((cwd.as_str(), path.as_str()), (foo_root.as_str(), "old.rs"));
+        let (cwd, path, text, request) =
+            merge_entry(&mut memo, Some(&wanted), &mut merges, &data).unwrap();
+        assert_eq!(
+            (cwd.as_str(), path.as_str(), request),
+            (foo_root.as_str(), "old.rs", 5)
+        );
         assert!(
             text.contains("<<<<<<< ") && text.contains("fn theirs() {}"),
             "{text}"
@@ -1742,20 +2112,20 @@ mod tests {
             .join(&tree[..2])
             .join(&tree[2..]);
         std::fs::remove_file(&object).unwrap();
-        let (_, _, again) = merge_entry(&mut None, Some(&wanted), &mut merges, &data).unwrap();
+        let (_, _, again, _) = merge_entry(&mut None, Some(&wanted), &mut merges, &data).unwrap();
         assert_eq!(again, text);
         assert_eq!(merges.runs(), 2);
         // Answered from the memo while the tree stays the same.
-        let (_, _, cached) = merge_entry(&mut memo, Some(&wanted), &mut merges, &data).unwrap();
+        let (_, _, cached, _) = merge_entry(&mut memo, Some(&wanted), &mut merges, &data).unwrap();
         assert_eq!(cached, text);
 
         // No prediction yet (a fresh feed): one is made.
         let mut fresh = git::MergePredictions::default();
-        let (_, _, text) = merge_entry(&mut None, Some(&wanted), &mut fresh, &data).unwrap();
+        let (_, _, text, _) = merge_entry(&mut None, Some(&wanted), &mut fresh, &data).unwrap();
         assert!(text.contains("<<<<<<< "), "{text}");
         // A worktree no longer listed says so instead.
-        let gone = ("/nowhere".to_owned(), "old.rs".to_owned());
-        let (_, _, note) = merge_entry(
+        let gone = ("/nowhere".to_owned(), "old.rs".to_owned(), 6);
+        let (_, _, note, _) = merge_entry(
             &mut None,
             Some(&gone),
             &mut git::MergePredictions::default(),

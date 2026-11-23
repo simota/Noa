@@ -185,6 +185,10 @@ pub(super) struct FloatGeometry {
     window: PaneRectApp,
     panes: Vec<(PaneId, PaneRectApp)>,
     zoomed: Option<PaneId>,
+    /// A split zoom transition is in flight: pane-anchored floats hide for
+    /// its whole length (they draw unclipped and unfaded above the panes)
+    /// and are re-placed by the relayout that ends it.
+    pane_anchors_hidden: bool,
     pub(super) metrics: FloatMetrics,
 }
 
@@ -195,7 +199,7 @@ impl FloatGeometry {
             window: self.window,
             panes: &self.panes,
             zoomed: self.zoomed,
-            pane_anchors_hidden: false,
+            pane_anchors_hidden: self.pane_anchors_hidden,
         }
     }
 }
@@ -439,6 +443,16 @@ pub(super) fn repaired_focus(
     }
 }
 
+/// The zoom after revealing a float with `anchor` (REQ-016): a float
+/// anchored to a pane hidden behind another zoomed pane unzooms it; any
+/// other reveal keeps the zoom.
+pub(super) fn reveal_zoom(anchor: FloatAnchor, zoomed: Option<PaneId>) -> Option<PaneId> {
+    match anchor {
+        FloatAnchor::Pane(pane) if zoomed.is_some_and(|zoomed| zoomed != pane) => None,
+        _ => zoomed,
+    }
+}
+
 /// The pane a wheel turn goes to.
 pub(super) fn wheel_pane(
     scripted: Option<PaneId>,
@@ -491,6 +505,7 @@ pub(super) fn float_geometry(
         window: bounds,
         panes,
         zoomed: state.zoomed,
+        pane_anchors_hidden: state.live_split_zoom_anim().is_some(),
         metrics: float_metrics(metrics, padding),
     }
 }
@@ -1669,11 +1684,11 @@ impl App {
         };
         let anchor = float.anchor;
         let collapsed = float.state == FloatState::Collapsed;
-        if let FloatAnchor::Pane(pane) = anchor
-            && state.zoomed.is_some_and(|zoomed| zoomed != pane)
-        {
-            state.zoomed = None;
-        }
+        // A reveal is an implicit zoom change, so it is instant
+        // (split-zoom-animation): it ends a tween in flight too, or
+        // pane-anchored floats would still read as hidden below and focus
+        // would fall to the parent pane while the float shows again later.
+        state.set_zoom_instant(reveal_zoom(anchor, state.zoomed));
         if collapsed {
             state.floats.toggle_collapse(id);
         }
@@ -1947,6 +1962,21 @@ mod tests {
         assert_eq!(focus_route(None), FocusRoute::Direct);
         assert_eq!(focus_route(Some(true)), FocusRoute::Direct);
         assert_eq!(focus_route(Some(false)), FocusRoute::Reveal);
+    }
+
+    // Split-zoom review: the reveal's zoom is applied through
+    // `set_zoom_instant` on every reveal, so a tween in flight ends with it.
+    // Zoom-in to the float's parent keeps the zoom; an unzoom shrink
+    // (logical zoom already `None`) stays unzoomed.
+    #[test]
+    fn a_float_reveal_unzooms_only_a_pane_hiding_its_parent() {
+        let (parent, other) = (PaneId::new(1), PaneId::new(2));
+        let pane = FloatAnchor::Pane(parent);
+        assert_eq!(reveal_zoom(pane, Some(other)), None);
+        assert_eq!(reveal_zoom(pane, Some(parent)), Some(parent));
+        assert_eq!(reveal_zoom(pane, None), None);
+        assert_eq!(reveal_zoom(FloatAnchor::Tab, Some(other)), Some(other));
+        assert_eq!(reveal_zoom(FloatAnchor::Window, None), None);
     }
 
     #[test]

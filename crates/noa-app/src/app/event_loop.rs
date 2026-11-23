@@ -61,6 +61,14 @@ fn mouse_gesture_pane(
     captured.or(hovered).unwrap_or(focused)
 }
 
+/// Whether a real (unscripted) button or wheel event re-resolves the pointer
+/// before it routes: the pane under it changed since the last motion, or a
+/// split zoom tween is sliding panes and content under a pointer at rest, so
+/// the pane and cell that motion cached no longer match what is drawn there.
+fn pointer_needs_reresolve(scripted: bool, hover_changed: bool, zoom_tween_live: bool) -> bool {
+    !scripted && (hover_changed || zoom_tween_live)
+}
+
 impl App {
     /// The pane a scripted mouse event being delivered in `state` names
     /// (agent-automation REQ-011). It outranks a live left-button capture
@@ -595,6 +603,7 @@ impl ApplicationHandler<UserEvent> for App {
         let memory_trim_deadline = self.tick_memory_trim();
         let bg_refresh_wake_deadline = self.tick_bg_refresh_wake();
         let scrollback_checkpoint_deadline = self.tick_scrollback_checkpoint();
+        let split_zoom_deadline = self.tick_split_zoom_anims();
         let deadline = [
             blink_deadline,
             resize_throttle_deadline,
@@ -612,6 +621,7 @@ impl ApplicationHandler<UserEvent> for App {
             memory_trim_deadline,
             bg_refresh_wake_deadline,
             scrollback_checkpoint_deadline,
+            split_zoom_deadline,
         ]
         .into_iter()
         .flatten()
@@ -1918,20 +1928,20 @@ impl App {
             ) {
                 return;
             }
-            if over_chrome
-                && let Some(owed) = owed
-                && let Some(tab) = self.windows.get_mut(&window_id)
-            {
-                tab.last_mouse_pane = Some(owed);
-            }
-            if state == ElementState::Pressed {
+            let (hovered, position, tween_live) =
+                self.windows
+                    .get(&window_id)
+                    .map_or((None, None, false), |tab| {
+                        (
+                            tab.last_mouse_pane,
+                            tab.last_mouse_physical_position,
+                            tab.live_split_zoom_anim().is_some(),
+                        )
+                    });
+            let hover_changed = state == ElementState::Pressed && !tween_live && {
                 let content = hit
                     .filter(|hit| hit.part == crate::floating::FloatHitPart::Content)
                     .map(|hit| hit.id);
-                let (hovered, position) =
-                    self.windows.get(&window_id).map_or((None, None), |tab| {
-                        (tab.last_mouse_pane, tab.last_mouse_physical_position)
-                    });
                 let split_under = match (content, position, self.gpu.as_ref()) {
                     (None, Some(position), Some(gpu)) if !over_chrome => {
                         let metrics = gpu.fonts.get(self.window_font_px(window_id)).metrics();
@@ -1940,12 +1950,21 @@ impl App {
                     }
                     _ => None,
                 };
-                if floating::press_hover(content, split_under, hovered) != hovered
-                    && let Some(position) = position
-                {
-                    // Re-resolve the pointer so the float's cell is fresh too.
-                    self.on_cursor_moved(window_id, position);
-                }
+                floating::press_hover(content, split_under, hovered) != hovered
+            };
+            if pointer_needs_reresolve(false, hover_changed, tween_live)
+                && let Some(position) = position
+            {
+                // Re-resolve the pointer so the float's cell is fresh too,
+                // and, mid-tween, so the press and its release land on the
+                // pane and cell drawn under the pointer now.
+                self.on_cursor_moved(window_id, position);
+            }
+            if over_chrome
+                && let Some(owed) = owed
+                && let Some(tab) = self.windows.get_mut(&window_id)
+            {
+                tab.last_mouse_pane = Some(owed);
             }
         }
         if button == MouseButton::Left {
@@ -2203,6 +2222,22 @@ impl App {
             && self.handle_theme_settings_wheel(window_id, delta)
         {
             return;
+        }
+        // Mid-tween the panes slide under a pointer at rest: route the wheel
+        // to the pane and cell drawn under it now, not the last motion's.
+        if let Some(position) = self
+            .windows
+            .get(&window_id)
+            .filter(|state| {
+                pointer_needs_reresolve(
+                    self.script_target(state).is_some(),
+                    false,
+                    state.live_split_zoom_anim().is_some(),
+                )
+            })
+            .and_then(|state| state.last_mouse_physical_position)
+        {
+            self.on_cursor_moved(window_id, position);
         }
         let pane_id = self.windows.get(&window_id).and_then(|state| {
             let over_float_chrome = state
@@ -2635,5 +2670,17 @@ mod focus_loss_tests {
         assert_eq!(mouse_gesture_pane(Some(a), Some(b), focused), a);
         assert_eq!(mouse_gesture_pane(None, Some(b), focused), b);
         assert_eq!(mouse_gesture_pane(None, None, focused), focused);
+    }
+
+    // Split-zoom review: with the pointer at rest over a pane sliding under
+    // it, a press, release or wheel re-resolves the pointer whatever the
+    // last motion found; at rest with no tween, only a changed hover does.
+    // A scripted event names its pane and never re-resolves.
+    #[test]
+    fn a_zoom_tween_re_resolves_a_pointer_at_rest() {
+        assert!(pointer_needs_reresolve(false, false, true));
+        assert!(pointer_needs_reresolve(false, true, false));
+        assert!(!pointer_needs_reresolve(false, false, false));
+        assert!(!pointer_needs_reresolve(true, true, true));
     }
 }

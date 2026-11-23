@@ -1008,6 +1008,7 @@ impl App {
                 renderer,
                 split_tree: SplitTree::leaf(initial_pane),
                 zoomed: None,
+                split_zoom_anim: None,
                 focused_pane: initial_pane,
                 return_pane: initial_pane,
                 floats: crate::floating::FloatSet::default(),

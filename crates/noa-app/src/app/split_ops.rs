@@ -276,7 +276,7 @@ impl App {
             state.surfaces.insert(new_pane, new_surface);
             state.focused_pane = new_pane;
             reset_ime_for_focus_switch(&state.window, losing_preedit);
-            state.zoomed = None;
+            state.set_zoom_instant(None);
             state.last_mouse_pane = Some(new_pane);
             state.window.clone()
         };
@@ -582,8 +582,11 @@ impl App {
             source_state.mouse_capture_pane = None;
         }
         source_state.split_tree = transform.source_tree;
+        // A shrink of `pane` already in flight here (logical zoom `None`)
+        // is left alone: `live_split_zoom_anim` drops it now that the pane
+        // has left this tree.
         if source_state.zoomed == Some(pane) {
-            source_state.zoomed = None;
+            source_state.set_zoom_instant(None);
         }
         if !transform.remove_outcome.tab_should_close {
             // P1: only steal focus when the moved pane itself held it —
@@ -645,7 +648,7 @@ impl App {
         // zoomed, not only when it's exactly `dest_focused` — a zoomed pane
         // fills the whole tab regardless of which pane is zoomed, so any
         // zoom state there must be cleared before the insert becomes visible.
-        dest_state.zoomed = None;
+        dest_state.set_zoom_instant(None);
         // P2-2 (review round 9): the moved Surface still carries the
         // `last_mouse_cell` it captured at the *source* window's drag-start
         // pointer position. The drop gesture that triggered this move happens
@@ -883,7 +886,7 @@ impl App {
         if !is_float && state.zoomed.is_some_and(|zoomed| zoomed != pane_id) {
             // Acknowledgement must not hide a notification behind another zoomed pane.
             if let Some(state) = self.windows.get_mut(&window_id) {
-                state.zoomed = Some(pane_id);
+                state.set_zoom_instant(Some(pane_id));
             }
             self.relayout_and_resize_window(window_id);
         }
@@ -986,8 +989,21 @@ impl App {
             let Some(state) = self.windows.get_mut(&window_id) else {
                 return;
             };
+            let prev = state.zoomed;
             let decision = zoom_toggle(&state.split_tree, state.zoomed, state.focused_pane, bounds);
             state.zoomed = decision.zoomed;
+            // The clip-reveal transition (split-zoom-animation AC1/AC3/AC4):
+            // set before the relayout below, which sizes grids by
+            // `grid_zoomed` — the zoomed pane's grid fills the pane area at
+            // once on zoom-in and keeps that size through an unzoom's
+            // shrink. Reduce Motion is sampled once per toggle.
+            state.split_zoom_anim = split_tree::next_split_zoom_anim(
+                prev,
+                decision.zoomed,
+                state.live_split_zoom_anim(),
+                crate::idle_ember::reduce_motion(),
+                Instant::now(),
+            );
             state.window.clone()
         };
         self.relayout_and_resize_window(window_id);

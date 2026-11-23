@@ -192,6 +192,23 @@ fn tc_007_pane_float_hides_while_another_pane_is_zoomed() {
 }
 
 #[test]
+fn pane_anchors_hidden_hides_pane_floats_but_not_tab_or_window_floats() {
+    let mut set = FloatSet::default();
+    let pane_float = float_at(&mut set, 1, A, &SPLIT, Rect::new(50, 100, 300, 200));
+    let tab_float = float_at(&mut set, 2, A, &SPLIT, Rect::new(10, 10, 300, 200));
+    set.cycle_anchor(tab_float, &layout(&SPLIT), M).unwrap();
+    let hidden = FloatLayout {
+        pane_anchors_hidden: true,
+        ..layout(&SPLIT)
+    };
+    assert!(!set.is_visible(pane_float, &hidden, M));
+    assert!(set.is_visible(tab_float, &hidden, M));
+    let shown: Vec<_> = set.draw_order(&hidden, M).iter().map(|p| p.id).collect();
+    assert_eq!(shown, vec![tab_float]);
+    assert!(set.is_visible(pane_float, &layout(&SPLIT), M));
+}
+
+#[test]
 fn tc_008_cycle_anchor_keeps_the_screen_rect_and_picks_the_pane_under_the_centre() {
     let mut set = FloatSet::default();
     let float = float_at(&mut set, 1, A, &SPLIT, Rect::new(100, 100, 300, 200));

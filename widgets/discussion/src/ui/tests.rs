@@ -1,8 +1,8 @@
-use noa_gpui_core::widgets::{Badge, Checkbox, PopUpButton, TextArea};
+use noa_gpui_core::widgets::{Badge, Checkbox, ComboBox, PopUpButton, TextArea};
 use noa_gpui_core::{Event, PointerButton};
 use noa_gpui_scene::Point;
 
-use discussion::model::types::{Debate, DebateStatus, MinuteSection};
+use discussion::model::types::{AgentChoice, AgentSetup, Debate, DebateStatus, MinuteSection};
 
 use super::*;
 use crate::live::{TestFeed, test_channel};
@@ -519,8 +519,8 @@ fn without_a_session_the_start_view_shows_and_starts_one() {
             topic: "テストの方針".into(),
             workdir: None,
             max_rounds: Some(5),
-            moderator: AgentKind::Codex,
-            panel: vec![AgentKind::Codex, AgentKind::Agy],
+            moderator: AgentKind::Codex.into(),
+            panel: vec![AgentKind::Codex.into(), AgentKind::Agy.into()],
         }]
     );
 
@@ -528,6 +528,74 @@ fn without_a_session_the_start_view_shows_and_starts_one() {
     h.deliver(Some(crate::demo::session()));
     assert!(h.screen.tree.is_hidden(h.screen.start.root));
     assert!(!h.screen.tree.is_hidden(h.screen.meeting));
+}
+
+#[test]
+fn the_start_view_sends_each_agents_model_and_effort() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    h.deliver(None);
+    h.set_text(h.screen.start.topic, "テストの方針");
+
+    // Picking codex as moderator offers codex's models and levels.
+    let moderator = h.screen.start.moderator;
+    h.screen
+        .tree
+        .update::<PopUpButton, _>(moderator, |m, cx| m.set_selected(cx, 1));
+    start::moderator_kind_changed(&mut h.screen.tree, &mut h.screen.start, &mut h.text);
+    let setup = &h.screen.start.moderator_setup;
+    let (model, effort) = (setup.model, setup.effort);
+    let items = h
+        .screen
+        .tree
+        .get::<ComboBox>(model)
+        .unwrap()
+        .items()
+        .to_vec();
+    assert_eq!(items, AgentKind::Codex.models());
+    h.screen
+        .tree
+        .update::<ComboBox, _>(model, |c, cx| c.set_text(cx, " gpt-6.2-astra "));
+    // 0 is the CLI default; codex's sixth level is ultra.
+    h.screen
+        .tree
+        .update::<PopUpButton, _>(effort, |p, cx| p.set_selected(cx, 6));
+
+    let claude = &h.screen.start.panel_setup[0];
+    let (model, effort) = (claude.model, claude.effort);
+    h.screen
+        .tree
+        .update::<ComboBox, _>(model, |c, cx| c.set_text(cx, "opus"));
+    h.screen
+        .tree
+        .update::<PopUpButton, _>(effort, |p, cx| p.set_selected(cx, 3));
+
+    let start = h.screen.start.start_button;
+    click(&mut h.screen, &mut h.text, start);
+    let setup = |model: Option<&str>, effort: Option<&str>| AgentSetup {
+        model: model.map(Into::into),
+        effort: effort.map(Into::into),
+    };
+    assert_eq!(
+        h.drain(),
+        vec![Command::Start {
+            topic: "テストの方針".into(),
+            workdir: None,
+            max_rounds: Some(5),
+            moderator: AgentChoice {
+                kind: AgentKind::Codex,
+                setup: setup(Some("gpt-6.2-astra"), Some("ultra")),
+            },
+            panel: vec![
+                AgentChoice {
+                    kind: AgentKind::Claude,
+                    setup: setup(Some("opus"), Some("high")),
+                },
+                AgentKind::Codex.into(),
+                AgentKind::Agy.into(),
+            ],
+        }]
+    );
 }
 
 #[test]

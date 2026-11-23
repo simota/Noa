@@ -24,7 +24,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use discussion::engine::{AgentState, Config, Effect, Engine, EngineError, Input, Setup};
 use discussion::model::export;
 use discussion::model::types::{
-    AgentKind, DebateId, IssueId, Millis, PartId, Phase, RoundNo, Session, SessionId,
+    AgentChoice, AgentKind, AgentSetup, DebateId, IssueId, Millis, PartId, Phase, RoundNo, Session,
+    SessionId,
 };
 use discussion::store::{self, Store};
 
@@ -83,8 +84,8 @@ pub enum Start {
         workdir: Option<PathBuf>,
         /// After this many rounds the discussion ends; `None` for no limit.
         max_rounds: Option<RoundNo>,
-        moderator: AgentKind,
-        panel: Vec<AgentKind>,
+        moderator: AgentChoice,
+        panel: Vec<AgentChoice>,
         root: PathBuf,
     },
     /// The discussion stored at `dir`, picked up where it stopped.
@@ -245,32 +246,47 @@ impl Clock for SystemClock {
 /// it finds `claude`/`codex`/`agy` on the PATH the user's shell sets up
 /// (Noa started from Finder has a bare one), then `exec`ed so the agent is
 /// the pane's foreground program.
-fn agent_argv(kind: AgentKind) -> Vec<String> {
-    let shell = std::env::var("SHELL")
+fn agent_argv(kind: AgentKind, setup: &AgentSetup) -> Vec<String> {
+    // Plain words only (`AgentSetup::check`, enforced when the session is
+    // created), written into the script itself: `"$@"` is not valid in
+    // every login shell.
+    let script = std::iter::once(format!("exec {}", kind.command()))
+        .chain(kind.flags(setup))
+        .collect::<Vec<_>>()
+        .join(" ");
+    vec![login_shell(), "-l".into(), "-i".into(), "-c".into(), script]
+}
+
+fn login_shell() -> String {
+    std::env::var("SHELL")
         .ok()
         .filter(|shell| shell.starts_with('/'))
-        .unwrap_or_else(|| "/bin/zsh".to_owned());
-    vec![
-        shell,
+        .unwrap_or_else(|| "/bin/zsh".to_owned())
+}
+
+/// `exec KIND "$@"` through the login shell, with `args` as the script's
+/// positional parameters (`$0` is `name`), so a prompt is never spliced
+/// into the script. Takes a POSIX login shell, as the first prompt always has.
+fn launch_argv(kind: AgentKind, name: &str, args: Vec<String>) -> Vec<String> {
+    let mut argv = vec![
+        login_shell(),
         "-l".into(),
         "-i".into(),
         "-c".into(),
-        format!("exec {}", kind.command()),
-    ]
+        format!("exec {} \"$@\"", kind.command()),
+        name.to_owned(),
+    ];
+    argv.extend(args);
+    argv
 }
 
-/// The command that starts `kind` on a first prompt, the way each CLI takes
-/// one: `claude PROMPT`, `codex PROMPT`, `agy -i PROMPT`. The prompt is the
-/// script's `$1`, never spliced into it.
 fn implement_argv(kind: AgentKind, prompt: &str) -> Vec<String> {
-    let mut argv = agent_argv(kind);
-    argv.pop();
-    let script = match kind {
-        AgentKind::Agy => format!("exec {} -i \"$1\"", kind.command()),
-        _ => format!("exec {} \"$1\"", kind.command()),
-    };
-    argv.extend([script, "noa-implement".to_owned(), prompt.to_owned()]);
-    argv
+    let mut args = Vec::new();
+    if kind == AgentKind::Agy {
+        args.push("-i".to_owned());
+    }
+    args.push(prompt.to_owned());
+    launch_argv(kind, "noa-implement", args)
 }
 
 fn agent_state(state: Option<&str>) -> Option<AgentState> {
@@ -549,6 +565,13 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             Start::Resume { dir } => {
                 let (store, session) = Store::open(&dir)
                     .map_err(|e| format!("{} を開けません: {e}", dir.display()))?;
+                // The setup is written into the login shell's script, so a
+                // log edited by hand gets the same check a new session does.
+                for part in std::iter::once(&session.moderator).chain(&session.panelists) {
+                    part.setup
+                        .check(part.kind)
+                        .map_err(|why| format!("{} を再開できません: {why}", dir.display()))?;
+                }
                 (Engine::resume(session, &dir, config), store)
             }
         };
@@ -972,7 +995,12 @@ impl<C: Connect, K: Clock> Runner<C, K> {
 
     /// Starts `part`'s agent. `Ok(Err(why))`: Noa refused.
     fn spawn(&mut self, conn: &mut C::Conn, part: &PartId) -> Result<Result<(), String>, Fail> {
-        let Some(kind) = self.engine.session().participant(part).map(|p| p.kind) else {
+        let Some((kind, setup)) = self
+            .engine
+            .session()
+            .participant(part)
+            .map(|p| (p.kind, p.setup.clone()))
+        else {
             return Ok(Err(format!("no participant {part}")));
         };
         let cwd = match &self.engine.session().workdir {
@@ -982,7 +1010,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         loop {
             let placement = self.placement(part);
             let spec = PaneSpec {
-                argv: agent_argv(kind),
+                argv: agent_argv(kind, &setup),
                 cwd: cwd.clone(),
                 label: self.label(part),
             };
@@ -1594,8 +1622,8 @@ mod tests {
                     topic: "Pick a database".into(),
                     workdir: None,
                     max_rounds: None,
-                    moderator: AgentKind::Claude,
-                    panel: vec![AgentKind::Claude, AgentKind::Codex],
+                    moderator: AgentKind::Claude.into(),
+                    panel: vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
                     root: root.to_owned(),
                 },
             )
@@ -1683,7 +1711,7 @@ mod tests {
                 .zip([("noa", "claude"), ("claude", "claude"), ("codex", "codex")])
         {
             assert_eq!(spec.label, format!("{part} · {id}"));
-            assert_eq!(spec.argv.last().unwrap(), &format!("exec {cmd}"));
+            assert_eq!(spec.argv[4], format!("exec {cmd}"));
             assert_eq!(spec.cwd, root);
         }
         let parts = &rig.session().panelists;
@@ -1968,8 +1996,8 @@ mod tests {
                 topic: "Review this repo".into(),
                 workdir: Some(workdir.clone()),
                 max_rounds: None,
-                moderator: AgentKind::Claude,
-                panel: vec![AgentKind::Claude, AgentKind::Codex],
+                moderator: AgentKind::Claude.into(),
+                panel: vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
                 root: root.clone(),
             },
         );
@@ -2050,8 +2078,8 @@ mod tests {
                 topic: "Review this repo".into(),
                 workdir: Some(workdir.clone()),
                 max_rounds: None,
-                moderator: AgentKind::Claude,
-                panel: vec![AgentKind::Codex],
+                moderator: AgentKind::Claude.into(),
+                panel: vec![AgentKind::Codex.into()],
                 root: root.clone(),
             },
         );
@@ -2081,8 +2109,8 @@ mod tests {
                 topic: "t".into(),
                 workdir: Some(missing.clone()),
                 max_rounds: None,
-                moderator: AgentKind::Claude,
-                panel: vec![AgentKind::Codex],
+                moderator: AgentKind::Claude.into(),
+                panel: vec![AgentKind::Codex.into()],
                 root: root.clone(),
             },
             fake.clone(),
@@ -2310,8 +2338,8 @@ mod tests {
                 topic: "Review this repo".into(),
                 workdir: Some(workdir.clone()),
                 max_rounds: None,
-                moderator: AgentKind::Claude,
-                panel: vec![AgentKind::Codex],
+                moderator: AgentKind::Claude.into(),
+                panel: vec![AgentKind::Codex.into()],
                 root: root.clone(),
             },
         );
@@ -2338,7 +2366,7 @@ mod tests {
             discussion::model::export::implementation_task(rig.session(), &task)
         );
         let command = spec.argv.join(" ");
-        assert!(command.contains("exec codex \"$1\""), "{command}");
+        assert!(command.contains("exec codex \"$@\""), "{command}");
         assert!(
             spec.argv.last().unwrap().contains(task.to_str().unwrap()),
             "{:?}",
@@ -2369,20 +2397,17 @@ mod tests {
     #[test]
     fn each_agent_gets_its_task_the_way_its_cli_takes_a_first_prompt() {
         let argv = |kind| implement_argv(kind, "do it");
-        assert!(
-            argv(AgentKind::Claude)
-                .join(" ")
-                .contains("exec claude \"$1\"")
+        assert_eq!(
+            &argv(AgentKind::Claude)[4..],
+            ["exec claude \"$@\"", "noa-implement", "do it"]
         );
-        assert!(
-            argv(AgentKind::Codex)
-                .join(" ")
-                .contains("exec codex \"$1\"")
+        assert_eq!(
+            &argv(AgentKind::Codex)[4..],
+            ["exec codex \"$@\"", "noa-implement", "do it"]
         );
-        assert!(
-            argv(AgentKind::Agy)
-                .join(" ")
-                .contains("exec agy -i \"$1\"")
+        assert_eq!(
+            &argv(AgentKind::Agy)[4..],
+            ["exec agy \"$@\"", "noa-implement", "-i", "do it"]
         );
         // The prompt is an argument of its own, never spliced into the script.
         assert_eq!(
@@ -2546,6 +2571,57 @@ mod tests {
     }
 
     #[test]
+    fn a_resumed_session_whose_log_holds_a_bad_model_is_refused() {
+        let root = temp_root("resume-bad-setup");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.step();
+        let dir = rig.dir();
+        rig.actions.send(Action::Stop).unwrap();
+        assert!(!rig.runner.step().unwrap());
+        drop(rig);
+        // The model name in the log is written into the login shell's script.
+        let log = dir.join(store::EVENTS_FILE);
+        let text = fs::read_to_string(&log).unwrap();
+        let tampered = text.replacen(
+            r#""role":"moderator""#,
+            r#""role":"moderator","setup":{"model":"opus; touch pwned"}"#,
+            1,
+        );
+        assert_ne!(tampered, text);
+        fs::write(&log, tampered).unwrap();
+        // The moderator's pane is gone, so resuming starts it again.
+        fake.w().panes.remove(&100);
+
+        let (_actions, action_rx) = mpsc::channel();
+        let (update_tx, _updates) = mpsc::channel();
+        let opened = Runner::open(
+            Start::Resume { dir },
+            fake.clone(),
+            fake.clone(),
+            CONFIG,
+            action_rx,
+            update_tx,
+            Rc::new(|| {}),
+        );
+        let before = fake.0.borrow().spawned.len();
+        match opened {
+            Err(why) => assert!(why.contains("opus; touch pwned"), "{why}"),
+            Ok(mut runner) => {
+                for _ in 0..20 {
+                    let _ = runner.step();
+                }
+                let argv: Vec<_> = fake.0.borrow().spawned[before..]
+                    .iter()
+                    .map(|(_, spec, _)| spec.argv.last().cloned())
+                    .collect();
+                panic!("resumed and started {argv:?}");
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn a_pane_with_the_old_id_but_another_label_is_not_taken_back() {
         let root = temp_root("relabel");
         let fake = Fake::new();
@@ -2616,8 +2692,8 @@ mod tests {
                 topic: "t".into(),
                 workdir: None,
                 max_rounds: None,
-                moderator: AgentKind::Codex,
-                panel: vec![AgentKind::Agy],
+                moderator: AgentKind::Codex.into(),
+                panel: vec![AgentKind::Agy.into()],
                 root: root.clone(),
             },
             fake.clone(),
@@ -2652,14 +2728,71 @@ mod tests {
 
     #[test]
     fn agents_start_through_the_login_shell() {
-        let argv = agent_argv(AgentKind::Agy);
+        let argv = agent_argv(AgentKind::Agy, &AgentSetup::default());
         assert!(argv[0].starts_with('/'));
         assert_eq!(&argv[1..], ["-l", "-i", "-c", "exec agy"]);
+        let setup = AgentSetup {
+            model: Some("gpt-6.2-sol".into()),
+            effort: Some("high".into()),
+        };
+        assert_eq!(
+            agent_argv(AgentKind::Codex, &setup)[4],
+            "exec codex -m gpt-6.2-sol -c model_reasoning_effort=high"
+        );
+        assert_eq!(
+            agent_argv(AgentKind::Claude, &setup)[4],
+            "exec claude --model gpt-6.2-sol --effort high"
+        );
+        assert_eq!(
+            &implement_argv(AgentKind::Agy, "go")[4..],
+            ["exec agy \"$@\"", "noa-implement", "-i", "go"]
+        );
         assert_eq!(
             agent_state(Some("permission")),
             Some(AgentState::Permission)
         );
         assert_eq!(agent_state(Some("weird")), None);
         assert_eq!(agent_state(None), None);
+    }
+
+    /// The script an agent is started with, run by a shell that is not
+    /// POSIX (csh here; fish has no `$@` either), with `echo` standing in
+    /// for the agent: it must still start, with every flag.
+    fn run_under_csh(argv: &[String], kind: AgentKind) -> Option<String> {
+        let csh = std::path::Path::new("/bin/csh");
+        if !csh.exists() {
+            return None;
+        }
+        let script = argv[4].replacen(&format!("exec {}", kind.command()), "exec /bin/echo", 1);
+        let out = std::process::Command::new(csh)
+            .arg("-f")
+            .arg("-c")
+            .arg(&script)
+            .args(&argv[5..])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{script:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Some(String::from_utf8(out.stdout).unwrap().trim().to_owned())
+    }
+
+    #[test]
+    fn agents_start_under_a_login_shell_that_is_not_posix() {
+        let setup = AgentSetup {
+            model: Some("opus".into()),
+            effort: Some("high".into()),
+        };
+        let Some(out) = run_under_csh(&agent_argv(AgentKind::Claude, &setup), AgentKind::Claude)
+        else {
+            return;
+        };
+        assert_eq!(out, "--model opus --effort high");
+        let codex = run_under_csh(&agent_argv(AgentKind::Codex, &setup), AgentKind::Codex);
+        assert_eq!(codex.unwrap(), "-m opus -c model_reasoning_effort=high");
+        let plain = agent_argv(AgentKind::Agy, &AgentSetup::default());
+        assert_eq!(run_under_csh(&plain, AgentKind::Agy).unwrap(), "");
     }
 }

@@ -16,9 +16,9 @@ use std::path::{Path, PathBuf};
 use crate::model::brief;
 use crate::model::reduce::{self, Event, ReduceError};
 use crate::model::types::{
-    AgentKind, Author, Brief, DebateId, DebateStatus, IssueId, IssueOp, MODERATOR_ID, Message,
-    Millis, MsgKind, PartId, Participant, Phase, Position, Role, RoundKind, RoundNo, Session,
-    SessionId,
+    AgentChoice, AgentKind, Author, Brief, DebateId, DebateStatus, IssueId, IssueOp, MODERATOR_ID,
+    Message, Millis, MsgKind, PartId, Participant, Phase, Position, Role, RoundKind, RoundNo,
+    Session, SessionId,
 };
 use crate::model::validate;
 use crate::store;
@@ -187,9 +187,13 @@ fn rejected<T>(why: impl Into<String>) -> Result<T, EngineError> {
 /// The participants a session with this moderator and panel gets: the
 /// moderator is `noa`; panelists are named after their kind, `-2`, `-3`, …
 /// when a kind repeats.
-pub fn participants(moderator: AgentKind, panel: &[AgentKind]) -> (Participant, Vec<Participant>) {
+pub fn participants(
+    moderator: &AgentChoice,
+    panel: &[AgentChoice],
+) -> (Participant, Vec<Participant>) {
     let mut panelists: Vec<Participant> = Vec::with_capacity(panel.len());
-    for &kind in panel {
+    for choice in panel {
+        let kind = choice.kind;
         let seen = panelists.iter().filter(|p| p.kind == kind).count();
         let id = match seen {
             0 => kind.command().to_owned(),
@@ -200,13 +204,15 @@ pub fn participants(moderator: AgentKind, panel: &[AgentKind]) -> (Participant, 
             kind,
             role: Role::Panelist,
             pane_id: None,
+            setup: choice.setup.clone(),
         });
     }
     let moderator = Participant {
         id: PartId::new(MODERATOR_ID),
-        kind: moderator,
+        kind: moderator.kind,
         role: Role::Moderator,
         pane_id: None,
+        setup: moderator.setup.clone(),
     };
     (moderator, panelists)
 }
@@ -221,8 +227,8 @@ pub struct Setup<'a> {
     /// go under it ([`store::workdir_reply_dir`]), so an agent whose sandbox
     /// writes only inside its working directory can write them.
     pub workdir: Option<PathBuf>,
-    pub moderator: AgentKind,
-    pub panel: &'a [AgentKind],
+    pub moderator: AgentChoice,
+    pub panel: &'a [AgentChoice],
 }
 
 #[derive(Debug, Clone)]
@@ -248,12 +254,13 @@ impl Engine {
         config: Config,
         now: Millis,
     ) -> Result<(Engine, Output), EngineError> {
+        let panel: Vec<AgentChoice> = panel.iter().map(|&kind| kind.into()).collect();
         let setup = Setup {
             topic,
             workdir: None,
             max_rounds: None,
-            moderator,
-            panel,
+            moderator: moderator.into(),
+            panel: &panel,
         };
         Engine::create_in(id, setup, dir, config, now)
     }
@@ -281,7 +288,12 @@ impl Engine {
         if panel.is_empty() {
             return rejected("the panel is empty");
         }
-        let (moderator, panelists) = participants(moderator, panel);
+        for choice in std::iter::once(&moderator).chain(panel) {
+            if let Err(why) = choice.setup.check(choice.kind) {
+                return rejected(why);
+            }
+        }
+        let (moderator, panelists) = participants(&moderator, panel);
         let batch = vec![Event::Created {
             id,
             topic: topic.to_owned(),
@@ -1165,7 +1177,7 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::model::brief::{MODERATOR_SECTIONS, PANELIST_SECTIONS, render_message};
-    use crate::model::types::{IssueState, MessageId};
+    use crate::model::types::{AgentSetup, IssueState, MessageId};
 
     #[test]
     fn a_session_with_a_workdir_sends_replies_under_its_dot_noa() {
@@ -1173,8 +1185,8 @@ mod tests {
             topic: "Pick a database",
             workdir: Some(PathBuf::from("/repo")),
             max_rounds: None,
-            moderator: AgentKind::Codex,
-            panel: &[AgentKind::Claude, AgentKind::Agy],
+            moderator: AgentKind::Codex.into(),
+            panel: &[AgentKind::Claude.into(), AgentKind::Agy.into()],
         };
         let (mut engine, _) =
             Engine::create_in(SessionId::new("disc-1"), setup, Path::new("/d"), CONFIG, 0).unwrap();
@@ -1328,17 +1340,33 @@ mod tests {
 
     #[test]
     fn participants_are_named_after_their_kind() {
+        let opus = AgentSetup {
+            model: Some("opus".into()),
+            effort: Some("high".into()),
+        };
         let (moderator, panel) = participants(
-            AgentKind::Agy,
+            &AgentChoice {
+                kind: AgentKind::Agy,
+                setup: AgentSetup {
+                    model: None,
+                    effort: Some("low".into()),
+                },
+            },
             &[
-                AgentKind::Claude,
-                AgentKind::Claude,
-                AgentKind::Codex,
-                AgentKind::Claude,
+                AgentChoice {
+                    kind: AgentKind::Claude,
+                    setup: opus.clone(),
+                },
+                AgentKind::Claude.into(),
+                AgentKind::Codex.into(),
+                AgentKind::Claude.into(),
             ],
         );
         assert_eq!(moderator.id, p("noa"));
         assert_eq!(moderator.kind, AgentKind::Agy);
+        assert_eq!(moderator.setup.effort.as_deref(), Some("low"));
+        assert_eq!(panel[0].setup, opus);
+        assert!(panel[1].setup.is_default());
         let ids: Vec<&str> = panel.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, ["claude", "claude-2", "codex", "claude-3"]);
         assert!(
@@ -1990,8 +2018,12 @@ mod tests {
             topic: "Pick a database",
             workdir: None,
             max_rounds,
-            moderator: AgentKind::Codex,
-            panel: &[AgentKind::Claude, AgentKind::Codex, AgentKind::Agy],
+            moderator: AgentKind::Codex.into(),
+            panel: &[
+                AgentKind::Claude.into(),
+                AgentKind::Codex.into(),
+                AgentKind::Agy.into(),
+            ],
         };
         Engine::create_in(SessionId::new("disc-1"), setup, Path::new("/d"), CONFIG, 0)
             .unwrap()

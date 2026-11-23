@@ -15,7 +15,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use competition::engine::{AgentState, Config, Effect, Engine, EngineError, Input, Setup};
 use competition::model::export;
-use competition::model::types::{AgentKind, Millis, PartId, Phase, RoundNo, Session, SessionId};
+use competition::model::types::{
+    AgentChoice, AgentKind, AgentSetup, Millis, PartId, Phase, RoundNo, Session, SessionId,
+};
 use competition::store::{self, Store};
 use competition::{check, preview, shots};
 
@@ -42,8 +44,8 @@ pub enum Start {
         workdir: Option<PathBuf>,
         max_rounds: Option<RoundNo>,
         reveal_interval: RoundNo,
-        judge: AgentKind,
-        panel: Vec<AgentKind>,
+        judge: AgentChoice,
+        panel: Vec<AgentChoice>,
         root: PathBuf,
     },
 }
@@ -150,29 +152,47 @@ impl Clock for SystemClock {
     }
 }
 
-fn agent_argv(kind: AgentKind) -> Vec<String> {
-    let shell = std::env::var("SHELL")
+fn agent_argv(kind: AgentKind, setup: &AgentSetup) -> Vec<String> {
+    // Plain words only (`AgentSetup::check`, enforced when the session is
+    // created), written into the script itself: `"$@"` is not valid in
+    // every login shell.
+    let script = std::iter::once(format!("exec {}", kind.command()))
+        .chain(kind.flags(setup))
+        .collect::<Vec<_>>()
+        .join(" ");
+    vec![login_shell(), "-l".into(), "-i".into(), "-c".into(), script]
+}
+
+fn login_shell() -> String {
+    std::env::var("SHELL")
         .ok()
         .filter(|shell| shell.starts_with('/'))
-        .unwrap_or_else(|| "/bin/zsh".to_owned());
-    vec![
-        shell,
+        .unwrap_or_else(|| "/bin/zsh".to_owned())
+}
+
+/// `exec KIND "$@"` through the login shell, with `args` as the script's
+/// positional parameters (`$0` is `name`), so a prompt is never spliced
+/// into the script. Takes a POSIX login shell, as the first prompt always has.
+fn launch_argv(kind: AgentKind, name: &str, args: Vec<String>) -> Vec<String> {
+    let mut argv = vec![
+        login_shell(),
         "-l".into(),
         "-i".into(),
         "-c".into(),
-        format!("exec {}", kind.command()),
-    ]
+        format!("exec {} \"$@\"", kind.command()),
+        name.to_owned(),
+    ];
+    argv.extend(args);
+    argv
 }
 
 fn adopt_argv(kind: AgentKind, prompt: &str) -> Vec<String> {
-    let mut argv = agent_argv(kind);
-    argv.pop();
-    let script = match kind {
-        AgentKind::Agy => format!("exec {} -i \"$1\"", kind.command()),
-        _ => format!("exec {} \"$1\"", kind.command()),
-    };
-    argv.extend([script, "noa-adopt".to_owned(), prompt.to_owned()]);
-    argv
+    let mut args = Vec::new();
+    if kind == AgentKind::Agy {
+        args.push("-i".to_owned());
+    }
+    args.push(prompt.to_owned());
+    launch_argv(kind, "noa-adopt", args)
 }
 
 fn agent_state(state: Option<&str>) -> Option<AgentState> {
@@ -933,7 +953,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             .unwrap_or_else(|| self.engine.dir().to_path_buf());
         let _ = fs::create_dir_all(&cwd);
         let spec = PaneSpec {
-            argv: agent_argv(participant.kind),
+            argv: agent_argv(participant.kind, &participant.setup),
             cwd,
             label: self.pane_label(part),
         };
@@ -1269,8 +1289,8 @@ mod tests {
             workdir: None,
             max_rounds: Some(2),
             reveal_interval: 5,
-            judge: AgentKind::Claude,
-            panel: vec![AgentKind::Claude, AgentKind::Codex],
+            judge: AgentKind::Claude.into(),
+            panel: vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
             root: root.to_owned(),
         };
         let mut runner = Runner::open(
@@ -1403,5 +1423,73 @@ mod tests {
         assert!(brief.receipt.failed.is_none());
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn agents_start_on_their_model_and_effort() {
+        let plain = agent_argv(AgentKind::Claude, &AgentSetup::default());
+        assert!(plain[0].starts_with('/'));
+        assert_eq!(&plain[1..], ["-l", "-i", "-c", "exec claude"]);
+        let setup = AgentSetup {
+            model: Some("gemini-4-neon-high".into()),
+            effort: Some("xhigh".into()),
+        };
+        assert_eq!(
+            agent_argv(AgentKind::Agy, &setup)[4],
+            "exec agy --model gemini-4-neon-high --effort xhigh"
+        );
+        let effort_only = AgentSetup {
+            model: None,
+            effort: Some("ultra".into()),
+        };
+        assert_eq!(
+            agent_argv(AgentKind::Codex, &effort_only)[4],
+            "exec codex -c model_reasoning_effort=ultra"
+        );
+        assert_eq!(
+            &adopt_argv(AgentKind::Agy, "go")[4..],
+            ["exec agy \"$@\"", "noa-adopt", "-i", "go"]
+        );
+    }
+
+    /// The script an agent is started with, run by a shell that is not
+    /// POSIX (csh here; fish has no `$@` either), with `echo` standing in
+    /// for the agent: it must still start, with every flag.
+    fn run_under_csh(argv: &[String], kind: AgentKind) -> Option<String> {
+        let csh = std::path::Path::new("/bin/csh");
+        if !csh.exists() {
+            return None;
+        }
+        let script = argv[4].replacen(&format!("exec {}", kind.command()), "exec /bin/echo", 1);
+        let out = std::process::Command::new(csh)
+            .arg("-f")
+            .arg("-c")
+            .arg(&script)
+            .args(&argv[5..])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{script:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Some(String::from_utf8(out.stdout).unwrap().trim().to_owned())
+    }
+
+    #[test]
+    fn agents_start_under_a_login_shell_that_is_not_posix() {
+        let setup = AgentSetup {
+            model: Some("opus".into()),
+            effort: Some("high".into()),
+        };
+        let Some(out) = run_under_csh(&agent_argv(AgentKind::Claude, &setup), AgentKind::Claude)
+        else {
+            return;
+        };
+        assert_eq!(out, "--model opus --effort high");
+        let codex = run_under_csh(&agent_argv(AgentKind::Codex, &setup), AgentKind::Codex);
+        assert_eq!(codex.unwrap(), "-m opus -c model_reasoning_effort=high");
+        let plain = agent_argv(AgentKind::Agy, &AgentSetup::default());
+        assert_eq!(run_under_csh(&plain, AgentKind::Agy).unwrap(), "");
     }
 }

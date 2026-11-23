@@ -637,6 +637,7 @@ mod tests {
             kind,
             role,
             pane_id: None,
+            setup: Default::default(),
         };
         let mut s = Session {
             id: SessionId::new("comp-1"),

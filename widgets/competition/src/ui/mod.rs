@@ -18,8 +18,8 @@ use noa_gpui_core::style::{
     Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
 };
 use noa_gpui_core::widgets::{
-    Button, ButtonClicked, Container, ControlSize, Label, ScrollView, SplitPane, SplitView,
-    StatusBar, Tag, Toast, Tone,
+    Button, ButtonClicked, Container, ControlSize, Label, ScrollView, SelectionChanged, SplitPane,
+    SplitView, StatusBar, Tag, Toast, Tone,
 };
 use noa_gpui_core::{Message as UiMessage, Role, Style, Theme, UiTree, WidgetId};
 use noa_gpui_platform::{FileDialogRequest, FileDialogResult, Screen};
@@ -634,6 +634,12 @@ impl Screen for Competition {
     }
 
     fn handle(&mut self, message: UiMessage, text: &mut TextStore) {
+        if message.source == self.start.judge
+            && message.downcast_ref::<SelectionChanged>().is_some()
+        {
+            start::judge_kind_changed(&mut self.tree, &mut self.start, text);
+            return;
+        }
         if message.downcast_ref::<ButtonClicked>().is_some()
             && let Some((_, action)) = self
                 .actions

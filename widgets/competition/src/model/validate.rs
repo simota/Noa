@@ -373,6 +373,7 @@ mod tests {
             kind,
             role,
             pane_id: None,
+            setup: Default::default(),
         };
         Session {
             id: SessionId::new("comp-1"),

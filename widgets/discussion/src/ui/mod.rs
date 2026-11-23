@@ -24,8 +24,8 @@ use noa_gpui_core::style::{
     Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
 };
 use noa_gpui_core::widgets::{
-    Badge, Button, ButtonClicked, Container, ControlSize, Label, ScrollView, SplitPane, SplitView,
-    StatusBar, Tag, TagStyle, Toast, Tone,
+    Badge, Button, ButtonClicked, Container, ControlSize, Label, ScrollView, SelectionChanged,
+    SplitPane, SplitView, StatusBar, Tag, TagStyle, Toast, Tone,
 };
 use noa_gpui_core::{Message as UiMessage, Role, Style, Theme, UiTree, WidgetId};
 use noa_gpui_platform::{FileDialogRequest, FileDialogResult, Screen};
@@ -681,10 +681,10 @@ impl Discussion {
         };
         let note = format!(
             "司会 {} とパネル {} で開始します",
-            form.moderator.command(),
+            form.moderator.label(),
             form.panel
                 .iter()
-                .map(|k| k.command())
+                .map(|k| k.label())
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -701,6 +701,12 @@ impl Discussion {
     }
 
     fn handle_message(&mut self, message: &UiMessage, text: &mut TextStore) {
+        if message.source == self.start.moderator
+            && message.downcast_ref::<SelectionChanged>().is_some()
+        {
+            start::moderator_kind_changed(&mut self.tree, &mut self.start, text);
+            return;
+        }
         if message.downcast_ref::<ButtonClicked>().is_none() {
             return;
         }

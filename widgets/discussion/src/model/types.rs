@@ -104,6 +104,140 @@ impl AgentKind {
             AgentKind::Agy => "agy",
         }
     }
+
+    /// Models the start view suggests for this kind; any other name the CLI
+    /// takes may be typed. Claude Code takes family aliases (latest of each);
+    /// the Codex and Antigravity names are from `codex debug models` (0.171)
+    /// and `agy models` (1.5.14).
+    pub fn models(self) -> &'static [&'static str] {
+        match self {
+            AgentKind::Claude => &["opus", "sonnet", "haiku", "fable"],
+            AgentKind::Codex => &[
+                "gpt-6.2-sol",
+                "gpt-6.2-astra",
+                "gpt-6.1-terra",
+                "gpt-6-luna",
+            ],
+            AgentKind::Agy => &[
+                "gemini-4-neon-high",
+                "gemini-4-carbon-high",
+                "gemini-4-argon-medium",
+                "gemini-4-hydrogen-low",
+            ],
+        }
+    }
+
+    /// The effort levels the CLI takes, lowest first.
+    pub fn efforts(self) -> &'static [&'static str] {
+        match self {
+            AgentKind::Codex => &["low", "medium", "high", "xhigh", "max", "ultra"],
+            AgentKind::Claude | AgentKind::Agy => &["low", "medium", "high", "xhigh", "max"],
+        }
+    }
+
+    /// The flags that start this kind on `setup`: `--model M --effort E`,
+    /// or Codex's `-m M -c model_reasoning_effort=E`. Each is a plain word
+    /// once `setup` passes [`AgentSetup::check`], so the flags can be
+    /// written into a script for any login shell (fish and csh have no `$@`).
+    pub fn flags(self, setup: &AgentSetup) -> Vec<String> {
+        let mut flags = Vec::new();
+        if let Some(model) = &setup.model {
+            let flag = if self == AgentKind::Codex {
+                "-m"
+            } else {
+                "--model"
+            };
+            flags.extend([flag.to_owned(), model.clone()]);
+        }
+        if let Some(effort) = &setup.effort {
+            match self {
+                AgentKind::Codex => {
+                    flags.extend(["-c".to_owned(), format!("model_reasoning_effort={effort}")]);
+                }
+                AgentKind::Claude | AgentKind::Agy => {
+                    flags.extend(["--effort".to_owned(), effort.clone()]);
+                }
+            }
+        }
+        flags
+    }
+}
+
+/// The model and effort an agent runs on; `None` leaves the CLI's default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AgentSetup {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+impl AgentSetup {
+    /// Why `kind` cannot start on this setup: a model name that is not one
+    /// plain word, or an effort level the CLI does not take.
+    pub fn check(&self, kind: AgentKind) -> Result<(), String> {
+        if let Some(model) = &self.model {
+            let plain = !model.starts_with(['-', '='])
+                && !model.is_empty()
+                && model
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "._:/@+=-".contains(c));
+            if !plain {
+                return Err(format!(
+                    "{} のモデル名 {model:?} には英数字と . _ : / @ + = - だけが使えます（先頭の - と = は不可）",
+                    kind.command()
+                ));
+            }
+        }
+        if let Some(effort) = &self.effort
+            && !kind.efforts().contains(&effort.as_str())
+        {
+            return Err(format!(
+                "{} はエフォート {effort:?} を受け付けません",
+                kind.command()
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn is_default(&self) -> bool {
+        self.model.is_none() && self.effort.is_none()
+    }
+
+    /// `model, effort` for display, or `None` when both are the defaults.
+    pub fn label(&self) -> Option<String> {
+        let parts: Vec<&str> = [self.model.as_deref(), self.effort.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect();
+        (!parts.is_empty()).then(|| parts.join(" · "))
+    }
+}
+
+/// An agent picked to take part: its kind and what it runs on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentChoice {
+    pub kind: AgentKind,
+    pub setup: AgentSetup,
+}
+
+impl AgentChoice {
+    /// `claude`, or `claude (opus · high)` with a model or effort.
+    pub fn label(&self) -> String {
+        match self.setup.label() {
+            Some(setup) => format!("{} ({setup})", self.kind.command()),
+            None => self.kind.command().to_owned(),
+        }
+    }
+}
+
+impl From<AgentKind> for AgentChoice {
+    fn from(kind: AgentKind) -> Self {
+        Self {
+            kind,
+            setup: AgentSetup::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +254,9 @@ pub struct Participant {
     pub role: Role,
     /// The Noa pane the agent runs in, once spawned.
     pub pane_id: Option<u64>,
+    /// The model and effort it is started on.
+    #[serde(default, skip_serializing_if = "AgentSetup::is_default")]
+    pub setup: AgentSetup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -734,5 +871,56 @@ impl Session {
         self.debates
             .iter()
             .find(|debate| debate.status == DebateStatus::Proposed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_plain_model_names_and_known_efforts_pass() {
+        let setup = |model: &str, effort: Option<&str>| AgentSetup {
+            model: Some(model.into()),
+            effort: effort.map(Into::into),
+        };
+        assert!(
+            setup("gpt-6.2-sol", Some("ultra"))
+                .check(AgentKind::Codex)
+                .is_ok()
+        );
+        assert!(
+            setup("claude-opus-5-5", None)
+                .check(AgentKind::Claude)
+                .is_ok()
+        );
+        for bad in ["a b", "-x", "=opus", "$(x)", "a;b", "a'b", "\"a\""] {
+            assert!(setup(bad, None).check(AgentKind::Claude).is_err(), "{bad}");
+        }
+        assert!(
+            setup("opus", Some("ultra"))
+                .check(AgentKind::Claude)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_participant_stored_before_model_and_effort_reads_with_the_defaults() {
+        let old = r#"{"id":"claude","kind":"claude","role":"panelist","pane_id":7}"#;
+        let part: Participant = serde_json::from_str(old).unwrap();
+        assert!(part.setup.is_default());
+        assert_eq!(part.pane_id, Some(7));
+        let json = serde_json::to_string(&part).unwrap();
+        assert!(!json.contains("setup"), "{json}");
+        let part = Participant {
+            setup: AgentSetup {
+                model: Some("opus".into()),
+                effort: None,
+            },
+            ..part
+        };
+        let back: Participant =
+            serde_json::from_str(&serde_json::to_string(&part).unwrap()).unwrap();
+        assert_eq!(back, part);
     }
 }

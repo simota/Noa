@@ -16,6 +16,7 @@ pub fn session() -> Session {
         kind,
         role,
         pane_id: None,
+        setup: Default::default(),
     };
     let claude = PartId::new("claude");
     let codex = PartId::new("codex");

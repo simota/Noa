@@ -150,6 +150,7 @@ mod tests {
             kind: AgentKind::Claude,
             role,
             pane_id: None,
+            setup: Default::default(),
         };
         let last = entries
             .iter()

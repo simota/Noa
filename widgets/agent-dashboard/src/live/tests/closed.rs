@@ -539,3 +539,38 @@ fn open_and_closed_workers_keep_their_cwd() {
     let closed = fleet.workers.iter().find(|w| w.is_closed()).unwrap();
     assert_eq!(closed.cwd, "/r");
 }
+
+/// A `close --prune` that removed the worktree leaves 差分を見る nothing to
+/// open; a prune that kept it (or a plain close) leaves the cwd.
+#[test]
+fn a_worker_whose_worktree_was_pruned_has_no_cwd() {
+    let at = NOW as u64 - 600;
+    let pruned = line(serde_json::json!({
+        "ev": "close", "ts": at + 60, "pane": 4,
+        "worktree": { "path": "/r", "removed": true, "branchDeleted": true },
+    }));
+    let kept = line(serde_json::json!({
+        "ev": "close", "ts": at + 60, "pane": 5,
+        "worktree": { "path": "/r", "removed": false, "kept": "x" },
+    }));
+    let text = [spawn(4, at, "pruned"), spawn(5, at, "kept"), pruned, kept].concat();
+    let mut tracker = Tracker::default();
+    tracker.gone = gone(
+        &[journal("s", &text)],
+        &tracker.panels,
+        &tracker.vanished,
+        NOW,
+    );
+    let fleet = tracker.fleet(NOW, None);
+    let cwd_of = |label: &str| {
+        fleet
+            .workers
+            .iter()
+            .find(|w| w.label == label)
+            .unwrap()
+            .cwd
+            .clone()
+    };
+    assert_eq!(cwd_of("pruned"), "");
+    assert_eq!(cwd_of("kept"), "/r");
+}

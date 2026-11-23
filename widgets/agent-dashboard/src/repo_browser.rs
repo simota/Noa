@@ -7,7 +7,8 @@
 use std::ffi::OsString;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 /// The repo browser's file name in `Noa.app`'s Helpers (where this
 /// dashboard is `Noa Agent Dashboard`).
@@ -19,6 +20,16 @@ const CRATE_NAME: &str = "repo-browser";
 /// What the notice line says when there is no repo browser to start.
 pub const NOT_FOUND: &str =
     "Repo Browser が見つかりません（widgets/repo-browser をビルドしてください）";
+
+/// What the demo and a snapshot have in place of the repo browser: nothing
+/// is ever started, the notice says so.
+pub struct Offline(pub &'static str);
+
+impl Launcher for Offline {
+    fn launch(&mut self, _cwd: &str) -> Result<(), String> {
+        Err(self.0.to_owned())
+    }
+}
 
 /// Starts the repo browser on a worktree; the tests give one of their own.
 pub trait Launcher {
@@ -35,12 +46,25 @@ impl Launcher for System {
     fn launch(&mut self, cwd: &str) -> Result<(), String> {
         let exe = std::env::current_exe().map_err(|_| NOT_FOUND.to_owned())?;
         let program = locate(&exe).ok_or_else(|| NOT_FOUND.to_owned())?;
+        worktree_exists(cwd)?;
         spawn(&program, cwd)
+    }
+}
+
+/// The worktree may be gone since the dashboard learned of it (`close
+/// --prune`): say so rather than start on nothing.
+fn worktree_exists(cwd: &str) -> Result<(), String> {
+    if Path::new(cwd).is_dir() {
+        Ok(())
+    } else {
+        Err(format!("作業ディレクトリがありません: {cwd}"))
     }
 }
 
 /// Where the repo browser is for the dashboard executable `exe`:
 /// - in a bundle, beside it: `Contents/Helpers/Noa Repo Browser`;
+/// - a plain `repo-browser` beside it (one Cargo target directory shared
+///   by both, as `scripts/bundle-macos.sh` builds);
 /// - in a checkout, `widgets/repo-browser/target/<profile>/repo-browser`,
 ///   from `widgets/agent-dashboard/target/<profile>/agent-dashboard`: the
 ///   dashboard's own profile first, then the other.
@@ -50,10 +74,12 @@ impl Launcher for System {
 pub fn locate(exe: &Path) -> Option<PathBuf> {
     let dir = exe.parent()?;
     let bundled = dir.join(BUNDLED);
+    let shared = dir.join(CRATE_NAME);
     let dev = dev_build_dirs(dir)
         .into_iter()
         .map(|dir| dir.join(CRATE_NAME));
-    std::iter::once(bundled)
+    [bundled, shared]
+        .into_iter()
         .chain(dev)
         .find(|path| path.is_file())
 }
@@ -104,16 +130,45 @@ fn spawn(program: &Path, cwd: &str) -> Result<(), String> {
     if let Some(home) = std::env::var_os("HOME") {
         command.current_dir(home);
     }
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|err| format!("Repo Browser を起動できません: {err}"))?;
-    std::thread::Builder::new()
-        .name("repo-browser-reaper".into())
-        .spawn(move || {
+    reap_when_done(child, &UNREAPED, |wait| {
+        std::thread::Builder::new()
+            .name("repo-browser-reaper".into())
+            .spawn(wait)
+            .map(drop)
+    });
+    Ok(())
+}
+
+/// Children no thread could be given to wait for (the thread could not be
+/// made): they are `try_wait`ed for at the next start, so they do not stay
+/// zombies for the dashboard's whole life.
+static UNREAPED: Mutex<Vec<Child>> = Mutex::new(Vec::new());
+
+/// Has `start_thread` run a wait for `child`; when it cannot, `child` goes
+/// to `leftovers` (after reaping those already done there) rather than
+/// being dropped unwaited.
+fn reap_when_done(
+    child: Child,
+    leftovers: &Mutex<Vec<Child>>,
+    start_thread: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+) {
+    let shared = Arc::new(Mutex::new(Some(child)));
+    let handed = Arc::clone(&shared);
+    let started = start_thread(Box::new(move || {
+        let child = handed.lock().ok().and_then(|mut slot| slot.take());
+        if let Some(mut child) = child {
             let _ = child.wait();
-        })
-        .map(drop)
-        .map_err(|err| format!("Repo Browser を見守れません: {err}"))
+        }
+    }));
+    let mut leftovers = leftovers.lock().unwrap_or_else(|e| e.into_inner());
+    leftovers.retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_)) | Err(_)));
+    if started.is_err() {
+        let child = shared.lock().ok().and_then(|mut slot| slot.take());
+        leftovers.extend(child);
+    }
 }
 
 #[cfg(test)]
@@ -223,5 +278,73 @@ mod tests {
         let err = spawn(&program, "/w").unwrap_err();
         std::fs::remove_dir_all(&root).unwrap();
         assert!(err.starts_with("Repo Browser を起動できません"), "{err}");
+    }
+
+    #[test]
+    fn a_plain_repo_browser_beside_a_shared_target_is_found_after_the_bundle_name() {
+        let root = scratch("shared");
+        let dir = root.join("target/release");
+        let exe = dir.join("agent-dashboard");
+        touch(&exe);
+        assert_eq!(locate(&exe), None);
+        touch(&dir.join(CRATE_NAME));
+        assert_eq!(locate(&exe), Some(dir.join(CRATE_NAME)));
+        touch(&dir.join(BUNDLED));
+        assert_eq!(locate(&exe), Some(dir.join(BUNDLED)), "bundle name first");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_worktree_that_is_gone_is_said_not_started() {
+        let err = worktree_exists("/definitely/not/a/worktree-agent-dashboard-test").unwrap_err();
+        assert_eq!(
+            worktree_exists(&std::env::temp_dir().to_string_lossy()),
+            Ok(())
+        );
+        assert!(err.starts_with("作業ディレクトリがありません"), "{err}");
+    }
+
+    /// The repo browser's own parser (another crate: its source is read)
+    /// takes the option this dashboard builds.
+    #[test]
+    fn the_argument_is_one_the_repo_browser_parses() {
+        let arg = args("/w");
+        let arg = arg[0].to_str().unwrap();
+        let (option, _) = arg.split_once('=').unwrap();
+        let parser = include_str!("../../repo-browser/src/main.rs");
+        assert!(
+            parser.contains(&format!("strip_prefix(\"{option}=\")")),
+            "repo-browser does not parse {option}="
+        );
+    }
+
+    fn short_lived() -> Child {
+        Command::new("true").spawn().unwrap()
+    }
+
+    #[test]
+    fn a_child_whose_reaper_thread_cannot_start_is_kept_and_reaped_later() {
+        let leftovers = Mutex::new(Vec::new());
+        reap_when_done(short_lived(), &leftovers, |_| {
+            Err(std::io::Error::other("no threads"))
+        });
+        assert_eq!(leftovers.lock().unwrap().len(), 1, "kept, not dropped");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        // The next start sweeps the finished one.
+        reap_when_done(short_lived(), &leftovers, |wait| {
+            wait();
+            Ok(())
+        });
+        assert!(leftovers.lock().unwrap().is_empty(), "reaped");
+    }
+
+    #[test]
+    fn a_reaper_thread_that_starts_takes_the_child() {
+        let leftovers = Mutex::new(Vec::new());
+        reap_when_done(short_lived(), &leftovers, |wait| {
+            wait();
+            Ok(())
+        });
+        assert!(leftovers.lock().unwrap().is_empty());
     }
 }

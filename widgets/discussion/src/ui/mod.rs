@@ -18,6 +18,7 @@ mod tree;
 mod tests;
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use noa_gpui_core::style::{
     AlignItems, FlexDirection, LengthPercentage, Overflow, Point as LayoutPoint,
@@ -113,7 +114,7 @@ pub struct Discussion {
     tree: UiTree,
     source: Source,
     link: Link,
-    session: Option<Session>,
+    session: Option<Arc<Session>>,
     filter: Option<IssueId>,
     center: Center,
     /// Debates already brought up on their own, so leaving one stays left.
@@ -148,7 +149,11 @@ pub struct Discussion {
 
 impl Discussion {
     pub fn demo() -> Self {
-        Self::build(Source::Demo, Link::Live, Some(crate::demo::session()))
+        Self::build(
+            Source::Demo,
+            Link::Live,
+            Some(Arc::new(crate::demo::session())),
+        )
     }
 
     pub fn live(channel: Channel) -> Self {
@@ -159,7 +164,7 @@ impl Discussion {
         Self::build(Source::Snapshot, snapshot.link, snapshot.session)
     }
 
-    fn build(source: Source, link: Link, session: Option<Session>) -> Self {
+    fn build(source: Source, link: Link, session: Option<Arc<Session>>) -> Self {
         let mut tree = UiTree::new();
         tree.set_theme(Theme::dark());
         let root = tree.insert(

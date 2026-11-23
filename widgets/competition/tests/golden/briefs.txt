@@ -1,0 +1,1840 @@
+===== R1 brief to claude =====
+## 1. Competition request and round
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestant: claude
+Round: 1 of 3 — BLIND (isolated — peers' work is hidden)
+Rounds remaining after this one: 2
+Next peer reveal: in 2 round(s) (every 2 rounds).
+Your private output directory: /golden/competition/entries/claude
+
+## 2. Competition rules
+- Create or refine all your deliverables (designs, HTML/CSS/JS, SVG, images, code, docs) ONLY inside your private output directory: /golden/competition/entries/claude
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- Before you submit, run the same check on your output directory: "<current_exe>" --check="/golden/competition/entries/claude". It prints the viewer copy, the screenshots and the manifest, and lists what could not be inlined. If it cannot run in your environment, say so in the report and mark what it would have shown as unverified.
+
+The judge publishes its checklist with the round-1 judgment.
+- BLIND ROUND: Do NOT inspect, read, or access any other contestant's directory. Compete strictly on your own ideas and the judge's feedback to you.
+
+## 3. Your previous work and private judge feedback
+(this is your first round; start fresh)
+
+## 5. User instructions / interventions
+(none)
+
+## 6. How to compete
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- Every round, also make at least one improvement nobody asked for: the change you expect to raise your score most. Prefer one bold, verified change over many small fixes.
+- In your report, add a `## Beyond feedback` section naming that change and why you expect it to win points.
+
+## 7. How to submit
+1. Write or update your deliverables in: /golden/competition/entries/claude
+2. Write your Markdown submission report to: /golden/competition/r1/report-claude.md
+   Start the report with a one-line summary (e.g. `# Summary: ...`), then describe what you built or improved this round, design/technical choices, and list key files in your output directory.
+   Write the file only after all deliverable files are saved.
+   Write the report in the language of the request, and mark anything you could not verify in your environment as unverified.
+===== R1 brief to codex =====
+## 1. Competition request and round
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestant: codex
+Round: 1 of 3 — BLIND (isolated — peers' work is hidden)
+Rounds remaining after this one: 2
+Next peer reveal: in 2 round(s) (every 2 rounds).
+Your private output directory: /golden/competition/entries/codex
+
+## 2. Competition rules
+- Create or refine all your deliverables (designs, HTML/CSS/JS, SVG, images, code, docs) ONLY inside your private output directory: /golden/competition/entries/codex
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- Before you submit, run the same check on your output directory: "<current_exe>" --check="/golden/competition/entries/codex". It prints the viewer copy, the screenshots and the manifest, and lists what could not be inlined. If it cannot run in your environment, say so in the report and mark what it would have shown as unverified.
+
+The judge publishes its checklist with the round-1 judgment.
+- BLIND ROUND: Do NOT inspect, read, or access any other contestant's directory. Compete strictly on your own ideas and the judge's feedback to you.
+
+## 3. Your previous work and private judge feedback
+(this is your first round; start fresh)
+
+## 5. User instructions / interventions
+(none)
+
+## 6. How to compete
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- Every round, also make at least one improvement nobody asked for: the change you expect to raise your score most. Prefer one bold, verified change over many small fixes.
+- In your report, add a `## Beyond feedback` section naming that change and why you expect it to win points.
+
+## 7. How to submit
+1. Write or update your deliverables in: /golden/competition/entries/codex
+2. Write your Markdown submission report to: /golden/competition/r1/report-codex.md
+   Start the report with a one-line summary (e.g. `# Summary: ...`), then describe what you built or improved this round, design/technical choices, and list key files in your output directory.
+   Write the file only after all deliverable files are saved.
+   Write the report in the language of the request, and mark anything you could not verify in your environment as unverified.
+===== R1 brief to agy =====
+## 1. Competition request and round
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestant: agy
+Round: 1 of 3 — BLIND (isolated — peers' work is hidden)
+Rounds remaining after this one: 2
+Next peer reveal: in 2 round(s) (every 2 rounds).
+Your private output directory: /golden/competition/entries/agy
+
+## 2. Competition rules
+- Create or refine all your deliverables (designs, HTML/CSS/JS, SVG, images, code, docs) ONLY inside your private output directory: /golden/competition/entries/agy
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- Before you submit, run the same check on your output directory: "<current_exe>" --check="/golden/competition/entries/agy". It prints the viewer copy, the screenshots and the manifest, and lists what could not be inlined. If it cannot run in your environment, say so in the report and mark what it would have shown as unverified.
+
+The judge publishes its checklist with the round-1 judgment.
+- BLIND ROUND: Do NOT inspect, read, or access any other contestant's directory. Compete strictly on your own ideas and the judge's feedback to you.
+
+## 3. Your previous work and private judge feedback
+(this is your first round; start fresh)
+
+## 5. User instructions / interventions
+(none)
+
+## 6. How to compete
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- Every round, also make at least one improvement nobody asked for: the change you expect to raise your score most. Prefer one bold, verified change over many small fixes.
+- In your report, add a `## Beyond feedback` section naming that change and why you expect it to win points.
+
+## 7. How to submit
+1. Write or update your deliverables in: /golden/competition/entries/agy
+2. Write your Markdown submission report to: /golden/competition/r1/report-agy.md
+   Start the report with a one-line summary (e.g. `# Summary: ...`), then describe what you built or improved this round, design/technical choices, and list key files in your output directory.
+   Write the file only after all deliverable files are saved.
+   Write the report in the language of the request, and mark anything you could not verify in your environment as unverified.
+===== R1 judge brief to judge =====
+## 1. Competition judging — Round 1 of 3
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestants: claude, codex, agy
+Peer-reveal schedule: every 2 rounds (0 = disabled)
+
+## 2. Round 1 submissions and artifacts
+### Contestant: claude
+Summary: claude entry for round 1 <with markup>
+  Directory: /golden/competition/r1/artifacts/claude
+  - index.html (HTML, 201 bytes)
+  - style.css (コード, 38 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 39 bytes)
+  Viewer copy: /golden/competition/r1/artifacts/claude/.preview/index.html
+  Screenshots of the viewer copy (1440x900.png, 768x1024.png, 320x568.png) and manifest.md: /golden/competition/r1/checks/claude
+Report:
+# Summary: claude entry for round 1 <with markup>
+
+## Beyond feedback
+Tightened spacing; added dark mode.
+
+Report body for r1-claude: measured 0 axe violations.
+
+### Contestant: codex
+Summary: codex entry for round 1 <with markup>
+  Directory: /golden/competition/r1/artifacts/codex
+  - index.html (HTML, 199 bytes)
+  - style.css (コード, 37 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 38 bytes)
+  Viewer copy: /golden/competition/r1/artifacts/codex/.preview/index.html
+  Screenshots of the viewer copy (1440x900.png, 768x1024.png, 320x568.png) and manifest.md: /golden/competition/r1/checks/codex
+Report:
+# Summary: codex entry for round 1 <with markup>
+
+## Beyond feedback
+Tightened spacing; added dark mode.
+
+Report body for r1-codex: measured 0 axe violations.
+
+### Contestant: agy
+Summary: agy entry for round 1 <with markup>
+  Directory: /golden/competition/r1/artifacts/agy
+  - notes on design.md (文書, 47 bytes)
+Report:
+# Summary: agy entry for round 1 <with markup>
+
+## Beyond feedback
+Tightened spacing; added dark mode.
+
+Report body for r1-agy: measured 0 axe violations.
+
+## 3. User interventions
+(none)
+
+## 4. Rules the contestants were given
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- Every round, make at least one improvement nobody asked for and name it in a `## Beyond feedback` section of the report.
+- In peer-reveal rounds, open at least one peer's deliverable and add a `## Peer review` section listing each idea adopted or not adopted, with the reason.
+- Start the report with a one-line summary, describe what changed and why, and list the key files.
+- Write the report in the language of the request and mark anything not verified as unverified.
+- Contestants can run the same snapshot check on their entry before submitting (`--check`).
+The judge publishes its checklist with the round-1 judgment.
+
+## 5. Judging rules
+- Judge visual entries from the viewer copy and its screenshots listed above: they show what the comparison viewer shows. If the screenshots are missing, capture the viewer copy yourself under the conditions in section 4. Do not penalize what the rules in section 4 allow. Results in a contestant's check output or in `r<N>/checks/` count as measured.
+- Publish your checklist in `checklist`: the concrete checks you will apply for the rest of the competition (viewports, what counts as the first view, thresholds such as minimum text size, accessibility bar). Contestants see it from round 2.
+- When the request weights its criteria, fill each evaluation's `breakdown` with one entry per criterion (its points and maximum); the points must add up to `score`. The contestant sees its own breakdown.
+- Inspect the actual artifact files in each contestant's snapshot directory above, not just their self-report.
+- Score every contestant on 0..100 based on how well their deliverable satisfies the user's request (quality, completeness, aesthetics/craft, usability).
+- IMPORTANT (blind rule): Each contestant's `strengths` and `feedback` are delivered privately to that contestant. Do NOT reveal other contestants' ideas, scores, or identities inside them.
+- Derive each contestant's `feedback` only from gaps between their own deliverable and the user's request. Do NOT suggest a feature, approach, layout, wording, or fix because you saw it in another contestant's work (this round or earlier), even unnamed or paraphrased; ideas are shared only through peer-reveal rounds. If a gap is evident only by comparison with a peer, leave it out.
+- Score against an absolute bar for the request, not against the previous round: an entry that only applies last round's feedback without raising its impact should not gain points. Reward bold, verified improvements the contestant initiated (see its `## Beyond feedback` section).
+- Write `feedback` as at most 3 items, highest score impact first, each with a check the contestant can run (e.g. "at 320×568, the install button and two queue items are visible").
+- Do not ask for checks the contestants' environment cannot run (e.g. a physical phone when only a headless browser is available); ask them to state the item as unverified instead.
+- Compare each report's claims with the files, and with the claims of that contestant's previous report; name any claim the files contradict in that contestant's `feedback`.
+- List in each evaluation's `evidence` the concrete claims your score rests on, each with `basis`: "measured" (you checked it in the files or screenshots), "self_reported" (taken from the report without re-checking), or "unverified". Never present a self-reported number as measured.
+- If you find that an earlier round's score rested on a wrong basis (a misread rule, the wrong rendering), correct it in `amendments` with the round, contestant, corrected score and reason, instead of only mentioning it in prose.
+- Leave "winner" and "final_verdict" null and "close": false unless the competition should end early.
+
+## 6. Your JSON output
+Write ONLY valid JSON (no prose around it) to: /golden/competition/r1/judge.json
+
+{
+  "overview": "1-3 sentence round overview comparing progress",
+  "evaluations": {
+    "<contestant_id>": {
+      "score": 85,
+      "strengths": "Key strengths of this entry",
+      "feedback": "Concrete private feedback for next round, based only on this entry vs the request (no peer ideas)",
+      "breakdown": [
+        { "axis": "<criterion>", "score": 50, "max": 60 },
+        { "axis": "<criterion>", "score": 35, "max": 40 }
+      ],
+      "evidence": [
+        { "claim": "index.html is 19,018 bytes", "basis": "measured" },
+        { "claim": "0 axe violations", "basis": "self_reported" }
+      ]
+    }
+  },
+  "ranking": ["<best_id>", "<second_id>"],
+  "checklist": ["<check>"],
+  "amendments": [],
+  "winner": null,
+  "final_verdict": null,
+  "close": false
+}
+
+An amendment looks like: { "round": 2, "contestant": "<id>", "score": 80, "reason": "why the R2 score was wrong" }
+===== R2 brief to claude =====
+## 1. Competition request and round
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestant: claude
+Round: 2 of 3 — BLIND (isolated — peers' work is hidden)
+Rounds remaining after this one: 1
+Next peer reveal: in 1 round(s) (every 2 rounds).
+Your private output directory: /golden/competition/entries/claude
+
+## 2. Competition rules
+- Create or refine all your deliverables (designs, HTML/CSS/JS, SVG, images, code, docs) ONLY inside your private output directory: /golden/competition/entries/claude
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- Before you submit, run the same check on your output directory: "<current_exe>" --check="/golden/competition/entries/claude". It prints the viewer copy, the screenshots and the manifest, and lists what could not be inlined. If it cannot run in your environment, say so in the report and mark what it would have shown as unverified.
+
+The judge's checklist (published with the R1 judgment):
+- 320x568: no horizontal scroll
+- Contrast >= 4.5:1
+- BLIND ROUND: Do NOT inspect, read, or access any other contestant's directory. Compete strictly on your own ideas and the judge's feedback to you.
+
+## 3. Your previous work and private judge feedback
+Your last submission (R1): claude entry for round 1 <with markup>
+  Directory: /golden/competition/r1/artifacts/claude
+  - index.html (HTML, 201 bytes)
+  - style.css (コード, 38 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 39 bytes)
+  What the judge saw (viewer-copy screenshots and manifest): /golden/competition/r1/checks/claude
+
+Judge evaluation of your R1 entry:
+- Score: 71/100
+  - impact: 40/60
+  - craft: 31/40
+- Strengths: Clear hierarchy
+- Feedback to address: Fix 320px overflow
+- Standing after R1: rank 1 of 3, you lead by 5 point(s).
+
+## 5. User instructions / interventions
+(none)
+
+## 6. How to compete
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- Every round, also make at least one improvement nobody asked for: the change you expect to raise your score most. Prefer one bold, verified change over many small fixes.
+- In your report, add a `## Beyond feedback` section naming that change and why you expect it to win points.
+
+## 7. How to submit
+1. Write or update your deliverables in: /golden/competition/entries/claude
+2. Write your Markdown submission report to: /golden/competition/r2/report-claude.md
+   Start the report with a one-line summary (e.g. `# Summary: ...`), then describe what you built or improved this round, design/technical choices, and list key files in your output directory.
+   Write the file only after all deliverable files are saved.
+   Write the report in the language of the request, and mark anything you could not verify in your environment as unverified.
+===== R2 brief to codex =====
+## 1. Competition request and round
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestant: codex
+Round: 2 of 3 — BLIND (isolated — peers' work is hidden)
+Rounds remaining after this one: 1
+Next peer reveal: in 1 round(s) (every 2 rounds).
+Your private output directory: /golden/competition/entries/codex
+
+## 2. Competition rules
+- Create or refine all your deliverables (designs, HTML/CSS/JS, SVG, images, code, docs) ONLY inside your private output directory: /golden/competition/entries/codex
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- Before you submit, run the same check on your output directory: "<current_exe>" --check="/golden/competition/entries/codex". It prints the viewer copy, the screenshots and the manifest, and lists what could not be inlined. If it cannot run in your environment, say so in the report and mark what it would have shown as unverified.
+
+The judge's checklist (published with the R1 judgment):
+- 320x568: no horizontal scroll
+- Contrast >= 4.5:1
+- BLIND ROUND: Do NOT inspect, read, or access any other contestant's directory. Compete strictly on your own ideas and the judge's feedback to you.
+
+## 3. Your previous work and private judge feedback
+Your last submission (R1): codex entry for round 1 <with markup>
+  Directory: /golden/competition/r1/artifacts/codex
+  - index.html (HTML, 199 bytes)
+  - style.css (コード, 37 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 38 bytes)
+  What the judge saw (viewer-copy screenshots and manifest): /golden/competition/r1/checks/codex
+
+Judge evaluation of your R1 entry:
+- Score: 66/100
+  - impact: 38/60
+  - craft: 28/40
+- Strengths: Small CSS
+- Feedback to address: Focus states
+- Standing after R1: rank 2 of 3, 5 point(s) behind the leader.
+
+## 5. User instructions / interventions
+(none)
+
+## 6. How to compete
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- Every round, also make at least one improvement nobody asked for: the change you expect to raise your score most. Prefer one bold, verified change over many small fixes.
+- In your report, add a `## Beyond feedback` section naming that change and why you expect it to win points.
+
+## 7. How to submit
+1. Write or update your deliverables in: /golden/competition/entries/codex
+2. Write your Markdown submission report to: /golden/competition/r2/report-codex.md
+   Start the report with a one-line summary (e.g. `# Summary: ...`), then describe what you built or improved this round, design/technical choices, and list key files in your output directory.
+   Write the file only after all deliverable files are saved.
+   Write the report in the language of the request, and mark anything you could not verify in your environment as unverified.
+===== R2 brief to agy =====
+## 1. Competition request and round
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestant: agy
+Round: 2 of 3 — BLIND (isolated — peers' work is hidden)
+Rounds remaining after this one: 1
+Next peer reveal: in 1 round(s) (every 2 rounds).
+Your private output directory: /golden/competition/entries/agy
+
+## 2. Competition rules
+- Create or refine all your deliverables (designs, HTML/CSS/JS, SVG, images, code, docs) ONLY inside your private output directory: /golden/competition/entries/agy
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- Before you submit, run the same check on your output directory: "<current_exe>" --check="/golden/competition/entries/agy". It prints the viewer copy, the screenshots and the manifest, and lists what could not be inlined. If it cannot run in your environment, say so in the report and mark what it would have shown as unverified.
+
+The judge's checklist (published with the R1 judgment):
+- 320x568: no horizontal scroll
+- Contrast >= 4.5:1
+- BLIND ROUND: Do NOT inspect, read, or access any other contestant's directory. Compete strictly on your own ideas and the judge's feedback to you.
+
+## 3. Your previous work and private judge feedback
+Your last submission (R1): agy entry for round 1 <with markup>
+  Directory: /golden/competition/r1/artifacts/agy
+  - notes on design.md (文書, 47 bytes)
+  What the judge saw (viewer-copy screenshots and manifest): /golden/competition/r1/checks/agy
+
+Judge evaluation of your R1 entry:
+- Score: 51/100
+  - impact: 30/60
+  - craft: 21/40
+- Strengths: Good notes
+- Feedback to address: Ship a page
+- Standing after R1: rank 3 of 3, 20 point(s) behind the leader.
+
+## 5. User instructions / interventions
+(none)
+
+## 6. How to compete
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- Every round, also make at least one improvement nobody asked for: the change you expect to raise your score most. Prefer one bold, verified change over many small fixes.
+- In your report, add a `## Beyond feedback` section naming that change and why you expect it to win points.
+
+## 7. How to submit
+1. Write or update your deliverables in: /golden/competition/entries/agy
+2. Write your Markdown submission report to: /golden/competition/r2/report-agy.md
+   Start the report with a one-line summary (e.g. `# Summary: ...`), then describe what you built or improved this round, design/technical choices, and list key files in your output directory.
+   Write the file only after all deliverable files are saved.
+   Write the report in the language of the request, and mark anything you could not verify in your environment as unverified.
+===== R2 judge brief to judge =====
+## 1. Competition judging — Round 2 of 3
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestants: claude, codex, agy
+Peer-reveal schedule: every 2 rounds (0 = disabled)
+
+## 2. Round 2 submissions and artifacts
+### Contestant: claude
+Summary: claude entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/claude
+  - index.html (HTML, 201 bytes)
+  - style.css (コード, 38 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 39 bytes)
+  Viewer copy: /golden/competition/r2/artifacts/claude/.preview/index.html
+  Screenshots of the viewer copy (1440x900.png, 768x1024.png, 320x568.png) and manifest.md: /golden/competition/r2/checks/claude
+Report:
+# Summary: claude entry for round 2 <with markup>
+
+## Beyond feedback
+Tightened spacing; added dark mode.
+
+Report body for r2-claude: measured 0 axe violations.
+
+### Contestant: codex
+Summary: codex entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/codex
+  - index.html (HTML, 199 bytes)
+  - style.css (コード, 37 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 38 bytes)
+  Viewer copy: /golden/competition/r2/artifacts/codex/.preview/index.html
+  Screenshots of the viewer copy (1440x900.png, 768x1024.png, 320x568.png) and manifest.md: /golden/competition/r2/checks/codex
+Report:
+# Summary: codex entry for round 2 <with markup>
+
+## Beyond feedback
+Tightened spacing; added dark mode.
+
+Report body for r2-codex: measured 0 axe violations.
+
+### Contestant: agy
+Summary: agy entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/agy
+  - notes on design.md (文書, 47 bytes)
+Report:
+# Summary: agy entry for round 2 <with markup>
+
+## Beyond feedback
+Tightened spacing; added dark mode.
+
+Report body for r2-agy: measured 0 axe violations.
+
+## 3. User interventions
+- [m5 R2 to codex] Use system
+fonts only.
+
+## 4. Rules the contestants were given
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- Every round, make at least one improvement nobody asked for and name it in a `## Beyond feedback` section of the report.
+- In peer-reveal rounds, open at least one peer's deliverable and add a `## Peer review` section listing each idea adopted or not adopted, with the reason.
+- Start the report with a one-line summary, describe what changed and why, and list the key files.
+- Write the report in the language of the request and mark anything not verified as unverified.
+- Contestants can run the same snapshot check on their entry before submitting (`--check`).
+The judge's checklist (published with the R1 judgment):
+- 320x568: no horizontal scroll
+- Contrast >= 4.5:1
+
+## 5. Judging rules
+- Judge visual entries from the viewer copy and its screenshots listed above: they show what the comparison viewer shows. If the screenshots are missing, capture the viewer copy yourself under the conditions in section 4. Do not penalize what the rules in section 4 allow. Results in a contestant's check output or in `r<N>/checks/` count as measured.
+- Apply the published checklist in section 4. Do not score a check that is not on it. To add or change a check, send the full new list in `checklist` and name the change in `overview`; it applies from the next round.
+- When the request weights its criteria, fill each evaluation's `breakdown` with one entry per criterion (its points and maximum); the points must add up to `score`. The contestant sees its own breakdown.
+- Inspect the actual artifact files in each contestant's snapshot directory above, not just their self-report.
+- Score every contestant on 0..100 based on how well their deliverable satisfies the user's request (quality, completeness, aesthetics/craft, usability).
+- IMPORTANT (blind rule): Each contestant's `strengths` and `feedback` are delivered privately to that contestant. Do NOT reveal other contestants' ideas, scores, or identities inside them.
+- Derive each contestant's `feedback` only from gaps between their own deliverable and the user's request. Do NOT suggest a feature, approach, layout, wording, or fix because you saw it in another contestant's work (this round or earlier), even unnamed or paraphrased; ideas are shared only through peer-reveal rounds. If a gap is evident only by comparison with a peer, leave it out.
+- Score against an absolute bar for the request, not against the previous round: an entry that only applies last round's feedback without raising its impact should not gain points. Reward bold, verified improvements the contestant initiated (see its `## Beyond feedback` section).
+- Write `feedback` as at most 3 items, highest score impact first, each with a check the contestant can run (e.g. "at 320×568, the install button and two queue items are visible").
+- Do not ask for checks the contestants' environment cannot run (e.g. a physical phone when only a headless browser is available); ask them to state the item as unverified instead.
+- Compare each report's claims with the files, and with the claims of that contestant's previous report; name any claim the files contradict in that contestant's `feedback`.
+- List in each evaluation's `evidence` the concrete claims your score rests on, each with `basis`: "measured" (you checked it in the files or screenshots), "self_reported" (taken from the report without re-checking), or "unverified". Never present a self-reported number as measured.
+- If you find that an earlier round's score rested on a wrong basis (a misread rule, the wrong rendering), correct it in `amendments` with the round, contestant, corrected score and reason, instead of only mentioning it in prose.
+- Leave "winner" and "final_verdict" null and "close": false unless the competition should end early.
+
+## 6. Your JSON output
+Write ONLY valid JSON (no prose around it) to: /golden/competition/r2/judge.json
+
+{
+  "overview": "1-3 sentence round overview comparing progress",
+  "evaluations": {
+    "<contestant_id>": {
+      "score": 85,
+      "strengths": "Key strengths of this entry",
+      "feedback": "Concrete private feedback for next round, based only on this entry vs the request (no peer ideas)",
+      "breakdown": [
+        { "axis": "<criterion>", "score": 50, "max": 60 },
+        { "axis": "<criterion>", "score": 35, "max": 40 }
+      ],
+      "evidence": [
+        { "claim": "index.html is 19,018 bytes", "basis": "measured" },
+        { "claim": "0 axe violations", "basis": "self_reported" }
+      ]
+    }
+  },
+  "ranking": ["<best_id>", "<second_id>"],
+  "checklist": ["<check>"],
+  "amendments": [],
+  "winner": null,
+  "final_verdict": null,
+  "close": false
+}
+
+An amendment looks like: { "round": 2, "contestant": "<id>", "score": 80, "reason": "why the R2 score was wrong" }
+===== R3 brief to claude =====
+## 1. Competition request and round
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestant: claude
+Round: 3 of 3 — PEER REVEAL (showcase of peers' work from the previous round)
+Notice: This is the FINAL round. Deliver your strongest, polished work.
+Your private output directory: /golden/competition/entries/claude
+
+## 2. Competition rules
+- Create or refine all your deliverables (designs, HTML/CSS/JS, SVG, images, code, docs) ONLY inside your private output directory: /golden/competition/entries/claude
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- Before you submit, run the same check on your output directory: "<current_exe>" --check="/golden/competition/entries/claude". It prints the viewer copy, the screenshots and the manifest, and lists what could not be inlined. If it cannot run in your environment, say so in the report and mark what it would have shown as unverified.
+
+The judge's checklist (published with the R2 judgment):
+- 320x568: no horizontal scroll
+- Contrast >= 4.5:1
+- PEER REVEAL ROUND: You may inspect the other contestants' round-2 snapshots listed below to understand their approaches, strengths, and gaps. Do NOT copy their files verbatim; synthesize better ideas and surpass them in your own output directory.
+- Open at least one peer's deliverable (its `index.html` or images), not only the reports quoted below. In your report, add a `## Peer review` section with one line per idea you adopted and one per idea you chose not to adopt, each with the reason.
+
+## 3. Your previous work and private judge feedback
+Your last submission (R2): claude entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/claude
+  - index.html (HTML, 201 bytes)
+  - style.css (コード, 38 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 39 bytes)
+  What the judge saw (viewer-copy screenshots and manifest): /golden/competition/r2/checks/claude
+
+Judge evaluation of your R2 entry:
+- Score: 72/100
+  - impact: 40/60
+  - craft: 32/40
+- Strengths: Clear hierarchy
+- Feedback to address: Fix 320px overflow
+- Standing after R2: rank 1 of 3, you lead by 5 point(s).
+- Score correction: your R1 score went from 71/100 to 78/100 (R1 was judged without its <style>sheet).
+
+## 4. Peer showcase (round 2 — visible once every 2 rounds)
+Judge overview of R2:
+Round 2: all three improved; claude leads on craft.
+
+R2 ranking: claude > codex > agy
+
+### Peer: codex (R2 — score 67/100)
+Screenshots and manifest (start here): /golden/competition/r2/checks/codex
+Summary: codex entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/codex
+  - index.html (HTML, 199 bytes)
+  - style.css (コード, 37 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 38 bytes)
+Full report: /golden/competition/r2/report-codex.md
+
+### Peer: agy (R2 — score 52/100)
+Screenshots and manifest (start here): /golden/competition/r2/checks/agy
+Summary: agy entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/agy
+  - notes on design.md (文書, 47 bytes)
+Full report: /golden/competition/r2/report-agy.md
+
+## 5. User instructions / interventions
+(none)
+
+## 6. How to compete
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- FINAL ROUND: finish rather than experiment. Close every open feedback item, verify everything you can, and leave no regression; a new idea is welcome only if you can verify it fully this round.
+- In your report, add a `## Beyond feedback` section naming the finishing work nobody asked for and why it raises the final result.
+
+## 7. How to submit
+1. Write or update your deliverables in: /golden/competition/entries/claude
+2. Write your Markdown submission report to: /golden/competition/r3/report-claude.md
+   Start the report with a one-line summary (e.g. `# Summary: ...`), then describe what you built or improved this round, design/technical choices, and list key files in your output directory.
+   Write the file only after all deliverable files are saved.
+   Write the report in the language of the request, and mark anything you could not verify in your environment as unverified.
+===== R3 brief to codex =====
+## 1. Competition request and round
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestant: codex
+Round: 3 of 3 — PEER REVEAL (showcase of peers' work from the previous round)
+Notice: This is the FINAL round. Deliver your strongest, polished work.
+Your private output directory: /golden/competition/entries/codex
+
+## 2. Competition rules
+- Create or refine all your deliverables (designs, HTML/CSS/JS, SVG, images, code, docs) ONLY inside your private output directory: /golden/competition/entries/codex
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- Before you submit, run the same check on your output directory: "<current_exe>" --check="/golden/competition/entries/codex". It prints the viewer copy, the screenshots and the manifest, and lists what could not be inlined. If it cannot run in your environment, say so in the report and mark what it would have shown as unverified.
+
+The judge's checklist (published with the R2 judgment):
+- 320x568: no horizontal scroll
+- Contrast >= 4.5:1
+- PEER REVEAL ROUND: You may inspect the other contestants' round-2 snapshots listed below to understand their approaches, strengths, and gaps. Do NOT copy their files verbatim; synthesize better ideas and surpass them in your own output directory.
+- Open at least one peer's deliverable (its `index.html` or images), not only the reports quoted below. In your report, add a `## Peer review` section with one line per idea you adopted and one per idea you chose not to adopt, each with the reason.
+
+## 3. Your previous work and private judge feedback
+Your last submission (R2): codex entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/codex
+  - index.html (HTML, 199 bytes)
+  - style.css (コード, 37 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 38 bytes)
+  What the judge saw (viewer-copy screenshots and manifest): /golden/competition/r2/checks/codex
+
+Judge evaluation of your R2 entry:
+- Score: 67/100
+  - impact: 38/60
+  - craft: 29/40
+- Strengths: Small CSS
+- Feedback to address: Focus states
+- Standing after R2: rank 2 of 3, 5 point(s) behind the leader.
+
+## 4. Peer showcase (round 2 — visible once every 2 rounds)
+Judge overview of R2:
+Round 2: all three improved; claude leads on craft.
+
+R2 ranking: claude > codex > agy
+
+### Peer: claude (R2 — score 72/100)
+Screenshots and manifest (start here): /golden/competition/r2/checks/claude
+Summary: claude entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/claude
+  - index.html (HTML, 201 bytes)
+  - style.css (コード, 38 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 39 bytes)
+Full report: /golden/competition/r2/report-claude.md
+
+### Peer: agy (R2 — score 52/100)
+Screenshots and manifest (start here): /golden/competition/r2/checks/agy
+Summary: agy entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/agy
+  - notes on design.md (文書, 47 bytes)
+Full report: /golden/competition/r2/report-agy.md
+
+## 5. User instructions / interventions
+- [m5 R2] Use system
+fonts only.
+
+## 6. How to compete
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- FINAL ROUND: finish rather than experiment. Close every open feedback item, verify everything you can, and leave no regression; a new idea is welcome only if you can verify it fully this round.
+- In your report, add a `## Beyond feedback` section naming the finishing work nobody asked for and why it raises the final result.
+
+## 7. How to submit
+1. Write or update your deliverables in: /golden/competition/entries/codex
+2. Write your Markdown submission report to: /golden/competition/r3/report-codex.md
+   Start the report with a one-line summary (e.g. `# Summary: ...`), then describe what you built or improved this round, design/technical choices, and list key files in your output directory.
+   Write the file only after all deliverable files are saved.
+   Write the report in the language of the request, and mark anything you could not verify in your environment as unverified.
+===== R3 brief to agy =====
+## 1. Competition request and round
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestant: agy
+Round: 3 of 3 — PEER REVEAL (showcase of peers' work from the previous round)
+Notice: This is the FINAL round. Deliver your strongest, polished work.
+Your private output directory: /golden/competition/entries/agy
+
+## 2. Competition rules
+- Create or refine all your deliverables (designs, HTML/CSS/JS, SVG, images, code, docs) ONLY inside your private output directory: /golden/competition/entries/agy
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- Before you submit, run the same check on your output directory: "<current_exe>" --check="/golden/competition/entries/agy". It prints the viewer copy, the screenshots and the manifest, and lists what could not be inlined. If it cannot run in your environment, say so in the report and mark what it would have shown as unverified.
+
+The judge's checklist (published with the R2 judgment):
+- 320x568: no horizontal scroll
+- Contrast >= 4.5:1
+- PEER REVEAL ROUND: You may inspect the other contestants' round-2 snapshots listed below to understand their approaches, strengths, and gaps. Do NOT copy their files verbatim; synthesize better ideas and surpass them in your own output directory.
+- Open at least one peer's deliverable (its `index.html` or images), not only the reports quoted below. In your report, add a `## Peer review` section with one line per idea you adopted and one per idea you chose not to adopt, each with the reason.
+
+## 3. Your previous work and private judge feedback
+Your last submission (R2): agy entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/agy
+  - notes on design.md (文書, 47 bytes)
+  What the judge saw (viewer-copy screenshots and manifest): /golden/competition/r2/checks/agy
+
+Judge evaluation of your R2 entry:
+- Score: 52/100
+  - impact: 30/60
+  - craft: 22/40
+- Strengths: Good notes
+- Feedback to address: Ship a page
+- Standing after R2: rank 3 of 3, 20 point(s) behind the leader.
+
+## 4. Peer showcase (round 2 — visible once every 2 rounds)
+Judge overview of R2:
+Round 2: all three improved; claude leads on craft.
+
+R2 ranking: claude > codex > agy
+
+### Peer: claude (R2 — score 72/100)
+Screenshots and manifest (start here): /golden/competition/r2/checks/claude
+Summary: claude entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/claude
+  - index.html (HTML, 201 bytes)
+  - style.css (コード, 38 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 39 bytes)
+Full report: /golden/competition/r2/report-claude.md
+
+### Peer: codex (R2 — score 67/100)
+Screenshots and manifest (start here): /golden/competition/r2/checks/codex
+Summary: codex entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/codex
+  - index.html (HTML, 199 bytes)
+  - style.css (コード, 37 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 38 bytes)
+Full report: /golden/competition/r2/report-codex.md
+
+## 5. User instructions / interventions
+(none)
+
+## 6. How to compete
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- FINAL ROUND: finish rather than experiment. Close every open feedback item, verify everything you can, and leave no regression; a new idea is welcome only if you can verify it fully this round.
+- In your report, add a `## Beyond feedback` section naming the finishing work nobody asked for and why it raises the final result.
+
+## 7. How to submit
+1. Write or update your deliverables in: /golden/competition/entries/agy
+2. Write your Markdown submission report to: /golden/competition/r3/report-agy.md
+   Start the report with a one-line summary (e.g. `# Summary: ...`), then describe what you built or improved this round, design/technical choices, and list key files in your output directory.
+   Write the file only after all deliverable files are saved.
+   Write the report in the language of the request, and mark anything you could not verify in your environment as unverified.
+===== R3 judge brief to judge =====
+## 1. Competition judging — Round 3 of 3
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestants: claude, codex, agy
+Peer-reveal schedule: every 2 rounds (0 = disabled)
+
+## 2. Round 3 submissions and artifacts
+### Contestant: claude
+Summary: claude entry for round 3 <with markup>
+  Directory: /golden/competition/r3/artifacts/claude
+  - index.html (HTML, 201 bytes)
+  - style.css (コード, 38 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 39 bytes)
+  Viewer copy: /golden/competition/r3/artifacts/claude/.preview/index.html
+  Screenshots of the viewer copy (1440x900.png, 768x1024.png, 320x568.png) and manifest.md: /golden/competition/r3/checks/claude
+Report:
+# Summary: claude entry for round 3 <with markup>
+
+## Beyond feedback
+Tightened spacing; added dark mode.
+
+Report body for r3-claude: measured 0 axe violations.
+
+### Contestant: codex
+Summary: codex entry for round 3 <with markup>
+  Directory: /golden/competition/r3/artifacts/codex
+  - index.html (HTML, 199 bytes)
+  - style.css (コード, 37 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 38 bytes)
+  Viewer copy: /golden/competition/r3/artifacts/codex/.preview/index.html
+  Screenshots of the viewer copy (1440x900.png, 768x1024.png, 320x568.png) and manifest.md: /golden/competition/r3/checks/codex
+Report:
+# Summary: codex entry for round 3 <with markup>
+
+## Beyond feedback
+Tightened spacing; added dark mode.
+
+Report body for r3-codex: measured 0 axe violations.
+
+### Contestant: agy
+Summary: agy entry for round 3 <with markup>
+  Directory: /golden/competition/r3/artifacts/agy
+  - notes on design.md (文書, 47 bytes)
+Report:
+# Summary: agy entry for round 3 <with markup>
+
+## Beyond feedback
+Tightened spacing; added dark mode.
+
+Report body for r3-agy: measured 0 axe violations.
+
+## 3. User interventions
+- [m5 R2 to codex] Use system
+fonts only.
+- [m10 R3 to everyone] Last round: polish only.
+
+## 4. Rules the contestants were given
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- Every round, make at least one improvement nobody asked for and name it in a `## Beyond feedback` section of the report.
+- In peer-reveal rounds, open at least one peer's deliverable and add a `## Peer review` section listing each idea adopted or not adopted, with the reason.
+- Start the report with a one-line summary, describe what changed and why, and list the key files.
+- Write the report in the language of the request and mark anything not verified as unverified.
+- Contestants can run the same snapshot check on their entry before submitting (`--check`).
+The judge's checklist (published with the R2 judgment):
+- 320x568: no horizontal scroll
+- Contrast >= 4.5:1
+
+## 5. Judging rules
+- Judge visual entries from the viewer copy and its screenshots listed above: they show what the comparison viewer shows. If the screenshots are missing, capture the viewer copy yourself under the conditions in section 4. Do not penalize what the rules in section 4 allow. Results in a contestant's check output or in `r<N>/checks/` count as measured.
+- Apply the published checklist in section 4. Do not score a check that is not on it. To add or change a check, send the full new list in `checklist` and name the change in `overview`; it applies from the next round.
+- When the request weights its criteria, fill each evaluation's `breakdown` with one entry per criterion (its points and maximum); the points must add up to `score`. The contestant sees its own breakdown.
+- Inspect the actual artifact files in each contestant's snapshot directory above, not just their self-report.
+- Score every contestant on 0..100 based on how well their deliverable satisfies the user's request (quality, completeness, aesthetics/craft, usability).
+- IMPORTANT (blind rule): Each contestant's `strengths` and `feedback` are delivered privately to that contestant. Do NOT reveal other contestants' ideas, scores, or identities inside them.
+- Derive each contestant's `feedback` only from gaps between their own deliverable and the user's request. Do NOT suggest a feature, approach, layout, wording, or fix because you saw it in another contestant's work (this round or earlier), even unnamed or paraphrased; ideas are shared only through peer-reveal rounds. If a gap is evident only by comparison with a peer, leave it out.
+- Score against an absolute bar for the request, not against the previous round: an entry that only applies last round's feedback without raising its impact should not gain points. Reward bold, verified improvements the contestant initiated (see its `## Beyond feedback` section).
+- Write `feedback` as at most 3 items, highest score impact first, each with a check the contestant can run (e.g. "at 320×568, the install button and two queue items are visible").
+- Do not ask for checks the contestants' environment cannot run (e.g. a physical phone when only a headless browser is available); ask them to state the item as unverified instead.
+- Compare each report's claims with the files, and with the claims of that contestant's previous report; name any claim the files contradict in that contestant's `feedback`.
+- List in each evaluation's `evidence` the concrete claims your score rests on, each with `basis`: "measured" (you checked it in the files or screenshots), "self_reported" (taken from the report without re-checking), or "unverified". Never present a self-reported number as measured.
+- If you find that an earlier round's score rested on a wrong basis (a misread rule, the wrong rendering), correct it in `amendments` with the round, contestant, corrected score and reason, instead of only mentioning it in prose.
+- This is the FINAL round: you MUST set "winner" to the winning contestant id, provide "final_verdict", and set "close": true.
+
+## 6. Your JSON output
+Write ONLY valid JSON (no prose around it) to: /golden/competition/r3/judge.json
+
+{
+  "overview": "1-3 sentence round overview comparing progress",
+  "evaluations": {
+    "<contestant_id>": {
+      "score": 85,
+      "strengths": "Key strengths of this entry",
+      "feedback": "Concrete private feedback for next round, based only on this entry vs the request (no peer ideas)",
+      "breakdown": [
+        { "axis": "<criterion>", "score": 50, "max": 60 },
+        { "axis": "<criterion>", "score": 35, "max": 40 }
+      ],
+      "evidence": [
+        { "claim": "index.html is 19,018 bytes", "basis": "measured" },
+        { "claim": "0 axe violations", "basis": "self_reported" }
+      ]
+    }
+  },
+  "ranking": ["<best_id>", "<second_id>"],
+  "checklist": ["<check>"],
+  "amendments": [],
+  "winner": null,
+  "final_verdict": null,
+  "close": false
+}
+
+An amendment looks like: { "round": 2, "contestant": "<id>", "score": 80, "reason": "why the R2 score was wrong" }
+===== direct contestant_brief R1 claude =====
+## 1. Competition request and round
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestant: claude
+Round: 1 of 3 — BLIND (isolated — peers' work is hidden)
+Rounds remaining after this one: 2
+Next peer reveal: in 2 round(s) (every 2 rounds).
+Your private output directory: /golden/competition/entries/claude
+
+## 2. Competition rules
+- Create or refine all your deliverables (designs, HTML/CSS/JS, SVG, images, code, docs) ONLY inside your private output directory: /golden/competition/entries/claude
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- Before you submit, run the same check on your output directory: "<current_exe>" --check="/golden/competition/entries/claude". It prints the viewer copy, the screenshots and the manifest, and lists what could not be inlined. If it cannot run in your environment, say so in the report and mark what it would have shown as unverified.
+
+The judge publishes its checklist with the round-1 judgment.
+- BLIND ROUND: Do NOT inspect, read, or access any other contestant's directory. Compete strictly on your own ideas and the judge's feedback to you.
+
+## 3. Your previous work and private judge feedback
+(this is your first round; start fresh)
+
+## 5. User instructions / interventions
+(none)
+
+## 6. How to compete
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- Every round, also make at least one improvement nobody asked for: the change you expect to raise your score most. Prefer one bold, verified change over many small fixes.
+- In your report, add a `## Beyond feedback` section naming that change and why you expect it to win points.
+
+## 7. How to submit
+1. Write or update your deliverables in: /golden/competition/entries/claude
+2. Write your Markdown submission report to: /golden/competition/direct-r1-claude.md
+   Start the report with a one-line summary (e.g. `# Summary: ...`), then describe what you built or improved this round, design/technical choices, and list key files in your output directory.
+   Write the file only after all deliverable files are saved.
+   Write the report in the language of the request, and mark anything you could not verify in your environment as unverified.
+===== direct contestant_brief R1 codex =====
+## 1. Competition request and round
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestant: codex
+Round: 1 of 3 — BLIND (isolated — peers' work is hidden)
+Rounds remaining after this one: 2
+Next peer reveal: in 2 round(s) (every 2 rounds).
+Your private output directory: /golden/competition/entries/codex
+
+## 2. Competition rules
+- Create or refine all your deliverables (designs, HTML/CSS/JS, SVG, images, code, docs) ONLY inside your private output directory: /golden/competition/entries/codex
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- Before you submit, run the same check on your output directory: "<current_exe>" --check="/golden/competition/entries/codex". It prints the viewer copy, the screenshots and the manifest, and lists what could not be inlined. If it cannot run in your environment, say so in the report and mark what it would have shown as unverified.
+
+The judge publishes its checklist with the round-1 judgment.
+- BLIND ROUND: Do NOT inspect, read, or access any other contestant's directory. Compete strictly on your own ideas and the judge's feedback to you.
+
+## 3. Your previous work and private judge feedback
+(this is your first round; start fresh)
+
+## 5. User instructions / interventions
+(none)
+
+## 6. How to compete
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- Every round, also make at least one improvement nobody asked for: the change you expect to raise your score most. Prefer one bold, verified change over many small fixes.
+- In your report, add a `## Beyond feedback` section naming that change and why you expect it to win points.
+
+## 7. How to submit
+1. Write or update your deliverables in: /golden/competition/entries/codex
+2. Write your Markdown submission report to: /golden/competition/direct-r1-codex.md
+   Start the report with a one-line summary (e.g. `# Summary: ...`), then describe what you built or improved this round, design/technical choices, and list key files in your output directory.
+   Write the file only after all deliverable files are saved.
+   Write the report in the language of the request, and mark anything you could not verify in your environment as unverified.
+===== direct contestant_brief R1 agy =====
+## 1. Competition request and round
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestant: agy
+Round: 1 of 3 — BLIND (isolated — peers' work is hidden)
+Rounds remaining after this one: 2
+Next peer reveal: in 2 round(s) (every 2 rounds).
+Your private output directory: /golden/competition/entries/agy
+
+## 2. Competition rules
+- Create or refine all your deliverables (designs, HTML/CSS/JS, SVG, images, code, docs) ONLY inside your private output directory: /golden/competition/entries/agy
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- Before you submit, run the same check on your output directory: "<current_exe>" --check="/golden/competition/entries/agy". It prints the viewer copy, the screenshots and the manifest, and lists what could not be inlined. If it cannot run in your environment, say so in the report and mark what it would have shown as unverified.
+
+The judge publishes its checklist with the round-1 judgment.
+- BLIND ROUND: Do NOT inspect, read, or access any other contestant's directory. Compete strictly on your own ideas and the judge's feedback to you.
+
+## 3. Your previous work and private judge feedback
+(this is your first round; start fresh)
+
+## 5. User instructions / interventions
+(none)
+
+## 6. How to compete
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- Every round, also make at least one improvement nobody asked for: the change you expect to raise your score most. Prefer one bold, verified change over many small fixes.
+- In your report, add a `## Beyond feedback` section naming that change and why you expect it to win points.
+
+## 7. How to submit
+1. Write or update your deliverables in: /golden/competition/entries/agy
+2. Write your Markdown submission report to: /golden/competition/direct-r1-agy.md
+   Start the report with a one-line summary (e.g. `# Summary: ...`), then describe what you built or improved this round, design/technical choices, and list key files in your output directory.
+   Write the file only after all deliverable files are saved.
+   Write the report in the language of the request, and mark anything you could not verify in your environment as unverified.
+===== direct judge_brief R1 =====
+## 1. Competition judging — Round 1 of 3
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestants: claude, codex, agy
+Peer-reveal schedule: every 2 rounds (0 = disabled)
+
+## 2. Round 1 submissions and artifacts
+### Contestant: claude
+Summary: claude entry for round 1 <with markup>
+  Directory: /golden/competition/r1/artifacts/claude
+  - index.html (HTML, 201 bytes)
+  - style.css (コード, 38 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 39 bytes)
+  Viewer copy: /golden/competition/r1/artifacts/claude/.preview/index.html
+  Screenshots of the viewer copy (1440x900.png, 768x1024.png, 320x568.png) and manifest.md: /golden/competition/r1/checks/claude
+Report:
+# Summary: claude entry for round 1 <with markup>
+
+## Beyond feedback
+Tightened spacing; added dark mode.
+
+Report body for r1-claude: measured 0 axe violations.
+
+### Contestant: codex
+Summary: codex entry for round 1 <with markup>
+  Directory: /golden/competition/r1/artifacts/codex
+  - index.html (HTML, 199 bytes)
+  - style.css (コード, 37 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 38 bytes)
+  Viewer copy: /golden/competition/r1/artifacts/codex/.preview/index.html
+  Screenshots of the viewer copy (1440x900.png, 768x1024.png, 320x568.png) and manifest.md: /golden/competition/r1/checks/codex
+Report:
+# Summary: codex entry for round 1 <with markup>
+
+## Beyond feedback
+Tightened spacing; added dark mode.
+
+Report body for r1-codex: measured 0 axe violations.
+
+### Contestant: agy
+Summary: agy entry for round 1 <with markup>
+  Directory: /golden/competition/r1/artifacts/agy
+  - notes on design.md (文書, 47 bytes)
+Report:
+# Summary: agy entry for round 1 <with markup>
+
+## Beyond feedback
+Tightened spacing; added dark mode.
+
+Report body for r1-agy: measured 0 axe violations.
+
+## 3. User interventions
+(none)
+
+## 4. Rules the contestants were given
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- Every round, make at least one improvement nobody asked for and name it in a `## Beyond feedback` section of the report.
+- In peer-reveal rounds, open at least one peer's deliverable and add a `## Peer review` section listing each idea adopted or not adopted, with the reason.
+- Start the report with a one-line summary, describe what changed and why, and list the key files.
+- Write the report in the language of the request and mark anything not verified as unverified.
+- Contestants can run the same snapshot check on their entry before submitting (`--check`).
+The judge publishes its checklist with the round-1 judgment.
+
+## 5. Judging rules
+- Judge visual entries from the viewer copy and its screenshots listed above: they show what the comparison viewer shows. If the screenshots are missing, capture the viewer copy yourself under the conditions in section 4. Do not penalize what the rules in section 4 allow. Results in a contestant's check output or in `r<N>/checks/` count as measured.
+- Publish your checklist in `checklist`: the concrete checks you will apply for the rest of the competition (viewports, what counts as the first view, thresholds such as minimum text size, accessibility bar). Contestants see it from round 2.
+- When the request weights its criteria, fill each evaluation's `breakdown` with one entry per criterion (its points and maximum); the points must add up to `score`. The contestant sees its own breakdown.
+- Inspect the actual artifact files in each contestant's snapshot directory above, not just their self-report.
+- Score every contestant on 0..100 based on how well their deliverable satisfies the user's request (quality, completeness, aesthetics/craft, usability).
+- IMPORTANT (blind rule): Each contestant's `strengths` and `feedback` are delivered privately to that contestant. Do NOT reveal other contestants' ideas, scores, or identities inside them.
+- Derive each contestant's `feedback` only from gaps between their own deliverable and the user's request. Do NOT suggest a feature, approach, layout, wording, or fix because you saw it in another contestant's work (this round or earlier), even unnamed or paraphrased; ideas are shared only through peer-reveal rounds. If a gap is evident only by comparison with a peer, leave it out.
+- Score against an absolute bar for the request, not against the previous round: an entry that only applies last round's feedback without raising its impact should not gain points. Reward bold, verified improvements the contestant initiated (see its `## Beyond feedback` section).
+- Write `feedback` as at most 3 items, highest score impact first, each with a check the contestant can run (e.g. "at 320×568, the install button and two queue items are visible").
+- Do not ask for checks the contestants' environment cannot run (e.g. a physical phone when only a headless browser is available); ask them to state the item as unverified instead.
+- Compare each report's claims with the files, and with the claims of that contestant's previous report; name any claim the files contradict in that contestant's `feedback`.
+- List in each evaluation's `evidence` the concrete claims your score rests on, each with `basis`: "measured" (you checked it in the files or screenshots), "self_reported" (taken from the report without re-checking), or "unverified". Never present a self-reported number as measured.
+- If you find that an earlier round's score rested on a wrong basis (a misread rule, the wrong rendering), correct it in `amendments` with the round, contestant, corrected score and reason, instead of only mentioning it in prose.
+- Leave "winner" and "final_verdict" null and "close": false unless the competition should end early.
+
+## 6. Your JSON output
+Write ONLY valid JSON (no prose around it) to: /golden/competition/direct-r1-judge.json
+
+{
+  "overview": "1-3 sentence round overview comparing progress",
+  "evaluations": {
+    "<contestant_id>": {
+      "score": 85,
+      "strengths": "Key strengths of this entry",
+      "feedback": "Concrete private feedback for next round, based only on this entry vs the request (no peer ideas)",
+      "breakdown": [
+        { "axis": "<criterion>", "score": 50, "max": 60 },
+        { "axis": "<criterion>", "score": 35, "max": 40 }
+      ],
+      "evidence": [
+        { "claim": "index.html is 19,018 bytes", "basis": "measured" },
+        { "claim": "0 axe violations", "basis": "self_reported" }
+      ]
+    }
+  },
+  "ranking": ["<best_id>", "<second_id>"],
+  "checklist": ["<check>"],
+  "amendments": [],
+  "winner": null,
+  "final_verdict": null,
+  "close": false
+}
+
+An amendment looks like: { "round": 2, "contestant": "<id>", "score": 80, "reason": "why the R2 score was wrong" }
+===== direct contestant_brief R2 claude =====
+## 1. Competition request and round
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestant: claude
+Round: 2 of 3 — BLIND (isolated — peers' work is hidden)
+Rounds remaining after this one: 1
+Next peer reveal: in 1 round(s) (every 2 rounds).
+Your private output directory: /golden/competition/entries/claude
+
+## 2. Competition rules
+- Create or refine all your deliverables (designs, HTML/CSS/JS, SVG, images, code, docs) ONLY inside your private output directory: /golden/competition/entries/claude
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- Before you submit, run the same check on your output directory: "<current_exe>" --check="/golden/competition/entries/claude". It prints the viewer copy, the screenshots and the manifest, and lists what could not be inlined. If it cannot run in your environment, say so in the report and mark what it would have shown as unverified.
+
+The judge's checklist (published with the R1 judgment):
+- 320x568: no horizontal scroll
+- Contrast >= 4.5:1
+- BLIND ROUND: Do NOT inspect, read, or access any other contestant's directory. Compete strictly on your own ideas and the judge's feedback to you.
+
+## 3. Your previous work and private judge feedback
+Your last submission (R1): claude entry for round 1 <with markup>
+  Directory: /golden/competition/r1/artifacts/claude
+  - index.html (HTML, 201 bytes)
+  - style.css (コード, 38 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 39 bytes)
+  What the judge saw (viewer-copy screenshots and manifest): /golden/competition/r1/checks/claude
+
+Judge evaluation of your R1 entry:
+- Score: 78/100
+- Strengths: Clear hierarchy
+- Feedback to address: Fix 320px overflow
+- Standing after R1: rank 1 of 3, you lead by 12 point(s).
+
+## 5. User instructions / interventions
+(none)
+
+## 6. How to compete
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- Every round, also make at least one improvement nobody asked for: the change you expect to raise your score most. Prefer one bold, verified change over many small fixes.
+- In your report, add a `## Beyond feedback` section naming that change and why you expect it to win points.
+
+## 7. How to submit
+1. Write or update your deliverables in: /golden/competition/entries/claude
+2. Write your Markdown submission report to: /golden/competition/direct-r2-claude.md
+   Start the report with a one-line summary (e.g. `# Summary: ...`), then describe what you built or improved this round, design/technical choices, and list key files in your output directory.
+   Write the file only after all deliverable files are saved.
+   Write the report in the language of the request, and mark anything you could not verify in your environment as unverified.
+===== direct contestant_brief R2 codex =====
+## 1. Competition request and round
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestant: codex
+Round: 2 of 3 — BLIND (isolated — peers' work is hidden)
+Rounds remaining after this one: 1
+Next peer reveal: in 1 round(s) (every 2 rounds).
+Your private output directory: /golden/competition/entries/codex
+
+## 2. Competition rules
+- Create or refine all your deliverables (designs, HTML/CSS/JS, SVG, images, code, docs) ONLY inside your private output directory: /golden/competition/entries/codex
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- Before you submit, run the same check on your output directory: "<current_exe>" --check="/golden/competition/entries/codex". It prints the viewer copy, the screenshots and the manifest, and lists what could not be inlined. If it cannot run in your environment, say so in the report and mark what it would have shown as unverified.
+
+The judge's checklist (published with the R1 judgment):
+- 320x568: no horizontal scroll
+- Contrast >= 4.5:1
+- BLIND ROUND: Do NOT inspect, read, or access any other contestant's directory. Compete strictly on your own ideas and the judge's feedback to you.
+
+## 3. Your previous work and private judge feedback
+Your last submission (R1): codex entry for round 1 <with markup>
+  Directory: /golden/competition/r1/artifacts/codex
+  - index.html (HTML, 199 bytes)
+  - style.css (コード, 37 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 38 bytes)
+  What the judge saw (viewer-copy screenshots and manifest): /golden/competition/r1/checks/codex
+
+Judge evaluation of your R1 entry:
+- Score: 66/100
+  - impact: 38/60
+  - craft: 28/40
+- Strengths: Small CSS
+- Feedback to address: Focus states
+- Standing after R1: rank 2 of 3, 12 point(s) behind the leader.
+
+## 5. User instructions / interventions
+- [m5 R2] Use system
+fonts only.
+
+## 6. How to compete
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- Every round, also make at least one improvement nobody asked for: the change you expect to raise your score most. Prefer one bold, verified change over many small fixes.
+- In your report, add a `## Beyond feedback` section naming that change and why you expect it to win points.
+
+## 7. How to submit
+1. Write or update your deliverables in: /golden/competition/entries/codex
+2. Write your Markdown submission report to: /golden/competition/direct-r2-codex.md
+   Start the report with a one-line summary (e.g. `# Summary: ...`), then describe what you built or improved this round, design/technical choices, and list key files in your output directory.
+   Write the file only after all deliverable files are saved.
+   Write the report in the language of the request, and mark anything you could not verify in your environment as unverified.
+===== direct contestant_brief R2 agy =====
+## 1. Competition request and round
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestant: agy
+Round: 2 of 3 — BLIND (isolated — peers' work is hidden)
+Rounds remaining after this one: 1
+Next peer reveal: in 1 round(s) (every 2 rounds).
+Your private output directory: /golden/competition/entries/agy
+
+## 2. Competition rules
+- Create or refine all your deliverables (designs, HTML/CSS/JS, SVG, images, code, docs) ONLY inside your private output directory: /golden/competition/entries/agy
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- Before you submit, run the same check on your output directory: "<current_exe>" --check="/golden/competition/entries/agy". It prints the viewer copy, the screenshots and the manifest, and lists what could not be inlined. If it cannot run in your environment, say so in the report and mark what it would have shown as unverified.
+
+The judge's checklist (published with the R1 judgment):
+- 320x568: no horizontal scroll
+- Contrast >= 4.5:1
+- BLIND ROUND: Do NOT inspect, read, or access any other contestant's directory. Compete strictly on your own ideas and the judge's feedback to you.
+
+## 3. Your previous work and private judge feedback
+Your last submission (R1): agy entry for round 1 <with markup>
+  Directory: /golden/competition/r1/artifacts/agy
+  - notes on design.md (文書, 47 bytes)
+  What the judge saw (viewer-copy screenshots and manifest): /golden/competition/r1/checks/agy
+
+Judge evaluation of your R1 entry:
+- Score: 51/100
+  - impact: 30/60
+  - craft: 21/40
+- Strengths: Good notes
+- Feedback to address: Ship a page
+- Standing after R1: rank 3 of 3, 27 point(s) behind the leader.
+
+## 5. User instructions / interventions
+(none)
+
+## 6. How to compete
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- Every round, also make at least one improvement nobody asked for: the change you expect to raise your score most. Prefer one bold, verified change over many small fixes.
+- In your report, add a `## Beyond feedback` section naming that change and why you expect it to win points.
+
+## 7. How to submit
+1. Write or update your deliverables in: /golden/competition/entries/agy
+2. Write your Markdown submission report to: /golden/competition/direct-r2-agy.md
+   Start the report with a one-line summary (e.g. `# Summary: ...`), then describe what you built or improved this round, design/technical choices, and list key files in your output directory.
+   Write the file only after all deliverable files are saved.
+   Write the report in the language of the request, and mark anything you could not verify in your environment as unverified.
+===== direct judge_brief R2 =====
+## 1. Competition judging — Round 2 of 3
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestants: claude, codex, agy
+Peer-reveal schedule: every 2 rounds (0 = disabled)
+
+## 2. Round 2 submissions and artifacts
+### Contestant: claude
+Summary: claude entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/claude
+  - index.html (HTML, 201 bytes)
+  - style.css (コード, 38 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 39 bytes)
+  Viewer copy: /golden/competition/r2/artifacts/claude/.preview/index.html
+  Screenshots of the viewer copy (1440x900.png, 768x1024.png, 320x568.png) and manifest.md: /golden/competition/r2/checks/claude
+Report:
+# Summary: claude entry for round 2 <with markup>
+
+## Beyond feedback
+Tightened spacing; added dark mode.
+
+Report body for r2-claude: measured 0 axe violations.
+
+### Contestant: codex
+Summary: codex entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/codex
+  - index.html (HTML, 199 bytes)
+  - style.css (コード, 37 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 38 bytes)
+  Viewer copy: /golden/competition/r2/artifacts/codex/.preview/index.html
+  Screenshots of the viewer copy (1440x900.png, 768x1024.png, 320x568.png) and manifest.md: /golden/competition/r2/checks/codex
+Report:
+# Summary: codex entry for round 2 <with markup>
+
+## Beyond feedback
+Tightened spacing; added dark mode.
+
+Report body for r2-codex: measured 0 axe violations.
+
+### Contestant: agy
+Summary: agy entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/agy
+  - notes on design.md (文書, 47 bytes)
+Report:
+# Summary: agy entry for round 2 <with markup>
+
+## Beyond feedback
+Tightened spacing; added dark mode.
+
+Report body for r2-agy: measured 0 axe violations.
+
+## 3. User interventions
+- [m5 R2 to codex] Use system
+fonts only.
+
+## 4. Rules the contestants were given
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- Every round, make at least one improvement nobody asked for and name it in a `## Beyond feedback` section of the report.
+- In peer-reveal rounds, open at least one peer's deliverable and add a `## Peer review` section listing each idea adopted or not adopted, with the reason.
+- Start the report with a one-line summary, describe what changed and why, and list the key files.
+- Write the report in the language of the request and mark anything not verified as unverified.
+- Contestants can run the same snapshot check on their entry before submitting (`--check`).
+The judge's checklist (published with the R1 judgment):
+- 320x568: no horizontal scroll
+- Contrast >= 4.5:1
+
+## 5. Judging rules
+- Judge visual entries from the viewer copy and its screenshots listed above: they show what the comparison viewer shows. If the screenshots are missing, capture the viewer copy yourself under the conditions in section 4. Do not penalize what the rules in section 4 allow. Results in a contestant's check output or in `r<N>/checks/` count as measured.
+- Apply the published checklist in section 4. Do not score a check that is not on it. To add or change a check, send the full new list in `checklist` and name the change in `overview`; it applies from the next round.
+- When the request weights its criteria, fill each evaluation's `breakdown` with one entry per criterion (its points and maximum); the points must add up to `score`. The contestant sees its own breakdown.
+- Inspect the actual artifact files in each contestant's snapshot directory above, not just their self-report.
+- Score every contestant on 0..100 based on how well their deliverable satisfies the user's request (quality, completeness, aesthetics/craft, usability).
+- IMPORTANT (blind rule): Each contestant's `strengths` and `feedback` are delivered privately to that contestant. Do NOT reveal other contestants' ideas, scores, or identities inside them.
+- Derive each contestant's `feedback` only from gaps between their own deliverable and the user's request. Do NOT suggest a feature, approach, layout, wording, or fix because you saw it in another contestant's work (this round or earlier), even unnamed or paraphrased; ideas are shared only through peer-reveal rounds. If a gap is evident only by comparison with a peer, leave it out.
+- Score against an absolute bar for the request, not against the previous round: an entry that only applies last round's feedback without raising its impact should not gain points. Reward bold, verified improvements the contestant initiated (see its `## Beyond feedback` section).
+- Write `feedback` as at most 3 items, highest score impact first, each with a check the contestant can run (e.g. "at 320×568, the install button and two queue items are visible").
+- Do not ask for checks the contestants' environment cannot run (e.g. a physical phone when only a headless browser is available); ask them to state the item as unverified instead.
+- Compare each report's claims with the files, and with the claims of that contestant's previous report; name any claim the files contradict in that contestant's `feedback`.
+- List in each evaluation's `evidence` the concrete claims your score rests on, each with `basis`: "measured" (you checked it in the files or screenshots), "self_reported" (taken from the report without re-checking), or "unverified". Never present a self-reported number as measured.
+- If you find that an earlier round's score rested on a wrong basis (a misread rule, the wrong rendering), correct it in `amendments` with the round, contestant, corrected score and reason, instead of only mentioning it in prose.
+- Leave "winner" and "final_verdict" null and "close": false unless the competition should end early.
+
+## 6. Your JSON output
+Write ONLY valid JSON (no prose around it) to: /golden/competition/direct-r2-judge.json
+
+{
+  "overview": "1-3 sentence round overview comparing progress",
+  "evaluations": {
+    "<contestant_id>": {
+      "score": 85,
+      "strengths": "Key strengths of this entry",
+      "feedback": "Concrete private feedback for next round, based only on this entry vs the request (no peer ideas)",
+      "breakdown": [
+        { "axis": "<criterion>", "score": 50, "max": 60 },
+        { "axis": "<criterion>", "score": 35, "max": 40 }
+      ],
+      "evidence": [
+        { "claim": "index.html is 19,018 bytes", "basis": "measured" },
+        { "claim": "0 axe violations", "basis": "self_reported" }
+      ]
+    }
+  },
+  "ranking": ["<best_id>", "<second_id>"],
+  "checklist": ["<check>"],
+  "amendments": [],
+  "winner": null,
+  "final_verdict": null,
+  "close": false
+}
+
+An amendment looks like: { "round": 2, "contestant": "<id>", "score": 80, "reason": "why the R2 score was wrong" }
+===== direct contestant_brief R3 claude =====
+## 1. Competition request and round
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestant: claude
+Round: 3 of 3 — PEER REVEAL (showcase of peers' work from the previous round)
+Notice: This is the FINAL round. Deliver your strongest, polished work.
+Your private output directory: /golden/competition/entries/claude
+
+## 2. Competition rules
+- Create or refine all your deliverables (designs, HTML/CSS/JS, SVG, images, code, docs) ONLY inside your private output directory: /golden/competition/entries/claude
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- Before you submit, run the same check on your output directory: "<current_exe>" --check="/golden/competition/entries/claude". It prints the viewer copy, the screenshots and the manifest, and lists what could not be inlined. If it cannot run in your environment, say so in the report and mark what it would have shown as unverified.
+
+The judge's checklist (published with the R2 judgment):
+- 320x568: no horizontal scroll
+- Contrast >= 4.5:1
+- PEER REVEAL ROUND: You may inspect the other contestants' round-2 snapshots listed below to understand their approaches, strengths, and gaps. Do NOT copy their files verbatim; synthesize better ideas and surpass them in your own output directory.
+- Open at least one peer's deliverable (its `index.html` or images), not only the reports quoted below. In your report, add a `## Peer review` section with one line per idea you adopted and one per idea you chose not to adopt, each with the reason.
+
+## 3. Your previous work and private judge feedback
+Your last submission (R2): claude entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/claude
+  - index.html (HTML, 201 bytes)
+  - style.css (コード, 38 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 39 bytes)
+  What the judge saw (viewer-copy screenshots and manifest): /golden/competition/r2/checks/claude
+
+Judge evaluation of your R2 entry:
+- Score: 72/100
+  - impact: 40/60
+  - craft: 32/40
+- Strengths: Clear hierarchy
+- Feedback to address: Fix 320px overflow
+- Standing after R2: rank 1 of 3, you lead by 5 point(s).
+- Score correction: your R1 score went from 71/100 to 78/100 (R1 was judged without its <style>sheet).
+
+## 4. Peer showcase (round 2 — visible once every 2 rounds)
+Judge overview of R2:
+Round 2: all three improved; claude leads on craft.
+
+R2 ranking: claude > codex > agy
+
+### Peer: codex (R2 — score 67/100)
+Screenshots and manifest (start here): /golden/competition/r2/checks/codex
+Summary: codex entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/codex
+  - index.html (HTML, 199 bytes)
+  - style.css (コード, 37 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 38 bytes)
+Full report: /golden/competition/r2/report-codex.md
+
+### Peer: agy (R2 — score 52/100)
+Screenshots and manifest (start here): /golden/competition/r2/checks/agy
+Summary: agy entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/agy
+  - notes on design.md (文書, 47 bytes)
+Full report: /golden/competition/r2/report-agy.md
+
+## 5. User instructions / interventions
+- [m10 R3] Last round: polish only.
+
+## 6. How to compete
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- FINAL ROUND: finish rather than experiment. Close every open feedback item, verify everything you can, and leave no regression; a new idea is welcome only if you can verify it fully this round.
+- In your report, add a `## Beyond feedback` section naming the finishing work nobody asked for and why it raises the final result.
+
+## 7. How to submit
+1. Write or update your deliverables in: /golden/competition/entries/claude
+2. Write your Markdown submission report to: /golden/competition/direct-r3-claude.md
+   Start the report with a one-line summary (e.g. `# Summary: ...`), then describe what you built or improved this round, design/technical choices, and list key files in your output directory.
+   Write the file only after all deliverable files are saved.
+   Write the report in the language of the request, and mark anything you could not verify in your environment as unverified.
+===== direct contestant_brief R3 codex =====
+## 1. Competition request and round
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestant: codex
+Round: 3 of 3 — PEER REVEAL (showcase of peers' work from the previous round)
+Notice: This is the FINAL round. Deliver your strongest, polished work.
+Your private output directory: /golden/competition/entries/codex
+
+## 2. Competition rules
+- Create or refine all your deliverables (designs, HTML/CSS/JS, SVG, images, code, docs) ONLY inside your private output directory: /golden/competition/entries/codex
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- Before you submit, run the same check on your output directory: "<current_exe>" --check="/golden/competition/entries/codex". It prints the viewer copy, the screenshots and the manifest, and lists what could not be inlined. If it cannot run in your environment, say so in the report and mark what it would have shown as unverified.
+
+The judge's checklist (published with the R2 judgment):
+- 320x568: no horizontal scroll
+- Contrast >= 4.5:1
+- PEER REVEAL ROUND: You may inspect the other contestants' round-2 snapshots listed below to understand their approaches, strengths, and gaps. Do NOT copy their files verbatim; synthesize better ideas and surpass them in your own output directory.
+- Open at least one peer's deliverable (its `index.html` or images), not only the reports quoted below. In your report, add a `## Peer review` section with one line per idea you adopted and one per idea you chose not to adopt, each with the reason.
+
+## 3. Your previous work and private judge feedback
+Your last submission (R2): codex entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/codex
+  - index.html (HTML, 199 bytes)
+  - style.css (コード, 37 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 38 bytes)
+  What the judge saw (viewer-copy screenshots and manifest): /golden/competition/r2/checks/codex
+
+Judge evaluation of your R2 entry:
+- Score: 67/100
+  - impact: 38/60
+  - craft: 29/40
+- Strengths: Small CSS
+- Feedback to address: Focus states
+- Standing after R2: rank 2 of 3, 5 point(s) behind the leader.
+
+## 4. Peer showcase (round 2 — visible once every 2 rounds)
+Judge overview of R2:
+Round 2: all three improved; claude leads on craft.
+
+R2 ranking: claude > codex > agy
+
+### Peer: claude (R2 — score 72/100)
+Screenshots and manifest (start here): /golden/competition/r2/checks/claude
+Summary: claude entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/claude
+  - index.html (HTML, 201 bytes)
+  - style.css (コード, 38 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 39 bytes)
+Full report: /golden/competition/r2/report-claude.md
+
+### Peer: agy (R2 — score 52/100)
+Screenshots and manifest (start here): /golden/competition/r2/checks/agy
+Summary: agy entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/agy
+  - notes on design.md (文書, 47 bytes)
+Full report: /golden/competition/r2/report-agy.md
+
+## 5. User instructions / interventions
+- [m5 R2] Use system
+fonts only.
+- [m10 R3] Last round: polish only.
+
+## 6. How to compete
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- FINAL ROUND: finish rather than experiment. Close every open feedback item, verify everything you can, and leave no regression; a new idea is welcome only if you can verify it fully this round.
+- In your report, add a `## Beyond feedback` section naming the finishing work nobody asked for and why it raises the final result.
+
+## 7. How to submit
+1. Write or update your deliverables in: /golden/competition/entries/codex
+2. Write your Markdown submission report to: /golden/competition/direct-r3-codex.md
+   Start the report with a one-line summary (e.g. `# Summary: ...`), then describe what you built or improved this round, design/technical choices, and list key files in your output directory.
+   Write the file only after all deliverable files are saved.
+   Write the report in the language of the request, and mark anything you could not verify in your environment as unverified.
+===== direct contestant_brief R3 agy =====
+## 1. Competition request and round
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestant: agy
+Round: 3 of 3 — PEER REVEAL (showcase of peers' work from the previous round)
+Notice: This is the FINAL round. Deliver your strongest, polished work.
+Your private output directory: /golden/competition/entries/agy
+
+## 2. Competition rules
+- Create or refine all your deliverables (designs, HTML/CSS/JS, SVG, images, code, docs) ONLY inside your private output directory: /golden/competition/entries/agy
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- Before you submit, run the same check on your output directory: "<current_exe>" --check="/golden/competition/entries/agy". It prints the viewer copy, the screenshots and the manifest, and lists what could not be inlined. If it cannot run in your environment, say so in the report and mark what it would have shown as unverified.
+
+The judge's checklist (published with the R2 judgment):
+- 320x568: no horizontal scroll
+- Contrast >= 4.5:1
+- PEER REVEAL ROUND: You may inspect the other contestants' round-2 snapshots listed below to understand their approaches, strengths, and gaps. Do NOT copy their files verbatim; synthesize better ideas and surpass them in your own output directory.
+- Open at least one peer's deliverable (its `index.html` or images), not only the reports quoted below. In your report, add a `## Peer review` section with one line per idea you adopted and one per idea you chose not to adopt, each with the reason.
+
+## 3. Your previous work and private judge feedback
+Your last submission (R2): agy entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/agy
+  - notes on design.md (文書, 47 bytes)
+  What the judge saw (viewer-copy screenshots and manifest): /golden/competition/r2/checks/agy
+
+Judge evaluation of your R2 entry:
+- Score: 52/100
+  - impact: 30/60
+  - craft: 22/40
+- Strengths: Good notes
+- Feedback to address: Ship a page
+- Standing after R2: rank 3 of 3, 20 point(s) behind the leader.
+
+## 4. Peer showcase (round 2 — visible once every 2 rounds)
+Judge overview of R2:
+Round 2: all three improved; claude leads on craft.
+
+R2 ranking: claude > codex > agy
+
+### Peer: claude (R2 — score 72/100)
+Screenshots and manifest (start here): /golden/competition/r2/checks/claude
+Summary: claude entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/claude
+  - index.html (HTML, 201 bytes)
+  - style.css (コード, 38 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 39 bytes)
+Full report: /golden/competition/r2/report-claude.md
+
+### Peer: codex (R2 — score 67/100)
+Screenshots and manifest (start here): /golden/competition/r2/checks/codex
+Summary: codex entry for round 2 <with markup>
+  Directory: /golden/competition/r2/artifacts/codex
+  - index.html (HTML, 199 bytes)
+  - style.css (コード, 37 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 38 bytes)
+Full report: /golden/competition/r2/report-codex.md
+
+## 5. User instructions / interventions
+- [m10 R3] Last round: polish only.
+
+## 6. How to compete
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- FINAL ROUND: finish rather than experiment. Close every open feedback item, verify everything you can, and leave no regression; a new idea is welcome only if you can verify it fully this round.
+- In your report, add a `## Beyond feedback` section naming the finishing work nobody asked for and why it raises the final result.
+
+## 7. How to submit
+1. Write or update your deliverables in: /golden/competition/entries/agy
+2. Write your Markdown submission report to: /golden/competition/direct-r3-agy.md
+   Start the report with a one-line summary (e.g. `# Summary: ...`), then describe what you built or improved this round, design/technical choices, and list key files in your output directory.
+   Write the file only after all deliverable files are saved.
+   Write the report in the language of the request, and mark anything you could not verify in your environment as unverified.
+===== direct judge_brief R3 =====
+## 1. Competition judging — Round 3 of 3
+Request:
+Build a responsive <audio> mixer page & explain
+the trade-offs ("mobile" first)
+
+Contestants: claude, codex, agy
+Peer-reveal schedule: every 2 rounds (0 = disabled)
+
+## 2. Round 3 submissions and artifacts
+### Contestant: claude
+Summary: claude entry for round 3 <with markup>
+  Directory: /golden/competition/r3/artifacts/claude
+  - index.html (HTML, 201 bytes)
+  - style.css (コード, 38 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 39 bytes)
+  Viewer copy: /golden/competition/r3/artifacts/claude/.preview/index.html
+  Screenshots of the viewer copy (1440x900.png, 768x1024.png, 320x568.png) and manifest.md: /golden/competition/r3/checks/claude
+Report:
+# Summary: claude entry for round 3 <with markup>
+
+## Beyond feedback
+Tightened spacing; added dark mode.
+
+Report body for r3-claude: measured 0 axe violations.
+
+### Contestant: codex
+Summary: codex entry for round 3 <with markup>
+  Directory: /golden/competition/r3/artifacts/codex
+  - index.html (HTML, 199 bytes)
+  - style.css (コード, 37 bytes)
+  - src/app.js (コード, 32782 bytes)
+  - logo.svg (SVG, 61 bytes)
+  - README.md (文書, 38 bytes)
+  Viewer copy: /golden/competition/r3/artifacts/codex/.preview/index.html
+  Screenshots of the viewer copy (1440x900.png, 768x1024.png, 320x568.png) and manifest.md: /golden/competition/r3/checks/codex
+Report:
+# Summary: codex entry for round 3 <with markup>
+
+## Beyond feedback
+Tightened spacing; added dark mode.
+
+Report body for r3-codex: measured 0 axe violations.
+
+### Contestant: agy
+Summary: agy entry for round 3 <with markup>
+  Directory: /golden/competition/r3/artifacts/agy
+  - notes on design.md (文書, 47 bytes)
+Report:
+# Summary: agy entry for round 3 <with markup>
+
+## Beyond feedback
+Tightened spacing; added dark mode.
+
+Report body for r3-agy: measured 0 axe violations.
+
+## 3. User interventions
+- [m5 R2 to codex] Use system
+fonts only.
+- [m10 R3 to everyone] Last round: polish only.
+
+## 4. Rules the contestants were given
+- If your deliverable is a UI or visual design, put its entry page at the root of your output directory as `index.html` (or deliver SVG/PNG files) so the comparison viewer can show it.
+- The comparison viewer opens a copy of your root `index.html` that the competition generates at each snapshot, with the stylesheets, scripts, images and fonts it references by relative path inlined. Reference your files by relative path; do not hand-build separate preview files.
+- The viewer still frames that copy in an iframe with `sandbox="allow-scripts"` (an opaque origin): popups, same-origin APIs and storage are blocked and clipboard access may fail, so the page must hold up under those limits.
+- What the viewer copy inlines: Inlined from the root `index.html`: `<link rel="stylesheet">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.
+- Every submission is checked at snapshot: the viewer copy, screenshots and a manifest (files, sizes, hashes, references that could not be inlined) under `r<N>/checks/<contestant>/`. Screenshot conditions: headless Chrome; the viewer copy framed in an `<iframe sandbox="allow-scripts">` of exactly the viewport size (as `compare.html` frames it); `prefers-color-scheme: light`; reduced motion not requested; 5 s of virtual time before the capture; viewports 1440x900, 768x1024 and 320x568, where the height is the first view.
+- Back every fact and number with files under version control in the reference workspace (`git ls-files`), unless the request names other sources. When sources disagree, the one the request calls canonical wins; say which source you used.
+- The judge's feedback is the floor, not the goal: points go to what raises the deliverable's impact for the request, not to applying the feedback alone.
+- Every round, make at least one improvement nobody asked for and name it in a `## Beyond feedback` section of the report.
+- In peer-reveal rounds, open at least one peer's deliverable and add a `## Peer review` section listing each idea adopted or not adopted, with the reason.
+- Start the report with a one-line summary, describe what changed and why, and list the key files.
+- Write the report in the language of the request and mark anything not verified as unverified.
+- Contestants can run the same snapshot check on their entry before submitting (`--check`).
+The judge's checklist (published with the R2 judgment):
+- 320x568: no horizontal scroll
+- Contrast >= 4.5:1
+
+## 5. Judging rules
+- Judge visual entries from the viewer copy and its screenshots listed above: they show what the comparison viewer shows. If the screenshots are missing, capture the viewer copy yourself under the conditions in section 4. Do not penalize what the rules in section 4 allow. Results in a contestant's check output or in `r<N>/checks/` count as measured.
+- Apply the published checklist in section 4. Do not score a check that is not on it. To add or change a check, send the full new list in `checklist` and name the change in `overview`; it applies from the next round.
+- When the request weights its criteria, fill each evaluation's `breakdown` with one entry per criterion (its points and maximum); the points must add up to `score`. The contestant sees its own breakdown.
+- Inspect the actual artifact files in each contestant's snapshot directory above, not just their self-report.
+- Score every contestant on 0..100 based on how well their deliverable satisfies the user's request (quality, completeness, aesthetics/craft, usability).
+- IMPORTANT (blind rule): Each contestant's `strengths` and `feedback` are delivered privately to that contestant. Do NOT reveal other contestants' ideas, scores, or identities inside them.
+- Derive each contestant's `feedback` only from gaps between their own deliverable and the user's request. Do NOT suggest a feature, approach, layout, wording, or fix because you saw it in another contestant's work (this round or earlier), even unnamed or paraphrased; ideas are shared only through peer-reveal rounds. If a gap is evident only by comparison with a peer, leave it out.
+- Score against an absolute bar for the request, not against the previous round: an entry that only applies last round's feedback without raising its impact should not gain points. Reward bold, verified improvements the contestant initiated (see its `## Beyond feedback` section).
+- Write `feedback` as at most 3 items, highest score impact first, each with a check the contestant can run (e.g. "at 320×568, the install button and two queue items are visible").
+- Do not ask for checks the contestants' environment cannot run (e.g. a physical phone when only a headless browser is available); ask them to state the item as unverified instead.
+- Compare each report's claims with the files, and with the claims of that contestant's previous report; name any claim the files contradict in that contestant's `feedback`.
+- List in each evaluation's `evidence` the concrete claims your score rests on, each with `basis`: "measured" (you checked it in the files or screenshots), "self_reported" (taken from the report without re-checking), or "unverified". Never present a self-reported number as measured.
+- If you find that an earlier round's score rested on a wrong basis (a misread rule, the wrong rendering), correct it in `amendments` with the round, contestant, corrected score and reason, instead of only mentioning it in prose.
+- This is the FINAL round: you MUST set "winner" to the winning contestant id, provide "final_verdict", and set "close": true.
+
+## 6. Your JSON output
+Write ONLY valid JSON (no prose around it) to: /golden/competition/direct-r3-judge.json
+
+{
+  "overview": "1-3 sentence round overview comparing progress",
+  "evaluations": {
+    "<contestant_id>": {
+      "score": 85,
+      "strengths": "Key strengths of this entry",
+      "feedback": "Concrete private feedback for next round, based only on this entry vs the request (no peer ideas)",
+      "breakdown": [
+        { "axis": "<criterion>", "score": 50, "max": 60 },
+        { "axis": "<criterion>", "score": 35, "max": 40 }
+      ],
+      "evidence": [
+        { "claim": "index.html is 19,018 bytes", "basis": "measured" },
+        { "claim": "0 axe violations", "basis": "self_reported" }
+      ]
+    }
+  },
+  "ranking": ["<best_id>", "<second_id>"],
+  "checklist": ["<check>"],
+  "amendments": [],
+  "winner": null,
+  "final_verdict": null,
+  "close": false
+}
+
+An amendment looks like: { "round": 2, "contestant": "<id>", "score": 80, "reason": "why the R2 score was wrong" }

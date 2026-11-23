@@ -530,7 +530,7 @@ impl Engine {
         if self.session.closed {
             return Ok(());
         }
-        let Some(round) = self.session.current_round().cloned() else {
+        let Some(round) = self.session.current_round() else {
             return self.next_round(out, now);
         };
         // Pick up a round where a restart left it.
@@ -644,24 +644,26 @@ impl Engine {
         }
         self.commit(out, batch)?;
 
-        let briefs: Vec<Brief> = questions
+        let reply_dir = self.reply_dir();
+        let paths: Vec<PathBuf> = questions
             .iter()
-            .map(|(part, question)| {
-                let path = store::reply_path(&self.reply_dir(), no, part);
-                brief::panelist_brief(&self.session, part, no, question, &path)
-            })
+            .map(|(part, _)| store::reply_path(&reply_dir, no, part))
             .collect();
-        let batch = briefs
+        let items: Vec<(&PartId, &str, &Path)> = questions
             .iter()
-            .map(|brief| Event::BriefIssued {
-                round: no,
-                brief: brief.clone(),
-            })
+            .zip(&paths)
+            .map(|((part, question), path)| (part, question.as_str(), path.as_path()))
+            .collect();
+        let batch: Vec<Event> = brief::panelist_briefs(&self.session, no, &items)
+            .into_iter()
+            .map(|brief| Event::BriefIssued { round: no, brief })
             .collect();
         self.commit(out, batch)?;
-        for brief in &briefs {
-            Self::watch(out, no, brief);
-            Self::send(out, no, brief);
+        if let Some(round) = self.session.current_round() {
+            for brief in &round.briefs {
+                Self::watch(out, no, brief);
+                Self::send(out, no, brief);
+            }
         }
         Ok(())
     }
@@ -709,14 +711,17 @@ impl Engine {
                     round: no,
                     phase: Phase::Summarizing,
                 },
-                Event::BriefIssued {
-                    round: no,
-                    brief: brief.clone(),
-                },
+                Event::BriefIssued { round: no, brief },
             ],
         )?;
-        Self::watch(out, no, &brief);
-        Self::send(out, no, &brief);
+        if let Some(brief) = self
+            .session
+            .current_round()
+            .and_then(|r| r.moderator_brief.as_ref())
+        {
+            Self::watch(out, no, brief);
+            Self::send(out, no, brief);
+        }
         Ok(())
     }
 
@@ -739,9 +744,8 @@ impl Engine {
                     reason,
                 }],
             )?;
-            let brief = self.open_brief(round, part).cloned();
-            if let Some(brief) = brief {
-                Self::send(out, round, &brief);
+            if let Some(brief) = self.open_brief(round, part) {
+                Self::send(out, round, brief);
             }
         } else {
             self.commit(

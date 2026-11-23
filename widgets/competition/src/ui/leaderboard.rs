@@ -69,19 +69,22 @@ pub(super) fn insert(
             Label::new(rank_label).font_size(13.0).weight(600),
         );
         spacer(tree, top);
-        if let Some(score) = session.latest_score(part) {
+        let score_hist = session.score_history(part);
+        if let Some(&(_, score)) = score_hist.last() {
             tag(tree, top, format!("{score} pt"), Tone::Accent);
         } else {
             tag(tree, top, "未採点", Tone::Neutral);
         }
 
-        let history: Vec<String> = session
-            .score_history(part)
-            .into_iter()
-            .map(|(r, s)| format!("R{r}:{s}"))
-            .collect();
-        if !history.is_empty() {
-            super::note(tree, card, history.join(" → "));
+        if !score_hist.is_empty() {
+            let mut line = String::with_capacity(score_hist.len() * 10);
+            for (i, (r, s)) in score_hist.iter().enumerate() {
+                if i > 0 {
+                    line.push_str(" → ");
+                }
+                let _ = std::fmt::Write::write_fmt(&mut line, format_args!("R{r}:{s}"));
+            }
+            super::note(tree, card, line);
         }
 
         if let Some(cur) = session.current_round()

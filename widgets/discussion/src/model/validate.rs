@@ -155,10 +155,22 @@ pub fn parse_moderator(
         return Err(ValidationError::one(format!("there is no round {round}")));
     };
     let panelists: Vec<&PartId> = session.panelist_ids().collect();
-    let known_parts = list(&panelists);
+    let known_parts = || list(&panelists);
     let mut problems = Vec::new();
-    let mut known: Vec<IssueId> = session.issues.issues.iter().map(|i| i.id.clone()).collect();
-    let issue_known = |known: &[IssueId], id: &str| known.iter().any(|k| k.as_str() == id);
+    let mut added: Vec<String> = Vec::new();
+    let issue_known = |added: &[String], id: &str| {
+        session.issues.contains_str(id) || added.iter().any(|k| k == id)
+    };
+    let known_issues = |added: &[String]| {
+        list(
+            session
+                .issues
+                .issues
+                .iter()
+                .map(|i| i.id.as_str())
+                .chain(added.iter().map(String::as_str)),
+        )
+    };
 
     let summary = raw.summary.trim().to_owned();
     if summary.is_empty() {
@@ -167,30 +179,29 @@ pub fn parse_moderator(
 
     let mut issue_ops = Vec::new();
     for (i, op) in raw.issue_ops.into_iter().enumerate() {
-        let at = format!("issue_ops[{i}]");
         match op {
             RawIssueOp::Add { id, parent, title } => {
                 let before = problems.len();
                 if !is_valid_issue_id(&id) {
                     problems.push(format!(
-                        "{at} (add): issue id {id:?} must be 1-{MAX_ISSUE_ID_LEN} ASCII letters, digits, '-' or '_'"
+                        "issue_ops[{i}] (add): issue id {id:?} must be 1-{MAX_ISSUE_ID_LEN} ASCII letters, digits, '-' or '_'"
                     ));
-                } else if issue_known(&known, &id) {
-                    problems.push(format!("{at} (add): issue {id:?} already exists"));
+                } else if issue_known(&added, &id) {
+                    problems.push(format!("issue_ops[{i}] (add): issue {id:?} already exists"));
                 }
                 if let Some(parent) = &parent
-                    && !issue_known(&known, parent)
+                    && !issue_known(&added, parent)
                 {
                     problems.push(format!(
-                        "{at} (add): unknown parent issue {parent:?}; known issues: {}",
-                        list(&known)
+                        "issue_ops[{i}] (add): unknown parent issue {parent:?}; known issues: {}",
+                        known_issues(&added)
                     ));
                 }
                 if title.trim().is_empty() {
-                    problems.push(format!("{at} (add): \"title\" is empty"));
+                    problems.push(format!("issue_ops[{i}] (add): \"title\" is empty"));
                 }
                 if problems.len() == before {
-                    known.push(IssueId::new(&id));
+                    added.push(id.clone());
                     issue_ops.push(IssueOp::Add {
                         id: IssueId::new(id),
                         parent: parent.map(IssueId::new),
@@ -200,16 +211,16 @@ pub fn parse_moderator(
             }
             RawIssueOp::SetState { id, state } => {
                 let before = problems.len();
-                if !issue_known(&known, &id) {
+                if !issue_known(&added, &id) {
                     problems.push(format!(
-                        "{at} (set_state): unknown issue {id:?}; known issues: {}",
-                        list(&known)
+                        "issue_ops[{i}] (set_state): unknown issue {id:?}; known issues: {}",
+                        known_issues(&added)
                     ));
                 }
                 let parsed = IssueState::parse(&state);
                 if parsed.is_none() {
                     problems.push(format!(
-                        "{at} (set_state): unknown state {state:?}; expected open, contested, agreed, conditional or deferred"
+                        "issue_ops[{i}] (set_state): unknown state {state:?}; expected open, contested, agreed, conditional or deferred"
                     ));
                 }
                 if let (Some(state), true) = (parsed, problems.len() == before) {
@@ -226,26 +237,27 @@ pub fn parse_moderator(
                 basis,
             } => {
                 let before = problems.len();
-                if !issue_known(&known, &id) {
+                if !issue_known(&added, &id) {
                     problems.push(format!(
-                        "{at} (set_stance): unknown issue {id:?}; known issues: {}",
-                        list(&known)
+                        "issue_ops[{i}] (set_stance): unknown issue {id:?}; known issues: {}",
+                        known_issues(&added)
                     ));
                 }
                 if !panelists.iter().any(|p| p.as_str() == part) {
                     problems.push(format!(
-                        "{at} (set_stance): unknown panelist {part:?}; panelists: {known_parts}"
+                        "issue_ops[{i}] (set_stance): unknown panelist {part:?}; panelists: {}",
+                        known_parts()
                     ));
                 }
                 let parsed = Position::parse(&pos);
                 if parsed.is_none() {
                     problems.push(format!(
-                        "{at} (set_stance): unknown pos {pos:?}; expected for, against, neutral or unknown"
+                        "issue_ops[{i}] (set_stance): unknown pos {pos:?}; expected for, against, neutral or unknown"
                     ));
                 }
-                if session.message(&MessageId::new(&basis)).is_none() {
+                if session.message_by_str(&basis).is_none() {
                     problems.push(format!(
-                        "{at} (set_stance): unknown basis message {basis:?}; use a message id such as m1"
+                        "issue_ops[{i}] (set_stance): unknown basis message {basis:?}; use a message id such as m1"
                     ));
                 }
                 if let (Some(pos), true) = (parsed, problems.len() == before) {
@@ -262,7 +274,6 @@ pub fn parse_moderator(
 
     let mut minutes_ops = Vec::new();
     for (i, op) in raw.minutes_ops.into_iter().enumerate() {
-        let at = format!("minutes_ops[{i}]");
         let RawMinuteOp::Add {
             section,
             text,
@@ -272,17 +283,17 @@ pub fn parse_moderator(
         let parsed = MinuteSection::parse(&section);
         if parsed.is_none() {
             problems.push(format!(
-                "{at} (add): unknown section {section:?}; expected decisions, contested, open_questions or actions"
+                "minutes_ops[{i}] (add): unknown section {section:?}; expected decisions, contested, open_questions or actions"
             ));
         }
         if text.trim().is_empty() {
-            problems.push(format!("{at} (add): \"text\" is empty"));
+            problems.push(format!("minutes_ops[{i}] (add): \"text\" is empty"));
         }
         for issue in &issues {
-            if !issue_known(&known, issue) {
+            if !issue_known(&added, issue) {
                 problems.push(format!(
-                    "{at} (add): unknown issue {issue:?}; known issues: {}",
-                    list(&known)
+                    "minutes_ops[{i}] (add): unknown issue {issue:?}; known issues: {}",
+                    known_issues(&added)
                 ));
             }
         }
@@ -299,7 +310,8 @@ pub fn parse_moderator(
     for (part, question) in raw.questions {
         if !panelists.iter().any(|p| p.as_str() == part) {
             problems.push(format!(
-                "questions: unknown panelist {part:?}; panelists: {known_parts}"
+                "questions: unknown panelist {part:?}; panelists: {}",
+                known_parts()
             ));
         } else if question.trim().is_empty() {
             problems.push(format!("questions: the question for {part:?} is empty"));
@@ -342,16 +354,18 @@ pub fn parse_moderator(
             );
         } else if debate.is_some() {
             problems.push("propose_debate: not allowed during a debate round".to_owned());
-        } else if session.debates.iter().any(|d| {
-            matches!(d.status, DebateStatus::Proposed | DebateStatus::Approved)
-        }) {
+        } else if session
+            .debates
+            .iter()
+            .any(|d| matches!(d.status, DebateStatus::Proposed | DebateStatus::Approved))
+        {
             problems.push("propose_debate: a debate is already waiting to run".to_owned());
         }
-        if !issue_known(&known, &proposal.issue) {
+        if !issue_known(&added, &proposal.issue) {
             problems.push(format!(
                 "propose_debate: unknown issue {:?}; known issues: {}",
                 proposal.issue,
-                list(&known)
+                known_issues(&added)
             ));
         }
         let mut seen = BTreeSet::new();
@@ -362,7 +376,8 @@ pub fn parse_moderator(
             for member in members {
                 if !panelists.iter().any(|p| p.as_str() == member) {
                     problems.push(format!(
-                        "propose_debate: unknown panelist {member:?} in \"{side}\"; panelists: {known_parts}"
+                        "propose_debate: unknown panelist {member:?} in \"{side}\"; panelists: {}",
+                        known_parts()
                     ));
                 } else if !seen.insert(member.clone()) {
                     problems.push(format!(
@@ -494,8 +509,6 @@ fn items(value: &str) -> impl Iterator<Item = &str> {
 /// messages that exist.
 pub fn parse_reply(text: &str, session: &Session) -> Result<Reply, ValidationError> {
     let text = text.trim_start_matches('\u{feff}');
-    let mut lines = text.lines();
-    let first = text.lines().find(|line| !line.trim().is_empty());
     let mut reply = Reply {
         issues: Vec::new(),
         reply_to: Vec::new(),
@@ -503,15 +516,29 @@ pub fn parse_reply(text: &str, session: &Session) -> Result<Reply, ValidationErr
         body: String::new(),
     };
     let mut problems = Vec::new();
-    let body = if first.map(str::trim) == Some("---") {
-        for line in lines.by_ref() {
-            if line.trim() == "---" {
+    let mut pos = 0usize;
+    let first_non_empty = {
+        let mut found = None;
+        for chunk in text.split_inclusive('\n') {
+            let line = chunk.strip_suffix('\n').unwrap_or(chunk);
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            pos += chunk.len();
+            if !line.trim().is_empty() {
+                found = Some(line);
                 break;
             }
         }
+        found
+    };
+    reply.body = if first_non_empty.map(str::trim) == Some("---") {
         let mut header = Vec::new();
         let mut closed = false;
-        for line in lines.by_ref() {
+        let rest_after_open = &text[pos..];
+        let mut header_bytes = 0usize;
+        for chunk in rest_after_open.split_inclusive('\n') {
+            let line = chunk.strip_suffix('\n').unwrap_or(chunk);
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            header_bytes += chunk.len();
             if line.trim() == "---" {
                 closed = true;
                 break;
@@ -535,14 +562,14 @@ pub fn parse_reply(text: &str, session: &Session) -> Result<Reply, ValidationErr
                 continue;
             };
             let key = key.trim();
-            if !seen.insert(key.to_owned()) {
+            if !seen.insert(key) {
                 problems.push(format!("{at}: {key:?} is given twice"));
                 continue;
             }
             match key {
                 "issues" => {
                     for id in items(strip_brackets(value, '[', ']')) {
-                        if session.issues.contains(&IssueId::new(id)) {
+                        if session.issues.contains_str(id) {
                             reply.issues.push(IssueId::new(id));
                         } else {
                             problems.push(format!(
@@ -554,7 +581,7 @@ pub fn parse_reply(text: &str, session: &Session) -> Result<Reply, ValidationErr
                 }
                 "reply_to" => {
                     for id in items(strip_brackets(value, '[', ']')) {
-                        if session.message(&MessageId::new(id)).is_some() {
+                        if session.message_by_str(id).is_some() {
                             reply.reply_to.push(MessageId::new(id));
                         } else {
                             problems.push(format!(
@@ -573,7 +600,7 @@ pub fn parse_reply(text: &str, session: &Session) -> Result<Reply, ValidationErr
                         };
                         let id = id.trim().trim_matches(['"', '\'']);
                         let pos = pos.trim().trim_matches(['"', '\'']);
-                        let known = session.issues.contains(&IssueId::new(id));
+                        let known = session.issues.contains_str(id);
                         if !known {
                             problems.push(format!(
                                 "{at}: unknown issue {id:?} in stance; known issues: {}",
@@ -594,11 +621,16 @@ pub fn parse_reply(text: &str, session: &Session) -> Result<Reply, ValidationErr
                 )),
             }
         }
-        lines.collect::<Vec<_>>().join("\n")
+        let body_slice = &rest_after_open[header_bytes..];
+        let trimmed = body_slice.trim();
+        if trimmed.as_bytes().contains(&b'\r') {
+            trimmed.lines().collect::<Vec<_>>().join("\n")
+        } else {
+            trimmed.to_owned()
+        }
     } else {
-        text.to_owned()
+        text.trim().to_owned()
     };
-    reply.body = body.trim().to_owned();
     if reply.body.is_empty() {
         problems.push("the reply body is empty".to_owned());
     }
@@ -974,5 +1006,21 @@ mod tests {
         assert!(!is_valid_issue_id("has space"));
         assert!(!is_valid_issue_id("[B]"));
         assert!(!is_valid_issue_id(&"x".repeat(17)));
+    }
+
+    #[test]
+    fn parse_reply_normalizes_crlf_and_preserves_lf_bodies() {
+        let s = session();
+        let lf = "---\nissues: [A]\n---\n\nline 1\n\nline 2\n  ";
+        let r_lf = parse_reply(lf, &s).unwrap();
+        assert_eq!(r_lf.body, "line 1\n\nline 2");
+        assert_eq!(r_lf.issues, vec![IssueId::new("A")]);
+
+        let crlf = "---\r\nissues: [A]\r\n---\r\n\r\nline 1\r\n\r\nline 2\r\n  ";
+        let r_crlf = parse_reply(crlf, &s).unwrap();
+        assert_eq!(r_crlf.body, "line 1\n\nline 2");
+
+        let plain = "  hello\nworld  \n";
+        assert_eq!(parse_reply(plain, &s).unwrap().body, "hello\nworld");
     }
 }

@@ -41,10 +41,11 @@ pub const OPENING_QUESTION: &str = "This is the opening round. Give your positio
 pub const DEFAULT_QUESTION: &str = "Respond to the latest summary and to the open and \
      contested issues: say where you agree or disagree with the other panelists, and why.";
 
-/// What one message looks like inside a brief: a header line with its id,
-/// round, author, kind and links, then its full text.
-pub fn render_message(session: &Session, message: &Message) -> String {
-    let mut line = format!(
+/// Writes one message's brief representation directly into `out`: a header
+/// line with its id, round, author, kind and links, then its full text.
+fn write_message(out: &mut String, session: &Session, message: &Message) {
+    let _ = write!(
+        out,
         "### [{}] R{} · {} · {}",
         message.id,
         message.round,
@@ -52,61 +53,113 @@ pub fn render_message(session: &Session, message: &Message) -> String {
         message.kind.name()
     );
     if !message.issues.is_empty() {
-        let issues: Vec<&str> = message.issues.iter().map(|i| i.as_str()).collect();
-        let _ = write!(line, " · issues: {}", issues.join(", "));
+        out.push_str(" · issues: ");
+        for (i, issue) in message.issues.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(issue.as_str());
+        }
     }
     if !message.reply_to.is_empty() {
-        let to: Vec<&str> = message.reply_to.iter().map(|m| m.as_str()).collect();
-        let _ = write!(line, " · ↪ {}", to.join(", "));
+        out.push_str(" · ↪ ");
+        for (i, id) in message.reply_to.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(id.as_str());
+        }
     }
     if !message.to.is_empty() {
-        let to: Vec<&str> = message.to.iter().map(|p| p.as_str()).collect();
-        let _ = write!(line, " · to: {}", to.join(", "));
+        out.push_str(" · to: ");
+        for (i, part) in message.to.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(part.as_str());
+        }
     }
     if let Some(debate) = &message.debate {
-        let _ = write!(line, " · debate {debate}");
+        let _ = write!(out, " · debate {debate}");
     }
-    format!("{line}\n{}\n", message.body)
+    out.push('\n');
+    out.push_str(&message.body);
+    out.push('\n');
 }
 
-fn issue_line(session: &Session, depth: usize, issue: &super::types::Issue) -> String {
-    let stances: Vec<String> = session
-        .panelist_ids()
-        .map(|part| match issue.stances.get(part) {
-            Some(stance) => format!("{part}: {} ({})", stance.pos.name(), stance.basis),
-            None => format!("{part}: no stance"),
-        })
-        .collect();
-    format!(
-        "{}- [{}] {} — {} · {}\n",
-        "  ".repeat(depth),
+/// What one message looks like inside a brief: a header line with its id,
+/// round, author, kind and links, then its full text.
+pub fn render_message(session: &Session, message: &Message) -> String {
+    let mut out = String::with_capacity(message.body.len() + 96);
+    write_message(&mut out, session, message);
+    out
+}
+
+fn write_issue_line(
+    out: &mut String,
+    session: &Session,
+    depth: usize,
+    issue: &super::types::Issue,
+    bullet: bool,
+) {
+    for _ in 0..depth {
+        out.push_str("  ");
+    }
+    if bullet {
+        out.push_str("- ");
+    }
+    let _ = write!(
+        out,
+        "[{}] {} — {} · ",
         issue.id,
         issue.title,
-        issue.state.name(),
-        stances.join(", ")
-    )
+        issue.state.name()
+    );
+    for (i, part) in session.panelist_ids().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        match issue.stances.get(part) {
+            Some(stance) => {
+                let _ = write!(out, "{part}: {} ({})", stance.pos.name(), stance.basis);
+            }
+            None => {
+                let _ = write!(out, "{part}: no stance");
+            }
+        }
+    }
+    out.push('\n');
+}
+
+fn write_panelist_list(out: &mut String, session: &Session) {
+    for (i, part) in session.panelist_ids().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(part.as_str());
+    }
 }
 
 fn section_topic(out: &mut String, heading: &str, session: &Session, round: RoundNo) {
-    let kind = match session.round(round).map(|r| &r.kind) {
+    let _ = write!(out, "{heading}\nTopic: {}\nRound: {round}", session.topic);
+    if let Some(max) = session.max_rounds {
+        let _ = write!(out, " of {max}");
+    }
+    out.push_str(" (");
+    match session.round(round).map(|r| &r.kind) {
         Some(RoundKind::Debate(id)) => match session.debate(id) {
-            Some(debate) => format!("debate {id} on issue {}", debate.issue),
-            None => format!("debate {id}"),
+            Some(debate) => {
+                let _ = write!(out, "debate {id} on issue {}", debate.issue);
+            }
+            None => {
+                let _ = write!(out, "debate {id}");
+            }
         },
-        _ => "open discussion".to_owned(),
-    };
-    let panel: Vec<&str> = session.panelist_ids().map(|p| p.as_str()).collect();
-    let of = session
-        .max_rounds
-        .map(|max| format!(" of {max}"))
-        .unwrap_or_default();
-    let _ = write!(
-        out,
-        "{heading}\nTopic: {}\nRound: {round}{of} ({kind})\nPanelists: {}\nModerator: {}\n\n",
-        session.topic,
-        panel.join(", "),
-        session.moderator.id
-    );
+        _ => out.push_str("open discussion"),
+    }
+    out.push_str(")\nPanelists: ");
+    write_panelist_list(out, session);
+    let _ = write!(out, "\nModerator: {}\n\n", session.moderator.id);
 }
 
 /// The rounds left after `round`; `None` when the discussion has no limit.
@@ -185,7 +238,7 @@ fn section_tree(out: &mut String, heading: &str, session: &Session) {
         out.push_str("(no issues yet)\n");
     }
     for (depth, issue) in walk {
-        out.push_str(&issue_line(session, depth, issue));
+        write_issue_line(out, session, depth, issue, true);
     }
     out.push('\n');
 }
@@ -207,8 +260,9 @@ fn section_delta(out: &mut String, heading: &str, session: &Session, base: Optio
             continue;
         };
         any = true;
-        let _ = write!(out, "{what}: ");
-        out.push_str(issue_line(session, 0, issue).trim_start_matches("- "));
+        out.push_str(what);
+        out.push_str(": ");
+        write_issue_line(out, session, 0, issue, false);
     }
     for section in MinuteSection::ALL {
         for item in session.minutes.section(section) {
@@ -234,7 +288,7 @@ fn section_messages(out: &mut String, heading: &str, session: &Session, messages
         if i > 0 {
             out.push('\n');
         }
-        out.push_str(&render_message(session, message));
+        write_message(out, session, message);
     }
     out.push('\n');
 }
@@ -245,13 +299,20 @@ fn section_interventions(out: &mut String, heading: &str, messages: &[Message]) 
     let mut any = false;
     for message in messages.iter().filter(|m| m.kind == MsgKind::Intervention) {
         any = true;
-        let to = if message.to.is_empty() {
-            "everyone".to_owned()
+        let _ = write!(out, "- [{}] to ", message.id);
+        if message.to.is_empty() {
+            out.push_str("everyone");
         } else {
-            let to: Vec<&str> = message.to.iter().map(|p| p.as_str()).collect();
-            to.join(", ")
-        };
-        let _ = writeln!(out, "- [{}] to {to}: {}", message.id, message.body);
+            for (i, part) in message.to.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(part.as_str());
+            }
+        }
+        out.push_str(": ");
+        out.push_str(&message.body);
+        out.push('\n');
     }
     if !any {
         out.push_str("(none)\n");
@@ -259,18 +320,28 @@ fn section_interventions(out: &mut String, heading: &str, messages: &[Message]) 
     out.push('\n');
 }
 
-fn issue_ids(session: &Session) -> String {
-    let ids: Vec<&str> = session
-        .issues
-        .issues
-        .iter()
-        .map(|i| i.id.as_str())
-        .collect();
-    if ids.is_empty() {
-        "(none yet)".to_owned()
-    } else {
-        ids.join(", ")
+fn write_issue_ids(out: &mut String, session: &Session) {
+    if session.issues.issues.is_empty() {
+        out.push_str("(none yet)");
+        return;
     }
+    for (i, issue) in session.issues.issues.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(issue.id.as_str());
+    }
+}
+
+fn finish_body(mut body: String) -> String {
+    let trimmed = body.trim_end().len();
+    body.truncate(trimmed);
+    body.push('\n');
+    body
+}
+
+fn estimate_messages_bytes(messages: &[Message]) -> usize {
+    messages.iter().map(|m| m.body.len() + 96).sum()
 }
 
 fn draft(
@@ -284,7 +355,8 @@ fn draft(
     let previous = session.previous_brief(to, round);
     let since = previous.and_then(|b| b.through.clone());
     let messages = session.messages_after(since.as_ref());
-    let mut body = String::new();
+    let cap = estimate_messages_bytes(messages) + session.issues.issues.len() * 128 + 2048;
+    let mut body = String::with_capacity(cap);
     section_topic(&mut body, sections[0], session, round);
     section_tree(&mut body, sections[1], session);
     section_delta(
@@ -301,10 +373,82 @@ fn draft(
         base_rev: session.rev,
         since,
         through: session.messages.last().map(|m| m.id.clone()),
-        body: body.trim_end().to_owned() + "\n",
+        body: finish_body(body),
         reply_path: reply_path.to_owned(),
         receipt: Receipt::default(),
     }
+}
+
+fn write_panelist_tail(
+    out: &mut String,
+    session: &Session,
+    to: &PartId,
+    round: RoundNo,
+    question: &str,
+    reply_path: &Path,
+) {
+    out.push_str(PANELIST_SECTIONS[5]);
+    out.push('\n');
+    let debate = session
+        .round(round)
+        .and_then(|r| r.debate())
+        .and_then(|id| session.debate(id));
+    if let Some(debate) = debate {
+        let _ = write!(out, "Your role in debate {}: ", debate.id);
+        match debate.side(to) {
+            Some(Side::Pro) => {
+                let _ = writeln!(out, "you argue FOR issue {}.", debate.issue);
+            }
+            Some(Side::Con) => {
+                let _ = writeln!(out, "you argue AGAINST issue {}.", debate.issue);
+            }
+            None => {
+                let _ = writeln!(out, "you observe the debate on issue {}.", debate.issue);
+            }
+        }
+    }
+    match (session.max_rounds, rounds_left(session, round)) {
+        (_, Some(0)) => out.push_str(
+            "This is the last round: the moderator concludes the discussion after it. \
+             Give your final position on each issue still open or contested, and the \
+             compromise you can accept.\n",
+        ),
+        (_, Some(1)) => out.push_str(
+            "One round is left after this one, and it is the last. Move toward a \
+             conclusion: say where you can agree and what compromise you could accept.\n",
+        ),
+        (Some(max), Some(left)) => {
+            let _ = writeln!(
+                out,
+                "{left} rounds are left after this one; the discussion concludes by \
+                 round {max}. Help it converge: focus on the issues still open or \
+                 contested rather than opening new ones."
+            );
+        }
+        _ => {}
+    }
+    out.push_str(question);
+    out.push_str("\n\n");
+
+    out.push_str(PANELIST_SECTIONS[6]);
+    out.push('\n');
+    let _ = write!(
+        out,
+        "Write your reply as a Markdown file at:\n{}\n\
+     Write the whole file in one go when you are done: the file appearing is how \
+     your reply is collected. Do not answer in the terminal.\n\n\
+     The file starts with this header (every line in it is optional):\n\
+     ---\n\
+     issues: [A]          # the issues your reply is about\n\
+     reply_to: [m1]       # the messages you answer, by their [m…] id\n\
+     stance: {{A: against}} # your position per issue: for, against, neutral or unknown\n\
+     ---\n\
+     Then your reply.\n\n\
+     Issue ids: ",
+        reply_path.display(),
+    );
+    write_issue_ids(out, session);
+    out.push('\n');
 }
 
 /// The brief for panelist `to` in `round`, asking `question`.
@@ -321,63 +465,72 @@ pub fn panelist_brief(
         round,
         reply_path,
         &PANELIST_SECTIONS,
-        |out, _| {
-            out.push_str(PANELIST_SECTIONS[5]);
-            out.push('\n');
-            let debate = session
-                .round(round)
-                .and_then(|r| r.debate())
-                .and_then(|id| session.debate(id));
-            if let Some(debate) = debate {
-                let role = match debate.side(to) {
-                    Some(Side::Pro) => format!("you argue FOR issue {}", debate.issue),
-                    Some(Side::Con) => format!("you argue AGAINST issue {}", debate.issue),
-                    None => format!("you observe the debate on issue {}", debate.issue),
-                };
-                let _ = writeln!(out, "Your role in debate {}: {role}.", debate.id);
-            }
-            match (session.max_rounds, rounds_left(session, round)) {
-                (_, Some(0)) => out.push_str(
-                    "This is the last round: the moderator concludes the discussion after it. \
-                     Give your final position on each issue still open or contested, and the \
-                     compromise you can accept.\n",
-                ),
-                (_, Some(1)) => out.push_str(
-                    "One round is left after this one, and it is the last. Move toward a \
-                     conclusion: say where you can agree and what compromise you could accept.\n",
-                ),
-                (Some(max), Some(left)) => {
-                    let _ = writeln!(
-                        out,
-                        "{left} rounds are left after this one; the discussion concludes by \
-                         round {max}. Help it converge: focus on the issues still open or \
-                         contested rather than opening new ones."
-                    );
-                }
-                _ => {}
-            }
-            let _ = write!(out, "{question}\n\n");
-
-            out.push_str(PANELIST_SECTIONS[6]);
-            out.push('\n');
-            let _ = write!(
-                out,
-                "Write your reply as a Markdown file at:\n{}\n\
-             Write the whole file in one go when you are done: the file appearing is how \
-             your reply is collected. Do not answer in the terminal.\n\n\
-             The file starts with this header (every line in it is optional):\n\
-             ---\n\
-             issues: [A]          # the issues your reply is about\n\
-             reply_to: [m1]       # the messages you answer, by their [m…] id\n\
-             stance: {{A: against}} # your position per issue: for, against, neutral or unknown\n\
-             ---\n\
-             Then your reply.\n\n\
-             Issue ids: {}\n",
-                reply_path.display(),
-                issue_ids(session)
-            );
-        },
+        |out, _| write_panelist_tail(out, session, to, round, question, reply_path),
     )
+}
+
+/// Builds panelist briefs for `round` together, sharing the identical topic,
+/// issue tree, delta and message sections across panelists that saw the same
+/// previous brief baseline.
+pub fn panelist_briefs(
+    session: &Session,
+    round: RoundNo,
+    items: &[(&PartId, &str, &Path)],
+) -> Vec<Brief> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+    if items.len() == 1 {
+        let (to, question, reply_path) = items[0];
+        return vec![panelist_brief(session, to, round, question, reply_path)];
+    }
+
+    let mut prefix = String::with_capacity(session.issues.issues.len() * 128 + 512);
+    section_topic(&mut prefix, PANELIST_SECTIONS[0], session, round);
+    section_tree(&mut prefix, PANELIST_SECTIONS[1], session);
+
+    let through = session.messages.last().map(|m| m.id.clone());
+    // Cache rendered sections 3..=5 per distinct `(base_rev, since)` key; in
+    // normal rounds every panelist shares one entry.
+    let mut middle_cache: Vec<(Option<u64>, Option<&super::types::MessageId>, String)> =
+        Vec::with_capacity(1);
+    let mut out = Vec::with_capacity(items.len());
+
+    for &(to, question, reply_path) in items {
+        let previous = session.previous_brief(to, round);
+        let base_rev = previous.map(|b| b.base_rev);
+        let since = previous.and_then(|b| b.through.as_ref());
+        let mid_idx = match middle_cache
+            .iter()
+            .position(|(b, s, _)| *b == base_rev && *s == since)
+        {
+            Some(idx) => idx,
+            None => {
+                let messages = session.messages_after(since);
+                let mut mid = String::with_capacity(estimate_messages_bytes(messages) + 512);
+                section_delta(&mut mid, PANELIST_SECTIONS[2], session, base_rev);
+                section_messages(&mut mid, PANELIST_SECTIONS[3], session, messages);
+                section_interventions(&mut mid, PANELIST_SECTIONS[4], messages);
+                middle_cache.push((base_rev, since, mid));
+                middle_cache.len() - 1
+            }
+        };
+        let mid = &middle_cache[mid_idx].2;
+        let mut body = String::with_capacity(prefix.len() + mid.len() + question.len() + 1024);
+        body.push_str(&prefix);
+        body.push_str(mid);
+        write_panelist_tail(&mut body, session, to, round, question, reply_path);
+        out.push(Brief {
+            to: to.clone(),
+            base_rev: session.rev,
+            since: since.cloned(),
+            through: through.clone(),
+            body: finish_body(body),
+            reply_path: reply_path.to_owned(),
+            receipt: Receipt::default(),
+        });
+    }
+    out
 }
 
 /// The moderator's summarize brief for `round`.
@@ -396,16 +549,22 @@ pub fn moderator_brief(session: &Session, round: RoundNo, reply_path: &Path) -> 
             for part in session.panelist_ids() {
                 let reply = session.messages.iter().rev().find(|m| {
                     m.round == round
-                        && m.author == Author::Part(part.clone())
+                        && matches!(&m.author, Author::Part(id) if id == part)
                         && matches!(m.kind, MsgKind::Reply | MsgKind::Argument)
                 });
                 let receipt = this.and_then(|r| r.brief(part)).map(|b| &b.receipt);
-                let status = match (reply, receipt.and_then(|r| r.failed.as_deref())) {
-                    (Some(reply), _) => format!("replied in {} (full text in section 4)", reply.id),
-                    (None, Some(why)) => format!("no reply: {why}"),
-                    (None, None) => "no reply".to_owned(),
-                };
-                let _ = writeln!(out, "- {part}: {status}");
+                let _ = write!(out, "- {part}: ");
+                match (reply, receipt.and_then(|r| r.failed.as_deref())) {
+                    (Some(reply), _) => {
+                        let _ = writeln!(out, "replied in {} (full text in section 4)", reply.id);
+                    }
+                    (None, Some(why)) => {
+                        let _ = writeln!(out, "no reply: {why}");
+                    }
+                    (None, None) => {
+                        out.push_str("no reply\n");
+                    }
+                }
             }
             let debate = this
                 .and_then(|r| r.debate())
@@ -414,23 +573,26 @@ pub fn moderator_brief(session: &Session, round: RoundNo, reply_path: &Path) -> 
                 let exchanges = session
                     .rounds
                     .iter()
-                    .filter(|r| r.no <= round && r.kind == RoundKind::Debate(debate.id.clone()))
+                    .filter(|r| {
+                        r.no <= round
+                            && matches!(&r.kind, RoundKind::Debate(id) if id == &debate.id)
+                    })
                     .count();
-                let names = |side: &[PartId]| {
-                    side.iter()
-                        .map(|p| p.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                };
-                let _ = writeln!(
-                    out,
-                    "Debate {} on issue {}: pro {} · con {} · exchange {exchanges} of {}.",
-                    debate.id,
-                    debate.issue,
-                    names(&debate.pro),
-                    names(&debate.con),
-                    debate.max_exchanges
-                );
+                let _ = write!(out, "Debate {} on issue {}: pro ", debate.id, debate.issue);
+                for (i, p) in debate.pro.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(p.as_str());
+                }
+                out.push_str(" · con ");
+                for (i, p) in debate.con.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(p.as_str());
+                }
+                let _ = writeln!(out, " · exchange {exchanges} of {}.", debate.max_exchanges);
                 if exchanges >= usize::from(debate.max_exchanges)
                     || rounds_left(session, round) == Some(0)
                 {
@@ -445,7 +607,6 @@ pub fn moderator_brief(session: &Session, round: RoundNo, reply_path: &Path) -> 
 
             out.push_str(MODERATOR_SECTIONS[6]);
             out.push('\n');
-            let panel: Vec<&str> = session.panelist_ids().map(|p| p.as_str()).collect();
             // A debate round may end in a verdict; any other may propose one.
             let last = rounds_left(session, round) == Some(0);
             let (optional, rule) = if debate.is_some() {
@@ -491,26 +652,32 @@ pub fn moderator_brief(session: &Session, round: RoundNo, reply_path: &Path) -> 
              {}{}\
              \x20 \"close\": false }}\n\n\
              {} Rules:\n\
-             - issue ids: 1-16 letters, digits, '-' or '_'; existing: {}\n\
+             - issue ids: 1-16 letters, digits, '-' or '_'; existing: ",
+                reply_path.display(),
+                optional,
+                conclusion,
+                required,
+            );
+            write_issue_ids(out, session);
+            out.push_str(
+                "\n\
              - states: open, contested, agreed, conditional, deferred\n\
              - stance pos: for, against, neutral, unknown; \"basis\" is a message id from section 4\n\
              - minutes sections: decisions, contested, open_questions, actions\n\
-             - panelists (for questions, stances and debate sides): {}\n\
+             - panelists (for questions, stances and debate sides): ",
+            );
+            write_panelist_list(out, session);
+            let _ = write!(
+                out,
+                "\n\
              - a panelist with no question gets a default one\n\
-             - {}\n\
+             - {rule}\n\
              - conclusion: your answer to the topic, deciding it yourself where the panel \
              did not agree; it ends the discussion. Required in the last round, unless \
              \"round_limit\" raises the limit past it\n\
              - round_limit: a new round limit, only as section 6 allows; it replaces the \
              current one for the rest of the discussion\n\
              - close: true ends the discussion and needs a \"conclusion\"\n",
-                reply_path.display(),
-                optional,
-                conclusion,
-                required,
-                issue_ids(session),
-                panel.join(", "),
-                rule,
             );
         },
     )
@@ -910,5 +1077,156 @@ mod tests {
             default_question(&s, &RoundKind::Open, &claude),
             DEFAULT_QUESTION
         );
+    }
+
+    #[test]
+    fn brief_formatting_preserves_exact_sections_metadata_and_deltas() {
+        let mut s = session();
+        start(&mut s, 1, RoundKind::Open);
+        reduce::apply(
+            &mut s,
+            &[
+                Event::IssueChanged {
+                    round: 1,
+                    op: IssueOp::Add {
+                        id: IssueId::new("A"),
+                        parent: None,
+                        title: "Storage".into(),
+                    },
+                },
+                Event::IssueChanged {
+                    round: 1,
+                    op: IssueOp::Add {
+                        id: IssueId::new("A1"),
+                        parent: Some(IssueId::new("A")),
+                        title: "Durability".into(),
+                    },
+                },
+            ],
+        )
+        .unwrap();
+        let claude_r1 = panelist_brief(&s, &part("claude"), 1, "Q1", Path::new("/r1/claude.md"));
+        issue(&claude_r1, &mut s, 1);
+
+        let reply = Message {
+            id: s.next_message_id(0),
+            round: 1,
+            author: Author::Part(part("claude")),
+            kind: MsgKind::Reply,
+            issues: vec![IssueId::new("A"), IssueId::new("A1")],
+            reply_to: vec![],
+            to: vec![part("codex")],
+            debate: None,
+            body: "Line one\nLine two".into(),
+            at: 1,
+        };
+        let intervention = Message {
+            id: s.next_message_id(1),
+            round: 1,
+            author: Author::User,
+            kind: MsgKind::Intervention,
+            issues: vec![],
+            reply_to: vec![MessageId::nth(1)],
+            to: vec![part("claude"), part("codex")],
+            debate: None,
+            body: "Check latency".into(),
+            at: 2,
+        };
+        reduce::apply(
+            &mut s,
+            &[
+                Event::MessagePosted { message: reply },
+                Event::MessagePosted {
+                    message: intervention,
+                },
+                Event::IssueChanged {
+                    round: 1,
+                    op: IssueOp::SetStance {
+                        id: IssueId::new("A"),
+                        part: part("claude"),
+                        pos: Position::For,
+                        basis: MessageId::nth(1),
+                    },
+                },
+            ],
+        )
+        .unwrap();
+
+        let mod_r1 = moderator_brief(&s, 1, Path::new("/r1/mod.json"));
+        assert!(mod_r1.body.ends_with('\n'));
+        assert!(!mod_r1.body.ends_with("\n\n"));
+        assert!(mod_r1.body.contains(
+            "### [m1] R1 · claude · reply · issues: A, A1 · to: codex\nLine one\nLine two\n"
+        ));
+        assert!(mod_r1.body.contains(
+            "### [m2] R1 · user · intervention · ↪ m1 · to: claude, codex\nCheck latency\n"
+        ));
+        assert!(
+            mod_r1
+                .body
+                .contains("- [m2] to claude, codex: Check latency\n")
+        );
+        assert!(
+            mod_r1
+                .body
+                .contains("- claude: replied in m1 (full text in section 4)\n")
+        );
+        assert!(mod_r1.body.contains("- codex: no reply\n"));
+        issue(&mod_r1, &mut s, 1);
+
+        start(&mut s, 2, RoundKind::Open);
+        let claude_r2 = panelist_brief(&s, &part("claude"), 2, "Q2", Path::new("/r2/claude.md"));
+        let codex_r2 = panelist_brief(&s, &part("codex"), 2, "Q2x", Path::new("/r2/codex.md"));
+        assert!(
+            claude_r2
+                .body
+                .contains("changed: [A] Storage — open · claude: for (m1), codex: no stance\n")
+        );
+        assert!(
+            codex_r2
+                .body
+                .contains("(this is your first brief: everything in it is new to you)")
+        );
+        assert!(claude_r2.body.ends_with('\n'));
+        assert!(!claude_r2.body.ends_with("\n\n"));
+
+        // Batch `panelist_briefs` must match per-panelist `panelist_brief`
+        // byte-for-byte both when panelists have divergent baselines (r2 here:
+        // claude had an r1 brief, codex did not) and when they share one.
+        let p_claude = part("claude");
+        let p_codex = part("codex");
+        let batch_divergent = panelist_briefs(
+            &s,
+            2,
+            &[
+                (&p_claude, "Q2", Path::new("/r2/claude.md")),
+                (&p_codex, "Q2x", Path::new("/r2/codex.md")),
+            ],
+        );
+        assert_eq!(batch_divergent, vec![claude_r2.clone(), codex_r2.clone()]);
+
+        issue(&claude_r2, &mut s, 2);
+        issue(&codex_r2, &mut s, 2);
+        post(
+            &mut s,
+            2,
+            Author::Part(part("codex")),
+            MsgKind::Reply,
+            "Round 2 body",
+        );
+        start(&mut s, 3, RoundKind::Open);
+        let expected_shared = vec![
+            panelist_brief(&s, &p_claude, 3, "Q3a", Path::new("/r3/claude.md")),
+            panelist_brief(&s, &p_codex, 3, "Q3b", Path::new("/r3/codex.md")),
+        ];
+        let batch_shared = panelist_briefs(
+            &s,
+            3,
+            &[
+                (&p_claude, "Q3a", Path::new("/r3/claude.md")),
+                (&p_codex, "Q3b", Path::new("/r3/codex.md")),
+            ],
+        );
+        assert_eq!(batch_shared, expected_shared);
     }
 }

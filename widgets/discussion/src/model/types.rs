@@ -1,7 +1,7 @@
 //! The discussion's state. Everything here is the fold of the event log
 //! (see `reduce`); nothing is mutated any other way.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::PathBuf;
 
@@ -385,6 +385,10 @@ impl IssueTree {
         self.get(id).is_some()
     }
 
+    pub fn contains_str(&self, id: &str) -> bool {
+        self.issues.iter().any(|issue| issue.id.as_str() == id)
+    }
+
     pub fn roots(&self) -> impl Iterator<Item = &Issue> {
         self.issues.iter().filter(|issue| issue.parent.is_none())
     }
@@ -398,20 +402,41 @@ impl IssueTree {
     /// Every issue depth-first with its depth (0 for a root), the order the
     /// tree is drawn and written into briefs in.
     pub fn walk(&self) -> Vec<(usize, &Issue)> {
+        let n = self.issues.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        let mut by_id: HashMap<&str, usize> = HashMap::with_capacity(n);
+        for (idx, issue) in self.issues.iter().enumerate() {
+            by_id.insert(issue.id.as_str(), idx);
+        }
+        let mut roots = Vec::new();
+        let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (idx, issue) in self.issues.iter().enumerate() {
+            match &issue.parent {
+                None => roots.push(idx),
+                Some(parent) => {
+                    if let Some(&pidx) = by_id.get(parent.as_str()) {
+                        children[pidx].push(idx);
+                    }
+                }
+            }
+        }
         fn visit<'a>(
-            tree: &'a IssueTree,
-            issue: &'a Issue,
+            issues: &'a [Issue],
+            children: &[Vec<usize>],
+            idx: usize,
             depth: usize,
             out: &mut Vec<(usize, &'a Issue)>,
         ) {
-            out.push((depth, issue));
-            for child in tree.children(&issue.id) {
-                visit(tree, child, depth + 1, out);
+            out.push((depth, &issues[idx]));
+            for &child in &children[idx] {
+                visit(issues, children, child, depth + 1, out);
             }
         }
-        let mut out = Vec::with_capacity(self.issues.len());
-        for root in self.roots() {
-            visit(self, root, 0, &mut out);
+        let mut out = Vec::with_capacity(n);
+        for root in roots {
+            visit(&self.issues, &children, root, 0, &mut out);
         }
         out
     }
@@ -807,28 +832,70 @@ impl Session {
     }
 
     pub fn round(&self, no: RoundNo) -> Option<&Round> {
+        if let Some(idx) = no.checked_sub(1)
+            && let Some(round) = self.rounds.get(idx as usize)
+            && round.no == no
+        {
+            return Some(round);
+        }
         self.rounds.iter().find(|round| round.no == no)
     }
 
     pub fn round_mut(&mut self, no: RoundNo) -> Option<&mut Round> {
+        if let Some(idx) = no.checked_sub(1)
+            && self.rounds.get(idx as usize).is_some_and(|r| r.no == no)
+        {
+            return self.rounds.get_mut(idx as usize);
+        }
         self.rounds.iter_mut().find(|round| round.no == no)
     }
 
+    fn debate_index(&self, id: &DebateId) -> Option<usize> {
+        if let Some(idx) = id
+            .as_str()
+            .strip_prefix('d')
+            .and_then(|s| s.parse::<usize>().ok())
+            .and_then(|seq| seq.checked_sub(1))
+            && self.debates.get(idx).is_some_and(|d| &d.id == id)
+        {
+            return Some(idx);
+        }
+        self.debates.iter().position(|debate| &debate.id == id)
+    }
+
     pub fn debate(&self, id: &DebateId) -> Option<&Debate> {
-        self.debates.iter().find(|debate| &debate.id == id)
+        self.debate_index(id).map(|i| &self.debates[i])
     }
 
     pub fn debate_mut(&mut self, id: &DebateId) -> Option<&mut Debate> {
-        self.debates.iter_mut().find(|debate| &debate.id == id)
+        self.debate_index(id).map(|i| &mut self.debates[i])
+    }
+
+    pub fn message_by_str(&self, id: &str) -> Option<&Message> {
+        self.message_index_by_str(id).map(|i| &self.messages[i])
     }
 
     pub fn message(&self, id: &MessageId) -> Option<&Message> {
-        self.messages.iter().find(|message| &message.id == id)
+        self.message_index(id).map(|i| &self.messages[i])
+    }
+
+    fn message_index_by_str(&self, id: &str) -> Option<usize> {
+        if let Some(idx) = id
+            .strip_prefix('m')
+            .and_then(|s| s.parse::<usize>().ok())
+            .and_then(|seq| seq.checked_sub(1))
+            && self.messages.get(idx).is_some_and(|m| m.id.as_str() == id)
+        {
+            return Some(idx);
+        }
+        self.messages
+            .iter()
+            .position(|message| message.id.as_str() == id)
     }
 
     /// The position of `id` in the log.
     pub fn message_index(&self, id: &MessageId) -> Option<usize> {
-        self.messages.iter().position(|message| &message.id == id)
+        self.message_index_by_str(id.as_str())
     }
 
     /// Every message after `since` (all of them when `None`).
@@ -922,5 +989,119 @@ mod tests {
         let back: Participant =
             serde_json::from_str(&serde_json::to_string(&part).unwrap()).unwrap();
         assert_eq!(back, part);
+    }
+
+    #[test]
+    fn issue_tree_walk_and_session_lookups_handle_sequential_and_nonsequential_ids() {
+        let mut tree = IssueTree::default();
+        for (id, parent) in [
+            ("A", None),
+            ("B", None),
+            ("A1", Some("A")),
+            ("A2", Some("A")),
+            ("A1a", Some("A1")),
+            ("B1", Some("B")),
+        ] {
+            tree.issues.push(Issue {
+                id: IssueId::new(id),
+                parent: parent.map(IssueId::new),
+                title: id.into(),
+                state: IssueState::Open,
+                stances: Default::default(),
+                opened_in: 1,
+                added_rev: 1,
+                changed_rev: 1,
+                history: vec![(1, IssueState::Open)],
+            });
+        }
+        let walked: Vec<(usize, &str)> = tree
+            .walk()
+            .into_iter()
+            .map(|(d, i)| (d, i.id.as_str()))
+            .collect();
+        assert_eq!(
+            walked,
+            vec![
+                (0, "A"),
+                (1, "A1"),
+                (2, "A1a"),
+                (1, "A2"),
+                (0, "B"),
+                (1, "B1"),
+            ]
+        );
+
+        let p = |id: &str, role| Participant {
+            id: PartId::new(id),
+            kind: AgentKind::Claude,
+            role,
+            pane_id: None,
+            setup: Default::default(),
+        };
+        let msg = |id: &str| Message {
+            id: MessageId::new(id),
+            round: 1,
+            author: Author::User,
+            kind: MsgKind::Intervention,
+            issues: vec![],
+            reply_to: vec![],
+            to: vec![],
+            debate: None,
+            body: id.into(),
+            at: 0,
+        };
+        let round = |no: RoundNo| Round {
+            no,
+            kind: RoundKind::Open,
+            phase: Phase::Closed,
+            started_at: 0,
+            briefs: vec![],
+            moderator_brief: None,
+            outcome: None,
+        };
+        let debate = |id: &str| Debate {
+            id: DebateId::new(id),
+            issue: IssueId::new("A"),
+            pro: vec![],
+            con: vec![],
+            max_exchanges: 2,
+            status: DebateStatus::Closed,
+            turns: vec![],
+            verdict: None,
+        };
+        let mut session = Session {
+            id: SessionId::new("s"),
+            topic: "t".into(),
+            workdir: None,
+            max_rounds: None,
+            user_max_rounds: None,
+            rev: 1,
+            created_at: 0,
+            moderator: p("noa", Role::Moderator),
+            panelists: vec![p("claude", Role::Panelist)],
+            issues: tree,
+            minutes: Default::default(),
+            messages: vec![msg("m1"), msg("m2"), msg("custom")],
+            rounds: vec![round(1), round(2), round(5)],
+            debates: vec![debate("d1"), debate("d9")],
+            closed: false,
+        };
+        assert_eq!(session.message_index(&MessageId::new("m1")), Some(0));
+        assert_eq!(session.message_index(&MessageId::new("m2")), Some(1));
+        assert_eq!(session.message_index(&MessageId::new("custom")), Some(2));
+        assert_eq!(session.message_index(&MessageId::new("m99")), None);
+        assert_eq!(session.round(1).map(|r| r.no), Some(1));
+        assert_eq!(session.round(5).map(|r| r.no), Some(5));
+        assert_eq!(session.round(3), None);
+        assert_eq!(session.round_mut(5).map(|r| r.no), Some(5));
+        assert_eq!(
+            session.debate(&DebateId::new("d1")).map(|d| d.id.as_str()),
+            Some("d1")
+        );
+        assert_eq!(
+            session.debate(&DebateId::new("d9")).map(|d| d.id.as_str()),
+            Some("d9")
+        );
+        assert_eq!(session.debate(&DebateId::new("d2")), None);
     }
 }

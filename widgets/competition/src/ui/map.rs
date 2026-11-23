@@ -4,6 +4,8 @@
 //! Positions come from `competition::model::map::layout`; this module draws
 //! them.
 
+use std::collections::HashMap;
+
 use noa_gpui_core::style::{
     AlignItems, FlexDirection, Position, Rect as LayoutRect, Size as LayoutSize, auto, length,
 };
@@ -152,6 +154,11 @@ pub(super) fn insert(
         },
     );
 
+    let histories: HashMap<&PartId, Vec<(RoundNo, u8)>> = order
+        .iter()
+        .map(|part| (part, session.score_history(part)))
+        .collect();
+
     for node in &map.nodes {
         match &node.kind {
             NodeKind::Request => {
@@ -230,7 +237,9 @@ pub(super) fn insert(
                     RoundKind::Reveal => (format!("R{round} 👁"), Tone::Accent),
                 };
                 tag(tree, head, label, tone);
-                if let Some(score) = score_label(&session.score_history(part), *round) {
+                if let Some(history) = histories.get(part)
+                    && let Some(score) = score_label(history, *round)
+                {
                     tag(tree, head, score, Tone::Success);
                 }
                 tree.insert(

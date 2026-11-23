@@ -12,6 +12,7 @@ mod timeline;
 
 use std::path::PathBuf;
 use std::process::Command as OsCommand;
+use std::sync::Arc;
 
 use noa_gpui_core::style::{
     AlignItems, FlexDirection, LengthPercentage, Overflow, Point as LayoutPoint,
@@ -85,7 +86,7 @@ pub struct Competition {
     tree: UiTree,
     source: Source,
     link: Link,
-    session: Option<Session>,
+    session: Option<Arc<Session>>,
     artifact_root: Option<PathBuf>,
     tab: CenterTab,
     selected_round: Option<RoundNo>,
@@ -111,7 +112,12 @@ pub struct Competition {
 
 impl Competition {
     pub fn demo() -> Self {
-        Self::build(Source::Demo, Link::Live, Some(crate::demo::session()), None)
+        Self::build(
+            Source::Demo,
+            Link::Live,
+            Some(Arc::new(crate::demo::session())),
+            None,
+        )
     }
 
     pub fn live(channel: Channel) -> Self {
@@ -130,7 +136,7 @@ impl Competition {
     fn build(
         source: Source,
         link: Link,
-        session: Option<Session>,
+        session: Option<Arc<Session>>,
         artifact_root: Option<PathBuf>,
     ) -> Self {
         let mut tree = UiTree::new();
@@ -452,9 +458,18 @@ impl Competition {
                 self.artifact_root = snapshot.artifact_root;
             }
         }
-        if self.built.as_ref() != Some(&self.built_key()) {
-            self.rebuild(text);
+        let next = self.built_key();
+        if let Some(prev) = &self.built {
+            if prev == &next {
+                return;
+            }
+            if prev.0 == next.0 && prev.1 == next.1 {
+                self.built = Some(next);
+                self.rebuild_progress(text);
+                return;
+            }
         }
+        self.rebuild(text);
     }
 
     fn toast(&mut self, message: impl Into<String>) {
@@ -829,7 +844,8 @@ mod tests {
                 sub.body = "- a long line of a submission report\n".repeat(80);
             }
         }
-        let mut screen = Competition::build(Source::Demo, Link::Live, Some(session), None);
+        let mut screen =
+            Competition::build(Source::Demo, Link::Live, Some(Arc::new(session)), None);
         let mut text = TextStore::new(Default::default());
         screen.prepare(Size::new(1440.0, 900.0), &mut text);
 
@@ -843,5 +859,99 @@ mod tests {
         for rect in buttons {
             assert!(rect.bottom() < 900.0, "{rect:?}");
         }
+    }
+
+    #[test]
+    fn minute_tick_updates_progress_and_preserves_actions() {
+        let mut session = crate::demo::session();
+        session.closed = false;
+        let last = session.rounds.len() - 1;
+        session.rounds[last].phase = Phase::Competing;
+        session.rounds[last].briefs[0].receipt.sent = Some(system_now().saturating_sub(120_000));
+        session.rounds[last].briefs[0].receipt.replied = None;
+        session.rounds[last].briefs[0].receipt.failed = None;
+
+        let mut screen =
+            Competition::build(Source::Demo, Link::Live, Some(Arc::new(session)), None);
+        let mut text = TextStore::new(Default::default());
+        screen.prepare(Size::new(1440.0, 900.0), &mut text);
+        let actions_before: Vec<Action> = screen.actions.iter().map(|(_, a)| a.clone()).collect();
+        let progress_before = screen.tree.children(screen.progress_host).to_vec();
+        let left_before = screen.tree.children(screen.left_host).to_vec();
+        let center_before = screen.tree.children(screen.center_host).to_vec();
+        let right_before = screen.tree.children(screen.right_host).to_vec();
+
+        if let Some((_, _, minute)) = &mut screen.built {
+            *minute = minute.map(|m| m.saturating_sub(1));
+        }
+        screen.poll_live(&mut text);
+        screen.prepare(Size::new(1440.0, 900.0), &mut text);
+
+        let actions_after: Vec<Action> = screen.actions.iter().map(|(_, a)| a.clone()).collect();
+        assert_eq!(actions_after, actions_before);
+        assert_ne!(
+            screen.tree.children(screen.progress_host),
+            progress_before.as_slice(),
+            "progress strip must refresh on minute tick"
+        );
+        assert_eq!(
+            screen.tree.children(screen.left_host),
+            left_before.as_slice()
+        );
+        assert_eq!(
+            screen.tree.children(screen.center_host),
+            center_before.as_slice()
+        );
+        assert_eq!(
+            screen.tree.children(screen.right_host),
+            right_before.as_slice()
+        );
+    }
+
+    #[test]
+    #[ignore = "perf probe: times competition UI minute-tick poll_live on 10-round session"]
+    fn probe_ui_minute_tick() {
+        let mut session = crate::demo::session();
+        let base_round = session.rounds.last().unwrap().clone();
+        while session.rounds.len() < 10 {
+            let mut r = base_round.clone();
+            r.no = session.rounds.len() as RoundNo + 1;
+            for sub in r.submissions.values_mut() {
+                sub.body = "Detailed evaluation and design report paragraph for performance measurement.\n"
+                    .repeat(280);
+            }
+            session.rounds.push(r);
+        }
+        session.closed = false;
+        let last = session.rounds.len() - 1;
+        session.rounds[last].phase = Phase::Competing;
+        session.rounds[last].briefs[0].receipt.sent = Some(system_now().saturating_sub(180_000));
+        session.rounds[last].briefs[0].receipt.replied = None;
+        session.rounds[last].briefs[0].receipt.failed = None;
+
+        let mut screen =
+            Competition::build(Source::Demo, Link::Live, Some(Arc::new(session)), None);
+        let mut text = TextStore::new(Default::default());
+        let viewport = Size::new(1440.0, 900.0);
+        screen.prepare(viewport, &mut text);
+
+        let iters = 20usize;
+        let mut times_us = Vec::with_capacity(iters);
+        for _ in 0..iters {
+            if let Some((_, _, minute)) = &mut screen.built {
+                *minute = minute.map(|m| m.saturating_sub(1));
+            }
+            let t0 = std::time::Instant::now();
+            screen.poll_live(&mut text);
+            screen.prepare(viewport, &mut text);
+            times_us.push(t0.elapsed().as_secs_f64() * 1_000_000.0);
+        }
+        times_us.sort_by(|a, b| a.total_cmp(b));
+        println!(
+            "competition ui_minute_tick (10r x 3 x 20KB, n={iters}): median={:.1} us  min={:.1} us  max={:.1} us",
+            times_us[iters / 2],
+            times_us[0],
+            times_us[iters - 1]
+        );
     }
 }

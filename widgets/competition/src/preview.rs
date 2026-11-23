@@ -9,10 +9,14 @@
 //! `index.html` and inlines the local stylesheets, scripts, images and fonts it
 //! references, so the viewer can frame the entry exactly as submitted.
 
+use std::borrow::Cow;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::rc::Rc;
 
 /// Directory (inside a round snapshot) holding the generated preview. It
 /// starts with a dot, so the snapshot copy never lists it as an artifact.
@@ -48,10 +52,7 @@ pub fn write(snapshot_dir: &Path) -> io::Result<Option<Preview>> {
         return Ok(None);
     }
     let html = fs::read_to_string(&page)?;
-    let ctx = Ctx {
-        root: snapshot_dir,
-        issues: Default::default(),
-    };
+    let ctx = Ctx::new(snapshot_dir);
     let inlined = inline_html(&html, &ctx, Path::new(""));
     let out = preview_path(snapshot_dir);
     if let Some(parent) = out.parent() {
@@ -96,16 +97,15 @@ fn resolve(ctx: &Ctx, base: &Path, reference: &str) -> Option<PathBuf> {
         }
     }
     let full = ctx.root.join(&rel);
-    match fs::symlink_metadata(&full) {
-        Ok(meta) if meta.is_file() && meta.len() <= MAX_INLINE_FILE_BYTES => Some(full),
-        Ok(meta) if meta.is_file() => {
+    match ctx.file_len(&full) {
+        Some(len) if len <= MAX_INLINE_FILE_BYTES => Some(full),
+        Some(len) => {
             ctx.note(format!(
-                "{reference}: {} bytes, over the {MAX_INLINE_FILE_BYTES}-byte inline limit (left as a link, which the viewer cannot load)",
-                meta.len()
+                "{reference}: {len} bytes, over the {MAX_INLINE_FILE_BYTES}-byte inline limit (left as a link, which the viewer cannot load)",
             ));
             None
         }
-        _ => {
+        None => {
             ctx.note(format!("{reference}: file not found"));
             None
         }
@@ -115,15 +115,54 @@ fn resolve(ctx: &Ctx, base: &Path, reference: &str) -> Option<PathBuf> {
 /// What inlining works against, and what it could not inline.
 struct Ctx<'a> {
     root: &'a Path,
-    issues: std::cell::RefCell<Vec<String>>,
+    issues: RefCell<Vec<String>>,
+    /// Cached `symlink_metadata` file sizes (`None` for missing or non-file).
+    meta: RefCell<HashMap<PathBuf, Option<u64>>>,
+    /// Cached `data:` URIs per resolved path so repeated assets are read and
+    /// base64-encoded once per preview build.
+    data_uris: RefCell<HashMap<PathBuf, Option<Rc<str>>>>,
 }
 
-impl Ctx<'_> {
+impl<'a> Ctx<'a> {
+    fn new(root: &'a Path) -> Self {
+        Self {
+            root,
+            issues: RefCell::new(Vec::new()),
+            meta: RefCell::new(HashMap::new()),
+            data_uris: RefCell::new(HashMap::new()),
+        }
+    }
+
     fn note(&self, issue: String) {
         let mut issues = self.issues.borrow_mut();
         if !issues.contains(&issue) {
             issues.push(issue);
         }
+    }
+
+    fn file_len(&self, path: &Path) -> Option<u64> {
+        if let Some(&cached) = self.meta.borrow().get(path) {
+            return cached;
+        }
+        let len = match fs::symlink_metadata(path) {
+            Ok(meta) if meta.is_file() => Some(meta.len()),
+            _ => None,
+        };
+        self.meta.borrow_mut().insert(path.to_path_buf(), len);
+        len
+    }
+
+    fn data_uri(&self, path: &Path) -> Option<Rc<str>> {
+        if let Some(cached) = self.data_uris.borrow().get(path) {
+            return cached.clone();
+        }
+        let uri = fs::read(path)
+            .ok()
+            .map(|bytes| Rc::<str>::from(data_uri_from_bytes(mime_for(path), &bytes)));
+        self.data_uris
+            .borrow_mut()
+            .insert(path.to_path_buf(), uri.clone());
+        uri
     }
 }
 
@@ -178,34 +217,58 @@ fn is_page(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm"))
 }
 
-fn data_uri(path: &Path) -> Option<String> {
-    let bytes = fs::read(path).ok()?;
-    Some(format!("data:{};base64,{}", mime_for(path), base64(&bytes)))
+fn data_uri_from_bytes(mime: &str, bytes: &[u8]) -> String {
+    let encoded_len = bytes.len().div_ceil(3) * 4;
+    let mut out = String::with_capacity(5 + mime.len() + 8 + encoded_len);
+    out.push_str("data:");
+    out.push_str(mime);
+    out.push_str(";base64,");
+    write_base64(&mut out, bytes);
+    out
 }
 
-fn base64(bytes: &[u8]) -> String {
+fn write_base64(out: &mut String, bytes: &[u8]) {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b = [
-            chunk[0],
-            chunk.get(1).copied().unwrap_or(0),
-            chunk.get(2).copied().unwrap_or(0),
-        ];
-        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-        out.push(TABLE[(n >> 18) as usize & 63] as char);
-        out.push(TABLE[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 {
-            TABLE[(n >> 6) as usize & 63] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            TABLE[n as usize & 63] as char
-        } else {
-            '='
-        });
+    let mut buf = Vec::with_capacity(bytes.len().div_ceil(3) * 4);
+    let chunks = bytes.chunks_exact(3);
+    let rem = chunks.remainder();
+    for chunk in chunks {
+        let n = (u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]);
+        buf.extend_from_slice(&[
+            TABLE[((n >> 18) & 63) as usize],
+            TABLE[((n >> 12) & 63) as usize],
+            TABLE[((n >> 6) & 63) as usize],
+            TABLE[(n & 63) as usize],
+        ]);
     }
+    match rem {
+        [b0] => {
+            let n = u32::from(*b0) << 16;
+            buf.extend_from_slice(&[
+                TABLE[((n >> 18) & 63) as usize],
+                TABLE[((n >> 12) & 63) as usize],
+                b'=',
+                b'=',
+            ]);
+        }
+        [b0, b1] => {
+            let n = (u32::from(*b0) << 16) | (u32::from(*b1) << 8);
+            buf.extend_from_slice(&[
+                TABLE[((n >> 18) & 63) as usize],
+                TABLE[((n >> 12) & 63) as usize],
+                TABLE[((n >> 6) & 63) as usize],
+                b'=',
+            ]);
+        }
+        _ => {}
+    }
+    out.push_str(std::str::from_utf8(&buf).expect("base64 output is ASCII"));
+}
+
+#[cfg(test)]
+fn base64(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    write_base64(&mut out, bytes);
     out
 }
 
@@ -320,11 +383,11 @@ fn inline_css_at(css: &str, ctx: &Ctx, base: &Path, depth: usize) -> (Vec<String
         };
         let raw = &tail[..close];
         let target = raw.trim().trim_matches(['"', '\'']);
-        match resolve(ctx, base, target).and_then(|p| data_uri(&p)) {
+        match resolve(ctx, base, target).and_then(|p| ctx.data_uri(&p)) {
             Some(uri) => {
                 out.push('"');
                 out.push_str(&uri);
-                out.push_str(&fragment(target));
+                out.push_str(fragment(target));
                 out.push('"');
             }
             None => match rebase(target, base) {
@@ -426,33 +489,30 @@ fn rebase_srcset(srcset: &str, base: &Path) -> String {
 }
 
 /// The `#fragment` of a reference, kept on its data URI (an SVG view).
-fn fragment(reference: &str) -> String {
-    reference
-        .find('#')
-        .map(|at| reference[at..].trim().to_owned())
-        .unwrap_or_default()
+fn fragment(reference: &str) -> &str {
+    reference.find('#').map_or("", |at| reference[at..].trim())
 }
 
 /// One attribute of a start tag.
-struct Attr {
-    key: String,
+struct Attr<'a> {
+    key: &'a str,
     /// The decoded value; `None` for a bare attribute like `defer`.
-    value: Option<String>,
+    value: Option<Cow<'a, str>>,
     /// The attribute exactly as written, rendered back while it is unchanged
     /// so character references and quoting survive untouched.
-    raw: Option<String>,
+    raw: Option<&'a str>,
 }
 
 /// One parsed start tag: its name and attributes in source order.
-struct Tag {
-    name: String,
-    attrs: Vec<Attr>,
+struct Tag<'a> {
+    name: &'a str,
+    attrs: Vec<Attr<'a>>,
     /// What stood between the last attribute and `>`, such as the ` /` of a
     /// self-closing SVG element, kept so foreign content still nests right.
-    tail: String,
+    tail: &'a str,
 }
 
-impl Tag {
+impl<'a> Tag<'a> {
     fn get(&self, name: &str) -> Option<&str> {
         self.attrs
             .iter()
@@ -475,36 +535,46 @@ impl Tag {
             .iter_mut()
             .find(|a| a.key.eq_ignore_ascii_case(name))
         {
-            slot.value = Some(value);
+            slot.value = Some(Cow::Owned(value));
             slot.raw = None;
         }
     }
 
-    fn render(&self) -> String {
-        let mut out = format!("<{}", self.name);
+    fn write_to(&self, out: &mut String) {
+        out.push('<');
+        out.push_str(self.name);
         for attr in &self.attrs {
             out.push(' ');
-            match (&attr.raw, &attr.value) {
+            match (attr.raw, attr.value.as_deref()) {
                 (Some(raw), _) => out.push_str(raw),
                 (None, Some(value)) => {
-                    out.push_str(&attr.key);
+                    out.push_str(attr.key);
                     out.push_str("=\"");
-                    out.push_str(&value.replace('&', "&amp;").replace('"', "&quot;"));
+                    if value.as_bytes().iter().any(|&b| b == b'&' || b == b'"') {
+                        for ch in value.chars() {
+                            match ch {
+                                '&' => out.push_str("&amp;"),
+                                '"' => out.push_str("&quot;"),
+                                _ => out.push(ch),
+                            }
+                        }
+                    } else {
+                        out.push_str(value);
+                    }
                     out.push('"');
                 }
-                (None, None) => out.push_str(&attr.key),
+                (None, None) => out.push_str(attr.key),
             }
         }
-        out.push_str(&self.tail);
+        out.push_str(self.tail);
         out.push('>');
-        out
     }
 }
 
 /// Parses the start tag at the beginning of `text` (which starts with `<`).
 /// Returns the tag and its byte length, or `None` for anything else
 /// (comments, end tags, doctype, a stray `<`).
-fn parse_tag(text: &str) -> Option<(Tag, usize)> {
+fn parse_tag(text: &str) -> Option<(Tag<'_>, usize)> {
     let bytes = text.as_bytes();
     let mut i = 1;
     let start = i;
@@ -514,7 +584,7 @@ fn parse_tag(text: &str) -> Option<(Tag, usize)> {
     if i == start || !bytes[start].is_ascii_alphabetic() {
         return None;
     }
-    let name = text[start..i].to_owned();
+    let name = &text[start..i];
     let mut attrs = Vec::new();
     loop {
         let gap_start = i;
@@ -525,7 +595,7 @@ fn parse_tag(text: &str) -> Option<(Tag, usize)> {
             return None;
         }
         if bytes[i] == b'>' {
-            let tail = text[gap_start..i].to_owned();
+            let tail = &text[gap_start..i];
             return Some((Tag { name, attrs, tail }, i + 1));
         }
         let key_start = i;
@@ -535,7 +605,7 @@ fn parse_tag(text: &str) -> Option<(Tag, usize)> {
         {
             i += 1;
         }
-        let key = text[key_start..i].to_owned();
+        let key = &text[key_start..i];
         while i < bytes.len() && bytes[i].is_ascii_whitespace() {
             i += 1;
         }
@@ -559,12 +629,12 @@ fn parse_tag(text: &str) -> Option<(Tag, usize)> {
             };
             attrs.push(Attr {
                 value: Some(decode_entities(value)),
-                raw: Some(text[key_start..i].to_owned()),
+                raw: Some(&text[key_start..i]),
                 key,
             });
         } else if !key.is_empty() {
             attrs.push(Attr {
-                raw: Some(key.clone()),
+                raw: Some(key),
                 key,
                 value: None,
             });
@@ -572,35 +642,66 @@ fn parse_tag(text: &str) -> Option<(Tag, usize)> {
     }
 }
 
-fn decode_entities(value: &str) -> String {
-    value
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
+fn decode_entities(value: &str) -> Cow<'_, str> {
+    if !value.contains('&') {
+        return Cow::Borrowed(value);
+    }
+    Cow::Owned(
+        value
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&"),
+    )
 }
 
-/// Keeps inlined script or style text from closing its element early.
-fn escape_raw_text(text: &str, element: &str) -> String {
-    let close = format!("</{element}");
-    let mut out = String::with_capacity(text.len());
+/// Keeps inlined script or style text from closing its element early, writing
+/// directly into `out`.
+fn write_escaped_raw_text(out: &mut String, text: &str, close: &str) {
     let mut rest = text;
-    while let Some(at) = find_ascii_ci(rest, &close) {
+    while let Some(at) = find_ascii_ci(rest, close) {
         out.push_str(&rest[..at]);
         out.push_str("<\\/");
         out.push_str(&rest[at + 2..at + close.len()]);
         rest = &rest[at + close.len()..];
     }
     out.push_str(rest);
+}
+
+#[cfg(test)]
+fn escape_raw_text(text: &str, element: &str) -> String {
+    let close = format!("</{element}");
+    let mut out = String::with_capacity(text.len());
+    write_escaped_raw_text(&mut out, text, &close);
     out
 }
 
 fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
-    haystack
-        .as_bytes()
-        .windows(needle.len())
-        .position(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+    let n = needle.as_bytes();
+    if n.is_empty() {
+        return Some(0);
+    }
+    let h = haystack.as_bytes();
+    if h.len() < n.len() {
+        return None;
+    }
+    let first = n[0];
+    if !first.is_ascii_alphabetic() {
+        let mut offset = 0;
+        while let Some(rel) = haystack[offset..].find(first as char) {
+            let at = offset + rel;
+            if at + n.len() > h.len() {
+                return None;
+            }
+            if h[at..at + n.len()].eq_ignore_ascii_case(n) {
+                return Some(at);
+            }
+            offset = at + 1;
+        }
+        return None;
+    }
+    h.windows(n.len()).position(|w| w.eq_ignore_ascii_case(n))
 }
 
 /// Attributes whose value is a single resource URL to inline as a data URI.
@@ -626,61 +727,62 @@ fn inline_html(html: &str, ctx: &Ctx, base: &Path) -> String {
             continue;
         };
         rest = &rest[len..];
-        let name = tag.name.to_ascii_lowercase();
+        let is_script = tag.name.eq_ignore_ascii_case("script");
+        let is_style = !is_script && tag.name.eq_ignore_ascii_case("style");
         // Raw-text elements: copy their body verbatim (or inline it).
-        if name == "script" || name == "style" {
-            let close = find_ascii_ci(rest, &format!("</{name}")).unwrap_or(rest.len());
+        if is_script || is_style {
+            let close_needle = if is_script { "</script" } else { "</style" };
+            let close = find_ascii_ci(rest, close_needle).unwrap_or(rest.len());
             let body = &rest[..close];
             rest = &rest[close..];
             // A local script stays where it is, so its timing and its order
             // against every other script hold. A deferred, async or module
             // one keeps those attributes with its code as a `data:` URI
             // (inline code would run at once); a plain one is inlined.
-            if name == "script"
-                && let Some(src) = tag.get("src").map(str::to_owned)
-            {
-                let local = resolve(ctx, base, &src)
-                    .and_then(|file| Some((fs::read_to_string(&file).ok()?, file)));
+            if is_script && let Some(src) = tag.get("src").map(str::to_owned) {
+                let local =
+                    resolve(ctx, base, &src).and_then(|file| fs::read_to_string(&file).ok());
                 match local {
-                    Some((code, file)) => {
+                    Some(code) => {
                         let late = tag.has("defer")
                             || tag.has("async")
                             || tag.get("type") == Some("module");
                         if late {
-                            let Some(uri) = data_uri(&file) else {
-                                continue;
-                            };
-                            tag.set("src", uri.replacen(mime_for(&file), "text/javascript", 1));
+                            let uri = data_uri_from_bytes("text/javascript", code.as_bytes());
+                            tag.set("src", uri);
                             tag.remove(&["integrity"]);
-                            out.push_str(&tag.render());
+                            tag.write_to(&mut out);
                             out.push_str(body);
                         } else {
                             tag.remove(&["src", "integrity", "crossorigin"]);
-                            out.push_str(&tag.render());
-                            out.push_str(&escape_raw_text(&code, "script"));
+                            tag.write_to(&mut out);
+                            write_escaped_raw_text(&mut out, &code, "</script");
                         }
                     }
                     None => {
                         if let Some(rebased) = rebase(&src, base) {
                             tag.set("src", rebased);
                         }
-                        out.push_str(&tag.render());
+                        tag.write_to(&mut out);
                         out.push_str(body);
                     }
                 }
                 continue;
             }
-            out.push_str(&tag.render());
-            if name == "style" {
+            tag.write_to(&mut out);
+            if is_style {
                 out.push_str(&inline_css(body, ctx, base));
             } else {
                 out.push_str(body);
             }
             continue;
         }
-        if name == "link" {
-            let rel = tag.get("rel").unwrap_or_default().to_ascii_lowercase();
-            if rel.split_whitespace().any(|r| r == "stylesheet")
+        if tag.name.eq_ignore_ascii_case("link") {
+            let is_stylesheet = tag.get("rel").is_some_and(|rel| {
+                rel.split_whitespace()
+                    .any(|r| r.eq_ignore_ascii_case("stylesheet"))
+            });
+            if is_stylesheet
                 && let Some(file) = tag.get("href").and_then(|href| resolve(ctx, base, href))
                 && let Ok(css) = fs::read_to_string(&file)
             {
@@ -690,21 +792,29 @@ fn inline_html(html: &str, ctx: &Ctx, base: &Path) -> String {
                     .and_then(Path::parent)
                     .map(Path::to_path_buf)
                     .unwrap_or_default();
-                let media = tag
-                    .get("media")
-                    .map(|m| format!(" media=\"{}\"", m.replace('"', "&quot;")))
-                    .unwrap_or_default();
-                out.push_str(&format!(
-                    "<style{media}>{}</style>",
-                    escape_raw_text(&inline_css(&css, ctx, &css_base), "style")
-                ));
+                out.push_str("<style");
+                if let Some(media) = tag.get("media") {
+                    out.push_str(" media=\"");
+                    if media.contains('"') {
+                        out.push_str(&media.replace('"', "&quot;"));
+                    } else {
+                        out.push_str(media);
+                    }
+                    out.push('"');
+                }
+                out.push('>');
+                let inlined_css = inline_css(&css, ctx, &css_base);
+                write_escaped_raw_text(&mut out, &inlined_css, "</style");
+                out.push_str("</style>");
                 continue;
             }
         }
         // Links to other pages stay links; resource URLs become data URIs.
         // Whatever stays a reference is pointed back at the entry, since the
         // copy lives one directory down.
-        let navigates = name == "a" || name == "area" || name == "form";
+        let navigates = tag.name.eq_ignore_ascii_case("a")
+            || tag.name.eq_ignore_ascii_case("area")
+            || tag.name.eq_ignore_ascii_case("form");
         for attr in URL_ATTRS.iter().chain(&["action"]) {
             let Some(value) = tag.get(attr).map(str::to_owned) else {
                 continue;
@@ -713,8 +823,14 @@ fn inline_html(html: &str, ctx: &Ctx, base: &Path) -> String {
                 .then(|| resolve(ctx, base, &value))
                 .flatten()
                 .filter(|p| !is_page(p))
-                .and_then(|p| data_uri(&p))
-                .map(|uri| uri + &fragment(&value));
+                .and_then(|p| ctx.data_uri(&p))
+                .map(|uri| {
+                    let frag = fragment(&value);
+                    let mut full = String::with_capacity(uri.len() + frag.len());
+                    full.push_str(&uri);
+                    full.push_str(frag);
+                    full
+                });
             if let Some(uri) = inlined.or_else(|| rebase(&value, base)) {
                 tag.set(attr, uri);
             }
@@ -731,7 +847,7 @@ fn inline_html(html: &str, ctx: &Ctx, base: &Path) -> String {
                 tag.set("style", inlined);
             }
         }
-        out.push_str(&tag.render());
+        tag.write_to(&mut out);
     }
     out.push_str(rest);
     out
@@ -862,10 +978,7 @@ mod tests {
 
     fn inline(html: &str) -> String {
         let dir = scratch("unit");
-        let ctx = Ctx {
-            root: &dir,
-            issues: Default::default(),
-        };
+        let ctx = Ctx::new(&dir);
         let out = inline_html(html, &ctx, Path::new(""));
         let _ = fs::remove_dir_all(&dir);
         out
@@ -1086,5 +1199,88 @@ mod tests {
             escape_raw_text("a='</script><b>'", "script"),
             "a='<\\/script><b>'"
         );
+        assert_eq!(
+            escape_raw_text("a='</SCRIPT><b></ScRiPt>'", "script"),
+            "a='<\\/SCRIPT><b><\\/ScRiPt>'"
+        );
+    }
+
+    #[test]
+    fn repeated_assets_and_mixed_tags_preserve_exact_output() {
+        let dir = scratch("repeated-pin");
+        fs::create_dir_all(dir.join("styles")).unwrap();
+        fs::write(
+            dir.join("index.html"),
+            r#"<!doctype html><html><head>
+<link rel="stylesheet" href="styles/app.css" media="screen and (min-width: 1px)">
+<script src="plain.js" integrity="sha256-abc" crossorigin="anonymous"></script>
+<script src="late.js" defer integrity="sha256-def"></script>
+<script type="module" src="mod.js"></script>
+<style>.h{background:url('assets/pic.png#top')}</style>
+</head><body>
+<div  class="card"  data-q="a &amp; &quot;b&quot;" style="background:url('assets/pic.png')">
+<img src="assets/pic.png" alt="first">
+<img src="assets/pic.png#v2" alt="second">
+<img src="assets/missing.png">
+<a href="sub.html">next</a>
+<svg><path d="M0 0"/></svg>
+</div>
+</body></html>"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("styles/app.css"),
+            "@import \"base.css\" print;\n.a{background:url('../assets/pic.png')}\n.b{background:url('../assets/pic.png')}\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("styles/base.css"),
+            ".base{background:url('../assets/pic.png')}\n",
+        )
+        .unwrap();
+        fs::write(dir.join("plain.js"), "const x = '</SCRIPT>';").unwrap();
+        fs::write(dir.join("late.js"), "console.log('late');").unwrap();
+        fs::write(dir.join("mod.js"), "export const v = 1;").unwrap();
+        fs::write(
+            dir.join("assets/pic.png"),
+            [0x89, b'P', b'N', b'G', 1, 2, 3],
+        )
+        .unwrap();
+
+        let prev = write(&dir).unwrap().unwrap();
+        assert_eq!(prev.issues, vec!["assets/missing.png: file not found"]);
+        let html = fs::read_to_string(&prev.page).unwrap();
+        let pic_uri = format!(
+            "data:image/png;base64,{}",
+            base64(&[0x89, b'P', b'N', b'G', 1, 2, 3])
+        );
+        let late_uri = format!(
+            "data:text/javascript;base64,{}",
+            base64(b"console.log('late');")
+        );
+        let mod_uri = format!(
+            "data:text/javascript;base64,{}",
+            base64(b"export const v = 1;")
+        );
+        // Expected exact rendered HTML (pinning attribute spacing, escaping, fragments, and inlining).
+        let expected = format!(
+            "<!doctype html><html><head>\n\
+<style media=\"screen and (min-width: 1px)\">@media print {{.base{{background:url(\"{pic_uri}\")}}\n}}\n.a{{background:url(\"{pic_uri}\")}}\n.b{{background:url(\"{pic_uri}\")}}\n</style>\n\
+<script>const x = '<\\/SCRIPT>';</script>\n\
+<script src=\"{late_uri}\" defer></script>\n\
+<script type=\"module\" src=\"{mod_uri}\"></script>\n\
+<style>.h{{background:url(\"{pic_uri}#top\")}}</style>\n\
+</head><body>\n\
+<div class=\"card\" data-q=\"a &amp; &quot;b&quot;\" style=\"background:url(&quot;{pic_uri}&quot;)\">\n\
+<img src=\"{pic_uri}\" alt=\"first\">\n\
+<img src=\"{pic_uri}#v2\" alt=\"second\">\n\
+<img src=\"../assets/missing.png\">\n\
+<a href=\"../sub.html\">next</a>\n\
+<svg><path d=\"M0 0\"/></svg>\n\
+</div>\n\
+</body></html>"
+        );
+        assert_eq!(html, expected);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

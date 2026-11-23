@@ -52,53 +52,84 @@ impl App {
         }
     }
 
-    pub(in crate::app) fn export_scrollback_to_temp_file(&self) {
-        let Some(text) = self.focused_scrollback_text(AppCommand::ExportScrollback) else {
+    pub(in crate::app) fn export_scrollback_to_temp_file(&mut self) {
+        let Some((_, snapshot)) = self.focused_scrollback_snapshot(AppCommand::ExportScrollback)
+        else {
             return;
         };
         let selected_path = match crate::app_actions::choose_scrollback_export_path() {
-            Ok(path) => path,
+            Ok(Some(path)) => path,
+            Ok(None) => return,
             Err(err) => {
                 log::warn!("failed to choose a scrollback export destination: {err}");
                 return;
             }
         };
-        match crate::app_actions::export_scrollback_to_file(&text, selected_path.as_deref()) {
-            Ok(Some(path)) => log::info!("exported scrollback to {}", path.display()),
-            Ok(None) => {}
-            Err(err) => log::warn!("failed to write scrollback to the selected file: {err}"),
-        }
+        self.queue_text_work(
+            move || {
+                let Some(text) = snapshot.into_text() else {
+                    return Ok(None);
+                };
+                crate::app_actions::export_scrollback_to_file(&text, Some(&selected_path))
+            },
+            |_, _, result| match result {
+                Ok(Some(path)) => log::info!("exported scrollback to {}", path.display()),
+                Ok(None) => {}
+                Err(err) => log::warn!("failed to write scrollback to the selected file: {err}"),
+            },
+        );
     }
 
-    pub(in crate::app) fn pipe_scrollback_to_pager(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(text) = self.focused_scrollback_text(AppCommand::PipeScrollbackToPager) else {
+    pub(in crate::app) fn pipe_scrollback_to_pager(&mut self) {
+        let Some((group, snapshot)) =
+            self.focused_scrollback_snapshot(AppCommand::PipeScrollbackToPager)
+        else {
             return;
         };
-        let path = match crate::app_actions::write_scrollback_temp_file(&text) {
-            Ok(path) => path,
-            Err(err) => {
-                log::warn!("failed to export scrollback for pager: {err}");
-                return;
-            }
-        };
-        let command = crate::app_actions::pager_shell_command(&path);
-        match self.spawn_tab(event_loop, SpawnTarget::CurrentWindow) {
-            Ok(window_id) => self.write_pty_bytes(window_id, command.into_bytes()),
-            Err(err) => log::warn!("failed to open pager tab for scrollback: {err:#}"),
-        }
+        let cwd = self.focused_pane_cwd();
+        self.queue_text_work(
+            move || {
+                snapshot
+                    .into_text()
+                    .map(|text| crate::app_actions::write_scrollback_temp_file(&text))
+                    .transpose()
+            },
+            move |app, event_loop, result| {
+                let path = match result {
+                    Ok(Some(path)) => path,
+                    Ok(None) => return,
+                    Err(err) => {
+                        log::warn!("failed to export scrollback for pager: {err}");
+                        return;
+                    }
+                };
+                let command = crate::app_actions::pager_shell_command(&path);
+                if !app.windows.values().any(|state| state.group == group) {
+                    let _ = std::fs::remove_file(path);
+                    return;
+                }
+                match app.spawn_script_tab(event_loop, GroupChoice::Existing(group), cwd) {
+                    Ok(window_id) => app.write_pty_bytes(window_id, command.into_bytes()),
+                    Err(err) => log::warn!("failed to open pager tab for scrollback: {err:#}"),
+                }
+            },
+        );
     }
 
-    fn focused_scrollback_text(&self, command: AppCommand) -> Option<String> {
+    fn focused_scrollback_snapshot(
+        &self,
+        command: AppCommand,
+    ) -> Option<(WindowGroupId, noa_grid::SelectionSnapshot)> {
         let (window_id, pane_id) = self.resolve_pane_command_target(command)?;
-        let text = self
-            .windows
-            .get(&window_id)
-            .and_then(|state| state.surfaces.get(&pane_id))
-            .and_then(|surface| surface.terminal.lock().scrollback_text());
-        if text.is_none() {
-            log::debug!("focused terminal has no scrollback text to export");
-        }
-        text
+        let state = self.windows.get(&window_id)?;
+        let snapshot = state
+            .surfaces
+            .get(&pane_id)?
+            .terminal
+            .lock()
+            .active()
+            .scrollback_text_snapshot()?;
+        Some((state.group, snapshot))
     }
 
     pub(in crate::app) fn handle_font_size_action(&mut self, action: FontSizeAction) {

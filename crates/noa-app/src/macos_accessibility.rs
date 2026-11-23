@@ -300,9 +300,8 @@ mod imp {
 
             #[unsafe(method_id(accessibilitySelectedText))]
             fn selected_text(&self) -> Retained<NSString> {
-                let text = self
-                    .with_terminal(terminal_selection)
-                    .unwrap_or_default();
+                let snapshot = self.with_terminal(|term| term.active().selection_snapshot()).flatten();
+                let text = terminal_selection(snapshot);
                 NSString::from_str(&text)
             }
 

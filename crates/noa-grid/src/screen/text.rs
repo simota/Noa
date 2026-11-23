@@ -512,62 +512,73 @@ impl Screen {
     }
 
     pub fn selected_text(&self) -> Option<String> {
-        let selection = self.selection?;
+        self.selection_snapshot()?.into_text()
+    }
+
+    pub fn selection_snapshot(&self) -> Option<crate::SelectionSnapshot> {
+        Some(self.text_snapshot(self.selection?))
+    }
+
+    /// Menu validation needs only the first row that contributes text.
+    pub fn has_selected_text(&self) -> bool {
+        let Some(selection) = self.selection else {
+            return false;
+        };
         let (start, end) = selection.normalized();
+        let mut wrapped = false;
         let mut text = String::new();
-
-        let mut previous_wrapped = false;
-        let scrollback_len = self.scrollback.len();
-        let mut history_row = Row::new(0);
-        for y in start.y..=end.y {
-            // A row that fell out of storage (stale selection edge) skips,
-            // rather than discarding the rest of the copy.
-            let row = if y < scrollback_len {
-                if !self.scrollback.row_into(y, &mut history_row) {
-                    continue;
-                }
-                &history_row
-            } else {
-                match self.grid.get(y - scrollback_len) {
-                    Some(row) => row,
-                    None => continue,
-                }
-            };
-            let Some(row_end) = row.cells.len().checked_sub(1) else {
-                continue;
-            };
-            let start_x = if y == start.y { start.x as usize } else { 0 }.min(row_end);
-            let end_x = if y == end.y { end.x as usize } else { row_end }.min(row_end);
-
-            if y > start.y && !previous_wrapped {
-                text.push('\n');
+        let stop = end
+            .y
+            .saturating_add(1)
+            .min(self.scrollback_len() + self.grid.len());
+        (start.y..stop).any(|y| {
+            if let Some(row) = self.storage_row(y) {
+                crate::selection::append_selection_row(
+                    start,
+                    end,
+                    y,
+                    &row,
+                    &mut wrapped,
+                    &mut text,
+                );
             }
-            Self::push_selected_row_text(row, start_x, end_x, &mut text);
-            previous_wrapped = row.wrapped;
-        }
+            !text.is_empty()
+        })
+    }
 
-        if text.is_empty() { None } else { Some(text) }
+    fn text_snapshot(&self, selection: Selection) -> crate::SelectionSnapshot {
+        let (start, end) = selection.normalized();
+        let history_len = self.scrollback_len();
+        let stop = end.y.saturating_add(1);
+        let first_live = start.y.max(history_len);
+        crate::SelectionSnapshot {
+            selection,
+            history: (start.y < history_len).then(|| {
+                self.scrollback
+                    .snapshot_range(start.y..stop.min(history_len))
+            }),
+            first_live,
+            live: (first_live..stop.min(history_len + self.grid.len()))
+                .map(|y| self.grid[y - history_len].clone())
+                .collect(),
+        }
     }
 
     /// Plain text for the active screen's retained history followed by the
     /// live grid, using the same cell-to-text rules as selection copy.
     pub fn scrollback_text(&mut self) -> Option<String> {
-        if self.cols == 0 || !self.has_selectable_text() {
+        self.scrollback_text_snapshot()?.into_text()
+    }
+
+    pub fn scrollback_text_snapshot(&self) -> Option<crate::SelectionSnapshot> {
+        let len = self.scrollback_len() + self.grid.len();
+        if len == 0 || self.cols == 0 || !self.has_selectable_text() {
             return None;
         }
-
-        let mut text = String::new();
-        let mut previous_wrapped = false;
-        let mut first_row = true;
-        let scrollback_len = self.scrollback_len();
-        self.for_each_scrollback_row(0..scrollback_len, |_, row| {
-            Self::push_full_row_text(row, &mut text, &mut previous_wrapped, &mut first_row);
-        });
-        for row in &self.grid {
-            Self::push_full_row_text(row, &mut text, &mut previous_wrapped, &mut first_row);
-        }
-
-        if text.is_empty() { None } else { Some(text) }
+        Some(self.text_snapshot(Selection::new(
+            SelectionPoint::new(0, 0),
+            SelectionPoint::new(u16::MAX, len - 1),
+        )))
     }
 
     /// Tail-bounded variant of [`Self::scrollback_text`] (noa-server spec
@@ -593,7 +604,7 @@ impl Screen {
         // Every rendered row's text lives in one buffer (rendered newest
         // chunk first, so not in display order); `tail` holds each kept row's
         // span in it, newest first, with whether it soft-wraps into the next.
-        // Rows with no cells contribute nothing (as in `push_full_row_text`).
+        // Rows with no cells contribute nothing to the full text either.
         let mut buf = String::new();
         let mut tail: Vec<(usize, usize, bool)> = Vec::new();
         let mut start = total;
@@ -666,24 +677,7 @@ impl Screen {
         Some((text, true))
     }
 
-    fn push_full_row_text(
-        row: &Row,
-        text: &mut String,
-        previous_wrapped: &mut bool,
-        first_row: &mut bool,
-    ) {
-        let Some(row_end) = row.cells.len().checked_sub(1) else {
-            return;
-        };
-        if !*first_row && !*previous_wrapped {
-            text.push('\n');
-        }
-        Self::push_selected_row_text(row, 0, row_end, text);
-        *previous_wrapped = row.wrapped;
-        *first_row = false;
-    }
-
-    pub(super) fn push_selected_row_text(
+    pub(crate) fn push_selected_row_text(
         row: &Row,
         start_x: usize,
         end_x: usize,
@@ -989,5 +983,39 @@ impl Screen {
     /// reports on the same snapshot pass.
     pub fn peek_scroll_shift(&self) -> usize {
         self.scroll_shift
+    }
+}
+
+#[cfg(test)]
+mod copy_tests {
+    #[test]
+    fn select_all_copy_does_not_read_history_rows_under_lock() {
+        for history_len in [10_000, 100_000, 1_000_000] {
+            let mut terminal = crate::Terminal::new(noa_core::GridSize::new(2, 1));
+            noa_vt::Stream::new().feed(b"x", &mut terminal);
+            let screen = &mut terminal.primary;
+            screen.scrollback.set_limit_bytes(128 * 1024 * 1024);
+            screen.scrollback.set_limit_lines(history_len);
+            for _ in 0..history_len {
+                screen.scrollback.push_row(&screen.grid[0]);
+            }
+            assert_eq!(screen.scrollback_len(), history_len);
+
+            let terminal = std::sync::Mutex::new(terminal);
+            crate::scrollback::ROW_READS.set(0);
+            let (copy, export) = {
+                let mut term = terminal.lock().unwrap();
+                term.select_all();
+                (
+                    term.active().selection_snapshot().unwrap(),
+                    term.active().scrollback_text_snapshot().unwrap(),
+                )
+            };
+            assert_eq!(crate::scrollback::ROW_READS.get(), 0);
+            drop(terminal);
+            let expected = "x\n".repeat(history_len) + "x";
+            assert_eq!(copy.into_text().unwrap(), expected);
+            assert_eq!(export.into_text().unwrap(), expected);
+        }
     }
 }

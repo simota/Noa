@@ -298,41 +298,41 @@ impl App {
         if self.focused_search_prompt_window().is_none() {
             return false;
         }
-        if self.selection_made_during_search_prompt() {
-            return false;
-        }
         let query = self
             .search_prompt
             .as_ref()
             .map(|session| session.prompt.buffer().to_string())
             .filter(|query| !query.is_empty());
-        if let Some(query) = query {
-            self.write_text_to_clipboard(&query);
+        if let Some(snapshot) = self.selection_during_search_prompt() {
+            self.queue_text_work(
+                move || snapshot.into_text().or(query),
+                |app, _, text| {
+                    if let Some(text) = text {
+                        app.write_text_to_clipboard(&text);
+                    }
+                },
+            );
+        } else if let Some(query) = query {
+            self.after_pending_text(move |app| app.write_text_to_clipboard(&query));
         }
         true
     }
 
-    fn selection_made_during_search_prompt(&self) -> bool {
-        let Some(session) = self.search_prompt.as_ref() else {
-            return false;
-        };
-        let Some((window_id, pane_id)) = self.resolve_pane_command_target(AppCommand::Copy) else {
-            return false;
-        };
-        let Some(surface) = self
+    fn selection_during_search_prompt(&self) -> Option<noa_grid::SelectionSnapshot> {
+        let session = self.search_prompt.as_ref()?;
+        let (window_id, pane_id) = self.resolve_pane_command_target(AppCommand::Copy)?;
+        let surface = self
             .windows
             .get(&window_id)
-            .and_then(|state| state.surfaces.get(&pane_id))
-        else {
-            return false;
-        };
+            .and_then(|state| state.surfaces.get(&pane_id))?;
         let terminal = surface.terminal.lock();
-        selection_is_newer_than_prompt(
+        if !selection_is_newer_than_prompt(
             (session.pane_id, session.selection_at_open),
             (pane_id, terminal.active().selection),
-        ) && terminal
-            .selected_text()
-            .is_some_and(|text| !text.is_empty())
+        ) {
+            return None;
+        }
+        terminal.active().selection_snapshot()
     }
 
     /// Paste the clipboard's text into the focused prompt. Returns whether a
@@ -341,11 +341,20 @@ impl App {
         let Some(window_id) = self.focused_search_prompt_window() else {
             return false;
         };
+        self.after_pending_text(move |app| {
+            if app.focused_search_prompt_window() == Some(window_id) {
+                app.paste_into_search_prompt(window_id);
+            }
+        });
+        true
+    }
+
+    fn paste_into_search_prompt(&mut self, window_id: WindowId) {
         let text = match self.clipboard.get_text() {
             Ok(text) => text,
             Err(err) => {
                 log::warn!("failed to read clipboard for the search prompt: {err}");
-                return true;
+                return;
             }
         };
         let effect = self
@@ -355,7 +364,6 @@ impl App {
         if let Some(effect) = effect {
             self.apply_search_prompt_effect(window_id, effect);
         }
-        true
     }
 
     /// Apply a [`SearchPromptEffect`] to the prompt's target terminal and

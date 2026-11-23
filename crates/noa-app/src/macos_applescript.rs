@@ -498,8 +498,10 @@ pub(crate) fn terminal_contents(terminal: &Terminal) -> String {
 }
 
 /// `selection`: the selected text, empty without a selection.
-pub(crate) fn terminal_selection(terminal: &Terminal) -> String {
-    terminal.selected_text().unwrap_or_default()
+pub(crate) fn terminal_selection(snapshot: Option<noa_grid::SelectionSnapshot>) -> String {
+    snapshot
+        .and_then(noa_grid::SelectionSnapshot::into_text)
+        .unwrap_or_default()
 }
 
 /// `scrollback`: the tail of the whole history (screen included), capped at
@@ -2112,13 +2114,13 @@ mod imp {
                     let Some(handle) = term.terminal.clone() else {
                         return Ok(string_desc(""));
                     };
-                    let mut terminal = handle.lock();
                     let text = if is(codes::PROP_CONTENTS) {
-                        terminal_contents(&terminal)
+                        terminal_contents(&handle.lock())
                     } else if is(codes::PROP_SELECTION) {
-                        terminal_selection(&terminal)
+                        let selection = handle.lock().active().selection_snapshot();
+                        terminal_selection(selection)
                     } else {
-                        terminal_scrollback(&mut terminal)
+                        terminal_scrollback(&mut handle.lock())
                     };
                     Ok(string_desc(&text))
                 } else {
@@ -3184,12 +3186,18 @@ mod tests {
             terminal_contents(&terminal),
             crate::ipc_bridge::screen_text(&terminal.active().visible_rows())
         );
-        assert_eq!(terminal_selection(&terminal), "");
+        assert_eq!(
+            terminal_selection(terminal.active().selection_snapshot()),
+            ""
+        );
         terminal.set_viewport_selection(
             noa_core::Point { x: 0, y: 1 },
             noa_core::Point { x: 2, y: 1 },
         );
-        assert_eq!(terminal_selection(&terminal), "two");
+        assert_eq!(
+            terminal_selection(terminal.active().selection_snapshot()),
+            "two"
+        );
 
         // 300 KiB of history: the read keeps the newest ≤ 256 KiB.
         let line = "x".repeat(99) + "\r\n";

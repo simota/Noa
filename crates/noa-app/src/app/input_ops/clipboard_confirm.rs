@@ -11,19 +11,43 @@ impl App {
             .and_then(|state| state.surfaces.get(&pane_id))
             .map(|surface| {
                 let terminal = surface.terminal.lock();
-                (terminal.selected_text(), application_copy_bytes(&terminal))
+                (
+                    terminal.active().selection_snapshot(),
+                    application_copy_bytes(&terminal),
+                )
             })
         else {
             return;
         };
-        if let Some(selected_text) = selected_text {
-            self.write_text_to_clipboard(&selected_text);
-        } else if let Some(bytes) = copy_bytes {
+        if let Some(bytes) = copy_bytes {
             // Native menu accelerators reach this path without a winit key
             // press. Send a complete gesture, including a negotiated release.
             self.mark_pane_user_input(window_id, pane_id);
             self.write_pane_pty_bytes(window_id, pane_id, bytes);
+        } else if let Some(snapshot) = selected_text {
+            self.copy_snapshot(snapshot, noa_config::CopyOnSelect::Clipboard);
         }
+    }
+
+    pub(in crate::app) fn copy_snapshot(
+        &mut self,
+        snapshot: noa_grid::SelectionSnapshot,
+        target: noa_config::CopyOnSelect,
+    ) {
+        self.queue_text_work(
+            move || snapshot.into_text(),
+            move |app, _, text| {
+                let Some(text) = text else { return };
+                if target.writes_primary()
+                    && let Err(err) = app.clipboard.set_primary_text(&text)
+                {
+                    log::warn!("failed to copy selection to the primary selection: {err}");
+                }
+                if target.writes_clipboard() {
+                    app.write_text_to_clipboard(&text);
+                }
+            },
+        );
     }
 
     pub(in crate::app) fn write_text_to_clipboard(&mut self, text: &str) {
@@ -48,19 +72,11 @@ impl App {
             .windows
             .get(&window_id)
             .and_then(|state| state.surfaces.get(&pane_id))
-            .and_then(|surface| surface.terminal.lock().selected_text())
-            .filter(|text| !text.is_empty())
+            .and_then(|surface| surface.terminal.lock().active().selection_snapshot())
         else {
             return;
         };
-        if copy_on_select.writes_primary()
-            && let Err(err) = self.clipboard.set_primary_text(&text)
-        {
-            log::warn!("failed to copy selection to the primary selection: {err}");
-        }
-        if copy_on_select.writes_clipboard() {
-            self.write_text_to_clipboard(&text);
-        }
+        self.copy_snapshot(text, copy_on_select);
     }
 
     /// Ghostty's `right-click-action` for a right press with mouse reporting
@@ -168,17 +184,14 @@ impl App {
             .and_then(|state| state.surfaces.get(&pane_id))
             .and_then(|surface| {
                 let mut terminal = surface.terminal.lock();
-                terminal.active().selection?;
-                let text = terminal.selected_text();
+                let text = terminal.active().selection_snapshot()?;
                 terminal.clear_selection();
                 Some(text)
             })
         else {
             return false;
         };
-        if let Some(text) = text {
-            self.write_text_to_clipboard(&text);
-        }
+        self.copy_snapshot(text, noa_config::CopyOnSelect::Clipboard);
         self.request_window_redraw(window_id);
         true
     }
@@ -209,18 +222,23 @@ impl App {
         window_id: WindowId,
         pane_id: PaneId,
     ) {
-        if self.send_kitty_paste_event(
-            window_id,
-            pane_id,
-            noa_grid::kitty_clipboard::ClipboardLocation::Primary,
-        ) {
-            return;
-        }
-        match self.clipboard.get_primary_text() {
-            Ok(text) if !text.is_empty() => self.paste_text_to_pane(window_id, pane_id, text),
-            Ok(_) => {}
-            Err(err) => log::warn!("failed to read the primary selection for paste: {err}"),
-        }
+        self.after_pending_text(move |app| {
+            let Some(window_id) = app.resolve_pane_window(window_id, pane_id) else {
+                return;
+            };
+            if app.send_kitty_paste_event(
+                window_id,
+                pane_id,
+                noa_grid::kitty_clipboard::ClipboardLocation::Primary,
+            ) {
+                return;
+            }
+            match app.clipboard.get_primary_text() {
+                Ok(text) if !text.is_empty() => app.paste_text_to_pane(window_id, pane_id, text),
+                Ok(_) => {}
+                Err(err) => log::warn!("failed to read the primary selection for paste: {err}"),
+            }
+        });
     }
 
     pub(in crate::app) fn paste_clipboard_to_pty(&mut self) {
@@ -233,6 +251,14 @@ impl App {
     /// Paste the system clipboard into a specific pane (a mouse paste
     /// targets the clicked pane, not whichever window holds focus).
     pub(in crate::app) fn paste_clipboard_to_pane(&mut self, window_id: WindowId, pane_id: PaneId) {
+        self.after_pending_text(move |app| {
+            if let Some(window_id) = app.resolve_pane_window(window_id, pane_id) {
+                app.paste_system_clipboard_contents(window_id, pane_id);
+            }
+        });
+    }
+
+    fn paste_system_clipboard_contents(&mut self, window_id: WindowId, pane_id: PaneId) {
         if self.send_kitty_paste_event(
             window_id,
             pane_id,
@@ -638,7 +664,7 @@ fn confirm_action_can_remember(action: &ConfirmAction) -> bool {
 
 fn application_copy_bytes(terminal: &noa_grid::Terminal) -> Option<Vec<u8>> {
     let flags = terminal.kitty_keyboard_flags();
-    if !terminal.active_is_alt || flags == 0 || terminal.selected_text().is_some() {
+    if !terminal.active_is_alt || flags == 0 || terminal.active().has_selected_text() {
         return None;
     }
     let key = winit::keyboard::Key::Character("c".into());

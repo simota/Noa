@@ -358,6 +358,7 @@ impl ApplicationHandler<UserEvent> for App {
                 title,
                 text,
             } => self.show_file_preview(window_id, pane_id, title, text),
+            UserEvent::TextReady => self.finish_text_work(event_loop),
             UserEvent::SearchUpdated(window_id, pane_id) => {
                 if let Some(window_id) = self.resolve_pane_window(window_id, pane_id)
                     && let Some(state) = self.windows.get(&window_id)

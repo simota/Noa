@@ -33,6 +33,7 @@ pub(super) fn insert(
     host: WidgetId,
     session: &Session,
     live: bool,
+    kinds: &[AgentKind],
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
     heading(tree, host, "議事録");
@@ -51,7 +52,7 @@ pub(super) fn insert(
             Container::wrapping_row(6.0, 6.0).align_items(noa_gpui_core::style::AlignItems::CENTER),
         );
         caption(tree, implement, "実装を依頼:");
-        for kind in AgentKind::ALL {
+        for &kind in kinds {
             let button = tree.insert(Some(implement), small(kind.command()));
             actions.push((button, Action::Implement(kind)));
         }

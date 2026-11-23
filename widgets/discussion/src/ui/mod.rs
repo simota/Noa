@@ -35,12 +35,13 @@ use noa_gpui_scene::{Color, Size};
 use noa_gpui_text::TextStore;
 
 use discussion::model::types::{
-    AgentKind, Author, DebateId, DebateStatus, IssueId, IssueState, MODERATOR_ID, Message, MsgKind,
-    PartId, Phase, Position, Receipt, RoundNo, Session,
+    AgentKind, Author, DebateId, DebateStatus, IssueId, IssueState, MAX_PANEL, MODERATOR_ID,
+    Message, MsgKind, PartId, Phase, Position, Receipt, RoundNo, Session,
 };
 
 use discussion::store::Summary;
 
+use crate::installed::Installed;
 use crate::live::{Channel, Command, Link, Snapshot};
 
 pub use debate::{DebateTarget, DebateView};
@@ -75,6 +76,10 @@ pub enum Action {
     Retry,
     Send,
     Start,
+    /// Add a row to the start view's panel.
+    AddPanelRow,
+    /// Remove the start view's panel row at this index.
+    RemovePanelRow(usize),
     /// End the discussion: no further round starts.
     Close,
     /// Put the result (summary, issues, minutes) on the clipboard.
@@ -171,6 +176,9 @@ pub struct Discussion {
     built: Option<(Option<(String, u64)>, Link)>,
     /// The stored discussions the start view lists, newest first.
     history: Arc<Vec<Summary>>,
+    /// Which agents are installed; `None` while the live check runs. The
+    /// demo and one-off renders take every kind as installed.
+    installed: Option<Installed>,
 
     start: start::Parts,
     meeting: WidgetId,
@@ -291,6 +299,10 @@ impl Discussion {
         let minutes_host = tree.insert(Some(split), pane_column(Role::Surface));
 
         let status = StatusBar::insert(&mut tree, root);
+        let installed = match source {
+            Source::Live(_) => None,
+            Source::Demo | Source::Snapshot => Some(Installed::all()),
+        };
 
         let mut screen = Self {
             tree,
@@ -306,6 +318,7 @@ impl Discussion {
             export: None,
             built: None,
             history: Arc::new(Vec::new()),
+            installed,
             start,
             meeting,
             tree_host,
@@ -377,8 +390,16 @@ impl Discussion {
             self.rebuild_minutes(text);
             self.rebuild_composer(text);
         } else {
-            start::rebuild_note(&mut self.tree, &self.start, &self.link, text);
-            self.actions.push((self.start.start_button, Action::Start));
+            start::rebuild_note(
+                &mut self.tree,
+                &self.start,
+                &self.link,
+                self.installed.as_ref(),
+                text,
+            );
+            self.tree
+                .set_enabled(self.start.start_button, self.agents_ready());
+            start::actions(&self.start, &mut self.actions);
             start::rebuild_history(
                 &mut self.tree,
                 &self.start,
@@ -391,6 +412,37 @@ impl Discussion {
         if self.read_only() {
             self.strip_controls();
         }
+    }
+
+    /// The kinds the agent buttons offer: the installed ones (every kind
+    /// while the check runs or when it could not tell).
+    fn available_kinds(&self) -> Vec<AgentKind> {
+        self.installed
+            .as_ref()
+            .map_or_else(|| AgentKind::ALL.to_vec(), Installed::available)
+    }
+
+    /// Whether a discussion can be started: the installed agents are known
+    /// and there is at least one.
+    fn agents_ready(&self) -> bool {
+        self.installed
+            .as_ref()
+            .is_some_and(|i| !i.available().is_empty())
+    }
+
+    /// The check for installed agents is done: the start view's menus
+    /// offer only those. Agents picked meanwhile that are not installed
+    /// are left out, and said so.
+    fn installed_known(&mut self, installed: Installed, text: &mut TextStore) {
+        let available = installed.available();
+        let untouched = start::agents_untouched(&self.tree, &self.start);
+        let dropped =
+            start::set_available(&mut self.tree, &mut self.start, available.clone(), text);
+        if !untouched && !dropped.is_empty() && !available.is_empty() {
+            self.toast(start::excluded_note(&dropped));
+        }
+        self.installed = Some(installed);
+        self.rebuild(text);
     }
 
     /// Takes away every control that would change a stored discussion
@@ -503,11 +555,13 @@ impl Discussion {
             return;
         };
         let read_only = self.read_only();
+        let kinds = self.available_kinds();
         minutes::insert(
             &mut self.tree,
             self.minutes_host,
             session,
             !read_only,
+            &kinds,
             &mut self.actions,
         );
     }
@@ -679,6 +733,7 @@ impl Discussion {
         let mut latest = None;
         let mut notices = Vec::new();
         let mut history = None;
+        let mut installed = None;
         if let Source::Live(ch) = &self.source {
             while let Ok(snapshot) = ch.snapshots.try_recv() {
                 latest = Some(snapshot);
@@ -689,6 +744,12 @@ impl Discussion {
             while let Ok(listed) = ch.history.try_recv() {
                 history = Some(listed);
             }
+            if let Ok(found) = ch.installed.try_recv() {
+                installed = Some(found);
+            }
+        }
+        if let Some(installed) = installed {
+            self.installed_known(installed, text);
         }
         let listed = history.is_some();
         let mut stale = false;
@@ -801,6 +862,14 @@ impl Discussion {
             Action::Retry => self.send(Command::Retry, "失敗したブリーフを再送します"),
             Action::Send => self.send_intervention(),
             Action::Start => self.start_session(),
+            Action::AddPanelRow => {
+                start::add_row(&mut self.tree, &mut self.start);
+                self.rebuild(text);
+            }
+            Action::RemovePanelRow(index) => {
+                start::remove_row(&mut self.tree, &mut self.start, index, text);
+                self.rebuild(text);
+            }
             Action::Close => self.send(Command::Close, "議論を終えます"),
             Action::CopyResult => {
                 if let Some(session) = &self.session {
@@ -928,6 +997,10 @@ impl Discussion {
     }
 
     fn start_session(&mut self) {
+        if !self.agents_ready() {
+            // The start button is disabled meanwhile; its note says why.
+            return;
+        }
         let form = start::read(&self.tree, &self.start);
         if form.topic.is_empty() {
             self.toast("議題を入力してください");
@@ -935,6 +1008,10 @@ impl Discussion {
         }
         if form.panel.is_empty() {
             self.toast("パネリストを 1 人以上選んでください");
+            return;
+        }
+        if form.panel.len() > MAX_PANEL {
+            self.toast(format!("パネリストは {MAX_PANEL} 体までです"));
             return;
         }
         let workdir = match start::workdir(&form.workdir) {
@@ -970,6 +1047,11 @@ impl Discussion {
             && message.downcast_ref::<SelectionChanged>().is_some()
         {
             start::moderator_kind_changed(&mut self.tree, &mut self.start, text);
+            return;
+        }
+        if message.downcast_ref::<SelectionChanged>().is_some()
+            && start::row_kind_changed(&mut self.tree, &mut self.start, message.source, text)
+        {
             return;
         }
         if message.downcast_ref::<ButtonClicked>().is_none() {

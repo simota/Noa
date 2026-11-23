@@ -1,4 +1,4 @@
-use noa_gpui_core::widgets::{Badge, Checkbox, ComboBox, Label, PopUpButton, Pressable, TextArea};
+use noa_gpui_core::widgets::{Badge, ComboBox, Label, PopUpButton, Pressable, TextArea};
 use noa_gpui_core::{Event, PointerButton};
 use noa_gpui_scene::Point;
 
@@ -396,7 +396,14 @@ struct Harness {
 }
 
 impl Harness {
+    /// A live screen on which every agent kind is installed.
     fn new(channel: crate::live::Channel, feed: TestFeed) -> Self {
+        feed.installed.send(Installed::all()).unwrap();
+        Self::pending(channel, feed)
+    }
+
+    /// A live screen whose check for installed agents has not finished.
+    fn pending(channel: crate::live::Channel, feed: TestFeed) -> Self {
         let mut h = Harness {
             screen: Discussion::live(channel),
             text: TextStore::new(Default::default()),
@@ -404,6 +411,11 @@ impl Harness {
         };
         h.screen.prepare(window(), &mut h.text);
         h
+    }
+
+    fn installed(&mut self, installed: Installed) {
+        self.feed.installed.send(installed).unwrap();
+        self.screen.prepare(window(), &mut self.text);
     }
 
     fn deliver(&mut self, session: Option<Session>) {
@@ -508,10 +520,8 @@ fn without_a_session_the_start_view_shows_and_starts_one() {
     h.screen
         .tree
         .update::<PopUpButton, _>(moderator, |m, cx| m.set_selected(cx, 1));
-    let claude = h.screen.start.panel[0];
-    h.screen.tree.update::<Checkbox, _>(claude, |c, cx| {
-        c.set_state(cx, noa_gpui_core::widgets::CheckState::Off)
-    });
+    let claude = h.screen.start.panel[0].remove;
+    click(&mut h.screen, &mut h.text, claude);
     click(&mut h.screen, &mut h.text, start);
     assert_eq!(
         h.drain(),
@@ -561,7 +571,7 @@ fn the_start_view_sends_each_agents_model_and_effort() {
         .tree
         .update::<PopUpButton, _>(effort, |p, cx| p.set_selected(cx, 6));
 
-    let claude = &h.screen.start.panel_setup[0];
+    let claude = &h.screen.start.panel[0].setup;
     let (model, effort) = (claude.model, claude.effort);
     h.screen
         .tree
@@ -598,20 +608,240 @@ fn the_start_view_sends_each_agents_model_and_effort() {
     );
 }
 
+fn panel_kinds(h: &Harness) -> Vec<AgentKind> {
+    start::read(&h.screen.tree, &h.screen.start)
+        .panel
+        .iter()
+        .map(|c| c.kind)
+        .collect()
+}
+
+fn note_of(h: &Harness) -> Vec<String> {
+    labels_under(&h.screen.tree, h.screen.start.note)
+}
+
 #[test]
-fn a_start_without_panelists_is_refused() {
+fn the_panel_takes_one_to_six_panelists_and_a_kind_more_than_once() {
     let (channel, feed) = test_channel();
     let mut h = Harness::new(channel, feed);
     h.deliver(None);
+    assert_eq!(panel_kinds(&h), AgentKind::ALL);
+    // Adding repeats the last row's kind, up to the limit.
+    while h.screen.tree.is_enabled(h.screen.start.add_row) {
+        let add = widget_for(&h.screen, &Action::AddPanelRow);
+        click(&mut h.screen, &mut h.text, add);
+    }
+    assert_eq!(h.screen.start.panel.len(), MAX_PANEL);
+    assert_eq!(panel_kinds(&h)[3..], [AgentKind::Agy; 3]);
+    h.screen.run(Action::AddPanelRow, &mut h.text);
+    assert_eq!(h.screen.start.panel.len(), MAX_PANEL);
+    // Removing stops at one.
+    while h.screen.start.panel.len() > 1 {
+        let remove = widget_for(&h.screen, &Action::RemovePanelRow(0));
+        click(&mut h.screen, &mut h.text, remove);
+    }
+    assert!(!h.screen.tree.is_enabled(h.screen.start.panel[0].remove));
+    h.screen.run(Action::RemovePanelRow(0), &mut h.text);
+    assert_eq!(panel_kinds(&h), [AgentKind::Agy]);
+    assert!(h.screen.tree.is_enabled(h.screen.start.add_row));
+
     h.set_text(h.screen.start.topic, "x");
-    for id in h.screen.start.panel.clone() {
-        h.screen.tree.update::<Checkbox, _>(id, |c, cx| {
-            c.set_state(cx, noa_gpui_core::widgets::CheckState::Off)
-        });
+    for _ in 0..2 {
+        h.screen.run(Action::AddPanelRow, &mut h.text);
     }
     h.screen.run(Action::Start, &mut h.text);
+    assert!(matches!(
+        &h.drain()[..],
+        [Command::Start { panel, .. }] if *panel == vec![AgentKind::Agy.into(); 3]
+    ));
+}
+
+#[test]
+fn the_agent_menus_offer_only_the_installed_kinds() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::pending(channel, feed);
+    h.deliver(None);
+    h.installed(Installed::Found(vec![AgentKind::Codex, AgentKind::Agy]));
+    let only = [AgentKind::Codex, AgentKind::Agy];
+    assert_eq!(h.screen.start.available, only);
+    // One row per installed kind; the moderator falls back to the first
+    // installed kind, without a toast for the untouched defaults.
+    assert_eq!(panel_kinds(&h), only);
+    let form = start::read(&h.screen.tree, &h.screen.start);
+    assert_eq!(form.moderator, AgentKind::Codex.into());
+    assert!(h.screen.toasts.is_empty());
+    assert!(note_of(&h).is_empty(), "{:?}", note_of(&h));
+    assert!(h.screen.tree.is_enabled(h.screen.start.start_button));
+
+    // Each menu has the two kinds: a third entry cannot be picked, and an
+    // index means a kind of the installed list, not of every kind.
+    let moderator = h.screen.start.moderator;
+    let row = h.screen.start.panel[0].kind;
+    for menu in [moderator, row] {
+        h.screen
+            .tree
+            .update::<PopUpButton, _>(menu, |m, cx| m.set_selected(cx, 2));
+        assert_eq!(
+            h.screen.tree.get::<PopUpButton>(menu).unwrap().selected(),
+            0
+        );
+        h.screen
+            .tree
+            .update::<PopUpButton, _>(menu, |m, cx| m.set_selected(cx, 1));
+    }
+    start::moderator_kind_changed(&mut h.screen.tree, &mut h.screen.start, &mut h.text);
+    assert!(start::row_kind_changed(
+        &mut h.screen.tree,
+        &mut h.screen.start,
+        row,
+        &mut h.text
+    ));
+    let model = h.screen.start.panel[0].setup.model;
+    let items = h
+        .screen
+        .tree
+        .get::<ComboBox>(model)
+        .unwrap()
+        .items()
+        .to_vec();
+    assert_eq!(items, AgentKind::Agy.models());
+    let form = start::read(&h.screen.tree, &h.screen.start);
+    assert_eq!(form.moderator, AgentKind::Agy.into());
+    assert_eq!(panel_kinds(&h), [AgentKind::Agy, AgentKind::Agy]);
+
+    // A running discussion offers only the installed kinds to implement.
+    let mut session = crate::demo::session();
+    session.workdir = Some(std::path::PathBuf::from("/repo"));
+    h.deliver(Some(session));
+    assert!(!has_widget_for(
+        &h.screen,
+        &Action::Implement(AgentKind::Claude)
+    ));
+    for kind in only {
+        assert!(has_widget_for(&h.screen, &Action::Implement(kind)));
+    }
+}
+
+#[test]
+fn filling_the_form_leaves_out_agents_that_are_not_installed() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::pending(channel, feed);
+    h.deliver(None);
+    h.installed(Installed::Found(vec![AgentKind::Claude, AgentKind::Agy]));
+    let opus = AgentChoice {
+        kind: AgentKind::Claude,
+        setup: AgentSetup {
+            model: Some("opus".into()),
+            effort: Some("high".into()),
+        },
+    };
+    let codex = AgentChoice {
+        kind: AgentKind::Codex,
+        setup: AgentSetup {
+            model: Some("gpt-6-luna".into()),
+            effort: None,
+        },
+    };
+    let panel = [
+        codex.clone(),
+        opus.clone(),
+        AgentKind::Codex.into(),
+        AgentKind::Agy.into(),
+    ];
+    let dropped = start::fill_agents(
+        &mut h.screen.tree,
+        &mut h.screen.start,
+        &codex,
+        &panel,
+        &mut h.text,
+    );
+    assert_eq!(dropped, [AgentKind::Codex]);
+    assert_eq!(
+        start::excluded_note(&dropped),
+        "インストールされていないため除外: codex"
+    );
+    let form = start::read(&h.screen.tree, &h.screen.start);
+    assert_eq!(form.moderator, AgentKind::Claude.into());
+    assert_eq!(form.panel, [opus.clone(), AgentKind::Agy.into()]);
+
+    // Nothing of the panel left: one of the first installed kind.
+    let fitted = start::fit(&opus, std::slice::from_ref(&codex), &[AgentKind::Agy]);
+    assert_eq!(fitted.moderator, AgentKind::Agy.into());
+    assert_eq!(fitted.panel, [AgentKind::Agy.into()]);
+    assert_eq!(fitted.dropped, [AgentKind::Claude, AgentKind::Codex]);
+    // More than the limit: the first six stay.
+    let many = vec![opus.clone(); MAX_PANEL + 2];
+    assert_eq!(
+        start::fit(&opus, &many, &[AgentKind::Claude]).panel.len(),
+        MAX_PANEL
+    );
+}
+
+#[test]
+fn agents_picked_before_the_check_ends_are_left_out_with_a_note() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::pending(channel, feed);
+    h.deliver(None);
+    let moderator = h.screen.start.moderator;
+    h.screen
+        .tree
+        .update::<PopUpButton, _>(moderator, |m, cx| m.set_selected(cx, 1));
+    h.installed(Installed::Found(vec![AgentKind::Claude, AgentKind::Agy]));
+    assert_eq!(h.screen.toasts, ["インストールされていないため除外: codex"]);
+    let form = start::read(&h.screen.tree, &h.screen.start);
+    assert_eq!(form.moderator, AgentKind::Claude.into());
+    assert_eq!(panel_kinds(&h), [AgentKind::Claude, AgentKind::Agy]);
+}
+
+#[test]
+fn starting_waits_for_the_check_and_needs_an_installed_agent() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::pending(channel, feed);
+    h.deliver(None);
+    h.set_text(h.screen.start.topic, "x");
+    let start = h.screen.start.start_button;
+    assert!(!h.screen.tree.is_enabled(start));
+    assert_eq!(
+        note_of(&h),
+        ["インストール済みのエージェントを確認しています…"]
+    );
+    h.screen.run(Action::Start, &mut h.text);
     assert!(h.drain().is_empty());
-    assert_eq!(h.screen.toasts, ["パネリストを 1 人以上選んでください"]);
+
+    h.installed(Installed::Found(Vec::new()));
+    assert!(!h.screen.tree.is_enabled(h.screen.start.start_button));
+    assert!(!h.screen.tree.is_enabled(h.screen.start.add_row));
+    assert!(h.screen.start.panel.is_empty());
+    assert_eq!(
+        note_of(&h),
+        ["claude / codex / agy のいずれもログインシェルの PATH に見つかりません"]
+    );
+    h.screen.run(Action::Start, &mut h.text);
+    assert!(h.drain().is_empty());
+    assert!(h.screen.toasts.is_empty());
+
+    // A check that could not tell offers every kind.
+    let (channel, feed) = test_channel();
+    let mut h = Harness::pending(channel, feed);
+    h.deliver(None);
+    h.installed(Installed::Unknown("10 秒以内に終わりませんでした".into()));
+    assert!(h.screen.tree.is_enabled(h.screen.start.start_button));
+    assert_eq!(h.screen.start.available, AgentKind::ALL);
+    assert_eq!(panel_kinds(&h), AgentKind::ALL);
+    assert_eq!(
+        note_of(&h),
+        [
+            "インストール済みエージェントを確認できませんでした（10 秒以内に終わりませんでした）。すべて表示しています"
+        ]
+    );
+}
+
+#[test]
+fn the_demo_takes_every_agent_as_installed() {
+    let mut screen = Discussion::demo_start();
+    screen.prepare(window(), &mut TextStore::new(Default::default()));
+    assert!(screen.tree.is_enabled(screen.start.start_button));
+    assert_eq!(screen.start.available, AgentKind::ALL);
 }
 
 // ── Stored discussions ──────────────────────────────────────────────────────
@@ -1687,5 +1917,41 @@ fn a_live_update_keeps_the_tree_and_the_minutes_where_they_were() {
         );
         assert!(before.y > 1.0, "did not scroll: {before:?}");
         assert!((after.y - before.y).abs() < 1.0, "{before:?} -> {after:?}");
+    }
+}
+
+#[test]
+fn six_panel_rows_fit_the_card_and_scroll_into_a_short_window() {
+    let small = Size::new(MIN_WINDOW.0 as f32, MIN_WINDOW.1 as f32);
+    for size in [window(), small] {
+        let (channel, feed) = test_channel();
+        let mut h = Harness::new(channel, feed);
+        h.deliver(None);
+        for _ in 0..MAX_PANEL - AgentKind::ALL.len() {
+            h.screen.run(Action::AddPanelRow, &mut h.text);
+        }
+        h.screen.prepare(size, &mut h.text);
+        let card = h.screen.tree.parent(h.screen.start.topic).unwrap();
+        let [cx, cy, cw, _] = rect(&h.screen.tree, card);
+        assert!(cy >= 0.0, "the card starts in view: {cy}");
+        for row in &h.screen.start.panel {
+            let [x, _, w, _] = rect(&h.screen.tree, row.remove);
+            assert!(x + w <= cx + cw, "{size:?}: a row overflows its card");
+        }
+        let scroll = scroll_under(&h.screen.tree, h.screen.start.root);
+        let [x, y, w, height] = rect(&h.screen.tree, scroll);
+        h.screen.dispatch(
+            Event::Wheel {
+                pos: Point::new(x + w / 2.0, y + height / 2.0),
+                delta: Point::new(0.0, -2000.0),
+            },
+            &mut h.text,
+        );
+        h.screen.prepare(size, &mut h.text);
+        let [_, by, _, bh] = rect(&h.screen.tree, h.screen.start.start_button);
+        assert!(
+            by + bh <= y + height,
+            "{size:?}: the start button is out of view"
+        );
     }
 }

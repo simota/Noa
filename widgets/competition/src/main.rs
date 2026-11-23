@@ -2,6 +2,7 @@
 //! model, engine, store and comparison viewer, fed by the live layer.
 
 mod demo;
+mod installed;
 mod live;
 #[path = "live"]
 mod session {
@@ -224,9 +225,11 @@ fn main() -> Result<(), String> {
         }
         let waker = setup.waker.clone();
         let channel = live::start(move || waker.wake());
+        let waker = setup.waker.clone();
+        let installed = installed::spawn(move || waker.wake());
         match &session_dir {
-            Some(dir) => Box::new(Competition::live_stored(channel, dir)),
-            None => Box::new(Competition::live(channel)),
+            Some(dir) => Box::new(Competition::live_stored(channel, installed, dir)),
+            None => Box::new(Competition::live(channel, installed)),
         }
     })
     .run()

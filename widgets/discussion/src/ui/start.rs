@@ -1,21 +1,22 @@
 //! The start view, shown until a session exists: the topic, the moderator's
-//! agent kind and the panel, beside the stored discussions to open or
-//! resume.
+//! agent kind and the panel (rows of agent, model and effort; a kind may
+//! take part more than once), beside the stored discussions to open or
+//! resume. The agent menus offer only the installed kinds.
 
 use noa_gpui_core::style::{
-    AlignItems, FlexDirection, JustifyContent, Rect as LayoutRect, Size as LayoutSize, auto,
-    length, percent,
+    AlignItems, FlexDirection, Overflow, Point as LayoutPoint, Rect as LayoutRect,
+    Size as LayoutSize, auto, length, percent,
 };
 use noa_gpui_core::widgets::{
-    Button, CheckState, Checkbox, ComboBox, Container, ControlSize, Label, NumberInput,
-    PopUpButton, TextArea, TextField, Tone, Truncation,
+    Button, ComboBox, Container, ControlSize, Label, NumberInput, PopUpButton, ScrollView,
+    TextArea, TextField, Tone, Truncation,
 };
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use std::path::PathBuf;
 
 use noa_gpui_text::TextStore;
 
-use discussion::model::types::{AgentChoice, AgentKind, AgentSetup, Millis, RoundNo};
+use discussion::model::types::{AgentChoice, AgentKind, AgentSetup, MAX_PANEL, Millis, RoundNo};
 use discussion::store::Summary;
 
 /// The round limit the start view offers first.
@@ -23,7 +24,8 @@ pub(crate) const DEFAULT_MAX_ROUNDS: RoundNo = 5;
 /// The highest round limit the start view takes.
 const MAX_MAX_ROUNDS: RoundNo = 50;
 
-use super::{Action, caption, clear_children, gap};
+use super::{Action, caption, clear_children, gap, spacer};
+use crate::installed::Installed;
 use crate::live::Link;
 
 pub(super) struct Parts {
@@ -31,17 +33,32 @@ pub(super) struct Parts {
     pub(super) topic: WidgetId,
     pub(super) workdir: WidgetId,
     pub(super) max_rounds: WidgetId,
+    /// Holds the moderator's kind menu, so it can be rebuilt.
+    moderator_host: WidgetId,
     pub(super) moderator: WidgetId,
     /// The model and effort of the moderator; rebuilt when its kind changes.
     pub(super) moderator_setup: SetupParts,
-    /// One checkbox per agent kind, in `AgentKind::ALL` order.
-    pub(super) panel: Vec<WidgetId>,
-    /// The model and effort of each panel checkbox, in the same order.
-    pub(super) panel_setup: Vec<SetupParts>,
+    /// Holds the panel's rows.
+    panel_list: WidgetId,
+    /// One row per panelist, in panel order.
+    pub(super) panel: Vec<PanelRow>,
+    pub(super) add_row: WidgetId,
     pub(super) start_button: WidgetId,
-    note: WidgetId,
+    /// Says why starting may not work yet.
+    pub(super) note: WidgetId,
     /// The list of stored discussions; rebuilt when the list changes.
     pub(super) history: WidgetId,
+    /// The kinds every agent menu offers, in menu order: a menu's index
+    /// is a position in this list.
+    pub(super) available: Vec<AgentKind>,
+}
+
+/// One panelist: its agent kind, model and effort, and its remove button.
+pub(super) struct PanelRow {
+    host: WidgetId,
+    pub(super) kind: WidgetId,
+    pub(super) setup: SetupParts,
+    pub(super) remove: WidgetId,
 }
 
 pub(crate) struct Form {
@@ -55,24 +72,49 @@ pub(crate) struct Form {
 }
 
 pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
+    // Scrolls as a whole: six panel rows outgrow a short window.
     let root = tree.insert(
         Some(parent),
-        Container::new(Style {
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::CENTER,
-            justify_content: JustifyContent::CENTER,
+        ScrollView::new(Style {
+            overflow: LayoutPoint {
+                x: Overflow::Hidden,
+                y: Overflow::Scroll,
+            },
             ..super::fill()
         }),
     );
-    let cards = tree.insert(
+    let centered = tree.insert(
         Some(root),
+        Container::new(Style {
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::CENTER,
+            size: LayoutSize {
+                width: percent(1.0),
+                height: auto(),
+            },
+            min_size: LayoutSize {
+                width: auto(),
+                height: percent(1.0),
+            },
+            ..Default::default()
+        }),
+    );
+    let cards = tree.insert(
+        Some(centered),
         Container::new(Style {
             flex_direction: FlexDirection::Row,
             align_items: AlignItems::START,
             gap: gap(16.0),
+            // Centered while it fits; from the top once it scrolls.
+            margin: LayoutRect {
+                left: length(0.0),
+                right: length(0.0),
+                top: auto(),
+                bottom: auto(),
+            },
             max_size: LayoutSize {
                 width: percent(1.0),
-                height: percent(1.0),
+                height: auto(),
             },
             ..Default::default()
         }),
@@ -144,18 +186,46 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         .stepper(true)
         .width(80.0),
     );
+    // Until the check for installed agents is done, every kind is offered.
+    let available = AgentKind::ALL.to_vec();
     let left = tree.insert(Some(card), Container::column().gap(6.0));
     caption(tree, left, "司会 (Noa) のエージェント・モデル・エフォート");
     let moderator_row = tree.insert(
         Some(left),
         Container::row().align_items(AlignItems::CENTER).gap(6.0),
     );
+    let moderator_host = tree.insert(Some(moderator_row), Container::row());
     let moderator = tree.insert(
-        Some(moderator_row),
-        PopUpButton::new(AgentKind::ALL.iter().map(|k| k.command())),
+        Some(moderator_host),
+        kind_menu(&available, AgentKind::ALL[0]),
     );
     let moderator_setup = insert_setup(tree, moderator_row, AgentKind::ALL[0]);
-    let (panel, panel_setup) = insert_panel(tree, card, "パネリスト・モデル・エフォート");
+
+    let panel_col = tree.insert(Some(card), Container::column().gap(6.0));
+    caption(
+        tree,
+        panel_col,
+        format!("パネリスト（1〜{MAX_PANEL}体）・エージェント・モデル・エフォート"),
+    );
+    let panel_list = tree.insert(Some(panel_col), Container::column().gap(6.0));
+    let panel = default_panel()
+        .iter()
+        .map(|choice| insert_row(tree, panel_list, choice, &available))
+        .collect();
+    let panel_foot = tree.insert(
+        Some(panel_col),
+        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+    );
+    let add_row = tree.insert(
+        Some(panel_foot),
+        Button::new("＋ パネリストを追加").control_size(ControlSize::Small),
+    );
+    tree.insert(
+        Some(panel_foot),
+        Label::new("同じエージェントの2体目以降は claude-2, claude-3 … として参加します")
+            .font_size(11.0)
+            .color(Role::Muted),
+    );
 
     let foot = tree.insert(
         Some(card),
@@ -167,19 +237,29 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         Button::new("ディスカッションを開始").default_button(true),
     );
     let history = insert_history_card(tree, cards);
-    Parts {
+    let mut parts = Parts {
         root,
         topic,
         workdir,
         max_rounds,
+        moderator_host,
         moderator,
         moderator_setup,
+        panel_list,
         panel,
-        panel_setup,
+        add_row,
         start_button,
         note,
         history,
-    }
+        available,
+    };
+    sync_row_buttons(tree, &mut parts);
+    parts
+}
+
+/// The panel the form opens with: one of each kind.
+fn default_panel() -> Vec<AgentChoice> {
+    AgentKind::ALL.iter().map(|&k| k.into()).collect()
 }
 
 const HISTORY_WIDTH: f32 = 380.0;
@@ -395,50 +475,191 @@ fn insert_setup_controls(
     (model, effort)
 }
 
-/// One row per agent kind: whether it takes part, and its model and effort.
-fn insert_panel(
+/// Shows `setup` in the model box and effort menu of `kind`.
+fn set_setup(tree: &mut UiTree, parts: &SetupParts, kind: AgentKind, setup: &AgentSetup) {
+    let model = setup.model.clone().unwrap_or_default();
+    tree.update::<ComboBox, _>(parts.model, |c, cx| c.set_text(cx, model));
+    let effort = setup
+        .effort
+        .as_deref()
+        .and_then(|e| kind.efforts().iter().position(|k| *k == e))
+        .map_or(0, |i| i + 1);
+    tree.update::<PopUpButton, _>(parts.effort, |p, cx| p.set_selected(cx, effort));
+}
+
+/// A menu of the `available` kinds with `kind` picked (the first one when
+/// `kind` is not among them).
+fn kind_menu(available: &[AgentKind], kind: AgentKind) -> PopUpButton {
+    let index = available.iter().position(|&k| k == kind).unwrap_or(0);
+    PopUpButton::new(available.iter().map(|k| k.command())).selected_index(index)
+}
+
+/// One panel row showing `choice`: kind menu, model, effort, remove.
+fn insert_row(
     tree: &mut UiTree,
-    card: WidgetId,
-    title: &str,
-) -> (Vec<WidgetId>, Vec<SetupParts>) {
-    let column = tree.insert(Some(card), Container::column().gap(6.0));
-    caption(tree, column, title);
-    AgentKind::ALL
-        .iter()
-        .map(|&kind| {
-            let row = tree.insert(
-                Some(column),
-                Container::row().align_items(AlignItems::CENTER).gap(10.0),
-            );
-            let check = tree.insert(
-                Some(row),
-                Container::new(Style {
-                    size: LayoutSize {
-                        width: length(84.0),
-                        height: auto(),
-                    },
-                    ..Default::default()
-                }),
-            );
-            let check = tree.insert(Some(check), Checkbox::new(kind.command()).checked(true));
-            (check, insert_setup(tree, row, kind))
-        })
-        .unzip()
+    list: WidgetId,
+    choice: &AgentChoice,
+    available: &[AgentKind],
+) -> PanelRow {
+    let host = tree.insert(
+        Some(list),
+        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+    );
+    let kind = tree.insert(Some(host), kind_menu(available, choice.kind));
+    let setup = insert_setup(tree, host, choice.kind);
+    set_setup(tree, &setup, choice.kind, &choice.setup);
+    spacer(tree, host);
+    let remove = tree.insert(
+        Some(host),
+        Button::new("削除").control_size(ControlSize::Small),
+    );
+    PanelRow {
+        host,
+        kind,
+        setup,
+        remove,
+    }
+}
+
+/// Adding stops at [`MAX_PANEL`] rows (or when no kind is installed),
+/// removing at one.
+fn sync_row_buttons(tree: &mut UiTree, parts: &mut Parts) {
+    let removable = parts.panel.len() > 1;
+    for row in &parts.panel {
+        tree.set_enabled(row.remove, removable);
+    }
+    tree.set_enabled(
+        parts.add_row,
+        parts.panel.len() < MAX_PANEL && !parts.available.is_empty(),
+    );
+}
+
+/// Adds a row of the last row's kind (on its default model and effort),
+/// so a second claude is one click away.
+pub(super) fn add_row(tree: &mut UiTree, parts: &mut Parts) {
+    if parts.panel.len() >= MAX_PANEL {
+        return;
+    }
+    let Some(kind) = parts
+        .panel
+        .last()
+        .map(|row| selected_kind(tree, row.kind, &parts.available))
+        .or_else(|| parts.available.first().copied())
+    else {
+        return;
+    };
+    let row = insert_row(tree, parts.panel_list, &kind.into(), &parts.available);
+    parts.panel.push(row);
+    sync_row_buttons(tree, parts);
+}
+
+pub(super) fn remove_row(tree: &mut UiTree, parts: &mut Parts, index: usize, text: &mut TextStore) {
+    if parts.panel.len() <= 1 || index >= parts.panel.len() {
+        return;
+    }
+    let row = parts.panel.remove(index);
+    tree.remove(row.host, text);
+    sync_row_buttons(tree, parts);
+}
+
+/// Rebuilds the model and effort controls of the row whose kind menu is
+/// `source`; `false` when no row's is.
+pub(super) fn row_kind_changed(
+    tree: &mut UiTree,
+    parts: &mut Parts,
+    source: WidgetId,
+    text: &mut TextStore,
+) -> bool {
+    let Some(row) = parts.panel.iter_mut().find(|row| row.kind == source) else {
+        return false;
+    };
+    let kind = selected_kind(tree, row.kind, &parts.available);
+    clear_children(tree, row.setup.host, text);
+    let (model, effort) = insert_setup_controls(tree, row.setup.host, kind);
+    row.setup.model = model;
+    row.setup.effort = effort;
+    true
+}
+
+/// The start view's buttons, for the screen's action table.
+pub(super) fn actions(parts: &Parts, actions: &mut Vec<(WidgetId, Action)>) {
+    actions.push((parts.start_button, Action::Start));
+    actions.push((parts.add_row, Action::AddPanelRow));
+    for (index, row) in parts.panel.iter().enumerate() {
+        actions.push((row.remove, Action::RemovePanelRow(index)));
+    }
 }
 
 /// Rebuilds the moderator's model and effort controls for the kind now
 /// picked, when it changed: each kind has its own models and levels.
 pub(super) fn moderator_kind_changed(tree: &mut UiTree, parts: &mut Parts, text: &mut TextStore) {
-    let kind = selected_kind(tree, parts.moderator);
+    let kind = selected_kind(tree, parts.moderator, &parts.available);
     clear_children(tree, parts.moderator_setup.host, text);
     let (model, effort) = insert_setup_controls(tree, parts.moderator_setup.host, kind);
     parts.moderator_setup.model = model;
     parts.moderator_setup.effort = effort;
 }
 
-fn selected_kind(tree: &UiTree, popup: WidgetId) -> AgentKind {
+/// The kind picked in `popup`, a menu of the `available` kinds. With none
+/// available the menu is empty, and the first kind of all stands in.
+fn selected_kind(tree: &UiTree, popup: WidgetId, available: &[AgentKind]) -> AgentKind {
     tree.get::<PopUpButton>(popup)
-        .map_or(AgentKind::ALL[0], |p| AgentKind::ALL[p.selected()])
+        .and_then(|p| available.get(p.selected()))
+        .or_else(|| available.first())
+        .copied()
+        .unwrap_or(AgentKind::ALL[0])
+}
+
+/// The agents a form asks for, fitted to the available kinds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Fitted {
+    pub moderator: AgentChoice,
+    pub panel: Vec<AgentChoice>,
+    /// The kinds left out for not being available, each once, in
+    /// [`AgentKind::ALL`] order.
+    pub dropped: Vec<AgentKind>,
+}
+
+/// Fits `moderator` and `panel` to the `available` kinds: panelists of
+/// another kind are left out (at most [`MAX_PANEL`] stay; an empty panel
+/// gets one of the first available kind), and a moderator of another kind
+/// becomes the first available kind. With nothing available, the panel is
+/// empty and the moderator stays as it was.
+pub(crate) fn fit(
+    moderator: &AgentChoice,
+    panel: &[AgentChoice],
+    available: &[AgentKind],
+) -> Fitted {
+    let is_available = |kind: AgentKind| available.contains(&kind);
+    let dropped = AgentKind::ALL
+        .into_iter()
+        .filter(|&kind| !is_available(kind))
+        .filter(|&kind| moderator.kind == kind || panel.iter().any(|c| c.kind == kind))
+        .collect();
+    let mut panel: Vec<AgentChoice> = panel
+        .iter()
+        .filter(|c| is_available(c.kind))
+        .take(MAX_PANEL)
+        .cloned()
+        .collect();
+    let moderator = match available.first() {
+        Some(&first) => {
+            if panel.is_empty() {
+                panel.push(first.into());
+            }
+            if is_available(moderator.kind) {
+                moderator.clone()
+            } else {
+                first.into()
+            }
+        }
+        None => moderator.clone(),
+    };
+    Fitted {
+        moderator,
+        panel,
+        dropped,
+    }
 }
 
 fn read_setup(tree: &UiTree, parts: &SetupParts, kind: AgentKind) -> AgentSetup {
@@ -454,15 +675,90 @@ fn read_setup(tree: &UiTree, parts: &SetupParts, kind: AgentKind) -> AgentSetup 
     AgentSetup { model, effort }
 }
 
-/// Says why starting may not work yet: the link to Noa.
-pub(super) fn rebuild_note(tree: &mut UiTree, parts: &Parts, link: &Link, text: &mut TextStore) {
+/// Puts `moderator` and `panel`, fitted to the available kinds, into the
+/// form (a rematch, or the agents as they were when the installed kinds
+/// became known); returns the kinds left out.
+pub(super) fn fill_agents(
+    tree: &mut UiTree,
+    parts: &mut Parts,
+    moderator: &AgentChoice,
+    panel: &[AgentChoice],
+    text: &mut TextStore,
+) -> Vec<AgentKind> {
+    let fitted = fit(moderator, panel, &parts.available);
+    clear_children(tree, parts.moderator_host, text);
+    parts.moderator = tree.insert(
+        Some(parts.moderator_host),
+        kind_menu(&parts.available, fitted.moderator.kind),
+    );
+    moderator_kind_changed(tree, parts, text);
+    let kind = fitted.moderator.kind;
+    set_setup(tree, &parts.moderator_setup, kind, &fitted.moderator.setup);
+    for row in std::mem::take(&mut parts.panel) {
+        tree.remove(row.host, text);
+    }
+    parts.panel = fitted
+        .panel
+        .iter()
+        .map(|choice| insert_row(tree, parts.panel_list, choice, &parts.available))
+        .collect();
+    sync_row_buttons(tree, parts);
+    fitted.dropped
+}
+
+/// Rebuilds every agent menu to offer only `available`, keeping the agents
+/// picked where their kind is still offered; returns the kinds left out.
+pub(super) fn set_available(
+    tree: &mut UiTree,
+    parts: &mut Parts,
+    available: Vec<AgentKind>,
+    text: &mut TextStore,
+) -> Vec<AgentKind> {
+    let (moderator, panel) = read_agents(tree, parts);
+    parts.available = available;
+    fill_agents(tree, parts, &moderator, &panel, text)
+}
+
+/// Whether the agents are still those the form opened with.
+pub(super) fn agents_untouched(tree: &UiTree, parts: &Parts) -> bool {
+    read_agents(tree, parts) == (AgentKind::ALL[0].into(), default_panel())
+}
+
+/// `インストールされていないため除外: codex, agy`.
+pub(super) fn excluded_note(dropped: &[AgentKind]) -> String {
+    let names: Vec<&str> = dropped.iter().map(|k| k.command()).collect();
+    format!("インストールされていないため除外: {}", names.join(", "))
+}
+
+/// Says why starting may not work yet: the check for installed agents
+/// (`None`: still running), and the link to Noa.
+pub(super) fn rebuild_note(
+    tree: &mut UiTree,
+    parts: &Parts,
+    link: &Link,
+    installed: Option<&Installed>,
+    text: &mut TextStore,
+) {
     clear_children(tree, parts.note, text);
-    let note = match link {
-        Link::Live | Link::Stored(_) => return,
-        Link::Connecting => "Noa に接続しています…".to_owned(),
-        Link::Down(why) => format!("Noa に接続できません: {why}"),
+    let agents = match installed {
+        None => Some("インストール済みのエージェントを確認しています…".to_owned()),
+        Some(Installed::Unknown(why)) => Some(format!(
+            "インストール済みエージェントを確認できませんでした（{why}）。すべて表示しています"
+        )),
+        Some(Installed::Found(kinds)) if kinds.is_empty() => Some(format!(
+            "{} のいずれもログインシェルの PATH に見つかりません",
+            AgentKind::ALL.map(AgentKind::command).join(" / ")
+        )),
+        Some(Installed::Found(_)) => None,
     };
-    super::note(tree, parts.note, note);
+    let link = match link {
+        Link::Live | Link::Stored(_) => None,
+        Link::Connecting => Some("Noa に接続しています…".to_owned()),
+        Link::Down(why) => Some(format!("Noa に接続できません: {why}")),
+    };
+    for note in [agents, link].into_iter().flatten() {
+        super::note(tree, parts.note, note);
+    }
 }
 
 /// Empties the topic, for the next discussion.
@@ -484,24 +780,7 @@ pub(super) fn read(tree: &UiTree, parts: &Parts) -> Form {
         .map_or(DEFAULT_MAX_ROUNDS, |n| {
             n.value().round().clamp(1.0, f64::from(MAX_MAX_ROUNDS)) as RoundNo
         });
-    let kind = selected_kind(tree, parts.moderator);
-    let moderator = AgentChoice {
-        kind,
-        setup: read_setup(tree, &parts.moderator_setup, kind),
-    };
-    let panel = AgentKind::ALL
-        .iter()
-        .zip(&parts.panel)
-        .zip(&parts.panel_setup)
-        .filter(|((_, id), _)| {
-            tree.get::<Checkbox>(**id)
-                .is_some_and(|c| c.state() == CheckState::On)
-        })
-        .map(|((&kind, _), setup)| AgentChoice {
-            kind,
-            setup: read_setup(tree, setup, kind),
-        })
-        .collect();
+    let (moderator, panel) = read_agents(tree, parts);
     Form {
         topic,
         workdir,
@@ -509,6 +788,24 @@ pub(super) fn read(tree: &UiTree, parts: &Parts) -> Form {
         moderator,
         panel,
     }
+}
+
+/// The moderator and the panel, as the form shows them.
+fn read_agents(tree: &UiTree, parts: &Parts) -> (AgentChoice, Vec<AgentChoice>) {
+    let choice = |popup: WidgetId, setup: &SetupParts| {
+        let kind = selected_kind(tree, popup, &parts.available);
+        AgentChoice {
+            kind,
+            setup: read_setup(tree, setup, kind),
+        }
+    };
+    let moderator = choice(parts.moderator, &parts.moderator_setup);
+    let panel = parts
+        .panel
+        .iter()
+        .map(|row| choice(row.kind, &row.setup))
+        .collect();
+    (moderator, panel)
 }
 
 /// The working directory typed in the start view: empty is none, `~` is

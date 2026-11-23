@@ -23,6 +23,7 @@ use competition::model::types::{
 use competition::store::Listed;
 
 use super::{Action, caption, clear_children, gap, spacer, tag};
+use crate::installed::Installed;
 use crate::live::Link;
 
 const MAX_MAX_ROUNDS: RoundNo = 50;
@@ -37,7 +38,12 @@ pub(super) struct Parts {
     pub(super) workdir: WidgetId,
     pub(super) max_rounds: WidgetId,
     pub(super) reveal_interval: WidgetId,
+    /// Holds the judge's kind menu, so it can be rebuilt for other kinds.
+    judge_host: WidgetId,
     pub(super) judge: WidgetId,
+    /// The kinds the agent menus offer, in menu order: the menu index
+    /// maps to a kind through this list, never through `AgentKind::ALL`.
+    kinds: Vec<AgentKind>,
     /// The model and effort of the judge; rebuilt when its kind changes.
     pub(super) judge_setup: SetupParts,
     /// Holds the panel's rows.
@@ -49,6 +55,83 @@ pub(super) struct Parts {
     note: WidgetId,
     /// Holds the list of past competitions.
     past: WidgetId,
+}
+
+impl Parts {
+    pub(super) fn kinds(&self) -> &[AgentKind] {
+        &self.kinds
+    }
+}
+
+/// Which agents are installed, as far as the screen knows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Detection {
+    /// The check is still running.
+    Pending,
+    Done(Installed),
+}
+
+impl Detection {
+    /// Every kind installed: what the demo and stored views assume, so
+    /// they stay deterministic.
+    pub(super) fn all_installed() -> Self {
+        Self::Done(Installed::Found(AgentKind::ALL.to_vec()))
+    }
+
+    /// The kinds the agent menus offer: the installed ones, or all of
+    /// them while nothing is known (pending, unknown, none installed; a
+    /// menu cannot be empty, and the start button is off in the last two
+    /// cases it matters for).
+    pub(super) fn menu_kinds(&self) -> Vec<AgentKind> {
+        match self {
+            Self::Done(Installed::Found(kinds)) if !kinds.is_empty() => kinds.clone(),
+            _ => AgentKind::ALL.to_vec(),
+        }
+    }
+
+    /// The kinds the buttons that hand work to an agent offer.
+    pub(super) fn available(&self) -> Vec<AgentKind> {
+        match self {
+            Self::Pending => AgentKind::ALL.to_vec(),
+            Self::Done(Installed::Found(kinds)) => kinds.clone(),
+            Self::Done(Installed::Unknown(_)) => AgentKind::ALL.to_vec(),
+        }
+    }
+
+    /// A competition can be started: the check is done and found an
+    /// agent (or could not tell, and all are offered).
+    pub(super) fn startable(&self) -> bool {
+        match self {
+            Self::Pending => false,
+            Self::Done(Installed::Found(kinds)) => !kinds.is_empty(),
+            Self::Done(Installed::Unknown(_)) => true,
+        }
+    }
+
+    /// Why the start button is off (also what shows in the note), or the
+    /// caveat when it is on.
+    fn note(&self) -> Option<String> {
+        match self {
+            Self::Pending => Some("インストール済みのエージェントを確認しています…".to_owned()),
+            Self::Done(Installed::Unknown(reason)) => Some(format!(
+                "インストール済みエージェントを確認できませんでした（{reason}）。すべて表示しています"
+            )),
+            Self::Done(Installed::Found(kinds)) if kinds.is_empty() => Some(
+                "claude / codex / agy のいずれもログインシェルの PATH に見つかりません".to_owned(),
+            ),
+            Self::Done(Installed::Found(_)) => None,
+        }
+    }
+
+    pub(super) fn blocked_reason(&self) -> String {
+        self.note().unwrap_or_default()
+    }
+}
+
+/// "インストールされていないため除外: codex, agy".
+pub(super) fn left_out_message(kinds: &[AgentKind]) -> String {
+    let names: Vec<&str> = kinds.iter().map(|k| k.command()).collect();
+    format!("インストールされていないため除外: {}", names.join(", "))
 }
 
 /// One panel entry: its agent kind, model and effort, and its remove button.
@@ -71,19 +154,63 @@ pub(crate) struct Form {
 }
 
 impl Default for Form {
+    /// The clean form while every kind is on offer.
     fn default() -> Self {
+        Self::for_kinds(&AgentKind::ALL)
+    }
+}
+
+/// The fewest entries a panel has.
+const MIN_PANEL: usize = 2;
+
+impl Form {
+    /// The clean form for the available `kinds` (not empty): the judge is
+    /// the first, and the panel one row per kind, padded to the minimum
+    /// by repeating the first.
+    pub(crate) fn for_kinds(kinds: &[AgentKind]) -> Self {
+        let first = kinds.first().copied().unwrap_or(AgentKind::ALL[0]);
+        let mut panel: Vec<AgentChoice> = kinds.iter().take(MAX_PANEL).map(|&k| k.into()).collect();
+        while panel.len() < MIN_PANEL {
+            panel.push(first.into());
+        }
         Self {
             request: String::new(),
             workdir: String::new(),
             max_rounds: DEFAULT_MAX_ROUNDS,
             reveal_interval: DEFAULT_REVEAL_INTERVAL,
-            judge: AgentKind::ALL[0].into(),
-            panel: AgentKind::ALL.iter().map(|&k| k.into()).collect(),
+            judge: first.into(),
+            panel,
         }
     }
-}
 
-impl Form {
+    /// This form with only the available `kinds`: panel entries of
+    /// another kind are dropped (the panel is padded back to the minimum
+    /// with the first kind), a judge of another kind becomes the first
+    /// kind on its defaults. Also the kinds left out, in order, once each.
+    fn restricted(mut self, kinds: &[AgentKind]) -> (Self, Vec<AgentKind>) {
+        let mut left_out = Vec::new();
+        let mut note = |kind: AgentKind| {
+            if !left_out.contains(&kind) {
+                left_out.push(kind);
+            }
+        };
+        if !kinds.contains(&self.judge.kind) {
+            note(self.judge.kind);
+            self.judge = kinds[0].into();
+        }
+        self.panel.retain(|choice| {
+            let keep = kinds.contains(&choice.kind);
+            if !keep {
+                note(choice.kind);
+            }
+            keep
+        });
+        while self.panel.len() < MIN_PANEL {
+            self.panel.push(kinds[0].into());
+        }
+        (self, left_out)
+    }
+
     /// `session`'s settings, for a rematch. A session without a round
     /// limit gets the default one (the form always sets a limit).
     pub(crate) fn of_session(session: &Session) -> Self {
@@ -247,11 +374,12 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         Some(judge_col),
         Container::row().align_items(AlignItems::CENTER).gap(6.0),
     );
-    let judge = tree.insert(
-        Some(judge_row),
-        PopUpButton::new(AgentKind::ALL.iter().map(|k| k.command())),
-    );
-    let judge_setup = insert_setup(tree, judge_row, AgentKind::ALL[0]);
+    // Nothing is known of what is installed yet: every kind is offered
+    // until the check reports ([`apply_kinds`]).
+    let kinds = AgentKind::ALL.to_vec();
+    let judge_host = tree.insert(Some(judge_row), Container::row());
+    let judge = insert_kind_menu(tree, judge_host, &kinds, kinds[0]);
+    let judge_setup = insert_setup(tree, judge_row, kinds[0]);
 
     let panel_col = tree.insert(Some(card), Container::column().gap(6.0));
     caption(
@@ -260,10 +388,10 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         format!("参加パネル（2〜{MAX_PANEL}体）・エージェント・モデル・エフォート"),
     );
     let panel_list = tree.insert(Some(panel_col), Container::column().gap(6.0));
-    let panel = Form::default()
+    let panel = Form::for_kinds(&kinds)
         .panel
         .iter()
-        .map(|choice| insert_row(tree, panel_list, choice))
+        .map(|choice| insert_row(tree, panel_list, &kinds, choice))
         .collect();
     let panel_foot = tree.insert(
         Some(panel_col),
@@ -296,7 +424,9 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         workdir,
         max_rounds,
         reveal_interval,
+        judge_host,
         judge,
+        kinds,
         judge_setup,
         panel_list,
         panel,
@@ -363,20 +493,37 @@ fn set_setup(tree: &mut UiTree, parts: &SetupParts, kind: AgentKind, setup: &Age
     tree.update::<PopUpButton, _>(parts.effort, |p, cx| p.set_selected(cx, effort));
 }
 
+/// A menu of `kinds`, `selected` picked (the first when it is not one).
+fn insert_kind_menu(
+    tree: &mut UiTree,
+    host: WidgetId,
+    kinds: &[AgentKind],
+    selected: AgentKind,
+) -> WidgetId {
+    tree.insert(
+        Some(host),
+        PopUpButton::new(kinds.iter().map(|k| k.command()))
+            .selected_index(kind_index(kinds, selected)),
+    )
+}
+
+/// Where `kind` is in the menu of `kinds`; the first when it is not.
+fn kind_index(kinds: &[AgentKind], kind: AgentKind) -> usize {
+    kinds.iter().position(|&k| k == kind).unwrap_or(0)
+}
+
 /// One panel row showing `choice`: kind menu, model, effort, remove.
-fn insert_row(tree: &mut UiTree, list: WidgetId, choice: &AgentChoice) -> PanelRow {
+fn insert_row(
+    tree: &mut UiTree,
+    list: WidgetId,
+    kinds: &[AgentKind],
+    choice: &AgentChoice,
+) -> PanelRow {
     let host = tree.insert(
         Some(list),
         Container::row().align_items(AlignItems::CENTER).gap(6.0),
     );
-    let index = AgentKind::ALL
-        .iter()
-        .position(|&k| k == choice.kind)
-        .unwrap_or(0);
-    let kind = tree.insert(
-        Some(host),
-        PopUpButton::new(AgentKind::ALL.iter().map(|k| k.command())).selected_index(index),
-    );
+    let kind = insert_kind_menu(tree, host, kinds, choice.kind);
     let setup = insert_setup(tree, host, choice.kind);
     set_setup(tree, &setup, choice.kind, &choice.setup);
     spacer(tree, host);
@@ -407,11 +554,10 @@ pub(super) fn add_row(tree: &mut UiTree, parts: &mut Parts) {
     if parts.panel.len() >= MAX_PANEL {
         return;
     }
-    let kind = parts
-        .panel
-        .last()
-        .map_or(AgentKind::ALL[0], |row| selected_kind(tree, row.kind));
-    let row = insert_row(tree, parts.panel_list, &kind.into());
+    let kind = parts.panel.last().map_or(parts.kinds[0], |row| {
+        selected_kind(tree, row.kind, &parts.kinds)
+    });
+    let row = insert_row(tree, parts.panel_list, &parts.kinds, &kind.into());
     parts.panel.push(row);
     sync_row_buttons(tree, parts);
 }
@@ -436,7 +582,7 @@ pub(super) fn row_kind_changed(
     let Some(row) = parts.panel.iter_mut().find(|row| row.kind == source) else {
         return false;
     };
-    let kind = selected_kind(tree, row.kind);
+    let kind = selected_kind(tree, row.kind, &parts.kinds);
     clear_children(tree, row.setup.host, text);
     let (model, effort) = insert_setup_controls(tree, row.setup.host, kind);
     row.setup.model = model;
@@ -444,8 +590,14 @@ pub(super) fn row_kind_changed(
     true
 }
 
-/// Puts `form` into the start view: a rematch, or a clean form.
-pub(super) fn fill(tree: &mut UiTree, parts: &mut Parts, form: &Form, text: &mut TextStore) {
+/// Puts `form` into the start view: a rematch, or a clean form. Entries
+/// of a kind the menus do not offer are left out; those kinds come back.
+pub(super) fn fill(
+    tree: &mut UiTree,
+    parts: &mut Parts,
+    form: &Form,
+    text: &mut TextStore,
+) -> Vec<AgentKind> {
     let request = form.request.clone();
     tree.update::<TextArea, _>(parts.request, |a, cx| a.set_text(cx, request));
     let workdir = form.workdir.clone();
@@ -453,10 +605,8 @@ pub(super) fn fill(tree: &mut UiTree, parts: &mut Parts, form: &Form, text: &mut
     let (rounds, reveal) = (f64::from(form.max_rounds), f64::from(form.reveal_interval));
     tree.update::<NumberInput, _>(parts.max_rounds, |n, cx| n.set_value(cx, rounds));
     tree.update::<NumberInput, _>(parts.reveal_interval, |n, cx| n.set_value(cx, reveal));
-    let judge = AgentKind::ALL
-        .iter()
-        .position(|&k| k == form.judge.kind)
-        .unwrap_or(0);
+    let (form, left_out) = form.clone().restricted(&parts.kinds);
+    let judge = kind_index(&parts.kinds, form.judge.kind);
     tree.update::<PopUpButton, _>(parts.judge, |p, cx| p.set_selected(cx, judge));
     judge_kind_changed(tree, parts, text);
     set_setup(tree, &parts.judge_setup, form.judge.kind, &form.judge.setup);
@@ -467,13 +617,30 @@ pub(super) fn fill(tree: &mut UiTree, parts: &mut Parts, form: &Form, text: &mut
         .panel
         .iter()
         .take(MAX_PANEL)
-        .map(|choice| insert_row(tree, parts.panel_list, choice))
+        .map(|choice| insert_row(tree, parts.panel_list, &parts.kinds, choice))
         .collect();
-    while parts.panel.len() < 2 {
-        let row = insert_row(tree, parts.panel_list, &AgentKind::ALL[0].into());
+    while parts.panel.len() < MIN_PANEL {
+        let row = insert_row(tree, parts.panel_list, &parts.kinds, &parts.kinds[0].into());
         parts.panel.push(row);
     }
     sync_row_buttons(tree, parts);
+    left_out
+}
+
+/// Makes the agent menus offer `kinds` (rebuilt: a menu's entries are
+/// fixed once made) and shows `form` in them; the kinds it had to leave
+/// out come back.
+pub(super) fn apply_kinds(
+    tree: &mut UiTree,
+    parts: &mut Parts,
+    kinds: Vec<AgentKind>,
+    form: &Form,
+    text: &mut TextStore,
+) -> Vec<AgentKind> {
+    parts.kinds = kinds;
+    clear_children(tree, parts.judge_host, text);
+    parts.judge = insert_kind_menu(tree, parts.judge_host, &parts.kinds, parts.kinds[0]);
+    fill(tree, parts, form, text)
 }
 
 /// The start view's buttons, for the screen's action table.
@@ -488,16 +655,18 @@ pub(super) fn actions(parts: &Parts, actions: &mut Vec<(WidgetId, Action)>) {
 /// Rebuilds the judge's model and effort controls for the kind now
 /// picked, when it changed: each kind has its own models and levels.
 pub(super) fn judge_kind_changed(tree: &mut UiTree, parts: &mut Parts, text: &mut TextStore) {
-    let kind = selected_kind(tree, parts.judge);
+    let kind = selected_kind(tree, parts.judge, &parts.kinds);
     clear_children(tree, parts.judge_setup.host, text);
     let (model, effort) = insert_setup_controls(tree, parts.judge_setup.host, kind);
     parts.judge_setup.model = model;
     parts.judge_setup.effort = effort;
 }
 
-fn selected_kind(tree: &UiTree, popup: WidgetId) -> AgentKind {
+/// The kind `popup` shows: its index into the menu's `kinds`.
+fn selected_kind(tree: &UiTree, popup: WidgetId, kinds: &[AgentKind]) -> AgentKind {
     tree.get::<PopUpButton>(popup)
-        .map_or(AgentKind::ALL[0], |p| AgentKind::ALL[p.selected()])
+        .and_then(|p| kinds.get(p.selected()).copied())
+        .unwrap_or(kinds[0])
 }
 
 fn read_setup(tree: &UiTree, parts: &SetupParts, kind: AgentKind) -> AgentSetup {
@@ -513,14 +682,26 @@ fn read_setup(tree: &UiTree, parts: &SetupParts, kind: AgentKind) -> AgentSetup 
     AgentSetup { model, effort }
 }
 
-pub(super) fn rebuild_note(tree: &mut UiTree, parts: &Parts, link: &Link, text: &mut TextStore) {
+pub(super) fn rebuild_note(
+    tree: &mut UiTree,
+    parts: &Parts,
+    link: &Link,
+    detection: &Detection,
+    text: &mut TextStore,
+) {
     clear_children(tree, parts.note, text);
-    let note = match link {
-        Link::Live => return,
-        Link::Connecting => "Noa に接続しています…".to_owned(),
-        Link::Down(why) => format!("Noa に接続できません: {why}"),
-    };
-    super::note(tree, parts.note, note);
+    tree.set_enabled(parts.start_button, detection.startable());
+    let notes = [
+        match link {
+            Link::Live => None,
+            Link::Connecting => Some("Noa に接続しています…".to_owned()),
+            Link::Down(why) => Some(format!("Noa に接続できません: {why}")),
+        },
+        detection.note(),
+    ];
+    for note in notes.into_iter().flatten() {
+        super::note(tree, parts.note, note);
+    }
 }
 
 pub(super) fn read(tree: &UiTree, parts: &Parts) -> Form {
@@ -542,7 +723,7 @@ pub(super) fn read(tree: &UiTree, parts: &Parts) -> Form {
         .map_or(DEFAULT_REVEAL_INTERVAL, |n| {
             n.value().round().clamp(0.0, f64::from(MAX_REVEAL_INTERVAL)) as RoundNo
         });
-    let kind = selected_kind(tree, parts.judge);
+    let kind = selected_kind(tree, parts.judge, &parts.kinds);
     let judge = AgentChoice {
         kind,
         setup: read_setup(tree, &parts.judge_setup, kind),
@@ -551,7 +732,7 @@ pub(super) fn read(tree: &UiTree, parts: &Parts) -> Form {
         .panel
         .iter()
         .map(|row| {
-            let kind = selected_kind(tree, row.kind);
+            let kind = selected_kind(tree, row.kind, &parts.kinds);
             AgentChoice {
                 kind,
                 setup: read_setup(tree, &row.setup, kind),
@@ -730,6 +911,35 @@ pub(super) fn workdir(typed: &str) -> Result<Option<PathBuf>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_clean_form_has_a_row_per_available_kind_and_at_least_two() {
+        let kinds = |form: &Form| form.panel.iter().map(|c| c.kind).collect::<Vec<_>>();
+        assert_eq!(kinds(&Form::default()), AgentKind::ALL);
+        let form = Form::for_kinds(&[AgentKind::Codex, AgentKind::Agy]);
+        assert_eq!(kinds(&form), [AgentKind::Codex, AgentKind::Agy]);
+        assert_eq!(form.judge.kind, AgentKind::Codex);
+        let form = Form::for_kinds(&[AgentKind::Agy]);
+        assert_eq!(kinds(&form), [AgentKind::Agy, AgentKind::Agy]);
+        assert_eq!(form.judge.kind, AgentKind::Agy);
+    }
+
+    #[test]
+    fn a_form_restricted_to_installed_kinds_says_what_it_left_out() {
+        let form = Form {
+            judge: AgentKind::Claude.into(),
+            panel: vec![
+                AgentKind::Codex.into(),
+                AgentKind::Claude.into(),
+                AgentKind::Codex.into(),
+            ],
+            ..Form::default()
+        };
+        let (form, left_out) = form.restricted(&[AgentKind::Codex]);
+        assert_eq!(left_out, [AgentKind::Claude]);
+        assert_eq!(form.judge.kind, AgentKind::Codex);
+        assert_eq!(form.panel.len(), 2);
+    }
 
     #[test]
     fn a_past_competition_shows_its_age_and_the_start_of_its_request() {

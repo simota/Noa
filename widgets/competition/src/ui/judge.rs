@@ -16,6 +16,7 @@ pub(super) fn insert(
     host: WidgetId,
     session: &Session,
     can_act: bool,
+    agents: &[AgentKind],
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
     heading(tree, host, "審判・アクション");
@@ -58,13 +59,13 @@ pub(super) fn insert(
                 Label::new(verdict.to_owned()).font_size(12.0).wrap(true),
             );
         }
-        if can_act && session.workdir.is_some() {
+        if can_act && session.workdir.is_some() && !agents.is_empty() {
             let adopt = tree.insert(
                 Some(banner),
                 Container::wrapping_row(6.0, 6.0).align_items(AlignItems::CENTER),
             );
             caption(tree, adopt, "優勝案を採用:");
-            for kind in AgentKind::ALL {
+            for &kind in agents {
                 let button = tree.insert(Some(adopt), small(kind.command()));
                 actions.push((
                     button,

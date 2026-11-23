@@ -1126,10 +1126,6 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             }
             Err(NoaError::Link(why)) => return Err(Fail::Link(why)),
         }
-        if pane.idle() {
-            pane.ready = true;
-            return Ok(true);
-        }
         let (quiet, input) = match conn.screen(pane.id) {
             Ok(text) if text.trim().is_empty() => {
                 pane.quiet = None;
@@ -1149,7 +1145,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             Err(NoaError::Link(why)) => return Err(Fail::Link(why)),
             Err(_) => (false, false),
         };
-        if input && quiet {
+        if pane.idle() || (input && quiet) {
             pane.ready = true;
         }
         Ok(pane.ready)
@@ -2807,34 +2803,6 @@ mod tests {
         assert_eq!(codex.unwrap(), "-m opus -c model_reasoning_effort=high");
         let plain = agent_argv(AgentKind::Agy, &AgentSetup::default());
         assert_eq!(run_under_csh(&plain, AgentKind::Agy).unwrap(), "");
-    }
-
-    #[test]
-    fn idle_pane_becomes_ready_without_capturing_screen() {
-        let root = temp_root("idle-no-screen");
-        let fake = Fake::new();
-        let mut rig = Rig::open(
-            &fake,
-            Start::New {
-                topic: "Pick a database".into(),
-                workdir: None,
-                max_rounds: None,
-                moderator: AgentKind::Agy.into(),
-                panel: vec![AgentKind::Claude.into()],
-                root: root.clone(),
-            },
-        );
-        rig.step();
-        let claude = fake.pane_of("claude · ");
-        let screen_before = fake.0.borrow().rpc_screen;
-        fake.report(claude, "input");
-        rig.until(10, |r| r.submitted(claude) == 1);
-        assert_eq!(
-            fake.0.borrow().rpc_screen,
-            screen_before,
-            "idle pane should not trigger screen capture RPCs"
-        );
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

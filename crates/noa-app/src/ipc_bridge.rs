@@ -107,8 +107,9 @@ impl IpcRegistry {
 pub(crate) struct IpcShared {
     pub(crate) registry: IpcRegistry,
     /// Wire-form panels, prebuilt so `noa.listPanels` and diffing never touch
-    /// a `Terminal` lock.
-    pub(crate) panels: Vec<Panel>,
+    /// a `Terminal` lock. Shared, so a listing holds this lock only to take a
+    /// reference, not to copy every panel.
+    pub(crate) panels: Arc<Vec<Panel>>,
     /// `(window_id, pane_id) -> Arc<Mutex<Terminal>>` for the off-main-thread
     /// `getText`/`getGrid` reads (short-held lock, per spec "制約").
     pub(crate) terminals: HashMap<(u64, u64), Arc<Mutex<Terminal>>>,
@@ -423,8 +424,8 @@ impl AppIpcBackend {
 }
 
 impl IpcBackend for AppIpcBackend {
-    fn list_panels(&self) -> Vec<Panel> {
-        self.shared.lock().panels.clone()
+    fn list_panels(&self) -> Arc<Vec<Panel>> {
+        Arc::clone(&self.shared.lock().panels)
     }
 
     fn get_text(

@@ -922,7 +922,7 @@ fn run_connection_loop(
         }
 
         for item in queue.drain() {
-            let text = serde_json::to_string(&to_notification(item)).unwrap_or_default();
+            let text = notification_text(item);
             ws.send(Message::Text(text)).map_err(ws_err_to_io)?;
         }
 
@@ -1252,19 +1252,29 @@ fn ws_err_to_io(err: tungstenite::Error) -> io::Error {
     io::Error::other(err.to_string())
 }
 
-fn to_notification(item: QueuedNotification) -> Value {
+/// A notification's envelope, declared in the key order `serde_json::Map`
+/// sorts to (as are its params' fields), so it serializes to the bytes the
+/// equivalent `Value` did without building one.
+#[derive(serde::Serialize)]
+struct NotificationEnvelope<P> {
+    jsonrpc: &'static str,
+    method: &'static str,
+    params: P,
+}
+
+fn notification_text(item: QueuedNotification) -> String {
     match item {
         QueuedNotification::StateChanged {
             panels,
             removed_pane_ids,
             dropped,
-        } => serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "noa.stateChanged",
-            "params": StateChangedParams {
+        } => serde_json::to_string(&NotificationEnvelope {
+            jsonrpc: "2.0",
+            method: "noa.stateChanged",
+            params: StateChangedParams {
+                dropped,
                 panels,
                 removed_pane_ids: removed_pane_ids.into_iter().map(WireId).collect(),
-                dropped,
             },
         }),
         QueuedNotification::Output {
@@ -1272,17 +1282,18 @@ fn to_notification(item: QueuedNotification) -> Value {
             coordinate_generation,
             lines,
             dropped,
-        } => serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "noa.output",
-            "params": OutputParams {
-                pane_id: WireId(pane_id),
+        } => serde_json::to_string(&NotificationEnvelope {
+            jsonrpc: "2.0",
+            method: "noa.output",
+            params: OutputParams {
                 coordinate_generation,
-                lines,
                 dropped,
+                lines,
+                pane_id: WireId(pane_id),
             },
         }),
     }
+    .unwrap_or_default()
 }
 
 // ---- request/response envelope ----
@@ -1346,19 +1357,27 @@ impl From<IpcError> for RpcFail {
 /// Declared in the key order `serde_json::Map` sorts to, so it serializes to
 /// the same bytes as the equivalent `Value` without copying `id` or `result`.
 #[derive(serde::Serialize)]
-struct SuccessEnvelope<'a> {
+struct SuccessEnvelope<'a, R> {
     id: &'a Value,
     jsonrpc: &'static str,
-    result: &'a Value,
+    result: &'a R,
 }
 
-fn success_response(id: &Value, result: &Value) -> String {
+/// [`ListPanelsResult`], written from the backend's shared listing.
+#[derive(serde::Serialize)]
+struct ListPanelsReply<'a> {
+    panels: &'a [Panel],
+}
+
+/// `result` is a `Value`, or a type whose fields are declared in sorted key
+/// order (as [`ListPanelsResult`]'s are), so the bytes are the `Value`'s.
+fn success_response<R: serde::Serialize>(id: &Value, result: &R) -> String {
     serde_json::to_string(&SuccessEnvelope {
         id,
         jsonrpc: "2.0",
         result,
     })
-    .expect("a Value always serializes")
+    .expect("a response result always serializes")
 }
 
 fn capped_get_text_response(id: &Value, mut result: Value) -> String {
@@ -1496,16 +1515,23 @@ fn dispatch(
         ));
     }
 
+    // The listing, the most frequent and largest result, is written
+    // directly rather than through a `Value`: same bytes, a third the work.
+    if req.method == "noa.listPanels" {
+        return Some(match require_scope(session, Scope::Read) {
+            Ok(()) => success_response(
+                &id,
+                &ListPanelsReply {
+                    panels: &backend.list_panels(),
+                },
+            ),
+            Err(fail) => error_response(id, fail.code, &fail.message),
+        });
+    }
+
     let is_get_text = req.method == "noa.getText";
     let outcome = (|| -> Result<Value, RpcFail> {
         match req.method.as_str() {
-            "noa.listPanels" => {
-                require_scope(session, Scope::Read)?;
-                Ok(serde_json::to_value(ListPanelsResult {
-                    panels: backend.list_panels(),
-                })
-                .unwrap())
-            }
             "noa.getText" => {
                 require_scope(session, Scope::Read)?;
                 handle_get_text(backend, req.params)
@@ -2026,6 +2052,233 @@ mod tests {
         }
     }
 
+    /// Panels with every optional field set, and with none: each key a
+    /// listing or a `stateChanged` can carry.
+    fn wire_panels() -> Vec<Panel> {
+        use crate::protocol::{Attr, PanelAgent, PanelExit, PanelSpawn, Row, Span, SpanColor};
+        let full = Panel {
+            window_group_id: WireId(3),
+            window_id: WireId(4),
+            pane_id: WireId(12),
+            name: "claude · \"worker\"\n".to_string(),
+            cwd: "/tmp/wt/é".to_string(),
+            branch: Some("orch/x".to_string()),
+            process: Some("claude".to_string()),
+            busy: true,
+            attention: true,
+            attachable: false,
+            preview: vec![Row {
+                row: 9,
+                spans: vec![
+                    Span {
+                        text: "● ".to_string(),
+                        fg: Some(SpanColor::rgb(95, 196, 160)),
+                        bg: Some(SpanColor::Palette(8)),
+                        attrs: Some(vec![Attr::Bold, Attr::CurlyUnderline]),
+                    },
+                    Span {
+                        text: "plain\t".to_string(),
+                        ..Span::default()
+                    },
+                ],
+            }],
+            surface_id: Some("0x00000000000000ff".to_string()),
+            agent: Some(PanelAgent {
+                kind: Some("claude".to_string()),
+                state: Some("permission".to_string()),
+                detail: Some("Bash(rm)".to_string()),
+                seq: 41,
+                blocked: Some("permission".to_string()),
+            }),
+            exit: Some(PanelExit { code: Some(-1) }),
+            parent_pane_id: Some(WireId(1)),
+            label: Some("worker-12".to_string()),
+            spawn: Some(PanelSpawn {
+                argv: vec!["claude".to_string(), "--model".to_string()],
+                started_at: 1_700_000_000,
+            }),
+        };
+        let bare = Panel {
+            window_group_id: WireId(0),
+            window_id: WireId(u64::MAX),
+            pane_id: WireId(1),
+            name: String::new(),
+            cwd: String::new(),
+            branch: None,
+            process: None,
+            busy: false,
+            attention: false,
+            attachable: true,
+            preview: Vec::new(),
+            surface_id: None,
+            agent: Some(PanelAgent {
+                kind: None,
+                state: None,
+                detail: None,
+                seq: 0,
+                blocked: None,
+            }),
+            exit: Some(PanelExit { code: None }),
+            parent_pane_id: None,
+            label: None,
+            spawn: None,
+        };
+        let mut none = bare.clone();
+        none.agent = None;
+        none.exit = None;
+        vec![full, bare, none]
+    }
+
+    struct ListingBackend(Vec<Panel>);
+    impl IpcBackend for ListingBackend {
+        fn list_panels(&self) -> Arc<Vec<Panel>> {
+            Arc::new(self.0.clone())
+        }
+        fn get_text(
+            &self,
+            pane: PaneRef,
+            source: crate::protocol::TextSource,
+            max_bytes: usize,
+        ) -> Result<crate::backend::TextResult, IpcError> {
+            NoopBackend.get_text(pane, source, max_bytes)
+        }
+        fn get_grid(
+            &self,
+            pane: PaneRef,
+            start_row: u64,
+            row_count: u64,
+        ) -> Result<crate::backend::GridResult, IpcError> {
+            NoopBackend.get_grid(pane, start_row, row_count)
+        }
+        fn send_text(
+            &self,
+            pane: PaneRef,
+            text: &str,
+            paste: bool,
+            require_paste_mode: bool,
+            refuse_shell: bool,
+        ) -> Result<(), IpcError> {
+            NoopBackend.send_text(pane, text, paste, require_paste_mode, refuse_shell)
+        }
+        fn focus_pane(&self, pane: PaneRef) -> Result<(), IpcError> {
+            NoopBackend.focus_pane(pane)
+        }
+        fn new_tab(&self, window: Option<crate::backend::WindowRef>) -> Result<PaneRef, IpcError> {
+            NoopBackend.new_tab(window)
+        }
+        fn split(
+            &self,
+            pane: PaneRef,
+            direction: crate::protocol::SplitDirection,
+        ) -> Result<PaneRef, IpcError> {
+            NoopBackend.split(pane, direction)
+        }
+        fn close_pane(&self, pane: PaneRef) -> Result<(), IpcError> {
+            NoopBackend.close_pane(pane)
+        }
+    }
+
+    // A listing's bytes are the ones the `Value` path wrote: keys sorted at
+    // every level.
+    #[test]
+    fn list_panels_response_bytes_match_the_value_path() {
+        let panels = wire_panels();
+        let backend: Arc<dyn IpcBackend> = Arc::new(ListingBackend(panels.clone()));
+        let broadcaster = Broadcaster::new();
+        let registry = broadcaster.attach_registry();
+        for (raw, id) in [
+            (
+                r#"{"jsonrpc":"2.0","id":5,"method":"noa.listPanels","params":{}}"#,
+                Value::from(5),
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":"x","method":"noa.listPanels"}"#,
+                Value::from("x"),
+            ),
+        ] {
+            let response = dispatch(
+                raw,
+                &backend,
+                "tok",
+                ScopeSet::from_strings(["read"]),
+                &broadcaster,
+                &registry,
+                1,
+                &mut session(),
+            )
+            .unwrap();
+            let result = serde_json::to_value(ListPanelsResult {
+                panels: panels.clone(),
+            })
+            .unwrap();
+            assert_eq!(response, value_envelope(&id, &result));
+        }
+    }
+
+    // A notification's bytes are the ones the `Value` path wrote.
+    #[test]
+    fn notification_bytes_match_the_value_path() {
+        use crate::protocol::{OutputParams, StateChangedParams};
+        let rows = wire_panels().remove(0).preview;
+        let items = || {
+            let mut items = Vec::new();
+            for (removed, dropped) in [(vec![], false), (vec![7, 3, u64::MAX], true)] {
+                for panels in [Vec::new(), wire_panels()] {
+                    items.push(QueuedNotification::StateChanged {
+                        panels,
+                        removed_pane_ids: removed.clone(),
+                        dropped,
+                    });
+                }
+            }
+            for dropped in [false, true] {
+                items.push(QueuedNotification::Output {
+                    pane_id: 9,
+                    coordinate_generation: 2,
+                    lines: rows.clone(),
+                    dropped,
+                });
+            }
+            items
+        };
+        let oracle = |item: QueuedNotification| {
+            match item {
+                QueuedNotification::StateChanged {
+                    panels,
+                    removed_pane_ids,
+                    dropped,
+                } => serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "noa.stateChanged",
+                    "params": StateChangedParams {
+                        panels,
+                        removed_pane_ids: removed_pane_ids.into_iter().map(WireId).collect(),
+                        dropped,
+                    },
+                }),
+                QueuedNotification::Output {
+                    pane_id,
+                    coordinate_generation,
+                    lines,
+                    dropped,
+                } => serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "noa.output",
+                    "params": OutputParams {
+                        pane_id: WireId(pane_id),
+                        coordinate_generation,
+                        lines,
+                        dropped,
+                    },
+                }),
+            }
+            .to_string()
+        };
+        for (item, expected) in items().into_iter().zip(items().into_iter().map(oracle)) {
+            assert_eq!(notification_text(item), expected);
+        }
+    }
+
     fn session() -> Session {
         Session {
             hello_done: true,
@@ -2281,8 +2534,8 @@ mod tests {
     /// Minimal backend for lifecycle-only tests: no RPC is ever dispatched.
     struct NoopBackend;
     impl IpcBackend for NoopBackend {
-        fn list_panels(&self) -> Vec<Panel> {
-            Vec::new()
+        fn list_panels(&self) -> Arc<Vec<Panel>> {
+            Arc::default()
         }
         fn get_text(
             &self,

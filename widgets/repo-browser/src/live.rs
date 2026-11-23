@@ -2,7 +2,7 @@
 //! inspecting local git worktrees for every active pane.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
@@ -551,42 +551,10 @@ fn build_snapshot(
     commit_cache: &mut git::CommitCache,
 ) -> Result<(RepoData, Option<DiffEntry>), ClientError> {
     let panels = client.list_panels()?;
-    let mut by_worktree: ByWorktree = HashMap::new();
     let mut bases = git::BaseRefs::default();
-
-    for panel in panels {
-        let cwd = panel.cwd.trim();
-        if cwd.is_empty() {
-            continue;
-        }
-        let info = if let Some((existing, _)) = by_worktree.get(cwd) {
-            existing.clone()
-        } else {
-            let Some(info) = git::inspect_worktree(cwd, mode, &mut bases) else {
-                continue;
-            };
-            info
-        };
-
-        let tail = fetch_pane_tail(client, &panel);
-        let summary = PaneSummary {
-            pane_id: panel.pane_id.0,
-            name: panel.name.clone(),
-            label: panel.label.clone(),
-            process: panel.process.clone(),
-            activity: panel_activity(&panel),
-            busy: panel.busy,
-            attention: panel.attention,
-            terminal_tail: tail,
-        };
-        let key = info.worktree_root.clone();
-        by_worktree
-            .entry(key)
-            .or_insert_with(|| (info, Vec::new()))
-            .1
-            .push(summary);
-    }
-
+    let mut by_worktree = place_panes(&panels, mode, &mut bases, |panel| {
+        pane_summary(panel, fetch_pane_tail(client, panel))
+    });
     add_paneless_worktrees(&mut by_worktree, mode, &mut bases);
     let data = repo_data(by_worktree, merges, commit_cache, &mut bases);
 
@@ -608,6 +576,75 @@ fn build_snapshot(
         });
 
     Ok((data, selected_diff))
+}
+
+/// The worktree of each panel's cwd, with the panes in it as `summary` makes
+/// them; a panel whose cwd is no worktree is left out. A cwd that resolves
+/// to the same directory as one already inspected successfully this time
+/// joins that worktree instead of being inspected again; one that failed,
+/// or cannot be resolved, is inspected again, as main does for every cwd.
+fn place_panes(
+    panels: &[Panel],
+    mode: DiffMode,
+    bases: &mut git::BaseRefs,
+    mut summary: impl FnMut(&Panel) -> PaneSummary,
+) -> ByWorktree {
+    let mut by_worktree: ByWorktree = HashMap::new();
+    // Resolved cwd -> the worktree its successful inspection found. Keyed by
+    // the resolved path, so a symlink retargeted between two panels is
+    // inspected again and lands where it points now.
+    let mut inspected: HashMap<PathBuf, String> = HashMap::new();
+    for panel in panels {
+        let cwd = panel.cwd.trim();
+        if cwd.is_empty() {
+            continue;
+        }
+        let (key, info) = if by_worktree.contains_key(cwd) {
+            (cwd.to_owned(), None)
+        } else {
+            let resolved = std::fs::canonicalize(cwd).ok();
+            if let Some(root) = resolved.as_ref().and_then(|dir| inspected.get(dir)) {
+                // Inspecting it again would find this worktree, which keeps
+                // the info of its first inspection.
+                (root.clone(), None)
+            } else {
+                let Some(info) = git::inspect_worktree(cwd, mode, bases) else {
+                    continue;
+                };
+                if let Some(dir) = resolved {
+                    inspected.insert(dir, info.worktree_root.clone());
+                }
+                (info.worktree_root.clone(), Some(info))
+            }
+        };
+        let summary = summary(panel);
+        match info {
+            Some(info) => by_worktree
+                .entry(key)
+                .or_insert_with(|| (info, Vec::new()))
+                .1
+                .push(summary),
+            None => {
+                if let Some((_, panes)) = by_worktree.get_mut(&key) {
+                    panes.push(summary);
+                }
+            }
+        }
+    }
+    by_worktree
+}
+
+fn pane_summary(panel: &Panel, terminal_tail: String) -> PaneSummary {
+    PaneSummary {
+        pane_id: panel.pane_id.0,
+        name: panel.name.clone(),
+        label: panel.label.clone(),
+        process: panel.process.clone(),
+        activity: panel_activity(panel),
+        busy: panel.busy,
+        attention: panel.attention,
+        terminal_tail,
+    }
 }
 
 /// Adds every other worktree of each repository a pane is in, from
@@ -872,6 +909,308 @@ mod tests {
         add_worktree(&repo, "bar", "orch/bar");
         for mode in DiffMode::ALL {
             assert_eq!(base_resolutions_in_one_refresh(&repo, mode), 1, "{mode:?}");
+        }
+    }
+
+    /// Pins what one refresh reports for a repository holding every kind of
+    /// worktree: ahead with commits and a predicted conflict, detached, on an
+    /// unborn branch, and the base itself, from a pane in a subdirectory.
+    #[test]
+    fn a_refresh_reports_every_kind_of_worktree() {
+        let repo = temp_repo("live-kinds", "main");
+        let _cleanup = TempRepo(format!("{}-wt", repo.0.display()).into());
+        let foo = add_worktree(&repo, "foo", "orch/foo");
+        commit_file(&foo, "old.rs", "fn theirs() {}\n");
+        commit_file(&foo, "two.rs", "2\n");
+        commit_file(&repo.0, "old.rs", "fn ours() {}\n");
+        std::fs::write(foo.join("old.rs"), "dirty\n").unwrap();
+        let detached = format!("{}-wt/detached", repo.0.display());
+        crate::git::tests::git(&repo.0, &["worktree", "add", "-q", "--detach", &detached]);
+        let unborn = format!("{}-wt/unborn", repo.0.display());
+        // An orphan worktree without `git worktree add --orphan` (Git 2.42+):
+        // a detached one switched to a new unborn branch, emptied.
+        crate::git::tests::git(&repo.0, &["worktree", "add", "-q", "--detach", &unborn]);
+        crate::git::tests::git(
+            Path::new(&unborn),
+            &["checkout", "-q", "--orphan", "unborn"],
+        );
+        crate::git::tests::git(Path::new(&unborn), &["rm", "-rfq", "."]);
+        std::fs::write(Path::new(&unborn).join("u.rs"), "u\n").unwrap();
+        std::fs::create_dir_all(repo.0.join("sub")).unwrap();
+        let sub = repo.0.join("sub");
+        for mode in DiffMode::ALL {
+            let mut merges = git::MergePredictions::default();
+            let mut commits = git::CommitCache::default();
+            for _ in 0..2 {
+                let (data, _) =
+                    offline_refresh(sub.to_str().unwrap(), mode, &mut merges, &mut commits);
+                assert_eq!(data.repos.len(), 1, "{mode:?}");
+                let got: Vec<_> = data.repos[0]
+                    .worktrees
+                    .iter()
+                    .map(|w| {
+                        (
+                            w.branch.clone(),
+                            w.has_pane(),
+                            w.ahead,
+                            w.behind,
+                            w.files
+                                .iter()
+                                .map(|f| {
+                                    format!("{} {} +{}-{}", f.status, f.path, f.added, f.deleted)
+                                })
+                                .collect::<Vec<_>>(),
+                            w.merge_conflicts.clone(),
+                            w.commits
+                                .iter()
+                                .map(|c| c.subject.clone())
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect();
+                let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+                let (foo_files, unborn_files) = match mode {
+                    DiffMode::Unstaged => (s(&["M old.rs +1-1"]), s(&["? u.rs +0-0"])),
+                    DiffMode::Staged => (s(&[]), s(&[])),
+                    DiffMode::VsMain => (s(&["M old.rs +1-1", "A two.rs +1-0"]), s(&[])),
+                };
+                assert_eq!(
+                    got,
+                    vec![
+                        ("(detached)".into(), false, 0, 0, s(&[]), s(&[]), s(&[])),
+                        ("main".into(), true, 0, 0, s(&[]), s(&[]), s(&[])),
+                        (
+                            "orch/foo".into(),
+                            false,
+                            0,
+                            0,
+                            foo_files,
+                            s(&["old.rs"]),
+                            s(&["two.rs", "old.rs"]),
+                        ),
+                        ("unborn".into(), false, 0, 0, unborn_files, s(&[]), s(&[])),
+                    ],
+                    "{mode:?}"
+                );
+            }
+            // The second refresh is answered from the caches.
+            assert_eq!(merges.runs(), 2, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn panes_are_placed_in_the_worktree_of_their_cwd() {
+        let repo = temp_repo("live-panes", "main");
+        let _cleanup = TempRepo(format!("{}-wt", repo.0.display()).into());
+        let foo = add_worktree(&repo, "foo", "orch/foo");
+        let plain = TempRepo(format!("{}-plain", repo.0.display()).into());
+        std::fs::create_dir_all(plain.0.join("sub")).unwrap();
+        std::fs::create_dir_all(repo.0.join("sub")).unwrap();
+        // Resolved paths, so that whether the temporary directory is reached
+        // through a symlink (`/var` on macOS) changes nothing: the root is
+        // then the key of the worktree its subdirectory found.
+        let real = |p: &Path| std::fs::canonicalize(p).unwrap();
+        let root = real(&repo.0);
+        let link = real(&plain.0).join("link");
+        std::os::unix::fs::symlink(root.join("sub"), &link).unwrap();
+        let s = |p: &Path| p.to_str().unwrap().to_owned();
+        let (sub, foo, plain, link) = (
+            s(&root.join("sub")),
+            s(&real(&foo)),
+            s(&real(&plain.0).join("sub")),
+            s(&link),
+        );
+        let missing = format!("{}/missing", s(&root));
+        let root = s(&root);
+        let cwds = [
+            &sub, &sub, &plain, &root, &foo, &plain, "  ", &missing, &sub, &foo, &link,
+        ];
+        let panels: Vec<Panel> = cwds
+            .iter()
+            .enumerate()
+            .map(|(i, cwd)| panel(i as u64 + 1, cwd))
+            .collect();
+        for mode in DiffMode::ALL {
+            let mut bases = git::BaseRefs::default();
+            let mut summarized = Vec::new();
+            let before = git::INSPECTIONS.with(std::cell::Cell::get);
+            let by_worktree = place_panes(&panels, mode, &mut bases, |panel| {
+                summarized.push(panel.pane_id.0);
+                pane(panel.pane_id.0)
+            });
+            assert_eq!(summarized, vec![1, 2, 4, 5, 9, 10, 11], "{mode:?}");
+            // sub, plain, foo, plain again (a failed inspection is retried)
+            // and missing; the root is the worktree sub found, and a repeat
+            // or a symlink to an inspected directory is not inspected again.
+            let inspected = git::INSPECTIONS.with(std::cell::Cell::get) - before;
+            assert_eq!(inspected, 5, "{mode:?}");
+            assert_eq!(
+                placed(&by_worktree),
+                [("main", vec![1, 2, 4, 9, 11]), ("orch/foo", vec![5, 10])],
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_symlink_retargeted_between_panes_is_inspected_again() {
+        let repo = temp_repo("live-relink", "main");
+        let _cleanup = TempRepo(format!("{}-wt", repo.0.display()).into());
+        let foo = add_worktree(&repo, "foo", "orch/foo");
+        let links = TempRepo(format!("{}-links", repo.0.display()).into());
+        std::fs::create_dir_all(&links.0).unwrap();
+        let link = links.0.join("link");
+        let panels = [
+            panel(1, link.to_str().unwrap()),
+            panel(2, link.to_str().unwrap()),
+        ];
+        for (second, want) in [
+            (foo.clone(), vec![("main", vec![1]), ("orch/foo", vec![2])]),
+            (repo.0.join("gone"), vec![("main", vec![1])]),
+        ] {
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(&repo.0, &link).unwrap();
+            // Retargeted while the first pane is summarized, as its terminal
+            // tail is fetched in a refresh.
+            let by_worktree = place_panes(
+                &panels,
+                DiffMode::Unstaged,
+                &mut git::BaseRefs::default(),
+                |panel| {
+                    if panel.pane_id.0 == 1 {
+                        std::fs::remove_file(&link).unwrap();
+                        std::os::unix::fs::symlink(&second, &link).unwrap();
+                    }
+                    pane(panel.pane_id.0)
+                },
+            );
+            assert_eq!(placed(&by_worktree), want, "{second:?}");
+        }
+    }
+
+    /// Each worktree's branch with the panes placed in it, sorted.
+    fn placed(by_worktree: &ByWorktree) -> Vec<(&str, Vec<u64>)> {
+        let mut got: Vec<(&str, Vec<u64>)> = by_worktree
+            .values()
+            .map(|(info, panes)| {
+                (
+                    info.branch.as_str(),
+                    panes.iter().map(|p| p.pane_id).collect(),
+                )
+            })
+            .collect();
+        got.sort();
+        got
+    }
+
+    /// The git half of `build_snapshot` for one pane in `cwd`, without a Noa
+    /// server: every worktree of its repository, then the first file's diff.
+    fn offline_refresh(
+        cwd: &str,
+        mode: DiffMode,
+        merges: &mut git::MergePredictions,
+        commit_cache: &mut git::CommitCache,
+    ) -> (RepoData, Option<DiffEntry>) {
+        offline_refresh_of(&[panel(1, cwd)], mode, merges, commit_cache)
+    }
+
+    /// A panel of pane `id` in `cwd`, as `noa.listPanels` sends it.
+    fn panel(id: u64, cwd: &str) -> Panel {
+        serde_json::from_value(serde_json::json!({
+            "windowGroupId": "1",
+            "windowId": "1",
+            "paneId": id.to_string(),
+            "name": "zsh",
+            "cwd": cwd,
+            "busy": false,
+            "attention": false,
+            "preview": [],
+        }))
+        .unwrap()
+    }
+
+    /// [`offline_refresh`] with `panels` for panes.
+    fn offline_refresh_of(
+        panels: &[Panel],
+        mode: DiffMode,
+        merges: &mut git::MergePredictions,
+        commit_cache: &mut git::CommitCache,
+    ) -> (RepoData, Option<DiffEntry>) {
+        let mut bases = git::BaseRefs::default();
+        let mut by_worktree = place_panes(panels, mode, &mut bases, |panel| pane(panel.pane_id.0));
+        add_paneless_worktrees(&mut by_worktree, mode, &mut bases);
+        let data = repo_data(by_worktree, merges, commit_cache, &mut bases);
+        let diff = data
+            .repos
+            .first()
+            .and_then(|r| r.worktrees.iter().find(|w| !w.files.is_empty()))
+            .and_then(|w| {
+                let f = w.files.first()?;
+                Some((
+                    w.cwd.clone(),
+                    f.path.clone(),
+                    git::file_diff(&w.cwd, &f.path, mode),
+                ))
+            });
+        (data, diff)
+    }
+
+    /// Times refreshes of `REPO_BROWSER_BENCH_DIR` (default: this crate's
+    /// repository) in every mode, `REPO_BROWSER_BENCH_RUNS` times each after
+    /// one warm-up, with `REPO_BROWSER_BENCH_PANES` panes (default 1) there.
+    /// Run with a logging `git` first on `PATH` to count spawns.
+    #[test]
+    #[ignore = "benchmark: cargo test -- --ignored --nocapture bench_refresh"]
+    fn bench_refresh() {
+        let dir = std::env::var("REPO_BROWSER_BENCH_DIR")
+            .unwrap_or_else(|_| env!("CARGO_MANIFEST_DIR").to_owned());
+        // At least one run, so there is a median to report.
+        let runs: usize = std::env::var("REPO_BROWSER_BENCH_RUNS")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(10)
+            .max(1);
+        let panes: u64 = std::env::var("REPO_BROWSER_BENCH_PANES")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(1);
+        let panels: Vec<Panel> = (1..=panes).map(|id| panel(id, &dir)).collect();
+        for mode in DiffMode::ALL {
+            let mut merges = git::MergePredictions::default();
+            let mut commits = git::CommitCache::default();
+            let mut times = Vec::new();
+            let (mut allocs, mut peaks) = (Vec::new(), Vec::new());
+            let mut worktrees = 0;
+            for i in 0..=runs {
+                let t = Instant::now();
+                let ((data, _), n, peak) = crate::heap::measure(|| {
+                    offline_refresh_of(&panels, mode, &mut merges, &mut commits)
+                });
+                if i > 0 {
+                    times.push(t.elapsed().as_secs_f64() * 1000.0);
+                    allocs.push(n);
+                    peaks.push(peak);
+                }
+                worktrees = data.repos.iter().map(|r| r.worktrees.len()).sum();
+            }
+            times.sort_by(f64::total_cmp);
+            allocs.sort();
+            peaks.sort();
+            println!(
+                "bench_refresh {mode:?}: {worktrees} worktrees, median {:.1} ms, min {:.1}, max {:.1} ({runs} runs)",
+                times[times.len() / 2],
+                times[0],
+                times[times.len() - 1]
+            );
+            println!(
+                "bench_heap {mode:?}: allocations median {} (min {}, max {}), peak heap median {} B (min {}, max {})",
+                allocs[allocs.len() / 2],
+                allocs[0],
+                allocs[allocs.len() - 1],
+                peaks[peaks.len() / 2],
+                peaks[0],
+                peaks[peaks.len() - 1]
+            );
         }
     }
 

@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use competition::model::types::{AgentChoice, AgentKind, PartId, RoundNo, Session};
@@ -25,6 +25,9 @@ pub struct Snapshot {
     pub session: Option<Arc<Session>>,
     /// Root directory holding `entries/<part>/`, `r<N>/artifacts/`, and `compare.html`.
     pub artifact_root: Option<PathBuf>,
+    /// The [`Channel::generation`] it was sent in; one sent before the
+    /// screen last left a competition is stale.
+    pub generation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,17 +53,42 @@ pub enum Command {
         winner: PartId,
         agent: AgentKind,
     },
+    /// Continues the unfinished competition logged in `dir`.
+    Resume {
+        dir: PathBuf,
+    },
+    /// Brings `part`'s pane to the front in Noa.
+    Focus {
+        part: PartId,
+    },
+    /// Leaves the competition on screen: its runner stops (an unfinished
+    /// one can be resumed from the list) and the start view comes back.
+    /// Sent by [`Channel::leave`].
+    Leave,
 }
 
 pub struct Channel {
     pub snapshots: Receiver<Snapshot>,
     pub notices: Receiver<String>,
     commands: Sender<Command>,
+    generation: Arc<AtomicU64>,
 }
 
 impl Channel {
     pub fn send(&self, cmd: Command) {
         let _ = self.commands.send(cmd);
+    }
+
+    /// Bumped each time the screen leaves a competition, so snapshots
+    /// still in flight from its runner are told apart and dropped.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// Leaves the competition on screen ([`Command::Leave`]).
+    pub fn leave(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.send(Command::Leave);
     }
 }
 
@@ -69,10 +97,12 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Channel {
     let (notice_tx, notices) = mpsc::channel();
     let (commands, command_rx) = mpsc::channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
+    let generation = Arc::new(AtomicU64::new(0));
     let _ = snapshot_tx.send(Snapshot {
         link: Link::Connecting,
         session: None,
         artifact_root: None,
+        generation: 0,
     });
     wake();
     let tick = Arc::clone(&wake);
@@ -90,12 +120,16 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Channel {
         .expect("spawn competition-clock thread");
     std::thread::Builder::new()
         .name("competition-commands".into())
-        .spawn(move || run_commands(command_rx, snapshot_tx, notice_tx, wake))
+        .spawn({
+            let generation = generation.clone();
+            move || run_commands(command_rx, snapshot_tx, notice_tx, wake, generation)
+        })
         .expect("spawn competition-commands thread");
     Channel {
         snapshots,
         notices,
         commands,
+        generation,
     }
 }
 
@@ -104,8 +138,13 @@ fn run_commands(
     snapshots: Sender<Snapshot>,
     notices: Sender<String>,
     wake: Arc<dyn Fn() + Send + Sync>,
+    generation: Arc<AtomicU64>,
 ) {
     let mut handle: Option<(Sender<Action>, Arc<AtomicBool>)> = None;
+    let notify = |text: &str| {
+        let _ = notices.send(text.to_owned());
+        wake();
+    };
     for cmd in commands {
         if handle
             .as_ref()
@@ -113,7 +152,20 @@ fn run_commands(
         {
             handle = None;
         }
-        let action = match (cmd, &handle) {
+        let start = match (cmd, &handle) {
+            (Command::Leave, _) => {
+                if let Some((actions, _)) = handle.take() {
+                    let _ = actions.send(Action::Stop);
+                }
+                let _ = snapshots.send(Snapshot {
+                    link: Link::Connecting,
+                    session: None,
+                    artifact_root: None,
+                    generation: generation.load(Ordering::Acquire),
+                });
+                wake();
+                continue;
+            }
             (
                 Command::Start {
                     request,
@@ -126,55 +178,61 @@ fn run_commands(
                 None,
             ) => {
                 let Some(root) = competition::store::default_root() else {
-                    let _ =
-                        notices.send("保存先（Noa のデータディレクトリ）が見つかりません".into());
-                    wake();
+                    notify("保存先（Noa のデータディレクトリ）が見つかりません");
                     continue;
                 };
-                let started = runner::spawn_session(
-                    runner::Start::New {
-                        request,
-                        workdir,
-                        max_rounds,
-                        reveal_interval,
-                        judge,
-                        panel,
-                        root,
-                    },
-                    || {},
-                );
-                let ended = Arc::new(AtomicBool::new(false));
-                handle = Some((started.actions(), ended.clone()));
-                let (snapshots, notices, wake) = (snapshots.clone(), notices.clone(), wake.clone());
-                std::thread::Builder::new()
-                    .name("competition-updates".into())
-                    .spawn(move || forward_updates(started, ended, snapshots, notices, wake))
-                    .expect("spawn competition-updates thread");
-                continue;
+                runner::Start::New {
+                    request,
+                    workdir,
+                    max_rounds,
+                    reveal_interval,
+                    judge,
+                    panel,
+                    root,
+                }
             }
-            (Command::Start { .. }, Some(_)) => {
-                let _ = notices.send("コンペティションはすでに始まっています".into());
-                wake();
+            (Command::Resume { dir }, None) => runner::Start::Resume { dir },
+            (Command::Start { .. } | Command::Resume { .. }, Some(_)) => {
+                notify("コンペティションはすでに始まっています");
                 continue;
             }
             (_, None) => {
-                let _ = notices.send("コンペティションが始まっていません".into());
-                wake();
+                notify("コンペティションが始まっていません");
                 continue;
             }
-            (Command::Intervene { to, body }, Some(_)) => Action::Intervene { to, body },
-            (Command::SelectWinner { winner }, Some(_)) => Action::SelectWinner { winner },
-            (Command::Retry, Some(_)) => Action::Retry,
-            (Command::Close, Some(_)) => Action::Close,
-            (Command::Adopt { winner, agent }, Some(_)) => Action::Adopt { winner, agent },
+            (cmd, Some((actions, _))) => {
+                if let Some(action) = forwarded(cmd) {
+                    let _ = actions.send(action);
+                }
+                continue;
+            }
         };
-        if let Some((actions, _)) = &handle {
-            let _ = actions.send(action);
-        }
+        let started = runner::spawn_session(start, || {});
+        let ended = Arc::new(AtomicBool::new(false));
+        handle = Some((started.actions(), ended.clone()));
+        let (snapshots, notices, wake) = (snapshots.clone(), notices.clone(), wake.clone());
+        let stamp = generation.load(Ordering::Acquire);
+        std::thread::Builder::new()
+            .name("competition-updates".into())
+            .spawn(move || forward_updates(started, ended, snapshots, notices, wake, stamp))
+            .expect("spawn competition-updates thread");
     }
     if let Some((actions, _)) = handle {
         let _ = actions.send(Action::Stop);
     }
+}
+
+/// The runner action a command on a running competition is.
+fn forwarded(cmd: Command) -> Option<Action> {
+    Some(match cmd {
+        Command::Intervene { to, body } => Action::Intervene { to, body },
+        Command::SelectWinner { winner } => Action::SelectWinner { winner },
+        Command::Retry => Action::Retry,
+        Command::Close => Action::Close,
+        Command::Adopt { winner, agent } => Action::Adopt { winner, agent },
+        Command::Focus { part } => Action::Focus { part },
+        Command::Start { .. } | Command::Resume { .. } | Command::Leave => return None,
+    })
 }
 
 fn forward_updates(
@@ -183,6 +241,7 @@ fn forward_updates(
     snapshots: Sender<Snapshot>,
     notices: Sender<String>,
     wake: Arc<dyn Fn() + Send + Sync>,
+    generation: u64,
 ) {
     let mut link = Link::Connecting;
     let mut session = None;
@@ -200,6 +259,7 @@ fn forward_updates(
                         link: link.clone(),
                         session: session.clone(),
                         artifact_root: artifact_root.clone(),
+                        generation,
                     })
                     .is_ok()
             }
@@ -214,6 +274,7 @@ fn forward_updates(
                         link: link.clone(),
                         session: session.clone(),
                         artifact_root: artifact_root.clone(),
+                        generation,
                     })
                     .is_ok()
             }
@@ -226,6 +287,7 @@ fn forward_updates(
                     link: Link::Down(why),
                     session,
                     artifact_root,
+                    generation,
                 });
                 wake();
                 break;
@@ -237,4 +299,52 @@ fn forward_updates(
         }
     }
     ended.store(true, Ordering::Release);
+}
+
+#[cfg(test)]
+impl Channel {
+    /// A channel with no command thread behind it, and the sender of its
+    /// snapshots.
+    pub fn fake() -> (Channel, Sender<Snapshot>) {
+        let (snapshot_tx, snapshots) = mpsc::channel();
+        let (_notice_tx, notices) = mpsc::channel();
+        let (commands, _command_rx) = mpsc::channel();
+        let channel = Channel {
+            snapshots,
+            notices,
+            commands,
+            generation: Arc::new(AtomicU64::new(0)),
+        };
+        (channel, snapshot_tx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn leaving_sends_the_start_view_in_a_new_generation() {
+        let channel = start(|| {});
+        let first = channel.snapshots.recv_timeout(WAIT).unwrap();
+        assert_eq!(first.generation, 0);
+        channel.leave();
+        assert_eq!(channel.generation(), 1);
+        let next = channel.snapshots.recv_timeout(WAIT).unwrap();
+        assert_eq!(next.generation, 1);
+        assert!(next.session.is_none());
+    }
+
+    #[test]
+    fn a_command_for_a_competition_that_is_not_running_says_so() {
+        let channel = start(|| {});
+        channel.send(Command::Focus {
+            part: PartId::new("claude"),
+        });
+        let notice = channel.notices.recv_timeout(WAIT).unwrap();
+        assert!(notice.contains("始まっていません"), "{notice}");
+    }
 }

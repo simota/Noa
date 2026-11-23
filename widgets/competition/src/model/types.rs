@@ -21,6 +21,10 @@ pub const DEFAULT_REVEAL_INTERVAL: RoundNo = 5;
 /// Default maximum rounds for a competition (allows two 5-round sprints).
 pub const DEFAULT_MAX_ROUNDS: RoundNo = 10;
 
+/// The most contestants one competition takes: each runs in a split of
+/// one Noa tab.
+pub const MAX_PANEL: usize = 6;
+
 /// The id of the judge agent ("Judge").
 pub const JUDGE_ID: &str = "judge";
 

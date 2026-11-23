@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use crate::model::brief;
 use crate::model::reduce::{self, Event, ReduceError};
 use crate::model::types::{
-    AgentChoice, ArtifactFile, Author, Brief, JUDGE_ID, Message, Millis, MsgKind, PartId,
-    Participant, Phase, Role, RoundKind, RoundNo, Session, SessionId, Submission,
+    AgentChoice, ArtifactFile, Author, Brief, JUDGE_ID, MAX_PANEL, Message, Millis, MsgKind,
+    PartId, Participant, Phase, Role, RoundKind, RoundNo, Session, SessionId, Submission,
 };
 use crate::model::validate;
 use crate::store;
@@ -209,6 +209,9 @@ impl Engine {
         if setup.panel.len() < 2 {
             return rejected("コンペティションには2体以上の参加パネルが必要です");
         }
+        if setup.panel.len() > MAX_PANEL {
+            return rejected(format!("参加パネルは{MAX_PANEL}体までです"));
+        }
         for choice in std::iter::once(&setup.judge).chain(setup.panel) {
             if let Err(why) = choice.setup.check(choice.kind) {
                 return rejected(why);
@@ -241,10 +244,7 @@ impl Engine {
 
     /// Root directory holding `entries/<part>/`, `r<N>/`, and `compare.html`.
     pub fn reply_dir(&self) -> PathBuf {
-        match &self.session.workdir {
-            Some(workdir) => store::workdir_reply_dir(workdir, &self.session.id),
-            None => self.dir.clone(),
-        }
+        store::reply_dir(&self.dir, &self.session)
     }
 
     pub fn resume(session: Session, dir: &Path, config: Config) -> Engine {
@@ -430,6 +430,13 @@ impl Engine {
         let Some(round) = self.session.current_round() else {
             return self.next_round(out, now);
         };
+        // A resumed session: briefs out before it stopped get their full
+        // time again from now, as the agents may have worked meanwhile.
+        for brief in round.briefs.iter().chain(&round.judge_brief) {
+            if brief.receipt.sent.is_some() && brief.receipt.replied.is_none() {
+                self.waiting.insert(brief.to.clone(), Some(now));
+            }
+        }
         for brief in &round.briefs {
             if brief.receipt.replied.is_some() {
                 continue;
@@ -1075,5 +1082,79 @@ mod tests {
         let claude_r6 = &r6.brief(&PartId::new("claude")).unwrap().body;
         assert!(claude_r6.contains("Peer showcase (round 5"));
         assert!(claude_r6.contains("r5/report-codex.md"));
+    }
+
+    #[test]
+    fn a_resumed_session_restarts_the_time_limits_of_briefs_already_sent() {
+        let mut engine = two_contestants();
+        for part in ["claude", "codex"] {
+            engine
+                .handle(Input::Sent {
+                    round: 1,
+                    part: PartId::new(part),
+                    at: 10,
+                })
+                .unwrap();
+        }
+        let config = Config::default();
+        let later = 10 + 10 * config.reply_timeout;
+        let mut resumed = Engine::resume(
+            engine.session().clone(),
+            Path::new("/tmp/comp-test"),
+            config,
+        );
+        let out = resumed.handle(Input::Start { now: later }).unwrap();
+        // Sent briefs are watched, not pasted again.
+        assert!(
+            out.effects
+                .iter()
+                .all(|e| matches!(e, Effect::WatchReply { .. }))
+        );
+        assert_eq!(out.effects.len(), 2);
+        let out = resumed.handle(Input::Tick { now: later + 1 }).unwrap();
+        assert!(out.batches.is_empty(), "{out:?}");
+        let out = resumed
+            .handle(Input::Tick {
+                now: later + config.start_timeout,
+            })
+            .unwrap();
+        assert_eq!(
+            out.effects
+                .iter()
+                .filter(|e| matches!(e, Effect::SendBrief { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_panel_larger_than_the_cap_is_turned_down() {
+        let panel = vec![AgentChoice::from(AgentKind::Claude); MAX_PANEL + 1];
+        let setup = Setup {
+            request: "x",
+            max_rounds: Some(2),
+            reveal_interval: 5,
+            workdir: None,
+            judge: AgentKind::Agy.into(),
+            panel: &panel,
+        };
+        let err = Engine::create_in(
+            SessionId::new("comp-test"),
+            setup,
+            Path::new("/tmp/comp-test"),
+            Config::default(),
+            1,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("6体まで"), "{err}");
+        let (judge, contestants) = participants(&AgentKind::Agy.into(), &panel[..MAX_PANEL]);
+        assert_eq!(judge.id.as_str(), JUDGE_ID);
+        let ids: Vec<&str> = contestants.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "claude", "claude-2", "claude-3", "claude-4", "claude-5", "claude-6"
+            ]
+        );
     }
 }

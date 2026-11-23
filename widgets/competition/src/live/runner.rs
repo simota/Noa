@@ -50,15 +50,31 @@ pub enum Start {
         panel: Vec<AgentChoice>,
         root: PathBuf,
     },
+    /// Continues the competition logged in `dir` (`Store::open` +
+    /// `Engine::resume`): agents still in their panes are taken up again,
+    /// the others are started anew.
+    Resume { dir: PathBuf },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    Intervene { to: Vec<PartId>, body: String },
-    SelectWinner { winner: PartId },
+    Intervene {
+        to: Vec<PartId>,
+        body: String,
+    },
+    SelectWinner {
+        winner: PartId,
+    },
     Retry,
     Close,
-    Adopt { winner: PartId, agent: AgentKind },
+    Adopt {
+        winner: PartId,
+        agent: AgentKind,
+    },
+    /// Brings `part`'s pane to the front in Noa.
+    Focus {
+        part: PartId,
+    },
     Stop,
 }
 
@@ -347,6 +363,9 @@ struct Runner<C: Connect, K: Clock> {
     last_tick: Millis,
     stop: bool,
     started: bool,
+    /// Opened from a log: agents whose panes are gone are briefed again
+    /// once the first connection shows which are.
+    resumed: bool,
     link_state: Link,
     /// Problems reported by snapshot checks running on their own threads.
     check_notes: (Sender<String>, Receiver<String>),
@@ -365,6 +384,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         wake: Rc<dyn Fn()>,
     ) -> Result<Self, String> {
         let now = clock.now();
+        let resumed = matches!(start, Start::Resume { .. });
         let (engine, store) = match start {
             Start::New {
                 request,
@@ -401,6 +421,33 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 let _ = store::write_viewer(&reply_dir, engine.session());
                 (engine, store)
             }
+            Start::Resume { dir } => {
+                let (store, session) = Store::open(&dir)
+                    .map_err(|e| format!("{} を開けません: {e}", dir.display()))?;
+                // The setup is written into the login shell's script, so a
+                // log edited by hand gets the same check a new session does.
+                for part in std::iter::once(&session.judge).chain(&session.contestants) {
+                    part.setup
+                        .check(part.kind)
+                        .map_err(|why| format!("{} を再開できません: {why}", dir.display()))?;
+                }
+                if let Some(workdir) = &session.workdir {
+                    if !workdir.is_dir() {
+                        return Err(format!(
+                            "{} はディレクトリではありません",
+                            workdir.display()
+                        ));
+                    }
+                    store::prepare_workdir(workdir)
+                        .map_err(|e| format!("prepare {}: {e}", workdir.display()))?;
+                }
+                let engine = Engine::resume(session, &dir, config);
+                let reply_dir = engine.reply_dir();
+                for part in engine.session().contestant_ids() {
+                    let _ = fs::create_dir_all(store::entry_dir(&reply_dir, part));
+                }
+                (engine, store)
+            }
         };
         let runner = Self {
             engine,
@@ -416,6 +463,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             last_tick: now,
             stop: false,
             started: false,
+            resumed,
             link_state: Link::Connecting,
             check_notes: mpsc::channel(),
             viewer_cache: ViewerCache::new(),
@@ -492,12 +540,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     }
 
     fn serve(&mut self, conn: &mut C::Conn) -> Result<(), Fail> {
-        self.sync_panes(conn)?;
-        if !self.started {
-            self.started = true;
-            let now = self.clock.now();
-            self.feed(Input::Start { now })?;
-        }
+        self.begin(conn)?;
         while !self.stop {
             self.drain_actions(Some(conn))?;
             if self.stop {
@@ -518,6 +561,21 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         Ok(())
     }
 
+    /// On each connection: takes up the panes; on the first, starts (or
+    /// resumes) the competition.
+    fn begin(&mut self, conn: &mut C::Conn) -> Result<(), Fail> {
+        self.sync_panes(conn)?;
+        if !self.started {
+            self.started = true;
+            let now = self.clock.now();
+            self.feed(Input::Start { now })?;
+            if self.resumed {
+                self.redeliver_lost()?;
+            }
+        }
+        Ok(())
+    }
+
     fn sync_panes(&mut self, conn: &mut C::Conn) -> Result<(), Fail> {
         let views = conn.panes().map_err(link)?;
         let by_id: BTreeMap<u64, &PaneView> = views.iter().map(|v| (v.pane_id, v)).collect();
@@ -530,11 +588,16 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                     .participant(&part)
                     .and_then(|p| p.pane_id)
             });
-            let found = known_id.and_then(|id| by_id.get(&id).copied()).or_else(|| {
-                views
-                    .iter()
-                    .find(|v| v.label.as_deref() == Some(label.as_str()))
-            });
+            // A pane id from the log names this agent's pane only while it
+            // still carries the label it was started with: ids are reused.
+            let found = known_id
+                .and_then(|id| by_id.get(&id).copied())
+                .filter(|v| v.label.as_deref().is_none_or(|l| l == label))
+                .or_else(|| {
+                    views
+                        .iter()
+                        .find(|v| v.label.as_deref() == Some(label.as_str()))
+                });
             if let Some(view) = found {
                 let mut pane = self
                     .panes
@@ -631,6 +694,9 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 Ok(Action::Adopt { winner, agent }) => {
                     self.adopt_winner(conn.as_deref_mut(), &winner, agent);
                 }
+                Ok(Action::Focus { part }) => {
+                    self.focus_pane(conn.as_deref_mut(), &part);
+                }
                 Err(TryRecvError::Empty) => return Ok(()),
                 Err(TryRecvError::Disconnected) => {
                     self.stop = true;
@@ -638,6 +704,54 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 }
             }
         }
+    }
+
+    fn focus_pane(&mut self, conn: Option<&mut C::Conn>, part: &PartId) {
+        let Some(conn) = conn else {
+            self.notice("Noa に接続されていません");
+            return;
+        };
+        let Some(pane) = self.panes.get(part).map(|p| p.id) else {
+            self.notice(format!(
+                "{part} のペインがありません（まだ起動していないか、閉じられています）"
+            ));
+            return;
+        };
+        match conn.focus(pane) {
+            Ok(()) => {}
+            Err(NoaError::PaneGone) => {
+                self.panes.remove(part);
+                self.notice(format!("{part} のペインは閉じられています"));
+            }
+            Err(e) => self.notice(format!("{part} のペインに移動できません: {e}")),
+        }
+    }
+
+    /// After a resume: a brief that went out before the competition
+    /// stopped, to an agent whose pane is gone and that left no reply, is
+    /// sent again (as a retry), which starts the agent in a new pane.
+    fn redeliver_lost(&mut self) -> Result<(), Fail> {
+        let Some(round) = self.engine.session().current_round() else {
+            return Ok(());
+        };
+        let no = round.no;
+        let lost: Vec<PartId> = round
+            .briefs
+            .iter()
+            .chain(&round.judge_brief)
+            .filter(|b| b.receipt.sent.is_some() && !b.reply_path.exists())
+            .filter(|b| !self.panes.contains_key(&b.to))
+            .filter(|b| in_play(self.engine.session(), no, &b.to))
+            .map(|b| b.to.clone())
+            .collect();
+        for part in lost {
+            self.feed(Input::SendFailed {
+                round: no,
+                part,
+                error: "the agent's pane was gone when the competition resumed".to_owned(),
+            })?;
+        }
+        Ok(())
     }
 
     fn adopt_winner(&mut self, conn: Option<&mut C::Conn>, winner: &PartId, agent: AgentKind) {
@@ -1154,6 +1268,7 @@ mod tests {
         panes: BTreeMap<u64, FakePane>,
         events: VecDeque<Changes>,
         typed: Vec<(u64, String)>,
+        focused: Vec<u64>,
         spawned: usize,
         /// Panes that are gone by the time they are asked for a paste.
         gone_on_paste: bool,
@@ -1278,6 +1393,15 @@ mod tests {
             self.0.borrow_mut().typed.push((pane, text.to_owned()));
             Ok(())
         }
+
+        fn focus(&mut self, pane: u64) -> Result<(), NoaError> {
+            let mut w = self.0.borrow_mut();
+            if !w.panes.contains_key(&pane) {
+                return Err(NoaError::PaneGone);
+            }
+            w.focused.push(pane);
+            Ok(())
+        }
     }
 
     const CONFIG: Config = Config {
@@ -1308,19 +1432,13 @@ mod tests {
         }
     }
 
-    fn rig(fake: &Fake, root: &Path) -> Runner<Fake, Fake> {
-        let (_actions_tx, actions) = mpsc::channel();
-        let (updates, _updates_rx) = mpsc::channel();
-        let start = Start::New {
-            request: "Design a music player UI".into(),
-            workdir: None,
-            max_rounds: Some(2),
-            reveal_interval: 5,
-            judge: AgentKind::Claude.into(),
-            panel: vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
-            root: root.to_owned(),
-        };
-        let mut runner = Runner::open(
+    type Wired = (Runner<Fake, Fake>, Sender<Action>, Receiver<Update>);
+
+    /// A runner opened on `start`, with its action and update channels.
+    fn open_wired(fake: &Fake, start: Start) -> Result<Wired, String> {
+        let (actions_tx, actions) = mpsc::channel();
+        let (updates, updates_rx) = mpsc::channel();
+        let runner = Runner::open(
             start,
             fake.clone(),
             fake.clone(),
@@ -1328,12 +1446,233 @@ mod tests {
             actions,
             updates,
             Rc::new(|| {}),
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
+        )?;
+        Ok((runner, actions_tx, updates_rx))
+    }
+
+    fn new_start(root: &Path, panel: Vec<AgentChoice>) -> Start {
+        Start::New {
+            request: "Design a music player UI".into(),
+            workdir: None,
+            max_rounds: Some(2),
+            reveal_interval: 5,
+            judge: AgentKind::Claude.into(),
+            panel,
+            root: root.to_owned(),
+        }
+    }
+
+    /// Opens a runner on `start` and runs its first connection.
+    fn rig_on(fake: &Fake, start: Start) -> Wired {
+        let (mut runner, actions, updates) =
+            open_wired(fake, start).unwrap_or_else(|e| panic!("{e}"));
         let mut conn = fake.clone();
-        assert!(runner.sync_panes(&mut conn).is_ok());
-        assert!(runner.feed(Input::Start { now: 1_000 }).is_ok());
-        runner
+        assert!(runner.begin(&mut conn).is_ok());
+        (runner, actions, updates)
+    }
+
+    fn rig(fake: &Fake, root: &Path) -> Runner<Fake, Fake> {
+        let panel = vec![AgentKind::Claude.into(), AgentKind::Codex.into()];
+        rig_on(fake, new_start(root, panel)).0
+    }
+
+    fn notices(updates: &Receiver<Update>) -> Vec<String> {
+        updates
+            .try_iter()
+            .filter_map(|u| match u {
+                Update::Notice(text) => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A competition whose two contestants took their first brief, then
+    /// stopped (the runner is dropped); returns its directory.
+    fn stopped_after_first_briefs(fake: &Fake, root: &Path) -> PathBuf {
+        let mut runner = rig(fake, root);
+        let mut conn = fake.clone();
+        step(&mut runner, &mut conn);
+        for part in [":claude", ":codex"] {
+            fake.report(fake.pane_of(part), "input", None);
+        }
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        for part in [":claude", ":codex"] {
+            assert_eq!(fake.pasted(fake.pane_of(part)), 1);
+        }
+        runner.engine.dir().to_owned()
+    }
+
+    #[test]
+    fn a_resumed_competition_takes_up_the_agents_still_in_their_panes() {
+        let fake = fake();
+        let root = temp_root();
+        let dir = stopped_after_first_briefs(&fake, &root);
+        let stored = store::read_session(&dir).unwrap();
+
+        let (mut runner, _actions, _updates) = rig_on(&fake, Start::Resume { dir: dir.clone() });
+        assert_eq!(*runner.engine.session(), stored);
+        let mut conn = fake.clone();
+        for _ in 0..3 {
+            step(&mut runner, &mut conn);
+        }
+        assert_eq!(fake.0.borrow().spawned, 2, "an agent was started again");
+        for part in [":claude", ":codex"] {
+            assert_eq!(fake.pasted(fake.pane_of(part)), 1, "{part} briefed again");
+        }
+        assert_eq!(runner.panes.len(), 2);
+
+        // Its reply is taken in as it would have been without the stop.
+        let claude = PartId::new("claude");
+        let reply = store::reply_path(&runner.engine.reply_dir(), 1, &claude);
+        fs::write(&reply, "# Summary: done").unwrap();
+        step(&mut runner, &mut conn);
+        fake.0.borrow_mut().now += REPLY_STABLE_FOR + 1;
+        step(&mut runner, &mut conn);
+        let round = runner.engine.session().round(1).unwrap();
+        assert!(round.submissions.contains_key(&claude));
+        drop(runner);
+        assert!(
+            store::read_session(&dir)
+                .unwrap()
+                .round(1)
+                .unwrap()
+                .submissions
+                .contains_key(&claude)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_resumed_competition_starts_agents_whose_panes_are_gone_again() {
+        let fake = fake();
+        let root = temp_root();
+        let dir = stopped_after_first_briefs(&fake, &root);
+        fake.0.borrow_mut().panes.clear();
+
+        let (mut runner, _actions, _updates) = rig_on(&fake, Start::Resume { dir });
+        let mut conn = fake.clone();
+        step(&mut runner, &mut conn);
+        assert_eq!(fake.0.borrow().spawned, 4);
+        for part in [":claude", ":codex"] {
+            let pane = fake.pane_of(part);
+            assert!(pane >= 102, "{part} was not started anew");
+            fake.report(pane, "input", None);
+        }
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        for part in [":claude", ":codex"] {
+            assert_eq!(fake.pasted(fake.pane_of(part)), 1, "{part} not briefed");
+        }
+        let round = runner.engine.session().round(1).unwrap();
+        let brief = round.brief(&PartId::new("claude")).unwrap();
+        assert_eq!(brief.receipt.retries, 1);
+        assert!(brief.receipt.failed.is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_pane_id_reused_by_another_pane_is_not_taken_for_the_agent() {
+        let fake = fake();
+        let root = temp_root();
+        let dir = stopped_after_first_briefs(&fake, &root);
+        // Noa restarted: the ids now name panes that are not the agents'.
+        for pane in fake.0.borrow_mut().panes.values_mut() {
+            pane.label = "zsh".into();
+        }
+        let (runner, _actions, _updates) = rig_on(&fake, Start::Resume { dir });
+        assert!(runner.panes.is_empty(), "{:?}", runner.panes);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_resume_checks_the_setup_of_a_log_edited_by_hand() {
+        let fake = fake();
+        let root = temp_root();
+        let panel = vec![
+            AgentChoice {
+                kind: AgentKind::Claude,
+                setup: AgentSetup {
+                    model: Some("opus".into()),
+                    effort: None,
+                },
+            },
+            AgentKind::Codex.into(),
+        ];
+        let (runner, _, _) = rig_on(&fake, new_start(&root, panel));
+        let dir = runner.engine.dir().to_owned();
+        drop(runner);
+        let log = dir.join(store::EVENTS_FILE);
+        let text = fs::read_to_string(&log).unwrap();
+        fs::write(&log, text.replace("\"opus\"", "\"opus;touch x\"")).unwrap();
+        let err = open_wired(&fake, Start::Resume { dir }).err().unwrap();
+        assert!(err.contains("再開できません"), "{err}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_competition_running_elsewhere_is_not_resumed_twice() {
+        let fake = fake();
+        let root = temp_root();
+        let runner = rig(&fake, &root);
+        let dir = runner.engine.dir().to_owned();
+        let err = open_wired(&fake, Start::Resume { dir: dir.clone() })
+            .err()
+            .unwrap();
+        assert!(err.contains("別のウィンドウで実行中"), "{err}");
+        drop(runner);
+        assert!(open_wired(&fake, Start::Resume { dir }).is_ok());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn focusing_an_agent_brings_its_pane_forward_or_says_why_not() {
+        let fake = fake();
+        let root = temp_root();
+        let panel = vec![AgentKind::Claude.into(), AgentKind::Codex.into()];
+        let (mut runner, actions, updates) = rig_on(&fake, new_start(&root, panel));
+        let mut conn = fake.clone();
+        step(&mut runner, &mut conn);
+        let claude = fake.pane_of(":claude");
+
+        actions
+            .send(Action::Focus {
+                part: PartId::new("claude"),
+            })
+            .unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        assert_eq!(fake.0.borrow().focused, [claude]);
+        assert!(notices(&updates).is_empty());
+
+        // The judge has no pane before its round is judged.
+        actions
+            .send(Action::Focus {
+                part: PartId::new("judge"),
+            })
+            .unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        assert_eq!(fake.0.borrow().focused.len(), 1);
+        assert!(notices(&updates)[0].contains("judge のペインがありません"));
+
+        // A pane closed behind the runner's back.
+        fake.0.borrow_mut().panes.remove(&claude);
+        actions
+            .send(Action::Focus {
+                part: PartId::new("claude"),
+            })
+            .unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        assert!(notices(&updates)[0].contains("閉じられています"));
+        assert!(!runner.panes.contains_key(&PartId::new("claude")));
+
+        actions
+            .send(Action::Focus {
+                part: PartId::new("codex"),
+            })
+            .unwrap();
+        runner.drain_actions(None).unwrap();
+        assert!(notices(&updates)[0].contains("接続されていません"));
+        let _ = fs::remove_dir_all(root);
     }
 
     fn fake() -> Fake {

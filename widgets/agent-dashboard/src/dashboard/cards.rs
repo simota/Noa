@@ -20,6 +20,15 @@ use super::{Pulse, Registry};
 
 pub(super) const RUNNING_CARD_WIDTH: f32 = 336.0;
 
+/// Whether the done panel shows the worker: it finished, or its pane is
+/// gone (a closed failure too: it asks nobody for anything).
+pub(super) fn shows_done(worker: &Worker) -> bool {
+    worker.state == State::Finished || worker.is_closed()
+}
+
+/// The tag of a worker whose pane is gone, rebuilt from its journal.
+pub(super) const CLOSED_TAG: &str = "閉じた";
+
 pub(super) fn quiet_text(worker: &Worker) -> String {
     format!("静止 {:.0} 分", worker.wait_minutes)
 }
@@ -312,11 +321,7 @@ pub(super) fn done(
     cards: Cards,
     reg: &mut Registry,
 ) {
-    let members: Vec<&Worker> = workers
-        .iter()
-        .copied()
-        .filter(|w| w.state == State::Finished)
-        .collect();
+    let members: Vec<&Worker> = workers.iter().copied().filter(|w| shows_done(w)).collect();
     let title = panel_title(tree, column, Panel::Done, members.len(), Tone::Neutral);
     let indicator = indicator(tree, title);
     let list = card_list(tree, column, 8.0);
@@ -356,6 +361,12 @@ pub(super) fn done_card(
         Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
     );
     identity_tags(tree, tags, worker);
+    if worker.is_closed() {
+        tree.insert(Some(tags), Tag::new(CLOSED_TAG).style(TagStyle::Outlined));
+        if worker.state == State::Error {
+            tree.insert(Some(tags), Tag::new("失敗").tone(Tone::Critical));
+        }
+    }
     if worker.has_result {
         tree.insert(Some(tags), Tag::new("結果あり").tone(Tone::Success));
     }

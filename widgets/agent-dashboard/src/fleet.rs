@@ -151,10 +151,18 @@ pub struct Worker {
     pub lines_per_tick: Vec<f64>,
     pub freshness: f64,
     pub phases: Vec<(Phase, f64)>,
+    /// For a worker whose pane is gone, rebuilt from its spawner's journal:
+    /// the id its pane had. `pane` is then a key of its own, never a pane's.
+    pub closed_pane: Option<u64>,
 }
 
 impl Worker {
     pub fn need(&self) -> Option<Need> {
+        // Its pane is gone: there is nothing left to act on, a failure
+        // included (it stays failed in the statistics).
+        if self.is_closed() {
+            return None;
+        }
         match self.state {
             State::Permission => Some(Need::Approval),
             State::Error => Some(Need::Failure),
@@ -170,6 +178,19 @@ impl Worker {
     pub fn card_tail(&self) -> &[String] {
         let from = self.screen_tail.len().saturating_sub(CARD_TAIL_LINES);
         &self.screen_tail[from..]
+    }
+
+    /// Whether a bulk close may take the worker without anyone looking at
+    /// it: it has ended (finished or failed). One running, or waiting on a
+    /// person for an approval or an answer, never.
+    pub fn can_close_unseen(&self) -> bool {
+        !self.is_closed() && matches!(self.state, State::Finished | State::Error)
+    }
+
+    /// Whether the worker's pane is gone (`closed_pane`): nothing can be
+    /// sent to it, opened or closed.
+    pub fn is_closed(&self) -> bool {
+        self.closed_pane.is_some()
     }
 
     /// One of the coding agents, which have a model; any other kind is a
@@ -415,6 +436,7 @@ pub fn canned() -> Fleet {
                 2.0, 6.0, 14.0, 9.0, 3.0, 18.0, 22.0, 11.0, 4.0, 7.0, 16.0, 12.0,
             ],
             freshness: 5.0,
+            closed_pane: None,
             phases: vec![
                 (Phase::Running, 20.0),
                 (Phase::Permission, 3.0),
@@ -446,6 +468,7 @@ pub fn canned() -> Fleet {
             screen_tail: Vec::new(),
             lines_per_tick: vec![1.0, 1.0, 3.0, 2.0, 5.0, 4.0, 2.0, 6.0, 3.0, 5.0, 4.0, 6.0],
             freshness: 5.0,
+            closed_pane: None,
             phases: vec![
                 (Phase::Running, 6.0),
                 (Phase::Input, 1.0),
@@ -479,6 +502,7 @@ pub fn canned() -> Fleet {
                 19.0, 24.0, 17.0, 21.0, 12.0, 6.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0,
             ],
             freshness: 1.0,
+            closed_pane: None,
             phases: vec![(Phase::Running, 38.0), (Phase::Quiet, 3.0)],
         },
         Worker {
@@ -511,6 +535,7 @@ pub fn canned() -> Fleet {
             ]),
             lines_per_tick: Vec::new(),
             freshness: 0.0,
+            closed_pane: None,
             phases: vec![(Phase::Running, 18.0), (Phase::Permission, 2.0)],
         },
         Worker {
@@ -542,6 +567,7 @@ pub fn canned() -> Fleet {
             ]),
             lines_per_tick: Vec::new(),
             freshness: 0.0,
+            closed_pane: None,
             phases: vec![(Phase::Running, 9.0), (Phase::Permission, 0.7)],
         },
         Worker {
@@ -573,6 +599,7 @@ pub fn canned() -> Fleet {
             ]),
             lines_per_tick: Vec::new(),
             freshness: 0.0,
+            closed_pane: None,
             phases: vec![(Phase::Running, 7.0), (Phase::Input, 6.0)],
         },
         Worker {
@@ -600,6 +627,7 @@ pub fn canned() -> Fleet {
             screen_tail: Vec::new(),
             lines_per_tick: Vec::new(),
             freshness: 0.0,
+            closed_pane: None,
             phases: vec![
                 (Phase::Running, 8.0),
                 (Phase::Permission, 1.0),
@@ -632,6 +660,7 @@ pub fn canned() -> Fleet {
             screen_tail: Vec::new(),
             lines_per_tick: Vec::new(),
             freshness: 0.0,
+            closed_pane: None,
             phases: vec![(Phase::Running, 6.0), (Phase::Ended, 11.0)],
         },
         Worker {
@@ -659,6 +688,7 @@ pub fn canned() -> Fleet {
             screen_tail: lines(&["FAIL scenario 3", "1 failed, 6 passed", "[exited 1]"]),
             lines_per_tick: Vec::new(),
             freshness: 0.0,
+            closed_pane: None,
             phases: vec![(Phase::Running, 22.0), (Phase::Ended, 1.0)],
         },
     ];
@@ -675,6 +705,66 @@ pub fn canned() -> Fleet {
             Orchestrator::named("perf-wish"),
         ],
     }
+}
+
+/// The canned fleet with two workers whose panes are gone, as the live
+/// feed rebuilds them from the spawners' journals (`--demo-closed`).
+pub fn canned_with_closed() -> Fleet {
+    let mut fleet = canned();
+    let closed = |key: u64, pane: u64, label: &str, kind: &str, orchestrator: &str| Worker {
+        pane: (1 << 63) | key,
+        label: label.into(),
+        kind: kind.into(),
+        branch: String::new(),
+        model: String::new(),
+        effort: String::new(),
+        orchestrator: orchestrator.into(),
+        orchestrator_pane: None,
+        parent: None,
+        state: State::Finished,
+        attention: false,
+        task: String::new(),
+        detail: String::new(),
+        since: String::new(),
+        wait_minutes: 0.0,
+        quiet: false,
+        reports: 0,
+        started_minutes: None,
+        took_minutes: None,
+        has_result: false,
+        result: None,
+        screen_tail: Vec::new(),
+        lines_per_tick: Vec::new(),
+        freshness: 0.0,
+        phases: Vec::new(),
+        closed_pane: Some(pane),
+    };
+    fleet.workers.extend([
+        Worker {
+            branch: "perf/ascii".into(),
+            model: "gpt-6.2-astra".into(),
+            effort: "high".into(),
+            task: "ascii 軸を 3 回計測して中央値を出す".into(),
+            detail: "最後の待ち結果: finished".into(),
+            since: "25 分前に閉じた".into(),
+            started_minutes: Some(43.0),
+            took_minutes: Some(18.0),
+            has_result: true,
+            phases: vec![(Phase::Running, 18.0), (Phase::Ended, 25.0)],
+            ..closed(1, 21, "bench-ascii", "codex", "perf-wish")
+        },
+        Worker {
+            model: "sonnet".into(),
+            task: "README の誤字を直す".into(),
+            since: "閉じた".into(),
+            started_minutes: Some(180.0),
+            ..closed(2, 4, "docs-typo", "claude", "閉じた親 9f3a")
+        },
+    ]);
+    fleet
+        .orchestrators
+        .push(Orchestrator::named("閉じた親 9f3a"));
+    fleet
 }
 
 fn lines(lines: &[&str]) -> Vec<String> {

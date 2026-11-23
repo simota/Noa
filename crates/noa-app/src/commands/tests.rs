@@ -1214,3 +1214,20 @@ fn applescript_actions_do_not_include_spawn() {
         Some(AppCommand::NewTab)
     );
 }
+
+#[test]
+fn the_review_widget_is_addressable_by_action_and_menu_id() {
+    let command = AppCommand::OpenReview;
+    assert_eq!(command.action_name(), "review.open");
+    assert_eq!(AppCommand::from_action_name("review.open"), Some(command));
+    assert_eq!(command.menu_id(), "noa.view.open-review");
+    assert_eq!(AppCommand::from_menu_id(command.menu_id()), Some(command));
+    assert_eq!(
+        crate::command_palette::command_palette_title(command),
+        "Open Review"
+    );
+    assert_eq!(
+        crate::command_palette::command_category(command),
+        crate::command_palette::CommandCategory::View
+    );
+}

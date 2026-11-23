@@ -184,7 +184,7 @@ fn main() -> Result<(), String> {
         } else {
             // The live feed stays connected until the selection's text is in.
             RepoBrowser::live_snapshot(
-                live::start(|| {}),
+                live::start(worktree.clone(), || {}),
                 worktree,
                 view,
                 &mut text,
@@ -206,7 +206,7 @@ fn main() -> Result<(), String> {
             RepoBrowser::demo()
         } else {
             let waker = setup.waker.clone();
-            let channel = live::start(move || waker.wake());
+            let channel = live::start(worktree.clone(), move || waker.wake());
             RepoBrowser::live(channel)
         };
         if let Some(path) = worktree.take() {

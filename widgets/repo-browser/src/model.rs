@@ -58,6 +58,16 @@ impl AgentKind {
         }
     }
 
+    /// The bytes of the argument [`exec_args`](Self::exec_args) execs the
+    /// agent with for `prompt`, without its NUL.
+    pub fn prompt_arg_len(self, prompt: &str) -> usize {
+        let joined = match self {
+            AgentKind::Agy => "--prompt-interactive=".len(),
+            AgentKind::Claude | AgentKind::Codex => 0,
+        };
+        joined + self.prompt_text(prompt).len()
+    }
+
     /// `prompt` as the agent is given it. Claude Code still runs a
     /// subcommand named by its prompt after `--` (`claude -- doctor`), so a
     /// one-word prompt gets a trailing line break, which no command name has.

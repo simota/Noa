@@ -2389,7 +2389,7 @@ impl RepoBrowser {
             self.toast("worktree が選択されていません");
             return;
         };
-        if agent_prompt_too_large(&text) {
+        if agent_prompt_too_large(agent, &text) {
             self.toast(format!(
                 "指示が大きすぎるためエージェントに渡せません（{} KiB）。引用を減らして {} KiB 未満にしてください",
                 text.len().div_ceil(1024),
@@ -5350,8 +5350,13 @@ diff --git a/gone.rs b/gone.rs\ndeleted file mode 100644\nindex 1..0\n--- a/gone
             h.screen.toasts
         );
         assert_eq!(prompt_text(&h.screen), huge);
-        // Exactly at the limit it goes.
+        // Claude is given a one-word prompt with a line break added, which
+        // counts: at the limit it does not go, one byte under it does.
+        h.screen.toasts.clear();
         set_prompt(&mut h.screen, &"x".repeat(AGENT_PROMPT_MAX));
+        h.screen.launch_agent(AgentKind::Claude);
+        assert_eq!(h.screen.toasts.len(), 1, "{:?}", h.screen.toasts);
+        set_prompt(&mut h.screen, &"x".repeat(AGENT_PROMPT_MAX - 1));
         h.screen.launch_agent(AgentKind::Claude);
         assert_eq!(launches(&h).len(), 1);
 

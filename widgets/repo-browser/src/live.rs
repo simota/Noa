@@ -116,7 +116,9 @@ impl Channel {
     }
 }
 
-pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Channel {
+/// The live feed. `asked` (`--worktree=PATH`) is listed with its
+/// repository's worktrees also when no pane is in that repository.
+pub fn start(asked: Option<String>, wake: impl Fn() + Send + Sync + 'static) -> Channel {
     let (snapshot_tx, snapshots) = mpsc::channel();
     let (notice_tx, notices) = mpsc::channel();
     let (delivered_tx, delivered) = mpsc::channel();
@@ -130,7 +132,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Channel {
     };
     std::thread::Builder::new()
         .name("repo-browser-live".into())
-        .spawn(move || run(snapshot_tx, outbox, command_rx, wake))
+        .spawn(move || run(snapshot_tx, outbox, command_rx, asked, wake))
         .expect("spawn repo-browser-live thread");
     Channel {
         snapshots,
@@ -152,6 +154,7 @@ fn run(
     snapshot_tx: Sender<Snapshot>,
     outbox: Outbox,
     command_rx: Receiver<Command>,
+    asked: Option<String>,
     wake: Arc<dyn Fn() + Send + Sync>,
 ) {
     let Outbox {
@@ -376,6 +379,7 @@ fn run(
                         let built = build_snapshot(
                             &mut client,
                             mode,
+                            asked.as_deref(),
                             selected_file.as_ref(),
                             &mut merges,
                             &mut commit_cache,
@@ -599,13 +603,14 @@ fn editor_argv(shell: Option<&str>, path: &str, line: u32, editor: Option<&str>)
     vec![shell.to_owned(), "-lc".to_owned(), script]
 }
 
-/// The most bytes of a prompt an agent is started with: the launch script
-/// hands it to the agent as one argument.
+/// The most bytes of the argument an agent is started with (the prompt and
+/// what [`AgentKind::prompt_arg_len`] adds): Linux's `MAX_ARG_STRLEN`,
+/// 128 KiB with the NUL.
 pub const AGENT_PROMPT_MAX: usize = 128 * 1024 - 1;
 
-/// Whether `prompt` is too large to start an agent with.
-pub fn agent_prompt_too_large(prompt: &str) -> bool {
-    prompt.len() > AGENT_PROMPT_MAX
+/// Whether `prompt` is too large to start `agent` with.
+pub fn agent_prompt_too_large(agent: AgentKind, prompt: &str) -> bool {
+    agent.prompt_arg_len(prompt) > AGENT_PROMPT_MAX
 }
 
 /// The label of a tab this browser starts an agent in. A label makes Noa
@@ -921,6 +926,7 @@ fn predict_again(merges: &mut git::MergePredictions, data: &RepoData, cwd: &str)
 fn build_snapshot(
     client: &mut Client,
     mode: DiffMode,
+    asked: Option<&str>,
     selected: Option<&(String, String)>,
     merges: &mut git::MergePredictions,
     commit_cache: &mut git::CommitCache,
@@ -930,7 +936,7 @@ fn build_snapshot(
     let mut by_worktree = place_panes(&panels, mode, &mut bases, |panel| {
         pane_summary(panel, fetch_pane_tail(client, panel))
     });
-    add_paneless_worktrees(&mut by_worktree, mode, &mut bases);
+    add_paneless_worktrees(&mut by_worktree, asked, mode, &mut bases);
     let data = repo_data(by_worktree, merges, commit_cache, &mut bases);
 
     let selected_diff = selected
@@ -1022,16 +1028,30 @@ fn pane_summary(panel: &Panel, terminal_tail: String) -> PaneSummary {
     }
 }
 
-/// Adds every other worktree of each repository a pane is in, from
-/// `git worktree list`, with no panes: a worker's worktree and branch stay
-/// to be reviewed and merged after its pane closed.
-fn add_paneless_worktrees(by_worktree: &mut ByWorktree, mode: DiffMode, bases: &mut git::BaseRefs) {
+/// Adds every other worktree of each repository a pane is in, and of the
+/// one holding `asked`, from `git worktree list`, with no panes: a worker's
+/// worktree and branch stay to be reviewed and merged after its pane (and
+/// every other pane of the repository) closed.
+fn add_paneless_worktrees(
+    by_worktree: &mut ByWorktree,
+    asked: Option<&str>,
+    mode: DiffMode,
+    bases: &mut git::BaseRefs,
+) {
     let mut repos = HashSet::new();
-    let anchors: Vec<String> = by_worktree
+    let mut anchors: Vec<String> = by_worktree
         .values()
         .filter(|(info, _)| repos.insert(info.repo_root.clone()))
         .map(|(info, _)| info.worktree_root.clone())
         .collect();
+    if let Some(info) = asked.and_then(|path| git::inspect_worktree(path, mode, bases))
+        && repos.insert(info.repo_root.clone())
+    {
+        anchors.push(info.worktree_root.clone());
+        by_worktree
+            .entry(info.worktree_root.clone())
+            .or_insert_with(|| (info, Vec::new()));
+    }
     for anchor in anchors {
         for path in git::list_worktrees(&anchor) {
             if by_worktree.contains_key(&path) {
@@ -1233,7 +1253,7 @@ mod tests {
             .unwrap();
         let mut by_worktree: ByWorktree = HashMap::new();
         by_worktree.insert(main.worktree_root.clone(), (main, vec![pane(7)]));
-        add_paneless_worktrees(&mut by_worktree, DiffMode::Unstaged, &mut bases);
+        add_paneless_worktrees(&mut by_worktree, None, DiffMode::Unstaged, &mut bases);
         let data = repo_data(
             by_worktree,
             &mut git::MergePredictions::default(),
@@ -1254,6 +1274,33 @@ mod tests {
         assert_eq!(main.files[0].conflict_worktrees, vec!["orch/foo"]);
     }
 
+    #[test]
+    fn the_worktree_asked_for_is_listed_with_no_pane_in_its_repository() {
+        // Every pane of the repository closed: `--worktree` (the dashboard's
+        // 差分を見る on a finished worker) still finds it and its siblings.
+        let repo = temp_repo("live-asked", "main");
+        let _cleanup = TempRepo(format!("{}-wt", repo.0.display()).into());
+        let foo = add_worktree(&repo, "foo", "orch/foo");
+        let mut bases = git::BaseRefs::default();
+        let mut by_worktree: ByWorktree = HashMap::new();
+        let asked = foo.to_str().unwrap();
+        add_paneless_worktrees(
+            &mut by_worktree,
+            Some(asked),
+            DiffMode::Unstaged,
+            &mut bases,
+        );
+        let mut roots: Vec<String> = by_worktree.keys().cloned().collect();
+        roots.sort();
+        let want = |p: &std::path::Path| {
+            std::fs::canonicalize(p)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+        assert_eq!(roots, vec![want(&repo.0), want(&foo)]);
+    }
+
     /// One refresh of `repo` (two worktrees with commits) in `mode`, the way
     /// `build_snapshot` does it, returning how often a base was resolved.
     fn base_resolutions_in_one_refresh(repo: &TempRepo, mode: DiffMode) -> usize {
@@ -1261,7 +1308,7 @@ mod tests {
         let main = git::inspect_worktree(repo.0.to_str().unwrap(), mode, &mut bases).unwrap();
         let mut by_worktree: ByWorktree = HashMap::new();
         by_worktree.insert(main.worktree_root.clone(), (main, vec![pane(7)]));
-        add_paneless_worktrees(&mut by_worktree, mode, &mut bases);
+        add_paneless_worktrees(&mut by_worktree, None, mode, &mut bases);
         let data = repo_data(
             by_worktree,
             &mut git::MergePredictions::default(),
@@ -1517,7 +1564,7 @@ mod tests {
     ) -> (RepoData, Option<DiffEntry>) {
         let mut bases = git::BaseRefs::default();
         let mut by_worktree = place_panes(panels, mode, &mut bases, |panel| pane(panel.pane_id.0));
-        add_paneless_worktrees(&mut by_worktree, mode, &mut bases);
+        add_paneless_worktrees(&mut by_worktree, None, mode, &mut bases);
         let data = repo_data(by_worktree, merges, commit_cache, &mut bases);
         let diff = data
             .repos
@@ -2100,11 +2147,45 @@ mod tests {
     }
 
     #[test]
+    fn a_prompt_within_the_cap_fits_in_one_linux_argument() {
+        // Linux takes at most MAX_ARG_STRLEN (131072) bytes per argument,
+        // its NUL included, also for what the launch script adds.
+        const MAX_ARG_STRLEN: usize = 131_072;
+        for agent in [AgentKind::Claude, AgentKind::Codex, AgentKind::Agy] {
+            let added = if agent == AgentKind::Agy {
+                "--prompt-interactive=".len()
+            } else {
+                0
+            };
+            let mut fitted = 0;
+            for prompt in [
+                "x".repeat(AGENT_PROMPT_MAX),
+                "x".repeat(AGENT_PROMPT_MAX - 22),
+            ] {
+                if agent_prompt_too_large(agent, &prompt) {
+                    continue;
+                }
+                fitted += 1;
+                let arg = added + agent.prompt_text(&prompt).len() + 1;
+                assert!(arg <= MAX_ARG_STRLEN, "{agent:?}: {arg}");
+            }
+            assert!(fitted > 0, "{agent:?}: the cap still lets one in");
+        }
+    }
+
+    #[test]
     fn prompts_beyond_the_cap_are_too_large() {
-        assert!(!agent_prompt_too_large(&"x".repeat(AGENT_PROMPT_MAX)));
-        assert!(agent_prompt_too_large(&"x".repeat(AGENT_PROMPT_MAX + 1)));
+        let codex = AgentKind::Codex;
+        assert!(!agent_prompt_too_large(
+            codex,
+            &"x".repeat(AGENT_PROMPT_MAX)
+        ));
+        assert!(agent_prompt_too_large(
+            codex,
+            &"x".repeat(AGENT_PROMPT_MAX + 1)
+        ));
         // Nothing of it crosses the control connection, so escaping is free.
-        assert!(!agent_prompt_too_large(&"\"".repeat(110 * 1024)));
+        assert!(!agent_prompt_too_large(codex, &"\"".repeat(110 * 1024)));
     }
 
     #[test]

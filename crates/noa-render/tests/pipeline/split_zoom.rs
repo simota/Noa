@@ -450,3 +450,73 @@ fn split_zoom_underlay_restores_the_background_image() {
         }
     }
 }
+
+/// The zoomed pane's own default background (OSC 11) differs from the
+/// sibling's, which comes first and so sets the split frame's background.
+/// At the tween's end (clip = full, siblings faded out) every pixel behind
+/// the zoomed pane's default-background cells must equal the steady zoomed
+/// frame, where that pane alone supplies the background.
+#[test]
+fn split_zoom_end_frame_uses_the_zoomed_panes_default_background() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping split-zoom default-background test");
+        return;
+    };
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let mut renderer = new_renderer(&device, &queue, &mut font);
+    let mut sibling = sibling_snapshot();
+    sibling.colors.set_default_bg(Rgb::new(255, 0, 0));
+    let mut zoomed = zoomed_snapshot();
+    zoomed.colors.set_default_bg(Rgb::new(0, 0, 255));
+    let fx = SplitZoomFx {
+        pane: ZOOMED,
+        clip: FULL,
+        content_origin: (FULL.x, FULL.y),
+        sibling_alpha: 0.0,
+    };
+
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let tween = draw(
+        &mut renderer,
+        &mut font,
+        &device,
+        &queue,
+        &frames(&sibling, &zoomed, FULL),
+        Some(fx),
+    );
+    let alone = [PaneFrame {
+        pane: ZOOMED,
+        rect: FULL,
+        snapshot: &zoomed,
+    }];
+    let steady = draw(&mut renderer, &mut font, &device, &queue, &alone, None);
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll split-zoom draws");
+    let err = pollster::block_on(error_scope.pop());
+    assert!(err.is_none(), "wgpu validation error: {err:?}");
+
+    assert_eq!(
+        pixel(&steady, W - 10, H - 4),
+        [0, 0, 255, 255],
+        "the steady zoomed frame shows the zoomed pane's own default background"
+    );
+    // Everything but the zoomed pane's one green cell (plus a pixel of
+    // margin) sits on a default-background cell or the padding.
+    let metrics = font.metrics();
+    let cell_x1 = (DEFAULT_GRID_PADDING.left + metrics.cell_w).ceil() as u32 + 1;
+    let cell_y1 = (DEFAULT_GRID_PADDING.top + metrics.cell_h).ceil() as u32 + 1;
+    for y in 0..H {
+        for x in 0..W {
+            if x < cell_x1 && y < cell_y1 {
+                continue;
+            }
+            assert_eq!(
+                pixel(&tween, x, y),
+                pixel(&steady, x, y),
+                "the tween's end frame must match the steady zoomed frame at ({x}, {y})"
+            );
+        }
+    }
+}

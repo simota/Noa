@@ -147,6 +147,10 @@ struct PaneInstances {
     /// boundary between image band 1 and band 2, and above which no image ever
     /// draws (UI overlays stay on top).
     text_end: u32,
+    /// This pane's default background as a clear color, before
+    /// `background-opacity`: what the frame would clear to were this pane
+    /// the first (or only) one, as in the steady zoomed frame.
+    clear_color: [f32; 4],
 }
 
 /// Fills the scissor rect with the pass's blend constant, replacing what is
@@ -1010,6 +1014,7 @@ impl Renderer {
                     range: start..end,
                     bg_end: start + bg_len,
                     text_end: start + text_len,
+                    clear_color,
                 };
                 if let Some(previous) = self.pane_instances.get_mut(pane_index) {
                     *previous = pane_instances;
@@ -1174,12 +1179,25 @@ impl Renderer {
             label: Some("noa-frame-encoder"),
         });
 
-        let background = wgpu::Color {
-            r: f64::from(self.clear_color[0]),
-            g: f64::from(self.clear_color[1]),
-            b: f64::from(self.clear_color[2]),
-            a: f64::from(self.clear_color[3]),
+        let to_wgpu = |[r, g, b, a]: [f32; 4]| wgpu::Color {
+            r: f64::from(r),
+            g: f64::from(g),
+            b: f64::from(b),
+            a: f64::from(a),
         };
+        let background = to_wgpu(self.clear_color);
+        // The underlay sits behind the transition pane's default-background
+        // cells, so it takes that pane's own background, as the steady
+        // zoomed frame (where the pane is alone) clears to; the frame's base
+        // keeps the first pane's.
+        let underlay_background = fx
+            .and_then(|fx| self.pane_instances.iter().find(|e| e.pane == fx.pane))
+            .map_or(background, |entry| {
+                to_wgpu(apply_background_opacity(
+                    entry.clear_color,
+                    self.background_opacity,
+                ))
+            });
         let needs_backdrop_pipeline = self.backdrop_rect.is_some()
             || plan
                 .iter()
@@ -1259,7 +1277,7 @@ impl Renderer {
                             pipeline,
                             *rect,
                             base,
-                            background,
+                            underlay_background,
                             bg_image_draw.as_ref(),
                         );
                     }
@@ -1329,8 +1347,10 @@ impl Renderer {
     /// [`DrawOp::ZoomUnderlay`]: put back over `rect` what the frame's base
     /// drew there before any pane, replacing what siblings drew since. The
     /// steps come from the same [`FrameBase`] the base was drawn from (see
-    /// [`FrameBase::underlay_steps`]); the background image is redrawn with
-    /// the viewport the base used. Ends with the full viewport set.
+    /// [`FrameBase::underlay_steps`]), except that `background` is the
+    /// transition pane's own default background rather than the frame's;
+    /// the background image is redrawn with the viewport the base used.
+    /// Ends with the full viewport set.
     fn draw_zoom_underlay(
         &self,
         pass: &mut wgpu::RenderPass<'_>,

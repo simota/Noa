@@ -161,6 +161,15 @@ pub(super) fn insert(
         if let Some(ev) = round.outcome.as_ref().and_then(|o| o.evaluations.get(part)) {
             tag(tree, head, format!("{}/100", ev.score), Tone::Accent);
         }
+        // In the header, not after the report: a long report or artifact
+        // list must not push the choice out of reach.
+        if round.submissions.contains_key(part) && !is_winner {
+            let win_btn = tree.insert(
+                Some(col),
+                Button::new("この案を優勝に選ぶ").control_size(ControlSize::Small),
+            );
+            actions.push((win_btn, Action::SelectWinner(part.clone())));
+        }
 
         if let Some(sub) = round.submissions.get(part) {
             tree.insert(
@@ -216,14 +225,6 @@ pub(super) fn insert(
                 Some(col),
                 Label::new(sub.body.clone()).font_size(11.5).wrap(true),
             );
-
-            if session.winner.as_ref() != Some(part) {
-                let win_btn = tree.insert(
-                    Some(col),
-                    Button::new("この案を優勝に選ぶ").control_size(ControlSize::Small),
-                );
-                actions.push((win_btn, Action::SelectWinner(part.clone())));
-            }
         } else {
             let status = round
                 .brief(part)

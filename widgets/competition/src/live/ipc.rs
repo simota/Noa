@@ -236,16 +236,7 @@ impl Noa for IpcNoa {
     }
 
     fn spawn(&mut self, placement: Placement, spec: &PaneSpec) -> Result<u64, NoaError> {
-        let params = SpawnParams {
-            config: Some(SpawnConfig {
-                command: Some(spec.argv.clone()),
-                cwd: Some(spec.cwd.to_string_lossy().into_owned()),
-                ..SpawnConfig::default()
-            }),
-            label: Some(spec.label.clone()),
-            focus: Some(false),
-            ..SpawnParams::default()
-        };
+        let params = spawn_params(placement, spec);
         let pane = match placement {
             Placement::NewTab => self.client.spawn_tab(None, &params),
             Placement::Right(pane) => {
@@ -298,9 +289,43 @@ impl Noa for IpcNoa {
     }
 }
 
+/// The `noa.newTab`/`noa.split` request for one competition pane.
+fn spawn_params(placement: Placement, spec: &PaneSpec) -> SpawnParams {
+    SpawnParams {
+        config: Some(SpawnConfig {
+            command: Some(spec.argv.clone()),
+            cwd: Some(spec.cwd.to_string_lossy().into_owned()),
+            ..SpawnConfig::default()
+        }),
+        label: Some(spec.label.clone()),
+        focus: Some(false),
+        // Contestants and the judge run unattended in their own tab, so
+        // its agent prompts are answered without the user (the later
+        // splits share the tab's setting).
+        auto_approve: matches!(placement, Placement::NewTab).then_some(true),
+        ..SpawnParams::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_competition_tab_turns_auto_approve_on() {
+        let spec = PaneSpec {
+            argv: vec!["codex".into()],
+            cwd: PathBuf::from("/tmp"),
+            label: "codex".into(),
+        };
+        assert_eq!(
+            spawn_params(Placement::NewTab, &spec).auto_approve,
+            Some(true)
+        );
+        for split in [Placement::Right(7), Placement::Below(7)] {
+            assert_eq!(spawn_params(split, &spec).auto_approve, None);
+        }
+    }
 
     #[test]
     fn client_errors_map_to_what_the_runner_does_next() {

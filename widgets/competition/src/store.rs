@@ -82,8 +82,12 @@ pub fn viewer_path(base_dir: &Path) -> PathBuf {
 }
 
 /// The file contestant `part` writes its round-`round` report to.
+///
+/// Prefixed so a contestant named `claude` or `agents` does not write
+/// `claude.md`, which case-insensitive filesystems (macOS) resolve as
+/// `CLAUDE.md` and agents then load as project instructions.
 pub fn reply_path(dir: &Path, round: RoundNo, part: &PartId) -> PathBuf {
-    round_dir(dir, round).join(format!("{part}.md"))
+    round_dir(dir, round).join(format!("report-{part}.md"))
 }
 
 /// The file the judge writes its round-`round` JSON to.
@@ -357,6 +361,14 @@ mod tests {
         assert!(dst.join("index.html").is_file());
         assert!(!dst.join(".git").exists());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_report_file_never_collides_with_agent_instruction_files() {
+        let path = reply_path(Path::new("/c"), 3, &PartId::new("claude"));
+        assert_eq!(path.file_name().unwrap(), "report-claude.md");
+        let name = path.file_name().unwrap().to_string_lossy().to_lowercase();
+        assert!(name != "claude.md" && name != "agents.md");
     }
 
     #[test]

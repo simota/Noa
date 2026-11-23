@@ -103,6 +103,10 @@ pub fn contestant_brief(
             "Reference workspace (read-only context): {}",
             workdir.display()
         );
+        let _ = writeln!(
+            body,
+            "  Do not write build outputs or temporary files there; use your output directory or $TMPDIR."
+        );
     }
     let _ = writeln!(
         body,
@@ -121,6 +125,10 @@ pub fn contestant_brief(
         body,
         "- If your deliverable is a UI or visual design, include a self-contained `index.html` (or SVG/PNG files) in your output directory so it can be previewed directly in the comparison viewer."
     );
+    let _ = writeln!(
+        body,
+        "- The comparison viewer embeds `index.html` in an iframe with `sandbox=\"allow-scripts\"` (an opaque origin: popups and same-origin APIs are blocked, and clipboard access and local file references may fail). Make the preview hold up under those limits, or add a separate self-contained preview with inlined assets and name it in your report."
+    );
     match kind {
         RoundKind::Blind => {
             let _ = writeln!(
@@ -133,6 +141,10 @@ pub fn contestant_brief(
                 body,
                 "- PEER REVEAL ROUND: You may inspect the other contestants' round-{} snapshots listed below to understand their approaches, strengths, and gaps. Do NOT copy their files verbatim; synthesize better ideas and surpass them in your own output directory.",
                 round.saturating_sub(1)
+            );
+            let _ = writeln!(
+                body,
+                "- Open at least one peer's deliverable (its `index.html` or images), not only the reports quoted below. In your report, add a `## Peer review` section with one line per idea you adopted and one per idea you chose not to adopt, each with the reason."
             );
         }
     }
@@ -234,6 +246,10 @@ pub fn contestant_brief(
         body,
         "   Write the file only after all deliverable files are saved."
     );
+    let _ = writeln!(
+        body,
+        "   Write the report in the language of the request, and mark anything you could not verify in your environment as unverified."
+    );
 
     Brief {
         to: to.clone(),
@@ -328,7 +344,23 @@ pub fn judge_brief(
     );
     let _ = writeln!(
         body,
-        "- IMPORTANT (blind rule): Each contestant's `feedback` is delivered privately. Do NOT reveal other contestants' ideas, scores, or identities inside `feedback`."
+        "- IMPORTANT (blind rule): Each contestant's `strengths` and `feedback` are delivered privately to that contestant. Do NOT reveal other contestants' ideas, scores, or identities inside them."
+    );
+    let _ = writeln!(
+        body,
+        "- Derive each contestant's `feedback` only from gaps between their own deliverable and the user's request. Do NOT suggest a feature, approach, layout, wording, or fix because you saw it in another contestant's work (this round or earlier), even unnamed or paraphrased; ideas are shared only through peer-reveal rounds. If a gap is evident only by comparison with a peer, leave it out."
+    );
+    let _ = writeln!(
+        body,
+        "- Write `feedback` as at most 3 items, highest score impact first, each with a check the contestant can run (e.g. \"at 320×568, the install button and two queue items are visible\")."
+    );
+    let _ = writeln!(
+        body,
+        "- Do not ask for checks the contestants' environment cannot run (e.g. a physical phone when only a headless browser is available); ask them to state the item as unverified instead."
+    );
+    let _ = writeln!(
+        body,
+        "- Compare each report's claims with the files, and with the claims of that contestant's previous report; name any claim the files contradict in that contestant's `feedback`."
     );
     if is_last {
         let _ = writeln!(
@@ -351,7 +383,7 @@ pub fn judge_brief(
     );
     let _ = writeln!(
         body,
-        "{{\n  \"overview\": \"1-3 sentence round overview comparing progress\",\n  \"evaluations\": {{\n    \"<contestant_id>\": {{\n      \"score\": 85,\n      \"strengths\": \"Key strengths of this entry\",\n      \"feedback\": \"Concrete private feedback for next round (no peer spoilers)\"\n    }}\n  }},\n  \"ranking\": [\"<best_id>\", \"<second_id>\"],\n  \"winner\": null,\n  \"final_verdict\": null,\n  \"close\": false\n}}"
+        "{{\n  \"overview\": \"1-3 sentence round overview comparing progress\",\n  \"evaluations\": {{\n    \"<contestant_id>\": {{\n      \"score\": 85,\n      \"strengths\": \"Key strengths of this entry\",\n      \"feedback\": \"Concrete private feedback for next round, based only on this entry vs the request (no peer ideas)\"\n    }}\n  }},\n  \"ranking\": [\"<best_id>\", \"<second_id>\"],\n  \"winner\": null,\n  \"final_verdict\": null,\n  \"close\": false\n}}"
     );
 
     Brief {
@@ -490,6 +522,48 @@ mod tests {
         assert!(!brief.body.contains("Peer showcase"));
         assert!(brief.body.contains("Tighten hero spacing"));
         assert!(!brief.body.contains("Add product cards"));
+    }
+
+    #[test]
+    fn judge_brief_forbids_peer_ideas_in_feedback() {
+        let s = sample_session();
+        let brief = judge_brief(
+            &s,
+            4,
+            &PathBuf::from("/tmp/comp"),
+            &PathBuf::from("/tmp/comp/r4/judge.json"),
+        );
+        assert!(brief.body.contains("`strengths` and `feedback` are delivered privately"));
+        assert!(brief.body.contains("because you saw it in another contestant's work"));
+        assert!(brief.body.contains("based only on this entry vs the request"));
+        assert!(brief.body.contains("at most 3 items"));
+        assert!(brief.body.contains("environment cannot run"));
+        assert!(brief.body.contains("claims of that contestant's previous report"));
+    }
+
+    #[test]
+    fn contestant_briefs_carry_viewer_language_and_peer_review_rules() {
+        let s = sample_session();
+        let blind = contestant_brief(
+            &s,
+            &PartId::new("claude"),
+            4,
+            &PathBuf::from("/tmp/entries/claude"),
+            &PathBuf::from("/tmp/comp"),
+            &PathBuf::from("/tmp/comp/r4/report-claude.md"),
+        );
+        assert!(blind.body.contains(r#"sandbox="allow-scripts""#));
+        assert!(blind.body.contains("language of the request"));
+        assert!(!blind.body.contains("## Peer review"));
+        let reveal = contestant_brief(
+            &s,
+            &PartId::new("claude"),
+            6,
+            &PathBuf::from("/tmp/entries/claude"),
+            &PathBuf::from("/tmp/comp"),
+            &PathBuf::from("/tmp/comp/r6/report-claude.md"),
+        );
+        assert!(reveal.body.contains("## Peer review"));
     }
 
     #[test]

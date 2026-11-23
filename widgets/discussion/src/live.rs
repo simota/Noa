@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 
+use crate::installed::Installed;
 use crate::session::runner::{self, Action, SessionHandle, Update};
 
 use discussion::model::types::{
@@ -104,6 +105,9 @@ pub struct Channel {
     /// The stored discussions, newest first: sent when the start view is
     /// shown (at launch and after [`Command::NewDiscussion`]).
     pub history: Receiver<Arc<Vec<Summary>>>,
+    /// Which agents are installed: sent once, when the check is done (see
+    /// [`start`]).
+    pub installed: Receiver<Installed>,
     commands: Sender<Command>,
 }
 
@@ -115,12 +119,21 @@ impl Channel {
 
 /// The live channel. It shows the start view (no session) until the user
 /// starts a discussion; then the runner opens the agents' panes in Noa.
+/// It also checks, on its own thread, which agents the login shell finds.
 pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Channel {
-    start_in(discussion::store::default_root(), wake)
+    let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
+    let installed = crate::installed::spawn({
+        let wake = wake.clone();
+        move || wake()
+    });
+    let mut channel = start_in(discussion::store::default_root(), move || wake());
+    channel.installed = installed;
+    channel
 }
 
 /// [`start`] with the discussions stored under `root` (`None`: no place to
-/// store them was found).
+/// store them was found), and without the check for installed agents: its
+/// `installed` never delivers.
 pub fn start_in(root: Option<PathBuf>, wake: impl Fn() + Send + Sync + 'static) -> Channel {
     start_with(root, wake, |start| runner::spawn_session(start, || {}))
 }
@@ -151,6 +164,7 @@ fn start_with(
         snapshots,
         notices,
         history,
+        installed: mpsc::channel().1,
         commands,
     }
 }
@@ -475,6 +489,7 @@ pub(crate) struct TestFeed {
     pub snapshots: Sender<Snapshot>,
     pub notices: Sender<String>,
     pub history: Sender<Arc<Vec<Summary>>>,
+    pub installed: Sender<Installed>,
     pub commands: Receiver<Command>,
 }
 
@@ -483,18 +498,21 @@ pub(crate) fn test_channel() -> (Channel, TestFeed) {
     let (snapshot_tx, snapshots) = mpsc::channel();
     let (notice_tx, notices) = mpsc::channel();
     let (history_tx, history) = mpsc::channel();
+    let (installed_tx, installed) = mpsc::channel();
     let (commands, command_rx) = mpsc::channel();
     (
         Channel {
             snapshots,
             notices,
             history,
+            installed,
             commands,
         },
         TestFeed {
             snapshots: snapshot_tx,
             notices: notice_tx,
             history: history_tx,
+            installed: installed_tx,
             commands: command_rx,
         },
     )

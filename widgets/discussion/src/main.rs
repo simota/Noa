@@ -2,6 +2,7 @@
 //! model, engine and store (`lib.rs`), fed by the live layer (`live.rs`).
 
 mod demo;
+mod installed;
 mod live;
 /// The live session runner (`src/live/`): `ipc` is the Noa port and its
 /// `noa-ipc` implementation, `runner` drives one discussion against it.
@@ -90,7 +91,8 @@ fn parse_size(arg: &str) -> Result<(u32, u32), String> {
 
 /// The live feed's first snapshot, and the stored discussions it listed.
 fn first_live_snapshot() -> Result<(Snapshot, Arc<Vec<Summary>>), String> {
-    let channel = live::start(|| {});
+    // A one-off render: no login shell is run to find the agents.
+    let channel = live::start_in(discussion::store::default_root(), || {});
     let history = || channel.history.try_recv().unwrap_or_default();
     let until = Instant::now() + FIRST_SNAPSHOT_WAIT;
     let mut reason = "Noa から 3 秒以内に応答がありません".to_owned();

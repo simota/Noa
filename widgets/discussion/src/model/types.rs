@@ -82,6 +82,9 @@ impl DebateId {
     }
 }
 
+/// The most panelists one discussion takes in the start view.
+pub const MAX_PANEL: usize = 6;
+
 /// The id of the moderator ("Noa").
 pub const MODERATOR_ID: &str = "noa";
 

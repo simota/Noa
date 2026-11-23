@@ -276,7 +276,7 @@ fn agent_argv(kind: AgentKind, setup: &AgentSetup) -> Vec<String> {
     vec![login_shell(), "-l".into(), "-i".into(), "-c".into(), script]
 }
 
-fn login_shell() -> String {
+pub(crate) fn login_shell() -> String {
     std::env::var("SHELL")
         .ok()
         .filter(|shell| shell.starts_with('/'))
@@ -1373,10 +1373,10 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         }
         let session = self.engine.session();
         self.watches.retain(|_, watch| {
-            !session
+            session
                 .round(watch.round)
                 .and_then(|r| r.brief(&watch.part))
-                .is_some_and(|b| b.receipt.replied.is_some())
+                .is_none_or(|b| b.receipt.replied.is_none())
         });
         Ok(())
     }

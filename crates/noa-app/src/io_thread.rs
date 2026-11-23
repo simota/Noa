@@ -61,7 +61,10 @@ use sidebar::*;
 #[allow(unused_imports)]
 use spawn::*;
 
-pub(crate) use auto_approve::{AutoApproveFeedback, AutoApprovePublish};
+pub(crate) use auto_approve::{
+    AutoApproveFeedback, AutoApprovePublish, retarget_pane_auto_approve,
+    set_tab_auto_approve_enabled,
+};
 #[cfg(test)]
 pub(crate) use input_queue::input_channel;
 pub(crate) use input_queue::{

@@ -2313,6 +2313,7 @@ fn io_thread_handle_shutdown_joins_within_timeout() {
         shutdown_tx,
         ipc_output_refresh_tx: crossbeam_channel::bounded::<()>(1).0,
         reply_flush_tx: crossbeam_channel::bounded::<()>(1).0,
+        auto_approve_rescan_tx: crossbeam_channel::bounded::<()>(1).0,
         join: Some(join),
     };
 
@@ -2332,6 +2333,7 @@ fn pane_io_thread_shutdown_joins_all_blocked_handles_within_timeout() {
             shutdown_tx,
             ipc_output_refresh_tx: crossbeam_channel::bounded::<()>(1).0,
             reply_flush_tx: crossbeam_channel::bounded::<()>(1).0,
+            auto_approve_rescan_tx: crossbeam_channel::bounded::<()>(1).0,
             join: Some(join),
         });
     }
@@ -2357,6 +2359,7 @@ fn shutdown_and_join_does_not_block_the_caller() {
         shutdown_tx,
         ipc_output_refresh_tx: crossbeam_channel::bounded::<()>(1).0,
         reply_flush_tx: crossbeam_channel::bounded::<()>(1).0,
+        auto_approve_rescan_tx: crossbeam_channel::bounded::<()>(1).0,
         join: Some(join),
     };
 
@@ -2630,5 +2633,394 @@ fn current_card_target_reflects_a_cross_tab_move_store() {
     assert_eq!(
         after_card,
         crate::session_store::SessionCardId::new(crate::session_store::SessionWindowId(2), pane_id)
+    );
+}
+
+fn codex_command_dialog_bytes() -> &'static [u8] {
+    concat!(
+        "Would you like to run the following command?\r\n",
+        "\r\n",
+        "Environment: local\r\n",
+        "\r\n",
+        "Reason: 変更をステージしてよいですか？\r\n",
+        "\r\n",
+        "$ git add sample.rs\r\n",
+        "\r\n",
+        "› 1. Yes, proceed (y)\r\n",
+        "  2. Yes, and don't ask again for commands that start with `git add` (p)\r\n",
+        "  3. No, and tell Codex what to do differently (esc)\r\n",
+        "\r\n",
+        "Press enter to confirm or esc to cancel",
+    )
+    .as_bytes()
+}
+
+fn test_io_handle_with_rescan_rx() -> (IoThreadHandle, crossbeam_channel::Receiver<()>) {
+    let (auto_approve_rescan_tx, auto_approve_rescan_rx) = crossbeam_channel::bounded::<()>(1);
+    let handle = IoThreadHandle {
+        shutdown_tx: crossbeam_channel::bounded::<()>(1).0,
+        ipc_output_refresh_tx: crossbeam_channel::bounded::<()>(1).0,
+        reply_flush_tx: crossbeam_channel::bounded::<()>(1).0,
+        auto_approve_rescan_tx,
+        join: None,
+    };
+    (handle, auto_approve_rescan_rx)
+}
+
+/// Runs the auto-approve rescan half of `io_thread::spawn`'s `Select` loop
+/// without needing a real PTY (`openpty` is blocked in the sandbox) or AppKit
+/// `EventLoopProxy`, so tests can exercise the real blocking `Select` wake-up
+/// and 350ms stability deadline.
+fn spawn_auto_approve_rescan_loop(
+    terminal: Arc<Mutex<Terminal>>,
+    auto_approve: AutoApprovePublish,
+    mut auto_approve_state: crate::auto_approve::AutoApproveState,
+    mut auto_approve_rescan_at: Option<Instant>,
+) -> (
+    IoThreadHandle,
+    crossbeam_channel::Sender<AutoApproveFeedback>,
+    crossbeam_channel::Receiver<AutoApproveCandidate>,
+) {
+    let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded::<()>(1);
+    let (auto_approve_rescan_tx, auto_approve_rescan_rx) = crossbeam_channel::bounded::<()>(1);
+    let (feedback_tx, feedback_rx) = crossbeam_channel::bounded::<AutoApproveFeedback>(4);
+    let (candidate_tx, candidate_rx) = crossbeam_channel::bounded::<AutoApproveCandidate>(4);
+
+    let join = std::thread::spawn(move || {
+        let mut sel = crossbeam_channel::Select::new();
+        sel.recv(&shutdown_rx);
+        sel.recv(&feedback_rx);
+        sel.recv(&auto_approve_rescan_rx);
+        loop {
+            match shutdown_rx.try_recv() {
+                Ok(()) | Err(crossbeam_channel::TryRecvError::Disconnected) => break,
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
+            }
+            let mut did_work = false;
+            match feedback_rx.try_recv() {
+                Ok(feedback) => {
+                    auto_approve_state.apply_feedback(
+                        feedback.signature,
+                        feedback.region_hash,
+                        feedback.accepted,
+                        Instant::now(),
+                    );
+                    auto_approve_rescan_at =
+                        auto_approve_rescan_deadline(&auto_approve_state, Instant::now());
+                    did_work = true;
+                }
+                Err(crossbeam_channel::TryRecvError::Disconnected) => break,
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
+            }
+            match auto_approve_rescan_rx.try_recv() {
+                Ok(()) => {
+                    if let Some(candidate) = rescan_auto_approve_at(
+                        &terminal,
+                        &auto_approve,
+                        &mut auto_approve_state,
+                        &mut auto_approve_rescan_at,
+                        Instant::now(),
+                    ) && candidate_tx.send(candidate).is_err()
+                    {
+                        break;
+                    }
+                    did_work = true;
+                }
+                Err(crossbeam_channel::TryRecvError::Disconnected) => break,
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
+            }
+            if did_work {
+                continue;
+            }
+            let now = Instant::now();
+            if auto_approve_rescan_at.is_some_and(|deadline| now >= deadline) {
+                if let Some(candidate) = rescan_auto_approve_at(
+                    &terminal,
+                    &auto_approve,
+                    &mut auto_approve_state,
+                    &mut auto_approve_rescan_at,
+                    Instant::now(),
+                ) && candidate_tx.send(candidate).is_err()
+                {
+                    break;
+                }
+                continue;
+            }
+            match auto_approve_rescan_at {
+                Some(deadline) => {
+                    let _ = sel.ready_timeout(deadline.saturating_duration_since(Instant::now()));
+                }
+                None => {
+                    let _ = sel.ready();
+                }
+            }
+        }
+    });
+
+    let handle = IoThreadHandle {
+        shutdown_tx,
+        ipc_output_refresh_tx: crossbeam_channel::bounded::<()>(1).0,
+        reply_flush_tx: crossbeam_channel::bounded::<()>(1).0,
+        auto_approve_rescan_tx,
+        join: Some(join),
+    };
+    (handle, feedback_tx, candidate_rx)
+}
+
+/// F-001: a Codex approval dialog painted while Auto Approve is OFF leaves
+/// `auto_approve_rescan_at == None`. Turning the tab ON must wake the blocked
+/// io loop without any further pty output, settle across two scans, and emit
+/// the candidate exactly once.
+#[test]
+fn auto_approve_toggle_on_rescans_static_codex_dialog_without_pty_output() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+    let sidebar = test_sidebar_publish(false);
+    let mut last_sidebar_publish = None;
+    let mut last_ipc_push = None;
+    let mut ipc_row_cache = IpcRowCache::default();
+
+    let tab_flag = Arc::new(AtomicBool::new(false));
+    let auto_approve = AutoApprovePublish {
+        enabled: Arc::new(Mutex::new(tab_flag.clone())),
+        guards: Arc::new(Mutex::new(
+            crate::auto_approve::AutoApproveInputGuards::default(),
+        )),
+    };
+    let mut auto_approve_state = crate::auto_approve::AutoApproveState::default();
+
+    let output = feed_terminal_batch(
+        &terminal,
+        &mut stream,
+        codex_command_dialog_bytes(),
+        std::iter::empty::<&[u8]>(),
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &auto_approve,
+        &mut auto_approve_state,
+        false,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+        &RawAttachTap::default(),
+        None,
+    );
+    assert!(
+        output.auto_approve.is_none(),
+        "must not fire while mode is OFF"
+    );
+    let initial_rescan_at = auto_approve_rescan_deadline(&auto_approve_state, Instant::now());
+    assert!(
+        initial_rescan_at.is_none(),
+        "mode OFF drops tracking and leaves no rescan deadline"
+    );
+
+    let (mut handle, feedback_tx, candidate_rx) = spawn_auto_approve_rescan_loop(
+        terminal,
+        auto_approve,
+        auto_approve_state,
+        initial_rescan_at,
+    );
+
+    assert!(
+        candidate_rx
+            .recv_timeout(Duration::from_millis(50))
+            .is_err(),
+        "still OFF: no candidate may fire"
+    );
+
+    set_tab_auto_approve_enabled(&tab_flag, true, [&handle]);
+
+    let candidate = candidate_rx
+        .recv_timeout(Duration::from_millis(1500))
+        .expect("turning Auto Approve ON must rescan and fire the static Codex dialog without further pty output");
+    assert_eq!(
+        candidate.signature,
+        crate::auto_approve::AutoApproveSignature::CodexCommand
+    );
+    assert_eq!(candidate.signature.bytes(), b"\r");
+    assert!(!candidate.disable_after);
+
+    feedback_tx
+        .send(AutoApproveFeedback {
+            signature: candidate.signature,
+            region_hash: candidate.region_hash,
+            accepted: true,
+        })
+        .expect("feedback channel open");
+    assert!(
+        candidate_rx
+            .recv_timeout(Duration::from_millis(450))
+            .is_err(),
+        "accepted static dialog must fire only once"
+    );
+
+    assert!(handle.shutdown_and_join_timeout(Duration::from_millis(500)));
+}
+
+/// F-001 (cross-tab move): moving a pane with a static approval dialog from an
+/// OFF tab into an ON tab must wake its blocked io loop without any further
+/// pty output and emit the candidate after two settled scans.
+#[test]
+fn auto_approve_retarget_to_enabled_tab_rescans_static_dialog_without_pty_output() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+    let sidebar = test_sidebar_publish(false);
+    let mut last_sidebar_publish = None;
+    let mut last_ipc_push = None;
+    let mut ipc_row_cache = IpcRowCache::default();
+
+    let source_flag = Arc::new(AtomicBool::new(false));
+    let dest_flag = Arc::new(AtomicBool::new(true));
+    let pane_flag_holder = Arc::new(Mutex::new(source_flag));
+    let auto_approve = AutoApprovePublish {
+        enabled: pane_flag_holder.clone(),
+        guards: Arc::new(Mutex::new(
+            crate::auto_approve::AutoApproveInputGuards::default(),
+        )),
+    };
+    let mut auto_approve_state = crate::auto_approve::AutoApproveState::default();
+
+    let output = feed_terminal_batch(
+        &terminal,
+        &mut stream,
+        codex_command_dialog_bytes(),
+        std::iter::empty::<&[u8]>(),
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &auto_approve,
+        &mut auto_approve_state,
+        false,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+        &RawAttachTap::default(),
+        None,
+    );
+    assert!(output.auto_approve.is_none());
+    let initial_rescan_at = auto_approve_rescan_deadline(&auto_approve_state, Instant::now());
+    assert!(initial_rescan_at.is_none());
+
+    let (mut handle, _feedback_tx, candidate_rx) = spawn_auto_approve_rescan_loop(
+        terminal,
+        auto_approve,
+        auto_approve_state,
+        initial_rescan_at,
+    );
+
+    retarget_pane_auto_approve(&pane_flag_holder, &dest_flag, Some(&handle));
+    assert!(Arc::ptr_eq(&pane_flag_holder.lock(), &dest_flag));
+
+    let candidate = candidate_rx
+        .recv_timeout(Duration::from_millis(1500))
+        .expect("moving a static-dialog pane into an ON tab must rescan and fire without further pty output");
+    assert_eq!(
+        candidate.signature,
+        crate::auto_approve::AutoApproveSignature::CodexCommand
+    );
+    assert_eq!(candidate.signature.bytes(), b"\r");
+    assert!(!candidate.disable_after);
+
+    assert!(handle.shutdown_and_join_timeout(Duration::from_millis(500)));
+}
+
+#[test]
+fn auto_approve_transitions_request_rescan_only_on_off_to_on() {
+    let tab_flag = AtomicBool::new(false);
+    let (h1, rx1) = test_io_handle_with_rescan_rx();
+    let (h2, rx2) = test_io_handle_with_rescan_rx();
+
+    // OFF -> OFF: no rescan.
+    set_tab_auto_approve_enabled(&tab_flag, false, [&h1, &h2]);
+    assert!(rx1.try_recv().is_err());
+    assert!(rx2.try_recv().is_err());
+
+    // OFF -> ON: wakes every local pane in the tab.
+    set_tab_auto_approve_enabled(&tab_flag, true, [&h1, &h2]);
+    assert_eq!(rx1.try_recv(), Ok(()));
+    assert_eq!(rx2.try_recv(), Ok(()));
+
+    // ON -> ON: no redundant rescan (must not shortcut two-match debounce).
+    set_tab_auto_approve_enabled(&tab_flag, true, [&h1, &h2]);
+    assert!(rx1.try_recv().is_err());
+    assert!(rx2.try_recv().is_err());
+
+    // ON -> OFF: no rescan.
+    set_tab_auto_approve_enabled(&tab_flag, false, [&h1, &h2]);
+    assert!(rx1.try_recv().is_err());
+    assert!(rx2.try_recv().is_err());
+
+    // Cross-tab retarget transitions.
+    let off_a = Arc::new(AtomicBool::new(false));
+    let off_b = Arc::new(AtomicBool::new(false));
+    let on_a = Arc::new(AtomicBool::new(true));
+    let on_b = Arc::new(AtomicBool::new(true));
+    let holder = Mutex::new(off_a);
+
+    retarget_pane_auto_approve(&holder, &off_b, Some(&h1));
+    assert!(rx1.try_recv().is_err(), "OFF -> OFF move must not rescan");
+
+    retarget_pane_auto_approve(&holder, &on_a, Some(&h1));
+    assert_eq!(rx1.try_recv(), Ok(()), "OFF -> ON move must rescan");
+
+    retarget_pane_auto_approve(&holder, &on_b, Some(&h1));
+    assert!(rx1.try_recv().is_err(), "ON -> ON move must not rescan");
+
+    retarget_pane_auto_approve(&holder, &off_b, Some(&h1));
+    assert!(rx1.try_recv().is_err(), "ON -> OFF move must not rescan");
+}
+
+#[test]
+fn auto_approve_breaker_reenable_rescan_does_not_refire_consumed_prompt() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
+    let mut stream = noa_vt::Stream::new();
+    {
+        let mut term = terminal.lock();
+        stream.feed(codex_command_dialog_bytes(), &mut *term);
+    }
+
+    let tab_flag = Arc::new(AtomicBool::new(true));
+    let auto_approve = AutoApprovePublish {
+        enabled: Arc::new(Mutex::new(tab_flag.clone())),
+        guards: Arc::new(Mutex::new(
+            crate::auto_approve::AutoApproveInputGuards::default(),
+        )),
+    };
+    let mut state = crate::auto_approve::AutoApproveState::default();
+    let mut rescan_at = None;
+    let t0 = Instant::now();
+
+    assert!(
+        rescan_auto_approve_at(&terminal, &auto_approve, &mut state, &mut rescan_at, t0).is_none()
+    );
+    assert!(rescan_at.is_some());
+
+    let t1 = t0 + Duration::from_millis(350);
+    let candidate =
+        rescan_auto_approve_at(&terminal, &auto_approve, &mut state, &mut rescan_at, t1)
+            .expect("second settled scan fires");
+
+    // Simulate breaker-off + accepted feedback, then immediate re-enable before
+    // any pty output arrives.
+    let (handle, rx) = test_io_handle_with_rescan_rx();
+    set_tab_auto_approve_enabled(&tab_flag, false, [&handle]);
+    state.apply_feedback(candidate.signature, candidate.region_hash, true, t1);
+    set_tab_auto_approve_enabled(&tab_flag, true, [&handle]);
+    assert_eq!(rx.try_recv(), Ok(()));
+
+    let t2 = t1 + Duration::from_millis(50);
+    assert!(
+        rescan_auto_approve_at(&terminal, &auto_approve, &mut state, &mut rescan_at, t2).is_none(),
+        "already-consumed dialog must not refire on immediate re-enable"
+    );
+    assert!(
+        rescan_at.is_none(),
+        "already-consumed dialog must not re-arm a rescan deadline"
     );
 }

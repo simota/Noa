@@ -1,10 +1,22 @@
 use super::*;
 use crate::auto_approve::{self, AutoApproveSignature, DetectContext};
-use crate::io_thread::{AutoApproveFeedback, QueueInputResult};
+use crate::io_thread::{AutoApproveFeedback, QueueInputResult, set_tab_auto_approve_enabled};
 use crate::session_store::{AutoApproveAuditEntry, SessionDelta};
 use crate::sidebar::{agent_display_name, classify_agent};
 
 const AUTO_APPROVE_FLASH_DURATION: Duration = Duration::from_millis(700);
+
+fn local_io_threads(
+    state: &WindowState,
+) -> impl Iterator<Item = &crate::io_thread::IoThreadHandle> {
+    state
+        .surfaces
+        .values()
+        .filter_map(|surface| match &surface.transport {
+            SurfaceTransport::Local(local) => local.io_thread.as_ref(),
+            SurfaceTransport::Remote(_) => None,
+        })
+}
 
 impl App {
     pub(super) fn handle_auto_approve(
@@ -129,7 +141,11 @@ impl App {
 
         if disable_after {
             if let Some(state) = self.windows.get(&window_id) {
-                state.auto_approve_enabled.store(false, Ordering::Relaxed);
+                set_tab_auto_approve_enabled(
+                    &state.auto_approve_enabled,
+                    false,
+                    local_io_threads(state),
+                );
             }
             self.session_store
                 .set_auto_approve_for_window(id.window_id, false);
@@ -161,7 +177,11 @@ impl App {
         let Some(state) = self.windows.get(&window_id) else {
             return;
         };
-        state.auto_approve_enabled.store(enabled, Ordering::Relaxed);
+        set_tab_auto_approve_enabled(
+            &state.auto_approve_enabled,
+            enabled,
+            local_io_threads(state),
+        );
         self.session_store
             .set_auto_approve_for_window(SessionWindowId(u64::from(window_id)), enabled);
         // The menu mirrors the focused tab; a background tab's change shows

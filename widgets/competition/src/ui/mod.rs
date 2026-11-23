@@ -13,6 +13,7 @@ mod timeline;
 use std::path::{Path, PathBuf};
 use std::process::Command as OsCommand;
 use std::sync::Arc;
+use std::sync::mpsc::Receiver;
 
 use noa_gpui_core::style::{
     AlignItems, FlexDirection, LengthPercentage, Overflow, Point as LayoutPoint,
@@ -35,6 +36,7 @@ use competition::model::types::{
 };
 use competition::store;
 
+use crate::installed::Installed;
 use crate::live::{Channel, Command, Link, Snapshot};
 use competition::store::Listed;
 
@@ -140,6 +142,12 @@ pub struct Competition {
     /// Rounds were asked for on the read-only competition on screen: it
     /// stays shown until the runner's first snapshot of it arrives.
     extending: bool,
+    /// Which agents are installed: unknown until the background check
+    /// reports (always "all" in the demo and in stored views, which stay
+    /// deterministic and run no shell).
+    detection: start::Detection,
+    /// Where that check reports, until it has.
+    installed: Option<Receiver<Installed>>,
     /// What the board was last built from: the session revision, the link,
     /// and the clock minute while some agent's elapsed time is running.
     built: Option<BuiltKey>,
@@ -167,8 +175,15 @@ impl Competition {
         )
     }
 
-    pub fn live(channel: Channel) -> Self {
-        Self::build(Source::Live(channel), Link::Connecting, None, None)
+    /// The live screen. `installed` delivers which agents the login shell
+    /// has; until it does, the start button waits.
+    pub fn live(channel: Channel, installed: Receiver<Installed>) -> Self {
+        let mut screen = Self::build(Source::Live(channel), Link::Connecting, None, None);
+        screen.installed = Some(installed);
+        screen.detection = start::Detection::Pending;
+        let mut text = TextStore::new(Default::default());
+        screen.rebuild(&mut text);
+        screen
     }
 
     pub fn of_snapshot(snapshot: Snapshot) -> Self {
@@ -219,8 +234,8 @@ impl Competition {
 
     /// The live screen, showing the competition logged in `dir` read-only
     /// (the start view, with why, when it cannot be read).
-    pub fn live_stored(channel: Channel, dir: &Path) -> Self {
-        let mut screen = Self::live(channel);
+    pub fn live_stored(channel: Channel, installed: Receiver<Installed>, dir: &Path) -> Self {
+        let mut screen = Self::live(channel, installed);
         let mut text = TextStore::new(Default::default());
         if let Err(why) = screen.show_stored(dir, &mut text) {
             screen.toast(why);
@@ -306,6 +321,8 @@ impl Competition {
             stored_dir: None,
             stored_free: false,
             extending: false,
+            detection: start::Detection::all_installed(),
+            installed: None,
             built: None,
             start,
             board,
@@ -351,7 +368,13 @@ impl Competition {
             self.rebuild_right(text);
             self.rebuild_composer(text);
         } else {
-            start::rebuild_note(&mut self.tree, &self.start, &self.link, text);
+            start::rebuild_note(
+                &mut self.tree,
+                &self.start,
+                &self.link,
+                &self.detection,
+                text,
+            );
             start::actions(&self.start, &mut self.actions);
             start::rebuild_past(
                 &mut self.tree,
@@ -556,6 +579,7 @@ impl Competition {
             self.right_host,
             session,
             !self.read_only,
+            &self.detection.available(),
             &mut self.actions,
         );
     }
@@ -713,7 +737,39 @@ impl Competition {
         }
     }
 
+    /// Takes the installed-agents report, once it has arrived: the menus
+    /// then offer only those, and the form drops what is not installed.
+    fn poll_installed(&mut self, text: &mut TextStore) {
+        let Some(rx) = &self.installed else {
+            return;
+        };
+        let Ok(installed) = rx.try_recv() else {
+            return;
+        };
+        self.installed = None;
+        let before = start::read(&self.tree, &self.start);
+        let pristine = before.panel == start::Form::for_kinds(self.start.kinds()).panel
+            && before.judge == AgentChoice::from(self.start.kinds()[0]);
+        self.detection = start::Detection::Done(installed);
+        let kinds = self.detection.menu_kinds();
+        let form = if pristine {
+            start::Form {
+                judge: AgentChoice::from(kinds[0]),
+                panel: start::Form::for_kinds(&kinds).panel,
+                ..before
+            }
+        } else {
+            before
+        };
+        let left_out = start::apply_kinds(&mut self.tree, &mut self.start, kinds, &form, text);
+        self.built = None;
+        if !left_out.is_empty() {
+            self.toast(start::left_out_message(&left_out));
+        }
+    }
+
     fn poll_live(&mut self, text: &mut TextStore) {
+        self.poll_installed(text);
         let mut latest = None;
         let mut notices = Vec::new();
         let mut released = false;
@@ -830,6 +886,10 @@ impl Competition {
     fn handle_action(&mut self, action: Action, text: &mut TextStore) {
         match action {
             Action::Start => {
+                if !self.detection.startable() {
+                    self.toast(self.detection.blocked_reason());
+                    return;
+                }
                 let form = start::read(&self.tree, &self.start);
                 if form.request.is_empty() {
                     self.toast("依頼内容を入力してください");
@@ -964,20 +1024,23 @@ impl Competition {
             Action::RematchPast(dir) => match self.load_stored(&dir) {
                 Ok((session, _)) => {
                     let form = start::Form::of_session(&session);
-                    start::fill(&mut self.tree, &mut self.start, &form, text);
+                    let left_out = start::fill(&mut self.tree, &mut self.start, &form, text);
                     self.rebuild(text);
-                    self.toast("前回の設定をフォームに入れました");
+                    self.toast(if left_out.is_empty() {
+                        "前回の設定をフォームに入れました".to_owned()
+                    } else {
+                        format!(
+                            "前回の設定をフォームに入れました。{}",
+                            start::left_out_message(&left_out)
+                        )
+                    });
                 }
                 Err(why) => self.toast(why),
             },
             Action::NewCompetition => {
                 self.leave();
-                start::fill(
-                    &mut self.tree,
-                    &mut self.start,
-                    &start::Form::default(),
-                    text,
-                );
+                let form = start::Form::for_kinds(self.start.kinds());
+                start::fill(&mut self.tree, &mut self.start, &form, text);
                 self.rebuild(text);
             }
             Action::Rematch => {
@@ -986,8 +1049,11 @@ impl Competition {
                 };
                 self.leave();
                 let form = start::Form::of_session(&session);
-                start::fill(&mut self.tree, &mut self.start, &form, text);
+                let left_out = start::fill(&mut self.tree, &mut self.start, &form, text);
                 self.rebuild(text);
+                if !left_out.is_empty() {
+                    self.toast(start::left_out_message(&left_out));
+                }
             }
             Action::FocusPane(part) => self.send_cmd(Command::Focus { part }),
             Action::SetHold(hold) => self.send_cmd(Command::SetHold { hold }),
@@ -1759,15 +1825,280 @@ mod tests {
         }
     }
 
+    /// A report that every kind is installed, already delivered.
+    fn installed_all() -> Receiver<Installed> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Installed::Found(AgentKind::ALL.to_vec())).unwrap();
+        rx
+    }
+
     /// A screen on the live channel whose list reads `root`.
     fn live_on(root: &Path) -> (Competition, crate::live::FakeLink, TextStore) {
         let (channel, link) = Channel::fake();
-        let mut screen = Competition::live(channel);
+        let mut screen = Competition::live(channel, installed_all());
         screen.past_root = Some(root.to_owned());
         screen.refresh_past();
         let mut text = TextStore::new(Default::default());
         screen.rebuild(&mut text);
         (screen, link, text)
+    }
+
+    /// A live screen still waiting for the installed-agents report, and
+    /// the end that delivers it.
+    fn live_pending() -> (
+        Competition,
+        crate::live::FakeLink,
+        std::sync::mpsc::Sender<Installed>,
+        TextStore,
+    ) {
+        let (channel, link) = Channel::fake();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let screen = Competition::live(channel, rx);
+        (screen, link, tx, TextStore::new(Default::default()))
+    }
+
+    /// `screen` once the check reported `installed`.
+    fn report(
+        screen: &mut Competition,
+        tx: &std::sync::mpsc::Sender<Installed>,
+        installed: Installed,
+        text: &mut TextStore,
+    ) {
+        tx.send(installed).unwrap();
+        screen.poll_live(text);
+    }
+
+    fn found(kinds: &[AgentKind]) -> Installed {
+        Installed::Found(kinds.to_vec())
+    }
+
+    /// How many entries `popup` has, by walking down its menu with the
+    /// keyboard to the end.
+    fn menu_len(screen: &mut Competition, popup: WidgetId, text: &mut TextStore) -> usize {
+        screen.tree.set_focus(Some(popup));
+        for _ in 0..AgentKind::ALL.len() + 2 {
+            screen.dispatch(
+                noa_gpui_core::Event::KeyDown {
+                    key: noa_gpui_core::Key::ArrowDown,
+                    modifiers: Default::default(),
+                },
+                text,
+            );
+        }
+        screen
+            .tree
+            .get::<noa_gpui_core::widgets::PopUpButton>(popup)
+            .unwrap()
+            .selected()
+            + 1
+    }
+
+    fn press_down(screen: &mut Competition, popup: WidgetId, text: &mut TextStore) {
+        screen.tree.set_focus(Some(popup));
+        screen.dispatch(
+            noa_gpui_core::Event::KeyDown {
+                key: noa_gpui_core::Key::ArrowDown,
+                modifiers: Default::default(),
+            },
+            text,
+        );
+    }
+
+    fn kinds_of(choices: &[AgentChoice]) -> Vec<AgentKind> {
+        choices.iter().map(|c| c.kind).collect()
+    }
+
+    #[test]
+    fn the_start_button_waits_for_the_installed_check() {
+        let (mut screen, link, tx, mut text) = live_pending();
+        let start = screen.start.start_button;
+        assert!(!screen.tree.is_enabled(start));
+        // A start that gets through anyway sends nothing.
+        screen.handle_action(Action::Start, &mut text);
+        assert!(link.commands.try_recv().is_err());
+
+        report(&mut screen, &tx, found(&[AgentKind::Codex]), &mut text);
+        assert!(screen.tree.is_enabled(start));
+    }
+
+    #[test]
+    fn the_start_button_stays_off_when_no_agent_is_installed() {
+        let (mut screen, link, tx, mut text) = live_pending();
+        report(&mut screen, &tx, found(&[]), &mut text);
+        assert!(!screen.tree.is_enabled(screen.start.start_button));
+        assert_eq!(
+            screen.detection.blocked_reason(),
+            "claude / codex / agy のいずれもログインシェルの PATH に見つかりません"
+        );
+        screen.handle_action(Action::Start, &mut text);
+        assert!(link.commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn an_unknown_check_offers_every_kind_and_allows_starting() {
+        let (mut screen, _link, tx, mut text) = live_pending();
+        report(
+            &mut screen,
+            &tx,
+            Installed::Unknown("zsh".into()),
+            &mut text,
+        );
+        assert!(screen.tree.is_enabled(screen.start.start_button));
+        assert_eq!(screen.start.kinds(), AgentKind::ALL);
+        let judge = screen.start.judge;
+        assert_eq!(
+            menu_len(&mut screen, judge, &mut text),
+            AgentKind::ALL.len()
+        );
+        assert!(
+            screen
+                .detection
+                .blocked_reason()
+                .contains("すべて表示しています")
+        );
+    }
+
+    #[test]
+    fn menus_offer_only_the_installed_kinds_and_map_by_position() {
+        let (mut screen, _link, tx, mut text) = live_pending();
+        report(
+            &mut screen,
+            &tx,
+            found(&[AgentKind::Codex, AgentKind::Agy]),
+            &mut text,
+        );
+        let form = start::read(&screen.tree, &screen.start);
+        // One row per installed kind, led by the first.
+        assert_eq!(form.judge.kind, AgentKind::Codex);
+        assert_eq!(kinds_of(&form.panel), [AgentKind::Codex, AgentKind::Agy]);
+
+        let judge = screen.start.judge;
+        assert_eq!(menu_len(&mut screen, judge, &mut text), 2);
+        for row in 0..2 {
+            let popup = screen.start.panel[row].kind;
+            assert_eq!(menu_len(&mut screen, popup, &mut text), 2);
+        }
+        // The judge's second entry is agy (`ALL[1]` would be codex).
+        let form = start::read(&screen.tree, &screen.start);
+        assert_eq!(form.judge.kind, AgentKind::Agy);
+        assert_eq!(kinds_of(&form.panel), [AgentKind::Agy, AgentKind::Agy]);
+
+        // The model box of a changed row follows its real kind.
+        let models = |screen: &Competition, index: usize| {
+            let model = screen.start.panel[index].setup.model;
+            screen
+                .tree
+                .get::<noa_gpui_core::widgets::ComboBox>(model)
+                .unwrap()
+                .items()
+                .to_vec()
+        };
+        let agy: Vec<String> = AgentKind::Agy
+            .models()
+            .iter()
+            .map(|m| m.to_string())
+            .collect();
+        assert_eq!(models(&screen, 0), agy);
+
+        // A new row takes the last row's kind.
+        screen.handle_action(Action::AddPanelRow, &mut text);
+        let panel = start::read(&screen.tree, &screen.start).panel;
+        assert_eq!(panel.last().unwrap().kind, AgentKind::Agy);
+    }
+
+    #[test]
+    fn a_menu_step_lands_on_the_next_installed_kind() {
+        let (mut screen, _link, tx, mut text) = live_pending();
+        report(
+            &mut screen,
+            &tx,
+            found(&[AgentKind::Codex, AgentKind::Agy]),
+            &mut text,
+        );
+        let popup = screen.start.panel[0].kind;
+        press_down(&mut screen, popup, &mut text);
+        let panel = start::read(&screen.tree, &screen.start).panel;
+        assert_eq!(kinds_of(&panel), [AgentKind::Agy, AgentKind::Agy]);
+    }
+
+    #[test]
+    fn a_form_filled_with_uninstalled_kinds_drops_them() {
+        let (mut screen, _link, tx, mut text) = live_pending();
+        report(
+            &mut screen,
+            &tx,
+            found(&[AgentKind::Codex, AgentKind::Agy]),
+            &mut text,
+        );
+        let form = start::Form {
+            judge: AgentKind::Claude.into(),
+            panel: vec![
+                AgentKind::Claude.into(),
+                AgentKind::Codex.into(),
+                AgentKind::Agy.into(),
+                AgentKind::Claude.into(),
+            ],
+            ..start::Form::default()
+        };
+        let left_out = start::fill(&mut screen.tree, &mut screen.start, &form, &mut text);
+        assert_eq!(left_out, [AgentKind::Claude]);
+        let read = start::read(&screen.tree, &screen.start);
+        assert_eq!(read.judge.kind, AgentKind::Codex);
+        assert_eq!(kinds_of(&read.panel), [AgentKind::Codex, AgentKind::Agy]);
+        assert_eq!(
+            start::left_out_message(&left_out),
+            "インストールされていないため除外: claude"
+        );
+
+        // Too few left: the panel is padded to two with the first kind.
+        let form = start::Form {
+            panel: vec![
+                AgentKind::Claude.into(),
+                AgentKind::Claude.into(),
+                AgentKind::Agy.into(),
+            ],
+            ..start::Form::default()
+        };
+        start::fill(&mut screen.tree, &mut screen.start, &form, &mut text);
+        let read = start::read(&screen.tree, &screen.start);
+        assert_eq!(kinds_of(&read.panel), [AgentKind::Agy, AgentKind::Codex]);
+    }
+
+    #[test]
+    fn a_rematch_leaves_out_what_is_not_installed() {
+        let mut screen = Competition::demo();
+        let mut text = TextStore::new(Default::default());
+        let kinds = vec![AgentKind::Codex, AgentKind::Agy];
+        screen.detection = start::Detection::Done(Installed::Found(kinds.clone()));
+        let form = start::Form::for_kinds(&kinds);
+        start::apply_kinds(&mut screen.tree, &mut screen.start, kinds, &form, &mut text);
+        screen.handle_action(
+            Action::RematchPast(PathBuf::from("/demo/comp-4")),
+            &mut text,
+        );
+        let read = start::read(&screen.tree, &screen.start);
+        let offered = [AgentKind::Codex, AgentKind::Agy];
+        assert!(offered.contains(&read.judge.kind));
+        assert!(read.panel.len() >= 2);
+        assert!(read.panel.iter().all(|c| offered.contains(&c.kind)));
+    }
+
+    #[test]
+    fn a_form_the_user_changed_is_kept_when_the_check_reports() {
+        let (mut screen, _link, tx, mut text) = live_pending();
+        // Pending offers every kind; a fourth row is the user's own.
+        screen.handle_action(Action::AddPanelRow, &mut text);
+        report(&mut screen, &tx, found(&[AgentKind::Codex]), &mut text);
+        let panel = start::read(&screen.tree, &screen.start).panel;
+        assert_eq!(kinds_of(&panel), [AgentKind::Codex, AgentKind::Codex]);
+    }
+
+    #[test]
+    fn the_adopt_buttons_offer_only_installed_kinds() {
+        let (mut screen, _link, tx, mut text) = live_pending();
+        report(&mut screen, &tx, found(&[AgentKind::Agy]), &mut text);
+        assert_eq!(screen.detection.available(), [AgentKind::Agy]);
+        assert!(!screen.detection.available().contains(&AgentKind::Claude));
     }
 
     #[test]
@@ -1896,7 +2227,7 @@ mod tests {
     #[test]
     fn notices_about_a_left_competition_are_dropped() {
         let (channel, link) = Channel::fake();
-        let mut screen = Competition::live(channel);
+        let mut screen = Competition::live(channel, installed_all());
         let mut text = TextStore::new(Default::default());
         screen.handle_action(Action::NewCompetition, &mut text);
         link.notices
@@ -1931,7 +2262,7 @@ mod tests {
     fn snapshots_of_a_left_competition_are_dropped() {
         let (channel, link) = Channel::fake();
         let snapshots = link.snapshots;
-        let mut screen = Competition::live(channel);
+        let mut screen = Competition::live(channel, installed_all());
         let mut text = TextStore::new(Default::default());
         let snapshot = |generation| Snapshot {
             link: Link::Live,
@@ -1981,7 +2312,7 @@ mod tests {
     #[test]
     fn a_held_competition_offers_the_next_round_and_the_toggle() {
         let (channel, link) = Channel::fake();
-        let mut screen = Competition::live(channel);
+        let mut screen = Competition::live(channel, installed_all());
         let mut text = TextStore::new(Default::default());
         let mut session = crate::demo::session();
         session.hold = true;

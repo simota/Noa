@@ -40,6 +40,8 @@ pub(super) const NEEDS_CONTROL: &str = "ペインへ移動するには Noa の s
 pub(super) const NEEDS_INPUT: &str = "送信するには Noa の server-scopes に input が必要です（例: server-scopes = read,control,input）";
 /// What the drawer and the notice line say of a worker whose pane is gone.
 pub(super) const CLOSED_PANE: &str = "ペインは閉じています（ctl の記録から表示）";
+/// The button that opens the Repo Browser on the worker's worktree.
+pub(super) const DIFF: &str = "差分を見る";
 pub(super) const CLOSED_SEND_GUARD: &str = "ペインは閉じているため送信できません";
 pub(super) const PERMISSION_SEND_GUARD: &str =
     "承認待ちのペインには安全のため送信できません（開く で直接操作してください）";
@@ -102,6 +104,8 @@ pub(super) struct DrawerButtons {
     pub(super) close_pane: Option<WidgetId>,
     /// まとめて閉じる, when the filter shows ended workers.
     pub(super) close_ended: Option<WidgetId>,
+    /// 差分を見る, when the worker's cwd is known.
+    pub(super) diff: Option<WidgetId>,
     pub(super) close: WidgetId,
     pub(super) result: Option<WidgetId>,
     pub(super) result_reload: Option<WidgetId>,
@@ -659,6 +663,10 @@ pub(super) fn build(
     };
     let id = worker.closed_pane.unwrap_or(pane);
     text_line(tree, pane_section, &format!("ID {id} · 親 {parent}"), 2);
+    if !worker.cwd.is_empty() {
+        let cwd = text_line(tree, pane_section, &one_line(&worker.cwd), 2);
+        tree.update::<Label, _>(cwd, |l, cx| l.set_color(cx, Role::Muted));
+    }
     if worker.is_closed() {
         let note = text_line(tree, pane_section, CLOSED_PANE, 2);
         tree.update::<Label, _>(note, |l, cx| l.set_color(cx, Role::Muted));
@@ -879,6 +887,13 @@ pub(super) fn build(
                 .selected(confirm_close),
         )
     });
+    // Open or closed, a worker with a known cwd has a worktree to look at.
+    let diff = (!worker.cwd.is_empty()).then(|| {
+        tree.insert(
+            Some(buttons),
+            Button::new(DIFF).control_size(ControlSize::Small),
+        )
+    });
     spacer(tree, buttons);
     let close = tree.insert(
         Some(buttons),
@@ -888,6 +903,7 @@ pub(super) fn build(
         open,
         close_pane,
         close_ended,
+        diff,
         close,
         result,
         result_reload,

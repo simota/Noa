@@ -39,6 +39,7 @@ pub(super) enum Action {
     CancelSend,
     ClosePane,
     CloseEnded,
+    ViewDiff,
     CycleGrouping,
     NextTab,
     StartFilter,
@@ -93,6 +94,9 @@ const NEXT: &str = "次のワーカーを選ぶ";
 const PREV: &str = "前のワーカーを選ぶ";
 const MOVE: &str = "入力したまま選択を動かす";
 const CLOSE_HELP: &str = "ヘルプを閉じる";
+/// The five panel keys share one help row (one keycap, 1–5), so every row
+/// fits the smallest window.
+const PANELS: &str = "パネル表示の切替（要対応・作業中・完了・推移・関連）";
 
 pub(super) const BINDINGS: &[Binding] = &[
     bind(Browse, K(Key::Char('j')), &["J"], Next, NEXT),
@@ -147,6 +151,13 @@ pub(super) const BINDINGS: &[Binding] = &[
     ),
     bind(
         Browse,
+        K(Key::Char('d')),
+        &["D"],
+        ViewDiff,
+        "選んだワーカーの作業ツリーを Repo Browser で開く（差分を見る）",
+    ),
+    bind(
+        Browse,
         K(Key::Char('g')),
         &["G"],
         CycleGrouping,
@@ -176,37 +187,37 @@ pub(super) const BINDINGS: &[Binding] = &[
     bind(
         Browse,
         K(Key::Char('1')),
-        &["1"],
+        &["1–5"],
         TogglePanel(Panel::Queue),
-        "要対応 の表示を切り替え",
+        PANELS,
     ),
     bind(
         Browse,
         K(Key::Char('2')),
-        &["2"],
+        &[],
         TogglePanel(Panel::Running),
-        "作業中 の表示を切り替え",
+        PANELS,
     ),
     bind(
         Browse,
         K(Key::Char('3')),
-        &["3"],
+        &[],
         TogglePanel(Panel::Done),
-        "完了 の表示を切り替え",
+        PANELS,
     ),
     bind(
         Browse,
         K(Key::Char('4')),
-        &["4"],
+        &[],
         TogglePanel(Panel::Timeline),
-        "状態の推移 の表示を切り替え",
+        PANELS,
     ),
     bind(
         Browse,
         K(Key::Char('5')),
-        &["5"],
+        &[],
         TogglePanel(Panel::Graph),
-        "関連 の表示を切り替え",
+        PANELS,
     ),
     bind(Browse, T("?"), &["?"], OpenHelp, "このヘルプ"),
     bind(

@@ -1579,6 +1579,7 @@ fn worker_of(
         has_result: result.is_some(),
         result,
         closed_pane: None,
+        cwd: panel.cwd.clone(),
         screen_tail: screen_tail.to_vec(),
         lines_per_tick: if running {
             buckets(&seen.changes, now)

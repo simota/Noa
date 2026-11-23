@@ -582,6 +582,7 @@ pub(super) fn closed_worker(gone: &Gone, now: f64) -> Worker {
         freshness: 0.0,
         phases,
         closed_pane: Some(record.pane),
+        cwd: record.cwd.clone().unwrap_or_default(),
     }
     .on_one_line()
 }

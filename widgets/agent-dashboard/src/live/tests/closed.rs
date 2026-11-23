@@ -517,3 +517,25 @@ fn the_end_of_a_pane_seen_leaving_is_when_it_left() {
         ]
     );
 }
+
+/// 差分を見る needs where a worker works: an open one's pane cwd, a closed
+/// one's journaled spawn cwd, as given (spaces kept).
+#[test]
+fn open_and_closed_workers_keep_their_cwd() {
+    let at = NOW as u64 - 600;
+    let mut open = open_worker("6", at);
+    open.cwd = "/Users/me/My Work/noa wt".into();
+    let text = [spawn(4, at, "closed"), close(4, at + 60)].concat();
+    let mut tracker = Tracker::default();
+    tracker.merge(vec![open], NOW);
+    tracker.gone = gone(
+        &[journal("s", &text)],
+        &tracker.panels,
+        &tracker.vanished,
+        NOW,
+    );
+    let fleet = tracker.fleet(NOW, None);
+    assert_eq!(fleet.worker(6).unwrap().cwd, "/Users/me/My Work/noa wt");
+    let closed = fleet.workers.iter().find(|w| w.is_closed()).unwrap();
+    assert_eq!(closed.cwd, "/r");
+}

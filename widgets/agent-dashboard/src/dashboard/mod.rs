@@ -19,6 +19,7 @@ use noa_gpui_text::TextStore;
 
 use crate::fleet::{self, Fleet, Grouping, Need, State, Tier, Worker};
 use crate::live::{Channel, CloseTarget, Command, Link, Snapshot, Unsent};
+use crate::repo_browser::{self, Launcher};
 
 mod analytics;
 mod cards;
@@ -335,6 +336,8 @@ pub struct Registry {
     close_pane_button: Option<(WidgetId, u64)>,
     /// The drawer's まとめて閉じる button, with the count it names.
     close_ended_button: Option<(WidgetId, usize)>,
+    /// The drawer's 差分を見る button.
+    diff_button: Option<(WidgetId, u64)>,
     /// The drawer's result 表示 / 隠す.
     result_toggle: Option<WidgetId>,
     /// The drawer's result 再読込 button.
@@ -512,6 +515,8 @@ pub struct Dashboard {
     /// Where the view is saved when it changes (`after_input`) and when
     /// the window closes; `None` keeps nothing (the tests, a snapshot).
     prefs_store: Option<PrefsStore>,
+    /// Starts the Repo Browser for 差分を見る.
+    repo_browser: Box<dyn Launcher>,
     #[cfg(test)]
     panels: [Option<WidgetId>; 5],
     /// Lets the tests drive `wheel` as if the pager took the event: U1's
@@ -1187,6 +1192,7 @@ impl Dashboard {
         self.filter_had_focus = old.filter_had_focus;
         self.pressed_in_filter = old.pressed_in_filter;
         self.prefs_store = old.prefs_store;
+        self.repo_browser = old.repo_browser;
         self.watch();
         self.lay_out_again(text);
     }
@@ -1269,6 +1275,7 @@ impl Dashboard {
             filter_had_focus: false,
             pressed_in_filter: false,
             prefs_store: None,
+            repo_browser: Box::new(repo_browser::System),
             #[cfg(test)]
             panels: [None; 5],
             #[cfg(test)]
@@ -1587,6 +1594,7 @@ impl Dashboard {
             .extend(buttons.open.map(|id| (id, pane)));
         self.registry.close_pane_button = buttons.close_pane.map(|id| (id, pane));
         self.registry.close_ended_button = buttons.close_ended.map(|id| (id, ended));
+        self.registry.diff_button = buttons.diff.map(|id| (id, pane));
         self.registry.drawer = Some((root, buttons.close));
         self.registry.result_toggle = buttons.result;
         self.registry.result_reload = buttons.result_reload;
@@ -1603,6 +1611,7 @@ impl Dashboard {
         self.registry.open_buttons.clear();
         self.registry.close_pane_button = None;
         self.registry.close_ended_button = None;
+        self.registry.diff_button = None;
         self.registry.result_toggle = None;
         self.registry.result_reload = None;
         self.registry.result_copy = None;
@@ -2025,6 +2034,31 @@ impl Dashboard {
         }
     }
 
+    /// 差分を見る: the Repo Browser on the worktree holding the worker's
+    /// cwd, open or closed. The notice says it started, or why not.
+    fn view_diff(&mut self, pane: u64) {
+        let Some(worker) = self.feed.fleet.worker(pane) else {
+            return;
+        };
+        let label = worker.label.clone();
+        if worker.cwd.is_empty() {
+            self.show_notice(format!("{label} の作業ディレクトリがわかりません"));
+            return;
+        }
+        let cwd = worker.cwd.clone();
+        let notice = match self.repo_browser.launch(&cwd) {
+            Ok(()) => format!("{label} の作業ツリーを Repo Browser で開きます"),
+            Err(why) => why,
+        };
+        self.show_notice(notice);
+    }
+
+    /// Lets a test start a Repo Browser of its own.
+    #[cfg(test)]
+    fn set_launcher(&mut self, launcher: impl Launcher + 'static) {
+        self.repo_browser = Box::new(launcher);
+    }
+
     fn copy_screen_tail(&mut self) {
         let Some(pane) = self.view.detail else {
             return;
@@ -2203,6 +2237,10 @@ impl Dashboard {
                 None => self.show_notice(NOTHING_SELECTED.to_owned()),
             },
             Action::CloseEnded => self.request_close_ended(self.shift_up, text),
+            Action::ViewDiff => match self.view.selected {
+                Some(pane) => self.view_diff(pane),
+                None => self.show_notice(NOTHING_SELECTED.to_owned()),
+            },
             Action::CycleGrouping => {
                 let current = Grouping::ALL
                     .iter()
@@ -2618,6 +2656,8 @@ impl Dashboard {
             .is_some_and(|(id, _)| id == source)
         {
             self.request_close_ended(true, text);
+        } else if let Some((_, pane)) = self.registry.diff_button.filter(|(id, _)| *id == source) {
+            self.view_diff(pane);
         } else if self
             .registry
             .drawer

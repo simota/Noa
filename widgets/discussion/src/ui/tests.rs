@@ -686,6 +686,28 @@ fn the_start_view_lists_stored_discussions_to_open_or_resume() {
 }
 
 #[test]
+fn the_list_sent_at_launch_with_the_first_snapshot_is_shown() {
+    // At launch the live channel sends the list and the start view's
+    // snapshot (no session, still connecting) before the window polls,
+    // so both arrive in the same poll.
+    let (channel, feed) = test_channel();
+    feed.history
+        .send(std::sync::Arc::new(crate::demo::history()))
+        .unwrap();
+    feed.snapshots
+        .send(Snapshot {
+            link: Link::Connecting,
+            session: None,
+        })
+        .unwrap();
+    let h = Harness::new(channel, feed);
+    assert!(has_widget_for(
+        &h.screen,
+        &Action::Open(demo_dir("disc-demo-1"))
+    ));
+}
+
+#[test]
 fn an_empty_history_says_so_and_still_starts() {
     let (channel, feed) = test_channel();
     let mut h = Harness::new(channel, feed);

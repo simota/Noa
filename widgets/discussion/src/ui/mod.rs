@@ -690,13 +690,10 @@ impl Discussion {
                 history = Some(listed);
             }
         }
+        let listed = history.is_some();
+        let mut stale = false;
         if let Some(listed) = history {
             self.history = listed;
-            // The start view lists them: build it again unless a session
-            // (or a snapshot below) hides it.
-            if self.session.is_none() && latest.is_none() {
-                self.rebuild(text);
-            }
         }
         if let Some(snapshot) = latest {
             let id = |s: &Option<Arc<Session>>| s.as_ref().map(|s| s.id.clone());
@@ -707,9 +704,13 @@ impl Discussion {
             self.session = snapshot.session;
             self.note_debates();
             self.settle_intervention();
-            if self.built != Some((self.session_key(), self.link.clone())) {
-                self.rebuild(text);
-            }
+            stale |= self.built != Some((self.session_key(), self.link.clone()));
+        }
+        // A new list is shown on the start view, also when a snapshot in the
+        // same poll left the view as it was built (the start view's first
+        // one at launch).
+        if stale || (listed && self.session.is_none()) {
+            self.rebuild(text);
         }
         for notice in notices {
             self.toast(notice);

@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use super::types::{
-    Brief, JudgeOutput, Message, Millis, PartId, Participant, Phase, Receipt, Round, RoundKind,
-    RoundNo, Session, SessionId, Submission,
+    AmendNote, Brief, JudgeOutput, Message, Millis, PartId, Participant, Phase, Receipt, Round,
+    RoundKind, RoundNo, Session, SessionId, Submission,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -289,6 +289,50 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
             round_mut(session, *round)?.phase = *phase;
         }
         Event::JudgeAccepted { round, output } => {
+            for amendment in &output.amendments {
+                if amendment.round >= *round {
+                    return err(format!(
+                        "round {round} cannot amend round {}",
+                        amendment.round
+                    ));
+                }
+                let ev = round_mut(session, amendment.round)?
+                    .outcome
+                    .as_mut()
+                    .and_then(|o| o.evaluations.get_mut(&amendment.part));
+                let Some(ev) = ev else {
+                    return err(format!(
+                        "no R{} evaluation of {} to amend",
+                        amendment.round, amendment.part
+                    ));
+                };
+                let from = ev.score;
+                ev.score = amendment.score;
+                // The split no longer adds up to the corrected score.
+                ev.breakdown.clear();
+                ev.amended = Some(AmendNote {
+                    from,
+                    by_round: *round,
+                    reason: amendment.reason.clone(),
+                });
+            }
+            // A corrected round is re-ranked by its scores (ties keep the
+            // judge's order), so its standings never show a negative gap.
+            let mut amended: Vec<RoundNo> = output.amendments.iter().map(|a| a.round).collect();
+            amended.dedup();
+            for no in amended {
+                if let Some(outcome) = round_mut(session, no)?.outcome.as_mut() {
+                    let evaluations = &outcome.evaluations;
+                    outcome.ranking.sort_by(|a, b| {
+                        let score = |p| {
+                            evaluations
+                                .get(p)
+                                .map_or(0, |e: &super::types::EntryEvaluation| e.score)
+                        };
+                        score(b).cmp(&score(a))
+                    });
+                }
+            }
             if let Some(winner) = &output.winner {
                 session.winner = Some(winner.clone());
             }

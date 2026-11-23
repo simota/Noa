@@ -2013,6 +2013,7 @@ impl Session {
             parent_pane_id: None,
             focus: Some(false),
             max_children: None,
+            auto_approve: None,
         };
         let window = self
             .client
@@ -2175,6 +2176,7 @@ impl Session {
                     parent_pane_id: Some(WireId(own)),
                     focus: Some(focus),
                     max_children: u32::try_from(max_children).ok(),
+                    auto_approve: None,
                 };
                 session
                     .client

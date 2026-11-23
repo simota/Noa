@@ -740,6 +740,11 @@ pub struct SpawnParams {
     /// concurrent spawns cannot overshoot it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_children: Option<u32>,
+    /// `noa.newTab` only: seed the new tab's agent-CLI auto approval (the
+    /// per-tab Toggle Auto Approve state) instead of the `auto-approve`
+    /// config default. `true` needs the `input` scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_approve: Option<bool>,
 }
 
 impl SpawnParams {
@@ -750,6 +755,7 @@ impl SpawnParams {
             || self.label.is_some()
             || self.parent_pane_id.is_some()
             || self.focus.is_some()
+            || self.auto_approve.is_some()
     }
 }
 

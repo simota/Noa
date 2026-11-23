@@ -21,9 +21,12 @@ use noa_gpui_text::TextStore;
 use crate::live::{Link, Snapshot};
 use crate::ui::Competition;
 
-const USAGE: &str = "usage: competition [--demo] [--snapshot=FILE.png [--size=WxH]]\n  \
+const USAGE: &str = "usage: competition [--demo] [--snapshot=FILE.png [--size=WxH]]\n       \
+                     competition --check=ENTRY_DIR [--out=DIR]\n  \
                      the live competition by default; \
-                     --demo shows a canned multi-round competition";
+                     --demo shows a canned multi-round competition; \
+                     --check runs the snapshot check a submission gets (viewer copy, \
+                     screenshots, manifest) on ENTRY_DIR";
 const DEFAULT_SIZE: (u32, u32) = (1440, 900);
 const SNAPSHOT_SCALE: f32 = 2.0;
 const FIRST_SNAPSHOT_WAIT: Duration = Duration::from_secs(3);
@@ -108,13 +111,42 @@ fn render_snapshot(
         .map_err(|e| format!("write {}: {e}", path.display()))
 }
 
+/// `--check`: the snapshot check a submission gets, run on an entry directory.
+fn run_check(entry: &std::path::Path, out: Option<PathBuf>) -> Result<(), String> {
+    let name = entry
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "entry".to_owned());
+    let out =
+        out.unwrap_or_else(|| std::env::temp_dir().join(format!("noa-competition-check-{name}")));
+    let inspection = competition::check::check_entry(entry, &out)
+        .map_err(|e| format!("check {}: {e}", entry.display()))?;
+    println!("manifest: {}", inspection.manifest.display());
+    if let Some(preview) = &inspection.preview {
+        println!("viewer copy: {}", preview.page.display());
+    }
+    for shot in inspection.shots.iter().flatten() {
+        println!("screenshot: {}", shot.display());
+    }
+    for problem in inspection.problems() {
+        println!("problem: {problem}");
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), String> {
     let mut snapshot_path = None;
     let mut demo = false;
     let mut size = DEFAULT_SIZE;
+    let mut check_entry = None;
+    let mut check_out = None;
 
     for arg in std::env::args().skip(1) {
-        if let Some(path) = arg.strip_prefix("--snapshot=") {
+        if let Some(path) = arg.strip_prefix("--check=") {
+            check_entry = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--out=") {
+            check_out = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--snapshot=") {
             snapshot_path = Some(PathBuf::from(path));
         } else if let Some(raw) = arg.strip_prefix("--size=") {
             size = parse_size(raw)?;
@@ -126,6 +158,10 @@ fn main() -> Result<(), String> {
         } else {
             return Err(format!("unknown option {arg:?}\n{USAGE}"));
         }
+    }
+
+    if let Some(entry) = check_entry {
+        return run_check(&entry, check_out);
     }
 
     if let Some(path) = snapshot_path {

@@ -5,6 +5,8 @@ mod compare;
 mod composer;
 mod judge;
 mod leaderboard;
+mod map;
+mod progress;
 mod start;
 mod timeline;
 
@@ -26,7 +28,7 @@ use noa_gpui_scene::Size;
 use noa_gpui_text::TextStore;
 
 use competition::model::export;
-use competition::model::types::{AgentKind, PartId, Phase, RoundKind, RoundNo, Session};
+use competition::model::types::{AgentKind, Millis, PartId, Phase, RoundKind, RoundNo, Session};
 use competition::store;
 
 use crate::live::{Channel, Command, Link, Snapshot};
@@ -44,6 +46,7 @@ pub enum Action {
     Start,
     ShowCompare,
     ShowTimeline,
+    ShowMap,
     SelectRound(RoundNo),
     FilterPart(PartId),
     ClearPartFilter,
@@ -69,6 +72,7 @@ pub enum Action {
 enum CenterTab {
     Compare,
     Timeline,
+    Map,
 }
 
 enum Source {
@@ -88,11 +92,14 @@ pub struct Competition {
     filter_part: Option<PartId>,
     pending_intervention: Option<String>,
     file_dialogs: Vec<FileDialogRequest>,
-    built: Option<(Option<(String, u64)>, Link)>,
+    /// What the board was last built from: the session revision, the link,
+    /// and the clock minute while some agent's elapsed time is running.
+    built: Option<BuiltKey>,
 
     start: start::Parts,
     board: WidgetId,
     left_host: WidgetId,
+    progress_host: WidgetId,
     center_host: WidgetId,
     right_host: WidgetId,
     composer: composer::Parts,
@@ -164,6 +171,17 @@ impl Competition {
         );
         let left_host = tree.insert(Some(split), pane_column(Role::Surface));
         let center_col = tree.insert(Some(split), pane_column(Role::Background));
+        let progress_host = tree.insert(
+            Some(center_col),
+            Container::new(Style {
+                flex_shrink: 0.0,
+                size: LayoutSize {
+                    width: percent(1.0),
+                    height: auto(),
+                },
+                ..Default::default()
+            }),
+        );
         let center_host = tree.insert(Some(center_col), Container::new(fill()));
         let composer = composer::insert(&mut tree, center_col);
         let right_host = tree.insert(Some(split), pane_column(Role::Surface));
@@ -185,6 +203,7 @@ impl Competition {
             start,
             board,
             left_host,
+            progress_host,
             center_host,
             right_host,
             composer,
@@ -197,12 +216,20 @@ impl Competition {
         screen
     }
 
-    fn session_key(&self) -> Option<(String, u64)> {
-        self.session.as_ref().map(|s| (s.id.to_string(), s.rev))
+    fn built_key(&self) -> BuiltKey {
+        let session = self.session.as_ref();
+        let minute = session
+            .filter(|s| progress::has_running(s))
+            .map(|_| system_now() / 60_000);
+        (
+            session.map(|s| (s.id.to_string(), s.rev)),
+            self.link.clone(),
+            minute,
+        )
     }
 
     fn rebuild(&mut self, text: &mut TextStore) {
-        self.built = Some((self.session_key(), self.link.clone()));
+        self.built = Some(self.built_key());
         self.actions.clear();
 
         let started = self.session.is_some();
@@ -211,6 +238,7 @@ impl Competition {
 
         if started {
             self.rebuild_left(text);
+            self.rebuild_progress(text);
             self.rebuild_center(text);
             self.rebuild_right(text);
             self.rebuild_composer(text);
@@ -234,6 +262,14 @@ impl Competition {
             self.filter_part.as_ref(),
             &mut self.actions,
         );
+    }
+
+    fn rebuild_progress(&mut self, text: &mut TextStore) {
+        clear_children(&mut self.tree, self.progress_host, text);
+        let Some(session) = &self.session else {
+            return;
+        };
+        progress::insert(&mut self.tree, self.progress_host, session, system_now());
     }
 
     fn rebuild_center(&mut self, text: &mut TextStore) {
@@ -268,6 +304,7 @@ impl Competition {
                 Action::ShowTimeline,
                 self.tab == CenterTab::Timeline,
             ),
+            ("方向性マップ", Action::ShowMap, self.tab == CenterTab::Map),
         ] {
             let btn = self.tree.insert(
                 Some(tabs),
@@ -302,6 +339,12 @@ impl Competition {
                 &mut self.actions,
             ),
             CenterTab::Timeline => timeline::insert(
+                &mut self.tree,
+                self.center_host,
+                session,
+                self.filter_part.as_ref(),
+            ),
+            CenterTab::Map => map::insert(
                 &mut self.tree,
                 self.center_host,
                 session,
@@ -408,9 +451,9 @@ impl Competition {
             if snapshot.artifact_root.is_some() {
                 self.artifact_root = snapshot.artifact_root;
             }
-            if self.built.as_ref() != Some(&(self.session_key(), self.link.clone())) {
-                self.rebuild(text);
-            }
+        }
+        if self.built.as_ref() != Some(&self.built_key()) {
+            self.rebuild(text);
         }
     }
 
@@ -496,6 +539,10 @@ impl Competition {
             }
             Action::ShowTimeline => {
                 self.tab = CenterTab::Timeline;
+                self.rebuild(text);
+            }
+            Action::ShowMap => {
+                self.tab = CenterTab::Map;
                 self.rebuild(text);
             }
             Action::SelectRound(no) => {
@@ -613,6 +660,14 @@ impl Screen for Competition {
             }
         }
     }
+}
+
+type BuiltKey = (Option<(String, u64)>, Link, Option<Millis>);
+
+fn system_now() -> Millis {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as Millis)
 }
 
 pub(super) fn full() -> LayoutSize<noa_gpui_core::style::Dimension> {
@@ -758,5 +813,29 @@ mod tests {
         let mut screen = Competition::demo();
         let mut text = TextStore::new(Default::default());
         screen.prepare(Size::new(1440.0, 900.0), &mut text);
+    }
+
+    #[test]
+    fn winner_buttons_stay_on_screen_above_long_reports() {
+        let mut session = crate::demo::session();
+        for round in &mut session.rounds {
+            for sub in round.submissions.values_mut() {
+                sub.body = "- a long line of a submission report\n".repeat(80);
+            }
+        }
+        let mut screen = Competition::build(Source::Demo, Link::Live, Some(session), None);
+        let mut text = TextStore::new(Default::default());
+        screen.prepare(Size::new(1440.0, 900.0), &mut text);
+
+        let buttons: Vec<_> = screen
+            .actions
+            .iter()
+            .filter(|(_, action)| matches!(action, Action::SelectWinner(_)))
+            .map(|(id, _)| screen.tree.window_rect(*id).unwrap())
+            .collect();
+        assert_eq!(buttons.len(), 3);
+        for rect in buttons {
+            assert!(rect.bottom() < 900.0, "{rect:?}");
+        }
     }
 }

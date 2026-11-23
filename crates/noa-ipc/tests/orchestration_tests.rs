@@ -191,6 +191,7 @@ fn auto_split_with_a_command_reaches_spawn_with_every_field() {
         parent_pane_id: Some(WireId(1)),
         focus: Some(false),
         max_children: Some(3),
+        auto_approve: None,
     };
 
     let pane = client
@@ -221,6 +222,7 @@ fn a_float_placement_reaches_spawn_as_a_float_on_the_pane() {
         parent_pane_id: Some(WireId(1)),
         focus: Some(false),
         max_children: None,
+        auto_approve: None,
     };
 
     client
@@ -245,6 +247,7 @@ fn a_float_may_go_over_a_pane_other_than_its_parent() {
         parent_pane_id: Some(WireId(1)),
         focus: Some(false),
         max_children: None,
+        auto_approve: None,
     };
 
     client
@@ -317,6 +320,35 @@ fn a_command_needs_the_input_scope_on_top_of_control() {
         backend.spawns.lock().unwrap()[0].0,
         SpawnTarget::Tab { window: Some(3) }
     );
+}
+
+#[test]
+fn auto_approve_needs_input_and_applies_to_new_tabs_only() {
+    let on = SpawnParams {
+        auto_approve: Some(true),
+        ..SpawnParams::default()
+    };
+    let (backend, _broadcaster, handle) = start(&["read", "control"]);
+    let mut client = connect(&handle, &["read", "control"]);
+    assert!(matches!(
+        client.spawn_tab(None, &on),
+        Err(ClientError::Rpc { code: -32003, .. })
+    ));
+    assert!(backend.spawns.lock().unwrap().is_empty());
+
+    let (backend, _broadcaster, handle) = start(&["read", "control", "input"]);
+    let mut client = connect(&handle, &["read", "control", "input"]);
+    client.spawn_tab(None, &on).unwrap();
+    assert_eq!(backend.spawns.lock().unwrap()[0].1.auto_approve, Some(true));
+
+    // A split shares its tab's setting with the panes already there.
+    for placement in [SplitPlacement::Horizontal, SplitPlacement::Auto] {
+        assert!(matches!(
+            client.spawn_split(1, placement, &on),
+            Err(ClientError::Rpc { code: -32602, .. })
+        ));
+    }
+    assert_eq!(backend.spawns.lock().unwrap().len(), 1);
 }
 
 #[test]

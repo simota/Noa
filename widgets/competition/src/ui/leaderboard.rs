@@ -87,17 +87,7 @@ pub(super) fn insert(
         if let Some(cur) = session.current_round()
             && let Some(brief) = cur.brief(part)
         {
-            let (status_text, tone) = if brief.receipt.failed.is_some() {
-                ("失敗", Tone::Critical)
-            } else if brief.receipt.replied.is_some() {
-                ("提出済", Tone::Success)
-            } else if brief.receipt.started.is_some() {
-                ("制作中", Tone::Accent)
-            } else if brief.receipt.sent.is_some() {
-                ("送信済", Tone::Warning)
-            } else {
-                ("待機中", Tone::Neutral)
-            };
+            let (status_text, tone) = super::progress::delivery(&brief.receipt);
             let row = tree.insert(
                 Some(card),
                 Container::row().align_items(AlignItems::CENTER).gap(6.0),

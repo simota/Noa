@@ -17,6 +17,7 @@ use competition::engine::{AgentState, Config, Effect, Engine, EngineError, Input
 use competition::model::export;
 use competition::model::types::{AgentKind, Millis, PartId, Phase, RoundNo, Session, SessionId};
 use competition::store::{self, Store};
+use competition::{check, preview, shots};
 
 use super::ipc::{Changes, Connect, IpcConnect, Noa, NoaError, PaneSpec, PaneView, Placement};
 
@@ -325,6 +326,8 @@ struct Runner<C: Connect, K: Clock> {
     stop: bool,
     started: bool,
     link_state: Link,
+    /// Problems reported by snapshot checks running on their own threads.
+    check_notes: (Sender<String>, Receiver<String>),
 }
 
 impl<C: Connect, K: Clock> Runner<C, K> {
@@ -390,6 +393,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             stop: false,
             started: false,
             link_state: Link::Connecting,
+            check_notes: mpsc::channel(),
         };
         runner.emit_session();
         runner.emit_link(Link::Connecting);
@@ -942,6 +946,9 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     }
 
     fn poll_replies(&mut self) -> Result<(), Fail> {
+        while let Ok(note) = self.check_notes.1.try_recv() {
+            self.notice(note);
+        }
         let now = self.clock.now();
         let mut ready = Vec::new();
         let mut idx = 0;
@@ -977,7 +984,11 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 let src = store::entry_dir(&reply_dir, &part);
                 let dst = store::artifact_snapshot_dir(&reply_dir, round, &part);
                 match store::snapshot_artifacts(&src, &dst) {
-                    Ok(files) => files,
+                    Ok(files) => {
+                        let checks = store::checks_dir(&reply_dir, round, &part);
+                        self.check_snapshot(&part, &dst, &checks);
+                        files
+                    }
                     Err(e) => {
                         self.notice(format!(
                             "{part} の成果物スナップショットに失敗しました: {e}"
@@ -997,6 +1008,14 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             })?;
         }
         Ok(())
+    }
+
+    /// Starts the snapshot check on a submitted entry; see [`start_check`].
+    fn check_snapshot(&self, part: &PartId, snapshot: &Path, out: &Path) {
+        let notes = self.check_notes.0.clone();
+        if let Err(e) = start_check(part, snapshot, out, shots::find_chrome(), notes) {
+            self.notice(format!("{part} のスナップショット確認に失敗しました: {e}"));
+        }
     }
 
     fn all_parts(&self) -> Vec<PartId> {
@@ -1021,8 +1040,63 @@ fn unique_session_id(root: &Path, now: Millis) -> SessionId {
     candidate
 }
 
+/// Runs the snapshot check on a submitted entry. The viewer copy is written
+/// before this returns, so the viewer refresh that follows the accepted
+/// submission frames it; the screenshots and manifest run on a thread of
+/// their own, since they start a browser several times, which must not hold
+/// up the runner. Problems come back on `notes`.
+fn start_check(
+    part: &PartId,
+    snapshot: &Path,
+    out: &Path,
+    chrome: Option<PathBuf>,
+    notes: Sender<String>,
+) -> std::io::Result<()> {
+    let preview = preview::write(snapshot)?;
+    let (part, snapshot, out) = (part.clone(), snapshot.to_owned(), out.to_owned());
+    std::thread::Builder::new()
+        .name(format!("competition-check-{part}"))
+        .spawn(move || {
+            let note = match check::inspect_with(&snapshot, &out, preview, chrome) {
+                Ok(inspection) => {
+                    let problems = inspection.problems();
+                    (!problems.is_empty()).then(|| {
+                        format!(
+                            "{part} のスナップショット確認で問題: {}",
+                            problems.join(" / ")
+                        )
+                    })
+                }
+                Err(e) => Some(format!("{part} のスナップショット確認に失敗しました: {e}")),
+            };
+            if let Some(note) = note {
+                let _ = notes.send(note);
+            }
+        })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    /// The comparison viewer is refreshed as soon as a submission is
+    /// accepted, and frames the viewer copy only if it exists by then.
+    #[test]
+    fn the_viewer_copy_exists_once_the_check_has_started() {
+        let dir = std::env::temp_dir().join(format!(
+            "noa-competition-start-check-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let snapshot = dir.join("snapshot");
+        fs::create_dir_all(&snapshot).unwrap();
+        fs::write(snapshot.join("index.html"), "<p>hi</p>").unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let part = PartId::new("claude");
+        start_check(&part, &snapshot, &dir.join("checks"), None, tx).unwrap();
+        assert!(preview::preview_path(&snapshot).is_file());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     use super::*;
     use std::cell::RefCell;
     use std::collections::VecDeque;

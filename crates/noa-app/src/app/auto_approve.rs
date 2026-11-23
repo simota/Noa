@@ -153,10 +153,22 @@ impl App {
             return;
         };
         let enabled = !state.auto_approve_enabled.load(Ordering::Relaxed);
+        self.set_tab_auto_approve(window_id, enabled);
+    }
+
+    /// Set `window_id`'s per-tab auto approval, as Toggle Auto Approve does.
+    pub(in crate::app) fn set_tab_auto_approve(&mut self, window_id: WindowId, enabled: bool) {
+        let Some(state) = self.windows.get(&window_id) else {
+            return;
+        };
         state.auto_approve_enabled.store(enabled, Ordering::Relaxed);
         self.session_store
             .set_auto_approve_for_window(SessionWindowId(u64::from(window_id)), enabled);
-        self.sync_macos_auto_approve_menu_state(window_id);
+        // The menu mirrors the focused tab; a background tab's change shows
+        // when it is focused (`WindowEvent::Focused`).
+        if self.focused == Some(window_id) {
+            self.sync_macos_auto_approve_menu_state(window_id);
+        }
         self.request_sidebar_redraw();
         self.request_window_redraw(window_id);
     }

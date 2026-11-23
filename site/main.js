@@ -1,52 +1,62 @@
 (() => {
   "use strict";
 
-  const root = document.documentElement;
-  root.classList.add("js");
   const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
   const reduced = () => motionQuery.matches;
   const $ = (sel) => document.querySelector(sel);
 
-  /* ---------- Theme toggle ---------- */
-  const toggle = $("#theme-toggle");
-  const lightQuery = window.matchMedia("(prefers-color-scheme: light)");
-  const effectiveTheme = () => {
-    const set = root.getAttribute("data-theme");
-    if (set === "light" || set === "dark") return set;
-    return lightQuery.matches ? "light" : "dark";
-  };
-  const syncToggleLabel = () => {
-    toggle.setAttribute("aria-label", effectiveTheme() === "dark" ? "Switch to light theme" : "Switch to dark theme");
-  };
-  toggle.addEventListener("click", () => {
-    const next = effectiveTheme() === "dark" ? "light" : "dark";
-    root.setAttribute("data-theme", next);
-    try { localStorage.setItem("noa-theme", next); } catch (e) { /* storage unavailable */ }
-    syncToggleLabel();
-  });
-  lightQuery.addEventListener("change", syncToggleLabel);
-  syncToggleLabel();
-
   /* ---------- Copy buttons ---------- */
+  /* In a sandboxed or insecure context the Clipboard API is refused, so the
+     command is selected instead and the button says which keys finish the copy. */
+  const status = $("#copy-status");
+  const copyKeys = /Mac|iPhone|iPad/.test(navigator.userAgent) ? "⌘C" : "Ctrl+C";
   document.querySelectorAll("button.copy[data-copy]").forEach((btn) => {
+    const label = btn.textContent;
+    let timer = 0;
     btn.addEventListener("click", async () => {
       const src = document.getElementById(btn.dataset.copy);
       if (!src) return;
-      const label = btn.textContent;
+      let msg;
       try {
         await navigator.clipboard.writeText(src.textContent.trim());
         btn.textContent = "Copied";
+        msg = "Copied to the clipboard.";
       } catch (e) {
         const range = document.createRange();
         range.selectNodeContents(src);
         const sel = window.getSelection();
         sel.removeAllRanges();
         sel.addRange(range);
-        btn.textContent = "Selected";
+        btn.textContent = "Press " + copyKeys;
+        msg = "Selected. Press " + copyKeys + " to copy.";
       }
-      setTimeout(() => { btn.textContent = label; }, 1600);
+      if (status) status.textContent = msg;
+      clearTimeout(timer);
+      timer = setTimeout(() => { btn.textContent = label; }, 2400);
     });
   });
+
+  /* ---------- Deep links to one install method ---------- */
+  /* "#install-linux" and "#install-source" open that method's panel (the
+     panels share one name, so the others close) and move focus to it. */
+  const openInstall = (hash, focus) => {
+    /* getElementById, not querySelector: a hash is not a valid selector in general
+       ("#install-a/b"), and a SyntaxError here would stop the rest of this script. */
+    const d = hash && hash.startsWith("#install-") ? document.getElementById(hash.slice(1)) : null;
+    if (!d || d.tagName !== "DETAILS") return false;
+    d.open = true;
+    if (focus) {
+      const summary = d.querySelector("summary");
+      summary.scrollIntoView({ block: "start" });
+      summary.focus({ preventScroll: true });
+    }
+    return true;
+  };
+  document.querySelectorAll('a[href^="#install-"]').forEach((a) => {
+    /* Following the hash would move focus back to the page, so scroll and focus here instead. */
+    a.addEventListener("click", (e) => { if (openInstall(a.getAttribute("href"), true)) e.preventDefault(); });
+  });
+  openInstall(location.hash, false);
 
   /* ---------- Orchestrator + board demo ---------- */
   const WORKERS = {
@@ -162,26 +172,66 @@
     waits.forEach((el) => { el.textContent = Number(el.dataset.wait) + elapsed + "s"; });
   }, 1000);
 
-  /* ---------- Meter ---------- */
-  const meter = $(".meter");
+  /* ---------- Hero log stream (illustration) ---------- */
+  const flood = $("#flood-lines");
+  const floodScreen = flood && flood.parentElement;
+  let floodVisible = false;
+  let floodRaf = 0;
+  let floodRun = () => {};
 
+  if (flood) {
+    const crates = ["noa-core", "noa-vt", "noa-grid", "noa-font", "noa-theme", "noa-config", "noa-pty", "noa-ipc", "noa-render", "noa-app"];
+    const tests = ["screen::reflow::wraps_cjk", "deferred::wide_tail", "osc::hyperlink_8", "kitty::push_pop_flags", "grapheme::zwj_family", "sgr::curly_underline"];
+    const wide = ["進捗 100%", "한글 입력 통과", "宽字符渲染 完成", "絵文字 👩‍💻 🇯🇵", "ログを流し込み中"];
+    const esc = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    const lines = [];
+    for (let i = 0; i < 48; i++) {
+      const k = i % 6;
+      if (k === 0 || k === 3) lines.push('<span class="g">   Compiling</span> ' + crates[i % crates.length] + " v0.9.12");
+      else if (k === 1) lines.push("test " + tests[i % tests.length] + " ... " + '<span class="g">ok</span>');
+      else if (k === 2) lines.push('<span class="d">[' + String(i * 37 % 1000).padStart(3, "0") + "]</span> " + esc(wide[i % wide.length]));
+      else if (k === 4) lines.push('<span class="d">  warning:</span> unused import in ' + crates[(i + 3) % crates.length]);
+      else lines.push('<span class="a">  →</span> ' + "0x" + (i * 2654435761 >>> 0).toString(16).padStart(8, "0") + " streamed");
+    }
+    const block = lines.join("\n");
+    flood.innerHTML = block + "\n" + block;
+
+    let y = 0;
+    let last = 0;
+    const step = (t) => {
+      floodRaf = 0;
+      if (!floodVisible || reduced() || document.hidden) { last = 0; return; }
+      if (last) y += (t - last) * 0.09;
+      last = t;
+      const half = (flood.scrollHeight - 24) / 2;
+      if (half > 0 && y >= half) y -= half;
+      flood.style.transform = "translateY(" + (-y).toFixed(1) + "px)";
+      floodRaf = requestAnimationFrame(step);
+    };
+    const run = floodRun = () => { if (!floodRaf && floodVisible && !reduced()) floodRaf = requestAnimationFrame(step); };
+    document.addEventListener("visibilitychange", run);
+    motionQuery.addEventListener("change", () => { if (reduced()) flood.style.transform = ""; else run(); });
+  }
+
+  /* ---------- Start things when they scroll into view ---------- */
+  const demo = $(".demo");
   if ("IntersectionObserver" in window) {
     const io = new IntersectionObserver((entries) => {
       entries.forEach((entry) => {
-        if (entry.target.classList.contains("demo")) {
+        if (entry.target === demo) {
           demoVisible = entry.isIntersecting;
           if (entry.isIntersecting) reveal();
-        } else if (entry.isIntersecting) {
-          entry.target.classList.add("on");
+        } else if (entry.target === floodScreen) {
+          floodVisible = entry.isIntersecting;
+          if (floodVisible) floodRun();
         }
       });
-    }, { threshold: 0.25 });
-    io.observe($(".demo"));
-    io.observe(meter);
+    }, { threshold: 0.2 });
+    io.observe(demo);
+    if (floodScreen) io.observe(floodScreen);
   } else {
     reveal();
     demoVisible = true;
-    meter.classList.add("on");
   }
 
   /* ---------- Theme preview (palettes from crates/noa-theme) ---------- */

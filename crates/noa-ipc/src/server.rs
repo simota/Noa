@@ -1724,6 +1724,14 @@ fn handle_split(
         Some(direction) if !p.spawn.is_extended() => backend.split(p.pane_id.0, direction)?,
         _ => {
             check_spawn_params(session, &p.spawn)?;
+            // Auto approval is per tab; a split or float would change it for
+            // every pane already in that tab.
+            if p.spawn.auto_approve.is_some() {
+                return Err(RpcFail::new(
+                    ErrorCode::InvalidParams,
+                    "autoApprove applies to noa.newTab only",
+                ));
+            }
             // Only an orchestrator's worker may be a float IPC can see
             // (floating-panes REQ-023 as amended).
             if p.direction == SplitPlacement::Float && p.spawn.parent_pane_id.is_none() {
@@ -1753,6 +1761,10 @@ fn handle_split(
 /// (agent-orchestration D2): a config that runs or types something needs
 /// `input` on top of `control`, and every field is bounded.
 fn check_spawn_params(session: &Session, params: &SpawnParams) -> Result<(), RpcFail> {
+    // Answering agent prompts on the user's behalf types into the pane.
+    if params.auto_approve == Some(true) {
+        require_scope(session, Scope::Input)?;
+    }
     if let Some(config) = &params.config {
         if config.needs_input_scope() {
             require_scope(session, Scope::Input)?;

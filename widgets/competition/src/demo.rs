@@ -168,6 +168,9 @@ pub fn session() -> Session {
                 } else {
                     "相互閲覧を経てインタラクションも取り込み、総合力でトップに立ちました。".into()
                 },
+                evidence: Vec::new(),
+                amended: None,
+                breakdown: Vec::new(),
             },
         );
         evaluations.insert(
@@ -178,6 +181,9 @@ pub fn session() -> Session {
                 feedback:
                     "ファーストビューの情報密度を少し下げ、ブランドの世界観を強調してください。"
                         .into(),
+                evidence: Vec::new(),
+                amended: None,
+                breakdown: Vec::new(),
             },
         );
         evaluations.insert(
@@ -186,6 +192,9 @@ pub fn session() -> Session {
                 score: sa,
                 strengths: "ストーリーテリングと定期便の分かりやすさ".into(),
                 feedback: "カード間のリズムとボタン状態のフィードバックを強化してください。".into(),
+                evidence: Vec::new(),
+                amended: None,
+                breakdown: Vec::new(),
             },
         );
 
@@ -221,6 +230,8 @@ pub fn session() -> Session {
                 winner: None,
                 final_verdict: None,
                 close: false,
+                amendments: Vec::new(),
+                checklist: Vec::new(),
             }),
         });
     }

@@ -9,6 +9,9 @@ use competition::model::types::{AgentKind, PartId, RoundNo, Session};
 
 use crate::session::runner::{self, Action, SessionHandle, Update};
 
+/// How often the screen is woken to refresh elapsed times.
+const CLOCK_TICK: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Link {
     Connecting,
@@ -72,6 +75,19 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Channel {
         artifact_root: None,
     });
     wake();
+    let tick = Arc::clone(&wake);
+    // Wakes the screen so the elapsed times in the progress strip move while
+    // agents work without emitting events; the screen rebuilds only when the
+    // shown minute changes.
+    std::thread::Builder::new()
+        .name("competition-clock".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(CLOCK_TICK);
+                tick();
+            }
+        })
+        .expect("spawn competition-clock thread");
     std::thread::Builder::new()
         .name("competition-commands".into())
         .spawn(move || run_commands(command_rx, snapshot_tx, notice_tx, wake))

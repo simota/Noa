@@ -173,11 +173,13 @@ pub fn inspect_worktree(
         .then(|| bases.get(&repo_root, top))
         .flatten()
         .map(|base| format!("{}...HEAD", base.name));
+    // "vs main" also needs each file's status letter, which `--raw` prints
+    // ahead of the counts in the same git.
     let numstat_args: Vec<&str> = match mode {
         DiffMode::Unstaged => vec!["diff", "--numstat", "-z"],
         DiffMode::Staged => vec!["diff", "--cached", "--numstat", "-z"],
         DiffMode::VsMain => match &range {
-            Some(range) => vec!["diff", "--numstat", "-z", range.as_str()],
+            Some(range) => vec!["diff", "--raw", "--numstat", "-z", range.as_str()],
             None => Vec::new(),
         },
     };
@@ -188,18 +190,11 @@ pub fn inspect_worktree(
     } else {
         run_git(top, &numstat_args).unwrap_or_default()
     };
-    let mut stats = parse_numstat(&numstat_out);
+    let (statuses, mut stats) = parse_raw_numstat(&numstat_out);
 
     let mut files = Vec::new();
     match mode {
         DiffMode::VsMain => {
-            let statuses = match &range {
-                Some(range) => parse_name_status(
-                    &run_git(top, &["diff", "--name-status", "-z", range.as_str()])
-                        .unwrap_or_default(),
-                ),
-                None => HashMap::new(),
-            };
             for (path, (added, deleted)) in stats.drain() {
                 let status = statuses.get(&path).map_or("M", String::as_str).to_owned();
                 files.push(ChangedFile {
@@ -784,30 +779,35 @@ fn parse_porcelain_v2(text: &str) -> PorcelainStatus {
     }
 }
 
-/// Parses `git diff --numstat -z`. A rename is `added\tdeleted\t` followed by
-/// the old and new paths as separate entries; it is keyed by the new path.
-/// `git diff --name-status -z`: each file's status letter (`A`, `D`, `M`,
-/// `R`, …) by its new path; a rename or copy carries old then new path.
-fn parse_name_status(text: &str) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    let mut entries = text.split('\0');
-    while let Some(code) = entries.next() {
-        let Some(letter) = code.chars().next() else {
+/// Parses `git diff [--raw] --numstat -z`: each file's status letter (`A`,
+/// `D`, `M`, `R`, …) from the `--raw` records, which come first, and its
+/// added and deleted line counts from the numstat ones, both by new path.
+fn parse_raw_numstat(text: &str) -> (HashMap<String, String>, HashMap<String, (usize, usize)>) {
+    let mut statuses = HashMap::new();
+    let mut entries = text.split('\0').peekable();
+    // `:<modes> <oids> <status>` then the path, or the old and the new path
+    // of a rename or copy, each its own entry.
+    while let Some(raw) = entries.next_if(|entry| entry.starts_with(':')) {
+        let Some(letter) = raw.rsplit(' ').next().and_then(|code| code.chars().next()) else {
             continue;
         };
         if matches!(letter, 'R' | 'C') {
             entries.next();
         }
         if let Some(path) = entries.next() {
-            map.insert(path.to_owned(), letter.to_string());
+            statuses.insert(path.to_owned(), letter.to_string());
         }
     }
-    map
+    (statuses, parse_numstat(entries))
 }
 
-fn parse_numstat(text: &str) -> HashMap<String, (usize, usize)> {
+/// Parses `git diff --numstat -z` entries. A rename is `added\tdeleted\t`
+/// followed by the old and new paths as separate entries; it is keyed by
+/// the new path.
+fn parse_numstat<'a>(
+    mut entries: impl Iterator<Item = &'a str>,
+) -> HashMap<String, (usize, usize)> {
     let mut map = HashMap::new();
-    let mut entries = text.split('\0');
     while let Some(entry) = entries.next() {
         let mut parts = entry.splitn(3, '\t');
         let (Some(a), Some(d), Some(p)) = (parts.next(), parts.next(), parts.next()) else {
@@ -854,6 +854,39 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         assert_eq!(parsed.files[0], ("src/main.rs".into(), ('.', 'M')));
         assert_eq!(parsed.files[1], ("src/new.rs".into(), ('A', '.')));
         assert_eq!(parsed.files[2], ("notes.txt".into(), ('?', '?')));
+    }
+
+    #[test]
+    fn raw_records_give_the_status_and_numstat_the_counts() {
+        let sample = ":100644 100644 422c2b7 7be73ce M\0a\0\
+:000000 100644 0000000 8ba3a16 A\0:colon\0\
+:100644 100644 587be6b 587be6b R100\0old\0new\0\
+:100644 100644 587be6b 587be6b C075\0src\0copy\0\
+2\t1\ta\0-\t-\t:colon\00\t0\t\0old\0new\03\t0\t\0src\0copy\0";
+        let (statuses, stats) = parse_raw_numstat(sample);
+        let mut statuses: Vec<_> = statuses.into_iter().collect();
+        statuses.sort();
+        let s = |a: &str, b: &str| (a.to_owned(), b.to_owned());
+        assert_eq!(
+            statuses,
+            vec![s(":colon", "A"), s("a", "M"), s("copy", "C"), s("new", "R")]
+        );
+        let mut stats: Vec<_> = stats.into_iter().collect();
+        stats.sort();
+        let n = |p: &str, a, d| (p.to_owned(), (a, d));
+        assert_eq!(
+            stats,
+            vec![
+                n(":colon", 0, 0),
+                n("a", 2, 1),
+                n("copy", 3, 0),
+                n("new", 0, 0)
+            ]
+        );
+        // Plain numstat has no raw records.
+        let (statuses, stats) = parse_raw_numstat("1\t2\tx\0");
+        assert!(statuses.is_empty());
+        assert_eq!(stats.get("x"), Some(&(1, 2)));
     }
 
     #[test]
@@ -1559,6 +1592,43 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         };
         assert_eq!(status("old.rs").as_deref(), Some("D"), "{:?}", info.files);
         assert_eq!(status("new.rs").as_deref(), Some("A"), "{:?}", info.files);
+    }
+
+    #[test]
+    fn vs_main_reports_every_kind_of_change() {
+        let repo = temp_repo("vs-main-kinds", "main");
+        let lines: String = (0..20).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(repo.0.join("moved.rs"), &lines).unwrap();
+        std::fs::write(repo.0.join("gone.rs"), "g\n").unwrap();
+        std::fs::write(repo.0.join("bin.dat"), b"\x00\x01\x02").unwrap();
+        git(&repo.0, &["add", "."]);
+        git(&repo.0, &["commit", "-q", "-m", "base"]);
+        git(&repo.0, &["checkout", "-q", "-b", "feature"]);
+        git(&repo.0, &["mv", "moved.rs", ":renamed to.rs"]);
+        std::fs::write(repo.0.join(":renamed to.rs"), lines.replace("line 3\n", "")).unwrap();
+        std::fs::remove_file(repo.0.join("gone.rs")).unwrap();
+        std::fs::write(repo.0.join("bin.dat"), b"\x00\x03").unwrap();
+        std::fs::write(repo.0.join("old.rs"), "fn b() {}\nfn c() {}\n").unwrap();
+        std::fs::write(repo.0.join("日本語 new.txt"), "a\nb\n").unwrap();
+        git(&repo.0, &["add", "-A"]);
+        git(&repo.0, &["commit", "-q", "-m", "change"]);
+        let info =
+            inspect_worktree(cwd(&repo), DiffMode::VsMain, &mut BaseRefs::default()).unwrap();
+        let got: Vec<String> = info
+            .files
+            .iter()
+            .map(|f| format!("{} {} +{}-{}", f.status, f.path, f.added, f.deleted))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                "R :renamed to.rs +0-1",
+                "M bin.dat +0-0",
+                "D gone.rs +0-1",
+                "M old.rs +2-1",
+                "A 日本語 new.txt +2-0",
+            ]
+        );
     }
 
     #[test]

@@ -352,8 +352,6 @@ struct Runner<C: Connect, K: Clock> {
     check_notes: (Sender<String>, Receiver<String>),
     /// Cached per-snapshot file previews reused across `Effect::RefreshViewer`.
     viewer_cache: ViewerCache,
-    /// Headless Chrome path discovered lazily once per runner.
-    chrome: Option<Option<PathBuf>>,
 }
 
 impl<C: Connect, K: Clock> Runner<C, K> {
@@ -421,7 +419,6 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             link_state: Link::Connecting,
             check_notes: mpsc::channel(),
             viewer_cache: ViewerCache::new(),
-            chrome: None,
         };
         runner.emit_session();
         runner.emit_link(Link::Connecting);
@@ -1052,10 +1049,9 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     }
 
     /// Starts the snapshot check on a submitted entry; see [`start_check`].
-    fn check_snapshot(&mut self, part: &PartId, snapshot: &Path, out: &Path) {
-        let chrome = self.chrome.get_or_insert_with(shots::find_chrome).clone();
+    fn check_snapshot(&self, part: &PartId, snapshot: &Path, out: &Path) {
         let notes = self.check_notes.0.clone();
-        if let Err(e) = start_check(part, snapshot, out, chrome, notes) {
+        if let Err(e) = start_check(part, snapshot, out, shots::find_chrome(), notes) {
             self.notice(format!("{part} のスナップショット確認に失敗しました: {e}"));
         }
     }

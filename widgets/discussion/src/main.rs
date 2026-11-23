@@ -101,7 +101,7 @@ fn first_live_snapshot() -> Result<(Snapshot, Arc<Vec<Summary>>), String> {
             // start view is what the window shows.
             Ok(snapshot) if snapshot.session.is_none() => return Ok((snapshot, history())),
             Ok(snapshot) => match &snapshot.link {
-                Link::Live | Link::Stored => return Ok((snapshot, history())),
+                Link::Live | Link::Stored(_) => return Ok((snapshot, history())),
                 Link::Down(why) => reason.clone_from(why),
                 Link::Connecting => {}
             },

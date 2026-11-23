@@ -24,9 +24,10 @@ pub enum Link {
     Connecting,
     Live,
     Down(String),
-    /// A stored discussion shown from its log: no runner and no link to
-    /// Noa, so nothing can change it.
-    Stored,
+    /// The discussion stored at this directory, shown from its log: no
+    /// runner and no link to Noa, so nothing can change it. The directory
+    /// comes with the session it shows, so "再開" always names what is shown.
+    Stored(PathBuf),
 }
 
 /// What the UI shows: the session as the engine folded it (none before the
@@ -280,18 +281,29 @@ fn run_commands(
                     root,
                 }
             }
-            Command::Resume { dir } => runner::Start::Resume { dir },
+            Command::Resume { dir } => {
+                if discussion::store::is_busy(&dir) {
+                    out.notice(format!("{} は別のウィンドウで実行中です", dir.display()));
+                    continue;
+                }
+                match discussion::store::load(&dir) {
+                    // Ended meanwhile (in another window): nothing to run,
+                    // so it is shown, not resumed.
+                    Ok(session) if session.closed => {
+                        out.notice("この議論は終了しています。記録を表示します");
+                        show_stored(&mut shown, dir, session, &out);
+                        continue;
+                    }
+                    Ok(_) => runner::Start::Resume { dir },
+                    Err(err) => {
+                        out.notice(format!("{} を開けません: {err}", dir.display()));
+                        continue;
+                    }
+                }
+            }
             Command::Open { dir } => {
                 match discussion::store::load(&dir) {
-                    Ok(session) => {
-                        shown.leave();
-                        let _ = out.snapshots.send(Snapshot {
-                            link: Link::Stored,
-                            session: Some(Arc::new(session)),
-                        });
-                        (out.wake)();
-                        shown = Shown::Stored(dir);
-                    }
+                    Ok(session) => show_stored(&mut shown, dir, session, &out),
                     Err(err) => out.notice(format!("{} を開けません: {err}", dir.display())),
                 }
                 continue;
@@ -321,14 +333,30 @@ fn run_commands(
     shown.leave();
 }
 
+/// Shows the stored discussion at `dir` read-only, leaving what was shown.
+fn show_stored(shown: &mut Shown, dir: PathBuf, session: Session, out: &Out) {
+    shown.leave();
+    let _ = out.snapshots.send(Snapshot {
+        link: Link::Stored(dir.clone()),
+        session: Some(Arc::new(session)),
+    });
+    (out.wake)();
+    *shown = Shown::Stored(dir);
+}
+
 /// Resumes the stored discussion at `dir` and gives it `by` more rounds,
-/// when it may get them; otherwise says why, and nothing starts.
+/// when it may get them; otherwise says why, and nothing starts. The
+/// runner extends it before it starts any pane.
 fn resume_to_extend(
     dir: PathBuf,
     by: RoundNo,
     out: &Out,
     spawn_session: &impl Fn(runner::Start) -> SessionHandle,
 ) -> Option<Running> {
+    if discussion::store::is_busy(&dir) {
+        out.notice(format!("{} は別のウィンドウで実行中です", dir.display()));
+        return None;
+    }
     match discussion::store::load(&dir) {
         Ok(session) => {
             if let Err(why) = session.extendable() {
@@ -341,9 +369,7 @@ fn resume_to_extend(
             return None;
         }
     }
-    let running = spawn(spawn_session(runner::Start::Resume { dir }), out);
-    let _ = running.actions.send(Action::Extend { by });
-    Some(running)
+    Some(spawn(spawn_session(runner::Start::Extend { dir, by }), out))
 }
 
 /// The runner action a command in a running discussion becomes; `None`
@@ -575,22 +601,26 @@ mod tests {
     /// stopped, takes `linger` to end. Every start it got goes to `starts`.
     fn fake_runner(
         session: Session,
-        linger: Duration,
+        gate: Gate,
         starts: Sender<runner::Start>,
     ) -> impl Fn(runner::Start) -> SessionHandle + Send + 'static {
-        fake_runner_seeing(session, linger, starts, mpsc::channel().0)
+        fake_runner_seeing(session, gate, starts, mpsc::channel().0)
     }
+
+    /// Holds a stopped stand-in runner until the test lets it end; `None`
+    /// lets it end at once.
+    type Gate = Option<Arc<std::sync::Mutex<Receiver<()>>>>;
 
     /// [`fake_runner`] that passes on every action it gets but `Stop`.
     fn fake_runner_seeing(
         session: Session,
-        linger: Duration,
+        gate: Gate,
         starts: Sender<runner::Start>,
         seen: Sender<Action>,
     ) -> impl Fn(runner::Start) -> SessionHandle + Send + 'static {
         move |start| {
             let _ = starts.send(start);
-            let seen = seen.clone();
+            let (seen, gate) = (seen.clone(), gate.clone());
             let (update_tx, updates) = mpsc::channel();
             let (actions, action_rx) = mpsc::channel();
             let session = Arc::new(session.clone());
@@ -602,7 +632,9 @@ mod tests {
                     }
                     let _ = seen.send(action);
                 }
-                std::thread::sleep(linger);
+                if let Some(gate) = gate {
+                    let _ = gate.lock().unwrap().recv();
+                }
                 // Sent late: it must not reach the UI after the start view.
                 let _ = update_tx.send(Update::Notice("late".into()));
                 let _ = update_tx.send(Update::Ended(Ok(())));
@@ -630,7 +662,7 @@ mod tests {
             dir: closed.clone(),
         });
         let shown = snapshot_within(&channel, Duration::from_secs(1)).unwrap();
-        assert_eq!(shown.link, Link::Stored);
+        assert_eq!(shown.link, Link::Stored(closed.clone()));
         let session = shown.session.unwrap();
         assert!(session.closed);
         assert_eq!(session.id.as_str(), "disc-1");
@@ -697,10 +729,15 @@ mod tests {
         let dir = stored(&root, "disc-3", false);
         let session = discussion::store::load(&dir).unwrap();
         let (starts_tx, starts) = mpsc::channel();
+        let (open_gate, gate) = mpsc::channel();
         let channel = start_with(
             Some(root.clone()),
             || {},
-            fake_runner(session, Duration::from_millis(150), starts_tx),
+            fake_runner(
+                session,
+                Some(Arc::new(std::sync::Mutex::new(gate))),
+                starts_tx,
+            ),
         );
         let _ = channel.history.recv_timeout(Duration::from_secs(1));
         let _ = snapshot_within(&channel, Duration::from_secs(1));
@@ -721,12 +758,21 @@ mod tests {
         );
 
         channel.send(Command::NewDiscussion);
+        // The old runner has not ended: the start view waits for it.
+        assert!(snapshot_within(&channel, Duration::from_millis(300)).is_none());
+        assert!(channel.history.try_recv().is_err());
+        open_gate.send(()).unwrap();
+        // Its last words come, then the start view, and nothing of it after.
+        assert_eq!(
+            channel
+                .notices
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap(),
+            "late"
+        );
         let back = snapshot_within(&channel, Duration::from_secs(2)).unwrap();
         assert!(back.session.is_none(), "the start view");
-        // The runner had ended before: its last words came first, and
-        // nothing of it follows the start view.
-        let notices = notices_within(&channel, Duration::from_millis(300));
-        assert!(notices.iter().all(|n| n == "late"), "{notices:?}");
+        assert!(notices_within(&channel, Duration::from_millis(200)).is_empty());
         assert!(snapshot_within(&channel, Duration::from_millis(100)).is_none());
 
         channel.send(Command::Resume { dir: dir.clone() });
@@ -794,7 +840,7 @@ mod tests {
         let channel = start_with(
             Some(root.clone()),
             || {},
-            fake_runner_seeing(session, Duration::ZERO, starts_tx, seen_tx),
+            fake_runner_seeing(session, None, starts_tx, seen_tx),
         );
         let _ = channel.history.recv_timeout(Duration::from_secs(1));
         let _ = snapshot_within(&channel, Duration::from_secs(1));
@@ -819,19 +865,59 @@ mod tests {
         });
         let _ = snapshot_within(&channel, Duration::from_secs(1));
         channel.send(Command::Extend { by: 2 });
+        // One start that extends before any pane: no separate action.
         assert_eq!(
             starts.recv_timeout(Duration::from_secs(1)).unwrap(),
-            runner::Start::Resume { dir: ran_out }
-        );
-        assert_eq!(
-            seen.recv_timeout(Duration::from_secs(1)).unwrap(),
-            Action::Extend { by: 2 }
+            runner::Start::Extend {
+                dir: ran_out,
+                by: 2
+            }
         );
         // Running now: later commands go to the runner.
         channel.send(Command::SetHold { hold: true });
         assert_eq!(
             seen.recv_timeout(Duration::from_secs(1)).unwrap(),
             Action::SetHold { hold: true }
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_resume_of_a_discussion_running_elsewhere_or_ended_starts_nothing() {
+        let root = temp_root("elsewhere");
+        let going = stored(&root, "disc-6", false);
+        let ended = stored(&root, "disc-7", true);
+        let (starts_tx, starts) = mpsc::channel();
+        let session = discussion::store::load(&going).unwrap();
+        let channel = start_with(
+            Some(root.clone()),
+            || {},
+            fake_runner(session, None, starts_tx),
+        );
+        let _ = channel.history.recv_timeout(Duration::from_secs(1));
+        let _ = snapshot_within(&channel, Duration::from_secs(1));
+
+        // Another window's runner holds it.
+        let held = discussion::store::Store::open(&going).unwrap();
+        channel.send(Command::Resume { dir: going.clone() });
+        let notices = notices_within(&channel, Duration::from_millis(300));
+        assert!(
+            notices.iter().any(|n| n.contains("別のウィンドウで実行中")),
+            "{notices:?}"
+        );
+        assert!(starts.try_recv().is_err());
+        drop(held);
+
+        // Ended since the list was read: shown, not resumed.
+        channel.send(Command::Resume { dir: ended.clone() });
+        let shown = snapshot_within(&channel, Duration::from_secs(1)).unwrap();
+        assert_eq!(shown.link, Link::Stored(ended));
+        assert!(shown.session.unwrap().closed);
+        assert!(starts.try_recv().is_err());
+        let notices = notices_within(&channel, Duration::from_millis(200));
+        assert!(
+            notices.iter().any(|n| n.contains("終了しています")),
+            "{notices:?}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

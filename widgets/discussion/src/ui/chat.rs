@@ -37,9 +37,10 @@ pub(super) fn insert(
     host: WidgetId,
     session: &Session,
     filter: Option<&IssueId>,
+    live: bool,
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
-    brief_bar(tree, host, session, actions);
+    brief_bar(tree, host, session, live, actions);
     debate_banner(tree, host, session, actions);
     if let Some(issue) = filter {
         filter_bar(tree, host, session, issue, actions);
@@ -63,7 +64,7 @@ pub(super) fn insert(
         );
     }
     for message in messages {
-        message_card(tree, list, session, message, actions);
+        message_card(tree, list, session, message, live, actions);
     }
 }
 
@@ -97,6 +98,7 @@ fn brief_bar(
     tree: &mut UiTree,
     host: WidgetId,
     session: &Session,
+    live: bool,
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
     let row = bar(tree, host, Role::SurfaceAlt);
@@ -124,13 +126,15 @@ fn brief_bar(
         let name = part_name(&brief.to);
         // A click shows the agent's pane: what it is doing, or the prompt
         // it waits on.
-        let link = pane_link(tree, row, &brief.to, actions);
-        tag(tree, link, &format!("{name} {state}"), tone);
-        let label = match &brief.receipt.failed {
-            Some(why) => format!("{name}: {why}（クリックでペインを表示）"),
-            None => format!("{name} のペインを表示"),
+        let link = pane_link(tree, row, &brief.to, live, actions);
+        let shown = tag(tree, link.unwrap_or(row), &format!("{name} {state}"), tone);
+        let label = match (&brief.receipt.failed, link) {
+            (Some(why), Some(_)) => format!("{name}: {why}（クリックでペインを表示）"),
+            (None, Some(_)) => format!("{name} のペインを表示"),
+            (Some(why), None) => format!("{name}: {why}"),
+            (None, None) => continue,
         };
-        tree.set_accessible_label(link, label);
+        tree.set_accessible_label(link.unwrap_or(shown), label);
     }
     // Offered only when the engine would take it (the same rule).
     if !session.closed && !round.retryable().is_empty() {
@@ -218,6 +222,7 @@ pub(super) fn message_card(
     parent: WidgetId,
     session: &Session,
     message: &Message,
+    live: bool,
     actions: &mut Vec<(WidgetId, Action)>,
 ) -> WidgetId {
     let question = message.kind == MsgKind::Brief;
@@ -262,16 +267,14 @@ pub(super) fn message_card(
         .font_size(12.0)
         .weight(600)
         .color(author_color(session, &message.author));
-    match &message.author {
-        Author::Part(part) => {
-            let link = pane_link(tree, head, part, actions);
-            tree.set_accessible_label(link, format!("{} のペインを表示", part_name(part)));
-            tree.insert(Some(link), author);
-        }
-        Author::User => {
-            tree.insert(Some(head), author);
-        }
+    let link = match &message.author {
+        Author::Part(part) => pane_link(tree, head, part, live, actions),
+        Author::User => None,
+    };
+    if let (Some(link), Author::Part(part)) = (link, &message.author) {
+        tree.set_accessible_label(link, format!("{} のペインを表示", part_name(part)));
     }
+    tree.insert(Some(link.unwrap_or(head)), author);
     if !message.to.is_empty() {
         caption(
             tree,
@@ -311,16 +314,21 @@ pub(super) fn message_card(
 }
 
 /// A participant's name or tag (the caller puts it inside): a click brings
-/// the participant's pane to the front in Noa.
+/// the participant's pane to the front in Noa. `None` when nothing runs
+/// the discussion (`live` false): the name is then plain, not a control.
 pub(super) fn pane_link(
     tree: &mut UiTree,
     parent: WidgetId,
     part: &PartId,
+    live: bool,
     actions: &mut Vec<(WidgetId, Action)>,
-) -> WidgetId {
+) -> Option<WidgetId> {
+    if !live {
+        return None;
+    }
     let link = tree.insert(Some(parent), Pressable::new(Style::default()).radius(9.0));
     actions.push((link, Action::Focus(part.clone())));
-    link
+    Some(link)
 }
 
 /// `[B]`: a tag that filters the chat to the issue.

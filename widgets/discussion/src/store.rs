@@ -123,6 +123,8 @@ pub enum StoreError {
     },
     /// The log parses but does not fold.
     Reduce(ReduceError),
+    /// Another runner (in this window or another) has the log open.
+    Busy,
 }
 
 impl fmt::Display for StoreError {
@@ -133,6 +135,7 @@ impl fmt::Display for StoreError {
                 write!(f, "{EVENTS_FILE} line {line} is damaged: {error}")
             }
             StoreError::Reduce(e) => write!(f, "{EVENTS_FILE} does not fold: {e}"),
+            StoreError::Busy => f.write_str("別のウィンドウで実行中です"),
         }
     }
 }
@@ -156,6 +159,21 @@ fn line(batch: &[Event]) -> io::Result<Vec<u8>> {
     let mut line = serde_json::to_vec(batch).map_err(io::Error::other)?;
     line.push(b'\n');
     Ok(line)
+}
+
+/// Takes the log's exclusive lock, held until the file is closed.
+fn lock(file: &File) -> Result<(), StoreError> {
+    match file.try_lock() {
+        Ok(()) => Ok(()),
+        Err(fs::TryLockError::WouldBlock) => Err(StoreError::Busy),
+        Err(fs::TryLockError::Error(e)) => Err(StoreError::Io(e)),
+    }
+}
+
+/// Whether a runner holds `dir`'s log open right now.
+pub fn is_busy(dir: &Path) -> bool {
+    File::open(dir.join(EVENTS_FILE))
+        .is_ok_and(|file| matches!(file.try_lock_shared(), Err(fs::TryLockError::WouldBlock)))
 }
 
 /// A log as read: its complete batches, how many bytes they take, and
@@ -261,7 +279,8 @@ pub fn summaries(root: &Path) -> io::Result<Vec<Summary>> {
 
 impl Store {
     /// Starts a new session directory at `dir` with its first batch (the
-    /// `Created` one). Fails if the directory already exists.
+    /// `Created` one). Fails if the directory already exists. The log stays
+    /// locked while the store is open, as with [`Store::open`].
     pub fn create(dir: &Path, first: &[Event]) -> Result<Store, StoreError> {
         reduce::create(first).map_err(StoreError::Reduce)?;
         if let Some(parent) = dir.parent() {
@@ -272,6 +291,7 @@ impl Store {
             .create_new(true)
             .append(true)
             .open(dir.join(EVENTS_FILE))?;
+        lock(&file)?;
         let mut store = Store {
             dir: dir.to_owned(),
             file,
@@ -282,13 +302,17 @@ impl Store {
 
     /// Opens the session at `dir` and folds its log. A last line cut short
     /// (the app died while writing it) is dropped from the file; damage
-    /// anywhere else is an error.
+    /// anywhere else is an error. The log is locked (an exclusive
+    /// `File::try_lock`, across processes) before it is read and stays
+    /// locked until the store is dropped, so two runners never fold and
+    /// append to one log: the second gets [`StoreError::Busy`].
     pub fn open(dir: &Path) -> Result<(Store, Session), StoreError> {
         let path = dir.join(EVENTS_FILE);
+        let mut file = OpenOptions::new().append(true).open(&path)?;
+        lock(&file)?;
         let text = fs::read(&path)?;
         let read = read_log(&text)?;
         let session = reduce::replay(&read.batches).map_err(StoreError::Reduce)?;
-        let mut file = OpenOptions::new().append(true).open(&path)?;
         if read.torn {
             if read.kept < text.len() {
                 file.set_len(read.kept as u64)?;
@@ -422,6 +446,7 @@ mod tests {
         assert_eq!(session.rev, 4);
         // Appending after a resume continues the same log.
         store.append(&posted(3)).unwrap();
+        drop(store);
         let (_, session) = Store::open(&dir).unwrap();
         assert_eq!(session.messages.len(), 3);
         assert_eq!(
@@ -451,6 +476,7 @@ mod tests {
         let (mut store, session) = Store::open(&dir).unwrap();
         assert_eq!(session.messages.len(), 1);
         store.append(&posted(2)).unwrap();
+        drop(store);
         let (_, session) = Store::open(&dir).unwrap();
         assert_eq!(session.messages.len(), 2);
         fs::remove_dir_all(&root).unwrap();
@@ -475,6 +501,7 @@ mod tests {
         let (mut store, session) = Store::open(&dir).unwrap();
         assert_eq!(session.messages.len(), 1);
         store.append(&posted(2)).unwrap();
+        drop(store);
         let (_, session) = Store::open(&dir).unwrap();
         assert_eq!(session.messages.len(), 2);
         fs::remove_dir_all(&root).unwrap();
@@ -496,6 +523,7 @@ mod tests {
         let (mut store, session) = Store::open(&dir).unwrap();
         assert_eq!(session.messages.len(), 1);
         store.append(&posted(2)).unwrap();
+        drop(store);
         assert_eq!(Store::open(&dir).unwrap().1.messages.len(), 2);
         fs::remove_dir_all(&root).unwrap();
     }
@@ -534,6 +562,24 @@ mod tests {
         clear_reply(&path).unwrap();
         assert_eq!(read_reply(&path).unwrap(), None);
         assert!(list_sessions(&root.join("missing")).unwrap().is_empty());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_log_open_in_one_store_is_busy_for_another_until_dropped() {
+        let root = temp_root("lock");
+        let dir = root.join("s");
+        let created = Store::create(&dir, &created()).unwrap();
+        assert!(is_busy(&dir));
+        assert!(matches!(Store::open(&dir), Err(StoreError::Busy)));
+        // Reading it stays possible.
+        assert!(load(&dir).is_ok());
+        drop(created);
+        assert!(!is_busy(&dir));
+        let (first, _) = Store::open(&dir).unwrap();
+        assert!(matches!(Store::open(&dir), Err(StoreError::Busy)));
+        drop(first);
+        assert!(Store::open(&dir).is_ok());
         fs::remove_dir_all(&root).unwrap();
     }
 

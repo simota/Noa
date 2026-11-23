@@ -313,7 +313,8 @@ fn run(held: bool) -> Session {
 
     // ── Round 4: debate, second exchange and the verdict ───────────────────
     if held {
-        s.feed(Input::UserSetHold { hold: true });
+        let at = s.tick();
+        s.feed(Input::UserSetHold { hold: true, at });
     }
     s.panel(&[
         (

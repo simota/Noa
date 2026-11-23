@@ -827,12 +827,22 @@ impl Session {
     /// Whether the user may add rounds, or why not: the discussion must
     /// have a round limit, and once it has ended it must have ended by
     /// running all its rounds (not by an early conclusion or the user).
+    /// While the moderator summarizes the last round it was told to
+    /// conclude, so rounds are added once that conclusion is in.
     pub fn extendable(&self) -> Result<(), &'static str> {
         let Some(max) = self.max_rounds else {
             return Err("this discussion has no round limit");
         };
         if !self.closed {
-            return Ok(());
+            let concluding = self.rounds.len() as RoundNo >= max
+                && self
+                    .current_round()
+                    .is_some_and(|round| round.phase == Phase::Summarizing);
+            return if concluding {
+                Err("the moderator is concluding the last round; add rounds once it has")
+            } else {
+                Ok(())
+            };
         }
         let ran_out = self.rounds.len() as RoundNo >= max
             && self

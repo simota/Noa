@@ -458,11 +458,16 @@ fn read_setup(tree: &UiTree, parts: &SetupParts, kind: AgentKind) -> AgentSetup 
 pub(super) fn rebuild_note(tree: &mut UiTree, parts: &Parts, link: &Link, text: &mut TextStore) {
     clear_children(tree, parts.note, text);
     let note = match link {
-        Link::Live | Link::Stored => return,
+        Link::Live | Link::Stored(_) => return,
         Link::Connecting => "Noa に接続しています…".to_owned(),
         Link::Down(why) => format!("Noa に接続できません: {why}"),
     };
     super::note(tree, parts.note, note);
+}
+
+/// Empties the topic, for the next discussion.
+pub(super) fn clear_topic(tree: &mut UiTree, parts: &Parts) {
+    tree.update::<TextArea, _>(parts.topic, |a, cx| a.set_text(cx, ""));
 }
 
 pub(super) fn read(tree: &UiTree, parts: &Parts) -> Form {

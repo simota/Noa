@@ -123,10 +123,10 @@ pub enum Input {
     /// starts.
     UserClose,
     /// The user holds the discussion after each round (`true`), or lets
-    /// rounds follow each other again. A round already waiting still waits
-    /// for `UserContinue`.
+    /// rounds follow each other again: a round that waits starts now.
     UserSetHold {
         hold: bool,
+        at: Millis,
     },
     /// The user starts the next round of a held discussion.
     UserContinue {
@@ -357,6 +357,51 @@ impl Engine {
         &self.session
     }
 
+    /// The first brief of a folded log whose reply file is not where this
+    /// session puts it (under [`Self::reply_dir`], named after its round
+    /// and participant), or whose participant's id is not a plain name: a
+    /// log edited by hand could otherwise have a file anywhere watched,
+    /// read and deleted. `None` when every brief is where it belongs.
+    pub fn foreign_reply_path(&self) -> Option<PathBuf> {
+        let plain = |part: &PartId| {
+            let id = part.as_str();
+            !id.is_empty()
+                && !id.starts_with('.')
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        };
+        let reply_dir = self.reply_dir();
+        for round in &self.session.rounds {
+            let panel = round
+                .briefs
+                .iter()
+                .map(|brief| (brief, store::reply_path(&reply_dir, round.no, &brief.to)));
+            let moderator = round
+                .moderator_brief
+                .iter()
+                .map(|brief| (brief, store::moderator_reply_path(&reply_dir, round.no)));
+            for (brief, expected) in panel.chain(moderator) {
+                if !plain(&brief.to) || brief.reply_path != expected {
+                    return Some(brief.reply_path.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// Every reply file a resumed session may watch: each brief without a
+    /// reply yet, in every round.
+    pub fn pending_reply_paths(&self) -> Vec<&Path> {
+        self.session
+            .rounds
+            .iter()
+            .flat_map(|round| round.briefs.iter().chain(&round.moderator_brief))
+            .filter(|brief| brief.receipt.replied.is_none())
+            .map(|brief| brief.reply_path.as_path())
+            .collect()
+    }
+
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -481,9 +526,14 @@ impl Engine {
             } => self.user_debate(&mut out, issue, pro, con, at)?,
             Input::UserRetry => self.user_retry(&mut out)?,
             Input::UserClose => self.commit(&mut out, vec![Event::SessionClosed])?,
-            Input::UserSetHold { hold } => {
+            Input::UserSetHold { hold, at } => {
                 if hold != self.session.hold {
+                    let waiting = self.session.waits_to_continue();
                     self.commit(&mut out, vec![Event::HoldSet { hold }])?;
+                    // Let go while a round waits: nothing holds it now.
+                    if waiting && !hold {
+                        self.next_round(&mut out, at)?;
+                    }
                 }
             }
             Input::UserContinue { at } => {
@@ -573,6 +623,39 @@ impl Engine {
         let Some(round) = self.session.current_round() else {
             return self.next_round(out, now);
         };
+        // A late reply to an earlier round is still taken in (as it is while
+        // the runner runs): watch every panelist brief of a finished round
+        // that has none yet.
+        for done in &self.session.rounds {
+            if done.no == round.no && done.phase != Phase::Closed {
+                continue;
+            }
+            for brief in done.briefs.iter().filter(|b| b.receipt.replied.is_none()) {
+                Self::watch(out, done.no, brief);
+            }
+        }
+        // The app stopped between a round's start and its briefs (two
+        // batches): issue them now from the questions already posted.
+        if round.phase == Phase::Briefing
+            && round.briefs.is_empty()
+            && !self.session.panelists.is_empty()
+        {
+            let no = round.no;
+            let questions: Vec<(PartId, String)> = self
+                .session
+                .panelist_ids()
+                .filter_map(|part| {
+                    self.session
+                        .messages
+                        .iter()
+                        .find(|m| {
+                            m.round == no && m.kind == MsgKind::Brief && m.to == [part.clone()]
+                        })
+                        .map(|m| (part.clone(), m.body.clone()))
+                })
+                .collect();
+            return self.issue_briefs(out, no, &questions);
+        }
         // Pick up a round where a restart left it.
         for brief in &round.briefs {
             if brief.receipt.replied.is_some() {
@@ -718,7 +801,17 @@ impl Engine {
             questions.push((part.clone(), question));
         }
         self.commit(out, batch)?;
+        self.issue_briefs(out, no, &questions)
+    }
 
+    /// Issues round `no`'s panelist briefs on the questions posted for it,
+    /// then sends them.
+    fn issue_briefs(
+        &mut self,
+        out: &mut Output,
+        no: RoundNo,
+        questions: &[(PartId, String)],
+    ) -> Result<(), EngineError> {
         let reply_dir = self.reply_dir();
         let paths: Vec<PathBuf> = questions
             .iter()
@@ -2306,11 +2399,11 @@ mod tests {
             e.handle(Input::UserContinue { at: 0 }),
             Err(EngineError::Rejected(_))
         ));
-        let out = feed(&mut e, Input::UserSetHold { hold: true });
+        let out = feed(&mut e, Input::UserSetHold { hold: true, at: 0 });
         assert_eq!(out.batches, vec![vec![Event::HoldSet { hold: true }]]);
         // Setting it again changes nothing.
         assert!(
-            feed(&mut e, Input::UserSetHold { hold: true })
+            feed(&mut e, Input::UserSetHold { hold: true, at: 0 })
                 .batches
                 .is_empty()
         );
@@ -2353,8 +2446,11 @@ mod tests {
         run_panel(&mut e, 5);
         moderate(&mut e, r#"{"summary":"two"}"#, 6);
         assert_eq!(no(&e), 2);
-        feed(&mut e, Input::UserSetHold { hold: false });
-        assert_eq!(no(&e), 2, "letting go does not start the waiting round");
+        assert!(e.session().waits_to_continue());
+        // Letting go of a waiting round starts it: nothing could otherwise.
+        let out = feed(&mut e, Input::UserSetHold { hold: false, at: 7 });
+        assert_eq!(no(&e), 3);
+        assert_eq!(sends(&out).len(), 3);
         assert!(!e.session().waits_to_continue());
         assert!(matches!(
             e.handle(Input::UserContinue { at: 7 }),
@@ -2366,7 +2462,7 @@ mod tests {
     fn a_held_discussion_still_ends_at_its_limit_and_a_proposed_debate_comes_first() {
         let mut e = engine_with_max_rounds(Some(2));
         feed(&mut e, Input::Start { now: 0 });
-        feed(&mut e, Input::UserSetHold { hold: true });
+        feed(&mut e, Input::UserSetHold { hold: true, at: 0 });
         run_panel(&mut e, 1);
         moderate(
             &mut e,
@@ -2456,39 +2552,207 @@ mod tests {
         let out = feed(&mut e, Input::UserExtend { by: 1, at: 7 });
         assert_eq!(e.session().max_rounds, Some(7));
         assert!(sends(&out).is_empty());
-        // Folded from its log, the session is the same.
-        let replayed = reduce::replay(
-            std::iter::once(vec![Event::Created {
-                id: SessionId::new("x"),
-                topic: "t".into(),
+    }
+
+    /// An engine that keeps every batch it commits, from `Created` on: the
+    /// log a store would hold.
+    struct Logged {
+        e: Engine,
+        log: Vec<Vec<Event>>,
+    }
+
+    impl Logged {
+        fn new(max_rounds: Option<RoundNo>) -> Self {
+            let setup = Setup {
+                topic: "Pick a database",
                 workdir: None,
-                max_rounds: Some(1),
-                moderator: e.session().moderator.clone(),
-                panelists: e.session().panelists.clone(),
-                at: 0,
-            }])
-            .chain(std::iter::once(vec![
-                Event::RoundStarted {
-                    no: 1,
-                    kind: RoundKind::Open,
-                    at: 0,
-                },
-                Event::SessionClosed,
-                Event::RoundsExtended {
-                    max_rounds: 3,
-                    at: 3,
-                },
-            ])),
-        )
-        .unwrap();
+                max_rounds,
+                moderator: AgentKind::Codex.into(),
+                panel: &[AgentKind::Claude.into(), AgentKind::Agy.into()],
+            };
+            let (e, out) =
+                Engine::create_in(SessionId::new("disc-1"), setup, Path::new("/d"), CONFIG, 0)
+                    .unwrap();
+            Logged {
+                e,
+                log: out.batches,
+            }
+        }
+
+        fn feed(&mut self, input: Input) -> Output {
+            let out = self.e.handle(input).unwrap();
+            self.log.extend(out.batches.iter().cloned());
+            out
+        }
+
+        fn round(&mut self, at: Millis, moderator: &str) {
+            let no = no(&self.e);
+            for part in panel(&self.e) {
+                self.feed(Input::Sent {
+                    round: no,
+                    part: part.clone(),
+                    at,
+                });
+                self.feed(Input::AgentStateChanged {
+                    part: part.clone(),
+                    state: AgentState::Running,
+                    at,
+                });
+                self.feed(Input::ReplyFileWritten {
+                    round: no,
+                    part: part.clone(),
+                    content: format!("{part} says so in round {no}"),
+                    at,
+                });
+            }
+            let part = p(MODERATOR_ID);
+            self.feed(Input::Sent {
+                round: no,
+                part: part.clone(),
+                at,
+            });
+            self.feed(Input::AgentStateChanged {
+                part: part.clone(),
+                state: AgentState::Running,
+                at,
+            });
+            self.feed(Input::ReplyFileWritten {
+                round: no,
+                part,
+                content: moderator.to_owned(),
+                at,
+            });
+        }
+    }
+
+    #[test]
+    fn an_extended_discussion_folds_back_from_its_own_log() {
+        let mut l = Logged::new(Some(1));
+        l.feed(Input::Start { now: 0 });
+        l.round(1, r#"{"summary":"one","conclusion":"SQLite."}"#);
+        assert!(l.e.session().closed);
+        l.feed(Input::UserExtend { by: 2, at: 2 });
+        l.feed(Input::UserSetHold { hold: true, at: 3 });
+        l.round(4, r#"{"summary":"two"}"#);
+        assert!(l.e.session().waits_to_continue());
+        l.feed(Input::UserIntervention {
+            to: vec![],
+            body: "And the cost?".into(),
+            at: 5,
+        });
+        l.feed(Input::UserContinue { at: 6 });
+        l.round(7, r#"{"summary":"three","conclusion":"Postgres."}"#);
+        assert!(l.e.session().closed);
+        assert_eq!(l.e.session().rounds.len(), 3);
+        // The whole session, rounds, briefs and messages included.
+        assert_eq!(&reduce::replay(&l.log).unwrap(), l.e.session());
+    }
+
+    #[test]
+    fn adding_rounds_waits_while_the_moderator_concludes_the_last_round() {
+        let mut e = engine_with_max_rounds(Some(1));
+        feed(&mut e, Input::Start { now: 0 });
+        run_panel(&mut e, 1);
+        assert_eq!(phase(&e), Phase::Summarizing);
+        // Its brief asks for the conclusion: rounds added now would not run.
+        assert!(matches!(
+            e.handle(Input::UserExtend { by: 1, at: 2 }),
+            Err(EngineError::Rejected(why)) if why.contains("concluding")
+        ));
+        assert_eq!(e.session().max_rounds, Some(1));
+        moderate(&mut e, r#"{"summary":"one","conclusion":"SQLite."}"#, 3);
+        assert!(e.session().closed);
+        // Once concluded, the rounds can be added and run.
+        feed(&mut e, Input::UserExtend { by: 1, at: 4 });
+        assert_eq!((no(&e), e.session().max_rounds), (2, Some(2)));
+    }
+
+    #[test]
+    fn a_round_cut_off_before_its_briefs_issues_them_on_resume() {
+        let mut l = Logged::new(None);
+        let started = l.feed(Input::Start { now: 0 });
+        // The app stopped after the round's first batch (start + questions).
+        assert_eq!(started.batches.len(), 2);
+        let cut = reduce::replay(&l.log[..2]).unwrap();
+        assert!(cut.current_round().unwrap().briefs.is_empty());
+        let mut resumed = Engine::resume(cut, Path::new("/d"), CONFIG);
+        let out = feed(&mut resumed, Input::Start { now: 1 });
         assert_eq!(
-            (
-                replayed.closed,
-                replayed.max_rounds,
-                replayed.user_max_rounds
-            ),
-            (false, Some(3), Some(3))
+            sends(&out),
+            sends(&started),
+            "every panelist gets its brief"
         );
+        assert_eq!(
+            resumed.session().current_round(),
+            l.e.session().current_round()
+        );
+    }
+
+    #[test]
+    fn a_resume_watches_unreplied_briefs_of_earlier_rounds() {
+        let mut e = engine();
+        feed(&mut e, Input::Start { now: 0 });
+        for part in panel(&e) {
+            sent(&mut e, &part, 0);
+            running(&mut e, &part, 0);
+        }
+        // codex never replies: its brief fails after the retries.
+        let codex = p("codex");
+        for part in panel(&e).into_iter().filter(|p| *p != codex) {
+            write(&mut e, &part, "here", 1);
+        }
+        let mut now = 1;
+        while round(&e).brief(&codex).unwrap().receipt.failed.is_none() {
+            now += CONFIG.reply_timeout + 1;
+            feed(&mut e, Input::Tick { now });
+            sent(&mut e, &codex, now);
+            running(&mut e, &codex, now);
+        }
+        moderate(&mut e, r#"{"summary":"one"}"#, now + 1);
+        assert_eq!(no(&e), 2);
+
+        let mut resumed = Engine::resume(e.session().clone(), Path::new("/d"), CONFIG);
+        let out = feed(&mut resumed, Input::Start { now: now + 2 });
+        assert!(out.effects.contains(&Effect::WatchReply {
+            round: 1,
+            part: codex.clone(),
+            path: store::reply_path(Path::new("/d"), 1, &codex),
+        }));
+        // Its late reply, once written, is taken in.
+        feed(
+            &mut resumed,
+            Input::ReplyFileWritten {
+                round: 1,
+                part: codex.clone(),
+                content: "late but here".into(),
+                at: now + 3,
+            },
+        );
+        assert!(resumed.session().messages.iter().any(|m| m.round == 1
+            && m.author == Author::Part(codex.clone())
+            && m.body == "late but here"));
+    }
+
+    #[test]
+    fn a_reply_path_outside_the_session_is_found() {
+        let mut e = engine();
+        feed(&mut e, Input::Start { now: 0 });
+        assert_eq!(e.foreign_reply_path(), None);
+        let mut session = e.session().clone();
+        session.rounds[0].briefs[0].reply_path = PathBuf::from("/etc/hosts");
+        let edited = Engine::resume(session, Path::new("/d"), CONFIG);
+        assert_eq!(
+            edited.foreign_reply_path(),
+            Some(PathBuf::from("/etc/hosts"))
+        );
+        // A participant id that climbs out of the round directory.
+        let mut session = e.session().clone();
+        let part = PartId::new("../../x");
+        session.rounds[0].briefs[0].to = part.clone();
+        session.rounds[0].briefs[0].reply_path = store::reply_path(Path::new("/d"), 1, &part);
+        let edited = Engine::resume(session, Path::new("/d"), CONFIG);
+        assert!(edited.foreign_reply_path().is_some());
+        assert_eq!(e.pending_reply_paths().len(), 3);
     }
 
     #[test]
@@ -2523,7 +2787,7 @@ mod tests {
     fn an_extended_and_held_discussion_waits_for_the_user_after_reopening() {
         let mut e = engine_with_max_rounds(Some(1));
         feed(&mut e, Input::Start { now: 0 });
-        feed(&mut e, Input::UserSetHold { hold: true });
+        feed(&mut e, Input::UserSetHold { hold: true, at: 0 });
         run_panel(&mut e, 1);
         moderate(&mut e, r#"{"summary":"one","conclusion":"SQLite."}"#, 2);
         let out = feed(&mut e, Input::UserExtend { by: 1, at: 3 });

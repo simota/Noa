@@ -1,4 +1,4 @@
-use noa_gpui_core::widgets::{Badge, Checkbox, ComboBox, PopUpButton, TextArea};
+use noa_gpui_core::widgets::{Badge, Checkbox, ComboBox, Label, PopUpButton, Pressable, TextArea};
 use noa_gpui_core::{Event, PointerButton};
 use noa_gpui_scene::Point;
 
@@ -697,7 +697,41 @@ fn an_empty_history_says_so_and_still_starts() {
             .iter()
             .any(|(_, a)| matches!(a, Action::Open(_) | Action::Resume(_)))
     );
-    assert!(has_widget_for(&h.screen, &Action::Start));
+    let shown = labels_under(&h.screen.tree, h.screen.start.history);
+    assert!(
+        shown
+            .iter()
+            .any(|l| l.starts_with("保存された議論はまだありません")),
+        "{shown:?}"
+    );
+    h.set_text(h.screen.start.topic, "最初の議題");
+    let start = h.screen.start.start_button;
+    click(&mut h.screen, &mut h.text, start);
+    assert!(matches!(&h.drain()[..], [Command::Start { topic, .. }] if topic == "最初の議題"));
+}
+
+/// Every label's text in `root`'s subtree, in tree order.
+fn labels_under(tree: &UiTree, root: WidgetId) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        if let Some(label) = tree.get::<Label>(id) {
+            out.push(label.text().to_owned());
+        }
+        stack.extend(tree.children(id).iter().rev());
+    }
+    out
+}
+
+/// Every widget in `root`'s subtree.
+fn subtree_of(tree: &UiTree, root: WidgetId) -> Vec<WidgetId> {
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        out.push(id);
+        stack.extend(tree.children(id).iter().rev());
+    }
+    out
 }
 
 #[test]
@@ -715,7 +749,7 @@ fn a_stored_discussion_shows_read_only_without_controls() {
     session.workdir = Some(std::path::PathBuf::from("/repo"));
     session.rounds.last_mut().unwrap().briefs[0].receipt.failed = Some("gone".into());
     session.closed = true;
-    h.deliver_with(Link::Stored, Some(session));
+    h.deliver_with(Link::Stored(demo_dir("disc-demo-1")), Some(session));
     assert!(!h.screen.tree.is_hidden(h.screen.meeting));
     assert_eq!(status_badges(&h.screen)[0], "記録");
     for action in h.screen.actions.iter().map(|(_, a)| a) {
@@ -746,7 +780,10 @@ fn an_unfinished_stored_discussion_can_be_resumed_from_its_view() {
     let open = widget_for(&h.screen, &Action::Open(demo_dir("disc-demo-3")));
     click(&mut h.screen, &mut h.text, open);
     h.drain();
-    h.deliver_with(Link::Stored, Some(crate::demo::session()));
+    h.deliver_with(
+        Link::Stored(demo_dir("disc-demo-3")),
+        Some(crate::demo::session()),
+    );
     assert!(!has_widget_for(&h.screen, &Action::Close));
     let resume = widget_for(&h.screen, &Action::Resume(demo_dir("disc-demo-3")));
     click(&mut h.screen, &mut h.text, resume);
@@ -767,6 +804,19 @@ fn a_new_discussion_returns_to_the_start_view_with_a_fresh_form_state() {
     let (channel, feed) = test_channel();
     let mut h = Harness::new(channel, feed);
     let session = crate::demo::session();
+    // The first discussion is started from the form.
+    h.deliver(None);
+    h.set_text(h.screen.start.topic, "最初の議題");
+    let workdir = std::env::temp_dir().display().to_string();
+    let field = h.screen.start.workdir;
+    h.screen
+        .tree
+        .update::<noa_gpui_core::widgets::TextField, _>(field, |f, cx| {
+            f.set_text(cx, workdir.clone())
+        });
+    let start = h.screen.start.start_button;
+    click(&mut h.screen, &mut h.text, start);
+    assert!(matches!(&h.drain()[..], [Command::Start { topic, .. }] if topic == "最初の議題"));
     h.deliver(Some(session.clone()));
     h.screen.run(Action::Filter(i("B")), &mut h.text);
     h.screen.prepare(window(), &mut h.text);
@@ -779,6 +829,10 @@ fn a_new_discussion_returns_to_the_start_view_with_a_fresh_form_state() {
     assert!(!h.screen.tree.is_hidden(h.screen.start.root));
     assert!(h.screen.tree.is_hidden(h.screen.meeting));
     assert_eq!(h.screen.filter, None);
+    // The topic is cleared for the next discussion; the settings stay.
+    let form = start::read(&h.screen.tree, &h.screen.start);
+    assert_eq!(form.topic, "");
+    assert_eq!(form.workdir, workdir);
     assert!(has_widget_for(
         &h.screen,
         &Action::Open(demo_dir("disc-demo-1"))
@@ -845,7 +899,10 @@ fn a_receipt_tag_or_an_agents_name_focuses_its_pane() {
 fn a_stored_discussion_has_no_panes_to_jump_to() {
     let (channel, feed) = test_channel();
     let mut h = Harness::new(channel, feed);
-    h.deliver_with(Link::Stored, Some(crate::demo::session()));
+    h.deliver_with(
+        Link::Stored(demo_dir("disc-demo-1")),
+        Some(crate::demo::session()),
+    );
     assert!(
         !h.screen
             .actions
@@ -903,7 +960,7 @@ fn a_held_discussion_offers_the_next_round_and_says_it_waits() {
     // The composer stays: an intervention now reaches the next brief.
     assert!(!h.screen.tree.is_hidden(h.screen.composer.root));
     // Read-only, a stored held discussion offers neither.
-    h.deliver_with(Link::Stored, Some(session));
+    h.deliver_with(Link::Stored(demo_dir("disc-demo-1")), Some(session));
     assert!(!has_widget_for(&h.screen, &Action::Continue));
     assert!(
         !h.screen
@@ -941,12 +998,15 @@ fn more_rounds_are_offered_where_the_engine_takes_them() {
     ran_out.rev += 1;
     h.deliver(Some(ran_out.clone()));
     assert!(has_widget_for(&h.screen, &Action::Extend(1)));
-    h.deliver_with(Link::Stored, Some(ran_out));
+    h.deliver_with(Link::Stored(demo_dir("disc-demo-1")), Some(ran_out));
     let one = widget_for(&h.screen, &Action::Extend(1));
     click(&mut h.screen, &mut h.text, one);
     assert_eq!(h.drain(), vec![Command::Extend { by: 1 }]);
     // A stored discussion still going is resumed instead.
-    h.deliver_with(Link::Stored, Some(limited(running, 8)));
+    h.deliver_with(
+        Link::Stored(demo_dir("disc-demo-1")),
+        Some(limited(running, 8)),
+    );
     assert!(!has_widget_for(&h.screen, &Action::Extend(1)));
 }
 
@@ -972,6 +1032,180 @@ fn every_status_control_fits_the_smallest_window() {
         lx + lw <= tx + 0.5,
         "leading {lx}+{lw} runs into trailing at {tx}"
     );
+}
+
+// ── Review fixes ────────────────────────────────────────────────────────────
+
+#[test]
+fn each_agents_name_focuses_that_agents_pane() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    h.deliver(Some(crate::demo::session()));
+    // Every author link names the participant it focuses.
+    let mut named = 0;
+    for (id, action) in &h.screen.actions {
+        let Action::Focus(part) = action else {
+            continue;
+        };
+        let labels = labels_under(&h.screen.tree, *id);
+        if let [label] = &labels[..] {
+            assert_eq!(*label, part_name(part), "{id:?}");
+            named += 1;
+        }
+    }
+    assert!(named > 4, "{named}");
+    // Clicking the names on the last cards sends their own authors.
+    for (who, part) in [("claude", "claude"), ("Noa", MODERATOR_ID)] {
+        let link = h
+            .screen
+            .actions
+            .iter()
+            .rev()
+            .find(|(id, a)| {
+                matches!(a, Action::Focus(_)) && labels_under(&h.screen.tree, *id) == [who]
+            })
+            .map(|(id, _)| *id)
+            .unwrap();
+        click(&mut h.screen, &mut h.text, link);
+        assert_eq!(h.drain(), vec![Command::Focus { part: p(part) }], "{who}");
+    }
+}
+
+#[test]
+fn a_read_only_view_has_no_inert_controls() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    h.deliver_with(
+        Link::Stored(demo_dir("disc-demo-1")),
+        Some(crate::demo::session()),
+    );
+    // Names and receipts are plain: every pressable left does something.
+    for id in subtree_of(&h.screen.tree, h.screen.center_host) {
+        if h.screen.tree.get::<Pressable>(id).is_some() {
+            assert!(
+                h.screen.actions.iter().any(|(w, _)| *w == id),
+                "a pressable without an action: {:?}",
+                labels_under(&h.screen.tree, id)
+            );
+        }
+    }
+}
+
+#[test]
+fn a_resumed_discussion_after_a_read_only_view_sends_interventions() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    let session = crate::demo::session();
+    h.deliver_with(Link::Stored(demo_dir("disc-demo-3")), Some(session.clone()));
+    // Resumed: the runner's live session.
+    let mut live = session;
+    live.rev += 1;
+    h.deliver(Some(live));
+    h.set_text(h.screen.composer.area, "コストも見てください");
+    let send = h.screen.composer.send;
+    assert!(!h.screen.tree.is_hidden(send));
+    click(&mut h.screen, &mut h.text, send);
+    assert_eq!(
+        h.drain(),
+        vec![Command::Intervene {
+            to: vec![],
+            body: "コストも見てください".into(),
+        }]
+    );
+}
+
+#[test]
+fn another_discussion_does_not_get_the_last_ones_unsent_intervention() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    h.deliver(Some(crate::demo::session()));
+    h.set_text(h.screen.composer.area, "A への下書き");
+    let mut other = crate::demo::session();
+    other.id = discussion::model::types::SessionId::new("disc-other");
+    h.deliver(Some(other.clone()));
+    assert_eq!(composer::text(&h.screen.tree, &h.screen.composer), "");
+    // Via the start view too.
+    h.set_text(h.screen.composer.area, "B への下書き");
+    h.deliver(None);
+    h.deliver(Some(crate::demo::session()));
+    assert_eq!(composer::text(&h.screen.tree, &h.screen.composer), "");
+}
+
+#[test]
+fn a_debate_with_a_seen_id_in_the_next_discussion_still_comes_up() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    h.deliver(Some(with_proposal()));
+    assert_eq!(
+        h.screen.center,
+        Center::Debate(DebateView::of(DebateId::new("d2")))
+    );
+    h.deliver(None);
+    let mut next = with_proposal();
+    next.id = discussion::model::types::SessionId::new("disc-next");
+    h.deliver(Some(next));
+    assert_eq!(
+        h.screen.center,
+        Center::Debate(DebateView::of(DebateId::new("d2")))
+    );
+}
+
+#[test]
+fn a_proposal_shown_read_only_offers_only_the_way_back() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    h.deliver_with(Link::Stored(demo_dir("disc-demo-3")), Some(with_proposal()));
+    h.screen
+        .run(Action::ShowDebate(DebateId::new("d2")), &mut h.text);
+    h.screen.prepare(window(), &mut h.text);
+    assert!(!has_widget_for(&h.screen, &Action::CancelDebate));
+    let back = widget_for(&h.screen, &Action::BackToChat);
+    click(&mut h.screen, &mut h.text, back);
+    assert!(h.drain().is_empty(), "nothing declined");
+    assert_eq!(h.screen.center, Center::Chat);
+}
+
+#[test]
+fn resume_names_the_discussion_the_view_shows() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    h.deliver(None);
+    h.list(crate::demo::history());
+    // A then B clicked before either is shown; only A could be read.
+    h.screen
+        .run(Action::Open(demo_dir("disc-demo-3")), &mut h.text);
+    h.screen
+        .run(Action::Open(demo_dir("disc-demo-1")), &mut h.text);
+    h.drain();
+    h.deliver_with(
+        Link::Stored(demo_dir("disc-demo-3")),
+        Some(crate::demo::session()),
+    );
+    assert!(has_widget_for(
+        &h.screen,
+        &Action::Resume(demo_dir("disc-demo-3"))
+    ));
+    assert!(!has_widget_for(
+        &h.screen,
+        &Action::Resume(demo_dir("disc-demo-1"))
+    ));
+}
+
+#[test]
+fn a_one_off_stored_render_offers_nothing_it_cannot_do() {
+    let going = Discussion::of_stored(demo_dir("disc-demo-3"), crate::demo::session());
+    let mut ran_out = crate::demo::held();
+    ran_out.max_rounds = Some(4);
+    ran_out.closed = true;
+    let ended = Discussion::of_stored(demo_dir("disc-demo-1"), ran_out.clone());
+    assert!(ran_out.extendable().is_ok());
+    for screen in [&going, &ended] {
+        assert!(!screen.actions.iter().any(|(_, a)| matches!(
+            a,
+            Action::Resume(_) | Action::Extend(_) | Action::NewDiscussion
+        )));
+    }
+    assert_eq!(status_badges(&ended)[0], "記録");
 }
 
 // ── Link state ──────────────────────────────────────────────────────────────
